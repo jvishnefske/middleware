@@ -1,0 +1,112 @@
+[package]
+name = "esp-base"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "ESP base firmware: serves the middleware serial protocol and runs WASM payloads"
+license = "MIT OR Apache-2.0"
+
+# Standalone workspace: builds for Xtensa and RISC-V targets with per-chip
+# features, so it stays out of the parent (host) workspace.
+[workspace]
+
+[lib]
+# The pure core (`esp_base`): request dispatch, image layout, chip tables.
+# No ESP dependencies; unit tested on the host with `cargo test --lib`.
+path = "src/lib.rs"
+
+[[bin]]
+name = "esp-base"
+path = "src/main.rs"
+test = false
+bench = false
+
+[features]
+default = []
+# Exactly one chip feature must be enabled to build the binary.
+esp32 = [
+  "shell",
+  "wasm",
+  "esp-hal/esp32",
+  "esp-rtos/esp32",
+  "esp-bootloader-esp-idf/esp32",
+  "esp-alloc/esp32",
+  "esp-backtrace/esp32",
+  "esp-println/esp32",
+  "esp-storage/esp32",
+]
+esp32s3 = [
+  "shell",
+  "wasm",
+  "esp-hal/esp32s3",
+  "esp-rtos/esp32s3",
+  "esp-bootloader-esp-idf/esp32s3",
+  "esp-alloc/esp32s3",
+  "esp-backtrace/esp32s3",
+  "esp-println/esp32s3",
+  "esp-storage/esp32s3",
+]
+esp32c3 = [
+  "shell",
+  "esp-hal/esp32c3",
+  "esp-rtos/esp32c3",
+  "esp-bootloader-esp-idf/esp32c3",
+  "esp-alloc/esp32c3",
+  "esp-backtrace/esp32c3",
+  "esp-println/esp32c3",
+  "esp-storage/esp32c3",
+]
+# The WASM payload runtime (wasm-host / wasmi). On by default for the
+# Xtensa chips. Not enabled for esp32c3: wasmi 2.0 needs CAS atomics and
+# `alloc::sync::Arc`, which `riscv32imc-unknown-none-elf` lacks. Without it
+# the firmware still serves sys/info, the loader and flash storage, reports
+# firmware version `<ver>+no-wasm`, and refuses sys/payload/start.
+wasm = ["dep:wasm-host"]
+# Internal: the imperative shell's dependencies, pulled in by a chip feature.
+shell = [
+  "dep:esp-hal",
+  "dep:esp-rtos",
+  "dep:esp-bootloader-esp-idf",
+  "dep:esp-alloc",
+  "dep:esp-backtrace",
+  "dep:esp-println",
+  "dep:esp-storage",
+  "dep:embassy-executor",
+  "dep:embassy-time",
+  "dep:embassy-sync",
+  "dep:embassy-futures",
+  "dep:static_cell",
+  "dep:critical-section",
+  "dep:embedded-io-async",
+]
+
+[dependencies]
+middleware = { path = "..", features = ["serial"] }
+heapless = { version = "0.9", default-features = false }
+embedded-storage = "0.3.2"
+
+wasm-host = { path = "../wasm-host", optional = true }
+
+esp-hal = { version = "~1.2.2", features = ["unstable"], optional = true }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc"], optional = true }
+esp-bootloader-esp-idf = { version = "0.6.0", optional = true }
+esp-alloc = { version = "0.11.0", optional = true }
+esp-backtrace = { version = "0.20.0", features = ["panic-handler", "println"], optional = true }
+esp-println = { version = "0.18.0", optional = true }
+esp-storage = { version = "0.10.0", features = ["embedded-storage"], optional = true }
+embassy-executor = { version = "0.10.0", optional = true }
+embassy-time = { version = "0.5.1", optional = true }
+embassy-sync = { version = "0.7.2", optional = true }
+embassy-futures = { version = "0.1.2", optional = true }
+static_cell = { version = "2.1.1", optional = true }
+critical-section = { version = "1.2.0", optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"

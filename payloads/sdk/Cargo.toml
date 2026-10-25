@@ -1,0 +1,16 @@
+[package]
+name = "mw-payload"
+description = "Safe no_std SDK for middleware WASM payloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["panic-handler"]
+# Provide a `#[panic_handler]` that logs the panic location through the
+# `log` import and traps. Disable to supply your own.
+panic-handler = []
+
+[dependencies]
+middleware = { path = "../..", default-features = false }
+embedded-hal = "1.0"

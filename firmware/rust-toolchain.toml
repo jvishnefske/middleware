@@ -1,0 +1,7 @@
+# Host unit tests and the ESP32-C3 (RISC-V) build use stable. The Xtensa
+# chips (ESP32, ESP32-S3) need the espup toolchain, selected explicitly by
+# `build.sh` with `cargo +esp-new` (rustc >= 1.95 required by esp-hal 1.2).
+[toolchain]
+channel = "stable"
+components = ["rust-src", "clippy"]
+targets = ["riscv32imc-unknown-none-elf"]

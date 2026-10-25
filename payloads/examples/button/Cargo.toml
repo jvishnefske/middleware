@@ -1,0 +1,13 @@
+[package]
+name = "button"
+description = "Example middleware payload: button"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }

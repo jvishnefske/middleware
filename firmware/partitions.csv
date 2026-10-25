@@ -1,0 +1,8 @@
+# ESP base firmware partition table (4 MiB flash minimum).
+# `payload` holds one WASM image: header sector at 0x310000, image from
+# 0x311000 (see src/image.rs). The firmware finds it by label at runtime.
+# Name,    Type, SubType,   Offset,   Size,     Flags
+nvs,       data, nvs,       0x9000,   0x6000,
+phy_init,  data, phy,       0xf000,   0x1000,
+factory,   app,  factory,   0x10000,  0x300000,
+payload,   data, undefined, 0x310000, 0x40000,

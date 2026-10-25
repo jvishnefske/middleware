@@ -69,7 +69,10 @@ impl ResponderService {
     pub async fn handle(self, req: http::Request<Body>) -> http::Response<Body> {
         match key_from_path(req.uri().path()) {
             Some(key) => {
-                let method = UnaryMethod { key: key.as_str().to_owned(), tx: self.tx };
+                let method = UnaryMethod {
+                    key: key.as_str().to_owned(),
+                    tx: self.tx,
+                };
                 Grpc::new(RawCodec).unary(method, req).await
             }
             None => Status::unimplemented("path is not /Service/Method").into_http(),
@@ -103,14 +106,20 @@ impl UnaryService<Bytes> for UnaryMethod {
 
     fn call(&mut self, request: Request<Bytes>) -> Self::Future {
         let (reply, answer) = oneshot::channel();
-        let call = Call { key: core::mem::take(&mut self.key), request: request.into_inner(), reply };
+        let call = Call {
+            key: core::mem::take(&mut self.key),
+            request: request.into_inner(),
+            reply,
+        };
         let queued = self.tx.try_send(call);
         Box::pin(async move {
             queued.map_err(|e| match e {
                 mpsc::error::TrySendError::Full(_) => Status::unavailable("responder busy"),
                 mpsc::error::TrySendError::Closed(_) => Status::unavailable("responder stopped"),
             })?;
-            let body = answer.await.map_err(|_| Status::internal("responder dropped the call"))??;
+            let body = answer
+                .await
+                .map_err(|_| Status::internal("responder dropped the call"))??;
             Ok(Response::new(body))
         })
     }
@@ -125,7 +134,9 @@ pub fn run_handler<H: Handler>(
     request: &[u8],
     scratch: &mut [u8],
 ) -> Result<Bytes, HandlerError> {
-    let (req_buf, resp_buf) = scratch.split_at_mut_checked(request.len()).ok_or(HandlerError::BufferTooSmall)?;
+    let (req_buf, resp_buf) = scratch
+        .split_at_mut_checked(request.len())
+        .ok_or(HandlerError::BufferTooSmall)?;
     req_buf.copy_from_slice(request);
     let n = handler.handle(key, req_buf, resp_buf)?;
     let out = resp_buf.get(..n).ok_or(HandlerError::BufferTooSmall)?;
@@ -144,7 +155,11 @@ impl Responder for GrpcResponder {
     /// Answers one queued call. Handler failures are sent to the client as a
     /// status and still return `Ok(())`; only a closed queue is an error. A
     /// client that disconnected before the reply is ignored.
-    async fn serve_one<H: Handler>(&mut self, handler: &mut H, scratch: &mut [u8]) -> Result<(), GrpcError> {
+    async fn serve_one<H: Handler>(
+        &mut self,
+        handler: &mut H,
+        scratch: &mut [u8],
+    ) -> Result<(), GrpcError> {
         let call = self.rx.recv().await.ok_or(GrpcError::Closed)?;
         let reply = match Key::new(&call.key) {
             Ok(key) => run_handler(handler, key, &call.request, scratch).map_err(to_status),
@@ -161,7 +176,10 @@ mod tests {
 
     #[test]
     fn key_from_path_requires_service_method() {
-        assert_eq!(key_from_path("/pkg.Svc/Call").map(|k| k.as_str()), Some("pkg.Svc/Call"));
+        assert_eq!(
+            key_from_path("/pkg.Svc/Call").map(|k| k.as_str()),
+            Some("pkg.Svc/Call")
+        );
         assert!(key_from_path("pkg.Svc/Call").is_none());
         assert!(key_from_path("/a").is_none());
         assert!(key_from_path("/a/b/c").is_none());
@@ -171,14 +189,25 @@ mod tests {
     #[test]
     fn run_handler_splits_scratch() {
         let mut echo = |_: Key<'_>, req: &[u8], resp: &mut [u8]| -> Result<usize, HandlerError> {
-            let out = resp.get_mut(..req.len()).ok_or(HandlerError::BufferTooSmall)?;
+            let out = resp
+                .get_mut(..req.len())
+                .ok_or(HandlerError::BufferTooSmall)?;
             out.copy_from_slice(req);
             Ok(req.len())
         };
         let k = Key::from_static("s/m");
         let mut scratch = [0u8; 6];
-        assert_eq!(run_handler(&mut echo, k, b"abc", &mut scratch).unwrap(), Bytes::from_static(b"abc"));
-        assert_eq!(run_handler(&mut echo, k, b"abcd", &mut scratch), Err(HandlerError::BufferTooSmall));
-        assert_eq!(run_handler(&mut echo, k, b"abcdefg", &mut scratch), Err(HandlerError::BufferTooSmall));
+        assert_eq!(
+            run_handler(&mut echo, k, b"abc", &mut scratch).unwrap(),
+            Bytes::from_static(b"abc")
+        );
+        assert_eq!(
+            run_handler(&mut echo, k, b"abcd", &mut scratch),
+            Err(HandlerError::BufferTooSmall)
+        );
+        assert_eq!(
+            run_handler(&mut echo, k, b"abcdefg", &mut scratch),
+            Err(HandlerError::BufferTooSmall)
+        );
     }
 }

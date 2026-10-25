@@ -1,0 +1,11 @@
+[package]
+name = "mwctl"
+version = "0.1.0"
+edition = "2024"
+description = "Host CLI for the ESP base firmware's serial protocol: info, payload upload, start/stop, monitor, reset"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+middleware = { path = "../.." }
+# No `libudev`: mwctl opens the one port it is given and never enumerates.
+serialport = { version = "4.10", default-features = false }

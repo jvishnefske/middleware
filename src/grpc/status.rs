@@ -72,9 +72,18 @@ mod tests {
     fn codes_map_back_to_handler_errors() {
         assert_eq!(handler_error(Code::Ok), None);
         assert_eq!(handler_error(Code::NotFound), Some(HandlerError::NotFound));
-        assert_eq!(handler_error(Code::OutOfRange), Some(HandlerError::InvalidRequest));
-        assert_eq!(handler_error(Code::FailedPrecondition), Some(HandlerError::InvalidRequest));
-        assert_eq!(handler_error(Code::Unavailable), Some(HandlerError::Internal));
+        assert_eq!(
+            handler_error(Code::OutOfRange),
+            Some(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            handler_error(Code::FailedPrecondition),
+            Some(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            handler_error(Code::Unavailable),
+            Some(HandlerError::Internal)
+        );
         assert_eq!(handler_error(Code::Unknown), Some(HandlerError::Internal));
     }
 }

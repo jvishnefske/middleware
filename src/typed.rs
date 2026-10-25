@@ -41,7 +41,12 @@ pub struct Client<T, C, const N: usize> {
 impl<T, C, const N: usize> Client<T, C, N> {
     /// Wraps `transport`, encoding with `codec`.
     pub const fn new(transport: T, codec: C) -> Self {
-        Self { transport, codec, tx: [0; N], rx: [0; N] }
+        Self {
+            transport,
+            codec,
+            tx: [0; N],
+            rx: [0; N],
+        }
     }
 
     /// Borrows the transport, e.g. to reach backend-specific methods.
@@ -65,7 +70,10 @@ impl<T: Publisher, C, const N: usize> Client<T, C, N> {
     where
         C: Codec<M>,
     {
-        let n = self.codec.encode(message, &mut self.tx).map_err(TypedError::Encode)?;
+        let n = self
+            .codec
+            .encode(message, &mut self.tx)
+            .map_err(TypedError::Encode)?;
         self.transport
             .publish(key, &self.tx[..n])
             .await
@@ -83,7 +91,10 @@ impl<T: Requester, C, const N: usize> Client<T, C, N> {
     where
         C: Codec<Req> + Codec<Resp, Error = <C as Codec<Req>>::Error>,
     {
-        let n = self.codec.encode(request, &mut self.tx).map_err(TypedError::Encode)?;
+        let n = self
+            .codec
+            .encode(request, &mut self.tx)
+            .map_err(TypedError::Encode)?;
         let resp = self
             .transport
             .request(key, &self.tx[..n], &mut self.rx)
@@ -95,15 +106,23 @@ impl<T: Requester, C, const N: usize> Client<T, C, N> {
 
 impl<T: Subscriber, C, const N: usize> Client<T, C, N> {
     /// Receives and decodes the next sample.
-    pub async fn recv<M>(
-        &mut self,
-    ) -> Result<TypedSample<'_, M>, TypedError<T::Error, C::Error>>
+    pub async fn recv<M>(&mut self) -> Result<TypedSample<'_, M>, TypedError<T::Error, C::Error>>
     where
         C: Codec<M>,
     {
-        let sample = self.transport.recv(&mut self.rx).await.map_err(TypedError::Transport)?;
-        let message = self.codec.decode(sample.payload).map_err(TypedError::Decode)?;
-        Ok(TypedSample { key: sample.key, message })
+        let sample = self
+            .transport
+            .recv(&mut self.rx)
+            .await
+            .map_err(TypedError::Transport)?;
+        let message = self
+            .codec
+            .decode(sample.payload)
+            .map_err(TypedError::Decode)?;
+        Ok(TypedSample {
+            key: sample.key,
+            message,
+        })
     }
 }
 
@@ -125,7 +144,9 @@ mod tests {
         type Error = ();
         async fn publish(&mut self, _key: Key<'_>, payload: &[u8]) -> Result<(), ()> {
             let mut b = [0u8; 8];
-            b.get_mut(..payload.len()).ok_or(())?.copy_from_slice(payload);
+            b.get_mut(..payload.len())
+                .ok_or(())?
+                .copy_from_slice(payload);
             self.last = Some((b, payload.len()));
             Ok(())
         }

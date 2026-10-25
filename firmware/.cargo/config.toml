@@ -1,0 +1,30 @@
+# Per-chip builds. Use `./build.sh <chip>`, which also selects the toolchain
+# (`+esp-new` for Xtensa) and the Xtensa linker PATH; the aliases below are
+# the cargo half of it:
+#
+#   cargo build-esp32c3                       # stable toolchain
+#   cargo +esp-new build-esp32                # after `source ~/export-esp.sh`
+#   cargo +esp-new build-esp32s3
+#
+# Host unit tests of the pure core: `cargo test --lib` (no chip feature).
+
+[alias]
+build-esp32 = "build --release --target xtensa-esp32-none-elf --features esp32 -Zbuild-std=core,alloc"
+build-esp32s3 = "build --release --target xtensa-esp32s3-none-elf --features esp32s3 -Zbuild-std=core,alloc"
+build-esp32c3 = "build --release --target riscv32imc-unknown-none-elf --features esp32c3"
+clippy-esp32c3 = "clippy --release --target riscv32imc-unknown-none-elf --features esp32c3"
+
+[target.xtensa-esp32-none-elf]
+runner = "espflash flash --monitor --chip esp32 --partition-table partitions.csv"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3 --partition-table partitions.csv"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3 --partition-table partitions.csv"
+rustflags = ["-C", "force-frame-pointers"]
+
+[env]
+ESP_LOG = "info"

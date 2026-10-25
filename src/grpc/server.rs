@@ -9,17 +9,17 @@
 //! [`tonic::transport::Server::serve_with_incoming_shutdown`]. A missing
 //! half answers `UNIMPLEMENTED`.
 
+use super::GrpcError;
 use super::bus::{BusService, SERVICE_NAME};
 use super::responder::ResponderService;
-use super::GrpcError;
 use core::convert::Infallible;
 use core::future::Future;
 use core::task::{Context, Poll};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service};
-use tonic::Status;
 
 /// Path router over an optional bus and an optional responder. Build with
 /// [`GrpcServer::new`], [`GrpcServer::with_bus`] and
@@ -45,12 +45,18 @@ impl GrpcServer {
 
     /// Returns this server with `bus` mounted on `middleware.v1.Bus`.
     pub fn with_bus(self, bus: BusService) -> Self {
-        Self { bus: Some(bus), ..self }
+        Self {
+            bus: Some(bus),
+            ..self
+        }
     }
 
     /// Returns this server with `responder` answering all other paths.
     pub fn with_responder(self, responder: ResponderService) -> Self {
-        Self { responder: Some(responder), ..self }
+        Self {
+            responder: Some(responder),
+            ..self
+        }
     }
 }
 
@@ -79,7 +85,11 @@ impl Service<http::Request<Body>> for GrpcServer {
 
 /// Serves `server` on `listener` (plaintext HTTP/2) until `shutdown`
 /// completes.
-pub async fn serve<F>(server: GrpcServer, listener: TcpListener, shutdown: F) -> Result<(), GrpcError>
+pub async fn serve<F>(
+    server: GrpcServer,
+    listener: TcpListener,
+    shutdown: F,
+) -> Result<(), GrpcError>
 where
     F: Future<Output = ()>,
 {

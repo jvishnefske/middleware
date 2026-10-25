@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# wasm-pack output (npm run build:wasm); wasm-pack also writes its own .gitignore there.
+src/pkg/

@@ -17,3 +17,21 @@ None are on by default. Firmware enables `ble,postcard`; services enable
 
 Requirements and the tests that cover them are listed in `design.md`.
 Feature isolation is checked by `scripts/check-features.sh`.
+
+## Device platform
+
+| path                 | what                                                         |
+|----------------------|--------------------------------------------------------------|
+| `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3): `./build.sh <chip>` |
+| `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
+| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info` |
+| `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
+| `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
+| `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |
+| `web/`               | flasher, device console/uploader, editor and simulator (`npm run dev`) |
+
+Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
+then load payloads over the same USB port, whether it is a CP2102/CH340
+bridge or the chip's native USB-Serial-JTAG. The ESP32-C3 and ESP8266 builds
+have no WASM runtime (the C3 lacks the atomics wasmi needs; the ESP8266 lacks
+the RAM), so they store payloads but cannot run them.

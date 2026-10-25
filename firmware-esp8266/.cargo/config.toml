@@ -1,0 +1,12 @@
+[build]
+target = "xtensa-esp8266-none-elf"
+
+[target.xtensa-esp8266-none-elf]
+linker = "xtensa-lx106-elf-gcc"
+rustflags = [
+  "-C", "link-arg=-nostartfiles",
+  "-C", "link-arg=-Wl,-Tlink.x",
+]
+
+[unstable]
+build-std = ["core"]

@@ -1,0 +1,15 @@
+[package]
+name = "wasm-host"
+version = "0.1.0"
+edition = "2024"
+description = "WASM payload runtime implementing the middleware payload ABI (no_std + alloc)"
+
+[dependencies]
+middleware = { path = ".." }
+# `auto-dispatch` falls back to loop dispatch when tail calls are unavailable
+# (debug builds, some targets); without it an unoptimised build overflows the
+# stack on long-running guest loops.
+wasmi = { version = "2.0", default-features = false, features = ["validate", "auto-dispatch"] }
+
+[dev-dependencies]
+wat = "1"

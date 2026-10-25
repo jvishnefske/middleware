@@ -55,7 +55,8 @@ struct Published {
 
 /// Validates key bytes from the wire.
 fn parse_key(bytes: &[u8]) -> Result<&str, Status> {
-    let text = core::str::from_utf8(bytes).map_err(|_| Status::invalid_argument("key is not UTF-8"))?;
+    let text =
+        core::str::from_utf8(bytes).map_err(|_| Status::invalid_argument("key is not UTF-8"))?;
     Key::new(text).map_err(|_| Status::invalid_argument("invalid key"))?;
     Ok(text)
 }
@@ -88,7 +89,11 @@ impl BusService {
     /// Handles one HTTP/2 request addressed to this service.
     pub async fn handle(self, req: http::Request<Body>) -> http::Response<Body> {
         match req.uri().path() {
-            PUBLISH_PATH => Grpc::new(RawCodec).unary(PublishMethod { tx: self.tx }, req).await,
+            PUBLISH_PATH => {
+                Grpc::new(RawCodec)
+                    .unary(PublishMethod { tx: self.tx }, req)
+                    .await
+            }
             SUBSCRIBE_PATH => {
                 Grpc::new(RawCodec)
                     .server_streaming(SubscribeMethod { tx: self.tx }, req)
@@ -132,14 +137,20 @@ impl UnaryService<Bytes> for PublishMethod {
     }
 }
 
-fn publish(tx: &broadcast::Sender<Published>, request: Request<Bytes>) -> Result<Response<Bytes>, Status> {
+fn publish(
+    tx: &broadcast::Sender<Published>,
+    request: Request<Bytes>,
+) -> Result<Response<Bytes>, Status> {
     let key = request
         .metadata()
         .get(KEY_HEADER)
         .ok_or_else(|| Status::invalid_argument("missing mw-key metadata"))?;
     let key = Bytes::copy_from_slice(parse_key(key.as_bytes())?.as_bytes());
     // A send error only means nobody is subscribed: fire and forget.
-    let _ = tx.send(Published { key, payload: request.into_inner() });
+    let _ = tx.send(Published {
+        key,
+        payload: request.into_inner(),
+    });
     Ok(Response::new(Bytes::new()))
 }
 
@@ -156,7 +167,10 @@ impl ServerStreamingService<Bytes> for SubscribeMethod {
     fn call(&mut self, request: Request<Bytes>) -> Self::Future {
         let key = request.into_inner();
         let result = match parse_key(&key) {
-            Ok(_) => Ok(Response::new(KeyedStream { key, inner: BroadcastStream::new(self.tx.subscribe()) })),
+            Ok(_) => Ok(Response::new(KeyedStream {
+                key,
+                inner: BroadcastStream::new(self.tx.subscribe()),
+            })),
             Err(status) => Err(status),
         };
         core::future::ready(result)
@@ -171,7 +185,9 @@ pub struct KeyedStream {
 
 impl core::fmt::Debug for KeyedStream {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("KeyedStream").field("key", &self.key).finish_non_exhaustive()
+        f.debug_struct("KeyedStream")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
     }
 }
 
@@ -183,7 +199,9 @@ impl Stream for KeyedStream {
         // channel is pending or closed, so it is bounded by the backlog.
         loop {
             match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(p))) if p.key == self.key => return Poll::Ready(Some(Ok(p.payload))),
+                Poll::Ready(Some(Ok(p))) if p.key == self.key => {
+                    return Poll::Ready(Some(Ok(p.payload)));
+                }
                 // Other keys, and lag notifications (samples already lost).
                 Poll::Ready(Some(_)) => continue,
                 Poll::Ready(None) => return Poll::Ready(None),
@@ -204,19 +222,30 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         let mut req = Request::new(Bytes::new());
-        req.metadata_mut().insert(KEY_HEADER, "a b".parse().unwrap());
-        assert_eq!(publish(&bus.tx, req).unwrap_err().code(), tonic::Code::InvalidArgument);
+        req.metadata_mut()
+            .insert(KEY_HEADER, "a b".parse().unwrap());
+        assert_eq!(
+            publish(&bus.tx, req).unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
 
         let mut req = Request::new(Bytes::from_static(b"x"));
-        req.metadata_mut().insert(KEY_HEADER, "a/b".parse().unwrap());
-        assert!(publish(&bus.tx, req).is_ok(), "no subscribers is not an error");
+        req.metadata_mut()
+            .insert(KEY_HEADER, "a/b".parse().unwrap());
+        assert!(
+            publish(&bus.tx, req).is_ok(),
+            "no subscribers is not an error"
+        );
     }
 
     #[tokio::test]
     async fn keyed_stream_filters_by_key() {
         use tokio_stream::StreamExt;
         let bus = BusService::new(8);
-        let mut s = KeyedStream { key: Bytes::from_static(b"a/b"), inner: BroadcastStream::new(bus.tx.subscribe()) };
+        let mut s = KeyedStream {
+            key: Bytes::from_static(b"a/b"),
+            inner: BroadcastStream::new(bus.tx.subscribe()),
+        };
         for (k, p) in [("x/y", "1"), ("a/b", "2")] {
             let mut req = Request::new(Bytes::from(p));
             req.metadata_mut().insert(KEY_HEADER, k.parse().unwrap());

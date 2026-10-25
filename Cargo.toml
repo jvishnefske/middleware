@@ -5,8 +5,13 @@ edition = "2024"
 description = "Transport-agnostic pub/sub and request/response middleware over Zenoh, gRPC (Istio mesh) and BLE"
 license = "MIT OR Apache-2.0"
 
-# Standalone crate: keep it out of the enclosing `katas` package.
+# Standalone workspace, kept out of the enclosing `katas` package.
+# `firmware/` (per-chip ESP32 targets), `firmware-esp8266/` (the ESP8266
+# protocol-only firmware) and `payloads/` (wasm32 guests) are separate
+# workspaces because they build for other targets and toolchains.
 [workspace]
+members = [".", "wasm-host", "tools/payload-sim", "tools/mwctl", "web/protocol-wasm"]
+exclude = ["firmware", "firmware-esp8266", "payloads"]
 
 [features]
 default = []
@@ -19,6 +24,7 @@ prost = ["dep:prost"]
 
 # Embedded transports (no_std, no heap)
 ble = []
+serial = ["dep:embedded-io-async"]
 
 # Cloud / host transports (std, tokio)
 zenoh = ["std", "dep:zenoh", "dep:tokio"]
@@ -29,6 +35,7 @@ istio = ["grpc"]
 postcard = { version = "1.1", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
+embedded-io-async = { version = "0.7", optional = true }
 
 zenoh = { version = "1.10", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }

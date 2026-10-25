@@ -1,0 +1,12 @@
+[package]
+name = "abi-check"
+description = "Host-side validator: checks .wasm/.wat payloads against middleware::wasm_abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+middleware = { path = "../..", default-features = false }
+wasmparser = "0.262"
+wat = "1.262"

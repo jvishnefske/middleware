@@ -2,7 +2,9 @@
 # Verifies feature isolation (design.md C1, F1-F3):
 #   * embedded feature sets build for thumbv6m-none-eabi without std and pull
 #     in no cloud dependency;
-#   * cloud feature sets never enable an embedded feature.
+#   * cloud feature sets never enable an embedded feature;
+#   * the host CLI `mwctl` uses only the pure, synchronous core: no
+#     middleware feature beyond `default` and no cloud dependency.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,7 +26,7 @@ features_of_self() {
 echo "== C1: no features, $EMBEDDED_TARGET"
 cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features
 
-for set in "ble" "ble,postcard" "postcard"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then
@@ -42,5 +44,15 @@ for set in "zenoh" "grpc" "grpc,istio" "zenoh,grpc,istio,prost"; do
         fail "[$set] enables the ble feature"
     fi
 done
+
+echo "== host tool: mwctl uses the pure core only"
+cargo build --quiet -p mwctl
+if cargo tree --edges normal --prefix none --format '{p}' -p mwctl | sort -u | grep -Eq "$CLOUD_CRATES"; then
+    fail "mwctl pulls in a cloud dependency"
+fi
+extra="$(features_of_self -p mwctl | grep -vx default || true)"
+if [ -n "$extra" ]; then
+    fail "mwctl enables middleware features: $extra"
+fi
 
 echo "OK: feature isolation holds"

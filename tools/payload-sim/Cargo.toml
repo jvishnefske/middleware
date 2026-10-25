@@ -1,0 +1,12 @@
+[package]
+name = "payload-sim"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop simulator for WASM payloads"
+
+[dependencies]
+middleware = { path = "../.." }
+wasm-host = { path = "../../wasm-host" }
+
+[dev-dependencies]
+wat = "1"

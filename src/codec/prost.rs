@@ -54,7 +54,9 @@ mod tests {
     #[test]
     fn round_trip() {
         let mut buf = [0u8; 8];
-        let m = SetPoint { millikelvin: 300_000 };
+        let m = SetPoint {
+            millikelvin: 300_000,
+        };
         let n = Prost.encode(&m, &mut buf).unwrap();
         assert_eq!(Codec::<SetPoint>::decode(&Prost, &buf[..n]).unwrap(), m);
     }
@@ -62,7 +64,9 @@ mod tests {
     #[test]
     fn small_buffer_reports_needed_length() {
         let mut buf = [0u8; 1];
-        let m = SetPoint { millikelvin: 300_000 };
+        let m = SetPoint {
+            millikelvin: 300_000,
+        };
         assert!(matches!(
             Prost.encode(&m, &mut buf),
             Err(ProstError::BufferTooSmall { needed }) if needed > 1

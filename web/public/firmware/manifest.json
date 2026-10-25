@@ -1,0 +1,9 @@
+{
+  "version": "0.1.0",
+  "images": {
+    "esp32": { "file": "esp32.bin", "offset": 0, "wasm": true },
+    "esp32s3": { "file": "esp32s3.bin", "offset": 0, "wasm": true },
+    "esp32c3": { "file": "esp32c3.bin", "offset": 0, "wasm": false },
+    "esp8266": { "file": "esp8266.bin", "offset": 0, "wasm": false }
+  }
+}

@@ -8,19 +8,19 @@
 //! caller's bytes into an owned [`Bytes`] at the boundary and copies the
 //! reply back into the caller's buffer, refusing to truncate.
 
+use super::GrpcError;
 use super::bus::{KEY_HEADER, PUBLISH_PATH, SUBSCRIBE_PATH};
 use super::codec::RawCodec;
-use super::GrpcError;
 use crate::key::Key;
 use crate::transport::{Publisher, Requester, Sample, Subscriber, copy_into, sample_into};
 use bytes::Bytes;
 use http::uri::PathAndQuery;
+use tonic::Streaming;
 use tonic::body::Body;
 use tonic::client::{Grpc, GrpcService};
 use tonic::codegen::{Body as HttpBody, StdError};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
-use tonic::Streaming;
 
 /// The HTTP/2 path `/Service/Method` for a two-segment key, or
 /// [`GrpcError::NotServiceMethod`] for any other key.
@@ -38,7 +38,9 @@ pub struct GrpcTransport<T = Channel> {
 impl GrpcTransport<Channel> {
     /// Connects to `uri` (for example `http://127.0.0.1:50051`).
     pub async fn connect(uri: impl Into<Bytes>) -> Result<Self, GrpcError> {
-        let channel = tonic::transport::Endpoint::from_shared(uri)?.connect().await?;
+        let channel = tonic::transport::Endpoint::from_shared(uri)?
+            .connect()
+            .await?;
         Ok(Self::new(channel))
     }
 }
@@ -52,14 +54,23 @@ where
 {
     /// Wraps an existing channel or intercepted service.
     pub fn new(inner: T) -> Self {
-        Self { grpc: Grpc::new(inner) }
+        Self {
+            grpc: Grpc::new(inner),
+        }
     }
 
     async fn ready(&mut self) -> Result<(), GrpcError> {
-        self.grpc.ready().await.map_err(|e| GrpcError::NotReady(e.into().to_string()))
+        self.grpc
+            .ready()
+            .await
+            .map_err(|e| GrpcError::NotReady(e.into().to_string()))
     }
 
-    async fn unary(&mut self, path: PathAndQuery, request: tonic::Request<Bytes>) -> Result<Bytes, GrpcError> {
+    async fn unary(
+        &mut self,
+        path: PathAndQuery,
+        request: tonic::Request<Bytes>,
+    ) -> Result<Bytes, GrpcError> {
         self.ready().await?;
         let resp = self.grpc.unary(request, path, RawCodec).await?;
         Ok(resp.into_inner())
@@ -76,7 +87,10 @@ where
             .grpc
             .server_streaming(request, PathAndQuery::from_static(SUBSCRIBE_PATH), RawCodec)
             .await?;
-        Ok(GrpcSubscriber { key: key.as_str().to_owned(), stream: resp.into_inner() })
+        Ok(GrpcSubscriber {
+            key: key.as_str().to_owned(),
+            stream: resp.into_inner(),
+        })
     }
 }
 
@@ -96,8 +110,12 @@ where
         response: &'b mut [u8],
     ) -> Result<&'b [u8], GrpcError> {
         let path = method_path(key)?;
-        let reply = self.unary(path, tonic::Request::new(Bytes::copy_from_slice(request))).await?;
-        let out = copy_into(response, &reply).ok_or(GrpcError::BufferTooSmall { needed: reply.len() })?;
+        let reply = self
+            .unary(path, tonic::Request::new(Bytes::copy_from_slice(request)))
+            .await?;
+        let out = copy_into(response, &reply).ok_or(GrpcError::BufferTooSmall {
+            needed: reply.len(),
+        })?;
         Ok(out)
     }
 }
@@ -115,7 +133,8 @@ where
         let mut request = tonic::Request::new(Bytes::copy_from_slice(payload));
         let value = MetadataValue::try_from(key.as_str()).map_err(|_| GrpcError::InvalidHeader)?;
         request.metadata_mut().insert(KEY_HEADER, value);
-        self.unary(PathAndQuery::from_static(PUBLISH_PATH), request).await?;
+        self.unary(PathAndQuery::from_static(PUBLISH_PATH), request)
+            .await?;
         Ok(())
     }
 }
@@ -152,7 +171,13 @@ mod tests {
     fn method_path_needs_two_segments() {
         let p = method_path(Key::from_static("pkg.Svc/Call")).unwrap();
         assert_eq!(p.as_str(), "/pkg.Svc/Call");
-        assert!(matches!(method_path(Key::from_static("a")), Err(GrpcError::NotServiceMethod)));
-        assert!(matches!(method_path(Key::from_static("a/b/c")), Err(GrpcError::NotServiceMethod)));
+        assert!(matches!(
+            method_path(Key::from_static("a")),
+            Err(GrpcError::NotServiceMethod)
+        ));
+        assert!(matches!(
+            method_path(Key::from_static("a/b/c")),
+            Err(GrpcError::NotServiceMethod)
+        ));
     }
 }

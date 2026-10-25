@@ -1,0 +1,12 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+# Microcontroller hosts have a few hundred KiB of RAM, so payloads use a
+# single 64 KiB page of linear memory (the WASM minimum) that cannot grow,
+# with a 16 KiB shadow stack instead of rustc's default 1 MiB.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=-zstack-size=16384",
+  "-C", "link-arg=--initial-memory=65536",
+  "-C", "link-arg=--max-memory=65536",
+]

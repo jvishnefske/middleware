@@ -184,7 +184,10 @@ impl ZenohTransport {
     /// Wraps an already opened session, using [`DEFAULT_TIMEOUT`] for
     /// requests.
     pub fn new(session: Session) -> Self {
-        Self { session, timeout: DEFAULT_TIMEOUT }
+        Self {
+            session,
+            timeout: DEFAULT_TIMEOUT,
+        }
     }
 
     /// Opens a session from `config` and wraps it.
@@ -233,7 +236,10 @@ fn decode_reply_error(payload: &[u8]) -> HandlerError {
 /// Copies `src` into `dst`, reporting the sizes on failure.
 fn copy_checked<'b>(dst: &'b mut [u8], src: &[u8]) -> Result<&'b mut [u8], ZenohError> {
     let capacity = dst.len();
-    copy_into(dst, src).ok_or(ZenohError::BufferTooSmall { needed: src.len(), capacity })
+    copy_into(dst, src).ok_or(ZenohError::BufferTooSmall {
+        needed: src.len(),
+        capacity,
+    })
 }
 
 impl Requester for ZenohTransport {
@@ -277,12 +283,19 @@ impl Subscriber for ZenohSubscriber {
     type Error = ZenohError;
 
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, ZenohError> {
-        let sample = self.inner.recv_async().await.map_err(|_| ZenohError::Closed)?;
+        let sample = self
+            .inner
+            .recv_async()
+            .await
+            .map_err(|_| ZenohError::Closed)?;
         let key = sample.key_expr().as_str();
         let payload = sample.payload().to_bytes();
         let needed = key.len() + payload.len();
         if needed > buf.len() {
-            return Err(ZenohError::BufferTooSmall { needed, capacity: buf.len() });
+            return Err(ZenohError::BufferTooSmall {
+                needed,
+                capacity: buf.len(),
+            });
         }
         Key::new(key).map_err(ZenohError::InvalidKey)?;
         // Size and key validity were checked above, so `None` is unreachable;
@@ -332,7 +345,11 @@ impl Responder for ZenohResponder<'_> {
         handler: &mut H,
         scratch: &mut [u8],
     ) -> Result<(), ZenohError> {
-        let query = self.inner.recv_async().await.map_err(|_| ZenohError::Closed)?;
+        let query = self
+            .inner
+            .recv_async()
+            .await
+            .map_err(|_| ZenohError::Closed)?;
         let request = query.payload().map(|p| p.to_bytes()).unwrap_or_default();
         match run_handler(handler, self.key, &request, scratch) {
             Ok(response) => query.reply(self.key.as_str(), response).await?,
@@ -348,18 +365,26 @@ mod tests {
 
     #[test]
     fn reply_error_payload_decodes_code_byte() {
-        assert_eq!(decode_reply_error(&[HandlerError::NotFound.code()]), HandlerError::NotFound);
+        assert_eq!(
+            decode_reply_error(&[HandlerError::NotFound.code()]),
+            HandlerError::NotFound
+        );
         assert_eq!(decode_reply_error(&[]), HandlerError::Internal);
     }
 
     #[test]
     fn run_handler_splits_scratch_and_reports_errors() {
         let mut echo = |_: Key<'_>, req: &[u8], resp: &mut [u8]| {
-            copy_into(resp, req).map(|s| s.len()).ok_or(HandlerError::BufferTooSmall)
+            copy_into(resp, req)
+                .map(|s| s.len())
+                .ok_or(HandlerError::BufferTooSmall)
         };
         let key = Key::from_static("a/b");
         let mut scratch = [0u8; 8];
-        assert_eq!(run_handler(&mut echo, key, b"abc", &mut scratch), Ok(&b"abc"[..]));
+        assert_eq!(
+            run_handler(&mut echo, key, b"abc", &mut scratch),
+            Ok(&b"abc"[..])
+        );
         assert_eq!(
             run_handler(&mut echo, key, b"abcde", &mut scratch),
             Err(HandlerError::BufferTooSmall)
@@ -373,6 +398,11 @@ mod tests {
     #[test]
     fn config_rejects_unescapable_endpoints() {
         assert!(SessionConfig::new().listen("tcp/\"x").build().is_err());
-        assert!(SessionConfig::new().connect("tcp/127.0.0.1:7447").build().is_ok());
+        assert!(
+            SessionConfig::new()
+                .connect("tcp/127.0.0.1:7447")
+                .build()
+                .is_ok()
+        );
     }
 }

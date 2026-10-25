@@ -125,7 +125,9 @@ pub struct TraceContext {
 impl TraceContext {
     /// Extracts the [`PROPAGATED_HEADERS`] present in `metadata`.
     pub fn from_metadata(metadata: &MetadataMap) -> Self {
-        Self { values: PROPAGATED_HEADERS.map(|name| metadata.get(name).cloned()) }
+        Self {
+            values: PROPAGATED_HEADERS.map(|name| metadata.get(name).cloned()),
+        }
     }
 
     /// Extracts the trace headers of an inbound request.
@@ -166,12 +168,18 @@ pub struct MeshInterceptor {
 impl MeshInterceptor {
     /// Propagates `trace`.
     pub fn new(trace: TraceContext) -> Self {
-        Self { trace, timeout: None }
+        Self {
+            trace,
+            timeout: None,
+        }
     }
 
     /// Returns this interceptor also setting `grpc-timeout` to `timeout`.
     pub fn with_timeout(self, timeout: Duration) -> Self {
-        Self { timeout: Some(GrpcTimeout::from_duration(timeout)), ..self }
+        Self {
+            timeout: Some(GrpcTimeout::from_duration(timeout)),
+            ..self
+        }
     }
 
     /// Applies the interceptor to `metadata`. Pure; [`Interceptor::call`]
@@ -289,7 +297,10 @@ impl GrpcTimeout {
                 return Self { value, unit };
             }
         }
-        Self { value: MAX_TIMEOUT_VALUE, unit: TimeoutUnit::Hours }
+        Self {
+            value: MAX_TIMEOUT_VALUE,
+            unit: TimeoutUnit::Hours,
+        }
     }
 
     /// Parses the wire form; `None` when malformed or over 8 digits.
@@ -299,7 +310,10 @@ impl GrpcTimeout {
         if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        Some(Self { value: digits.parse().ok()?, unit })
+        Some(Self {
+            value: digits.parse().ok()?,
+            unit,
+        })
     }
 
     /// The numeric part.
@@ -417,7 +431,11 @@ pub struct MeshChannelBuilder {
 impl MeshChannelBuilder {
     /// Targets `authority`, typically from [`mesh_authority`].
     pub fn new(authority: impl Into<String>) -> Self {
-        Self { authority: authority.into(), sidecar: None, connect_timeout: None }
+        Self {
+            authority: authority.into(),
+            sidecar: None,
+            connect_timeout: None,
+        }
     }
 
     /// Targets `service.namespace.svc.cluster.local:port`.
@@ -427,12 +445,18 @@ impl MeshChannelBuilder {
 
     /// Returns this builder connecting through `addr` (`host:port`).
     pub fn via_sidecar(self, addr: impl Into<String>) -> Self {
-        Self { sidecar: Some(addr.into()), ..self }
+        Self {
+            sidecar: Some(addr.into()),
+            ..self
+        }
     }
 
     /// Returns this builder with a TCP connect timeout.
     pub fn connect_timeout(self, d: Duration) -> Self {
-        Self { connect_timeout: Some(d), ..self }
+        Self {
+            connect_timeout: Some(d),
+            ..self
+        }
     }
 
     /// The `:authority` requests will carry.
@@ -443,7 +467,8 @@ impl MeshChannelBuilder {
     /// The tonic [`Endpoint`]; no I/O.
     pub fn endpoint(&self) -> Result<Endpoint, IstioError> {
         let target = self.sidecar.as_deref().unwrap_or(&self.authority);
-        let origin = Uri::try_from(format!("http://{}", self.authority)).map_err(|_| IstioError::InvalidUri)?;
+        let origin = Uri::try_from(format!("http://{}", self.authority))
+            .map_err(|_| IstioError::InvalidUri)?;
         if origin.authority().map(|a| a.as_str()) != Some(self.authority.as_str()) {
             return Err(IstioError::InvalidUri);
         }
@@ -458,7 +483,10 @@ impl MeshChannelBuilder {
 
     /// Connects the channel.
     pub async fn connect(&self) -> Result<Channel, IstioError> {
-        self.endpoint()?.connect().await.map_err(IstioError::Transport)
+        self.endpoint()?
+            .connect()
+            .await
+            .map_err(IstioError::Transport)
     }
 
     /// A channel that connects on first use.
@@ -477,11 +505,26 @@ mod tests {
             mesh_authority("reviews", "bookinfo", 9080).unwrap(),
             "reviews.bookinfo.svc.cluster.local:9080"
         );
-        assert!(matches!(mesh_authority("Reviews", "ns", 1), Err(IstioError::InvalidLabel)));
-        assert!(matches!(mesh_authority("-a", "ns", 1), Err(IstioError::InvalidLabel)));
-        assert!(matches!(mesh_authority("a", "", 1), Err(IstioError::InvalidLabel)));
-        assert!(matches!(mesh_authority("a.b", "ns", 1), Err(IstioError::InvalidLabel)));
-        assert!(matches!(mesh_authority("a", "ns", 0), Err(IstioError::InvalidPort)));
+        assert!(matches!(
+            mesh_authority("Reviews", "ns", 1),
+            Err(IstioError::InvalidLabel)
+        ));
+        assert!(matches!(
+            mesh_authority("-a", "ns", 1),
+            Err(IstioError::InvalidLabel)
+        ));
+        assert!(matches!(
+            mesh_authority("a", "", 1),
+            Err(IstioError::InvalidLabel)
+        ));
+        assert!(matches!(
+            mesh_authority("a.b", "ns", 1),
+            Err(IstioError::InvalidLabel)
+        ));
+        assert!(matches!(
+            mesh_authority("a", "ns", 0),
+            Err(IstioError::InvalidPort)
+        ));
         assert!(is_dns_label(&"a".repeat(63)));
         assert!(!is_dns_label(&"a".repeat(64)));
     }
@@ -490,7 +533,12 @@ mod tests {
     fn trace_context_extracts_and_injects_only_propagated_headers() {
         let mut inbound = MetadataMap::new();
         inbound.insert("x-request-id", "req-1".parse().unwrap());
-        inbound.insert("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".parse().unwrap());
+        inbound.insert(
+            "traceparent",
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+                .parse()
+                .unwrap(),
+        );
         inbound.insert("x-b3-sampled", "1".parse().unwrap());
         inbound.insert("authorization", "secret".parse().unwrap());
         let ctx = TraceContext::from_metadata(&inbound);
@@ -513,7 +561,8 @@ mod tests {
         for name in PROPAGATED_HEADERS {
             inbound.insert(name, "v".parse().unwrap());
         }
-        let mut i = MeshInterceptor::new(TraceContext::from_metadata(&inbound)).with_timeout(Duration::from_millis(250));
+        let mut i = MeshInterceptor::new(TraceContext::from_metadata(&inbound))
+            .with_timeout(Duration::from_millis(250));
         let req = Interceptor::call(&mut i, Request::new(())).unwrap();
         for name in PROPAGATED_HEADERS {
             assert_eq!(req.metadata().get(name).unwrap(), "v", "{name}");
@@ -535,7 +584,11 @@ mod tests {
         assert_eq!(f(Duration::from_secs(99_999_999 * 60)), "99999999M");
         assert_eq!(f(Duration::from_secs(100_000_000 * 60)), "1666667H");
         assert_eq!(f(Duration::MAX), "99999999H");
-        for d in [Duration::from_millis(1), Duration::from_secs(7), Duration::from_secs(86_400)] {
+        for d in [
+            Duration::from_millis(1),
+            Duration::from_secs(7),
+            Duration::from_secs(86_400),
+        ] {
             let t = GrpcTimeout::from_duration(d);
             assert!(t.to_string().len() <= 9);
             assert_eq!(GrpcTimeout::parse(&t.to_string()), Some(t));
@@ -549,7 +602,10 @@ mod tests {
 
     #[test]
     fn retriable_codes_match_istio_default_retry_on() {
-        assert_eq!(retry_condition(Code::Unavailable), Some(RetryOn::Unavailable));
+        assert_eq!(
+            retry_condition(Code::Unavailable),
+            Some(RetryOn::Unavailable)
+        );
         assert_eq!(retry_condition(Code::Cancelled), Some(RetryOn::Cancelled));
         for c in [
             Code::Ok,
@@ -564,7 +620,10 @@ mod tests {
             assert!(!is_retriable(c), "{c:?}");
         }
         let joined: Vec<_> = DEFAULT_RETRY_ON.iter().map(|r| r.as_str()).collect();
-        assert_eq!(joined.join(","), "connect-failure,refused-stream,unavailable,cancelled,retriable-status-codes");
+        assert_eq!(
+            joined.join(","),
+            "connect-failure,refused-stream,unavailable,cancelled,retriable-status-codes"
+        );
     }
 
     #[test]

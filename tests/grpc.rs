@@ -21,7 +21,9 @@ const MISSING: Key<'static> = Key::from_static("test.Echo/Missing");
 fn echo_handler(key: Key<'_>, req: &[u8], resp: &mut [u8]) -> Result<usize, HandlerError> {
     match key.as_str() {
         "test.Echo/Reverse" => {
-            let out = resp.get_mut(..req.len()).ok_or(HandlerError::BufferTooSmall)?;
+            let out = resp
+                .get_mut(..req.len())
+                .ok_or(HandlerError::BufferTooSmall)?;
             out.copy_from_slice(req);
             out.reverse();
             Ok(req.len())
@@ -55,7 +57,9 @@ async fn start() -> Running {
         let mut scratch = [0u8; 256];
         while resp.serve_one(&mut handler, &mut scratch).await.is_ok() {}
     });
-    let server = GrpcServer::new().with_bus(BusService::default()).with_responder(svc);
+    let server = GrpcServer::new()
+        .with_bus(BusService::default())
+        .with_responder(svc);
     let (listener, addr) = bind_loopback().await;
     let (stop, stopped) = oneshot::channel::<()>();
     tokio::spawn(serve(server, listener, async {
@@ -65,11 +69,15 @@ async fn start() -> Running {
 }
 
 async fn client(addr: SocketAddr) -> GrpcTransport {
-    GrpcTransport::connect(format!("http://{addr}")).await.unwrap()
+    GrpcTransport::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
 }
 
 async fn within<F: core::future::Future>(f: F) -> F::Output {
-    tokio::time::timeout(Duration::from_secs(5), f).await.expect("timed out")
+    tokio::time::timeout(Duration::from_secs(5), f)
+        .await
+        .expect("timed out")
 }
 
 #[tokio::test]
@@ -112,9 +120,15 @@ struct SetPoint {
 fn prost_double(req: &[u8], resp: &mut [u8]) -> Result<usize, HandlerError> {
     use middleware::Codec;
     use middleware::codec::prost::Prost;
-    let m: SetPoint = Prost.decode(req).map_err(|_| HandlerError::InvalidRequest)?;
-    let out = SetPoint { millikelvin: m.millikelvin * 2 };
-    Prost.encode(&out, resp).map_err(|_| HandlerError::BufferTooSmall)
+    let m: SetPoint = Prost
+        .decode(req)
+        .map_err(|_| HandlerError::InvalidRequest)?;
+    let out = SetPoint {
+        millikelvin: m.millikelvin * 2,
+    };
+    Prost
+        .encode(&out, resp)
+        .map_err(|_| HandlerError::BufferTooSmall)
 }
 
 #[cfg(feature = "prost")]
@@ -125,17 +139,35 @@ async fn g1_prost_codec_on_top_of_raw_bytes() {
     let srv = start().await;
     let mut c: Client<_, _, 64> = Client::new(client(srv.addr).await, Prost);
     let key = Key::from_static("test.Thermostat/Double");
-    let resp: SetPoint = within(c.request(key, &SetPoint { millikelvin: 150_000 })).await.unwrap();
-    assert_eq!(resp, SetPoint { millikelvin: 300_000 });
+    let resp: SetPoint = within(c.request(
+        key,
+        &SetPoint {
+            millikelvin: 150_000,
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        resp,
+        SetPoint {
+            millikelvin: 300_000
+        }
+    );
 }
 
 #[tokio::test]
 async fn g2_publish_reaches_matching_subscriber_only() {
     let srv = start().await;
     let mut c = client(srv.addr).await;
-    let mut sub = within(c.subscribe(Key::from_static("sensor/temp"))).await.unwrap();
-    within(c.publish(Key::from_static("sensor/other"), b"no")).await.unwrap();
-    within(c.publish(Key::from_static("sensor/temp"), b"21C")).await.unwrap();
+    let mut sub = within(c.subscribe(Key::from_static("sensor/temp")))
+        .await
+        .unwrap();
+    within(c.publish(Key::from_static("sensor/other"), b"no"))
+        .await
+        .unwrap();
+    within(c.publish(Key::from_static("sensor/temp"), b"21C"))
+        .await
+        .unwrap();
     let mut buf = [0u8; 64];
     let s = within(sub.recv(&mut buf)).await.unwrap();
     assert_eq!(s.key.as_str(), "sensor/temp");
@@ -146,10 +178,14 @@ async fn g2_publish_reaches_matching_subscriber_only() {
 async fn g2_publish_without_subscribers_succeeds_and_small_buffer_fails() {
     let srv = start().await;
     let mut c = client(srv.addr).await;
-    within(c.publish(Key::from_static("nobody/listens"), b"x")).await.unwrap();
+    within(c.publish(Key::from_static("nobody/listens"), b"x"))
+        .await
+        .unwrap();
 
     let mut sub = within(c.subscribe(Key::from_static("a/b"))).await.unwrap();
-    within(c.publish(Key::from_static("a/b"), b"payload")).await.unwrap();
+    within(c.publish(Key::from_static("a/b"), b"payload"))
+        .await
+        .unwrap();
     let mut tiny = [0u8; 4];
     let r = within(sub.recv(&mut tiny)).await;
     assert!(matches!(r, Err(GrpcError::BufferTooSmall { needed: 10 })));
@@ -162,18 +198,29 @@ async fn g2_bus_service_mounts_on_stock_tonic_router() {
     tokio::spawn(
         tonic::transport::Server::builder()
             .add_service(BusService::new(8))
-            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
-                let _ = stopped.await;
-            }),
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async {
+                    let _ = stopped.await;
+                },
+            ),
     );
     let mut c = client(addr).await;
     let mut sub = within(c.subscribe(Key::from_static("x"))).await.unwrap();
-    within(c.publish(Key::from_static("x"), b"1")).await.unwrap();
+    within(c.publish(Key::from_static("x"), b"1"))
+        .await
+        .unwrap();
     let mut buf = [0u8; 8];
     assert_eq!(within(sub.recv(&mut buf)).await.unwrap().payload, b"1");
     // Only the bus is mounted: other services are UNIMPLEMENTED.
     let r = within(c.request(REVERSE, b"a", &mut buf)).await;
-    assert!(matches!(r, Err(GrpcError::Status { code: Code::Unimplemented, .. })));
+    assert!(matches!(
+        r,
+        Err(GrpcError::Status {
+            code: Code::Unimplemented,
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -188,7 +235,10 @@ async fn g3_handler_errors_arrive_as_grpc_status_and_map_back() {
         (MISSING, Code::Unimplemented, HandlerError::NotFound),
     ] {
         let err = within(c.request(key, b"x", &mut buf)).await.unwrap_err();
-        assert!(matches!(err, GrpcError::Status { code: c, .. } if c == code), "{key}: {err}");
+        assert!(
+            matches!(err, GrpcError::Status { code: c, .. } if c == code),
+            "{key}: {err}"
+        );
         assert_eq!(err.handler_error(), Some(handler_error), "{key}");
     }
 }
@@ -198,7 +248,9 @@ async fn g3_request_larger_than_server_scratch_is_resource_exhausted() {
     let srv = start().await;
     let mut c = client(srv.addr).await;
     let mut buf = [0u8; 16];
-    let err = within(c.request(REVERSE, &[7u8; 300], &mut buf)).await.unwrap_err();
+    let err = within(c.request(REVERSE, &[7u8; 300], &mut buf))
+        .await
+        .unwrap_err();
     assert_eq!(err.handler_error(), Some(HandlerError::BufferTooSmall));
 }
 
@@ -218,7 +270,9 @@ mod istio {
     use core::future::Ready;
     use core::task::{Context, Poll};
     use middleware::grpc::RawCodec;
-    use middleware::grpc::istio::{MeshChannelBuilder, MeshInterceptor, PROPAGATED_HEADERS, TraceContext};
+    use middleware::grpc::istio::{
+        MeshChannelBuilder, MeshInterceptor, PROPAGATED_HEADERS, TraceContext,
+    };
     use tonic::body::Body;
     use tonic::codegen::{BoxFuture, Service};
     use tonic::metadata::MetadataMap;
@@ -248,7 +302,10 @@ mod istio {
             Poll::Ready(Ok(()))
         }
         fn call(&mut self, req: http::Request<Body>) -> Self::Future {
-            let mut lines = vec![format!("authority={}", req.uri().authority().map_or("", |a| a.as_str()))];
+            let mut lines = vec![format!(
+                "authority={}",
+                req.uri().authority().map_or("", |a| a.as_str())
+            )];
             for name in PROPAGATED_HEADERS.iter().chain(&["grpc-timeout"]) {
                 if let Some(v) = req.headers().get(*name).and_then(|v| v.to_str().ok()) {
                     lines.push(format!("{name}={v}"));
@@ -294,13 +351,21 @@ mod istio {
         let mut c = GrpcTransport::new(InterceptedService::new(channel, interceptor));
 
         let mut buf = [0u8; 1024];
-        let out = within(c.request(Key::from_static("pkg.Reviews/Get"), b"", &mut buf)).await.unwrap();
+        let out = within(c.request(Key::from_static("pkg.Reviews/Get"), b"", &mut buf))
+            .await
+            .unwrap();
         let text = core::str::from_utf8(out).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.first(), Some(&"authority=reviews.bookinfo.svc.cluster.local:9080"));
+        assert_eq!(
+            lines.first(),
+            Some(&"authority=reviews.bookinfo.svc.cluster.local:9080")
+        );
         for name in PROPAGATED_HEADERS {
             let expected = format!("{name}=v-{name}");
-            assert!(lines.contains(&expected.as_str()), "missing {expected} in {text}");
+            assert!(
+                lines.contains(&expected.as_str()),
+                "missing {expected} in {text}"
+            );
         }
         assert!(lines.contains(&"grpc-timeout=2000000u"), "{text}");
         assert!(!text.contains("must-not-leak"));

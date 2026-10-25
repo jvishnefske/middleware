@@ -1,0 +1,369 @@
+//! Per-chip profiles and GPIO policy.
+//!
+//! A [`Profile`] collects everything the firmware needs to know about a chip
+//! that is not a peripheral driver: the name reported in `sys/info`, whether
+//! it has a USB-Serial-JTAG port, whether the image includes the WASM
+//! payload runtime (`runtime`), the heap plan, the WASM memory limit, the
+//! largest payload image it accepts, the console UART pins, and three GPIO
+//! bitmasks:
+//!
+//! * `gpio` — pins that exist on the chip.
+//! * `reserved` — pins a payload may never touch: SPI flash and in-package
+//!   or module PSRAM, the USB D-/D+ pair, and UART0 TX/RX (the protocol
+//!   port).
+//! * `input_only` — pins without an output driver (ESP32 GPIO34–39).
+//!
+//! [`Profile::check_pin`] applies the policy and returns the
+//! [`AbiError`] a host import reports: `InvalidArgument` for a pin that does
+//! not exist, `Unsupported` for a reserved pin or an output on an input-only
+//! pin.
+//!
+//! # Heap plan
+//!
+//! The heap holds WASM linear memory (64 KiB pages), the payload image while
+//! it is compiled, and the wasmi interpreter's module and instance data. It
+//! is built from two regions: RAM reclaimed from the second-stage bootloader
+//! (`heap_reclaimed`, the size `esp-generate` uses per chip) plus a region in
+//! ordinary `.bss` (`heap_main`).
+//!
+//! | chip     | reclaimed | main    | total   | pages | max image |
+//! |----------|-----------|---------|---------|-------|-----------|
+//! | ESP32    | 96.4 KiB  | 112 KiB | 208 KiB | 2     | 32 KiB    |
+//! | ESP32-S3 | 72.0 KiB  | 240 KiB | 312 KiB | 3     | 80 KiB    |
+//! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 2     | 64 KiB    |
+//! | ESP8266  | 0         | 0       | 0       | 0     | 252 KiB   |
+//!
+//! The ESP8266 runs the protocol only: it has no WASM runtime, so it has no
+//! payload heap and no linear-memory pages. Its `max_image` is the 256 KiB
+//! payload flash region at 0x100000 on the 4 MB module minus the 4 KiB
+//! header sector; images are stored, not run. The ESP32-C3 also builds
+//! without the runtime (`runtime` is `false`, matching the absent `wasm`
+//! cargo feature), though its heap plan is kept for when it gains one.
+//!
+//! The main regions are sized so the linker leaves a usable main stack
+//! (after `.bss`, measured from `_stack_end`..`_stack_start`): ESP32 about
+//! 25 KiB, ESP32-S3 about 17 KiB, ESP32-C3 about 103 KiB. On the Xtensa
+//! chips the ABI 2 peripherals take about 14 KiB of `.bss` (two SPI DMA
+//! buffers and the UART transmit buffer of `MAX_DMA` bytes each, the
+//! 1 KiB UART receive ring, the event queue) plus esp-hal's RAM-resident
+//! SPI/DMA/UART code; the ESP32-C3 builds without them.
+//!
+//! Each runtime profile leaves at least [`INTERPRETER_RESERVE`] bytes beyond
+//! the linear memory and image for wasmi (checked by a unit test); the heap
+//! check applies only to profiles with `runtime` set.
+
+use middleware::wasm_abi::AbiError;
+
+/// Size of one WASM linear-memory page.
+pub const WASM_PAGE: usize = 64 * 1024;
+
+/// Heap kept free for the wasmi engine, compiled module and instance on top
+/// of linear memory and the image buffer.
+pub const INTERPRETER_RESERVE: usize = 40 * 1024;
+
+/// Supported chips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    /// ESP32 (Xtensa LX6, dual core).
+    Esp32,
+    /// ESP32-S3 (Xtensa LX7, dual core, USB-Serial-JTAG).
+    Esp32s3,
+    /// ESP32-C3 (RISC-V, single core, USB-Serial-JTAG).
+    Esp32c3,
+    /// ESP8266 (Xtensa LX106, single core, no WASM runtime).
+    Esp8266,
+}
+
+/// What a payload wants to do with a pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Read the pin level.
+    Input,
+    /// Drive the pin.
+    Output,
+}
+
+/// Static description of a chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Profile {
+    /// The chip.
+    pub chip: Chip,
+    /// Name reported in `sys/info` (matches the cargo feature and
+    /// `espflash --chip`).
+    pub name: &'static str,
+    /// Whether the chip has a USB-Serial-JTAG port the protocol also serves.
+    pub usb_serial_jtag: bool,
+    /// Whether the image includes the WASM payload runtime (the `wasm`
+    /// cargo feature). Without it payloads can be stored but not run, and
+    /// the heap fields and `max_memory_pages` describe no live allocation.
+    pub runtime: bool,
+    /// Heap bytes in RAM reclaimed from the bootloader.
+    pub heap_reclaimed: usize,
+    /// Heap bytes in ordinary `.bss`.
+    pub heap_main: usize,
+    /// WASM linear-memory limit in 64 KiB pages.
+    pub max_memory_pages: u32,
+    /// Largest payload image accepted, in bytes (also capped by the flash
+    /// partition).
+    pub max_image: u32,
+    /// UART0 TX pin (protocol port behind the bridge chip).
+    pub uart0_tx: u8,
+    /// UART0 RX pin.
+    pub uart0_rx: u8,
+    gpio: u64,
+    reserved: u64,
+    input_only: u64,
+}
+
+/// Bitmask with bits `from..=to` set.
+const fn span(from: u8, to: u8) -> u64 {
+    let mut m = 0u64;
+    let mut i = from;
+    while i <= to {
+        m |= 1 << i;
+        i += 1;
+    }
+    m
+}
+
+const fn bit(pin: u8) -> u64 {
+    1 << pin
+}
+
+/// ESP32: GPIO0–19, 21–23, 25–27, 32–39. Flash on 6–11, PSRAM (WROVER) or
+/// flash (PICO) on 16/17, UART0 on 1 (TX) / 3 (RX). 34–39 are input only.
+pub const ESP32: Profile = Profile {
+    chip: Chip::Esp32,
+    name: "esp32",
+    usb_serial_jtag: false,
+    runtime: true,
+    heap_reclaimed: 98_768,
+    heap_main: 112 * 1024,
+    max_memory_pages: 2,
+    max_image: 32 * 1024,
+    uart0_tx: 1,
+    uart0_rx: 3,
+    gpio: span(0, 19) | span(21, 23) | span(25, 27) | span(32, 39),
+    reserved: bit(1) | bit(3) | span(6, 11) | bit(16) | bit(17),
+    input_only: span(34, 39),
+};
+
+/// ESP32-S3: GPIO0–21, 26–48. Flash/PSRAM on 26–32, octal flash/PSRAM on
+/// 33–37, USB D-/D+ on 19/20, UART0 on 43 (TX) / 44 (RX).
+pub const ESP32S3: Profile = Profile {
+    chip: Chip::Esp32s3,
+    name: "esp32s3",
+    usb_serial_jtag: true,
+    runtime: true,
+    heap_reclaimed: 73_744,
+    heap_main: 240 * 1024,
+    max_memory_pages: 3,
+    max_image: 80 * 1024,
+    uart0_tx: 43,
+    uart0_rx: 44,
+    gpio: span(0, 21) | span(26, 48),
+    reserved: bit(19) | bit(20) | span(26, 37) | bit(43) | bit(44),
+    input_only: 0,
+};
+
+/// ESP32-C3: GPIO0–21. Flash on 12–17, USB D-/D+ on 18/19, UART0 on 21
+/// (TX) / 20 (RX).
+pub const ESP32C3: Profile = Profile {
+    chip: Chip::Esp32c3,
+    name: "esp32c3",
+    usb_serial_jtag: true,
+    runtime: false,
+    heap_reclaimed: 66_320,
+    heap_main: 176 * 1024,
+    max_memory_pages: 2,
+    max_image: 64 * 1024,
+    uart0_tx: 21,
+    uart0_rx: 20,
+    gpio: span(0, 21),
+    reserved: span(12, 17) | bit(18) | bit(19) | bit(20) | bit(21),
+    input_only: 0,
+};
+
+/// ESP8266: GPIO0–16. Flash on 6–11, UART0 on 1 (TX) / 3 (RX) behind the
+/// CH340 bridge. No WASM runtime, so no payload heap or linear memory; the
+/// payload flash region is 256 KiB at 0x100000 on the 4 MB module (one
+/// 4 KiB header sector plus the image).
+pub const ESP8266: Profile = Profile {
+    chip: Chip::Esp8266,
+    name: "esp8266",
+    usb_serial_jtag: false,
+    runtime: false,
+    heap_reclaimed: 0,
+    heap_main: 0,
+    max_memory_pages: 0,
+    max_image: 252 * 1024,
+    uart0_tx: 1,
+    uart0_rx: 3,
+    gpio: span(0, 16),
+    reserved: span(6, 11) | bit(1) | bit(3),
+    input_only: 0,
+};
+
+impl Chip {
+    /// The chip's profile.
+    pub const fn profile(self) -> &'static Profile {
+        match self {
+            Chip::Esp32 => &ESP32,
+            Chip::Esp32s3 => &ESP32S3,
+            Chip::Esp32c3 => &ESP32C3,
+            Chip::Esp8266 => &ESP8266,
+        }
+    }
+}
+
+fn has(mask: u64, pin: u8) -> bool {
+    pin < 64 && mask & (1u64 << pin) != 0
+}
+
+impl Profile {
+    /// Total heap in bytes.
+    pub const fn heap_total(&self) -> usize {
+        self.heap_reclaimed + self.heap_main
+    }
+
+    /// Whether `pin` exists on the chip.
+    pub fn exists(&self, pin: u8) -> bool {
+        has(self.gpio, pin)
+    }
+
+    /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
+    pub fn is_reserved(&self, pin: u8) -> bool {
+        has(self.reserved, pin)
+    }
+
+    /// Whether a payload may use `pin` in `direction`.
+    pub fn check_pin(&self, pin: u8, direction: Direction) -> Result<(), AbiError> {
+        if !self.exists(pin) {
+            Err(AbiError::InvalidArgument)
+        } else if self.is_reserved(pin)
+            || (direction == Direction::Output && has(self.input_only, pin))
+        {
+            Err(AbiError::Unsupported)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Pins a payload may use at all (exist and not reserved), ascending.
+    pub fn payload_pins(&self) -> impl Iterator<Item = u8> + '_ {
+        (0u8..64).filter(|&p| self.exists(p) && !self.is_reserved(p))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [&Profile; 4] = [&ESP32, &ESP32S3, &ESP32C3, &ESP8266];
+
+    #[test]
+    fn console_uart_pins_are_reserved() {
+        for p in ALL {
+            assert!(p.exists(p.uart0_tx) && p.exists(p.uart0_rx), "{}", p.name);
+            assert_eq!(p.check_pin(p.uart0_tx, Direction::Output), Err(AbiError::Unsupported));
+            assert_eq!(p.check_pin(p.uart0_rx, Direction::Input), Err(AbiError::Unsupported));
+        }
+    }
+
+    #[test]
+    fn flash_psram_and_usb_pins_are_refused() {
+        for pin in 6..=11 {
+            assert_eq!(ESP32.check_pin(pin, Direction::Input), Err(AbiError::Unsupported));
+        }
+        assert_eq!(ESP32.check_pin(16, Direction::Output), Err(AbiError::Unsupported));
+        assert_eq!(ESP32.check_pin(17, Direction::Output), Err(AbiError::Unsupported));
+        for pin in (26..=37).chain([19, 20]) {
+            assert_eq!(ESP32S3.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+        }
+        for pin in 12..=19 {
+            assert_eq!(ESP32C3.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+        }
+        for pin in 6..=11 {
+            assert_eq!(ESP8266.check_pin(pin, Direction::Input), Err(AbiError::Unsupported));
+        }
+    }
+
+    #[test]
+    fn missing_pins_are_invalid() {
+        for pin in [20, 24, 28, 31, 40, 63, 64, 255] {
+            assert_eq!(ESP32.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+        }
+        for pin in [22, 25, 49, 64] {
+            assert_eq!(ESP32S3.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+        }
+        for pin in [22, 30, 64] {
+            assert_eq!(ESP32C3.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+        }
+        for pin in [17, 20, 64] {
+            assert_eq!(ESP8266.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+        }
+    }
+
+    #[test]
+    fn esp32_input_only_pins_refuse_output() {
+        for pin in 34..=39 {
+            assert_eq!(ESP32.check_pin(pin, Direction::Input), Ok(()));
+            assert_eq!(ESP32.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+        }
+    }
+
+    #[test]
+    fn general_purpose_pins_are_allowed() {
+        for pin in [0, 2, 4, 5, 12, 13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33] {
+            assert_eq!(ESP32.check_pin(pin, Direction::Output), Ok(()), "esp32 {pin}");
+        }
+        for pin in (0..=18).chain([21, 38, 39, 40, 41, 42, 45, 46, 47, 48]) {
+            assert_eq!(ESP32S3.check_pin(pin, Direction::Output), Ok(()), "esp32s3 {pin}");
+        }
+        for pin in 0..=11 {
+            assert_eq!(ESP32C3.check_pin(pin, Direction::Output), Ok(()), "esp32c3 {pin}");
+        }
+        assert_eq!(ESP32C3.payload_pins().count(), 12);
+        for pin in [0, 2, 4, 5, 12, 13, 14, 15, 16] {
+            assert_eq!(ESP8266.check_pin(pin, Direction::Output), Ok(()), "esp8266 {pin}");
+        }
+        assert_eq!(ESP8266.payload_pins().count(), 9);
+        assert!(ESP32S3.payload_pins().all(|p| !ESP32S3.is_reserved(p)));
+    }
+
+    #[test]
+    fn heap_leaves_room_for_payload() {
+        for p in ALL.into_iter().filter(|p| p.runtime) {
+            let need = p.max_memory_pages as usize * WASM_PAGE + p.max_image as usize + INTERPRETER_RESERVE;
+            assert!(p.heap_total() >= need, "{}: {} < {}", p.name, p.heap_total(), need);
+            assert!(p.max_memory_pages >= 2, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn heapless_profiles_have_no_linear_memory() {
+        // ESP32-C3 has no runtime but keeps its heap plan, so the check is
+        // on heapless profiles rather than all non-runtime ones.
+        for p in ALL.into_iter().filter(|p| p.heap_total() == 0) {
+            assert!(!p.runtime, "{}", p.name);
+            assert_eq!(p.max_memory_pages, 0, "{}", p.name);
+        }
+        assert_eq!(ESP8266.heap_total(), 0);
+        const REGION: u32 = 256 * 1024;
+        const HEADER: u32 = 4 * 1024;
+        const { assert!(ESP8266.max_image <= REGION - HEADER) };
+    }
+
+    #[test]
+    fn profiles_match_chips() {
+        let chips = [Chip::Esp32, Chip::Esp32s3, Chip::Esp32c3, Chip::Esp8266];
+        for (chip, p) in chips.into_iter().zip(ALL) {
+            assert_eq!(chip.profile().chip, chip);
+            assert_eq!(p.chip, chip);
+        }
+        let usb: [bool; 4] = ALL.map(|p| p.usb_serial_jtag);
+        assert_eq!(usb, [false, true, true, false]);
+        let runtime: [bool; 4] = ALL.map(|p| p.runtime);
+        assert_eq!(runtime, [true, true, false, false]);
+    }
+}

@@ -107,7 +107,10 @@ impl GrpcError {
 
 impl From<tonic::Status> for GrpcError {
     fn from(s: tonic::Status) -> Self {
-        GrpcError::Status { code: s.code(), message: s.message().to_owned() }
+        GrpcError::Status {
+            code: s.code(),
+            message: s.message().to_owned(),
+        }
     }
 }
 
@@ -127,7 +130,9 @@ impl core::fmt::Display for GrpcError {
             GrpcError::BufferTooSmall { needed } => {
                 write!(f, "buffer too small, {needed} bytes needed")
             }
-            GrpcError::InvalidHeader => f.write_str("key cannot be encoded as gRPC metadata or path"),
+            GrpcError::InvalidHeader => {
+                f.write_str("key cannot be encoded as gRPC metadata or path")
+            }
             GrpcError::StreamEnded => f.write_str("subscription stream ended"),
             GrpcError::Closed => f.write_str("responder channel closed"),
         }

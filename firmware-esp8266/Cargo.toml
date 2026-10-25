@@ -1,0 +1,51 @@
+[package]
+name = "firmware-esp8266"
+version = "0.1.0"
+edition = "2024"
+description = "ESP8266 base firmware: serves the middleware serial protocol (no WASM runtime)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone workspace: cross-compiled for xtensa-esp8266-none-elf with the
+# esp-new toolchain, so it stays out of the parent (host) workspace.
+[workspace]
+
+[lib]
+# The pure, host-testable part: flash driver, frame link, controller.
+path = "src/lib.rs"
+
+[[bin]]
+# The imperative shell; only builds for the ESP8266 (target_arch xtensa).
+name = "firmware-esp8266"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+# Pure core of the ESP base firmware: dispatch, payload store, chip tables.
+# Default features off: no chip feature, so no esp-hal dependencies.
+esp-base = { path = "../firmware", default-features = false }
+# Frame codec, loader commands and keys need no optional features.
+middleware = { path = "..", default-features = false }
+embedded-storage = "0.3.2"
+embedded-hal = { version = "0.2", features = ["unproven"] }
+nb = "1.0"
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+esp8266-hal = "0.5.1"
+xtensa-lx = { version = "0.7", features = ["esp8266"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+lto = true
+panic = "abort"
+
+[patch.crates-io]
+xtensa-lx-rt = { path = "vendor/xtensa-lx-rt" }

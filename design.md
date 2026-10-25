@@ -132,3 +132,239 @@ characteristic UUID and a 16-bit advertising id.
   `grpc::istio::tests::retriable_codes_match_istio_default_retry_on`.
 - [x] I5 Plaintext h2c to the sidecar; mTLS is left to the mesh —
   `grpc::istio::tests::channel_builder_targets_sidecar_with_mesh_origin`, `istio::i2_i5_interceptor_propagates_trace_and_channel_sets_mesh_authority`.
+## Device platform: ESP base firmware, WASM payloads, web tooling
+
+A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
+from the browser. Afterwards, application logic ships as WASM payloads loaded over the
+same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI) or
+the chip's native USB-Serial-JTAG. Payloads talk to the world through the
+middleware ABI in `wasm_abi`.
+
+Heap policy: the no-heap rule applies to the `middleware` crate and to RP2040
+firmware. On ESP the base firmware may use a global allocator (`esp-alloc`),
+because WASM linear memory and the wasmi interpreter require one.
+
+### Serial protocol and loader (`serial`, `loader`, `wasm_abi`)
+
+- [x] S1 COBS framing round trips arbitrary bytes, including long zero-free
+  runs, and rejects malformed encodings — `serial::cobs::tests::*`.
+- [x] S2 Frames (request, response, publish) carry a CRC-16 and round trip;
+  corrupt, truncated, oversized and unknown frames are rejected —
+  `serial::frame::tests::every_kind_round_trips_through_the_wire`,
+  `corrupt_frames_are_rejected`, `oversized_frames_are_rejected`.
+- [x] S3 Non-frame bytes on the line (ROM boot banners) are skipped —
+  `serial::frame::tests::splitter_finds_frames_amid_noise`,
+  `serial::link::tests::request_skips_noise_and_stale_responses`.
+- [x] S4 `SerialLink` implements request/response with correlation ids,
+  publish/subscribe and a responder over any `embedded-io-async` stream —
+  `serial::link::tests::*`.
+- [x] S5 The loader accepts an image only when chunks arrive in order, fit
+  the declared length and the CRC-32 matches; any violation abandons the
+  transfer — `loader::tests::complete_transfer_activates`,
+  `out_of_order_oversized_and_corrupt_transfers_fail`.
+- [x] S6 System commands and `sys/info` encode and parse symmetrically;
+  application keys pass through, unknown `sys/` keys are `NotFound` —
+  `loader::tests::commands_round_trip_through_parse`,
+  `parse_rejects_bad_bodies_and_passes_app_keys`, `device_info_round_trips`.
+- [x] S7 The payload ABI (imports, exports, error codes, bounds checks) is
+  defined once in `wasm_abi` — `wasm_abi::tests::*`.
+
+### WASM runtime (`wasm-host`)
+
+- [x] W1 Loads a module, rejecting imports not in `wasm_abi::IMPORTS` or with
+  wrong signatures, and a missing `memory` export —
+  `wasm-host/tests/runtime.rs`: `w1_accepts_module_using_every_import`, `w1_rejects_unknown_import`, `w1_rejects_wrong_import_signature`, `w1_rejects_missing_memory`, `w1_rejects_bad_export_signature_and_garbage`, `w1_extra_exports_and_start_function_are_accepted`; `abi::tests::imports_must_be_known_functions_with_exact_signatures`.
+- [x] W2 Runs `init`, `tick` on the requested period, and `on_message` for
+  subscribed keys via `mw_alloc` —
+  `w2_init_runs_once_on_load`, `w2_tick_runs_on_requested_period`, `w2_set_tick_zero_disables_and_tick_without_schedule_is_noop`, `w2_deliver_runs_on_message_for_exact_subscribed_keys`, `w2_alloc_refusal_means_not_delivered`, `abi::tests::tick_schedule_wraps_and_skips_missed_ticks`.
+- [x] W3 Host imports validate pointers, pins, keys (no `sys/`), and the
+  subscription limit, returning `AbiError` codes rather than trapping —
+  `w3_imports_return_error_codes_instead_of_trapping`, `w3_subscription_limit_returns_no_resources`, `w3_log_truncates_at_max_log`, `abi::tests::keys_reject_sys_and_malformed`, `gpio_arguments_are_range_checked`, `link::tests::publish_checks_bounds_size_and_key`.
+- [x] W4 Each call is fuel metered; an infinite loop traps and is reported,
+  without hanging the host —
+  `w4_infinite_loop_runs_out_of_fuel_and_poisons_payload`, `w4_infinite_loop_in_init_fails_load`, `w4_fuel_is_refilled_before_every_call`, `w4_other_traps_are_reported`.
+- [x] W5 Memory is capped by a configurable page limit —
+  `w5_memory_grow_beyond_cap_fails`, `w5_initial_memory_over_cap_is_rejected`, `abi::tests::memory_cap_is_checked_and_converted`.
+- [ ] W6 `no_std` + `alloc`; builds for the ESP targets and `wasm32`.
+  Partial: builds for `wasm32-unknown-unknown`, `xtensa-esp32-none-elf`,
+  `xtensa-esp32s3-none-elf`; fails on `riscv32imc-unknown-none-elf`
+  (ESP32-C3 has no CAS atomics, wasmi needs `Arc`). Decision: wasmi is the
+  only engine; the C3 firmware builds without the runtime (it installs and
+  stores payloads but cannot run them).
+- [x] W7 The desktop simulator runs a payload against a fake device —
+  `tools/payload-sim/tests/sim.rs`: `w7_runs_payload_against_fake_device_in_virtual_time`, `w7_real_time_ticks`, `w7_reports_traps_and_load_errors`.
+
+### Payload SDK (`payloads/`)
+
+- [x] P1 A `no_std` Rust SDK wraps the ABI safely (log, publish, subscribe,
+  timers, GPIO) and provides the exports — `cargo test -p mw-payload
+  --target x86_64-unknown-linux-gnu` in `payloads/` (15 tests: error codes,
+  slots, oversized publish, lazy init, delivery buffer, re-entrancy, LogLine,
+  GPIO). `unsafe` is confined to `payloads/sdk/src/sys.rs` (FFI imports) and
+  the `payload!` export attributes; documented in the crate rustdoc.
+- [x] P2 Example payloads (blink, echo) build for `wasm32-unknown-unknown`
+  and pass ABI validation in the simulator —
+  `cargo build --release` in `payloads/`; `abi-check` tests `rust_*`; blink and echo run in `payload-sim` (blink toggles GPIO 8 every 500 ms, echo republishes `app/echo/in` on `app/echo/out`).
+- [x] P3 WAT and AssemblyScript templates exercise the same ABI and run in
+  the simulator —
+  `abi-check` tests `wat_*`; `payloads/scripts/check-all.sh` compiles the AssemblyScript templates and validates them; both AS payloads run in `payload-sim`.
+
+### ESP base firmware (`firmware/`)
+
+- [x] E1 Builds for `esp32`, `esp32s3` and `esp32c3` from one source tree
+  via cargo features —
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3` release builds; `compile_error!` in `firmware/src/main.rs` unless exactly one chip feature is set.
+- [ ] E2 Serves the protocol on UART0 (bridge chips) on all chips and on
+  USB-Serial-JTAG on S3 and C3. Implemented (`firmware/src/shell/board.rs`,
+  `link.rs`) and builds. Hardware evidence so far: UART0 behind a CH340 on an
+  ESP8266EX (`firmware-esp8266`, 2026-10-25): `mwctl info`, `upload`,
+  `reset` + `monitor` and `start` all ran against `/dev/ttyUSB0`, including
+  recovery from the ROM's 74880-baud boot output. ESP32 family and
+  USB-Serial-JTAG still need a hardware test.
+- [x] E3 Answers `sys/info`; installs payloads with the loader into a flash
+  region, verifying CRC-32; the payload survives reboot —
+  `firmware` core tests `dispatch::tests::info_reports_device`, `full_transfer_installs_then_start_and_stop`, `abandoned_transfer_leaves_no_payload`, `oversized_begin_from_idle_keeps_installed_payload`, `resent_last_chunk_is_acknowledged_without_rewriting`; `store::tests::installed_image_survives_reopen_and_verifies`, `interrupted_transfer_leaves_no_image`, `corruption_is_detected`, `limits_and_ordering_are_enforced` (RAM flash model; silicon untested).
+- [x] E4 Starts the stored payload on boot and on `sys/payload/start`; stops
+  on `sys/payload/stop`; publishes status and log lines —
+  `dispatch::tests::start_requires_an_installed_image`, `begin_while_running_stops_and_erases`, `storage_failure_and_traps_update_status`, `start_without_runtime_is_refused_but_loader_works`, `tick_delay_handles_wrap`.
+- [x] E5 Bridges payload publish/subscribe to the serial link and GPIO to
+  the chip, refusing pins used by flash, USB or the console UART —
+  `chip::tests::console_uart_pins_are_reserved`, `flash_psram_and_usb_pins_are_refused`, `missing_pins_are_invalid`, `esp32_input_only_pins_refuse_output`, `general_purpose_pins_are_allowed`; `dispatch::tests::publications_route_only_to_running_subscribed_payloads`. Runs payloads on ESP32 and ESP32-S3 only; the C3 has no runtime.
+- [x] E6 Produces merged flash images per chip for the web flasher —
+  `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
+
+### ESP8266 base firmware (`firmware-esp8266/`)
+
+Protocol only: about 80 KB of DRAM cannot hold wasmi plus a 64 KiB page, so
+like the C3 build it stores payloads but cannot run them. It is a blocking
+super-loop on esp8266-hal (no executor on the LX106). esp8266-hal's runtime
+crate `xtensa-lx-rt` 0.12 is vendored and patched for current rustc
+(`#[unsafe(naked)]`, `naked_asm!`, one `global_asm!` block for the exception
+handlers); the unsafe asm stays in that vendored dependency.
+
+- [x] E7 Builds for `xtensa-esp8266-none-elf` from `firmware-esp8266/`,
+  reusing the `esp_base` core unchanged apart from the chip profile —
+  `firmware-esp8266/build.sh` release build (`#![deny(unsafe_code)]` in the
+  binary, `#![forbid(unsafe_code)]` in its library); `firmware-esp8266/test.sh`
+  clippy `-D warnings` for host and chip; `esp_base` changes limited to
+  `chip::ESP8266` and `Profile::runtime`, covered by
+  `chip::tests::profiles_match_chips`, `heapless_profiles_have_no_linear_memory`,
+  `missing_pins_are_invalid`, `general_purpose_pins_are_allowed`.
+- [x] E8 Answers `sys/info`, installs payloads into flash at 0x100000 (above
+  the 1 MB code window) with CRC-32 verification, keeps them across reboot,
+  and refuses start —
+  host: `controller::tests::fresh_boot_reports_empty_esp8266_without_runtime`, `upload_installs_and_survives_reboot`, `start_is_refused_and_stop_is_a_no_op`, `wrong_crc_commit_leaves_no_image`, `corrupted_stored_image_boots_empty`, `largest_image_fits_the_region`, `info_request_over_the_link`.
+  Hardware (ESP8266EX, 4 MB flash, 2026-10-25) with `mwctl`: `info` reports
+  esp8266, `0.1.0+no-wasm`, ABI 2, capacity 258048; `upload echo.wasm`
+  installs (status Stopped); after `mwctl reset` the boot log reports the
+  stored image and `info` still says Stopped; `start` answers NotFound;
+  `upload --corrupt-chunk 3` fails at commit with InvalidRequest and leaves
+  status Empty. A 252 KiB image also installed and survived reboot. Note:
+  the payload store has one slot and `begin` erases it, so a rejected
+  transfer leaves no payload rather than the previous one.
+- [x] E9 The flash driver satisfies `NorFlash` semantics (4 KiB erase one
+  sector per HAL call, 4-byte writes split at 256-byte pages, region-relative
+  bounds) — `flash::tests::erased_reads_ff_and_writes_and_like_nor`, `addresses_are_region_relative`, `erase_issues_one_call_per_sector`, `writes_split_at_page_boundaries`, `aligned_page_sized_write_is_one_program`, `misaligned_requests_are_refused_without_device_access`, `out_of_region_requests_are_refused`, `whole_region_erases`, `device_failures_surface_as_other` (RAM model, `firmware-esp8266/src/flash/ram.rs`).
+- [x] E10 `firmware/build-images.sh` emits `esp8266.bin` (merged, offset 0x0)
+  and its manifest entry with `"wasm": false` —
+  full four-chip `firmware/build-images.sh` run (2026-10-25) wrote
+  `web/public/firmware/esp8266.bin` (78508 bytes, via
+  `firmware-esp8266/image.sh`) and the `esp8266` manifest entry; the same
+  merged image, written by `firmware-esp8266/flash.sh`, boots on the board.
+
+### Host tool (`tools/mwctl`)
+
+`mwctl --port <PATH> info|upload|start|stop|monitor|reset` drives a device
+over one named serial port, synchronously, with the same pure frame and
+loader code as the firmware. It never enumerates ports. It opens the port
+without resetting the board (verified on the CH340 board: no boot output on
+open).
+
+- [x] T1 Protocol logic is tested against an in-memory device running the
+  real splitter and loader —
+  `device::tests::info_decodes_a_protocol_only_esp8266`, `upload_happy_path_installs_reports_progress_and_starts`, `dropped_chunk_reply_is_retried_and_the_device_deduplicates`, `dropped_request_and_late_reply_are_handled`, `exhausted_retries_time_out`, `corrupt_chunk_makes_commit_fail_on_the_device`, `start_without_runtime_is_a_clear_error`, `oversized_image_is_refused_at_begin`, `boot_garbage_before_the_first_reply_needs_no_retry`; `link::tests::garbage_without_delimiter_before_a_frame_is_skipped`, `garbage_with_delimiters_is_noise_and_frames_still_decode`; `plan::tests::*`, `cli::tests::*`.
+
+### Web site (`web/`)
+
+- [ ] U1 Flashes the base firmware from Chrome over Web Serial with
+  esptool-js, detecting the chip and picking the matching image.
+  Partial: manifest parsing and chip mapping, including `ESP8266` →
+  `esp8266`, are tested (`web/test/manifest.test.ts`: "maps esptool-js chip
+  names to manifest keys"); the esptool-js flash needs a manual run in
+  Chrome against the ESP8266 board.
+- [x] U2 Connects to the base firmware, shows device info, log and published
+  messages, and publishes to the device —
+  `web/test/upload.test.ts`: "reads sys/info after a boot banner and shows the banner as console text", "delivers device publications and sends host publications", "releases both stream locks on close"; `web/test/ports.test.ts` (mocked serial streams; not run against a real port).
+- [x] U3 Uploads a `.wasm` payload with the loader protocol, with progress,
+  then starts it —
+  `web/test/upload.test.ts` upload flow against a fake device running the real Rust loader: in-order chunks + CRC + activate + start, lost request retried, lost response retried, refused step, over capacity, silent device; `loader::tests::resent_last_chunk_is_acknowledged_without_rewriting`.
+- [x] U4 The browser uses the Rust protocol implementation compiled to WASM
+  (`protocol-wasm`), not a second implementation —
+  `protocol-wasm` `decoder::tests::*`, `encode::tests::*`, `loader::tests::*`; `web/test/protocol.test.ts` exercises the wasm-pack output, including ABI constants matching `wasm_abi`.
+- [x] U5 In-browser editor for WAT and AssemblyScript that compiles to
+  `.wasm` locally —
+  `web/test/editor.test.ts` (WAT via wabt, AssemblyScript via asc without `env.abort`, error reporting, ABI pre-check); compiled in headless Chrome on localhost.
+- [x] U6 In-browser simulator runs the payload with the same runtime as the
+  device (wasm-host compiled to WASM), with virtual GPIO and message log —
+  `protocol-wasm` `simulator::tests::simulator_runs_payload_with_virtual_gpio_and_messages`, `simulator_reports_rejection_and_traps`; `web/test/editor.test.ts` runs the blink/echo templates (WAT and AssemblyScript) in wasm-host compiled to WASM.
+- [x] U7 Automated tests cover the protocol bindings and the upload flow
+  against a mocked serial port —
+  `npm test` in `web/` (58 tests) and `cargo test -p protocol-wasm` (17 tests).
+- [x] U8 The manifest carries each image's `wasm` flag (absent means `true`)
+  and the UI marks protocol-only images; the device page disables "start
+  after upload" and Start for `+no-wasm` firmware —
+  `web/test/manifest.test.ts`: "parses the wasm runtime flag, defaulting to true when absent"; `web/test/upload.test.ts`: "recognises protocol-only firmware by its +no-wasm version suffix".
+### Interrupts and DMA (ABI 2)
+
+Payloads handle GPIO edges, hardware timer alarms, DMA completion and
+secondary-UART receive, and start SPI-master and UART DMA transfers.
+Payload code never runs in interrupt context: ISRs timestamp events into a
+bounded queue and the main loop dispatches them to the `on_irq` export. DMA
+uses firmware-owned buffers copied to and from guest memory.
+
+- [x] D1 ABI 2 is a superset of ABI 1 (new imports, optional `on_irq`
+  export, `Busy` error) defined once in `wasm_abi` —
+  `wasm_abi::tests::import_table_is_unique_and_searchable`,
+  `error_codes_round_trip`.
+- [x] D2 The event queue is bounded and never blocks: FIFO order, timer and
+  UART RX coalescing, drop-and-count on overflow, per-source purge —
+  `wasm_abi::events::tests::*`.
+- [x] D3 Peripheral arguments (edges, timers, SPI config and lengths, UART
+  config and lengths) are validated in one place —
+  `wasm_abi::periph::tests::*`.
+- [x] D4 `wasm-host` implements every ABI 2 import through `Device`, dispatches
+  queued events to `on_irq` with fuel metering, and still loads ABI 1
+  payloads — `wasm-host/tests/irq.rs` (`d4_*`, 16 tests, including
+  `d4_abi1_module_still_loads_and_runs`,
+  `d4_infinite_loop_in_on_irq_runs_out_of_fuel_and_poisons`); `abi::tests::
+  spi_transfer_checks_arguments_before_pointer`, `uart_write_and_read_targets`.
+- [x] D5 The firmware's GPIO, timer, DMA and UART ISRs only enqueue (bounded
+  work, no allocation, no payload calls); overflow is reported via
+  `irq_overflow` and `sys/log` —
+  `firmware` `periph::tests::d5_gpio_event_respects_edge`, `d5_overflow_is_reported_once_per_rise`, `d5_isr_pushes_are_bounded_and_counted`, `claims::tests::d5_irq_pins_do_not_collide`; ISRs bound at compile time with `#[handler]` (`shell/gpio.rs`, `shell/timer.rs`); esp32/esp32s3 builds. Hardware delivery untested.
+- [x] D6 SPI master transfers (bus 0) run on DMA with firmware-owned buffers;
+  completion raises `DmaDone`; `dma_read` returns the received bytes —
+  `claims::tests::d6_spi_pins_are_checked_against_the_chip`, `d6_reopening_spi_replaces_its_pins`, `dma::tests::d6_transfer_lifecycle_and_consuming_read`, `d6_errors_and_aborts_return_to_idle`, `periph::tests::d6_d7_completion_events`; SPI2 with DMA (`DMA_SPI2` on ESP32, GDMA on S3) in `shell/spi.rs`. Hardware untested.
+- [x] D7 Secondary UART 1 transmits with DMA (or the chip's closest
+  equivalent, documented per chip) and buffers received bytes, raising
+  coalesced `UartRx` events —
+  `claims::tests::d7_uart_pins_avoid_console_flash_usb_and_other_owners`, `dma::tests::d7_uart_tx_uses_the_same_machine`, `ring::tests::d7_ring_keeps_order_across_wrap`, `d7_ring_drops_and_counts_overflow`. Per chip: esp-hal 1.2 has no usable UART DMA (no UHCI on ESP32; S3 UHCI cannot share a gapless RX ring), so both use the interrupt-driven async FIFO driver, documented in `firmware/src/shell/uart1.rs`.
+- [x] D8 Hardware timers 0–3 deliver one-shot and periodic alarms with
+  microsecond timestamps; stopping a timer purges its pending events —
+  `timers::tests::d8_one_shot_fires_once`, `d8_periodic_rearms_on_its_grid_and_counts_missed_periods`, `d8_four_timers_fire_in_deadline_order`, `d8_stop_and_restart`; four timers multiplexed on TIMG1 alarm (`shell/timer.rs`). Accuracy untested on hardware.
+- [x] D9 Payload SDK exposes interrupts, timers, SPI and UART safely, with
+  examples (button IRQ, SPI loopback, UART echo) and WAT/AssemblyScript
+  templates — `mw-payload` `irq::tests::*`, `rt::tests::on_irq_*`,
+  `rt::tests::reentrant_on_irq_is_dropped`, `dma::tests::*`,
+  `spi::tests::*`, `uart::tests::*`, `timer::tests::*`,
+  `gpio::tests::irq_helpers`; `abi-check` `tests::rejects_bad_on_irq_signature`,
+  `tests::event_sources_require_on_irq` and `tests/payloads.rs`
+  (`rust_button_example`, `rust_spi_loopback_example`,
+  `rust_uart_echo_example`, `wat_button_template`, `wat_timer_template`,
+  `as_button_template`, `as_spi_template`); run end to end in `payload-sim`.
+- [x] D10 The desktop and browser simulators provide virtual GPIO edges,
+  timers, an SPI loopback device and a UART terminal, so ABI 2 payloads run
+  without hardware — desktop: `tools/payload-sim/tests/d10.rs` (`d10_*`);
+  browser: `protocol-wasm` `d10_*` (timers, edges, SPI loopback/pattern, UART,
+  overflow, bounded dispatch, trap in `on_irq`) and `web/test/abi2.test.ts`
+  (including the real `payloads/templates` ABI 2 templates).

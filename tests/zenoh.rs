@@ -15,7 +15,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn isolated() -> ZenohTransport {
     let config = SessionConfig::new().build().expect("config");
-    ZenohTransport::open(config).await.expect("open").with_timeout(Duration::from_secs(2))
+    ZenohTransport::open(config)
+        .await
+        .expect("open")
+        .with_timeout(Duration::from_secs(2))
 }
 
 /// Echoes the request reversed; empty requests are `InvalidRequest`.
@@ -23,7 +26,9 @@ fn reverse(_key: Key<'_>, req: &[u8], resp: &mut [u8]) -> Result<usize, HandlerE
     if req.is_empty() {
         return Err(HandlerError::InvalidRequest);
     }
-    let out = resp.get_mut(..req.len()).ok_or(HandlerError::BufferTooSmall)?;
+    let out = resp
+        .get_mut(..req.len())
+        .ok_or(HandlerError::BufferTooSmall)?;
     out.copy_from_slice(req);
     out.reverse();
     Ok(req.len())
@@ -47,7 +52,9 @@ async fn z1_publish_subscribe_round_trip() {
     let mut sub = t.subscriber(K).await.expect("subscriber");
     t.publish(K, b"21.5").await.expect("publish");
     let mut buf = [0u8; 64];
-    let sample = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf)).await.expect("timeout");
+    let sample = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf))
+        .await
+        .expect("timeout");
     let sample = sample.expect("recv");
     assert_eq!(sample.key, K);
     assert_eq!(sample.payload, b"21.5");
@@ -60,8 +67,19 @@ async fn z1_subscriber_buffer_too_small_is_error() {
     let mut sub = t.subscriber(K).await.expect("subscriber");
     t.publish(K, b"payload").await.expect("publish");
     let mut buf = [0u8; 8];
-    let r = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf)).await.expect("timeout");
-    assert!(matches!(r, Err(ZenohError::BufferTooSmall { needed: 20, capacity: 8 })), "{r:?}");
+    let r = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf))
+        .await
+        .expect("timeout");
+    assert!(
+        matches!(
+            r,
+            Err(ZenohError::BufferTooSmall {
+                needed: 20,
+                capacity: 8
+            })
+        ),
+        "{r:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -84,7 +102,16 @@ async fn z2_response_buffer_too_small_is_error() {
     let server = serve_one_in_background(responder, reverse);
     let mut resp = [0u8; 2];
     let r = t.request(K, b"abcd", &mut resp).await;
-    assert!(matches!(r, Err(ZenohError::BufferTooSmall { needed: 4, capacity: 2 })), "{r:?}");
+    assert!(
+        matches!(
+            r,
+            Err(ZenohError::BufferTooSmall {
+                needed: 4,
+                capacity: 2
+            })
+        ),
+        "{r:?}"
+    );
     server.await.expect("join").expect("serve_one");
 }
 
@@ -96,7 +123,10 @@ async fn z3_handler_error_surfaces_at_requester() {
     let server = serve_one_in_background(responder, reverse);
     let mut resp = [0u8; 16];
     let r = t.request(K, b"", &mut resp).await;
-    assert!(matches!(r, Err(ZenohError::Handler(HandlerError::InvalidRequest))), "{r:?}");
+    assert!(
+        matches!(r, Err(ZenohError::Handler(HandlerError::InvalidRequest))),
+        "{r:?}"
+    );
     server.await.expect("join").expect("serve_one");
 }
 
@@ -108,7 +138,10 @@ async fn z3_oversized_request_is_buffer_too_small_reply() {
     let server = serve_one_in_background(responder, reverse);
     let mut resp = [0u8; 16];
     let r = t.request(K, &[1u8; 100], &mut resp).await;
-    assert!(matches!(r, Err(ZenohError::Handler(HandlerError::BufferTooSmall))), "{r:?}");
+    assert!(
+        matches!(r, Err(ZenohError::Handler(HandlerError::BufferTooSmall))),
+        "{r:?}"
+    );
     server.await.expect("join").expect("serve_one");
 }
 
@@ -123,7 +156,9 @@ async fn z2_request_without_responder_is_no_reply() {
 
 /// Reserves a free loopback port by binding port 0 (no probing).
 async fn free_loopback_port() -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     l.local_addr().expect("addr").port()
 }
 
@@ -133,8 +168,14 @@ async fn z4_two_sessions_over_explicit_loopback_endpoint() {
     const RPC: Key<'static> = Key::from_static("test/z4/rpc");
     let endpoint = format!("tcp/127.0.0.1:{}", free_loopback_port().await);
 
-    let server_cfg = SessionConfig::new().listen(endpoint.clone()).build().expect("config");
-    let client_cfg = SessionConfig::new().connect(endpoint).build().expect("config");
+    let server_cfg = SessionConfig::new()
+        .listen(endpoint.clone())
+        .build()
+        .expect("config");
+    let client_cfg = SessionConfig::new()
+        .connect(endpoint)
+        .build()
+        .expect("config");
     let server = ZenohTransport::open(server_cfg).await.expect("open server");
     let mut client = ZenohTransport::open(client_cfg)
         .await
@@ -166,7 +207,11 @@ async fn z4_two_sessions_over_explicit_loopback_endpoint() {
         let mut scratch = [0u8; 64];
         let mut handler = reverse;
         loop {
-            if responder.serve_one(&mut handler, &mut scratch).await.is_err() {
+            if responder
+                .serve_one(&mut handler, &mut scratch)
+                .await
+                .is_err()
+            {
                 break;
             }
         }

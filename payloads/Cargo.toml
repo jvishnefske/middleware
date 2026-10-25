@@ -1,0 +1,39 @@
+# WASM payload workspace. Kept out of the parent `middleware` workspace
+# (see its `exclude`) because everything here except `abi-check` builds for
+# `wasm32-unknown-unknown` (set in `.cargo/config.toml`).
+[workspace]
+resolver = "3"
+members = [
+    "sdk",
+    "examples/blink",
+    "examples/echo",
+    "examples/button",
+    "examples/spi_loopback",
+    "examples/uart_echo",
+    "abi-check",
+]
+# `cargo build --release` builds only the guests; `abi-check` is a host tool
+# run with `--target x86_64-unknown-linux-gnu` (see README.md).
+default-members = [
+    "sdk",
+    "examples/blink",
+    "examples/echo",
+    "examples/button",
+    "examples/spi_loopback",
+    "examples/uart_echo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

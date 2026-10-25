@@ -96,8 +96,12 @@ impl HandlerError {
 /// into `response` and return its length.
 pub trait Handler {
     /// Produces the response for one request.
-    fn handle(&mut self, key: Key<'_>, request: &[u8], response: &mut [u8])
-    -> Result<usize, HandlerError>;
+    fn handle(
+        &mut self,
+        key: Key<'_>,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> Result<usize, HandlerError>;
 }
 
 impl<F> Handler for F

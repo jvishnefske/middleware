@@ -1,0 +1,33 @@
+{
+  "name": "middleware-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Web flasher, device console, payload editor and simulator for the middleware ESP base firmware",
+  "scripts": {
+    "build:wasm": "wasm-pack build protocol-wasm --target web --out-dir ../src/pkg",
+    "build:wasm:nosim": "wasm-pack build protocol-wasm --target web --out-dir ../src/pkg -- --no-default-features",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "assemblyscript": "0.28.20",
+    "codemirror": "6.0.2",
+    "esptool-js": "0.7.0",
+    "wabt": "1.0.39"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/w3c-web-serial": "1.0.9",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

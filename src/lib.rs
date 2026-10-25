@@ -12,11 +12,18 @@
 //!   so implementations need no heap.
 //! * [`codec`] — [`Codec`] turns typed messages into bytes; [`typed::Client`]
 //!   combines a transport with a codec.
+//! * [`serial`] — COBS-framed wire format for byte streams (always built, pure);
+//!   its async `SerialLink` transport needs the `serial` feature.
+//! * [`loader`] — system keys and the pure state machine for installing WASM
+//!   payloads on a device over any transport.
+//! * [`wasm_abi`] — the import/export contract between payloads and firmware.
+//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * Backends, each behind a cargo feature:
 //!
 //! | feature    | module      | target            | needs                     |
 //! |------------|-------------|-------------------|---------------------------|
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
+//! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |
@@ -32,9 +39,13 @@
 #![allow(async_fn_in_trait)]
 
 pub mod codec;
+pub mod crc;
 pub mod key;
+pub mod loader;
+pub mod serial;
 pub mod transport;
 pub mod typed;
+pub mod wasm_abi;
 
 #[cfg(feature = "ble")]
 pub mod ble;

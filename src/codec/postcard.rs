@@ -33,7 +33,10 @@ mod tests {
     #[test]
     fn round_trip() {
         let mut buf = [0u8; 16];
-        let r = Reading { millikelvin: 295_150, sensor: 3 };
+        let r = Reading {
+            millikelvin: 295_150,
+            sensor: 3,
+        };
         let n = Postcard.encode(&r, &mut buf).unwrap();
         assert_eq!(Codec::<Reading>::decode(&Postcard, &buf[..n]).unwrap(), r);
     }
@@ -41,7 +44,10 @@ mod tests {
     #[test]
     fn small_buffer_is_an_error() {
         let mut buf = [0u8; 1];
-        let r = Reading { millikelvin: 295_150, sensor: 3 };
+        let r = Reading {
+            millikelvin: 295_150,
+            sensor: 3,
+        };
         assert!(Postcard.encode(&r, &mut buf).is_err());
     }
 }
