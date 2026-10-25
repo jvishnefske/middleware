@@ -26,7 +26,7 @@ features_of_self() {
 echo "== C1: no features, $EMBEDDED_TARGET"
 cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then
@@ -40,8 +40,8 @@ done
 for set in "zenoh" "grpc" "grpc,istio" "zenoh,grpc,istio,prost"; do
     echo "== F2: [$set] on host"
     cargo build --quiet --no-default-features --features "$set"
-    if features_of_self --no-default-features --features "$set" | grep -qx ble; then
-        fail "[$set] enables the ble feature"
+    if features_of_self --no-default-features --features "$set" | grep -Eqx 'ble|espnow'; then
+        fail "[$set] enables an embedded radio feature (ble/espnow)"
     fi
 done
 

@@ -12,12 +12,30 @@
 //!
 //! # Behaviour
 //!
-//! * [`Publisher::publish`] is a Zenoh `put` of the payload on the key.
-//! * [`ZenohTransport::subscriber`] declares a Zenoh subscriber on one key and
-//!   returns a [`ZenohSubscriber`]. Its [`Subscriber::recv`] waits for the next
-//!   sample and writes the sample's key followed by its payload into the
-//!   caller's buffer (via [`sample_into`]). A buffer that cannot hold both is
-//!   [`ZenohError::BufferTooSmall`]; the sample is dropped, never truncated.
+//! * [`Publisher::publish`] is a Zenoh `put` of the payload on the key, with
+//!   a 12-byte attachment `"mw" 1 [sender id: 8] [seq]` identifying this
+//!   transport ([`ZenohTransport::sender_id`]) and numbering its publications
+//!   (a wrapping `u8` per transport value).
+//! * [`Subscribe::subscribe`] declares a Zenoh subscriber and returns a
+//!   [`ZenohSubscriber`]. [`KeyFilter::Exact`] maps to the key expression
+//!   `k`; [`KeyFilter::Prefix`] maps to the single key expression `k/**`,
+//!   which in Zenoh matches `k` itself as well as every key below it (`**`
+//!   matches zero or more chunks), and never `kx`.
+//!   [`ZenohTransport::subscriber`] is the exact-key shorthand.
+//! * [`Subscriber::recv`] waits for the next sample and writes the sample's
+//!   key followed by its payload into the caller's buffer (via
+//!   [`sample_into`]); [`Subscriber::try_recv`] does the same if a sample is
+//!   already queued and returns `None` otherwise. A buffer that cannot hold
+//!   both is [`ZenohError::BufferTooSmall`]; the sample is dropped, never
+//!   truncated. When the attachment is present, [`SampleMeta`] carries the
+//!   publisher's sender id and sequence number; samples from other Zenoh
+//!   publishers have empty metadata.
+//! * **No self-delivery:** subscribers are declared with
+//!   `allowed_origin(Locality::Remote)`, so a transport never receives its
+//!   own session's publications. [`ZenohTransport::with_local_delivery`]
+//!   turns this off (needed for a single isolated session talking to
+//!   itself, as in tests). Clones of a transport share one session and so
+//!   one origin.
 //! * [`Requester::request`] is a Zenoh `get` on the key carrying the request as
 //!   the query payload, bounded by the transport's timeout
 //!   ([`DEFAULT_TIMEOUT`] unless changed with [`ZenohTransport::with_timeout`]).
@@ -38,6 +56,27 @@
 //!   every one of these cases the query has been answered, so `serve_one`
 //!   returns `Ok(())`; it fails only when Zenoh itself fails.
 //!
+//! # Cancel safety
+//!
+//! Zenoh's `put`, `reply` and declaration futures are ready on first poll
+//! (they resolve synchronously), so the only suspension points are channel
+//! receives:
+//!
+//! * [`Subscriber::recv`] and [`Responder::serve_one`] wait on a FIFO
+//!   channel whose receive future leaves the item in the queue when dropped,
+//!   so cancelling loses no sample or query. Once an item is dequeued the
+//!   rest of the call completes without suspending.
+//! * [`Requester::request`] owns the reply channel of its own `get`;
+//!   dropping it abandons that query and its late replies go nowhere.
+//! * [`Publisher::publish`] completes on its first poll: once polled it has
+//!   been sent exactly once.
+//!
+//! # Limits
+//!
+//! [`ZenohTransport`]'s [`Publisher::LIMITS`] allow keys up to
+//! [`MAX_KEY_LEN`] and payloads up to [`MAX_PAYLOAD`], which leaves 1 KiB of
+//! Zenoh's default 1 GiB `max_message_size` for key, attachment and headers.
+//!
 //! # Session configuration
 //!
 //! [`SessionConfig`] builds a [`::zenoh::Config`] with multicast scouting and
@@ -52,14 +91,76 @@ use ::zenoh::Session;
 use ::zenoh::handlers::FifoChannelHandler;
 use ::zenoh::query::Query;
 
-use crate::key::{Key, KeyError};
+use ::zenoh::sample::Locality;
+
+use crate::dedup::{Sequence, fnv1a64};
+use crate::key::{Key, KeyError, KeyFilter, MAX_KEY_LEN};
 use crate::transport::{
-    Handler, HandlerError, Publisher, Requester, Responder, Sample, Subscriber, copy_into,
-    sample_into,
+    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, SampleMeta, SenderId,
+    Subscribe, Subscriber, copy_into, sample_into,
 };
 
 /// Request timeout used by [`ZenohTransport::new`].
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Largest payload [`ZenohTransport`] advertises in [`Publisher::LIMITS`]:
+/// Zenoh's default `transport/link/rx/max_message_size` (1 GiB) minus 1 KiB
+/// for the key, the attachment and Zenoh's own headers.
+pub const MAX_PAYLOAD: usize = (1 << 30) - 1024;
+
+/// Leading bytes of the attachment [`ZenohTransport`] puts on every
+/// publication: `"mw"` and format version 1.
+const ATTACHMENT_TAG: [u8; 3] = [b'm', b'w', 1];
+
+/// Length of the publication attachment: tag, sender id, sequence number.
+const ATTACHMENT_LEN: usize = ATTACHMENT_TAG.len() + 8 + 1;
+
+/// The [`SenderId`] of a Zenoh session: the 64-bit FNV-1a hash of its
+/// 16-byte Zenoh id (little-endian), so distinct sessions get distinct ids
+/// with overwhelming probability.
+pub fn sender_id_of(zid: ::zenoh::session::ZenohId) -> SenderId {
+    SenderId(fnv1a64(&zid.to_le_bytes()).to_le_bytes())
+}
+
+/// The publication attachment for `sender` and `seq`.
+fn encode_attachment(sender: SenderId, seq: Sequence) -> [u8; ATTACHMENT_LEN] {
+    let mut out = [0u8; ATTACHMENT_LEN];
+    let (tag, rest) = out.split_at_mut(ATTACHMENT_TAG.len());
+    tag.copy_from_slice(&ATTACHMENT_TAG);
+    let (id, last) = rest.split_at_mut(8);
+    id.copy_from_slice(&sender.0);
+    if let Some(b) = last.first_mut() {
+        *b = seq.get();
+    }
+    out
+}
+
+/// Reads sender and sequence from a publication attachment; anything that is
+/// not exactly our format yields empty metadata.
+fn decode_attachment(bytes: &[u8]) -> SampleMeta {
+    let parsed = (bytes.len() == ATTACHMENT_LEN)
+        .then_some(bytes)
+        .and_then(|b| b.strip_prefix(&ATTACHMENT_TAG[..]))
+        .and_then(|rest| {
+            let (id, seq) = rest.split_first_chunk::<8>()?;
+            Some((SenderId(*id), *seq.first()?))
+        });
+    match parsed {
+        Some((sender, seq)) => SampleMeta {
+            sender: Some(sender),
+            seq: Some(seq),
+        },
+        None => SampleMeta::default(),
+    }
+}
+
+/// The Zenoh key expression selecting what `filter` selects.
+fn key_expr(filter: KeyFilter<'_>) -> String {
+    match filter {
+        KeyFilter::Exact(k) => k.as_str().to_owned(),
+        KeyFilter::Prefix(k) => format!("{k}/**"),
+    }
+}
 
 /// Failure of a Zenoh transport operation.
 #[derive(Debug)]
@@ -178,15 +279,22 @@ fn json_array(items: &[String]) -> Result<String, ZenohError> {
 pub struct ZenohTransport {
     session: Session,
     timeout: Duration,
+    sender: SenderId,
+    seq: Sequence,
+    local_delivery: bool,
 }
 
 impl ZenohTransport {
     /// Wraps an already opened session, using [`DEFAULT_TIMEOUT`] for
-    /// requests.
+    /// requests and no self-delivery.
     pub fn new(session: Session) -> Self {
+        let sender = sender_id_of(session.zid());
         Self {
             session,
             timeout: DEFAULT_TIMEOUT,
+            sender,
+            seq: Sequence::default(),
+            local_delivery: false,
         }
     }
 
@@ -201,14 +309,44 @@ impl ZenohTransport {
         Self { timeout, ..self }
     }
 
+    /// Returns a transport whose subscribers, declared from now on, also
+    /// receive publications made through this same session (`true`), or only
+    /// publications from other sessions (`false`, the default).
+    pub fn with_local_delivery(self, local_delivery: bool) -> Self {
+        Self {
+            local_delivery,
+            ..self
+        }
+    }
+
+    /// The id this transport stamps on its publications and that remote
+    /// subscribers report in [`SampleMeta::sender`].
+    pub fn sender_id(&self) -> SenderId {
+        self.sender
+    }
+
     /// The underlying session.
     pub fn session(&self) -> &Session {
         &self.session
     }
 
-    /// Declares a subscriber on `key`.
+    /// Declares a subscriber on exactly `key`; shorthand for
+    /// [`Subscribe::subscribe`] with [`KeyFilter::Exact`].
     pub async fn subscriber(&self, key: Key<'_>) -> Result<ZenohSubscriber, ZenohError> {
-        let inner = self.session.declare_subscriber(key.as_str()).await?;
+        self.declare(KeyFilter::Exact(key)).await
+    }
+
+    async fn declare(&self, filter: KeyFilter<'_>) -> Result<ZenohSubscriber, ZenohError> {
+        let origin = if self.local_delivery {
+            Locality::Any
+        } else {
+            Locality::Remote
+        };
+        let inner = self
+            .session
+            .declare_subscriber(key_expr(filter))
+            .allowed_origin(origin)
+            .await?;
         Ok(ZenohSubscriber { inner })
     }
 
@@ -222,9 +360,30 @@ impl ZenohTransport {
 impl Publisher for ZenohTransport {
     type Error = ZenohError;
 
+    /// Keys up to [`MAX_KEY_LEN`], payloads up to [`MAX_PAYLOAD`].
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_PAYLOAD);
+
+    /// A Zenoh `put` carrying the sender/sequence attachment. The sequence
+    /// number advances even if Zenoh rejects the put.
     async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), ZenohError> {
-        self.session.put(key.as_str(), payload).await?;
+        let attachment = encode_attachment(self.sender, self.seq);
+        self.seq = self.seq.next();
+        self.session
+            .put(key.as_str(), payload)
+            .attachment(attachment.to_vec())
+            .await?;
         Ok(())
+    }
+}
+
+impl Subscribe for ZenohTransport {
+    type Subscriber = ZenohSubscriber;
+    type Error = ZenohError;
+
+    /// Declares a subscriber for `filter` (see the module docs for the key
+    /// expressions and the self-delivery rule).
+    async fn subscribe(&mut self, filter: KeyFilter<'_>) -> Result<ZenohSubscriber, ZenohError> {
+        self.declare(filter).await
     }
 }
 
@@ -273,37 +432,62 @@ impl Requester for ZenohTransport {
     }
 }
 
-/// Receives samples published on the one key it was declared for.
+/// Receives samples matching the filter it was declared for.
 #[derive(Debug)]
 pub struct ZenohSubscriber {
     inner: ::zenoh::pubsub::Subscriber<FifoChannelHandler<::zenoh::sample::Sample>>,
 }
 
+/// Copies a received Zenoh sample into `buf` as a [`Sample`] with metadata.
+fn into_sample<'b>(
+    sample: &::zenoh::sample::Sample,
+    buf: &'b mut [u8],
+) -> Result<Sample<'b>, ZenohError> {
+    let key = sample.key_expr().as_str();
+    let payload = sample.payload().to_bytes();
+    let needed = key.len() + payload.len();
+    if needed > buf.len() {
+        return Err(ZenohError::BufferTooSmall {
+            needed,
+            capacity: buf.len(),
+        });
+    }
+    Key::new(key).map_err(ZenohError::InvalidKey)?;
+    let meta = sample
+        .attachment()
+        .map_or_else(SampleMeta::default, |a| decode_attachment(&a.to_bytes()));
+    // Size and key validity were checked above, so `None` is unreachable;
+    // it is still mapped to an error rather than unwrapped.
+    sample_into(buf, key, &payload)
+        .map(|s| s.with_meta(meta))
+        .ok_or(ZenohError::BufferTooSmall {
+            needed,
+            capacity: needed,
+        })
+}
+
 impl Subscriber for ZenohSubscriber {
     type Error = ZenohError;
 
+    /// Waits on the subscriber's FIFO channel. Cancel safe: a dropped wait
+    /// leaves queued samples in the channel.
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, ZenohError> {
         let sample = self
             .inner
             .recv_async()
             .await
             .map_err(|_| ZenohError::Closed)?;
-        let key = sample.key_expr().as_str();
-        let payload = sample.payload().to_bytes();
-        let needed = key.len() + payload.len();
-        if needed > buf.len() {
-            return Err(ZenohError::BufferTooSmall {
-                needed,
-                capacity: buf.len(),
-            });
+        into_sample(&sample, buf)
+    }
+
+    /// Dequeues a sample if one is queued; `Ok(None)` when the channel is
+    /// empty, [`ZenohError::Closed`] when it is empty and closed.
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, ZenohError> {
+        match self.inner.try_recv() {
+            Ok(Some(sample)) => into_sample(&sample, buf).map(Some),
+            Ok(None) => Ok(None),
+            Err(_) => Err(ZenohError::Closed),
         }
-        Key::new(key).map_err(ZenohError::InvalidKey)?;
-        // Size and key validity were checked above, so `None` is unreachable;
-        // it is still mapped to an error rather than unwrapped.
-        sample_into(buf, key, &payload).ok_or(ZenohError::BufferTooSmall {
-            needed,
-            capacity: needed,
-        })
     }
 }
 
@@ -403,6 +587,33 @@ mod tests {
                 .connect("tcp/127.0.0.1:7447")
                 .build()
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn attachment_round_trips_and_foreign_ones_are_ignored() {
+        let id = SenderId([1, 2, 3, 4, 5, 6, 7, 8]);
+        let a = encode_attachment(id, Sequence::new(9));
+        assert_eq!(
+            decode_attachment(&a),
+            SampleMeta {
+                sender: Some(id),
+                seq: Some(9)
+            }
+        );
+        assert_eq!(decode_attachment(&a[..11]), SampleMeta::default());
+        assert_eq!(decode_attachment(b"xx\x01123456789"), SampleMeta::default());
+        assert_eq!(decode_attachment(b""), SampleMeta::default());
+    }
+
+    #[test]
+    fn filters_map_to_key_expressions() {
+        let k = Key::from_static("app");
+        assert_eq!(key_expr(KeyFilter::Exact(k)), "app");
+        assert_eq!(key_expr(KeyFilter::Prefix(k)), "app/**");
+        assert_eq!(
+            <ZenohTransport as Publisher>::LIMITS,
+            Limits::new(MAX_KEY_LEN, MAX_PAYLOAD)
         );
     }
 }

@@ -33,7 +33,7 @@ pub struct Options {
     pub file: String,
     /// Stop after this many ticks; `None` runs until stdin closes.
     pub ticks: Option<u32>,
-    /// Runtime limits (`--fuel`, `--pages`).
+    /// Runtime limits (`--fuel`, `--pages`, `--memory-bytes`).
     pub limits: Limits,
     /// Use virtual time: stdin is processed first, then the clock jumps
     /// straight to each due tick or timer.
@@ -45,7 +45,7 @@ pub struct Options {
 }
 
 /// Usage text printed on argument errors.
-pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P] [--virtual]\n\
+pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
                          [--until-ms T] [--spi-pattern HEX]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal";
@@ -67,7 +67,11 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         match arg {
             "--ticks" => opts.ticks = Some(number(value("--ticks")?)?),
             "--fuel" => opts.limits.fuel_per_call = number(value("--fuel")?)?,
-            "--pages" => opts.limits.max_memory_pages = number(value("--pages")?)?,
+            "--pages" => {
+                opts.limits.max_memory_bytes =
+                    Limits::pages(number(value("--pages")?)?).max_memory_bytes
+            }
+            "--memory-bytes" => opts.limits.max_memory_bytes = number(value("--memory-bytes")?)?,
             "--virtual" => opts.virtual_time = true,
             "--until-ms" => opts.until_ms = Some(number(value("--until-ms")?)?),
             "--spi-pattern" => opts.spi_pattern = Some(hex(value("--spi-pattern")?)?),
@@ -471,13 +475,7 @@ mod tests {
         .unwrap();
         assert_eq!(o.file, "p.wasm");
         assert_eq!(o.ticks, Some(3));
-        assert_eq!(
-            o.limits,
-            Limits {
-                max_memory_pages: 4,
-                fuel_per_call: 99
-            }
-        );
+        assert_eq!(o.limits, Limits::pages(4).with_fuel(99));
         assert!(o.virtual_time);
         assert!(parse_args::<&str>(&[]).is_err());
         assert!(parse_args(&["a", "b"]).is_err());

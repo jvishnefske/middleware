@@ -72,6 +72,44 @@ fn rust_echo_example() {
     assert!(has(&r.imports, &["subscribe", "publish", "log"]));
 }
 
+/// The 1-byte-page build of an example (`scripts/build-byte-pages.sh`), if
+/// it has been built.
+fn byte_pages(name: &str) -> Option<abi_check::Report> {
+    let path = root()
+        .join("target/byte-pages/wasm32-unknown-unknown/release")
+        .join(format!("{name}.wasm"));
+    path.exists().then(|| validate(&path))
+}
+
+#[test]
+fn rust_examples_with_one_byte_pages() {
+    for name in ["blink", "echo"] {
+        let Some(r) = byte_pages(name) else {
+            eprintln!("{name}: no byte-page build; run scripts/build-byte-pages.sh");
+            continue;
+        };
+        assert_eq!(r.memory_page_bytes, Some(1), "{name}");
+        // check-all.sh links them with 16 KiB fixed memory.
+        assert_eq!(r.memory_pages, Some((16_384, Some(16_384))), "{name}");
+        assert_eq!(r.initial_memory_bytes(), Some(16_384), "{name}");
+    }
+}
+
+#[test]
+fn default_build_uses_one_64k_page() {
+    let r = validate(&release("blink"));
+    assert_eq!(r.memory_page_bytes, Some(65_536));
+    assert_eq!(r.initial_memory_bytes(), Some(65_536));
+}
+
+#[test]
+fn wat_one_byte_page_module_validates() {
+    let wasm = abi_check::load(br#"(module (memory (export "memory") 300 (pagesize 1)))"#).unwrap();
+    let r = abi_check::check(&wasm).expect("custom page sizes are accepted");
+    assert_eq!(r.memory_page_bytes, Some(1));
+    assert_eq!(r.initial_memory_bytes(), Some(300));
+}
+
 // ABI 2: interrupts, timers, SPI and UART DMA.
 
 const ALL_EXPORTS: &[&str] = &["memory", "init", "tick", "mw_alloc", "on_message", "on_irq"];

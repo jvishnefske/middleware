@@ -6,10 +6,13 @@ description = "WASM payload runtime implementing the middleware payload ABI (no_
 
 [dependencies]
 middleware = { path = ".." }
-# `auto-dispatch` falls back to loop dispatch when tail calls are unavailable
-# (debug builds, some targets); without it an unoptimised build overflows the
-# stack on long-running guest loops.
-wasmi = { version = "2.0", default-features = false, features = ["validate", "auto-dispatch"] }
+# `validate`: the safe `Module::new`. `portable-dispatch`: the loop-based
+# dispatcher on every target and opt level. The tail-call dispatcher relies on
+# sibling-call optimisation; without it (debug builds, Xtensa) each executed
+# instruction nests a stack frame and a guest loop running down its fuel
+# overflows the native stack (seen on the conagotchi badge, xtensa). See the
+# crate docs, "Interpreter build".
+wasmi = { version = "2.0", default-features = false, features = ["validate", "portable-dispatch"] }
 
 [dev-dependencies]
 wat = "1"

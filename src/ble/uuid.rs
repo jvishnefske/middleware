@@ -3,11 +3,17 @@
 //! Both peers derive identifiers from the key text, so no discovery table is
 //! exchanged. A key's 64-bit FNV-1a hash replaces the low eight bytes of
 //! [`BASE_UUID`] to form its GATT characteristic UUID, and is folded to 16
-//! bits for the advertising id carried in manufacturer data.
+//! bits for the advertising id carried in manufacturer data. The hash is
+//! [`fnv1a64`], shared with the other backends.
+//!
+//! A 16-bit id can collide: two keys may share a [`short_id`]. Receivers that
+//! resolve ids back to key text detect this when learning keys
+//! ([`ShortIdTable`](super::advert::ShortIdTable)).
 //!
 //! All functions are `const`, so identifiers for literal keys are computed at
 //! compile time.
 
+use crate::dedup::fnv1a64;
 use crate::key::Key;
 
 /// A 128-bit UUID in big-endian (textual) byte order.
@@ -62,18 +68,6 @@ const fn with_low(base: Uuid128, low: u64) -> Uuid128 {
     Uuid128(out)
 }
 
-/// 64-bit FNV-1a over `bytes`.
-pub const fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        i += 1;
-    }
-    hash
-}
-
 /// The GATT characteristic UUID for publications on `key`. Values 0 and 1 are
 /// reserved for [`SERVICE_UUID`] and [`RPC_CHARACTERISTIC_UUID`]; a key hashing
 /// there is moved to 2.
@@ -84,8 +78,7 @@ pub const fn characteristic_uuid(key: Key<'_>) -> Uuid128 {
 
 /// 16-bit id identifying `key` inside an advertisement.
 pub const fn short_id(key: Key<'_>) -> u16 {
-    let h = fnv1a64(key.as_bytes());
-    (h ^ (h >> 16) ^ (h >> 32) ^ (h >> 48)) as u16
+    crate::dedup::short_id(key)
 }
 
 #[cfg(test)]
@@ -94,12 +87,6 @@ mod tests {
 
     const TEMP: Key<'static> = Key::from_static("sensor/temperature");
     const HUM: Key<'static> = Key::from_static("sensor/humidity");
-
-    #[test]
-    fn fnv_matches_reference_vectors() {
-        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
-    }
 
     #[test]
     fn ids_are_stable_and_distinct() {

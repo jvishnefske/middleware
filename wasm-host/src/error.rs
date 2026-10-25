@@ -32,11 +32,13 @@ pub enum LoadError {
     },
     /// The module does not export a memory named `memory`.
     MissingMemory,
-    /// The exported memory starts larger than the page cap.
+    /// The module's initial linear memory is larger than the byte cap, or
+    /// its memory section could not be read.
     MemoryTooLarge {
-        /// Initial size declared by the module, in pages.
-        pages: u64,
-        /// [`Limits::max_memory_pages`](crate::Limits::max_memory_pages).
+        /// Initial size declared by the module, in bytes (`u64::MAX` when
+        /// unreadable or overflowing).
+        bytes: u64,
+        /// [`Limits::max_memory_bytes`](crate::Limits::max_memory_bytes).
         max: u32,
     },
     /// Instantiation failed (data segment out of range, `start` trapped, ...).
@@ -57,8 +59,8 @@ impl fmt::Display for LoadError {
             }
             LoadError::BadExport { name } => write!(f, "export {name} has the wrong signature"),
             LoadError::MissingMemory => f.write_str("module does not export `memory`"),
-            LoadError::MemoryTooLarge { pages, max } => {
-                write!(f, "memory needs {pages} pages, limit is {max}")
+            LoadError::MemoryTooLarge { bytes, max } => {
+                write!(f, "memory needs {bytes} bytes, limit is {max}")
             }
             LoadError::Instantiate(m) => write!(f, "instantiation failed: {m}"),
             LoadError::Init(t) => write!(f, "init failed: {t}"),

@@ -67,8 +67,19 @@
 //! | `on_irq`     | `(kind, source, value, time_us) -> ()` | if using interrupts or DMA | per queued event |
 //!
 //! Every call into the payload is metered with [`FUEL_PER_CALL`] units of
-//! fuel; running out traps the payload instead of hanging the device.
+//! fuel (the runtime's default; firmware may grant a different budget per
+//! call); running out traps the payload instead of hanging the device.
 //! Payloads may not publish or subscribe on `sys/...` keys.
+//!
+//! # Memory
+//!
+//! The exported `memory` may use standard 64 KiB pages or 1-byte pages
+//! (the WebAssembly custom-page-sizes proposal; the Rust SDK links with
+//! `--page-size=1`). The firmware caps linear memory in **bytes**, so a
+//! payload with 1-byte pages can run on a device that cannot spare a whole
+//! 64 KiB page. Initial memory above the cap fails to load; `memory.grow`
+//! past it returns `-1`. Pointers and lengths in the imports are byte
+//! offsets either way.
 
 pub mod events;
 pub mod periph;
@@ -90,7 +101,9 @@ pub const MAX_MESSAGE: usize = 512;
 /// Largest `log` line, in bytes; longer lines are truncated.
 pub const MAX_LOG: usize = 256;
 
-/// Fuel granted to each call into the payload (`init`, `tick`, `on_message`).
+/// Default fuel granted to each call into the payload (`init`, `tick`,
+/// `mw_alloc`, `on_message`, `on_irq`), roughly one unit per executed
+/// instruction.
 pub const FUEL_PER_CALL: u64 = 1_000_000;
 
 /// Shortest accepted `set_tick` period.
@@ -219,7 +232,7 @@ pub fn import(name: &str) -> Option<&'static Import> {
 
 /// Export names.
 pub mod exports {
-    /// Linear memory.
+    /// Linear memory, with 64 KiB or 1-byte pages.
     pub const MEMORY: &str = "memory";
     /// Optional initialiser.
     pub const INIT: &str = "init";

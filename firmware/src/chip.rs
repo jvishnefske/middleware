@@ -3,9 +3,9 @@
 //! A [`Profile`] collects everything the firmware needs to know about a chip
 //! that is not a peripheral driver: the name reported in `sys/info`, whether
 //! it has a USB-Serial-JTAG port, whether the image includes the WASM
-//! payload runtime (`runtime`), the heap plan, the WASM memory limit, the
-//! largest payload image it accepts, the console UART pins, and three GPIO
-//! bitmasks:
+//! payload runtime (`runtime`), the heap plan, the WASM memory limit in
+//! bytes (`max_memory_bytes`), the largest payload image it accepts, the
+//! console UART pins, and three GPIO bitmasks:
 //!
 //! * `gpio` — pins that exist on the chip.
 //! * `reserved` — pins a payload may never touch: SPI flash and in-package
@@ -20,21 +20,28 @@
 //!
 //! # Heap plan
 //!
-//! The heap holds WASM linear memory (64 KiB pages), the payload image while
+//! The heap holds WASM linear memory, the payload image while
 //! it is compiled, and the wasmi interpreter's module and instance data. It
 //! is built from two regions: RAM reclaimed from the second-stage bootloader
 //! (`heap_reclaimed`, the size `esp-generate` uses per chip) plus a region in
 //! ordinary `.bss` (`heap_main`).
 //!
-//! | chip     | reclaimed | main    | total   | pages | max image |
-//! |----------|-----------|---------|---------|-------|-----------|
-//! | ESP32    | 96.4 KiB  | 112 KiB | 208 KiB | 2     | 32 KiB    |
-//! | ESP32-S3 | 72.0 KiB  | 240 KiB | 312 KiB | 3     | 80 KiB    |
-//! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 2     | 64 KiB    |
-//! | ESP8266  | 0         | 0       | 0       | 0     | 252 KiB   |
+//! | chip     | reclaimed | main    | total   | memory  | max image |
+//! |----------|-----------|---------|---------|---------|-----------|
+//! | ESP32    | 96.4 KiB  | 112 KiB | 208 KiB | 128 KiB | 32 KiB    |
+//! | ESP32-S3 | 72.0 KiB  | 240 KiB | 312 KiB | 192 KiB | 80 KiB    |
+//! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    |
+//! | ESP8266  | 0         | 0       | 0       | 0       | 252 KiB   |
+//!
+//! The memory limit is a byte cap (`wasm_host::Limits::bytes`): a payload
+//! with standard 64 KiB pages gets whole pages up to it, and one built with
+//! 1-byte pages (custom-page-sizes, see `payloads/README.md`) may use any
+//! size up to it. The caps are page multiples so 64 KiB-page payloads lose
+//! nothing. `sys/info` does not carry the limit, so its wire format is
+//! unchanged; the boot log reports it in bytes.
 //!
 //! The ESP8266 runs the protocol only: it has no WASM runtime, so it has no
-//! payload heap and no linear-memory pages. Its `max_image` is the 256 KiB
+//! payload heap and no linear memory. Its `max_image` is the 256 KiB
 //! payload flash region at 0x100000 on the 4 MB module minus the 4 KiB
 //! header sector; images are stored, not run. The ESP32-C3 also builds
 //! without the runtime (`runtime` is `false`, matching the absent `wasm`
@@ -54,8 +61,9 @@
 
 use middleware::wasm_abi::AbiError;
 
-/// Size of one WASM linear-memory page.
-pub const WASM_PAGE: usize = 64 * 1024;
+/// Size of one standard (64 KiB) WASM linear-memory page, used to express
+/// the per-chip byte caps.
+pub const WASM_PAGE: u32 = 64 * 1024;
 
 /// Heap kept free for the wasmi engine, compiled module and instance on top
 /// of linear memory and the image buffer.
@@ -95,14 +103,14 @@ pub struct Profile {
     pub usb_serial_jtag: bool,
     /// Whether the image includes the WASM payload runtime (the `wasm`
     /// cargo feature). Without it payloads can be stored but not run, and
-    /// the heap fields and `max_memory_pages` describe no live allocation.
+    /// the heap fields and `max_memory_bytes` describe no live allocation.
     pub runtime: bool,
     /// Heap bytes in RAM reclaimed from the bootloader.
     pub heap_reclaimed: usize,
     /// Heap bytes in ordinary `.bss`.
     pub heap_main: usize,
-    /// WASM linear-memory limit in 64 KiB pages.
-    pub max_memory_pages: u32,
+    /// WASM linear-memory limit in bytes, whatever the payload's page size.
+    pub max_memory_bytes: u32,
     /// Largest payload image accepted, in bytes (also capped by the flash
     /// partition).
     pub max_image: u32,
@@ -139,7 +147,7 @@ pub const ESP32: Profile = Profile {
     runtime: true,
     heap_reclaimed: 98_768,
     heap_main: 112 * 1024,
-    max_memory_pages: 2,
+    max_memory_bytes: 2 * WASM_PAGE,
     max_image: 32 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
@@ -157,7 +165,7 @@ pub const ESP32S3: Profile = Profile {
     runtime: true,
     heap_reclaimed: 73_744,
     heap_main: 240 * 1024,
-    max_memory_pages: 3,
+    max_memory_bytes: 3 * WASM_PAGE,
     max_image: 80 * 1024,
     uart0_tx: 43,
     uart0_rx: 44,
@@ -175,7 +183,7 @@ pub const ESP32C3: Profile = Profile {
     runtime: false,
     heap_reclaimed: 66_320,
     heap_main: 176 * 1024,
-    max_memory_pages: 2,
+    max_memory_bytes: 2 * WASM_PAGE,
     max_image: 64 * 1024,
     uart0_tx: 21,
     uart0_rx: 20,
@@ -195,7 +203,7 @@ pub const ESP8266: Profile = Profile {
     runtime: false,
     heap_reclaimed: 0,
     heap_main: 0,
-    max_memory_pages: 0,
+    max_memory_bytes: 0,
     max_image: 252 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
@@ -334,9 +342,11 @@ mod tests {
     #[test]
     fn heap_leaves_room_for_payload() {
         for p in ALL.into_iter().filter(|p| p.runtime) {
-            let need = p.max_memory_pages as usize * WASM_PAGE + p.max_image as usize + INTERPRETER_RESERVE;
+            let need = p.max_memory_bytes as usize + p.max_image as usize + INTERPRETER_RESERVE;
             assert!(p.heap_total() >= need, "{}: {} < {}", p.name, p.heap_total(), need);
-            assert!(p.max_memory_pages >= 2, "{}", p.name);
+            assert!(p.max_memory_bytes >= 2 * WASM_PAGE, "{}", p.name);
+            // Page multiples, so a 64 KiB-page payload can use all of it.
+            assert_eq!(p.max_memory_bytes % WASM_PAGE, 0, "{}", p.name);
         }
     }
 
@@ -346,7 +356,7 @@ mod tests {
         // on heapless profiles rather than all non-runtime ones.
         for p in ALL.into_iter().filter(|p| p.heap_total() == 0) {
             assert!(!p.runtime, "{}", p.name);
-            assert_eq!(p.max_memory_pages, 0, "{}", p.name);
+            assert_eq!(p.max_memory_bytes, 0, "{}", p.name);
         }
         assert_eq!(ESP8266.heap_total(), 0);
         const REGION: u32 = 256 * 1024;

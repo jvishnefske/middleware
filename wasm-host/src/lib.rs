@@ -10,7 +10,7 @@
 //! 1. [`Payload::load`] validates the module (requirement W1): every import
 //!    must be an `mw` function from [`wasm_abi::IMPORTS`] with the listed
 //!    signature, `memory` must be exported and start within
-//!    [`Limits::max_memory_pages`], and the optional exports `init`, `tick`,
+//!    [`Limits::max_memory_bytes`], and the optional exports `init`, `tick`,
 //!    `mw_alloc` and `on_message` must have their ABI signatures. It then
 //!    instantiates the module and calls `init` if exported.
 //! 2. The firmware loop asks [`Payload::next_tick`] when the next `tick` is
@@ -36,8 +36,32 @@
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
 //!   `on_irq`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
-//! * Linear memory is capped at [`Limits::max_memory_pages`], at load time
-//!   and on every `memory.grow` (which then returns `-1`) (W5).
+//! * Linear memory is capped at [`Limits::max_memory_bytes`], at load time
+//!   (the module's initial memory) and on every `memory.grow` (which then
+//!   returns `-1`) (W5). The cap is in bytes, not pages, because modules may
+//!   use either page size:
+//!   * standard 64 KiB pages, and
+//!   * 1-byte pages from the WebAssembly custom-page-sizes proposal (enabled
+//!     in the engine), which let a payload ask for, say, 12 KiB instead of
+//!     a whole 64 KiB page. The Rust SDK builds this way with
+//!     `-C link-arg=--page-size=1` (see `payloads/README.md`).
+//!
+//!   The page size is read from the module's memory section
+//!   ([`abi::initial_memory_bytes`]) because wasmi does not expose it.
+//!
+//! # Interpreter build
+//!
+//! wasmi is built with `validate` (the safe `Module::new`) and
+//! `portable-dispatch`, the loop-based instruction dispatcher. The default
+//! tail-call dispatcher needs LLVM's sibling-call optimisation; without it
+//! (unoptimised builds, and targets LLVM cannot tail-call on, such as
+//! Xtensa) every executed instruction nests a native stack frame, and a long
+//! guest loop running down its fuel overflows the firmware's stack.
+//! `auto-dispatch` would pick the loop dispatcher in exactly those cases, but
+//! `portable-dispatch` makes the choice explicit and identical on every
+//! target (ESP32, ESP32-S3, the browser and the desktop simulator), so a
+//! payload's native stack use does not depend on the build. The cost is
+//! some interpreter speed, which [`Limits::fuel_per_call`] already bounds.
 //! * Any trap poisons the payload: later calls return [`Trap::Poisoned`] and
 //!   [`Payload::next_tick`] returns `None`, because guest state may be
 //!   inconsistent. Reload to recover.
@@ -162,21 +186,56 @@ pub trait Device {
 }
 
 /// Resource limits for one payload.
+///
+/// Build with [`Limits::pages`] or [`Limits::bytes`] and adjust the fuel
+/// with [`Limits::with_fuel`]; the fields are public for direct use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// Largest linear memory, in 64 KiB pages.
-    pub max_memory_pages: u32,
-    /// Fuel granted to every call into the payload.
+    /// Largest linear memory, in bytes, whatever the module's page size.
+    /// Checked against the module's initial memory at load and enforced on
+    /// every `memory.grow`.
+    pub max_memory_bytes: u32,
+    /// Fuel granted to every call into the payload (`init`, `tick`,
+    /// `mw_alloc`, `on_message`, `on_irq`). This is the knob that bounds how
+    /// long one call may run: roughly one unit per executed instruction, so
+    /// an infinite loop ends with [`Trap::OutOfFuel`] after this many. The
+    /// default is [`wasm_abi::FUEL_PER_CALL`].
     pub fuel_per_call: u64,
 }
 
-impl Default for Limits {
-    /// Two pages (128 KiB) and [`wasm_abi::FUEL_PER_CALL`].
-    fn default() -> Self {
+impl Limits {
+    /// A cap of `n` 64 KiB pages (saturating at `u32::MAX` bytes) and the
+    /// default fuel.
+    pub const fn pages(n: u32) -> Self {
+        let bytes = (n as u64).saturating_mul(abi::PAGE_BYTES as u64);
+        Limits::bytes(if bytes > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            bytes as u32
+        })
+    }
+
+    /// A cap of `n` bytes and the default fuel.
+    pub const fn bytes(n: u32) -> Self {
         Limits {
-            max_memory_pages: 2,
+            max_memory_bytes: n,
             fuel_per_call: wasm_abi::FUEL_PER_CALL,
         }
+    }
+
+    /// The same limits with `fuel` per call.
+    pub const fn with_fuel(self, fuel: u64) -> Self {
+        Limits {
+            fuel_per_call: fuel,
+            ..self
+        }
+    }
+}
+
+impl Default for Limits {
+    /// Two 64 KiB pages (128 KiB) and [`wasm_abi::FUEL_PER_CALL`].
+    fn default() -> Self {
+        Limits::pages(2)
     }
 }
 
@@ -210,7 +269,7 @@ fn trap(e: &wasmi::Error) -> Trap {
 
 /// Checks imports and exports of a compiled module; returns the optional
 /// exports it provides.
-fn validate(module: &Module, limits: &Limits) -> Result<Exports, LoadError> {
+fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, LoadError> {
     for import in module.imports() {
         let kind = match import.ty() {
             ExternType::Func(f) => ImportKind::Func(shape(f)),
@@ -233,8 +292,7 @@ fn validate(module: &Module, limits: &Limits) -> Result<Exports, LoadError> {
                     _ => {}
                 }
             }
-            ExternType::Memory(m) if export.name() == wasm_abi::exports::MEMORY => {
-                abi::check_memory(m.minimum(), limits.max_memory_pages)?;
+            ExternType::Memory(_) if export.name() == wasm_abi::exports::MEMORY => {
                 memory = true;
             }
             _ => {}
@@ -243,6 +301,8 @@ fn validate(module: &Module, limits: &Limits) -> Result<Exports, LoadError> {
     if !memory {
         return Err(LoadError::MissingMemory);
     }
+    let initial = abi::initial_memory_bytes(wasm).unwrap_or(u64::MAX);
+    abi::check_memory(initial, limits.max_memory_bytes)?;
     exports.messages = alloc && on_message;
     Ok(exports)
 }
@@ -251,17 +311,17 @@ impl<D: Device + 'static> Payload<D> {
     /// Validates and instantiates `wasm`, then calls `init` if exported.
     pub fn load(wasm: &[u8], device: D, limits: Limits) -> Result<Self, LoadError> {
         let mut config = Config::default();
-        config.consume_fuel(true);
+        config.consume_fuel(true).wasm_custom_page_sizes(true);
         let engine = Engine::new(&config);
         let module = Module::new(&engine, wasm).map_err(|e| LoadError::Invalid(e.to_string()))?;
-        let exports = validate(&module, &limits)?;
+        let exports = validate(wasm, &module, &limits)?;
         let state = State {
             device,
             subscriptions: Vec::new(),
             schedule: None,
             exports,
             limits: StoreLimitsBuilder::new()
-                .memory_size(abi::memory_bytes(limits.max_memory_pages))
+                .memory_size(abi::memory_bytes(limits.max_memory_bytes))
                 .memories(1)
                 .instances(1)
                 .build(),

@@ -1,6 +1,6 @@
 //! Desktop payload simulator (requirements W7 and D10).
 //!
-//! `payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P] [--virtual]
+//! `payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]
 //! [--until-ms T] [--spi-pattern HEX]` loads a payload with the same
 //! runtime as the firmware (`wasm-host`) and runs it against
 //! [`sim::SimDevice`], printing every log line, publish, GPIO change and

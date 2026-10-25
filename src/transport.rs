@@ -8,23 +8,150 @@
 //! Server-side request handling is split into a pure [`Handler`] (decision
 //! logic, synchronous, unit-testable) and a [`Responder`] (the I/O shell that
 //! receives one request, runs the handler and sends the reply).
+//!
+//! # Cancel safety
+//!
+//! Every async method may be raced in a `select` and dropped before it
+//! completes. Implementations must guarantee:
+//!
+//! - [`Subscriber::recv`]: dropping the future before it is ready loses no
+//!   sample; the next `recv` or [`Subscriber::try_recv`] returns it.
+//! - [`Responder::serve_one`]: partial request state (e.g. fragment
+//!   reassembly) is kept in `self`, so a dropped call resumes where it left
+//!   off on the next call.
+//! - [`Requester::request`]: dropping abandons the request; a late response
+//!   is discarded by the next call (correlation ids or equivalent).
+//! - [`Publisher::publish`]: dropping may or may not have sent the message
+//!   (on fragmenting transports, possibly only part of it); it never sends it
+//!   twice. A transport that numbers messages advances its sequence **before**
+//!   the first await, so a dropped or failed send never makes the next
+//!   message look like a repeat to receivers that deduplicate by sequence.
+//! - [`Responder::serve_one`] dropped while its reply is being written: the
+//!   rest of that reply may be lost (the requester discards it as stale) or
+//!   completed by the next call; the transport documents which.
+//!
+//! These rules assume the underlying I/O futures (a stream `read`, a radio
+//! `receive`) are themselves cancel-safe; implementations of
+//! [`Subscriber::try_recv`] that poll an await-only stream once with a no-op
+//! waker rely on the same assumption and say so.
+//!
+//! # Buffer too small
+//!
+//! When the caller's buffer cannot hold the next sample, `recv` / `try_recv`
+//! return the transport's buffer-too-small error. Transports should keep the
+//! sample so a retry with a larger buffer returns it; each transport documents
+//! whether it does (some radios cannot re-read a frame and drop it).
+//!
+//! # Limits
+//!
+//! [`Publisher::LIMITS`] states the largest key and payload the transport
+//! carries, so callers can size buffers and reject oversized messages before
+//! sending.
 
-use crate::key::Key;
+use crate::key::{Key, KeyFilter};
 
-/// A message received by a [`Subscriber`]. Both fields borrow the buffer
-/// passed to [`Subscriber::recv`].
+/// Identifies the sender of a sample as far as the transport knows it (a MAC
+/// address, a Zenoh session id, ...), zero-padded to 8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SenderId(pub [u8; 8]);
+
+impl SenderId {
+    /// The id of a node with this 48-bit hardware address.
+    pub const fn from_mac(mac: [u8; 6]) -> Self {
+        SenderId([mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0, 0])
+    }
+}
+
+/// What the transport knows about where a sample came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SampleMeta {
+    /// The sender, if the transport identifies senders.
+    pub sender: Option<SenderId>,
+    /// The sender's sequence number for this message, if the transport
+    /// carries one.
+    pub seq: Option<u8>,
+}
+
+/// A message received by a [`Subscriber`]. `key` and `payload` borrow the
+/// buffer passed to [`Subscriber::recv`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sample<'a> {
     /// The key the message was published on.
     pub key: Key<'a>,
     /// The raw payload.
     pub payload: &'a [u8],
+    /// Sender and sequence, when known.
+    pub meta: SampleMeta,
+}
+
+impl<'a> Sample<'a> {
+    /// A sample with no sender information.
+    pub const fn new(key: Key<'a>, payload: &'a [u8]) -> Self {
+        Sample { key, payload, meta: SampleMeta { sender: None, seq: None } }
+    }
+
+    /// The same sample with `meta` attached.
+    pub const fn with_meta(self, meta: SampleMeta) -> Self {
+        Sample { meta, ..self }
+    }
+}
+
+/// Size limits of a transport.
+///
+/// `max_key` bounds the key and `max_payload` is the largest payload that
+/// fits with **any** allowed key, so it is always safe for sizing buffers.
+/// When key and payload share one frame ([`Limits::shared`]), a shorter key
+/// leaves room for a longer payload, up to `max_message` bytes together; use
+/// [`Limits::fits`] to check an actual message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Longest key, in bytes.
+    pub max_key: usize,
+    /// Largest payload that fits with any allowed key.
+    pub max_payload: usize,
+    /// Largest key length plus payload length together.
+    pub max_message: usize,
+    /// True if key and payload share `max_message` (a shorter key frees
+    /// payload room); false if the payload cap is independent of the key.
+    pub shared: bool,
+}
+
+impl Limits {
+    /// No transport-specific limit beyond [`crate::key::MAX_KEY_LEN`].
+    pub const UNBOUNDED: Limits = Limits::new(crate::key::MAX_KEY_LEN, usize::MAX);
+
+    /// Independent limits: the key does not use payload room (e.g. it is
+    /// hashed into a header or a UUID).
+    pub const fn new(max_key: usize, max_payload: usize) -> Limits {
+        Limits { max_key, max_payload, max_message: max_key.saturating_add(max_payload), shared: false }
+    }
+
+    /// Key and payload share `max_message` bytes; `max_payload` is what is
+    /// left with the longest key.
+    pub const fn shared(max_key: usize, max_message: usize) -> Limits {
+        Limits { max_key, max_payload: max_message.saturating_sub(max_key), max_message, shared: true }
+    }
+
+    /// True if a message with these key and payload lengths fits.
+    pub const fn fits(&self, key_len: usize, payload_len: usize) -> bool {
+        if key_len > self.max_key {
+            return false;
+        }
+        if self.shared {
+            payload_len <= self.max_message.saturating_sub(key_len)
+        } else {
+            payload_len <= self.max_payload
+        }
+    }
 }
 
 /// Fire-and-forget delivery of a payload to everyone subscribed to a key.
 pub trait Publisher {
     /// Transport-specific failure.
     type Error: core::fmt::Debug;
+
+    /// What this transport can carry.
+    const LIMITS: Limits = Limits::UNBOUNDED;
 
     /// Sends `payload` on `key`.
     async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error>;
@@ -36,7 +163,24 @@ pub trait Subscriber {
     type Error: core::fmt::Debug;
 
     /// Waits for the next sample and writes its key and payload into `buf`.
+    /// Cancel-safe (see the module docs).
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error>;
+
+    /// Returns the next sample if one is already available, without waiting.
+    /// For tick-driven callers that cannot await.
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error>;
+}
+
+/// Creates subscriptions at runtime, for transports that can add keys after
+/// construction (Zenoh, gRPC bus, serial link, in-process buses).
+pub trait Subscribe {
+    /// The subscriber handed out.
+    type Subscriber: Subscriber;
+    /// Transport-specific failure.
+    type Error: core::fmt::Debug;
+
+    /// Starts receiving samples whose key matches `filter`.
+    async fn subscribe(&mut self, filter: KeyFilter<'_>) -> Result<Self::Subscriber, Self::Error>;
 }
 
 /// Unary request/response: one request in, one response out.
@@ -151,10 +295,7 @@ pub fn sample_into<'b>(buf: &'b mut [u8], key: &str, payload: &[u8]) -> Option<S
     let payload_buf = rest.get_mut(..payload.len())?;
     payload_buf.copy_from_slice(payload);
     let key = core::str::from_utf8(key_buf).ok()?;
-    Some(Sample {
-        key: Key::new(key).ok()?,
-        payload: payload_buf,
-    })
+    Some(Sample::new(Key::new(key).ok()?, payload_buf))
 }
 
 #[cfg(test)]

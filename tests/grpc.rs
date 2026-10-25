@@ -5,7 +5,9 @@
 use core::time::Duration;
 use middleware::grpc::server::serve;
 use middleware::grpc::{BusService, GrpcError, GrpcServer, GrpcTransport, responder};
-use middleware::{HandlerError, Key, Publisher, Requester, Responder, Subscriber};
+use middleware::{
+    HandlerError, Key, KeyFilter, Publisher, Requester, Responder, Subscribe, Subscriber,
+};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -72,6 +74,13 @@ async fn client(addr: SocketAddr) -> GrpcTransport {
     GrpcTransport::connect(format!("http://{addr}"))
         .await
         .unwrap()
+}
+
+/// Polls `fut` exactly once with a no-op waker, then drops it.
+fn poll_once_and_drop<F: core::future::Future>(fut: F) -> bool {
+    let fut = core::pin::pin!(fut);
+    let waker = core::task::Waker::noop();
+    fut.poll(&mut core::task::Context::from_waker(waker)).is_ready()
 }
 
 async fn within<F: core::future::Future>(f: F) -> F::Output {
@@ -159,7 +168,7 @@ async fn g1_prost_codec_on_top_of_raw_bytes() {
 async fn g2_publish_reaches_matching_subscriber_only() {
     let srv = start().await;
     let mut c = client(srv.addr).await;
-    let mut sub = within(c.subscribe(Key::from_static("sensor/temp")))
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("sensor/temp"))))
         .await
         .unwrap();
     within(c.publish(Key::from_static("sensor/other"), b"no"))
@@ -182,7 +191,7 @@ async fn g2_publish_without_subscribers_succeeds_and_small_buffer_fails() {
         .await
         .unwrap();
 
-    let mut sub = within(c.subscribe(Key::from_static("a/b"))).await.unwrap();
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("a/b")))).await.unwrap();
     within(c.publish(Key::from_static("a/b"), b"payload"))
         .await
         .unwrap();
@@ -206,7 +215,7 @@ async fn g2_bus_service_mounts_on_stock_tonic_router() {
             ),
     );
     let mut c = client(addr).await;
-    let mut sub = within(c.subscribe(Key::from_static("x"))).await.unwrap();
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("x")))).await.unwrap();
     within(c.publish(Key::from_static("x"), b"1"))
         .await
         .unwrap();
@@ -261,6 +270,98 @@ async fn g4_responder_reports_closed_when_server_side_dropped() {
     let mut h = echo_handler;
     let r = resp.serve_one(&mut h, &mut [0u8; 8]).await;
     assert!(matches!(r, Err(GrpcError::Closed)));
+}
+
+#[tokio::test]
+async fn g5_try_recv_is_none_when_empty_and_some_without_waiting() {
+    let srv = start().await;
+    let mut c = client(srv.addr).await;
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("t/try"))))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 64];
+    assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
+    within(c.publish(Key::from_static("t/try"), b"now"))
+        .await
+        .unwrap();
+    // The item crosses a real HTTP/2 connection, so retry briefly; each
+    // `try_recv` returns immediately.
+    let mut got = None;
+    for _ in 0..200 {
+        if let Some(s) = sub.try_recv(&mut buf).unwrap() {
+            got = Some((s.key.as_str().to_owned(), s.payload.to_vec(), s.meta));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (key, payload, meta) = got.expect("sample");
+    assert_eq!((key.as_str(), payload.as_slice()), ("t/try", &b"now"[..]));
+    assert_eq!(meta, middleware::SampleMeta::default());
+    assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
+}
+
+#[tokio::test]
+async fn g5_prefix_subscription_delivers_app_x_but_not_apple() {
+    let srv = start().await;
+    let mut c = client(srv.addr).await;
+    let mut sub = within(c.subscribe(KeyFilter::Prefix(Key::from_static("app"))))
+        .await
+        .unwrap();
+    for k in ["apple", "app/x", "app", "app/x/y"] {
+        within(c.publish(Key::new(k).unwrap(), k.as_bytes()))
+            .await
+            .unwrap();
+    }
+    within(c.publish(Key::from_static("app/end"), b"app/end"))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 64];
+    let mut keys = Vec::new();
+    for _ in 0..4 {
+        let s = within(sub.recv(&mut buf)).await.unwrap();
+        assert_eq!(s.key.as_str().as_bytes(), s.payload);
+        keys.push(s.key.as_str().to_owned());
+    }
+    // `apple` was published first; had it matched it would have come first.
+    assert_eq!(keys, ["app/x", "app", "app/x/y", "app/end"]);
+}
+
+#[tokio::test]
+async fn g6_cancelled_recv_loses_no_sample() {
+    let srv = start().await;
+    let mut c = client(srv.addr).await;
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("t/cancel"))))
+        .await
+        .unwrap();
+    let mut buf = [0u8; 64];
+    assert!(!poll_once_and_drop(sub.recv(&mut buf)), "nothing sent yet");
+    within(c.publish(Key::from_static("t/cancel"), b"kept"))
+        .await
+        .unwrap();
+    assert_eq!(within(sub.recv(&mut buf)).await.unwrap().payload, b"kept");
+}
+
+#[test]
+fn g7_limits_fit_tonic_default_message_size() {
+    use middleware::grpc::{MAX_MESSAGE, MAX_PAYLOAD};
+    let limits = <GrpcTransport as Publisher>::LIMITS;
+    assert_eq!(limits.max_key, middleware::key::MAX_KEY_LEN);
+    assert_eq!(limits.max_payload, MAX_PAYLOAD);
+    assert_eq!(1 + limits.max_key + limits.max_payload, MAX_MESSAGE);
+}
+
+#[tokio::test]
+async fn g7_payload_at_limit_round_trips_through_subscription() {
+    let srv = start().await;
+    let mut c = client(srv.addr).await;
+    let long = "k".repeat(middleware::key::MAX_KEY_LEN);
+    let key = Key::new(&long).unwrap();
+    let mut sub = within(c.subscribe(KeyFilter::Exact(key))).await.unwrap();
+    let payload = vec![5u8; middleware::grpc::MAX_PAYLOAD];
+    within(c.publish(key, &payload)).await.unwrap();
+    let mut buf = vec![0u8; long.len() + payload.len()];
+    let s = within(sub.recv(&mut buf)).await.unwrap();
+    assert_eq!(s.payload.len(), payload.len());
 }
 
 #[cfg(feature = "istio")]

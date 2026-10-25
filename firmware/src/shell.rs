@@ -123,10 +123,10 @@ pub async fn run(spawner: Spawner) -> ! {
     let ctx = Context { chip: profile.name, firmware: FIRMWARE, capacity, runtime: cfg!(feature = "wasm") };
 
     bus.log(format_args!(
-        "esp-base {FIRMWARE} on {} (heap {} B, {} WASM pages, uart {})",
+        "esp-base {FIRMWARE} on {} (heap {} B, WASM memory {} B, uart {})",
         profile.name,
         profile.heap_total(),
-        profile.max_memory_pages,
+        profile.max_memory_bytes,
         if uart_ok { "ok" } else { "failed" },
     ));
     match installed {

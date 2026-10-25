@@ -25,6 +25,10 @@ pub const MAX_RAW_FRAME: usize = 1024;
 /// Largest frame on the wire including COBS overhead and delimiter.
 pub const MAX_WIRE_FRAME: usize = cobs::max_encoded_len(MAX_RAW_FRAME) + 1;
 
+/// Raw bytes a request or publish frame adds around its key and payload:
+/// the three header bytes `[kind][id][key_len]` and the two CRC bytes.
+pub const FRAME_OVERHEAD: usize = 5;
+
 const KIND_REQUEST: u8 = 1;
 const KIND_RESPONSE: u8 = 2;
 const KIND_PUBLISH: u8 = 3;

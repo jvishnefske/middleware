@@ -4,11 +4,13 @@
 //! for outgoing encodings, one for incoming bytes), so typed calls allocate
 //! nothing. Its methods exist only when the transport implements the matching
 //! trait: `publish` needs [`Publisher`], `request` needs [`Requester`], and
-//! `recv` needs [`Subscriber`].
+//! `recv` / `try_recv` need [`Subscriber`]. Cancel safety is the transport's
+//! (see [`crate::transport`]): the client keeps no state of its own between
+//! the transport call and decoding.
 
 use crate::codec::Codec;
 use crate::key::Key;
-use crate::transport::{Publisher, Requester, Subscriber};
+use crate::transport::{Publisher, Requester, Sample, SampleMeta, Subscriber};
 
 /// Failure of a typed call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,8 @@ pub struct TypedSample<'a, M> {
     pub key: Key<'a>,
     /// The decoded message.
     pub message: M,
+    /// Sender and sequence, as reported by the transport.
+    pub meta: SampleMeta,
 }
 
 /// Transport + codec + `N`-byte buffers.
@@ -115,22 +119,46 @@ impl<T: Subscriber, C, const N: usize> Client<T, C, N> {
             .recv(&mut self.rx)
             .await
             .map_err(TypedError::Transport)?;
-        let message = self
-            .codec
-            .decode(sample.payload)
-            .map_err(TypedError::Decode)?;
-        Ok(TypedSample {
-            key: sample.key,
-            message,
-        })
+        decode_sample(&mut self.codec, sample)
     }
+
+    /// Returns and decodes the next sample if the transport already has one,
+    /// without waiting ([`Subscriber::try_recv`]).
+    #[allow(clippy::type_complexity)]
+    pub fn try_recv<M>(
+        &mut self,
+    ) -> Result<Option<TypedSample<'_, M>>, TypedError<T::Error, C::Error>>
+    where
+        C: Codec<M>,
+    {
+        let sample = self
+            .transport
+            .try_recv(&mut self.rx)
+            .map_err(TypedError::Transport)?;
+        sample
+            .map(|s| decode_sample(&mut self.codec, s))
+            .transpose()
+    }
+}
+
+/// Decodes a raw sample's payload, keeping its key and metadata.
+fn decode_sample<'a, M, C: Codec<M>, E>(
+    codec: &mut C,
+    sample: Sample<'a>,
+) -> Result<TypedSample<'a, M>, TypedError<E, C::Error>> {
+    let message = codec.decode(sample.payload).map_err(TypedError::Decode)?;
+    Ok(TypedSample {
+        key: sample.key,
+        message,
+        meta: sample.meta,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec::Raw;
-    use crate::transport::{Sample, sample_into};
+    use crate::transport::{SenderId, sample_into};
     use futures::executor::block_on;
 
     /// Loopback transport: requests are echoed reversed, publishes are
@@ -157,6 +185,20 @@ mod tests {
         async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, ()> {
             let (b, n) = self.last.take().ok_or(())?;
             sample_into(buf, "loop/back", &b[..n]).ok_or(())
+        }
+
+        fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, ()> {
+            match self.last.take() {
+                None => Ok(None),
+                Some((b, n)) => {
+                    let meta = SampleMeta {
+                        sender: Some(SenderId([7; 8])),
+                        seq: Some(3),
+                    };
+                    let s = sample_into(buf, "loop/back", &b[..n]).ok_or(())?;
+                    Ok(Some(s.with_meta(meta)))
+                }
+            }
         }
     }
 
@@ -198,5 +240,16 @@ mod tests {
         let mut c: Client<_, _, 16> = Client::new(Loopback::default(), Raw);
         let r: Result<[u8; 4], _> = block_on(c.request(K, &[1u8, 2, 3]));
         assert!(matches!(r, Err(TypedError::Decode(_))));
+    }
+
+    #[test]
+    fn typed_try_recv_is_none_then_decodes_with_meta() {
+        let mut c: Client<_, _, 32> = Client::new(Loopback::default(), Raw);
+        assert_eq!(c.try_recv::<[u8; 2]>(), Ok(None));
+        block_on(c.publish(K, &[4u8, 5])).unwrap();
+        let s = c.try_recv::<[u8; 2]>().unwrap().expect("sample ready");
+        assert_eq!((s.key, s.message), (K, [4, 5]));
+        assert_eq!(s.meta.sender, Some(SenderId([7; 8])));
+        assert_eq!(s.meta.seq, Some(3));
     }
 }

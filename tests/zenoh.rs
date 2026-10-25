@@ -1,4 +1,4 @@
-//! Zenoh backend integration tests (Z1–Z4).
+//! Zenoh backend integration tests (Z1–Z8).
 //!
 //! Network conduct: every session is built with [`SessionConfig`], which
 //! disables multicast scouting and gossip. Single-session tests have no
@@ -8,17 +8,43 @@
 
 use std::time::Duration;
 
+use core::future::Future;
+use core::pin::pin;
+use core::task::{Context, Waker};
+
 use middleware::zenoh::{SessionConfig, ZenohError, ZenohTransport};
-use middleware::{Handler, HandlerError, Key, Publisher, Requester, Responder, Subscriber};
+use middleware::{
+    Handler, HandlerError, Key, KeyFilter, Publisher, Requester, Responder, Subscribe, Subscriber,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A session with no endpoints. It can only talk to itself, so local
+/// delivery is switched on.
 async fn isolated() -> ZenohTransport {
     let config = SessionConfig::new().build().expect("config");
     ZenohTransport::open(config)
         .await
         .expect("open")
         .with_timeout(Duration::from_secs(2))
+        .with_local_delivery(true)
+}
+
+/// Polls `fut` exactly once with a no-op waker, then drops it.
+fn poll_once_and_drop<F: Future>(fut: F) -> bool {
+    let fut = pin!(fut);
+    fut.poll(&mut Context::from_waker(Waker::noop())).is_ready()
+}
+
+/// Two sessions joined over one explicit loopback endpoint; default
+/// (remote-only) delivery.
+async fn loopback_pair() -> (ZenohTransport, ZenohTransport) {
+    let endpoint = format!("tcp/127.0.0.1:{}", free_loopback_port().await);
+    let a = SessionConfig::new().listen(endpoint.clone()).build().expect("config");
+    let b = SessionConfig::new().connect(endpoint).build().expect("config");
+    let a = ZenohTransport::open(a).await.expect("open a");
+    let b = ZenohTransport::open(b).await.expect("open b");
+    (a, b)
 }
 
 /// Echoes the request reversed; empty requests are `InvalidRequest`.
@@ -230,4 +256,109 @@ async fn z4_two_sessions_over_explicit_loopback_endpoint() {
     .expect("request");
     assert_eq!(out, b"zyx");
     serving.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z5_try_recv_is_none_when_empty_and_some_without_waiting() {
+    const K: Key<'static> = Key::from_static("test/z5/try");
+    let mut t = isolated().await;
+    let mut sub = t.subscribe(KeyFilter::Exact(K)).await.expect("subscribe");
+    let mut buf = [0u8; 64];
+    assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
+    t.publish(K, b"now").await.expect("publish");
+    // Local delivery is synchronous; the bounded retry only guards against a
+    // scheduler hiccup. `try_recv` itself never waits.
+    let mut got = None;
+    for _ in 0..100 {
+        if let Some(s) = sub.try_recv(&mut buf).expect("try_recv") {
+            got = Some((s.key.as_str().to_owned(), s.payload.to_vec(), s.meta));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (key, payload, meta) = got.expect("sample");
+    assert_eq!((key.as_str(), payload.as_slice()), (K.as_str(), &b"now"[..]));
+    assert_eq!(meta.sender, Some(t.sender_id()));
+    assert_eq!(meta.seq, Some(0));
+    assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z6_prefix_subscription_delivers_app_x_but_not_apple() {
+    let mut t = isolated().await;
+    let mut sub = t
+        .subscribe(KeyFilter::Prefix(Key::from_static("app")))
+        .await
+        .expect("subscribe");
+    for k in ["apple", "app/x", "app", "app/x/y"] {
+        t.publish(Key::new(k).unwrap(), k.as_bytes()).await.expect("publish");
+    }
+    let mut buf = [0u8; 64];
+    let mut keys = Vec::new();
+    for _ in 0..3 {
+        let s = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf))
+            .await
+            .expect("timeout")
+            .expect("recv");
+        assert_eq!(s.key.as_str().as_bytes(), s.payload);
+        keys.push(s.key.as_str().to_owned());
+    }
+    assert_eq!(keys, ["app/x", "app", "app/x/y"]);
+    assert!(matches!(sub.try_recv(&mut buf), Ok(None)), "apple not delivered");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z7_no_self_delivery_and_sender_meta_present() {
+    let (mut a, mut b) = loopback_pair().await;
+    assert_ne!(a.sender_id(), b.sender_id());
+    let filter = KeyFilter::Prefix(Key::from_static("test/z7"));
+    let mut sub = a.subscribe(filter).await.expect("subscribe");
+    let mut buf = [0u8; 64];
+
+    // A's own publication is not delivered to A (local delivery would be
+    // synchronous, so it would already be queued).
+    a.publish(Key::from_static("test/z7/own"), b"self").await.expect("publish");
+    assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
+
+    // B's publications are, once the declaration has propagated.
+    let got = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            b.publish(Key::from_static("test/z7/remote"), b"peer")
+                .await
+                .expect("publish");
+            let wait = tokio::time::timeout(Duration::from_millis(200), sub.recv(&mut buf));
+            if let Ok(r) = wait.await {
+                let s = r.expect("recv");
+                break (s.key.as_str().to_owned(), s.payload.to_vec(), s.meta);
+            }
+        }
+    })
+    .await
+    .expect("timeout");
+    assert_eq!(got.0, "test/z7/remote");
+    assert_eq!(got.1, b"peer");
+    assert_eq!(got.2.sender, Some(b.sender_id()));
+    assert!(got.2.seq.is_some());
+
+    // Whatever else is queued also came from B, never from A.
+    a.publish(Key::from_static("test/z7/own"), b"self").await.expect("publish");
+    while let Some(s) = sub.try_recv(&mut buf).expect("try_recv") {
+        assert_eq!(s.meta.sender, Some(b.sender_id()));
+        assert_eq!(s.payload, b"peer");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z8_cancelled_recv_loses_no_sample() {
+    const K: Key<'static> = Key::from_static("test/z8/cancel");
+    let mut t = isolated().await;
+    let mut sub = t.subscriber(K).await.expect("subscriber");
+    let mut buf = [0u8; 64];
+    assert!(!poll_once_and_drop(sub.recv(&mut buf)), "nothing queued yet");
+    t.publish(K, b"kept").await.expect("publish");
+    let s = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf))
+        .await
+        .expect("timeout")
+        .expect("recv");
+    assert_eq!(s.payload, b"kept");
 }

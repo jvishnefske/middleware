@@ -17,9 +17,17 @@
 //!   `middleware.v1.Bus/Publish` with the key in the [`bus::KEY_HEADER`]
 //!   metadata entry and the payload as the body.
 //!
-//! [`GrpcTransport::subscribe`] opens the server-streaming
-//! `middleware.v1.Bus/Subscribe` call and returns a [`GrpcSubscriber`], which
-//! implements [`Subscriber`](crate::Subscriber).
+//! * [`Subscribe`](crate::Subscribe) — opens the server-streaming
+//!   `middleware.v1.Bus/Subscribe` call for an exact or prefix
+//!   [`KeyFilter`](crate::KeyFilter) and returns a [`GrpcSubscriber`], which
+//!   implements [`Subscriber`](crate::Subscriber) (including a non-blocking
+//!   `try_recv`). The bus filters server side and does not identify
+//!   publishers, so samples carry no sender metadata and a client receives
+//!   its own publications on keys it subscribes to.
+//!
+//! [`Publisher::LIMITS`](crate::Publisher::LIMITS) is keys up to
+//! [`MAX_KEY_LEN`](crate::key::MAX_KEY_LEN) and payloads up to
+//! [`MAX_PAYLOAD`].
 //!
 //! # Server
 //!
@@ -64,6 +72,23 @@ pub use server::GrpcServer;
 
 use crate::transport::HandlerError;
 
+/// tonic's default limit on a decoded message, which both the server (for
+/// a publish body) and the client (for a stream item) enforce.
+pub const MAX_MESSAGE: usize = 4 * 1024 * 1024;
+
+/// Largest payload a publish carries: [`MAX_MESSAGE`] minus the stream
+/// item's length byte and a maximal key.
+pub const MAX_PAYLOAD: usize = MAX_MESSAGE - 1 - crate::key::MAX_KEY_LEN;
+
+/// The filter kind a [`GrpcSubscriber`] was opened with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcSubscriberKind {
+    /// [`KeyFilter::Exact`](crate::KeyFilter::Exact).
+    Exact,
+    /// [`KeyFilter::Prefix`](crate::KeyFilter::Prefix).
+    Prefix,
+}
+
 /// Failure of a gRPC transport operation.
 #[derive(Debug)]
 pub enum GrpcError {
@@ -89,6 +114,9 @@ pub enum GrpcError {
     InvalidHeader,
     /// The server closed a subscription stream.
     StreamEnded,
+    /// A subscription stream item was not `[key_len][key][payload]` with a
+    /// valid key.
+    MalformedSample,
     /// Every sender feeding a [`GrpcResponder`] was dropped.
     Closed,
 }
@@ -134,6 +162,7 @@ impl core::fmt::Display for GrpcError {
                 f.write_str("key cannot be encoded as gRPC metadata or path")
             }
             GrpcError::StreamEnded => f.write_str("subscription stream ended"),
+            GrpcError::MalformedSample => f.write_str("malformed subscription stream item"),
             GrpcError::Closed => f.write_str("responder channel closed"),
         }
     }

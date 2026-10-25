@@ -121,9 +121,59 @@ impl core::fmt::Display for Key<'_> {
     }
 }
 
+/// Which keys a subscription receives.
+///
+/// Keys themselves never contain wildcards (BLE and gRPC cannot express
+/// them); a filter is the subscriber-side way to ask for a family of keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyFilter<'a> {
+    /// Exactly this key.
+    Exact(Key<'a>),
+    /// This key and every key below it, segment-wise: `app` matches `app`,
+    /// `app/x` and `app/x/y`, but not `apple`. Zenoh expresses it as
+    /// `<prefix>/**` plus the prefix itself.
+    Prefix(Key<'a>),
+}
+
+impl<'a> KeyFilter<'a> {
+    /// True if `key` is selected by this filter.
+    pub fn matches(&self, key: Key<'_>) -> bool {
+        match self {
+            KeyFilter::Exact(k) => k.as_str() == key.as_str(),
+            KeyFilter::Prefix(p) => {
+                let (p, k) = (p.as_bytes(), key.as_bytes());
+                k.starts_with(p) && (k.len() == p.len() || k.get(p.len()) == Some(&b'/'))
+            }
+        }
+    }
+
+    /// The key the filter is built on.
+    pub const fn key(&self) -> Key<'a> {
+        match self {
+            KeyFilter::Exact(k) | KeyFilter::Prefix(k) => *k,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filters_match_exact_and_segment_prefixes() {
+        let app = Key::from_static("app");
+        let exact = KeyFilter::Exact(Key::from_static("app/x"));
+        let prefix = KeyFilter::Prefix(app);
+        assert!(exact.matches(Key::from_static("app/x")));
+        assert!(!exact.matches(Key::from_static("app/x/y")));
+        for k in ["app", "app/x", "app/x/y"] {
+            assert!(prefix.matches(Key::new(k).unwrap()), "{k}");
+        }
+        for k in ["apple", "ap", "other/app"] {
+            assert!(!prefix.matches(Key::new(k).unwrap()), "{k}");
+        }
+        assert_eq!(prefix.key(), app);
+    }
 
     #[test]
     fn accepts_paths_and_grpc_names() {

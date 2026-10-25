@@ -21,10 +21,12 @@ fn main() -> ExitCode {
             });
         match result {
             Ok((r, size)) => println!(
-                "ok   {f} ({size} bytes)\n     imports mw: {}\n     exports: {}\n     memory pages (initial, max): {:?}",
+                "ok   {f} ({size} bytes)\n     imports mw: {}\n     exports: {}\n     memory pages (initial, max): {:?} of {:?} bytes, initial {:?} bytes",
                 r.imports.join(", "),
                 r.exports.join(", "),
-                r.memory_pages
+                r.memory_pages,
+                r.memory_page_bytes,
+                r.initial_memory_bytes()
             ),
             Err(errs) => {
                 failed = true;

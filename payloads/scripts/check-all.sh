@@ -12,6 +12,10 @@ TEMPLATES=(blink echo button timer)   # .wat
 AS_TEMPLATES=(blink echo button spi)  # .ts
 
 cargo build --release
+# blink and echo again with 1-byte pages (16 KiB fixed memory), for hosts
+# that cap linear memory below one 64 KiB page.
+BYTE_PAGE_EXAMPLES=(blink echo)
+scripts/build-byte-pages.sh "${BYTE_PAGE_EXAMPLES[@]/#/--package=}"
 cargo test -p mw-payload -p button -p spi_loopback -p uart_echo --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings
@@ -23,6 +27,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps --document-private-
 files=()
 for e in "${EXAMPLES[@]}"; do
   files+=("target/wasm32-unknown-unknown/release/$e.wasm")
+done
+for e in "${BYTE_PAGE_EXAMPLES[@]}"; do
+  files+=("target/byte-pages/wasm32-unknown-unknown/release/$e.wasm")
 done
 for t in "${TEMPLATES[@]}"; do
   files+=("templates/$t.wat")

@@ -50,6 +50,20 @@ flags in `.cargo/config.toml` give every payload exactly one 64 KiB page of
 linear memory that cannot grow, with a 16 KiB stack, because the target
 microcontrollers have only a few hundred KiB of RAM.
 
+### 1-byte pages
+
+Hosts that cannot spare a 64 KiB page (the ESP-NOW badge caps linear memory
+at a few KiB) accept modules built with the WebAssembly custom-page-sizes
+proposal, where a page is one byte and memory is sized to the byte.
+`scripts/build-byte-pages.sh` builds with `-C link-arg=--page-size=1` and a
+fixed linear memory of `MEMORY_BYTES` (default 16384) with a `STACK_BYTES`
+(default 4096) stack, for example `scripts/build-byte-pages.sh -p blink -p
+echo`. The output lands in `target/byte-pages/wasm32-unknown-unknown/release/`
+so it never overwrites the 64 KiB-page build. Pointers and the ABI are the
+same either way; only the host's byte cap (`wasm_host::Limits::bytes`) has
+to be at least `MEMORY_BYTES`. `scripts/check-all.sh` builds and validates
+blink and echo both ways.
+
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.
 

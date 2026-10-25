@@ -12,7 +12,9 @@
 //!   [`subscribe_slot`], [`set_tick`] — host-call argument validation (W3).
 //! * [`alloc_range`] — whether `mw_alloc` accepted a delivery (W2).
 //! * [`Schedule`] — `tick` scheduling with wrapping millisecond time (W2).
-//! * [`memory_bytes`] — page cap to byte limit (W5).
+//! * [`initial_memory_bytes`], [`check_memory`], [`memory_bytes`] — the
+//!   byte cap on linear memory for 64 KiB and 1-byte (custom-page-sizes)
+//!   pages (W5).
 //! * ABI 2 (requirement D4): [`gpio_irq`], [`dma_channel`],
 //!   [`spi_transfer`], [`uart_write`] and [`read_target`] validate
 //!   arguments with the shared [`wasm_abi::periph`] parsers and bound guest
@@ -135,25 +137,103 @@ pub fn check_export(name: &str, shape: Option<Shape>) -> Result<(), LoadError> {
     }
 }
 
-/// Checks the exported memory's initial size against the page cap.
-pub fn check_memory(initial_pages: u64, max_pages: u32) -> Result<(), LoadError> {
-    if initial_pages > u64::from(max_pages) {
+/// Checks a module's initial linear memory, in bytes, against the byte cap.
+pub fn check_memory(initial_bytes: u64, max_bytes: u32) -> Result<(), LoadError> {
+    if initial_bytes > u64::from(max_bytes) {
         Err(LoadError::MemoryTooLarge {
-            pages: initial_pages,
-            max: max_pages,
+            bytes: initial_bytes,
+            max: max_bytes,
         })
     } else {
         Ok(())
     }
 }
 
-/// Converts a page cap to the byte limit the store's resource limiter
-/// enforces on `memory.grow`, saturating on targets with a small `usize`.
-pub fn memory_bytes(pages: u32) -> usize {
-    usize::try_from(pages)
-        .ok()
-        .and_then(|p| p.checked_mul(PAGE_BYTES))
-        .unwrap_or(usize::MAX)
+/// Converts the byte cap to the limit the store's resource limiter enforces
+/// on `memory.grow`, saturating on targets with a small `usize`.
+pub fn memory_bytes(max_bytes: u32) -> usize {
+    usize::try_from(max_bytes).unwrap_or(usize::MAX)
+}
+
+/// Section id of the memory section.
+const MEMORY_SECTION: u8 = 5;
+/// Memory type flag: a maximum follows the minimum.
+const FLAG_HAS_MAX: u32 = 1;
+/// Memory type flag: a page-size exponent follows (custom-page-sizes).
+const FLAG_PAGE_SIZE: u32 = 8;
+/// log2 of the default 64 KiB page.
+const DEFAULT_PAGE_LOG2: u32 = 16;
+
+/// Reads an unsigned LEB128 value of at most 64 bits at `*at`, advancing it.
+/// Reads at most ten bytes.
+fn leb_u64(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0u32..64).step_by(7) {
+        let byte = *bytes.get(*at)?;
+        *at += 1;
+        value |= u64::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Total initial size, in bytes, of the memories a module defines: each
+/// memory's minimum times its page size (64 KiB, or 2^n bytes with the
+/// custom-page-sizes proposal, which in practice means 1 byte). Returns
+/// `Some(0)` when the module defines no memory and `None` when the section
+/// headers or memory types are malformed.
+///
+/// wasmi validates the module but does not expose a memory's page size, so
+/// the runtime reads it here. Only section headers and the memory section
+/// are walked: every step consumes at least one byte, so the walk is bounded
+/// by the module length. A product that overflows saturates to `u64::MAX`,
+/// which any cap rejects.
+pub fn initial_memory_bytes(wasm: &[u8]) -> Option<u64> {
+    let mut at = 8; // magic and version
+    while at < wasm.len() {
+        let id = *wasm.get(at)?;
+        at += 1;
+        let len = usize::try_from(leb_u64(wasm, &mut at)?).ok()?;
+        let end = at.checked_add(len).filter(|e| *e <= wasm.len())?;
+        if id == MEMORY_SECTION {
+            let section = wasm.get(at..end)?;
+            return memory_section_bytes(section);
+        }
+        at = end;
+    }
+    Some(0)
+}
+
+/// Sums the initial bytes of every memory type in a memory section body.
+fn memory_section_bytes(section: &[u8]) -> Option<u64> {
+    let mut at = 0;
+    let count = leb_u64(section, &mut at)?;
+    let mut total = 0u64;
+    // Each memory type takes at least two bytes, so a count beyond the
+    // section length is malformed; bounding by the length keeps the loop
+    // finite whatever the count says.
+    for _ in 0..count.min(section.len() as u64) {
+        let flags = u32::try_from(leb_u64(section, &mut at)?).ok()?;
+        // `memory64` (flag 4) only widens the LEB values, which `leb_u64`
+        // already reads.
+        let min = leb_u64(section, &mut at)?;
+        if flags & FLAG_HAS_MAX != 0 {
+            leb_u64(section, &mut at)?;
+        }
+        let log2 = if flags & FLAG_PAGE_SIZE != 0 {
+            u32::try_from(leb_u64(section, &mut at)?).ok()?
+        } else {
+            DEFAULT_PAGE_LOG2
+        };
+        let bytes = min
+            .checked_shl(log2)
+            .filter(|b| b >> log2 == min)
+            .unwrap_or(u64::MAX);
+        total = total.saturating_add(bytes);
+    }
+    Some(total)
 }
 
 /// Parses a key the payload passed to `publish` or `subscribe`: it must be
@@ -533,13 +613,75 @@ mod tests {
     }
 
     #[test]
-    fn memory_cap_is_checked_and_converted() {
-        assert_eq!(check_memory(2, 2), Ok(()));
+    fn memory_cap_is_checked_in_bytes() {
+        assert_eq!(
+            check_memory(2 * PAGE_BYTES as u64, 2 * PAGE_BYTES as u32),
+            Ok(())
+        );
+        assert_eq!(check_memory(4096, 4096), Ok(()));
         assert!(matches!(
-            check_memory(3, 2),
-            Err(LoadError::MemoryTooLarge { pages: 3, max: 2 })
+            check_memory(4097, 4096),
+            Err(LoadError::MemoryTooLarge {
+                bytes: 4097,
+                max: 4096
+            })
         ));
-        assert_eq!(memory_bytes(2), 2 * PAGE_BYTES);
+        assert_eq!(memory_bytes(4096), 4096);
+        assert_eq!(memory_bytes(u32::MAX), u32::MAX as usize);
+    }
+
+    /// A minimal module: header plus one memory section with `memtype`.
+    fn with_memory(memtype: &[u8]) -> Vec<u8> {
+        let mut m = b"\0asm\x01\0\0\0".to_vec();
+        // An unrelated custom section first, to exercise the section walk.
+        m.extend_from_slice(&[0, 2, 1, b'x']);
+        m.push(MEMORY_SECTION);
+        m.push(memtype.len() as u8 + 1);
+        m.push(1);
+        m.extend_from_slice(memtype);
+        m
+    }
+
+    #[test]
+    fn initial_memory_bytes_reads_both_page_sizes() {
+        // 64 KiB pages: min 2.
+        assert_eq!(
+            initial_memory_bytes(&with_memory(&[0, 2])),
+            Some(2 * PAGE_BYTES as u64)
+        );
+        // 64 KiB pages with a maximum: min 1, max 3.
+        assert_eq!(
+            initial_memory_bytes(&with_memory(&[1, 1, 3])),
+            Some(PAGE_BYTES as u64)
+        );
+        // 1-byte pages: flags 8, min 8192 (LEB 0x80 0x40), log2 0.
+        assert_eq!(
+            initial_memory_bytes(&with_memory(&[8, 0x80, 0x40, 0])),
+            Some(8192)
+        );
+        // 1-byte pages with a maximum: flags 9, min 300, max 300.
+        assert_eq!(
+            initial_memory_bytes(&with_memory(&[9, 0xac, 0x02, 0xac, 0x02, 0])),
+            Some(300)
+        );
+        // No memory section.
+        assert_eq!(initial_memory_bytes(b"\0asm\x01\0\0\0"), Some(0));
+    }
+
+    #[test]
+    fn initial_memory_bytes_rejects_malformed_and_saturates() {
+        assert_eq!(initial_memory_bytes(&with_memory(&[8, 0x80])), None);
+        let mut truncated = with_memory(&[0, 2]);
+        truncated.pop();
+        assert_eq!(initial_memory_bytes(&truncated), None);
+        let mut bad_len = b"\0asm\x01\0\0\0".to_vec();
+        bad_len.extend_from_slice(&[MEMORY_SECTION, 50, 1, 0, 1]);
+        assert_eq!(initial_memory_bytes(&bad_len), None);
+        // A huge exponent saturates instead of wrapping.
+        assert_eq!(
+            initial_memory_bytes(&with_memory(&[8, 2, 63])),
+            Some(u64::MAX)
+        );
     }
 
     #[test]

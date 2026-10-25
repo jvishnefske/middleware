@@ -24,6 +24,7 @@
 //! |------------|-------------|-------------------|---------------------------|
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
+//! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |
@@ -39,6 +40,7 @@
 #![allow(async_fn_in_trait)]
 
 pub mod codec;
+pub mod dedup;
 pub mod crc;
 pub mod key;
 pub mod loader;
@@ -49,11 +51,16 @@ pub mod wasm_abi;
 
 #[cfg(feature = "ble")]
 pub mod ble;
+#[cfg(feature = "espnow")]
+pub mod espnow;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 #[cfg(feature = "zenoh")]
 pub mod zenoh;
 
 pub use codec::Codec;
-pub use key::{Key, KeyError};
-pub use transport::{Handler, HandlerError, Publisher, Requester, Responder, Sample, Subscriber};
+pub use key::{Key, KeyError, KeyFilter};
+pub use transport::{
+    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, SampleMeta, SenderId,
+    Subscribe, Subscriber,
+};

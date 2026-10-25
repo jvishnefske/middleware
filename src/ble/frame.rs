@@ -290,6 +290,14 @@ impl<const N: usize> Reassembler<N> {
         matches!(self.state, State::Receiving { .. })
     }
 
+    /// The id of the message being received, or `None` while idle.
+    pub const fn message_id(&self) -> Option<u8> {
+        match self.state {
+            State::Receiving { id, .. } => Some(id),
+            State::Idle => None,
+        }
+    }
+
     /// Feeds one fragment, consuming the state.
     pub fn accept(self, fragment: &[u8]) -> Result<Progress<N>, FrameError> {
         let (h, data) = FragmentHeader::parse(fragment)?;

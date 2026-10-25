@@ -6,7 +6,8 @@
 //! * every import comes from [`IMPORT_MODULE`] (`"mw"`), names an entry of
 //!   [`IMPORTS`], is a function, and has exactly that many `i32` parameters
 //!   and an `i32` result iff the entry `returns`;
-//! * `memory` is exported as a memory;
+//! * `memory` is exported as a memory, with 64 KiB pages or 1-byte pages
+//!   (the custom-page-sizes proposal, enabled in the validator);
 //! * the optional exports `init () -> ()`, `tick (i32) -> ()`,
 //!   `mw_alloc (i32) -> i32`, `on_message (i32 i32 i32) -> ()` and (ABI 2)
 //!   `on_irq (i32 i32 i32 i32) -> ()` have those signatures, and
@@ -21,7 +22,9 @@
 //! tests apply it to the built examples and the WAT templates.
 
 use middleware::wasm_abi::{IMPORT_MODULE, IMPORTS, exports};
-use wasmparser::{ExternalKind, FuncType, Parser, Payload, TypeRef, ValType};
+use wasmparser::{
+    ExternalKind, FuncType, Parser, Payload, TypeRef, ValType, Validator, WasmFeatures,
+};
 
 /// What a valid module imports and exports.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -30,8 +33,25 @@ pub struct Report {
     pub imports: Vec<String>,
     /// All export names, in module order.
     pub exports: Vec<String>,
-    /// Linear memory limits in 64 KiB pages: (initial, maximum).
+    /// Linear memory limits in the memory's own pages: (initial, maximum).
     pub memory_pages: Option<(u64, Option<u64>)>,
+    /// Page size of that memory in bytes: 65536, or 1 for a module linked
+    /// with `--page-size=1`.
+    pub memory_page_bytes: Option<u64>,
+}
+
+impl Report {
+    /// Initial linear memory in bytes (pages times page size), the figure a
+    /// host's byte cap (`wasm_host::Limits::bytes`) is compared against.
+    pub fn initial_memory_bytes(&self) -> Option<u64> {
+        let (initial, _) = self.memory_pages?;
+        initial.checked_mul(self.memory_page_bytes?)
+    }
+}
+
+/// The validator features: wasmparser's defaults plus custom page sizes.
+fn features() -> WasmFeatures {
+    WasmFeatures::default() | WasmFeatures::CUSTOM_PAGE_SIZES
 }
 
 /// Compiles WAT text, or passes binary `.wasm` through.
@@ -72,7 +92,9 @@ pub const EVENT_SOURCES: &[&str] = &["gpio_irq", "timer_start", "spi_transfer", 
 
 /// Validates `wasm` (binary) against the ABI. Returns every violation found.
 pub fn check(wasm: &[u8]) -> Result<Report, Vec<String>> {
-    wasmparser::validate(wasm).map_err(|e| vec![format!("invalid module: {e}")])?;
+    Validator::new_with_features(features())
+        .validate_all(wasm)
+        .map_err(|e| vec![format!("invalid module: {e}")])?;
 
     let mut errors = Vec::new();
     let mut report = Report::default();
@@ -123,6 +145,7 @@ pub fn check(wasm: &[u8]) -> Result<Report, Vec<String>> {
                 for m in r {
                     let m = m.map_err(|e| vec![e.to_string()])?;
                     report.memory_pages = Some((m.initial, m.maximum));
+                    report.memory_page_bytes = Some(1u64 << m.page_size_log2());
                 }
             }
             Payload::FunctionSection(r) => {

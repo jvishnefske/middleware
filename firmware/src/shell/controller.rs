@@ -204,10 +204,8 @@ impl Controller {
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
         let device = EspDevice::new(self.profile, self.bus).ok_or(StartError::NoPins)?;
-        let limits = Limits {
-            max_memory_pages: self.profile.max_memory_pages,
-            fuel_per_call: middleware::wasm_abi::FUEL_PER_CALL,
-        };
+        let limits = Limits::bytes(self.profile.max_memory_bytes)
+            .with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
         Payload::load(&image, device, limits).map_err(StartError::Load)
     }
 

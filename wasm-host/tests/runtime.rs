@@ -484,6 +484,21 @@ fn w4_other_traps_are_reported() {
 
 // ---------------------------------------------------------------- W5
 
+const KIB64: u32 = 65_536;
+
+#[test]
+fn w5_limits_constructors_are_byte_based() {
+    assert_eq!(Limits::pages(2).max_memory_bytes, 2 * KIB64);
+    assert_eq!(Limits::bytes(12_288).max_memory_bytes, 12_288);
+    assert_eq!(Limits::pages(u32::MAX).max_memory_bytes, u32::MAX);
+    assert_eq!(Limits::default(), Limits::pages(2));
+    assert_eq!(
+        Limits::default().fuel_per_call,
+        middleware::wasm_abi::FUEL_PER_CALL
+    );
+    assert_eq!(Limits::bytes(1).with_fuel(7).fuel_per_call, 7);
+}
+
 #[test]
 fn w5_memory_grow_beyond_cap_fails() {
     let body = r#"
@@ -495,27 +510,88 @@ fn w5_memory_grow_beyond_cap_fails() {
     let mut p = loaded(body);
     assert_eq!(p.device().results(), vec![1, -1, 2]);
 
-    let limits = Limits {
-        max_memory_pages: 4,
-        ..Limits::default()
-    };
-    let mut p = Payload::load(&module(body), Fake::default(), limits).unwrap();
+    let mut p = Payload::load(&module(body), Fake::default(), Limits::pages(4)).unwrap();
     assert_eq!(p.device().results(), vec![1, 2, 3]);
+
+    // A byte cap between page multiples rounds down: 2.5 pages allows 2.
+    let limits = Limits::bytes(2 * KIB64 + KIB64 / 2);
+    let mut p = Payload::load(&module(body), Fake::default(), limits).unwrap();
+    assert_eq!(p.device().results(), vec![1, -1, 2]);
 }
 
 #[test]
 fn w5_initial_memory_over_cap_is_rejected() {
     let err = load(r#"(memory (export "memory") 3)"#).err();
-    assert_eq!(err, Some(LoadError::MemoryTooLarge { pages: 3, max: 2 }));
-    let limits = Limits {
-        max_memory_pages: 3,
-        ..Limits::default()
-    };
+    assert_eq!(
+        err,
+        Some(LoadError::MemoryTooLarge {
+            bytes: 3 * u64::from(KIB64),
+            max: 2 * KIB64
+        })
+    );
     assert!(
         Payload::load(
             &module(r#"(memory (export "memory") 3)"#),
             Fake::default(),
-            limits
+            Limits::pages(3)
+        )
+        .is_ok()
+    );
+}
+
+/// A module with 1-byte pages: `bytes` of initial memory. The prelude's data
+/// segment and `$report` scratch sit in the first 8 bytes.
+fn byte_page_module(bytes: u32, init: &str) -> Vec<u8> {
+    module(&format!(
+        r#"(memory (export "memory") {bytes} (pagesize 1)) (func (export "init") {init})"#
+    ))
+}
+
+#[test]
+fn w5_one_byte_page_module_within_cap_loads_and_grows_to_it() {
+    // 12 KiB initial under a 16 KiB cap: grows by bytes, up to the cap.
+    let wasm = byte_page_module(
+        12_288,
+        r#"(call $report (memory.size))
+           (call $report (memory.grow (i32.const 4096)))
+           (call $report (memory.grow (i32.const 1)))
+           (call $report (memory.size))"#,
+    );
+    let mut p = Payload::load(&wasm, Fake::default(), Limits::bytes(16_384)).unwrap();
+    assert_eq!(p.device().results(), vec![12_288, 12_288, -1, 16_384]);
+    // Exactly at the cap is accepted.
+    assert!(
+        Payload::load(
+            &byte_page_module(16_384, ""),
+            Fake::default(),
+            Limits::bytes(16_384)
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn w5_one_byte_page_module_over_cap_is_rejected() {
+    let err = Payload::load(
+        &byte_page_module(16_385, ""),
+        Fake::default(),
+        Limits::bytes(16_384),
+    )
+    .err();
+    assert_eq!(
+        err,
+        Some(LoadError::MemoryTooLarge {
+            bytes: 16_385,
+            max: 16_384
+        })
+    );
+    // The same module is far below a one-page cap, which a 64 KiB-page
+    // module could not get under with any non-empty memory.
+    assert!(
+        Payload::load(
+            &byte_page_module(16_385, ""),
+            Fake::default(),
+            Limits::pages(1)
         )
         .is_ok()
     );

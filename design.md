@@ -38,11 +38,46 @@ characteristic UUID and a 16-bit advertising id.
 - [x] C7 Codecs: raw bytes, postcard (no_std) and prost (protobuf) round trip
   and report undersized buffers — `codec::tests::raw_round_trip_and_errors`,
   `codec::postcard::tests::*`, `codec::prost::tests::*`.
+- [x] C8 Subscriptions take a `KeyFilter` (exact key, or a segment-wise
+  prefix: `app` selects `app`, `app/x`, `app/x/y`, never `apple`); runtime
+  subscription is the `Subscribe` trait (Zenoh, gRPC bus); the serial link
+  borrows itself as a `Filtered` subscriber instead —
+  `key::tests::filters_match_exact_and_segment_prefixes`,
+  `tests/zenoh.rs`: `z6_prefix_subscription_delivers_app_x_but_not_apple`;
+  `tests/grpc.rs`: `g5_prefix_subscription_delivers_app_x_but_not_apple`;
+  `grpc::bus::tests::keyed_stream_prefix_selects_segments_not_apple`,
+  `serial::link::tests::filtered_prefix_delivers_app_x_but_not_apple`.
+- [x] C9 Samples carry `SampleMeta` (sender id, sequence) when the transport
+  knows them; others report none —
+  `tests/zenoh.rs`: `z7_no_self_delivery_and_sender_meta_present`,
+  `z5_try_recv_is_none_when_empty_and_some_without_waiting`;
+  `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`;
+  `typed::tests::typed_try_recv_is_none_then_decodes_with_meta`;
+  `serial::link::tests::try_recv_is_none_when_empty_and_some_without_waiting`
+  and `g5_try_recv_is_none_when_empty_and_some_without_waiting` (no meta).
+- [x] C10 Every subscriber has a non-blocking `try_recv` (`None` when
+  nothing is queued, the sample otherwise, without awaiting), and every
+  async method is cancel safe as stated in `transport`: a `recv` dropped
+  before completion loses no sample —
+  `z5_try_recv_is_none_when_empty_and_some_without_waiting`,
+  `z8_cancelled_recv_loses_no_sample`,
+  `g5_try_recv_is_none_when_empty_and_some_without_waiting`,
+  `g6_cancelled_recv_loses_no_sample`,
+  `serial::link::tests::try_recv_is_none_when_empty_and_some_without_waiting`,
+  `serial::link::tests::cancelled_recv_keeps_partial_frame`,
+  `serial::link::tests::cancelled_publish_is_completed_by_next_send`,
+  `typed::tests::typed_try_recv_is_none_then_decodes_with_meta`.
+- [x] C11 Each publisher states its `Limits` (largest key and payload) —
+  `serial::link::tests::limits_admit_longest_key_with_largest_payload`
+  (128-byte key + 891-byte payload fill one 1024-byte frame),
+  `zenoh::tests::filters_map_to_key_expressions` (1 GiB − 1 KiB),
+  `g7_limits_fit_tonic_default_message_size`,
+  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 129).
 
 ### Feature isolation
 
 - [x] F1 `ble` and `postcard` build for `thumbv6m-none-eabi` without `std` —
-  `scripts/check-features.sh` (builds `ble`, `ble,postcard`, `postcard` for `thumbv6m-none-eabi`, asserts `std` off).
+  `scripts/check-features.sh` (builds `ble`, `ble,postcard`, `postcard`, `serial`, `espnow`, `espnow,postcard` for `thumbv6m-none-eabi`, asserts `std` off).
 - [x] F2 `zenoh`, `grpc` and `istio` build on the host without pulling in the
   `ble` module —
   `scripts/check-features.sh` (builds `zenoh`, `grpc`, `grpc,istio`, `zenoh,grpc,istio,prost`, asserts `ble` off).
@@ -53,19 +88,45 @@ characteristic UUID and a 16-bit advertising id.
 ### BLE GATT (`ble`)
 
 - [x] B1 Keys map to stable, distinct 128-bit characteristic UUIDs and 16-bit
-  advertising ids in a fixed namespace — `ble::uuid::tests::*`.
+  advertising ids in a fixed namespace, hashed with the shared
+  `dedup::fnv1a64` — `ble::uuid::tests::*`.
 - [x] B2 Messages larger than one ATT payload are fragmented and reassembled;
   out-of-order, duplicate or oversized fragments are rejected —
-  `ble::frame::tests::*` (`large_message_is_fragmented_and_reassembled`, `out_of_order_fragment_is_rejected`, `duplicate_fragment_is_rejected`, `oversized_message_is_rejected`, `interleaved_and_inconsistent_fragments_are_rejected`, `malformed_fragments_are_rejected`), `ble::gatt::tests::responder_rejects_duplicate_fragment`, `responder_rejects_oversized_request_and_tells_requester`.
-- [x] B3 Publish sends a notification on the key's characteristic; subscribe
-  yields notifications received on it —
-  `ble::gatt::tests::publish_notifies_fragments_on_key_characteristic`, `subscribe_yields_notification_for_subscribed_key`, `subscribe_reports_small_buffer_and_bad_fragments`, `end_to_end_publish_subscribe_over_in_memory_link`.
+  `ble::frame::tests::*` (`large_message_is_fragmented_and_reassembled`, `out_of_order_fragment_is_rejected`, `duplicate_fragment_is_rejected`, `oversized_message_is_rejected`, `interleaved_and_inconsistent_fragments_are_rejected`, `malformed_fragments_are_rejected`), `ble::gatt::tests::responder_rejects_duplicate_fragment_then_recovers`, `responder_rejects_oversized_request_and_tells_requester`.
+- [x] B3 The GATT server publishes as a notification on the key's
+  characteristic; the GATT client's subscriber yields notifications received
+  on it, at ATT MTU 23 and 247 —
+  `ble::gatt::tests::publish_notifies_fragments_on_key_characteristic`, `subscribe_yields_notification_for_subscribed_key`, `subscribe_reports_small_buffer_and_bad_fragments`, `subscriber_drops_unrelated_events_up_to_a_bound`, `end_to_end_publish_subscribe_at_mtu_23_and_247`.
 - [x] B4 Requests carry a correlation id; the response matching it is
-  returned and stale responses are discarded. Handler errors reach the caller —
-  `ble::gatt::tests::request_carries_correlation_id_and_discards_stale_responses`, `successive_requests_use_new_correlation_ids`, `handler_error_reaches_requester`, `responder_maps_failures_to_status_codes`, `end_to_end_request_over_in_memory_link`.
+  returned and stale responses are discarded. Handler errors reach the
+  caller; the handler alone decides which keys exist (`NotFound`), with no
+  second service list —
+  `ble::gatt::tests::request_carries_correlation_id_and_discards_stale_responses`, `successive_requests_use_new_correlation_ids`, `handler_error_reaches_requester`, `responder_maps_failures_to_status_codes`, `end_to_end_request_at_mtu_23_and_247`.
 - [x] B5 The radio is reached only through traits, so a host test drives the
   transport with an in-memory fake —
-  all `ble::gatt::tests::*` drive `BleTransport` through the in-memory `FakeLink`; `att_mtu_is_range_checked`.
+  all `ble::gatt::tests::*` drive `BleServer` / `BleClient` through the in-memory `ServerEnd` / `ClientEnd`; `att_mtu_is_range_checked`.
+- [x] B6 Roles are separate traits: `GattServer` (notify, receive writes)
+  and `GattClient` (write, receive notifications, non-blocking
+  `try_receive`); `BleServer` implements `Publisher` + `Responder`,
+  `BleClient` implements `Subscriber` + `Requester`, so no binding has to
+  fail a call its role cannot make —
+  `ble::gatt::tests::end_to_end_request_at_mtu_23_and_247`, `end_to_end_publish_subscribe_at_mtu_23_and_247` (fakes implement one role each).
+- [x] B7 The ATT MTU is read per message from the connection, and fragments
+  are capped by the const-generic buffer size `A` —
+  `ble::gatt::tests::mtu_is_read_per_message_and_capped_by_buffer`.
+- [x] B8 `serve_one` is cancel-safe: the partial request lives in the
+  server, so a dropped call resumes; a disconnect, or fragment 0 of a new
+  request id, discards a partial request; stray tails of abandoned or
+  rejected requests are dropped instead of poisoning the next request —
+  `ble::gatt::tests::serve_one_is_cancel_safe`, `disconnect_discards_partial_request`, `new_request_id_replaces_partial_request`, `responder_rejects_duplicate_fragment_then_recovers`.
+- [x] B9 The client's `recv` is cancel-safe and loses no publication that
+  completes during a request; `try_recv` returns without waiting; a
+  disconnect discards a partial publication and fails a waiting request
+  with `Disconnected`; a dropped request's late response is discarded —
+  `ble::gatt::tests::recv_is_cancel_safe`, `publication_during_request_is_kept_for_recv`, `try_recv_returns_publications_without_waiting`, `disconnect_discards_partial_publication`, `requester_reports_small_buffer_link_errors_and_disconnect`, `dropped_request_late_response_is_discarded`.
+- [x] B10 `Publisher::LIMITS` for the GATT server is the reassembly size `N`,
+  bounded by the 16-bit length and 256 fragments at the minimum MTU —
+  `ble::gatt::tests::publisher_limits_follow_reassembly_size`.
 
 ### BLE advertising (`ble`)
 
@@ -77,14 +138,76 @@ characteristic UUID and a 16-bit advertising id.
   rejected without panicking —
   `ble::advert::tests::parser_rejects_malformed_lengths`, `parser_stops_at_zero_padding`.
 - [x] A3 Connectionless publish: a payload on a key is broadcast as
-  manufacturer data `[short id][sequence][payload]` —
-  `ble::advert::tests::publish_broadcasts_short_id_sequence_and_payload`, `publish_rejects_payload_that_does_not_fit`.
-- [x] A4 Scanning subscriber yields samples whose short id matches a
-  subscribed key and drops repeated sequence numbers —
-  `ble::advert::tests::scanning_subscriber_matches_keys_and_drops_repeats`, `dedup_table_tracks_each_slot`, `scanning_subscriber_errors`, `end_to_end_publish_to_scanning_subscriber`.
+  manufacturer data `[short id][sequence][payload]`; `LIMITS` states the 21
+  bytes the default template leaves and `max_payload` the room left by any
+  template —
+  `ble::advert::tests::publish_broadcasts_short_id_sequence_and_payload`, `publish_rejects_payload_that_does_not_fit`, `publisher_limits_match_the_template`.
+- [x] A4 Scanning subscriber yields samples whose short id resolves to a
+  subscribed key and drops repeated sequence numbers per (sender address,
+  key), so two senders on one key never suppress each other; samples carry
+  the sender and sequence in `SampleMeta` —
+  `ble::advert::tests::scanning_subscriber_matches_keys_and_drops_repeats`, `dedup_is_per_sender`, `scanning_subscriber_errors`, `end_to_end_publish_to_scanning_subscriber`.
 - [x] A5 Discovery: a scan report advertising the middleware service UUID is
   recognised as a middleware node, with its name —
   `ble::advert::tests::discovery_recognises_middleware_nodes`.
+- [x] A6 `ShortIdTable` learns key texts at run time, resolves a short id to
+  its key, and rejects a key whose short id is taken by another key
+  (`Collision`) —
+  `ble::advert::tests::short_id_table_learns_resolves_and_detects_collisions`.
+- [x] A7 The advertising subscriber takes exact and prefix `KeyFilter`s,
+  added or removed at run time and bounded by `K`; a prefix matches only
+  learned keys, because adverts carry no key text —
+  `ble::advert::tests::prefix_subscription_end_to_end`, `subscribe_key_is_atomic_and_bounded`.
+- [x] A8 `Scanner::try_next_report` returns a queued report without waiting,
+  and the subscriber's `try_recv` drains such reports, bounded per call —
+  `ble::advert::tests::try_next_report_is_non_blocking`, `try_recv_drains_without_waiting`.
+- [x] A9 An `Advertiser` may share the advertising set: a successful publish
+  means accepted or queued, not on air, and a refusal does not advance the
+  sequence; the publisher exposes the binding through `advertiser()` —
+  `ble::advert::tests::queueing_advertiser_accepts_or_refuses`, `publisher_limits_match_the_template`.
+
+### ESP-NOW (`espnow`)
+
+Broadcast transport ported from the conagotchi badge (`badge-mw`). One
+ESP-NOW frame per publication: `MW` | version 1 | short id u16 LE | sequence
+u8 | key length u8 | key | payload, at most 250 bytes.
+
+- [x] N1 Frames have the v1 layout, round trip, and the largest key
+  (64 bytes) with the largest payload (179 bytes) fills exactly one 250-byte
+  ESP-NOW frame; the short id equals the BLE short id —
+  `espnow::tests::n1_frame_round_trip_and_layout`, `n1_largest_frame_fits_espnow_v1`, `n1_short_id_is_fnv1a64_folded`.
+- [x] N2 Oversized keys or payloads are refused before anything is sent and
+  without consuming a sequence number; the transport advertises its limits
+  as `Publisher::LIMITS` —
+  `espnow::tests::n2_oversized_publications_are_refused`, `n2_limits_are_advertised`.
+- [x] N3 Malformed `MW` frames are reported as frame errors; frames without
+  the magic (other ESP-NOW users) are skipped —
+  `espnow::tests::n3_malformed_frames_are_rejected`, `n3_malformed_mw_frame_is_an_error_foreign_frames_are_skipped`.
+- [x] N4 Receivers select keys with `KeyFilter`s (exact or segment-wise
+  prefix), added and removed at runtime in a fixed number of slots —
+  `espnow::tests::n4_exact_and_prefix_filters_select_keys`, `n4_filters_change_at_runtime_and_are_bounded`.
+- [x] N5 Repeats are dropped per (sender, key) with `dedup::SeenTable`, so
+  two senders on one key never suppress each other —
+  `espnow::tests::n5_duplicates_are_dropped_per_sender_and_key`.
+- [x] N6 Samples carry `SampleMeta` with the sender (`SenderId::from_mac`)
+  and the frame's sequence number —
+  `espnow::tests::n6_samples_carry_sender_and_sequence`.
+- [x] N7 Own frames are skipped and every receive call is bounded in frames
+  (`MAX_IGNORED_FRAMES`) —
+  `espnow::tests::n7_own_frames_are_skipped`, `n7_ignored_limit_bounds_recv_and_try_recv`.
+- [x] N8 A sample that does not fit the caller's buffer is an error, never a
+  truncation, and is kept for the next receive call —
+  `espnow::tests::n8_buffer_too_small_keeps_the_sample`.
+- [x] N9 `try_recv` returns a queued sample without waiting and `None` when
+  the radio has none —
+  `espnow::tests::n9_try_recv_returns_queued_samples_without_waiting`.
+- [x] N10 Cancel safety: a dropped `recv` loses no sample; a dropped
+  `publish` never makes the next message reuse its sequence number —
+  `espnow::tests::n10_dropped_recv_loses_no_sample`, `n10_dropped_publish_never_reuses_a_sequence`.
+- [x] N11 Publish to subscribe end to end over the in-memory radio —
+  `espnow::tests::n11_end_to_end_publish_to_subscribe`.
+- [x] N12 `espnow` and `espnow,postcard` build for `thumbv6m-none-eabi`
+  without `std` or cloud dependencies — `scripts/check-features.sh`.
 
 ### Zenoh (`zenoh`)
 
@@ -104,6 +227,20 @@ characteristic UUID and a 16-bit advertising id.
   to explicit loopback endpoints —
   `z4_two_sessions_over_explicit_loopback_endpoint`,
   `zenoh::tests::config_rejects_unescapable_endpoints`.
+- [x] Z5 `try_recv` dequeues from the subscriber's FIFO without waiting —
+  `z5_try_recv_is_none_when_empty_and_some_without_waiting`.
+- [x] Z6 `Subscribe` maps `Exact(k)` to the key expression `k` and
+  `Prefix(k)` to `k/**`, which Zenoh matches against `k` itself too —
+  `z6_prefix_subscription_delivers_app_x_but_not_apple`,
+  `zenoh::tests::filters_map_to_key_expressions`.
+- [x] Z7 Publications carry a 12-byte attachment (`mw`, version, sender id
+  hashed from the session's Zenoh id, sequence) surfaced as `SampleMeta`;
+  subscribers use `allowed_origin(Remote)`, so a session never receives its
+  own publications (`with_local_delivery(true)` opts back in) —
+  `z7_no_self_delivery_and_sender_meta_present`,
+  `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`.
+- [x] Z8 Cancelling `recv` loses no sample —
+  `z8_cancelled_recv_loses_no_sample`.
 
 ### gRPC (`grpc`)
 
@@ -117,6 +254,19 @@ characteristic UUID and a 16-bit advertising id.
   `g3_handler_errors_arrive_as_grpc_status_and_map_back`, `g3_request_larger_than_server_scratch_is_resource_exhausted`, `grpc::status::tests::handler_errors_round_trip_through_codes`, `grpc::status::tests::codes_map_back_to_handler_errors`.
 - [x] G4 Tests run client and server in process on a loopback port —
   every `tests/grpc.rs` test binds `127.0.0.1:0`; `g4_responder_reports_closed_when_server_side_dropped`.
+- [x] G5 `Subscribe` opens the bus stream for an exact or prefix filter
+  (`mw-filter` metadata); the server filters with `KeyFilter::matches` and
+  each stream item carries its key (`[key_len][key][payload]`); `try_recv`
+  polls the stream once without waiting —
+  `g5_try_recv_is_none_when_empty_and_some_without_waiting`,
+  `g5_prefix_subscription_delivers_app_x_but_not_apple`,
+  `grpc::bus::tests::keyed_stream_prefix_selects_segments_not_apple`,
+  `grpc::bus::tests::subscribe_rejects_unknown_filter_kind_and_bad_key`,
+  `grpc::bus::tests::items_round_trip_and_reject_garbage`.
+- [x] G6 Cancelling `recv` loses no sample — `g6_cancelled_recv_loses_no_sample`.
+- [x] G7 `LIMITS` keep a publish body and its stream item within tonic's
+  default 4 MiB message size — `g7_limits_fit_tonic_default_message_size`,
+  `g7_payload_at_limit_round_trips_through_subscription`.
 
 ### Istio (`istio`)
 
@@ -183,8 +333,10 @@ because WASM linear memory and the wasmi interpreter require one.
 - [x] W4 Each call is fuel metered; an infinite loop traps and is reported,
   without hanging the host —
   `w4_infinite_loop_runs_out_of_fuel_and_poisons_payload`, `w4_infinite_loop_in_init_fails_load`, `w4_fuel_is_refilled_before_every_call`, `w4_other_traps_are_reported`.
-- [x] W5 Memory is capped by a configurable page limit —
-  `w5_memory_grow_beyond_cap_fails`, `w5_initial_memory_over_cap_is_rejected`, `abi::tests::memory_cap_is_checked_and_converted`.
+- [x] W5 Memory is capped by a configurable byte limit (`Limits::bytes`,
+  `Limits::pages`), at load (initial memory) and on `memory.grow`, for
+  modules with 64 KiB pages and with 1-byte pages (custom-page-sizes) —
+  `w5_limits_constructors_are_byte_based`, `w5_memory_grow_beyond_cap_fails`, `w5_initial_memory_over_cap_is_rejected`, `w5_one_byte_page_module_within_cap_loads_and_grows_to_it`, `w5_one_byte_page_module_over_cap_is_rejected`, `abi::tests::memory_cap_is_checked_in_bytes`, `abi::tests::initial_memory_bytes_reads_both_page_sizes`, `abi::tests::initial_memory_bytes_rejects_malformed_and_saturates`.
 - [ ] W6 `no_std` + `alloc`; builds for the ESP targets and `wasm32`.
   Partial: builds for `wasm32-unknown-unknown`, `xtensa-esp32-none-elf`,
   `xtensa-esp32s3-none-elf`; fails on `riscv32imc-unknown-none-elf`
@@ -205,6 +357,10 @@ because WASM linear memory and the wasmi interpreter require one.
 - [x] P2 Example payloads (blink, echo) build for `wasm32-unknown-unknown`
   and pass ABI validation in the simulator —
   `cargo build --release` in `payloads/`; `abi-check` tests `rust_*`; blink and echo run in `payload-sim` (blink toggles GPIO 8 every 500 ms, echo republishes `app/echo/in` on `app/echo/out`).
+- [x] P4 Payloads can be built with 1-byte pages and a byte-sized linear
+  memory (default 16 KiB) for hosts that cannot spare a 64 KiB page; blink
+  and echo are built and validated both ways —
+  `payloads/scripts/build-byte-pages.sh` (run by `check-all.sh`); `abi-check` tests `rust_examples_with_one_byte_pages`, `default_build_uses_one_64k_page`, `wat_one_byte_page_module_validates`; `payload-sim --memory-bytes 16384` runs the byte-page blink.
 - [x] P3 WAT and AssemblyScript templates exercise the same ABI and run in
   the simulator —
   `abi-check` tests `wat_*`; `payloads/scripts/check-all.sh` compiles the AssemblyScript templates and validates them; both AS payloads run in `payload-sim`.
@@ -368,3 +524,11 @@ uses firmware-owned buffers copied to and from guest memory.
   browser: `protocol-wasm` `d10_*` (timers, edges, SPI loopback/pattern, UART,
   overflow, bounded dispatch, trap in `on_irq`) and `web/test/abi2.test.ts`
   (including the real `payloads/templates` ABI 2 templates).
+
+## Known limitations (0.2)
+
+- **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.
+- **`Subscribe` hands out owned subscribers.** Single-stream transports (serial, one GATT connection, one scanner, one ESP-NOW radio) therefore offer runtime filters (`filtered`, `subscribe_key`, `add_filter`) instead of `Subscribe`. A lifetime-carrying associated type would lift this.
+- **There is no owned key type.** Runtime filters borrow their key, or backends store key text in fixed slots.
+- **The gRPC bus has no publisher identity,** so it carries no sender metadata and delivers a client's own publications back to it.
+- **`SampleMeta.seq` is 8 bits.** That is enough for deduplicating repeats, but not for ordering long streams.
