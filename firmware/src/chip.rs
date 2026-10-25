@@ -31,7 +31,7 @@
 //! | ESP32    | 96.4 KiB  | 112 KiB | 208 KiB | 128 KiB | 32 KiB    |
 //! | ESP32-S3 | 72.0 KiB  | 240 KiB | 312 KiB | 192 KiB | 80 KiB    |
 //! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    |
-//! | ESP8266  | 0         | 0       | 0       | 0       | 252 KiB   |
+//! | ESP8266  | 0         | 0       | 0       | 0       | 124 KiB   |
 //!
 //! The memory limit is a byte cap (`wasm_host::Limits::bytes`): a payload
 //! with standard 64 KiB pages gets whole pages up to it, and one built with
@@ -41,9 +41,10 @@
 //! unchanged; the boot log reports it in bytes.
 //!
 //! The ESP8266 runs the protocol only: it has no WASM runtime, so it has no
-//! payload heap and no linear memory. Its `max_image` is the 256 KiB
-//! payload flash region at 0x100000 on the 4 MB module minus the 4 KiB
-//! header sector; images are stored, not run. The ESP32-C3 also builds
+//! payload heap and no linear memory. Its `max_image` is one slot of the
+//! 256 KiB payload flash region at 0x100000 on the 4 MB module: the region
+//! holds two 128 KiB slots (see [`crate::image`]), each a 4 KiB header
+//! sector plus 124 KiB of image; images are stored, not run. The ESP32-C3 also builds
 //! without the runtime (`runtime` is `false`, matching the absent `wasm`
 //! cargo feature), though its heap plan is kept for when it gains one.
 //!
@@ -58,6 +59,11 @@
 //! Each runtime profile leaves at least [`INTERPRETER_RESERVE`] bytes beyond
 //! the linear memory and image for wasmi (checked by a unit test); the heap
 //! check applies only to profiles with `runtime` set.
+//!
+//! Every profile's `max_image` fits one slot of the 256 KiB (`0x40000`)
+//! payload partition, whose per-slot capacity is 124 KiB: the ESP32 family
+//! uses the `payload` partition in `partitions.csv`, the ESP8266 the region
+//! at 0x100000 (checked by a unit test).
 
 use middleware::wasm_abi::AbiError;
 
@@ -194,8 +200,8 @@ pub const ESP32C3: Profile = Profile {
 
 /// ESP8266: GPIO0–16. Flash on 6–11, UART0 on 1 (TX) / 3 (RX) behind the
 /// CH340 bridge. No WASM runtime, so no payload heap or linear memory; the
-/// payload flash region is 256 KiB at 0x100000 on the 4 MB module (one
-/// 4 KiB header sector plus the image).
+/// payload flash region is 256 KiB at 0x100000 on the 4 MB module, two
+/// 128 KiB slots of one 4 KiB header sector plus up to 124 KiB of image.
 pub const ESP8266: Profile = Profile {
     chip: Chip::Esp8266,
     name: "esp8266",
@@ -204,7 +210,7 @@ pub const ESP8266: Profile = Profile {
     heap_reclaimed: 0,
     heap_main: 0,
     max_memory_bytes: 0,
-    max_image: 252 * 1024,
+    max_image: 124 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
     gpio: span(0, 16),
@@ -359,9 +365,17 @@ mod tests {
             assert_eq!(p.max_memory_bytes, 0, "{}", p.name);
         }
         assert_eq!(ESP8266.heap_total(), 0);
-        const REGION: u32 = 256 * 1024;
-        const HEADER: u32 = 4 * 1024;
-        const { assert!(ESP8266.max_image <= REGION - HEADER) };
+    }
+
+    #[test]
+    fn max_image_fits_one_payload_slot() {
+        // 256 KiB payload partition (ESP32 family) and ESP8266 region.
+        let slot = crate::image::Region::new(0x4_0000).capacity();
+        assert_eq!(slot, 124 * 1024);
+        for p in ALL {
+            assert!(p.max_image <= slot, "{}: {} > {}", p.name, p.max_image, slot);
+        }
+        assert_eq!(ESP8266.max_image, slot, "the ESP8266 accepts a whole slot");
     }
 
     #[test]

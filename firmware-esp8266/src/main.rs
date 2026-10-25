@@ -26,6 +26,19 @@
 //!
 //! The panic handler spins; the watchdog then resets the chip. Production
 //! paths do not panic (no `unwrap`, all indexing checked).
+//!
+//! # `wdt-test` feature (hardware test only)
+//!
+//! Off by default; the shipped image does not contain it. With
+//! `./build.sh --features wdt-test` the super-loop runs normally for
+//! `WDT_TEST_RUN_SECS` (5 s) after boot (counted in CCOUNT cycles with
+//! `wrapping_sub`, so the 53.7 s counter wrap is harmless), logs
+//! `wdt-test: starving watchdog` on `sys/log`, then stops feeding the
+//! watchdog and spins. The watchdog stage then expires and resets the chip
+//! 26.84 s later, and it boots again and repeats the cycle (measured: 31.87 s
+//! reset to reset). The ROM boot log reports `rst cause:4` (watchdog); after
+//! a watchdog reset the PLL is still set up, so that log arrives at the app's
+//! 115200 baud, not the 74880 baud of a power-on boot.
 
 #![no_std]
 #![no_main]
@@ -45,6 +58,11 @@ use middleware::serial::frame::{MAX_WIRE_FRAME, Splitter};
 
 /// CPU clock after ROM/PLL init; CCOUNT increments once per CPU cycle.
 const CPU_HZ: u32 = 80_000_000;
+
+/// `wdt-test` only: seconds of normal operation before the watchdog is
+/// starved. 5 s is 400 M cycles, well inside CCOUNT's 32-bit range.
+#[cfg(feature = "wdt-test")]
+const WDT_TEST_RUN_SECS: u32 = 5;
 
 /// The HAL's SPI0 flash as a [`RawFlash`]. Its operations cannot fail
 /// (`Void` errors); erases go one sector per call because the HAL's
@@ -74,6 +92,9 @@ fn main() -> ! {
         }
     };
 
+    #[cfg(feature = "wdt-test")]
+    let boot_cycles = xtensa_lx::timer::get_cycle_count();
+
     let mut watchdog = dp.WDT.watchdog();
     watchdog.start(StageTimeout::Stage2684Sec);
     watchdog.feed();
@@ -101,6 +122,25 @@ fn main() -> ! {
         if let Ok(Rx::Frame(Ok(frame))) = link.poll(&mut splitter) {
             controller.on_frame(&frame, &mut Port::new(&mut link, &mut tx));
         }
+        #[cfg(feature = "wdt-test")]
+        if xtensa_lx::timer::get_cycle_count().wrapping_sub(boot_cycles)
+            >= WDT_TEST_RUN_SECS * CPU_HZ
+        {
+            firmware_esp8266::controller::log(
+                &mut Port::new(&mut link, &mut tx),
+                format_args!("wdt-test: starving watchdog"),
+            );
+            starve_watchdog();
+        }
+    }
+}
+
+/// `wdt-test` only: spin without feeding the watchdog, so it resets the
+/// chip. The one deliberately unbounded loop besides the panic handler.
+#[cfg(feature = "wdt-test")]
+fn starve_watchdog() -> ! {
+    loop {
+        core::hint::spin_loop();
     }
 }
 

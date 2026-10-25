@@ -379,7 +379,7 @@ because WASM linear memory and the wasmi interpreter require one.
   USB-Serial-JTAG still need a hardware test.
 - [x] E3 Answers `sys/info`; installs payloads with the loader into a flash
   region, verifying CRC-32; the payload survives reboot —
-  `firmware` core tests `dispatch::tests::info_reports_device`, `full_transfer_installs_then_start_and_stop`, `abandoned_transfer_leaves_no_payload`, `oversized_begin_from_idle_keeps_installed_payload`, `resent_last_chunk_is_acknowledged_without_rewriting`; `store::tests::installed_image_survives_reopen_and_verifies`, `interrupted_transfer_leaves_no_image`, `corruption_is_detected`, `limits_and_ordering_are_enforced` (RAM flash model; silicon untested).
+  `firmware` core tests `dispatch::tests::info_reports_device`, `full_transfer_installs_then_start_and_stop`, `abandoned_transfer_keeps_installed_payload`, `oversized_begin_from_idle_keeps_installed_payload`, `resent_last_chunk_is_acknowledged_without_rewriting`; `store::tests::installed_image_survives_reopen_and_verifies`, `interrupted_transfer_keeps_previous_image`, `corruption_is_detected`, `limits_and_ordering_are_enforced` (RAM flash model; silicon untested).
 - [x] E4 Starts the stored payload on boot and on `sys/payload/start`; stops
   on `sys/payload/stop`; publishes status and log lines —
   `dispatch::tests::start_requires_an_installed_image`, `begin_while_running_stops_and_erases`, `storage_failure_and_traps_update_status`, `start_without_runtime_is_refused_but_loader_works`, `tick_delay_handles_wrap`.
@@ -405,19 +405,22 @@ handlers); the unsafe asm stays in that vendored dependency.
   clippy `-D warnings` for host and chip; `esp_base` changes limited to
   `chip::ESP8266` and `Profile::runtime`, covered by
   `chip::tests::profiles_match_chips`, `heapless_profiles_have_no_linear_memory`,
-  `missing_pins_are_invalid`, `general_purpose_pins_are_allowed`.
+  `missing_pins_are_invalid`, `general_purpose_pins_are_allowed`,
+  `max_image_fits_one_payload_slot`.
 - [x] E8 Answers `sys/info`, installs payloads into flash at 0x100000 (above
   the 1 MB code window) with CRC-32 verification, keeps them across reboot,
-  and refuses start —
-  host: `controller::tests::fresh_boot_reports_empty_esp8266_without_runtime`, `upload_installs_and_survives_reboot`, `start_is_refused_and_stop_is_a_no_op`, `wrong_crc_commit_leaves_no_image`, `corrupted_stored_image_boots_empty`, `largest_image_fits_the_region`, `info_request_over_the_link`.
-  Hardware (ESP8266EX, 4 MB flash, 2026-10-25) with `mwctl`: `info` reports
-  esp8266, `0.1.0+no-wasm`, ABI 2, capacity 258048; `upload echo.wasm`
-  installs (status Stopped); after `mwctl reset` the boot log reports the
-  stored image and `info` still says Stopped; `start` answers NotFound;
-  `upload --corrupt-chunk 3` fails at commit with InvalidRequest and leaves
-  status Empty. A 252 KiB image also installed and survived reboot. Note:
-  the payload store has one slot and `begin` erases it, so a rejected
-  transfer leaves no payload rather than the previous one.
+  and refuses start. The 256 KiB region holds two 128 KiB slots (E12), so
+  `sys/info` reports a capacity of 126976 bytes (124 KiB) and a rejected
+  upload keeps the previous image —
+  host: `controller::tests::fresh_boot_reports_empty_esp8266_without_runtime`, `upload_installs_and_survives_reboot`, `start_is_refused_and_stop_is_a_no_op`, `wrong_crc_commit_on_empty_flash_leaves_no_image`, `rejected_upload_keeps_previous_image`, `uploads_alternate_slots_and_newest_wins`, `corrupted_stored_image_boots_empty`, `largest_image_fits_a_slot`, `oversized_and_unknown_requests_are_refused`, `info_request_over_the_link`.
+  Hardware (ESP8266EX, 4 MB flash, 2026-10-25, single-slot firmware before
+  E12) with `mwctl`: `info` reported esp8266, `0.1.0+no-wasm`, ABI 2,
+  capacity 258048; `upload echo.wasm` installed (status Stopped); after
+  `mwctl reset` the boot log reported the stored image and `info` still said
+  Stopped; `start` answered NotFound; `upload --corrupt-chunk 3` failed at
+  commit with InvalidRequest and, with one slot, left status Empty. A
+  252 KiB image also installed and survived reboot. The two-slot firmware
+  was then verified on the board; see E13.
 - [x] E9 The flash driver satisfies `NorFlash` semantics (4 KiB erase one
   sector per HAL call, 4-byte writes split at 256-byte pages, region-relative
   bounds) — `flash::tests::erased_reads_ff_and_writes_and_like_nor`, `addresses_are_region_relative`, `erase_issues_one_call_per_sector`, `writes_split_at_page_boundaries`, `aligned_page_sized_write_is_one_program`, `misaligned_requests_are_refused_without_device_access`, `out_of_region_requests_are_refused`, `whole_region_erases`, `device_failures_surface_as_other` (RAM model, `firmware-esp8266/src/flash/ram.rs`).
@@ -427,6 +430,46 @@ handlers); the unsafe asm stays in that vendored dependency.
   `web/public/firmware/esp8266.bin` (78508 bytes, via
   `firmware-esp8266/image.sh`) and the `esp8266` manifest entry; the same
   merged image, written by `firmware-esp8266/flash.sh`, boots on the board.
+- [x] E11 The hardware watchdog (26.8 s stage, fed every super-loop pass)
+  resets the chip when starved, and the chip boots the firmware again —
+  hardware (ESP8266EX, 2026-10-25), image built with the opt-in `wdt-test`
+  feature (`firmware-esp8266/build.sh --features wdt-test`, then `flash.sh`),
+  which runs normally for 5 s after boot, logs `wdt-test: starving watchdog`
+  and stops feeding. A timestamped pyserial capture (DTR and RTS deasserted)
+  over 130 s saw four resets, each with the ROM line `rst cause:4, boot
+  mode:(3,7)` and `wdt reset`, followed by the `sys/log` banner
+  `esp-base 0.1.0+no-wasm on esp8266`. Reset to reset took 31.865 to
+  31.867 s, and the starve log to the next reset took 26.843 to 26.844 s,
+  matching the 26.84 s stage. After a watchdog reset the PLL stays set up,
+  so the ROM log arrives at 115200 baud, not the 74880 baud of a power-on
+  boot. Rebuilt with plain `build.sh` (merged image byte-identical to the
+  one built before the feature existed) and reflashed: `mwctl info`
+  answered, and a 90 s capture saw no output and no reset.
+- [x] E12 The payload store keeps two slots, so a failed upload keeps the
+  previous image. The payload partition (ESP32 family) or region (ESP8266)
+  is split into two equal slots, each a header sector (magic, length,
+  CRC-32, generation) followed by the image; for 256 KiB that is 124 KiB
+  per slot, which every chip's `max_image` fits. `begin` erases and fills
+  only the inactive slot, and commit re-checks the written image's CRC
+  before writing that slot's header, magic word last. Boot picks the valid
+  slot (header decodes, image CRC matches) with the newer generation, by
+  wrapping serial-number comparison, slot A on a tie; with neither valid
+  the store is empty. The dispatcher returns to `Stopped`, not `Empty`,
+  when a transfer or storage action fails while an image is installed —
+  `store::tests::first_install_on_empty_flash_uses_slot_a`, `wrong_crc_commit_keeps_old_image_after_reboot`, `interrupted_transfer_keeps_previous_image`, `power_loss_at_any_flash_operation_keeps_old_or_new_image` (a torn erase or write injected at every flash operation in turn, with one, two or no prior images), `generations_alternate_slots_across_installs`, `generation_wraps_past_u32_max`, `corrupt_newest_slot_falls_back_to_older`, `both_slots_corrupt_boots_empty`, `limits_and_ordering_are_enforced`; `image::tests::region_splits_into_two_slots`, `generations_compare_across_wrap`, `newest_valid_slot_wins_and_ties_go_to_a`, `header_round_trips_and_rejects_erased_or_oversized`; `dispatch::tests::abandoned_transfer_keeps_installed_payload`, `failed_transfer_after_first_install_keeps_it`, `storage_failure_and_traps_update_status`; `chip::tests::max_image_fits_one_payload_slot` (RAM flash model).
+- [x] E13 On the ESP8266 board, `mwctl upload ... --corrupt-chunk 3` after
+  a good upload fails at commit and leaves the previous image installed
+  (status Stopped, and still stored after `mwctl reset`), and `info`
+  reports capacity 126976 — hardware (ESP8266EX, 2026-10-25), two-slot
+  firmware (80004-byte merged image via `firmware-esp8266/flash.sh`):
+  `info` reported capacity 126976 and status Empty; `upload echo.wasm`
+  (5167 bytes) installed, status Stopped; `upload echo.wasm
+  --corrupt-chunk 3` failed at step 13/13 with `sys/loader/commit`
+  InvalidRequest and status returned to Stopped; after `mwctl reset` the
+  boot log reported `stored payload: 5167 bytes, crc dd2098fa` and `info`
+  said Stopped. A second good upload (into the other slot) then installed
+  and survived `mwctl reset`, and a repeated corrupt upload again left
+  status Stopped.
 
 ### Host tool (`tools/mwctl`)
 

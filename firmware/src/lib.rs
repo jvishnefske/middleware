@@ -7,13 +7,15 @@
 //!   largest payload image, and the GPIO tables that decide which pins a
 //!   payload may touch (flash/PSRAM, USB D+/D-, and console UART pins are
 //!   refused).
-//! * [`image`] — layout of the payload flash partition: a header sector
-//!   (magic, length, CRC-32) followed by the image, erase spans, and a
+//! * [`image`] — layout of the payload flash partition: two slots, each a
+//!   header sector (magic, length, CRC-32, generation) followed by the
+//!   image, the boot-slot choice by generation, erase spans, and a
 //!   word aligner that turns in-order loader chunks into 4-byte aligned flash
 //!   writes.
 //! * [`store`] — [`store::PayloadStore`], the loader's storage effects
-//!   (erase, ordered writes, activate) and boot-time verification over any
-//!   `embedded-storage` NOR flash; tested against a RAM flash model.
+//!   (erase, ordered writes, activate) into the inactive slot and boot-time
+//!   slot selection and verification over any `embedded-storage` NOR flash;
+//!   tested against a RAM flash model with power-loss injection.
 //! * [`dispatch`] — request dispatch: `(State, request) -> (State, reply,
 //!   Action)`, built on [`middleware::loader::Loader`], plus the payload
 //!   lifecycle transitions and publication routing.
