@@ -1,0 +1,42 @@
+[package]
+name = "middleware"
+version = "0.1.0"
+edition = "2024"
+description = "Transport-agnostic pub/sub and request/response middleware over Zenoh, gRPC (Istio mesh) and BLE"
+license = "MIT OR Apache-2.0"
+
+# Standalone crate: keep it out of the enclosing `katas` package.
+[workspace]
+
+[features]
+default = []
+# Host-only conveniences. Never enabled by the microcontroller features.
+std = []
+
+# Codecs
+postcard = ["dep:postcard", "dep:serde"]
+prost = ["dep:prost"]
+
+# Embedded transports (no_std, no heap)
+ble = []
+
+# Cloud / host transports (std, tokio)
+zenoh = ["std", "dep:zenoh", "dep:tokio"]
+grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
+istio = ["grpc"]
+
+[dependencies]
+postcard = { version = "1.1", default-features = false, optional = true }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
+
+zenoh = { version = "1.10", optional = true }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
+tokio-stream = { version = "0.1", features = ["net"], optional = true }
+tonic = { version = "0.14", optional = true }
+http = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+
+[dev-dependencies]
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
