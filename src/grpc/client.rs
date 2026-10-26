@@ -16,22 +16,35 @@
 //! `istio::MeshInterceptor`, which adds trace headers). Each call copies the
 //! caller's bytes into an owned [`Bytes`] at the boundary and copies the
 //! reply back into the caller's buffer, refusing to truncate.
+//!
+//! # Client identity
+//!
+//! Each transport sends its [`GrpcTransport::client_id`] in
+//! [`CLIENT_HEADER`] on every publish and subscribe. Its subscribers receive
+//! the publisher's id in [`SampleMeta::sender`] (`None` for publishers that
+//! sent none) and, unless [`GrpcTransport::with_local_delivery`] is set, no
+//! samples the transport (or a clone of it) published itself.
+//! [`SampleMeta::seq`] is always `None`: the bus carries no sequence.
 
 use super::GrpcError;
 use super::bus::{
-    FILTER_HEADER, KEY_HEADER, PUBLISH_PATH, SUBSCRIBE_PATH, decode_item, filter_header,
+    CLIENT_HEADER, FILTER_HEADER, KEY_HEADER, PUBLISH_PATH, SELF_DELIVER, SELF_HEADER, SELF_REFUSE,
+    SUBSCRIBE_PATH, client_id_header, decode_item_with_sender, filter_header,
 };
 use super::codec::RawCodec;
 use super::{GrpcSubscriberKind, MAX_PAYLOAD};
+use crate::dedup::fnv1a64;
 use crate::key::{Key, KeyFilter, MAX_KEY_LEN};
 use crate::transport::{
-    Limits, Publisher, Requester, Sample, Subscribe, Subscriber, copy_into, sample_into,
+    Limits, Publisher, Requester, Sample, SampleMeta, SenderId, Subscribe, Subscriber, copy_into,
+    sample_into,
 };
 use bytes::Bytes;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
-use tokio_stream::Stream;
 use http::uri::PathAndQuery;
+use tokio_stream::Stream;
 use tonic::Streaming;
 use tonic::body::Body;
 use tonic::client::{Grpc, GrpcService};
@@ -46,10 +59,31 @@ pub fn method_path(key: Key<'_>) -> Result<PathAndQuery, GrpcError> {
     PathAndQuery::try_from(format!("/{service}/{method}")).map_err(|_| GrpcError::InvalidHeader)
 }
 
+/// A client id that differs between transports of one process (a
+/// counter) and, with overwhelming probability, between processes and runs
+/// (process id and wall-clock time, hashed with FNV-1a 64).
+pub fn fresh_client_id() -> SenderId {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mut seed = [0u8; 28];
+    seed[..8].copy_from_slice(&n.to_le_bytes());
+    seed[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+    seed[12..].copy_from_slice(&nanos.to_le_bytes());
+    SenderId(fnv1a64(&seed).to_le_bytes())
+}
+
 /// gRPC client implementing [`Requester`], [`Publisher`] and [`Subscribe`].
+///
+/// Clones share the client id, so they count as one client for the
+/// self-delivery rule (see the module docs).
 #[derive(Debug, Clone)]
 pub struct GrpcTransport<T = Channel> {
     grpc: Grpc<T>,
+    client_id: SenderId,
+    local_delivery: bool,
 }
 
 impl GrpcTransport<Channel> {
@@ -69,11 +103,45 @@ where
     T::ResponseBody: HttpBody<Data = Bytes> + Send + 'static,
     <T::ResponseBody as HttpBody>::Error: Into<StdError>,
 {
-    /// Wraps an existing channel or intercepted service.
+    /// Wraps an existing channel or intercepted service, with a
+    /// [`fresh_client_id`] and no self-delivery.
     pub fn new(inner: T) -> Self {
         Self {
             grpc: Grpc::new(inner),
+            client_id: fresh_client_id(),
+            local_delivery: false,
         }
+    }
+
+    /// The transport identified as `id` from now on (for a stable identity
+    /// across restarts, or to make two transports count as one client).
+    pub fn with_client_id(self, id: SenderId) -> Self {
+        Self {
+            client_id: id,
+            ..self
+        }
+    }
+
+    /// Returns a transport whose subscriptions, opened from now on, also
+    /// receive its own publications (`true`), or only other clients'
+    /// (`false`, the default).
+    pub fn with_local_delivery(self, local_delivery: bool) -> Self {
+        Self {
+            local_delivery,
+            ..self
+        }
+    }
+
+    /// The id sent in [`CLIENT_HEADER`] and reported to other clients'
+    /// subscribers in [`SampleMeta::sender`].
+    pub fn client_id(&self) -> SenderId {
+        self.client_id
+    }
+
+    /// The [`CLIENT_HEADER`] metadata value of this transport.
+    fn client_value(&self) -> Result<MetadataValue<tonic::metadata::Ascii>, GrpcError> {
+        MetadataValue::try_from(client_id_header(self.client_id))
+            .map_err(|_| GrpcError::InvalidHeader)
     }
 
     async fn ready(&mut self) -> Result<(), GrpcError> {
@@ -92,7 +160,6 @@ where
         let resp = self.grpc.unary(request, path, RawCodec).await?;
         Ok(resp.into_inner())
     }
-
 }
 
 impl<T> Subscribe for GrpcTransport<T>
@@ -102,14 +169,16 @@ where
     T::ResponseBody: HttpBody<Data = Bytes> + Send + 'static,
     <T::ResponseBody as HttpBody>::Error: Into<StdError>,
 {
-    type Subscriber<'a> = GrpcSubscriber
+    type Subscriber<'a>
+        = GrpcSubscriber
     where
         Self: 'a;
     type Error = GrpcError;
 
     /// Opens a `middleware.v1.Bus/Subscribe` stream for `filter` (the key in
-    /// the body, the kind in [`FILTER_HEADER`]); the server filters with
-    /// [`KeyFilter::matches`].
+    /// the body, the kind in [`FILTER_HEADER`], this client in
+    /// [`CLIENT_HEADER`] and the self-delivery choice in [`SELF_HEADER`]);
+    /// the server filters with [`KeyFilter::matches`].
     ///
     /// Returns once the server has accepted the subscription, so samples
     /// published afterwards are delivered.
@@ -121,6 +190,17 @@ where
             FILTER_HEADER,
             MetadataValue::from_static(filter_header(filter)),
         );
+        request
+            .metadata_mut()
+            .insert(CLIENT_HEADER, self.client_value()?);
+        let own = if self.local_delivery {
+            SELF_DELIVER
+        } else {
+            SELF_REFUSE
+        };
+        request
+            .metadata_mut()
+            .insert(SELF_HEADER, MetadataValue::from_static(own));
         let resp = self
             .grpc
             .server_streaming(request, PathAndQuery::from_static(SUBSCRIBE_PATH), RawCodec)
@@ -181,6 +261,9 @@ where
         let mut request = tonic::Request::new(Bytes::copy_from_slice(payload));
         let value = MetadataValue::try_from(key.as_str()).map_err(|_| GrpcError::InvalidHeader)?;
         request.metadata_mut().insert(KEY_HEADER, value);
+        request
+            .metadata_mut()
+            .insert(CLIENT_HEADER, self.client_value()?);
         self.unary(PathAndQuery::from_static(PUBLISH_PATH), request)
             .await?;
         Ok(())
@@ -188,8 +271,8 @@ where
 }
 
 /// One `Subscribe` stream; implements [`Subscriber`]. Samples carry their
-/// own key (a prefix subscription receives many) and no sender metadata:
-/// the bus does not identify publishers.
+/// own key (a prefix subscription receives many) and the publisher's client
+/// id as [`SampleMeta::sender`] when it sent one.
 #[derive(Debug)]
 pub struct GrpcSubscriber {
     key: String,
@@ -209,11 +292,14 @@ impl GrpcSubscriber {
     }
 }
 
-/// Copies one keyed stream item into `buf` as a [`Sample`].
+/// Copies one keyed stream item into `buf` as a [`Sample`] with the
+/// publisher as its sender.
 fn item_into<'b>(item: &[u8], buf: &'b mut [u8]) -> Result<Sample<'b>, GrpcError> {
-    let (key, payload) = decode_item(item).ok_or(GrpcError::MalformedSample)?;
+    let (key, sender, payload) = decode_item_with_sender(item).ok_or(GrpcError::MalformedSample)?;
     let needed = key.as_bytes().len() + payload.len();
-    sample_into(buf, key.as_str(), payload).ok_or(GrpcError::BufferTooSmall { needed })
+    let sample =
+        sample_into(buf, key.as_str(), payload).ok_or(GrpcError::BufferTooSmall { needed })?;
+    Ok(sample.with_meta(SampleMeta { sender, seq: None }))
 }
 
 impl Subscriber for GrpcSubscriber {
@@ -244,6 +330,23 @@ impl Subscriber for GrpcSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn g8_fresh_client_ids_differ_and_ids_can_be_set() {
+        let ids: std::collections::HashSet<_> = (0..64).map(|_| fresh_client_id().0).collect();
+        assert_eq!(ids.len(), 64);
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let a = GrpcTransport::new(channel.clone());
+        let b = GrpcTransport::new(channel);
+        assert_ne!(a.client_id(), b.client_id());
+        assert_eq!(
+            a.clone().client_id(),
+            a.client_id(),
+            "clones are one client"
+        );
+        let fixed = SenderId([7; 8]);
+        assert_eq!(b.with_client_id(fixed).client_id(), fixed);
+    }
 
     #[test]
     fn method_path_needs_two_segments() {

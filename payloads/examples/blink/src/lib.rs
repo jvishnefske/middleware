@@ -8,7 +8,7 @@
 //! payload logs the error and keeps publishing the would-be level, so it
 //! still runs in the simulator or on a board without that LED.
 #![no_std]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use mw_payload::{LogLine, Payload, gpio::Output};
 

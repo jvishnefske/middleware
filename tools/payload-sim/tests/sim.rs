@@ -125,3 +125,27 @@ fn w7_reports_traps_and_load_errors() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown import env.x"));
 }
+
+#[test]
+fn w8_prints_init_log_before_the_init_trap() {
+    let failing = r#"(module
+        (import "mw" "log" (func $log (param i32 i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 16) "sensor missing")
+        (func (export "init")
+          (call $log (i32.const 16) (i32.const 14))
+          unreachable))"#;
+    let wasm = write_wasm("init_trap.wasm", failing);
+    let out = sim(&[wasm.to_str().unwrap(), "--virtual"], "");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[     0 ms] log sensor missing"),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("load failed: init failed: trap"),
+        "{stderr}"
+    );
+}

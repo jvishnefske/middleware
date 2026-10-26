@@ -25,7 +25,7 @@
 //! serial adapter crosswise (adapter RX to GPIO 17, adapter TX to GPIO 18,
 //! common ground). In the simulator, type `!uart <text>`.
 #![cfg_attr(not(test), no_std)]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use mw_payload::irq::Event;
 use mw_payload::timer::Timer;

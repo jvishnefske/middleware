@@ -13,9 +13,11 @@ AS_TEMPLATES=(blink echo button spi)  # .ts
 
 cargo build --release
 # blink and echo again with 1-byte pages (16 KiB fixed memory), for hosts
-# that cap linear memory below one 64 KiB page.
+# that cap linear memory below one 64 KiB page. check-reproducible.sh runs
+# build-byte-pages.sh here and in a copy at another path, and fails unless
+# both builds are byte-identical.
 BYTE_PAGE_EXAMPLES=(blink echo)
-scripts/build-byte-pages.sh "${BYTE_PAGE_EXAMPLES[@]/#/--package=}"
+scripts/check-reproducible.sh "${BYTE_PAGE_EXAMPLES[@]}"
 cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings

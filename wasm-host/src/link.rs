@@ -28,8 +28,8 @@ use middleware::wasm_abi::periph::{
 use middleware::wasm_abi::{self, AbiError, IMPORT_MODULE, MAX_MESSAGE, guest_range};
 use wasmi::{Caller, Engine, Extern, Linker, StoreLimits};
 
-use crate::Device;
 use crate::abi::{self, Schedule, Slot};
+use crate::{Device, InitLog};
 
 /// Which optional exports the module provides.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -59,6 +59,9 @@ pub struct State<D> {
     /// Host copy buffer for DMA and UART imports; grown on demand, never
     /// beyond [`periph::MAX_DMA`] bytes.
     pub scratch: Vec<u8>,
+    /// While `init` runs, a bounded copy of its log lines (see [`InitLog`]);
+    /// `None` at all other times.
+    pub init_log: Option<InitLog>,
 }
 
 /// The first `n` bytes of the scratch buffer (`n <= MAX_DMA`), zeroed.
@@ -235,7 +238,8 @@ fn copy_out(mem: &mut [u8], start: usize, buf: &[u8], reported: usize) -> Result
     i32::try_from(n).map_err(|_| AbiError::InvalidArgument)
 }
 
-/// `log(ptr, len)`: forwards the (truncated) line to the device.
+/// `log(ptr, len)`: forwards the (truncated) line to the device and, while
+/// `init` runs, records it in [`State::init_log`].
 pub fn log_call<D: Device>(
     mem: &[u8],
     st: &mut State<D>,
@@ -244,7 +248,11 @@ pub fn log_call<D: Device>(
 ) -> Result<(), AbiError> {
     let range = guest_range(ptr, len, mem.len())?;
     let bytes = mem.get(range).ok_or(AbiError::OutOfBounds)?;
-    st.device.log(abi::log_line(bytes));
+    let line = abi::log_line(bytes);
+    st.device.log(line);
+    if let Some(log) = st.init_log.as_mut() {
+        log.push(line);
+    }
     Ok(())
 }
 
@@ -554,6 +562,7 @@ mod tests {
             exports,
             limits: wasmi::StoreLimitsBuilder::new().build(),
             scratch: Vec::new(),
+            init_log: None,
         }
     }
 
@@ -622,6 +631,21 @@ mod tests {
         assert_eq!(log_call(b"hey", &mut st, 0, 3), Ok(()));
         assert_eq!(log_call(b"hey", &mut st, 2, 3), Err(AbiError::OutOfBounds));
         assert_eq!(st.device.logs, vec!["hey".to_string()]);
+        assert_eq!(st.init_log, None, "not recorded outside init");
+    }
+
+    #[test]
+    fn log_is_recorded_while_init_runs() {
+        let mut st = state(Exports::default());
+        st.init_log = Some(InitLog::new());
+        assert_eq!(log_call(b"hey", &mut st, 0, 3), Ok(()));
+        let kept: Vec<&str> = st
+            .init_log
+            .as_ref()
+            .map(|l| l.lines().collect())
+            .unwrap_or_default();
+        assert_eq!(kept, vec!["hey"]);
+        assert_eq!(st.device.logs, vec!["hey".to_string()], "still forwarded");
     }
 
     #[test]

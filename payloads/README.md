@@ -15,7 +15,9 @@ default target in `.cargo/config.toml`). It contains:
 - `sdk/` — the `mw-payload` crate, a `no_std` Rust SDK. Implement its
   `Payload` trait and invoke `mw_payload::payload!(YourType)` to get every
   export. Its crate documentation lists the API and explains the single,
-  confined use of `unsafe` needed to call host imports.
+  confined use of `unsafe` needed to call host imports. A payload crate can
+  be `#![forbid(unsafe_code)]`, as every example here is: the macro adds no
+  `allow`.
 - `examples/blink` — toggles GPIO 8 every 500 ms and publishes the level on
   `app/blink/state`.
 - `examples/echo` — republishes everything from `app/echo/in` on
@@ -71,6 +73,13 @@ so it never overwrites the 64 KiB-page build. Pointers and the ABI are the
 same either way; only the host's byte cap (`wasm_host::Limits::bytes`) has
 to be at least `MEMORY_BYTES`. `scripts/check-all.sh` builds and validates
 blink and echo both ways.
+
+The byte-page build is reproducible: it passes `--remap-path-prefix` for
+the home directory, the cargo registry and the repository, so no absolute
+build path ends up in the module. `scripts/check-reproducible.sh [package...]`
+builds here and in a copy of the sources at another path and fails unless
+the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink
+and echo.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.

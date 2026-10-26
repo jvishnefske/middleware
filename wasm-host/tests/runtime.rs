@@ -2,7 +2,7 @@
 //! device that records every host call.
 
 use middleware::Key;
-use wasm_host::{AbiError, Device, Limits, LoadError, Payload, Pull, Trap};
+use wasm_host::{AbiError, Device, INIT_LOG_LINES, Limits, LoadError, Payload, Pull, Ticked, Trap};
 
 /// A pin the fake board reserves (like a flash or console pin).
 const RESERVED_PIN: u8 = 13;
@@ -203,9 +203,9 @@ fn w2_tick_runs_on_requested_period() {
     let mut p = Payload::load(&module(&body), fake, Limits::default()).unwrap();
     assert_eq!(p.device().results(), vec![0]);
     assert_eq!(p.next_tick(), Some(1100));
-    p.tick(1050).unwrap(); // not due
+    assert_eq!(p.tick(1050), Ok(Ticked::NotDue));
     assert_eq!(p.device().results(), vec![0]);
-    p.tick(1100).unwrap();
+    assert_eq!(p.tick(1100), Ok(Ticked::Ran));
     assert_eq!(p.next_tick(), Some(1200));
     p.tick(1230).unwrap(); // late: next stays on the grid
     assert_eq!(p.next_tick(), Some(1300));
@@ -223,9 +223,9 @@ fn w2_set_tick_zero_disables_and_tick_without_schedule_is_noop() {
     );
     let mut p = loaded(&body);
     assert_eq!(p.next_tick(), Some(50));
-    p.tick(50).unwrap();
+    assert_eq!(p.tick(50), Ok(Ticked::Ran));
     assert_eq!(p.next_tick(), None);
-    p.tick(1000).unwrap();
+    assert_eq!(p.tick(1000), Ok(Ticked::Disabled));
     assert_eq!(p.device().results(), vec![0]);
 }
 
@@ -440,7 +440,13 @@ fn w4_infinite_loop_in_init_fails_load() {
         r#"{MEM} (func (export "init") (loop $l (br $l)))"#
     ))
     .err();
-    assert_eq!(err, Some(LoadError::Init(Trap::OutOfFuel)));
+    assert!(matches!(
+        err,
+        Some(LoadError::Init {
+            trap: Trap::OutOfFuel,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -465,7 +471,11 @@ fn w4_fuel_is_refilled_before_every_call() {
         if p.tick(10).is_ok() {
             fuel_needed = Some(fuel);
             for t in 1..20 {
-                assert_eq!(p.tick(10 + 10 * t), Ok(()), "call {t} with fuel {fuel}");
+                assert_eq!(
+                    p.tick(10 + 10 * t),
+                    Ok(Ticked::Ran),
+                    "call {t} with fuel {fuel}"
+                );
             }
             break;
         }
@@ -479,7 +489,98 @@ fn w4_fuel_is_refilled_before_every_call() {
 #[test]
 fn w4_other_traps_are_reported() {
     let err = load(&format!(r#"{MEM} (func (export "init") unreachable)"#)).err();
-    assert!(matches!(err, Some(LoadError::Init(Trap::Wasm(_)))));
+    assert!(matches!(
+        err,
+        Some(LoadError::Init {
+            trap: Trap::Wasm(_),
+            ..
+        })
+    ));
+}
+
+// ---------------------------------------------------------------- W8
+
+/// `init` logs "a" then "b", then traps with `trap` (WAT instructions).
+fn logging_init(trap: &str) -> String {
+    format!(
+        r#"{MEM} (data (i32.const 16) "ab")
+           (func (export "init")
+             (call $log (i32.const 16) (i32.const 1))
+             (call $log (i32.const 17) (i32.const 1))
+             {trap})"#
+    )
+}
+
+#[test]
+fn w8_init_trap_returns_the_lines_logged_before_it() {
+    for (trap, want) in [("unreachable", "wasm"), ("(loop $l (br $l))", "fuel")] {
+        let Some(LoadError::Init { trap: t, log }) = load(&logging_init(trap)).err() else {
+            panic!("init must fail with {trap}");
+        };
+        assert_eq!(matches!(t, Trap::OutOfFuel), want == "fuel", "{t}");
+        assert_eq!(log.lines().collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(log.dropped(), 0);
+        let shown = LoadError::Init { trap: t, log }.to_string();
+        assert!(shown.ends_with(r#"init log: "a" | "b""#), "{shown}");
+    }
+}
+
+#[test]
+fn w8_init_log_is_bounded_to_the_last_lines() {
+    // Logs 0, 1, ..., 19 (one ASCII digit pair each), then traps.
+    let n = INIT_LOG_LINES + 12;
+    let body = format!(
+        r#"{MEM} (data (i32.const 16) "00010203040506070809101112131415161718192021")
+           (func (export "init") (local $i i32)
+             (loop $l
+               (call $log
+                 (i32.add (i32.const 16) (i32.mul (local.get $i) (i32.const 2)))
+                 (i32.const 2))
+               (local.set $i (i32.add (local.get $i) (i32.const 1)))
+               (br_if $l (i32.lt_u (local.get $i) (i32.const {n}))))
+             unreachable)"#
+    );
+    let Some(LoadError::Init { log, .. }) = load(&body).err() else {
+        panic!("init must trap");
+    };
+    assert_eq!(log.len(), INIT_LOG_LINES);
+    assert_eq!(log.dropped(), 12);
+    let first = format!("{:02}", n - INIT_LOG_LINES);
+    let last = format!("{:02}", n - 1);
+    assert_eq!(log.lines().next(), Some(first.as_str()));
+    assert_eq!(log.lines().last(), Some(last.as_str()));
+}
+
+#[test]
+fn w8_init_lines_still_reach_the_device() {
+    let mut p = loaded(&logging_init(""));
+    assert_eq!(p.device().logs, vec!["a", "b"]);
+}
+
+// ---------------------------------------------------------------- W9
+
+#[test]
+fn w9_tick_reports_whether_it_ran() {
+    // No `tick` export at all.
+    let mut p = loaded(MEM);
+    assert_eq!(p.tick(0), Ok(Ticked::NoTickExport));
+    // A `tick` export but no period yet.
+    let body = format!(
+        r#"{MEM} (func (export "tick") (param i32) (call $report (local.get 0)))
+           (func (export "init"))"#
+    );
+    let mut p = loaded(&body);
+    assert_eq!(p.tick(100), Ok(Ticked::Disabled));
+    assert!(p.device().results().is_empty(), "nothing ran");
+    // Poisoned payloads report the trap, not a `Ticked`.
+    let body = format!(
+        r#"{MEM} (func (export "init") (drop (call $set_tick (i32.const 10))))
+           (func (export "tick") (param i32) unreachable)"#
+    );
+    let mut p = loaded(&body);
+    assert_eq!(p.tick(5), Ok(Ticked::NotDue));
+    assert!(matches!(p.tick(10), Err(Trap::Wasm(_))));
+    assert_eq!(p.tick(20), Err(Trap::Poisoned));
 }
 
 // ---------------------------------------------------------------- W5

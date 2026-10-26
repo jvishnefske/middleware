@@ -70,7 +70,14 @@ async fn start() -> Running {
     Running { addr, _stop: stop }
 }
 
+/// A client that also receives its own publications, so one transport can
+/// publish and subscribe in a test (as `tests/zenoh.rs` does).
 async fn client(addr: SocketAddr) -> GrpcTransport {
+    remote_client(addr).await.with_local_delivery(true)
+}
+
+/// A client with the default rule: it never receives its own publications.
+async fn remote_client(addr: SocketAddr) -> GrpcTransport {
     GrpcTransport::connect(format!("http://{addr}"))
         .await
         .unwrap()
@@ -80,7 +87,8 @@ async fn client(addr: SocketAddr) -> GrpcTransport {
 fn poll_once_and_drop<F: core::future::Future>(fut: F) -> bool {
     let fut = core::pin::pin!(fut);
     let waker = core::task::Waker::noop();
-    fut.poll(&mut core::task::Context::from_waker(waker)).is_ready()
+    fut.poll(&mut core::task::Context::from_waker(waker))
+        .is_ready()
 }
 
 async fn within<F: core::future::Future>(f: F) -> F::Output {
@@ -191,7 +199,9 @@ async fn g2_publish_without_subscribers_succeeds_and_small_buffer_fails() {
         .await
         .unwrap();
 
-    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("a/b")))).await.unwrap();
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("a/b"))))
+        .await
+        .unwrap();
     within(c.publish(Key::from_static("a/b"), b"payload"))
         .await
         .unwrap();
@@ -215,7 +225,9 @@ async fn g2_bus_service_mounts_on_stock_tonic_router() {
             ),
     );
     let mut c = client(addr).await;
-    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("x")))).await.unwrap();
+    let mut sub = within(c.subscribe(KeyFilter::Exact(Key::from_static("x"))))
+        .await
+        .unwrap();
     within(c.publish(Key::from_static("x"), b"1"))
         .await
         .unwrap();
@@ -296,7 +308,13 @@ async fn g5_try_recv_is_none_when_empty_and_some_without_waiting() {
     }
     let (key, payload, meta) = got.expect("sample");
     assert_eq!((key.as_str(), payload.as_slice()), ("t/try", &b"now"[..]));
-    assert_eq!(meta, middleware::SampleMeta::default());
+    assert_eq!(
+        meta,
+        middleware::SampleMeta {
+            sender: Some(c.client_id()),
+            seq: None
+        }
+    );
     assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
 }
 
@@ -347,7 +365,10 @@ fn g7_limits_fit_tonic_default_message_size() {
     let limits = <GrpcTransport as Publisher>::LIMITS;
     assert_eq!(limits.max_key, middleware::key::MAX_KEY_LEN);
     assert_eq!(limits.max_payload, MAX_PAYLOAD);
-    assert_eq!(1 + limits.max_key + limits.max_payload, MAX_MESSAGE);
+    assert_eq!(
+        middleware::grpc::bus::ITEM_OVERHEAD + limits.max_key + limits.max_payload,
+        MAX_MESSAGE
+    );
 }
 
 #[tokio::test]
@@ -362,6 +383,59 @@ async fn g7_payload_at_limit_round_trips_through_subscription() {
     let mut buf = vec![0u8; long.len() + payload.len()];
     let s = within(sub.recv(&mut buf)).await.unwrap();
     assert_eq!(s.payload.len(), payload.len());
+}
+
+#[tokio::test]
+async fn g8_samples_carry_the_publisher_and_self_delivery_is_refused() {
+    let srv = start().await;
+    let mut me = remote_client(srv.addr).await;
+    let mut peer = remote_client(srv.addr).await;
+    assert_ne!(me.client_id(), peer.client_id());
+    let key = Key::from_static("g8/topic");
+    let mut mine = within(me.subscribe(KeyFilter::Exact(key))).await.unwrap();
+    let mut theirs = within(peer.subscribe(KeyFilter::Exact(key))).await.unwrap();
+    within(me.publish(key, b"from me")).await.unwrap();
+    within(peer.publish(key, b"from peer")).await.unwrap();
+    let mut buf = [0u8; 64];
+    // Each side's first sample is the other's: its own was not delivered.
+    let s = within(mine.recv(&mut buf)).await.unwrap();
+    assert_eq!(s.payload, b"from peer");
+    assert_eq!(s.meta.sender, Some(peer.client_id()));
+    assert_eq!(s.meta.seq, None);
+    let s = within(theirs.recv(&mut buf)).await.unwrap();
+    assert_eq!(s.payload, b"from me");
+    assert_eq!(s.meta.sender, Some(me.client_id()));
+    assert!(matches!(mine.try_recv(&mut buf), Ok(None)));
+}
+
+#[tokio::test]
+async fn g8_local_delivery_and_shared_ids_follow_the_client_id() {
+    let srv = start().await;
+    let key = Key::from_static("g8/local");
+    let mut looped = client(srv.addr).await;
+    let mut sub = within(looped.subscribe(KeyFilter::Exact(key)))
+        .await
+        .unwrap();
+    within(looped.publish(key, b"echo")).await.unwrap();
+    let mut buf = [0u8; 64];
+    let s = within(sub.recv(&mut buf)).await.unwrap();
+    assert_eq!(
+        (s.payload, s.meta.sender),
+        (&b"echo"[..], Some(looped.client_id()))
+    );
+
+    // A second transport set to the same id is the same client: refused.
+    let mut a = remote_client(srv.addr).await;
+    let mut twin = remote_client(srv.addr).await.with_client_id(a.client_id());
+    let mut other = remote_client(srv.addr).await;
+    let mut a_sub = within(a.subscribe(KeyFilter::Exact(key))).await.unwrap();
+    within(twin.publish(key, b"twin")).await.unwrap();
+    within(other.publish(key, b"other")).await.unwrap();
+    let s = within(a_sub.recv(&mut buf)).await.unwrap();
+    assert_eq!(
+        (s.payload, s.meta.sender),
+        (&b"other"[..], Some(other.client_id()))
+    );
 }
 
 #[cfg(feature = "istio")]

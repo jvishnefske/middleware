@@ -26,8 +26,8 @@
 //!
 //! # Transport
 //!
-//! [`EspNowTransport`] owns an [`EspNowRadio`] and implements both
-//! [`Publisher`] and [`Subscriber`]:
+//! [`EspNowTransport`] owns an [`EspNowRadio`] and implements
+//! [`Publisher`], [`Subscriber`] and [`Subscribe`]:
 //!
 //! - **Publish** encodes a frame carrying the transport's [`Sequence`] and
 //!   broadcasts it. The sequence is per sender, shared by all keys, and
@@ -39,6 +39,17 @@
 //!   [`KeyFilter::Prefix`]), set with [`EspNowTransport::with_filter`] and
 //!   changed at runtime with [`EspNowTransport::add_filter`] /
 //!   [`EspNowTransport::remove_filter`]. With no filter nothing is received.
+//! - **Subscribe**: [`Subscribe::subscribe`] borrows the transport as an
+//!   [`EspNowSubscriber`] that owns a copy of one filter (a
+//!   [`KeyFilterBuf`] of [`MAX_KEY`] bytes, so the caller's key need not
+//!   outlive it) and receives exactly the keys it selects, *instead of* the
+//!   transport's filter slots. Own-address skipping, dedup and the kept
+//!   sample work as for the transport itself; the dedup table is shared, so
+//!   a frame delivered through one is a repeat for the other. One radio
+//!   is one stream: the view holds `&mut` the transport, so there is one
+//!   subscriber at a time; drop it to publish. A filter on a key longer than
+//!   [`MAX_KEY`] could never match a frame and is refused with
+//!   [`FrameError::KeyTooLong`].
 //! - **Dedupe**: a [`SeenTable`] of `K` entries remembers the last sequence
 //!   number per (sender MAC, key); a frame repeating it is dropped. A full
 //!   table replaces its least recently updated entry. A sender that
@@ -57,9 +68,25 @@
 //!   are [`EspNowError::Radio`]; an oversized key or payload on publish is
 //!   [`EspNowError::Frame`] with [`FrameError::KeyTooLong`] or
 //!   [`FrameError::PayloadTooLarge`]. A sample that does not fit the
-//!   caller's buffer is [`EspNowError::BufferTooSmall`] and is **kept**: the
-//!   next `recv` or `try_recv` returns it first. After any error the
-//!   transport is still usable.
+//!   caller's buffer is [`EspNowError::BufferTooSmall`] and is **kept**
+//!   (see below): the next `recv` or `try_recv` whose filters select it
+//!   returns it first. After any error the transport is still usable.
+//!
+//! # The kept frame (`P`)
+//!
+//! Keeping a too-large sample costs a frame buffer of `P` bytes inside the
+//! transport. The default `P` = [`MAX_FRAME`] keeps every frame (the
+//! behaviour above). A receiver that always passes a buffer of at least
+//! [`MAX_FRAME`] bytes never sees [`EspNowError::BufferTooSmall`] and can set
+//! `P = 0`, which shrinks the kept slot from 258 to 8 bytes (the transport
+//! by about [`MAX_FRAME`] bytes, depending on field layout); the trade-off is that with `P = 0` (or any `P` shorter than the
+//! frame) a sample that does not fit is reported as
+//! [`EspNowError::BufferTooSmall`] and **dropped**, so a retry with a larger
+//! buffer does not get it back. `P` above [`MAX_FRAME`] is a compile error.
+//!
+//! There is one kept slot. A receive whose filters do not select the kept
+//! sample leaves it in place and goes on to the radio; if that receive must
+//! keep a sample of its own, it replaces (drops) the earlier one.
 //!
 //! # Cancel safety
 //!
@@ -75,8 +102,10 @@
 //! on the host with an in-memory radio.
 
 use crate::dedup::{SeenTable, Sequence};
-use crate::key::{Key, KeyFilter};
-use crate::transport::{Limits, Publisher, Sample, SampleMeta, SenderId, Subscriber, sample_into};
+use crate::key::{Key, KeyFilter, KeyFilterBuf};
+use crate::transport::{
+    Limits, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber, sample_into,
+};
 
 /// First two bytes of every middleware ESP-NOW frame.
 pub const MAGIC: [u8; 2] = *b"MW";
@@ -255,31 +284,68 @@ pub enum EspNowError<E> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FiltersFull;
 
-/// A frame accepted for delivery that did not fit the caller's buffer.
+/// A frame accepted for delivery that did not fit the caller's buffer,
+/// kept in a buffer of `P` bytes (`len <= P <= MAX_FRAME`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Pending {
-    frame: [u8; MAX_FRAME],
-    len: usize,
+struct Pending<const P: usize> {
+    frame: [u8; P],
+    len: u8,
     src: Mac,
+}
+
+impl<const P: usize> Pending<P> {
+    /// Copies `bytes`, or `None` when they do not fit `P` (or a `u8`).
+    fn keep(bytes: &[u8], src: Mac) -> Option<Self> {
+        let len = u8::try_from(bytes.len()).ok()?;
+        let mut frame = [0u8; P];
+        frame.get_mut(..bytes.len())?.copy_from_slice(bytes);
+        Some(Pending { frame, len, src })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        self.frame.get(..usize::from(self.len)).unwrap_or(&[])
+    }
+}
+
+/// Which keys one receive call accepts.
+#[derive(Clone, Copy)]
+enum Selection<'f> {
+    /// The transport's filter slots.
+    Slots,
+    /// One subscriber's filter, instead of the slots.
+    Only(KeyFilter<'f>),
 }
 
 /// Middleware publisher and subscriber over ESP-NOW broadcast, remembering
 /// `K` (sender, key) pairs for duplicate suppression and holding up to `F`
 /// key filters. All state is inline (no heap): the radio, `F` filter slots,
-/// a `K`-entry [`SeenTable`] and one kept frame of [`MAX_FRAME`] bytes.
-pub struct EspNowTransport<'a, R, const K: usize = 16, const F: usize = 8> {
+/// a `K`-entry [`SeenTable`] and one kept frame of `P` bytes (default
+/// [`MAX_FRAME`]; `P = 0` disables keeping, see the module docs).
+pub struct EspNowTransport<
+    'a,
+    R,
+    const K: usize = 16,
+    const F: usize = 8,
+    const P: usize = { MAX_FRAME },
+> {
     radio: R,
     filters: [Option<KeyFilter<'a>>; F],
     own: Option<Mac>,
     seq: Sequence,
     seen: SeenTable<K>,
-    pending: Option<Pending>,
+    pending: Option<Pending<P>>,
 }
 
-impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, K, F> {
+impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
+    EspNowTransport<'a, R, K, F, P>
+{
+    /// Compile-time check that the kept-frame buffer is at most a frame.
+    const KEEP_OK: () = assert!(P <= MAX_FRAME, "EspNowTransport: P exceeds MAX_FRAME");
+
     /// A transport over `radio` with no filters (it receives nothing until
     /// one is added) and sequence number 0.
     pub const fn new(radio: R) -> Self {
+        let () = Self::KEEP_OK;
         EspNowTransport {
             radio,
             filters: [None; F],
@@ -355,6 +421,14 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, 
         self.filters.iter().flatten().any(|f| f.matches(key))
     }
 
+    /// True if `sel` selects `key`.
+    fn selects(&self, sel: Selection<'_>, key: Key<'_>) -> bool {
+        match sel {
+            Selection::Slots => self.subscribed(key),
+            Selection::Only(f) => f.matches(key),
+        }
+    }
+
     /// The sequence number the next publish will carry.
     pub const fn sequence(&self) -> Sequence {
         self.seq
@@ -368,7 +442,7 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, 
     /// Decides whether a received frame is delivered: skips our own,
     /// foreign, unfiltered and repeated frames, recording fresh ones in the
     /// seen table.
-    fn accept(&mut self, bytes: &[u8], src: Mac) -> Result<bool, FrameError> {
+    fn accept(&mut self, sel: Selection<'_>, bytes: &[u8], src: Mac) -> Result<bool, FrameError> {
         if self.own == Some(src) {
             return Ok(false);
         }
@@ -377,7 +451,7 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, 
             Err(_) if !bytes.starts_with(&MAGIC) => return Ok(false),
             Err(e) => return Err(e),
         };
-        if !self.subscribed(frame.key) {
+        if !self.selects(sel, frame.key) {
             return Ok(false);
         }
         let (seen, fresh) = self
@@ -388,7 +462,8 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, 
     }
 
     /// Writes an accepted frame into `buf` as a sample with sender meta, or
-    /// keeps it for the next call when `buf` is too small.
+    /// keeps it for the next call when `buf` is too small (dropped instead
+    /// when it does not fit the `P`-byte kept buffer).
     fn deliver<'b>(
         &mut self,
         buf: &'b mut [u8],
@@ -403,18 +478,21 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, 
         match sample_into(buf, frame.key.as_str(), frame.payload) {
             Some(sample) => Ok(sample.with_meta(meta)),
             None => {
-                let mut kept = [0u8; MAX_FRAME];
-                let slot = kept
-                    .get_mut(..bytes.len())
-                    .ok_or(EspNowError::Frame(FrameError::TooLong))?;
-                slot.copy_from_slice(bytes);
-                self.pending = Some(Pending {
-                    frame: kept,
-                    len: bytes.len(),
-                    src,
-                });
+                self.pending = Pending::keep(bytes, src).or(self.pending);
                 Err(EspNowError::BufferTooSmall)
             }
+        }
+    }
+
+    /// Takes the kept sample if `sel` selects its key; otherwise leaves it.
+    fn take_pending(&mut self, sel: Selection<'_>) -> Option<Pending<P>> {
+        let p = self.pending?;
+        let key = Frame::decode(p.bytes()).ok()?.key;
+        if self.selects(sel, key) {
+            self.pending = None;
+            Some(p)
+        } else {
+            None
         }
     }
 
@@ -422,17 +500,64 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize> EspNowTransport<'a, R, 
     fn deliver_pending<'b>(
         &mut self,
         buf: &'b mut [u8],
-        p: Pending,
+        p: Pending<P>,
     ) -> Result<Sample<'b>, EspNowError<R::Error>> {
-        let bytes = p
-            .frame
-            .get(..p.len)
-            .ok_or(EspNowError::Frame(FrameError::TooLong))?;
-        self.deliver(buf, bytes, p.src)
+        self.deliver(buf, p.bytes(), p.src)
+    }
+
+    /// Waits for the next fresh sample `sel` selects.
+    async fn recv_selected<'b>(
+        &mut self,
+        sel: Selection<'_>,
+        buf: &'b mut [u8],
+    ) -> Result<Sample<'b>, EspNowError<R::Error>> {
+        if let Some(p) = self.take_pending(sel) {
+            return self.deliver_pending(buf, p);
+        }
+        let mut raw = [0u8; MAX_FRAME];
+        for _ in 0..MAX_IGNORED_FRAMES {
+            let (bytes, src) = self
+                .radio
+                .receive(&mut raw)
+                .await
+                .map_err(EspNowError::Radio)?;
+            if self.accept(sel, bytes, src).map_err(EspNowError::Frame)? {
+                return self.deliver(buf, bytes, src);
+            }
+        }
+        Err(EspNowError::IgnoredLimit)
+    }
+
+    /// Returns the next fresh sample `sel` selects among the frames already
+    /// queued in the radio.
+    fn try_recv_selected<'b>(
+        &mut self,
+        sel: Selection<'_>,
+        buf: &'b mut [u8],
+    ) -> Result<Option<Sample<'b>>, EspNowError<R::Error>> {
+        if let Some(p) = self.take_pending(sel) {
+            return self.deliver_pending(buf, p).map(Some);
+        }
+        let mut raw = [0u8; MAX_FRAME];
+        for _ in 0..MAX_IGNORED_FRAMES {
+            let Some((bytes, src)) = self
+                .radio
+                .try_receive(&mut raw)
+                .map_err(EspNowError::Radio)?
+            else {
+                return Ok(None);
+            };
+            if self.accept(sel, bytes, src).map_err(EspNowError::Frame)? {
+                return self.deliver(buf, bytes, src).map(Some);
+            }
+        }
+        Err(EspNowError::IgnoredLimit)
     }
 }
 
-impl<R: EspNowRadio, const K: usize, const F: usize> Publisher for EspNowTransport<'_, R, K, F> {
+impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Publisher
+    for EspNowTransport<'_, R, K, F, P>
+{
     type Error = EspNowError<R::Error>;
 
     const LIMITS: Limits = LIMITS;
@@ -459,49 +584,88 @@ impl<R: EspNowRadio, const K: usize, const F: usize> Publisher for EspNowTranspo
     }
 }
 
-impl<R: EspNowRadio, const K: usize, const F: usize> Subscriber for EspNowTransport<'_, R, K, F> {
+impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Subscriber
+    for EspNowTransport<'_, R, K, F, P>
+{
     type Error = EspNowError<R::Error>;
 
-    /// Waits for the next fresh sample selected by a filter. Cancel-safe if
-    /// the radio's `receive` is (see the module docs).
+    /// Waits for the next fresh sample selected by a filter slot.
+    /// Cancel-safe if the radio's `receive` is (see the module docs).
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
-        if let Some(p) = self.pending.take() {
-            return self.deliver_pending(buf, p);
-        }
-        let mut raw = [0u8; MAX_FRAME];
-        for _ in 0..MAX_IGNORED_FRAMES {
-            let (bytes, src) = self
-                .radio
-                .receive(&mut raw)
-                .await
-                .map_err(EspNowError::Radio)?;
-            if self.accept(bytes, src).map_err(EspNowError::Frame)? {
-                return self.deliver(buf, bytes, src);
-            }
-        }
-        Err(EspNowError::IgnoredLimit)
+        self.recv_selected(Selection::Slots, buf).await
     }
 
     /// Returns the next fresh sample among the frames already queued in the
     /// radio, or `Ok(None)` once the radio has none.
     fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
-        if let Some(p) = self.pending.take() {
-            return self.deliver_pending(buf, p).map(Some);
-        }
-        let mut raw = [0u8; MAX_FRAME];
-        for _ in 0..MAX_IGNORED_FRAMES {
-            let Some((bytes, src)) = self
-                .radio
-                .try_receive(&mut raw)
-                .map_err(EspNowError::Radio)?
-            else {
-                return Ok(None);
-            };
-            if self.accept(bytes, src).map_err(EspNowError::Frame)? {
-                return self.deliver(buf, bytes, src).map(Some);
-            }
-        }
-        Err(EspNowError::IgnoredLimit)
+        self.try_recv_selected(Selection::Slots, buf)
+    }
+}
+
+impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize> Subscribe
+    for EspNowTransport<'a, R, K, F, P>
+{
+    type Subscriber<'s>
+        = EspNowSubscriber<'s, 'a, R, K, F, P>
+    where
+        Self: 's;
+    type Error = EspNowError<R::Error>;
+
+    /// Borrows the transport as an [`EspNowSubscriber`] owning a copy of
+    /// `filter`. Never waits. [`EspNowError::Frame`] with
+    /// [`FrameError::KeyTooLong`] when the filter's key is longer than
+    /// [`MAX_KEY`] (no frame could match it).
+    async fn subscribe<'s>(
+        &'s mut self,
+        filter: KeyFilter<'_>,
+    ) -> Result<EspNowSubscriber<'s, 'a, R, K, F, P>, Self::Error> {
+        let filter = filter
+            .to_buf()
+            .map_err(|_| EspNowError::Frame(FrameError::KeyTooLong))?;
+        Ok(EspNowSubscriber {
+            transport: self,
+            filter,
+        })
+    }
+}
+
+/// An [`EspNowTransport`] borrowed as a subscriber to the keys one filter
+/// selects; made by [`Subscribe::subscribe`]. The transport's own filter
+/// slots do not apply while receiving through it (see the module docs).
+pub struct EspNowSubscriber<
+    's,
+    'a,
+    R,
+    const K: usize = 16,
+    const F: usize = 8,
+    const P: usize = { MAX_FRAME },
+> {
+    transport: &'s mut EspNowTransport<'a, R, K, F, P>,
+    filter: KeyFilterBuf<MAX_KEY>,
+}
+
+impl<R, const K: usize, const F: usize, const P: usize> EspNowSubscriber<'_, '_, R, K, F, P> {
+    /// The filter this view applies.
+    pub fn filter(&self) -> KeyFilter<'_> {
+        self.filter.as_filter()
+    }
+}
+
+impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Subscriber
+    for EspNowSubscriber<'_, '_, R, K, F, P>
+{
+    type Error = EspNowError<R::Error>;
+
+    /// As the transport's `recv`, selecting with this view's filter only.
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        let sel = Selection::Only(self.filter.as_filter());
+        self.transport.recv_selected(sel, buf).await
+    }
+
+    /// As the transport's `try_recv`, selecting with this view's filter only.
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        let sel = Selection::Only(self.filter.as_filter());
+        self.transport.try_recv_selected(sel, buf)
     }
 }
 
@@ -691,7 +855,12 @@ mod tests {
         assert_eq!(<T<'_> as Publisher>::LIMITS, LIMITS);
         assert_eq!(
             LIMITS,
-            Limits { max_key: 64, max_payload: 179, max_message: 243, shared: true }
+            Limits {
+                max_key: 64,
+                max_payload: 179,
+                max_message: 243,
+                shared: true
+            }
         );
         assert_eq!(HEADER_LEN + LIMITS.max_key + LIMITS.max_payload, MAX_FRAME);
     }
@@ -962,6 +1131,122 @@ mod tests {
         let mut buf = [0u8; 64];
         assert_eq!(r.try_recv(&mut buf).unwrap().unwrap().payload, b"maybe");
         assert_eq!(r.try_recv(&mut buf).unwrap().unwrap().payload, b"sure");
+    }
+
+    #[test]
+    fn n13_subscribe_borrows_the_transport_with_its_own_filter() {
+        let mut radio = FakeRadio::default();
+        radio.push(&frame(0, SYNC, b"slot only"), A);
+        radio.push(&frame(0, Key::from_static("apple"), b"no"), A);
+        radio.push(&frame(0, HELLO, b"mine"), A);
+        radio.push(&frame(0, HELLO, b"mine"), A); // repeat
+        radio.push(&frame(1, SYNC, b"later"), B);
+        radio.push(&frame(0, OTHER, b"own"), B);
+        let mut t = sub::<4>(radio, &[SYNC_ONLY]).with_own_address(B);
+        let mut buf = [0u8; 64];
+        {
+            // The filter's key text is gone once the view is made.
+            let text = std::string::String::from("app");
+            let mut view =
+                block_on(t.subscribe(KeyFilter::Prefix(Key::new(&text).unwrap()))).unwrap();
+            drop(text);
+            assert_eq!(view.filter(), APP);
+            let s = block_on(view.recv(&mut buf)).unwrap();
+            assert_eq!((s.key, s.payload), (HELLO, &b"mine"[..]));
+            assert_eq!(s.meta.sender, Some(SenderId::from_mac(A)));
+            // The repeat is dropped; SYNC is not this view's key and the
+            // last frame is from our own address.
+            assert_eq!(view.try_recv(&mut buf), Ok(None));
+        }
+        // The view consumed the frames it skipped; the slots apply again.
+        assert!(t.try_recv(&mut buf).unwrap().is_none());
+        t.radio_mut().push(&frame(2, SYNC, b"slot"), A);
+        assert_eq!(t.try_recv(&mut buf).unwrap().unwrap().payload, b"slot");
+        // A filter on a key no frame can carry is refused.
+        let key_text = [b'k'; MAX_KEY + 1];
+        let long = Key::new(core::str::from_utf8(&key_text).unwrap()).unwrap();
+        assert!(matches!(
+            block_on(t.subscribe(KeyFilter::Exact(long))),
+            Err(EspNowError::Frame(FrameError::KeyTooLong))
+        ));
+    }
+
+    /// Generic code reaches the transport through the trait alone.
+    async fn first_payload_len<S: Subscribe>(
+        transport: &mut S,
+        filter: KeyFilter<'_>,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        let mut sub = transport.subscribe(filter).await.ok()?;
+        sub.recv(buf).await.ok().map(|s| s.payload.len())
+    }
+
+    #[test]
+    fn n13_transport_is_usable_through_generic_subscribe() {
+        let mut radio = FakeRadio::default();
+        radio.push(&frame(0, OTHER, b"x"), A);
+        radio.push(&frame(0, SYNC, b"abcd"), A);
+        // No filter slots at all: the view's filter is what selects.
+        let mut t: T<'_> = EspNowTransport::new(radio);
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            block_on(first_payload_len(&mut t, SYNC_ONLY, &mut buf)),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn n13_kept_sample_waits_for_a_receive_that_selects_it() {
+        let mut radio = FakeRadio::default();
+        radio.push(&frame(0, SYNC, b"0123456789"), A);
+        radio.push(&frame(0, HELLO, b"hi"), A);
+        let mut t = sub::<4>(radio, &[SYNC_ONLY]);
+        let mut small = [0u8; 20];
+        assert_eq!(t.try_recv(&mut small), Err(EspNowError::BufferTooSmall));
+        let mut buf = [0u8; 64];
+        {
+            let mut view = block_on(t.subscribe(APP)).unwrap();
+            // The kept SYNC sample is not this view's: it stays kept.
+            assert_eq!(view.try_recv(&mut buf).unwrap().unwrap().payload, b"hi");
+        }
+        assert_eq!(
+            t.try_recv(&mut buf).unwrap().unwrap().payload,
+            b"0123456789"
+        );
+    }
+
+    #[test]
+    fn n14_keeping_is_optional_and_saves_a_frame_of_ram() {
+        type Keep = EspNowTransport<'static, FakeRadio, 4, 4>;
+        type NoKeep = EspNowTransport<'static, FakeRadio, 4, 4, 0>;
+        let keep = core::mem::size_of::<Keep>();
+        let no_keep = core::mem::size_of::<NoKeep>();
+        assert_eq!(
+            core::mem::size_of::<Option<Pending<MAX_FRAME>>>(),
+            MAX_FRAME + 8,
+            "an enabled kept slot is the frame plus sender and length"
+        );
+        // Field reordering may move a few bytes of padding into the gap.
+        assert!(keep - no_keep >= MAX_FRAME - 8, "{keep} vs {no_keep}");
+        assert_eq!(
+            core::mem::size_of::<Option<Pending<0>>>(),
+            8,
+            "a disabled kept slot is the sender and length only"
+        );
+
+        let mut radio = FakeRadio::default();
+        radio.push(&frame(3, SYNC, b"0123456789"), A);
+        radio.push(&frame(4, SYNC, b"next"), A);
+        let mut t: NoKeep = EspNowTransport::new(radio).with_filter(SYNC_ONLY).unwrap();
+        let mut small = [0u8; 20];
+        assert_eq!(t.try_recv(&mut small), Err(EspNowError::BufferTooSmall));
+        let mut buf = [0u8; MAX_FRAME];
+        let s = t.try_recv(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            (s.payload, s.meta.seq),
+            (&b"next"[..], Some(4)),
+            "with P = 0 the sample that did not fit is dropped"
+        );
     }
 
     #[test]

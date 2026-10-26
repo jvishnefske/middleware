@@ -11,7 +11,9 @@
 //! * [`payload_key`], [`log_line`], [`pin`], [`level`], [`pull`],
 //!   [`subscribe_slot`], [`set_tick`] — host-call argument validation (W3).
 //! * [`alloc_range`] — whether `mw_alloc` accepted a delivery (W2).
-//! * [`Schedule`] — `tick` scheduling with wrapping millisecond time (W2).
+//! * [`Schedule`] — `tick` scheduling with wrapping millisecond time (W2);
+//!   [`tick_decision`] — whether a `tick` call runs, as a
+//!   [`Ticked`], and the schedule after it (W9).
 //! * [`initial_memory_bytes`], [`check_memory`], [`memory_bytes`] — the
 //!   byte cap on linear memory for 64 KiB and 1-byte (custom-page-sizes)
 //!   pages (W5).
@@ -37,7 +39,7 @@ use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
 
-use crate::LoadError;
+use crate::{LoadError, Ticked};
 
 /// Size of one WASM page in bytes.
 pub const PAGE_BYTES: usize = 65_536;
@@ -347,6 +349,23 @@ impl Schedule {
         } else {
             next
         }
+    }
+}
+
+/// Decides what [`Payload::tick`](crate::Payload::tick) at `now` does for a
+/// module with (`has_tick`) or without a `tick` export and the current
+/// `schedule`: [`Ticked::Ran`] with the advanced schedule when a tick is
+/// due, otherwise the reason nothing runs and the unchanged schedule.
+pub const fn tick_decision(
+    has_tick: bool,
+    schedule: Option<Schedule>,
+    now: u32,
+) -> (Ticked, Option<Schedule>) {
+    match schedule {
+        _ if !has_tick => (Ticked::NoTickExport, schedule),
+        None => (Ticked::Disabled, None),
+        Some(s) if s.is_due(now) => (Ticked::Ran, Some(s.advance(now))),
+        Some(s) => (Ticked::NotDue, Some(s)),
     }
 }
 
@@ -759,6 +778,27 @@ mod tests {
         assert_eq!(subscribe_slot(&subs, "a"), Ok(Slot::Existing(0)));
         assert_eq!(slot_for(&subs, "k3"), Some(3));
         assert_eq!(slot_for(&subs, "k"), None);
+    }
+
+    #[test]
+    fn w9_tick_decision_reports_why_nothing_ran() {
+        let s = Schedule {
+            period: 100,
+            due: 50,
+        };
+        assert_eq!(
+            tick_decision(true, Some(s), 50),
+            (Ticked::Ran, Some(s.advance(50)))
+        );
+        assert_eq!(tick_decision(true, Some(s), 49), (Ticked::NotDue, Some(s)));
+        assert_eq!(tick_decision(true, None, 50), (Ticked::Disabled, None));
+        // `set_tick` refuses a schedule without the export, but the decision
+        // does not depend on that.
+        assert_eq!(
+            tick_decision(false, Some(s), 50),
+            (Ticked::NoTickExport, Some(s))
+        );
+        assert_eq!(tick_decision(false, None, 50), (Ticked::NoTickExport, None));
     }
 
     #[test]

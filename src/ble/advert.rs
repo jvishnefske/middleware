@@ -27,15 +27,24 @@
 //!   [`Publisher::LIMITS`] states [`MAX_ADVERT_PAYLOAD`] (21 bytes, the room
 //!   left by the default template) and [`AdvertisingPublisher::max_payload`]
 //!   the exact room left by the configured template.
+//! * [`ScanQueue`] is a bounded, no-heap queue of scan reports between a
+//!   radio callback ([`ScanQueue::push_report`], `&mut self`, newest wins
+//!   when full) and a [`Scanner`] consumer that awaits a report with a
+//!   registered [`Waker`]. Producer and consumer can be one owner or split
+//!   by the caller's own lock ([`ScanQueue::poll_report`]); a dropped await
+//!   loses no report.
 //! * An advert carries only the 16-bit short id of its key, never the key
 //!   text. [`ShortIdTable`] holds up to `K` learned key texts and resolves a
 //!   short id back to its key; learning a key whose short id is already taken
 //!   by a different key fails with [`ShortIdError::Collision`], so ambiguous
 //!   ids are noticed instead of silently delivering the wrong key.
-//! * [`AdvertisingSubscriber`] implements [`Subscriber`] for a set of
-//!   [`KeyFilter`]s that can grow at run time
-//!   ([`AdvertisingSubscriber::subscribe_key`],
-//!   [`AdvertisingSubscriber::learn`]). A report becomes a sample when its
+//! * [`AdvertisingSubscriber`] implements [`Subscriber`] for up to `F`
+//!   filters, copied in as owned [`KeyFilterBuf`]s, that can grow at run
+//!   time ([`AdvertisingSubscriber::subscribe_key`],
+//!   [`AdvertisingSubscriber::learn`]); `K` separately bounds its learned
+//!   keys. It also implements [`Subscribe`]: each subscription is an
+//!   [`AdvertisingSubscription`] view borrowing the subscriber and
+//!   delivering only its own filter's keys. A report becomes a sample when its
 //!   manufacturer data has the configured company id, its short id resolves
 //!   to a learned key, and that key matches a filter. An exact filter learns
 //!   its key; a prefix filter matches **only keys that were learned**, because
@@ -53,14 +62,23 @@
 //! [`MAX_IGNORED_REPORTS`] with [`AdvertisingError::ReportLimit`] and
 //! [`Subscriber::try_recv`] returns `Ok(None)` after as many, so every call
 //! is bounded. Receiving is cancel-safe when the scanner's
-//! [`Scanner::next_report`] is: all subscriber state changes happen
-//! synchronously after a report arrives.
+//! [`Scanner::next_report`] is (a [`ScanQueue`]'s is): all subscriber state
+//! changes happen synchronously after a report arrives.
+//!
+//! The publisher, subscriber, [`ShortIdTable`] and [`ScanQueue`] have
+//! `const fn new` constructors and [`Default`] impls (the publisher and
+//! subscriber when their radio type is `Default`), so they can live in
+//! `static` initialisers.
+
+use core::task::{Context, Poll, Waker};
 
 use super::uuid::{SERVICE_UUID, short_id};
 use crate::dedup::SeenTable;
 pub use crate::dedup::Sequence;
-use crate::key::{Key, KeyFilter, MAX_KEY_LEN};
-use crate::transport::{Limits, Publisher, Sample, SampleMeta, SenderId, Subscriber, sample_into};
+use crate::key::{AsKey, Filter, Key, KeyBuf, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
+use crate::transport::{
+    Limits, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber, sample_into,
+};
 
 /// Largest legacy advertising data payload.
 pub const MAX_ADV_DATA: usize = 31;
@@ -428,11 +446,285 @@ pub trait Scanner {
 
     /// Returns the next advertisement if one was already received, without
     /// waiting. A binding fed by a synchronous radio callback queues reports
-    /// there and pops one here.
+    /// there and pops one here; [`ScanQueue`] is such a queue.
     fn try_next_report<'b>(
         &mut self,
         buf: &'b mut [u8],
     ) -> Result<Option<ScanReport<'b>>, Self::Error>;
+}
+
+/// Default capacity of a [`ScanQueue`].
+pub const DEFAULT_SCAN_QUEUE: usize = 8;
+
+/// Why a [`ScanQueue`] refused or lost a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanQueueError {
+    /// The pushed advertising data is longer than [`MAX_ADV_DATA`]; the
+    /// report is dropped (and counted).
+    TooLong,
+    /// The caller's buffer is shorter than the popped report; the report is
+    /// dropped (and counted).
+    BufferTooSmall,
+}
+
+/// What [`ScanQueue::push_report`] did with a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pushed {
+    /// Queued with room to spare.
+    Queued,
+    /// Queued after dropping (and counting) the oldest report, because the
+    /// queue was full: the newest reports win.
+    DisplacedOldest,
+}
+
+/// One scan report held by value: [`ScanReport`] with its data copied in.
+///
+/// What [`ScanQueue::pop_report`] and [`ScanQueue::poll_report`] return, so
+/// a caller that shares the queue behind its own lock can take a report out
+/// under the lock and use it after releasing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuedReport {
+    address: Address,
+    rssi: i8,
+    len: u8,
+    data: [u8; MAX_ADV_DATA],
+}
+
+impl QueuedReport {
+    const EMPTY: Self = QueuedReport {
+        address: Address([0; 6]),
+        rssi: 0,
+        len: 0,
+        data: [0; MAX_ADV_DATA],
+    };
+
+    /// Copies `report`.
+    ///
+    /// # Errors
+    ///
+    /// [`ScanQueueError::TooLong`] when its data exceeds [`MAX_ADV_DATA`].
+    pub fn new(report: &ScanReport<'_>) -> Result<Self, ScanQueueError> {
+        let mut data = [0u8; MAX_ADV_DATA];
+        data.get_mut(..report.data.len())
+            .ok_or(ScanQueueError::TooLong)?
+            .copy_from_slice(report.data);
+        Ok(QueuedReport {
+            address: report.address,
+            rssi: report.rssi,
+            // Lossless: at most MAX_ADV_DATA (31) bytes were copied.
+            len: report.data.len() as u8,
+            data,
+        })
+    }
+
+    /// The report, borrowing its data from `self`.
+    pub fn as_report(&self) -> ScanReport<'_> {
+        ScanReport {
+            address: self.address,
+            rssi: self.rssi,
+            data: self.data.get(..usize::from(self.len)).unwrap_or(&[]),
+        }
+    }
+
+    /// The report with its data copied into `buf`.
+    ///
+    /// # Errors
+    ///
+    /// [`ScanQueueError::BufferTooSmall`] when `buf` is shorter than the data.
+    pub fn copy_into<'b>(&self, buf: &'b mut [u8]) -> Result<ScanReport<'b>, ScanQueueError> {
+        let report = self.as_report();
+        let out = buf
+            .get_mut(..report.data.len())
+            .ok_or(ScanQueueError::BufferTooSmall)?;
+        out.copy_from_slice(report.data);
+        Ok(ScanReport {
+            address: report.address,
+            rssi: report.rssi,
+            data: out,
+        })
+    }
+}
+
+/// A bounded, waker-based queue of scan reports between a radio callback and
+/// a [`Scanner`] consumer. No heap, no locks: it holds up to `R` reports
+/// inline (default [`DEFAULT_SCAN_QUEUE`]; `R` must be at least 1) and one
+/// [`Waker`].
+///
+/// * **Producer.** The radio's scan callback calls
+///   [`ScanQueue::push_report`] (`&mut self`, synchronous, never blocks). A
+///   full queue drops its oldest report to make room ([`Pushed::DisplacedOldest`]);
+///   data longer than [`MAX_ADV_DATA`] is refused ([`ScanQueueError::TooLong`]).
+///   Both are counted in [`ScanQueue::dropped`]. A push wakes the registered
+///   waker, if any, before it returns; waking only schedules the waiting
+///   task, it never runs it inline.
+/// * **Consumer.** The [`Scanner`] implementation awaits a report:
+///   [`Scanner::next_report`] pops one if queued, otherwise registers the
+///   task's waker and waits for a push. [`Scanner::try_next_report`] pops
+///   without waiting. The queue keeps one waker, so it serves one waiting
+///   consumer; a second one replaces the first's registration.
+/// * **Ownership.** Producer and consumer may be one owner, for example a
+///   task that holds an [`AdvertisingSubscriber`] over the queue, pushes
+///   through [`AdvertisingSubscriber::scanner_mut`] and then drains with
+///   `try_recv`. Or the caller splits them with its own synchronisation (a
+///   critical section, a `RefCell` on one executor): put the queue behind
+///   that lock and give the consumer a small [`Scanner`] that, on each poll,
+///   takes the lock and calls [`ScanQueue::poll_report`], which hands back an
+///   owned [`QueuedReport`] so nothing borrowed outlives the lock.
+/// * **Cancel safety.** A report is removed only in the same poll that
+///   returns it as ready, so dropping a pending `next_report` (or a pending
+///   `recv` over the queue) loses no report; a later call finds it. A
+///   popped report that does not fit the caller's buffer is dropped with
+///   [`ScanQueueError::BufferTooSmall`] (and counted); the subscribers in
+///   this module always offer [`MAX_ADV_DATA`] bytes, so they never see it.
+#[derive(Debug, Clone)]
+pub struct ScanQueue<const R: usize = DEFAULT_SCAN_QUEUE> {
+    slots: [QueuedReport; R],
+    head: usize,
+    len: usize,
+    dropped: u32,
+    waker: Option<Waker>,
+}
+
+impl<const R: usize> Default for ScanQueue<R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const R: usize> ScanQueue<R> {
+    /// Compile-time check that the queue can hold a report.
+    const CAPACITY_OK: () = assert!(R > 0, "ScanQueue capacity must be at least 1");
+
+    /// An empty queue with no waker registered.
+    pub const fn new() -> Self {
+        let () = Self::CAPACITY_OK;
+        ScanQueue {
+            slots: [QueuedReport::EMPTY; R],
+            head: 0,
+            len: 0,
+            dropped: 0,
+            waker: None,
+        }
+    }
+
+    /// Queues `report` (data copied) and wakes the waiting consumer. A full
+    /// queue drops its oldest report first. Does not block and does not
+    /// consume the queue, so a radio callback calls it in place.
+    ///
+    /// # Errors
+    ///
+    /// [`ScanQueueError::TooLong`] when the data exceeds [`MAX_ADV_DATA`];
+    /// the report is dropped and counted, and the queue is otherwise
+    /// unchanged.
+    pub fn push_report(&mut self, report: &ScanReport<'_>) -> Result<Pushed, ScanQueueError> {
+        let queued = match QueuedReport::new(report) {
+            Ok(q) => q,
+            Err(e) => {
+                self.dropped = self.dropped.wrapping_add(1);
+                return Err(e);
+            }
+        };
+        let pushed = if self.len >= R {
+            self.head = (self.head + 1) % R;
+            self.len -= 1;
+            self.dropped = self.dropped.wrapping_add(1);
+            Pushed::DisplacedOldest
+        } else {
+            Pushed::Queued
+        };
+        if let Some(slot) = self.slots.get_mut((self.head + self.len) % R) {
+            *slot = queued;
+            self.len += 1;
+        }
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+        Ok(pushed)
+    }
+
+    /// Removes and returns the oldest report, without waiting.
+    pub fn pop_report(&mut self) -> Option<QueuedReport> {
+        if self.len == 0 {
+            return None;
+        }
+        let report = self.slots.get(self.head).copied()?;
+        self.head = (self.head + 1) % R;
+        self.len -= 1;
+        Some(report)
+    }
+
+    /// Pops the oldest report, or registers `cx`'s waker to be woken by the
+    /// next [`ScanQueue::push_report`] and returns `Pending`. A report is
+    /// removed only when `Ready` is returned (see the cancel-safety notes).
+    pub fn poll_report(&mut self, cx: &mut Context<'_>) -> Poll<QueuedReport> {
+        if let Some(report) = self.pop_report() {
+            return Poll::Ready(report);
+        }
+        match &self.waker {
+            Some(w) if w.will_wake(cx.waker()) => {}
+            _ => self.waker = Some(cx.waker().clone()),
+        }
+        Poll::Pending
+    }
+
+    /// Reports waiting.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True if no report is waiting.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The number of reports the queue holds, `R`.
+    pub const fn capacity(&self) -> usize {
+        R
+    }
+
+    /// Reports dropped so far (displaced by a full queue, too long, or not
+    /// fitting the consumer's buffer); wraps at `u32::MAX`.
+    pub const fn dropped(&self) -> u32 {
+        self.dropped
+    }
+}
+
+/// Waits through [`ScanQueue::poll_report`]; see [`ScanQueue`] for the
+/// waking and cancel-safety rules.
+impl<const R: usize> Scanner for ScanQueue<R> {
+    type Error = ScanQueueError;
+
+    async fn next_report<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<ScanReport<'b>, ScanQueueError> {
+        let report = core::future::poll_fn(|cx| self.poll_report(cx)).await;
+        self.deliver(&report, buf)
+    }
+
+    fn try_next_report<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Option<ScanReport<'b>>, ScanQueueError> {
+        match self.pop_report() {
+            Some(report) => self.deliver(&report, buf).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+impl<const R: usize> ScanQueue<R> {
+    /// Copies a popped report into `buf`, counting it as dropped if it does
+    /// not fit.
+    fn deliver<'b>(
+        &mut self,
+        report: &QueuedReport,
+        buf: &'b mut [u8],
+    ) -> Result<ScanReport<'b>, ScanQueueError> {
+        report.copy_into(buf).inspect_err(|_| {
+            self.dropped = self.dropped.wrapping_add(1);
+        })
+    }
 }
 
 /// Failure of an advertising publisher or subscriber.
@@ -461,6 +753,14 @@ pub struct AdvertisingPublisher<'a, A> {
     sequence: Sequence,
 }
 
+/// A default advertiser with the default template
+/// ([`AdvertisementBuilder::new`]), sequence 0.
+impl<A: Advertiser + Default> Default for AdvertisingPublisher<'_, A> {
+    fn default() -> Self {
+        Self::new(A::default(), AdvertisementBuilder::new())
+    }
+}
+
 impl<'a, A: Advertiser> AdvertisingPublisher<'a, A> {
     /// Publishes through `advertiser`; `template` supplies flags, name,
     /// service UUID and company id, and its manufacturer data is replaced.
@@ -470,6 +770,17 @@ impl<'a, A: Advertiser> AdvertisingPublisher<'a, A> {
             template,
             sequence: Sequence::new(0),
         }
+    }
+
+    /// Replaces the template (builder form, usable in `const` context).
+    pub const fn with_template(mut self, template: AdvertisementBuilder<'a>) -> Self {
+        self.template = template;
+        self
+    }
+
+    /// The configured template.
+    pub const fn template(&self) -> &AdvertisementBuilder<'a> {
+        &self.template
     }
 
     /// The sequence number the next publish will carry.
@@ -530,64 +841,44 @@ impl<A: Advertiser> Publisher for AdvertisingPublisher<'_, A> {
     }
 }
 
-/// A valid key's text held by value in an `L`-byte slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct KeyText<const L: usize> {
-    buf: [u8; L],
-    len: usize,
-}
-
-impl<const L: usize> KeyText<L> {
-    fn new(key: Key<'_>) -> Result<Self, ShortIdError> {
-        let bytes = key.as_bytes();
-        let mut buf = [0u8; L];
-        buf.get_mut(..bytes.len())
-            .ok_or(ShortIdError::TooLong)?
-            .copy_from_slice(bytes);
-        Ok(KeyText {
-            buf,
-            len: bytes.len(),
-        })
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.buf.get(..self.len).unwrap_or(&[])
-    }
-
-    /// The key. Always `Some`: only valid keys are stored.
-    fn key(&self) -> Option<Key<'_>> {
-        let text = core::str::from_utf8(self.as_bytes()).ok()?;
-        Key::new(text).ok()
-    }
-
-    fn is(&self, key: Key<'_>) -> bool {
-        self.as_bytes() == key.as_bytes()
-    }
-}
-
 /// Why a key or filter was not added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortIdError {
-    /// The table (or the subscriber's filter list) already holds `K` entries.
+    /// The table already holds `K` keys, or the subscriber's filter list
+    /// already holds `F` filters.
     Full,
-    /// The key is longer than the `L`-byte text slots.
+    /// The key is longer than the `L`-byte key slots.
     TooLong,
     /// A different learned key already has this short id, so adverts could
     /// not tell the two apart.
     Collision(u16),
 }
 
+/// An owned key of at most `L` bytes, or [`ShortIdError::TooLong`].
+fn key_buf<const L: usize>(key: Key<'_>) -> Result<KeyBuf<L>, ShortIdError> {
+    KeyBuf::from_key(key).map_err(|_| ShortIdError::TooLong)
+}
+
+/// An owned filter whose key fits `L` bytes, or [`ShortIdError::TooLong`].
+fn filter_buf<const L: usize, Q: AsKey>(
+    filter: &Filter<Q>,
+) -> Result<KeyFilterBuf<L>, ShortIdError> {
+    filter.to_buf().map_err(|_| ShortIdError::TooLong)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Learned<const L: usize> {
     id: u16,
-    text: KeyText<L>,
+    key: KeyBuf<L>,
 }
 
 /// Learned key texts, resolving advert short ids back to keys.
 ///
 /// Holds up to `K` keys of at most `L` bytes each (default
-/// [`MAX_KEY_LEN`], so any key fits). No two learned keys share a short id.
-/// Transitions consume the table and return the next one.
+/// [`MAX_KEY_LEN`], so any key fits; `L` may not exceed it), stored inline
+/// as [`KeyBuf`]s. No two learned keys share a short id. Transitions
+/// consume the table and return the next one. [`ShortIdTable::new`] is a
+/// `const fn` and [`Default`] is the same empty table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortIdTable<const K: usize, const L: usize = MAX_KEY_LEN> {
     entries: [Option<Learned<L>>; K],
@@ -616,17 +907,17 @@ impl<const K: usize, const L: usize> ShortIdTable<K, L> {
     pub fn learn(self, key: Key<'_>) -> Result<Self, ShortIdError> {
         let id = short_id(key);
         match self.entries.iter().flatten().find(|e| e.id == id) {
-            Some(e) if e.text.is(key) => return Ok(self),
+            Some(e) if e.key == key => return Ok(self),
             Some(_) => return Err(ShortIdError::Collision(id)),
             None => {}
         }
-        let text = KeyText::new(key)?;
+        let key = key_buf(key)?;
         let mut entries = self.entries;
         let slot = entries
             .iter_mut()
             .find(|e| e.is_none())
             .ok_or(ShortIdError::Full)?;
-        *slot = Some(Learned { id, text });
+        *slot = Some(Learned { id, key });
         Ok(ShortIdTable { entries })
     }
 
@@ -634,7 +925,7 @@ impl<const K: usize, const L: usize> ShortIdTable<K, L> {
     pub fn forget(self, key: Key<'_>) -> Self {
         let mut entries = self.entries;
         for e in entries.iter_mut() {
-            if matches!(e, Some(l) if l.text.is(key)) {
+            if matches!(e, Some(l) if l.key == key) {
                 *e = None;
             }
         }
@@ -647,17 +938,17 @@ impl<const K: usize, const L: usize> ShortIdTable<K, L> {
             .iter()
             .flatten()
             .find(|e| e.id == id)
-            .and_then(|e| e.text.key())
+            .map(|e| e.key.as_key())
     }
 
     /// True when `key` was learned.
     pub fn contains(&self, key: Key<'_>) -> bool {
-        self.entries.iter().flatten().any(|e| e.text.is(key))
+        self.entries.iter().flatten().any(|e| e.key == key)
     }
 
     /// The learned keys, in slot order.
     pub fn keys(&self) -> impl Iterator<Item = Key<'_>> {
-        self.entries.iter().flatten().filter_map(|e| e.text.key())
+        self.entries.iter().flatten().map(|e| e.key.as_key())
     }
 
     /// Number of learned keys.
@@ -670,44 +961,17 @@ impl<const K: usize, const L: usize> ShortIdTable<K, L> {
         self.len() == 0
     }
 
-    fn resolve_text(&self, id: u16) -> Option<KeyText<L>> {
+    /// The number of keys the table holds, `K`.
+    pub const fn capacity(&self) -> usize {
+        K
+    }
+
+    fn resolve_buf(&self, id: u16) -> Option<KeyBuf<L>> {
         self.entries
             .iter()
             .flatten()
             .find(|e| e.id == id)
-            .map(|e| e.text)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FilterKind {
-    Exact,
-    Prefix,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StoredFilter<const L: usize> {
-    kind: FilterKind,
-    text: KeyText<L>,
-}
-
-impl<const L: usize> StoredFilter<L> {
-    fn new(filter: KeyFilter<'_>) -> Result<Self, ShortIdError> {
-        let kind = match filter {
-            KeyFilter::Exact(_) => FilterKind::Exact,
-            KeyFilter::Prefix(_) => FilterKind::Prefix,
-        };
-        Ok(StoredFilter {
-            kind,
-            text: KeyText::new(filter.key())?,
-        })
-    }
-
-    fn matches(&self, key: Key<'_>) -> bool {
-        self.text.key().is_some_and(|k| match self.kind {
-            FilterKind::Exact => KeyFilter::Exact(k).matches(key),
-            FilterKind::Prefix => KeyFilter::Prefix(k).matches(key),
-        })
+            .map(|e| e.key)
     }
 }
 
@@ -717,15 +981,14 @@ pub const DEFAULT_SENDERS: usize = 16;
 
 /// An accepted report, before it is copied into the caller's buffer.
 struct Hit<'r, const L: usize> {
-    key: KeyText<L>,
+    key: KeyBuf<L>,
     meta: SampleMeta,
     payload: &'r [u8],
 }
 
 impl<const L: usize> Hit<'_, L> {
     fn deliver<'b, E>(self, buf: &'b mut [u8]) -> Result<Sample<'b>, AdvertisingError<E>> {
-        let key = self.key.key().ok_or(AdvertisingError::BufferTooSmall)?;
-        sample_into(buf, key.as_str(), self.payload)
+        sample_into(buf, self.key.as_str(), self.payload)
             .map(|s| s.with_meta(self.meta))
             .ok_or(AdvertisingError::BufferTooSmall)
     }
@@ -733,39 +996,63 @@ impl<const L: usize> Hit<'_, L> {
 
 /// Receives publications by scanning (see the module docs).
 ///
-/// * `K` bounds both the learned keys and the filters;
-/// * `L` is the longest key text held (default [`MAX_KEY_LEN`]);
+/// * `K` bounds the learned keys (its [`ShortIdTable`]);
+/// * `L` is the longest key text held (default [`MAX_KEY_LEN`], which it
+///   may not exceed);
 /// * `D` is the number of (sender, key) pairs remembered for duplicate
-///   suppression (default [`DEFAULT_SENDERS`]).
+///   suppression (default [`DEFAULT_SENDERS`]);
+/// * `F` bounds the filters, stored as owned [`KeyFilterBuf`]s (default `K`,
+///   the 0.2 behaviour where one bound covered both).
+///
+/// [`AdvertisingSubscriber::new`] and [`AdvertisingSubscriber::with_company_id`]
+/// are `const fn`, so a subscriber can be built in a `static` initialiser;
+/// [`Default`] wraps a default scanner.
 pub struct AdvertisingSubscriber<
     S,
     const K: usize,
     const L: usize = MAX_KEY_LEN,
     const D: usize = DEFAULT_SENDERS,
+    const F: usize = K,
 > {
     scanner: S,
     keys: ShortIdTable<K, L>,
-    filters: [Option<StoredFilter<L>>; K],
+    filters: [Option<KeyFilterBuf<L>>; F],
     company_id: u16,
     seen: SeenTable<D>,
 }
 
-impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubscriber<S, K, L, D> {
+impl<S: Scanner + Default, const K: usize, const L: usize, const D: usize, const F: usize> Default
+    for AdvertisingSubscriber<S, K, L, D, F>
+{
+    fn default() -> Self {
+        Self::new(S::default())
+    }
+}
+
+impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize>
+    AdvertisingSubscriber<S, K, L, D, F>
+{
     /// A subscriber with no filters (it delivers nothing until one is added),
     /// accepting manufacturer data from [`TEST_COMPANY_ID`].
     pub const fn new(scanner: S) -> Self {
         AdvertisingSubscriber {
             scanner,
             keys: ShortIdTable::new(),
-            filters: [None; K],
+            filters: [None; F],
             company_id: TEST_COMPANY_ID,
             seen: SeenTable::new(),
         }
     }
 
     /// Accepts manufacturer data from `company_id` instead.
-    pub fn with_company_id(self, company_id: u16) -> Self {
-        AdvertisingSubscriber { company_id, ..self }
+    pub const fn with_company_id(mut self, company_id: u16) -> Self {
+        self.company_id = company_id;
+        self
+    }
+
+    /// The accepted company id.
+    pub const fn company_id(&self) -> u16 {
+        self.company_id
     }
 
     /// Builder form of [`AdvertisingSubscriber::subscribe_key`].
@@ -773,27 +1060,26 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubs
     /// # Errors
     ///
     /// As [`AdvertisingSubscriber::subscribe_key`].
-    pub fn with_filter(mut self, filter: KeyFilter<'_>) -> Result<Self, ShortIdError> {
+    pub fn with_filter<Q: AsKey>(mut self, filter: Filter<Q>) -> Result<Self, ShortIdError> {
         self.subscribe_key(filter)?;
         Ok(self)
     }
 
-    /// Starts delivering keys matched by `filter`. An exact filter also
-    /// learns its key. A prefix filter matches only learned keys
+    /// Starts delivering keys matched by `filter`, a borrowed [`KeyFilter`]
+    /// or an owned [`KeyFilterBuf`]; the filter is copied into the
+    /// subscriber, so the caller's key need not outlive the call. An exact
+    /// filter also learns its key. A prefix filter matches only learned keys
     /// ([`AdvertisingSubscriber::learn`]). Adding a filter that is already
     /// present changes nothing. On error the subscriber is unchanged.
     ///
     /// # Errors
     ///
-    /// [`ShortIdError::Full`] when `K` filters (or, for an exact filter, `K`
+    /// [`ShortIdError::Full`] when `F` filters (or, for an exact filter, `K`
     /// keys) are held, [`ShortIdError::TooLong`] for a key longer than `L`,
     /// [`ShortIdError::Collision`] when an exact key's short id is taken.
-    pub fn subscribe_key(&mut self, filter: KeyFilter<'_>) -> Result<(), ShortIdError> {
-        let stored = StoredFilter::new(filter)?;
-        let keys = match filter {
-            KeyFilter::Exact(key) => self.keys.clone().learn(key)?,
-            KeyFilter::Prefix(_) => self.keys.clone(),
-        };
+    pub fn subscribe_key<Q: AsKey>(&mut self, filter: Filter<Q>) -> Result<(), ShortIdError> {
+        let stored = filter_buf::<L, Q>(&filter)?;
+        let keys = self.learned_for(&stored)?;
         let mut filters = self.filters;
         if !filters.contains(&Some(stored)) {
             let slot = filters
@@ -809,8 +1095,8 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubs
 
     /// Stops delivering keys matched by `filter` (an identical filter must
     /// have been added). Learned keys are kept.
-    pub fn unsubscribe_key(&mut self, filter: KeyFilter<'_>) {
-        let Ok(stored) = StoredFilter::<L>::new(filter) else {
+    pub fn unsubscribe_key<Q: AsKey>(&mut self, filter: Filter<Q>) {
+        let Ok(stored) = filter_buf::<L, Q>(&filter) else {
             return;
         };
         for f in self.filters.iter_mut() {
@@ -818,6 +1104,11 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubs
                 *f = None;
             }
         }
+    }
+
+    /// The filters held, borrowing their keys from the subscriber.
+    pub fn filters(&self) -> impl Iterator<Item = KeyFilter<'_>> {
+        self.filters.iter().flatten().map(|f| f.as_filter())
     }
 
     /// Learns `key` so its adverts can be resolved and matched by prefix
@@ -836,14 +1127,58 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubs
         &self.keys
     }
 
-    /// Borrows the radio.
+    /// Borrows the radio, e.g. to inspect a [`ScanQueue`].
+    pub const fn scanner(&self) -> &S {
+        &self.scanner
+    }
+
+    /// Borrows the radio mutably, e.g. to
+    /// [`push_report`](ScanQueue::push_report) into a [`ScanQueue`] in place.
     pub fn scanner_mut(&mut self) -> &mut S {
         &mut self.scanner
     }
 
-    /// Decides whether `report` is a fresh sample on a subscribed key,
-    /// recording its sequence number if it is.
-    fn admit<'r>(&mut self, report: &ScanReport<'r>) -> Option<Hit<'r, L>> {
+    /// A filtered view delivering only keys matched by `filter`, borrowing
+    /// the subscriber (what [`Subscribe::subscribe`] returns). The filter is
+    /// copied into the view and is not added to the subscriber's own
+    /// filters; an exact filter's key is learned, and stays learned. While
+    /// the view receives, reports on other keys are consumed and dropped, as
+    /// for any single-stream subscriber. On error the subscriber is
+    /// unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`ShortIdError::TooLong`] for a key longer than `L`; for an exact
+    /// filter, [`ShortIdError::Full`] when `K` keys are held and
+    /// [`ShortIdError::Collision`] when its short id is taken.
+    pub fn subscription<Q: AsKey>(
+        &mut self,
+        filter: Filter<Q>,
+    ) -> Result<AdvertisingSubscription<'_, S, K, L, D, F>, ShortIdError> {
+        let filter = filter_buf::<L, Q>(&filter)?;
+        self.keys = self.learned_for(&filter)?;
+        Ok(AdvertisingSubscription {
+            subscriber: self,
+            filter,
+        })
+    }
+
+    /// The key table after adding `filter`'s key if it is exact.
+    fn learned_for(&self, filter: &KeyFilterBuf<L>) -> Result<ShortIdTable<K, L>, ShortIdError> {
+        match filter {
+            Filter::Exact(key) => self.keys.clone().learn(key.as_key()),
+            Filter::Prefix(_) => Ok(self.keys.clone()),
+        }
+    }
+
+    /// Decides whether `report` is a fresh sample on a wanted key (matched by
+    /// `only`, or by any held filter when `None`), recording its sequence
+    /// number if it is.
+    fn admit<'r>(
+        &mut self,
+        report: &ScanReport<'r>,
+        only: Option<&KeyFilterBuf<L>>,
+    ) -> Option<Hit<'r, L>> {
         let Ok(Some((company, [lo, hi, seq, payload @ ..]))) = manufacturer_data(report.data)
         else {
             return None;
@@ -851,16 +1186,20 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubs
         if company != self.company_id {
             return None;
         }
-        let text = self.keys.resolve_text(u16::from_le_bytes([*lo, *hi]))?;
-        let key = text.key()?;
-        if !self.filters.iter().flatten().any(|f| f.matches(key)) {
+        let owned = self.keys.resolve_buf(u16::from_le_bytes([*lo, *hi]))?;
+        let key = owned.as_key();
+        let wanted = match only {
+            Some(f) => f.matches(key),
+            None => self.filters.iter().flatten().any(|f| f.matches(key)),
+        };
+        if !wanted {
             return None;
         }
         let sender = report.address.sender();
         let (seen, fresh) = self.seen.observe(sender, key, *seq);
         self.seen = seen;
         fresh.then_some(Hit {
-            key: text,
+            key: owned,
             meta: SampleMeta {
                 sender: Some(sender),
                 seq: Some(*seq),
@@ -868,14 +1207,13 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> AdvertisingSubs
             payload,
         })
     }
-}
 
-impl<S: Scanner, const K: usize, const L: usize, const D: usize> Subscriber
-    for AdvertisingSubscriber<S, K, L, D>
-{
-    type Error = AdvertisingError<S::Error>;
-
-    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+    /// [`Subscriber::recv`], restricted to `only` when given.
+    async fn recv_where<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+        only: Option<&KeyFilterBuf<L>>,
+    ) -> Result<Sample<'b>, AdvertisingError<S::Error>> {
         let mut adv = [0u8; MAX_ADV_DATA];
         for _ in 0..MAX_IGNORED_REPORTS {
             let report = self
@@ -883,18 +1221,19 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> Subscriber
                 .next_report(&mut adv)
                 .await
                 .map_err(AdvertisingError::Radio)?;
-            if let Some(hit) = self.admit(&report) {
+            if let Some(hit) = self.admit(&report, only) {
                 return hit.deliver(buf);
             }
         }
         Err(AdvertisingError::ReportLimit)
     }
 
-    /// Drains already-received reports until one is a fresh sample. Returns
-    /// `Ok(None)` when the scanner has no report, or after
-    /// [`MAX_IGNORED_REPORTS`] unrelated ones (the rest are examined on the
-    /// next call).
-    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+    /// [`Subscriber::try_recv`], restricted to `only` when given.
+    fn try_recv_where<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+        only: Option<&KeyFilterBuf<L>>,
+    ) -> Result<Option<Sample<'b>>, AdvertisingError<S::Error>> {
         let mut adv = [0u8; MAX_ADV_DATA];
         for _ in 0..MAX_IGNORED_REPORTS {
             let Some(report) = self
@@ -904,11 +1243,86 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize> Subscriber
             else {
                 return Ok(None);
             };
-            if let Some(hit) = self.admit(&report) {
+            if let Some(hit) = self.admit(&report, only) {
                 return hit.deliver(buf).map(Some);
             }
         }
         Ok(None)
+    }
+}
+
+impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize> Subscriber
+    for AdvertisingSubscriber<S, K, L, D, F>
+{
+    type Error = AdvertisingError<S::Error>;
+
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        self.recv_where(buf, None).await
+    }
+
+    /// Drains already-received reports until one is a fresh sample. Returns
+    /// `Ok(None)` when the scanner has no report, or after
+    /// [`MAX_IGNORED_REPORTS`] unrelated ones (the rest are examined on the
+    /// next call).
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        self.try_recv_where(buf, None)
+    }
+}
+
+/// Runtime subscriptions on one scanner: each is a filtered view borrowing
+/// the subscriber ([`AdvertisingSubscriber::subscription`]).
+impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize> Subscribe
+    for AdvertisingSubscriber<S, K, L, D, F>
+{
+    type Subscriber<'a>
+        = AdvertisingSubscription<'a, S, K, L, D, F>
+    where
+        Self: 'a;
+    type Error = ShortIdError;
+
+    async fn subscribe<'a>(
+        &'a mut self,
+        filter: KeyFilter<'_>,
+    ) -> Result<AdvertisingSubscription<'a, S, K, L, D, F>, ShortIdError> {
+        self.subscription(filter)
+    }
+}
+
+/// A filtered view of an [`AdvertisingSubscriber`], delivering only keys its
+/// own owned filter matches; see [`AdvertisingSubscriber::subscription`].
+/// Bounds, dedup and cancel safety are the subscriber's.
+pub struct AdvertisingSubscription<
+    'a,
+    S,
+    const K: usize,
+    const L: usize = MAX_KEY_LEN,
+    const D: usize = DEFAULT_SENDERS,
+    const F: usize = K,
+> {
+    subscriber: &'a mut AdvertisingSubscriber<S, K, L, D, F>,
+    filter: KeyFilterBuf<L>,
+}
+
+impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize>
+    AdvertisingSubscription<'_, S, K, L, D, F>
+{
+    /// The view's filter.
+    pub fn filter(&self) -> KeyFilter<'_> {
+        self.filter.as_filter()
+    }
+}
+
+impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize> Subscriber
+    for AdvertisingSubscription<'_, S, K, L, D, F>
+{
+    type Error = AdvertisingError<S::Error>;
+
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        self.subscriber.recv_where(buf, Some(&self.filter)).await
+    }
+
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        self.subscriber.try_recv_where(buf, Some(&self.filter))
     }
 }
 
@@ -940,6 +1354,7 @@ pub fn discover<'b>(report: &ScanReport<'b>) -> Option<Node<'b>> {
 mod tests {
     extern crate std;
     use super::*;
+    use core::future::Future;
     use futures::executor::block_on;
     use std::collections::VecDeque;
     use std::vec::Vec;
@@ -1553,5 +1968,353 @@ mod tests {
         })
         .unwrap();
         assert_eq!(node.name, None);
+    }
+
+    /// A waker that counts its wakes.
+    struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.wake_by_ref();
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (std::sync::Arc<CountingWaker>, Waker) {
+        let count = std::sync::Arc::new(CountingWaker(0.into()));
+        (count.clone(), Waker::from(count))
+    }
+
+    fn wakes(count: &CountingWaker) -> usize {
+        count.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn report(data: &[u8]) -> ScanReport<'_> {
+        ScanReport {
+            address: ADDR,
+            rssi: -50,
+            data,
+        }
+    }
+
+    #[test]
+    fn scan_queue_wakes_waiting_consumer() {
+        let (count, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut q = ScanQueue::<2>::new();
+        let mut buf = [0u8; MAX_ADV_DATA];
+        {
+            let fut = core::pin::pin!(q.next_report(&mut buf));
+            assert!(fut.poll(&mut cx).is_pending(), "empty queue waits");
+        }
+        assert_eq!(wakes(&count), 0);
+        assert_eq!(
+            q.push_report(&report(&[2, AD_FLAGS, 6])),
+            Ok(Pushed::Queued)
+        );
+        assert_eq!(wakes(&count), 1, "a push wakes the registered waker");
+        assert_eq!(q.push_report(&report(&[1, 9])), Ok(Pushed::Queued));
+        assert_eq!(wakes(&count), 1, "the waker is taken by the first push");
+        {
+            let fut = core::pin::pin!(q.next_report(&mut buf));
+            match fut.poll(&mut cx) {
+                Poll::Ready(Ok(r)) => {
+                    assert_eq!(
+                        (r.address, r.rssi, r.data),
+                        (ADDR, -50, &[2, AD_FLAGS, 6][..])
+                    )
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let r = q.try_next_report(&mut buf).unwrap().unwrap();
+        assert_eq!(r.data, &[1, 9]);
+        assert_eq!(q.try_next_report(&mut buf), Ok(None), "try does not wait");
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn scan_queue_is_bounded_and_counts_drops() {
+        let mut q = ScanQueue::<2>::default();
+        assert_eq!(q.capacity(), 2);
+        for i in 0..3u8 {
+            q.push_report(&report(&[1, i])).unwrap();
+        }
+        assert_eq!(q.push_report(&report(&[1, 3])), Ok(Pushed::DisplacedOldest));
+        assert_eq!((q.len(), q.dropped()), (2, 2), "newest win");
+        assert_eq!(
+            q.push_report(&report(&[0; MAX_ADV_DATA + 1])),
+            Err(ScanQueueError::TooLong)
+        );
+        assert_eq!((q.len(), q.dropped()), (2, 3));
+        let mut small = [0u8; 1];
+        assert_eq!(
+            q.try_next_report(&mut small),
+            Err(ScanQueueError::BufferTooSmall)
+        );
+        assert_eq!((q.len(), q.dropped()), (1, 4));
+        let mut buf = [0u8; MAX_ADV_DATA];
+        assert_eq!(q.try_next_report(&mut buf).unwrap().unwrap().data, &[1, 3]);
+        // Wraps around the ring many times without losing order.
+        for i in 0..10u8 {
+            q.push_report(&report(&[1, i])).unwrap();
+            assert_eq!(q.pop_report().unwrap().as_report().data, &[1, i]);
+        }
+        assert_eq!(q.pop_report(), None);
+    }
+
+    #[test]
+    fn scan_queue_dropped_await_loses_no_report() {
+        let (count, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ad = mfr(TEST_COMPANY_ID, TEMP, 0, b"t0");
+        let mut s = AdvertisingSubscriber::<ScanQueue<4>, 1>::new(ScanQueue::new())
+            .with_filter(KeyFilter::Exact(TEMP))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        {
+            let fut = core::pin::pin!(s.recv(&mut buf));
+            assert!(fut.poll(&mut cx).is_pending());
+        } // the pending recv is dropped
+        s.scanner_mut().push_report(&report(&ad)).unwrap();
+        assert_eq!(wakes(&count), 1);
+        // Dropped again after the wake, before it was polled.
+        drop(s.recv(&mut buf));
+        assert_eq!(s.scanner().len(), 1, "the report is still queued");
+        let got = block_on(s.recv(&mut buf)).unwrap();
+        assert_eq!((got.key, got.payload), (TEMP, &b"t0"[..]));
+    }
+
+    #[test]
+    fn scan_queue_single_owner_pushes_in_place() {
+        // As the badge does: one owner pushes from its scan callback, then
+        // drains with try_recv.
+        let mut s = AdvertisingSubscriber::<ScanQueue, 2>::default()
+            .with_filter(KeyFilter::Exact(TEMP))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        for seq in 0..2 {
+            let ad = mfr(TEST_COMPANY_ID, TEMP, seq, b"x");
+            s.scanner_mut().push_report(&report(&ad)).unwrap();
+            s.scanner_mut().push_report(&report(&ad)).unwrap(); // repeat
+        }
+        let mut seqs = Vec::new();
+        while let Some(sample) = s.try_recv(&mut buf).unwrap() {
+            seqs.push(sample.meta.seq);
+        }
+        assert_eq!(seqs, std::vec![Some(0), Some(1)]);
+        assert!(s.scanner().is_empty());
+    }
+
+    /// A consumer that shares the queue through the caller's own lock (a
+    /// `RefCell` on one executor), locking only inside each poll.
+    struct Shared<'q>(&'q core::cell::RefCell<ScanQueue<4>>);
+
+    impl Scanner for Shared<'_> {
+        type Error = ScanQueueError;
+        async fn next_report<'b>(
+            &mut self,
+            buf: &'b mut [u8],
+        ) -> Result<ScanReport<'b>, ScanQueueError> {
+            let r = core::future::poll_fn(|cx| self.0.borrow_mut().poll_report(cx)).await;
+            r.copy_into(buf)
+        }
+        fn try_next_report<'b>(
+            &mut self,
+            buf: &'b mut [u8],
+        ) -> Result<Option<ScanReport<'b>>, ScanQueueError> {
+            let r = self.0.borrow_mut().pop_report();
+            r.map(|r| r.copy_into(buf)).transpose()
+        }
+    }
+
+    #[test]
+    fn scan_queue_splits_by_caller_lock() {
+        let (count, waker) = counting_waker();
+        let mut cx = Context::from_waker(&waker);
+        let queue = core::cell::RefCell::new(ScanQueue::<4>::new());
+        let mut s = AdvertisingSubscriber::<_, 1>::new(Shared(&queue))
+            .with_filter(KeyFilter::Exact(HUM))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        let mut fut = core::pin::pin!(s.recv(&mut buf));
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        // The producer side, e.g. a radio callback, while recv is pending.
+        let ad = mfr(TEST_COMPANY_ID, HUM, 4, b"55%");
+        queue.borrow_mut().push_report(&report(&ad)).unwrap();
+        assert_eq!(wakes(&count), 1);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(got)) => {
+                assert_eq!(
+                    (got.key, got.payload, got.meta.seq),
+                    (HUM, &b"55%"[..], Some(4))
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_and_filter_bounds_are_separate() {
+        // One learned key, three filters.
+        type S = AdvertisingSubscriber<FakeScanner, 1, MAX_KEY_LEN, DEFAULT_SENDERS, 3>;
+        let mut s = S::new(FakeScanner::new(Vec::new()));
+        for p in ["a", "b"] {
+            s.subscribe_key(KeyFilter::Prefix(Key::new(p).unwrap()))
+                .unwrap();
+        }
+        s.subscribe_key(KeyFilter::Exact(TEMP)).unwrap();
+        assert_eq!(s.filters().count(), 3);
+        assert_eq!(s.keys().capacity(), 1);
+        assert_eq!(
+            s.subscribe_key(KeyFilter::Prefix(Key::from_static("c"))),
+            Err(ShortIdError::Full),
+            "F bounds the filters"
+        );
+        s.unsubscribe_key(KeyFilter::Prefix(Key::from_static("a")));
+        assert_eq!(
+            s.subscribe_key(KeyFilter::Exact(HUM)),
+            Err(ShortIdError::Full),
+            "K bounds the learned keys"
+        );
+        assert_eq!(s.filters().count(), 2, "a failed subscribe changes nothing");
+        // Many keys, one filter.
+        type T = AdvertisingSubscriber<FakeScanner, 4, MAX_KEY_LEN, DEFAULT_SENDERS, 1>;
+        let mut t = T::new(FakeScanner::new(Vec::new()))
+            .with_filter(KeyFilter::Prefix(Key::from_static("sensor")))
+            .unwrap();
+        t.learn(TEMP).unwrap();
+        t.learn(HUM).unwrap();
+        assert_eq!(t.keys().len(), 2);
+        assert_eq!(
+            t.subscribe_key(KeyFilter::Exact(TEMP)),
+            Err(ShortIdError::Full)
+        );
+    }
+
+    #[test]
+    fn filters_are_owned() {
+        let mut s = Sub::<2>::new(FakeScanner::new(std::vec![mfr(
+            TEST_COMPANY_ID,
+            TEMP,
+            0,
+            b"t"
+        ),]));
+        {
+            // The caller's key text lives only in this scope.
+            let text = std::string::String::from("sensor/temperature");
+            s.subscribe_key(KeyFilter::Exact(Key::new(&text).unwrap()))
+                .unwrap();
+        }
+        let owned: KeyFilterBuf<16> = KeyFilter::Prefix(Key::from_static("sensor"))
+            .to_buf()
+            .unwrap();
+        s.subscribe_key(owned).unwrap();
+        assert_eq!(
+            s.filters().collect::<Vec<_>>(),
+            std::vec![
+                KeyFilter::Exact(TEMP),
+                KeyFilter::Prefix(Key::from_static("sensor"))
+            ]
+        );
+        let mut buf = [0u8; 64];
+        assert_eq!(block_on(s.recv(&mut buf)).unwrap().key, TEMP);
+        s.unsubscribe_key(owned);
+        assert_eq!(s.filters().count(), 1);
+        // A key longer than the L-byte slots is refused.
+        let mut short =
+            AdvertisingSubscriber::<FakeScanner, 1, 4>::new(FakeScanner::new(Vec::new()));
+        assert_eq!(
+            short.subscribe_key(KeyFilter::Prefix(TEMP)),
+            Err(ShortIdError::TooLong)
+        );
+    }
+
+    #[test]
+    fn subscribe_hands_out_filtered_view() {
+        let reports = std::vec![
+            mfr(TEST_COMPANY_ID, TEMP, 0, b"t0"),
+            mfr(TEST_COMPANY_ID, HUM, 0, b"h0"),
+            mfr(TEST_COMPANY_ID, HUM, 1, b"h1"),
+        ];
+        let mut s = exact::<2>(FakeScanner::new(reports), &[TEMP]);
+        let mut buf = [0u8; 64];
+        {
+            let mut view = block_on(s.subscribe(KeyFilter::Exact(HUM))).unwrap();
+            assert_eq!(view.filter(), KeyFilter::Exact(HUM));
+            let got = block_on(view.recv(&mut buf)).unwrap();
+            // The TEMP report was consumed and dropped by the HUM view.
+            assert_eq!((got.key, got.payload), (HUM, &b"h0"[..]));
+        }
+        assert!(s.keys().contains(HUM), "the view's exact key stays learned");
+        assert_eq!(
+            s.filters().collect::<Vec<_>>(),
+            std::vec![KeyFilter::Exact(TEMP)],
+            "the view's filter is not added to the subscriber"
+        );
+        // The subscriber's own filters do not select HUM.
+        assert_eq!(s.try_recv(&mut buf), Ok(None));
+        let mut s = Sub::<1>::new(FakeScanner::new(Vec::new()));
+        s.learn(TEMP).unwrap();
+        assert!(matches!(
+            block_on(s.subscribe(KeyFilter::Exact(HUM))),
+            Err(ShortIdError::Full)
+        ));
+        let mut view = s
+            .subscription(KeyFilter::Prefix(Key::from_static("sensor")))
+            .unwrap();
+        assert_eq!(view.try_recv(&mut buf), Ok(None));
+    }
+
+    #[derive(Default)]
+    struct DefaultScanner;
+
+    impl Scanner for DefaultScanner {
+        type Error = ();
+        async fn next_report<'b>(&mut self, _: &'b mut [u8]) -> Result<ScanReport<'b>, ()> {
+            Err(())
+        }
+        fn try_next_report<'b>(&mut self, _: &'b mut [u8]) -> Result<Option<ScanReport<'b>>, ()> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn defaults_and_const_builders() {
+        const TEMPLATE: AdvertisementBuilder<'static> =
+            AdvertisementBuilder::new().company_id(0x0059);
+        const PUB: AdvertisingPublisher<'static, FakeAdvertiser2> =
+            AdvertisingPublisher::new(FakeAdvertiser2, AdvertisementBuilder::new())
+                .with_template(TEMPLATE);
+        const SUB: AdvertisingSubscriber<ScanQueue<4>, 2> =
+            AdvertisingSubscriber::new(ScanQueue::new()).with_company_id(0x0059);
+        const TABLE: ShortIdTable<2> = ShortIdTable::new();
+        const QUEUE: ScanQueue<3> = ScanQueue::new();
+        assert_eq!(PUB.template().get_company_id(), 0x0059);
+        assert_eq!(PUB.sequence().get(), 0);
+        assert_eq!(SUB.company_id(), 0x0059);
+        assert!(SUB.keys().is_empty() && SUB.scanner().is_empty());
+        assert_eq!(TABLE, ShortIdTable::default());
+        assert_eq!((QUEUE.capacity(), QUEUE.len(), QUEUE.dropped()), (3, 0, 0));
+
+        let p = AdvertisingPublisher::<FakeAdvertiser>::default();
+        assert_eq!(*p.template(), AdvertisementBuilder::new());
+        assert_eq!(p.max_payload(), Some(MAX_ADVERT_PAYLOAD));
+        let s = AdvertisingSubscriber::<DefaultScanner, 2>::default();
+        assert_eq!(s.company_id(), TEST_COMPANY_ID);
+        assert_eq!(s.filters().count(), 0);
+        assert!(ScanQueue::<1>::default().is_empty());
+    }
+
+    /// A unit advertiser, constructible in `const` context.
+    struct FakeAdvertiser2;
+
+    impl Advertiser for FakeAdvertiser2 {
+        type Error = ();
+        async fn set_advertising_data(&mut self, _: &[u8]) -> Result<(), ()> {
+            Ok(())
+        }
     }
 }

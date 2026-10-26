@@ -12,12 +12,12 @@
 //! # Subscriptions
 //!
 //! A link is one point-to-point stream, so [`Subscriber`] on the link itself
-//! yields every publication whatever its key. [`SerialLink::filtered`]
-//! borrows the link as a [`Filtered`] subscriber that yields only keys
-//! matching a [`KeyFilter`] and discards the rest. The link does not
-//! implement [`Subscribe`](crate::transport::Subscribe): that trait hands out
-//! an owned subscriber with no lifetime, while every subscriber of a serial
-//! link must borrow the one stream it reads from.
+//! yields every publication whatever its key. [`Subscribe::subscribe`]
+//! borrows the link as a [`Filtered`] subscriber that keeps its own copy of
+//! the [`KeyFilter`] (a [`KeyFilterBuf`], no heap) and yields only matching
+//! keys, discarding the rest. The view borrows the one stream it reads from,
+//! so there is one subscriber at a time and the link cannot be used
+//! directly while it lives; drop it to publish or request again.
 //!
 //! # Cancel safety
 //!
@@ -43,9 +43,9 @@
 use super::frame::{
     self, FRAME_OVERHEAD, Frame, FrameError, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter,
 };
-use crate::key::{Key, KeyFilter, MAX_KEY_LEN};
+use crate::key::{Key, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
 use crate::transport::{
-    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, Subscriber,
+    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, Subscribe, Subscriber,
 };
 use core::future::Future;
 use core::pin::pin;
@@ -134,12 +134,6 @@ impl<IO> SerialLink<IO> {
     /// yet completed are discarded.
     pub fn into_inner(self) -> IO {
         self.io
-    }
-
-    /// Borrows the link as a subscriber that yields only publications whose
-    /// key matches `filter`; others are discarded.
-    pub fn filtered<'k>(&mut self, filter: KeyFilter<'k>) -> Filtered<'_, 'k, IO> {
-        Filtered { link: self, filter }
     }
 
     /// Feeds buffered bytes to the splitter until a delimited run that
@@ -361,33 +355,59 @@ impl<IO: Read + Write> Subscriber for SerialLink<IO> {
     }
 }
 
-/// A [`SerialLink`] borrowed as a subscriber to the keys matching a
-/// [`KeyFilter`]; made by [`SerialLink::filtered`]. Publications on other
-/// keys, and frames of other kinds, are read and discarded.
-pub struct Filtered<'l, 'k, IO> {
-    link: &'l mut SerialLink<IO>,
-    filter: KeyFilter<'k>,
-}
+impl<IO: Read + Write> Subscribe for SerialLink<IO> {
+    type Subscriber<'a>
+        = Filtered<'a, IO>
+    where
+        Self: 'a;
+    type Error = LinkError<IO::Error>;
 
-impl<IO> Filtered<'_, '_, IO> {
-    /// The filter this view applies.
-    pub fn filter(&self) -> KeyFilter<'_> {
-        self.filter
+    /// Borrows the link as a [`Filtered`] subscriber holding a copy of
+    /// `filter`. Never waits and never fails: every valid key fits the
+    /// view's [`MAX_KEY_LEN`]-byte filter buffer.
+    async fn subscribe<'a>(
+        &'a mut self,
+        filter: KeyFilter<'_>,
+    ) -> Result<Filtered<'a, IO>, Self::Error> {
+        // Unreachable error: a valid key is at most MAX_KEY_LEN bytes.
+        let filter = filter
+            .to_buf()
+            .map_err(|_| LinkError::Frame(FrameError::InvalidKey))?;
+        Ok(Filtered { link: self, filter })
     }
 }
 
-impl<IO: Read + Write> Subscriber for Filtered<'_, '_, IO> {
+/// A [`SerialLink`] borrowed as a subscriber to the keys matching a
+/// [`KeyFilter`]; made by [`Subscribe::subscribe`]. The filter is copied
+/// into the view, so it does not borrow the caller's key. Publications on
+/// other keys, and frames of other kinds, are read and discarded.
+pub struct Filtered<'l, IO> {
+    link: &'l mut SerialLink<IO>,
+    filter: KeyFilterBuf<MAX_KEY_LEN>,
+}
+
+impl<IO> Filtered<'_, IO> {
+    /// The filter this view applies.
+    pub fn filter(&self) -> KeyFilter<'_> {
+        self.filter.as_filter()
+    }
+}
+
+impl<IO: Read + Write> Subscriber for Filtered<'_, IO> {
     type Error = LinkError<IO::Error>;
 
     /// As [`SerialLink`]'s `recv`, skipping keys the filter rejects (they
     /// count towards [`MAX_SKIPPED_FRAMES`]).
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
-        self.link.recv_matching(Some(self.filter), buf).await
+        self.link
+            .recv_matching(Some(self.filter.as_filter()), buf)
+            .await
     }
 
     /// As [`SerialLink`]'s `try_recv`, skipping keys the filter rejects.
     fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
-        self.link.try_recv_matching(Some(self.filter), buf)
+        self.link
+            .try_recv_matching(Some(self.filter.as_filter()), buf)
     }
 }
 
@@ -744,13 +764,80 @@ mod tests {
             },
         ]);
         let mut link = SerialLink::new(Pipe::new(input));
-        let mut sub = link.filtered(KeyFilter::Prefix(Key::from_static("app")));
+        let mut sub = block_on(link.subscribe(KeyFilter::Prefix(Key::from_static("app")))).unwrap();
         let mut buf = [0u8; RECV_BUF_LEN];
         let s = block_on(sub.recv(&mut buf)).unwrap();
         assert_eq!((s.key, s.payload), (app_x, &b"yes"[..]));
         let s = sub.try_recv(&mut buf).unwrap().expect("app itself matches");
         assert_eq!(s.key.as_str(), "app");
         assert_eq!(sub.try_recv(&mut buf), Err(LinkError::Closed));
+    }
+
+    #[test]
+    fn c12_subscribe_borrows_the_link_and_owns_its_filter() {
+        let wanted = Key::from_static("sensor/t");
+        let input = wire(&[
+            Frame::Response {
+                id: 3,
+                result: Ok(b"skip"),
+            },
+            Frame::Publish {
+                key: Key::from_static("sensor/tx"),
+                payload: b"no",
+            },
+            Frame::Publish {
+                key: wanted,
+                payload: b"yes",
+            },
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let mut buf = [0u8; RECV_BUF_LEN];
+        {
+            // The filter's key text lives only in this block; the view keeps
+            // its own copy.
+            let text = std::string::String::from("sensor/t");
+            let filter = KeyFilter::Exact(Key::new(&text).unwrap());
+            let mut sub = block_on(link.subscribe(filter)).unwrap();
+            drop(text);
+            assert_eq!(sub.filter(), KeyFilter::Exact(wanted));
+            let s = block_on(sub.recv(&mut buf)).unwrap();
+            assert_eq!((s.key, s.payload), (wanted, &b"yes"[..]));
+        }
+        // The borrow ended with the view: the link is usable again.
+        block_on(link.publish(K, b"after")).unwrap();
+        assert_eq!(decode_all(&link.into_inner().output).len(), 1);
+    }
+
+    /// Generic code reaches the link through the trait alone.
+    async fn first_matching<S: Subscribe>(
+        transport: &mut S,
+        filter: KeyFilter<'_>,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        let mut sub = transport.subscribe(filter).await.ok()?;
+        sub.recv(buf).await.ok().map(|s| s.payload.len())
+    }
+
+    #[test]
+    fn c12_serial_link_is_usable_through_generic_subscribe() {
+        let input = wire(&[
+            Frame::Publish {
+                key: Key::from_static("b"),
+                payload: b"x",
+            },
+            Frame::Publish {
+                key: Key::from_static("a/1"),
+                payload: b"abc",
+            },
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let mut buf = [0u8; RECV_BUF_LEN];
+        let got = block_on(first_matching(
+            &mut link,
+            KeyFilter::Prefix(Key::from_static("a")),
+            &mut buf,
+        ));
+        assert_eq!(got, Some(3));
     }
 
     #[test]
@@ -807,6 +894,9 @@ mod tests {
             key,
             payload: &payload,
         };
-        assert_eq!(frame::encode_raw(&over, &mut raw), Err(FrameError::TooLarge));
+        assert_eq!(
+            frame::encode_raw(&over, &mut raw),
+            Err(FrameError::TooLarge)
+        );
     }
 }

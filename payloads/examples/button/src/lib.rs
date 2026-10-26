@@ -16,7 +16,7 @@
 //! during reset), and GPIO 8 is a free header pin for an external LED with
 //! a series resistor. Missing pins are logged and the payload keeps running.
 #![cfg_attr(not(test), no_std)]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use mw_payload::gpio::{Edge, Input, Output};
 use mw_payload::irq::{self, Event};

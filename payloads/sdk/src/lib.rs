@@ -97,9 +97,11 @@
 //!    without the `atomics` target feature, where there is exactly one
 //!    thread. This lets payload state live in a `static` `RefCell`.
 //! 4. The [`payload!`] macro, defined in `sys`, whose expansion carries
-//!    `#[unsafe(no_mangle)]` (with `#[allow(unsafe_code)]`) on the five
-//!    generated exports. `no_mangle` is an unsafe attribute only because of
-//!    symbol clashes; the names are the fixed ABI names.
+//!    `#[unsafe(no_mangle)]` on the five generated exports. `no_mangle` is
+//!    an unsafe attribute only because of symbol clashes; the names are the
+//!    fixed ABI names. The attribute is written in this crate and the
+//!    expansion has no `#[allow(unsafe_code)]`, so a payload crate may be
+//!    `#![forbid(unsafe_code)]` (requirement P5; see [`payload!`]).
 //!
 //! On non-wasm targets the imports are replaced by inert stubs (`log` does
 //! nothing, `now_ms` / `now_us` return 0, the rest return

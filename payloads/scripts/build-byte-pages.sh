@@ -14,12 +14,26 @@
 #
 # RUSTFLAGS replaces (not extends) the rustflags of .cargo/config.toml, and
 # only for the wasm32 target, so the host build scripts are unaffected.
+#
+# The build is reproducible: --remap-path-prefix rewrites the absolute paths
+# rustc would embed (panic locations, debug info) so the module does not
+# depend on where the repository, the cargo registry or the home directory
+# are. Later flags win when several match, so the most specific comes last:
+# $HOME -> /home, the cargo registry -> /cargo/registry, the middleware
+# repository (the payloads' parent, which holds the `middleware` crate the
+# SDK depends on) -> /mw. scripts/check-reproducible.sh verifies that two
+# builds from different directories are byte-identical.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MEMORY_BYTES="${MEMORY_BYTES:-16384}"
 STACK_BYTES="${STACK_BYTES:-4096}"
+REPO="$(cd .. && pwd -P)"
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
 RUSTFLAGS="-C link-arg=--page-size=1 \
 -C link-arg=-zstack-size=$STACK_BYTES \
 -C link-arg=--initial-memory=$MEMORY_BYTES \
--C link-arg=--max-memory=$MEMORY_BYTES" \
+-C link-arg=--max-memory=$MEMORY_BYTES \
+--remap-path-prefix=$HOME=/home \
+--remap-path-prefix=$CARGO_HOME_DIR/registry=/cargo/registry \
+--remap-path-prefix=$REPO=/mw" \
   cargo build --release --target-dir target/byte-pages "$@"

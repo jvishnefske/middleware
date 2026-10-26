@@ -17,7 +17,7 @@
 //!   skipped. After [`STALL_PERIODS`] such periods the completion is assumed
 //!   lost (event queue overflow) and the bus is recovered.
 #![cfg_attr(not(test), no_std)]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use mw_payload::irq::Event;
 use mw_payload::spi::{Mode, Spi, SpiConfig};

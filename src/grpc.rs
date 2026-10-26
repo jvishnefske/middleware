@@ -15,15 +15,23 @@
 //!   [`GrpcError::NotServiceMethod`] before anything is sent.
 //! * [`Publisher`](crate::Publisher) — a unary call to
 //!   `middleware.v1.Bus/Publish` with the key in the [`bus::KEY_HEADER`]
-//!   metadata entry and the payload as the body.
+//!   metadata entry, the client's id in [`bus::CLIENT_HEADER`] and the
+//!   payload as the body.
 //!
 //! * [`Subscribe`](crate::Subscribe) — opens the server-streaming
 //!   `middleware.v1.Bus/Subscribe` call for an exact or prefix
 //!   [`KeyFilter`](crate::KeyFilter) and returns a [`GrpcSubscriber`], which
 //!   implements [`Subscriber`](crate::Subscriber) (including a non-blocking
-//!   `try_recv`). The bus filters server side and does not identify
-//!   publishers, so samples carry no sender metadata and a client receives
-//!   its own publications on keys it subscribes to.
+//!   `try_recv`). The bus filters server side.
+//!
+//! Every [`GrpcTransport`] has a client id ([`GrpcTransport::client_id`], a
+//! [`SenderId`](crate::SenderId) unique per transport value unless set with
+//! [`GrpcTransport::with_client_id`]; clones share it). The bus stamps it on
+//! the transport's publications, so delivered samples carry it in
+//! [`SampleMeta::sender`](crate::SampleMeta::sender), and, as Zenoh does,
+//! does not deliver a transport's own publications to its subscribers;
+//! [`GrpcTransport::with_local_delivery`] opts back in. See [`bus`] for the
+//! wire format.
 //!
 //! [`Publisher::LIMITS`](crate::Publisher::LIMITS) is keys up to
 //! [`MAX_KEY_LEN`](crate::key::MAX_KEY_LEN) and payloads up to
@@ -77,8 +85,9 @@ use crate::transport::HandlerError;
 pub const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 
 /// Largest payload a publish carries: [`MAX_MESSAGE`] minus the stream
-/// item's length byte and a maximal key.
-pub const MAX_PAYLOAD: usize = MAX_MESSAGE - 1 - crate::key::MAX_KEY_LEN;
+/// item's framing ([`bus::ITEM_OVERHEAD`]: key length, sender length and
+/// sender) and a maximal key.
+pub const MAX_PAYLOAD: usize = MAX_MESSAGE - bus::ITEM_OVERHEAD - crate::key::MAX_KEY_LEN;
 
 /// The filter kind a [`GrpcSubscriber`] was opened with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,8 +123,8 @@ pub enum GrpcError {
     InvalidHeader,
     /// The server closed a subscription stream.
     StreamEnded,
-    /// A subscription stream item was not `[key_len][key][payload]` with a
-    /// valid key.
+    /// A subscription stream item was not
+    /// `[key_len][key][sender_len][sender][payload]` with a valid key.
     MalformedSample,
     /// Every sender feeding a [`GrpcResponder`] was dropped.
     Closed,

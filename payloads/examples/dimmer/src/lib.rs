@@ -17,7 +17,7 @@
 //! the simulator's I2C device sits at 0x50, so the sensor read reports a
 //! missing acknowledge.
 #![cfg_attr(not(test), no_std)]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use core::fmt::Write as _;
 

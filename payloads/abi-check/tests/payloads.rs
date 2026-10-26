@@ -251,3 +251,31 @@ fn abi1_examples_import_no_abi2_functions() {
         );
     }
 }
+
+// P5: payload crates can forbid unsafe code.
+
+const RUST_EXAMPLES: &[&str] = &[
+    "blink",
+    "echo",
+    "button",
+    "spi_loopback",
+    "uart_echo",
+    "dimmer",
+];
+
+#[test]
+fn p5_forbid_unsafe_code_examples_export_the_abi() {
+    for name in RUST_EXAMPLES {
+        let src = root().join("examples").join(name).join("src/lib.rs");
+        let text = std::fs::read_to_string(&src).expect("example source");
+        assert!(
+            text.contains("#![forbid(unsafe_code)]"),
+            "{name}: must stay #![forbid(unsafe_code)] (it proves payload! needs no allow)"
+        );
+        assert!(!text.contains("allow(unsafe_code)"), "{name}");
+        // It compiled under forbid, and `payload!` still produced every
+        // export.
+        let r = validate(&release(name));
+        assert!(has(&r.exports, ALL_EXPORTS), "{name}: {:?}", r.exports);
+    }
+}

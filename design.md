@@ -40,8 +40,8 @@ characteristic UUID and a 16-bit advertising id.
   `codec::postcard::tests::*`, `codec::prost::tests::*`.
 - [x] C8 Subscriptions take a `KeyFilter` (exact key, or a segment-wise
   prefix: `app` selects `app`, `app/x`, `app/x/y`, never `apple`); runtime
-  subscription is the `Subscribe` trait (Zenoh, gRPC bus); the serial link
-  borrows itself as a `Filtered` subscriber instead —
+  subscription is the `Subscribe` trait (Zenoh, gRPC bus, serial link,
+  ESP-NOW; see C12) —
   `key::tests::filters_match_exact_and_segment_prefixes`,
   `tests/zenoh.rs`: `z6_prefix_subscription_delivers_app_x_but_not_apple`;
   `tests/grpc.rs`: `g5_prefix_subscription_delivers_app_x_but_not_apple`;
@@ -54,7 +54,9 @@ characteristic UUID and a 16-bit advertising id.
   `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`;
   `typed::tests::typed_try_recv_is_none_then_decodes_with_meta`;
   `serial::link::tests::try_recv_is_none_when_empty_and_some_without_waiting`
-  and `g5_try_recv_is_none_when_empty_and_some_without_waiting` (no meta).
+  (no meta); `g5_try_recv_is_none_when_empty_and_some_without_waiting` and
+  `g8_samples_carry_the_publisher_and_self_delivery_is_refused` (sender
+  only, see G8).
 - [x] C10 Every subscriber has a non-blocking `try_recv` (`None` when
   nothing is queued, the sample otherwise, without awaiting), and every
   async method is cancel safe as stated in `transport`: a `recv` dropped
@@ -72,7 +74,17 @@ characteristic UUID and a 16-bit advertising id.
   (128-byte key + 891-byte payload fill one 1024-byte frame),
   `zenoh::tests::filters_map_to_key_expressions` (1 GiB − 1 KiB),
   `g7_limits_fit_tonic_default_message_size`,
-  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 129).
+  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 138).
+- [x] C12 Single-stream transports implement `Subscribe` with a subscriber
+  that borrows the transport (`Subscriber<'a>`) and owns a copy of its
+  filter (`KeyFilterBuf`, no heap), so the caller's key need not outlive
+  it and the transport is usable again once the subscriber is dropped:
+  the serial link (`serial::link::Filtered`, replacing
+  `SerialLink::filtered`) and ESP-NOW (`espnow::EspNowSubscriber`, N13) —
+  `serial::link::tests::c12_subscribe_borrows_the_link_and_owns_its_filter`,
+  `serial::link::tests::c12_serial_link_is_usable_through_generic_subscribe`,
+  `serial::link::tests::filtered_prefix_delivers_app_x_but_not_apple`,
+  `espnow::tests::n13_transport_is_usable_through_generic_subscribe`.
 
 ### Feature isolation
 
@@ -165,6 +177,28 @@ characteristic UUID and a 16-bit advertising id.
   means accepted or queued, not on air, and a refusal does not advance the
   sequence; the publisher exposes the binding through `advertiser()` —
   `ble::advert::tests::queueing_advertiser_accepts_or_refuses`, `publisher_limits_match_the_template`.
+- [x] A10 `AdvertisingSubscriber` bounds its learned keys (`K`) and its
+  filters (`F`, default `K`) separately, and stores filters as owned
+  `KeyFilterBuf`s, so a `KeyFilter` over a short-lived key or an owned
+  `KeyFilterBuf` can be added and read back with `filters()` —
+  `ble::advert::tests::key_and_filter_bounds_are_separate`, `filters_are_owned`.
+- [x] A11 `ScanQueue` is a bounded, no-heap queue of scan reports: a radio
+  callback pushes in place with `push_report(&mut self)` (newest wins when
+  full, oversized data refused, both counted), a waiting `next_report` is
+  woken by the push, and `try_next_report` pops without waiting —
+  `ble::advert::tests::scan_queue_wakes_waiting_consumer`, `scan_queue_is_bounded_and_counts_drops`, `scan_queue_single_owner_pushes_in_place`.
+- [x] A12 Receiving over a `ScanQueue` is cancel-safe: a dropped `recv` or
+  `next_report` loses no report; producer and consumer can be split by the
+  caller's own lock through `poll_report` —
+  `ble::advert::tests::scan_queue_dropped_await_loses_no_report`, `scan_queue_splits_by_caller_lock`.
+- [x] A13 `AdvertisingSubscriber` implements `Subscribe`: each subscription
+  is a view borrowing the subscriber that delivers only its own filter's
+  keys, without adding the filter to the subscriber —
+  `ble::advert::tests::subscribe_hands_out_filtered_view`.
+- [x] A14 The advertising publisher, subscriber, `ShortIdTable` and
+  `ScanQueue` have `const fn` constructors and builders usable in `const`
+  and `static` initialisers, and `Default` impls —
+  `ble::advert::tests::defaults_and_const_builders`.
 
 ### ESP-NOW (`espnow`)
 
@@ -208,6 +242,20 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `espnow::tests::n11_end_to_end_publish_to_subscribe`.
 - [x] N12 `espnow` and `espnow,postcard` build for `thumbv6m-none-eabi`
   without `std` or cloud dependencies — `scripts/check-features.sh`.
+- [x] N13 `EspNowTransport` implements `Subscribe`: the `EspNowSubscriber`
+  borrows the transport, owns its filter (a key over 64 bytes is refused
+  with `KeyTooLong`) and selects with it instead of the filter slots, with
+  own-address skipping and dedup unchanged; a kept sample stays kept until
+  a receive whose filters select it —
+  `espnow::tests::n13_subscribe_borrows_the_transport_with_its_own_filter`,
+  `n13_transport_is_usable_through_generic_subscribe`,
+  `n13_kept_sample_waits_for_a_receive_that_selects_it`.
+- [x] N14 The kept-frame buffer is a const generic `P` (default
+  `MAX_FRAME`, behaviour unchanged); `P = 0` shrinks the kept slot from
+  258 to 8 bytes and a sample that does not fit the caller's buffer is
+  then dropped rather than kept; `P > MAX_FRAME` does not compile —
+  `espnow::tests::n14_keeping_is_optional_and_saves_a_frame_of_ram`,
+  `n8_buffer_too_small_keeps_the_sample` (default `P`).
 
 ### Zenoh (`zenoh`)
 
@@ -256,7 +304,8 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   every `tests/grpc.rs` test binds `127.0.0.1:0`; `g4_responder_reports_closed_when_server_side_dropped`.
 - [x] G5 `Subscribe` opens the bus stream for an exact or prefix filter
   (`mw-filter` metadata); the server filters with `KeyFilter::matches` and
-  each stream item carries its key (`[key_len][key][payload]`); `try_recv`
+  each stream item carries its key (`[key_len][key][payload]`, plus the
+  sender for named clients, G8); `try_recv`
   polls the stream once without waiting —
   `g5_try_recv_is_none_when_empty_and_some_without_waiting`,
   `g5_prefix_subscription_delivers_app_x_but_not_apple`,
@@ -267,6 +316,26 @@ u8 | key length u8 | key | payload, at most 250 bytes.
 - [x] G7 `LIMITS` keep a publish body and its stream item within tonic's
   default 4 MiB message size — `g7_limits_fit_tonic_default_message_size`,
   `g7_payload_at_limit_round_trips_through_subscription`.
+- [x] G8 Every `GrpcTransport` has a client id (`SenderId`, fresh per
+  transport, settable with `with_client_id`, shared by clones) sent as
+  `mw-client` metadata (16 hex digits) on publish and subscribe; the bus
+  stamps it on the sample so delivered samples carry it in
+  `SampleMeta.sender`, and, like Zenoh's `allowed_origin(Remote)`, does
+  not deliver a client's own publications unless it subscribes with
+  `mw-self: deliver` (`with_local_delivery(true)`); a malformed id or
+  `mw-self` value is `INVALID_ARGUMENT` —
+  `tests/grpc.rs`: `g8_samples_carry_the_publisher_and_self_delivery_is_refused`,
+  `g8_local_delivery_and_shared_ids_follow_the_client_id`;
+  `grpc::bus::tests::g8_bus_refuses_self_delivery_and_fills_the_sender`,
+  `grpc::bus::tests::g8_client_ids_round_trip_as_hex_and_bad_ones_are_refused`,
+  `grpc::client::tests::g8_fresh_client_ids_differ_and_ids_can_be_set`.
+- [x] G9 Subscribers that send no `mw-client` (0.2 clients) keep the
+  `[key_len][key][payload]` item format and receive every matching sample;
+  named subscribers get `[key_len][key][sender_len][sender][payload]`, so
+  `MAX_PAYLOAD` is 4 MiB − 138 —
+  `grpc::bus::tests::g8_bus_refuses_self_delivery_and_fills_the_sender`
+  (legacy stream), `grpc::bus::tests::g8_items_with_sender_round_trip_and_reject_garbage`,
+  `g7_limits_fit_tonic_default_message_size`.
 
 ### Istio (`istio`)
 
@@ -345,6 +414,17 @@ because WASM linear memory and the wasmi interpreter require one.
   stores payloads but cannot run them).
 - [x] W7 The desktop simulator runs a payload against a fake device —
   `tools/payload-sim/tests/sim.rs`: `w7_runs_payload_against_fake_device_in_virtual_time`, `w7_real_time_ticks`, `w7_reports_traps_and_load_errors`.
+- [x] W8 When `init` traps, `Payload::load` returns `LoadError::Init { trap,
+  log }` with the log lines `init` emitted before the trap, bounded to the
+  last `INIT_LOG_LINES` (8) lines of at most `MAX_LOG` bytes, with a count
+  of dropped earlier lines; the lines still reach `Device::log`, and the
+  error's `Display` includes them. `payload-sim` prints them before the
+  error —
+  `wasm-host/tests/runtime.rs`: `w8_init_trap_returns_the_lines_logged_before_it`, `w8_init_log_is_bounded_to_the_last_lines`, `w8_init_lines_still_reach_the_device`; `error::tests::init_log_keeps_the_most_recent_lines`, `error::tests::init_error_display_includes_the_log`; `link::tests::log_is_recorded_while_init_runs`, `link::tests::log_rejects_bad_pointer`; `tools/payload-sim/tests/sim.rs`: `w8_prints_init_log_before_the_init_trap`.
+- [x] W9 `Payload::tick` returns `Result<Ticked, Trap>` reporting whether
+  the `tick` export ran: `Ran`, `NotDue`, `Disabled` (no period set) or
+  `NoTickExport`; the decision is the pure `abi::tick_decision` —
+  `abi::tests::w9_tick_decision_reports_why_nothing_ran`; `wasm-host/tests/runtime.rs`: `w9_tick_reports_whether_it_ran`, `w2_tick_runs_on_requested_period`, `w2_set_tick_zero_disables_and_tick_without_schedule_is_noop`.
 
 ### Payload SDK (`payloads/`)
 
@@ -364,6 +444,18 @@ because WASM linear memory and the wasmi interpreter require one.
 - [x] P3 WAT and AssemblyScript templates exercise the same ABI and run in
   the simulator —
   `abi-check` tests `wat_*`; `payloads/scripts/check-all.sh` compiles the AssemblyScript templates and validates them; both AS payloads run in `payload-sim`.
+- [x] P5 `mw_payload::payload!` works in a payload crate with
+  `#![forbid(unsafe_code)]`: the expansion carries no `#[allow(unsafe_code)]`
+  and its `#[unsafe(no_mangle)]` attributes are SDK tokens, which the lint
+  does not report in the user crate. Every Rust example is
+  `#![forbid(unsafe_code)]` and still exports `init`, `tick`, `mw_alloc`,
+  `on_message` and `on_irq` —
+  `abi-check` test `p5_forbid_unsafe_code_examples_export_the_abi` (run by `check-all.sh` after the release build).
+- [x] P6 The byte-page payload build is reproducible: `build-byte-pages.sh`
+  remaps the home directory, the cargo registry and the repository with
+  `--remap-path-prefix`, and builds from two different directories are
+  byte-identical —
+  `payloads/scripts/check-reproducible.sh` (blink and echo, run by `check-all.sh`).
 
 ### ESP base firmware (`firmware/`)
 
@@ -585,10 +677,10 @@ complete immediately. None of these raise events.
   target that implements ABI 3 on hardware) —
   `cargo build -p wasm-host --target thumbv7em-none-eabihf`.
 
-## Known limitations (0.2)
+## Known limitations (0.3)
 
 - **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.
-- **`Subscribe` hands out owned subscribers.** Single-stream transports (serial, one GATT connection, one scanner, one ESP-NOW radio) therefore offer runtime filters (`filtered`, `subscribe_key`, `add_filter`) instead of `Subscribe`. A lifetime-carrying associated type would lift this.
-- **There is no owned key type.** Runtime filters borrow their key, or backends store key text in fixed slots.
-- **The gRPC bus has no publisher identity,** so it carries no sender metadata and delivers a client's own publications back to it.
-- **`SampleMeta.seq` is 8 bits.** That is enough for deduplicating repeats, but not for ordering long streams.
+- **One borrowed subscriber at a time on single-stream transports.** Since 0.3 `Subscribe::Subscriber<'a>` may borrow the transport (serial C12, ESP-NOW N13, BLE advertising A13), so only one such view exists at once; independent concurrent subscriptions still need a multiplexing transport (Zenoh, gRPC bus) or the runtime filter slots. The GATT client (`BleClient`) does not implement `Subscribe` yet.
+- **`SampleMeta.seq` is 8 bits** (documented on the field): it distinguishes repeats inside a dedup window, not order in a long stream; compare it with wrapping arithmetic.
+
+Lifted in 0.3: owned keys (`KeyBuf<N>`, `KeyFilterBuf<N>`), runtime `Subscribe` on single-stream transports, and publisher identity on the gRPC bus (G8).

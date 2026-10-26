@@ -39,8 +39,13 @@
 //!   queued, or when the next due time is past `--until-ms`. Output is
 //!   deterministic.
 //!
-//! Exit status: 0 on success, 1 on bad arguments or a rejected module, 2 if
-//! the payload trapped.
+//! If `init` traps, the lines it logged before the trap are printed as
+//! `[     0 ms] log <line>` (from the runtime's bounded
+//! [`InitLog`](wasm_host::InitLog)), followed by `load failed: ...` on
+//! stderr.
+//!
+//! Exit status: 0 on success, 1 on bad arguments or a rejected module
+//! (including a trapping `init`), 2 if the payload trapped later.
 //!
 //! [`sim`] holds the pure parts; this file is the I/O shell.
 
@@ -52,7 +57,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use middleware::wasm_abi::events::MAX_EVENTS;
-use wasm_host::{Payload, Trap};
+use wasm_host::{LoadError, Payload, Trap};
 
 use sim::{Options, SimDevice};
 
@@ -129,12 +134,36 @@ fn deliver(p: &mut Sim, line: &str) -> Result<(), Trap> {
     result
 }
 
-/// Fires the tick due at `now_us`.
+/// Fires the tick due at `now_us`. The callers only call it when a tick is
+/// due, so whether it ran ([`wasm_host::Ticked`]) is not reported.
 fn tick(p: &mut Sim, now_us: u64) -> Result<(), Trap> {
     p.device().advance_to(now_us);
-    let result = p.tick((now_us / 1000) as u32);
+    let result = p.tick((now_us / 1000) as u32).map(|_| ());
     flush(p);
     result
+}
+
+/// Reports a rejected module: for a trapping `init`, first the lines it
+/// logged (in the device's `log` format, at time 0), then the error.
+fn report_load_error(e: &LoadError) {
+    let mut out = std::io::stdout().lock();
+    if let LoadError::Init { trap, log } = e {
+        if log.dropped() > 0 {
+            let _ = writeln!(
+                out,
+                "[{:>6} ms] ({} earlier log lines dropped)",
+                0,
+                log.dropped()
+            );
+        }
+        for line in log.lines() {
+            let _ = writeln!(out, "[{:>6} ms] log {line}", 0);
+        }
+        let _ = out.flush();
+        eprintln!("load failed: init failed: {trap}");
+    } else {
+        eprintln!("load failed: {e}");
+    }
 }
 
 /// Signed milliseconds from `now` until `due` on the wrapping clock.
@@ -250,7 +279,7 @@ fn run(opts: &Options) -> Result<(), ExitCode> {
     })?;
     let device = SimDevice::new(opts.spi_pattern.clone());
     let mut p = Payload::load(&wasm, device, opts.limits).map_err(|e| {
-        eprintln!("load failed: {e}");
+        report_load_error(&e);
         ExitCode::from(1)
     })?;
     flush(&mut p);

@@ -4,7 +4,7 @@
 //! the same bytes on [`OUT_KEY`] and logs `echo: <payload>` (or
 //! `echo: <N bytes>` for non-UTF-8 data).
 #![no_std]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use mw_payload::{LogLine, Payload, Slot};
 

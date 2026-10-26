@@ -14,9 +14,12 @@
 //! * [`advert`] — connectionless messaging: an advertising data builder and
 //!   zero-copy parser, the [`Advertiser`] and [`Scanner`] radio traits,
 //!   [`AdvertisingPublisher`] / [`AdvertisingSubscriber`] carrying
-//!   `[short id][sequence][payload]` in manufacturer data, the
-//!   [`ShortIdTable`] that resolves short ids back to key text, and
-//!   [`discover`](advert::discover) for finding middleware nodes.
+//!   `[short id][sequence][payload]` in manufacturer data (the subscriber
+//!   also implements [`Subscribe`](crate::Subscribe), handing out filtered
+//!   [`AdvertisingSubscription`] views), the [`ShortIdTable`] that resolves
+//!   short ids back to key text, the waker-based [`ScanQueue`] a radio
+//!   callback fills, and [`discover`](advert::discover) for finding
+//!   middleware nodes.
 //!
 //! The radio itself is reached only through these small traits, so the same
 //! logic runs over trouble-host or nrf-softdevice on a microcontroller, or a
@@ -29,7 +32,8 @@ pub mod gatt;
 pub mod uuid;
 
 pub use advert::{
-    AdvertisementBuilder, Advertiser, AdvertisingPublisher, AdvertisingSubscriber, Scanner,
+    AdvertisementBuilder, Advertiser, AdvertisingPublisher, AdvertisingSubscriber,
+    AdvertisingSubscription, Pushed, QueuedReport, ScanQueue, ScanQueueError, Scanner,
     ShortIdError, ShortIdTable,
 };
 pub use gatt::{BleClient, BleError, BleServer, GattClient, GattServer, Inbound};

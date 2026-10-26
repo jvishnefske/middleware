@@ -268,6 +268,25 @@ unsafe impl<T> Sync for GuestCell<T> {}
 /// each export to the safe functions in [`rt`](crate::rt). The five function
 /// exports carry `#[unsafe(no_mangle)]` so the linker emits the fixed ABI
 /// names.
+///
+/// # `#![forbid(unsafe_code)]` in the payload crate
+///
+/// The macro works in a crate with `#![forbid(unsafe_code)]` (requirement
+/// P5), and the example payloads all use it. The expansion contains no
+/// `#[allow(unsafe_code)]`, which `forbid` would reject (E0453). The
+/// `#[unsafe(no_mangle)]` tokens are written here, in this crate, so they
+/// carry this crate's spans; rustc does not report the `unsafe_code` lint
+/// for code that originates in another crate's macro, so the payload crate
+/// needs no `allow` and keeps its `forbid` in force for the code its author
+/// writes.
+///
+/// Why the exports are not plain functions in this crate: an export has
+/// to call the payload's type, which is defined downstream. Stable Rust has
+/// no safe way for an upstream crate to call into a downstream one except
+/// through a symbol the downstream crate defines (itself a `no_mangle`
+/// item) or generics, which cannot be exported. The macro therefore keeps
+/// the five exports as one-line forwarders into the generic, safe
+/// [`rt`](crate::rt) functions, and everything else lives in this crate.
 #[macro_export]
 macro_rules! payload {
     ($ty:ty) => {
@@ -277,31 +296,26 @@ macro_rules! payload {
             static RX: $crate::GuestCell<[u8; $crate::MAX_MESSAGE]> =
                 $crate::GuestCell::new([0; $crate::MAX_MESSAGE]);
 
-            #[allow(unsafe_code)]
             #[unsafe(no_mangle)]
             pub extern "C" fn init() {
                 $crate::rt::init::<$ty>(&STATE);
             }
 
-            #[allow(unsafe_code)]
             #[unsafe(no_mangle)]
             pub extern "C" fn tick(now_ms: i32) {
                 $crate::rt::tick::<$ty>(&STATE, now_ms);
             }
 
-            #[allow(unsafe_code)]
             #[unsafe(no_mangle)]
             pub extern "C" fn mw_alloc(len: i32) -> i32 {
                 $crate::rt::alloc(&RX, len)
             }
 
-            #[allow(unsafe_code)]
             #[unsafe(no_mangle)]
             pub extern "C" fn on_message(slot: i32, ptr: i32, len: i32) {
                 $crate::rt::on_message::<$ty>(&STATE, &RX, slot, ptr, len);
             }
 
-            #[allow(unsafe_code)]
             #[unsafe(no_mangle)]
             pub extern "C" fn on_irq(kind: i32, source: i32, value: i32, time_us: i32) {
                 $crate::rt::on_irq::<$ty>(&STATE, kind, source, value, time_us);

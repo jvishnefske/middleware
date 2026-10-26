@@ -12,10 +12,13 @@
 //!    signature, `memory` must be exported and start within
 //!    [`Limits::max_memory_bytes`], and the optional exports `init`, `tick`,
 //!    `mw_alloc` and `on_message` must have their ABI signatures. It then
-//!    instantiates the module and calls `init` if exported.
+//!    instantiates the module and calls `init` if exported. If `init` traps,
+//!    the error, [`LoadError::Init`], carries an [`InitLog`] with the last
+//!    [`INIT_LOG_LINES`] lines `init` logged before the trap (W8).
 //! 2. The firmware loop asks [`Payload::next_tick`] when the next `tick` is
 //!    due (an absolute `now_ms`, wrapping) and calls [`Payload::tick`]; the
-//!    payload chooses the period with `set_tick` (W2).
+//!    payload chooses the period with `set_tick` (W2). `tick` reports with
+//!    [`Ticked`] whether the export actually ran (W9).
 //! 3. Messages for subscribed keys go through [`Payload::deliver`], which
 //!    matches the key exactly, copies the data into a buffer from
 //!    `mw_alloc`, and calls `on_message(slot, ptr, len)` (W2). `mw_alloc`
@@ -93,7 +96,7 @@ use wasmi::{
     ValType,
 };
 
-pub use error::{LoadError, Trap};
+pub use error::{INIT_LOG_LINES, InitLog, LoadError, Trap};
 pub use middleware::wasm_abi::events::{DmaChannel, Event, EventKind};
 pub use middleware::wasm_abi::periph::{
     Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
@@ -296,6 +299,22 @@ impl Default for Limits {
     }
 }
 
+/// What [`Payload::tick`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ticked {
+    /// A tick was due: the schedule advanced and the `tick` export ran
+    /// (and returned).
+    Ran,
+    /// A tick is scheduled but not yet due at the given `now_ms`; nothing
+    /// ran.
+    NotDue,
+    /// The module exports `tick` but no period is set (`set_tick` was never
+    /// called, or was called with 0); nothing ran.
+    Disabled,
+    /// The module does not export `tick`, so it can never run.
+    NoTickExport,
+}
+
 /// A loaded, running payload bound to a device.
 ///
 /// `D: 'static` is required because wasmi stores host closures and the
@@ -366,6 +385,12 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
 
 impl<D: Device + 'static> Payload<D> {
     /// Validates and instantiates `wasm`, then calls `init` if exported.
+    ///
+    /// While `init` runs, its log lines are forwarded to [`Device::log`] and
+    /// also kept in a bounded [`InitLog`] (the last [`INIT_LOG_LINES`]). If
+    /// `init` traps, the device is dropped and the error is
+    /// [`LoadError::Init`] carrying the trap and that log, so the caller can
+    /// show why `init` failed. On success the log is discarded.
     pub fn load(wasm: &[u8], device: D, limits: Limits) -> Result<Self, LoadError> {
         let mut config = Config::default();
         config.consume_fuel(true).wasm_custom_page_sizes(true);
@@ -383,6 +408,7 @@ impl<D: Device + 'static> Payload<D> {
                 .instances(1)
                 .build(),
             scratch: Vec::new(),
+            init_log: None,
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -399,9 +425,13 @@ impl<D: Device + 'static> Payload<D> {
             poisoned: false,
         };
         if exports.init {
-            payload
-                .call::<(), ()>(wasm_abi::exports::INIT, ())
-                .map_err(LoadError::Init)?;
+            payload.store.data_mut().init_log = Some(InitLog::new());
+            let result = payload.call::<(), ()>(wasm_abi::exports::INIT, ());
+            let log = payload.store.data_mut().init_log.take();
+            result.map_err(|trap| LoadError::Init {
+                trap,
+                log: log.unwrap_or_default(),
+            })?;
         }
         Ok(payload)
     }
@@ -440,18 +470,25 @@ impl<D: Device + 'static> Payload<D> {
     }
 
     /// Calls `tick(now_ms)` if a tick is due at `now_ms`, after advancing the
-    /// schedule by one period (missed periods are skipped). Does nothing when
-    /// no tick is due. A `set_tick` inside the callback replaces the schedule.
-    pub fn tick(&mut self, now_ms: u32) -> Result<(), Trap> {
+    /// schedule by one period (missed periods are skipped), and returns
+    /// [`Ticked::Ran`]. When nothing runs it returns why:
+    /// [`Ticked::NotDue`], [`Ticked::Disabled`] (no period set) or
+    /// [`Ticked::NoTickExport`]. A `set_tick` inside the callback replaces
+    /// the schedule.
+    ///
+    /// Errors: the trap of the `tick` call (which poisons the payload), or
+    /// [`Trap::Poisoned`] after an earlier trap.
+    pub fn tick(&mut self, now_ms: u32) -> Result<Ticked, Trap> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
         let state = self.store.data_mut();
-        match state.schedule {
-            Some(s) if s.is_due(now_ms) => state.schedule = Some(s.advance(now_ms)),
-            _ => return Ok(()),
+        match abi::tick_decision(state.exports.tick, state.schedule, now_ms) {
+            (Ticked::Ran, next) => state.schedule = next,
+            (other, _) => return Ok(other),
         }
         self.call::<i32, ()>(wasm_abi::exports::TICK, now_ms as i32)
+            .map(|()| Ticked::Ran)
     }
 
     /// Delivers a message. Returns `Ok(true)` if `key` exactly matches a
