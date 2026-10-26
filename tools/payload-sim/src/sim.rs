@@ -12,6 +12,12 @@
 //! completions are deferred: a transfer started during one loop iteration
 //! raises its `DmaDone` when the shell calls [`SimDevice::complete_dma`] at
 //! the start of the next.
+//!
+//! The ABI 3 peripherals (requirement X7) are synchronous and raise no
+//! events: PWM records each channel's duty (printed as an event line), ADC
+//! pins read values set by
+//! `!adc` commands, and each I2C bus carries a register device at
+//! [`periph::I2C_DEVICE_ADDR`].
 
 pub mod periph;
 
@@ -20,11 +26,11 @@ use std::fmt::Write as _;
 use middleware::Key;
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, EventKind, Limits, Pull, SpiConfig, TimerSpec,
-    UartConfig,
+    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
+    SpiConfig, TimerSpec, UartConfig,
 };
 
-use periph::{Spi, Timers, Uart};
+use periph::{Adc, I2c, Pwm, Spi, Timers, Uart};
 
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +54,8 @@ pub struct Options {
 pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
                          [--until-ms T] [--spi-pattern HEX]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
-`!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal";
+`!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
+`!adc <pin> <0..4095>` sets an analog input";
 
 /// Parses the arguments after the program name.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
@@ -117,6 +124,13 @@ pub enum Command {
     },
     /// `!uart <text>`: bytes arriving on UART1.
     Uart(Vec<u8>),
+    /// `!adc <pin> <value>`: the value an analog pin reads.
+    Adc {
+        /// Pin number.
+        pin: u8,
+        /// Raw reading, `0..=ADC_MAX`.
+        value: u16,
+    },
 }
 
 /// Parses a command line; `Ok(None)` when the line is not a command.
@@ -142,6 +156,18 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, String> {
             Ok(Some(Command::Gpio {
                 pin: number(pin)?,
                 high,
+            }))
+        }
+        "adc" => {
+            let usage = "!adc needs <pin> <0..4095>";
+            let mut it = args.split_whitespace();
+            let (pin, value) = (it.next().ok_or(usage)?, it.next().ok_or(usage)?);
+            if it.next().is_some() {
+                return Err(usage.to_string());
+            }
+            Ok(Some(Command::Adc {
+                pin: number(pin)?,
+                value: number(value)?,
             }))
         }
         "uart" if !args.is_empty() => Ok(Some(Command::Uart(args.as_bytes().to_vec()))),
@@ -182,7 +208,11 @@ enum Mode {
 }
 
 /// Number of simulated GPIO pins; higher pins are `Unsupported`.
-pub const PINS: usize = 48;
+///
+/// 144 covers every board the payloads target: the ESP32 parts (up to 48
+/// GPIOs) and STM32F4 boards numbered `port * 16 + n` for ports A–I
+/// (PE0 = 64, PI15 = 143).
+pub const PINS: usize = 144;
 
 /// In-memory board. The shell moves the clock with
 /// [`SimDevice::advance_to`] before each call and drains
@@ -199,6 +229,9 @@ pub struct SimDevice {
     timers: Timers,
     spi: Spi,
     uart: Uart,
+    pwm: Pwm,
+    adc: Adc,
+    i2c: I2c,
 }
 
 impl Default for SimDevice {
@@ -221,6 +254,9 @@ impl SimDevice {
             timers: Timers::default(),
             spi: Spi::new(spi_pattern),
             uart: Uart::default(),
+            pwm: Pwm::default(),
+            adc: Adc::default(),
+            i2c: I2c::default(),
         }
     }
 
@@ -262,7 +298,8 @@ impl SimDevice {
 
     /// Applies a stdin command: `!gpio` drives an input and raises an edge
     /// event when it matches the pin's interrupt setting; `!uart` buffers
-    /// received bytes and raises a `UartRx` event.
+    /// received bytes and raises a `UartRx` event; `!adc` sets the value an
+    /// analog pin reads.
     pub fn apply(&mut self, command: Command) -> Result<(), String> {
         match command {
             Command::Gpio { pin, high } => {
@@ -289,6 +326,11 @@ impl SimDevice {
                 let event = self.uart.receive(&bytes, self.now_us as u32)?;
                 self.event(format!("uart1 rx {}", render(&bytes)));
                 self.queue.push(event);
+                Ok(())
+            }
+            Command::Adc { pin, value } => {
+                self.adc.set(pin, value)?;
+                self.event(format!("adc {pin} <- {value}"));
                 Ok(())
             }
         }
@@ -454,6 +496,58 @@ impl Device for SimDevice {
     fn uart_read(&mut self, port: u8, out: &mut [u8]) -> Result<usize, AbiError> {
         self.uart.read(port, out)
     }
+
+    fn pwm_open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
+        self.pwm.open(spec)?;
+        self.event(format!("pwm{} open {} Hz", spec.timer, spec.freq_hz));
+        Ok(())
+    }
+
+    fn pwm_set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
+        self.pwm.set(timer, channel, duty)?;
+        self.event(format!("pwm{timer}.{channel} duty {duty}"));
+        Ok(())
+    }
+
+    fn pwm_stop(&mut self, timer: u8) -> Result<(), AbiError> {
+        self.pwm.stop(timer)?;
+        self.event(format!("pwm{timer} stop"));
+        Ok(())
+    }
+
+    /// Reads are silent (a payload may poll every tick).
+    fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
+        self.adc.read(pin)
+    }
+
+    fn i2c_open(&mut self, cfg: I2cConfig) -> Result<(), AbiError> {
+        self.i2c.open(cfg)?;
+        self.event(format!("i2c{} open {} Hz", cfg.bus, cfg.freq_hz));
+        Ok(())
+    }
+
+    fn i2c_transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
+        let result = self.i2c.transfer(bus, addr, tx, rx);
+        let shown = |b: &[u8]| {
+            if b.is_empty() {
+                "-".to_string()
+            } else {
+                render(b)
+            }
+        };
+        let outcome = match result {
+            Ok(()) => format!("r {}", shown(rx)),
+            Err(e) => format!("{e:?}"),
+        };
+        self.event(format!("i2c{bus} {addr:#04x} w {} {outcome}", shown(tx)));
+        result
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +598,16 @@ mod tests {
         assert!(parse_command("!gpio 4").is_err());
         assert!(parse_command("!gpio x 1").is_err());
         assert!(parse_command("!uart").is_err());
+        assert_eq!(
+            parse_command("!adc 3 1234"),
+            Ok(Some(Command::Adc {
+                pin: 3,
+                value: 1234
+            }))
+        );
+        assert!(parse_command("!adc 3").is_err());
+        assert!(parse_command("!adc 3 4 5").is_err());
+        assert!(parse_command("!adc 3 x").is_err());
         assert!(parse_command("!nope").is_err());
     }
 
@@ -614,5 +718,46 @@ mod tests {
         assert_eq!(d.gpio_output(200), Err(AbiError::Unsupported));
         assert_eq!(d.events.len(), 3);
         assert!(d.events[1].ends_with("gpio 2 = high"));
+    }
+
+    #[test]
+    fn abi3_peripherals() {
+        let mut d = SimDevice::default();
+        d.pwm_open(PwmSpec {
+            timer: 1,
+            freq_hz: 1000,
+        })
+        .unwrap();
+        d.pwm_set(1, 2, 32_768).unwrap();
+        assert_eq!(d.pwm.duty(1, 2), Some(32_768));
+        assert!(d.events.last().unwrap().ends_with("pwm1.2 duty 32768"));
+        assert_eq!(d.adc_read(5), Ok(0));
+        d.apply(Command::Adc { pin: 5, value: 777 }).unwrap();
+        assert_eq!(d.adc_read(5), Ok(777));
+        assert!(
+            d.apply(Command::Adc {
+                pin: 5,
+                value: 4096
+            })
+            .is_err()
+        );
+        assert_eq!(d.adc_read(200), Err(AbiError::Unsupported));
+        d.i2c_open(I2cConfig {
+            bus: 0,
+            freq_hz: 100_000,
+        })
+        .unwrap();
+        d.i2c_transfer(0, 0x50, &[0, b'o', b'k'], &mut []).unwrap();
+        let mut rx = [0; 2];
+        d.i2c_transfer(0, 0x50, &[0], &mut rx).unwrap();
+        assert_eq!(&rx, b"ok");
+        assert!(d.events.last().unwrap().ends_with("i2c0 0x50 w 0x00 r ok"));
+        assert_eq!(
+            d.i2c_transfer(0, 0x10, &[0], &mut rx),
+            Err(AbiError::Transport)
+        );
+        assert!(d.events.last().unwrap().ends_with("Transport"));
+        d.pwm_stop(1).unwrap();
+        assert_eq!(d.pwm.duty(1, 2), None);
     }
 }

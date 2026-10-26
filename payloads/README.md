@@ -4,7 +4,8 @@ Application payloads are small WebAssembly modules that the base firmware
 runs in a fuel-metered sandbox. They talk to the device only through the ABI
 defined in `src/wasm_abi.rs` of the `middleware` crate: host functions
 imported from module `mw` (log, publish, subscribe, time, tick period, GPIO,
-and since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA) and the
+since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA, and since
+ABI 3 PWM, ADC and I2C) and the
 exports `memory`, `init`, `tick`, `mw_alloc`, `on_message` and `on_irq`.
 
 This directory is a Cargo workspace of its own, excluded from the parent
@@ -31,6 +32,12 @@ default target in `.cargo/config.toml`). It contains:
   (GPIO 17 TX, GPIO 18 RX, 115200 baud) back with DMA writes and publishes
   each received line on `app/uart/line`; a line ends at a newline, a
   carriage return or 200 ms of silence.
+- `examples/dimmer` (ABI 3) — every 100 ms reads ADC pin 0 (a
+  potentiometer), sets PWM timer 0 channel 0 to the matching duty through
+  `embedded-hal`'s `SetDutyCycle`, publishes the reading on
+  `app/dimmer/adc`, and reads the temperature register of an LM75-style
+  sensor at I2C address 0x48 through `embedded-hal`'s `I2c`, publishing it
+  on `app/dimmer/temp`. The board decides which pins those are.
 - `templates/` — the same programs written by hand in WAT and in
   AssemblyScript (blink, echo, button, a timer demo and the SPI loopback),
   used as starting points by the web editor. `templates/README.md` also
@@ -45,7 +52,8 @@ From this directory, `cargo build --release` produces one `.wasm` file per
 example in `target/wasm32-unknown-unknown/release/`. The release profile
 optimises for size, uses link-time optimisation, aborts on panic and strips
 symbols; the examples come out at 5 to 8 KiB. An example that uses no ABI 2
-feature imports no ABI 2 function, so it still loads on ABI 1 firmware. The linker
+(or ABI 3) feature imports no function of that revision, so it still loads
+on older firmware. The linker
 flags in `.cargo/config.toml` give every payload exactly one 64 KiB page of
 linear memory that cannot grow, with a 16 KiB stack, because the target
 microcontrollers have only a few hundred KiB of RAM.
@@ -109,6 +117,12 @@ and raises the matching edge event, the SPI device loops MOSI back to MISO
 types at a UART 1 terminal whose transmit side is printed. With `--virtual`
 the clock jumps from one due timer to the next, so `--until-ms 1000` runs a
 second of `spi_loopback` instantly and deterministically.
+
+For ABI 3, `!adc <pin> <0..4095>` sets the value an analog pin reads, PWM
+duty changes are printed, and every I2C bus carries a 256-byte register
+device at address 0x50 (write a register number followed by data to store
+it; a read returns registers from the last register number written). Other
+I2C addresses do not acknowledge.
 
 ## Uploading
 

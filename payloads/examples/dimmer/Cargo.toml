@@ -1,0 +1,14 @@
+[package]
+name = "dimmer"
+description = "Example middleware payload: dimmer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }
+embedded-hal = "1.0"

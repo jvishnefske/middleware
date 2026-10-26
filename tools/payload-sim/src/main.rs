@@ -1,4 +1,4 @@
-//! Desktop payload simulator (requirements W7 and D10).
+//! Desktop payload simulator (requirements W7, D10 and X7).
 //!
 //! `payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]
 //! [--until-ms T] [--spi-pattern HEX]` loads a payload with the same
@@ -14,6 +14,14 @@
 //!   if the transition matches the pin's `gpio_irq` edge.
 //! * `!uart <text>` buffers the text as bytes received on UART1 and raises a
 //!   (coalesced) `UartRx` event.
+//! * `!adc <pin> <0..4095>` sets the value `adc_read(pin)` returns (ABI 3;
+//!   pins read 0 until set).
+//!
+//! The ABI 3 PWM and I2C imports print `pwm<t> open <f> Hz`,
+//! `pwm<t>.<ch> duty <d>`, `pwm<t> stop`, `i2c<bus> open <f> Hz` and
+//! `i2c<bus> <addr> w <bytes> r <bytes>` (or the error). Each I2C bus has a
+//! 256-byte register device at address 0x50; other addresses do not
+//! acknowledge.
 //!
 //! Hardware timers run on the simulator clock. `spi_transfer` loops the
 //! transmitted bytes back (or returns `--spi-pattern`, repeated) and

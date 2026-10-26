@@ -1,7 +1,9 @@
 //! Virtual ABI 2 peripherals for the simulator (requirement D10): hardware
 //! timers driven by the simulator clock, an SPI loopback device and a UART
-//! terminal. Each model only decides; [`super::SimDevice`] owns them, feeds
-//! their [`Event`]s into its queue and prints what they report.
+//! terminal; and the ABI 3 ones (requirement X7): PWM outputs, ADC inputs
+//! and an I2C register device. Each model only decides;
+//! [`super::SimDevice`] owns them, feeds their [`Event`]s into its queue
+//! and prints what they report.
 //!
 //! * [`Timers`] — ids `0..MAX_TIMERS`; [`Timers::fire`] raises at most one
 //!   `Timer` event per timer per call, whose `value` counts every period
@@ -15,13 +17,28 @@
 //!   received bytes are buffered up to [`UART_RX_BUFFER`] (excess dropped)
 //!   and reported as a (queue-coalesced) `UartRx` event.
 //!
+//! * [`Pwm`] — timers `0..MAX_PWM_TIMERS`; records each timer's frequency
+//!   and the last duty of each channel.
+//! * [`Adc`] — one settable 12-bit value per pin (0 until set).
+//! * [`I2c`] — buses `0..I2C_BUSES`, each with a 256-byte register device
+//!   at [`I2C_DEVICE_ADDR`]: a write `[reg, data...]` stores `data` from
+//!   `reg` and sets the register pointer to `reg`; a read returns registers
+//!   from the pointer, auto-incrementing (wrapping at 256). Any other
+//!   address does not acknowledge ([`AbiError::Transport`]).
+//!
 //! Using a peripheral before opening it, or starting a transfer while one
 //! is in flight, is [`AbiError::Busy`].
 
 use std::collections::VecDeque;
 
-use middleware::wasm_abi::periph::{MAX_TIMERS, UART_RX_BUFFER};
-use wasm_host::{AbiError, DmaChannel, Event, EventKind, SpiConfig, TimerSpec, UartConfig};
+use middleware::wasm_abi::periph::{
+    ADC_MAX, I2C_BUSES, MAX_PWM_TIMERS, MAX_TIMERS, PWM_CHANNELS, UART_RX_BUFFER,
+};
+use wasm_host::{
+    AbiError, DmaChannel, Event, EventKind, I2cConfig, PwmSpec, SpiConfig, TimerSpec, UartConfig,
+};
+
+use super::PINS;
 
 /// One running timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +258,175 @@ impl Uart {
     }
 }
 
+/// One open PWM timer: its frequency and each channel's duty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PwmTimer {
+    freq_hz: u32,
+    duty: [u16; PWM_CHANNELS],
+}
+
+/// The payload's PWM timers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pwm {
+    timers: [Option<PwmTimer>; MAX_PWM_TIMERS],
+}
+
+impl Pwm {
+    /// Opens (or retunes) a timer; a fresh timer starts at duty 0, a
+    /// retuned one keeps its duties.
+    pub fn open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
+        let slot = self
+            .timers
+            .get_mut(usize::from(spec.timer))
+            .ok_or(AbiError::InvalidArgument)?;
+        let duty = slot.map_or([0; PWM_CHANNELS], |t| t.duty);
+        *slot = Some(PwmTimer {
+            freq_hz: spec.freq_hz,
+            duty,
+        });
+        Ok(())
+    }
+
+    /// Records a channel's duty; `Busy` if the timer is not open.
+    pub fn set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
+        let t = self
+            .timers
+            .get_mut(usize::from(timer))
+            .ok_or(AbiError::InvalidArgument)?
+            .as_mut()
+            .ok_or(AbiError::Busy)?;
+        *t.duty
+            .get_mut(usize::from(channel))
+            .ok_or(AbiError::InvalidArgument)? = duty;
+        Ok(())
+    }
+
+    /// Stops a timer (a no-op if it is not open).
+    pub fn stop(&mut self, timer: u8) -> Result<(), AbiError> {
+        *self
+            .timers
+            .get_mut(usize::from(timer))
+            .ok_or(AbiError::InvalidArgument)? = None;
+        Ok(())
+    }
+
+    /// The frequency of an open timer.
+    #[cfg(test)]
+    pub fn freq_hz(&self, timer: u8) -> Option<u32> {
+        self.timers.get(usize::from(timer))?.map(|t| t.freq_hz)
+    }
+
+    /// The last duty set on a channel of an open timer.
+    #[cfg(test)]
+    pub fn duty(&self, timer: u8, channel: u8) -> Option<u16> {
+        let t = (*self.timers.get(usize::from(timer))?)?;
+        t.duty.get(usize::from(channel)).copied()
+    }
+}
+
+/// The analog inputs: one settable value per pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adc {
+    values: [u16; PINS],
+}
+
+impl Default for Adc {
+    fn default() -> Self {
+        Adc { values: [0; PINS] }
+    }
+}
+
+impl Adc {
+    /// Sets the value `pin` reads (`0..=ADC_MAX`).
+    pub fn set(&mut self, pin: u8, value: u16) -> Result<(), String> {
+        if value > ADC_MAX {
+            return Err(format!("adc value {value} above {ADC_MAX}"));
+        }
+        let slot = self
+            .values
+            .get_mut(usize::from(pin))
+            .ok_or_else(|| format!("no pin {pin}"))?;
+        *slot = value;
+        Ok(())
+    }
+
+    /// The value `pin` reads; `Unsupported` beyond the simulated pins.
+    pub fn read(&self, pin: u8) -> Result<u16, AbiError> {
+        self.values
+            .get(usize::from(pin))
+            .copied()
+            .ok_or(AbiError::Unsupported)
+    }
+}
+
+/// Address of the register device on every simulated I2C bus.
+pub const I2C_DEVICE_ADDR: u8 = 0x50;
+
+/// One I2C bus with its register device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct I2cBus {
+    config: Option<I2cConfig>,
+    regs: [u8; 256],
+    pointer: u8,
+}
+
+impl Default for I2cBus {
+    fn default() -> Self {
+        I2cBus {
+            config: None,
+            regs: [0; 256],
+            pointer: 0,
+        }
+    }
+}
+
+/// The I2C buses.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct I2c {
+    buses: [I2cBus; I2C_BUSES as usize],
+}
+
+impl I2c {
+    /// Configures a bus; the register contents survive reopening.
+    pub fn open(&mut self, cfg: I2cConfig) -> Result<(), AbiError> {
+        self.bus(cfg.bus)?.config = Some(cfg);
+        Ok(())
+    }
+
+    fn bus(&mut self, bus: u8) -> Result<&mut I2cBus, AbiError> {
+        self.buses
+            .get_mut(usize::from(bus))
+            .ok_or(AbiError::InvalidArgument)
+    }
+
+    /// Writes `tx`, then reads `rx`, from the device at `addr`.
+    pub fn transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
+        let b = self.bus(bus)?;
+        if b.config.is_none() {
+            return Err(AbiError::Busy);
+        }
+        if addr != I2C_DEVICE_ADDR {
+            return Err(AbiError::Transport);
+        }
+        if let Some((&reg, data)) = tx.split_first() {
+            b.pointer = reg;
+            for (i, byte) in data.iter().enumerate() {
+                b.regs[usize::from(reg.wrapping_add(i as u8))] = *byte;
+            }
+        }
+        for (i, out) in rx.iter_mut().enumerate() {
+            *out = b.regs[usize::from(b.pointer.wrapping_add(i as u8))];
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +522,60 @@ mod tests {
             u.receive(&big, 0).map(|e| e.value),
             Ok(UART_RX_BUFFER as i32)
         );
+    }
+
+    #[test]
+    fn pwm_records_duty_per_channel() {
+        let mut p = Pwm::default();
+        assert_eq!(p.set(0, 0, 1), Err(AbiError::Busy), "not open");
+        p.open(PwmSpec {
+            timer: 2,
+            freq_hz: 1000,
+        })
+        .unwrap();
+        p.set(2, 3, 40_000).unwrap();
+        assert_eq!(p.duty(2, 3), Some(40_000));
+        assert_eq!(p.duty(2, 0), Some(0));
+        p.open(PwmSpec {
+            timer: 2,
+            freq_hz: 50,
+        })
+        .unwrap();
+        assert_eq!((p.freq_hz(2), p.duty(2, 3)), (Some(50), Some(40_000)));
+        assert_eq!(p.set(2, 4, 1), Err(AbiError::InvalidArgument));
+        p.stop(2).unwrap();
+        assert_eq!((p.freq_hz(2), p.duty(2, 3)), (None, None));
+        assert_eq!(p.stop(6), Err(AbiError::InvalidArgument));
+    }
+
+    #[test]
+    fn adc_values_are_settable() {
+        let mut a = Adc::default();
+        assert_eq!(a.read(3), Ok(0));
+        a.set(3, 1234).unwrap();
+        assert_eq!(a.read(3), Ok(1234));
+        assert!(a.set(3, ADC_MAX + 1).is_err());
+        assert!(a.set(PINS as u8, 1).is_err());
+        assert_eq!(a.read(PINS as u8), Err(AbiError::Unsupported));
+    }
+
+    #[test]
+    fn i2c_register_device() {
+        let mut i = I2c::default();
+        let mut rx = [0u8; 4];
+        assert_eq!(i.transfer(0, 0x50, &[0], &mut rx), Err(AbiError::Busy));
+        i.open(I2cConfig {
+            bus: 0,
+            freq_hz: 100_000,
+        })
+        .unwrap();
+        i.transfer(0, 0x50, &[0xFE, 1, 2, 3], &mut []).unwrap();
+        i.transfer(0, 0x50, &[0xFE], &mut rx).unwrap();
+        assert_eq!(rx, [1, 2, 3, 0], "wraps at 256");
+        let mut two = [0u8; 2];
+        i.transfer(0, 0x50, &[], &mut two).unwrap();
+        assert_eq!(two, [1, 2], "read-only continues from the pointer");
+        assert_eq!(i.transfer(0, 0x51, &[0], &mut rx), Err(AbiError::Transport));
+        assert_eq!(i.transfer(1, 0x50, &[0], &mut rx), Err(AbiError::Busy));
     }
 }

@@ -291,6 +291,42 @@ mod tests {
     }
 
     #[test]
+    fn follows_the_import_table_including_abi3() {
+        // Built from `IMPORTS`, so every entry added to the table (ABI 3
+        // PWM, ADC, I2C included) is accepted with its listed signature.
+        let decls: String = IMPORTS
+            .iter()
+            .map(|i| {
+                let result = if i.returns { " (result i32)" } else { "" };
+                format!(
+                    r#"(import "mw" "{}" (func (param{}){result}))"#,
+                    i.name,
+                    " i32".repeat(i.params)
+                )
+            })
+            .collect();
+        let r = run(&format!(
+            r#"(module {decls} (memory (export "memory") 1)
+                (func (export "on_irq") (param i32 i32 i32 i32)))"#
+        ))
+        .expect("valid");
+        assert_eq!(r.imports.len(), IMPORTS.len());
+        // ABI 3 imports raise no events, so they need no on_irq.
+        let r = run(r#"(module
+            (import "mw" "pwm_set" (func (param i32 i32 i32) (result i32)))
+            (import "mw" "adc_read" (func (param i32) (result i32)))
+            (import "mw" "i2c_transfer" (func (param i32 i32 i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1))"#)
+        .expect("valid");
+        assert_eq!(r.imports, ["pwm_set", "adc_read", "i2c_transfer"]);
+        let errs = run(r#"(module
+            (import "mw" "i2c_transfer" (func (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1))"#)
+        .expect_err("wrong arity");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+    }
+
+    #[test]
     fn event_sources_are_abi_imports() {
         for s in EVENT_SOURCES {
             assert!(middleware::wasm_abi::import(s).is_some(), "{s}");

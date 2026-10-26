@@ -21,9 +21,12 @@
 //!   pointers with [`wasm_abi::guest_range`]; [`copied`] clamps what a
 //!   device reports, and [`count_code`] keeps a `u32` count non-negative.
 //!
-//! For the pointer-carrying ABI 2 imports, arguments are checked before the
-//! pointer: a bad port, bus or length is `InvalidArgument` even when the
-//! pointer is also out of range.
+//! * ABI 3: [`i2c_transfer`] validates `i2c_transfer` with
+//!   [`periph::I2cTransfer::parse`] and bounds both guest buffers.
+//!
+//! For the pointer-carrying ABI 2 and 3 imports, arguments are checked
+//! before the pointer: a bad port, bus, address or length is
+//! `InvalidArgument` even when the pointer is also out of range.
 
 use alloc::string::{String, ToString};
 
@@ -31,7 +34,7 @@ use core::ops::Range;
 use middleware::Key;
 
 use middleware::wasm_abi::events::DmaChannel;
-use middleware::wasm_abi::periph::{self, Edge};
+use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
 
 use crate::LoadError;
@@ -432,6 +435,30 @@ pub fn uart_write(
     Ok((port, wasm_abi::guest_range(ptr, len, mem_len)?))
 }
 
+/// A validated `i2c_transfer` request (ABI 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct I2cPlan {
+    /// Bus, address and lengths.
+    pub transfer: I2cTransfer,
+    /// Bytes to write, in guest memory (empty for a read-only transfer).
+    pub tx: Range<usize>,
+    /// Where the read bytes go, in guest memory (empty for write-only).
+    pub rx: Range<usize>,
+}
+
+/// Plans `i2c_transfer(bus, addr7, tx_ptr, tx_len, rx_ptr, rx_len)` against
+/// `mem_len` bytes of linear memory: arguments first, then both pointers
+/// (a zero-length buffer still needs an in-bounds pointer).
+pub fn i2c_transfer(
+    (bus, addr7, tx_ptr, tx_len, rx_ptr, rx_len): (i32, i32, i32, i32, i32, i32),
+    mem_len: usize,
+) -> Result<I2cPlan, AbiError> {
+    let transfer = I2cTransfer::parse(bus, addr7, tx_len, rx_len)?;
+    let tx = wasm_abi::guest_range(tx_ptr, tx_len, mem_len)?;
+    let rx = wasm_abi::guest_range(rx_ptr, rx_len, mem_len)?;
+    Ok(I2cPlan { transfer, tx, rx })
+}
+
 /// The guest range a read import (`dma_read`, `uart_read`) may fill: the
 /// whole `(ptr, len)` must lie in memory, and at most `cap` bytes (the host
 /// buffer size) are written from its start.
@@ -785,5 +812,32 @@ mod tests {
     fn result_codes() {
         assert_eq!(result_code(Ok(3)), 3);
         assert_eq!(result_code(Err(AbiError::OutOfBounds)), -2);
+    }
+
+    #[test]
+    fn i2c_transfer_checks_arguments_before_pointers() {
+        let plan = i2c_transfer((1, 0x50, 16, 2, 32, 4), 64).expect("valid");
+        assert_eq!(plan.tx, 16..18);
+        assert_eq!(plan.rx, 32..36);
+        assert_eq!((plan.transfer.bus, plan.transfer.addr), (1, 0x50));
+        assert_eq!(
+            i2c_transfer((0, 0x80, -1, 1, 0, 0), 64),
+            Err(AbiError::InvalidArgument),
+            "bad address wins over bad pointer"
+        );
+        assert_eq!(
+            i2c_transfer((0, 0x50, 62, 4, 0, 0), 64),
+            Err(AbiError::OutOfBounds)
+        );
+        assert_eq!(
+            i2c_transfer((0, 0x50, 0, 0, 65, 0), 64),
+            Err(AbiError::OutOfBounds),
+            "an empty buffer still needs an in-bounds pointer"
+        );
+        assert_eq!(
+            i2c_transfer((0, 0x50, 0, 0, 0, 65), 64),
+            Err(AbiError::InvalidArgument),
+            "over MAX_I2C"
+        );
     }
 }

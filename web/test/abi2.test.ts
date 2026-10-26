@@ -46,7 +46,7 @@ describe("ABI 2 constants and checks", () => {
     for (const n of ["now_us", "irq_overflow", "gpio_irq", "timer_start", "timer_stop", "spi_open", "spi_transfer", "dma_read", "uart_open", "uart_write", "uart_read"]) {
       expect(names).toContain(n);
     }
-    expect(proto.abi.version).toBe(2);
+    expect(proto.abi.version).toBeGreaterThanOrEqual(2);
     expect(proto.abi.exports.onIrq).toBe("on_irq");
     expect(proto.abi.eventKinds).toEqual({ Gpio: 1, Timer: 2, DmaDone: 3, UartRx: 4 });
     expect(proto.abi.dmaChannels).toEqual({ Spi0: 0, Uart1Tx: 1 });

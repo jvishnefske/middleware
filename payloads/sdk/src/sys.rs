@@ -1,6 +1,6 @@
-//! The crate's only `unsafe` code: host import declarations, the two safe
+//! The crate's only `unsafe` code: host import declarations, the three safe
 //! wrappers around the imports that write into guest memory (`dma_read`,
-//! `uart_read`), the single-threaded `Sync` impl for [`GuestCell`], and the
+//! `uart_read`, `i2c_transfer`), the single-threaded `Sync` impl for [`GuestCell`], and the
 //! [`payload!`] export macro.
 //!
 //! Everything here is a thin, logic-free shim. The rest of the crate is
@@ -27,7 +27,8 @@ mod imports {
     // memory during these calls (`spi_transfer` and `uart_write` copy into
     // firmware-owned DMA buffers before returning), and reports problems as
     // negative codes. `dma_read` and `uart_read` *write* `len` bytes at `ptr`,
-    // so they stay `unsafe` and are only called through the wrappers below.
+    // and `i2c_transfer` writes `rx_len` bytes at `rx_ptr`, so they stay
+    // `unsafe` and are only called through the wrappers below.
     #[link(wasm_import_module = "mw")]
     unsafe extern "C" {
         pub safe fn log(ptr: i32, len: i32);
@@ -59,13 +60,28 @@ mod imports {
         pub safe fn uart_open(port: i32, tx: i32, rx: i32, baud: i32) -> i32;
         pub safe fn uart_write(port: i32, ptr: i32, len: i32) -> i32;
         pub fn uart_read(port: i32, ptr: i32, len: i32) -> i32;
+        // ABI 3
+        pub safe fn pwm_open(timer: i32, freq_hz: i32) -> i32;
+        pub safe fn pwm_set(timer: i32, channel: i32, duty: i32) -> i32;
+        pub safe fn pwm_stop(timer: i32) -> i32;
+        pub safe fn adc_read(pin: i32) -> i32;
+        pub safe fn i2c_open(bus: i32, freq_hz: i32) -> i32;
+        pub fn i2c_transfer(
+            bus: i32,
+            addr: i32,
+            tx_ptr: i32,
+            tx_len: i32,
+            rx_ptr: i32,
+            rx_len: i32,
+        ) -> i32;
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 mod imports {
-    //! Host stand-ins for the imports, used by unit tests. `dma_read` and
-    //! `uart_read` are `unsafe fn` only to match the wasm32 declarations.
+    //! Host stand-ins for the imports, used by unit tests. `dma_read`,
+    //! `uart_read` and `i2c_transfer` are `unsafe fn` only to match the
+    //! wasm32 declarations.
     const UNSUPPORTED: i32 = crate::AbiError::Unsupported as i32;
     pub fn log(_ptr: i32, _len: i32) {}
     pub fn publish(_kp: i32, _kl: i32, _dp: i32, _dl: i32) -> i32 {
@@ -125,12 +141,30 @@ mod imports {
     pub unsafe fn uart_read(_port: i32, _p: i32, _l: i32) -> i32 {
         UNSUPPORTED
     }
+    pub fn pwm_open(_timer: i32, _freq_hz: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn pwm_set(_timer: i32, _channel: i32, _duty: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn pwm_stop(_timer: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn adc_read(_pin: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn i2c_open(_bus: i32, _freq_hz: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub unsafe fn i2c_transfer(_b: i32, _a: i32, _tp: i32, _tl: i32, _rp: i32, _rl: i32) -> i32 {
+        UNSUPPORTED
+    }
 }
 
 pub(crate) use imports::{
-    gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, irq_overflow, log, now_ms, now_us,
-    publish, set_tick, spi_open, spi_transfer, subscribe, timer_start, timer_stop, uart_open,
-    uart_write,
+    adc_read, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
+    log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, set_tick, spi_open, spi_transfer,
+    subscribe, timer_start, timer_stop, uart_open, uart_write,
 };
 
 /// `(ptr, len)` of an exclusively borrowed guest buffer, or `None` if the
@@ -168,6 +202,24 @@ pub(crate) fn uart_read(port: i32, buf: &mut [u8]) -> i32 {
     // SAFETY: as for `dma_read`: the host writes at most `len` bytes into
     // `buf`, which is exclusively borrowed for the duration of the call.
     unsafe { imports::uart_read(port, ptr, len) }
+}
+
+/// Runs one I2C transfer to `addr` on `bus`: writes `tx`, then reads into
+/// `rx` (`i2c_transfer`); returns the import's result.
+pub(crate) fn i2c_transfer(bus: i32, addr: i32, tx: &[u8], rx: &mut [u8]) -> i32 {
+    let Ok(tx_len) = i32::try_from(tx.len()) else {
+        return crate::AbiError::OutOfBounds.code();
+    };
+    let Some((rx_ptr, rx_len)) = out_buffer(rx) else {
+        return crate::AbiError::OutOfBounds.code();
+    };
+    let tx_ptr = crate::ptr_i32(tx);
+    // SAFETY: `(rx_ptr, rx_len)` describes exactly `rx`, held as `&mut [u8]`
+    // for the whole call, so the host's write of at most `rx_len` bytes
+    // lands in memory nothing else references; `tx` is only read (the host
+    // copies it out before the transfer). The host validates both ranges
+    // against linear memory and retains neither pointer after returning.
+    unsafe { imports::i2c_transfer(bus, addr, tx_ptr, tx_len, rx_ptr, rx_len) }
 }
 
 /// A `RefCell` that may be placed in a `static` on single-threaded wasm32.

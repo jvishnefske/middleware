@@ -13,11 +13,18 @@
 //! `dma_read`, `uart_read`) never hand guest memory to the device: they copy
 //! through [`State::scratch`], a host buffer of at most
 //! [`periph::MAX_DMA`] bytes, so the device only ever sees host-owned data.
+//!
+//! The ABI 3 imports (PWM, ADC, I2C) are registered by `link_abi3`.
+//! `i2c_transfer` is synchronous and copies through two stack buffers of
+//! [`periph::MAX_I2C`] bytes: transmit bytes leave guest memory before the
+//! device runs, received bytes enter it only after the device succeeds.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use middleware::wasm_abi::periph::{self, SpiConfig, TimerSpec, UartConfig};
+use middleware::wasm_abi::periph::{
+    self, I2cConfig, MAX_I2C, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
+};
 use middleware::wasm_abi::{self, AbiError, IMPORT_MODULE, MAX_MESSAGE, guest_range};
 use wasmi::{Caller, Engine, Extern, Linker, StoreLimits};
 
@@ -154,6 +161,69 @@ pub fn uart_read_call<D: Device>(
     let buf = scratch(&mut st.scratch, target.len());
     let n = st.device.uart_read(port, buf)?;
     copy_out(mem, target.start, buf, n)
+}
+
+/// `pwm_open(timer, freq_hz)`.
+pub fn pwm_open_call<D: Device>(
+    st: &mut State<D>,
+    (timer, freq_hz): (i32, i32),
+) -> Result<(), AbiError> {
+    st.device.pwm_open(PwmSpec::parse(timer, freq_hz)?)
+}
+
+/// `pwm_set(timer, channel, duty)`.
+pub fn pwm_set_call<D: Device>(
+    st: &mut State<D>,
+    (timer, channel, duty): (i32, i32, i32),
+) -> Result<(), AbiError> {
+    let d = PwmDuty::parse(timer, channel, duty)?;
+    st.device.pwm_set(d.timer, d.channel, d.duty)
+}
+
+/// `pwm_stop(timer)`.
+pub fn pwm_stop_call<D: Device>(st: &mut State<D>, timer: i32) -> Result<(), AbiError> {
+    st.device.pwm_stop(periph::pwm_timer(timer)?)
+}
+
+/// `adc_read(pin)`: the raw reading, clamped to [`periph::ADC_MAX`].
+pub fn adc_read_call<D: Device>(st: &mut State<D>, pin: i32) -> Result<i32, AbiError> {
+    let raw = st.device.adc_read(periph::adc_pin(pin)?)?;
+    Ok(periph::adc_result(raw))
+}
+
+/// `i2c_open(bus, freq_hz)`.
+pub fn i2c_open_call<D: Device>(
+    st: &mut State<D>,
+    (bus, freq_hz): (i32, i32),
+) -> Result<(), AbiError> {
+    st.device.i2c_open(I2cConfig::parse(bus, freq_hz)?)
+}
+
+/// `i2c_transfer(bus, addr7, tx_ptr, tx_len, rx_ptr, rx_len)`: copies the
+/// transmit bytes out of guest memory, runs the blocking transfer, and on
+/// success copies the received bytes into guest memory. On error guest
+/// memory is left untouched.
+pub fn i2c_transfer_call<D: Device>(
+    mem: &mut [u8],
+    st: &mut State<D>,
+    args: (i32, i32, i32, i32, i32, i32),
+) -> Result<(), AbiError> {
+    let plan = abi::i2c_transfer(args, mem.len())?;
+    let (mut tx_buf, mut rx_buf) = ([0u8; MAX_I2C], [0u8; MAX_I2C]);
+    let src = mem.get(plan.tx.clone()).ok_or(AbiError::OutOfBounds)?;
+    let tx = tx_buf
+        .get_mut(..src.len())
+        .ok_or(AbiError::InvalidArgument)?;
+    tx.copy_from_slice(src);
+    let rx = rx_buf
+        .get_mut(..plan.rx.len())
+        .ok_or(AbiError::InvalidArgument)?;
+    let t = plan.transfer;
+    st.device.i2c_transfer(t.bus, t.addr, tx, rx)?;
+    mem.get_mut(plan.rx)
+        .ok_or(AbiError::OutOfBounds)?
+        .copy_from_slice(rx);
+    Ok(())
 }
 
 /// Copies the first `reported` bytes of `buf` (clamped to its length) into
@@ -305,6 +375,7 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
         abi::result_code(r)
     })?;
     link_abi2(&mut l)?;
+    link_abi3(&mut l)?;
     Ok(l)
 }
 
@@ -384,6 +455,53 @@ fn link_abi2<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
         "uart_read",
         |c: Caller<'_, State<D>>, port: i32, ptr: i32, len: i32| {
             with_memory(c, |mem, st| uart_read_call(mem, st, (port, ptr, len)))
+        },
+    )?;
+    Ok(())
+}
+
+/// Registers the ABI 3 imports (PWM, ADC, I2C).
+fn link_abi3<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    let m = IMPORT_MODULE;
+    l.func_wrap(
+        m,
+        "pwm_open",
+        |mut c: Caller<'_, State<D>>, timer: i32, freq: i32| {
+            abi::result_code(ok0(pwm_open_call(c.data_mut(), (timer, freq))))
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "pwm_set",
+        |mut c: Caller<'_, State<D>>, timer: i32, channel: i32, duty: i32| {
+            abi::result_code(ok0(pwm_set_call(c.data_mut(), (timer, channel, duty))))
+        },
+    )?;
+    l.func_wrap(m, "pwm_stop", |mut c: Caller<'_, State<D>>, timer: i32| {
+        abi::result_code(ok0(pwm_stop_call(c.data_mut(), timer)))
+    })?;
+    l.func_wrap(m, "adc_read", |mut c: Caller<'_, State<D>>, pin: i32| {
+        abi::result_code(adc_read_call(c.data_mut(), pin))
+    })?;
+    l.func_wrap(
+        m,
+        "i2c_open",
+        |mut c: Caller<'_, State<D>>, bus: i32, freq: i32| {
+            abi::result_code(ok0(i2c_open_call(c.data_mut(), (bus, freq))))
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "i2c_transfer",
+        |c: Caller<'_, State<D>>,
+         bus: i32,
+         addr: i32,
+         tx_ptr: i32,
+         tx_len: i32,
+         rx_ptr: i32,
+         rx_len: i32| {
+            let args = (bus, addr, tx_ptr, tx_len, rx_ptr, rx_len);
+            with_memory(c, |mem, st| ok0(i2c_transfer_call(mem, st, args)))
         },
     )?;
     Ok(())
@@ -504,5 +622,21 @@ mod tests {
         assert_eq!(log_call(b"hey", &mut st, 0, 3), Ok(()));
         assert_eq!(log_call(b"hey", &mut st, 2, 3), Err(AbiError::OutOfBounds));
         assert_eq!(st.device.logs, vec!["hey".to_string()]);
+    }
+
+    #[test]
+    fn i2c_transfer_leaves_memory_alone_on_error() {
+        let mut mem = vec![0xAAu8; 64];
+        let mut st = state(Exports::default());
+        assert_eq!(
+            i2c_transfer_call(&mut mem, &mut st, (0, 0x50, 0, 2, 8, 4)),
+            Err(AbiError::Unsupported)
+        );
+        assert!(mem.iter().all(|&b| b == 0xAA));
+        assert_eq!(adc_read_call(&mut st, 3), Err(AbiError::Unsupported));
+        assert_eq!(
+            pwm_set_call(&mut st, (0, 4, 0)),
+            Err(AbiError::InvalidArgument)
+        );
     }
 }

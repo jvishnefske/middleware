@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Payload ABI 3 (PWM, ADC, I2C)
+- `wasm_abi::ABI_VERSION` is 3. New imports `pwm_open`, `pwm_set`, `pwm_stop`, `adc_read`, `i2c_open` and `i2c_transfer` (synchronous write, repeated start, read; at most `periph::MAX_I2C` = 64 bytes each way). ABI 1 and ABI 2 payloads load unchanged.
+- `wasm_abi::periph` gains `PwmSpec`, `PwmDuty`, `I2cConfig`, `I2cTransfer` and the limits `MAX_PWM_TIMERS`, `PWM_CHANNELS`, `PWM_FREQ_HZ`, `ADC_MAX`, `I2C_BUSES`, `I2C_FREQ_HZ`, `MAX_I2C`.
+- `wasm_host::Device` gains `pwm_open`, `pwm_set`, `pwm_stop`, `adc_read`, `i2c_open` and `i2c_transfer`, defaulting to `Unsupported`.
+- The payload SDK adds `pwm` (`SetDutyCycle`), `adc` and `i2c` (`embedded_hal::i2c::I2c`); new `examples/dimmer`.
+- `payload-sim` simulates PWM, ADC (`!adc <pin> <value>`) and an I2C register device at 0x50.
+
 ## 0.2.0
 
 Breaking release driven by the conagotchi badge (ESP32-S3), which binds every backend to real radios and found where the 0.1 traits made it work around the crate.

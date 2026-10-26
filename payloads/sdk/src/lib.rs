@@ -58,6 +58,16 @@
 //! DMA never targets guest memory: the host copies transmit data into
 //! firmware-owned buffers before `transfer` / `write` return, and copies
 //! received data back when the payload reads it.
+//!
+//! Added with ABI 3 (requires firmware implementing [`ABI_VERSION`] 3):
+//!
+//! * [`pwm::Pwm`] / [`pwm::PwmChannel`] — PWM timers whose channels
+//!   implement the `embedded-hal` 1.0 `SetDutyCycle` trait.
+//! * [`adc::AnalogPin`] — 12-bit analog readings, with an integer
+//!   millivolt conversion.
+//! * [`i2c::I2c`] — a blocking I2C controller implementing the
+//!   `embedded-hal` 1.0 `I2c` trait (write, read, write-read, and
+//!   transactions of the shape "writes, then reads").
 //! * [`AbiError`] — re-exported from `middleware::wasm_abi`, so the codes are
 //!   defined exactly once.
 //!
@@ -77,12 +87,12 @@
 //!    the host validates every pointer/length pair against linear memory and
 //!    never writes into guest memory during those calls (`spi_transfer` and
 //!    `uart_write` copy into firmware-owned DMA buffers).
-//! 2. Two `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
-//!    `uart_read`, which *write* into guest memory and are therefore declared
-//!    without `safe`. Each sits in a private wrapper that takes the
-//!    destination as `&mut [u8]` and passes exactly that slice's pointer and
-//!    length, so the host can only write into memory the caller holds
-//!    exclusively for the duration of the call.
+//! 2. Three `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
+//!    `uart_read` and the ABI 3 import `i2c_transfer`, which *write* into
+//!    guest memory and are therefore declared without `safe`. Each sits in a
+//!    private wrapper that takes the destination as `&mut [u8]` and passes
+//!    exactly that slice's pointer and length, so the host can only write
+//!    into memory the caller holds exclusively for the duration of the call.
 //! 3. `unsafe impl Sync for GuestCell<T>`, compiled only for `wasm32`
 //!    without the `atomics` target feature, where there is exactly one
 //!    thread. This lets payload state live in a `static` `RefCell`.
@@ -105,12 +115,15 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod adc;
 pub mod dma;
 pub mod gpio;
+pub mod i2c;
 pub mod irq;
 mod logline;
 #[cfg(all(feature = "panic-handler", target_arch = "wasm32", not(test)))]
 mod panic;
+pub mod pwm;
 pub mod rt;
 pub mod spi;
 #[allow(unsafe_code)]

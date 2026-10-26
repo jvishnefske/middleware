@@ -114,7 +114,10 @@ impl Input {
     }
 }
 
-/// [`AbiError`] as an `embedded-hal` digital error.
+/// [`AbiError`] as an `embedded-hal` error: the SDK's error type for the
+/// digital traits here, `SetDutyCycle` ([`crate::pwm`]) and `I2c`
+/// ([`crate::i2c`], which reports [`AbiError::Transport`] as a missing
+/// acknowledge).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HalError(pub AbiError);
 

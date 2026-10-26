@@ -25,7 +25,8 @@
 //!
 //! * Host imports validate every pointer, pin, level, pull, key (no `sys/`),
 //!   period, the subscription limit and (ABI 2) every edge, timer, SPI and
-//!   UART argument with the shared [`wasm_abi::periph`] parsers, returning
+//!   UART argument and (ABI 3) every PWM, ADC and I2C argument with the
+//!   shared [`wasm_abi::periph`] parsers, returning
 //!   [`AbiError`] codes instead of trapping (W3). Messages over
 //!   [`wasm_abi::MAX_MESSAGE`] are refused; `log` lines are truncated to
 //!   [`wasm_abi::MAX_LOG`] bytes on a character boundary.
@@ -33,6 +34,12 @@
 //!   [`periph::MAX_DMA`](wasm_abi::periph::MAX_DMA) bytes; the device never
 //!   sees guest memory. `dma_read` / `uart_read` copy at most that buffer's
 //!   worth back and return the count.
+//! * `i2c_transfer` (ABI 3) copies through two stack buffers of
+//!   [`periph::MAX_I2C`](wasm_abi::periph::MAX_I2C) bytes: the transmit
+//!   bytes are copied out of guest memory before the device is called, and
+//!   the received bytes are copied back only if the device succeeds.
+//!   `adc_read` results are clamped to
+//!   [`periph::ADC_MAX`](wasm_abi::periph::ADC_MAX).
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
 //!   `on_irq`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
@@ -88,7 +95,9 @@ use wasmi::{
 
 pub use error::{LoadError, Trap};
 pub use middleware::wasm_abi::events::{DmaChannel, Event, EventKind};
-pub use middleware::wasm_abi::periph::{Edge, SpiConfig, TimerSpec, UartConfig};
+pub use middleware::wasm_abi::periph::{
+    Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
+};
 pub use middleware::wasm_abi::{AbiError, Pull};
 
 use abi::{ImportKind, Shape};
@@ -102,8 +111,10 @@ use link::{Exports, State};
 /// link failures → `Transport`, a peripheral not opened or still busy →
 /// `Busy`).
 ///
-/// The ABI 2 methods (from [`Device::now_us`] on) have defaults so a board
-/// without interrupts or DMA keeps compiling; see the crate docs.
+/// The ABI 2 methods (from [`Device::now_us`] on) and the ABI 3 methods
+/// (from [`Device::pwm_open`] on) have defaults (`Unsupported`, or a
+/// derived clock) so a board without interrupts, DMA, PWM, ADC or I2C keeps
+/// compiling; see the crate docs.
 pub trait Device {
     /// A payload log line (UTF-8, at most [`wasm_abi::MAX_LOG`] bytes).
     fn log(&mut self, line: &str);
@@ -181,6 +192,52 @@ pub trait Device {
     /// 0).
     fn uart_read(&mut self, port: u8, out: &mut [u8]) -> Result<usize, AbiError> {
         let _ = (port, out);
+        Err(AbiError::Unsupported)
+    }
+
+    /// Starts PWM timer `spec.timer` at `spec.freq_hz` with every channel
+    /// at duty 0 (ABI 3). Reopening an open timer changes its frequency.
+    /// The board maps `(timer, channel)` to fixed pins.
+    fn pwm_open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
+        let _ = spec;
+        Err(AbiError::Unsupported)
+    }
+    /// Sets one channel's duty, a fraction of `u16::MAX` (ABI 3); `Busy`
+    /// if the timer is not open.
+    fn pwm_set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
+        let _ = (timer, channel, duty);
+        Err(AbiError::Unsupported)
+    }
+    /// Stops a PWM timer and drives its outputs low (ABI 3).
+    fn pwm_stop(&mut self, timer: u8) -> Result<(), AbiError> {
+        let _ = timer;
+        Err(AbiError::Unsupported)
+    }
+    /// Samples the analog input on `pin` (ABI 3); the result is 12-bit
+    /// (`0..=ADC_MAX`; larger values are clamped by the runtime).
+    /// `Unsupported` for a pin without an analog input.
+    fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
+        let _ = pin;
+        Err(AbiError::Unsupported)
+    }
+    /// Configures I2C controller `cfg.bus` at `cfg.freq_hz` (ABI 3).
+    fn i2c_open(&mut self, cfg: I2cConfig) -> Result<(), AbiError> {
+        let _ = cfg;
+        Err(AbiError::Unsupported)
+    }
+    /// Blocking transfer to the 7-bit address `addr` (ABI 3): writes `tx`,
+    /// then (repeated start) fills `rx`; either may be empty (both empty is
+    /// an address probe). Each is at most
+    /// [`periph::MAX_I2C`](wasm_abi::periph::MAX_I2C) bytes. A missing
+    /// acknowledge or bus error is `Transport`; a bus not opened is `Busy`.
+    fn i2c_transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
+        let _ = (bus, addr, tx, rx);
         Err(AbiError::Unsupported)
     }
 }

@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST=x86_64-unknown-linux-gnu
 
-EXAMPLES=(blink echo button spi_loopback uart_echo)
+EXAMPLES=(blink echo button spi_loopback uart_echo dimmer)
 TEMPLATES=(blink echo button timer)   # .wat
 AS_TEMPLATES=(blink echo button spi)  # .ts
 
@@ -16,11 +16,11 @@ cargo build --release
 # that cap linear memory below one 64 KiB page.
 BYTE_PAGE_EXAMPLES=(blink echo)
 scripts/build-byte-pages.sh "${BYTE_PAGE_EXAMPLES[@]/#/--package=}"
-cargo test -p mw-payload -p button -p spi_loopback -p uart_echo --target "$HOST"
+cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings
 # The examples are no_std cdylibs: on the host only their tests build.
-cargo clippy -p button -p spi_loopback -p uart_echo --target "$HOST" --tests -- -D warnings
+cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer --target "$HOST" --tests -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps --document-private-items --target "$HOST"
 

@@ -38,6 +38,27 @@
 //! | `uart_write`   | `port, ptr, len`                          | 0 (started) or error |
 //! | `uart_read`    | `port, ptr, len`                          | bytes copied (may be 0) or error |
 //!
+//! Added in ABI 3 (PWM, ADC, I2C; arguments validated by [`periph`]):
+//!
+//! | name           | params                                   | result            |
+//! |----------------|------------------------------------------|-------------------|
+//! | `pwm_open`     | `timer, freq_hz`                          | 0 or error        |
+//! | `pwm_set`      | `timer, channel, duty` (`0..=65535`, 65535 = always on) | 0 or error |
+//! | `pwm_stop`     | `timer`                                  | 0 or error        |
+//! | `adc_read`     | `pin`                                    | raw `0..=4095` or error |
+//! | `i2c_open`     | `bus, freq_hz`                            | 0 or error        |
+//! | `i2c_transfer` | `bus, addr7, tx_ptr, tx_len, rx_ptr, rx_len` | 0 or error     |
+//!
+//! The firmware owns the pin mapping for PWM and I2C: a PWM `(timer,
+//! channel)` and an I2C `bus` drive fixed, board-documented pins, so a
+//! payload never names them. `adc_read` takes a board pin number and fails
+//! with `Unsupported` on a pin without an analog input. `i2c_transfer` is
+//! synchronous: it writes `tx_len` bytes, issues a repeated start and reads
+//! `rx_len` bytes (either length may be 0, at most
+//! [`periph::MAX_I2C`] each) before returning; a missing acknowledge or a
+//! bus error is `Transport`. Using a PWM timer or I2C bus before opening it
+//! is `Busy`.
+//!
 //! # Interrupt model
 //!
 //! Payload code never runs inside a hardware interrupt. The firmware's ISR
@@ -85,9 +106,12 @@ pub mod events;
 pub mod periph;
 
 /// ABI revision. Each revision is a superset of the previous one, so a
-/// payload built for revision `n` loads on firmware implementing `>= n`.
-/// Revision 2 added interrupts, timers, SPI and UART DMA.
-pub const ABI_VERSION: u16 = 2;
+/// payload built for revision `n` loads on firmware implementing `>= n`:
+/// the runtime checks each import by name and signature against
+/// [`IMPORTS`], and an older payload simply imports a subset. Revision 2
+/// added interrupts, timers, SPI and UART DMA; revision 3 added PWM, ADC
+/// and I2C.
+pub const ABI_VERSION: u16 = 3;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -223,7 +247,44 @@ pub const IMPORTS: &[Import] = &[
         params: 3,
         returns: true,
     },
+    // ABI 3
+    Import {
+        name: "pwm_open",
+        params: 2,
+        returns: true,
+    },
+    Import {
+        name: "pwm_set",
+        params: 3,
+        returns: true,
+    },
+    Import {
+        name: "pwm_stop",
+        params: 1,
+        returns: true,
+    },
+    Import {
+        name: "adc_read",
+        params: 1,
+        returns: true,
+    },
+    Import {
+        name: "i2c_open",
+        params: 2,
+        returns: true,
+    },
+    Import {
+        name: "i2c_transfer",
+        params: 6,
+        returns: true,
+    },
 ];
+
+/// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
+pub const ABI1_IMPORTS: usize = 9;
+
+/// Number of imports in ABI 2 (the prefix of [`IMPORTS`] up to `uart_read`).
+pub const ABI2_IMPORTS: usize = 20;
 
 /// Looks up an import by name.
 pub fn import(name: &str) -> Option<&'static Import> {
@@ -258,7 +319,8 @@ pub enum AbiError {
     NoResources = -3,
     /// The device does not provide this feature (e.g. the pin is reserved).
     Unsupported = -4,
-    /// The message could not be sent.
+    /// The message could not be sent; for `i2c_transfer` (ABI 3), the
+    /// target did not acknowledge or the bus failed.
     Transport = -5,
     /// The key is malformed or reserved (`sys/...`).
     InvalidKey = -6,
@@ -338,6 +400,28 @@ mod tests {
             assert_eq!(import(a.name), Some(a));
         }
         assert_eq!(import("nope"), None);
+    }
+
+    #[test]
+    fn revisions_are_prefixes_of_the_import_table() {
+        assert_eq!(IMPORTS[ABI1_IMPORTS - 1].name, "gpio_read");
+        assert_eq!(IMPORTS[ABI2_IMPORTS - 1].name, "uart_read");
+        let abi3 = [
+            ("pwm_open", 2),
+            ("pwm_set", 3),
+            ("pwm_stop", 1),
+            ("adc_read", 1),
+            ("i2c_open", 2),
+            ("i2c_transfer", 6),
+        ];
+        assert!(
+            IMPORTS[ABI2_IMPORTS..]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq(abi3)
+        );
+        assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
+        assert_eq!(ABI_VERSION, 3);
     }
 
     #[test]

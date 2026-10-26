@@ -207,12 +207,43 @@ fn rust_uart_echo_example() {
 }
 
 #[test]
+fn rust_dimmer_example() {
+    let r = validate(&release("dimmer"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(
+        &r.imports,
+        &[
+            "pwm_open",
+            "pwm_set",
+            "adc_read",
+            "i2c_open",
+            "i2c_transfer",
+            "publish"
+        ]
+    ));
+}
+
+#[test]
+fn abi2_examples_import_no_abi3_functions() {
+    // ABI 2 payloads keep loading on ABI 2 firmware.
+    for name in ["button", "spi_loopback", "uart_echo"] {
+        let r = validate(&release(name));
+        let abi2 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI2_IMPORTS];
+        assert!(
+            r.imports.iter().all(|i| abi2.iter().any(|a| a.name == i)),
+            "{name}: {:?}",
+            r.imports
+        );
+    }
+}
+
+#[test]
 fn abi1_examples_import_no_abi2_functions() {
     // Unused SDK wrappers are stripped, so ABI 1 payloads still load on
     // ABI 1 firmware.
     for name in ["blink", "echo"] {
         let r = validate(&release(name));
-        let abi1 = &middleware::wasm_abi::IMPORTS[..9];
+        let abi1 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI1_IMPORTS];
         assert!(
             r.imports.iter().all(|i| abi1.iter().any(|a| a.name == i)),
             "{name}: {:?}",

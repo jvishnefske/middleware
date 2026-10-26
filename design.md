@@ -525,6 +525,66 @@ uses firmware-owned buffers copied to and from guest memory.
   overflow, bounded dispatch, trap in `on_irq`) and `web/test/abi2.test.ts`
   (including the real `payloads/templates` ABI 2 templates).
 
+### PWM, ADC and I2C (ABI 3)
+
+Payloads drive PWM outputs, sample analog inputs and talk to I2C targets.
+The board owns the pin mapping: a PWM `(timer, channel)` and an I2C bus
+name fixed pins, and an ADC read names a board pin. I2C transfers are
+synchronous and bounded (`periph::MAX_I2C` = 64 bytes each way), so the
+payload SDK can offer the blocking `embedded-hal` traits; PWM and ADC calls
+complete immediately. None of these raise events.
+
+- [x] X1 ABI 3 is a superset of ABI 2 (six imports appended to
+  `wasm_abi::IMPORTS`, `ABI_VERSION` 3), and ABI 1 and ABI 2 payloads still
+  load because imports are checked by name and signature only —
+  `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`,
+  `import_table_is_unique_and_searchable`; `wasm-host/tests/abi3.rs`
+  `x1_every_import_links_and_older_revisions_still_load`; `abi-check`
+  `tests/payloads.rs` `abi2_examples_import_no_abi3_functions`,
+  `abi1_examples_import_no_abi2_functions`.
+- [x] X2 The new `Device` methods default to `Unsupported`, so existing
+  boards compile unchanged, and device errors reach the payload as codes —
+  `x2_device_errors_pass_through_and_defaults_are_unsupported`; the ESP
+  firmware builds and passes `cargo test --lib` in `firmware/` without
+  changes.
+- [x] X3 PWM arguments are validated in one place (timer `< 6`, channel
+  `< 4`, frequency 1 Hz to 1 MHz, duty a `u16` where 65535 is always on) —
+  `wasm_abi::periph::tests::pwm_rules`;
+  `x3_pwm_open_set_stop_and_bad_args`.
+- [x] X4 `adc_read` returns a raw 12-bit value (device readings above 4095
+  are clamped), rejects pins outside `u8`, and passes `Unsupported` through
+  for pins without an analog input — `wasm_abi::periph::tests::adc_rules`;
+  `x4_adc_read_returns_raw_values_clamped_and_errors`.
+- [x] X5 `i2c_open` and `i2c_transfer` validate bus (`< 2`), clock
+  (10 kHz to 1 MHz), 7-bit address and lengths (`<= MAX_I2C`, either may be
+  0) before the guest pointers, bound both buffers, copy through host
+  buffers, write guest memory only after the device succeeds, and report a
+  missing acknowledge as `Transport` —
+  `wasm_abi::periph::tests::i2c_rules`;
+  `abi::tests::i2c_transfer_checks_arguments_before_pointers`;
+  `link::tests::i2c_transfer_leaves_memory_alone_on_error`;
+  `x5_i2c_open_and_bad_config`,
+  `x5_i2c_write_then_write_read_round_trips_data`,
+  `x5_i2c_errors_bounds_and_untouched_memory`.
+- [x] X6 The payload SDK exposes PWM channels as `embedded-hal`
+  `SetDutyCycle`, analog pins with integer millivolt conversion, and I2C as
+  `embedded-hal` `I2c` (write, read, write-read, and transactions of the
+  shape "writes, then reads"; other shapes are `Unsupported`), validating
+  with the ABI parsers before calling the host, with `unsafe` still confined
+  to `sys.rs`; the `dimmer` example builds for `wasm32` and validates —
+  `mw-payload` `pwm::tests::*`, `adc::tests::*`, `i2c::tests::*`; `dimmer`
+  `tests::*`; `abi-check` `tests::follows_the_import_table_including_abi3`,
+  `tests/payloads.rs` `rust_dimmer_example`.
+- [x] X7 The desktop simulator provides PWM (records duty), ADC (values
+  set with `!adc <pin> <value>`) and an I2C register device at 0x50 on each
+  bus — `payload-sim` `sim::periph::tests::pwm_records_duty_per_channel`,
+  `adc_values_are_settable`, `i2c_register_device`;
+  `sim::tests::abi3_peripherals`, `parses_commands`; `tests/x7.rs`
+  `x7_adc_pwm_and_i2c_in_the_simulator`.
+- [x] X8 `wasm-host` still builds for `thumbv7em-none-eabihf` (the STM32F407
+  target that implements ABI 3 on hardware) —
+  `cargo build -p wasm-host --target thumbv7em-none-eabihf`.
+
 ## Known limitations (0.2)
 
 - **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.

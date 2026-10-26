@@ -10,6 +10,7 @@ members = [
     "examples/button",
     "examples/spi_loopback",
     "examples/uart_echo",
+    "examples/dimmer",
     "abi-check",
 ]
 # `cargo build --release` builds only the guests; `abi-check` is a host tool
@@ -21,6 +22,7 @@ default-members = [
     "examples/button",
     "examples/spi_loopback",
     "examples/uart_echo",
+    "examples/dimmer",
 ]
 
 [workspace.package]
