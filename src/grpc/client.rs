@@ -102,7 +102,9 @@ where
     T::ResponseBody: HttpBody<Data = Bytes> + Send + 'static,
     <T::ResponseBody as HttpBody>::Error: Into<StdError>,
 {
-    type Subscriber = GrpcSubscriber;
+    type Subscriber<'a> = GrpcSubscriber
+    where
+        Self: 'a;
     type Error = GrpcError;
 
     /// Opens a `middleware.v1.Bus/Subscribe` stream for `filter` (the key in

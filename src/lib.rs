@@ -59,7 +59,7 @@ pub mod grpc;
 pub mod zenoh;
 
 pub use codec::Codec;
-pub use key::{Key, KeyError, KeyFilter};
+pub use key::{AsKey, Filter, Key, KeyBuf, KeyError, KeyFilter, KeyFilterBuf};
 pub use transport::{
     Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, SampleMeta, SenderId,
     Subscribe, Subscriber,

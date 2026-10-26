@@ -377,7 +377,7 @@ impl Publisher for ZenohTransport {
 }
 
 impl Subscribe for ZenohTransport {
-    type Subscriber = ZenohSubscriber;
+    type Subscriber<'a> = ZenohSubscriber;
     type Error = ZenohError;
 
     /// Declares a subscriber for `filter` (see the module docs for the key

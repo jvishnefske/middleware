@@ -68,7 +68,11 @@ pub struct SampleMeta {
     /// The sender, if the transport identifies senders.
     pub sender: Option<SenderId>,
     /// The sender's sequence number for this message, if the transport
-    /// carries one.
+    /// carries one. Deliberately 8 bits: it is what the radio frames carry
+    /// (one byte per frame matters at 31-byte advertising payloads), and
+    /// it only has to distinguish repeats inside a short dedup window
+    /// ([`crate::dedup`]), not order a long history. It wraps after 255;
+    /// compare with wrapping arithmetic, never with `<`.
     pub seq: Option<u8>,
 }
 
@@ -171,16 +175,27 @@ pub trait Subscriber {
     fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error>;
 }
 
-/// Creates subscriptions at runtime, for transports that can add keys after
-/// construction (Zenoh, gRPC bus, serial link, in-process buses).
+/// Creates subscriptions at runtime.
+///
+/// The subscriber may borrow the transport (`Subscriber<'a>` with
+/// `Self: 'a`): a single-stream transport (a serial link, one radio) hands
+/// out a filtered view of itself, valid while it is borrowed, while
+/// multiplexing transports (Zenoh, gRPC bus, in-process buses) hand out
+/// independent owned subscribers and ignore the lifetime.
 pub trait Subscribe {
-    /// The subscriber handed out.
-    type Subscriber: Subscriber;
+    /// The subscriber handed out, possibly borrowing `self`.
+    type Subscriber<'a>: Subscriber
+    where
+        Self: 'a;
     /// Transport-specific failure.
     type Error: core::fmt::Debug;
 
-    /// Starts receiving samples whose key matches `filter`.
-    async fn subscribe(&mut self, filter: KeyFilter<'_>) -> Result<Self::Subscriber, Self::Error>;
+    /// Starts receiving samples whose key matches `filter`. The filter is
+    /// copied if the subscriber needs to keep it.
+    async fn subscribe<'a>(
+        &'a mut self,
+        filter: KeyFilter<'_>,
+    ) -> Result<Self::Subscriber<'a>, Self::Error>;
 }
 
 /// Unary request/response: one request in, one response out.
