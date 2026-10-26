@@ -143,6 +143,12 @@ describe("ABI constants", () => {
       "uart_open",
       "uart_write",
       "uart_read",
+      "pwm_open",
+      "pwm_set",
+      "pwm_stop",
+      "adc_read",
+      "i2c_open",
+      "i2c_transfer",
     ]);
     expect(abi.imports.find((i) => i.name === "publish")).toEqual({ name: "publish", params: 4, returns: true });
     expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq" });

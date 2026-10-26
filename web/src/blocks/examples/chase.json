@@ -1,0 +1,119 @@
+{
+  "variables": [{ "name": "pos", "id": "pos" }],
+  "blocks": {
+    "languageVersion": 0,
+    "blocks": [
+      {
+        "type": "mw_on_init",
+        "id": "init",
+        "x": 20,
+        "y": 20,
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "badge_show_text",
+              "id": "hello",
+              "inputs": { "TEXT": { "shadow": { "type": "text", "id": "helloText", "fields": { "TEXT": "LED chase" } } } },
+              "next": { "block": { "type": "badge_pet_mode", "id": "pet", "fields": { "MODE": "4" } } }
+            }
+          }
+        }
+      },
+      {
+        "type": "mw_every",
+        "id": "every",
+        "x": 20,
+        "y": 160,
+        "fields": { "MS": 100 },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "badge_leds_fill",
+              "id": "clear",
+              "inputs": {
+                "R": { "shadow": { "type": "math_number", "id": "c0", "fields": { "NUM": 0 } } },
+                "G": { "shadow": { "type": "math_number", "id": "c1", "fields": { "NUM": 0 } } },
+                "B": { "shadow": { "type": "math_number", "id": "c2", "fields": { "NUM": 0 } } }
+              },
+              "next": {
+                "block": {
+                  "type": "badge_led",
+                  "id": "head",
+                  "inputs": {
+                    "INDEX": { "block": { "type": "variables_get", "id": "getPos", "fields": { "VAR": { "id": "pos" } } } },
+                    "R": { "shadow": { "type": "math_number", "id": "h0", "fields": { "NUM": 255 } } },
+                    "G": { "shadow": { "type": "math_number", "id": "h1", "fields": { "NUM": 0 } } },
+                    "B": { "shadow": { "type": "math_number", "id": "h2", "fields": { "NUM": 96 } } }
+                  },
+                  "next": {
+                    "block": {
+                      "type": "badge_set_leds",
+                      "id": "show",
+                      "next": {
+                        "block": {
+                          "type": "variables_set",
+                          "id": "step",
+                          "fields": { "VAR": { "id": "pos" } },
+                          "inputs": {
+                            "VALUE": {
+                              "block": {
+                                "type": "math_modulo",
+                                "id": "wrap",
+                                "inputs": {
+                                  "DIVIDEND": {
+                                    "block": {
+                                      "type": "math_arithmetic",
+                                      "id": "inc",
+                                      "fields": { "OP": "ADD" },
+                                      "inputs": {
+                                        "A": { "block": { "type": "variables_get", "id": "getPos2", "fields": { "VAR": { "id": "pos" } } } },
+                                        "B": { "shadow": { "type": "math_number", "id": "one", "fields": { "NUM": 1 } } }
+                                      }
+                                    }
+                                  },
+                                  "DIVISOR": { "shadow": { "type": "math_number", "id": "eight", "fields": { "NUM": 8 } } }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "badge_on_button",
+        "id": "button",
+        "x": 20,
+        "y": 420,
+        "fields": { "BUTTON": "0", "ACTION": "1" },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "badge_show_text",
+              "id": "pressed",
+              "inputs": {
+                "TEXT": {
+                  "block": {
+                    "type": "text_join",
+                    "id": "join",
+                    "extraState": { "itemCount": 2 },
+                    "inputs": {
+                      "ADD0": { "block": { "type": "text", "id": "label", "fields": { "TEXT": "button " } } },
+                      "ADD1": { "block": { "type": "badge_button", "id": "which" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

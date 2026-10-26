@@ -28,7 +28,7 @@ Feature isolation is checked by `scripts/check-features.sh`.
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
 | `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |
-| `web/`               | flasher, device console/uploader, editor and simulator (`npm run dev`) |
+| `web/`               | flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
 
 Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
 then load payloads over the same USB port, whether it is a CP2102/CH340

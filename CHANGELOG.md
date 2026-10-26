@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
+
+### Web: Blocks editor
+- New "Blocks" tab (Blockly 13.3.0): events, publish/log, GPIO, timers, badge LEDs/text/pet/buttons and bounded built-ins generate one AssemblyScript module with only the "mw" imports it uses and fixed buffers. Compile → `checkAbi` → simulate → upload over Web Serial. Board profiles (esp-base, conagotchi badge) disable unsupported blocks; badge builds are rewritten to 1-byte pages (16 KiB). `web/check.sh` runs `npm test` and `npm run build`. (U9–U12)
 
 ### Core: owned keys and borrowing subscriptions (0.3, breaking)
 - `key::KeyBuf<N>`: an owned, inline, validated key (`Copy`, no heap), with `AsKey` implemented for it and `Key`.

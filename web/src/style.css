@@ -217,3 +217,30 @@ pre {
   border-bottom: 1px solid var(--line);
   text-align: left;
 }
+.blockly-area {
+  height: 560px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.generated .cm-editor {
+  height: 260px;
+}
+.issues {
+  margin: 6px 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+.issues .error {
+  color: #c0392b;
+}
+.issues .warning {
+  color: var(--muted);
+}
+.issues .link {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.badge-leds .led {
+  width: 20px;
+  height: 20px;
+}

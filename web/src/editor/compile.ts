@@ -16,7 +16,8 @@ export type CompileResult = { ok: true; wasm: Uint8Array; log: string } | { ok: 
 type WabtModule = Awaited<ReturnType<typeof import("wabt")>>;
 let wabtPromise: Promise<WabtModule> | null = null;
 
-function loadWabt(): Promise<WabtModule> {
+/** wabt, loaded once on first use (also used by the Blocks pipeline). */
+export function loadWabt(): Promise<WabtModule> {
   wabtPromise ??= import("wabt").then((m) => (m.default as unknown as () => Promise<WabtModule>)());
   return wabtPromise;
 }

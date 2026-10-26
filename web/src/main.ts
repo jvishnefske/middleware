@@ -1,10 +1,11 @@
-// Entry point: loads protocol-wasm, builds the three tabs and the shared
+// Entry point: loads protocol-wasm, builds the four tabs and the shared
 // serial-port bar.
 
 import "./style.css";
 import { loadProtocol } from "./protocol/wasm";
 import { PortManager, describePort, webSerialProblem } from "./serial/ports";
 import type { App, PayloadHandoff, TabId } from "./ui/app";
+import { blocksPage } from "./ui/blocksPage";
 import { devicePage } from "./ui/devicePage";
 import { errorText, h } from "./ui/dom";
 import { editorPage } from "./ui/editorPage";
@@ -49,12 +50,14 @@ async function main() {
   pages.flash = flashPage(app);
   pages.device = devicePage(app);
   pages.editor = editorPage(app);
+  pages.blocks = blocksPage(app);
 
   const nav = h("nav", { role: "tablist" });
   for (const [id, label] of [
     ["flash", "Flash"],
     ["device", "Device"],
     ["editor", "Editor"],
+    ["blocks", "Blocks"],
   ] as [TabId, string][]) {
     tabs[id] = h("button", { role: "tab", onclick: () => app.showTab(id) }, label);
     nav.append(tabs[id]);
@@ -78,16 +81,17 @@ async function main() {
       nav,
       h("div", { class: "portbar" }, "Serial port: ", portLabel, " ", chooseBtn),
     ),
-    serialProblem ? h("p", { class: "note warn" }, serialProblem, " Flashing and the device console are disabled; the editor and simulator still work.") : "",
+    serialProblem ? h("p", { class: "note warn" }, serialProblem, " Flashing and the device console are disabled; the editors and simulator still work.") : "",
     pages.flash,
     pages.device,
     pages.editor,
+    pages.blocks,
   );
 
   let initial: TabId = "flash";
   try {
     const saved = localStorage.getItem("tab");
-    if (saved === "flash" || saved === "device" || saved === "editor") initial = saved;
+    if (saved === "flash" || saved === "device" || saved === "editor" || saved === "blocks") initial = saved;
   } catch {
     /* storage unavailable */
   }

@@ -557,11 +557,32 @@ open).
   `protocol-wasm` `simulator::tests::simulator_runs_payload_with_virtual_gpio_and_messages`, `simulator_reports_rejection_and_traps`; `web/test/editor.test.ts` runs the blink/echo templates (WAT and AssemblyScript) in wasm-host compiled to WASM.
 - [x] U7 Automated tests cover the protocol bindings and the upload flow
   against a mocked serial port —
-  `npm test` in `web/` (58 tests) and `cargo test -p protocol-wasm` (17 tests).
+  `npm test` in `web/` (91 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
 - [x] U8 The manifest carries each image's `wasm` flag (absent means `true`)
   and the UI marks protocol-only images; the device page disables "start
   after upload" and Start for `+no-wasm` firmware —
   `web/test/manifest.test.ts`: "parses the wasm runtime flag, defaulting to true when absent"; `web/test/upload.test.ts`: "recognises protocol-only firmware by its +no-wasm version suffix".
+- [x] U9 A Blocks tab (Blockly) generates one AssemblyScript payload that
+  imports only the `mw` functions its blocks use, exports `init`, `tick`,
+  `mw_alloc` + `on_message` and `on_irq` only when needed, never allocates
+  (fixed 512-byte receive and transmit buffers, integer-only values,
+  loops with constant bounds) and shows the code read-only —
+  `web/test/blocks.generator.test.ts`: golden files `web/test/fixtures/blocks/*.as` ("blink", "echo", "chase", "logic", "irq" ... "matches ... and compiles"), "imports only what the blocks use and exports only the handlers needed", "uses fixed buffers and never allocates", "rejects unbounded and non-constant loops".
+- [x] U10 Blocks compiles with the editor's asc options, runs `checkAbi`,
+  simulates in wasm-host and hands the module to the Device tab for upload;
+  every example workspace (blink, echo, badge LED chase) compiles and passes
+  the ABI check —
+  `web/test/blocks.build.test.ts`: "example ... compiles and passes checkAbi", "every 500 ms toggle pin toggles GPIO", "on message -> publish echoes text and numbers", "on pin edge runs on the configured edge and timers fire on_irq".
+- [x] U11 Board profiles: `esp-base` (GPIO, timers, pin interrupts) and
+  `badge` (conagotchi: `set LEDs` on `badge/leds`, `show text` on
+  `badge/text` at most 256 bytes, `pet mode` on `badge/pet`, `on button`
+  from `badge/buttons`; no GPIO or timers). Unsupported blocks are disabled.
+  Badge payloads get 16 KiB of 1-byte-page memory by rewriting asc's memory
+  section, because asc has no page-size option —
+  `web/test/blocks.build.test.ts`: "the badge profile publishes on badge/leds from a byte-paged module", "rewrites the memory section to min = max = 16384 bytes with page size 2^0", "detects memory.size and memory.grow, which assume 64 KiB pages", "show text cuts badge text to 256 bytes on a character boundary"; `web/test/blocks.generator.test.ts`: "supports GPIO and timers on esp-base and the badge blocks only on the badge", "shows unsupported blocks disabled in the toolbox", "skips disabled blocks and reports blocks the profile does not support". Not yet run on badge hardware.
+- [x] U12 The Blocks workspace persists in localStorage and survives storage
+  errors; it exports and imports as JSON —
+  `web/test/blocks.storage.test.ts`: "saves and restores the workspace with its profile", "survives storage that throws, is missing or holds garbage", "round-trips the export format and imports bare Blockly workspaces", "rejects files that are not workspaces".
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and

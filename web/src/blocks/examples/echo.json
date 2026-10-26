@@ -1,0 +1,31 @@
+{
+  "blocks": {
+    "languageVersion": 0,
+    "blocks": [
+      {
+        "type": "mw_on_message",
+        "id": "msg",
+        "x": 20,
+        "y": 20,
+        "fields": { "KEY": "app/echo/in" },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "mw_log",
+              "id": "log",
+              "inputs": { "TEXT": { "shadow": { "type": "text", "id": "logText", "fields": { "TEXT": "echo: message" } } } },
+              "next": {
+                "block": {
+                  "type": "mw_publish",
+                  "id": "pub",
+                  "fields": { "KEY": "app/echo/out" },
+                  "inputs": { "DATA": { "block": { "type": "mw_message_text", "id": "text" } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
