@@ -277,6 +277,14 @@ export function variableIdent(name: string): string {
   return `v_${base}`;
 }
 
+/** A string constant's text for a `//` comment: JSON-quoted with every
+ * character outside printable ASCII as `\\uXXXX`, so text from an imported
+ * workspace (U+2028 / U+2029 end a line in AssemblyScript) can never close
+ * the comment and inject source. */
+export function commentText(text: string): string {
+  return JSON.stringify(text).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 /** Checks a key the way the host would before the payload runs. */
 export function keyProblem(key: string): string | null {
   if (key.length === 0) return "key is empty";
@@ -964,7 +972,7 @@ class Gen {
         [...this.strings]
           .map(([text, id]) => {
             const bytes = [...new TextEncoder().encode(text)];
-            return `// ${JSON.stringify(text)}\nconst ${id}: usize = memory.data<u8>([${bytes.join(", ")}]);\nconst ${id}_LEN: i32 = ${bytes.length};`;
+            return `// ${commentText(text)}\nconst ${id}: usize = memory.data<u8>([${bytes.join(", ")}]);\nconst ${id}_LEN: i32 = ${bytes.length};`;
           })
           .join("\n"),
       );

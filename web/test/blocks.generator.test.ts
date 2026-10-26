@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { BLOCK_DEFS, BUILTIN_BLOCKS, EVENT_BLOCKS, blockSupported, featureOf, toolbox } from "../src/blocks/defs";
 import { EXAMPLES } from "../src/blocks/examples";
-import { generate, keyProblem } from "../src/blocks/generator";
+import { commentText, generate, keyProblem } from "../src/blocks/generator";
 import { buildPayload } from "../src/blocks/pipeline";
 import type { BlockJson, WorkspaceJson } from "../src/blocks/workspace";
 import { compileAssemblyScript } from "../src/editor/compile";
@@ -234,6 +234,16 @@ describe("AssemblyScript generator", () => {
     expect(g.source).toContain("mw_gpio_irq(0, 3);");
     expect(g.source).toContain("if (kind == 1 && source == 0 && value == 0) {");
     expect(g.source).toContain("if (kind == 1 && source == 0 && value == 1) {");
+  });
+
+  it("keeps string constants inside their comment (no source injection)", () => {
+    const evil = "x\u2028mw_set_tick(1);\u2029\n}\r// é";
+    expect(commentText(evil)).toMatch(/^[\x20-\x7e]*$/);
+    const g = generate(ws(onInit({ type: "mw_log", inputs: { TEXT: txt(evil) } })), "esp-base");
+    expect(g.errors).toEqual([]);
+    expect(g.source).not.toMatch(/[\u2028\u2029\r]/);
+    expect(g.source).not.toMatch(/^\s*mw_set_tick/m);
+    expect(g.source).toContain('// "x\\u2028mw_set_tick(1);\\u2029\\n}\\r// \\u00e9"');
   });
 
   it("uses fixed buffers and never allocates", () => {
