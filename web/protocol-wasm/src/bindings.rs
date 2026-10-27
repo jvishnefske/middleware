@@ -11,6 +11,7 @@ use crate::decoder::{Event, StreamDecoder};
 use crate::loader::{Action, DeviceLoader, Info};
 use crate::{encode, loader};
 use js_sys::{Array, Object, Reflect, Uint8Array};
+use middleware::loader::trust::{self, TrustInfo, TrustState};
 use middleware::loader::{CHUNK_MAX, keys};
 use middleware::serial::frame::{MAX_RAW_FRAME, MAX_WIRE_FRAME};
 use middleware::wasm_abi;
@@ -119,10 +120,26 @@ pub fn crc32(data: &[u8]) -> u32 {
 }
 
 /// Upload plan: `[{key, body: Uint8Array, done}]` for begin, chunks, commit.
-/// `chunk` is clamped to `1..=CHUNK_MAX`.
+/// `chunk` is clamped to `1..=CHUNK_MAX`. The commit is unsigned (empty).
 #[wasm_bindgen(js_name = uploadPlan)]
 pub fn upload_plan(image: &[u8], chunk: usize) -> Result<Array, JsError> {
-    let steps = loader::plan(image, chunk).map_err(|e| js_err(e.describe()))?;
+    upload_plan_signed(image, chunk, &[])
+}
+
+/// As `uploadPlan`, with `commitBody` (empty, or the 68 bytes from
+/// `encodeSignedCommit`) as the final `sys/loader/commit` body. Throws on
+/// any other commit body length.
+#[wasm_bindgen(js_name = uploadPlanSigned)]
+pub fn upload_plan_signed(
+    image: &[u8],
+    chunk: usize,
+    commit_body: &[u8],
+) -> Result<Array, JsError> {
+    if !commit_body.is_empty() && commit_body.len() != trust::SIGNED_COMMIT_LEN {
+        return Err(js_err("commit body must be empty or 68 bytes"));
+    }
+    let steps =
+        loader::plan_with_commit(image, chunk, commit_body).map_err(|e| js_err(e.describe()))?;
     Ok(steps
         .iter()
         .map(|s| {
@@ -175,6 +192,62 @@ pub fn encode_device_info(
     .ok_or_else(|| js_err("invalid device info"))
 }
 
+/// SHA-256 of `data` (32 bytes), computed by the device loader's hasher.
+#[wasm_bindgen]
+pub fn sha256(data: &[u8]) -> Vec<u8> {
+    loader::sha256(data).to_vec()
+}
+
+/// The 54-byte message a payload signature covers:
+/// `"mw-payload-v1\0" || len u32 LE || version u32 LE || sha256`. Throws when
+/// `sha256` is not 32 bytes. Sign it with Ed25519 (pure, RFC 8032).
+#[wasm_bindgen(js_name = signedMessage)]
+pub fn signed_message(len: u32, version: u32, sha256: &[u8]) -> Result<Vec<u8>, JsError> {
+    loader::signed_message(len, version, sha256).ok_or_else(|| js_err("sha256 must be 32 bytes"))
+}
+
+/// The 68-byte signed commit body `[version u32 LE][signature 64]`. Throws
+/// when `signature` is not 64 bytes.
+#[wasm_bindgen(js_name = encodeSignedCommit)]
+pub fn encode_signed_commit(version: u32, signature: &[u8]) -> Result<Vec<u8>, JsError> {
+    loader::signed_commit_body(version, signature)
+        .ok_or_else(|| js_err("signature must be 64 bytes"))
+}
+
+fn trust_info_object(info: &TrustInfo) -> Object {
+    let o = Object::new();
+    let code = info.code() as u8;
+    set(&o, "state", code);
+    set(
+        &o,
+        "stateName",
+        loader::trust_state_name(code).unwrap_or("unknown"),
+    );
+    match info.state {
+        TrustState::Unclaimed => set(&o, "minVersion", 0u32),
+        TrustState::Claimed { key, min_version } => {
+            set(&o, "minVersion", min_version.0);
+            set(&o, "key", bytes(&key.0));
+        }
+    }
+    o
+}
+
+/// Decodes a `sys/trust/info` body into
+/// `{state: 0|1|2, stateName: "unclaimed"|"claimed"|"rekey", minVersion,
+/// key?: Uint8Array}` (`key` iff state != 0), or `undefined` when
+/// malformed.
+#[wasm_bindgen(js_name = decodeTrustInfo)]
+pub fn decode_trust_info(data: &[u8]) -> Option<Object> {
+    TrustInfo::decode(data).map(|i| trust_info_object(&i))
+}
+
+/// Name of a `sys/trust/info` state byte, or `undefined`.
+#[wasm_bindgen(js_name = trustStateName)]
+pub fn trust_state_name(code: u8) -> Option<String> {
+    loader::trust_state_name(code).map(str::to_owned)
+}
+
 /// Name of a `sys/payload/status` byte, or `undefined`.
 #[wasm_bindgen(js_name = payloadStatusName)]
 pub fn payload_status_name(b: u8) -> Option<String> {
@@ -199,9 +272,33 @@ impl JsDeviceLoader {
         self.0.receiving()
     }
 
+    /// Sets the simulated clock (ms since boot); the re-key window expires
+    /// against it.
+    #[wasm_bindgen(js_name = setNow)]
+    pub fn set_now(&mut self, now_ms: f64) {
+        // JS numbers: clamp negatives and NaN to 0.
+        self.0 = self.0.at(if now_ms > 0.0 { now_ms as u64 } else { 0 });
+    }
+
+    /// Simulates physical presence (BOOT held 3 s): opens the re-key window
+    /// for 60 s from the current clock.
+    #[wasm_bindgen(js_name = assertPresence)]
+    pub fn assert_presence(&mut self) {
+        self.0 = self.0.assert_presence();
+    }
+
+    /// The current trust state, as `decodeTrustInfo` returns it.
+    #[wasm_bindgen(getter, js_name = trustInfo)]
+    pub fn trust_info(&self) -> Object {
+        trust_info_object(&self.0.trust_info())
+    }
+
     /// Handles a request. Returns `{statusCode, status, action?, offset?,
-    /// data?, len?, crc?}` where `action` is one of `app`, `info`, `start`,
-    /// `stop`, `erase`, `write`, `activate`.
+    /// data?, len?, crc?, body?}` where `action` is one of `app`, `info`,
+    /// `start`, `stop`, `erase`, `write`, `activate`, `trustInfo` (with the
+    /// response `body`), `claim`. Signed commits are checked against the
+    /// simulated trust state; a refusal is status `Denied` (5) and no
+    /// `activate`.
     pub fn step(&mut self, key: &str, body: &[u8]) -> Object {
         let (next, result) = self.0.step(key, body);
         self.0 = next;
@@ -229,6 +326,11 @@ impl JsDeviceLoader {
                     set(&o, "crc", crc);
                     "activate"
                 }
+                Action::TrustInfo(body) => {
+                    set(&o, "body", bytes(&body));
+                    "trustInfo"
+                }
+                Action::Claim => "claim",
             };
             set(&o, "action", name);
         }
@@ -237,13 +339,18 @@ impl JsDeviceLoader {
 }
 
 /// Protocol constants and system keys:
-/// `{chunkMax, maxRawFrame, maxWireFrame, keys: {info, begin, chunk, commit, start, stop, log, status}}`.
+/// `{chunkMax, maxRawFrame, maxWireFrame, signedCommitLen, rekeyWindowMs,
+/// presenceHoldMs, keys: {info, begin, chunk, commit, start, stop, log,
+/// status, trustInfo, trustClaim}}`.
 #[wasm_bindgen]
 pub fn protocol() -> Object {
     let o = Object::new();
     set(&o, "chunkMax", CHUNK_MAX as u32);
     set(&o, "maxRawFrame", MAX_RAW_FRAME as u32);
     set(&o, "maxWireFrame", MAX_WIRE_FRAME as u32);
+    set(&o, "signedCommitLen", trust::SIGNED_COMMIT_LEN as u32);
+    set(&o, "rekeyWindowMs", trust::REKEY_WINDOW_MS as f64);
+    set(&o, "presenceHoldMs", trust::PRESENCE_HOLD_MS as f64);
     let k = Object::new();
     for (name, key) in [
         ("info", keys::INFO),
@@ -254,6 +361,8 @@ pub fn protocol() -> Object {
         ("stop", keys::STOP),
         ("log", keys::LOG),
         ("status", keys::STATUS),
+        ("trustInfo", keys::TRUST_INFO),
+        ("trustClaim", keys::TRUST_CLAIM),
     ] {
         set(&k, name, key.as_str());
     }

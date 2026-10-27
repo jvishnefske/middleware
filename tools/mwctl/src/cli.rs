@@ -1,6 +1,7 @@
 //! Command-line parsing (pure).
 //!
-//! [`parse`] turns the arguments after the program name into a [`Cli`] or
+//! [`parse`] turns the arguments after the program name into a [`Cli`]
+//! (device commands, which need `--port`), a local [`KeyCmd`] (no port) or
 //! a [`Parsed::Help`] request. Options may appear before or after the
 //! command; command-specific options are rejected on other commands.
 //! [`HELP`] is the usage text printed by `--help` and on usage errors.
@@ -14,10 +15,15 @@ mwctl - talk to the middleware ESP base firmware over one serial port
 
 USAGE:
     mwctl --port <PATH> [--baud <N>] [--timeout <MS>] <COMMAND>
+    mwctl key new <KEYFILE> | key pub <KEYFILE>
 
 COMMANDS:
     info                       Print chip, firmware, ABI, capacity and payload status
     upload <FILE.wasm>         Install a payload (sys/loader begin/chunk/commit)
+        --key <KEYFILE>            sign the commit (Ed25519); without it the commit is
+                                   unsigned, which only an unclaimed device accepts
+        --version <N>              signed version, must exceed the device's last one
+                                   [default: current Unix time in seconds]
         --start                    then send sys/payload/start
         --corrupt-chunk <INDEX>    test hook: flip a byte in that chunk's data but
                                    declare the original CRC, so commit must fail
@@ -27,6 +33,14 @@ COMMANDS:
                                (and other publications) until N seconds pass or Ctrl-C
     reset                      Reboot into run mode: RTS asserted for 100 ms with DTR
                                deasserted (EN pulse through the DTR/RTS auto-reset circuit)
+    trust info                 Print the root of trust: unclaimed, or the pinned key and
+                               the last signed version installed
+    trust claim --key <KEYFILE>
+                               Pin KEYFILE's public key (sys/trust/claim). Accepted when
+                               unclaimed, or within 60 s after BOOT was held for 3 s
+    key new <KEYFILE>          Create a signing key: 32 random bytes (the Ed25519 seed),
+                               mode 0600, never overwriting; prints the public key
+    key pub <KEYFILE>          Print a key file's public key (hex)
 
 OPTIONS:
     --port <PATH>      Serial port to open, e.g. /dev/ttyUSB0 (required; never scanned)
@@ -45,7 +59,22 @@ pub const DEFAULT_BAUD: u32 = 115_200;
 /// Default per-attempt timeout.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1000);
 
-/// A subcommand.
+/// A local key-file command (no device, no port).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyCmd {
+    /// `key new <file>`.
+    New {
+        /// Key file to create.
+        file: PathBuf,
+    },
+    /// `key pub <file>`.
+    Pub {
+        /// Key file to read.
+        file: PathBuf,
+    },
+}
+
+/// A device subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
     /// `info`.
@@ -58,6 +87,17 @@ pub enum Cmd {
         start: bool,
         /// Test hook: chunk to corrupt.
         corrupt_chunk: Option<usize>,
+        /// Signing key file; `None` sends an unsigned commit.
+        key: Option<PathBuf>,
+        /// Signed version; `None` uses the current Unix time.
+        version: Option<u32>,
+    },
+    /// `trust info`.
+    TrustInfo,
+    /// `trust claim --key <file>`.
+    TrustClaim {
+        /// Key file whose public key is pinned.
+        key: PathBuf,
     },
     /// `start`.
     Start,
@@ -88,8 +128,10 @@ pub struct Cli {
 /// Result of a successful parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
-    /// Run a command.
+    /// Run a device command.
     Run(Cli),
+    /// Run a local key command.
+    Key(KeyCmd),
     /// Print [`HELP`] and exit successfully.
     Help,
 }
@@ -110,6 +152,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut start = false;
     let mut corrupt_chunk = None;
     let mut seconds = None;
+    let mut key: Option<PathBuf> = None;
+    let mut version = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -119,6 +163,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--start" => start = true,
             "--corrupt-chunk" => corrupt_chunk = Some(number("--corrupt-chunk", args.next())?),
             "--seconds" => seconds = Some(number("--seconds", args.next())?),
+            "--key" => key = Some(PathBuf::from(args.next().ok_or("--key needs a key file")?)),
+            "--version" => version = Some(number("--version", args.next())?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             _ => positional.push(a),
         }
@@ -130,23 +176,59 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         return Err("--timeout must be positive".into());
     }
     let mut pos = positional.into_iter();
-    let name = pos.next().ok_or("no command given")?;
-    let only = |flag: &str, set: bool, cmd: &str| {
-        if set && name != cmd {
-            Err(format!("{flag} applies only to '{cmd}'"))
+    let first = pos.next().ok_or("no command given")?;
+    // Two-word commands are named "trust info", "key new", ...
+    let name = match first.as_str() {
+        "trust" | "key" => {
+            let sub = pos
+                .next()
+                .ok_or_else(|| format!("'{first}' needs a subcommand"))?;
+            format!("{first} {sub}")
+        }
+        _ => first,
+    };
+    let only = |flag: &str, set: bool, cmds: &[&str]| {
+        if set && !cmds.contains(&name.as_str()) {
+            Err(format!("{flag} applies only to '{}'", cmds.join("' or '")))
         } else {
             Ok(())
         }
     };
-    only("--start", start, "upload")?;
-    only("--corrupt-chunk", corrupt_chunk.is_some(), "upload")?;
-    only("--seconds", seconds.is_some(), "monitor")?;
+    only("--start", start, &["upload"])?;
+    only("--corrupt-chunk", corrupt_chunk.is_some(), &["upload"])?;
+    only("--seconds", seconds.is_some(), &["monitor"])?;
+    only("--key", key.is_some(), &["upload", "trust claim"])?;
+    only("--version", version.is_some(), &["upload"])?;
+    if version.is_some() && key.is_none() {
+        return Err("--version needs --key (only signed commits carry a version)".into());
+    }
+    let local = match name.as_str() {
+        "key new" => Some(KeyCmd::New {
+            file: PathBuf::from(pos.next().ok_or("key new needs a key file")?),
+        }),
+        "key pub" => Some(KeyCmd::Pub {
+            file: PathBuf::from(pos.next().ok_or("key pub needs a key file")?),
+        }),
+        _ => None,
+    };
+    if let Some(k) = local {
+        if let Some(extra) = pos.next() {
+            return Err(format!("unexpected argument '{extra}'"));
+        }
+        return Ok(Parsed::Key(k));
+    }
     let cmd = match name.as_str() {
         "info" => Cmd::Info,
         "upload" => Cmd::Upload {
             file: PathBuf::from(pos.next().ok_or("upload needs a .wasm file")?),
             start,
             corrupt_chunk,
+            key,
+            version,
+        },
+        "trust info" => Cmd::TrustInfo,
+        "trust claim" => Cmd::TrustClaim {
+            key: key.ok_or("trust claim needs --key <KEYFILE>")?,
         },
         "start" => Cmd::Start,
         "stop" => Cmd::Stop,
@@ -202,7 +284,9 @@ mod tests {
                 cmd: Cmd::Upload {
                     file: "a.wasm".into(),
                     start: true,
-                    corrupt_chunk: Some(3)
+                    corrupt_chunk: Some(3),
+                    key: None,
+                    version: None,
                 }
             }
         );
@@ -219,6 +303,85 @@ mod tests {
             Duration::from_millis(250)
         );
         assert_eq!(p("info --help"), Ok(Parsed::Help));
+    }
+
+    #[test]
+    fn parses_trust_key_and_signed_upload_commands() {
+        assert_eq!(run("--port p trust info").cmd, Cmd::TrustInfo);
+        assert_eq!(
+            run("trust claim --key k.key --port p").cmd,
+            Cmd::TrustClaim {
+                key: "k.key".into()
+            }
+        );
+        assert_eq!(
+            run("--port p upload a.wasm --key k.key").cmd,
+            Cmd::Upload {
+                file: "a.wasm".into(),
+                start: false,
+                corrupt_chunk: None,
+                key: Some("k.key".into()),
+                version: None,
+            }
+        );
+        match run("--port p upload a.wasm --key k --version 42").cmd {
+            Cmd::Upload { version, .. } => assert_eq!(version, Some(42)),
+            other => panic!("{other:?}"),
+        }
+        // Key commands are local: no port needed.
+        assert_eq!(
+            p("key new k.key"),
+            Ok(Parsed::Key(KeyCmd::New {
+                file: "k.key".into()
+            }))
+        );
+        assert_eq!(
+            p("key pub k.key"),
+            Ok(Parsed::Key(KeyCmd::Pub {
+                file: "k.key".into()
+            }))
+        );
+        assert_eq!(
+            p("--port p key pub k.key"),
+            Ok(Parsed::Key(KeyCmd::Pub {
+                file: "k.key".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn rejects_bad_trust_and_key_usage() {
+        for (args, why) in [
+            ("--port p trust claim", "needs --key"),
+            ("--port p trust", "needs a subcommand"),
+            ("--port p trust frob", "unknown command"),
+            ("key", "needs a subcommand"),
+            ("key new", "needs a key file"),
+            ("key pub", "needs a key file"),
+            ("key new a b", "unexpected"),
+            ("trust info", "--port"),
+            ("--port p upload a.wasm --version 3", "needs --key"),
+            (
+                "--port p upload a.wasm --key k --version x",
+                "not a valid number",
+            ),
+            (
+                "--port p upload a.wasm --key k --version 4294967296",
+                "not a valid number",
+            ),
+            ("--port p info --key k", "only to 'upload' or 'trust claim'"),
+            ("--port p trust info --key k", "only to"),
+            (
+                "--port p trust claim --key k --version 1",
+                "only to 'upload'",
+            ),
+            ("--port p upload a.wasm --key", "needs a key file"),
+        ] {
+            match p(args) {
+                Err(e) => assert!(e.contains(why), "{args}: {e}"),
+                Ok(v) => panic!("{args}: accepted as {v:?}"),
+            }
+        }
     }
 
     #[test]

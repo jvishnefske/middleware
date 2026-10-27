@@ -17,7 +17,9 @@
 //! * [`PayloadStore::activate`] flushes the last partial word, re-reads the
 //!   new image and checks it against the expected CRC-32, then writes the
 //!   slot's header (fields first, magic last) with the next generation, and
-//!   only then makes that slot active.
+//!   only then makes that slot active. [`PayloadStore::activate_with`]
+//!   runs a caller step (persisting the trust record) between the CRC
+//!   check and the header write.
 //!
 //! The active slot is never erased or written while it is active, so a
 //! transfer that is abandoned, rejected, fails on a flash error, or is cut by
@@ -213,6 +215,21 @@ impl<F: NorFlash> PayloadStore<F> {
     /// written and be non-zero. The transfer ends whatever the result; on
     /// failure the previously active slot stays active.
     pub fn activate(&mut self, len: u32, crc: u32) -> Result<(), StoreError> {
+        self.activate_with(len, crc, |_| Ok(()))
+    }
+
+    /// [`PayloadStore::activate`] with `before_header` run on the flash
+    /// after the image has been flushed and its CRC-32 checked, and before
+    /// the slot header is written. If it fails, no header is written and
+    /// the previous image stays active. The shell persists the trust
+    /// record's raised `min_version` here (see [`crate::trust_store`]), so
+    /// it reaches flash before the new image can boot.
+    pub fn activate_with(
+        &mut self,
+        len: u32,
+        crc: u32,
+        before_header: impl FnOnce(&mut F) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
         let t = self.transfer.take().ok_or(StoreError::OutOfOrder)?;
         if t.writer.position() != len || len == 0 {
             return Err(StoreError::OutOfOrder);
@@ -224,6 +241,7 @@ impl<F: NorFlash> PayloadStore<F> {
         if self.crc_of(t.slot, len)? != crc {
             return Err(StoreError::Crc);
         }
+        before_header(&mut self.flash)?;
         let generation = self.latest.map_or(Generation::FIRST, Generation::next);
         let header = Header { len, crc, generation };
         let bytes = header.encode();
@@ -234,6 +252,12 @@ impl<F: NorFlash> PayloadStore<F> {
         self.active = Ok((t.slot, header));
         self.latest = Some(generation);
         Ok(())
+    }
+
+    /// The flash device, for other partitions on it (the trust record).
+    /// Callers must not write inside this store's partition.
+    pub fn flash(&mut self) -> &mut F {
+        &mut self.flash
     }
 
     /// The active image's header, if a valid one is installed.
@@ -304,101 +328,14 @@ mod tests {
 
     use super::*;
     use std::{vec, vec::Vec};
-    use embedded_storage::nor_flash::{ErrorType, NorFlashErrorKind, ReadNorFlash};
 
     const SIZE: usize = 8 * SECTOR as usize;
     const BASE: u32 = 2 * SECTOR;
     /// Slot B's header, absolute.
     const SLOT_B: u32 = BASE + SIZE as u32 / 2;
 
-    /// RAM NOR flash: 4-byte reads/writes, 4 KiB erases, writes only clear
-    /// bits. `cut` injects power loss: the erase or write with that index
-    /// (counting from 0 after [`RamFlash::cut_at`]) is torn, half of its
-    /// bytes applied, and it and every later erase or write fail.
-    struct RamFlash {
-        mem: [u8; SIZE + BASE as usize],
-        erases: usize,
-        ops: usize,
-        cut: Option<usize>,
-    }
-
-    impl RamFlash {
-        fn new() -> Self {
-            RamFlash { mem: [0x00; SIZE + BASE as usize], erases: 0, ops: 0, cut: None }
-        }
-
-        fn cut_at(&mut self, op: usize) {
-            self.ops = 0;
-            self.cut = Some(op);
-        }
-
-        /// Power is back: no more faults.
-        fn restore(&mut self) {
-            self.cut = None;
-        }
-
-        /// How much of an operation of `len` bytes takes effect: all, half
-        /// (torn, then fail), or none (fail).
-        fn admit(&mut self, len: usize) -> Result<usize, usize> {
-            let op = self.ops;
-            self.ops += 1;
-            match self.cut {
-                Some(cut) if op == cut => Err(len / 2),
-                Some(cut) if op > cut => Err(0),
-                _ => Ok(len),
-            }
-        }
-    }
-
-    impl ErrorType for RamFlash {
-        type Error = NorFlashErrorKind;
-    }
-
-    impl ReadNorFlash for RamFlash {
-        const READ_SIZE: usize = 4;
-        fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
-            if !offset.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
-                return Err(NorFlashErrorKind::NotAligned);
-            }
-            let src = self.mem.get(offset as usize..offset as usize + bytes.len());
-            bytes.copy_from_slice(src.ok_or(NorFlashErrorKind::OutOfBounds)?);
-            Ok(())
-        }
-        fn capacity(&self) -> usize {
-            self.mem.len()
-        }
-    }
-
-    impl NorFlash for RamFlash {
-        const WRITE_SIZE: usize = 4;
-        const ERASE_SIZE: usize = SECTOR as usize;
-        fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
-            if !offset.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
-                return Err(NorFlashErrorKind::NotAligned);
-            }
-            let admitted = self.admit(bytes.len());
-            let n = admitted.unwrap_or_else(|n| n);
-            let dst = self.mem.get_mut(offset as usize..offset as usize + bytes.len());
-            for (d, s) in dst.ok_or(NorFlashErrorKind::OutOfBounds)?.iter_mut().zip(bytes).take(n) {
-                *d &= *s;
-            }
-            admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
-        }
-        fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
-            if !from.is_multiple_of(SECTOR) || !to.is_multiple_of(SECTOR) {
-                return Err(NorFlashErrorKind::NotAligned);
-            }
-            let span = self.mem.get_mut(from as usize..to as usize).ok_or(NorFlashErrorKind::OutOfBounds)?;
-            let len = span.len();
-            let admitted = self.admit(len);
-            let n = admitted.unwrap_or_else(|n| n);
-            if let Some(part) = self.mem.get_mut(from as usize..from as usize + n) {
-                part.fill(0xFF);
-            }
-            self.erases += 1;
-            admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
-        }
-    }
+    /// The RAM flash model, sized for this partition plus the bytes before it.
+    type RamFlash = crate::ram_flash::RamFlash<{ SIZE + BASE as usize }>;
 
     fn open(flash: RamFlash) -> PayloadStore<RamFlash> {
         PayloadStore::new(flash, BASE, SIZE as u32, u32::MAX).unwrap()
@@ -619,6 +556,42 @@ mod tests {
         power_loss_sweep(&[pattern(5003, 3), pattern(4100, 4)], &pattern(6000, 5), 256);
         // First install on empty flash: empty or the new image.
         power_loss_sweep(&[], &pattern(300, 6), 7);
+    }
+
+    #[test]
+    fn activate_with_runs_after_crc_and_before_header() {
+        let mut store = open(RamFlash::new());
+        let old = pattern(300, 1);
+        install(&mut store, &old, 64);
+        let new = pattern(400, 2);
+        // A failing step leaves the old image active, now and after reboot.
+        store.erase(400).unwrap();
+        store.write(0, &new).unwrap();
+        let r = store.activate_with(400, Crc32::checksum(&new), |_| Err(StoreError::Flash));
+        assert_eq!(r, Err(StoreError::Flash));
+        assert_eq!(store.active_slot(), Some(Slot::A));
+        let mut store = reboot(store);
+        assert_eq!(contents(&mut store), Some(old.clone()));
+        // A CRC mismatch never runs the step.
+        store.erase(400).unwrap();
+        store.write(0, &new).unwrap();
+        let mut ran = false;
+        let r = store.activate_with(400, 0, |_| {
+            ran = true;
+            Ok(())
+        });
+        assert_eq!((r, ran), (Err(StoreError::Crc), false));
+        // Success: the step ran while the old image was still active.
+        store.erase(400).unwrap();
+        store.write(0, &new).unwrap();
+        let header_b = SLOT_B as usize;
+        let r = store.activate_with(400, Crc32::checksum(&new), |f| {
+            assert!(f.mem[header_b..header_b + HEADER_LEN].iter().all(|&b| b == 0xFF), "no header yet");
+            Ok(())
+        });
+        assert_eq!(r, Ok(()));
+        let mut store = reboot(store);
+        assert_eq!(contents(&mut store), Some(new));
     }
 
     #[test]

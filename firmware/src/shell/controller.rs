@@ -20,18 +20,30 @@
 //!   device stops timers, aborts DMA, disables interrupts, releases the
 //!   pins and clears the queue.
 //!
+//! Trust: each request is dispatched with `Context::rekey_window` taken
+//! from [`presence::window_open`]. A `Claim` action saves the trust record
+//! ([`TrustStore::save`], on the flash the payload store lends) and closes
+//! the window. An `Activate` that raises `min_version` saves the record
+//! inside [`PayloadStore::activate_with`], after the image CRC check and
+//! before the slot header (the ordering is explained in
+//! `esp_base::trust_store`). Refused claims and commits are logged.
+//!
 //! All decisions come from `esp_base::dispatch`; this module performs them.
 //! Status changes are published on `sys/payload/status`, notable events as
 //! `sys/log` lines.
 
 use esp_base::dispatch::{Action, Context, Outcome, State, handle_request};
 use esp_base::store::{PayloadStore, StoreError};
+use esp_base::trust_store::TrustStore;
+use middleware::loader::keys;
+use middleware::loader::trust::TrustState;
 use esp_storage::FlashStorage;
 use heapless::Vec;
 use middleware::Key;
 use middleware::transport::HandlerError;
 
 use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Port, Reply};
+use super::presence;
 
 #[cfg(feature = "wasm")]
 use {
@@ -63,6 +75,8 @@ pub struct Controller {
     state: State,
     ctx: Context<'static>,
     store: Option<Store>,
+    /// The trust partition; `None` when the partition table has none.
+    trust: Option<TrustStore>,
     bus: &'static Bus,
     #[cfg(feature = "wasm")]
     profile: &'static Profile,
@@ -94,6 +108,7 @@ impl Controller {
         state: State,
         ctx: Context<'static>,
         store: Option<Store>,
+        trust: Option<TrustStore>,
         bus: &'static Bus,
         #[cfg(feature = "wasm")] profile: &'static Profile,
     ) -> Self {
@@ -101,6 +116,7 @@ impl Controller {
             state,
             ctx,
             store,
+            trust,
             bus,
             #[cfg(feature = "wasm")]
             profile,
@@ -142,8 +158,49 @@ impl Controller {
         match outcome.action {
             Action::Erase { len } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
-            Action::Activate { len, crc } => self.store()?.activate(len, crc),
+            Action::Activate { len, crc, trust: None } => self.store()?.activate(len, crc),
+            Action::Activate { len, crc, trust: Some(next) } => {
+                let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
+                    return Err(StoreError::Flash);
+                };
+                store.activate_with(len, crc, |flash| ts.save(flash, &next))
+            }
+            Action::Claim { trust } => {
+                let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
+                    return Err(StoreError::Flash);
+                };
+                ts.save(store.flash(), &trust)
+            }
             Action::None | Action::Start | Action::Stop => Ok(()),
+        }
+    }
+
+    /// Logs what a trust-related request did.
+    fn log_trust(&self, key: &str, outcome: &Outcome<'_>) {
+        if let Action::Claim { trust: TrustState::Claimed { key, .. } } = outcome.action {
+            let k = key.0;
+            self.bus.log(format_args!(
+                "trust: key {:02x}{:02x}{:02x}{:02x}... pinned, min_version 0; re-key window closed",
+                k[0], k[1], k[2], k[3]
+            ));
+        }
+        if let Action::Activate { trust: Some(TrustState::Claimed { min_version, .. }), .. } = outcome.action {
+            self.bus.log(format_args!("trust: signed payload accepted, min_version {}", min_version.0));
+        }
+        if outcome.reply == Err(HandlerError::Denied) {
+            if key == keys::COMMIT.as_str() {
+                let min = match self.state.trust() {
+                    TrustState::Claimed { min_version, .. } => min_version.0,
+                    TrustState::Unclaimed => 0,
+                };
+                self.bus.log(format_args!(
+                    "trust: commit denied (needs a valid signature and version > {min}); previous payload kept"
+                ));
+            } else {
+                self.bus.log(format_args!(
+                    "trust: claim denied; hold BOOT 3 s to open the re-key window"
+                ));
+            }
         }
     }
 
@@ -155,7 +212,8 @@ impl Controller {
             return Handled { reply: Some(reply), stop: false };
         };
         let mut out = [0u8; MAX_REPLY];
-        let outcome = handle_request(self.state, &self.ctx, key, body, &mut out);
+        let ctx = Context { rekey_window: presence::window_open(), ..self.ctx };
+        let outcome = handle_request(self.state, &ctx, key, body, &mut out);
         if outcome.action == Action::Start {
             return Handled { reply: None, stop: false };
         }
@@ -165,6 +223,10 @@ impl Controller {
                 if let Action::Activate { len, .. } = outcome.action {
                     self.bus.log(format_args!("payload installed ({len} bytes)"));
                 }
+                if let Action::Claim { .. } = outcome.action {
+                    presence::close();
+                }
+                self.log_trust(key.as_str(), &outcome);
                 self.set_state(outcome.state);
                 outcome.reply
             }

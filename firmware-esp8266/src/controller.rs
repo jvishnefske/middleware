@@ -18,7 +18,9 @@
 //!   (`begin` erases the inactive slot, `chunk` writes it, `commit`
 //!   activates it), so a rejected or interrupted upload leaves the previous
 //!   image installed and the status returns to `Stopped`;
-//!   `sys/payload/stop` (`Ok`, nothing runs). `sys/payload/start` is
+//!   `sys/payload/stop` (`Ok`, nothing runs). Signed payloads are not
+//!   enabled here (`esp-base` without its `trust` feature): `sys/trust/*`
+//!   is `NotFound` and a signature in a commit body is accepted unchecked. `sys/payload/start` is
 //!   answered `NotFound` by dispatch because [`Context::runtime`] is
 //!   `false`, exactly as on the ESP32-C3 build without `wasm`. Publications
 //!   and responses from the host are ignored: there is no payload to
@@ -121,6 +123,7 @@ impl<F: NorFlash> Controller<F> {
             firmware: FIRMWARE,
             capacity,
             runtime: profile.runtime,
+            rekey_window: false,
         };
         log(
             out,
@@ -194,7 +197,9 @@ impl<F: NorFlash> Controller<F> {
         match outcome.action {
             Action::Erase { len } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
-            Action::Activate { len, crc } => self.store()?.activate(len, crc),
+            // Built without `trust`: commits are never checked, so there is
+            // never a trust record to persist.
+            Action::Activate { len, crc, .. } => self.store()?.activate(len, crc),
             Action::None | Action::Start | Action::Stop => Ok(()),
         }
     }

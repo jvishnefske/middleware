@@ -14,7 +14,8 @@ default = ["simulator"]
 simulator = ["dep:wasm-host"]
 
 [dependencies]
-middleware = { path = "../.." }
+# `trust`: the device-side loader checks signed commits like the firmware.
+middleware = { path = "../..", features = ["trust"] }
 wasm-host = { path = "../../wasm-host", optional = true }
 wasm-bindgen = "0.2"
 js-sys = "0.3"

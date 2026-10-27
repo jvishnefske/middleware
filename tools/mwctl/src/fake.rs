@@ -5,8 +5,18 @@
 //! [`Splitter`], parsed with [`Command::parse`], transfers run through the
 //! device's [`Loader`] state machine (so resend deduplication and the
 //! commit CRC check are the firmware's own), and `sys/info` is encoded with
-//! [`DeviceInfo::encode`]. Storage is a `Vec`. Without the runtime,
+//! [`DeviceInfo::encode`]. Storage is a `Vec` staged apart from the
+//! installed image, like the firmware's two-slot store: a failed or
+//! refused commit keeps the previous image. Without the runtime,
 //! `sys/payload/start` answers `NotFound`, as in a `+no-wasm` build.
+//!
+//! Trust mirrors `middleware::loader::trust`: `sys/trust/claim` pins a key
+//! when unclaimed (or when built [`FakeDevice::with_rekey_window`], until a
+//! claim closes it) and is `Denied` otherwise; once claimed, a commit must
+//! be signed by that key over `signed_message(len, version, sha256)` with a
+//! version above `min_version`, else `Denied`. The check uses
+//! `ed25519-dalek` directly, because mwctl builds `middleware` with no
+//! features (the crate's own check needs `trust`).
 //!
 //! (`esp_base` itself is not used: it requires rustc 1.95 through its own
 //! toolchain file, which the host workspace does not use.)
@@ -17,7 +27,10 @@
 //! returns `Ok(0)` at once, which the link treats as a timeout.
 
 use crate::link::Transport;
+use crate::sign::image_sha256;
+use ed25519_dalek::{Signature, VerifyingKey};
 use middleware::Key;
+use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
 use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
@@ -55,6 +68,8 @@ pub struct FakeDevice {
     staging: Vec<u8>,
     installed: Option<Vec<u8>>,
     declared_crc: Option<u32>,
+    trust: TrustState,
+    rekey_open: bool,
 }
 
 impl FakeDevice {
@@ -75,6 +90,59 @@ impl FakeDevice {
             staging: Vec::new(),
             installed: None,
             declared_crc: None,
+            trust: TrustState::Unclaimed,
+            rekey_open: false,
+        }
+    }
+
+    /// Already claimed with `key` (as if claimed before this session).
+    pub fn with_claim(self, key: middleware::loader::trust::PublicKey) -> Self {
+        FakeDevice {
+            trust: TrustState::Claimed {
+                key,
+                min_version: Version(0),
+            },
+            ..self
+        }
+    }
+
+    /// The re-key window is open (as if BOOT had been held).
+    pub fn with_rekey_window(self) -> Self {
+        FakeDevice {
+            rekey_open: true,
+            ..self
+        }
+    }
+
+    /// The device's commit check (`TrustState::accept_commit`).
+    fn accept(
+        &self,
+        image: &[u8],
+        auth: Option<&SignedCommit>,
+    ) -> Result<TrustState, HandlerError> {
+        let TrustState::Claimed { key, min_version } = self.trust else {
+            return Ok(self.trust);
+        };
+        let auth = auth.ok_or(HandlerError::Denied)?;
+        if auth.version <= min_version {
+            return Err(HandlerError::Denied);
+        }
+        let vk = VerifyingKey::from_bytes(&key.0).map_err(|_| HandlerError::Denied)?;
+        let len = u32::try_from(image.len()).map_err(|_| HandlerError::Denied)?;
+        let m = signed_message(len, auth.version, &image_sha256(image));
+        vk.verify_strict(&m, &Signature::from_bytes(&auth.signature.0))
+            .map_err(|_| HandlerError::Denied)?;
+        Ok(TrustState::Claimed {
+            key,
+            min_version: auth.version,
+        })
+    }
+
+    fn resting(&self) -> PayloadStatus {
+        if self.installed.is_some() {
+            PayloadStatus::Stopped
+        } else {
+            PayloadStatus::Empty
         }
     }
 
@@ -152,13 +220,32 @@ impl FakeDevice {
                 }
                 Ok(0)
             }
-            Command::Begin { .. } | Command::Chunk { .. } | Command::Commit => {
+            Command::TrustInfo => self
+                .trust
+                .info(self.rekey_open)
+                .encode(out)
+                .ok_or(HandlerError::BufferTooSmall),
+            Command::TrustClaim { key } => {
+                if VerifyingKey::from_bytes(&key.0).is_err() {
+                    return Err(HandlerError::InvalidRequest);
+                }
+                if self.trust.is_claimed() && !self.rekey_open {
+                    return Err(HandlerError::Denied);
+                }
+                self.trust = TrustState::Claimed {
+                    key,
+                    min_version: Version(0),
+                };
+                self.rekey_open = false;
+                Ok(0)
+            }
+            Command::Begin { .. } | Command::Chunk { .. } | Command::Commit { .. } => {
                 let (next, effect) = self.loader.step(&cmd, self.capacity);
                 self.loader = next;
                 match effect {
                     Err(e) => {
                         if self.status == PayloadStatus::Loading {
-                            self.set_status(PayloadStatus::Empty);
+                            self.set_status(self.resting());
                         }
                         Err(e)
                     }
@@ -166,7 +253,6 @@ impl FakeDevice {
                         if let Command::Begin { crc, .. } = cmd {
                             self.declared_crc = Some(crc);
                         }
-                        self.installed = None;
                         self.staging.clear();
                         self.set_status(PayloadStatus::Loading);
                         Ok(0)
@@ -175,8 +261,16 @@ impl FakeDevice {
                         self.staging.extend_from_slice(data);
                         Ok(0)
                     }
-                    Ok(Effect::Activate { .. }) => {
-                        self.installed = Some(std::mem::take(&mut self.staging));
+                    Ok(Effect::Activate { auth, .. }) => {
+                        let staged = std::mem::take(&mut self.staging);
+                        match self.accept(&staged, auth.as_ref()) {
+                            Ok(next) => self.trust = next,
+                            Err(e) => {
+                                self.set_status(self.resting());
+                                return Err(e);
+                            }
+                        }
+                        self.installed = Some(staged);
                         self.set_status(PayloadStatus::Stopped);
                         self.publish(keys::LOG, b"payload installed");
                         Ok(0)

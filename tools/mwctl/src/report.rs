@@ -2,6 +2,8 @@
 //!
 //! * [`format_info`] — `sys/info` as aligned `name: value` lines, noting a
 //!   protocol-only (`+no-wasm`) firmware and an ABI mismatch.
+//! * [`format_trust`] — `sys/trust/info`: the state, the last signed
+//!   version and the pinned key in hex.
 //! * [`format_event`] — one line per publication: `sys/log` as text,
 //!   `sys/payload/status` by name, anything else as UTF-8 or hex; noise runs
 //!   as their length and printable characters.
@@ -9,6 +11,7 @@
 
 use crate::device::Info;
 use crate::link::Event;
+use middleware::loader::trust::{TrustCode, TrustInfo, TrustState};
 use middleware::loader::{PayloadStatus, keys};
 use middleware::wasm_abi::ABI_VERSION;
 use std::fmt::Write as _;
@@ -43,6 +46,23 @@ pub fn format_info(i: &Info) -> String {
         i.capacity,
         status_name(i.status)
     )
+}
+
+/// `sys/trust/info` for printing.
+pub fn format_trust(t: &TrustInfo) -> String {
+    let state = match t.code() {
+        TrustCode::Unclaimed => "unclaimed (any upload is accepted; the first claim pins a key)",
+        TrustCode::Claimed => "claimed",
+        TrustCode::RekeyOpen => "claimed, re-key window open (a new claim is accepted)",
+    };
+    match t.state {
+        TrustState::Unclaimed => format!("trust:            {state}\n"),
+        TrustState::Claimed { key, min_version } => format!(
+            "trust:            {state}\nlast version:     {}\npinned key:       {}\n",
+            min_version.0,
+            crate::sign::hex(&key.0)
+        ),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -117,6 +137,22 @@ mod tests {
         });
         assert!(s.contains("WASM (payloads run)"), "{s}");
         assert!(s.contains("mwctl expects"), "{s}");
+    }
+
+    #[test]
+    fn trust_info_shows_state_version_and_key() {
+        use middleware::loader::trust::{PublicKey, Version};
+        let s = format_trust(&TrustState::Unclaimed.info(false));
+        assert!(s.starts_with("trust:            unclaimed"), "{s}");
+        let claimed = TrustState::Claimed {
+            key: PublicKey([0xab; 32]),
+            min_version: Version(42),
+        };
+        let s = format_trust(&claimed.info(false));
+        assert!(s.contains("trust:            claimed\n"), "{s}");
+        assert!(s.contains("last version:     42"), "{s}");
+        assert!(s.contains(&"ab".repeat(32)), "{s}");
+        assert!(format_trust(&claimed.info(true)).contains("re-key window open"));
     }
 
     #[test]

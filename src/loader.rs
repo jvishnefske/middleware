@@ -9,9 +9,11 @@
 //! | `sys/info`          | empty                           | [`DeviceInfo`]     |
 //! | `sys/loader/begin`  | `[len u32 LE][crc32 u32 LE]`    | empty              |
 //! | `sys/loader/chunk`  | `[offset u32 LE][≤CHUNK_MAX bytes]` | empty          |
-//! | `sys/loader/commit` | empty                           | empty              |
+//! | `sys/loader/commit` | empty, or `[version u32 LE][signature 64]` | empty   |
 //! | `sys/payload/start` | empty                           | empty              |
 //! | `sys/payload/stop`  | empty                           | empty              |
+//! | `sys/trust/info`    | empty                           | [`trust::TrustInfo`] |
+//! | `sys/trust/claim`   | `[public key 32]`               | empty              |
 //!
 //! The device publishes logs on `sys/log` and payload state changes on
 //! `sys/payload/status` ([`PayloadStatus`] as one byte). All integers are
@@ -20,10 +22,26 @@
 //! [`Loader`] is a value-typed state machine. [`Loader::step`] consumes the
 //! state and a [`Command`] and returns the next state and an [`Effect`] for
 //! the firmware shell to perform (erase, write, activate); it does no I/O.
+//!
+//! # Signed commits
+//!
+//! The commit body and the `sys/trust/*` keys are parsed whatever the
+//! features ([`trust`] holds the wire types and the rules). With the
+//! `trust` feature the loader also hashes the image (SHA-256,
+//! [`sha256::ImageHash`]) while chunks arrive, and [`Effect::Activate`]
+//! carries the digest and the commit's [`trust::SignedCommit`] so the
+//! shell can decide with [`trust::TrustState::accept_commit`] before it
+//! activates anything. Without `trust` the loader behaves as in 0.3: a
+//! signature in the commit body is parsed and passed on, never checked.
+
+#[cfg(feature = "trust")]
+pub mod sha256;
+pub mod trust;
 
 use crate::crc::Crc32;
 use crate::key::Key;
 use crate::transport::HandlerError;
+use trust::{PublicKey, SignedCommit};
 
 /// Largest chunk body accepted by `sys/loader/chunk`.
 pub const CHUNK_MAX: usize = 512;
@@ -48,6 +66,10 @@ pub mod keys {
     pub const LOG: Key<'static> = Key::from_static("sys/log");
     /// Payload state changes (published by the device).
     pub const STATUS: Key<'static> = Key::from_static("sys/payload/status");
+    /// Root-of-trust state request.
+    pub const TRUST_INFO: Key<'static> = Key::from_static("sys/trust/info");
+    /// Pins a payload signing key.
+    pub const TRUST_CLAIM: Key<'static> = Key::from_static("sys/trust/claim");
 }
 
 /// A parsed system request.
@@ -70,11 +92,21 @@ pub enum Command<'a> {
         data: &'a [u8],
     },
     /// `sys/loader/commit`.
-    Commit,
+    Commit {
+        /// The signature, for a signed commit.
+        auth: Option<SignedCommit>,
+    },
     /// `sys/payload/start`.
     Start,
     /// `sys/payload/stop`.
     Stop,
+    /// `sys/trust/info`.
+    TrustInfo,
+    /// `sys/trust/claim`.
+    TrustClaim {
+        /// The key to pin.
+        key: PublicKey,
+    },
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
@@ -97,9 +129,15 @@ impl<'a> Command<'a> {
         };
         match key.as_str() {
             k if k == keys::INFO.as_str() => empty(Command::Info),
-            k if k == keys::COMMIT.as_str() => empty(Command::Commit),
+            k if k == keys::COMMIT.as_str() => {
+                Ok(Some(Command::Commit { auth: SignedCommit::parse_body(body)? }))
+            }
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
+            k if k == keys::TRUST_INFO.as_str() => empty(Command::TrustInfo),
+            k if k == keys::TRUST_CLAIM.as_str() => {
+                Ok(Some(Command::TrustClaim { key: PublicKey::parse_claim(body)? }))
+            }
             k if k == keys::BEGIN.as_str() => {
                 if body.len() != 8 {
                     return Err(bad);
@@ -127,9 +165,11 @@ impl<'a> Command<'a> {
             Command::Info => keys::INFO,
             Command::Begin { .. } => keys::BEGIN,
             Command::Chunk { .. } => keys::CHUNK,
-            Command::Commit => keys::COMMIT,
+            Command::Commit { .. } => keys::COMMIT,
             Command::Start => keys::START,
             Command::Stop => keys::STOP,
+            Command::TrustInfo => keys::TRUST_INFO,
+            Command::TrustClaim { .. } => keys::TRUST_CLAIM,
         }
     }
 
@@ -147,7 +187,20 @@ impl<'a> Command<'a> {
                 out.get_mut(4..4 + data.len())?.copy_from_slice(data);
                 Some(4 + data.len())
             }
-            _ => Some(0),
+            Command::Commit { auth: Some(auth) } => {
+                let body = auth.encode();
+                out.get_mut(..body.len())?.copy_from_slice(&body);
+                Some(body.len())
+            }
+            Command::TrustClaim { key } => {
+                out.get_mut(..key.0.len())?.copy_from_slice(&key.0);
+                Some(key.0.len())
+            }
+            Command::Info
+            | Command::Commit { auth: None }
+            | Command::Start
+            | Command::Stop
+            | Command::TrustInfo => Some(0),
         }
     }
 }
@@ -173,13 +226,27 @@ pub enum Effect<'a> {
         /// Bytes to write.
         data: &'a [u8],
     },
-    /// The image is complete and verified; record it as installed.
+    /// The image is complete and its CRC-32 matches; record it as
+    /// installed. With the `trust` feature the shell must first pass
+    /// `image` and `auth` to [`trust::TrustState::accept_commit`].
     Activate {
-        /// Image length.
-        len: u32,
-        /// Image CRC-32.
-        crc: u32,
+        /// What was received.
+        image: ImageDigest,
+        /// The commit's signature, if it was signed.
+        auth: Option<SignedCommit>,
     },
+}
+
+/// A completed image as the loader received it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDigest {
+    /// Image length.
+    pub len: u32,
+    /// Image CRC-32.
+    pub crc: u32,
+    /// SHA-256 of the image (feature `trust`).
+    #[cfg(feature = "trust")]
+    pub sha256: [u8; 32],
 }
 
 /// Loader progress.
@@ -197,6 +264,9 @@ pub enum Loader {
         received: u32,
         /// CRC-32 of the bytes received so far.
         running: Crc32,
+        /// SHA-256 of the bytes received so far.
+        #[cfg(feature = "trust")]
+        hash: sha256::ImageHash,
     },
 }
 
@@ -204,8 +274,8 @@ impl Loader {
     /// Applies `cmd` given a storage `capacity` in bytes. On error the
     /// returned state is [`Loader::Idle`] for transfer commands (the transfer
     /// is abandoned) and unchanged otherwise. Non-loader commands
-    /// (`Info`, `Start`, `Stop`) leave the state unchanged with
-    /// [`Effect::None`]; the shell handles them.
+    /// (`Info`, `Start`, `Stop`, `TrustInfo`, `TrustClaim`) leave the state
+    /// unchanged with [`Effect::None`]; the shell handles them.
     pub fn step<'a>(
         self,
         cmd: &Command<'a>,
@@ -222,6 +292,8 @@ impl Loader {
                             crc,
                             received: 0,
                             running: Crc32::new(),
+                            #[cfg(feature = "trust")]
+                            hash: sha256::ImageHash::new(),
                         },
                         Ok(Effect::Erase { len }),
                     )
@@ -234,6 +306,8 @@ impl Loader {
                     crc,
                     received,
                     running,
+                    #[cfg(feature = "trust")]
+                    hash,
                 },
             ) => {
                 let n = data.len() as u32;
@@ -253,30 +327,47 @@ impl Loader {
                             crc,
                             received: received + n,
                             running: running.update(data),
+                            #[cfg(feature = "trust")]
+                            hash: hash.update(data),
                         },
                         Ok(Effect::Write { offset, data }),
                     )
                 }
             }
             (
-                Command::Commit,
+                Command::Commit { auth },
                 Loader::Receiving {
                     len,
                     crc,
                     received,
                     running,
+                    #[cfg(feature = "trust")]
+                    hash,
                 },
             ) => {
                 if received == len && running.finish() == crc {
-                    (Loader::Idle, Ok(Effect::Activate { len, crc }))
+                    let image = ImageDigest {
+                        len,
+                        crc,
+                        #[cfg(feature = "trust")]
+                        sha256: hash.finish(),
+                    };
+                    (Loader::Idle, Ok(Effect::Activate { image, auth }))
                 } else {
                     (Loader::Idle, Err(HandlerError::InvalidRequest))
                 }
             }
-            (Command::Chunk { .. } | Command::Commit, Loader::Idle) => {
+            (Command::Chunk { .. } | Command::Commit { .. }, Loader::Idle) => {
                 (Loader::Idle, Err(HandlerError::InvalidRequest))
             }
-            (Command::Info | Command::Start | Command::Stop, state) => (state, Ok(Effect::None)),
+            (
+                Command::Info
+                | Command::Start
+                | Command::Stop
+                | Command::TrustInfo
+                | Command::TrustClaim { .. },
+                state,
+            ) => (state, Ok(Effect::None)),
         }
     }
 }
@@ -407,22 +498,71 @@ mod tests {
             assert!(matches!(e, Ok(Effect::Write { .. })));
             s = next;
         }
-        let (s, e) = s.step(&Command::Commit, 4096);
+        let (s, e) = s.step(&COMMIT, 4096);
         assert_eq!(s, Loader::Idle);
         e.map(|e| match e {
-            Effect::Activate { len, crc } => Effect::Activate { len, crc },
+            Effect::Activate { image, auth } => Effect::Activate { image, auth },
             _ => Effect::None,
         })
+    }
+
+    const COMMIT: Command<'static> = Command::Commit { auth: None };
+
+    fn digest(image: &[u8]) -> ImageDigest {
+        ImageDigest {
+            len: image.len() as u32,
+            crc: Crc32::checksum(image),
+            #[cfg(feature = "trust")]
+            sha256: sha256::ImageHash::digest(image),
+        }
+    }
+
+    fn activated(e: Result<Effect<'_>, HandlerError>) -> Option<ImageDigest> {
+        match e {
+            Ok(Effect::Activate { image, .. }) => Some(image),
+            _ => None,
+        }
     }
 
     #[test]
     fn complete_transfer_activates() {
         let image = [0x5Au8; 1300];
-        let crc = Crc32::checksum(&image);
         assert_eq!(
             run_transfer(&image, CHUNK_MAX),
-            Ok(Effect::Activate { len: 1300, crc })
+            Ok(Effect::Activate { image: digest(&image), auth: None })
         );
+    }
+
+    /// The digest (SHA-256 with `trust`) covers the streamed bytes, and the
+    /// commit's signature is passed through untouched.
+    #[test]
+    fn commit_passes_digest_and_signature_through() {
+        let image: [u8; 1000] = core::array::from_fn(|i| (i * 7 + 3) as u8);
+        let auth = trust::SignedCommit {
+            version: trust::Version(9),
+            signature: trust::Signature([5; 64]),
+        };
+        let (mut s, _) = Loader::Idle.step(
+            &Command::Begin { len: 1000, crc: Crc32::checksum(&image) },
+            4096,
+        );
+        for (i, part) in image.chunks(97).enumerate() {
+            s = s.step(&Command::Chunk { offset: (i * 97) as u32, data: part }, 4096).0;
+        }
+        let (_, e) = s.step(&Command::Commit { auth: Some(auth) }, 4096);
+        assert_eq!(e, Ok(Effect::Activate { image: digest(&image), auth: Some(auth) }));
+        #[cfg(feature = "trust")]
+        assert_eq!(
+            activated(e).map(|d| d.sha256),
+            Some(trust_vector_sha()),
+            "golden vector image hash"
+        );
+    }
+
+    #[cfg(feature = "trust")]
+    fn trust_vector_sha() -> [u8; 32] {
+        let h = "1e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371";
+        core::array::from_fn(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap())
     }
 
     #[test]
@@ -454,7 +594,7 @@ mod tests {
             64,
         );
         assert_eq!(
-            s2.step(&Command::Commit, 64).1,
+            s2.step(&COMMIT, 64).1,
             Err(HandlerError::InvalidRequest)
         );
 
@@ -466,7 +606,7 @@ mod tests {
             64,
         );
         assert_eq!(
-            s2.step(&Command::Commit, 64).1,
+            s2.step(&COMMIT, 64).1,
             Err(HandlerError::InvalidRequest)
         );
 
@@ -475,7 +615,7 @@ mod tests {
             Err(HandlerError::BufferTooSmall)
         );
         assert_eq!(
-            Loader::Idle.step(&Command::Commit, 64).1,
+            Loader::Idle.step(&COMMIT, 64).1,
             Err(HandlerError::InvalidRequest)
         );
     }
@@ -500,10 +640,7 @@ mod tests {
             64,
         );
         assert!(matches!(e, Ok(Effect::Write { offset: 6, .. })));
-        assert_eq!(
-            s.step(&Command::Commit, 64).1,
-            Ok(Effect::Activate { len: 10, crc })
-        );
+        assert_eq!(activated(s.step(&COMMIT, 64).1).map(|d| (d.len, d.crc)), Some((10, crc)));
     }
 
     #[test]
@@ -519,11 +656,19 @@ mod tests {
                 offset: 512,
                 data: &data,
             },
-            Command::Commit,
+            COMMIT,
+            Command::Commit {
+                auth: Some(trust::SignedCommit {
+                    version: trust::Version(0x0102_0304),
+                    signature: trust::Signature([0xAB; 64]),
+                }),
+            },
             Command::Start,
             Command::Stop,
+            Command::TrustInfo,
+            Command::TrustClaim { key: trust::PublicKey([3; 32]) },
         ] {
-            let mut body = [0u8; 16];
+            let mut body = [0u8; 80];
             let n = cmd.encode_body(&mut body).unwrap();
             assert_eq!(Command::parse(cmd.key(), &body[..n]), Ok(Some(cmd)));
         }
@@ -545,6 +690,22 @@ mod tests {
         );
         assert_eq!(
             Command::parse(keys::CHUNK, &[0; 4 + CHUNK_MAX + 1]),
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            Command::parse(keys::COMMIT, &[0; 67]),
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            Command::parse(keys::COMMIT, &[0; 1]),
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            Command::parse(keys::TRUST_INFO, &[0]),
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            Command::parse(keys::TRUST_CLAIM, &[0; 31]),
             Err(HandlerError::InvalidRequest)
         );
         assert_eq!(

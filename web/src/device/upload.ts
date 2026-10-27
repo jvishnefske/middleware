@@ -9,8 +9,18 @@
 // request lost on the way to the device, and also a lost response: the
 // device's loader acknowledges a resend of the chunk it last wrote without
 // writing it again, and the CRC-32 check at commit covers the stored bytes.
+//
+// Signing (U13): with `signing` set, the commit body is
+// `[version u32 LE][Ed25519 signature 64]` over the trust message built from
+// the image (see `trust/wire.ts`). `trustedUpload` first reads
+// `sys/trust/info` and decides: sign when the device pins this browser's
+// key, upload unsigned when it is unclaimed or its firmware predates trust
+// (after asking `confirmUnsigned`), and refuse before sending anything when
+// the device pins a key this browser does not hold.
 
 import type { Protocol } from "../protocol/wasm";
+import { signImage } from "../trust/crypto";
+import { type UploadPlan, planUpload } from "../trust/wire";
 import { type DeviceClient, type RequestOptions, RequestError } from "./client";
 
 export interface UploadOptions extends RequestOptions {
@@ -22,6 +32,8 @@ export interface UploadOptions extends RequestOptions {
   signal?: AbortSignal;
   /** Send `sys/payload/start` after a successful commit. */
   start?: boolean;
+  /** Sign the commit with this key and version. */
+  signing?: { privateKey: CryptoKey; version: number };
 }
 
 /** Suffix of the firmware version string of builds without the WASM
@@ -65,6 +77,12 @@ export async function uploadPayload(
   opts: UploadOptions = {},
 ): Promise<void> {
   const steps = proto.uploadPlan(image, opts.chunk);
+  if (opts.signing) {
+    const commit = steps.findIndex((s) => s.key === proto.constants.keys.commit);
+    if (commit < 0) throw new UploadError(steps.length, proto.constants.keys.commit, new Error("upload plan has no commit"));
+    const signed = await signImage(opts.signing.privateKey, image, opts.signing.version);
+    steps[commit] = { ...steps[commit], body: signed.body };
+  }
   const total = image.length;
   const reqOpts: RequestOptions = { timeoutMs: opts.timeoutMs, retries: opts.retries ?? 1 };
   opts.onProgress?.(0, total);
@@ -88,4 +106,56 @@ export async function uploadPayload(
       throw new UploadError(steps.length, proto.constants.keys.start, e);
     }
   }
+}
+
+/** The device pins a key this browser cannot sign with; nothing was sent. */
+export class TrustRefusal extends Error {
+  constructor(readonly reason: "different-key" | "no-local-key") {
+    super(
+      reason === "different-key"
+        ? "the device trusts a different key — restore that key from its backup, or hold BOOT ≥3 s after boot to open the re-key window and claim the device again"
+        : "the device is claimed, and this browser has no signing key — restore the key from its backup, or re-key the device (hold BOOT ≥3 s after boot, then claim)",
+    );
+    this.name = "TrustRefusal";
+  }
+}
+
+export interface SigningKey {
+  privateKey: CryptoKey;
+  publicKey: Uint8Array;
+}
+
+export interface TrustedUploadOptions extends UploadOptions {
+  /** Wall clock for the version, ms; defaults to `Date.now`. */
+  now?: () => number;
+  /** Asked before an unsigned upload; resolve false to cancel. */
+  confirmUnsigned?(reason: "unclaimed" | "legacy-firmware"): Promise<boolean> | boolean;
+}
+
+/** What `trustedUpload` did. */
+export type TrustedUploadResult = Exclude<UploadPlan, { kind: "refuse" }>;
+
+/** Reads the device's trust state, then uploads signed or unsigned
+ * accordingly (see the module comment). */
+export async function trustedUpload(
+  client: DeviceClient,
+  proto: Protocol,
+  image: Uint8Array,
+  key: SigningKey | null,
+  opts: TrustedUploadOptions = {},
+): Promise<TrustedUploadResult> {
+  const reqOpts: RequestOptions = { timeoutMs: opts.timeoutMs, retries: opts.retries ?? 1 };
+  const info = await client.trustInfo(reqOpts);
+  const plan = planUpload(info, key?.publicKey ?? null, (opts.now ?? Date.now)());
+  if (plan.kind === "refuse") throw new TrustRefusal(plan.reason);
+  if (plan.kind === "unsigned") {
+    if (opts.confirmUnsigned && !(await opts.confirmUnsigned(plan.reason))) {
+      throw new UploadError(0, proto.constants.keys.begin, new Error("cancelled"));
+    }
+    await uploadPayload(client, proto, image, { ...opts, signing: undefined });
+    return plan;
+  }
+  if (!key) throw new TrustRefusal("no-local-key");
+  await uploadPayload(client, proto, image, { ...opts, signing: { privateKey: key.privateKey, version: plan.version } });
+  return plan;
 }

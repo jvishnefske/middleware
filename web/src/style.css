@@ -244,3 +244,39 @@ pre {
   width: 20px;
   height: 20px;
 }
+.badge[data-state="match"] {
+  background: var(--accent);
+  color: #fff;
+}
+.badge[data-state="different"],
+.badge[data-state="no-local-key"] {
+  background: #c0392b;
+  color: #fff;
+}
+.badge[data-state="unclaimed"],
+.badge[data-state="rekey"] {
+  background: var(--warn-bg);
+}
+dialog.modal {
+  max-width: min(520px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--fg);
+}
+dialog.modal::backdrop {
+  background: rgb(0 0 0 / 0.4);
+}
+dialog.modal h3 {
+  margin-top: 0;
+}
+input[type="password"] {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+  width: 100%;
+  box-sizing: border-box;
+}

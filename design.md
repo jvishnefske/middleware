@@ -571,7 +571,8 @@ loader code as the firmware. It never enumerates ports. It opens the port
 without resetting the board (verified on the CH340 board: no boot output on
 open).
 
-- [x] T1 Protocol logic is tested against an in-memory device running the
+- [x] H1 (was T1 before 0.4, renamed so T* names the trust requirements)
+  Protocol logic is tested against an in-memory device running the
   real splitter and loader —
   `device::tests::info_decodes_a_protocol_only_esp8266`, `upload_happy_path_installs_reports_progress_and_starts`, `dropped_chunk_reply_is_retried_and_the_device_deduplicates`, `dropped_request_and_late_reply_are_handled`, `exhausted_retries_time_out`, `corrupt_chunk_makes_commit_fail_on_the_device`, `start_without_runtime_is_a_clear_error`, `oversized_image_is_refused_at_begin`, `boot_garbage_before_the_first_reply_needs_no_retry`; `link::tests::garbage_without_delimiter_before_a_frame_is_skipped`, `garbage_with_delimiters_is_noise_and_frames_still_decode`; `plan::tests::*`, `cli::tests::*`.
 
@@ -600,7 +601,7 @@ open).
   `protocol-wasm` `simulator::tests::simulator_runs_payload_with_virtual_gpio_and_messages`, `simulator_reports_rejection_and_traps`; `web/test/editor.test.ts` runs the blink/echo templates (WAT and AssemblyScript) in wasm-host compiled to WASM.
 - [x] U7 Automated tests cover the protocol bindings and the upload flow
   against a mocked serial port —
-  `npm test` in `web/` (91 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
+  `npm test` in `web/` (115 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
 - [x] U8 The manifest carries each image's `wasm` flag (absent means `true`)
   and the UI marks protocol-only images; the device page disables "start
   after upload" and Start for `+no-wasm` firmware —
@@ -626,6 +627,29 @@ open).
 - [x] U12 The Blocks workspace persists in localStorage and survives storage
   errors; it exports and imports as JSON —
   `web/test/blocks.storage.test.ts`: "saves and restores the workspace with its profile", "survives storage that throws, is missing or holds garbage", "round-trips the export format and imports bare Blockly workspaces", "rejects files that are not workspaces".
+- [x] U13 The browser signs payload commits with Ed25519 (WebCrypto) over
+  `"mw-payload-v1\0" || len u32 LE || version u32 LE || sha256(image)`; the
+  commit body is `[version u32 LE][signature 64]`, the version is wall-clock
+  seconds, bumped to `min_version + 1` with a warning when not ahead; the
+  `sys/trust/info` and `sys/trust/claim` bodies are built and parsed by pure,
+  unit-tested functions; wire code 5 surfaces as a `Denied` error that says
+  how to re-key —
+  `web/test/trust.test.ts`: "reproduces the message, signature and commit body of the shared vector" (`web/test/fixtures/trust-vector.json`, shared with the device side), "builds the message from its parts", "encodes and splits the commit body", "encodes the claim body as the raw public key", "fingerprints a key as the first 8 bytes of its SHA-256", "parses the three states, with the key present iff claimed", "round-trips through the encoder", "rejects short bodies, unknown states and a key that disagrees with the state", "relates the device key to this browser's key and decides the upload", "uses wall-clock seconds as the version, bumping past min_version when behind".
+- [x] U14 Key custody: the signing key is generated in the browser and
+  stored in IndexedDB as a non-extractable CryptoKey; the private key leaves
+  the browser only as the backup file made at creation (PKCS#8 under
+  AES-256-GCM, key from PBKDF2-SHA-256 with ≥ 600 000 iterations, random
+  salt and IV recorded in the file, the public key as GCM additional data),
+  which restores with the passphrase; storage failures surface as readable
+  errors; the Device tab shows both fingerprints (first 8 bytes of SHA-256
+  of the public key) —
+  `web/test/trust.test.ts`: "backs up a new key and restores it with the passphrase", "rejects the wrong passphrase and a tampered file", "enforces passphrase length, the iteration floor and the file format", "keeps the non-extractable key, its public key and the backup", "reports unavailable or failing IndexedDB as a KeyStorageError". The Trust panel and its dialogs are not covered by automated tests.
+- [x] U15 Uploads read `sys/trust/info` first: signed when the device pins
+  this browser's key, unsigned after a confirmation when it is unclaimed,
+  unsigned with a note when the firmware answers NotFound (predates trust),
+  and refused before sending anything when the device pins another key;
+  claim is offered when unclaimed or in the re-key window —
+  `web/test/trustUpload.test.ts` against a fake device modelling the trust contract in TypeScript in front of the Rust loader: "uploads unsigned to an unclaimed device after asking", "sends nothing when the unsigned upload is declined", "uploads unsigned to firmware without sys/trust and says why", "claims an unclaimed device and denies a second claim", "signs the commit for a device that pins this key, and the device accepts it", "a commit signed by another key is Denied and the old image stays active", "a replayed version is Denied; a clock behind the device bumps past min_version", "re-keys only while the window opened by holding BOOT is open".
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and
@@ -740,6 +764,131 @@ complete immediately. None of these raise events.
 - [x] X8 `wasm-host` still builds for `thumbv7em-none-eabihf` (the STM32F407
   target that implements ABI 3 on hardware) —
   `cargo build -p wasm-host --target thumbv7em-none-eabihf`.
+
+### Signed payloads (trust)
+
+From 0.4 a device can pin an Ed25519 public key (the root of trust, held by
+the browser or by `mwctl`) on first use; from then on it installs a payload
+only when the commit is signed by that key with a strictly increasing
+version. The rules and wire types live in `middleware::loader::trust`; the
+SHA-256 and Ed25519 checks sit behind the `trust` cargo feature (no_std, no
+heap: `sha2` 0.10.9 with `compress`, `ed25519-dalek` 2.2.0 verify only, no
+default features). The ESP base firmware (`firmware/`) enables it for every
+chip; the ESP8266 firmware does not.
+
+System keys (all integers little-endian; the full table, including the 0.3
+keys, is in the `loader` module docs):
+
+| key                 | request body                                  | response body |
+|---------------------|-----------------------------------------------|---------------|
+| `sys/trust/info`    | empty                                         | `[state u8][min_version u32][key 32, iff state != 0]`; state 0 Unclaimed, 1 Claimed, 2 Claimed with the re-key window open |
+| `sys/trust/claim`   | `[public key 32]`                             | empty; `Denied` when claimed and the window is closed |
+| `sys/loader/commit` | empty (unsigned) or `[version u32][signature 64]` | empty; `Denied` when the trust rules refuse it |
+
+The signature is Ed25519 (RFC 8032) over the 54-byte message
+`b"mw-payload-v1\0" || len u32 || version u32 || sha256(image)`; the device
+hashes the image while the in-order chunks arrive. `HandlerError::Denied`
+(wire code 5, gRPC `PERMISSION_DENIED`) is new in 0.4.
+
+**Threat model.** The trust check protects the payload loader: once a key is
+pinned, nobody without that key can install, replace or roll back a payload
+over any transport, and an unsigned, badly signed or replayed upload leaves
+the previous payload running. It does not protect the firmware itself:
+without eFuse secure boot and flash encryption, anyone with the USB port can
+reflash the base firmware (or the `trust` partition) through the ROM
+bootloader, and anyone who can press the BOOT button can open the re-key
+window and pin their own key — physical presence is the authority for
+re-keying by design. Rollback and replay are prevented by
+`version > min_version` (strictly), with `min_version` persisted before the
+new image can boot, so a captured signed commit can be used at most once
+and never after a newer one. Before the first claim the device trusts on
+first use: it accepts any commit, signed or not, exactly as 0.3 did, and the
+first claimant pins the key — claim a device before exposing it.
+
+- [x] T1 The signed message, signed commit body, claim body and
+  `sys/trust/info` encode and parse as specified; wrong lengths are
+  `InvalidRequest` — `loader::trust::tests::signed_message_matches_golden_vector`,
+  `commit_bodies_parse_and_encode`, `claim_bodies_must_be_32_bytes`,
+  `trust_info_round_trips_every_state`; `loader::tests::commands_round_trip_through_parse`,
+  `parse_rejects_bad_bodies_and_passes_app_keys`.
+- [x] T2 The loader hashes the image (SHA-256) incrementally as chunks arrive
+  and hands the digest and the commit's signature to the shell; the hash
+  matches RustCrypto `Sha256` at every length and split —
+  `loader::sha256::tests::known_answers`, `matches_sha2_at_every_length_and_split`,
+  `equal_inputs_give_equal_states`; `loader::tests::commit_passes_digest_and_signature_through`.
+- [x] T3 The golden vector `web/test/fixtures/trust-vector.json` reproduces
+  in Rust: message, signature verification, commit body —
+  `loader::trust::tests::crypto::golden_vector_verifies`; mwctl
+  `sign::tests::golden_vector_commit_body_is_reproduced`,
+  `golden_vector_file_matches_the_constants`; protocol-wasm
+  `loader::tests::wire_helpers_match_the_golden_vector`,
+  `signed_upload_of_the_golden_vector_installs_and_replay_is_denied`.
+- [x] T4 A claim is accepted when Unclaimed or when the re-key window is
+  open, stores the key and resets `min_version` to 0; otherwise `Denied`; a
+  key that is not a curve point is `InvalidRequest` —
+  `loader::trust::tests::crypto::claim_transitions`; firmware
+  `dispatch::tests::trust::claim_on_unclaimed_pins_key_and_info_reports_it`,
+  `reclaim_needs_the_rekey_window`.
+- [x] T5 When Claimed, a commit is accepted only if signed by the pinned key
+  over this image with `version > min_version`, and then raises
+  `min_version`; unsigned, other key, altered version, other image or
+  length, corrupt or non-canonical signature, replay and rollback are all
+  `Denied` and the installed image stays —
+  `loader::trust::tests::crypto::claimed_commit_denials`; firmware
+  `dispatch::tests::trust::signed_commit_installs_and_raises_min_version`,
+  `denied_commits_keep_the_installed_image`; mwctl
+  `device::tests::unsigned_upload_to_a_claimed_device_is_denied`,
+  `replayed_or_older_version_is_denied_and_keeps_the_image`.
+- [x] T6 When Unclaimed every commit is accepted and any signature ignored
+  (TOFU) — `loader::trust::tests::crypto::unclaimed_accepts_any_commit`;
+  firmware `dispatch::tests::trust::unclaimed_device_accepts_unsigned_and_signed_commits`;
+  mwctl `device::tests::unclaimed_device_accepts_signed_and_unsigned_commits`.
+- [x] T7 Presence: the BOOT button held ≥ 3 s, pressed after boot (a pin
+  held or stuck low from boot never fires; an unreadable pin counts as
+  released), opens the re-key window for 60 s —
+  firmware `presence::tests::three_second_hold_after_release_fires_once`,
+  `short_press_does_not_fire_and_release_resets`,
+  `held_from_boot_never_fires_until_released`,
+  `unreadable_pin_counts_as_released`, `second_press_fires_again`;
+  `loader::trust::tests::window_opens_for_sixty_seconds`.
+- [x] T8 The trust record (magic, format version, sequence, CRC-32) is
+  written to the other of two sectors, so power loss at any flash operation
+  leaves the old or the new record, never none —
+  firmware `trust_store::tests::records_round_trip_and_reject_damage`,
+  `blank_or_foreign_partition_is_unclaimed`,
+  `saves_alternate_sectors_and_survive_reopen`,
+  `power_loss_at_any_operation_keeps_old_or_new_record`,
+  `newest_valid_record_wins_and_a_corrupt_one_falls_back`.
+- [x] T9 A raised `min_version` reaches flash after the new image's CRC
+  check and before its slot header, so the new image never boots with the
+  old `min_version`; a failed save writes no header —
+  firmware `store::tests::activate_with_runs_after_crc_and_before_header`.
+- [x] T10 `HandlerError::Denied` is wire code 5 and round trips through the
+  one-byte code and gRPC status —
+  `transport::tests::handler_error_codes_round_trip`,
+  `grpc::status::tests::handler_errors_round_trip_through_codes`,
+  `codes_map_back_to_handler_errors`.
+- [x] T11 `trust` and `trust,serial` build for `thumbv6m-none-eabi` without
+  std or cloud dependencies, and mwctl still enables no middleware feature —
+  `scripts/check-features.sh`.
+- [x] T12 `mwctl key new|pub`, `trust info|claim --key` and
+  `upload --key [--version]` (default version: Unix seconds) —
+  mwctl `cli::tests::parses_trust_key_and_signed_upload_commands`,
+  `rejects_bad_trust_and_key_usage`; `plan::tests::signed_plan_ends_in_a_68_byte_commit_the_loader_passes_on`;
+  `sign::tests::key_files_must_be_32_bytes`, `default_version_is_unix_seconds`;
+  `device::tests::trust_info_round_trips_through_claim`,
+  `second_claim_is_denied_with_an_explanation`,
+  `claim_then_signed_upload_installs_and_raises_min_version`;
+  `report::tests::trust_info_shows_state_version_and_key`.
+- [x] T13 The browser simulator runs the real trust rules (claim, presence,
+  signed commit) — protocol-wasm
+  `loader::tests::unclaimed_accepts_unsigned_and_rekey_needs_presence`,
+  `signed_upload_of_the_golden_vector_installs_and_replay_is_denied`.
+- [ ] T14 On hardware (ESP32-S3): claim, signed upload, refusal of an
+  unsigned and of a replayed upload with the previous payload still
+  running, the trust record surviving reboot, and BOOT-held re-keying.
+  Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`); not yet run on
+  a board.
 
 ## Known limitations (0.3)
 

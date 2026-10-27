@@ -6,6 +6,7 @@
 //! | `InvalidRequest` | `INVALID_ARGUMENT`       | `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `OUT_OF_RANGE` |
 //! | `BufferTooSmall` | `RESOURCE_EXHAUSTED`     | `RESOURCE_EXHAUSTED`              |
 //! | `Internal`       | `INTERNAL`               | every other non-OK code           |
+//! | `Denied`         | `PERMISSION_DENIED`      | `PERMISSION_DENIED`, `UNAUTHENTICATED` |
 //!
 //! `NotFound` means "no handler for this key", which gRPC spells
 //! `UNIMPLEMENTED` (unknown method). `OK` maps back to `None`. The mapping
@@ -21,6 +22,7 @@ pub const fn code(e: HandlerError) -> Code {
         HandlerError::InvalidRequest => Code::InvalidArgument,
         HandlerError::BufferTooSmall => Code::ResourceExhausted,
         HandlerError::Internal => Code::Internal,
+        HandlerError::Denied => Code::PermissionDenied,
     }
 }
 
@@ -34,6 +36,7 @@ pub const fn handler_error(c: Code) -> Option<HandlerError> {
             Some(HandlerError::InvalidRequest)
         }
         Code::ResourceExhausted => Some(HandlerError::BufferTooSmall),
+        Code::PermissionDenied | Code::Unauthenticated => Some(HandlerError::Denied),
         _ => Some(HandlerError::Internal),
     }
 }
@@ -45,6 +48,7 @@ pub fn to_status(e: HandlerError) -> tonic::Status {
         HandlerError::InvalidRequest => "invalid request",
         HandlerError::BufferTooSmall => "response exceeds server buffer",
         HandlerError::Internal => "handler failed",
+        HandlerError::Denied => "request refused by policy",
     };
     tonic::Status::new(code(e), msg)
 }
@@ -53,11 +57,12 @@ pub fn to_status(e: HandlerError) -> tonic::Status {
 mod tests {
     use super::*;
 
-    const ALL: [HandlerError; 4] = [
+    const ALL: [HandlerError; 5] = [
         HandlerError::NotFound,
         HandlerError::InvalidRequest,
         HandlerError::BufferTooSmall,
         HandlerError::Internal,
+        HandlerError::Denied,
     ];
 
     #[test]
@@ -85,5 +90,9 @@ mod tests {
             Some(HandlerError::Internal)
         );
         assert_eq!(handler_error(Code::Unknown), Some(HandlerError::Internal));
+        assert_eq!(
+            handler_error(Code::Unauthenticated),
+            Some(HandlerError::Denied)
+        );
     }
 }

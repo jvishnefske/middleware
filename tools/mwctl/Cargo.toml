@@ -9,3 +9,6 @@ license = "MIT OR Apache-2.0"
 middleware = { path = "../.." }
 # No `libudev`: mwctl opens the one port it is given and never enumerates.
 serialport = { version = "4.10", default-features = false }
+# Payload signing (host only): the image SHA-256 and Ed25519 signatures.
+sha2 = "0.10.9"
+ed25519-dalek = "2.2"

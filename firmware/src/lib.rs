@@ -18,7 +18,13 @@
 //!   tested against a RAM flash model with power-loss injection.
 //! * [`dispatch`] — request dispatch: `(State, request) -> (State, reply,
 //!   Action)`, built on [`middleware::loader::Loader`], plus the payload
-//!   lifecycle transitions and publication routing.
+//!   lifecycle transitions, the signed-commit and key-claim decisions
+//!   (feature `trust`, on by default) and publication routing.
+//! * [`trust_store`] — the pinned signing key and `min_version` on the
+//!   `trust` partition: two alternately written sectors, magic, format
+//!   version and CRC-32, safe against power loss at any flash operation.
+//! * [`presence`] — the BOOT-button hold detector that asserts physical
+//!   presence for the re-key window.
 //! * [`periph`] — the ABI 2 peripheral decisions: pin claims, the timer
 //!   deadline table, the DMA channel state machine, the UART receive ring,
 //!   and the events ISRs and completions push.
@@ -34,4 +40,8 @@ pub mod chip;
 pub mod dispatch;
 pub mod image;
 pub mod periph;
+pub mod presence;
+#[cfg(test)]
+mod ram_flash;
 pub mod store;
+pub mod trust_store;

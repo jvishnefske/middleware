@@ -15,7 +15,8 @@
 //! * [`serial`] — COBS-framed wire format for byte streams (always built, pure);
 //!   its async `SerialLink` transport needs the `serial` feature.
 //! * [`loader`] — system keys and the pure state machine for installing WASM
-//!   payloads on a device over any transport.
+//!   payloads on a device over any transport; [`loader::trust`] holds the
+//!   signed-payload wire types and rules (its crypto needs `trust`).
 //! * [`wasm_abi`] — the import/export contract between payloads and firmware.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * Backends, each behind a cargo feature:
@@ -25,6 +26,7 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
+//! | `trust`    | `loader::sha256`, `loader::trust` checks | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |
