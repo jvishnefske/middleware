@@ -29,7 +29,7 @@
 //! | chip     | reclaimed | main    | total   | memory  | max image |
 //! |----------|-----------|---------|---------|---------|-----------|
 //! | ESP32    | 96.4 KiB  | 112 KiB | 208 KiB | 128 KiB | 32 KiB    |
-//! | ESP32-S3 | 72.0 KiB  | 240 KiB | 312 KiB | 192 KiB | 80 KiB    |
+//! | ESP32-S3 | 72.0 KiB  | 176 KiB | 248 KiB | 128 KiB | 80 KiB    |
 //! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    |
 //! | ESP8266  | 0         | 0       | 0       | 0       | 252 KiB   |
 //!
@@ -49,7 +49,10 @@
 //!
 //! The main regions are sized so the linker leaves a usable main stack
 //! (after `.bss`, measured from `_stack_end`..`_stack_start`): ESP32 about
-//! 25 KiB, ESP32-S3 about 17 KiB, ESP32-C3 about 103 KiB. On the Xtensa
+//! 25 KiB, ESP32-S3 about 81 KiB, ESP32-C3 about 103 KiB. The ESP32-S3 had
+//! 240 KiB main and 192 KiB memory until 0.4, which left 17 KiB of stack;
+//! loading a payload (wasmi parse plus `init`, about 31 KiB deep) then
+//! overflowed into the stack guard on hardware. On the Xtensa
 //! chips the ABI 2 peripherals take about 14 KiB of `.bss` (two SPI DMA
 //! buffers and the UART transmit buffer of `MAX_DMA` bytes each, the
 //! 1 KiB UART receive ring, the event queue) plus esp-hal's RAM-resident
@@ -164,8 +167,8 @@ pub const ESP32S3: Profile = Profile {
     usb_serial_jtag: true,
     runtime: true,
     heap_reclaimed: 73_744,
-    heap_main: 240 * 1024,
-    max_memory_bytes: 3 * WASM_PAGE,
+    heap_main: 176 * 1024,
+    max_memory_bytes: 2 * WASM_PAGE,
     max_image: 80 * 1024,
     uart0_tx: 43,
     uart0_rx: 44,

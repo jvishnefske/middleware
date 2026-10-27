@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### ESP base firmware
+- ESP32-S3: `heap_main` 240 → 176 KiB and the linear-memory cap 192 → 128 KiB (two pages), so the main stack grows from about 17 KiB to 81 KiB. Loading a payload (wasmi parse plus `init`, about 31 KiB deep) overflowed into the stack guard on hardware (2024 Kansas badge, ESP32-S3 v0.2); the echo payload now autostarts and echoes.
+
 ## 0.3.0
 
 ### Web: Blocks editor
