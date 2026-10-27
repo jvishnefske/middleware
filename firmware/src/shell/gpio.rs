@@ -68,7 +68,9 @@ struct Slot {
     mode: Mode,
     edge: Edge,
     /// The payload enabled the pull-down (an input that reads low unpressed).
-    pull_down: bool,
+    /// The payload configured this input with the pull-up (the only
+    /// configuration in which a low level means the button is pressed).
+    pull_up: bool,
 }
 
 impl Slot {
@@ -100,7 +102,7 @@ impl PinBank {
             && !self.profile.is_reserved(n)
             && let Some(slot) = self.slots.get_mut(usize::from(n))
         {
-            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off, pull_down: false });
+            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off, pull_up: false });
         }
     }
 
@@ -121,16 +123,18 @@ impl PinBank {
             slot.pin.set_input_enable(false);
             slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
             slot.mode = Mode::Idle;
-            slot.pull_down = false;
+            slot.pull_up = false;
         }
     }
 
     /// Samples the BOOT button on pin `n` for the presence detector:
     /// `Some(true)` when it reads low (pressed). An idle pin is read with
     /// the pull-up briefly enabled and returned to high impedance; a
-    /// payload's input is read as is. `None` when the pin is missing, an
-    /// output, routed to a peripheral, or pulled down by the payload, so a
-    /// payload can never fake a press.
+    /// payload's input counts only when the payload enabled the pull-up.
+    /// `None` when the pin is missing, an output, routed to a peripheral,
+    /// or an input without pull-up (floating or pulled down could read low
+    /// with nobody pressing), so a payload can never fake a press; a `None`
+    /// sample also restarts the 3 s hold.
     pub fn boot_button(&mut self, n: u8) -> Option<bool> {
         let slot = self.slots.get_mut(usize::from(n))?.as_mut()?;
         match slot.mode {
@@ -142,7 +146,7 @@ impl PinBank {
                 slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
                 Some(low)
             }
-            Mode::Input if !slot.pull_down => Some(slot.pin.is_low()),
+            Mode::Input if slot.pull_up => Some(slot.pin.is_low()),
             Mode::Input | Mode::Output | Mode::Peripheral => None,
         }
     }
@@ -172,7 +176,7 @@ impl PinBank {
         slot.pin.apply_input_config(&InputConfig::default().with_pull(pull));
         slot.pin.set_input_enable(true);
         slot.mode = Mode::Input;
-        slot.pull_down = pull == HalPull::Down;
+        slot.pull_up = pull == HalPull::Up;
         Ok(())
     }
 

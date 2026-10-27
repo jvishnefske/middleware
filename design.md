@@ -838,14 +838,22 @@ first claimant pins the key — claim a device before exposing it.
   `dispatch::tests::trust::signed_commit_installs_and_raises_min_version`,
   `denied_commits_keep_the_installed_image`; mwctl
   `device::tests::unsigned_upload_to_a_claimed_device_is_denied`,
-  `replayed_or_older_version_is_denied_and_keeps_the_image`.
+  `replayed_or_older_version_is_denied_and_keeps_the_image`. The trust
+  store refuses to save a record that lowers `min_version` for the same
+  key (`StoreError::Rollback`), and when an activation fails after its
+  trust record was saved the shell adopts the record on flash, so RAM
+  never trusts an older `min_version` than a reboot would —
+  `trust_store::tests::saves_never_lower_min_version_for_the_same_key`.
 - [x] T6 When Unclaimed every commit is accepted and any signature ignored
   (TOFU) — `loader::trust::tests::crypto::unclaimed_accepts_any_commit`;
   firmware `dispatch::tests::trust::unclaimed_device_accepts_unsigned_and_signed_commits`;
   mwctl `device::tests::unclaimed_device_accepts_signed_and_unsigned_commits`.
 - [x] T7 Presence: the BOOT button held ≥ 3 s, pressed after boot (a pin
   held or stuck low from boot never fires; an unreadable pin counts as
-  released), opens the re-key window for 60 s —
+  released), opens the re-key window for 60 s. The pin is read with the
+  pull-up enabled; when a payload owns GPIO0 it counts only as an input
+  with pull-up, so a payload that floats, pulls down, drives or reroutes
+  the pin cannot fake a press —
   firmware `presence::tests::three_second_hold_after_release_fires_once`,
   `short_press_does_not_fire_and_release_resets`,
   `held_from_boot_never_fires_until_released`,

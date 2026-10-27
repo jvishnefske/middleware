@@ -232,7 +232,15 @@ impl Controller {
             }
             Err(e) => {
                 self.bus.log(format_args!("storage: {e}"));
-                self.set_state(self.state.storage_failed());
+                // The trust record may already be on flash (saved before
+                // the slot header): trust what a reboot would load, never
+                // an older min_version.
+                let failed = self.state.storage_failed();
+                let failed = match self.trust.as_ref() {
+                    Some(ts) => failed.with_trust(ts.persisted()),
+                    None => failed,
+                };
+                self.set_state(failed);
                 Err(HandlerError::Internal)
             }
         };

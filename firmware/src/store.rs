@@ -60,6 +60,9 @@ pub enum StoreError {
     Crc,
     /// The caller's buffer does not match the image length.
     Buffer,
+    /// A trust record would lower `min_version` for the pinned key
+    /// (`trust_store::lowers_min_version`); nothing was written.
+    Rollback,
 }
 
 impl From<OutOfOrder> for StoreError {
@@ -77,6 +80,7 @@ impl core::fmt::Display for StoreError {
             StoreError::NoImage => "no image installed",
             StoreError::Crc => "image CRC mismatch",
             StoreError::Buffer => "buffer size mismatch",
+            StoreError::Rollback => "trust record would lower min_version",
         };
         f.write_str(s)
     }

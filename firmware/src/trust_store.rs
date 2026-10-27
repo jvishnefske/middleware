@@ -107,6 +107,8 @@ pub struct TrustStore {
     base: u32,
     /// Sector index (0 or 1) and sequence of the current record.
     current: Option<(u32, u32)>,
+    /// The state the current record holds (what a reboot would load).
+    persisted: TrustState,
 }
 
 impl TrustStore {
@@ -133,14 +135,18 @@ impl TrustStore {
                 newest = Some((sector, r));
             }
         }
-        let store = TrustStore { base, current: newest.map(|(s, r)| (s, r.seq)) };
-        Ok((store, newest.map_or(TrustState::Unclaimed, |(_, r)| r.state)))
+        let persisted = newest.map_or(TrustState::Unclaimed, |(_, r)| r.state);
+        let store = TrustStore { base, current: newest.map(|(s, r)| (s, r.seq)), persisted };
+        Ok((store, persisted))
     }
 
     /// Persists `state` in the sector that does not hold the current
     /// record (see the module docs). On error the previous record is still
     /// the one [`TrustStore::open`] finds.
     pub fn save<F: NorFlash>(&mut self, flash: &mut F, state: &TrustState) -> Result<(), StoreError> {
+        if lowers_min_version(&self.persisted, state) {
+            return Err(StoreError::Rollback);
+        }
         let (sector, seq) = match self.current {
             Some((s, seq)) => (1 - s, seq.wrapping_add(1)),
             None => (0, 1),
@@ -152,7 +158,29 @@ impl TrustStore {
         flash.write(at + WORD, fields).map_err(|_| StoreError::Flash)?;
         flash.write(at, magic).map_err(|_| StoreError::Flash)?;
         self.current = Some((sector, seq));
+        self.persisted = *state;
         Ok(())
+    }
+
+    /// The trust state on flash: what the device would load after a reboot.
+    /// The shell adopts it when a later step of an activation fails, so RAM
+    /// never trusts an older `min_version` than flash does.
+    pub const fn persisted(&self) -> TrustState {
+        self.persisted
+    }
+}
+
+/// True if saving `next` over `current` would lower `min_version` for the
+/// same pinned key, which would reopen versions already superseded
+/// (rollback). A new key (re-key) starts over at 0 and is allowed.
+pub fn lowers_min_version(current: &TrustState, next: &TrustState) -> bool {
+    match (current, next) {
+        (
+            TrustState::Claimed { key: a, min_version: old },
+            TrustState::Claimed { key: b, min_version: new },
+        ) => a == b && new.0 < old.0,
+        (TrustState::Claimed { .. }, TrustState::Unclaimed) => true,
+        _ => false,
     }
 }
 
@@ -169,6 +197,22 @@ mod tests {
 
     fn open(flash: &mut Flash) -> (TrustStore, TrustState) {
         TrustStore::open(flash, BASE, PARTITION_LEN).unwrap()
+    }
+
+    #[test]
+    fn saves_never_lower_min_version_for_the_same_key() {
+        let mut flash = Flash::new();
+        let (mut ts, _) = open(&mut flash);
+        ts.save(&mut flash, &claimed(1, 100)).unwrap();
+        assert_eq!(ts.save(&mut flash, &claimed(1, 99)), Err(StoreError::Rollback));
+        assert_eq!(ts.save(&mut flash, &TrustState::Unclaimed), Err(StoreError::Rollback));
+        assert_eq!(ts.persisted(), claimed(1, 100));
+        // Same key upwards, and a re-key (new key at 0), are allowed.
+        ts.save(&mut flash, &claimed(1, 101)).unwrap();
+        ts.save(&mut flash, &claimed(2, 0)).unwrap();
+        assert_eq!(ts.persisted(), claimed(2, 0));
+        let (reopened, state) = open(&mut flash);
+        assert_eq!((reopened.persisted(), state), (claimed(2, 0), claimed(2, 0)));
     }
 
     #[test]
