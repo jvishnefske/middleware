@@ -14,13 +14,19 @@
 //! | `sys/loader/chunk`   | in order, fits       | `Write`    | `Loading`    |
 //! | `sys/loader/chunk`   | resend of last chunk | none (`Ok`) | `Loading`   |
 //! | `sys/loader/commit`  | complete, CRC ok     | `Activate` | `Stopped`    |
-//! | any loader failure   | transfer abandoned   | none       | `Empty`      |
+//! | any loader failure   | transfer abandoned   | none       | `Stopped` if an image is installed, else `Empty` |
 //! | `sys/payload/start`  | `Stopped`/`Trapped`  | `Start`    | `Running` once the shell calls [`State::started`] |
 //! | `sys/payload/start`  | `Empty`/`Loading`    | none (`InvalidRequest`) | unchanged |
 //! | `sys/payload/start`  | built without runtime | none (`NotFound`) | unchanged |
 //! | `sys/payload/stop`   | `Running`/`Trapped`  | `Stop`     | `Stopped`    |
 //! | other `sys/...`      | —                    | none (`NotFound`) | unchanged |
 //! | application key      | —                    | none (`NotFound`) | unchanged |
+//!
+//! The store writes a transfer into the slot that is not active (see
+//! [`crate::store`]), so an abandoned transfer or a failed storage action
+//! leaves the installed image in place. [`State`] remembers whether one is
+//! installed (from boot, and after each successful activate) and returns to
+//! `Stopped` rather than `Empty` when a transfer fails.
 //!
 //! Incoming publications go to the payload only when it is running, the key
 //! is not a system key, and the payload subscribed to exactly that key
@@ -50,14 +56,21 @@ pub struct Context<'a> {
 pub struct State {
     loader: Loader,
     status: PayloadStatus,
+    /// A valid image is installed (it may not be running).
+    installed: bool,
 }
 
 impl State {
     /// State after boot: `Stopped` if a valid image is installed, else
     /// `Empty`.
     pub const fn boot(installed: bool) -> Self {
-        let status = if installed { PayloadStatus::Stopped } else { PayloadStatus::Empty };
-        State { loader: Loader::Idle, status }
+        let status = Self::resting(installed);
+        State { loader: Loader::Idle, status, installed }
+    }
+
+    /// Status when no transfer is in progress and nothing runs.
+    const fn resting(installed: bool) -> PayloadStatus {
+        if installed { PayloadStatus::Stopped } else { PayloadStatus::Empty }
     }
 
     /// Current payload status.
@@ -85,9 +98,11 @@ impl State {
         State { status: PayloadStatus::Trapped, ..self }
     }
 
-    /// A flash operation failed; the image can no longer be trusted.
+    /// A storage action failed. Storage actions only touch the inactive
+    /// slot, so the transfer ends and the status returns to `Stopped` if an
+    /// image is installed, else `Empty`.
     pub const fn storage_failed(self) -> Self {
-        State { loader: Loader::Idle, status: PayloadStatus::Empty }
+        State { loader: Loader::Idle, status: Self::resting(self.installed), ..self }
     }
 }
 
@@ -96,7 +111,8 @@ impl State {
 pub enum Action<'a> {
     /// Nothing.
     None,
-    /// Stop the payload, then erase storage for an image of `len` bytes.
+    /// Stop the payload, then erase the inactive slot for an image of `len`
+    /// bytes.
     Erase {
         /// Image length.
         len: u32,
@@ -108,7 +124,8 @@ pub enum Action<'a> {
         /// Bytes to write.
         data: &'a [u8],
     },
-    /// Flush pending bytes and write the header: the image is installed.
+    /// Flush pending bytes, check the CRC and write the slot header: the
+    /// image is installed and its slot becomes active.
     Activate {
         /// Image length.
         len: u32,
@@ -198,22 +215,23 @@ fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32) -> Outcome<'a> {
     let (loader, result) = state.loader.step(cmd, capacity);
     match result {
         Err(e) => {
-            // A failure mid-transfer abandons an erased, partly written
-            // region; a rejected `begin` from idle touched nothing.
+            // A failure mid-transfer abandons the partly written inactive
+            // slot; the installed image, if any, is intact. A rejected
+            // `begin` from idle touched nothing.
             let status = match state.status {
-                PayloadStatus::Loading => PayloadStatus::Empty,
+                PayloadStatus::Loading => State::resting(state.installed),
                 other => other,
             };
-            Outcome::reply(State { loader, status }, Err(e))
+            Outcome::reply(State { loader, status, ..state }, Err(e))
         }
         Ok(Effect::Erase { len }) => {
-            Outcome::act(State { loader, status: PayloadStatus::Loading }, Action::Erase { len })
+            Outcome::act(State { loader, status: PayloadStatus::Loading, ..state }, Action::Erase { len })
         }
         Ok(Effect::Write { offset, data }) => {
             Outcome::act(State { loader, ..state }, Action::Write { offset, data })
         }
         Ok(Effect::Activate { len, crc }) => Outcome::act(
-            State { loader, status: PayloadStatus::Stopped },
+            State { loader, status: PayloadStatus::Stopped, installed: true },
             Action::Activate { len, crc },
         ),
         Ok(Effect::None) => Outcome::reply(State { loader, ..state }, Ok(0)),
@@ -341,23 +359,42 @@ mod tests {
     }
 
     #[test]
-    fn abandoned_transfer_leaves_no_payload() {
-        let b = begin(8, 0);
-        let o = req(State::boot(true), keys::BEGIN, &b);
-        let (c, n) = chunk(4, &[1]);
-        let o = req(o.state, keys::CHUNK, &c[..n]);
-        assert_eq!(o.reply, Err(HandlerError::InvalidRequest));
-        assert_eq!(o.state.status(), PayloadStatus::Empty);
-        assert_eq!(o.state.loader(), Loader::Idle);
+    fn abandoned_transfer_keeps_installed_payload() {
+        for (installed, after) in [(true, PayloadStatus::Stopped), (false, PayloadStatus::Empty)] {
+            let b = begin(8, 0);
+            let o = req(State::boot(installed).started(), keys::BEGIN, &b);
+            let (c, n) = chunk(4, &[1]);
+            let o = req(o.state, keys::CHUNK, &c[..n]);
+            assert_eq!(o.reply, Err(HandlerError::InvalidRequest));
+            assert_eq!(o.state.status(), after);
+            assert_eq!(o.state.loader(), Loader::Idle);
+            assert_eq!(o.state.startable(), installed);
 
-        // Wrong CRC on commit.
-        let b = begin(4, 0);
+            // Wrong CRC on commit.
+            let b = begin(4, 0);
+            let o = req(State::boot(installed), keys::BEGIN, &b);
+            let (c, n) = chunk(0, &[1, 2, 3, 4]);
+            let o = req(o.state, keys::CHUNK, &c[..n]);
+            let o = req(o.state, keys::COMMIT, &[]);
+            assert_eq!(o.reply, Err(HandlerError::InvalidRequest));
+            assert_eq!(o.state.status(), after);
+        }
+    }
+
+    #[test]
+    fn failed_transfer_after_first_install_keeps_it() {
+        let image = [3u8; 4];
+        let b = begin(4, Crc32::checksum(&image));
         let o = req(State::boot(false), keys::BEGIN, &b);
-        let (c, n) = chunk(0, &[1, 2, 3, 4]);
+        let (c, n) = chunk(0, &image);
         let o = req(o.state, keys::CHUNK, &c[..n]);
+        let installed = req(o.state, keys::COMMIT, &[]).state;
+        let b = begin(4, 0);
+        let o = req(installed, keys::BEGIN, &b);
         let o = req(o.state, keys::COMMIT, &[]);
         assert_eq!(o.reply, Err(HandlerError::InvalidRequest));
-        assert_eq!(o.state.status(), PayloadStatus::Empty);
+        assert_eq!(o.state.status(), PayloadStatus::Stopped);
+        assert_eq!(req(o.state, keys::START, &[]).action, Action::Start);
     }
 
     #[test]
@@ -405,6 +442,10 @@ mod tests {
         let s = State::boot(true).started();
         assert_eq!(s.trapped().status(), PayloadStatus::Trapped);
         let f = s.storage_failed();
+        assert_eq!((f.status(), f.loader()), (PayloadStatus::Stopped, Loader::Idle));
+        assert!(f.startable());
+        let loading = req(State::boot(false), keys::BEGIN, &begin(4, 0)).state;
+        let f = loading.storage_failed();
         assert_eq!((f.status(), f.loader()), (PayloadStatus::Empty, Loader::Idle));
         assert!(!f.startable());
         assert!(State::boot(true).startable());

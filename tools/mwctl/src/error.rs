@@ -99,7 +99,7 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
         }
         InvalidRequest if is(keys::COMMIT) => {
             "the device rejected the image: CRC-32 mismatch or incomplete transfer \
-             (the transfer was abandoned; no payload is installed)"
+             (the transfer was abandoned; any previously installed payload is kept)"
         }
         InvalidRequest if is(keys::CHUNK) => {
             "chunk out of order or no transfer in progress (the transfer was abandoned)"
