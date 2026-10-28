@@ -205,7 +205,7 @@ fn importing(imports: &[middleware::wasm_abi::Import]) -> Vec<u8> {
 #[test]
 fn x1_every_import_links_and_older_revisions_still_load() {
     for (what, imports) in [
-        ("ABI 3", IMPORTS),
+        ("ABI 4 (all)", IMPORTS),
         ("ABI 2", &IMPORTS[..ABI2_IMPORTS]),
         ("ABI 1", &IMPORTS[..ABI1_IMPORTS]),
     ] {

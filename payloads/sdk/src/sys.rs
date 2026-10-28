@@ -25,7 +25,9 @@ mod imports {
     // treats pointers as offsets into the exported memory, checks every
     // `(ptr, len)` pair with `wasm_abi::guest_range`, only ever *reads* guest
     // memory during these calls (`spi_transfer` and `uart_write` copy into
-    // firmware-owned DMA buffers before returning), and reports problems as
+    // firmware-owned DMA buffers before returning; the ABI 4 route imports
+    // copy the key and config out and never touch guest memory again, since
+    // frame data stays in host memory), and reports problems as
     // negative codes. `dma_read` and `uart_read` *write* `len` bytes at `ptr`,
     // and `i2c_transfer` writes `rx_len` bytes at `rx_ptr`, so they stay
     // `unsafe` and are only called through the wrappers below.
@@ -74,6 +76,23 @@ mod imports {
             rx_ptr: i32,
             rx_len: i32,
         ) -> i32;
+        // ABI 4 (all read guest memory only: key and config are copied out)
+        pub safe fn route_source(
+            source: i32,
+            key_ptr: i32,
+            key_len: i32,
+            cfg_ptr: i32,
+            cfg_len: i32,
+        ) -> i32;
+        pub safe fn route_sink(
+            key_ptr: i32,
+            key_len: i32,
+            bus: i32,
+            cfg_ptr: i32,
+            cfg_len: i32,
+        ) -> i32;
+        pub safe fn route_stop(handle: i32) -> i32;
+        pub safe fn route_stat(handle: i32, stat: i32) -> i32;
     }
 }
 
@@ -159,12 +178,25 @@ mod imports {
     pub unsafe fn i2c_transfer(_b: i32, _a: i32, _tp: i32, _tl: i32, _rp: i32, _rl: i32) -> i32 {
         UNSUPPORTED
     }
+    pub fn route_source(_s: i32, _kp: i32, _kl: i32, _cp: i32, _cl: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn route_sink(_kp: i32, _kl: i32, _b: i32, _cp: i32, _cl: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn route_stop(_h: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn route_stat(_h: i32, _s: i32) -> i32 {
+        UNSUPPORTED
+    }
 }
 
 pub(crate) use imports::{
     adc_read, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
-    log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, set_tick, spi_open, spi_transfer,
-    subscribe, timer_start, timer_stop, uart_open, uart_write,
+    log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, route_sink, route_source,
+    route_stat, route_stop, set_tick, spi_open, spi_transfer, subscribe, timer_start, timer_stop,
+    uart_open, uart_write,
 };
 
 /// `(ptr, len)` of an exclusively borrowed guest buffer, or `None` if the

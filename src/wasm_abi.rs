@@ -49,6 +49,24 @@
 //! | `i2c_open`     | `bus, freq_hz`                            | 0 or error        |
 //! | `i2c_transfer` | `bus, addr7, tx_ptr, tx_len, rx_ptr, rx_len` | 0 or error     |
 //!
+//! Added in ABI 4 (DMA routes between pub/sub keys and host data sources or
+//! SPI displays; arguments and config layouts in [`route`], chunk format
+//! and sink rules in [`crate::stream`]):
+//!
+//! | name           | params                                   | result            |
+//! |----------------|------------------------------------------|-------------------|
+//! | `route_source` | `source, key_ptr, key_len, cfg_ptr, cfg_len` ([`route::SourceKind`], [`route::SourceConfig`]) | handle ≥ 0 or error |
+//! | `route_sink`   | `key_ptr, key_len, bus, cfg_ptr, cfg_len` ([`route::SinkConfig`]) | handle ≥ 0 or error |
+//! | `route_stop`   | `handle`                                 | 0 or error        |
+//! | `route_stat`   | `handle, stat` ([`route::RouteStat`])     | count ≥ 0 (saturating) or error |
+//!
+//! A route moves frames without copying them through guest memory: a
+//! source route publishes host-captured frames on a key as chunks, a sink
+//! route DMAs a key's chunks to an SPI bus with a per-frame preamble.
+//! Routes report through `on_irq` ([`events::EventKind::RouteFrames`],
+//! [`events::EventKind::RouteDropped`], [`events::EventKind::RouteStopped`]),
+//! so `route_source` and `route_sink` are event sources.
+//!
 //! The firmware owns the pin mapping for PWM and I2C: a PWM `(timer,
 //! channel)` and an I2C `bus` drive fixed, board-documented pins, so a
 //! payload never names them. `adc_read` takes a board pin number and fails
@@ -104,14 +122,15 @@
 
 pub mod events;
 pub mod periph;
+pub mod route;
 
 /// ABI revision. Each revision is a superset of the previous one, so a
 /// payload built for revision `n` loads on firmware implementing `>= n`:
 /// the runtime checks each import by name and signature against
 /// [`IMPORTS`], and an older payload simply imports a subset. Revision 2
 /// added interrupts, timers, SPI and UART DMA; revision 3 added PWM, ADC
-/// and I2C.
-pub const ABI_VERSION: u16 = 3;
+/// and I2C; revision 4 added DMA routes.
+pub const ABI_VERSION: u16 = 4;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -278,6 +297,27 @@ pub const IMPORTS: &[Import] = &[
         params: 6,
         returns: true,
     },
+    // ABI 4
+    Import {
+        name: "route_source",
+        params: 5,
+        returns: true,
+    },
+    Import {
+        name: "route_sink",
+        params: 5,
+        returns: true,
+    },
+    Import {
+        name: "route_stop",
+        params: 1,
+        returns: true,
+    },
+    Import {
+        name: "route_stat",
+        params: 2,
+        returns: true,
+    },
 ];
 
 /// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
@@ -285,6 +325,10 @@ pub const ABI1_IMPORTS: usize = 9;
 
 /// Number of imports in ABI 2 (the prefix of [`IMPORTS`] up to `uart_read`).
 pub const ABI2_IMPORTS: usize = 20;
+
+/// Number of imports in ABI 3 (the prefix of [`IMPORTS`] up to
+/// `i2c_transfer`).
+pub const ABI3_IMPORTS: usize = 26;
 
 /// Looks up an import by name.
 pub fn import(name: &str) -> Option<&'static Import> {
@@ -415,13 +459,25 @@ mod tests {
             ("i2c_transfer", 6),
         ];
         assert!(
-            IMPORTS[ABI2_IMPORTS..]
+            IMPORTS[ABI2_IMPORTS..ABI3_IMPORTS]
                 .iter()
                 .map(|i| (i.name, i.params))
                 .eq(abi3)
         );
+        let abi4 = [
+            ("route_source", 5),
+            ("route_sink", 5),
+            ("route_stop", 1),
+            ("route_stat", 2),
+        ];
+        assert!(
+            IMPORTS[ABI3_IMPORTS..]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq(abi4)
+        );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI_VERSION, 3);
+        assert_eq!(ABI_VERSION, 4);
     }
 
     #[test]
