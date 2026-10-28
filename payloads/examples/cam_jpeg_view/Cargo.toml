@@ -1,0 +1,17 @@
+[package]
+name = "cam_jpeg_view"
+description = "Example middleware payload: cam_jpeg_view (JPEG camera viewer for the conagotchi badge)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }
+mw-jpeg = { path = "../../jpeg" }
+gc9a01 = { path = "../../gc9a01" }
+# The chunk wire format (`middleware::stream::chunk`), no_std and heap-free.
+middleware = { path = "../../..", default-features = false }

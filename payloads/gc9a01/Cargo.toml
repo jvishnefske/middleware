@@ -1,0 +1,10 @@
+[package]
+name = "gc9a01"
+description = "GC9A01 panel bring-up for the conagotchi badge's payloads (shared by cam_view and cam_jpeg_view)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mw-payload = { path = "../sdk" }

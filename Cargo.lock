@@ -683,6 +683,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
 name = "embedded-io"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1681,6 +1687,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mw-jpeg"
+version = "0.1.0"
+dependencies = [
+ "mw-payload",
+]
+
+[[package]]
+name = "mw-payload"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+ "middleware",
+]
+
+[[package]]
 name = "mwctl"
 version = "0.1.0"
 dependencies = [
@@ -1871,6 +1892,7 @@ name = "payload-sim"
 version = "0.1.0"
 dependencies = [
  "middleware",
+ "mw-jpeg",
  "wasm-host",
  "wat",
 ]

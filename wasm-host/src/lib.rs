@@ -52,6 +52,10 @@
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
 //!   `on_irq`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
+//!   After each call the fuel it used (the budget minus what is left; the
+//!   whole budget if it ran dry) is added to the payload's [`FuelStats`]
+//!   (call count, largest single call, saturating total), read with
+//!   [`Payload::fuel_stats`].
 //! * Linear memory is capped at [`Limits::max_memory_bytes`], at load time
 //!   (the module's initial memory) and on every `memory.grow` (which then
 //!   returns `-1`) (W5). The cap is in bytes, not pages, because modules may
@@ -102,6 +106,7 @@ use wasmi::{
     ValType,
 };
 
+pub use abi::FuelStats;
 pub use error::{INIT_LOG_LINES, InitLog, LoadError, Trap};
 pub use middleware::wasm_abi::events::{DmaChannel, Event, EventKind};
 pub use middleware::wasm_abi::periph::{
@@ -381,6 +386,7 @@ pub struct Payload<D: Device + 'static> {
     store: Store<State<D>>,
     instance: Instance,
     fuel: u64,
+    fuel_stats: FuelStats,
     poisoned: bool,
 }
 
@@ -480,6 +486,7 @@ impl<D: Device + 'static> Payload<D> {
             store,
             instance,
             fuel: limits.fuel_per_call,
+            fuel_stats: FuelStats::default(),
             poisoned: false,
         };
         if exports.init {
@@ -494,7 +501,8 @@ impl<D: Device + 'static> Payload<D> {
         Ok(payload)
     }
 
-    /// Refuels and calls the export `name`, poisoning the payload on a trap.
+    /// Refuels and calls the export `name`, records the fuel it used in
+    /// [`Payload::fuel_stats`], and poisons the payload on a trap.
     fn call<P, R>(&mut self, name: &str, params: P) -> Result<R, Trap>
     where
         P: wasmi::WasmParams,
@@ -509,8 +517,16 @@ impl<D: Device + 'static> Payload<D> {
             .and_then(|()| self.instance.get_typed_func::<P, R>(&self.store, name))
             .and_then(|f| f.call(&mut self.store, params))
             .map_err(|e| trap(&e));
+        let used = abi::fuel_used(self.fuel, self.store.get_fuel().ok());
+        self.fuel_stats = self.fuel_stats.record(used);
         self.poisoned = result.is_err();
         result
+    }
+
+    /// Fuel used so far by every export call into this payload, `init`
+    /// included (see [`FuelStats`]).
+    pub fn fuel_stats(&self) -> FuelStats {
+        self.fuel_stats
     }
 
     /// Keys the payload subscribed to, in slot order.
