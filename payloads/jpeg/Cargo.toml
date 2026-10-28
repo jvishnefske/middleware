@@ -1,0 +1,21 @@
+[package]
+name = "mw-jpeg"
+description = "Incremental no_std baseline JPEG decoder to RGB565 for WASM payloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+# Only the `fuel_probe` example (a wasm32 payload) uses the SDK.
+mw-payload = { path = "../sdk" }
+
+# A minimal payload that decodes an embedded frame, one MCU row per tick:
+# its size is the decoder's code size, and `payload-sim --fuel F` bisects
+# the fuel one call needs (see the crate docs).
+[[example]]
+name = "fuel_probe"
+crate-type = ["cdylib"]
+test = false
