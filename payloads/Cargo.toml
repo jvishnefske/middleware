@@ -13,6 +13,7 @@ members = [
     "examples/dimmer",
     "examples/cam_stream",
     "examples/cam_view",
+    "jpeg",
     "abi-check",
 ]
 # `cargo build --release` builds only the guests; `abi-check` is a host tool
@@ -27,6 +28,7 @@ default-members = [
     "examples/dimmer",
     "examples/cam_stream",
     "examples/cam_view",
+    "jpeg",
 ]
 
 [workspace.package]
@@ -43,3 +45,10 @@ lto = true
 panic = "abort"
 strip = true
 codegen-units = 1
+
+# The JPEG decoder's hot loops run under wasmi's fuel metering, which
+# charges every Wasm operator: "s" lets LLVM inline the small std helpers
+# that "z" leaves as calls, for about 15-30 % less fuel per MCU and a
+# slightly smaller binary (measured with jpeg/examples/fuel_probe.rs).
+[profile.release.package.mw-jpeg]
+opt-level = "s"
