@@ -2,7 +2,7 @@
 //!
 //! `payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]
 //! [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE] [--seed S]
-//! [--dump-panel <file.ppm>]` loads a payload with the same runtime as the
+//! [--dump-panel <file.ppm>] [--panel-dc <pin>]` loads a payload with the same runtime as the
 //! firmware (`wasm-host`) and runs it against [`sim::SimDevice`], printing
 //! every log line, publish, GPIO change and peripheral transfer to stdout
 //! as `[   time ms] event`.
@@ -29,6 +29,9 @@
 //! `uart_write` prints `uart1 tx <text>`; both complete with a `DmaDone`
 //! event on the next loop iteration. Every iteration drains at most
 //! [`MAX_EVENTS`] queued events into `Payload::dispatch` (`on_irq`).
+//! A transfer prints `spi<bus> tx <bytes> (<len> bytes)`; transmit buffers
+//! longer than 32 bytes show only their first 16 bytes, in hex, followed by
+//! `…`, as in `spi0 tx 0x000102030405060708090a0b0c0d0e0f… (3840 bytes)`.
 //!
 //! ABI 4 DMA routes (R10) run on the same clock: a test-pattern source
 //! route publishes each frame as chunks and prints one line per frame
@@ -37,6 +40,20 @@
 //! prints `route<h> frame <seq> drawn` or `... dropped`. When the run ends,
 //! each running route prints its counters, and `--dump-panel` writes the
 //! panel framebuffer as a binary PPM (P6) image.
+//!
+//! * `--panel-dc <pin>` also puts the panel on the payload's own SPI bus 0
+//!   with `<pin>` as its D/C line, so a payload driving a GC9A01 directly
+//!   (CASET / RASET / RAMWR with D/C low for commands, high for data) draws
+//!   on it too. Each accepted `spi_transfer` on bus 0 feeds the panel the
+//!   bytes clocked out (`tx` padded with `0x00` to the transfer length) at
+//!   the pin's current output level; while the pin is not configured as a
+//!   GPIO output the panel ignores the transfer. In a `--peer` run it
+//!   applies to both boards.
+//!
+//! When the run ends, each board also prints its payload's fuel use
+//! (every export call, `init` included) as
+//! `fuel calls <C> max <M> total <T>`: the number of calls, the most fuel
+//! one call used, and the saturating total (labelled in `--peer` runs).
 //!
 //! * `--peer <other.wasm>` runs a second payload on its own board in the
 //!   same process. Each board's publications (a payload's own and its
@@ -269,12 +286,18 @@ impl Bench {
         }
     }
 
-    /// Prints the route counters and bus summary, and dumps the panel.
+    /// Prints the route counters, fuel use and bus summary, and dumps the
+    /// panel.
     fn finish(&mut self, opts: &Options) {
         for n in &mut self.nodes {
             for line in n.device().route_summary() {
                 n.device().note(line);
             }
+            let fuel = n.payload.fuel_stats();
+            n.device().note(format!(
+                "fuel calls {} max {} total {}",
+                fuel.calls, fuel.max_call, fuel.total
+            ));
             flush(&mut n.payload);
         }
         if self.nodes.len() > 1 {
@@ -482,6 +505,10 @@ fn load(path: &str, label: Option<String>, opts: &Options) -> Result<Node, ExitC
     let device = SimDevice::new(opts.spi_pattern.clone());
     let device = match &label {
         Some(l) => device.with_label(l),
+        None => device,
+    };
+    let device = match opts.panel_dc {
+        Some(pin) => device.with_panel_dc(pin),
         None => device,
     };
     let mut payload = Payload::load(&wasm, device, opts.limits).map_err(|e| {

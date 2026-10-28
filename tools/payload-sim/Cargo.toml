@@ -11,3 +11,5 @@ wasm-host = { path = "../../wasm-host" }
 
 [dev-dependencies]
 wat = "1"
+# Reference decode for the R14 end-to-end test (tests/r14.rs), host-side.
+mw-jpeg = { path = "../../payloads/jpeg" }

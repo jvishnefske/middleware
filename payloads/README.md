@@ -59,6 +59,25 @@ default target in `.cargo/config.toml`). It contains:
   stopped route or failed step is retried after 1 s with a fresh bring-up.
   Built with 1-byte pages it fits the badge (16 KiB memory, 4 KiB stack,
   13 KiB image), and no call does more than one GPIO write and one transfer.
+- `examples/cam_jpeg_stream` (ABI 4, ESP32-CAM, R14) — like `cam_stream`
+  but a 240×240 baseline JPEG source on `app/cam/jpeg` every 100 ms (the
+  firmware's baked fixture frames until the OV2640 lands: 25–29 ESP-NOW
+  messages a frame, at most 290 a second of a 1 000-message budget). Stats
+  on `app/cam/stats`; a stopped route is restarted.
+- `examples/cam_jpeg_view` (ABI 4, conagotchi badge, R14) — brings the
+  GC9A01 up with the shared `gc9a01` crate, subscribes to `app/cam/jpeg`,
+  reassembles chunks into three 8 KiB frame slots (fill, newest ready,
+  decoding; in-order continuation only, a gap drops the frame), decodes
+  the newest complete frame with `mw-jpeg` four MCUs per call (under
+  300 000 fuel a call in `payload-sim`) and draws each 16-row strip with
+  `CASET`/`RASET`/`RAMWR` and the RGB565 pixels in at most 3 840-byte
+  transfers, one in flight at a time. Stats (received, decoded, dropped,
+  failed, decode ms) are logged and published on `app/cam/view_stats`
+  every 2 s. Standard build: one 64 KiB page, 16 KiB stack, 36 KiB of
+  buffers in `.bss`.
+- `gc9a01/` — the badge panel's wiring, `mipidsi`-derived init sequence,
+  its pure `Sequencer` and the bring-up `Controller` with retry and
+  give-up, shared by `cam_view` and `cam_jpeg_view`.
 - `templates/` — the same programs written by hand in WAT and in
   AssemblyScript (blink, echo, button, a timer demo and the SPI loopback),
   used as starting points by the web editor. `templates/README.md` also
@@ -163,6 +182,14 @@ cam_view.wasm --peer cam_stream.wasm --virtual --until-ms 2000 --dump-panel
 panel.ppm` runs the camera-to-display pipeline and writes the panel as a
 PPM image at the end. `--loss <permille>` drops that share of the messages
 between the two boards, reproducibly for a given `--seed <n>`.
+
+`--panel-dc <pin>` makes the panel also interpret the payload's own
+`spi_transfer`s on bus 0, with the D/C level read from that GPIO output, so
+a payload that draws by itself runs too:
+`cargo run -p payload-sim -- cam_jpeg_view.wasm --peer cam_jpeg_stream.wasm
+--virtual --fuel 1000000 --memory-bytes 65536 --panel-dc 13 --ticks 10
+--until-ms 3000 --dump-panel panel.ppm`. Each board's fuel use (calls, the
+most any call took, total) is printed when the run ends.
 
 ## Uploading
 

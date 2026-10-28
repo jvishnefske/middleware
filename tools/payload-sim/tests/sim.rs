@@ -67,7 +67,10 @@ fn w7_runs_payload_against_fake_device_in_virtual_time() {
         "{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let lines: Vec<&str> = stdout.lines().collect();
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    // init, mw_alloc + on_message for the delivery, and three ticks.
+    let fuel = lines.pop().unwrap_or_default();
+    assert!(fuel.starts_with("[   300 ms] fuel calls 6 max "), "{fuel}");
     assert_eq!(
         lines,
         vec![

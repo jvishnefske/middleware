@@ -13,6 +13,9 @@ members = [
     "examples/dimmer",
     "examples/cam_stream",
     "examples/cam_view",
+    "examples/cam_jpeg_stream",
+    "examples/cam_jpeg_view",
+    "gc9a01",
     "jpeg",
     "abi-check",
 ]
@@ -28,6 +31,9 @@ default-members = [
     "examples/dimmer",
     "examples/cam_stream",
     "examples/cam_view",
+    "examples/cam_jpeg_stream",
+    "examples/cam_jpeg_view",
+    "gc9a01",
     "jpeg",
 ]
 

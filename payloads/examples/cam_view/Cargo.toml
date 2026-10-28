@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 mw-payload = { path = "../../sdk" }
+gc9a01 = { path = "../../gc9a01" }

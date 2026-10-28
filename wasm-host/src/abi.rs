@@ -14,6 +14,9 @@
 //! * [`Schedule`] — `tick` scheduling with wrapping millisecond time (W2);
 //!   [`tick_decision`] — whether a `tick` call runs, as a
 //!   [`Ticked`], and the schedule after it (W9).
+//! * [`FuelStats`] — per-payload fuel accounting: [`fuel_used`] derives
+//!   one call's consumption from its budget and the fuel left, and
+//!   [`FuelStats::record`] folds it into the counters (W4).
 //! * [`initial_memory_bytes`], [`check_memory`], [`memory_bytes`] — the
 //!   byte cap on linear memory for 64 KiB and 1-byte (custom-page-sizes)
 //!   pages (W5).
@@ -590,6 +593,47 @@ pub fn count_code(count: u32) -> i32 {
     i32::try_from(count).unwrap_or(i32::MAX)
 }
 
+/// Fuel consumed by the calls into one payload (requirement W4).
+///
+/// Every export call (`init`, `tick`, `mw_alloc`, `on_message`, `on_irq`)
+/// is recorded, including calls that trap; a call that runs out of fuel
+/// counts as its whole budget. Read with [`crate::Payload::fuel_stats`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FuelStats {
+    /// Number of export calls made.
+    pub calls: u64,
+    /// The most fuel any single call used.
+    pub max_call: u64,
+    /// Fuel used by all calls together, saturating at `u64::MAX`.
+    pub total: u64,
+}
+
+impl FuelStats {
+    /// The counters after one more call that used `used` fuel.
+    #[must_use]
+    pub const fn record(self, used: u64) -> Self {
+        FuelStats {
+            calls: self.calls.saturating_add(1),
+            max_call: if used > self.max_call {
+                used
+            } else {
+                self.max_call
+            },
+            total: self.total.saturating_add(used),
+        }
+    }
+}
+
+/// Fuel one call used: its `budget` minus the fuel `remaining` afterwards.
+/// `None` (the interpreter could not report the fuel left) counts as the
+/// whole budget, as does running dry.
+pub const fn fuel_used(budget: u64, remaining: Option<u64>) -> u64 {
+    match remaining {
+        Some(left) => budget.saturating_sub(left),
+        None => budget,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,5 +1090,23 @@ mod tests {
             Err(AbiError::InvalidArgument),
             "over MAX_I2C"
         );
+    }
+
+    #[test]
+    fn fuel_stats_track_calls_max_and_saturating_total() {
+        let s = FuelStats::default().record(10).record(30).record(20);
+        assert_eq!(
+            s,
+            FuelStats {
+                calls: 3,
+                max_call: 30,
+                total: 60
+            }
+        );
+        assert_eq!(s.record(u64::MAX).total, u64::MAX);
+        assert_eq!(fuel_used(100, Some(40)), 60);
+        assert_eq!(fuel_used(100, Some(0)), 100);
+        assert_eq!(fuel_used(100, None), 100);
+        assert_eq!(fuel_used(100, Some(200)), 0);
     }
 }

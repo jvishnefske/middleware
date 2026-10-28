@@ -1194,9 +1194,69 @@ payload): each frame is one JPEG of varying length (R14).
     `r11_test_pattern_jpeg_needs_the_fixtures`, run with and without
     `--features cam-fixtures`); `./build.sh esp32` and `./build.sh
     esp32s3` build (about 54 KB more flash).
-  - [ ] `cam_stream` switches its source to JPEG and `cam_view` decodes
-    the frames in WASM (the `payloads/jpeg` decoder) and draws them; then
-    on hardware; then the OV2640 behind `SourceKind::Camera`.
+  - [x] Payloads: `cam_jpeg_stream` (ESP32-CAM; `cam_stream` stays
+    RGB565) starts a `TestPattern` source with `SourceConfig::jpeg(240,
+    240, 100)` on `app/cam/jpeg`: the fixtures' 25–29 chunks a frame make
+    at most 290 ESP-NOW messages a second, within the 1 000-a-second budget
+    (a frame may grow to 100 chunks); stats on `app/cam/stats`, restart on
+    `RouteStopped` — `cam_jpeg_stream` `tests::*`
+    (`config_bytes_are_a_240_jpeg_at_100_ms`,
+    `fixture_frames_are_25_to_29_chunks_within_budget`,
+    `source_is_the_test_pattern_until_the_camera_lands`,
+    `events_accumulate_and_a_stop_asks_for_a_restart`,
+    `stats_encoding_is_three_le_words`, `host_stub_start_fails_cleanly`).
+    `cam_jpeg_view` (badge) brings the panel up with the shared `gc9a01`
+    crate (moved out of `cam_view`, whose tests still pass), reassembles
+    `app/cam/jpeg` into three 8 KiB slots (fill, newest complete,
+    decoding: in-order continuation only, a gap or a new first chunk drops
+    the frame in progress, a complete frame not yet decoded is superseded
+    by a newer one, the decoding slot is never written), decodes the newest
+    frame with `mw-jpeg` four MCUs per call, and sends each strip as
+    `CASET`/`RASET` (D/C low command, D/C high parameters), `RAMWR` and the
+    pixels in transfers of at most 3 840 bytes, one in flight at a time;
+    stats on `app/cam/view_stats` — `cam_jpeg_view` `reasm::tests::*`
+    (`in_order_frames_complete_and_are_taken_newest_first`,
+    `a_gap_abandons_the_frame_and_its_rest_is_dropped`,
+    `a_new_first_chunk_abandons_the_frame_in_progress`,
+    `duplicates_are_dropped_without_losing_the_frame`,
+    `oversize_malformed_and_foreign_chunks`,
+    `single_chunk_frames_and_counters_saturate`,
+    `lossy_reordered_delivery_only_ever_yields_whole_frames`),
+    `pipeline::tests::*` (`a_full_width_strip_is_window_ramwr_and_two_parts`,
+    `smaller_images_are_centred_and_parts_never_exceed_max_dma`,
+    `errors_abandon_the_frame`, `events_out_of_place_are_ignored`),
+    `tests::*` (`memory_fits_one_page_with_the_stack`,
+    `stats_fold_the_reassembler_and_encode_as_le_words`,
+    `received_fixture_frames_decode_in_bounded_steps`,
+    `host_stub_bring_up_backs_off_and_frames_still_reassemble`);
+    `gc9a01` `tests::*`; `abi-check` `tests/payloads.rs`
+    (`rust_cam_jpeg_stream_example`, `rust_cam_jpeg_view_example`,
+    `cam_jpeg_view_fits_one_standard_page`,
+    `p5_forbid_unsafe_code_examples_export_the_abi`);
+    `scripts/check-all.sh`.
+  - [x] `payload-sim` draws a payload's own SPI: `--panel-dc <pin>` feeds
+    `spi_transfer`s on bus 0 (padded to the clocked length) to the panel
+    with the D/C level of that GPIO output, and every board prints its
+    fuel use (calls, most in one call, total; `wasm_host::FuelStats`) —
+    `sim::tests::*` (`panel_dc_payload_spi_draws_on_the_panel`,
+    `panel_dc_padding_bytes_are_pixel_data`,
+    `panel_dc_pin_not_an_output_does_not_feed_the_panel`,
+    `without_panel_dc_payload_spi_leaves_the_panel_alone`,
+    `long_spi_transfers_render_their_head_only`); `tests/panel_dc.rs`;
+    `tests/d10.rs` `d10_run_ends_with_the_payload_fuel_use`; `wasm-host`
+    `tests/runtime.rs` (`w4_fuel_stats_record_every_call`,
+    `w4_fuel_stats_count_a_dry_call_as_its_whole_budget`).
+  - [x] End-to-end in `payload-sim` (`--peer`, `--virtual`, 1 000 000 fuel,
+    64 KiB): the panel equals `mw-jpeg`'s host decode of the fixture frame
+    last drawn, bit for bit; every frame after the bring-up is drawn; no
+    call traps and the most any call needs is 294 354 fuel (about 15 M per
+    frame in all); with 2 % message loss frames are dropped, none fails,
+    and every 16-row band is black or a band of a fixture frame —
+    `tools/payload-sim/tests/r14.rs`
+    (`r14_jpeg_stream_is_decoded_bit_exactly_onto_the_panel_within_the_fuel_budget`,
+    `r14_lossy_stream_drops_frames_without_trapping_or_misdrawing`).
+  - [ ] On hardware (ESP32-CAM to badge); then the OV2640 behind
+    `SourceKind::Camera`.
 
 ### JPEG decode in WASM (J…)
 
@@ -1282,6 +1342,17 @@ wasmi's per-call fuel budget into RGB565 strips for the GC9A01.
   needs eager translation or a larger first-call budget. Code size is
   about 14 KiB of wasm (target 12 KiB), the decoder state 4.3 KB, the
   4:2:0 strip 7 680 bytes at 240 wide.
+- [x] J11 The badge payload (`cam_jpeg_view`) stays within its budgets:
+  `decode_mcus(.., 4)` per call (worst case about 4 × 114 000 fuel on a
+  noisy frame), `Decoder::start` in a call of its own, and every call of a
+  run on the fixture stream under 600 000 fuel (294 354 measured) at the
+  firmware's 1 000 000; one standard 64 KiB page holds the 16 KiB stack,
+  three 8 KiB frame slots, the 7 680-byte strip and the decoder in `.bss`
+  — `tools/payload-sim/tests/r14.rs`
+  (`r14_jpeg_stream_is_decoded_bit_exactly_onto_the_panel_within_the_fuel_budget`);
+  `cam_jpeg_view` `tests::received_fixture_frames_decode_in_bounded_steps`,
+  `tests::memory_fits_one_page_with_the_stack`; `abi-check`
+  `cam_jpeg_view_fits_one_standard_page`.
 - [x] J10 Built and checked with the payload workspace: unit, round-trip,
   interop and fuzz tests, clippy (wasm32 and host) and rustdoc with
   warnings denied, and the `fuel_probe` payload validated by `abi-check` —

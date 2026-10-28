@@ -1,9 +1,13 @@
 [package]
 name = "mw-jpeg"
 description = "Incremental no_std baseline JPEG decoder to RGB565 for WASM payloads"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Spelled out instead of inherited from the payload workspace: the parent
+# workspace's payload-sim uses this crate (as a dev-dependency, for the
+# R14 reference decode), and a path dependency outside its own workspace
+# cannot inherit.
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]

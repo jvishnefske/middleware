@@ -487,6 +487,60 @@ fn w4_fuel_is_refilled_before_every_call() {
 }
 
 #[test]
+fn w4_fuel_stats_record_every_call() {
+    // `tick` counts to 1000, so one tick burns well over 1000 fuel.
+    let body = format!(
+        r#"{MEM}
+           (func (export "init") (drop (call $set_tick (i32.const 10))))
+           (func (export "tick") (param i32) (local $i i32)
+             (loop $l
+               (local.set $i (i32.add (local.get $i) (i32.const 1)))
+               (br_if $l (i32.lt_u (local.get $i) (i32.const 1000)))))"#
+    );
+    let mut p = loaded(&body);
+    let after_init = p.fuel_stats();
+    assert_eq!(after_init.calls, 1, "init is counted");
+    assert!(after_init.total > 0 && after_init.total < 1_000);
+    assert_eq!(after_init.max_call, after_init.total);
+
+    assert_eq!(p.tick(10), Ok(Ticked::Ran));
+    let one = p.fuel_stats();
+    let tick_fuel = one.total - after_init.total;
+    assert!(tick_fuel >= 1_000, "{tick_fuel}");
+    assert_eq!(one.max_call, tick_fuel);
+
+    assert_eq!(p.tick(20), Ok(Ticked::Ran));
+    let two = p.fuel_stats();
+    // The interpreter may charge a first call more (lazy compilation), so
+    // compare against what each call actually added.
+    let second = two.total - one.total;
+    assert!(second >= 1_000, "{second}");
+    assert_eq!(two.calls, 3);
+    assert_eq!(two.max_call, tick_fuel.max(second));
+    assert_eq!(two.total, after_init.total + tick_fuel + second);
+    // Not-due ticks make no call.
+    assert_eq!(p.tick(21), Ok(Ticked::NotDue));
+    assert_eq!(p.fuel_stats(), two);
+}
+
+#[test]
+fn w4_fuel_stats_count_a_dry_call_as_its_whole_budget() {
+    let body = format!(
+        r#"{MEM}
+           (func (export "init") (drop (call $set_tick (i32.const 10))))
+           (func (export "tick") (param i32) (loop $forever (br $forever)))"#
+    );
+    let limits = Limits::default().with_fuel(5_000);
+    let mut p = Payload::load(&module(&body), Fake::default(), limits).unwrap();
+    let before = p.fuel_stats();
+    assert_eq!(p.tick(10), Err(Trap::OutOfFuel));
+    let after = p.fuel_stats();
+    assert_eq!(after.calls, 2);
+    assert_eq!(after.max_call, 5_000);
+    assert_eq!(after.total, before.total + 5_000);
+}
+
+#[test]
 fn w4_other_traps_are_reported() {
     let err = load(&format!(r#"{MEM} (func (export "init") unreachable)"#)).err();
     assert!(matches!(

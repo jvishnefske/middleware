@@ -264,6 +264,46 @@ fn cam_view_fits_the_badge() {
 }
 
 #[test]
+fn rust_cam_jpeg_stream_example() {
+    let r = validate(&release("cam_jpeg_stream"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(&r.imports, &["route_source", "set_tick", "publish"]));
+}
+
+#[test]
+fn rust_cam_jpeg_view_example() {
+    // Decodes in WASM and draws with its own transfers: no sink route.
+    let r = validate(&release("cam_jpeg_view"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(
+        &r.imports,
+        &[
+            "subscribe",
+            "spi_open",
+            "spi_transfer",
+            "gpio_output",
+            "gpio_write",
+            "timer_start",
+            "publish",
+        ]
+    ));
+    assert!(
+        !r.imports.iter().any(|i| i == "route_sink"),
+        "{:?}",
+        r.imports
+    );
+}
+
+#[test]
+fn cam_jpeg_view_fits_one_standard_page() {
+    // esp-base on the badge: one 64 KiB page, 16 KiB of it stack, frame
+    // slots, strip and decoder in .bss (see the crate docs' memory table).
+    let r = validate(&release("cam_jpeg_view"));
+    assert_eq!(r.memory_pages, Some((1, Some(1))));
+    assert_eq!(r.initial_memory_bytes(), Some(65_536));
+}
+
+#[test]
 fn abi3_examples_import_no_abi4_functions() {
     // ABI 3 payloads keep loading on ABI 3 firmware.
     for name in [
@@ -324,6 +364,8 @@ const RUST_EXAMPLES: &[&str] = &[
     "dimmer",
     "cam_stream",
     "cam_view",
+    "cam_jpeg_stream",
+    "cam_jpeg_view",
 ];
 
 #[test]

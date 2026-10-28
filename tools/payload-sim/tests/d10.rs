@@ -12,8 +12,27 @@ fn write_wasm(name: &str, wat_src: &str) -> PathBuf {
     path
 }
 
+/// Parses the run's closing `fuel calls C max M total T` line into
+/// `(C, M, T)`, checking the counters are consistent.
+fn fuel_line(line: &str) -> (u64, u64, u64) {
+    let rest = line
+        .split_once("] fuel calls ")
+        .unwrap_or_else(|| panic!("not a fuel line: {line:?}"))
+        .1;
+    let n: Vec<u64> = rest
+        .split(' ')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 0)
+        .map(|(_, v)| v.parse().expect("number"))
+        .collect();
+    let (calls, max, total) = (n[0], n[1], n[2]);
+    assert!(calls > 0 && max <= total && total <= calls * max, "{line}");
+    (calls, max, total)
+}
+
 /// Runs the simulator in virtual time and returns stdout lines after the
-/// `loaded ...` banner, asserting a clean exit.
+/// `loaded ...` banner, asserting a clean exit. The closing fuel line is
+/// checked with [`fuel_line`] and left out.
 fn sim_virtual(wasm: &PathBuf, extra: &[&str], stdin: &str) -> Vec<String> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_payload-sim"))
         .arg(wasm)
@@ -37,12 +56,31 @@ fn sim_virtual(wasm: &PathBuf, extra: &[&str], stdin: &str) -> Vec<String> {
         "{stdout}\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    stdout
+    let mut lines: Vec<String> = stdout
         .lines()
         .skip_while(|l| !l.starts_with("loaded "))
         .skip(1)
         .map(str::to_string)
-        .collect()
+        .collect();
+    let last = lines.pop().expect("a fuel line");
+    fuel_line(&last);
+    lines
+}
+
+#[test]
+fn d10_run_ends_with_the_payload_fuel_use() {
+    // The timer payload makes init plus five on_irq calls.
+    let wasm = write_wasm("d10_timer_fuel.wasm", TIMER_COUNT);
+    let out = Command::new(env!("CARGO_BIN_EXE_payload-sim"))
+        .arg(&wasm)
+        .arg("--virtual")
+        .stdin(Stdio::null())
+        .output()
+        .expect("payload-sim runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let last = stdout.lines().last().expect("output");
+    assert!(last.starts_with("[     5 ms] fuel calls 6 max "), "{last}");
+    assert_eq!(fuel_line(last).0, 6);
 }
 
 /// Starts periodic timer 0 at 1 ms; `on_irq` publishes the running count on

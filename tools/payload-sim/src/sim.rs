@@ -24,7 +24,11 @@
 //! line per frame), and a sink route consumes the messages on its key,
 //! steps a [`middleware::stream::Sink`], and sends the preamble and the
 //! forwarded chunk data to a virtual GC9A01-like [`panel::Panel`] on its
-//! SPI bus. Route progress raises `RouteFrames` / `RouteDropped` events
+//! SPI bus. With [`SimDevice::with_panel_dc`] (`--panel-dc`) the panel
+//! also sits on the payload's own bus 0: every accepted `spi_transfer` on
+//! bus 0 feeds the panel the clocked bytes, with the D/C level read from
+//! that pin (see [`SimDevice::spi_transfer`](Device::spi_transfer)).
+//! Route progress raises `RouteFrames` / `RouteDropped` events
 //! through the same queue as the other peripherals. Every publication, the
 //! payload's own and a source route's chunks, is also queued in an outbox
 //! ([`SimDevice::take_outbox`]) that the shell hands to a `--peer` payload
@@ -74,12 +78,16 @@ pub struct Options {
     /// Where to write the panel framebuffer as a PPM image at the end
     /// (`--dump-panel`).
     pub dump_panel: Option<String>,
+    /// GPIO pin whose output level is the panel's D/C line for the
+    /// payload's own SPI transfers on bus 0 (`--panel-dc`); `None` keeps
+    /// the panel fed by sink routes only.
+    pub panel_dc: Option<u8>,
 }
 
 /// Usage text printed on argument errors.
 pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
                          [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE]\n\
-                         [--seed S] [--dump-panel <file.ppm>]\n\
+                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input";
@@ -98,6 +106,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         loss: 0,
         seed: 1,
         dump_panel: None,
+        panel_dc: None,
     };
     let mut it = args.iter().map(AsRef::as_ref);
     while let Some(arg) = it.next() {
@@ -122,6 +131,13 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
             }
             "--seed" => opts.seed = number(value("--seed")?)?,
             "--dump-panel" => opts.dump_panel = Some(value("--dump-panel")?.to_string()),
+            "--panel-dc" => {
+                let pin: u8 = number(value("--panel-dc")?)?;
+                if usize::from(pin) >= PINS {
+                    return Err(format!("--panel-dc pin must be below {PINS}"));
+                }
+                opts.panel_dc = Some(pin);
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path if file.is_none() => file = Some(path.to_string()),
             extra => return Err(format!("unexpected argument {extra}")),
@@ -228,6 +244,30 @@ pub fn parse_line(line: &str) -> Result<Option<(Key<'_>, &[u8])>, String> {
     Ok(Some((key, text.as_bytes())))
 }
 
+/// Longest SPI transmit buffer [`render_spi`] prints in full.
+pub const SPI_RENDER_MAX: usize = 32;
+
+/// Leading bytes [`render_spi`] prints of a longer buffer.
+pub const SPI_RENDER_HEAD: usize = 16;
+
+/// Renders an SPI transmit buffer: up to [`SPI_RENDER_MAX`] bytes like
+/// [`render`]; a longer one as its first [`SPI_RENDER_HEAD`] bytes in hex
+/// followed by `…` (e.g. `0x2c00…`), so streaming large transfers keeps
+/// the event lines short.
+pub fn render_spi(tx: &[u8]) -> String {
+    match tx.get(..SPI_RENDER_HEAD) {
+        Some(head) if tx.len() > SPI_RENDER_MAX => {
+            let mut out = head.iter().fold(String::from("0x"), |mut out, b| {
+                let _ = write!(out, "{b:02x}");
+                out
+            });
+            out.push('…');
+            out
+        }
+        _ => render(tx),
+    }
+}
+
 /// Renders message bytes: as text when printable UTF-8, otherwise hex.
 pub fn render(data: &[u8]) -> String {
     match std::str::from_utf8(data) {
@@ -266,6 +306,8 @@ pub struct SimDevice {
     outbox: Vec<(String, Vec<u8>)>,
     routes: Routes,
     panel: Panel,
+    /// D/C pin for payload SPI transfers on bus 0 to reach the panel.
+    panel_dc: Option<u8>,
     now_us: u64,
     pins: [Mode; PINS],
     /// Level driven from outside (`!gpio`); overrides the pull when set.
@@ -296,6 +338,7 @@ impl SimDevice {
             outbox: Vec::new(),
             routes: Routes::default(),
             panel: Panel::new(),
+            panel_dc: None,
             now_us: 0,
             pins: [Mode::Unused; PINS],
             external: [None; PINS],
@@ -315,6 +358,26 @@ impl SimDevice {
         SimDevice {
             label: Some(label.to_string()),
             ..self
+        }
+    }
+
+    /// The same board with the panel also on the payload's SPI bus 0,
+    /// `pin` being its D/C line (`--panel-dc`); see
+    /// [`SimDevice::spi_transfer`](Device::spi_transfer).
+    pub fn with_panel_dc(self, pin: u8) -> Self {
+        SimDevice {
+            panel_dc: Some(pin),
+            ..self
+        }
+    }
+
+    /// The D/C level for a payload transfer on `bus`: `Some` only for bus
+    /// 0 on a board with a panel D/C pin that is configured as an output.
+    fn panel_level(&self, bus: u8) -> Option<bool> {
+        let pin = self.panel_dc.filter(|_| bus == 0)?;
+        match self.pins.get(usize::from(pin))? {
+            Mode::Output(level) => Some(*level),
+            _ => None,
         }
     }
 
@@ -645,13 +708,31 @@ impl Device for SimDevice {
         Ok(())
     }
 
-    /// `Busy` while a sink route owns the bus.
+    /// `Busy` while a sink route owns the bus. Prints
+    /// `spi<bus> tx <bytes> (<len> bytes)`, the bytes shortened by
+    /// [`render_spi`] past [`SPI_RENDER_MAX`].
+    ///
+    /// With a panel D/C pin ([`SimDevice::with_panel_dc`]), an accepted
+    /// transfer on bus 0 also goes to the panel: the `len` clocked bytes
+    /// (`tx` padded with `0x00`, as the bus sends them) at the pin's
+    /// current output level (low = command, high = data). If the pin is
+    /// not configured as a GPIO output, the panel is not fed, since its
+    /// D/C line would be undriven.
     fn spi_transfer(&mut self, bus: u8, tx: &[u8], len: usize) -> Result<(), AbiError> {
         if self.routes.owns_bus(bus) {
             return Err(AbiError::Busy);
         }
         self.spi.transfer(bus, tx, len)?;
-        self.event(format!("spi{bus} tx {} ({len} bytes)", render(tx)));
+        if let Some(level) = self.panel_level(bus) {
+            let clocked: Vec<u8> = tx
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(0))
+                .take(len)
+                .collect();
+            self.panel.write(level, &clocked);
+        }
+        self.event(format!("spi{bus} tx {} ({len} bytes)", render_spi(tx)));
         Ok(())
     }
 
@@ -851,6 +932,13 @@ mod tests {
         assert_eq!(o.dump_panel.as_deref(), Some("p.ppm"));
         assert!(parse_args(&["a", "--loss", "1001"]).is_err());
         assert!(parse_args(&["a", "--peer"]).is_err());
+        assert_eq!(o.panel_dc, None);
+        let o = parse_args(&["a", "--panel-dc", "13"]).unwrap();
+        assert_eq!(o.panel_dc, Some(13));
+        assert!(parse_args(&["a", "--panel-dc"]).is_err());
+        assert!(parse_args(&["a", "--panel-dc", "x"]).is_err());
+        assert!(parse_args(&["a", "--panel-dc", "144"]).is_err());
+        assert!(parse_args(&["a", "--panel-dc", "300"]).is_err());
     }
 
     #[test]
@@ -974,6 +1062,106 @@ mod tests {
     fn renders_text_or_hex() {
         assert_eq!(render(b"hi"), "hi");
         assert_eq!(render(&[0, 255]), "0x00ff");
+    }
+
+    #[test]
+    fn long_spi_transfers_render_their_head_only() {
+        assert_eq!(render_spi(b"hi"), "hi");
+        let short = [0xAB; SPI_RENDER_MAX];
+        assert_eq!(render_spi(&short), render(&short));
+        let long: Vec<u8> = (0..=255).cycle().take(3840).collect();
+        assert_eq!(render_spi(&long), "0x000102030405060708090a0b0c0d0e0f…");
+        let mut d = SimDevice::default();
+        d.spi_open(spi_cfg()).unwrap();
+        d.spi_transfer(0, &long, long.len()).unwrap();
+        assert!(
+            d.events
+                .last()
+                .unwrap()
+                .ends_with("spi0 tx 0x000102030405060708090a0b0c0d0e0f… (3840 bytes)")
+        );
+    }
+
+    fn spi_cfg() -> SpiConfig {
+        SpiConfig {
+            bus: 0,
+            sck: 12,
+            mosi: Some(11),
+            miso: None,
+            cs: Some(10),
+            freq_khz: 40_000,
+            mode: 0,
+        }
+    }
+
+    const DC: u8 = 13;
+
+    /// Sends one payload transfer with D/C at `level` and completes it.
+    fn send(d: &mut SimDevice, level: bool, tx: &[u8], len: usize) {
+        d.gpio_write(DC, level).unwrap();
+        d.spi_transfer(0, tx, len).unwrap();
+        d.complete_dma();
+        while d.pop_event().is_some() {}
+    }
+
+    /// A 2×1 window at (3, 4) and RAMWR, as payload SPI transfers.
+    fn window_and_ramwr(d: &mut SimDevice) {
+        d.spi_open(spi_cfg()).unwrap();
+        d.gpio_output(DC).unwrap();
+        send(d, false, &[panel::CASET], 1);
+        send(d, true, &[0, 3, 0, 4], 4);
+        send(d, false, &[panel::RASET], 1);
+        send(d, true, &[0, 4, 0, 4], 4);
+        send(d, false, &[panel::RAMWR], 1);
+    }
+
+    #[test]
+    fn panel_dc_payload_spi_draws_on_the_panel() {
+        let mut d = SimDevice::default().with_panel_dc(DC);
+        window_and_ramwr(&mut d);
+        send(&mut d, true, &[0xF8, 0x00, 0x07, 0xE0], 4);
+        assert_eq!(d.panel().pixel(3, 4), Some(0xF800));
+        assert_eq!(d.panel().pixel(4, 4), Some(0x07E0));
+        assert_eq!(d.panel().pixel_writes(), 2);
+        assert!(!d.panel().written(5, 4));
+    }
+
+    #[test]
+    fn panel_dc_padding_bytes_are_pixel_data() {
+        let mut d = SimDevice::default().with_panel_dc(DC);
+        window_and_ramwr(&mut d);
+        // One byte sent, four clocked: 0xFF00 then 0x0000.
+        send(&mut d, true, &[0xFF], 4);
+        assert_eq!(d.panel().pixel(3, 4), Some(0xFF00));
+        assert_eq!(d.panel().pixel(4, 4), Some(0x0000));
+        assert_eq!(d.panel().pixel_writes(), 2);
+    }
+
+    #[test]
+    fn panel_dc_pin_not_an_output_does_not_feed_the_panel() {
+        let mut d = SimDevice::default().with_panel_dc(DC);
+        d.spi_open(spi_cfg()).unwrap();
+        for (tx, len) in [
+            (&[panel::RAMWR][..], 1),
+            (&[0xF8, 0x00][..], 2),
+            (&[][..], 4),
+        ] {
+            d.spi_transfer(0, tx, len).unwrap();
+            d.complete_dma();
+        }
+        d.gpio_input(DC, Pull::Up).unwrap();
+        d.spi_transfer(0, &[0xF8, 0x00], 2).unwrap();
+        assert_eq!(d.panel().pixel_writes(), 0);
+        assert!(!d.panel().written(0, 0));
+    }
+
+    #[test]
+    fn without_panel_dc_payload_spi_leaves_the_panel_alone() {
+        let mut d = SimDevice::default();
+        window_and_ramwr(&mut d);
+        send(&mut d, true, &[0xF8, 0x00, 0x07, 0xE0], 4);
+        assert_eq!(d.panel().pixel_writes(), 0);
+        assert!(!d.panel().written(3, 4));
     }
 
     #[test]
