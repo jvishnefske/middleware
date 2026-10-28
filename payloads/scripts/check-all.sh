@@ -7,22 +7,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST=x86_64-unknown-linux-gnu
 
-EXAMPLES=(blink echo button spi_loopback uart_echo dimmer)
+EXAMPLES=(blink echo button spi_loopback uart_echo dimmer cam_stream cam_view)
 TEMPLATES=(blink echo button timer)   # .wat
 AS_TEMPLATES=(blink echo button spi)  # .ts
 
 cargo build --release
-# blink and echo again with 1-byte pages (16 KiB fixed memory), for hosts
-# that cap linear memory below one 64 KiB page. check-reproducible.sh runs
+# blink, echo and cam_view (the conagotchi badge's camera viewer) again
+# with 1-byte pages (16 KiB fixed memory), for hosts that cap linear memory
+# below one 64 KiB page. check-reproducible.sh runs
 # build-byte-pages.sh here and in a copy at another path, and fails unless
 # both builds are byte-identical.
-BYTE_PAGE_EXAMPLES=(blink echo)
+BYTE_PAGE_EXAMPLES=(blink echo cam_view)
 scripts/check-reproducible.sh "${BYTE_PAGE_EXAMPLES[@]}"
-cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer --target "$HOST"
+cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings
 # The examples are no_std cdylibs: on the host only their tests build.
-cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer --target "$HOST" --tests -- -D warnings
+cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view --target "$HOST" --tests -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps --document-private-items --target "$HOST"
 

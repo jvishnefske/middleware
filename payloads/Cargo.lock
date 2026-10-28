@@ -38,6 +38,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cam_stream"
+version = "0.1.0"
+dependencies = [
+ "mw-payload",
+]
+
+[[package]]
+name = "cam_view"
+version = "0.1.0"
+dependencies = [
+ "mw-payload",
+]
+
+[[package]]
 name = "dimmer"
 version = "0.1.0"
 dependencies = [
