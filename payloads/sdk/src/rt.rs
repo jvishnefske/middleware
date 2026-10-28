@@ -243,7 +243,7 @@ mod tests {
     fn on_irq_ignores_unknown_kinds_without_panicking() {
         let state: State<Rec> = GuestCell::new(None);
         init(&state);
-        for kind in [0, 5, -1, i32::MIN, i32::MAX] {
+        for kind in [0, 8, -1, i32::MIN, i32::MAX] {
             on_irq(&state, kind, 0, 1, 0);
         }
         on_irq(&state, 2, 0, 0, 0); // timer with 0 periods: malformed

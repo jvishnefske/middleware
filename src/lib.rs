@@ -18,6 +18,9 @@
 //!   payloads on a device over any transport; [`loader::trust`] holds the
 //!   signed-payload wire types and rules (its crypto needs `trust`).
 //! * [`wasm_abi`] — the import/export contract between payloads and firmware.
+//! * [`stream`] — chunked frame streams over keys (always built, pure): the
+//!   chunk wire format, the source chunker, the sink state machine and a
+//!   test pattern, behind the ABI 4 DMA routes.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * Backends, each behind a cargo feature:
 //!
@@ -47,6 +50,7 @@ pub mod crc;
 pub mod key;
 pub mod loader;
 pub mod serial;
+pub mod stream;
 pub mod transport;
 pub mod typed;
 pub mod wasm_abi;

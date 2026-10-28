@@ -8,10 +8,12 @@
 //! The queue is a fixed ring of `N` entries. Pushing never blocks and never
 //! allocates:
 //!
-//! * [`EventKind::Timer`] and [`EventKind::UartRx`] coalesce with a pending
-//!   event from the same source. A timer increments the pending event's
-//!   `value` (missed periods); UART RX replaces `value` with the latest
-//!   byte count. A fast periodic source therefore occupies one slot.
+//! * [`EventKind::Timer`], [`EventKind::UartRx`] and (ABI 4)
+//!   [`EventKind::RouteFrames`] and [`EventKind::RouteDropped`] coalesce
+//!   with a pending event from the same source. Timer and route events add
+//!   their `value` to the pending event's (missed periods, frames); UART RX
+//!   replaces `value` with the latest byte count. A fast periodic source
+//!   therefore occupies one slot.
 //! * Other kinds take a new slot; when the ring is full the event is dropped
 //!   and [`EventQueue::overflow`] counts it.
 //!
@@ -37,6 +39,20 @@ pub enum EventKind {
     /// Bytes received on a secondary UART: `source` = port, `value` = bytes
     /// now buffered (read them with `uart_read`).
     UartRx = 4,
+    /// Frames a DMA route completed (ABI 4): `source` = route handle,
+    /// `value` = frames since the payload last saw this event (≥ 1). A sink
+    /// route counts frames fully sent to its bus, a source route frames fully
+    /// published.
+    RouteFrames = 5,
+    /// Frames a DMA route lost (ABI 4): `source` = route handle, `value` =
+    /// frames since the payload last saw this event (≥ 1). A sink route
+    /// counts frames abandoned after a missing chunk, a source route frames
+    /// skipped (capture overrun, failed publish).
+    RouteDropped = 6,
+    /// A DMA route stopped by itself (ABI 4): `source` = route handle,
+    /// `value` = the negative [`AbiError`](super::AbiError) code of the
+    /// fault. The handle is free afterwards. `route_stop` raises no event.
+    RouteStopped = 7,
 }
 
 impl EventKind {
@@ -47,14 +63,36 @@ impl EventKind {
             2 => Some(EventKind::Timer),
             3 => Some(EventKind::DmaDone),
             4 => Some(EventKind::UartRx),
+            5 => Some(EventKind::RouteFrames),
+            6 => Some(EventKind::RouteDropped),
+            7 => Some(EventKind::RouteStopped),
             _ => None,
         }
     }
 
     const fn coalesces(self) -> bool {
-        matches!(self, EventKind::Timer | EventKind::UartRx)
+        matches!(
+            self,
+            EventKind::Timer | EventKind::UartRx | EventKind::RouteFrames | EventKind::RouteDropped
+        )
+    }
+
+    /// Whether coalescing adds `value`s (counts) rather than replacing them.
+    const fn sums(self) -> bool {
+        matches!(
+            self,
+            EventKind::Timer | EventKind::RouteFrames | EventKind::RouteDropped
+        )
     }
 }
+
+/// The event kinds a DMA route raises (ABI 4), for purging all of one
+/// route's pending events when it stops.
+pub const ROUTE_EVENTS: [EventKind; 3] = [
+    EventKind::RouteFrames,
+    EventKind::RouteDropped,
+    EventKind::RouteStopped,
+];
 
 /// DMA channels a payload can use, as the `source` of a
 /// [`EventKind::DmaDone`] event and the `channel` argument of `dma_read`.
@@ -83,7 +121,7 @@ impl DmaChannel {
 pub struct Event {
     /// Event kind.
     pub kind: EventKind,
-    /// Pin, timer id, DMA channel or UART port.
+    /// Pin, timer id, DMA channel, UART port or route handle.
     pub source: i32,
     /// Kind-specific value (see [`EventKind`]).
     pub value: i32,
@@ -182,9 +220,10 @@ impl<const N: usize> EventQueue<N> {
                 if let Some(Some(pending)) = self.slots.get_mut(i)
                     && pending.same_source(&event)
                 {
-                    pending.value = match event.kind {
-                        EventKind::Timer => pending.value.saturating_add(event.value.max(1)),
-                        _ => event.value,
+                    pending.value = if event.kind.sums() {
+                        pending.value.saturating_add(event.value.max(1))
+                    } else {
+                        event.value
                     };
                     pending.time_us = event.time_us;
                     return Pushed::Coalesced;
@@ -323,6 +362,34 @@ mod tests {
         assert_eq!(q.len(), 2);
         assert_eq!(q.pop().map(|e| e.source), Some(0));
         assert_eq!(q.pop().map(|e| e.source), Some(1));
+    }
+
+    #[test]
+    fn route_events_coalesce_per_handle_and_stops_do_not() {
+        let mut q: EventQueue<8> = EventQueue::new();
+        q.push(ev(EventKind::RouteFrames, 0, 1, 10));
+        assert_eq!(
+            q.push(ev(EventKind::RouteFrames, 0, 2, 20)),
+            Pushed::Coalesced
+        );
+        assert_eq!(q.push(ev(EventKind::RouteFrames, 1, 1, 21)), Pushed::Queued);
+        q.push(ev(EventKind::RouteDropped, 0, 1, 30));
+        assert_eq!(
+            q.push(ev(EventKind::RouteDropped, 0, 1, 40)),
+            Pushed::Coalesced
+        );
+        let stop = ev(EventKind::RouteStopped, 0, -5, 50);
+        assert_eq!(q.push(stop), Pushed::Queued);
+        assert_eq!(q.push(stop), Pushed::Queued);
+        assert_eq!(q.pop(), Some(ev(EventKind::RouteFrames, 0, 3, 20)));
+        assert_eq!(q.pop().map(|e| e.source), Some(1));
+        assert_eq!(q.pop(), Some(ev(EventKind::RouteDropped, 0, 2, 40)));
+        q.purge(EventKind::RouteStopped, 0);
+        assert!(q.is_empty());
+        for k in 5..=7 {
+            assert_eq!(EventKind::from_i32(k).map(|e| e as i32), Some(k));
+        }
+        assert_eq!(EventKind::from_i32(8), None);
     }
 
     #[test]
