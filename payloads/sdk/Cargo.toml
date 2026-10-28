@@ -1,9 +1,12 @@
 [package]
 name = "mw-payload"
 description = "Safe no_std SDK for middleware WASM payloads"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Spelled out instead of inherited from the payload workspace: cargo loads
+# this manifest from the parent workspace too (as mw-jpeg's dev-dependency,
+# which payload-sim's R14 test uses), where it cannot inherit.
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [features]
 default = ["panic-handler"]

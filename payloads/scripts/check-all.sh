@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST=x86_64-unknown-linux-gnu
 
-EXAMPLES=(blink echo button spi_loopback uart_echo dimmer cam_stream cam_view)
+EXAMPLES=(blink echo button spi_loopback uart_echo dimmer cam_stream cam_view cam_jpeg_stream cam_jpeg_view)
 TEMPLATES=(blink echo button timer)   # .wat
 AS_TEMPLATES=(blink echo button spi)  # .ts
 
@@ -22,14 +22,16 @@ cargo build --release --example fuel_probe -p mw-jpeg
 # both builds are byte-identical.
 BYTE_PAGE_EXAMPLES=(blink echo cam_view)
 scripts/check-reproducible.sh "${BYTE_PAGE_EXAMPLES[@]}"
-cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view --target "$HOST"
+cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view -p gc9a01 --target "$HOST"
 cargo test -p mw-jpeg --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings
 cargo clippy -p mw-jpeg --release --examples -- -D warnings
 cargo clippy -p mw-jpeg --target "$HOST" --all-targets -- -D warnings
 # The examples are no_std cdylibs: on the host only their tests build.
-cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view --target "$HOST" --tests -- -D warnings
+cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view --target "$HOST" --tests -- -D warnings
+cargo clippy -p gc9a01 --target "$HOST" --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc -p gc9a01 -p cam_jpeg_view --no-deps --document-private-items --target "$HOST"
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps --document-private-items --target "$HOST"
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-jpeg --no-deps
