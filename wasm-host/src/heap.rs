@@ -9,7 +9,9 @@
 //!    bytecode of every function, translated eagerly) and the translator's
 //!    working buffers ([`compile_bytes`]).
 //! 2. **Run** ([`Payload::instantiate`](crate::Payload::instantiate) and every
-//!    later call): the module, linear memory up to the cap, the value
+//!    later call): the module, linear memory up to what the module can
+//!    reach (the cap, or its declared maximum when smaller:
+//!    [`abi::memory_reach`](crate::abi::memory_reach)), the value
 //!    stack (allocated once, in full), the call frame list up to the depth
 //!    cap, and the fixed host state: linker, store, instance, the DMA copy
 //!    buffer, the subscription list and `init`'s bounded log
@@ -25,8 +27,12 @@
 //! closest runnable stand-in for the 32-bit Xtensa chips), with margin.
 //! With the fixed part set to 16 KiB (32 bits) and 20 KiB (64 bits), the
 //! measured modules needed at most 2.64 and 3.84 bytes per image byte
-//! (`cam_view`); `cam_jpeg_view` (30.9 KB image, 27.4 KB of code)
-//! measured a 94 KB module on 32 bits and 145 KB on 64 bits.
+//! (`cam_view`, before the SDK dropped its panic paths; 2.58 and 3.77
+//! since); `cam_jpeg_view` (25.7 KB image, 23.3 KB of code) measures an
+//! 82 KB module on 32 bits and 127 KB on 64 bits (94 and 145 KB at 30.9
+//! KB). The 32-bit run is `cargo test -p payload-sim --release --test heap
+//! --target i686-unknown-linux-gnu`; its smallest margin (bound minus
+//! peak) is `cam_view`'s, 1.9 KB.
 //!
 //! The figures are payload bytes as the allocator's callers request them;
 //! a firmware allocator adds its own per-block overhead and fragmentation,
@@ -67,8 +73,9 @@ pub const PER_CALL_DEPTH: u32 = 3 * FRAME_BYTES;
 /// ([`MAX_DMA`] bytes), the subscription list with its keys, `init`'s
 /// bounded log, and a trap message: 19.7 KB on 32-bit targets, 32.2 KB
 /// on 64-bit ones. Measured (instantiation or run peak minus module,
-/// memory and value stack) at most 19.6 KB and 26.8 KB, both for
-/// `cam_jpeg_view`, simulator allocations inside its calls included.
+/// memory and value stack, call frames included) at most 19.7 KB and
+/// 23.3 KB, both for `cam_jpeg_view` (26.8 KB on 64 bits for its 30.9 KB
+/// build), simulator allocations inside its calls included.
 pub const RUNTIME_FIXED: u32 = MAX_DMA as u32
     + (MAX_SUBSCRIPTIONS as u32) * (middleware::key::MAX_KEY_LEN as u32 + 4 * PTR)
     + (INIT_LOG_LINES as u32) * (MAX_LOG as u32 + 4 * PTR)

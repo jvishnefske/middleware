@@ -73,8 +73,13 @@ default target in `.cargo/config.toml`). It contains:
   `CASET`/`RASET`/`RAMWR` and the RGB565 pixels in at most 3 840-byte
   transfers, one in flight at a time. Stats (received, decoded, dropped,
   failed, decode ms) are logged and published on `app/cam/view_stats`
-  every 2 s. Standard build: one 64 KiB page, 16 KiB stack, 36 KiB of
-  buffers in `.bss`.
+  every 2 s. Deploy the byte-page build on the badge:
+  `scripts/build-byte-pages.sh -p cam_jpeg_view` (memory fixed at 48 128
+  bytes with an 8 KiB stack, from the crate's
+  `[package.metadata.byte-pages]`; 25.7 KB image), which the firmware's
+  heap check charges 16 KiB less than the standard build (one 64 KiB
+  page, 16 KiB stack, 36 KiB of buffers in `.bss`). Its mw-jpeg is built
+  without `Scale::Half` (`default-features = false`).
 - `gc9a01/` — the badge panel's wiring, `mipidsi`-derived init sequence,
   its pure `Sequencer` and the bring-up `Controller` with retry and
   give-up, shared by `cam_view` and `cam_jpeg_view`.
@@ -106,18 +111,30 @@ proposal, where a page is one byte and memory is sized to the byte.
 `scripts/build-byte-pages.sh` builds with `-C link-arg=--page-size=1` and a
 fixed linear memory of `MEMORY_BYTES` (default 16384) with a `STACK_BYTES`
 (default 4096) stack, for example `scripts/build-byte-pages.sh -p blink -p
-echo`. The output lands in `target/byte-pages/wasm32-unknown-unknown/release/`
-so it never overwrites the 64 KiB-page build. Pointers and the ABI are the
-same either way; only the host's byte cap (`wasm_host::Limits::bytes`) has
-to be at least `MEMORY_BYTES`. `scripts/check-all.sh` builds and validates
-blink, echo and cam_view both ways.
+echo`. Built alone, a package can set its own sizes in its manifest:
+
+```toml
+[package.metadata.byte-pages]
+memory = 48128   # data + .bss + stack, rounded up to 1 KiB
+stack = 8192
+```
+
+(`cam_jpeg_view` does; the environment still wins.) The output lands in
+`target/byte-pages/wasm32-unknown-unknown/release/` so it never overwrites
+the 64 KiB-page build. Pointers and the ABI are the same either way; only
+the host's byte cap (`wasm_host::Limits::bytes`) has to be at least
+`MEMORY_BYTES`. The module declares that memory as its maximum, and the
+host's heap bound (`Limits::heap_needed`) charges exactly it instead of
+the whole cap, so a payload sized to its real need starts with less free
+heap. `scripts/check-all.sh` builds and validates blink, echo, cam_view
+and cam_jpeg_view both ways.
 
 The byte-page build is reproducible: it passes `--remap-path-prefix` for
 the home directory, the cargo registry and the repository, so no absolute
 build path ends up in the module. `scripts/check-reproducible.sh [package...]`
 builds here and in a copy of the sources at another path and fails unless
 the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink,
-echo and cam_view.
+echo and cam_view, and for cam_jpeg_view with its own sizes.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.

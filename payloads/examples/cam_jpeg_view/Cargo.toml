@@ -11,7 +11,19 @@ crate-type = ["cdylib"]
 
 [dependencies]
 mw-payload = { path = "../../sdk" }
-mw-jpeg = { path = "../../jpeg" }
+# Full scale only: without `half` the reduced IDCT is not compiled in.
+mw-jpeg = { path = "../../jpeg", default-features = false }
 gc9a01 = { path = "../../gc9a01" }
 # The chunk wire format (`middleware::stream::chunk`), no_std and heap-free.
 middleware = { path = "../../..", default-features = false }
+
+# The deploy build (scripts/build-byte-pages.sh -p cam_jpeg_view, run by
+# scripts/check-all.sh): 1-byte pages, linear memory fixed at exactly what
+# the payload uses, so the host's heap bound charges 48 128 bytes instead
+# of a whole 64 KiB page. memory = data + .bss (39 088 bytes as linked)
+# + stack, rounded up to 1 KiB; the stack is 8 KiB, about 2.7 times the
+# 2.8–3 KiB the fixture stream needs (it overflows with 2 816, runs with
+# 3 072 bytes). See the crate docs, "Memory".
+[package.metadata.byte-pages]
+memory = 48128
+stack = 8192

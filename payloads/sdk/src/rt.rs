@@ -102,10 +102,19 @@ pub fn deliver<P: Payload>(state: &State<P>, rx: &RxBuffer, slot: i32, len: i32)
     };
     let mut local = [0u8; MAX_MESSAGE];
     match rx.borrow_mut() {
-        Some(buf) => local[..len].copy_from_slice(&buf[..len]),
+        // A zip, not `copy_from_slice`: under `opt-level = "z"` that stays
+        // an out-of-line call whose length-mismatch panic drags core's
+        // panic formatting into every payload.
+        Some(buf) => local
+            .iter_mut()
+            .zip(buf.iter())
+            .take(len)
+            .for_each(|(d, s)| *d = *s),
         None => return,
     }
-    with_state(state, |app| app.on_message(slot, &local[..len]));
+    with_state(state, |app| {
+        app.on_message(slot, local.get(..len).unwrap_or(&[]))
+    });
 }
 
 #[cfg(test)]
