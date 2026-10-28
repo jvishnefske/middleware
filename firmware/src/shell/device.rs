@@ -25,7 +25,10 @@
 //! timers, cancels SPI DMA and UART transmit, closes both peripherals,
 //! zeroes every PWM channel, releases every pin (interrupts off, signals
 //! detached, analog pins back on the digital mux) and clears the event
-//! queue.
+//! queue. The peripherals go back to [`HW`] whatever state they were in:
+//! SPI through [`SpiBus::close`] (idle, payload transfer or sink-route
+//! write in flight; see `esp_base::periph::dma_hw`), UART, the LEDC and
+//! ADC1 by value, so the next payload can open them again.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.
