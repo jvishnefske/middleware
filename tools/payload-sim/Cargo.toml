@@ -5,7 +5,8 @@ edition = "2024"
 description = "Desktop simulator for WASM payloads"
 
 [dependencies]
-middleware = { path = "../.." }
+# `cam-fixtures`: JPEG test-pattern sources serve the baked camera frames.
+middleware = { path = "../..", features = ["cam-fixtures"] }
 wasm-host = { path = "../../wasm-host" }
 
 [dev-dependencies]

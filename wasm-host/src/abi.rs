@@ -974,8 +974,11 @@ mod tests {
             Err(AbiError::InvalidKey)
         );
         mem[..3].copy_from_slice(b"app");
-        mem[20] = 1; // pixel format
+        mem[20] = 2; // pixel format
         assert_eq!(route_source((1, 0, 7, 16, 10), &mem), bad, "cfg contents");
+        mem[20] = 1; // JPEG
+        let jpeg = route_source((0, 0, 7, 16, 10), &mem).expect("JPEG is valid");
+        assert_eq!(jpeg.cfg.format, route::PixelFormat::Jpeg);
     }
 
     #[test]

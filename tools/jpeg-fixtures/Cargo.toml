@@ -1,0 +1,11 @@
+[package]
+name = "jpeg-fixtures"
+version = "0.1.0"
+edition = "2024"
+description = "Generates the baked baseline-JPEG frames of the fake camera (fixtures/cam)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# No dependencies: the encoder is a small integer-only baseline JPEG writer,
+# so the fixtures are byte-for-byte reproducible on any host.
+[dependencies]
