@@ -63,6 +63,9 @@ pub enum Unsupported {
     Dnl,
     /// Width or height above [`MAX_DIMENSION`](crate::MAX_DIMENSION).
     TooLarge,
+    /// [`Scale::Half`](crate::Scale::Half) in a build without the `half`
+    /// feature.
+    Scale,
 }
 
 /// The way the data breaks the JPEG syntax.

@@ -59,9 +59,14 @@ impl SerialTransport {
 }
 
 impl Transport for SerialTransport {
+    /// Hands `bytes` to the kernel; each write waits at most the port's
+    /// timeout for room. No `flush`: serialport's is `tcdrain`, which
+    /// waits without a timeout until the device has taken every byte, and
+    /// a device whose serial task is not running (a USB-Serial-JTAG port
+    /// stops accepting data) then blocks mwctl indefinitely instead of
+    /// letting the request time out.
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.port.write_all(bytes)?;
-        self.port.flush()
+        self.port.write_all(bytes)
     }
 
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {

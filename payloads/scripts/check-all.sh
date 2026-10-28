@@ -17,17 +17,25 @@ cargo build --release
 cargo build --release --example fuel_probe -p mw-jpeg
 # blink, echo and cam_view (the conagotchi badge's camera viewer) again
 # with 1-byte pages (16 KiB fixed memory), for hosts that cap linear memory
-# below one 64 KiB page. check-reproducible.sh runs
+# below one 64 KiB page, and cam_jpeg_view (the badge's JPEG viewer) with
+# the memory it needs. check-reproducible.sh runs
 # build-byte-pages.sh here and in a copy at another path, and fails unless
 # both builds are byte-identical.
 BYTE_PAGE_EXAMPLES=(blink echo cam_view)
 scripts/check-reproducible.sh "${BYTE_PAGE_EXAMPLES[@]}"
+# cam_jpeg_view's deploy build (the badge): built alone so
+# build-byte-pages.sh takes memory and stack from its manifest's
+# [package.metadata.byte-pages] (memory sized to data + .bss + stack).
+scripts/check-reproducible.sh cam_jpeg_view
 cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view -p gc9a01 --target "$HOST"
 cargo test -p mw-jpeg --target "$HOST"
+# Without `half` (as cam_jpeg_view builds it): Scale::Half is refused.
+cargo test -p mw-jpeg --no-default-features --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings
 cargo clippy -p mw-jpeg --release --examples -- -D warnings
 cargo clippy -p mw-jpeg --target "$HOST" --all-targets -- -D warnings
+cargo clippy -p mw-jpeg --no-default-features --target "$HOST" --all-targets -- -D warnings
 # The examples are no_std cdylibs: on the host only their tests build.
 cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view --target "$HOST" --tests -- -D warnings
 cargo clippy -p gc9a01 --target "$HOST" --all-targets -- -D warnings
@@ -42,7 +50,7 @@ for e in "${EXAMPLES[@]}"; do
   files+=("target/wasm32-unknown-unknown/release/$e.wasm")
 done
 files+=("target/wasm32-unknown-unknown/release/examples/fuel_probe.wasm")
-for e in "${BYTE_PAGE_EXAMPLES[@]}"; do
+for e in "${BYTE_PAGE_EXAMPLES[@]}" cam_jpeg_view; do
   files+=("target/byte-pages/wasm32-unknown-unknown/release/$e.wasm")
 done
 for t in "${TEMPLATES[@]}"; do

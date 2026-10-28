@@ -20,7 +20,10 @@ members = [
     "abi-check",
 ]
 # `cargo build --release` builds only the guests; `abi-check` is a host tool
-# run with `--target x86_64-unknown-linux-gnu` (see README.md).
+# run with `--target x86_64-unknown-linux-gnu` (see README.md). `jpeg` is
+# left out: built in the same invocation, its default `half` feature would
+# be unified into `cam_jpeg_view`, which turns it off (scripts/check-all.sh
+# checks mw-jpeg on its own).
 default-members = [
     "sdk",
     "examples/blink",
@@ -34,7 +37,6 @@ default-members = [
     "examples/cam_jpeg_stream",
     "examples/cam_jpeg_view",
     "gc9a01",
-    "jpeg",
 ]
 
 [workspace.package]
@@ -58,3 +60,12 @@ codegen-units = 1
 # slightly smaller binary (measured with jpeg/examples/fuel_probe.rs).
 [profile.release.package.mw-jpeg]
 opt-level = "s"
+
+# cam_jpeg_view's own code at "s" too: measured with payload-sim on the
+# fixture stream, 12 % less fuel per frame (13.2 M against 15.1 M) and
+# 84 bytes less code than "z", which leaves `copy_from_slice` and similar
+# helpers out of line. A package override drops the profile's `strip`, so
+# it is repeated (otherwise the name section adds about 3 KB).
+[profile.release.package.cam_jpeg_view]
+opt-level = "s"
+strip = true

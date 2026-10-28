@@ -40,7 +40,9 @@
 //!   accepted.
 //! * Output as [`Rgb565Be`] (high byte first, for SPI panels) or
 //!   [`Rgb888`], at [`Scale::Full`] or [`Scale::Half`] (reduced 4×4 IDCT,
-//!   e.g. 240×240 → 120×120).
+//!   e.g. 240×240 → 120×120; cargo feature `half`, on by default: a
+//!   payload that only decodes at full scale saves about 1 KB of code
+//!   with `default-features = false`).
 //!
 //! Progressive, lossless, hierarchical and arithmetic-coded files, 12-bit
 //! samples, 16-bit quantisation tables, CMYK/four components, other

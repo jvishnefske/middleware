@@ -304,6 +304,37 @@ fn cam_jpeg_view_fits_one_standard_page() {
 }
 
 #[test]
+fn cam_jpeg_view_deploy_build_declares_exactly_its_memory() {
+    // The badge's deploy build (check-all.sh: build-byte-pages.sh -p
+    // cam_jpeg_view): 1-byte pages fixed at the crate's
+    // [package.metadata.byte-pages] memory, which the host's heap bound
+    // charges instead of the 64 KiB cap; and a smaller image than before
+    // its panic paths and Scale::Half were dropped (30 878 bytes).
+    let Some(r) = byte_pages("cam_jpeg_view") else {
+        eprintln!(
+            "cam_jpeg_view: no byte-page build; run scripts/build-byte-pages.sh -p cam_jpeg_view"
+        );
+        return;
+    };
+    assert_eq!(r.memory_page_bytes, Some(1));
+    assert_eq!(r.memory_pages, Some((48_128, Some(48_128))));
+    let path = root().join("target/byte-pages/wasm32-unknown-unknown/release/cam_jpeg_view.wasm");
+    let len = std::fs::metadata(path).expect("built").len();
+    assert!(len <= 26 * 1024, "cam_jpeg_view.wasm is {len} bytes");
+}
+
+#[test]
+fn p7_sdk_payloads_link_no_panic_formatting() {
+    // blink logs through LogLine and receives nothing: with the SDK's
+    // panic-free LogLine and delivery path it links no core::fmt panic
+    // machinery (5 467 bytes before, about 2 KB now).
+    let len = std::fs::metadata(root().join("target/wasm32-unknown-unknown/release/blink.wasm"))
+        .expect("built")
+        .len();
+    assert!(len <= 3 * 1024, "blink.wasm is {len} bytes");
+}
+
+#[test]
 fn abi3_examples_import_no_abi4_functions() {
     // ABI 3 payloads keep loading on ABI 3 firmware.
     for name in [

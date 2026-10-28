@@ -44,7 +44,9 @@ pub struct Encoded {
     pub jpeg: Vec<u8>,
     /// Full-scale reference.
     pub full: Vec<u8>,
-    /// Half-scale reference, `ceil(w/2) × ceil(h/2)`.
+    /// Half-scale reference, `ceil(w/2) × ceil(h/2)` (read only with the
+    /// `half` feature).
+    #[cfg_attr(not(feature = "half"), allow(dead_code))]
     pub half: Vec<u8>,
 }
 

@@ -184,8 +184,14 @@ fn ptr_i32(bytes: &[u8]) -> i32 {
 /// Writes one log line. Lines longer than [`MAX_LOG`] bytes are truncated by
 /// the host.
 pub fn log(line: &str) {
-    if let Ok(len) = len_i32(line.len()) {
-        sys::log(ptr_i32(line.as_bytes()), len);
+    log_utf8(line.as_bytes());
+}
+
+/// [`log`] for bytes the caller knows to be UTF-8 ([`LogLine`]'s buffer),
+/// without checking them again (the host does).
+fn log_utf8(bytes: &[u8]) {
+    if let Ok(len) = len_i32(bytes.len()) {
+        sys::log(ptr_i32(bytes), len);
     }
 }
 
