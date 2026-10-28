@@ -22,7 +22,7 @@ Feature isolation is checked by `scripts/check-features.sh`.
 
 | path                 | what                                                         |
 |----------------------|--------------------------------------------------------------|
-| `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3): `./build.sh <chip>` |
+| `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
 | `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info` |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
