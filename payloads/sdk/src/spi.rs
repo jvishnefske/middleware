@@ -194,6 +194,16 @@ impl Spi {
         })
     }
 
+    /// An open bus without calling the host, for other modules' unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(config: SpiConfig) -> Self {
+        Spi {
+            config,
+            channel: DmaChannel::Spi0,
+            state: Transfer::Idle,
+        }
+    }
+
     /// The configuration the bus was opened with.
     pub fn config(&self) -> &SpiConfig {
         &self.config

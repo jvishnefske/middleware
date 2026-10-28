@@ -898,6 +898,107 @@ first claimant pins the key — claim a device before exposing it.
   Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`); not yet run on
   a board.
 
+### DMA routes (ABI 4)
+
+Frame streams between devices without copying through guest memory. A
+payload configures a *route* and the host runs it: a **source route**
+captures frames (a camera, or the synthetic test pattern standing in for
+one) into host-owned DMA-capable buffers and publishes each frame on a key
+as chunks; a **sink route** subscribes a key and DMAs the chunks to an SPI
+bus opened with `spi_open`, sending a per-frame preamble (e.g. the
+`CASET`/`RASET`/`RAMWR` window, D/C low for command bytes and high for
+their parameters) before each frame's first chunk and the pixel data with
+D/C high. Pixels are RGB565 big-endian (display-ready), default 120×120
+(28 800 bytes). Over ESP-NOW a message carries at most 179 bytes whatever
+the key, so a chunk is a 12-byte header and up to 166 data bytes (174
+chunks per 120×120 frame). The contract is `wasm_abi::route` (imports,
+config layouts) and `stream` (chunk wire format, chunker, sink rules,
+test pattern), both pure, `no_std` and heap-free.
+
+- [x] R1 ABI 4 is a superset of ABI 3: `route_source` (5 params),
+  `route_sink` (5), `route_stop` (1) and `route_stat` (2) are appended to
+  `wasm_abi::IMPORTS`, `ABI_VERSION` is 4, and ABI 1–3 modules still load
+  because imports are checked by name and signature only —
+  `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`;
+  `wasm-host/tests/abi4.rs` `r1_every_import_links_and_older_revisions_still_load`;
+  `abi-check` `tests/payloads.rs` `abi3_examples_import_no_abi4_functions`.
+- [x] R2 The chunk wire format is a 12-byte header (version, first/last
+  flags, `u16` frame sequence, `u32` byte offset, `u32` frame length, all
+  little-endian) followed by at least one data byte lying inside the frame;
+  truncated, unknown-version, inconsistent-flag, empty and out-of-frame
+  chunks are refused; a chunk of 166 data bytes fits one ESP-NOW message —
+  `stream::chunk::tests::*` (`layout_and_round_trip`,
+  `rejects_truncated_version_and_flags`,
+  `rejects_zero_length_and_out_of_frame_data`, `write_needs_room`,
+  `seq_is_little_endian_and_full_range`); `stream::tests::espnow_budget`;
+  compile-time assertion against `espnow::MAX_PAYLOAD` with `espnow`.
+- [x] R3 The source chunker splits a frame of `1..=MAX_FRAME_BYTES` bytes
+  into chunks of `1..=MAX_CHUNK_DATA` bytes, any chunk computable directly
+  from its index, and its output round trips through a sink into the
+  original frame —
+  `stream::source::tests::*` (`splits_into_full_chunks_and_a_short_tail`,
+  `exact_multiple_and_single_chunk`, `rejects_bad_sizes`, `seq_wraps`,
+  `chunker_output_feeds_a_sink_end_to_end`).
+- [x] R4 The sink state machine (state in, `Step` out) forwards a chunk only
+  when it is a new frame's first chunk (preamble first) or the exact
+  continuation of the frame in progress, so loss, reordering, duplicates,
+  sequence wrap, wrong frame sizes, zero-length and overrunning chunks never
+  put a byte in the wrong place —
+  `stream::sink::tests::*` (`in_order_frame_completes`, `single_chunk_frames`,
+  `loss_of_a_middle_chunk_abandons_the_frame`,
+  `loss_of_the_first_chunk_skips_the_frame`,
+  `loss_of_the_last_chunk_is_abandoned_by_the_next_frame`,
+  `duplicates_are_dropped_without_disturbing_the_frame`,
+  `reordering_never_forwards_a_misplaced_chunk`,
+  `exhaustive_small_permutations_never_misplace`, `seq_wrap_is_a_new_frame`,
+  `wrong_size_frames_are_dropped`,
+  `malformed_zero_length_and_oversize_chunks_are_dropped`,
+  `receive_returns_the_data_to_send`,
+  `source_restart_with_the_same_seq_loses_one_frame`);
+  `stream::tests::stats_count_steps_and_saturate`, `source_stats`.
+- [x] R5 The fake camera is a deterministic RGB565 big-endian test pattern
+  (frame-number band, moving bar, shifting gradient) that differs every
+  frame and can be generated for any byte range, so a host fills one chunk
+  at a time without a frame buffer — `stream::pattern::tests::*`.
+- [x] R6 Route arguments are validated in one place: source kind, source
+  config (exactly 10 bytes: width and height `1..=320`, RGB565, flags 0,
+  period ≥ 10 ms, chunk size `1..=500` or 0 for 166, frame ≤ 153 600
+  bytes), sink config (D/C pin, flags 0, frame length, up to 8 preamble
+  segments of D/C level and bytes, at most 64 bytes, nothing trailing), the
+  MIPI-DCS window helper, stat selectors and handles `0..4` —
+  `wasm_abi::route::tests::*`.
+- [x] R7 Routes report through `on_irq` with `RouteFrames` (5),
+  `RouteDropped` (6) and `RouteStopped` (7) events; frame counts coalesce
+  per route so a stream occupies one queue slot —
+  `wasm_abi::events::tests::route_events_coalesce_per_handle_and_stops_do_not`.
+- [x] R8 `wasm-host` implements the route imports through `Device` methods
+  defaulting to `Unsupported`, checks source kind or bus and config length
+  before pointers, never passes bad arguments to the device, maps a device
+  handle outside `0..4` to `NoResources`, saturates counters at `i32::MAX`
+  and dispatches route events to `on_irq` —
+  `abi::tests::route_source_checks_arguments_before_pointers`,
+  `route_sink_checks_arguments_before_pointers`; `wasm-host/tests/abi4.rs`
+  (`r8_*`).
+- [x] R9 The payload SDK exposes routes safely (`route::Route::source`,
+  `Route::sink`, `stat`, `stop`, `on_event`; `irq::Event::RouteFrames`,
+  `RouteDropped`, `RouteStopped`) with no new `unsafe` (the route imports
+  only read guest memory), and `abi-check` treats `route_source` and
+  `route_sink` as event sources that require `on_irq` —
+  `mw-payload` `route::tests::*`, `irq::tests::decodes_route_events`;
+  `abi-check` `tests::route_starters_require_on_irq_and_stop_stat_do_not`.
+- [ ] R10 The desktop and browser simulators run source and sink routes
+  (test pattern source; a sink that records or renders the frames), so the
+  camera and display payloads run without hardware.
+- [ ] R11 ESP32-CAM firmware: a test-pattern source route publishes
+  120×120 frames on `app/cam/frame` over ESP-NOW from DMA-capable buffers;
+  later the OV2640 behind the same `SourceKind::Camera`.
+- [ ] R12 Conagotchi badge firmware (ESP32-S3, GC9A01 on SPI2: SCK 12,
+  MOSI 11, CS 10, DC 13, RST 14): a sink route DMAs received chunks to the
+  panel with the preamble re-sent at each frame start; the payload
+  initialises the panel over `spi_open`/`spi_transfer`/GPIO.
+- [ ] R13 Camera and display payloads (Rust SDK) and an end-to-end run
+  between the two devices.
+
 ## Known limitations (0.3)
 
 - **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.

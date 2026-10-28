@@ -14,7 +14,12 @@
 //! through [`State::scratch`], a host buffer of at most
 //! [`periph::MAX_DMA`] bytes, so the device only ever sees host-owned data.
 //!
-//! The ABI 3 imports (PWM, ADC, I2C) are registered by `link_abi3`.
+//! The ABI 3 imports (PWM, ADC, I2C) are registered by `link_abi3`, the
+//! ABI 4 route imports by `link_abi4`. Route imports pass the device a key
+//! borrowed from guest memory and a parsed config; no frame data crosses
+//! this layer.
+//!
+//! The ABI 3 imports
 //! `i2c_transfer` is synchronous and copies through two stack buffers of
 //! [`periph::MAX_I2C`] bytes: transmit bytes leave guest memory before the
 //! device runs, received bytes enter it only after the device succeeds.
@@ -25,6 +30,7 @@ use alloc::vec::Vec;
 use middleware::wasm_abi::periph::{
     self, I2cConfig, MAX_I2C, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
+use middleware::wasm_abi::route::{self, RouteStat};
 use middleware::wasm_abi::{self, AbiError, IMPORT_MODULE, MAX_MESSAGE, guest_range};
 use wasmi::{Caller, Engine, Extern, Linker, StoreLimits};
 
@@ -229,6 +235,46 @@ pub fn i2c_transfer_call<D: Device>(
     Ok(())
 }
 
+/// `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` (ABI 4):
+/// returns the route handle.
+pub fn route_source_call<D: Device>(
+    mem: &[u8],
+    st: &mut State<D>,
+    args: (i32, i32, i32, i32, i32),
+) -> Result<i32, AbiError> {
+    let plan = abi::route_source(args, mem)?;
+    let handle = st.device.route_source(plan.source, plan.key, plan.cfg)?;
+    abi::route_handle_code(handle)
+}
+
+/// `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)` (ABI 4): returns
+/// the route handle.
+pub fn route_sink_call<D: Device>(
+    mem: &[u8],
+    st: &mut State<D>,
+    args: (i32, i32, i32, i32, i32),
+) -> Result<i32, AbiError> {
+    let plan = abi::route_sink(args, mem)?;
+    let handle = st.device.route_sink(plan.key, plan.bus, &plan.cfg)?;
+    abi::route_handle_code(handle)
+}
+
+/// `route_stop(handle)` (ABI 4).
+pub fn route_stop_call<D: Device>(st: &mut State<D>, handle: i32) -> Result<(), AbiError> {
+    st.device.route_stop(route::route_handle(handle)?)
+}
+
+/// `route_stat(handle, stat)` (ABI 4): the counter, saturated to
+/// `i32::MAX`.
+pub fn route_stat_call<D: Device>(
+    st: &mut State<D>,
+    (handle, stat): (i32, i32),
+) -> Result<i32, AbiError> {
+    let handle = route::route_handle(handle)?;
+    let stat = RouteStat::from_i32(stat)?;
+    Ok(abi::count_code(st.device.route_stat(handle, stat)?))
+}
+
 /// Copies the first `reported` bytes of `buf` (clamped to its length) into
 /// guest memory at `start`; returns the count copied.
 fn copy_out(mem: &mut [u8], start: usize, buf: &[u8], reported: usize) -> Result<i32, AbiError> {
@@ -384,6 +430,7 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     })?;
     link_abi2(&mut l)?;
     link_abi3(&mut l)?;
+    link_abi4(&mut l)?;
     Ok(l)
 }
 
@@ -510,6 +557,42 @@ fn link_abi3<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
          rx_len: i32| {
             let args = (bus, addr, tx_ptr, tx_len, rx_ptr, rx_len);
             with_memory(c, |mem, st| ok0(i2c_transfer_call(mem, st, args)))
+        },
+    )?;
+    Ok(())
+}
+
+/// Registers the ABI 4 imports (DMA routes).
+fn link_abi4<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    let m = IMPORT_MODULE;
+    l.func_wrap(
+        m,
+        "route_source",
+        |c: Caller<'_, State<D>>, source: i32, kp: i32, kl: i32, cp: i32, cl: i32| {
+            with_memory(c, |mem, st| {
+                route_source_call(mem, st, (source, kp, kl, cp, cl))
+            })
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "route_sink",
+        |c: Caller<'_, State<D>>, kp: i32, kl: i32, bus: i32, cp: i32, cl: i32| {
+            with_memory(c, |mem, st| route_sink_call(mem, st, (kp, kl, bus, cp, cl)))
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "route_stop",
+        |mut c: Caller<'_, State<D>>, handle: i32| {
+            abi::result_code(ok0(route_stop_call(c.data_mut(), handle)))
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "route_stat",
+        |mut c: Caller<'_, State<D>>, handle: i32, stat: i32| {
+            abi::result_code(route_stat_call(c.data_mut(), (handle, stat)))
         },
     )?;
     Ok(())

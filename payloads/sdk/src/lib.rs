@@ -71,6 +71,16 @@
 //! * [`AbiError`] — re-exported from `middleware::wasm_abi`, so the codes are
 //!   defined exactly once.
 //!
+//! Added with ABI 4 (requires firmware implementing [`ABI_VERSION`] 4):
+//!
+//! * [`route::Route`] — DMA routes: [`route::Route::source`] publishes
+//!   frames from a host data source (a camera, or the synthetic test
+//!   pattern) on a key as chunks, [`route::Route::sink`] sends a key's
+//!   frames to an SPI display with a per-frame [`route::Preamble`]. The
+//!   frame bytes never enter guest memory. Progress arrives as
+//!   [`irq::Event::RouteFrames`], [`irq::Event::RouteDropped`] and
+//!   [`irq::Event::RouteStopped`].
+//!
 //! Received messages are copied by the host into one fixed receive buffer of
 //! [`MAX_MESSAGE`] bytes that `mw_alloc` hands out; there is no heap.
 //!
@@ -86,7 +96,9 @@
 //!    import that only *reads* guest memory is declared `safe fn`, because
 //!    the host validates every pointer/length pair against linear memory and
 //!    never writes into guest memory during those calls (`spi_transfer` and
-//!    `uart_write` copy into firmware-owned DMA buffers).
+//!    `uart_write` copy into firmware-owned DMA buffers; the ABI 4 route
+//!    imports copy the key and config out and move frames in host memory
+//!    only).
 //! 2. Three `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
 //!    `uart_read` and the ABI 3 import `i2c_transfer`, which *write* into
 //!    guest memory and are therefore declared without `safe`. Each sits in a
@@ -126,6 +138,7 @@ mod logline;
 #[cfg(all(feature = "panic-handler", target_arch = "wasm32", not(test)))]
 mod panic;
 pub mod pwm;
+pub mod route;
 pub mod rt;
 pub mod spi;
 #[allow(unsafe_code)]

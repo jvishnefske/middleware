@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Payload ABI 4: DMA routes (R1–R9)
+- `wasm_abi::ABI_VERSION` is 4. Four imports appended to `IMPORTS` (new `ABI3_IMPORTS` = 26 marks the ABI 3 prefix): `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)`, `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)`, `route_stop(handle)`, `route_stat(handle, stat)`. ABI 1–3 payloads load unchanged. (R1)
+- New `wasm_abi::route`: `SourceKind` (`TestPattern` = 0, `Camera` = 1), `PixelFormat::Rgb565Be`, `SourceConfig` (10-byte config: width, height, format, flags, period ms, chunk size), `SinkConfig` with `Preamble` (D/C pin, frame length, up to 8 segments / 64 bytes, `Preamble::mipi_window` for CASET/RASET/RAMWR), `RouteStat`, `route_handle`, `MAX_ROUTES` = 4. (R6)
+- New events `EventKind::RouteFrames` (5), `RouteDropped` (6), coalescing per route by summing, and `RouteStopped` (7); `events::ROUTE_EVENTS`. Exhaustive matches on `EventKind` need new arms. (R7)
+- New always-built, pure `stream` module: the 12-byte chunk wire format (`ChunkHeader`, `decode`), the `Chunker`, the `Sink` state machine that never forwards a misplaced chunk, `RouteStats`, and the `pattern` RGB565 test pattern (the fake camera). `ESPNOW_CHUNK_DATA` = 166 data bytes per ESP-NOW chunk. (R2–R5)
+- `wasm-host`: `Device::route_source`, `route_sink`, `route_stop`, `route_stat` (default `Unsupported`), linked as `mw` imports; re-exports `SourceConfig`, `SinkConfig`, `Preamble`, `Segment`, `SourceKind`, `RouteStat`. (R8)
+- `mw-payload`: `route::Route` (`source`, `sink`, `stat`, `stop`, `on_event`), `irq::Event::{RouteFrames, RouteDropped, RouteStopped}`; no new `unsafe`. Exhaustive matches on `irq::Event` need new arms. `abi-check` treats `route_source` and `route_sink` as event sources requiring `on_irq`. (R9)
+- Not yet implemented by any firmware or simulator: the methods default to `Unsupported` (R10–R13 in design.md).
+
 ## 0.4.0
 
 ### Signed payloads (trust, breaking)

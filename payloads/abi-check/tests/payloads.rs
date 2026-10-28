@@ -224,6 +224,27 @@ fn rust_dimmer_example() {
 }
 
 #[test]
+fn abi3_examples_import_no_abi4_functions() {
+    // ABI 3 payloads keep loading on ABI 3 firmware.
+    for name in [
+        "blink",
+        "echo",
+        "button",
+        "spi_loopback",
+        "uart_echo",
+        "dimmer",
+    ] {
+        let r = validate(&release(name));
+        let abi3 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI3_IMPORTS];
+        assert!(
+            r.imports.iter().all(|i| abi3.iter().any(|a| a.name == i)),
+            "{name}: {:?}",
+            r.imports
+        );
+    }
+}
+
+#[test]
 fn abi2_examples_import_no_abi3_functions() {
     // ABI 2 payloads keep loading on ABI 2 firmware.
     for name in ["button", "spi_loopback", "uart_echo"] {

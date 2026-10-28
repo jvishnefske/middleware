@@ -21,7 +21,7 @@ export interface AbiReport {
 }
 
 /** Imports that make the device raise `on_irq` events. */
-const EVENT_SOURCES = ["gpio_irq", "timer_start", "spi_transfer", "uart_open", "uart_write"];
+const EVENT_SOURCES = ["gpio_irq", "timer_start", "spi_transfer", "uart_open", "uart_write", "route_source", "route_sink"];
 
 export function checkAbi(wasm: Uint8Array, abi: AbiInfo): AbiReport {
   let mod: WebAssembly.Module;

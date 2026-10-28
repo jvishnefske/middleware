@@ -4,8 +4,9 @@ Application payloads are small WebAssembly modules that the base firmware
 runs in a fuel-metered sandbox. They talk to the device only through the ABI
 defined in `src/wasm_abi.rs` of the `middleware` crate: host functions
 imported from module `mw` (log, publish, subscribe, time, tick period, GPIO,
-since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA, and since
-ABI 3 PWM, ADC and I2C) and the
+since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA, since
+ABI 3 PWM, ADC and I2C, and since ABI 4 DMA routes that stream frames
+between a key and a camera or SPI display, `mw_payload::route`) and the
 exports `memory`, `init`, `tick`, `mw_alloc`, `on_message` and `on_irq`.
 
 This directory is a Cargo workspace of its own, excluded from the parent
@@ -54,7 +55,7 @@ From this directory, `cargo build --release` produces one `.wasm` file per
 example in `target/wasm32-unknown-unknown/release/`. The release profile
 optimises for size, uses link-time optimisation, aborts on panic and strips
 symbols; the examples come out at 5 to 8 KiB. An example that uses no ABI 2
-(or ABI 3) feature imports no function of that revision, so it still loads
+(or ABI 3, or ABI 4) feature imports no function of that revision, so it still loads
 on older firmware. The linker
 flags in `.cargo/config.toml` give every payload exactly one 64 KiB page of
 linear memory that cannot grow, with a 16 KiB stack, because the target

@@ -13,8 +13,10 @@
 //!   `on_irq (i32 i32 i32 i32) -> ()` have those signatures, and
 //!   `on_message` and `mw_alloc` come as a pair;
 //! * a module that imports an event source ([`EVENT_SOURCES`]: `gpio_irq`,
-//!   `timer_start`, `spi_transfer`, `uart_write`) exports `on_irq`, without
-//!   which its interrupts and DMA completions could never be delivered.
+//!   `timer_start`, `spi_transfer`, `uart_write`, and the ABI 4 route
+//!   starters `route_source`, `route_sink`) exports `on_irq`, without which
+//!   its interrupts, DMA completions and route events could never be
+//!   delivered.
 //!
 //! Other exports (e.g. `__data_end` from rustc) are allowed and listed in the
 //! [`Report`]. [`load`] accepts `.wasm` bytes or WAT text. The `abi-check`
@@ -85,10 +87,17 @@ fn export_sig(name: &str) -> Option<(usize, bool)> {
     }
 }
 
-/// ABI 2 imports whose effects arrive as `on_irq` events (GPIO edges, timer
-/// alarms, DMA completions). A module importing any of them must export
-/// `on_irq`.
-pub const EVENT_SOURCES: &[&str] = &["gpio_irq", "timer_start", "spi_transfer", "uart_write"];
+/// Imports whose effects arrive as `on_irq` events: GPIO edges, timer
+/// alarms and DMA completions (ABI 2), and route frame, drop and stop
+/// events (ABI 4). A module importing any of them must export `on_irq`.
+pub const EVENT_SOURCES: &[&str] = &[
+    "gpio_irq",
+    "timer_start",
+    "spi_transfer",
+    "uart_write",
+    "route_source",
+    "route_sink",
+];
 
 /// Validates `wasm` (binary) against the ABI. Returns every violation found.
 pub fn check(wasm: &[u8]) -> Result<Report, Vec<String>> {
@@ -321,6 +330,34 @@ mod tests {
         assert_eq!(r.imports, ["pwm_set", "adc_read", "i2c_transfer"]);
         let errs = run(r#"(module
             (import "mw" "i2c_transfer" (func (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1))"#)
+        .expect_err("wrong arity");
+        assert_eq!(errs.len(), 1, "{errs:?}");
+    }
+
+    #[test]
+    fn route_starters_require_on_irq_and_stop_stat_do_not() {
+        let errs = run(r#"(module
+            (import "mw" "route_source" (func (param i32 i32 i32 i32 i32) (result i32)))
+            (import "mw" "route_sink" (func (param i32 i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1))"#)
+        .expect_err("invalid");
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert!(errs[0].contains("route_source") && errs[1].contains("route_sink"));
+        run(r#"(module
+            (import "mw" "route_source" (func (param i32 i32 i32 i32 i32) (result i32)))
+            (import "mw" "route_sink" (func (param i32 i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "on_irq") (param i32 i32 i32 i32)))"#)
+        .expect("valid with on_irq");
+        // Stopping or reading a route raises nothing by itself.
+        run(r#"(module
+            (import "mw" "route_stop" (func (param i32) (result i32)))
+            (import "mw" "route_stat" (func (param i32 i32) (result i32)))
+            (memory (export "memory") 1))"#)
+        .expect("valid");
+        let errs = run(r#"(module
+            (import "mw" "route_stat" (func (param i32) (result i32)))
             (memory (export "memory") 1))"#)
         .expect_err("wrong arity");
         assert_eq!(errs.len(), 1, "{errs:?}");

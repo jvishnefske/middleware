@@ -29,7 +29,8 @@
 //! * Host imports validate every pointer, pin, level, pull, key (no `sys/`),
 //!   period, the subscription limit and (ABI 2) every edge, timer, SPI and
 //!   UART argument and (ABI 3) every PWM, ADC and I2C argument with the
-//!   shared [`wasm_abi::periph`] parsers, returning
+//!   shared [`wasm_abi::periph`] parsers, and (ABI 4) every route argument
+//!   and config with [`wasm_abi::route`], returning
 //!   [`AbiError`] codes instead of trapping (W3). Messages over
 //!   [`wasm_abi::MAX_MESSAGE`] are refused; `log` lines are truncated to
 //!   [`wasm_abi::MAX_LOG`] bytes on a character boundary.
@@ -43,6 +44,11 @@
 //!   the received bytes are copied back only if the device succeeds.
 //!   `adc_read` results are clamped to
 //!   [`periph::ADC_MAX`](wasm_abi::periph::ADC_MAX).
+//! * The ABI 4 route imports copy the key and config out of guest memory
+//!   and hand the device parsed values ([`SourceConfig`], [`SinkConfig`]);
+//!   frame data never passes through guest memory or this crate. Handles
+//!   the device returns outside `0..MAX_ROUTES` reach the payload as
+//!   `NoResources`, and `route_stat` counts saturate at `i32::MAX`.
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
 //!   `on_irq`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
@@ -101,6 +107,9 @@ pub use middleware::wasm_abi::events::{DmaChannel, Event, EventKind};
 pub use middleware::wasm_abi::periph::{
     Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
+pub use middleware::wasm_abi::route::{
+    Preamble, RouteStat, Segment, SinkConfig, SourceConfig, SourceKind,
+};
 pub use middleware::wasm_abi::{AbiError, Pull};
 
 use abi::{ImportKind, Shape};
@@ -114,10 +123,11 @@ use link::{Exports, State};
 /// link failures → `Transport`, a peripheral not opened or still busy →
 /// `Busy`).
 ///
-/// The ABI 2 methods (from [`Device::now_us`] on) and the ABI 3 methods
-/// (from [`Device::pwm_open`] on) have defaults (`Unsupported`, or a
-/// derived clock) so a board without interrupts, DMA, PWM, ADC or I2C keeps
-/// compiling; see the crate docs.
+/// The ABI 2 methods (from [`Device::now_us`] on), the ABI 3 methods
+/// (from [`Device::pwm_open`] on) and the ABI 4 route methods (from
+/// [`Device::route_source`] on) have defaults (`Unsupported`, or a derived
+/// clock) so a board without interrupts, DMA, PWM, ADC, I2C or routes
+/// keeps compiling; see the crate docs.
 pub trait Device {
     /// A payload log line (UTF-8, at most [`wasm_abi::MAX_LOG`] bytes).
     fn log(&mut self, line: &str);
@@ -241,6 +251,54 @@ pub trait Device {
         rx: &mut [u8],
     ) -> Result<(), AbiError> {
         let _ = (bus, addr, tx, rx);
+        Err(AbiError::Unsupported)
+    }
+
+    /// Starts a source route (ABI 4): every `cfg.period_ms` the device
+    /// captures a frame from `source` into its own DMA-capable memory and
+    /// publishes it on `key` as [`middleware::stream`] chunks of
+    /// `cfg.chunk_data` bytes, one sequence number per frame. Returns the
+    /// route handle (`0..MAX_ROUTES`; any other value reaches the payload as
+    /// `NoResources`). Raises `RouteFrames` / `RouteDropped` events for the
+    /// handle. `Unsupported` for a source the board lacks, `NoResources`
+    /// when every route is taken.
+    fn route_source(
+        &mut self,
+        source: SourceKind,
+        key: middleware::Key<'_>,
+        cfg: SourceConfig,
+    ) -> Result<u8, AbiError> {
+        let _ = (source, key, cfg);
+        Err(AbiError::Unsupported)
+    }
+    /// Starts a sink route (ABI 4): messages on `key` are consumed by the
+    /// route (not passed to [`Payload::deliver`]) and run through a
+    /// [`middleware::stream::Sink`] with `cfg.frame_len`; on
+    /// `StartFrame` the device sends `cfg.preamble` on SPI `bus` (each
+    /// segment with `cfg.dc_pin` at its level), then DMAs each accepted
+    /// chunk's data with D/C high. The device owns the bus (its
+    /// `spi_transfer` is `Busy`) and the D/C pin until the route stops.
+    /// `Busy` if the bus is not open; `Unsupported` for a D/C pin the board
+    /// reserves.
+    fn route_sink(
+        &mut self,
+        key: middleware::Key<'_>,
+        bus: u8,
+        cfg: &SinkConfig,
+    ) -> Result<u8, AbiError> {
+        let _ = (key, bus, cfg);
+        Err(AbiError::Unsupported)
+    }
+    /// Stops a route (ABI 4), releases its key, bus and pin, and purges its
+    /// pending events; `Busy` if the handle is not running.
+    fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        let _ = handle;
+        Err(AbiError::Unsupported)
+    }
+    /// One counter of a running route (ABI 4); `Busy` if the handle is not
+    /// running. Larger values reach the payload saturated to `i32::MAX`.
+    fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        let _ = (handle, stat);
         Err(AbiError::Unsupported)
     }
 }

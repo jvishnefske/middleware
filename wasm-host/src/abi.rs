@@ -25,6 +25,10 @@
 //!
 //! * ABI 3: [`i2c_transfer`] validates `i2c_transfer` with
 //!   [`periph::I2cTransfer::parse`] and bounds both guest buffers.
+//! * ABI 4: [`route_source`] and [`route_sink`] validate the source kind or
+//!   bus and the config length, then the key and config pointers, parsing
+//!   with the shared [`wasm_abi::route`] parsers; [`route_handle_code`]
+//!   checks the handle a device hands back.
 //!
 //! For the pointer-carrying ABI 2 and 3 imports, arguments are checked
 //! before the pointer: a bad port, bus, address or length is
@@ -37,6 +41,7 @@ use middleware::Key;
 
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
+use middleware::wasm_abi::route::{self, SinkConfig, SourceConfig, SourceKind};
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
 
 use crate::{LoadError, Ticked};
@@ -478,6 +483,87 @@ pub fn i2c_transfer(
     Ok(I2cPlan { transfer, tx, rx })
 }
 
+/// A validated `route_source` request (ABI 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePlan<'m> {
+    /// The data source.
+    pub source: SourceKind,
+    /// The publish key (not under `sys/`).
+    pub key: Key<'m>,
+    /// Frame geometry, rate and chunk size.
+    pub cfg: SourceConfig,
+}
+
+/// Plans `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` against
+/// linear memory `mem`: the source kind and config length first, then the
+/// key and config pointers, then their contents.
+pub fn route_source(
+    (source, kp, kl, cp, cl): (i32, i32, i32, i32, i32),
+    mem: &[u8],
+) -> Result<SourcePlan<'_>, AbiError> {
+    let source = SourceKind::from_i32(source)?;
+    if usize::try_from(cl).ok() != Some(route::SOURCE_CFG_LEN) {
+        return Err(AbiError::InvalidArgument);
+    }
+    let key = mem
+        .get(wasm_abi::guest_range(kp, kl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    let cfg = mem
+        .get(wasm_abi::guest_range(cp, cl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    Ok(SourcePlan {
+        source,
+        key: payload_key(key)?,
+        cfg: SourceConfig::parse(cfg)?,
+    })
+}
+
+/// A validated `route_sink` request (ABI 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkPlan<'m> {
+    /// The subscribed key (not under `sys/`).
+    pub key: Key<'m>,
+    /// SPI bus number.
+    pub bus: u8,
+    /// D/C pin, frame length and preamble.
+    pub cfg: SinkConfig,
+}
+
+/// Plans `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)` against
+/// linear memory `mem`: the bus and config length (at most
+/// [`route::MAX_SINK_CFG_LEN`]) first, then the pointers, then contents.
+pub fn route_sink(
+    (kp, kl, bus, cp, cl): (i32, i32, i32, i32, i32),
+    mem: &[u8],
+) -> Result<SinkPlan<'_>, AbiError> {
+    let bus = periph::spi_bus(bus)?;
+    let len = usize::try_from(cl).map_err(|_| AbiError::InvalidArgument)?;
+    if !(route::SINK_HEADER_LEN..=route::MAX_SINK_CFG_LEN).contains(&len) {
+        return Err(AbiError::InvalidArgument);
+    }
+    let key = mem
+        .get(wasm_abi::guest_range(kp, kl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    let cfg = mem
+        .get(wasm_abi::guest_range(cp, cl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    Ok(SinkPlan {
+        key: payload_key(key)?,
+        bus,
+        cfg: SinkConfig::parse(cfg)?,
+    })
+}
+
+/// The import result for a route handle a device returned: the handle, or
+/// `NoResources` if the device answered outside `0..MAX_ROUTES`.
+pub fn route_handle_code(handle: u8) -> Result<i32, AbiError> {
+    if usize::from(handle) < route::MAX_ROUTES {
+        Ok(i32::from(handle))
+    } else {
+        Err(AbiError::NoResources)
+    }
+}
+
 /// The guest range a read import (`dma_read`, `uart_read`) may fill: the
 /// whole `(ptr, len)` must lie in memory, and at most `cap` bytes (the host
 /// buffer size) are written from its start.
@@ -507,6 +593,7 @@ pub fn count_code(count: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     const LOG: Shape = Shape {
@@ -852,6 +939,83 @@ mod tests {
     fn result_codes() {
         assert_eq!(result_code(Ok(3)), 3);
         assert_eq!(result_code(Err(AbiError::OutOfBounds)), -2);
+    }
+
+    #[test]
+    fn route_source_checks_arguments_before_pointers() {
+        let mut mem = vec![0u8; 64];
+        mem[..7].copy_from_slice(b"app/cam");
+        let cfg = SourceConfig::new(120, 120, 100).expect("valid").encode();
+        mem[16..26].copy_from_slice(&cfg);
+        let plan = route_source((0, 0, 7, 16, 10), &mem).expect("valid");
+        assert_eq!(plan.source, SourceKind::TestPattern);
+        assert_eq!(plan.key.as_str(), "app/cam");
+        assert_eq!(plan.cfg.frame_len(), 28_800);
+        let bad = Err(AbiError::InvalidArgument);
+        assert_eq!(route_source((2, 0, 7, 16, 10), &mem), bad, "source");
+        assert_eq!(
+            route_source((2, 500, 7, 500, 10), &mem),
+            bad,
+            "source first"
+        );
+        assert_eq!(route_source((0, 0, 7, 16, 9), &mem), bad, "cfg len");
+        assert_eq!(route_source((0, 0, 7, 500, 11), &mem), bad, "cfg len first");
+        assert_eq!(
+            route_source((0, 60, 7, 16, 10), &mem),
+            Err(AbiError::OutOfBounds)
+        );
+        assert_eq!(
+            route_source((0, 0, 7, 60, 10), &mem),
+            Err(AbiError::OutOfBounds)
+        );
+        mem[..3].copy_from_slice(b"sys");
+        assert_eq!(
+            route_source((0, 0, 7, 16, 10), &mem),
+            Err(AbiError::InvalidKey)
+        );
+        mem[..3].copy_from_slice(b"app");
+        mem[20] = 1; // pixel format
+        assert_eq!(route_source((1, 0, 7, 16, 10), &mem), bad, "cfg contents");
+    }
+
+    #[test]
+    fn route_sink_checks_arguments_before_pointers() {
+        let mut mem = vec![0u8; 128];
+        mem[..7].copy_from_slice(b"app/cam");
+        let cfg = SinkConfig::new(13, 28_800)
+            .expect("valid")
+            .with_preamble(route::Preamble::mipi_window(60, 60, 179, 179).expect("fits"));
+        let mut buf = [0u8; route::MAX_SINK_CFG_LEN];
+        let n = cfg.encode(&mut buf);
+        mem[16..16 + n].copy_from_slice(&buf[..n]);
+        let plan = route_sink((0, 7, 0, 16, n as i32), &mem).expect("valid");
+        assert_eq!((plan.key.as_str(), plan.bus), ("app/cam", 0));
+        assert_eq!(plan.cfg, cfg);
+        let bad = Err(AbiError::InvalidArgument);
+        assert_eq!(
+            route_sink((500, 7, 1, 500, n as i32), &mem),
+            bad,
+            "bus first"
+        );
+        assert_eq!(route_sink((500, 7, 0, 500, 6), &mem), bad, "cfg too short");
+        let long = route::MAX_SINK_CFG_LEN as i32 + 1;
+        assert_eq!(
+            route_sink((500, 7, 0, 500, long), &mem),
+            bad,
+            "cfg too long"
+        );
+        assert_eq!(route_sink((0, 7, 0, 16, -1), &mem), bad);
+        assert_eq!(
+            route_sink((0, 7, 0, 120, n as i32), &mem),
+            Err(AbiError::OutOfBounds)
+        );
+        assert_eq!(
+            route_sink((0, 7, 0, 16, n as i32 - 1), &mem),
+            bad,
+            "cut segment"
+        );
+        assert_eq!(route_handle_code(3), Ok(3));
+        assert_eq!(route_handle_code(4), Err(AbiError::NoResources));
     }
 
     #[test]
