@@ -80,6 +80,15 @@ default target in `.cargo/config.toml`). It contains:
   heap check charges 16 KiB less than the standard build (one 64 KiB
   page, 16 KiB stack, 36 KiB of buffers in `.bss`). Its mw-jpeg is built
   without `Scale::Half` (`default-features = false`).
+- `examples/bench` — measures a host's interpreter speed in fuel per
+  second: one-shot timer steps 1 ms apart alternate integer mixing over a
+  4 KiB table (196 564 fuel a step) and `mw-jpeg` decoding the fake
+  camera's 240×240 frame four MCUs a step (12 786 673 fuel a frame); every
+  5 s it logs per workload the steps, their average and largest time and
+  the implied fuel rate. It subscribes to `app/cam/jpeg` and only counts,
+  so with the camera streaming the host carries `cam_jpeg_view`'s message
+  load. Deploy `scripts/build-byte-pages.sh -p bench` (30 720 bytes of
+  memory); read its lines next to esp-base's `perf:` lines.
 - `gc9a01/` — the badge panel's wiring, `mipidsi`-derived init sequence,
   its pure `Sequencer` and the bring-up `Controller` with retry and
   give-up, shared by `cam_view` and `cam_jpeg_view`.
@@ -126,15 +135,15 @@ the host's byte cap (`wasm_host::Limits::bytes`) has to be at least
 `MEMORY_BYTES`. The module declares that memory as its maximum, and the
 host's heap bound (`Limits::heap_needed`) charges exactly it instead of
 the whole cap, so a payload sized to its real need starts with less free
-heap. `scripts/check-all.sh` builds and validates blink, echo, cam_view
-and cam_jpeg_view both ways.
+heap. `scripts/check-all.sh` builds and validates blink, echo, cam_view,
+cam_jpeg_view and bench both ways.
 
 The byte-page build is reproducible: it passes `--remap-path-prefix` for
 the home directory, the cargo registry and the repository, so no absolute
 build path ends up in the module. `scripts/check-reproducible.sh [package...]`
 builds here and in a copy of the sources at another path and fails unless
 the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink,
-echo and cam_view, and for cam_jpeg_view with its own sizes.
+echo and cam_view, and for cam_jpeg_view and bench with their own sizes.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.

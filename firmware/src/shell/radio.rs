@@ -36,7 +36,10 @@
 //! otherwise keep the controller and the serial links from running.
 //!
 //! The counters (`esp_base::radio::Counters`) are logged on `sys/log` when
-//! losses rise, at most every `REPORT_INTERVAL_MS`.
+//! losses rise, at most every `REPORT_INTERVAL_MS`. The time spent handling
+//! received frames (transport decode and the queue to the controller) is
+//! added up in [`TIME`] for the controller's `perf:` report
+//! ([`take_time`]).
 //!
 //! [`SOURCES`] is the one piece of state the controller and this task
 //! share: a critical-section mutex around the pure
@@ -56,6 +59,7 @@ use esp_base::radio::{
     APP_FILTER, CHANNEL, Counters, KEY_CAPACITY, RX_DEPTH, RX_PAYLOAD, SEND_TIMEOUT_MS, TX_DEPTH,
     TX_PAYLOAD,
 };
+use esp_base::perf::RadioTime;
 use esp_base::route::sources::{Due, Job, SourceTable};
 use esp_base::route::{Report, source::write_frame};
 use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNowError, EspNowReceiver, EspNowSender};
@@ -91,6 +95,24 @@ static TX: Channel<CriticalSectionRawMutex, Outgoing, TX_DEPTH> = Channel::new()
 
 /// Publishes the controller dropped before they reached [`TX`].
 static TX_DROPPED: Mutex<CriticalSectionRawMutex, RefCell<u32>> = Mutex::new(RefCell::new(0));
+
+/// Time spent on received frames since the controller last took it.
+static TIME: Mutex<CriticalSectionRawMutex, RefCell<RadioTime>> = Mutex::new(RefCell::new(RadioTime::ZERO));
+
+/// Adds `frames` frames handled in the time since `start_us`.
+fn add_time(start_us: u64, frames: u32) {
+    let us = irq::now_us().saturating_sub(start_us);
+    TIME.lock(|t| {
+        let mut t = t.borrow_mut();
+        *t = t.add(us, frames);
+    });
+}
+
+/// The radio task's time on received frames since the last call (for the
+/// controller's `perf:` report).
+pub fn take_time() -> RadioTime {
+    TIME.lock(|t| core::mem::take(&mut *t.borrow_mut()))
+}
 
 /// The running source routes, shared with the controller.
 pub static SOURCES: Mutex<CriticalSectionRawMutex, RefCell<SourceTable>> =
@@ -271,13 +293,17 @@ impl Radio {
 
     /// Drains the frames already received, at most [`RX_DEPTH`].
     fn drain(&mut self, buf: &mut [u8; SAMPLE_BUF]) {
+        let start = irq::now_us();
+        let mut frames = 0;
         for _ in 0..RX_DEPTH {
             match self.transport.try_recv(buf) {
                 Ok(Some(s)) => self.received(Ok(s)),
                 Ok(None) => break,
                 Err(e) => self.received(Err(e)),
             }
+            frames += 1;
         }
+        add_time(start, frames);
     }
 
     /// Broadcasts a payload publish.
@@ -372,7 +398,9 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
         };
         match select4(radio.transport.recv(&mut sample), TX.receive(), timer, SOURCES_CHANGED.wait()).await {
             Either4::First(rx) => {
+                let start = irq::now_us();
                 radio.received(rx);
+                add_time(start, 1);
                 // A flood keeps esp-radio's queue non-empty, so `recv` is
                 // ready on every poll; yield so the controller and the
                 // serial links still run between two frames.

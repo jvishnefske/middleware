@@ -25,6 +25,9 @@
 //!   version and CRC-32, safe against power loss at any flash operation.
 //! * [`presence`] — the BOOT-button hold detector that asserts physical
 //!   presence for the re-key window.
+//! * [`perf`] — the payload loop's time accounting: wall time and fuel per
+//!   payload operation, waits, yields and the radio task's time, folded into
+//!   a reporting window and logged as two `sys/log` lines.
 //! * [`periph`] — the ABI 2 peripheral decisions: pin claims, the timer
 //!   deadline table, the DMA channel state machine, the UART receive ring,
 //!   and the events ISRs and completions push.
@@ -48,6 +51,7 @@
 pub mod chip;
 pub mod dispatch;
 pub mod image;
+pub mod perf;
 pub mod periph;
 pub mod presence;
 pub mod radio;

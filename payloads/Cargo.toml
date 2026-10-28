@@ -15,6 +15,7 @@ members = [
     "examples/cam_view",
     "examples/cam_jpeg_stream",
     "examples/cam_jpeg_view",
+    "examples/bench",
     "gc9a01",
     "jpeg",
     "abi-check",
@@ -36,6 +37,7 @@ default-members = [
     "examples/cam_view",
     "examples/cam_jpeg_stream",
     "examples/cam_jpeg_view",
+    "examples/bench",
     "gc9a01",
 ]
 
@@ -67,5 +69,11 @@ opt-level = "s"
 # helpers out of line. A package override drops the profile's `strip`, so
 # it is repeated (otherwise the name section adds about 3 KB).
 [profile.release.package.cam_jpeg_view]
+opt-level = "s"
+strip = true
+
+# The benchmark's workloads at the opt-level cam_jpeg_view uses, so its
+# fuel per step matches the viewer's code.
+[profile.release.package.bench]
 opt-level = "s"
 strip = true

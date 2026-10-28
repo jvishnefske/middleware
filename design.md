@@ -528,7 +528,7 @@ because WASM linear memory and the wasmi interpreter require one.
   remaps the home directory, the cargo registry and the repository with
   `--remap-path-prefix`, and builds from two different directories are
   byte-identical —
-  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view and cam_jpeg_view, run by `check-all.sh`).
+  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view, cam_jpeg_view and bench, run by `check-all.sh`).
 - [x] P7 The SDK cannot panic on its own paths: `LogLine` (append, decimal
   numbers dropped whole when they do not fit, `log` without re-validating
   UTF-8) and the `on_message` delivery copy use checked access only, so a
@@ -537,6 +537,24 @@ because WASM linear memory and the wasmi interpreter require one.
   bytes, cam_jpeg_view 30 878 → 25 714 —
   `mw-payload` `logline::tests::*` (`a_number_that_does_not_fit_is_dropped_whole`);
   `abi-check` `p7_sdk_payloads_link_no_panic_formatting`.
+- [x] P8 A benchmark payload (`bench`) measures a host's interpreter speed
+  in fuel per second with workloads of known fuel cost: alternating steps,
+  1 ms apart, of integer mixing over a 4 KiB table (196 564 fuel) and
+  `mw-jpeg` decoding the fake camera's 240×240 frame 4 MCUs at a time
+  (62 steps, 12 786 673 fuel per frame), each timed with `now_us`; every
+  5 s it logs steps, average and largest step time and the implied fuel
+  rate per workload, and how many `app/cam/jpeg` messages it was delivered
+  (it subscribes and only counts, to load the host as `cam_jpeg_view`
+  does). Its heap bound stays below `cam_jpeg_view`'s, so it starts
+  wherever the viewer does —
+  `bench` `tests::steps_alternate_and_a_frame_takes_the_documented_steps`,
+  `tests::mix_is_deterministic_and_touches_the_table`,
+  `tests::jpeg_is_the_fake_camera_frame`; `tools/payload-sim/tests/bench.rs`
+  (`bench_fuel_constants_match_the_measured_steps`: the constants within
+  5 % of the measured fuel, largest step 255 360;
+  `bench_starts_wherever_cam_jpeg_view_starts`); `abi-check`
+  `p5_forbid_unsafe_code_examples_export_the_abi`; built reproducibly with
+  1-byte pages (30 720 bytes of memory) by `check-all.sh`.
 
 ### ESP base firmware (`firmware/`)
 
@@ -572,6 +590,76 @@ because WASM linear memory and the wasmi interpreter require one.
   badge, the host blocked in `tcdrain`, see H2). A refused start is not
   affected: it allocates nothing beyond the image buffer, replies through
   a signal and returns to idle. Shell code; to be verified on hardware.
+- [x] E15 While a payload runs, the controller accounts for its time and
+  logs it every 5 s as two `sys/log` lines: wall time inside payload
+  operations and its share, export calls, fuel and fuel per second while
+  busy, the longest operation (µs and fuel), the split per operation kind
+  (deliveries, `on_irq`, `tick`: calls / fuel / time), the time waiting
+  for input, yielding and in its own work, and the radio task's time on
+  received frames with their count. On by default
+  (`esp_base::perf::ENABLED`); the accounting and the line format are a
+  pure core, the clock reads and the logging shell code —
+  `perf::tests::window_folds_operations_per_kind_and_tracks_the_largest`,
+  `summary_splits_the_wall_time_and_rates_the_fuel`,
+  `cost_is_the_difference_of_the_counters_and_saturates`, `due_after_one_interval`,
+  `empty_window_reports_zeros_without_dividing_by_zero`,
+  `log_lines_fit_a_sys_log_line`. The lines themselves are to be read on
+  hardware (see "Interpreter speed on the badge").
+- [x] E16 The boot log names the SPI flash mode and clock the bootloader
+  set up (`flash: DIO 40 MHz (bootloader header)`), decoded from the image
+  header at flash offset 0; code runs from flash through the instruction
+  cache at that speed —
+  `chip::tests::flash_settings_decode_the_image_header`.
+
+#### Interpreter speed on the badge
+
+`cam_jpeg_view` decoded a 240×240 frame in 9 761 ms on the badge while an
+ESP32-CAM flooded it with about 290 ESP-NOW frames a second: about 1.4 M
+fuel per second, for 13.2 M fuel per frame measured in `payload-sim`.
+Findings from the code and the built images, most likely cause first:
+
+1. **Code runs from flash at espflash's defaults, DIO 40 MHz, and the
+   radio evicts the interpreter from the instruction cache.** Neither the
+   badge's runner nor `build-images.sh` passes `--flash-mode` or
+   `--flash-freq`, and espflash 4 defaults the ESP32-S3 to DIO at 40 MHz:
+   a 32-byte cache line costs about 150 SPI clocks, some 900 CPU cycles at
+   240 MHz, where QIO at 80 MHz costs about a quarter of that. The
+   interpreter's dispatch loop calls one of about 1 100 handlers per
+   instruction, spread over 113 KB of flash; the i32, branch, copy and
+   memory handlers alone are about 32 KB, the size of the whole
+   instruction cache (already at its maximum: 32 KiB, 8 ways, 32-byte
+   lines, esp-hal's default). Every received frame runs the Wi-Fi
+   driver's receive path, much of it from flash, between interpreter
+   instructions; refilling a 20 KB hot set at DIO 40 MHz takes about 2 ms.
+   Placing the hot handlers in IRAM (esp-hal's `rwtext_hook.x`, enabled
+   with `ESP_HAL_CONFIG_USE_RWTEXT_LD_HOOK`) is possible by section name,
+   but IRAM comes out of the same SRAM as the main stack and the heap:
+   the badge has about 7 KB above its 40 KiB stack floor, far from the
+   32 KB the integer handlers need, without shrinking the payload heap.
+2. **Deliveries of the flood.** Every received frame on a subscribed key
+   is two export calls (`mw_alloc`, `on_message`) and a copy into linear
+   memory, even when the payload then drops it; at 290 frames a second
+   that is 580 calls a second on the main task between decode steps.
+   The `perf:` lines' `msg` column measures it.
+3. **Pacing (computed, small).** A frame is 1 start and 61 decode calls
+   with a 1 ms one-shot gap between them, plus 105 panel transfers of at
+   most 3 840 bytes at 40 MHz SPI (115 200 bytes, about 23 ms): about
+   90 ms of a frame's wall time is gaps and transfers, under 1 % of
+   9 761 ms.
+4. **Build profile (ruled out).** The badge builds wasmi at
+   `opt-level = "z"`, esp-base at `"s"`; at `3` the handlers come out
+   the same size (the i32 add handlers byte for byte) and the image grows
+   by 145 KB, so the interpreter's inner loop does not depend on it. No
+   debug assertions or overflow checks in either release profile.
+5. **Per-call host overhead (small).** Each export call looks the
+   function up by name and refuels; next to a 200 000-fuel decode step
+   this is noise, and for deliveries it is part of item 2.
+
+The decisive measurements are the `bench` payload's rates with the radio
+quiet and flooded, the `perf:` lines (fuel per second inside calls, and
+where the rest of the time goes) and the same again after flashing with
+`--flash-mode qio --flash-freq 80mhz` (`flash:` at boot shows which is in
+effect).
 
 ### ESP8266 base firmware (`firmware-esp8266/`)
 

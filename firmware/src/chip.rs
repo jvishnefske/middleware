@@ -13,6 +13,9 @@
 //!   port).
 //! * `input_only` — pins without an output driver (ESP32 GPIO34–39).
 //!
+//! [`FlashSettings`] decodes the SPI flash mode and clock from the image
+//! header, which the shell logs at boot.
+//!
 //! [`Profile::check_pin`] applies the policy and returns the
 //! [`AbiError`] a host import reports: `InvalidArgument` for a pin that does
 //! not exist, `Unsupported` for a reserved pin or an output on an input-only
@@ -314,6 +317,73 @@ impl Profile {
     }
 }
 
+/// SPI flash read mode, from an ESP image header (byte 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashMode {
+    /// Quad I/O: four lines for address and data.
+    Qio,
+    /// Quad output: four lines for data.
+    Qout,
+    /// Dual I/O: two lines for address and data (espflash's default).
+    Dio,
+    /// Dual output: two lines for data.
+    Dout,
+}
+
+/// The SPI flash mode and clock the second-stage bootloader set up, as
+/// written by `espflash` into the image header at flash offset 0 (the
+/// bootloader's own header; espflash writes the app's with the same
+/// values). The application runs from flash through the instruction cache
+/// with these settings: every cache miss costs one flash read at this
+/// speed, so they bound how fast code executes from flash (`perf:` lines,
+/// `design.md`, "Interpreter speed").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlashSettings {
+    /// Read mode.
+    pub mode: FlashMode,
+    /// SPI clock in MHz.
+    pub mhz: u8,
+}
+
+impl FlashSettings {
+    /// Decodes the first four bytes of an ESP image header: magic `0xE9`,
+    /// segment count, flash mode, then flash size (high nibble) and
+    /// frequency (low nibble, the ESP32 / ESP32-S3 / ESP32-C3 encoding).
+    /// `None` for a missing magic or an unknown mode or frequency.
+    pub const fn from_header(h: [u8; 4]) -> Option<FlashSettings> {
+        if h[0] != 0xE9 {
+            return None;
+        }
+        let mode = match h[2] {
+            0 => FlashMode::Qio,
+            1 => FlashMode::Qout,
+            2 => FlashMode::Dio,
+            3 => FlashMode::Dout,
+            _ => return None,
+        };
+        let mhz = match h[3] & 0x0F {
+            0x0 => 40,
+            0x1 => 26,
+            0x2 => 20,
+            0xF => 80,
+            _ => return None,
+        };
+        Some(FlashSettings { mode, mhz })
+    }
+}
+
+impl core::fmt::Display for FlashSettings {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mode = match self.mode {
+            FlashMode::Qio => "QIO",
+            FlashMode::Qout => "QOUT",
+            FlashMode::Dio => "DIO",
+            FlashMode::Dout => "DOUT",
+        };
+        write!(f, "{mode} {} MHz", self.mhz)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +511,21 @@ mod tests {
         assert_eq!(usb, [false, true, true, false]);
         let runtime: [bool; 4] = ALL.map(|p| p.runtime);
         assert_eq!(runtime, [true, true, false, false]);
+    }
+
+    #[test]
+    fn flash_settings_decode_the_image_header() {
+        // espflash defaults (DIO, 40 MHz, 8 MB: size nibble 3).
+        let dio40 = FlashSettings::from_header([0xE9, 3, 2, 0x30]).expect("valid");
+        assert_eq!(dio40, FlashSettings { mode: FlashMode::Dio, mhz: 40 });
+        extern crate std;
+        assert_eq!(std::format!("{dio40}"), "DIO 40 MHz");
+        let qio80 = FlashSettings::from_header([0xE9, 5, 0, 0x2F]).expect("valid");
+        assert_eq!(std::format!("{qio80}"), "QIO 80 MHz");
+        assert_eq!(FlashSettings::from_header([0xE9, 1, 1, 0x01]).map(|s| (s.mode, s.mhz)), Some((FlashMode::Qout, 26)));
+        assert_eq!(FlashSettings::from_header([0xE9, 1, 3, 0x02]).map(|s| (s.mode, s.mhz)), Some((FlashMode::Dout, 20)));
+        assert_eq!(FlashSettings::from_header([0xFF; 4]), None, "erased flash");
+        assert_eq!(FlashSettings::from_header([0xE9, 1, 4, 0]), None, "unknown mode");
+        assert_eq!(FlashSettings::from_header([0xE9, 1, 2, 0x05]), None, "unknown frequency");
     }
 }

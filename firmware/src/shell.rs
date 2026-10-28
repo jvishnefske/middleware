@@ -11,7 +11,10 @@
 //!    link first writes one `0x00` delimiter to separate its frames from
 //!    any ROM banner text.
 //! 3. The partition table is read and the `payload` and `trust` data
-//!    partitions located (see `partitions.csv`); the stored image header is
+//!    partitions located (see `partitions.csv`), and the SPI flash mode and
+//!    clock read from the bootloader's image header logged
+//!    ([`esp_base::chip::FlashSettings`]: code runs from flash through the
+//!    cache at that speed); the stored image header is
 //!    CRC verified and the pinned signing key, if any, read
 //!    ([`esp_base::trust_store`]). The [`presence`] task starts watching the
 //!    BOOT button for the re-key window.
@@ -56,6 +59,7 @@ mod timer;
 mod uart1;
 
 use embassy_executor::Spawner;
+use esp_base::chip::FlashSettings;
 use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
 use esp_base::trust_store::TrustStore;
@@ -152,8 +156,12 @@ pub async fn run(spawner: Spawner) -> ! {
     #[cfg(any(feature = "esp32s3", feature = "esp32c3"))]
     spawner.spawn(usb_link(board.usb, bus).unwrap());
 
-    let Storage { mut store, trust, state: trust_state } =
-        open_storage(FlashStorage::new(board.flash), profile.max_image);
+    let mut flash = FlashStorage::new(board.flash);
+    // The bootloader's image header: the flash mode and clock code runs
+    // from (read before the flash moves into the payload store).
+    let mut header = [0u8; 4];
+    let flash_settings = flash.read(0, &mut header).ok().and_then(|()| FlashSettings::from_header(header));
+    let Storage { mut store, trust, state: trust_state } = open_storage(flash, profile.max_image);
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
     let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state);
@@ -173,6 +181,10 @@ pub async fn run(spawner: Spawner) -> ! {
         profile.radio_heap,
         if uart_ok { "ok" } else { "failed" },
     ));
+    match flash_settings {
+        Some(s) => bus.log(format_args!("flash: {s} (bootloader header)")),
+        None => bus.log(format_args!("flash: mode unknown (header {header:02x?})")),
+    }
     match installed {
         None => bus.log(format_args!("no '{PAYLOAD_PARTITION}' partition; loader disabled")),
         Some(Ok(h)) => bus.log(format_args!("stored payload: {} bytes, crc {:08x}", h.len, h.crc)),
