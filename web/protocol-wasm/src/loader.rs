@@ -7,9 +7,20 @@
 //! * [`Info`] is an owned [`DeviceInfo`].
 //! * [`DeviceLoader`] runs the middleware's own [`Loader`] state machine, so
 //!   a scripted fake device in the JS tests enforces exactly the ordering,
-//!   length and CRC rules the firmware does.
+//!   length and CRC rules the firmware does. It also holds a simulated root
+//!   of trust ([`TrustState`] and re-key [`Window`] on a JS-set clock) and
+//!   answers `sys/trust/info`, `sys/trust/claim` and signed commits with
+//!   the middleware's own [`TrustState::claim`] and
+//!   [`TrustState::accept_commit`]; a refused commit is `Denied` and never
+//!   reaches `Activate`, as on the device.
+//! * [`signed_message`], [`sha256`], [`signed_commit_body`] and
+//!   [`trust_state_name`] expose the signed-payload wire helpers.
 
 use middleware::crc::Crc32;
+use middleware::loader::sha256::ImageHash;
+use middleware::loader::trust::{
+    self, INFO_MAX, Signature, SignedCommit, TrustCode, TrustInfo, TrustState, Version, Window,
+};
 use middleware::loader::{CHUNK_MAX, Command, DeviceInfo, Effect, Loader, PayloadStatus};
 use middleware::{HandlerError, Key};
 
@@ -56,8 +67,14 @@ pub fn image_crc32(image: &[u8]) -> u32 {
 }
 
 /// The full request sequence for installing `image`, chunks of at most
-/// `chunk` bytes (clamped to `1..=CHUNK_MAX`).
+/// `chunk` bytes (clamped to `1..=CHUNK_MAX`), with an unsigned commit.
 pub fn plan(image: &[u8], chunk: usize) -> Result<Vec<Step>, PlanError> {
+    plan_with_commit(image, chunk, &[])
+}
+
+/// As [`plan`], with `commit` as the `sys/loader/commit` body (empty, or a
+/// 68-byte [`signed_commit_body`]); the body is sent as given.
+pub fn plan_with_commit(image: &[u8], chunk: usize, commit: &[u8]) -> Result<Vec<Step>, PlanError> {
     if image.is_empty() {
         return Err(PlanError::Empty);
     }
@@ -84,11 +101,48 @@ pub fn plan(image: &[u8], chunk: usize) -> Result<Vec<Step>, PlanError> {
         });
     }
     steps.push(Step {
-        key: Command::Commit.key().as_str(),
-        body: Vec::new(),
+        key: Command::Commit { auth: None }.key().as_str(),
+        body: commit.to_vec(),
         done: len,
     });
     Ok(steps)
+}
+
+/// SHA-256 of `data` (the digest a payload signature covers).
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    ImageHash::digest(data)
+}
+
+/// The 54-byte message an Ed25519 payload signature covers:
+/// `b"mw-payload-v1\0" || len u32 LE || version u32 LE || sha256`.
+/// `None` when `digest` is not 32 bytes.
+pub fn signed_message(len: u32, version: u32, digest: &[u8]) -> Option<Vec<u8>> {
+    let digest = <[u8; 32]>::try_from(digest).ok()?;
+    Some(trust::signed_message(len, Version(version), &digest).to_vec())
+}
+
+/// The signed `sys/loader/commit` body `[version u32 LE][signature 64]`;
+/// `None` when `signature` is not 64 bytes.
+pub fn signed_commit_body(version: u32, signature: &[u8]) -> Option<Vec<u8>> {
+    let signature = Signature(<[u8; 64]>::try_from(signature).ok()?);
+    Some(
+        SignedCommit {
+            version: Version(version),
+            signature,
+        }
+        .encode()
+        .to_vec(),
+    )
+}
+
+/// Name of a `sys/trust/info` state byte.
+pub const fn trust_state_name(b: u8) -> Option<&'static str> {
+    match TrustCode::from_byte(b) {
+        Some(TrustCode::Unclaimed) => Some("unclaimed"),
+        Some(TrustCode::Claimed) => Some("claimed"),
+        Some(TrustCode::RekeyOpen) => Some("rekey"),
+        None => None,
+    }
 }
 
 /// Name of a payload status byte.
@@ -163,11 +217,18 @@ pub enum Action {
     Erase(u32),
     /// Write bytes at an offset.
     Write(u32, Vec<u8>),
-    /// The image is complete and its CRC verified.
+    /// The image is complete, its CRC verified and (when claimed) its
+    /// signature accepted: `(len, crc)`.
     Activate(u32, u32),
+    /// `sys/trust/info`: the encoded [`TrustInfo`] response body.
+    TrustInfo(Vec<u8>),
+    /// `sys/trust/claim` accepted: the key is pinned.
+    Claim,
 }
 
-/// A device-side loader with a storage capacity, for fakes and tests.
+/// A device-side loader with a storage capacity and a simulated root of
+/// trust, for fakes and tests. It starts Unclaimed (every commit accepted)
+/// with the re-key window closed and the clock at 0 ms.
 ///
 /// [`DeviceLoader::step`] takes the loader by value and returns its
 /// successor, matching [`Loader::step`].
@@ -175,15 +236,55 @@ pub enum Action {
 pub struct DeviceLoader {
     state: Loader,
     capacity: u32,
+    trust: TrustState,
+    window: Window,
+    now_ms: u64,
 }
 
 impl DeviceLoader {
-    /// An idle loader accepting images up to `capacity` bytes.
+    /// An idle, unclaimed loader accepting images up to `capacity` bytes.
     pub const fn new(capacity: u32) -> Self {
         Self {
             state: Loader::Idle,
             capacity,
+            trust: TrustState::Unclaimed,
+            window: Window::Closed,
+            now_ms: 0,
         }
+    }
+
+    /// The same loader with its clock (ms since boot) at `now_ms`; the
+    /// re-key window expires against it.
+    pub const fn at(self, now_ms: u64) -> Self {
+        Self {
+            now_ms,
+            window: self.window.expire(now_ms),
+            ..self
+        }
+    }
+
+    /// Physical presence asserted now (the BOOT button held on a device):
+    /// opens the re-key window for [`trust::REKEY_WINDOW_MS`].
+    pub const fn assert_presence(self) -> Self {
+        Self {
+            window: Window::opened_at(self.now_ms),
+            ..self
+        }
+    }
+
+    /// The simulated persisted trust state.
+    pub const fn trust(&self) -> TrustState {
+        self.trust
+    }
+
+    /// Whether the re-key window is open now.
+    pub const fn rekey_open(&self) -> bool {
+        self.window.is_open(self.now_ms)
+    }
+
+    /// The `sys/trust/info` view now.
+    pub const fn trust_info(&self) -> TrustInfo {
+        self.trust.info(self.rekey_open())
     }
 
     /// Whether a transfer is in progress.
@@ -201,17 +302,51 @@ impl DeviceLoader {
             Ok(None) => return (self, Ok(Action::App)),
             Err(e) => return (self, Err(e)),
         };
+        match cmd {
+            Command::TrustInfo => {
+                let mut out = [0u8; INFO_MAX];
+                let n = self.trust_info().encode(&mut out).unwrap_or(0);
+                return (self, Ok(Action::TrustInfo(out[..n].to_vec())));
+            }
+            Command::TrustClaim { key } => {
+                return match self.trust.claim(key, self.rekey_open()) {
+                    Ok(trust) => (
+                        Self {
+                            trust,
+                            window: Window::Closed,
+                            ..self
+                        },
+                        Ok(Action::Claim),
+                    ),
+                    Err(e) => (self, Err(e)),
+                };
+            }
+            _ => {}
+        }
         let (state, effect) = self.state.step(&cmd, self.capacity);
         let next = Self { state, ..self };
-        let action = effect.map(|e| match (e, cmd) {
-            (Effect::Erase { len }, _) => Action::Erase(len),
-            (Effect::Write { offset, data }, _) => Action::Write(offset, data.to_vec()),
-            (Effect::Activate { len, crc }, _) => Action::Activate(len, crc),
-            (Effect::None, Command::Start) => Action::Start,
-            (Effect::None, Command::Stop) => Action::Stop,
-            (Effect::None, _) => Action::Info,
-        });
-        (next, action)
+        match effect {
+            Err(e) => (next, Err(e)),
+            Ok(Effect::Activate { image, auth }) => {
+                match self.trust.accept_commit(&image, auth.as_ref()) {
+                    Ok(trust) => (
+                        Self { trust, ..next },
+                        Ok(Action::Activate(image.len, image.crc)),
+                    ),
+                    Err(e) => (next, Err(e)),
+                }
+            }
+            Ok(Effect::Erase { len }) => (next, Ok(Action::Erase(len))),
+            Ok(Effect::Write { offset, data }) => (next, Ok(Action::Write(offset, data.to_vec()))),
+            Ok(Effect::None) => {
+                let action = match cmd {
+                    Command::Start => Action::Start,
+                    Command::Stop => Action::Stop,
+                    _ => Action::Info,
+                };
+                (next, Ok(action))
+            }
+        }
     }
 }
 
@@ -285,6 +420,134 @@ mod tests {
         assert_eq!(d.step("app/led", &[1]).1, Ok(Action::App));
         assert_eq!(d.step("sys/nope", &[]).1, Err(HandlerError::NotFound));
         assert_eq!(d.step("bad//", &[]).1, Err(HandlerError::InvalidRequest));
+    }
+
+    /// `web/test/fixtures/trust-vector.json` (TEST KEY ONLY).
+    mod vector {
+        pub const PUBLIC_KEY: &str =
+            "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8";
+        pub const VERSION: u32 = 1_761_500_000;
+        pub const SHA256: &str = "1e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371";
+        pub const MESSAGE: &str = "6d772d7061796c6f61642d763100e8030000605bfe681e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371";
+        pub const SIGNATURE: &str = "ca90e0aef84dfa5173aed3af1738933d2cebbd3f74012fe398847dad9db8b092fe91b9beaa7b59c6665f41b3abd352ddf890668cf994125438aa084c6a7b9f07";
+        pub const COMMIT_BODY: &str = "605bfe68ca90e0aef84dfa5173aed3af1738933d2cebbd3f74012fe398847dad9db8b092fe91b9beaa7b59c6665f41b3abd352ddf890668cf994125438aa084c6a7b9f07";
+
+        pub fn image() -> Vec<u8> {
+            (0..1000usize).map(|i| ((i * 7 + 3) & 0xff) as u8).collect()
+        }
+
+        pub fn hex(s: &str) -> Vec<u8> {
+            (0..s.len() / 2)
+                .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+                .collect()
+        }
+    }
+
+    /// Runs `steps` through `dev`, returning it and the last result.
+    fn run(mut dev: DeviceLoader, steps: &[Step]) -> (DeviceLoader, Result<Action, HandlerError>) {
+        let mut last = Ok(Action::Info);
+        for s in steps {
+            let (next, r) = dev.step(s.key, &s.body);
+            dev = next;
+            last = r;
+            if last.is_err() {
+                break;
+            }
+        }
+        (dev, last)
+    }
+
+    #[test]
+    fn wire_helpers_match_the_golden_vector() {
+        let image = vector::image();
+        assert_eq!(sha256(&image).to_vec(), vector::hex(vector::SHA256));
+        let m = signed_message(1000, vector::VERSION, &sha256(&image)).unwrap();
+        assert_eq!(m, vector::hex(vector::MESSAGE));
+        assert_eq!(signed_message(1000, 1, &[0; 31]), None);
+        let body = signed_commit_body(vector::VERSION, &vector::hex(vector::SIGNATURE)).unwrap();
+        assert_eq!(body, vector::hex(vector::COMMIT_BODY));
+        assert_eq!(signed_commit_body(1, &[0; 63]), None);
+        let names: Vec<_> = (0..4).map(trust_state_name).collect();
+        assert_eq!(
+            names,
+            [Some("unclaimed"), Some("claimed"), Some("rekey"), None]
+        );
+    }
+
+    #[test]
+    fn signed_upload_of_the_golden_vector_installs_and_replay_is_denied() {
+        let image = vector::image();
+        let key = vector::hex(vector::PUBLIC_KEY);
+        let commit = vector::hex(vector::COMMIT_BODY);
+        let dev = DeviceLoader::new(4096);
+        let (dev, r) = dev.step("sys/trust/info", &[]);
+        assert_eq!(r, Ok(Action::TrustInfo(vec![0, 0, 0, 0, 0])));
+        let (dev, r) = dev.step("sys/trust/claim", &key);
+        assert_eq!(r, Ok(Action::Claim));
+        let (dev, r) = dev.step("sys/trust/info", &[]);
+        let Ok(Action::TrustInfo(info)) = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(info[0], 1);
+        assert_eq!(&info[5..], key.as_slice());
+
+        // Claimed: an unsigned upload is denied, nothing activates.
+        let (dev, r) = run(dev, &plan(&image, 256).unwrap());
+        assert_eq!(r, Err(HandlerError::Denied));
+        assert!(!dev.receiving());
+
+        let steps = plan_with_commit(&image, 256, &commit).unwrap();
+        let (dev, r) = run(dev, &steps);
+        assert_eq!(r, Ok(Action::Activate(1000, image_crc32(&image))));
+        let TrustState::Claimed { min_version, .. } = dev.trust() else {
+            panic!()
+        };
+        assert_eq!(min_version, Version(vector::VERSION));
+        // The same signed commit again is a replay.
+        let (_, r) = run(dev, &steps);
+        assert_eq!(r, Err(HandlerError::Denied));
+        // Another image under the same signature fails too.
+        let mut other = image.clone();
+        other[0] ^= 1;
+        let (_, r) = run(
+            DeviceLoader::new(4096).step("sys/trust/claim", &key).0,
+            &plan_with_commit(&other, 256, &commit).unwrap(),
+        );
+        assert_eq!(r, Err(HandlerError::Denied));
+    }
+
+    #[test]
+    fn unclaimed_accepts_unsigned_and_rekey_needs_presence() {
+        let image = [9u8; 40];
+        let (dev, r) = run(DeviceLoader::new(64), &plan(&image, 16).unwrap());
+        assert_eq!(r, Ok(Action::Activate(40, image_crc32(&image))));
+        let key = vector::hex(vector::PUBLIC_KEY);
+        let (dev, _) = dev.step("sys/trust/claim", &key);
+        assert!(dev.trust().is_claimed());
+        // Claimed, no presence: a second claim is denied.
+        let (dev, r) = dev.at(1_000).step("sys/trust/claim", &key);
+        assert_eq!(r, Err(HandlerError::Denied));
+        // Presence opens the window for 60 s; info reports state 2.
+        let dev = dev.assert_presence();
+        assert!(dev.rekey_open());
+        assert_eq!(
+            dev.step("sys/trust/info", &[])
+                .1
+                .map(|a| matches!(a, Action::TrustInfo(b) if b[0] == 2)),
+            Ok(true)
+        );
+        assert!(!dev.at(61_000).rekey_open(), "expired after 60 s");
+        let (dev, r) = dev.at(30_000).step("sys/trust/claim", &key);
+        assert_eq!(r, Ok(Action::Claim));
+        assert!(!dev.rekey_open(), "a claim closes the window");
+        assert_eq!(
+            dev.step("sys/trust/claim", &[0; 31]).1,
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            dev.step("sys/loader/commit", &[0; 5]).1,
+            Err(HandlerError::InvalidRequest)
+        );
     }
 
     #[test]

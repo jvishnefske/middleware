@@ -1,0 +1,12 @@
+{
+  "comment": "middleware signed-payload golden vector; TEST KEY ONLY (seed = 00..1f)",
+  "seed": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "image_len": 1000,
+  "image": "byte i = (i*7+3) & 0xff for i in 0..len",
+  "version": 1761500000,
+  "sha256": "1e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371",
+  "message": "6d772d7061796c6f61642d763100e8030000605bfe681e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371",
+  "signature": "ca90e0aef84dfa5173aed3af1738933d2cebbd3f74012fe398847dad9db8b092fe91b9beaa7b59c6665f41b3abd352ddf890668cf994125438aa084c6a7b9f07",
+  "commit_body": "605bfe68ca90e0aef84dfa5173aed3af1738933d2cebbd3f74012fe398847dad9db8b092fe91b9beaa7b59c6665f41b3abd352ddf890668cf994125438aa084c6a7b9f07"
+}

@@ -4,7 +4,9 @@
 //! same sequence the web page sends (protocol-wasm's `uploadPlan`):
 //! `sys/loader/begin` with `[len][crc32]`, then `sys/loader/chunk` with
 //! `[offset][data]` for each in-order chunk of at most
-//! [`CHUNK_MAX`] bytes, then `sys/loader/commit`. Bodies are written by
+//! [`CHUNK_MAX`] bytes, then `sys/loader/commit`: empty (unsigned) or, with
+//! a [`SignedCommit`] from [`crate::sign::sign_commit`], the 68-byte
+//! `[version][signature]` body. Bodies are written by
 //! [`Command::encode_body`], so they match what the device parses.
 //!
 //! The `corrupt` test hook flips every bit of the first data byte of one
@@ -15,6 +17,7 @@
 
 use middleware::Key;
 use middleware::crc::Crc32;
+use middleware::loader::trust::SignedCommit;
 use middleware::loader::{CHUNK_MAX, Command};
 use std::fmt;
 
@@ -79,8 +82,13 @@ fn step(cmd: &Command<'_>, done: u32) -> Step {
 }
 
 /// The requests that install `image`, with chunk `corrupt` (zero-based)
-/// altered after the CRC is computed, when given.
-pub fn upload_plan(image: &[u8], corrupt: Option<usize>) -> Result<Vec<Step>, PlanError> {
+/// altered after the CRC is computed, when given, and a commit signed with
+/// `auth`, when given.
+pub fn upload_plan(
+    image: &[u8],
+    corrupt: Option<usize>,
+    auth: Option<SignedCommit>,
+) -> Result<Vec<Step>, PlanError> {
     if image.is_empty() {
         return Err(PlanError::Empty);
     }
@@ -112,7 +120,7 @@ pub fn upload_plan(image: &[u8], corrupt: Option<usize>) -> Result<Vec<Step>, Pl
         steps.push(step(&Command::Chunk { offset, data }, end));
         offset = end;
     }
-    steps.push(step(&Command::Commit, len));
+    steps.push(step(&Command::Commit { auth }, len));
     Ok(steps)
 }
 
@@ -136,7 +144,7 @@ mod tests {
             let (next, e) = s.step(&cmd, 1 << 20);
             s = next;
             last = e.map(|e| match e {
-                Effect::Activate { len, crc } => Effect::Activate { len, crc },
+                Effect::Activate { image, auth } => Effect::Activate { image, auth },
                 _ => Effect::None,
             });
             last?;
@@ -147,7 +155,7 @@ mod tests {
     #[test]
     fn plan_has_begin_chunks_commit_and_runs_through_the_loader() {
         let img = image(1300);
-        let steps = upload_plan(&img, None).unwrap();
+        let steps = upload_plan(&img, None, None).unwrap();
         assert_eq!(steps.len(), 1 + 3 + 1);
         assert_eq!(steps[0].key, keys::BEGIN);
         assert_eq!(steps[0].body.len(), 8);
@@ -158,20 +166,37 @@ mod tests {
         assert!(steps[4].body.is_empty());
         let done: Vec<u32> = steps.iter().map(|s| s.done).collect();
         assert_eq!(done, [0, 512, 1024, 1300, 1300]);
-        assert_eq!(
-            run(&steps),
-            Ok(Effect::Activate {
-                len: 1300,
-                crc: Crc32::checksum(&img)
-            })
-        );
+        match run(&steps) {
+            Ok(Effect::Activate { image, auth: None }) => {
+                assert_eq!((image.len, image.crc), (1300, Crc32::checksum(&img)));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn signed_plan_ends_in_a_68_byte_commit_the_loader_passes_on() {
+        use crate::sign::sign_commit;
+        use crate::sign::tests::{COMMIT_BODY, VERSION, unhex, vector_image, vector_seed};
+        use middleware::loader::trust::{SIGNED_COMMIT_LEN, Version};
+        let img = vector_image();
+        let auth = sign_commit(&img, &vector_seed(), Version(VERSION)).unwrap();
+        let steps = upload_plan(&img, None, Some(auth)).unwrap();
+        let commit = steps.last().unwrap();
+        assert_eq!(commit.key, keys::COMMIT);
+        assert_eq!(commit.body.len(), SIGNED_COMMIT_LEN);
+        assert_eq!(commit.body, unhex(COMMIT_BODY));
+        match run(&steps) {
+            Ok(Effect::Activate { auth: Some(a), .. }) => assert_eq!(a, auth),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
     fn corrupt_chunk_keeps_declared_crc_and_fails_commit() {
         let img = image(1300);
-        let good = upload_plan(&img, None).unwrap();
-        let bad = upload_plan(&img, Some(1)).unwrap();
+        let good = upload_plan(&img, None, None).unwrap();
+        let bad = upload_plan(&img, Some(1), None).unwrap();
         assert_eq!(good[0], bad[0], "begin declares the original CRC");
         assert_ne!(good[2].body, bad[2].body);
         assert_eq!(good[2].body.len(), bad[2].body.len());
@@ -185,15 +210,15 @@ mod tests {
 
     #[test]
     fn rejects_empty_images_and_missing_chunks() {
-        assert_eq!(upload_plan(&[], None), Err(PlanError::Empty));
+        assert_eq!(upload_plan(&[], None, None), Err(PlanError::Empty));
         assert_eq!(
-            upload_plan(&image(600), Some(2)),
+            upload_plan(&image(600), Some(2), None),
             Err(PlanError::NoSuchChunk {
                 index: 2,
                 chunks: 2
             })
         );
-        assert!(upload_plan(&image(600), Some(1)).is_ok());
+        assert!(upload_plan(&image(600), Some(1), None).is_ok());
         assert_eq!(chunk_count(512), 1);
         assert_eq!(chunk_count(513), 2);
     }

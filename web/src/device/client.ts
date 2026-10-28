@@ -6,8 +6,13 @@
 // about Web Serial or the DOM: it takes a ReadableStream/WritableStream pair,
 // which is a SerialPort's `readable`/`writable` in the browser and an
 // in-memory pipe in the tests.
+//
+// Trust (U13): `trustInfo` and `trustClaim` speak `sys/trust/*`; a response
+// with wire status 5 rejects with `DeniedError`, whose message says how to
+// recover (the device pins a different key; hold BOOT to re-key).
 
 import type { DeviceInfo, LineEvent, Protocol } from "../protocol/wasm";
+import { DENIED_CODE, TRUST_KEYS, type TrustInfo, claimBody, parseTrustInfo } from "../trust/wire";
 
 export interface ByteStreams {
   readable: ReadableStream<Uint8Array>;
@@ -42,6 +47,25 @@ export class RequestError extends Error {
     super(`${key}: device returned ${status}`);
     this.name = "RequestError";
   }
+}
+
+/** Wire status code of `HandlerError::NotFound`. */
+export const NOT_FOUND_CODE = 1;
+
+/** The device refused with `Denied` (wire code 5): a trust check failed. */
+export class DeniedError extends RequestError {
+  constructor(key: string) {
+    super(key, "Denied", DENIED_CODE);
+    this.name = "DeniedError";
+    this.message = `${key}: Denied by the device. ${deniedHint(key)}`;
+  }
+}
+
+/** Recovery advice for a `Denied` answer to `key`. */
+export function deniedHint(key: string): string {
+  const rekey = "hold BOOT ≥3 s after boot to open the 60 s re-key window";
+  if (key === TRUST_KEYS.claim) return `The device is already claimed by another key — ${rekey}, then claim again.`;
+  return `The device trusts a different key, or this version is not newer than the last one it accepted — ${rekey}.`;
 }
 
 /** No response arrived within the timeout, after all retries. */
@@ -122,7 +146,8 @@ export class DeviceClient {
           const p = this.pending.get(e.id);
           if (!p) break; // stale (answer to a timed-out attempt)
           this.pending.delete(e.id);
-          if (e.statusCode) p.reject(new RequestError(p.key, e.status ?? "error", e.statusCode));
+          if (e.statusCode === DENIED_CODE) p.reject(new DeniedError(p.key));
+          else if (e.statusCode) p.reject(new RequestError(p.key, e.status ?? "error", e.statusCode));
           else p.resolve(e.payload);
           break;
         }
@@ -206,6 +231,24 @@ export class DeviceClient {
     const info = this.proto.decodeDeviceInfo(body);
     if (!info) throw new Error("malformed sys/info response");
     return info;
+  }
+
+  /** Reads `sys/trust/info`; null when the firmware predates trust and
+   * answers NotFound (it accepts unsigned payloads only). */
+  async trustInfo(opts?: RequestOptions): Promise<TrustInfo | null> {
+    try {
+      return parseTrustInfo(await this.request(TRUST_KEYS.info, new Uint8Array(), opts));
+    } catch (e) {
+      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
+      throw e;
+    }
+  }
+
+  /** `sys/trust/claim`: pins `publicKey` (raw 32 bytes). Rejects with
+   * `DeniedError` unless the device is unclaimed or its re-key window is
+   * open. */
+  async trustClaim(publicKey: Uint8Array, opts?: RequestOptions): Promise<void> {
+    await this.request(TRUST_KEYS.claim, claimBody(publicKey), opts);
   }
 
   /** `sys/payload/start`. */

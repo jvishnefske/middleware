@@ -7,6 +7,11 @@
 //!   optionally `sys/payload/start`. A failed step is wrapped in
 //!   [`Error::Upload`] with its index and key. Retries and the longer
 //!   `begin` timeout come from the link's [`Timeouts`](crate::link::Timeouts).
+//!   With [`UploadOptions::auth`] the commit is signed (see
+//!   [`crate::sign`]); a device with a pinned key refuses an unsigned or
+//!   stale commit with `Denied` and keeps its installed payload.
+//! * [`Device::trust_info`], [`Device::trust_claim`] — `sys/trust/info`
+//!   (decoded with [`TrustInfo::decode`]) and `sys/trust/claim`.
 //! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`.
 //! * [`Device::next_event`] — the next publication or noise run, for
 //!   `monitor`.
@@ -14,6 +19,7 @@
 use crate::error::Error;
 use crate::link::{Event, Link, Transport};
 use crate::plan::upload_plan;
+use middleware::loader::trust::{PublicKey, SignedCommit, TrustInfo};
 use middleware::loader::{Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
 
@@ -62,6 +68,9 @@ pub struct UploadOptions {
     /// Test hook: corrupt this chunk's data (zero-based) while declaring
     /// the original image's CRC, so commit fails on the device.
     pub corrupt_chunk: Option<usize>,
+    /// Sign the commit with this authorisation; `None` sends an unsigned
+    /// commit.
+    pub auth: Option<SignedCommit>,
 }
 
 /// Progress after one acknowledged upload step.
@@ -108,6 +117,19 @@ impl<T: Transport> Device<T> {
         })
     }
 
+    /// `sys/trust/info`.
+    pub fn trust_info(&mut self) -> Result<TrustInfo, Error> {
+        let body = self.link.command(&Command::TrustInfo)?;
+        TrustInfo::decode(&body).ok_or_else(|| Error::Malformed {
+            key: keys::TRUST_INFO.as_str().to_owned(),
+        })
+    }
+
+    /// `sys/trust/claim`: pins `key` as the payload signing key.
+    pub fn trust_claim(&mut self, key: PublicKey) -> Result<(), Error> {
+        self.link.command(&Command::TrustClaim { key }).map(drop)
+    }
+
     /// `sys/payload/start`.
     pub fn start(&mut self) -> Result<(), Error> {
         self.link.command(&Command::Start).map(drop)
@@ -125,7 +147,7 @@ impl<T: Transport> Device<T> {
         opts: UploadOptions,
         mut progress: impl FnMut(Progress),
     ) -> Result<(), Error> {
-        let plan = upload_plan(image, opts.corrupt_chunk)?;
+        let plan = upload_plan(image, opts.corrupt_chunk, opts.auth)?;
         let total = u32::try_from(image.len()).unwrap_or(u32::MAX);
         let steps = plan.len() + usize::from(opts.start);
         for (i, s) in plan.iter().enumerate() {
@@ -167,7 +189,10 @@ mod tests {
     use super::*;
     use crate::fake::{FakeDevice, Script};
     use crate::link::Timeouts;
+    use crate::sign::sign_commit;
+    use crate::sign::tests::{vector_image, vector_seed};
     use middleware::crc::Crc32;
+    use middleware::loader::trust::{TrustCode, TrustState, Version};
     use middleware::transport::HandlerError;
     use std::time::Duration;
 
@@ -210,7 +235,7 @@ mod tests {
             &img,
             UploadOptions {
                 start: true,
-                corrupt_chunk: None,
+                ..UploadOptions::default()
             },
             |p| seen.push((p.step, p.steps, p.done, p.total)),
         )
@@ -297,8 +322,8 @@ mod tests {
             .upload(
                 &img,
                 UploadOptions {
-                    start: false,
                     corrupt_chunk: Some(1),
+                    ..UploadOptions::default()
                 },
                 |_| {},
             )
@@ -333,7 +358,7 @@ mod tests {
                 &img,
                 UploadOptions {
                     start: true,
-                    corrupt_chunk: None,
+                    ..UploadOptions::default()
                 },
                 |_| {},
             )
@@ -393,6 +418,136 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Noise(n) if n.len() == 200))
         );
+    }
+
+    fn signed(img: &[u8], version: u32) -> UploadOptions {
+        let auth = sign_commit(img, &vector_seed(), Version(version));
+        UploadOptions {
+            auth,
+            ..UploadOptions::default()
+        }
+    }
+
+    #[test]
+    fn trust_info_round_trips_through_claim() {
+        let mut d = device(FakeDevice::new("esp32s3", "0.1.0", 4096, true));
+        let i = d.trust_info().unwrap();
+        assert_eq!(i.state, TrustState::Unclaimed);
+        assert_eq!(i.code(), TrustCode::Unclaimed);
+        let key = vector_seed().public_key();
+        d.trust_claim(key).unwrap();
+        let i = d.trust_info().unwrap();
+        assert_eq!(
+            i.state,
+            TrustState::Claimed {
+                key,
+                min_version: Version(0)
+            }
+        );
+        assert_eq!(i.code(), TrustCode::Claimed);
+    }
+
+    #[test]
+    fn second_claim_is_denied_with_an_explanation() {
+        let mut d = device(FakeDevice::new("esp32s3", "0.1.0", 4096, true));
+        d.trust_claim(vector_seed().public_key()).unwrap();
+        let err = d
+            .trust_claim(crate::sign::Seed::new([42; 32]).public_key())
+            .unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied));
+        assert!(err.to_string().contains("re-key window"), "{err}");
+        // With the window open (BOOT held), the re-key is accepted.
+        let fake = FakeDevice::new("esp32s3", "0.1.0", 4096, true)
+            .with_claim(vector_seed().public_key())
+            .with_rekey_window();
+        let mut d = device(fake);
+        assert_eq!(d.trust_info().unwrap().code(), TrustCode::RekeyOpen);
+        let new = crate::sign::Seed::new([42; 32]).public_key();
+        d.trust_claim(new).unwrap();
+        let i = d.trust_info().unwrap();
+        assert_eq!(i.code(), TrustCode::Claimed, "a claim closes the window");
+        assert_eq!(
+            i.state,
+            TrustState::Claimed {
+                key: new,
+                min_version: Version(0)
+            }
+        );
+        let err = d.trust_claim(vector_seed().public_key()).unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied));
+    }
+
+    #[test]
+    fn claim_then_signed_upload_installs_and_raises_min_version() {
+        let img = vector_image();
+        let mut d = device(FakeDevice::new("esp32s3", "0.1.0", 4096, true));
+        d.trust_claim(vector_seed().public_key()).unwrap();
+        d.upload(&img, signed(&img, 7), |_| {}).unwrap();
+        assert_eq!(d.link().transport().installed(), Some(img.as_slice()));
+        match d.trust_info().unwrap().state {
+            TrustState::Claimed { min_version, .. } => assert_eq!(min_version, Version(7)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_upload_to_a_claimed_device_is_denied() {
+        let old = image(100);
+        let mut d = device(FakeDevice::new("esp32s3", "0.1.0", 4096, true));
+        d.upload(&old, UploadOptions::default(), |_| {}).unwrap();
+        d.trust_claim(vector_seed().public_key()).unwrap();
+        let err = d
+            .upload(&image(200), UploadOptions::default(), |_| {})
+            .unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied));
+        let s = err.to_string();
+        assert!(
+            s.contains("sys/loader/commit") && s.contains("pinned key"),
+            "{s}"
+        );
+        assert_eq!(
+            d.link().transport().installed(),
+            Some(old.as_slice()),
+            "old image kept"
+        );
+        assert_eq!(d.info().unwrap().status, PayloadStatus::Stopped);
+        // Signed by another key: denied too.
+        let other = crate::sign::Seed::new([42; 32]);
+        let bad = UploadOptions {
+            auth: sign_commit(&image(200), &other, Version(9)),
+            ..UploadOptions::default()
+        };
+        let err = d.upload(&image(200), bad, |_| {}).unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied));
+        assert_eq!(d.link().transport().installed(), Some(old.as_slice()));
+    }
+
+    #[test]
+    fn replayed_or_older_version_is_denied_and_keeps_the_image() {
+        let first = vector_image();
+        let mut d = device(FakeDevice::new("esp32s3", "0.1.0", 4096, true));
+        d.trust_claim(vector_seed().public_key()).unwrap();
+        d.upload(&first, signed(&first, 10), |_| {}).unwrap();
+        // The same signed upload replayed.
+        let err = d.upload(&first, signed(&first, 10), |_| {}).unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied));
+        // An older, validly signed image (rollback).
+        let older = image(300);
+        let err = d.upload(&older, signed(&older, 9), |_| {}).unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied));
+        assert_eq!(d.link().transport().installed(), Some(first.as_slice()));
+        // A newer one installs.
+        d.upload(&older, signed(&older, 11), |_| {}).unwrap();
+        assert_eq!(d.link().transport().installed(), Some(older.as_slice()));
+    }
+
+    #[test]
+    fn unclaimed_device_accepts_signed_and_unsigned_commits() {
+        let img = vector_image();
+        let mut d = device(FakeDevice::new("esp32s3", "0.1.0", 4096, true));
+        d.upload(&img, signed(&img, 3), |_| {}).unwrap();
+        d.upload(&img, UploadOptions::default(), |_| {}).unwrap();
+        assert_eq!(d.trust_info().unwrap().state, TrustState::Unclaimed);
     }
 
     #[test]

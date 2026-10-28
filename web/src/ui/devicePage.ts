@@ -1,15 +1,21 @@
-// Device tab (U2, U3): console, sys/info, publications, publish form, and
-// payload upload/start/stop over the base firmware's serial protocol.
+// Device tab (U2, U3, U13): console, sys/info, publications, publish form,
+// the Trust panel, and payload upload/start/stop over the base firmware's
+// serial protocol. Uploads (including payloads handed over by the Editor and
+// Blocks tabs) go through `trustedUpload`: signed when the device pins this
+// browser's key, unsigned after a confirmation when it is unclaimed, and
+// unsigned with a note when its firmware predates trust.
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { DeviceClient } from "../device/client";
-import { firmwareRunsPayloads, uploadPayload } from "../device/upload";
+import { firmwareRunsPayloads, trustedUpload } from "../device/upload";
+import { indexedDbStorage } from "../trust/keyStore";
 import type { DeviceInfo } from "../protocol/wasm";
 import { describePort } from "../serial/ports";
 import type { App, PayloadHandoff } from "./app";
 import { errorText, formatBytes, h, parseHex, progressBar } from "./dom";
+import { modal, trustPanel } from "./trustPanel";
 
 const BAUD = 115200;
 const MAX_ROWS = 100;
@@ -21,6 +27,10 @@ export function devicePage(app: App): HTMLElement {
   let client: DeviceClient | null = null;
   let port: SerialPort | null = null;
   let offered: PayloadHandoff | null = null;
+  // The user agreed to unsigned uploads to this unclaimed device; reset on
+  // each connection.
+  let unsignedOk = false;
+  const trust = trustPanel(indexedDbStorage());
 
   // ---- console
   const termEl = h("div", { class: "terminal" });
@@ -122,6 +132,26 @@ export function devicePage(app: App): HTMLElement {
   const stopBtn = h("button", { disabled: true }, "Stop");
   const upBar = progressBar();
   const upMsg = h("span", { class: "muted" });
+  const trustNote = h("p", { class: "muted" });
+  trust.onChange(() => {
+    const n = trust.uploadNote();
+    trustNote.textContent = n.text;
+    trustNote.className = n.warn ? "note" : "muted";
+  });
+
+  async function confirmUnsigned(why: "unclaimed" | "legacy-firmware"): Promise<boolean> {
+    if (why === "legacy-firmware" || unsignedOk) return true;
+    const r = await modal(
+      "Upload unsigned?",
+      [
+        h("p", {}, "This device is unclaimed, so it accepts any payload, signed or not, from anyone with a cable."),
+        h("p", {}, "Claim it in the Trust panel to pin your key; after that it installs only payloads you signed."),
+      ],
+      "Upload unsigned",
+    );
+    unsignedOk = r !== null;
+    return unsignedOk;
+  }
 
   app.onPayloadOffered((p) => {
     offered = p;
@@ -144,15 +174,23 @@ export function devicePage(app: App): HTMLElement {
       const p = await payloadBytes();
       const start = runtime && autoStart.checked;
       upMsg.textContent = `Uploading ${p.name} ...`;
-      await uploadPayload(client, proto, p.wasm, {
+      const sent = await trustedUpload(client, proto, p.wasm, trust.key(), {
         start,
         onProgress: (d, t) => upBar.set(d, t),
+        confirmUnsigned,
       });
-      upMsg.textContent = `Installed ${p.name} (${p.wasm.length} bytes)${start ? " and started" : runtime ? "" : " (stored only: this firmware does not run payloads)"}.`;
+      const how =
+        sent.kind === "signed"
+          ? ` signed, version ${sent.version}${sent.bumped ? " (warning: the clock is not ahead of the device's last version, so it was bumped to min_version + 1)" : ""}`
+          : sent.reason === "unclaimed"
+            ? " unsigned (device unclaimed)"
+            : " unsigned (this firmware predates signed payloads)";
+      upMsg.textContent = `Installed ${p.name} (${p.wasm.length} bytes),${how}${start ? ", and started" : runtime ? "" : " (stored only: this firmware does not run payloads)"}.`;
     } catch (e) {
       upMsg.textContent = errorText(e);
     } finally {
       upBtn.disabled = !client;
+      await trust.refresh();
     }
   });
   startBtn.addEventListener("click", () => client?.startPayload().catch((e) => note(errorText(e))));
@@ -190,6 +228,7 @@ export function devicePage(app: App): HTMLElement {
       /* already closed or lost */
     }
     setConnected(false);
+    trust.setClient(null);
     app.ports.released(OWNER);
   }
 
@@ -220,6 +259,8 @@ export function devicePage(app: App): HTMLElement {
     setConnected(true);
     note(`connected to ${describePort(p.getInfo())} at ${BAUD} baud`);
     await refreshInfo();
+    unsignedOk = false;
+    trust.setClient(client);
   }
 
   connBtn.addEventListener("click", async () => {
@@ -255,6 +296,8 @@ export function devicePage(app: App): HTMLElement {
       h("div", {}, h("h3", {}, "Console"), termEl),
       h("div", {}, h("h3", {}, "Device info"), infoEl),
     ),
+    h("h3", {}, "Trust"),
+    trust.el,
     h("h3", {}, "Publish"),
     pubForm,
     h("h3", {}, "Payload"),
@@ -264,6 +307,7 @@ export function devicePage(app: App): HTMLElement {
       h("label", {}, useFile, " File ", wasmFile),
       h("label", {}, useEditor, " ", fromEditor),
       h("p", { class: "row" }, upBtn, h("label", {}, autoStart, " start after upload"), startBtn, stopBtn, autoStartNote),
+      trustNote,
       upBar.el,
       upMsg,
     ),

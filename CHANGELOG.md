@@ -1,9 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
-### ESP base firmware
+### Signed payloads (trust, breaking)
+- New `loader::trust`: Ed25519 signed payload commits with a key pinned on first use. Wire types are always built (`PublicKey`, `Signature`, `Version`, `SignedCommit`, `TrustState`, `TrustInfo`, `TrustCode`, `Window`, `signed_message`); the new no_std feature `trust` adds SHA-256 hashing in the loader (`loader::sha256::ImageHash`, a `Copy` value over `sha2::compress256`) and `TrustState::claim` / `TrustState::accept_commit` (`ed25519-dalek` 2.2, `verify_strict`, no default features). (T1–T6)
+- New system keys `sys/trust/info` and `sys/trust/claim`; `sys/loader/commit` takes an empty body or `[version u32][signature 64]`. (T1)
+- **Breaking:** `Command::Commit` is `Command::Commit { auth }`; new `Command::TrustInfo` and `Command::TrustClaim { key }`. `Effect::Activate` is `Effect::Activate { image: ImageDigest, auth }`, where `ImageDigest` has `len`, `crc` and (with `trust`) `sha256`.
+- **Breaking:** new `HandlerError::Denied`, wire code 5, gRPC `PERMISSION_DENIED` (and `UNAUTHENTICATED` maps back to it). Exhaustive matches on `HandlerError` need a new arm. (T10)
+- `scripts/check-features.sh` also builds `trust` and `trust,serial` for `thumbv6m-none-eabi`. (T11)
+
+### ESP base firmware (`firmware/`)
 - ESP32-S3: `heap_main` 240 → 176 KiB and the linear-memory cap 192 → 128 KiB (two pages), so the main stack grows from about 17 KiB to 81 KiB. Loading a payload (wasmi parse plus `init`, about 31 KiB deep) overflowed into the stack guard on hardware (2024 Kansas badge, ESP32-S3 v0.2); the echo payload now autostarts and echoes.
+- `trust` enabled on every chip: the dispatcher keeps the pinned key, refuses unsigned, wrongly signed and non-increasing commits with `Denied` (the previous payload stays installed), answers `sys/trust/*`, and logs claims and refusals on `sys/log`. (T4–T6)
+- New `trust` partition in `partitions.csv` (0x350000, 0x2000: two sectors written alternately, magic/format/sequence/CRC-32), `esp_base::trust_store`. A raised `min_version` is saved between the image CRC check and the slot header (`PayloadStore::activate_with`). (T8, T9)
+- Re-key by physical presence: hold BOOT (GPIO0 on ESP32/ESP32-S3, GPIO9 on ESP32-C3) for 3 s after boot to open a 60 s window (`esp_base::presence`, shell task `presence::watch`). (T7)
+- `Context` has a new `rekey_window` field; `Action::Activate` carries `trust`, and there is a new `Action::Claim` (with `trust`).
+- The ESP8266 firmware builds `esp-base` without `trust`: `sys/trust/*` is `NotFound` and commits are not checked.
+
+### mwctl and web
+- `mwctl key new|pub <file>`, `mwctl trust info`, `mwctl trust claim --key <file>`, `mwctl upload <wasm> --key <file> [--version N]` (default version: Unix seconds); `Denied` explanations. (T12)
+- protocol-wasm: `sha256`, `signedMessage`, `encodeSignedCommit`, `decodeTrustInfo`, `trustStateName`, `uploadPlanSigned`; the simulated `DeviceLoader` runs the trust rules (`setNow`, `assertPresence`, `trustInfo`); `statusName(5)` is "Denied". (T13)
+- web: the Device tab's Trust panel keeps a non-extractable Ed25519 key in IndexedDB with a passphrase-wrapped backup file (PBKDF2-SHA-256 600 000 iterations, AES-256-GCM), claims devices and signs Editor and Blocks uploads automatically. (U13–U15)
+- design.md: the host tool requirement T1 is renamed H1.
 
 ## 0.3.0
 

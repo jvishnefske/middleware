@@ -8,20 +8,26 @@
 //! [`Outbound`] sink (in the shell, the UART [`crate::link::Port`]).
 //!
 //! * [`Controller::boot`] opens the store over the whole payload region
-//!   (region-relative base `0`, [`REGION_SIZE`] bytes, images capped at the
-//!   chip profile's `max_image`), verifies a stored image's CRC, and starts
-//!   in `Stopped` if it is valid, else `Empty`. It logs the firmware banner
+//!   (region-relative base `0`, [`REGION_SIZE`] bytes split into two
+//!   128 KiB slots, images capped at the chip profile's `max_image` of
+//!   124 KiB), which selects the newest slot whose image matches its CRC,
+//!   verifies it, and starts in `Stopped` if one is valid, else `Empty`. It logs the firmware banner
 //!   and the stored image on `sys/log` and publishes the status on
 //!   `sys/payload/status`.
 //! * [`Controller::on_frame`] answers requests: `sys/info`, the loader
-//!   (`begin` erases, `chunk` writes, `commit` activates),
-//!   `sys/payload/stop` (`Ok`, nothing runs). `sys/payload/start` is
+//!   (`begin` erases the inactive slot, `chunk` writes it, `commit`
+//!   activates it), so a rejected or interrupted upload leaves the previous
+//!   image installed and the status returns to `Stopped`;
+//!   `sys/payload/stop` (`Ok`, nothing runs). Signed payloads are not
+//!   enabled here (`esp-base` without its `trust` feature): `sys/trust/*`
+//!   is `NotFound` and a signature in a commit body is accepted unchecked. `sys/payload/start` is
 //!   answered `NotFound` by dispatch because [`Context::runtime`] is
 //!   `false`, exactly as on the ESP32-C3 build without `wasm`. Publications
 //!   and responses from the host are ignored: there is no payload to
 //!   deliver them to.
 //! * A failed storage action logs `storage: <error>`, applies
-//!   [`State::storage_failed`] and replies `Internal`. A successful
+//!   [`State::storage_failed`] (back to `Stopped` if an image is installed,
+//!   else `Empty`) and replies `Internal`. A successful
 //!   activate logs `payload installed (<n> bytes)`. Every status change is
 //!   published.
 //!
@@ -117,6 +123,7 @@ impl<F: NorFlash> Controller<F> {
             firmware: FIRMWARE,
             capacity,
             runtime: profile.runtime,
+            rekey_window: false,
         };
         log(
             out,
@@ -190,7 +197,9 @@ impl<F: NorFlash> Controller<F> {
         match outcome.action {
             Action::Erase { len } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
-            Action::Activate { len, crc } => self.store()?.activate(len, crc),
+            // Built without `trust`: commits are never checked, so there is
+            // never a trust record to persist.
+            Action::Activate { len, crc, .. } => self.store()?.activate(len, crc),
             Action::None | Action::Start | Action::Stop => Ok(()),
         }
     }
@@ -346,7 +355,7 @@ mod tests {
         assert_eq!(
             info(&mut ctl, &mut rec),
             (
-                252 * 1024,
+                124 * 1024,
                 PayloadStatus::Empty,
                 "esp8266".into(),
                 FIRMWARE.into()
@@ -417,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_crc_commit_leaves_no_image() {
+    fn wrong_crc_commit_on_empty_flash_leaves_no_image() {
         let mut flash = ram();
         let (mut ctl, mut rec) = boot(&mut flash);
         let img = image(700);
@@ -428,6 +437,68 @@ mod tests {
         assert_eq!(ctl.state().status(), PayloadStatus::Empty);
         let (mut ctl, mut rec) = boot(&mut flash);
         assert_eq!(info(&mut ctl, &mut rec).1, PayloadStatus::Empty);
+    }
+
+    #[test]
+    fn rejected_upload_keeps_previous_image() {
+        let mut flash = ram();
+        let (mut ctl, mut rec) = boot(&mut flash);
+        let old = image(700);
+        upload(&mut ctl, &mut rec, &old, Crc32::checksum(&old)).unwrap();
+        // Like `mwctl upload --corrupt-chunk`: the begin CRC does not match
+        // the bytes sent, so commit is refused.
+        let new: Vec<u8> = image(900).iter().map(|b| b ^ 0x5A).collect();
+        assert_eq!(
+            upload(&mut ctl, &mut rec, &new, Crc32::checksum(&new) ^ 1),
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(ctl.state().status(), PayloadStatus::Stopped);
+        let stopped = PayloadStatus::Stopped as u8;
+        let loading = PayloadStatus::Loading as u8;
+        assert_eq!(rec.statuses()[1..], [loading, stopped, loading, stopped]);
+
+        // Reboot: the previous image is still the stored one.
+        let (mut ctl, mut rec) = boot(&mut flash);
+        assert_eq!(info(&mut ctl, &mut rec).1, PayloadStatus::Stopped);
+        assert!(
+            rec.logs()[1].starts_with(&format!(
+                "stored payload: 700 bytes, crc {:08x}",
+                Crc32::checksum(&old)
+            )),
+            "{:?}",
+            rec.logs()
+        );
+    }
+
+    #[test]
+    fn uploads_alternate_slots_and_newest_wins() {
+        let mut flash = ram();
+        let (mut ctl, mut rec) = boot(&mut flash);
+        let first = image(300);
+        upload(&mut ctl, &mut rec, &first, Crc32::checksum(&first)).unwrap();
+        let second: Vec<u8> = image(400).iter().map(|b| !b).collect();
+        upload(&mut ctl, &mut rec, &second, Crc32::checksum(&second)).unwrap();
+        const SLOT_B: u32 = REGION_SIZE / 2;
+        assert_eq!(
+            flash.raw().byte(REGION_BASE + SECTOR),
+            first[0],
+            "slot A kept"
+        );
+        assert_eq!(
+            flash.raw().byte(REGION_BASE + SLOT_B + SECTOR),
+            second[0],
+            "second image in slot B"
+        );
+        let (mut ctl, mut rec) = boot(&mut flash);
+        assert_eq!(info(&mut ctl, &mut rec).1, PayloadStatus::Stopped);
+        assert!(rec.logs()[1].starts_with("stored payload: 400 bytes"));
+        // A corrupt newest slot falls back to the older image.
+        flash
+            .raw_mut()
+            .corrupt(REGION_BASE + SLOT_B + SECTOR + 1, 0);
+        let (mut ctl, mut rec) = boot(&mut flash);
+        assert_eq!(info(&mut ctl, &mut rec).1, PayloadStatus::Stopped);
+        assert!(rec.logs()[1].starts_with("stored payload: 300 bytes"));
     }
 
     #[test]
@@ -446,7 +517,7 @@ mod tests {
     fn oversized_and_unknown_requests_are_refused() {
         let mut flash = ram();
         let (mut ctl, mut rec) = boot(&mut flash);
-        let too_big = begin_body(252 * 1024 + 1, 0);
+        let too_big = begin_body(124 * 1024 + 1, 0);
         assert_eq!(
             req(&mut ctl, &mut rec, 1, keys::BEGIN, &too_big),
             Err(HandlerError::BufferTooSmall)
@@ -474,10 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn largest_image_fits_the_region() {
+    fn largest_image_fits_a_slot() {
         let mut flash = ram();
         let (mut ctl, mut rec) = boot(&mut flash);
-        let img = image(252 * 1024);
+        let img = image(124 * 1024);
         assert_eq!(
             upload(&mut ctl, &mut rec, &img, Crc32::checksum(&img)),
             Ok(vec![])

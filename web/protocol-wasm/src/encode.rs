@@ -79,6 +79,7 @@ pub const fn status_name(status: Option<HandlerError>) -> &'static str {
         Some(HandlerError::InvalidRequest) => "InvalidRequest",
         Some(HandlerError::BufferTooSmall) => "BufferTooSmall",
         Some(HandlerError::Internal) => "Internal",
+        Some(HandlerError::Denied) => "Denied",
     }
 }
 
@@ -126,6 +127,7 @@ mod tests {
         assert_eq!(status_name(status_from_code(1)), "NotFound");
         assert_eq!(status_name(status_from_code(2)), "InvalidRequest");
         assert_eq!(status_name(status_from_code(3)), "BufferTooSmall");
+        assert_eq!(status_name(status_from_code(5)), "Denied");
         assert_eq!(status_name(status_from_code(99)), "Internal");
     }
 }

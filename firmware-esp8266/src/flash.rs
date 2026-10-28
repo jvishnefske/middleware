@@ -11,7 +11,7 @@
 //! | constant          | value      | meaning                                  |
 //! |-------------------|------------|------------------------------------------|
 //! | [`REGION_BASE`]   | `0x100000` | absolute flash address of the region     |
-//! | [`REGION_SIZE`]   | `0x40000`  | 256 KiB: header sector + 252 KiB image   |
+//! | [`REGION_SIZE`]   | `0x40000`  | 256 KiB: two 128 KiB payload slots       |
 //!
 //! Offsets passed to the `NorFlash` methods are **region relative**
 //! (`0..REGION_SIZE`); the driver adds [`REGION_BASE`]. The store is

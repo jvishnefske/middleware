@@ -9,6 +9,10 @@
 //! | ESP32-S3 | 43 / 44     | yes             | 0–18 21 38–42 45–48               |
 //! | ESP32-C3 | 21 / 20     | yes             | 0–11                              |
 //!
+//! The BOOT button ([`Board::boot`], physical presence for re-keying) is
+//! GPIO0 on ESP32 and ESP32-S3, sampled through the pin bank, and GPIO9 on
+//! ESP32-C3, owned by the shell (no pin bank without `wasm`).
+//!
 //! The pin lists hand pins to the [`PinBank`], which drops any the profile
 //! reserves, so the pure tables in `esp_base::chip` stay authoritative.
 //!
@@ -20,6 +24,8 @@ use esp_base::chip::Profile;
 use esp_hal::Async;
 use esp_hal::peripherals::{FLASH, FROM_CPU_INTR0, Peripherals, TIMG0};
 use esp_hal::uart::{Config as UartConfig, ConfigError, Uart};
+
+use super::presence::BootButton;
 
 #[cfg(feature = "wasm")]
 use {
@@ -72,6 +78,8 @@ pub struct Board {
     pub usb: UsbSerialJtag<'static, Async>,
     /// SPI flash.
     pub flash: FLASH<'static>,
+    /// The BOOT button, for physical presence ([`super::presence`]).
+    pub boot: BootButton,
     /// Pins available to payloads.
     #[cfg(feature = "wasm")]
     pub pins: PinBank,
@@ -136,6 +144,7 @@ pub fn split(p: Peripherals) -> Board {
         sw_int: p.FROM_CPU_INTR0,
         uart: uart(p.UART0, p.GPIO1, p.GPIO3),
         flash: p.FLASH,
+        boot: BootButton::in_bank(0),
         #[cfg(feature = "wasm")]
         pins: pin_bank!(p;
             0 => GPIO0, 2 => GPIO2, 4 => GPIO4, 5 => GPIO5,
@@ -158,6 +167,7 @@ pub fn split(p: Peripherals) -> Board {
         uart: uart(p.UART0, p.GPIO43, p.GPIO44),
         usb: UsbSerialJtag::new(p.USB_DEVICE).into_async(),
         flash: p.FLASH,
+        boot: BootButton::in_bank(0),
         #[cfg(feature = "wasm")]
         pins: pin_bank!(p;
             0 => GPIO0, 1 => GPIO1, 2 => GPIO2, 3 => GPIO3, 4 => GPIO4, 5 => GPIO5,
@@ -181,6 +191,14 @@ pub fn split(p: Peripherals) -> Board {
         uart: uart(p.UART0, p.GPIO21, p.GPIO20),
         usb: UsbSerialJtag::new(p.USB_DEVICE).into_async(),
         flash: p.FLASH,
+        // No runtime on ESP32-C3, so no pin bank: the shell owns GPIO9.
+        #[cfg(not(feature = "wasm"))]
+        boot: BootButton::owned(esp_hal::gpio::Input::new(
+            p.GPIO9,
+            esp_hal::gpio::InputConfig::default().with_pull(esp_hal::gpio::Pull::Up),
+        )),
+        #[cfg(feature = "wasm")]
+        boot: BootButton::in_bank(9),
         #[cfg(feature = "wasm")]
         pins: pin_bank!(p;
             0 => GPIO0, 1 => GPIO1, 2 => GPIO2, 3 => GPIO3, 4 => GPIO4, 5 => GPIO5,

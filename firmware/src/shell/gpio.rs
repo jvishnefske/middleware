@@ -67,6 +67,10 @@ struct Slot {
     pin: Flex<'static>,
     mode: Mode,
     edge: Edge,
+    /// The payload enabled the pull-down (an input that reads low unpressed).
+    /// The payload configured this input with the pull-up (the only
+    /// configuration in which a low level means the button is pressed).
+    pull_up: bool,
 }
 
 impl Slot {
@@ -98,7 +102,7 @@ impl PinBank {
             && !self.profile.is_reserved(n)
             && let Some(slot) = self.slots.get_mut(usize::from(n))
         {
-            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off });
+            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off, pull_up: false });
         }
     }
 
@@ -119,6 +123,31 @@ impl PinBank {
             slot.pin.set_input_enable(false);
             slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
             slot.mode = Mode::Idle;
+            slot.pull_up = false;
+        }
+    }
+
+    /// Samples the BOOT button on pin `n` for the presence detector:
+    /// `Some(true)` when it reads low (pressed). An idle pin is read with
+    /// the pull-up briefly enabled and returned to high impedance; a
+    /// payload's input counts only when the payload enabled the pull-up.
+    /// `None` when the pin is missing, an output, routed to a peripheral,
+    /// or an input without pull-up (floating or pulled down could read low
+    /// with nobody pressing), so a payload can never fake a press; a `None`
+    /// sample also restarts the 3 s hold.
+    pub fn boot_button(&mut self, n: u8) -> Option<bool> {
+        let slot = self.slots.get_mut(usize::from(n))?.as_mut()?;
+        match slot.mode {
+            Mode::Idle => {
+                slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::Up));
+                slot.pin.set_input_enable(true);
+                let low = slot.pin.is_low();
+                slot.pin.set_input_enable(false);
+                slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
+                Some(low)
+            }
+            Mode::Input if slot.pull_up => Some(slot.pin.is_low()),
+            Mode::Input | Mode::Output | Mode::Peripheral => None,
         }
     }
 
@@ -147,6 +176,7 @@ impl PinBank {
         slot.pin.apply_input_config(&InputConfig::default().with_pull(pull));
         slot.pin.set_input_enable(true);
         slot.mode = Mode::Input;
+        slot.pull_up = pull == HalPull::Up;
         Ok(())
     }
 
@@ -259,6 +289,12 @@ impl PinHome {
     /// Installs the bank at boot.
     pub fn install(&self, bank: PinBank) {
         self.with_home(|h| h.bank = Some(bank));
+    }
+
+    /// Samples the BOOT button on pin `n` ([`PinBank::boot_button`]);
+    /// `None` before the bank is installed or while it is borrowed.
+    pub fn boot_button(&self, n: u8) -> Option<bool> {
+        self.with_home(|h| h.bank.as_mut().and_then(|b| b.boot_button(n))).flatten()
     }
 
     /// Takes the lease for a payload, with every pin released; `None` when

@@ -1,8 +1,14 @@
 # ESP base firmware partition table (4 MiB flash minimum).
-# `payload` holds one WASM image: header sector at 0x310000, image from
-# 0x311000 (see src/image.rs). The firmware finds it by label at runtime.
+# `payload` holds two 128 KiB WASM image slots (see src/image.rs): slot A
+# header sector at 0x310000, image from 0x311000; slot B header sector at
+# 0x330000, image from 0x331000. Each slot takes up to 124 KiB, above every
+# ESP32 chip's max_image. The firmware finds it by label at runtime.
+# `trust` holds the pinned payload-signing key and min_version (see
+# src/trust_store.rs): two 4 KiB sectors written alternately, so a power
+# cut while one is rewritten leaves the other's record intact.
 # Name,    Type, SubType,   Offset,   Size,     Flags
 nvs,       data, nvs,       0x9000,   0x6000,
 phy_init,  data, phy,       0xf000,   0x1000,
 factory,   app,  factory,   0x10000,  0x300000,
 payload,   data, undefined, 0x310000, 0x40000,
+trust,     data, undefined, 0x350000, 0x2000,

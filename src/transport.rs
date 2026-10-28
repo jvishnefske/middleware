@@ -227,6 +227,11 @@ pub enum HandlerError {
     BufferTooSmall,
     /// The handler failed for an application reason.
     Internal,
+    /// The request was well formed but refused by policy: a payload commit
+    /// that is unsigned, badly signed or a rollback on a device with a
+    /// pinned key, or a key claim on an already claimed device outside the
+    /// re-key window ([`crate::loader::trust`]).
+    Denied,
 }
 
 impl HandlerError {
@@ -237,6 +242,7 @@ impl HandlerError {
             HandlerError::InvalidRequest => 2,
             HandlerError::BufferTooSmall => 3,
             HandlerError::Internal => 4,
+            HandlerError::Denied => 5,
         }
     }
 
@@ -246,6 +252,7 @@ impl HandlerError {
             1 => HandlerError::NotFound,
             2 => HandlerError::InvalidRequest,
             3 => HandlerError::BufferTooSmall,
+            5 => HandlerError::Denied,
             _ => HandlerError::Internal,
         }
     }
@@ -339,8 +346,11 @@ mod tests {
             HandlerError::InvalidRequest,
             HandlerError::BufferTooSmall,
             HandlerError::Internal,
+            HandlerError::Denied,
         ] {
             assert_eq!(HandlerError::from_code(e.code()), e);
         }
+        assert_eq!(HandlerError::Denied.code(), 5);
+        assert_eq!(HandlerError::from_code(6), HandlerError::Internal);
     }
 }
