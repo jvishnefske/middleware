@@ -58,7 +58,10 @@ use wasm_host::{Compiled, Limits, Payload, Ticked};
 
 use src::sim::SimDevice;
 
-/// The examples `payloads/scripts/check-all.sh` builds.
+/// The examples `payloads/scripts/check-all.sh` builds, except `bench`:
+/// a CPU benchmark that never stops stepping (about 100 000 fuel per
+/// millisecond of virtual time), so [`STEPS`] of it would take minutes
+/// here; its fuel is measured in `tests/bench.rs`.
 const EXAMPLES: [&str; 10] = [
     "blink",
     "echo",

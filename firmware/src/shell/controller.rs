@@ -25,6 +25,14 @@
 //!   yield the serial link tasks, which carry the start reply, and the
 //!   radio task would never run.
 //!
+//!   With [`esp_base::perf::ENABLED`] every payload operation (delivery,
+//!   `on_irq`, `tick`) is timed with the microsecond clock and its fuel
+//!   read from [`Payload::fuel_stats`], as are the wait and the yield;
+//!   every [`esp_base::perf::REPORT_INTERVAL_US`] the window is logged on
+//!   `sys/log` as two `perf:` lines (busy time, fuel per second while busy,
+//!   the split per operation kind, waiting, yielding, the radio task's
+//!   time) and restarted.
+//!
 //!   Requests are dispatched as when idle. A publication (from a serial
 //!   port, or with `espnow` a sample received over ESP-NOW) on the key of a
 //!   sink route goes to that route ([`EspDevice::route_message`], which
@@ -70,6 +78,7 @@ use {
     embassy_time::Timer,
     esp_base::chip::Profile,
     esp_base::dispatch::{route_publication, tick_delay},
+    esp_base::perf::{self, CallKind, Cost, RadioTime, Window},
     esp_base::start::{HeapShort, check_heap, check_heap_holding},
     wasm_host::{Compiled, Limits, LoadError, Payload, Trap},
 };
@@ -320,18 +329,34 @@ impl Controller {
     }
 
     /// Routes one publication: to the sink route on its key, else to the
-    /// payload if subscribed.
+    /// payload if subscribed. Returns what the delivery cost the payload
+    /// ([`Cost::ZERO`] when it was not delivered).
     #[cfg(feature = "wasm")]
-    async fn publication(&mut self, payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Result<(), Trap> {
-        let Ok(key) = Key::new(key) else { return Ok(()) };
+    async fn publication(&mut self, payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Result<Cost, Trap> {
+        let Ok(key) = Key::new(key) else { return Ok(Cost::ZERO) };
         if let Some(handle) = payload.device().sink_for(key) {
             payload.device().route_message(handle, body).await;
-            return Ok(());
+            return Ok(Cost::ZERO);
         }
         if route_publication(&self.state, key, payload.subscriptions()) {
-            payload.deliver(key, body)?;
+            let (delivered, cost) = timed(payload, |p| p.deliver(key, body));
+            delivered?;
+            return Ok(cost);
         }
-        Ok(())
+        Ok(Cost::ZERO)
+    }
+
+    /// Logs and restarts `window` when it is due ([`perf::ENABLED`] only).
+    #[cfg(feature = "wasm")]
+    fn report(&self, window: Window) -> Window {
+        let now = irq::now_us();
+        if !perf::ENABLED || !window.due(now) {
+            return window;
+        }
+        let summary = window.summary(now, radio_time());
+        self.bus.log(format_args!("{}", summary.wasm_line()));
+        self.bus.log(format_args!("{}", summary.host_line()));
+        Window::new(now)
     }
 
     #[cfg(feature = "wasm")]
@@ -366,6 +391,9 @@ impl Controller {
         answer(self.bus, Ok(()));
         #[cfg(feature = "espnow")]
         super::radio::clear();
+        // Start the radio's count with the window.
+        let _ = radio_time();
+        let mut window = Window::new(irq::now_us());
         loop {
             // Let every other task run once per iteration. The waits below
             // are often ready at once (a payload's timer that fired during
@@ -373,10 +401,15 @@ impl Controller {
             // never sees a pending future never returns to the executor:
             // the serial links (and the start reply) and the radio would
             // starve for as long as the payload stays busy.
+            let t = irq::now_us();
             yield_now().await;
+            window = window.yielded(irq::now_us().saturating_sub(t));
+            window = self.report(window);
             for _ in 0..MAX_EVENTS {
                 let Some(event) = irq::pop() else { break };
-                if let Err(trap) = payload.dispatch(event) {
+                let (result, cost) = timed(&mut payload, |p| p.dispatch(event));
+                window = window.op(CallKind::Irq, cost);
+                if let Err(trap) = result {
                     self.trapped(&trap);
                     return;
                 }
@@ -392,27 +425,36 @@ impl Controller {
                 }
             };
             let inbound = select(self.bus.receive_inbound(), radio_sample());
-            match select4(inbound, tick, irq::WAKE.wait(), payload.device().io()).await {
+            let t = irq::now_us();
+            let woke = select4(inbound, tick, irq::WAKE.wait(), payload.device().io()).await;
+            window = window.waited(irq::now_us().saturating_sub(t));
+            match woke {
                 Either4::Third(()) | Either4::Fourth(()) => {}
                 Either4::Second(()) => {
-                    if let Err(trap) = payload.tick(now_ms()) {
+                    let (result, cost) = timed(&mut payload, |p| p.tick(now_ms()));
+                    window = window.op(CallKind::Tick, cost);
+                    if let Err(trap) = result {
                         self.trapped(&trap);
                         return;
                     }
                 }
                 Either4::First(Either::Second((key, body))) => {
-                    if let Err(trap) = self.publication(&mut payload, &key, &body).await {
-                        self.trapped(&trap);
-                        return;
-                    }
-                }
-                Either4::First(Either::First(msg)) => match msg.kind {
-                    Kind::Publish => {
-                        if let Err(trap) = self.publication(&mut payload, &msg.key, &msg.body).await {
+                    match self.publication(&mut payload, &key, &body).await {
+                        Ok(cost) => window = window.op(CallKind::Message, cost),
+                        Err(trap) => {
                             self.trapped(&trap);
                             return;
                         }
                     }
+                }
+                Either4::First(Either::First(msg)) => match msg.kind {
+                    Kind::Publish => match self.publication(&mut payload, &msg.key, &msg.body).await {
+                        Ok(cost) => window = window.op(CallKind::Message, cost),
+                        Err(trap) => {
+                            self.trapped(&trap);
+                            return;
+                        }
+                    },
                     Kind::Request { id } => {
                         let handled = self.handle(id, &msg.key, &msg.body);
                         // A start while running is answered by dispatch, so
@@ -428,6 +470,32 @@ impl Controller {
             }
         }
     }
+}
+
+/// Runs one payload operation; returns its result and what it cost (export
+/// calls and fuel from [`Payload::fuel_stats`], wall time from the
+/// microsecond clock).
+#[cfg(feature = "wasm")]
+fn timed<R>(payload: &mut Payload<EspDevice>, op: impl FnOnce(&mut Payload<EspDevice>) -> R) -> (R, Cost) {
+    let before = payload.fuel_stats();
+    let start = irq::now_us();
+    let result = op(payload);
+    let end = irq::now_us();
+    let after = payload.fuel_stats();
+    let cost = Cost::between((before.calls, before.total), (after.calls, after.total), start, end);
+    (result, cost)
+}
+
+/// The radio task's time on received frames since the last call.
+#[cfg(feature = "espnow")]
+fn radio_time() -> RadioTime {
+    super::radio::take_time()
+}
+
+/// Without `espnow` there is no radio task.
+#[cfg(all(feature = "wasm", not(feature = "espnow")))]
+fn radio_time() -> RadioTime {
+    RadioTime::ZERO
 }
 
 /// The next sample received over ESP-NOW, as key and body.
