@@ -5,17 +5,25 @@
 //!
 //! * **idle** — no payload runs; requests are dispatched and storage actions
 //!   performed. A `sys/payload/start` ends the session.
-//! * **running** (`wasm` only) — if the free heap covers the payload's
-//!   bound plus margin ([`esp_base::start`]; otherwise the start fails
-//!   with the free and needed bytes on `sys/log`), the stored image is
-//!   read, CRC checked, compiled, freed and the module instantiated into a
-//!   [`Payload`]; the session then loops:
+//! * **running** (`wasm` only) — the stored image is read and CRC
+//!   checked; if the free heap covers the payload's bound plus margin
+//!   ([`esp_base::start`], the bound charging linear memory at the
+//!   module's declared maximum; otherwise the start fails with the free
+//!   and needed bytes on `sys/log` and the image buffer is freed), it is
+//!   compiled, freed and the module instantiated into a [`Payload`]; the
+//!   session then loops:
 //!   1. drain the interrupt event queue ([`irq`]), at most `MAX_EVENTS`
 //!      events per iteration, into `Payload::dispatch` (`on_irq`), and log
 //!      on `sys/log` when the queue's overflow count has risen;
 //!   2. wait for whichever comes first: an inbound message, the payload's
 //!      next tick, a newly queued event ([`irq::WAKE`]), or SPI/UART work
 //!      completing ([`EspDevice::io`], which queues `DmaDone` / `UartRx`).
+//!
+//!   Every iteration first yields to the executor once: a busy payload
+//!   (say, a decoder whose 1 ms timer has always fired again by the time
+//!   its call returns) keeps one of those waits ready, and without the
+//!   yield the serial link tasks, which carry the start reply, and the
+//!   radio task would never run.
 //!
 //!   Requests are dispatched as when idle. A publication (from a serial
 //!   port, or with `espnow` a sample received over ESP-NOW) on the key of a
@@ -57,11 +65,12 @@ use {
     super::irq,
     alloc::vec::Vec as AllocVec,
     embassy_futures::select::{Either, Either4, select, select4},
+    embassy_futures::yield_now,
     middleware::wasm_abi::events::MAX_EVENTS,
     embassy_time::Timer,
     esp_base::chip::Profile,
     esp_base::dispatch::{route_publication, tick_delay},
-    esp_base::start::{HeapShort, check_heap},
+    esp_base::start::{HeapShort, check_heap, check_heap_holding},
     wasm_host::{Compiled, Limits, LoadError, Payload, Trap},
 };
 
@@ -275,24 +284,29 @@ impl Controller {
     }
 
     /// Loads the stored payload in two steps, compile then instantiate,
-    /// freeing the image buffer between them. Refuses first, before
-    /// allocating anything, if the free heap is below the payload's bound
-    /// ([`Limits::load_heap_needed`]) plus [`esp_base::start::HEAP_MARGIN`]:
-    /// translation is eager, so once this succeeds the payload's later
-    /// calls stay within heap that was free here.
+    /// freeing the image buffer between them. Refuses, with nothing left
+    /// allocated, if the free heap is below the payload's bound plus
+    /// [`esp_base::start::HEAP_MARGIN`]: first if it cannot even hold the
+    /// image, then, with the image read (the bound charges linear memory at
+    /// the module's declared maximum, [`Limits::heap_needed`]), if the heap
+    /// free before the read is below the whole bound. Translation is eager,
+    /// so once this succeeds the payload's later calls stay within heap
+    /// that was free here.
     #[cfg(feature = "wasm")]
     fn load(&mut self) -> Result<Payload<EspDevice>, StartError> {
         let limits = Limits::bytes(self.profile.max_memory_bytes)
             .with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
         let store = self.store().map_err(StartError::Store)?;
         let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
-        let bound = limits.load_heap_needed(header.len);
-        let needed = check_heap(esp_alloc::HEAP.free(), bound).map_err(StartError::NoHeap)?;
+        check_heap(esp_alloc::HEAP.free(), header.len).map_err(StartError::NoHeap)?;
         let len = header.len as usize;
         let mut image = AllocVec::new();
         image.try_reserve_exact(len).map_err(|_| StartError::NoMemory)?;
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
+        let bound = limits.heap_needed(&image);
+        let needed =
+            check_heap_holding(esp_alloc::HEAP.free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
         let device = EspDevice::new(self.profile, self.bus).ok_or(StartError::NoPins)?;
@@ -353,6 +367,13 @@ impl Controller {
         #[cfg(feature = "espnow")]
         super::radio::clear();
         loop {
+            // Let every other task run once per iteration. The waits below
+            // are often ready at once (a payload's timer that fired during
+            // a long call, a full radio queue), and an embassy task that
+            // never sees a pending future never returns to the executor:
+            // the serial links (and the start reply) and the radio would
+            // starve for as long as the payload stays busy.
+            yield_now().await;
             for _ in 0..MAX_EVENTS {
                 let Some(event) = irq::pop() else { break };
                 if let Err(trap) = payload.dispatch(event) {

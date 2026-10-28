@@ -6,6 +6,12 @@
 //! `push_bytes_lossy` and `push_u32` avoid pulling `core::fmt` into the
 //! module; `core::fmt::Write` is also implemented for `write!` when size does
 //! not matter.
+//!
+//! Nothing here can panic, and [`LogLine::log`] hands the bytes to the
+//! host without re-validating them (they are UTF-8 by construction; the
+//! host checks again): a payload that logs only through `LogLine` links
+//! none of core's panic formatting (`panic_fmt`, `Display for usize`) or
+//! `str::from_utf8`, about 2 KB of code and data.
 
 use crate::MAX_LOG;
 
@@ -30,16 +36,32 @@ impl LogLine {
         }
     }
 
+    /// Appends `bytes`, which the caller has cut to fit and to whole UTF-8
+    /// characters.
+    fn push_fitted(&mut self, bytes: &[u8]) -> &mut Self {
+        let dst = self
+            .len
+            .checked_add(bytes.len())
+            .and_then(|end| self.buf.get_mut(self.len..end).map(|d| (d, end)));
+        if let Some((dst, end)) = dst {
+            dst.copy_from_slice(bytes);
+            self.len = end;
+        }
+        self
+    }
+
     /// Appends as much of `s` as fits, cutting at a character boundary.
     pub fn push_str(&mut self, s: &str) -> &mut Self {
-        let room = MAX_LOG - self.len;
+        let room = MAX_LOG.saturating_sub(self.len);
         let mut take = s.len().min(room);
+        // At most three steps back: a character is at most four bytes.
         while take > 0 && !s.is_char_boundary(take) {
             take -= 1;
         }
-        self.buf[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
-        self.len += take;
-        self
+        match s.as_bytes().get(..take) {
+            Some(bytes) => self.push_fitted(bytes),
+            None => self,
+        }
     }
 
     /// Appends `bytes` if they are UTF-8, otherwise `<N bytes>`.
@@ -53,35 +75,43 @@ impl LogLine {
         }
     }
 
-    /// Appends `n` in decimal.
+    /// Appends `n` in decimal, or nothing if the digits do not all fit.
     pub fn push_u32(&mut self, n: u32) -> &mut Self {
         let mut digits = [0u8; 10];
-        let mut i = digits.len();
+        let mut start = digits.len();
         let mut v = n;
-        loop {
-            i -= 1;
-            digits[i] = b'0' + (v % 10) as u8;
+        // At most ten digits; `digits.len()` steps bound the loop.
+        for d in digits.iter_mut().rev() {
+            *d = b'0' + (v % 10) as u8;
+            start -= 1;
             v /= 10;
             if v == 0 {
                 break;
             }
         }
-        // Digits are ASCII, so this cannot fail.
-        match core::str::from_utf8(&digits[i..]) {
-            Ok(s) => self.push_str(s),
-            Err(_) => self,
+        match digits.get(start..) {
+            // ASCII digits: whole characters.
+            Some(ascii) if ascii.len() <= MAX_LOG.saturating_sub(self.len) => {
+                self.push_fitted(ascii)
+            }
+            _ => self,
         }
     }
 
     /// The line so far.
     pub fn as_str(&self) -> &str {
         // Only whole characters are ever appended.
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+        core::str::from_utf8(self.bytes()).unwrap_or("")
+    }
+
+    /// The bytes of the line so far: UTF-8, only whole characters.
+    fn bytes(&self) -> &[u8] {
+        self.buf.get(..self.len).unwrap_or(&[])
     }
 
     /// Sends the line with [`log`](crate::log).
     pub fn log(&self) {
-        crate::log(self.as_str());
+        crate::log_utf8(self.bytes());
     }
 }
 
@@ -120,5 +150,19 @@ mod tests {
         l.push_str("bc");
         assert_eq!(l.as_str().len(), MAX_LOG);
         assert!(l.as_str().ends_with('b'));
+    }
+
+    #[test]
+    fn a_number_that_does_not_fit_is_dropped_whole() {
+        let mut l = LogLine::new();
+        for _ in 0..MAX_LOG - 3 {
+            l.push_str("a");
+        }
+        l.push_u32(1234);
+        assert_eq!(l.as_str().len(), MAX_LOG - 3, "never half a number");
+        l.push_u32(567);
+        assert!(l.as_str().ends_with("a567"));
+        l.push_u32(8);
+        assert_eq!(l.as_str().len(), MAX_LOG);
     }
 }

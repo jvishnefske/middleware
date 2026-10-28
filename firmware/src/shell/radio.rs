@@ -30,6 +30,10 @@
 //! roughly 170–250 ms at the 1 Mbit/s ESP-NOW rate). Between two chunks the
 //! task first drains the frames already received (at most [`RX_DEPTH`])
 //! and one queued publish, so a streaming source never starves either.
+//! After every received frame it yields to the executor once: under a
+//! flood (a camera streaming, every frame dropped while no payload
+//! subscribes) the receive is ready on every poll, and the task would
+//! otherwise keep the controller and the serial links from running.
 //!
 //! The counters (`esp_base::radio::Counters`) are logged on `sys/log` when
 //! losses rise, at most every `REPORT_INTERVAL_MS`.
@@ -42,6 +46,7 @@
 use core::cell::RefCell;
 
 use embassy_futures::select::{Either4, select4};
+use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -366,7 +371,13 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
             }
         };
         match select4(radio.transport.recv(&mut sample), TX.receive(), timer, SOURCES_CHANGED.wait()).await {
-            Either4::First(rx) => radio.received(rx),
+            Either4::First(rx) => {
+                radio.received(rx);
+                // A flood keeps esp-radio's queue non-empty, so `recv` is
+                // ready on every poll; yield so the controller and the
+                // serial links still run between two frames.
+                yield_now().await;
+            }
             Either4::Second(msg) => radio.publish(msg).await,
             Either4::Third(()) | Either4::Fourth(()) => {}
         }

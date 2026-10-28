@@ -10,6 +10,14 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = ["half"]
+# `Scale::Half` (the reduced 4×4 IDCT, about 1 KB of WASM code). A payload
+# that only decodes at full scale (`cam_jpeg_view`) turns default features
+# off; `Decoder::start` then refuses `Scale::Half` with
+# `Unsupported::Scale`.
+half = []
+
 [dependencies]
 
 [dev-dependencies]

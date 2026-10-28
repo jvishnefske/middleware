@@ -17,9 +17,11 @@
 //! * [`FuelStats`] — per-payload fuel accounting: [`fuel_used`] derives
 //!   one call's consumption from its budget and the fuel left, and
 //!   [`FuelStats::record`] folds it into the counters (W4).
-//! * [`initial_memory_bytes`], [`check_memory`], [`memory_bytes`] — the
-//!   byte cap on linear memory for 64 KiB and 1-byte (custom-page-sizes)
-//!   pages (W5).
+//! * [`memory_decl`] (and [`initial_memory_bytes`]), [`check_memory`],
+//!   [`memory_bytes`] — the byte cap on linear memory for 64 KiB and
+//!   1-byte (custom-page-sizes) pages (W5); [`memory_reach`] — the most
+//!   memory a module can hold under the cap, its declared maximum when
+//!   that is smaller, which the heap bound uses (W10).
 //! * ABI 2 (requirement D4): [`gpio_irq`], [`dma_channel`],
 //!   [`spi_transfer`], [`uart_write`] and [`read_target`] validate
 //!   arguments with the shared [`wasm_abi::periph`] parsers and bound guest
@@ -192,18 +194,30 @@ fn leb_u64(bytes: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-/// Total initial size, in bytes, of the memories a module defines: each
-/// memory's minimum times its page size (64 KiB, or 2^n bytes with the
-/// custom-page-sizes proposal, which in practice means 1 byte). Returns
-/// `Some(0)` when the module defines no memory and `None` when the section
-/// headers or memory types are malformed.
+/// The linear memory a module defines, in bytes: the sums over its
+/// memories of each one's minimum and maximum times its page size (64 KiB,
+/// or 2^n bytes with the custom-page-sizes proposal, which in practice
+/// means 1 byte). Read by [`memory_decl`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryDecl {
+    /// Initial size: what instantiation allocates.
+    pub initial: u64,
+    /// Declared maximum, the most `memory.grow` can ever reach; `None`
+    /// when a memory declares none (it may then grow up to the host's
+    /// cap).
+    pub maximum: Option<u64>,
+}
+
+/// Reads the memory section: the [`MemoryDecl`] of a module. A module
+/// without one defines no memory (`initial` and `maximum` both 0). `None`
+/// when the section headers or memory types are malformed.
 ///
-/// wasmi validates the module but does not expose a memory's page size, so
-/// the runtime reads it here. Only section headers and the memory section
-/// are walked: every step consumes at least one byte, so the walk is bounded
-/// by the module length. A product that overflows saturates to `u64::MAX`,
-/// which any cap rejects.
-pub fn initial_memory_bytes(wasm: &[u8]) -> Option<u64> {
+/// wasmi validates the module but exposes neither a memory's page size nor
+/// its maximum before instantiation, so the runtime reads them here. Only
+/// section headers and the memory section are walked: every step consumes
+/// at least one byte, so the walk is bounded by the module length. A
+/// product that overflows saturates to `u64::MAX`, which any cap rejects.
+pub fn memory_decl(wasm: &[u8]) -> Option<MemoryDecl> {
     let mut at = 8; // magic and version
     while at < wasm.len() {
         let id = *wasm.get(at)?;
@@ -212,18 +226,51 @@ pub fn initial_memory_bytes(wasm: &[u8]) -> Option<u64> {
         let end = at.checked_add(len).filter(|e| *e <= wasm.len())?;
         if id == MEMORY_SECTION {
             let section = wasm.get(at..end)?;
-            return memory_section_bytes(section);
+            return memory_section(section);
         }
         at = end;
     }
-    Some(0)
+    Some(MemoryDecl {
+        initial: 0,
+        maximum: Some(0),
+    })
 }
 
-/// Sums the initial bytes of every memory type in a memory section body.
-fn memory_section_bytes(section: &[u8]) -> Option<u64> {
+/// Total initial size, in bytes, of the memories a module defines
+/// ([`MemoryDecl::initial`]); `Some(0)` without a memory section, `None`
+/// when malformed.
+pub fn initial_memory_bytes(wasm: &[u8]) -> Option<u64> {
+    memory_decl(wasm).map(|d| d.initial)
+}
+
+/// The most linear memory a module can ever hold under a cap of
+/// `max_bytes`: its declared maximum ([`MemoryDecl::maximum`]) when it has
+/// one below the cap, else the cap (also for a malformed module, which
+/// fails to load anyway). Requirement W10 bounds the heap with this rather
+/// than the cap, so a module built for exactly the memory it needs (1-byte
+/// pages, initial = maximum) is not charged for the whole cap.
+pub fn memory_reach(wasm: &[u8], max_bytes: u32) -> u32 {
+    match memory_decl(wasm).and_then(|d| d.maximum) {
+        Some(max) if max < u64::from(max_bytes) => max as u32,
+        _ => max_bytes,
+    }
+}
+
+/// Converts `pages` of `2^log2` bytes to bytes, saturating at `u64::MAX`.
+fn page_bytes(pages: u64, log2: u32) -> u64 {
+    pages
+        .checked_shl(log2)
+        .filter(|b| b >> log2 == pages)
+        .unwrap_or(u64::MAX)
+}
+
+/// Sums the initial and maximum bytes of every memory type in a memory
+/// section body.
+fn memory_section(section: &[u8]) -> Option<MemoryDecl> {
     let mut at = 0;
     let count = leb_u64(section, &mut at)?;
-    let mut total = 0u64;
+    let mut initial = 0u64;
+    let mut maximum = Some(0u64);
     // Each memory type takes at least two bytes, so a count beyond the
     // section length is malformed; bounding by the length keeps the loop
     // finite whatever the count says.
@@ -232,21 +279,23 @@ fn memory_section_bytes(section: &[u8]) -> Option<u64> {
         // `memory64` (flag 4) only widens the LEB values, which `leb_u64`
         // already reads.
         let min = leb_u64(section, &mut at)?;
-        if flags & FLAG_HAS_MAX != 0 {
-            leb_u64(section, &mut at)?;
-        }
+        let max = if flags & FLAG_HAS_MAX != 0 {
+            Some(leb_u64(section, &mut at)?)
+        } else {
+            None
+        };
         let log2 = if flags & FLAG_PAGE_SIZE != 0 {
             u32::try_from(leb_u64(section, &mut at)?).ok()?
         } else {
             DEFAULT_PAGE_LOG2
         };
-        let bytes = min
-            .checked_shl(log2)
-            .filter(|b| b >> log2 == min)
-            .unwrap_or(u64::MAX);
-        total = total.saturating_add(bytes);
+        initial = initial.saturating_add(page_bytes(min, log2));
+        maximum = match (maximum, max) {
+            (Some(total), Some(max)) => Some(total.saturating_add(page_bytes(max, log2))),
+            _ => None,
+        };
     }
-    Some(total)
+    Some(MemoryDecl { initial, maximum })
 }
 
 /// Parses a key the payload passed to `publish` or `subscribe`: it must be
@@ -860,6 +909,58 @@ mod tests {
             initial_memory_bytes(&with_memory(&[8, 2, 63])),
             Some(u64::MAX)
         );
+    }
+
+    #[test]
+    fn w10_memory_decl_reads_the_declared_maximum() {
+        // 64 KiB pages, min 1, max 3.
+        assert_eq!(
+            memory_decl(&with_memory(&[1, 1, 3])),
+            Some(MemoryDecl {
+                initial: PAGE_BYTES as u64,
+                maximum: Some(3 * PAGE_BYTES as u64)
+            })
+        );
+        // No maximum.
+        assert_eq!(
+            memory_decl(&with_memory(&[0, 2])).map(|d| d.maximum),
+            Some(None)
+        );
+        // 1-byte pages, min = max = 57 344 (LEB 0x80 0xc0 0x03).
+        assert_eq!(
+            memory_decl(&with_memory(&[9, 0x80, 0xc0, 0x03, 0x80, 0xc0, 0x03, 0])),
+            Some(MemoryDecl {
+                initial: 57_344,
+                maximum: Some(57_344)
+            })
+        );
+        // No memory section: nothing to hold.
+        assert_eq!(
+            memory_decl(b"\0asm\x01\0\0\0"),
+            Some(MemoryDecl {
+                initial: 0,
+                maximum: Some(0)
+            })
+        );
+        // Malformed: the maximum is cut off.
+        assert_eq!(memory_decl(&with_memory(&[9, 1])), None);
+    }
+
+    #[test]
+    fn w10_memory_reach_is_the_smaller_of_cap_and_declared_maximum() {
+        let cap = 65_536;
+        // A byte-page module declaring 57 344: charged 57 344, not the cap.
+        let exact = with_memory(&[9, 0x80, 0xc0, 0x03, 0x80, 0xc0, 0x03, 0]);
+        assert_eq!(memory_reach(&exact, cap), 57_344);
+        // Declared maximum above the cap, or none at all: the cap.
+        assert_eq!(memory_reach(&with_memory(&[1, 1, 3]), cap), cap);
+        assert_eq!(memory_reach(&with_memory(&[0, 1]), cap), cap);
+        // Malformed: the cap, conservatively.
+        assert_eq!(memory_reach(&with_memory(&[9, 1]), cap), cap);
+        // A maximum equal to the cap.
+        assert_eq!(memory_reach(&with_memory(&[1, 1, 1]), cap), cap);
+        // Saturated maximum (huge exponent): the cap.
+        assert_eq!(memory_reach(&with_memory(&[9, 1, 2, 63]), cap), cap);
     }
 
     #[test]

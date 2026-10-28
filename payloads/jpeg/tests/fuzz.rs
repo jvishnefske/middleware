@@ -110,7 +110,7 @@ fn mutate(rng: &mut Rng, jpeg: &[u8]) -> Vec<u8> {
 /// Decodes `jpeg` (if its header parses) with a random scale, format and
 /// budget, asserting it ends (`Done` or an error) within one call per block.
 fn run(rng: &mut Rng, jpeg: &[u8]) -> Result<(), Error> {
-    let scale = if rng.below(2) == 0 {
+    let scale = if rng.below(2) == 0 || !cfg!(feature = "half") {
         Scale::Full
     } else {
         Scale::Half

@@ -31,7 +31,7 @@
 
 use crate::bits::BitReader;
 use crate::color::{PixelFormat, apply, chroma, ycc_to_rgb};
-use crate::error::{Error, Malformed};
+use crate::error::{Error, Malformed, Unsupported};
 use crate::header::{Component, Header, Layout, Tables, parse};
 use crate::huffman::HuffTable;
 use crate::idct::{Block, Extent, dc_only, idct_4x4, idct_8x8};
@@ -65,12 +65,18 @@ pub enum Scale {
     #[default]
     Full,
     /// One output pixel per 2×2 image pixels, size rounded up: a 240×240
-    /// frame becomes 120×120. Each block goes through libjpeg's reduced
-    /// 4×4 IDCT (`jpeg_idct_4x4`, equal to a 2×2 box average of the full
-    /// IDCT for the low frequencies), so it costs about two thirds of
+    /// frame becomes 120×120. Needs the `half` feature (on by default);
+    /// without it [`Decoder::start`] returns [`Unsupported::Scale`] and the
+    /// reduced IDCT is not compiled in (about 1 KB of WASM code). Each
+    /// block goes through libjpeg's reduced 4×4 IDCT (`jpeg_idct_4x4`,
+    /// equal to a 2×2 box average of the full IDCT for the low
+    /// frequencies), so it costs about two thirds of
     /// [`Scale::Full`] per MCU and a quarter of the strip and SPI traffic.
     Half,
 }
+
+/// Whether [`Scale::Half`] is built in (feature `half`, on by default).
+const HALF: bool = cfg!(feature = "half");
 
 /// A completed band of output rows in the strip buffer.
 ///
@@ -259,6 +265,9 @@ impl Decoder {
     #[inline(never)]
     pub fn start(&mut self, jpeg: &[u8], scale: Scale) -> Result<(), Error> {
         self.phase = Phase::Done;
+        if scale == Scale::Half && !HALF {
+            return Err(Error::Unsupported(Unsupported::Scale));
+        }
         self.tables = Tables::EMPTY;
         let parsed = parse(jpeg, &mut self.tables)?;
         self.header = parsed.header;
@@ -314,9 +323,16 @@ impl Decoder {
         self.header.height.div_ceil(self.header.layout.mcu_height())
     }
 
+    /// The output scale: always [`Scale::Full`] without the `half`
+    /// feature, so the compiler drops the reduced IDCT and its paths
+    /// ([`Decoder::start`] refuses [`Scale::Half`] then).
+    const fn out_scale(&self) -> Scale {
+        if HALF { self.scale } else { Scale::Full }
+    }
+
     /// `v` at the output scale.
     const fn scaled(&self, v: u16) -> u16 {
-        match self.scale {
+        match self.out_scale() {
             Scale::Full => v,
             Scale::Half => v.div_ceil(2),
         }
@@ -425,6 +441,7 @@ impl Decoder {
         }
         let b = usize::from(self.block);
         let comp = layout.component_of_block(b);
+        let scale = self.out_scale();
         let samples = self.mcu.get_mut(b).ok_or(Malformed::Coefficient)?;
         decode_block(
             &self.tables,
@@ -432,7 +449,7 @@ impl Decoder {
             &mut self.entropy,
             jpeg,
             comp,
-            self.scale,
+            scale,
             samples,
         )?;
         if b + 1 < layout.blocks() {
@@ -470,7 +487,7 @@ impl Decoder {
     #[inline(never)]
     fn emit<F: PixelFormat>(&self, blocks: &McuBlocks, out: &mut [u8]) {
         let layout = self.header.layout;
-        let sh = match self.scale {
+        let sh = match self.out_scale() {
             Scale::Full => 3,
             Scale::Half => 2,
         };
@@ -535,7 +552,7 @@ fn decode_block(
     state.bits = br;
     if flags & AC == 0 {
         *samples = [[dc_only(coef[0][0]); 8]; 8];
-    } else if scale == Scale::Half {
+    } else if HALF && scale == Scale::Half {
         idct_4x4(&coef, samples);
     } else {
         let extent = Extent {

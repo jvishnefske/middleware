@@ -1,13 +1,19 @@
 //! The heap check before a payload starts (requirement W10).
 //!
-//! `wasm_host::Limits::load_heap_needed` bounds the heap a payload can use
-//! from compiling its image to its last call. The controller starts a
-//! payload only if the free heap covers that bound plus
-//! [`HEAP_MARGIN`], the allocator's own overhead (block headers,
+//! `wasm_host::Limits::heap_needed` bounds the heap a payload can use from
+//! compiling its image to its last call, charging linear memory at the
+//! module's declared maximum when that is below the chip's cap. The
+//! controller starts a payload only if the free heap covers that bound
+//! plus [`HEAP_MARGIN`], the allocator's own overhead (block headers,
 //! alignment, the split between the reclaimed and `.bss` heap regions).
-//! Otherwise the start is refused with a [`HeapShort`] report, before
-//! anything is allocated, instead of the allocator failing later, which
-//! halts the chip (an allocation failure is a panic).
+//!
+//! The bound needs the image (its memory section), so the check runs in
+//! two steps: [`check_heap`] with the image length alone before the image
+//! buffer is allocated, then [`check_heap_holding`] with the image read,
+//! crediting the buffer (which the bound already counts) back to the free
+//! heap. Either refusal is a [`HeapShort`] report, with the image buffer
+//! dropped again, instead of the allocator failing later, which halts the
+//! chip (an allocation failure is a panic).
 
 /// Heap kept free on top of the payload's bound for the allocator's
 /// per-block overhead and fragmentation, in bytes.
@@ -52,6 +58,14 @@ pub const fn check_heap(free: usize, bound: u32) -> Result<u32, HeapShort> {
     }
 }
 
+/// [`check_heap`] with the image already read into a buffer of `held`
+/// bytes: `free` is the heap free now, with the buffer allocated. The
+/// bound counts the image, so the buffer is credited back; the reported
+/// [`HeapShort::free`] is the heap free before the image was read.
+pub const fn check_heap_holding(free: usize, held: usize, bound: u32) -> Result<u32, HeapShort> {
+    check_heap(free.saturating_add(held), bound)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
@@ -72,6 +86,17 @@ mod tests {
     fn w10_saturates() {
         assert_eq!(check_heap(usize::MAX, u32::MAX), Ok(u32::MAX));
         assert_eq!(check_heap(10, u32::MAX), Err(HeapShort { free: 10, needed: u32::MAX }));
+    }
+
+    #[test]
+    fn w10_holding_the_image_credits_it_back() {
+        // 150 000 free before a 30 000-byte image was read, 120 000 after.
+        assert_eq!(check_heap_holding(120_000, 30_000, 140_000), Ok(140_000 + HEAP_MARGIN));
+        assert_eq!(
+            check_heap_holding(120_000, 30_000, 150_000),
+            Err(HeapShort { free: 150_000, needed: 150_000 + HEAP_MARGIN })
+        );
+        assert_eq!(check_heap_holding(usize::MAX, usize::MAX, u32::MAX), Ok(u32::MAX));
     }
 
     #[test]

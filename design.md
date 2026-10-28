@@ -431,30 +431,62 @@ because WASM linear memory and the wasmi interpreter require one.
   allocated once in full (`Limits::max_stack_bytes`, default 4 KiB) and
   the call depth capped (`Limits::max_call_depth`, default 32), both
   trapping with a stack overflow instead of growing; the DMA copy buffer
-  and subscription list are reserved at load. `Limits::load_heap_needed
-  (image_len)` bounds the heap from compiling to the last call (the larger
-  of the compile phase, image included, and the run phase, image freed;
-  model and constants in `wasm_host::heap`), and covers the measured peak
-  of every example payload. The ESP base firmware loads in two steps
-  (compile, free the image, instantiate) and refuses a start, before
-  allocating, when the free heap is below that bound plus
-  `start::HEAP_MARGIN`, logging the free and needed bytes —
+  and subscription list are reserved at load. `Limits::heap_needed(wasm)`
+  bounds the heap from compiling to the last call (the larger of the
+  compile phase, image included, and the run phase, image freed; model and
+  constants in `wasm_host::heap`; `Limits::load_heap_needed(image_len)` is
+  the same bound for any image of that length), and covers the measured
+  peak of every example payload. The ESP base firmware reads the image,
+  sizes the bound from it, loads in two steps (compile, free the image,
+  instantiate) and refuses a start when the free heap is below that bound
+  plus `start::HEAP_MARGIN`, logging the free and needed bytes —
   `tools/payload-sim/tests/heap.rs` (every example under the badge's
-  limits: bound >= measured compile, instantiate and run peaks;
-  `cam_jpeg_view` must decode a frame); `wasm-host/tests/alloc.rs` (after
-  the deepest call, 398 calls allocate nothing; the frame list's growth
-  stays within its share); `wasm-host/tests/runtime.rs`:
+  limits, and `cam_jpeg_view`'s byte-page deploy build: bound >= measured
+  compile, instantiate and run peaks; `cam_jpeg_view` must decode a
+  frame); `wasm-host/tests/alloc.rs` (after the deepest call, 398 calls
+  allocate nothing; the frame list's growth stays within its share);
+  `wasm-host/tests/runtime.rs`:
   `w10_call_depth_is_capped_by_limits`, `w10_value_stack_is_capped_by_limits`,
   `w10_compile_then_instantiate_equals_load`, `w10_heap_bound_counts_every_limit`,
   `w4_fuel_stats_record_every_call` (the first call costs no more fuel
   than the second); `heap::tests::w10_*`; esp-base `start::tests::w10_*`.
-  Measured on a 32-bit host (i686, not part of the test suite), the
-  bound's target width: `cam_jpeg_view` (30.9 KB image) peaks at 183 KB
-  and is bounded at 191 790 bytes (195 886 with the margin), more than
-  the ESP32-S3 heap leaves beside the 48 KiB radio budget (229 392 total,
-  180 240 beside the radio), so unless the radio uses much less than its
-  budget the badge refuses to start it rather than halting; `cam_view`
-  (13.2 KB) peaks at 141 KB, bound 143 137.
+  Measured on a 32-bit host (i686: `cargo test -p payload-sim --release
+  --test heap --target i686-unknown-linux-gnu`, not part of the gates),
+  the bound's target width: `cam_jpeg_view`'s deploy build (25.7 KB
+  image, 48 128 bytes of memory) peaks at 153.6 KB and is bounded at
+  160 195 bytes (164 291 with the margin), which the badge's 188 KB free
+  after boot covers with 24 KB to spare; its 64 KiB-page build is bounded
+  at 177 589; `cam_view` (11.0 KB) peaks at 135.3 KB, bound 137 153. (At
+  30.9 KB and a 64 KiB page, `cam_jpeg_view` needed 195 886 bytes and the
+  badge refused it.)
+- [x] W12 The heap bound charges linear memory at what the module can
+  reach: the smaller of the host's cap and the module's declared maximum
+  (`abi::memory_reach`, read from the memory section with
+  `abi::memory_decl`; the cap when there is no maximum or the section is
+  malformed). wasmi enforces the declared maximum on `memory.grow`, so a
+  1-byte-page module with initial = maximum is charged exactly its memory
+  — `abi::tests::w10_memory_decl_reads_the_declared_maximum`,
+  `abi::tests::w10_memory_reach_is_the_smaller_of_cap_and_declared_maximum`;
+  `wasm-host/tests/runtime.rs`:
+  `w10_heap_bound_charges_the_declared_maximum_not_the_cap` (also checks
+  that growing past the declared maximum fails under a larger cap);
+  esp-base `start::tests::w10_holding_the_image_credits_it_back` (the
+  firmware checks again with the image read, crediting its buffer).
+- [x] W13 Refused and failed starts return every byte of heap: a start
+  refused after the image was read, a compile error, a compiled module
+  dropped, an `init` trap and a load followed by a stop, repeated 20
+  times, leave exactly the heap in use before them —
+  `wasm-host/tests/alloc.rs` (`refused_and_failed_starts_return_every_byte`,
+  counting allocator). On the badge the free heap still moved by 1 248
+  bytes between two refused starts (188 632 → 187 384, a new image
+  uploaded between them, the ESP32-CAM streaming): neither the refusal,
+  which allocated nothing, nor the upload path (heapless, no allocation)
+  holds heap. ESP-NOW reception does: esp-radio queues each received
+  frame as a `Box<[u8]>` in a `VecDeque` of up to 10 entries, whose
+  capacity grows (4, 8, 16) and is never given back, and the Wi-Fi driver
+  allocates its dynamic RX buffers per frame. Under a flood the free heap
+  therefore moves by a few KB from one reading to the next; the start
+  check's margin and headroom must cover it.
 - [ ] W11 A firmware crash during a payload's run does not repeat on the
   next boot (skip the autostart after a crash). Not implemented: on the
   ESP chips `esp-backtrace` halts after a panic rather than resetting, so
@@ -496,7 +528,15 @@ because WASM linear memory and the wasmi interpreter require one.
   remaps the home directory, the cargo registry and the repository with
   `--remap-path-prefix`, and builds from two different directories are
   byte-identical —
-  `payloads/scripts/check-reproducible.sh` (blink and echo, run by `check-all.sh`).
+  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view and cam_jpeg_view, run by `check-all.sh`).
+- [x] P7 The SDK cannot panic on its own paths: `LogLine` (append, decimal
+  numbers dropped whole when they do not fit, `log` without re-validating
+  UTF-8) and the `on_message` delivery copy use checked access only, so a
+  payload that logs through them links none of core's panic formatting
+  (`panic_fmt`, `Display for usize`, `str::from_utf8`): blink 5 467 → 1 972
+  bytes, cam_jpeg_view 30 878 → 25 714 —
+  `mw-payload` `logline::tests::*` (`a_number_that_does_not_fit_is_dropped_whole`);
+  `abi-check` `p7_sdk_payloads_link_no_panic_formatting`.
 
 ### ESP base firmware (`firmware/`)
 
@@ -521,6 +561,17 @@ because WASM linear memory and the wasmi interpreter require one.
   `chip::tests::console_uart_pins_are_reserved`, `flash_psram_and_usb_pins_are_refused`, `missing_pins_are_invalid`, `esp32_input_only_pins_refuse_output`, `general_purpose_pins_are_allowed`; `dispatch::tests::publications_route_only_to_running_subscribed_payloads`. Runs payloads on ESP32 and ESP32-S3 only; the C3 has no runtime.
 - [x] E6 Produces merged flash images per chip for the web flasher —
   `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
+- [ ] E14 A busy payload or an ESP-NOW flood cannot starve the serial
+  links: the controller yields to the executor once per iteration of its
+  running loop, and the radio task once per received frame. Before, an
+  embassy task whose awaits were always ready never returned to the
+  executor: `cam_jpeg_view`'s 1 ms decode timer has always fired again by
+  the time a decode call returns (and a flood keeps the radio queue
+  full), so the link task never sent the start reply nor read the
+  host's retry, and `mwctl upload --start` stalled (150 s seen on the
+  badge, the host blocked in `tcdrain`, see H2). A refused start is not
+  affected: it allocates nothing beyond the image buffer, replies through
+  a signal and returns to idle. Shell code; to be verified on hardware.
 
 ### ESP8266 base firmware (`firmware-esp8266/`)
 
@@ -616,6 +667,14 @@ open).
   Protocol logic is tested against an in-memory device running the
   real splitter and loader —
   `device::tests::info_decodes_a_protocol_only_esp8266`, `upload_happy_path_installs_reports_progress_and_starts`, `dropped_chunk_reply_is_retried_and_the_device_deduplicates`, `dropped_request_and_late_reply_are_handled`, `exhausted_retries_time_out`, `corrupt_chunk_makes_commit_fail_on_the_device`, `start_without_runtime_is_a_clear_error`, `oversized_image_is_refused_at_begin`, `boot_garbage_before_the_first_reply_needs_no_retry`; `link::tests::garbage_without_delimiter_before_a_frame_is_skipped`, `garbage_with_delimiters_is_noise_and_frames_still_decode`; `plan::tests::*`, `cli::tests::*`.
+- [ ] H2 A request always ends within its attempts' timeouts, whatever
+  the device does: the serial transport writes without `flush`
+  (serialport's is `tcdrain`, which waits with no timeout until the
+  device has taken every byte, so a device that stops reading its
+  USB-Serial-JTAG port blocked mwctl indefinitely), and a refused
+  `start` keeps listening 2 s for the device's explanation on `sys/log`
+  before reporting the error. Shell code (`tools/mwctl/src/port.rs`,
+  `main.rs`); to be verified on hardware.
 
 ### Web site (`web/`)
 
@@ -1394,7 +1453,25 @@ wasmi's per-call fuel budget into RGB565 strips for the GC9A01.
   (`r14_jpeg_stream_is_decoded_bit_exactly_onto_the_panel_within_the_fuel_budget`);
   `cam_jpeg_view` `tests::received_fixture_frames_decode_in_bounded_steps`,
   `tests::memory_fits_one_page_with_the_stack`; `abi-check`
-  `cam_jpeg_view_fits_one_standard_page`.
+  `cam_jpeg_view_fits_one_standard_page`. (Now 259 985 fuel at most, see
+  J12.)
+- [x] J12 The badge deploys `cam_jpeg_view`'s byte-page build sized to
+  its need, small enough that the firmware's heap check passes with room:
+  memory fixed at 48 128 bytes (data and `.bss` 39 088 + 8 KiB stack,
+  rounded up to 1 KiB; the fixture stream needs under 3 072 bytes of
+  stack) from `[package.metadata.byte-pages]`, which
+  `build-byte-pages.sh` reads; `mw-jpeg` without `half` (no reduced IDCT,
+  `Unsupported::Scale` for `Scale::Half`), the SDK's panic-free paths
+  (P7) and `opt-level = "s"` for the crate: image 30 878 → 25 714 bytes,
+  23.3 KB of code, 13.2 M fuel per frame (15.0 M before; "z" for
+  `mw-jpeg` measured 15.9 M and a larger image), 259 985 at most per
+  call. Heap needed on the badge 164 291 bytes (W10) —
+  `cam_jpeg_view` `tests::deploy_build_memory_is_whole_kib_and_holds_buffers_and_stack`;
+  `abi-check` `cam_jpeg_view_deploy_build_declares_exactly_its_memory`;
+  `tools/payload-sim/tests/heap.rs` (`cam_jpeg_view/b`); `mw-jpeg` tests
+  with and without default features (`header_reports_geometry` checks the
+  refusal); `payloads/scripts/check-all.sh` (builds it reproducibly and
+  validates it).
 - [x] J10 Built and checked with the payload workspace: unit, round-trip,
   interop and fuzz tests, clippy (wasm32 and host) and rustdoc with
   warnings denied, and the `fuel_probe` payload validated by `abi-check` —

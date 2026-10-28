@@ -35,7 +35,7 @@
 //!   route table (handles, keys, owned bus and D/C pin) and the source
 //!   table the radio task polls.
 //! * [`start`] — the heap check before a payload starts: free heap must
-//!   cover the payload's bound (`wasm_host::Limits::load_heap_needed`) plus
+//!   cover the payload's bound (`wasm_host::Limits::heap_needed`) plus
 //!   a margin.
 //!
 //! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled

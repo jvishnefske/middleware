@@ -85,7 +85,7 @@
 //! 64 KiB page of linear memory (checked by a unit test); the heap check
 //! applies only to profiles with `runtime` set. This static plan is a
 //! floor, not a promise that every image up to `max_image` runs: what a
-//! payload needs is `wasm_host::Limits::load_heap_needed` (wasmi's module
+//! payload needs is `wasm_host::Limits::heap_needed` (wasmi's module
 //! grows with the image, about 2.75 bytes per image byte plus 16 KiB on
 //! these 32-bit chips), and the controller checks it against the heap
 //! actually free before every start ([`crate::start`]). With 64 KiB of

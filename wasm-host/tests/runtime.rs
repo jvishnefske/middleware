@@ -833,3 +833,29 @@ fn w10_heap_bound_counts_every_limit() {
     assert!(base.load_heap_needed(20_000) > need);
     assert_eq!(Limits::bytes(u32::MAX).load_heap_needed(u32::MAX), u32::MAX);
 }
+
+#[test]
+fn w10_heap_bound_charges_the_declared_maximum_not_the_cap() {
+    let cap = Limits::bytes(65_536);
+    // 1-byte pages, initial = maximum = 12 KiB: 52 KiB less than the cap.
+    let exact = module(r#"(memory (export "memory") 12288 12288 (pagesize 1))"#);
+    let len = exact.len() as u32;
+    assert_eq!(
+        cap.heap_needed(&exact),
+        cap.load_heap_needed(len) - (65_536 - 12_288)
+    );
+    // No maximum: may grow to the cap, which is charged.
+    let open = byte_page_module(12_288, "");
+    assert_eq!(cap.heap_needed(&open), cap.load_heap_needed(open.len() as u32));
+    // A maximum above the cap: the cap.
+    let big = module(r#"(memory (export "memory") 1 4)"#);
+    assert_eq!(cap.heap_needed(&big), cap.load_heap_needed(big.len() as u32));
+    // The declared maximum holds at run time: growing past it fails even
+    // though the cap would allow it.
+    let grow = module(
+        r#"(memory (export "memory") 12288 12288 (pagesize 1))
+           (func (export "init") (call $report (memory.grow (i32.const 1))))"#,
+    );
+    let mut p = Payload::load(&grow, Fake::default(), cap).unwrap();
+    assert_eq!(p.device().results(), vec![-1]);
+}

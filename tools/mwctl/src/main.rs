@@ -26,6 +26,10 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
+/// How long `start` keeps listening after a refused start, for the
+/// device's `sys/log` line that explains it (sent after the reply).
+const START_FAILURE_LOG_SECONDS: u64 = 2;
+
 fn print_events(events: &[Event]) {
     for e in events {
         println!("{}", format_event(e));
@@ -108,7 +112,18 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
     let mut dev = Device::new(Link::new(transport, timeouts));
     let result = match cli.cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
-        Cmd::Start => dev.start().map(|()| println!("payload started")),
+        Cmd::Start => match dev.start() {
+            Ok(()) => {
+                println!("payload started");
+                Ok(())
+            }
+            Err(e) => {
+                // The device logs why a start failed right after its reply;
+                // show those lines before reporting the error.
+                let _ = monitor(&mut dev, Some(START_FAILURE_LOG_SECONDS));
+                Err(e)
+            }
+        },
         Cmd::Stop => dev.stop().map(|()| println!("payload stopped")),
         Cmd::TrustInfo => dev.trust_info().map(|t| print!("{}", format_trust(&t))),
         Cmd::TrustClaim { key } => {

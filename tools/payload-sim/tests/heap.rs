@@ -1,9 +1,13 @@
 //! Heap use of every example payload under the badge's limits
-//! (requirement W10): the bound [`Limits::load_heap_needed`] must cover
-//! the measured peak of loading and of running each one.
+//! (requirement W10): the bound [`Limits::heap_needed`] must cover the
+//! measured peak of loading and of running each one.
 //!
 //! The examples are built here from `payloads/` with
-//! `cargo build --release`, as in `r14.rs`. Each is loaded with the
+//! `cargo build --release`, as in `r14.rs`, plus `cam_jpeg_view`'s deploy
+//! build with 1-byte pages and exactly its memory
+//! (`scripts/build-byte-pages.sh -p cam_jpeg_view`, listed as
+//! `cam_jpeg_view/b`), whose bound charges its declared 48 128 bytes
+//! rather than the 64 KiB cap. Each is loaded with the
 //! ESP32-S3 profile's limits (one 64 KiB page of linear memory, 1 000 000
 //! fuel per call, the default stacks) and run in virtual time against the
 //! simulator's board ([`sim::SimDevice`]): its subscriptions get a message
@@ -22,6 +26,12 @@
 //! recorded frames). Simulator allocations made inside a call (event
 //! lines, the copies of SPI transfers) are counted too, so the figures
 //! over-estimate the runtime's own use slightly.
+//!
+//! The 32-bit figures in `wasm_host::heap` come from this same test built
+//! for a 32-bit host, the closest runnable stand-in for the Xtensa chips:
+//! `cargo test -p payload-sim --release --test heap --target
+//! i686-unknown-linux-gnu` (not part of the gates; it needs the i686
+//! target and a multilib C toolchain).
 //!
 //! This file is its own test binary without the libtest harness
 //! (`harness = false` in `Cargo.toml`): the allocator's counters are
@@ -78,6 +88,26 @@ const PANEL_DC: u8 = 13;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Builds `cam_jpeg_view`'s deploy build, with 1-byte pages and the
+/// memory and stack of its `[package.metadata.byte-pages]`, as
+/// `payloads/scripts/check-all.sh` does; returns its path.
+fn build_byte_pages() -> PathBuf {
+    let dir = repo().join("payloads");
+    let status = Command::new(dir.join("scripts/build-byte-pages.sh"))
+        .args(["-q", "-p", "cam_jpeg_view"])
+        .current_dir(&dir)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("MEMORY_BYTES")
+        .env_remove("STACK_BYTES")
+        .status()
+        .expect("build-byte-pages.sh runs");
+    assert!(status.success(), "building the byte-page payload failed");
+    dir.join("target/byte-pages/wasm32-unknown-unknown/release/cam_jpeg_view.wasm")
 }
 
 /// Builds the examples; returns the release directory.
@@ -214,13 +244,13 @@ struct Measured {
     bound: u32,
 }
 
-fn measure(dir: &Path, name: &str, feed: &[(String, Vec<u8>)]) -> Measured {
-    let path = dir.join(format!("{name}.wasm"));
+fn measure(path: &Path, name: &str, feed: &[(String, Vec<u8>)]) -> Measured {
     let device = board();
     let base = PEAK.current_usage();
     PEAK.reset_peak_usage();
-    let image = std::fs::read(&path).expect("payload built");
+    let image = std::fs::read(path).expect("payload built");
     let image_len = u32::try_from(image.len()).expect("small image");
+    let bound = LIMITS.heap_needed(&image);
     let compiled = Compiled::new(&image, LIMITS).expect("payload compiles");
     let compile = PEAK.peak_usage() - base;
     drop(image);
@@ -265,7 +295,7 @@ fn measure(dir: &Path, name: &str, feed: &[(String, Vec<u8>)]) -> Measured {
         resident,
         run: run_peak,
         calls: outcome.calls,
-        bound: LIMITS.load_heap_needed(image_len),
+        bound,
     }
 }
 
@@ -278,20 +308,30 @@ fn main() {
         "payload", "image", "compile", "module", "instant", "resident", "run", "calls", "bound"
     );
     let mut failed = Vec::new();
-    for name in EXAMPLES {
+    let deploy = build_byte_pages();
+    let runs = EXAMPLES
+        .iter()
+        .map(|name| (*name, dir.join(format!("{name}.wasm"))))
+        .chain([("cam_jpeg_view", deploy)]);
+    for (i, (name, path)) in runs.enumerate() {
         let feed: &[(String, Vec<u8>)] = match name {
             "cam_jpeg_view" => &jpeg,
             "cam_view" => &rgb,
             _ => &[],
         };
-        let m = measure(&dir, name, feed);
+        let m = measure(&path, name, feed);
+        let label = if i < EXAMPLES.len() {
+            name.to_string()
+        } else {
+            format!("{name}/b")
+        };
         println!(
-            "{name:<16} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "{label:<16} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
             m.image, m.compile, m.module, m.instantiate, m.resident, m.run, m.calls, m.bound
         );
         let peak = m.compile.max(m.instantiate).max(m.run);
         if usize::try_from(m.bound).unwrap_or(usize::MAX) < peak {
-            failed.push(format!("{name}: bound {} < peak {peak}", m.bound));
+            failed.push(format!("{label}: bound {} < peak {peak}", m.bound));
         }
     }
     assert!(failed.is_empty(), "heap bound too small: {failed:?}");

@@ -79,8 +79,11 @@
 //!   at [`Limits::max_call_depth`] (a deeper call or a fuller stack traps
 //!   with a stack overflow instead of allocating); the DMA copy buffer and
 //!   the subscription list are reserved at load. What a payload can then
-//!   allocate is bounded by [`Limits::load_heap_needed`] ([`heap`]), which
-//!   a firmware checks against its free heap before starting one. Eager
+//!   allocate is bounded by [`Limits::heap_needed`] ([`heap`]; linear
+//!   memory charged at the module's declared maximum when that is below
+//!   the cap, [`abi::memory_reach`]), which a firmware checks against its
+//!   free heap before starting one; [`Limits::load_heap_needed`] is the
+//!   same bound for any image of a given length. Eager
 //!   translation also means the first call into a function costs the same
 //!   fuel as later ones.
 //!
@@ -426,10 +429,32 @@ impl Limits {
     /// A host that starts a payload only when this much heap is free (plus
     /// its allocator's own overhead) cannot run out of heap in the payload
     /// later, as long as nothing else allocates meanwhile.
+    ///
+    /// This is the worst case over every image of that length: it charges
+    /// linear memory at the whole cap. With the image at hand,
+    /// [`Limits::heap_needed`] charges only what the module can reach.
     pub const fn load_heap_needed(&self, image_len: u32) -> u32 {
         heap::needed(
             image_len,
             self.max_memory_bytes,
+            self.max_stack_bytes,
+            self.max_call_depth,
+        )
+    }
+
+    /// [`Limits::load_heap_needed`] for this image: the same bound, with
+    /// linear memory charged at [`abi::memory_reach`], the smaller of the
+    /// cap and the module's declared maximum (requirement W10). A module
+    /// built with 1-byte pages and initial = maximum (see
+    /// `payloads/scripts/build-byte-pages.sh`) is charged exactly its
+    /// memory; one without a maximum, or a malformed one, the cap.
+    ///
+    /// The declared maximum is a hard limit: wasmi's `memory.grow` never
+    /// passes it, whatever the cap.
+    pub fn heap_needed(&self, wasm: &[u8]) -> u32 {
+        heap::needed(
+            u32::try_from(wasm.len()).unwrap_or(u32::MAX),
+            abi::memory_reach(wasm, self.max_memory_bytes),
             self.max_stack_bytes,
             self.max_call_depth,
         )

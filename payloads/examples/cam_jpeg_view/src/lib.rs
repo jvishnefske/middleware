@@ -36,22 +36,49 @@
 //! a call of its own. A 240-wide row of 15 MCUs takes four steps, and a
 //! frame 60 steps, 15 strips of 7 transfers and one start. Measured in
 //! `payload-sim` (`tools/payload-sim/tests/r14.rs`, 1 000 000 fuel per
-//! call) on the fixture frames: at most 294 354 fuel in one call, about
-//! 15.0 M per frame in all (reception included), so the frame rate is the
-//! host's wasmi speed divided by that.
+//! call) on the fixture frames: at most 259 985 fuel in one call, about
+//! 13.2 M per frame in all (reception included), so the frame rate is the
+//! host's wasmi speed divided by that. This crate and `mw-jpeg` are built
+//! at `opt-level = "s"` (`payloads/Cargo.toml`): against "z", 12 % less
+//! fuel per frame (15.1 M) for no more code.
 //!
-//! # Memory (64 KiB linear memory, one standard page)
+//! # Code size
+//!
+//! The heap a host needs for a payload grows by about 2.75 bytes per image
+//! byte (wasmi's translated module, `wasm_host::heap`), so the image is
+//! kept small: 25 714 bytes (23.3 KB of code), down from 30 878.
+//!
+//! * `mw-jpeg` without its `half` feature: no reduced 4×4 IDCT (only
+//!   [`Scale::Full`] is used).
+//! * No panic path at all, so none of core's panic formatting
+//!   (`panic_fmt`, `Display for usize`): the SDK's `LogLine` and its
+//!   message copy cannot panic, and frame chunks are copied with a zip
+//!   rather than `copy_from_slice`, whose length check stays an
+//!   out-of-line call.
+//!
+//! # Memory
 //!
 //! | what | bytes |
 //! |---|---|
-//! | shadow stack (`-zstack-size`) | 16 384 |
+//! | shadow stack (`-zstack-size`) | 8 192 (deploy) / 16 384 (standard) |
 //! | [`SLOTS`] frame slots of [`FRAME_CAP`] | 24 576 |
 //! | strip buffer ([`STRIP_BYTES`], 240 × 16 RGB565) | 7 680 |
 //! | `mw_jpeg::Decoder` | 4 352 |
-//! | constants and other statics (SDK receive buffer, payload state) | about 3 500 |
+//! | constants and other statics (SDK receive buffer, payload state) | about 2 500 |
 //!
-//! As linked: the stack takes 0..16 384, data 16 384..19 360, `.bss` up
-//! to `__heap_base` 56 496, leaving about 9 KB of the page unused.
+//! Data and `.bss` take 39 088 bytes as linked. **Deploy the byte-page
+//! build** (`payloads/scripts/build-byte-pages.sh -p cam_jpeg_view`, output
+//! in `payloads/target/byte-pages/wasm32-unknown-unknown/release/`): its
+//! linear memory is fixed at MEMORY = 48 128 bytes (initial = maximum,
+//! 1-byte pages) with STACK = 8 192, from `[package.metadata.byte-pages]`
+//! in `Cargo.toml`: stack + data + `.bss` = 47 280 (`__heap_base`),
+//! rounded up to 1 KiB. The stack is about 2.7 times what the fixture
+//! stream needs (an overflow traps with 2 816 bytes; 3 072 run clean).
+//! The host's heap bound charges the module's declared 48 128 bytes rather
+//! than a 64 KiB page: on the badge (32-bit) it needs 164 291 bytes free
+//! (160 195 bound + 4 096 margin), against 181 685 for the standard build
+//! (one 64 KiB page, 16 KiB stack, `.bss` up to 55 472).
+//!
 //! The big buffers live in one all-zero static ([`Buffers::EMPTY`], in
 //! `.bss`), not in the payload state, which the SDK builds on the stack.
 //! The fixture frames are at most 4 728 bytes; [`FRAME_CAP`] leaves room
@@ -352,8 +379,11 @@ impl CamJpegView {
                 .frames
                 .get_mut(usize::from(slot))
                 .and_then(|s| s.get_mut(start..start.saturating_add(data.len())));
+            // A zip, not `copy_from_slice` (equal lengths by construction):
+            // the payload links no panic path, so none of core's panic
+            // formatting.
             if let Some(dst) = dst {
-                dst.copy_from_slice(data);
+                dst.iter_mut().zip(data).for_each(|(d, s)| *d = *s);
             }
             if completed.is_some() {
                 self.kick();
@@ -590,6 +620,35 @@ mod tests {
         assert_eq!(big, 36_608);
         assert!(16 * 1024 + big + 4096 <= 64 * 1024);
         assert!(fixture_lens().iter().all(|&n| n <= FRAME_CAP));
+    }
+
+    /// `key = N` from the manifest's `[package.metadata.byte-pages]`.
+    fn byte_pages(key: &str) -> usize {
+        let manifest = include_str!("../Cargo.toml");
+        let table = manifest
+            .split("[package.metadata.byte-pages]")
+            .nth(1)
+            .expect("byte-pages table");
+        table
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| k.trim() == key)
+            .and_then(|(_, v)| v.trim().parse().ok())
+            .expect(key)
+    }
+
+    #[test]
+    fn deploy_build_memory_is_whole_kib_and_holds_buffers_and_stack() {
+        let (memory, stack) = (byte_pages("memory"), byte_pages("stack"));
+        assert_eq!((memory, stack), (48_128, 8_192), "update the crate docs");
+        assert_eq!(memory % 1024, 0);
+        // The linker checks the exact fit; this keeps the numbers honest
+        // when the buffers change: stack, the buffers and 2 KiB of other
+        // statics, with less than 1 KiB of rounding left over.
+        let big = SLOTS * FRAME_CAP + STRIP_BYTES + 4352;
+        assert!(stack + big + 2048 <= memory);
+        assert!(memory < stack + big + 2048 + 1024 + 2048);
+        assert!(memory < 64 * 1024, "smaller than the standard page");
     }
 
     fn fixture_lens() -> Vec<usize> {

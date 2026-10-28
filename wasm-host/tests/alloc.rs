@@ -7,12 +7,15 @@
 //! [`heap::PER_CALL_DEPTH`] per level of [`Limits::max_call_depth`].
 //! Once grown it keeps its capacity: further calls allocate nothing.
 //!
+//! Then repeated refused and failed starts must return every byte they
+//! allocated (see [`refused_and_failed_starts_return_every_byte`]).
+//!
 //! Its own test binary without the libtest harness (`harness = false` in
 //! `Cargo.toml`): the counting allocator ([`peak_alloc`]) is process wide.
 
 use middleware::Key;
 use peak_alloc::PeakAlloc;
-use wasm_host::{AbiError, Device, Limits, Payload, Pull, Ticked, heap};
+use wasm_host::{AbiError, Compiled, Device, Limits, LoadError, Payload, Pull, Ticked, heap};
 
 #[global_allocator]
 static PEAK: PeakAlloc = PeakAlloc;
@@ -113,4 +116,59 @@ fn main() {
     );
     assert_eq!(PEAK.current_usage(), resident);
     println!("frame list grew {grown} of {allowed} bytes once; 398 later calls allocated nothing");
+    drop(p);
+
+    refused_and_failed_starts_return_every_byte(&wasm, limits);
+}
+
+/// `init` traps (unreachable) after subscribing: the load fails.
+const TRAPS_IN_INIT: &str = r#"
+(module
+  (import "mw" "subscribe" (func $subscribe (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "in/x")
+  (func (export "init")
+    (drop (call $subscribe (i32.const 0) (i32.const 4)))
+    unreachable))
+"#;
+
+/// Repeated refused or failed starts lose no heap (requirement W10): each
+/// path a firmware takes when a start does not go ahead, run 20 times,
+/// leaves exactly the heap in use before it.
+///
+/// * refused: the image is read into a buffer, [`Limits::heap_needed`]
+///   says it does not fit, the buffer is dropped (esp-base's controller);
+/// * compile error: [`Compiled::new`] rejects the image;
+/// * compiled, then dropped without instantiating;
+/// * `init` traps: [`Payload::instantiate`] fails after allocating linear
+///   memory, the value stack and the host buffers;
+/// * loaded, then dropped (a stop).
+fn refused_and_failed_starts_return_every_byte(wasm: &[u8], limits: Limits) {
+    let trap = wat::parse_str(TRAPS_IN_INIT).expect("valid WAT");
+    let garbage = [0u8, b'a', b's', b'm', 1, 0, 0, 0, 0xff];
+    let before = PEAK.current_usage();
+    for round in 0..20 {
+        // Refused: the firmware reads the image, sizes it, gives it back.
+        let mut image = Vec::new();
+        image.try_reserve_exact(wasm.len()).expect("room");
+        image.extend_from_slice(wasm);
+        assert!(limits.heap_needed(&image) > 0);
+        drop(image);
+        assert!(Compiled::new(&garbage, limits).is_err());
+        drop(Compiled::new(wasm, limits).expect("compiles"));
+        let compiled = Compiled::new(&trap, limits).expect("compiles");
+        assert!(matches!(
+            Payload::instantiate(compiled, Quiet::default()),
+            Err(LoadError::Init { .. })
+        ));
+        drop(Payload::load(wasm, Quiet::default(), limits).expect("loads"));
+        let now = PEAK.current_usage();
+        assert_eq!(
+            now,
+            before,
+            "round {round}: {} bytes still held",
+            now.abs_diff(before)
+        );
+    }
+    println!("20 rounds of refused, failed and stopped starts returned every byte");
 }

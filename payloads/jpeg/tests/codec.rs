@@ -29,6 +29,14 @@ enum Drive {
 
 /// Decodes `jpeg` completely with pixel format `F`, checking each strip's
 /// geometry, and returns the image.
+/// The scales this build decodes: [`Scale::Half`] needs the `half`
+/// feature.
+const SCALES: &[Scale] = if cfg!(feature = "half") {
+    &[Scale::Full, Scale::Half]
+} else {
+    &[Scale::Full]
+};
+
 fn decode<F: PixelFormat>(jpeg: &[u8], scale: Scale, drive: Drive) -> Result<Vec<u8>, Error> {
     let mut dec = Decoder::new_scaled(jpeg, scale)?;
     let (w, h) = (
@@ -140,6 +148,7 @@ fn restart_intervals_decode_like_the_reference() {
     }
 }
 
+#[cfg(feature = "half")]
 #[test]
 fn half_scale_matches_reference() {
     for sampling in ALL {
@@ -158,7 +167,7 @@ fn every_step_size_gives_the_same_image() {
     for sampling in ALL {
         let (w, h) = (50, 35);
         let e = encode(&image(w, h, 8, 3), w, h, sampling, 70, 3);
-        for scale in [Scale::Full, Scale::Half] {
+        for &scale in SCALES {
             let rows = decode::<Rgb565Be>(&e.jpeg, scale, Drive::Rows).unwrap();
             for drive in [
                 Drive::Mcus(1),
@@ -203,9 +212,16 @@ fn header_reports_geometry() {
         assert_eq!(dec.mcu_rows(), 21u16.div_ceil(mcu.1));
         assert_eq!(dec.strip_height(), mcu.1);
         assert_eq!(dec.strip_bytes::<Rgb565Be>(), 35 * usize::from(mcu.1) * 2);
-        let half = Decoder::new_scaled(&e.jpeg, Scale::Half).unwrap();
-        assert_eq!((half.output_width(), half.output_height()), (18, 11));
-        assert_eq!(half.strip_height(), mcu.1 / 2);
+        if cfg!(feature = "half") {
+            let half = Decoder::new_scaled(&e.jpeg, Scale::Half).unwrap();
+            assert_eq!((half.output_width(), half.output_height()), (18, 11));
+            assert_eq!(half.strip_height(), mcu.1 / 2);
+        } else {
+            assert_eq!(
+                Decoder::new_scaled(&e.jpeg, Scale::Half).err(),
+                Some(Error::Unsupported(Unsupported::Scale))
+            );
+        }
     }
 }
 

@@ -152,11 +152,11 @@ pub struct Chunk<'a> {
 
 /// Reads a little-endian `u32` at `at` (the caller guarantees the bounds).
 fn le32(b: &[u8; HEADER_LEN], at: usize) -> u32 {
-    let mut v = [0u8; 4];
-    if let Some(src) = b.get(at..at + 4) {
-        v.copy_from_slice(src);
-    }
-    u32::from_le_bytes(v)
+    // `first_chunk` instead of `copy_from_slice`: no length-mismatch panic
+    // path for no_std payloads to link.
+    b.get(at..)
+        .and_then(|s| s.first_chunk::<4>())
+        .map_or(0, |v| u32::from_le_bytes(*v))
 }
 
 /// Parses one message as a chunk, checking version, flags and bounds.
