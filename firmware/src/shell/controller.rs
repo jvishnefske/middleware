@@ -14,8 +14,11 @@
 //!      next tick, a newly queued event ([`irq::WAKE`]), or SPI/UART work
 //!      completing ([`EspDevice::io`], which queues `DmaDone` / `UartRx`).
 //!
-//!   Requests are dispatched as when idle; publications on subscribed keys
-//!   are delivered. A trap, `sys/payload/stop` or a new transfer
+//!   Requests are dispatched as when idle. A publication (from a serial
+//!   port, or with `espnow` a sample received over ESP-NOW) on the key of a
+//!   sink route goes to that route ([`EspDevice::route_message`], which
+//!   DMAs it to the display) and never to the payload; otherwise it is
+//!   delivered if the payload subscribed to its key. A trap, `sys/payload/stop` or a new transfer
 //!   (`sys/loader/begin`) ends the session and drops the payload, whose
 //!   device stops timers, aborts DMA, disables interrupts, releases the
 //!   pins and clears the queue.
@@ -50,7 +53,7 @@ use {
     super::device::{EspDevice, now_ms},
     super::irq,
     alloc::vec::Vec as AllocVec,
-    embassy_futures::select::{Either4, select4},
+    embassy_futures::select::{Either, Either4, select, select4},
     middleware::wasm_abi::events::MAX_EVENTS,
     embassy_time::Timer,
     esp_base::chip::Profile,
@@ -279,6 +282,21 @@ impl Controller {
         Payload::load(&image, device, limits).map_err(StartError::Load)
     }
 
+    /// Routes one publication: to the sink route on its key, else to the
+    /// payload if subscribed.
+    #[cfg(feature = "wasm")]
+    async fn publication(&mut self, payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Result<(), Trap> {
+        let Ok(key) = Key::new(key) else { return Ok(()) };
+        if let Some(handle) = payload.device().sink_for(key) {
+            payload.device().route_message(handle, body).await;
+            return Ok(());
+        }
+        if route_publication(&self.state, key, payload.subscriptions()) {
+            payload.deliver(key, body)?;
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "wasm")]
     fn trapped(&mut self, trap: &Trap) {
         self.bus.log(format_args!("payload trapped: {trap}"));
@@ -309,6 +327,8 @@ impl Controller {
         };
         self.set_state(self.state.started());
         answer(self.bus, Ok(()));
+        #[cfg(feature = "espnow")]
+        super::radio::clear();
         loop {
             for _ in 0..MAX_EVENTS {
                 let Some(event) = irq::pop() else { break };
@@ -327,7 +347,8 @@ impl Controller {
                     None => core::future::pending::<()>().await,
                 }
             };
-            match select4(self.bus.receive_inbound(), tick, irq::WAKE.wait(), payload.device().io()).await {
+            let inbound = select(self.bus.receive_inbound(), radio_sample());
+            match select4(inbound, tick, irq::WAKE.wait(), payload.device().io()).await {
                 Either4::Third(()) | Either4::Fourth(()) => {}
                 Either4::Second(()) => {
                     if let Err(trap) = payload.tick(now_ms()) {
@@ -335,12 +356,15 @@ impl Controller {
                         return;
                     }
                 }
-                Either4::First(msg) => match msg.kind {
+                Either4::First(Either::Second((key, body))) => {
+                    if let Err(trap) = self.publication(&mut payload, &key, &body).await {
+                        self.trapped(&trap);
+                        return;
+                    }
+                }
+                Either4::First(Either::First(msg)) => match msg.kind {
                     Kind::Publish => {
-                        let Ok(key) = Key::new(&msg.key) else { continue };
-                        if route_publication(&self.state, key, payload.subscriptions())
-                            && let Err(trap) = payload.deliver(key, &msg.body)
-                        {
+                        if let Err(trap) = self.publication(&mut payload, &msg.key, &msg.body).await {
                             self.trapped(&trap);
                             return;
                         }
@@ -360,4 +384,17 @@ impl Controller {
             }
         }
     }
+}
+
+/// The next sample received over ESP-NOW, as key and body.
+#[cfg(feature = "espnow")]
+async fn radio_sample() -> (heapless::String<{ esp_base::radio::KEY_CAPACITY }>, Vec<u8, { esp_base::radio::RX_PAYLOAD }>) {
+    let r = super::radio::receive().await;
+    (r.key, r.payload)
+}
+
+/// Without `espnow` nothing is ever received by radio.
+#[cfg(all(feature = "wasm", not(feature = "espnow")))]
+async fn radio_sample() -> (heapless::String<1>, Vec<u8, 1>) {
+    core::future::pending().await
 }
