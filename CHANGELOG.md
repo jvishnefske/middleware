@@ -18,6 +18,8 @@
 - Source routes (`route_source`, `TestPattern`): each chunk's ESP-NOW frame is written in place (radio header, key, chunk header, pattern bytes), one broadcast in flight at a time; late frames skip whole periods as `RouteDropped`. `Camera`, non-`app` keys and chunks over 167 bytes are `Unsupported`. (`esp_base::route::source`, `sources`)
 - Sink routes (`route_sink` on bus 0): chunks on the key bypass `on_message` and are DMAed to SPI2 with the preamble (D/C per segment) at each frame start; the bus (`spi_open`, `spi_transfer`) and D/C pin (`gpio_*`, `gpio_irq`) are `Busy` to the payload while the route runs; a failed transfer stops the route with `RouteStopped`. `route_stat` and `route_stop` per the contract. (`esp_base::route::sink`, `table`)
 - Memory, to make room for the Wi-Fi driver: ESP32 `heap_main` 112 → 80 KiB, WASM memory 128 → 64 KiB, max image 32 → 24 KiB; ESP32-S3 `heap_main` 176 → 128 KiB, memory 128 → 64 KiB, max image 80 → 32 KiB; both budget 48 KiB of heap for the radio (`Profile::radio_heap`, also in the boot log). Payloads built for one 64 KiB page or 1-byte pages are unaffected; two-page payloads no longer load on these chips.
+- Fix: starting any payload on an ESP32 panicked (`Pin 34 is not an OutputPin`): releasing the pins routed the output signal to the input-only GPIO34–39. `PinBank::release_all` now skips the output side of pins without a driver (`Profile::can_output`).
+- `build.sh esp32` sets `ESP_HAL_CONFIG_MIN_CHIP_REVISION=100` (esp-hal defaults to 300), so the firmware boots on v1.x silicon such as the ESP32-CAM.
 
 ## 0.4.0
 

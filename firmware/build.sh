@@ -12,6 +12,9 @@
 # Output: target/<triple>/release/esp-base (ELF). Flash with e.g.
 #   espflash flash --chip esp32c3 --partition-table partitions.csv \
 #       target/riscv32imc-unknown-none-elf/release/esp-base
+#
+# ESP32 builds accept silicon from v1.0 (ESP_HAL_CONFIG_MIN_CHIP_REVISION,
+# default 100 here; esp-hal's own default is 300).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -31,6 +34,11 @@ case "$chip" in
       [[ -d "$bin" ]] && PATH="$bin:$PATH"
     done
     export PATH
+    if [[ "$chip" == esp32 ]]; then
+      # esp-hal refuses ESP32 silicon older than v3.0 by default; boards
+      # such as the ESP32-CAM ship v1.x.
+      export ESP_HAL_CONFIG_MIN_CHIP_REVISION="${ESP_HAL_CONFIG_MIN_CHIP_REVISION:-100}"
+    fi
     exec cargo "+$toolchain" "build-$chip" "$@"
     ;;
   *)

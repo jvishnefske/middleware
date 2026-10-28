@@ -278,6 +278,12 @@ impl Profile {
         has(self.reserved, pin)
     }
 
+    /// Whether `pin` exists and has an output driver (ESP32 GPIO34–39 do
+    /// not; esp-hal panics when one is routed to an output signal).
+    pub fn can_output(&self, pin: u8) -> bool {
+        self.exists(pin) && !has(self.input_only, pin)
+    }
+
     /// Whether a payload may use `pin` in `direction`.
     pub fn check_pin(&self, pin: u8, direction: Direction) -> Result<(), AbiError> {
         if !self.exists(pin) {
@@ -351,7 +357,11 @@ mod tests {
         for pin in 34..=39 {
             assert_eq!(ESP32.check_pin(pin, Direction::Input), Ok(()));
             assert_eq!(ESP32.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+            assert!(!ESP32.can_output(pin), "esp32 {pin}");
         }
+        assert!(ESP32.can_output(33));
+        assert!(ESP32S3.can_output(39));
+        assert!(!ESP32S3.can_output(22), "missing pin");
     }
 
     #[test]

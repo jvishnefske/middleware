@@ -112,14 +112,19 @@ impl PinBank {
     }
 
     /// Returns every pin to high impedance (input and output disabled, no
-    /// pull, interrupt off, plain GPIO function), as after reset.
+    /// pull, interrupt off, plain GPIO function), as after reset. Input-only
+    /// pins ([`Profile::can_output`]) have no output side to reset.
     fn release_all(&mut self) {
-        for slot in self.slots.iter_mut().flatten() {
+        let profile = self.profile;
+        for (n, slot) in self.slots.iter_mut().enumerate() {
+            let Some(slot) = slot else { continue };
             slot.pin.unlisten();
             slot.pin.clear_interrupt();
             slot.edge = Edge::Off;
-            OutputSignal::GPIO.connect_to(&slot.pin);
-            slot.pin.set_output_enable(false);
+            if u8::try_from(n).is_ok_and(|n| profile.can_output(n)) {
+                OutputSignal::GPIO.connect_to(&slot.pin);
+                slot.pin.set_output_enable(false);
+            }
             slot.pin.set_input_enable(false);
             slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
             slot.mode = Mode::Idle;
