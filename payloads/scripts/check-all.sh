@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the Rust examples, runs the host unit tests, compiles the
+# Builds the Rust examples (and mw-jpeg's fuel_probe payload), runs the
+# host unit tests (including mw-jpeg's), compiles the
 # AssemblyScript templates (if node is available) and validates every payload
 # against middleware::wasm_abi. The AssemblyScript step runs before the
 # abi-check tests so they can validate its output too.
@@ -12,6 +13,8 @@ TEMPLATES=(blink echo button timer)   # .wat
 AS_TEMPLATES=(blink echo button spi)  # .ts
 
 cargo build --release
+# mw-jpeg's fuel_probe example is a payload too (see jpeg/src/lib.rs).
+cargo build --release --example fuel_probe -p mw-jpeg
 # blink, echo and cam_view (the conagotchi badge's camera viewer) again
 # with 1-byte pages (16 KiB fixed memory), for hosts that cap linear memory
 # below one 64 KiB page. check-reproducible.sh runs
@@ -20,17 +23,23 @@ cargo build --release
 BYTE_PAGE_EXAMPLES=(blink echo cam_view)
 scripts/check-reproducible.sh "${BYTE_PAGE_EXAMPLES[@]}"
 cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view --target "$HOST"
+cargo test -p mw-jpeg --target "$HOST"
 cargo clippy --release -- -D warnings
 cargo clippy -p mw-payload -p abi-check --target "$HOST" --all-targets -- -D warnings
+cargo clippy -p mw-jpeg --release --examples -- -D warnings
+cargo clippy -p mw-jpeg --target "$HOST" --all-targets -- -D warnings
 # The examples are no_std cdylibs: on the host only their tests build.
 cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view --target "$HOST" --tests -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps --document-private-items --target "$HOST"
+RUSTDOCFLAGS="-D warnings" cargo doc -p mw-jpeg --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p mw-jpeg --no-deps --document-private-items --target "$HOST"
 
 files=()
 for e in "${EXAMPLES[@]}"; do
   files+=("target/wasm32-unknown-unknown/release/$e.wasm")
 done
+files+=("target/wasm32-unknown-unknown/release/examples/fuel_probe.wasm")
 for e in "${BYTE_PAGE_EXAMPLES[@]}"; do
   files+=("target/byte-pages/wasm32-unknown-unknown/release/$e.wasm")
 done

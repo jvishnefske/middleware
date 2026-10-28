@@ -1198,6 +1198,95 @@ payload): each frame is one JPEG of varying length (R14).
     the frames in WASM (the `payloads/jpeg` decoder) and draws them; then
     on hardware; then the OV2640 behind `SourceKind::Camera`.
 
+### JPEG decode in WASM (J…)
+
+`payloads/jpeg` (`mw-jpeg`): the badge-side decoder of R14, a `no_std`,
+heap-free, float-free, `#![forbid(unsafe_code)]` library a payload links.
+A frame reassembled in linear memory is decoded in bounded steps under
+wasmi's per-call fuel budget into RGB565 strips for the GC9A01.
+
+- [x] J1 Baseline sequential Huffman JPEG, 8-bit samples (SOF0, and SOF1
+  within the same limits): grayscale and YCbCr 4:4:4, 4:2:2 (h2v1) and
+  4:2:0 (h2v2), any size from 1×1 to `MAX_DIMENSION` (2048) including
+  sizes that are not a multiple of the MCU; APPn/COM skipped, a missing
+  EOI accepted. Decoded output matches a floating point reference decode
+  within a mean of 0.3 and a maximum of 3 levels per channel (observed
+  0.17 and 3), at qualities 30, 75 and 95 and sizes up to 320×240 —
+  `tests/codec.rs` (`full_scale_matches_reference_for_every_layout_size_and_quality`,
+  `header_reports_geometry`, `missing_eoi_is_accepted`).
+- [x] J2 Interoperability with libjpeg: Pillow-encoded fixtures decode
+  bit-exactly for 4:4:4 and grayscale, and within 3 levels of ffmpeg's
+  planes with replicated chroma for 4:2:2 and 4:2:0 (chroma is replicated,
+  not interpolated like libjpeg's "fancy" upsampling); the fake camera's
+  baked frames decode — `tests/fixtures.rs` (`libjpeg_444_matches`,
+  `libjpeg_gray_matches`, `libjpeg_422_matches`, `libjpeg_420_matches`,
+  `libjpeg_420_with_restart_markers_matches`, `baked_camera_frames_decode`).
+- [x] J3 Restart intervals (DRI, RST0..RST7 in sequence; a wrong marker is
+  `Malformed::Restart`) — `tests/codec.rs`
+  (`restart_intervals_decode_like_the_reference`,
+  `wrong_restart_marker_is_malformed`); `bits::tests::restart_checks_number`.
+- [x] J4 Everything else is a clear error from `Decoder::new`:
+  `Unsupported::{Progressive, Lossless, Hierarchical, Arithmetic,
+  Precision, Components, Sampling, MultiScan, QuantPrecision, TableSlot,
+  Dnl, TooLarge}` and `Malformed::*` for broken syntax — `tests/codec.rs`
+  (`unsupported_and_malformed_headers`, `four_components_are_unsupported`,
+  `arithmetic_conditioning_segment_is_unsupported`); `tests/fixtures.rs`
+  (`libjpeg_progressive_is_unsupported`);
+  `huffman::tests::rejects_overfull_and_mismatched_tables`.
+- [x] J5 Incremental, fixed-size and borrowing: the `Decoder` struct
+  (4 352 bytes on wasm32, independent of the image size; all-zero
+  `Decoder::IDLE` for a `.bss` static, `start` re-fills it in place) holds
+  tables, bit position, DC predictors, an MCU cursor and one MCU of
+  samples; the JPEG slice is passed to each call (`InputChanged` if its
+  length differs) and pixels go to the caller's strip buffer.
+  `decode_blocks(n)`, `decode_mcus(n)` and `decode_mcu_row` return
+  `Step::{Partial, Row(Strip), Done}` and give the same image for every
+  step size; misuse (`BufferTooSmall`, `InputChanged`) leaves the state
+  untouched — `tests/codec.rs` (`every_step_size_gives_the_same_image`,
+  `idle_decoder_is_done_and_restarts_in_place`,
+  `misuse_is_reported_without_losing_state`); `tests::decoder_size`
+  (and a compile-time check in `examples/fuel_probe.rs`).
+- [x] J6 Integer arithmetic: libjpeg's `jidctint` IDCT (within one level
+  of the exact IDCT) and `jpeg_idct_4x4` for half scale, fixed-point
+  YCbCr → RGB, RGB565 big-endian output (also RGB888) —
+  `idct::tests::*` (`matches_float_idct_within_one_level`,
+  `reduced_idct_is_the_2x2_average_of_the_full_idct`,
+  `dc_only_block_is_flat`, `clamps_extremes`); `color::tests::*`;
+  `tests/codec.rs` (`rgb565_is_rgb888_truncated_and_big_endian`);
+  `tests/fixtures.rs` (`camera_frame_rgb565_matches_rgb888`).
+- [x] J7 Half-scale output (`Scale::Half`, e.g. 240×240 → 120×120 for the
+  centre window) within a mean of 0.5 and a maximum of 4 levels of the
+  reference (observed 0.22 and 2) — `tests/codec.rs`
+  (`half_scale_matches_reference`).
+- [x] J8 Corrupt or truncated input never panics or loops: every loop has a
+  fixed bound, arithmetic on coefficients wraps, and 10 000 seeded random
+  mutations (byte flips, header flips, truncations, insertions, deletions,
+  runs of `FF`/`00`) of valid files, decoded with overflow checks on at
+  random scales, formats and budgets, end in `Done` or an error within one
+  call per block; every truncation of a frame is an error, and a truncated
+  frame keeps failing — `tests/fuzz.rs`
+  (`random_corruptions_never_panic_or_hang`,
+  `every_truncation_of_a_frame_is_handled`); `tests/codec.rs`
+  (`truncated_data_is_an_error_that_sticks`);
+  `idct::tests::huge_coefficients_do_not_panic`;
+  `bits::tests::end_of_data_is_an_overrun_only_when_consumed`.
+- [ ] J9 Fits the badge's budgets. Measured, not regression-tested
+  (`examples/fuel_probe.rs`, wasmi with eager translation, 240×240 4:2:0):
+  `start` 20 400 fuel; `decode_blocks(.., 1)` at most 41 200 (18 800 at
+  half scale); a 4:2:0 MCU 74 500 on average (50 600 at half scale) on a
+  noisy quality-80 frame and 56 600 (38 700) on the fake camera's
+  quality-60 frames, i.e. about 0.8 M fuel per 240-wide MCU row. wasmi's
+  lazy translation adds about 7 fuel per code byte to the first call that
+  reaches a function (about 36 000 on the first `start`, 33 000 on the
+  first decode call), more than a 50 000-fuel budget allows; the host
+  needs eager translation or a larger first-call budget. Code size is
+  about 14 KiB of wasm (target 12 KiB), the decoder state 4.3 KB, the
+  4:2:0 strip 7 680 bytes at 240 wide.
+- [x] J10 Built and checked with the payload workspace: unit, round-trip,
+  interop and fuzz tests, clippy (wasm32 and host) and rustdoc with
+  warnings denied, and the `fuel_probe` payload validated by `abi-check` —
+  `payloads/scripts/check-all.sh`.
+
 ## Known limitations (0.3)
 
 - **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.
