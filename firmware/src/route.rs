@@ -7,8 +7,10 @@
 //! * [`source`] — a **source route** ([`SourceRoute`]) paces one frame per
 //!   period and decides, chunk by chunk, what to publish next;
 //!   [`source::write_frame`] writes the ESP-NOW frame for one chunk (radio
-//!   header, key, chunk header) and generates the chunk's pixels of the
-//!   test pattern in place, so there is no frame buffer and no copy.
+//!   header, key, chunk header) and fills the chunk's bytes in place from
+//!   its [`FrameSource`](middleware::stream::FrameSource): test-pattern
+//!   pixels generated there, or JPEG fixture bytes copied from flash, so
+//!   there is no frame buffer.
 //! * [`sources`] — the [`SourceTable`] the radio task polls for due chunks
 //!   (round robin over running routes) and folds broadcast results into.
 //! * [`sink`] — a **sink route** ([`SinkRoute`]) runs each received message

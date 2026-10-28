@@ -19,8 +19,9 @@
 //!   signed-payload wire types and rules (its crypto needs `trust`).
 //! * [`wasm_abi`] — the import/export contract between payloads and firmware.
 //! * [`stream`] — chunked frame streams over keys (always built, pure): the
-//!   chunk wire format, the source chunker, the sink state machine and a
-//!   test pattern, behind the ABI 4 DMA routes.
+//!   chunk wire format, the source chunker, the sink state machine, a test
+//!   pattern and looped stored frames (the fake JPEG camera), behind the
+//!   ABI 4 DMA routes.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * Backends, each behind a cargo feature:
 //!
@@ -30,6 +31,7 @@
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
 //! | `trust`    | `loader::sha256`, `loader::trust` checks | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |

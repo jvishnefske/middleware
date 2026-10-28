@@ -6,9 +6,14 @@
 //!
 //! * A [`SourceRoute`] (only [`wasm_host::SourceKind::TestPattern`]; the camera is
 //!   `Unsupported`) is due every `period_ms` on the simulator clock, first
-//!   one period after it starts. [`Routes::due_frames`] produces each due
-//!   frame `n` (counting from 0, sequence number `n as u16`) as
-//!   [`Chunker`] chunks whose data is [`pattern::fill`] of frame `n`. When
+//!   one period after it starts. Its [`FrameSource`] comes from
+//!   [`FrameSource::test_pattern`]: the RGB565 [`pattern`](middleware::stream::pattern) for an RGB565
+//!   config, the baked JPEG frames (`stream::frames::fixtures`) for a JPEG
+//!   config of 240×240 or 120×120 (other JPEG sizes are
+//!   `InvalidArgument`). [`Routes::due_frames`] produces each due frame `n`
+//!   (counting from 0, sequence number `n as u16`) as [`Chunker`](middleware::stream::Chunker) chunks
+//!   of frame `n` ([`frame_chunks`]): generated pattern bytes, or stored
+//!   frame `n mod 8` with its own length as each chunk's `total`. When
 //!   the clock jumped over several periods, only the latest frame is
 //!   produced and the earlier ones count as skipped
 //!   ([`RouteStats::skipped`]), like a camera that overran.
@@ -16,7 +21,7 @@
 //!   key goes through a [`Sink`] ([`SinkRoute::receive`]) and its
 //!   [`RouteStats`] record each step.
 
-use middleware::stream::{Chunker, HEADER_LEN, MAX_CHUNK_DATA, RouteStats, Sink, Step, pattern};
+use middleware::stream::{FrameSource, HEADER_LEN, MAX_CHUNK_DATA, RouteStats, Sink, Step};
 use middleware::wasm_abi::route::MAX_ROUTES;
 use wasm_host::{AbiError, SinkConfig, SourceConfig};
 
@@ -27,6 +32,8 @@ pub struct SourceRoute {
     pub key: String,
     /// Frame geometry, period and chunk size.
     pub cfg: SourceConfig,
+    /// Where the frame bytes come from.
+    pub source: FrameSource<'static>,
     /// Number of the next frame.
     pub frame: u32,
     /// When the next frame is due, in microseconds.
@@ -94,9 +101,15 @@ pub struct Frame {
     pub chunks: Vec<Vec<u8>>,
 }
 
-/// The chunk messages of test-pattern frame `number` with config `cfg`.
-pub fn pattern_chunks(cfg: &SourceConfig, number: u32) -> Result<Vec<Vec<u8>>, AbiError> {
-    let chunker = Chunker::new(number as u16, cfg.frame_len(), usize::from(cfg.chunk_data))
+/// The chunk messages of frame `number` of `source`, in chunks of at most
+/// `chunk_data` bytes, with sequence number `number as u16`.
+pub fn frame_chunks(
+    source: &FrameSource<'_>,
+    chunk_data: u16,
+    number: u32,
+) -> Result<Vec<Vec<u8>>, AbiError> {
+    let chunker = source
+        .chunker(number, number as u16, usize::from(chunk_data))
         .map_err(|_| AbiError::InvalidArgument)?;
     let mut data = [0u8; MAX_CHUNK_DATA];
     let mut msg = [0u8; HEADER_LEN + MAX_CHUNK_DATA];
@@ -106,7 +119,9 @@ pub fn pattern_chunks(cfg: &SourceConfig, number: u32) -> Result<Vec<Vec<u8>>, A
             let body = data
                 .get_mut(..plan.range.len())
                 .ok_or(AbiError::InvalidArgument)?;
-            pattern::fill(number, cfg.width, cfg.height, plan.range.start, body);
+            if source.fill(number, plan.range.start, body) != body.len() {
+                return Err(AbiError::InvalidArgument);
+            }
             let n = plan
                 .header
                 .write(body, &mut msg)
@@ -208,7 +223,7 @@ impl Routes {
             let late = (now_us - src.due_us) / period;
             let skipped = u32::try_from(late).unwrap_or(u32::MAX);
             let number = src.frame.wrapping_add(skipped);
-            let Ok(chunks) = pattern_chunks(&src.cfg, number) else {
+            let Ok(chunks) = frame_chunks(&src.source, src.cfg.chunk_data, number) else {
                 continue;
             };
             let count = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
@@ -239,12 +254,19 @@ impl Routes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use middleware::stream::{Action, chunk};
+    use middleware::stream::frames::fixtures;
+    use middleware::stream::{Action, chunk, pattern};
+
+    fn pattern_chunks(cfg: &SourceConfig, number: u32) -> Result<Vec<Vec<u8>>, AbiError> {
+        frame_chunks(&FrameSource::test_pattern(cfg)?, cfg.chunk_data, number)
+    }
 
     fn source(period_ms: u16) -> SourceRoute {
+        let cfg = SourceConfig::new(4, 3, period_ms).unwrap();
         SourceRoute {
             key: "cam".into(),
-            cfg: SourceConfig::new(4, 3, period_ms).unwrap(),
+            source: FrameSource::test_pattern(&cfg).unwrap(),
+            cfg,
             frame: 0,
             due_us: u64::from(period_ms) * 1000,
             stats: RouteStats::default(),
@@ -269,6 +291,36 @@ mod tests {
         let mut want = vec![0; 40];
         pattern::fill(9, 5, 4, 0, &mut want);
         assert_eq!(frame, want);
+    }
+
+    /// A JPEG test-pattern source publishes the baked fixture frames in
+    /// order, looping, each frame's chunks carrying its own length.
+    #[test]
+    fn jpeg_chunks_are_the_fixture_frames_in_order() {
+        for size in [240, 120] {
+            let cfg = SourceConfig::jpeg(size, size, 200).unwrap();
+            let src = FrameSource::test_pattern(&cfg).unwrap();
+            let set = fixtures::jpeg(size, size).unwrap();
+            for number in 0..10u32 {
+                let chunks = frame_chunks(&src, cfg.chunk_data, number).unwrap();
+                let want = set.frame(number);
+                assert_eq!(want, set.frame(number % 8));
+                assert_eq!(chunks.len(), want.len().div_ceil(166));
+                let mut frame = Vec::new();
+                for c in &chunks {
+                    let c = chunk::decode(c).unwrap();
+                    assert_eq!(c.header.total as usize, want.len());
+                    assert_eq!(c.header.seq, number as u16);
+                    frame.extend_from_slice(c.data);
+                }
+                assert_eq!(frame, want);
+            }
+        }
+        let odd = SourceConfig::jpeg(200, 200, 200).unwrap();
+        assert_eq!(
+            FrameSource::test_pattern(&odd),
+            Err(AbiError::InvalidArgument)
+        );
     }
 
     #[test]

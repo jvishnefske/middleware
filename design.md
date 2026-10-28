@@ -913,7 +913,9 @@ D/C high. Pixels are RGB565 big-endian (display-ready), default 120×120
 the key, so a chunk is a 12-byte header and up to 166 data bytes (174
 chunks per 120×120 frame). The contract is `wasm_abi::route` (imports,
 config layouts) and `stream` (chunk wire format, chunker, sink rules,
-test pattern), both pure, `no_std` and heap-free.
+test pattern), both pure, `no_std` and heap-free. A source may instead
+stream baseline JPEG (the OV2640's native output, decoded by the receiving
+payload): each frame is one JPEG of varying length (R14).
 
 - [x] R1 ABI 4 is a superset of ABI 3: `route_source` (5 params),
   `route_sink` (5), `route_stop` (1) and `route_stat` (2) are appended to
@@ -961,7 +963,7 @@ test pattern), both pure, `no_std` and heap-free.
   frame and can be generated for any byte range, so a host fills one chunk
   at a time without a frame buffer — `stream::pattern::tests::*`.
 - [x] R6 Route arguments are validated in one place: source kind, source
-  config (exactly 10 bytes: width and height `1..=320`, RGB565, flags 0,
+  config (exactly 10 bytes: width and height `1..=320`, RGB565 or JPEG (R14), flags 0,
   period ≥ 10 ms, chunk size `1..=500` or 0 for 166, frame ≤ 153 600
   bytes), sink config (D/C pin, flags 0, frame length, up to 8 preamble
   segments of D/C level and bytes, at most 64 bytes, nothing trailing), the
@@ -1129,6 +1131,72 @@ test pattern), both pure, `no_std` and heap-free.
     memory) the pair brings the panel up in 330 ms and draws every frame
     in the centre window; the most fuel any call needed was 27 971
     (`cam_view`'s `init`) and 6 637 for `cam_stream`.
+- [ ] R14 The camera stream is baseline JPEG: a source config may say
+  `PixelFormat::Jpeg`; until the OV2640 driver lands, the fake camera
+  serves baked JPEG frames, and the badge decodes them in WASM.
+  - [x] ABI: format byte 1 is JPEG; width and height (`1..=320`) describe
+    the image, the period and chunk rules are those of RGB565, and the
+    frame length varies per frame (each chunk header's `total`,
+    `1..=MAX_FRAME_BYTES`), so `SourceConfig::fixed_frame_len` is `None`;
+    a 240×240 JPEG source at 200 ms encodes as `[240, 0, 240, 0, 1, 0,
+    200, 0, 166, 0]`; the host accepts it —
+    `wasm_abi::route::tests::jpeg_source_config`,
+    `source_kinds_and_formats`, `source_config_rules`;
+    `wasm-host` `abi::tests::route_source_checks_arguments_before_pointers`.
+  - [x] Fixtures: 8 frames of a moving scene (gradient shifting per frame,
+    a bar crossing the image once per loop, the frame number as a
+    seven-segment digit and as bits in a counter band) at 240×240 and
+    120×120 in `fixtures/cam/jpeg<size>/frame_<nn>.jpg`, baseline JPEG
+    YCbCr 4:2:0, quality 60, no restart markers, no APPn, 4.1–4.7 KB (25–29
+    chunks of 166 bytes) at 240×240 and 2.1–2.4 KB at 120×120. They are
+    produced by an integer-only encoder (`tools/jpeg-fixtures`), and a
+    fresh run reproduces the committed bytes exactly —
+    `jpeg-fixtures` `tests/fixtures.rs`
+    (`committed_fixtures_match_a_fresh_run`,
+    `generation_is_deterministic_and_frames_differ`); `encoder::tests::*`
+    (`zigzag_starts_and_ends_right_and_is_a_permutation`,
+    `huffman_tables_are_complete_and_cover_every_symbol`,
+    `fdct_matches_the_reference_dct`,
+    `quantize_rounds_half_away_from_zero_and_tables_scale`,
+    `categories_and_magnitudes`, `bit_writer_stuffs_and_pads`,
+    `writes_a_baseline_420_stream`); `scene::tests::*`;
+    `stream::frames::fixtures::tests::*`
+    (`frames_are_baseline_420_jpegs_of_their_size`,
+    `sizes_and_chunk_counts`, feature `cam-fixtures`).
+  - [x] Fake JPEG camera core (`stream::frames`, `no_std`, no heap): a
+    `FrameSet` of stored frames is checked once (non-empty, each
+    `1..=MAX_FRAME_BYTES`) and loops (frame `i` is `frames[i % n]`); a
+    `FrameSource` (pattern or set) gives each frame's length, its
+    `Chunker` and any byte range written into a caller's buffer, so the
+    chunks of every frame rebuild it with its own `total`; for
+    `TestPattern`, RGB565 serves the pattern and JPEG the fixture set of
+    that size (`InvalidArgument` for another size, `Unsupported` without
+    `cam-fixtures`) — `stream::frames::tests::*`
+    (`sets_are_checked_once`, `frames_loop_and_vary_in_length`,
+    `fill_copies_any_range_and_stops_at_the_end`,
+    `pattern_source_matches_the_pattern`,
+    `chunks_rebuild_each_stored_frame`,
+    `test_pattern_picks_the_source_by_format`).
+  - [x] `payload-sim`: a JPEG `TestPattern` source publishes the fixture
+    frames in order, looping, one per period, every chunk carrying its
+    frame's length; other JPEG sizes are `InvalidArgument` —
+    `sim::route::tests::jpeg_chunks_are_the_fixture_frames_in_order`;
+    `sim::tests::r10_jpeg_source_publishes_the_fixture_frames_in_order`.
+  - [x] ESP base firmware (ESP32, ESP32-S3; feature `cam-fixtures`): each
+    frame gets its own chunker, frames vary in length and loop, skipped
+    periods jump through the loop, and each chunk is copied from the
+    flash-resident frame straight into the ESP-NOW frame buffer (no frame
+    buffer); a chunk past the stored frame is refused; JPEG without the
+    feature is `Unsupported` — `esp_base::route::source::tests::*`
+    (`r11_jpeg_frames_vary_in_length_and_loop`,
+    `r11_jpeg_skipped_periods_jump_through_the_loop`,
+    `r11_jpeg_write_frame_copies_the_stored_bytes`,
+    `r11_test_pattern_jpeg_needs_the_fixtures`, run with and without
+    `--features cam-fixtures`); `./build.sh esp32` and `./build.sh
+    esp32s3` build (about 54 KB more flash).
+  - [ ] `cam_stream` switches its source to JPEG and `cam_view` decodes
+    the frames in WASM (the `payloads/jpeg` decoder) and draws them; then
+    on hardware; then the OV2640 behind `SourceKind::Camera`.
 
 ## Known limitations (0.3)
 

@@ -31,7 +31,10 @@
 //! owns); all decisions are in `esp_base::route`.
 //!
 //! * `route_source` (feature `espnow`): `TestPattern` only (`Camera` is
-//!   `Unsupported` until the OV2640 driver lands); the key must travel over
+//!   `Unsupported` until the OV2640 driver lands): the generated pattern
+//!   for RGB565, the baked 240×240 / 120×120 JPEG frames for JPEG (feature
+//!   `cam-fixtures`, on for ESP32 and ESP32-S3; another JPEG size is
+//!   `InvalidArgument`, and without the feature `Unsupported`); the key must travel over
 //!   ESP-NOW (`app/...`, at most 64 bytes) and a chunk must fit one frame
 //!   (≤ 167 data bytes), else `Unsupported`. The route is entered in the
 //!   radio task's [`SOURCES`](super::radio::SOURCES) table, which sends it.

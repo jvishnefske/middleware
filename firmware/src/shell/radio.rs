@@ -20,8 +20,9 @@
 //!   broadcast through the transport;
 //! * a source-route chunk due in [`SOURCES`]: written into the frame buffer
 //!   by `esp_base::route::source::write_frame` (radio header, key, chunk
-//!   header and the pattern bytes generated in place) and broadcast with
-//!   the radio directly.
+//!   header, then the pattern bytes generated in place or the JPEG bytes
+//!   copied from the flash-resident fixture) and broadcast with the radio
+//!   directly.
 //!
 //! Every broadcast is awaited until esp-radio's send callback, bounded by
 //! `SEND_TIMEOUT_MS`, so at most one frame waits in the Wi-Fi driver: that
@@ -291,7 +292,7 @@ impl Radio {
     async fn chunk(&mut self, job: Job, frame: &mut [u8; MAX_FRAME]) {
         let seq = self.route_seq;
         self.route_seq = seq.wrapping_add(1);
-        let ok = match write_frame(frame, seq, job.key.as_key(), job.frame, &job.cfg, &job.plan) {
+        let ok = match write_frame(frame, seq, job.key.as_key(), job.frame, &job.source, &job.plan) {
             Ok(n) => match frame.get(..n) {
                 Some(bytes) => matches!(
                     with_timeout(

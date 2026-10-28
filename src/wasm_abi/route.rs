@@ -7,9 +7,8 @@
 //!
 //! * A **source route** (`route_source`) binds a host data source
 //!   ([`SourceKind`]) to a publish key. Every frame period the host captures
-//!   (or, for [`SourceKind::TestPattern`], generates) a frame into
-//!   host-owned DMA-capable memory and publishes it on the key as
-//!   [`crate::stream::Chunker`] chunks.
+//!   (or, for [`SourceKind::TestPattern`], generates or reads from flash) a
+//!   frame and publishes it on the key as [`crate::stream::Chunker`] chunks.
 //! * A **sink route** (`route_sink`) binds a key to an SPI bus opened with
 //!   `spi_open`. Chunks received on the key go through a
 //!   [`crate::stream::Sink`]; before a frame's first chunk the host sends
@@ -25,12 +24,18 @@
 //! |-------|---------------------------------------------------------------|
 //! | 2     | width in pixels, `1..=MAX_DIM`                                 |
 //! | 2     | height in pixels, `1..=MAX_DIM`                                |
-//! | 1     | [`PixelFormat`] (0 = RGB565 big-endian)                        |
+//! | 1     | [`PixelFormat`] (0 = RGB565 big-endian, 1 = baseline JPEG)     |
 //! | 1     | flags, must be 0                                              |
 //! | 2     | frame period in ms, `MIN_PERIOD_MS..`                          |
 //! | 2     | chunk data bytes, `1..=MAX_CHUNK_DATA`, 0 = [`ESPNOW_CHUNK_DATA`] |
 //!
-//! The frame length (`width * height * 2`) is at most [`MAX_FRAME_BYTES`].
+//! For RGB565 every frame is exactly `width * height * 2` bytes, at most
+//! [`MAX_FRAME_BYTES`]. For JPEG, width and height describe the image and
+//! the frame length varies from frame to frame: each frame's length is the
+//! `total` of its chunk headers, `1..=MAX_FRAME_BYTES`
+//! ([`SourceConfig::fixed_frame_len`] is `None`). A JPEG frame is one
+//! complete baseline JPEG stream (`SOI` … `EOI`), e.g. YCbCr 4:2:0 as an
+//! OV2640 emits it.
 //!
 //! # `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)`
 //!
@@ -115,8 +120,12 @@ impl SourceKind {
 /// Pixel encoding of a stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
-    /// 16-bit RGB565, high byte first (what SPI panels take).
+    /// 16-bit RGB565, high byte first (what SPI panels take); every frame
+    /// is `width * height * 2` bytes.
     Rgb565Be = 0,
+    /// Baseline JPEG, one complete image per frame; the length varies per
+    /// frame (each chunk header's `total`).
+    Jpeg = 1,
 }
 
 impl PixelFormat {
@@ -124,14 +133,16 @@ impl PixelFormat {
     pub const fn from_u8(v: u8) -> Result<Self, AbiError> {
         match v {
             0 => Ok(PixelFormat::Rgb565Be),
+            1 => Ok(PixelFormat::Jpeg),
             _ => Err(AbiError::InvalidArgument),
         }
     }
 
-    /// Bytes per pixel.
-    pub const fn bytes_per_pixel(self) -> u32 {
+    /// Bytes per pixel of a raw format; `None` for a compressed one (JPEG).
+    pub const fn bytes_per_pixel(self) -> Option<u32> {
         match self {
-            PixelFormat::Rgb565Be => 2,
+            PixelFormat::Rgb565Be => Some(2),
+            PixelFormat::Jpeg => None,
         }
     }
 }
@@ -164,6 +175,19 @@ impl SourceConfig {
         .validated()
     }
 
+    /// A baseline-JPEG config of a `width`×`height` image with the default
+    /// chunk size, validated.
+    pub const fn jpeg(width: u16, height: u16, period_ms: u16) -> Result<Self, AbiError> {
+        SourceConfig {
+            width,
+            height,
+            format: PixelFormat::Jpeg,
+            period_ms,
+            chunk_data: ESPNOW_CHUNK_DATA as u16,
+        }
+        .validated()
+    }
+
     /// The same config with `bytes` of data per chunk (0 = default),
     /// validated.
     pub const fn with_chunk_data(self, bytes: u16) -> Result<Self, AbiError> {
@@ -190,9 +214,22 @@ impl SourceConfig {
         Ok(self)
     }
 
-    /// Frame length in bytes.
+    /// Length of every frame in bytes for a raw format (`width * height *
+    /// bytes_per_pixel`); `None` for JPEG, whose frames vary in length.
+    pub const fn fixed_frame_len(&self) -> Option<u32> {
+        match self.format.bytes_per_pixel() {
+            Some(bpp) => Some(self.width as u32 * self.height as u32 * bpp),
+            None => None,
+        }
+    }
+
+    /// Largest frame length in bytes: the exact length for a raw format,
+    /// [`MAX_FRAME_BYTES`] for JPEG.
     pub const fn frame_len(&self) -> u32 {
-        self.width as u32 * self.height as u32 * self.format.bytes_per_pixel()
+        match self.fixed_frame_len() {
+            Some(len) => len,
+            None => MAX_FRAME_BYTES,
+        }
     }
 
     /// Parses the `cfg` bytes of `route_source`.
@@ -483,7 +520,10 @@ mod tests {
         assert_eq!(SourceKind::from_i32(2), Err(AbiError::InvalidArgument));
         assert_eq!(SourceKind::from_i32(-1), Err(AbiError::InvalidArgument));
         assert_eq!(PixelFormat::from_u8(0), Ok(PixelFormat::Rgb565Be));
-        assert_eq!(PixelFormat::from_u8(1), Err(AbiError::InvalidArgument));
+        assert_eq!(PixelFormat::from_u8(1), Ok(PixelFormat::Jpeg));
+        assert_eq!(PixelFormat::from_u8(2), Err(AbiError::InvalidArgument));
+        assert_eq!(PixelFormat::Rgb565Be.bytes_per_pixel(), Some(2));
+        assert_eq!(PixelFormat::Jpeg.bytes_per_pixel(), None);
     }
 
     #[test]
@@ -514,7 +554,8 @@ mod tests {
         assert_eq!(SourceConfig::parse(&[0; 11]), bad, "long");
         assert_eq!(with(0, 0), bad, "width 0");
         assert_eq!(with(2, 0), bad, "height 0");
-        assert_eq!(with(4, 1), bad, "format");
+        assert!(with(4, 1).is_ok(), "JPEG");
+        assert_eq!(with(4, 2), bad, "format");
         assert_eq!(with(5, 1), bad, "flags");
         assert_eq!(with(6, 9), bad, "period below 10 ms");
         assert!(with(6, 10).is_ok());
@@ -529,6 +570,35 @@ mod tests {
         let c = SourceConfig::new(1, 1, 10).expect("valid");
         assert_eq!(c.with_chunk_data(501), bad, "chunk over MAX_CHUNK_DATA");
         assert!(c.with_chunk_data(1).is_ok());
+    }
+
+    #[test]
+    fn jpeg_source_config() {
+        let c = SourceConfig::jpeg(240, 240, 200).expect("valid");
+        let bytes = c.encode();
+        assert_eq!(bytes, [240, 0, 240, 0, 1, 0, 200, 0, 166, 0]);
+        assert_eq!(SourceConfig::parse(&bytes), Ok(c));
+        assert_eq!(c.format, PixelFormat::Jpeg);
+        // Frame length varies per frame; only the ceiling is known.
+        assert_eq!(c.fixed_frame_len(), None);
+        assert_eq!(c.frame_len(), MAX_FRAME_BYTES);
+        assert_eq!(
+            SourceConfig::new(120, 120, 100).map(|c| c.fixed_frame_len()),
+            Ok(Some(28_800))
+        );
+        // Geometry, period and chunk rules apply as for RGB565; a 320×320
+        // JPEG is allowed (no raw frame to fit), 321 is not.
+        let bad = Err(AbiError::InvalidArgument);
+        assert!(SourceConfig::jpeg(320, 320, 10).is_ok());
+        assert_eq!(SourceConfig::jpeg(321, 240, 100), bad);
+        assert_eq!(SourceConfig::jpeg(0, 240, 100), bad);
+        assert_eq!(SourceConfig::jpeg(240, 240, 9), bad);
+        assert_eq!(c.with_chunk_data(501), bad);
+        assert_eq!(
+            SourceConfig::parse(&[240, 0, 240, 0, 1, 1, 200, 0, 166, 0]),
+            bad,
+            "flags"
+        );
     }
 
     #[test]

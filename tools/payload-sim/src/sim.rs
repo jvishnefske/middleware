@@ -38,7 +38,7 @@ pub mod route;
 use std::fmt::Write as _;
 
 use middleware::Key;
-use middleware::stream::{Action, Sink};
+use middleware::stream::{Action, FrameSource, Sink};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
@@ -731,8 +731,10 @@ impl Device for SimDevice {
         result
     }
 
-    /// Only the test pattern; the camera is `Unsupported`. The first frame
-    /// is due one period from now.
+    /// Only the test pattern; the camera is `Unsupported`. RGB565 configs
+    /// stream the generated pattern, JPEG configs the baked 240×240 or
+    /// 120×120 frames (other JPEG sizes are `InvalidArgument`). The first
+    /// frame is due one period from now.
     fn route_source(
         &mut self,
         source: SourceKind,
@@ -742,16 +744,18 @@ impl Device for SimDevice {
         if source != SourceKind::TestPattern {
             return Err(AbiError::Unsupported);
         }
+        let frames = FrameSource::test_pattern(&cfg)?;
         let handle = self.routes.add(Route::Source(SourceRoute {
             key: key.as_str().to_string(),
             cfg,
+            source: frames,
             frame: 0,
             due_us: self.now_us + u64::from(cfg.period_ms) * 1000,
             stats: Default::default(),
         }))?;
         self.event(format!(
-            "route{handle} source {source:?} {}x{} every {} ms on {key} ({} B chunks)",
-            cfg.width, cfg.height, cfg.period_ms, cfg.chunk_data
+            "route{handle} source {source:?} {}x{} {:?} every {} ms on {key} ({} B chunks)",
+            cfg.width, cfg.height, cfg.format, cfg.period_ms, cfg.chunk_data
         ));
         Ok(handle)
     }
@@ -1200,5 +1204,37 @@ mod tests {
                 .unwrap()
                 .ends_with("route0 frame 2 -> cam (7 chunks, 2 skipped)")
         );
+    }
+
+    /// A JPEG test-pattern source publishes the baked fixture frames, in
+    /// order and looping, one frame per period; JPEG sizes without
+    /// fixtures are refused.
+    #[test]
+    fn r10_jpeg_source_publishes_the_fixture_frames_in_order() {
+        use middleware::stream::{chunk, frames::fixtures};
+        let key = Key::new("app/cam/frame").unwrap();
+        let mut cam = SimDevice::default();
+        let odd = SourceConfig::jpeg(200, 200, 100).unwrap();
+        assert_eq!(
+            cam.route_source(SourceKind::TestPattern, key, odd),
+            Err(AbiError::InvalidArgument)
+        );
+        let cfg = SourceConfig::jpeg(240, 240, 100).unwrap();
+        assert_eq!(cam.route_source(SourceKind::TestPattern, key, cfg), Ok(0));
+        for n in 0..10u32 {
+            cam.advance_to(u64::from(n + 1) * 100_000);
+            let want = fixtures::JPEG_240.frame(n);
+            assert_eq!(want, fixtures::JPEG_240.frame(n % 8), "loops");
+            let mut frame = Vec::new();
+            for (k, msg) in cam.take_outbox() {
+                assert_eq!(k, "app/cam/frame");
+                let c = chunk::decode(&msg).unwrap();
+                assert_eq!(c.header.offset as usize, frame.len());
+                assert_eq!(c.header.total as usize, want.len());
+                frame.extend_from_slice(c.data);
+            }
+            assert_eq!(frame.as_slice(), want, "frame {n}");
+        }
+        assert_eq!(cam.route_stat(0, RouteStat::Frames), Ok(10));
     }
 }

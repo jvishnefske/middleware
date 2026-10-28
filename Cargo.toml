@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 # protocol-only firmware) and `payloads/` (wasm32 guests) are separate
 # workspaces because they build for other targets and toolchains.
 [workspace]
-members = [".", "wasm-host", "tools/payload-sim", "tools/mwctl", "web/protocol-wasm"]
+members = [".", "wasm-host", "tools/payload-sim", "tools/mwctl", "tools/jpeg-fixtures", "web/protocol-wasm"]
 exclude = ["firmware", "firmware-esp8266", "payloads"]
 
 [features]
@@ -31,6 +31,10 @@ espnow = []
 # streams in, Ed25519 verification of signed commits, and the pure trust
 # state transitions. The wire types are always built; this adds the crypto.
 trust = ["dep:sha2", "dep:ed25519-dalek"]
+# The fake JPEG camera's baked frames (`stream::frames::fixtures`, about
+# 53 KB of `include_bytes!` data from `fixtures/cam`), served by
+# `SourceKind::TestPattern` for JPEG configs. no_std, no heap.
+cam-fixtures = []
 
 # Cloud / host transports (std, tokio)
 zenoh = ["std", "dep:zenoh", "dep:tokio"]

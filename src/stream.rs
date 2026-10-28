@@ -22,6 +22,11 @@
 //!   bytes in the wrong place.
 //! * [`pattern`] — a deterministic RGB565 test pattern (the fake camera),
 //!   generated per byte range so a host can fill one chunk at a time.
+//! * [`frames`] — where a source's frame bytes come from: the pattern or a
+//!   looped [`FrameSet`] of stored frames that may vary in length (the fake
+//!   JPEG camera; its baked frames are `frames::fixtures`, feature
+//!   `cam-fixtures`), behind one [`FrameSource`] that sizes, chunks and
+//!   fills any frame.
 //! * [`RouteStats`] — the per-route counters behind the `route_stat` import.
 //!
 //! # Budget per ESP-NOW message
@@ -34,11 +39,13 @@
 //! chunks.
 
 pub mod chunk;
+pub mod frames;
 pub mod pattern;
 pub mod sink;
 pub mod source;
 
 pub use chunk::{Chunk, ChunkError, ChunkHeader, FLAG_FIRST, FLAG_LAST, HEADER_LEN, VERSION};
+pub use frames::{FrameSet, FrameSource};
 pub use sink::{Action, DropReason, Sink, Step};
 pub use source::{ChunkPlan, Chunker, Chunks};
 

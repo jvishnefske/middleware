@@ -34,6 +34,7 @@ esp32 = [
   "trust",
   "wasm",
   "espnow",
+  "cam-fixtures",
   "esp-radio?/esp32",
   "esp-hal/esp32",
   "esp-rtos/esp32",
@@ -48,6 +49,7 @@ esp32s3 = [
   "trust",
   "wasm",
   "espnow",
+  "cam-fixtures",
   "esp-radio?/esp32s3",
   "esp-hal/esp32s3",
   "esp-rtos/esp32s3",
@@ -79,6 +81,10 @@ wasm = ["dep:wasm-host"]
 # payload runtime, so not for esp32c3 (no `wasm` there). Costs heap for the
 # Wi-Fi driver (`Profile::radio_heap`).
 espnow = ["wasm", "dep:esp-radio", "esp-rtos/esp-radio"]
+# The fake JPEG camera: a JPEG `TestPattern` source route serves the baked
+# 240×240 and 120×120 frames (middleware `cam-fixtures`, about 53 KB of
+# flash). On for the ESP32 and ESP32-S3 builds.
+cam-fixtures = ["middleware/cam-fixtures"]
 # Internal: the imperative shell's dependencies, pulled in by a chip feature.
 shell = [
   "dep:esp-hal",

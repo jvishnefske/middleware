@@ -20,7 +20,7 @@
 
 use middleware::KeyBuf;
 use middleware::espnow::MAX_KEY;
-use middleware::stream::{ChunkPlan, RouteStats};
+use middleware::stream::{ChunkPlan, FrameSource, RouteStats};
 use middleware::wasm_abi::route::{MAX_ROUTES, SourceConfig};
 
 use super::Report;
@@ -46,10 +46,12 @@ pub struct Job {
     pub epoch: u32,
     /// The route's key.
     pub key: RouteKey,
-    /// Pattern frame number.
+    /// Source frame number.
     pub frame: u32,
     /// The route's config.
     pub cfg: SourceConfig,
+    /// Where the chunk's bytes come from.
+    pub source: FrameSource<'static>,
     /// The chunk.
     pub plan: ChunkPlan,
 }
@@ -137,6 +139,7 @@ impl SourceTable {
                         key: slot.key,
                         frame: slot.route.frame(),
                         cfg: slot.route.config(),
+                        source: slot.route.source(),
                         plan,
                     };
                     return (SourceTable { last: handle, ..self }, Due::Send(job));
