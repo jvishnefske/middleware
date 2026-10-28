@@ -1071,6 +1071,19 @@ test pattern), both pure, `no_std` and heap-free.
     `Busy` (a D/C pin the payload drives as an output is taken over);
     `route_sink` is `Busy` while a payload transfer is in flight; a failed
     transfer releases bus and pin and raises `RouteStopped`.
+  - [x] Stopping a payload in any state (bus idle, payload transfer in
+    flight, sink-route write mid-frame) cancels what runs and returns SPI2
+    and its static DMA buffers to the hardware home, so the next payload
+    (same boot) can `spi_open` again; starting while a transfer runs is
+    `Busy` and keeps that transfer; a transfer that fails to start hands
+    the parts back. The driver and buffers are always either idle or inside
+    the running transfer (`esp_base::periph::dma_hw::DmaHw`) —
+    `periph::dma_hw::tests::*` (`r12_stop_while_idle_returns_the_parts`,
+    `r12_stop_during_a_payload_transfer_cancels_and_returns_the_parts`,
+    `r12_stop_during_a_route_write_cancels_and_returns_the_parts`,
+    `r12_starting_while_in_flight_is_busy_and_keeps_the_transfer`,
+    `r12_a_transfer_that_fails_to_start_hands_the_parts_back`,
+    `r12_parts_survive_any_number_of_payload_runs`).
 - [ ] R13 Camera and display payloads (Rust SDK) and an end-to-end run
   between the two devices.
   - [x] `payloads/examples/cam_stream` (ESP32-CAM): a `TestPattern`

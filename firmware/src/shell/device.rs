@@ -17,7 +17,10 @@
 //! Dropping the device (payload stop, trap, reload, failed load) stops all
 //! timers, cancels SPI DMA and UART transmit, closes both peripherals,
 //! releases every pin (interrupts off, signals detached) and clears the
-//! event queue.
+//! event queue. Both peripherals go back to [`HW`] whatever state they were
+//! in: SPI through [`SpiBus::close`] (idle, payload transfer or sink-route
+//! write in flight; see `esp_base::periph::dma_hw`), UART by value, so the
+//! next payload can open them again.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.

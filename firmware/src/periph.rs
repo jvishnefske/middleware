@@ -13,6 +13,9 @@
 //!   periods (D8).
 //! * [`dma`] — the per-channel transfer state machine
 //!   (`Idle → InFlight → Done`, read back while `Done`) (D6, D7).
+//! * [`dma_hw`] — who holds a DMA peripheral's driver and buffers (idle,
+//!   or the running transfer), so a payload stop in any state returns them
+//!   (D6, R12).
 //! * [`ring`] — the fixed UART receive ring that drops and counts bytes
 //!   beyond its capacity (D7).
 //!
@@ -23,6 +26,7 @@
 
 pub mod claims;
 pub mod dma;
+pub mod dma_hw;
 pub mod ring;
 pub mod timers;
 
