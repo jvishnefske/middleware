@@ -18,19 +18,36 @@
 //! pins read values set by
 //! `!adc` commands, and each I2C bus carries a register device at
 //! [`periph::I2C_DEVICE_ADDR`].
+//!
+//! The ABI 4 DMA routes (requirement R10) run in [`route`]: a test-pattern
+//! source route publishes each due frame as chunks (one printed summary
+//! line per frame), and a sink route consumes the messages on its key,
+//! steps a [`middleware::stream::Sink`], and sends the preamble and the
+//! forwarded chunk data to a virtual GC9A01-like [`panel::Panel`] on its
+//! SPI bus. Route progress raises `RouteFrames` / `RouteDropped` events
+//! through the same queue as the other peripherals. Every publication, the
+//! payload's own and a source route's chunks, is also queued in an outbox
+//! ([`SimDevice::take_outbox`]) that the shell hands to a `--peer` payload
+//! over a [`bus::Bus`].
 
+pub mod bus;
+pub mod panel;
 pub mod periph;
+pub mod route;
 
 use std::fmt::Write as _;
 
 use middleware::Key;
+use middleware::stream::{Action, Sink};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
-    SpiConfig, TimerSpec, UartConfig,
+    RouteStat, SinkConfig, SourceConfig, SourceKind, SpiConfig, TimerSpec, UartConfig,
 };
 
+use panel::Panel;
 use periph::{Adc, I2c, Pwm, Spi, Timers, Uart};
+use route::{Route, Routes, SinkRoute, SourceRoute};
 
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,11 +65,21 @@ pub struct Options {
     pub until_ms: Option<u64>,
     /// Bytes the SPI device returns instead of looping back (`--spi-pattern`).
     pub spi_pattern: Option<Vec<u8>>,
+    /// A second payload sharing an in-memory bus with the first (`--peer`).
+    pub peer: Option<String>,
+    /// Per-mille message loss on that bus (`--loss`, `0..=1000`).
+    pub loss: u16,
+    /// Seed of the loss generator (`--seed`).
+    pub seed: u64,
+    /// Where to write the panel framebuffer as a PPM image at the end
+    /// (`--dump-panel`).
+    pub dump_panel: Option<String>,
 }
 
 /// Usage text printed on argument errors.
 pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
-                         [--until-ms T] [--spi-pattern HEX]\n\
+                         [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE]\n\
+                         [--seed S] [--dump-panel <file.ppm>]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input";
@@ -67,6 +94,10 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         virtual_time: false,
         until_ms: None,
         spi_pattern: None,
+        peer: None,
+        loss: 0,
+        seed: 1,
+        dump_panel: None,
     };
     let mut it = args.iter().map(AsRef::as_ref);
     while let Some(arg) = it.next() {
@@ -82,6 +113,15 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
             "--virtual" => opts.virtual_time = true,
             "--until-ms" => opts.until_ms = Some(number(value("--until-ms")?)?),
             "--spi-pattern" => opts.spi_pattern = Some(hex(value("--spi-pattern")?)?),
+            "--peer" => opts.peer = Some(value("--peer")?.to_string()),
+            "--loss" => {
+                opts.loss = number(value("--loss")?)?;
+                if opts.loss > bus::MAX_LOSS {
+                    return Err(format!("--loss is per mille, at most {}", bus::MAX_LOSS));
+                }
+            }
+            "--seed" => opts.seed = number(value("--seed")?)?,
+            "--dump-panel" => opts.dump_panel = Some(value("--dump-panel")?.to_string()),
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path if file.is_none() => file = Some(path.to_string()),
             extra => return Err(format!("unexpected argument {extra}")),
@@ -220,6 +260,12 @@ pub const PINS: usize = 144;
 pub struct SimDevice {
     /// Event lines produced since the last drain.
     pub events: Vec<String>,
+    /// Name printed after the timestamp (`--peer` runs label both boards).
+    label: Option<String>,
+    /// Publications not yet handed to the shell.
+    outbox: Vec<(String, Vec<u8>)>,
+    routes: Routes,
+    panel: Panel,
     now_us: u64,
     pins: [Mode; PINS],
     /// Level driven from outside (`!gpio`); overrides the pull when set.
@@ -246,6 +292,10 @@ impl SimDevice {
     pub fn new(spi_pattern: Option<Vec<u8>>) -> Self {
         SimDevice {
             events: Vec::new(),
+            label: None,
+            outbox: Vec::new(),
+            routes: Routes::default(),
+            panel: Panel::new(),
             now_us: 0,
             pins: [Mode::Unused; PINS],
             external: [None; PINS],
@@ -260,18 +310,129 @@ impl SimDevice {
         }
     }
 
-    /// Moves the clock to `now_us` (never backwards) and queues every timer
-    /// event due by then.
+    /// The same board with event lines labelled `label`.
+    pub fn with_label(self, label: &str) -> Self {
+        SimDevice {
+            label: Some(label.to_string()),
+            ..self
+        }
+    }
+
+    /// Moves the clock to `now_us` (never backwards), queues every timer
+    /// event due by then, and publishes the source-route frames due by
+    /// then.
     pub fn advance_to(&mut self, now_us: u64) {
         self.now_us = self.now_us.max(now_us);
         for event in self.timers.fire(self.now_us) {
             self.queue.push(event);
         }
+        for frame in self.routes.due_frames(self.now_us) {
+            let skipped = if frame.skipped > 0 {
+                format!(", {} skipped", frame.skipped)
+            } else {
+                String::new()
+            };
+            self.event(format!(
+                "route{} frame {} -> {} ({} chunks{skipped})",
+                frame.handle,
+                frame.number,
+                frame.key,
+                frame.chunks.len()
+            ));
+            for chunk in frame.chunks {
+                self.outbox.push((frame.key.clone(), chunk));
+            }
+            self.route_event(EventKind::RouteFrames, frame.handle, 1);
+            if frame.skipped > 0 {
+                let n = i32::try_from(frame.skipped).unwrap_or(i32::MAX);
+                self.route_event(EventKind::RouteDropped, frame.handle, n);
+            }
+        }
     }
 
     /// When the next timer is due, in microseconds.
+    #[cfg(test)]
     pub fn next_timer_us(&self) -> Option<u64> {
         self.timers.next_due()
+    }
+
+    /// When the next timer or source-route frame is due, in microseconds.
+    pub fn next_due_us(&self) -> Option<u64> {
+        [self.timers.next_due(), self.routes.next_due()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// The publications (key, data) made since the last call, oldest first.
+    pub fn take_outbox(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.outbox)
+    }
+
+    /// The virtual panel sink routes draw on.
+    pub fn panel(&self) -> &Panel {
+        &self.panel
+    }
+
+    /// One line per running route with its counters.
+    pub fn route_summary(&self) -> Vec<String> {
+        self.routes
+            .iter()
+            .map(|(h, r)| {
+                let (kind, key) = match r {
+                    Route::Source(s) => ("source", &s.key),
+                    Route::Sink(s) => ("sink", &s.key),
+                };
+                let s = self.routes.stats(h).unwrap_or_default();
+                format!(
+                    "route{h} {kind} {key}: frames {} dropped {} chunks {} chunks dropped {}",
+                    s.frames, s.frames_dropped, s.chunks, s.chunks_dropped
+                )
+            })
+            .collect()
+    }
+
+    /// Offers a received message to the sink routes. Returns `true` if a
+    /// sink route consumed it (then it must not reach `on_message`):
+    /// a frame start sends the preamble, then forwarded data goes to the
+    /// panel with D/C high; completed and abandoned frames raise route
+    /// events and print one line each.
+    pub fn route_receive(&mut self, key: &str, data: &[u8]) -> bool {
+        let Some((handle, sink)) = self.routes.sink_for(key) else {
+            return false;
+        };
+        let before = sink.sink;
+        let preamble = sink.cfg.preamble;
+        let (step, forwarded) = sink.receive(data);
+        let after = sink.sink;
+        if step.action == Action::StartFrame {
+            for segment in preamble.segments() {
+                self.panel.write(segment.dc, segment.bytes);
+            }
+        }
+        self.panel.write(true, forwarded);
+        if step.aborted {
+            if let Sink::Receiving { seq, .. } = before {
+                self.event(format!("route{handle} frame {seq} dropped"));
+            }
+            self.route_event(EventKind::RouteDropped, handle, 1);
+        }
+        if step.completed {
+            if let Sink::Idle { last: Some(seq) } = after {
+                self.event(format!("route{handle} frame {seq} drawn"));
+            }
+            self.route_event(EventKind::RouteFrames, handle, 1);
+        }
+        true
+    }
+
+    fn route_event(&mut self, kind: EventKind, handle: u8, value: i32) {
+        self.queue.push(Event {
+            kind,
+            source: i32::from(handle),
+            value,
+            time_us: self.now_us as u32,
+        });
     }
 
     /// Completes the SPI and UART transfers started earlier, queueing their
@@ -366,10 +527,23 @@ impl SimDevice {
         }
     }
 
-    /// Records a printable event line stamped with the current time.
+    /// Records a printable event line stamped with the current time (and
+    /// the board's label, if any).
     pub fn note(&mut self, line: String) {
-        self.events
-            .push(format!("[{:>6} ms] {line}", self.now_us / 1000));
+        let ms = self.now_us / 1000;
+        self.events.push(match &self.label {
+            Some(label) => format!("[{ms:>6} ms] {label}: {line}"),
+            None => format!("[{ms:>6} ms] {line}"),
+        });
+    }
+
+    /// `Busy` if a sink route owns `pin` as its D/C pin.
+    fn pin_free(&self, pin: u8) -> Result<(), AbiError> {
+        if self.routes.owns_pin(pin) {
+            Err(AbiError::Busy)
+        } else {
+            Ok(())
+        }
     }
 
     fn event(&mut self, line: String) {
@@ -384,6 +558,7 @@ impl Device for SimDevice {
 
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
         self.event(format!("publish {key} {}", render(data)));
+        self.outbox.push((key.as_str().to_string(), data.to_vec()));
         Ok(())
     }
 
@@ -392,6 +567,7 @@ impl Device for SimDevice {
     }
 
     fn gpio_output(&mut self, pin: u8) -> Result<(), AbiError> {
+        self.pin_free(pin)?;
         *self.pin(pin)? = Mode::Output(false);
         self.set_edge(pin, Edge::Off);
         self.event(format!("gpio {pin} output"));
@@ -399,12 +575,14 @@ impl Device for SimDevice {
     }
 
     fn gpio_input(&mut self, pin: u8, pull: Pull) -> Result<(), AbiError> {
+        self.pin_free(pin)?;
         *self.pin(pin)? = Mode::Input(pull);
         self.event(format!("gpio {pin} input {pull:?}"));
         Ok(())
     }
 
     fn gpio_write(&mut self, pin: u8, high: bool) -> Result<(), AbiError> {
+        self.pin_free(pin)?;
         let mode = self.pin(pin)?;
         if !matches!(mode, Mode::Output(_)) {
             return Err(AbiError::InvalidArgument);
@@ -467,7 +645,11 @@ impl Device for SimDevice {
         Ok(())
     }
 
+    /// `Busy` while a sink route owns the bus.
     fn spi_transfer(&mut self, bus: u8, tx: &[u8], len: usize) -> Result<(), AbiError> {
+        if self.routes.owns_bus(bus) {
+            return Err(AbiError::Busy);
+        }
         self.spi.transfer(bus, tx, len)?;
         self.event(format!("spi{bus} tx {} ({len} bytes)", render(tx)));
         Ok(())
@@ -548,6 +730,73 @@ impl Device for SimDevice {
         self.event(format!("i2c{bus} {addr:#04x} w {} {outcome}", shown(tx)));
         result
     }
+
+    /// Only the test pattern; the camera is `Unsupported`. The first frame
+    /// is due one period from now.
+    fn route_source(
+        &mut self,
+        source: SourceKind,
+        key: Key<'_>,
+        cfg: SourceConfig,
+    ) -> Result<u8, AbiError> {
+        if source != SourceKind::TestPattern {
+            return Err(AbiError::Unsupported);
+        }
+        let handle = self.routes.add(Route::Source(SourceRoute {
+            key: key.as_str().to_string(),
+            cfg,
+            frame: 0,
+            due_us: self.now_us + u64::from(cfg.period_ms) * 1000,
+            stats: Default::default(),
+        }))?;
+        self.event(format!(
+            "route{handle} source {source:?} {}x{} every {} ms on {key} ({} B chunks)",
+            cfg.width, cfg.height, cfg.period_ms, cfg.chunk_data
+        ));
+        Ok(handle)
+    }
+
+    /// `Busy` unless `bus` is open and no other sink owns it; `Unsupported`
+    /// for a D/C pin past [`PINS`]. The D/C pin becomes an output.
+    fn route_sink(&mut self, key: Key<'_>, bus: u8, cfg: &SinkConfig) -> Result<u8, AbiError> {
+        if !self.spi.is_open(bus) || self.routes.owns_bus(bus) || self.spi.in_flight() {
+            return Err(AbiError::Busy);
+        }
+        self.pin_free(cfg.dc_pin)?;
+        *self.pin(cfg.dc_pin)? = Mode::Output(true);
+        self.set_edge(cfg.dc_pin, Edge::Off);
+        let handle = self.routes.add(Route::Sink(SinkRoute {
+            key: key.as_str().to_string(),
+            bus,
+            cfg: *cfg,
+            sink: Sink::new(),
+            stats: Default::default(),
+        }))?;
+        self.event(format!(
+            "route{handle} sink {key} -> spi{bus} dc {} ({} B frames, {} B preamble)",
+            cfg.dc_pin,
+            cfg.frame_len,
+            cfg.preamble.byte_len()
+        ));
+        Ok(handle)
+    }
+
+    fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        self.routes.stop(handle)?;
+        for kind in [
+            EventKind::RouteFrames,
+            EventKind::RouteDropped,
+            EventKind::RouteStopped,
+        ] {
+            self.queue.purge(kind, i32::from(handle));
+        }
+        self.event(format!("route{handle} stop"));
+        Ok(())
+    }
+
+    fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        Ok(stat.of(&self.routes.stats(handle)?))
+    }
 }
 
 #[cfg(test)]
@@ -581,6 +830,23 @@ mod tests {
         assert_eq!(o.spi_pattern, Some(vec![0xA5, 0x5A]));
         assert!(parse_args(&["a", "--spi-pattern", "abc"]).is_err());
         assert!(parse_args(&["a", "--spi-pattern", "zz"]).is_err());
+        let o = parse_args(&[
+            "a",
+            "--peer",
+            "b.wasm",
+            "--loss",
+            "250",
+            "--seed",
+            "9",
+            "--dump-panel",
+            "p.ppm",
+        ])
+        .unwrap();
+        assert_eq!(o.peer.as_deref(), Some("b.wasm"));
+        assert_eq!((o.loss, o.seed), (250, 9));
+        assert_eq!(o.dump_panel.as_deref(), Some("p.ppm"));
+        assert!(parse_args(&["a", "--loss", "1001"]).is_err());
+        assert!(parse_args(&["a", "--peer"]).is_err());
     }
 
     #[test]
@@ -759,5 +1025,180 @@ mod tests {
         assert!(d.events.last().unwrap().ends_with("Transport"));
         d.pwm_stop(1).unwrap();
         assert_eq!(d.pwm.duty(1, 2), None);
+    }
+
+    use middleware::stream::pattern;
+    use wasm_host::Preamble;
+
+    const W: u16 = 20;
+    const H: u16 = 10;
+    /// Window top-left corner on the panel.
+    const X0: u16 = 5;
+    const Y0: u16 = 7;
+
+    /// A camera board with a 20×10 test-pattern source on `cam` (64-byte
+    /// chunks, 10 ms), and a display board with a sink drawing it at
+    /// `(X0, Y0)`.
+    fn camera_and_display() -> (SimDevice, SimDevice) {
+        let key = Key::new("cam").unwrap();
+        let cfg = SourceConfig::new(W, H, 10)
+            .unwrap()
+            .with_chunk_data(64)
+            .unwrap();
+        let mut cam = SimDevice::default();
+        assert_eq!(
+            cam.route_source(SourceKind::Camera, key, cfg),
+            Err(AbiError::Unsupported)
+        );
+        assert_eq!(cam.route_source(SourceKind::TestPattern, key, cfg), Ok(0));
+        let mut view = SimDevice::default();
+        let window = Preamble::mipi_window(X0, Y0, X0 + W - 1, Y0 + H - 1).unwrap();
+        let sink = SinkConfig::new(13, cfg.frame_len())
+            .unwrap()
+            .with_preamble(window);
+        assert_eq!(
+            view.route_sink(key, 0, &sink),
+            Err(AbiError::Busy),
+            "bus closed"
+        );
+        view.spi_open(SpiConfig {
+            bus: 0,
+            sck: 12,
+            mosi: Some(11),
+            miso: None,
+            cs: Some(10),
+            freq_khz: 40_000,
+            mode: 0,
+        })
+        .unwrap();
+        assert_eq!(view.route_sink(key, 0, &sink), Ok(0));
+        assert_eq!(
+            view.route_sink(key, 0, &sink),
+            Err(AbiError::Busy),
+            "bus taken"
+        );
+        (cam, view)
+    }
+
+    /// Runs `frames` frame periods, delivering each chunk when `pass` says
+    /// so.
+    fn stream(
+        cam: &mut SimDevice,
+        view: &mut SimDevice,
+        frames: u64,
+        mut pass: impl FnMut() -> bool,
+    ) {
+        for f in 1..=frames {
+            cam.advance_to(f * 10_000);
+            for (key, data) in cam.take_outbox() {
+                if pass() {
+                    assert!(view.route_receive(&key, &data));
+                }
+            }
+        }
+    }
+
+    fn in_window(x: u16, y: u16) -> bool {
+        (X0..X0 + W).contains(&x) && (Y0..Y0 + H).contains(&y)
+    }
+
+    #[test]
+    fn r10_source_chunks_drive_the_sink_onto_the_panel() {
+        let (mut cam, mut view) = camera_and_display();
+        assert_eq!(view.spi_transfer(0, b"x", 1), Err(AbiError::Busy));
+        assert_eq!(view.gpio_write(13, false), Err(AbiError::Busy));
+        assert!(!view.route_receive("other", b"x"));
+        stream(&mut cam, &mut view, 3, || true);
+        let panel = view.panel();
+        for y in 0..panel::HEIGHT {
+            for x in 0..panel::WIDTH {
+                if in_window(x, y) {
+                    let want = pattern::pixel(2, W, H, x - X0, y - Y0);
+                    assert_eq!(panel.pixel(x, y), Some(want), "({x}, {y})");
+                } else {
+                    assert!(!panel.written(x, y), "({x}, {y}) outside the window");
+                }
+            }
+        }
+        // 400 bytes in 64-byte chunks: 7 per frame.
+        assert_eq!(cam.route_stat(0, RouteStat::Frames), Ok(3));
+        assert_eq!(cam.route_stat(0, RouteStat::Chunks), Ok(21));
+        assert_eq!(view.route_stat(0, RouteStat::Frames), Ok(3));
+        assert_eq!(view.route_stat(0, RouteStat::Chunks), Ok(21));
+        assert_eq!(view.route_stat(0, RouteStat::ChunksDropped), Ok(0));
+        let e = view.pop_event().unwrap();
+        assert_eq!((e.kind, e.source, e.value), (EventKind::RouteFrames, 0, 3));
+        let e = cam.pop_event().unwrap();
+        assert_eq!((e.kind, e.source, e.value), (EventKind::RouteFrames, 0, 3));
+        assert!(
+            view.events
+                .iter()
+                .any(|l| l.ends_with("route0 frame 2 drawn"))
+        );
+        assert!(
+            cam.events
+                .iter()
+                .any(|l| l.ends_with("route0 frame 2 -> cam (7 chunks)"))
+        );
+
+        assert_eq!(view.route_stop(0), Ok(()));
+        assert_eq!(view.route_stop(0), Err(AbiError::Busy));
+        assert_eq!(view.route_stat(0, RouteStat::Frames), Err(AbiError::Busy));
+        assert!(view.spi_transfer(0, b"x", 1).is_ok(), "bus released");
+        assert!(!view.route_receive("cam", b"x"), "key released");
+    }
+
+    #[test]
+    fn r10_lossy_delivery_never_misplaces_pixels() {
+        let (mut cam, mut view) = camera_and_display();
+        let mut bus = bus::Bus::new(150, 42);
+        let frames = 40;
+        stream(&mut cam, &mut view, frames, || bus.pass());
+        assert!(bus.lost > 0);
+        let panel = view.panel();
+        for y in 0..panel::HEIGHT {
+            for x in 0..panel::WIDTH {
+                if !in_window(x, y) {
+                    assert!(!panel.written(x, y), "({x}, {y}) outside the window");
+                } else if panel.written(x, y) {
+                    let got = panel.pixel(x, y);
+                    assert!(
+                        (0..frames as u32)
+                            .any(|f| Some(pattern::pixel(f, W, H, x - X0, y - Y0)) == got),
+                        "({x}, {y}) = {got:?} is in no frame"
+                    );
+                }
+            }
+        }
+        let frames_drawn = view.route_stat(0, RouteStat::Frames).unwrap();
+        let dropped = view.route_stat(0, RouteStat::FramesDropped).unwrap();
+        assert!(
+            frames_drawn > 0 && dropped > 0,
+            "{frames_drawn} drawn, {dropped} dropped"
+        );
+        assert!(frames_drawn + dropped <= frames as u32);
+        assert!(view.route_stat(0, RouteStat::ChunksDropped).unwrap() > 0);
+    }
+
+    #[test]
+    fn r10_late_clock_skips_source_frames() {
+        let (mut cam, _) = camera_and_display();
+        cam.advance_to(35_000);
+        assert_eq!(cam.take_outbox().len(), 7, "only the latest frame");
+        assert_eq!(cam.route_stat(0, RouteStat::FramesDropped), Ok(2));
+        assert_eq!(cam.next_due_us(), Some(40_000));
+        let kinds: Vec<_> = std::iter::from_fn(|| cam.pop_event())
+            .map(|e| (e.kind, e.value))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![(EventKind::RouteFrames, 1), (EventKind::RouteDropped, 2)]
+        );
+        assert!(
+            cam.events
+                .last()
+                .unwrap()
+                .ends_with("route0 frame 2 -> cam (7 chunks, 2 skipped)")
+        );
     }
 }

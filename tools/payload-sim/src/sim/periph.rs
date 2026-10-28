@@ -142,6 +142,11 @@ impl Spi {
         self.in_flight.is_some()
     }
 
+    /// Whether `bus` is open.
+    pub fn is_open(&self, bus: u8) -> bool {
+        self.config.is_some_and(|cfg| cfg.bus == bus)
+    }
+
     /// Starts a `len`-byte transfer of `tx` (padded with `0x00`).
     pub fn transfer(&mut self, bus: u8, tx: &[u8], len: usize) -> Result<(), AbiError> {
         match self.config {
