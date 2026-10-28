@@ -27,6 +27,7 @@ Feature isolation is checked by `scripts/check-features.sh`.
 | `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info` |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
+| `tools/jpeg-fixtures/` | regenerate (or `--check`) the fake camera's baked JPEG frames in `fixtures/cam/` (8 frames at 240×240 and 120×120, baseline 4:2:0): `cargo run -p jpeg-fixtures` |
 | `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |
 | `web/`               | flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
 

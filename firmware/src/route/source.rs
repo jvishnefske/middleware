@@ -1,8 +1,9 @@
 //! Source routes: frame pacing and the ESP-NOW frame of one chunk.
 //!
-//! A [`SourceRoute`] is the state of one running source: which frame of the
-//! pattern is being sent, which chunk is next, when the frame is due, and
-//! its [`RouteStats`]. The radio task asks [`SourceRoute::next`] what to do
+//! A [`SourceRoute`] is the state of one running source: where its bytes
+//! come from (a [`FrameSource`]: the generated RGB565 pattern, or the baked
+//! JPEG frames for a JPEG config), which frame is being sent, which chunk
+//! is next, when the frame is due, and its [`RouteStats`]. The radio task asks [`SourceRoute::next`] what to do
 //! and reports each broadcast with [`SourceRoute::published`] or
 //! [`SourceRoute::failed`]; each returns the next state and a [`Report`].
 //!
@@ -24,19 +25,25 @@
 //!   above.
 //!
 //! The frame sequence number of the chunk header advances by one per frame
-//! attempted, while the pattern's frame number advances by one per period
-//! (so skipped periods show as a jump in the counter band).
+//! attempted, while the source's frame number advances by one per period
+//! (so skipped periods show as a jump in the counter band, or in the JPEG
+//! loop). Each frame gets its own [`Chunker`] from
+//! [`FrameSource::chunker`], so a JPEG frame's chunks carry that frame's
+//! length as `total`; the chunks of skipped periods are counted with the
+//! length of the frame that follows them.
 //!
 //! # One chunk, in place
 //!
 //! [`write_frame`] fills one ESP-NOW frame buffer: the middleware ESP-NOW
 //! header and key ([`middleware::espnow::Frame`]), the 12-byte chunk header
 //! ([`ChunkHeader::encode`](middleware::stream::ChunkHeader::encode)), then
-//! the chunk's bytes of the test pattern generated directly into the frame
-//! ([`pattern::fill`]).
+//! the chunk's bytes written directly into the frame by
+//! [`FrameSource::fill`]: test-pattern pixels generated in place, or JPEG
+//! bytes copied from the flash-resident `&'static [u8]` fixture. There is
+//! no frame buffer.
 
 use middleware::espnow::{Frame, FrameError, MAX_FRAME};
-use middleware::stream::{ChunkError, ChunkPlan, Chunker, HEADER_LEN, RouteStats, pattern};
+use middleware::stream::{ChunkError, ChunkPlan, Chunker, FrameSource, HEADER_LEN, RouteStats};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::route::SourceConfig;
 use middleware::Key;
@@ -57,8 +64,10 @@ pub enum Next {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRoute {
     cfg: SourceConfig,
+    source: FrameSource<'static>,
+    /// Chunker of the current frame.
     chunker: Chunker,
-    /// Pattern frame number (one per period).
+    /// Source frame number (one per period).
     frame: u32,
     /// Index of the next chunk of the current frame.
     chunk: u32,
@@ -68,16 +77,25 @@ pub struct SourceRoute {
 }
 
 impl SourceRoute {
-    /// A route for `cfg` whose first frame is due at `now_ms`.
-    /// `Unsupported` when the chunk size does not fit one ESP-NOW message
-    /// ([`AIR_CHUNK_DATA`]).
+    /// A `TestPattern` route for `cfg` whose first frame is due at
+    /// `now_ms`, serving [`FrameSource::test_pattern`]: the pattern for
+    /// RGB565, the 240×240 or 120×120 fixture frames for JPEG
+    /// (`InvalidArgument` for another JPEG size, `Unsupported` without the
+    /// `cam-fixtures` feature). `Unsupported` too when the chunk size does
+    /// not fit one ESP-NOW message ([`AIR_CHUNK_DATA`]).
     pub fn new(cfg: SourceConfig, now_ms: u32) -> Result<Self, AbiError> {
+        Self::with_source(cfg, FrameSource::test_pattern(&cfg)?, now_ms)
+    }
+
+    /// A route for `cfg` serving `source`, first frame due at `now_ms`.
+    /// `Unsupported` when the chunk size does not fit one ESP-NOW message.
+    pub fn with_source(cfg: SourceConfig, source: FrameSource<'static>, now_ms: u32) -> Result<Self, AbiError> {
         let data = usize::from(cfg.chunk_data);
         if data > AIR_CHUNK_DATA {
             return Err(AbiError::Unsupported);
         }
-        let chunker = Chunker::new(0, cfg.frame_len(), data).map_err(|_| AbiError::InvalidArgument)?;
-        Ok(SourceRoute { cfg, chunker, frame: 0, chunk: 0, due: now_ms, stats: RouteStats::default() })
+        let chunker = source.chunker(0, 0, data).map_err(|_| AbiError::InvalidArgument)?;
+        Ok(SourceRoute { cfg, source, chunker, frame: 0, chunk: 0, due: now_ms, stats: RouteStats::default() })
     }
 
     /// The route's config.
@@ -85,7 +103,12 @@ impl SourceRoute {
         self.cfg
     }
 
-    /// The pattern frame number being sent.
+    /// Where the route's frame bytes come from.
+    pub const fn source(&self) -> FrameSource<'static> {
+        self.source
+    }
+
+    /// The source frame number being sent.
     pub const fn frame(&self) -> u32 {
         self.frame
     }
@@ -95,7 +118,7 @@ impl SourceRoute {
         self.stats
     }
 
-    /// Chunks per frame.
+    /// Chunks in the current frame.
     pub const fn chunks_per_frame(&self) -> u32 {
         self.chunker.count()
     }
@@ -146,13 +169,16 @@ impl SourceRoute {
             ..stats
         };
         let seq = middleware::stream::source::next_seq(self.chunker.seq());
-        // Same total and chunk size as the validated chunker, so this
-        // cannot fail; keep the old chunker if it ever did.
-        let chunker = Chunker::new(seq, self.chunker.total(), usize::from(self.cfg.chunk_data))
-            .unwrap_or(self.chunker);
+        let frame = self.frame.wrapping_add(1).wrapping_add(missed);
+        // Every frame of a source was checked when it was built (pattern
+        // size by the config, stored frames by `FrameSet::new`), so this
+        // cannot fail; if it ever did, the old chunker's length would not
+        // match the frame and `write_frame` would refuse its chunks.
+        let chunker =
+            self.source.chunker(frame, seq, usize::from(self.cfg.chunk_data)).unwrap_or(self.chunker);
         let next = SourceRoute {
             chunker,
-            frame: self.frame.wrapping_add(1).wrapping_add(missed),
+            frame,
             chunk: 0,
             due: due.wrapping_add(missed.wrapping_mul(period)),
             stats,
@@ -171,15 +197,16 @@ pub enum WireError {
     Chunk(ChunkError),
 }
 
-/// Writes the ESP-NOW frame carrying chunk `plan` of pattern frame `frame`
-/// of a `cfg` source on `key`, with radio sequence number `radio_seq`, into
-/// `out`; returns the frame length. The pixels are generated in place.
+/// Writes the ESP-NOW frame carrying chunk `plan` of frame `frame` of
+/// `source` on `key`, with radio sequence number `radio_seq`, into `out`;
+/// returns the frame length. The chunk's bytes are generated or copied
+/// straight into `out`.
 pub fn write_frame(
     out: &mut [u8; MAX_FRAME],
     radio_seq: u8,
     key: Key<'_>,
     frame: u32,
-    cfg: &SourceConfig,
+    source: &FrameSource<'_>,
     plan: &ChunkPlan,
 ) -> Result<usize, WireError> {
     let len = plan.range.len();
@@ -193,7 +220,7 @@ pub fn write_frame(
     let slot = out.get_mut(at..end).ok_or(WireError::Frame(FrameError::PayloadTooLarge))?;
     let (head, data) = slot.split_at_mut(HEADER_LEN);
     head.copy_from_slice(&header);
-    let filled = pattern::fill(frame, cfg.width, cfg.height, plan.range.start, data);
+    let filled = source.fill(frame, plan.range.start, data);
     if filled != len {
         return Err(WireError::Chunk(ChunkError::Bounds));
     }
@@ -206,10 +233,24 @@ mod tests {
 
     use super::*;
     use middleware::espnow::MAX_KEY;
-    use middleware::stream::{ESPNOW_CHUNK_DATA, Sink, chunk};
+    use middleware::stream::{ESPNOW_CHUNK_DATA, FrameSet, Sink, chunk, pattern};
     use std::vec;
+    use std::vec::Vec;
 
     const KEY: Key<'static> = Key::from_static("app/cam/frame");
+    const PATTERN: FrameSource<'static> = FrameSource::Pattern { width: 120, height: 120 };
+
+    /// Three stored "JPEG" frames of different lengths: 1, 2 and 3 chunks.
+    const F0: &[u8] = &[0xA0; 100];
+    const F1: &[u8] = &[0xA1; 300];
+    const F2: &[u8] = &[0xA2; 400];
+    const STORED: &[&[u8]] = &[F0, F1, F2];
+
+    fn jpeg_route(now: u32) -> SourceRoute {
+        let cfg = SourceConfig::jpeg(240, 240, 200).expect("valid");
+        let set = FrameSet::new(STORED).expect("valid");
+        SourceRoute::with_source(cfg, FrameSource::Frames(set), now).expect("valid")
+    }
 
     fn cfg() -> SourceConfig {
         SourceConfig::new(120, 120, 200).expect("valid")
@@ -312,7 +353,7 @@ mod tests {
         let r = SourceRoute::new(c, 0).expect("valid");
         let Next::Send(plan) = r.next(0) else { panic!("due") };
         let mut out = [0u8; MAX_FRAME];
-        let n = write_frame(&mut out, 7, KEY, 3, &c, &plan).expect("fits");
+        let n = write_frame(&mut out, 7, KEY, 3, &r.source(), &plan).expect("fits");
         assert_eq!(n, 7 + KEY.as_str().len() + 12 + ESPNOW_CHUNK_DATA);
         let f = Frame::decode(&out[..n]).expect("radio frame");
         assert_eq!((f.seq, f.key), (7, KEY));
@@ -332,7 +373,7 @@ mod tests {
         let mut out = [0u8; MAX_FRAME];
         for i in 0..r.chunks_per_frame() {
             let Next::Send(plan) = r.next(0) else { panic!("due") };
-            let n = write_frame(&mut out, i as u8, KEY, r.frame(), &c, &plan).expect("fits");
+            let n = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source(), &plan).expect("fits");
             let f = Frame::decode(&out[..n]).expect("radio frame");
             let (step, data) = sink.receive(c.frame_len(), f.payload);
             assert!(step.forwards());
@@ -354,13 +395,13 @@ mod tests {
         };
         let mut out = [0u8; MAX_FRAME];
         assert_eq!(
-            write_frame(&mut out, 0, KEY, 0, &c, &plan),
+            write_frame(&mut out, 0, KEY, 0, &PATTERN, &plan),
             Err(WireError::Frame(FrameError::PayloadTooLarge))
         );
         let long = std::string::String::from("app/") + &"k".repeat(MAX_KEY);
         let plan = ChunkPlan { range: 0..10, ..plan };
         assert_eq!(
-            write_frame(&mut out, 0, Key::new(&long).expect("valid"), 0, &c, &plan),
+            write_frame(&mut out, 0, Key::new(&long).expect("valid"), 0, &PATTERN, &plan),
             Err(WireError::Frame(FrameError::KeyTooLong))
         );
         // A plan past the frame end is a chunk error, not a short frame.
@@ -368,6 +409,87 @@ mod tests {
             header: middleware::stream::ChunkHeader { seq: 0, offset: 28_790, total: 28_800 },
             range: 28_790..28_810,
         };
-        assert_eq!(write_frame(&mut out, 0, KEY, 0, &c, &past), Err(WireError::Chunk(ChunkError::Bounds)));
+        assert_eq!(write_frame(&mut out, 0, KEY, 0, &PATTERN, &past), Err(WireError::Chunk(ChunkError::Bounds)));
+    }
+
+    #[test]
+    fn r11_jpeg_frames_vary_in_length_and_loop() {
+        let mut r = jpeg_route(0);
+        let mut now = 0;
+        for n in 0..6u32 {
+            let want = STORED[n as usize % 3];
+            assert_eq!(r.frame(), n);
+            assert_eq!(r.chunks_per_frame() as usize, want.len().div_ceil(ESPNOW_CHUNK_DATA));
+            let mut rebuilt = Vec::new();
+            let mut out = [0u8; MAX_FRAME];
+            for i in 0..r.chunks_per_frame() {
+                let Next::Send(plan) = r.next(now) else { panic!("due") };
+                assert_eq!((plan.header.total as usize, plan.header.seq), (want.len(), n as u16));
+                let len = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source(), &plan).expect("fits");
+                let f = Frame::decode(&out[..len]).expect("radio frame");
+                rebuilt.extend_from_slice(chunk::decode(f.payload).expect("chunk").data);
+                r = r.published(now).0;
+            }
+            assert_eq!(rebuilt, want);
+            now += 200;
+        }
+        assert_eq!(r.stats(), RouteStats { frames: 6, chunks: 2 * (1 + 2 + 3), ..RouteStats::default() });
+    }
+
+    #[test]
+    fn r11_jpeg_skipped_periods_jump_through_the_loop() {
+        let r = jpeg_route(0);
+        // Frame 0 (one chunk) ends at 650: the periods due 200 and 400
+        // passed, so frames 1 and 2 are skipped and frame 3 (stored frame
+        // 0 again, due 600) starts at once.
+        let (r, rep) = r.published(650);
+        assert_eq!(rep, Report { frames: 1, dropped: 2 });
+        assert_eq!(r.frame(), 3);
+        assert!(matches!(r.next(650), Next::Send(ref p) if p.header.total == 100 && p.header.seq == 1));
+        // The skipped chunks are counted with the next frame's length.
+        assert_eq!(r.stats().chunks_dropped, 2);
+    }
+
+    #[test]
+    fn r11_jpeg_write_frame_copies_the_stored_bytes() {
+        let r = jpeg_route(0).published(0).0;
+        let Next::Send(plan) = r.next(200) else { panic!("due") };
+        let mut out = [0u8; MAX_FRAME];
+        let n = write_frame(&mut out, 0, KEY, r.frame(), &r.source(), &plan).expect("fits");
+        let ch = chunk::decode(Frame::decode(&out[..n]).expect("radio frame").payload).expect("chunk");
+        assert_eq!(ch.data, &F1[..ESPNOW_CHUNK_DATA]);
+        // A plan for a longer frame than the stored one is refused.
+        let wrong = ChunkPlan {
+            header: middleware::stream::ChunkHeader { seq: 0, offset: 166, total: 400 },
+            range: 166..332,
+        };
+        assert_eq!(write_frame(&mut out, 0, KEY, 1, &r.source(), &wrong), Err(WireError::Chunk(ChunkError::Bounds)));
+    }
+
+    #[test]
+    fn r11_test_pattern_jpeg_needs_the_fixtures() {
+        let jpeg = SourceConfig::jpeg(240, 240, 200).expect("valid");
+        let odd = SourceConfig::jpeg(200, 200, 200).expect("valid");
+        #[cfg(not(feature = "cam-fixtures"))]
+        {
+            assert_eq!(SourceRoute::new(jpeg, 0), Err(AbiError::Unsupported));
+            assert_eq!(SourceRoute::new(odd, 0), Err(AbiError::Unsupported));
+        }
+        #[cfg(feature = "cam-fixtures")]
+        {
+            use middleware::stream::frames::fixtures;
+            assert_eq!(SourceRoute::new(odd, 0), Err(AbiError::InvalidArgument));
+            for size in [240, 120] {
+                let cfg = SourceConfig::jpeg(size, size, 200).expect("valid");
+                let r = SourceRoute::new(cfg, 0).expect("fixtures");
+                let set = fixtures::jpeg(size, size).expect("fixture set");
+                assert_eq!(r.source(), FrameSource::Frames(set));
+                assert_eq!(r.chunks_per_frame(), set.frame_len(0).div_ceil(166));
+            }
+            let _ = jpeg;
+        }
+        let too_big = jpeg.with_chunk_data(168).expect("valid ABI config");
+        let set = FrameSet::new(STORED).expect("valid");
+        assert_eq!(SourceRoute::with_source(too_big, FrameSource::Frames(set), 0), Err(AbiError::Unsupported));
     }
 }
