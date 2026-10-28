@@ -210,6 +210,7 @@ pub async fn run(spawner: Spawner) -> ! {
             Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),
             Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
         }
+        bus.log(format_args!("heap: {} B free after boot", esp_alloc::HEAP.free()));
         Controller::new(state, ctx, store, trust, bus, profile)
     };
     #[cfg(not(feature = "wasm"))]

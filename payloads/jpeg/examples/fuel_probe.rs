@@ -3,9 +3,11 @@
 //! tick, forever.
 //!
 //! * The first tick of each frame runs `Decoder::new` (marker parsing).
-//! * The second decodes one block: wasmi translates functions lazily and
-//!   charges 7 fuel per code byte to the first call that runs them, so this
-//!   call carries the translation of the whole decode path.
+//! * The second decodes one block: on a host whose wasmi translates
+//!   functions lazily (charging 7 fuel per code byte to the first call
+//!   that runs them) this call carries the translation of the whole decode
+//!   path. `wasm-host` translates eagerly at load, so there it costs what
+//!   any one-block step costs.
 //! * Every following tick runs `decode_blocks` with a budget of
 //!   `FUEL_PROBE_BLOCKS` blocks (a compile-time environment variable,
 //!   default 90: one full MCU row of the 240-wide frame, 15 MCUs of 6

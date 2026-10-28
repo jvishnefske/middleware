@@ -113,11 +113,13 @@
 //! 56 600 fuel (38 700 at half scale), a 240-wide row about 795 000
 //! (544 000), and `decode_blocks(.., 1)` at most 37 000.
 //!
-//! wasmi translates each function lazily, the first time it is called, and
-//! charges about 7 fuel per byte of code to that call: about 36 000 extra
-//! on the first [`Decoder::start`], 33 000 on the first decode call and
-//! 8 000 on the first MCU conversion. A host with a 50 000-fuel budget
-//! therefore needs eager translation, or a larger budget for the first
+//! wasmi's default lazy translation translates each function the first time
+//! it is called and charges about 7 fuel per byte of code to that call:
+//! about 36 000 extra on the first [`Decoder::start`], 33 000 on the first
+//! decode call and 8 000 on the first MCU conversion. The middleware
+//! runtime (`wasm-host`) translates eagerly when it loads a payload, so
+//! there the first calls cost the same as later ones; a lazily translating
+//! host with a 50 000-fuel budget needs a larger budget for the first
 //! calls.
 //!
 //! # Limits

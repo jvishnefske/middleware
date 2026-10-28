@@ -425,6 +425,47 @@ because WASM linear memory and the wasmi interpreter require one.
   the `tick` export ran: `Ran`, `NotDue`, `Disabled` (no period set) or
   `NoTickExport`; the decision is the pure `abi::tick_decision` —
   `abi::tests::w9_tick_decision_reports_why_nothing_ran`; `wasm-host/tests/runtime.rs`: `w9_tick_reports_whether_it_ran`, `w2_tick_runs_on_requested_period`, `w2_set_tick_zero_disables_and_tick_without_schedule_is_noop`.
+- [x] W10 A payload that starts cannot exhaust the heap later. wasmi
+  translates every function eagerly at load (`Compiled::new`), so no
+  translation allocates during a call; the value stack is capped and
+  allocated once in full (`Limits::max_stack_bytes`, default 4 KiB) and
+  the call depth capped (`Limits::max_call_depth`, default 32), both
+  trapping with a stack overflow instead of growing; the DMA copy buffer
+  and subscription list are reserved at load. `Limits::load_heap_needed
+  (image_len)` bounds the heap from compiling to the last call (the larger
+  of the compile phase, image included, and the run phase, image freed;
+  model and constants in `wasm_host::heap`), and covers the measured peak
+  of every example payload. The ESP base firmware loads in two steps
+  (compile, free the image, instantiate) and refuses a start, before
+  allocating, when the free heap is below that bound plus
+  `start::HEAP_MARGIN`, logging the free and needed bytes —
+  `tools/payload-sim/tests/heap.rs` (every example under the badge's
+  limits: bound >= measured compile, instantiate and run peaks;
+  `cam_jpeg_view` must decode a frame); `wasm-host/tests/alloc.rs` (after
+  the deepest call, 398 calls allocate nothing; the frame list's growth
+  stays within its share); `wasm-host/tests/runtime.rs`:
+  `w10_call_depth_is_capped_by_limits`, `w10_value_stack_is_capped_by_limits`,
+  `w10_compile_then_instantiate_equals_load`, `w10_heap_bound_counts_every_limit`,
+  `w4_fuel_stats_record_every_call` (the first call costs no more fuel
+  than the second); `heap::tests::w10_*`; esp-base `start::tests::w10_*`.
+  Measured on a 32-bit host (i686, not part of the test suite), the
+  bound's target width: `cam_jpeg_view` (30.9 KB image) peaks at 183 KB
+  and is bounded at 191 790 bytes (195 886 with the margin), more than
+  the ESP32-S3 heap leaves beside the 48 KiB radio budget (229 392 total,
+  180 240 beside the radio), so unless the radio uses much less than its
+  budget the badge refuses to start it rather than halting; `cam_view`
+  (13.2 KB) peaks at 141 KB, bound 143 137.
+- [ ] W11 A firmware crash during a payload's run does not repeat on the
+  next boot (skip the autostart after a crash). Not implemented: on the
+  ESP chips `esp-backtrace` halts after a panic rather than resetting, so
+  there is no boot loop, but a manual reset autostarts the same payload
+  again. Doing this needs a flag that survives the reset (RTC fast memory
+  or a field in the payload slot header written before the autostart and
+  cleared once it has run for a while) and a panic handler that resets
+  instead of halting; RTC `persistent` statics need `unsafe` access in
+  esp-hal 1.2, and a flash write per boot wears the header sector, so it is
+  left as a follow-up. W10 removes the known cause (heap exhaustion after
+  a start).
 
 ### Payload SDK (`payloads/`)
 
@@ -1338,8 +1379,9 @@ wasmi's per-call fuel budget into RGB565 strips for the GC9A01.
   quality-60 frames, i.e. about 0.8 M fuel per 240-wide MCU row. wasmi's
   lazy translation adds about 7 fuel per code byte to the first call that
   reaches a function (about 36 000 on the first `start`, 33 000 on the
-  first decode call), more than a 50 000-fuel budget allows; the host
-  needs eager translation or a larger first-call budget. Code size is
+  first decode call), more than a 50 000-fuel budget allows; `wasm-host`
+  now translates eagerly at load (W10), so on it first calls cost no
+  extra. Code size is
   about 14 KiB of wasm (target 12 KiB), the decoder state 4.3 KB, the
   4:2:0 strip 7 680 bytes at 240 wide.
 - [x] J11 The badge payload (`cam_jpeg_view`) stays within its budgets:

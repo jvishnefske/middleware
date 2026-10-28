@@ -31,7 +31,7 @@
 //! | chip     | reclaimed | main    | total   | memory  | max image | radio  |
 //! |----------|-----------|---------|---------|---------|-----------|--------|
 //! | ESP32    | 96.4 KiB  | 80 KiB  | 176 KiB | 64 KiB  | 24 KiB    | 48 KiB |
-//! | ESP32-S3 | 72.0 KiB  | 128 KiB | 200 KiB | 64 KiB  | 32 KiB    | 48 KiB |
+//! | ESP32-S3 | 72.0 KiB  | 152 KiB | 224 KiB | 64 KiB  | 32 KiB    | 48 KiB |
 //! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    | 0      |
 //! | ESP8266  | 0         | 0       | 0       | 0       | 124 KiB   | 0      |
 //!
@@ -44,7 +44,11 @@
 //! DRAM share one SRAM, the driver's RAM-resident code (`.rwtext.wifi`,
 //! 31 KiB) also comes out of data RAM, about 58 KiB in all; keeping the
 //! stack above the 31 KiB a payload load needs took `heap_main` 176 → 128
-//! KiB, memory 128 → 64 KiB and image 80 → 32 KiB. The radio budget is the
+//! KiB, memory 128 → 64 KiB and image 80 → 32 KiB. Eager translation
+//! (W10) then made a payload's whole bytecode resident from its start, and
+//! the ESP32-S3 gave the main stack's surplus back: `heap_main` 128 → 152
+//! KiB, leaving about 46 KiB of stack (the conagotchi badge's build checks
+//! at least 40 KiB). The radio budget is the
 //! driver's footprint with the reduced buffer counts of the radio shell
 //! (6 static RX buffers of 1.6 KiB, no aggregation) plus margin; it is an
 //! estimate until measured on hardware.
@@ -66,7 +70,7 @@
 //!
 //! The main regions are sized so the linker leaves a usable main stack
 //! (after `.bss`, measured from `_stack_end`..`_stack_start`): ESP32 about
-//! 26 KiB, ESP32-S3 about 70 KiB (both with ESP-NOW), ESP32-C3 about
+//! 26 KiB, ESP32-S3 about 46 KiB (both with ESP-NOW), ESP32-C3 about
 //! 103 KiB. The ESP32-S3 had
 //! 240 KiB main and 192 KiB memory until 0.4, which left 17 KiB of stack;
 //! loading a payload (wasmi parse plus `init`, about 31 KiB deep) then
@@ -79,7 +83,14 @@
 //! Each runtime profile leaves at least [`INTERPRETER_RESERVE`] bytes beyond
 //! the linear memory, image and radio budget for wasmi, and at least one
 //! 64 KiB page of linear memory (checked by a unit test); the heap check
-//! applies only to profiles with `runtime` set.
+//! applies only to profiles with `runtime` set. This static plan is a
+//! floor, not a promise that every image up to `max_image` runs: what a
+//! payload needs is `wasm_host::Limits::load_heap_needed` (wasmi's module
+//! grows with the image, about 2.75 bytes per image byte plus 16 KiB on
+//! these 32-bit chips), and the controller checks it against the heap
+//! actually free before every start ([`crate::start`]). With 64 KiB of
+//! linear memory that admits images up to about 7 KiB on the ESP32 and
+//! 24 KiB on the ESP32-S3 if the radio uses its whole budget.
 //!
 //! Every profile's `max_image` fits one slot of the 256 KiB (`0x40000`)
 //! payload partition, whose per-slot capacity is 124 KiB: the ESP32 family
@@ -195,7 +206,7 @@ pub const ESP32S3: Profile = Profile {
     usb_serial_jtag: true,
     runtime: true,
     heap_reclaimed: 73_744,
-    heap_main: 128 * 1024,
+    heap_main: 152 * 1024,
     max_memory_bytes: WASM_PAGE,
     radio_heap: 48 * 1024,
     max_image: 32 * 1024,

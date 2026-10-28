@@ -5,8 +5,11 @@
 //!
 //! * **idle** — no payload runs; requests are dispatched and storage actions
 //!   performed. A `sys/payload/start` ends the session.
-//! * **running** (`wasm` only) — the stored image is read, CRC checked and
-//!   loaded into a [`Payload`]; the session then loops:
+//! * **running** (`wasm` only) — if the free heap covers the payload's
+//!   bound plus margin ([`esp_base::start`]; otherwise the start fails
+//!   with the free and needed bytes on `sys/log`), the stored image is
+//!   read, CRC checked, compiled, freed and the module instantiated into a
+//!   [`Payload`]; the session then loops:
 //!   1. drain the interrupt event queue ([`irq`]), at most `MAX_EVENTS`
 //!      events per iteration, into `Payload::dispatch` (`on_irq`), and log
 //!      on `sys/log` when the queue's overflow count has risen;
@@ -58,7 +61,8 @@ use {
     embassy_time::Timer,
     esp_base::chip::Profile,
     esp_base::dispatch::{route_publication, tick_delay},
-    wasm_host::{Limits, LoadError, Payload, Trap},
+    esp_base::start::{HeapShort, check_heap},
+    wasm_host::{Compiled, Limits, LoadError, Payload, Trap},
 };
 
 /// The flash-backed payload store.
@@ -88,6 +92,8 @@ pub struct Controller {
 #[cfg(feature = "wasm")]
 enum StartError {
     Store(StoreError),
+    /// The free heap is below the payload's bound plus margin.
+    NoHeap(HeapShort),
     NoMemory,
     NoPins,
     Load(LoadError),
@@ -98,6 +104,7 @@ impl core::fmt::Display for StartError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             StartError::Store(e) => write!(f, "{e}"),
+            StartError::NoHeap(short) => write!(f, "{short}"),
             StartError::NoMemory => f.write_str("not enough heap for the image"),
             StartError::NoPins => f.write_str("pins unavailable"),
             StartError::Load(e) => write!(f, "{e}"),
@@ -267,19 +274,35 @@ impl Controller {
         }
     }
 
+    /// Loads the stored payload in two steps, compile then instantiate,
+    /// freeing the image buffer between them. Refuses first, before
+    /// allocating anything, if the free heap is below the payload's bound
+    /// ([`Limits::load_heap_needed`]) plus [`esp_base::start::HEAP_MARGIN`]:
+    /// translation is eager, so once this succeeds the payload's later
+    /// calls stay within heap that was free here.
     #[cfg(feature = "wasm")]
     fn load(&mut self) -> Result<Payload<EspDevice>, StartError> {
+        let limits = Limits::bytes(self.profile.max_memory_bytes)
+            .with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
         let store = self.store().map_err(StartError::Store)?;
         let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
+        let bound = limits.load_heap_needed(header.len);
+        let needed = check_heap(esp_alloc::HEAP.free(), bound).map_err(StartError::NoHeap)?;
         let len = header.len as usize;
         let mut image = AllocVec::new();
         image.try_reserve_exact(len).map_err(|_| StartError::NoMemory)?;
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
+        let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
+        drop(image);
         let device = EspDevice::new(self.profile, self.bus).ok_or(StartError::NoPins)?;
-        let limits = Limits::bytes(self.profile.max_memory_bytes)
-            .with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
-        Payload::load(&image, device, limits).map_err(StartError::Load)
+        let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
+        self.bus.log(format_args!(
+            "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
+            header.len,
+            esp_alloc::HEAP.free(),
+        ));
+        Ok(payload)
     }
 
     /// Routes one publication: to the sink route on its key, else to the

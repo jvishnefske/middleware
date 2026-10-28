@@ -15,6 +15,10 @@
 //!    instantiates the module and calls `init` if exported. If `init` traps,
 //!    the error, [`LoadError::Init`], carries an [`InitLog`] with the last
 //!    [`INIT_LOG_LINES`] lines `init` logged before the trap (W8).
+//!    Loading is two steps, also available separately: [`Compiled::new`]
+//!    validates and translates every function to wasmi bytecode
+//!    (eagerly), then [`Payload::instantiate`] links and instantiates it
+//!    and calls `init`. A caller may free the image between them.
 //! 2. The firmware loop asks [`Payload::next_tick`] when the next `tick` is
 //!    due (an absolute `now_ms`, wrapping) and calls [`Payload::tick`]; the
 //!    payload chooses the period with `set_tick` (W2). `tick` reports with
@@ -68,6 +72,17 @@
 //!
 //!   The page size is read from the module's memory section
 //!   ([`abi::initial_memory_bytes`]) because wasmi does not expose it.
+//! * Heap (W10): every function is translated when the payload loads
+//!   (wasmi's `CompilationMode::Eager`), not on its first call, so a call
+//!   never allocates bytecode; the value stack is allocated in full on the
+//!   first call and capped at [`Limits::max_stack_bytes`], the call depth
+//!   at [`Limits::max_call_depth`] (a deeper call or a fuller stack traps
+//!   with a stack overflow instead of allocating); the DMA copy buffer and
+//!   the subscription list are reserved at load. What a payload can then
+//!   allocate is bounded by [`Limits::load_heap_needed`] ([`heap`]), which
+//!   a firmware checks against its free heap before starting one. Eager
+//!   translation also means the first call into a function costs the same
+//!   fuel as later ones.
 //!
 //! # Interpreter build
 //!
@@ -95,6 +110,7 @@ extern crate alloc;
 
 pub mod abi;
 mod error;
+pub mod heap;
 pub mod link;
 
 use alloc::string::ToString;
@@ -102,7 +118,7 @@ use alloc::vec::Vec;
 
 use middleware::wasm_abi::{self, MAX_MESSAGE};
 use wasmi::{
-    Config, Engine, ExternType, FuncType, Instance, Module, Store, StoreLimitsBuilder, TrapCode,
+    CompilationMode, Config, Engine, ExternType, FuncType, Instance, Module, Store, StoreLimitsBuilder, TrapCode,
     ValType,
 };
 
@@ -308,10 +324,27 @@ pub trait Device {
     }
 }
 
+/// Default [`Limits::max_stack_bytes`]: 4 KiB of wasmi value stack.
+///
+/// Every example payload, the JPEG decoder of `cam_jpeg_view` included,
+/// runs with 1 KiB (Rust payloads keep their own stack in linear memory;
+/// wasmi's holds only the registers of active frames), so this leaves 4x
+/// headroom. A call that needs more traps with a stack overflow.
+pub const DEFAULT_STACK_BYTES: u32 = 4 * 1024;
+
+/// Default [`Limits::max_call_depth`]: 32 nested WebAssembly calls.
+///
+/// Every example payload runs with 12. A deeper call traps with a stack
+/// overflow.
+pub const DEFAULT_CALL_DEPTH: u32 = 32;
+
 /// Resource limits for one payload.
 ///
 /// Build with [`Limits::pages`] or [`Limits::bytes`] and adjust the fuel
-/// with [`Limits::with_fuel`]; the fields are public for direct use.
+/// with [`Limits::with_fuel`] and the interpreter stacks with
+/// [`Limits::with_stack`]; the fields are public for direct use.
+/// [`Limits::load_heap_needed`] bounds the heap a payload loaded under
+/// these limits can ever use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest linear memory, in bytes, whatever the module's page size.
@@ -324,11 +357,20 @@ pub struct Limits {
     /// an infinite loop ends with [`Trap::OutOfFuel`] after this many. The
     /// default is [`wasm_abi::FUEL_PER_CALL`].
     pub fuel_per_call: u64,
+    /// Size of wasmi's value stack (locals and temporaries of every active
+    /// frame), in bytes. It is allocated in full on the first call into the
+    /// payload and never grows: a call that needs more traps with a stack
+    /// overflow instead of allocating. Default [`DEFAULT_STACK_BYTES`].
+    pub max_stack_bytes: u32,
+    /// Deepest WebAssembly call nesting; one deeper call traps with a stack
+    /// overflow. wasmi's frame list grows on demand up to this many
+    /// entries. Default [`DEFAULT_CALL_DEPTH`].
+    pub max_call_depth: u32,
 }
 
 impl Limits {
     /// A cap of `n` 64 KiB pages (saturating at `u32::MAX` bytes) and the
-    /// default fuel.
+    /// default fuel and stacks.
     pub const fn pages(n: u32) -> Self {
         let bytes = (n as u64).saturating_mul(abi::PAGE_BYTES as u64);
         Limits::bytes(if bytes > u32::MAX as u64 {
@@ -338,11 +380,13 @@ impl Limits {
         })
     }
 
-    /// A cap of `n` bytes and the default fuel.
+    /// A cap of `n` bytes and the default fuel and stacks.
     pub const fn bytes(n: u32) -> Self {
         Limits {
             max_memory_bytes: n,
             fuel_per_call: wasm_abi::FUEL_PER_CALL,
+            max_stack_bytes: DEFAULT_STACK_BYTES,
+            max_call_depth: DEFAULT_CALL_DEPTH,
         }
     }
 
@@ -353,10 +397,67 @@ impl Limits {
             ..self
         }
     }
+
+    /// The same limits with a value stack of `bytes` and at most `depth`
+    /// nested calls.
+    pub const fn with_stack(self, bytes: u32, depth: u32) -> Self {
+        Limits {
+            max_stack_bytes: bytes,
+            max_call_depth: depth,
+            ..self
+        }
+    }
+
+    /// Upper bound, in bytes, on the heap a payload image of `image_len`
+    /// bytes can use at any moment under these limits, from compiling it
+    /// ([`Compiled::new`], with the caller's image buffer) through
+    /// instantiating it and every later call ([`Payload::instantiate`],
+    /// with the image freed), saturating at `u32::MAX` (requirement W10).
+    ///
+    /// Translation is eager, so all bytecode is allocated while compiling;
+    /// later calls allocate only the value stack (once,
+    /// [`Limits::max_stack_bytes`]), call frames (up to
+    /// [`Limits::max_call_depth`]), linear memory growth (up to
+    /// [`Limits::max_memory_bytes`]), subscription keys and `init`'s log,
+    /// all counted here. See [`heap`] for the model and its measurements.
+    /// A caller that keeps the image during [`Payload::load`] needs
+    /// `image_len` more.
+    ///
+    /// A host that starts a payload only when this much heap is free (plus
+    /// its allocator's own overhead) cannot run out of heap in the payload
+    /// later, as long as nothing else allocates meanwhile.
+    pub const fn load_heap_needed(&self, image_len: u32) -> u32 {
+        heap::needed(
+            image_len,
+            self.max_memory_bytes,
+            self.max_stack_bytes,
+            self.max_call_depth,
+        )
+    }
+
+    /// The wasmi engine configuration for these limits: fuel metering,
+    /// custom page sizes, eager translation and the stack caps.
+    fn config(&self) -> Config {
+        let mut config = Config::default();
+        let stack = self.max_stack_bytes as usize;
+        // Order matters: wasmi panics if the minimum ever exceeds the
+        // maximum. Lowering the minimum first makes every step valid.
+        config
+            .consume_fuel(true)
+            .wasm_custom_page_sizes(true)
+            .compilation_mode(CompilationMode::Eager)
+            .set_max_recursion_depth(self.max_call_depth as usize)
+            .set_min_stack_height(0)
+            .set_max_stack_height(stack)
+            .set_min_stack_height(stack)
+            .set_max_cached_stacks(1);
+        config
+    }
 }
 
 impl Default for Limits {
-    /// Two 64 KiB pages (128 KiB) and [`wasm_abi::FUEL_PER_CALL`].
+    /// Two 64 KiB pages (128 KiB), [`wasm_abi::FUEL_PER_CALL`],
+    /// [`DEFAULT_STACK_BYTES`] and [`DEFAULT_CALL_DEPTH`].
     fn default() -> Self {
         Limits::pages(2)
     }
@@ -447,23 +548,76 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
     Ok(exports)
 }
 
+/// A validated module, translated to wasmi bytecode and ready to
+/// instantiate, independent of the image bytes it came from.
+///
+/// Loading in two steps lets the caller free the image between them, so
+/// the image and linear memory are never allocated at the same time (see
+/// [`heap`]).
+pub struct Compiled {
+    engine: Engine,
+    module: Module,
+    exports: Exports,
+    limits: Limits,
+}
+
+impl Compiled {
+    /// Validates `wasm` against the ABI (W1, W5) and translates every
+    /// function eagerly, so no translation (and no allocation for it)
+    /// happens on a later call.
+    pub fn new(wasm: &[u8], limits: Limits) -> Result<Self, LoadError> {
+        let engine = Engine::new(&limits.config());
+        let module = Module::new(&engine, wasm).map_err(|e| LoadError::Invalid(e.to_string()))?;
+        let exports = validate(wasm, &module, &limits)?;
+        Ok(Compiled {
+            engine,
+            module,
+            exports,
+            limits,
+        })
+    }
+
+    /// The limits the module was compiled under.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+}
+
 impl<D: Device + 'static> Payload<D> {
-    /// Validates and instantiates `wasm`, then calls `init` if exported.
+    /// Validates and instantiates `wasm`, then calls `init` if exported:
+    /// [`Compiled::new`] followed by [`Payload::instantiate`].
+    pub fn load(wasm: &[u8], device: D, limits: Limits) -> Result<Self, LoadError> {
+        Self::instantiate(Compiled::new(wasm, limits)?, device)
+    }
+
+    /// Instantiates a compiled module on `device`, then calls `init` if
+    /// exported.
     ///
     /// While `init` runs, its log lines are forwarded to [`Device::log`] and
     /// also kept in a bounded [`InitLog`] (the last [`INIT_LOG_LINES`]). If
     /// `init` traps, the device is dropped and the error is
     /// [`LoadError::Init`] carrying the trap and that log, so the caller can
     /// show why `init` failed. On success the log is discarded.
-    pub fn load(wasm: &[u8], device: D, limits: Limits) -> Result<Self, LoadError> {
-        let mut config = Config::default();
-        config.consume_fuel(true).wasm_custom_page_sizes(true);
-        let engine = Engine::new(&config);
-        let module = Module::new(&engine, wasm).map_err(|e| LoadError::Invalid(e.to_string()))?;
-        let exports = validate(wasm, &module, &limits)?;
+    pub fn instantiate(compiled: Compiled, device: D) -> Result<Self, LoadError> {
+        let Compiled {
+            engine,
+            module,
+            exports,
+            limits,
+        } = compiled;
+        // The DMA copy buffer and the subscription list at their largest
+        // now, so the imports that use them never reallocate later.
+        let mut scratch = Vec::new();
+        scratch
+            .try_reserve_exact(wasm_abi::periph::MAX_DMA)
+            .map_err(|_| LoadError::OutOfMemory)?;
+        let mut subscriptions = Vec::new();
+        subscriptions
+            .try_reserve_exact(wasm_abi::MAX_SUBSCRIPTIONS)
+            .map_err(|_| LoadError::OutOfMemory)?;
         let state = State {
             device,
-            subscriptions: Vec::new(),
+            subscriptions,
             schedule: None,
             exports,
             limits: StoreLimitsBuilder::new()
@@ -471,7 +625,7 @@ impl<D: Device + 'static> Payload<D> {
                 .memories(1)
                 .instances(1)
                 .build(),
-            scratch: Vec::new(),
+            scratch,
             init_log: None,
         };
         let mut store = Store::new(&engine, state);
@@ -517,7 +671,14 @@ impl<D: Device + 'static> Payload<D> {
             .and_then(|()| self.instance.get_typed_func::<P, R>(&self.store, name))
             .and_then(|f| f.call(&mut self.store, params))
             .map_err(|e| trap(&e));
-        let used = abi::fuel_used(self.fuel, self.store.get_fuel().ok());
+        // A call that ran dry counts as its whole budget: wasmi traps when
+        // the next instruction costs more than is left, so a few units
+        // may remain.
+        let remaining = match result {
+            Err(Trap::OutOfFuel) => None,
+            _ => self.store.get_fuel().ok(),
+        };
+        let used = abi::fuel_used(self.fuel, remaining);
         self.fuel_stats = self.fuel_stats.record(used);
         self.poisoned = result.is_err();
         result

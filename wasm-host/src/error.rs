@@ -126,6 +126,9 @@ pub enum LoadError {
         /// [`Limits::max_memory_bytes`](crate::Limits::max_memory_bytes).
         max: u32,
     },
+    /// A host buffer the payload needs (the DMA copy buffer or the
+    /// subscription list) could not be allocated.
+    OutOfMemory,
     /// Instantiation failed (data segment out of range, `start` trapped, ...).
     Instantiate(String),
     /// The `init` export trapped.
@@ -152,6 +155,7 @@ impl fmt::Display for LoadError {
             LoadError::MemoryTooLarge { bytes, max } => {
                 write!(f, "memory needs {bytes} bytes, limit is {max}")
             }
+            LoadError::OutOfMemory => f.write_str("out of heap for the payload's host buffers"),
             LoadError::Instantiate(m) => write!(f, "instantiation failed: {m}"),
             LoadError::Init { trap, log } if log.is_empty() => {
                 write!(f, "init failed: {trap}")

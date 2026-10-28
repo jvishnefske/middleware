@@ -13,3 +13,11 @@ wasm-host = { path = "../../wasm-host" }
 wat = "1"
 # Reference decode for the R14 end-to-end test (tests/r14.rs), host-side.
 mw-jpeg = { path = "../../payloads/jpeg" }
+# Counting global allocator for the heap measurement (tests/heap.rs).
+peak_alloc = "0.3"
+
+# Measures heap use with a process-wide counting allocator, so it runs
+# alone, without the libtest harness and its threads.
+[[test]]
+name = "heap"
+harness = false

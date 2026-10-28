@@ -16,3 +16,10 @@ wasmi = { version = "2.0", default-features = false, features = ["validate", "po
 
 [dev-dependencies]
 wat = "1"
+# Counting global allocator for tests/alloc.rs.
+peak_alloc = "0.3"
+
+# Process-wide allocation counting: runs alone, without the libtest harness.
+[[test]]
+name = "alloc"
+harness = false
