@@ -511,10 +511,10 @@ fn w4_fuel_stats_record_every_call() {
 
     assert_eq!(p.tick(20), Ok(Ticked::Ran));
     let two = p.fuel_stats();
-    // The interpreter may charge a first call more (lazy compilation), so
-    // compare against what each call actually added.
+    // Translation is eager (W10): the first call is charged no more than
+    // the second, which runs the same loop.
     let second = two.total - one.total;
-    assert!(second >= 1_000, "{second}");
+    assert_eq!(second, tick_fuel);
     assert_eq!(two.calls, 3);
     assert_eq!(two.max_call, tick_fuel.max(second));
     assert_eq!(two.total, after_init.total + tick_fuel + second);
@@ -756,4 +756,80 @@ fn w5_one_byte_page_module_over_cap_is_rejected() {
 fn into_device_returns_state() {
     let p = loaded(ECHO);
     assert_eq!(p.into_device().results(), vec![0, 1, 0]);
+}
+
+// ---------------------------------------------------------------- W10
+
+/// `init` recurses `$depth` levels deep (`$f(n)` calls `$f(n - 1)`).
+fn recursion(depth: u32) -> Vec<u8> {
+    module(&format!(
+        r#"{MEM}
+           (func $f (param $n i32)
+             (if (local.get $n)
+               (then (call $f (i32.sub (local.get $n) (i32.const 1))))))
+           (func (export "init") (call $f (i32.const {depth})))"#
+    ))
+}
+
+#[test]
+fn w10_call_depth_is_capped_by_limits() {
+    let limits = Limits::default().with_stack(4096, 16);
+    // `init` plus 10 nested calls fits in 16 frames.
+    assert!(Payload::load(&recursion(10), Fake::default(), limits).is_ok());
+    let err = Payload::load(&recursion(100), Fake::default(), limits).err();
+    let Some(LoadError::Init { trap: Trap::Wasm(msg), .. }) = err else {
+        panic!("expected a trap, got {err:?}");
+    };
+    assert!(msg.contains("stack exhausted"), "{msg}");
+    // The default depth takes the shallow recursion too.
+    assert!(Payload::load(&recursion(20), Fake::default(), Limits::default()).is_ok());
+}
+
+#[test]
+fn w10_value_stack_is_capped_by_limits() {
+    // 40 nested frames of 2 cells (8 bytes each) need more than 256 bytes
+    // of value stack, well under 4 KiB.
+    let small = Limits::default().with_stack(256, 1000);
+    let err = Payload::load(&recursion(40), Fake::default(), small).err();
+    assert!(
+        matches!(&err, Some(LoadError::Init { trap: Trap::Wasm(m), .. }) if m.contains("stack exhausted")),
+        "{err:?}"
+    );
+    let roomy = Limits::default().with_stack(4096, 1000);
+    assert!(Payload::load(&recursion(40), Fake::default(), roomy).is_ok());
+}
+
+#[test]
+fn w10_compile_then_instantiate_equals_load() {
+    let wasm = module(&format!(
+        r#"{MEM} (func (export "init") (call $report (i32.const 7)))"#
+    ));
+    let compiled = wasm_host::Compiled::new(&wasm, Limits::default()).expect("compiles");
+    assert_eq!(compiled.limits(), Limits::default());
+    drop(wasm);
+    let mut p = Payload::instantiate(compiled, Fake::default()).expect("instantiates");
+    assert_eq!(p.device().results(), [7]);
+    // A module that does not validate fails in the compile step.
+    assert!(matches!(
+        wasm_host::Compiled::new(b"\0asm junk", Limits::default()),
+        Err(LoadError::Invalid(_))
+    ));
+}
+
+#[test]
+fn w10_heap_bound_counts_every_limit() {
+    let base = Limits::bytes(65_536);
+    let need = base.load_heap_needed(10_000);
+    assert!(need > 65_536 + 10_000);
+    assert_eq!(
+        Limits::bytes(65_536 + 4096).load_heap_needed(10_000),
+        need + 4096
+    );
+    assert_eq!(
+        base.with_stack(base.max_stack_bytes + 100, base.max_call_depth)
+            .load_heap_needed(10_000),
+        need + 100
+    );
+    assert!(base.load_heap_needed(20_000) > need);
+    assert_eq!(Limits::bytes(u32::MAX).load_heap_needed(u32::MAX), u32::MAX);
 }

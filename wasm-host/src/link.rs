@@ -62,8 +62,9 @@ pub struct State<D> {
     pub exports: Exports,
     /// Memory limiter consulted by wasmi on growth.
     pub limits: StoreLimits,
-    /// Host copy buffer for DMA and UART imports; grown on demand, never
-    /// beyond [`periph::MAX_DMA`] bytes.
+    /// Host copy buffer for DMA and UART imports; its capacity of
+    /// [`periph::MAX_DMA`] bytes is reserved at load, so it never
+    /// reallocates.
     pub scratch: Vec<u8>,
     /// While `init` runs, a bounded copy of its log lines (see [`InitLog`]);
     /// `None` at all other times.

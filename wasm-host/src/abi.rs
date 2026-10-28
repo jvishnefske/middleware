@@ -625,8 +625,9 @@ impl FuelStats {
 }
 
 /// Fuel one call used: its `budget` minus the fuel `remaining` afterwards.
-/// `None` (the interpreter could not report the fuel left) counts as the
-/// whole budget, as does running dry.
+/// `None` counts as the whole budget: the caller passes it when the call
+/// ran out of fuel (wasmi may leave a few units below the next
+/// instruction's cost) or the interpreter could not report the fuel left.
 pub const fn fuel_used(budget: u64, remaining: Option<u64>) -> u64 {
     match remaining {
         Some(left) => budget.saturating_sub(left),

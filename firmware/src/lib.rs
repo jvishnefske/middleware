@@ -34,6 +34,9 @@
 //!   in-place ESP-NOW chunk frame, the sink route's bus transfers, the
 //!   route table (handles, keys, owned bus and D/C pin) and the source
 //!   table the radio task polls.
+//! * [`start`] — the heap check before a payload starts: free heap must
+//!   cover the payload's bound (`wasm_host::Limits::load_heap_needed`) plus
+//!   a margin.
 //!
 //! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
 //! with a chip feature (`esp32`, `esp32s3`, `esp32c3`). It owns the UARTs,
@@ -51,5 +54,6 @@ pub mod radio;
 #[cfg(test)]
 mod ram_flash;
 pub mod route;
+pub mod start;
 pub mod store;
 pub mod trust_store;

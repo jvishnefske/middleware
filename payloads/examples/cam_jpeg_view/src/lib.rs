@@ -30,8 +30,8 @@
 //! decode steps: `mw-jpeg` measures a 4:2:0 MCU at 56 600 fuel on average
 //! on the fake camera's quality-60 frames and 114 000 on the most detailed
 //! MCU of a noisy quality-80 frame, so [`MCUS_PER_STEP`] = 4 bounds a step
-//! at about 460 000 even for that worst case (plus about 40 000 of wasmi's
-//! one-off lazy translation on the first call), well under the target of
+//! at about 460 000 even for that worst case (the runtime translates the
+//! whole payload when it loads it, so first calls cost no extra), well under the target of
 //! 600 000. `Decoder::start` (about 20 000, 56 000 on its first call) gets
 //! a call of its own. A 240-wide row of 15 MCUs takes four steps, and a
 //! frame 60 steps, 15 strips of 7 transfers and one start. Measured in
