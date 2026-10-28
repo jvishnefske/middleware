@@ -41,6 +41,24 @@ default target in `.cargo/config.toml`). It contains:
   `app/dimmer/adc`, and reads the temperature register of an LM75-style
   sensor at I2C address 0x48 through `embedded-hal`'s `I2c`, publishing it
   on `app/dimmer/temp`. The board decides which pins those are.
+- `examples/cam_stream` (ABI 4, ESP32-CAM) — starts a source route that
+  publishes 120×120 RGB565 frames on `app/cam/frame` every 200 ms as
+  166-byte chunks, one ESP-NOW message each (174 per frame, 870 messages a
+  second). The source is the synthetic test pattern until the firmware
+  drives the camera behind `SourceKind::Camera`; switching is a one-constant
+  change. Route events are counted and published every 2 s on
+  `app/cam/stats` (frames, dropped frames, stops as three `u32` LE); a
+  route that stops by itself is restarted.
+- `examples/cam_view` (ABI 4, conagotchi badge) — brings up the badge's
+  GC9A01 240×240 round panel on SPI2 (SCK 12, MOSI 11, CS 10, D/C 13,
+  reset 14, 40 MHz): a hardware reset and the `mipidsi` GC9A01 init
+  sequence with colour inversion and BGR order, each command and parameter
+  run a DMA transfer sequenced through `DmaDone` and one-shot timer events
+  by a pure, host-tested state machine, then a black fill. It then starts a
+  sink route that draws `app/cam/frame` in the centre 120×120 window. A
+  stopped route or failed step is retried after 1 s with a fresh bring-up.
+  Built with 1-byte pages it fits the badge (16 KiB memory, 4 KiB stack,
+  13 KiB image), and no call does more than one GPIO write and one transfer.
 - `templates/` — the same programs written by hand in WAT and in
   AssemblyScript (blink, echo, button, a timer demo and the SPI loopback),
   used as starting points by the web editor. `templates/README.md` also
@@ -54,7 +72,7 @@ default target in `.cargo/config.toml`). It contains:
 From this directory, `cargo build --release` produces one `.wasm` file per
 example in `target/wasm32-unknown-unknown/release/`. The release profile
 optimises for size, uses link-time optimisation, aborts on panic and strips
-symbols; the examples come out at 5 to 8 KiB. An example that uses no ABI 2
+symbols; the examples come out at 5 to 13 KiB. An example that uses no ABI 2
 (or ABI 3, or ABI 4) feature imports no function of that revision, so it still loads
 on older firmware. The linker
 flags in `.cargo/config.toml` give every payload exactly one 64 KiB page of
@@ -73,14 +91,14 @@ echo`. The output lands in `target/byte-pages/wasm32-unknown-unknown/release/`
 so it never overwrites the 64 KiB-page build. Pointers and the ABI are the
 same either way; only the host's byte cap (`wasm_host::Limits::bytes`) has
 to be at least `MEMORY_BYTES`. `scripts/check-all.sh` builds and validates
-blink and echo both ways.
+blink, echo and cam_view both ways.
 
 The byte-page build is reproducible: it passes `--remap-path-prefix` for
 the home directory, the cargo registry and the repository, so no absolute
 build path ends up in the module. `scripts/check-reproducible.sh [package...]`
 builds here and in a copy of the sources at another path and fails unless
-the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink
-and echo.
+the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink,
+echo and cam_view.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.
@@ -96,8 +114,9 @@ in the ABI table, that `memory` is exported, and that the optional exports
 have the right signatures.
 
 It also requires an `on_irq` export from any module that imports an event
-source (`gpio_irq`, `timer_start`, `spi_transfer` or `uart_write`), since
-the events would otherwise have nowhere to go.
+source (`gpio_irq`, `timer_start`, `spi_transfer`, `uart_write`, and since
+ABI 4 `route_source` and `route_sink`), since the events would otherwise
+have nowhere to go.
 
 `cargo test -p abi-check --target x86_64-unknown-linux-gnu` runs the same
 checks on the WAT templates, on the built examples (build them first) and on
