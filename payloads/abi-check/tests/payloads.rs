@@ -223,6 +223,46 @@ fn rust_dimmer_example() {
     ));
 }
 
+// ABI 4: DMA routes.
+
+#[test]
+fn rust_cam_stream_example() {
+    let r = validate(&release("cam_stream"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(&r.imports, &["route_source", "set_tick", "publish"]));
+}
+
+#[test]
+fn rust_cam_view_example() {
+    let r = validate(&release("cam_view"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(
+        &r.imports,
+        &[
+            "route_sink",
+            "spi_open",
+            "spi_transfer",
+            "gpio_output",
+            "gpio_write",
+            "timer_start",
+        ]
+    ));
+}
+
+#[test]
+fn cam_view_fits_the_badge() {
+    // conagotchi: 16 KiB fixed memory and a 16 KiB image limit.
+    let Some(r) = byte_pages("cam_view") else {
+        eprintln!("cam_view: no byte-page build; run scripts/build-byte-pages.sh -p cam_view");
+        return;
+    };
+    assert_eq!(r.memory_page_bytes, Some(1));
+    assert_eq!(r.initial_memory_bytes(), Some(16_384));
+    let path = root().join("target/byte-pages/wasm32-unknown-unknown/release/cam_view.wasm");
+    let len = std::fs::metadata(path).expect("built").len();
+    assert!(len <= 16 * 1024, "cam_view.wasm is {len} bytes");
+}
+
 #[test]
 fn abi3_examples_import_no_abi4_functions() {
     // ABI 3 payloads keep loading on ABI 3 firmware.
@@ -282,6 +322,8 @@ const RUST_EXAMPLES: &[&str] = &[
     "spi_loopback",
     "uart_echo",
     "dimmer",
+    "cam_stream",
+    "cam_view",
 ];
 
 #[test]

@@ -1,0 +1,13 @@
+[package]
+name = "cam_view"
+description = "Example middleware payload: cam_view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }
