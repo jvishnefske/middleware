@@ -989,6 +989,27 @@ test pattern), both pure, `no_std` and heap-free.
 - [ ] R10 The desktop and browser simulators run source and sink routes
   (test pattern source; a sink that records or renders the frames), so the
   camera and display payloads run without hardware.
+  - [x] Desktop (`payload-sim`): a test-pattern source route publishes each
+    frame on the simulator clock (real and `--virtual`) as `Chunker`
+    chunks filled by `stream::pattern`, the camera is `Unsupported`, and
+    late clocks count skipped frames; a sink route on an open SPI bus owns
+    the bus and D/C pin, steps a `stream::Sink`, sends the preamble and
+    forwarded data to a GC9A01-like 240×240 panel model (`CASET`, `RASET`,
+    `RAMWR`, RGB565 big-endian), raises `RouteFrames` / `RouteDropped`,
+    and keeps `route_stat` counts; `--peer` runs two payloads over a
+    shared in-memory bus, `--loss`/`--seed` drop messages reproducibly,
+    and `--dump-panel` writes the panel as PPM. Lossy delivery never
+    writes a pixel outside the window or one that belongs to no frame —
+    `tools/payload-sim/tests/r10.rs`
+    (`r10_camera_and_display_payloads_stream_the_pattern_onto_the_panel`,
+    `r10_lossy_bus_never_draws_misplaced_pixels`,
+    `r10_real_time_routes_follow_the_wall_clock`); `sim::tests::*`
+    (`r10_source_chunks_drive_the_sink_onto_the_panel`,
+    `r10_lossy_delivery_never_misplaces_pixels`,
+    `r10_late_clock_skips_source_frames`); `sim::route::tests::*`,
+    `sim::panel::tests::*`, `sim::bus::tests::*`.
+  - [ ] Browser (`web/protocol-wasm`): not yet; its device still answers
+    the route imports with `Unsupported`.
 - [ ] R11 ESP32-CAM firmware: a test-pattern source route publishes
   120×120 frames on `app/cam/frame` over ESP-NOW from DMA-capable buffers;
   later the OV2640 behind the same `SourceKind::Camera`.
@@ -1052,6 +1073,49 @@ test pattern), both pure, `no_std` and heap-free.
     transfer releases bus and pin and raises `RouteStopped`.
 - [ ] R13 Camera and display payloads (Rust SDK) and an end-to-end run
   between the two devices.
+  - [x] `payloads/examples/cam_stream` (ESP32-CAM): a `TestPattern`
+    source route on `app/cam/frame`, 120×120 RGB565 every 200 ms in
+    166-byte chunks (174 ESP-NOW messages a frame, 870 a second, within a
+    1000-a-second budget); route events counted and published on
+    `app/cam/stats` (three `u32` LE); a stopped route restarted at once,
+    else on every tick; `SourceKind::Camera` is a one-constant change —
+    `cam_stream` `tests::*` (`config_bytes_match_the_abi_example`,
+    `a_frame_is_174_espnow_messages_within_budget`,
+    `source_is_the_test_pattern_until_the_camera_lands`,
+    `events_accumulate_and_a_stop_asks_for_a_restart`, `counters_saturate`,
+    `stats_encoding_is_three_le_words`, `host_stub_start_fails_cleanly`).
+  - [x] `payloads/examples/cam_view` (conagotchi badge): opens SPI2 at
+    40 MHz and the D/C and reset pins, runs the `mipidsi` 0.10 GC9A01 init
+    sequence with the badge's inversion-on and BGR options (each command
+    with D/C low, its parameters with D/C high, one transfer per
+    `DmaDone`, delays on a one-shot timer), clears the panel black in 30
+    padded transfers, then starts a sink route with D/C 13, 28 800-byte
+    frames and `Preamble::mipi_window(60, 60, 179, 179)`; a failed step or
+    a stopped route backs off 1 s and repeats the bring-up, giving up after
+    5 failures in a row. The decisions are pure state machines
+    (`Sequencer`, `Controller`) —
+    `cam_view` `tests::*` (`init_sequence_matches_mipidsi_gc9a01_with_the_badge_options`,
+    `reset_then_power_up_delay_come_first`,
+    `sleep_out_waits_120_ms_before_display_on`,
+    `clear_fills_the_whole_panel_in_bounded_transfers_after_ramwr`,
+    `sequencer_ignores_unawaited_events_and_fails_on_dma_errors`,
+    `sink_config_bytes_match_the_abi_example`,
+    `controller_boots_reopens_and_starts_the_sink`,
+    `route_stop_backs_off_then_redoes_the_bring_up`,
+    `repeated_failures_give_up`, `a_started_route_resets_the_failure_count`,
+    `stats_accumulate_and_saturate`,
+    `host_stub_bring_up_backs_off_instead_of_panicking`).
+  - [x] Both validate against the ABI and `cam_view` fits the badge
+    (1-byte pages, 16 KiB memory, 4 KiB stack, 13 154-byte image,
+    reproducible) — `abi-check` `tests/payloads.rs` (`rust_cam_stream_example`,
+    `rust_cam_view_example`, `cam_view_fits_the_badge`,
+    `p5_forbid_unsafe_code_examples_export_the_abi`);
+    `scripts/check-all.sh`.
+  - [ ] End-to-end run between the ESP32-CAM and the badge (needs R11 and
+    R12). In `payload-sim` (`--peer`, `--virtual`, 50 000 fuel, 16 KiB
+    memory) the pair brings the panel up in 330 ms and draws every frame
+    in the centre window; the most fuel any call needed was 27 971
+    (`cam_view`'s `init`) and 6 637 for `cam_stream`.
 
 ## Known limitations (0.3)
 

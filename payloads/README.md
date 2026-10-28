@@ -153,6 +153,17 @@ device at address 0x50 (write a register number followed by data to store
 it; a read returns registers from the last register number written). Other
 I2C addresses do not acknowledge.
 
+For ABI 4 the simulator runs DMA routes on its clock: a test-pattern source
+route prints one line per frame it publishes, and a sink route draws the
+chunks arriving on its key on a virtual 240×240 GC9A01-like panel, printing
+one line per frame drawn or dropped. `--peer <other.wasm>` runs a second
+payload on its own board in the same process, with each board's
+publications delivered to the other, so `cargo run -p payload-sim --
+cam_view.wasm --peer cam_stream.wasm --virtual --until-ms 2000 --dump-panel
+panel.ppm` runs the camera-to-display pipeline and writes the panel as a
+PPM image at the end. `--loss <permille>` drops that share of the messages
+between the two boards, reproducibly for a given `--seed <n>`.
+
 ## Uploading
 
 Open the project's web page in Chrome, connect to a device running the base
