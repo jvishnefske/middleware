@@ -21,17 +21,33 @@
 //! # Heap plan
 //!
 //! The heap holds WASM linear memory, the payload image while
-//! it is compiled, and the wasmi interpreter's module and instance data. It
-//! is built from two regions: RAM reclaimed from the second-stage bootloader
+//! it is compiled, the wasmi interpreter's module and instance data and,
+//! on chips built with ESP-NOW (`espnow` feature: ESP32, ESP32-S3), the
+//! Wi-Fi driver's buffers and tasks (`radio_heap`). It is built from two
+//! regions: RAM reclaimed from the second-stage bootloader
 //! (`heap_reclaimed`, the size `esp-generate` uses per chip) plus a region in
 //! ordinary `.bss` (`heap_main`).
 //!
-//! | chip     | reclaimed | main    | total   | memory  | max image |
-//! |----------|-----------|---------|---------|---------|-----------|
-//! | ESP32    | 96.4 KiB  | 112 KiB | 208 KiB | 128 KiB | 32 KiB    |
-//! | ESP32-S3 | 72.0 KiB  | 176 KiB | 248 KiB | 128 KiB | 80 KiB    |
-//! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    |
-//! | ESP8266  | 0         | 0       | 0       | 0       | 124 KiB   |
+//! | chip     | reclaimed | main    | total   | memory  | max image | radio  |
+//! |----------|-----------|---------|---------|---------|-----------|--------|
+//! | ESP32    | 96.4 KiB  | 80 KiB  | 176 KiB | 64 KiB  | 24 KiB    | 48 KiB |
+//! | ESP32-S3 | 72.0 KiB  | 128 KiB | 200 KiB | 64 KiB  | 32 KiB    | 48 KiB |
+//! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    | 0      |
+//! | ESP8266  | 0         | 0       | 0       | 0       | 124 KiB   | 0      |
+//!
+//! ESP-NOW (0.5) cost the ESP32 its second WASM page and part of its image
+//! cap: the Wi-Fi driver adds about 30 KiB of static RAM (blob `.data` and
+//! `.bss`, the radio task, its queues) and needs heap at run time, and the
+//! ESP32's 192 KiB of main DRAM had no slack (`heap_main` 112 → 80 KiB,
+//! memory 128 → 64 KiB, image 32 → 24 KiB, which still holds every
+//! example payload, the largest 13 KiB). On the ESP32-S3, whose IRAM and
+//! DRAM share one SRAM, the driver's RAM-resident code (`.rwtext.wifi`,
+//! 31 KiB) also comes out of data RAM, about 58 KiB in all; keeping the
+//! stack above the 31 KiB a payload load needs took `heap_main` 176 → 128
+//! KiB, memory 128 → 64 KiB and image 80 → 32 KiB. The radio budget is the
+//! driver's footprint with the reduced buffer counts of the radio shell
+//! (6 static RX buffers of 1.6 KiB, no aggregation) plus margin; it is an
+//! estimate until measured on hardware.
 //!
 //! The memory limit is a byte cap (`wasm_host::Limits::bytes`): a payload
 //! with standard 64 KiB pages gets whole pages up to it, and one built with
@@ -50,7 +66,8 @@
 //!
 //! The main regions are sized so the linker leaves a usable main stack
 //! (after `.bss`, measured from `_stack_end`..`_stack_start`): ESP32 about
-//! 25 KiB, ESP32-S3 about 81 KiB, ESP32-C3 about 103 KiB. The ESP32-S3 had
+//! 26 KiB, ESP32-S3 about 70 KiB (both with ESP-NOW), ESP32-C3 about
+//! 103 KiB. The ESP32-S3 had
 //! 240 KiB main and 192 KiB memory until 0.4, which left 17 KiB of stack;
 //! loading a payload (wasmi parse plus `init`, about 31 KiB deep) then
 //! overflowed into the stack guard on hardware. On the Xtensa
@@ -60,8 +77,9 @@
 //! SPI/DMA/UART code; the ESP32-C3 builds without them.
 //!
 //! Each runtime profile leaves at least [`INTERPRETER_RESERVE`] bytes beyond
-//! the linear memory and image for wasmi (checked by a unit test); the heap
-//! check applies only to profiles with `runtime` set.
+//! the linear memory, image and radio budget for wasmi, and at least one
+//! 64 KiB page of linear memory (checked by a unit test); the heap check
+//! applies only to profiles with `runtime` set.
 //!
 //! Every profile's `max_image` fits one slot of the 256 KiB (`0x40000`)
 //! payload partition, whose per-slot capacity is 124 KiB: the ESP32 family
@@ -120,6 +138,9 @@ pub struct Profile {
     pub heap_main: usize,
     /// WASM linear-memory limit in bytes, whatever the payload's page size.
     pub max_memory_bytes: u32,
+    /// Heap bytes left for the Wi-Fi driver (esp-radio, ESP-NOW), 0 on a
+    /// chip built without the `espnow` feature.
+    pub radio_heap: usize,
     /// Largest payload image accepted, in bytes (also capped by the flash
     /// partition).
     pub max_image: u32,
@@ -155,9 +176,10 @@ pub const ESP32: Profile = Profile {
     usb_serial_jtag: false,
     runtime: true,
     heap_reclaimed: 98_768,
-    heap_main: 112 * 1024,
-    max_memory_bytes: 2 * WASM_PAGE,
-    max_image: 32 * 1024,
+    heap_main: 80 * 1024,
+    max_memory_bytes: WASM_PAGE,
+    radio_heap: 48 * 1024,
+    max_image: 24 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
     gpio: span(0, 19) | span(21, 23) | span(25, 27) | span(32, 39),
@@ -173,9 +195,10 @@ pub const ESP32S3: Profile = Profile {
     usb_serial_jtag: true,
     runtime: true,
     heap_reclaimed: 73_744,
-    heap_main: 176 * 1024,
-    max_memory_bytes: 2 * WASM_PAGE,
-    max_image: 80 * 1024,
+    heap_main: 128 * 1024,
+    max_memory_bytes: WASM_PAGE,
+    radio_heap: 48 * 1024,
+    max_image: 32 * 1024,
     uart0_tx: 43,
     uart0_rx: 44,
     gpio: span(0, 21) | span(26, 48),
@@ -193,6 +216,7 @@ pub const ESP32C3: Profile = Profile {
     heap_reclaimed: 66_320,
     heap_main: 176 * 1024,
     max_memory_bytes: 2 * WASM_PAGE,
+    radio_heap: 0,
     max_image: 64 * 1024,
     uart0_tx: 21,
     uart0_rx: 20,
@@ -213,6 +237,7 @@ pub const ESP8266: Profile = Profile {
     heap_reclaimed: 0,
     heap_main: 0,
     max_memory_bytes: 0,
+    radio_heap: 0,
     max_image: 124 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
@@ -351,9 +376,12 @@ mod tests {
     #[test]
     fn heap_leaves_room_for_payload() {
         for p in ALL.into_iter().filter(|p| p.runtime) {
-            let need = p.max_memory_bytes as usize + p.max_image as usize + INTERPRETER_RESERVE;
+            let need = p.max_memory_bytes as usize
+                + p.max_image as usize
+                + INTERPRETER_RESERVE
+                + p.radio_heap;
             assert!(p.heap_total() >= need, "{}: {} < {}", p.name, p.heap_total(), need);
-            assert!(p.max_memory_bytes >= 2 * WASM_PAGE, "{}", p.name);
+            assert!(p.max_memory_bytes >= WASM_PAGE, "{}", p.name);
             // Page multiples, so a 64 KiB-page payload can use all of it.
             assert_eq!(p.max_memory_bytes % WASM_PAGE, 0, "{}", p.name);
         }

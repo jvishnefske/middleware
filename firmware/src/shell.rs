@@ -18,7 +18,12 @@
 //! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
 //!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
 //!    ([`uart1`]), all without pins until a payload opens them.
-//! 5. The [`controller`] runs on the main task and starts the stored payload
+//! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
+//!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
+//!    publishes go out over ESP-NOW, `app/...` samples come in, and source
+//!    routes stream from it. A radio that fails to start is logged and the
+//!    firmware runs without it.
+//! 6. The [`controller`] runs on the main task and starts the stored payload
 //!    if one is valid (and the `wasm` runtime is built in).
 //!
 //! Ownership is a tree: the main task owns the controller (state, flash
@@ -41,6 +46,8 @@ mod gpio;
 mod irq;
 mod link;
 mod presence;
+#[cfg(feature = "espnow")]
+mod radio;
 #[cfg(feature = "wasm")]
 mod spi;
 #[cfg(feature = "wasm")]
@@ -159,10 +166,11 @@ pub async fn run(spawner: Spawner) -> ! {
     };
 
     bus.log(format_args!(
-        "esp-base {FIRMWARE} on {} (heap {} B, WASM memory {} B, uart {})",
+        "esp-base {FIRMWARE} on {} (heap {} B, WASM memory {} B, radio {} B, uart {})",
         profile.name,
         profile.heap_total(),
         profile.max_memory_bytes,
+        profile.radio_heap,
         if uart_ok { "ok" } else { "failed" },
     ));
     match installed {
@@ -197,6 +205,11 @@ pub async fn run(spawner: Spawner) -> ! {
             ));
         }
         device::HW.put(device::Hw { spi, uart });
+        #[cfg(feature = "espnow")]
+        match radio::start(board.wifi) {
+            Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),
+            Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
+        }
         Controller::new(state, ctx, store, trust, bus, profile)
     };
     #[cfg(not(feature = "wasm"))]

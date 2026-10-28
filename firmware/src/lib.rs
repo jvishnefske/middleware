@@ -28,6 +28,12 @@
 //! * [`periph`] — the ABI 2 peripheral decisions: pin claims, the timer
 //!   deadline table, the DMA channel state machine, the UART receive ring,
 //!   and the events ISRs and completions push.
+//! * [`radio`] — the ESP-NOW policy: the fixed channel, the `app` key
+//!   filter for what goes over the air, queue depths and drop counters.
+//! * [`route`] — the ABI 4 DMA routes: source-route pacing and the
+//!   in-place ESP-NOW chunk frame, the sink route's bus transfers, the
+//!   route table (handles, keys, owned bus and D/C pin) and the source
+//!   table the radio task polls.
 //!
 //! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
 //! with a chip feature (`esp32`, `esp32s3`, `esp32c3`). It owns the UARTs,
@@ -41,7 +47,9 @@ pub mod dispatch;
 pub mod image;
 pub mod periph;
 pub mod presence;
+pub mod radio;
 #[cfg(test)]
 mod ram_flash;
+pub mod route;
 pub mod store;
 pub mod trust_store;

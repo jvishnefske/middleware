@@ -19,6 +19,11 @@
 //! With `wasm`, [`PayloadPeripherals`] adds the ABI 2 hardware: IO_MUX (GPIO
 //! interrupt handler), TIMG1 (payload timer alarm), SPI2 with its DMA
 //! channel (`DMA_SPI2` on ESP32, GDMA `DMA_CH0` on ESP32-S3) and UART1.
+//! With `espnow` (ESP32, ESP32-S3) the board also hands over `WIFI`.
+//!
+//! The heap ([`init_heap`]) is one allocator over the two regions of the
+//! profile; esp-radio's Wi-Fi driver allocates from it too, which the
+//! profile budgets as `radio_heap`.
 
 use esp_base::chip::Profile;
 use esp_hal::Async;
@@ -86,6 +91,9 @@ pub struct Board {
     /// Peripherals behind the ABI 2 imports.
     #[cfg(feature = "wasm")]
     pub payload: PayloadPeripherals,
+    /// The Wi-Fi radio, for ESP-NOW ([`super::radio`]).
+    #[cfg(feature = "espnow")]
+    pub wifi: esp_hal::peripherals::WIFI<'static>,
 }
 
 /// Peripherals behind the ABI 2 imports (interrupts, timers, SPI, UART).
@@ -155,6 +163,8 @@ pub fn split(p: Peripherals) -> Board {
         ),
         #[cfg(feature = "wasm")]
         payload: payload_peripherals!(p, DMA_SPI2),
+        #[cfg(feature = "espnow")]
+        wifi: p.WIFI,
     }
 }
 
@@ -179,6 +189,8 @@ pub fn split(p: Peripherals) -> Board {
         ),
         #[cfg(feature = "wasm")]
         payload: payload_peripherals!(p, DMA_CH0),
+        #[cfg(feature = "espnow")]
+        wifi: p.WIFI,
     }
 }
 

@@ -11,6 +11,12 @@
 - `mw-payload`: `route::Route` (`source`, `sink`, `stat`, `stop`, `on_event`), `irq::Event::{RouteFrames, RouteDropped, RouteStopped}`; no new `unsafe`. Exhaustive matches on `irq::Event` need new arms. `abi-check` treats `route_source` and `route_sink` as event sources requiring `on_irq`. (R9)
 - Not yet implemented by any firmware or simulator: the methods default to `Unsupported` (R10–R13 in design.md).
 
+### ESP base firmware: ESP-NOW and DMA routes (R11, R12)
+- ESP-NOW on ESP32 and ESP32-S3 (feature `espnow`, on with those chips): esp-radio 1.0.0-beta.1 brings Wi-Fi up as an unassociated station on fixed channel 1 and runs the middleware `EspNowTransport` (port of the conagotchi badge's `EspNowLink`). Payload publishes on `app/...` keys are also broadcast; received `app/...` samples reach `on_message` or a sink route. Queues are bounded (TX 4, RX 8) and drop and count; losses are logged on `sys/log`. (`esp_base::radio`)
+- Source routes (`route_source`, `TestPattern`): each chunk's ESP-NOW frame is written in place (radio header, key, chunk header, pattern bytes), one broadcast in flight at a time; late frames skip whole periods as `RouteDropped`. `Camera`, non-`app` keys and chunks over 167 bytes are `Unsupported`. (`esp_base::route::source`, `sources`)
+- Sink routes (`route_sink` on bus 0): chunks on the key bypass `on_message` and are DMAed to SPI2 with the preamble (D/C per segment) at each frame start; the bus (`spi_open`, `spi_transfer`) and D/C pin (`gpio_*`, `gpio_irq`) are `Busy` to the payload while the route runs; a failed transfer stops the route with `RouteStopped`. `route_stat` and `route_stop` per the contract. (`esp_base::route::sink`, `table`)
+- Memory, to make room for the Wi-Fi driver: ESP32 `heap_main` 112 → 80 KiB, WASM memory 128 → 64 KiB, max image 32 → 24 KiB; ESP32-S3 `heap_main` 176 → 128 KiB, memory 128 → 64 KiB, max image 80 → 32 KiB; both budget 48 KiB of heap for the radio (`Profile::radio_heap`, also in the boot log). Payloads built for one 64 KiB page or 1-byte pages are unaffected; two-page payloads no longer load on these chips.
+
 ## 0.4.0
 
 ### Signed payloads (trust, breaking)

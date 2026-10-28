@@ -992,10 +992,64 @@ test pattern), both pure, `no_std` and heap-free.
 - [ ] R11 ESP32-CAM firmware: a test-pattern source route publishes
   120×120 frames on `app/cam/frame` over ESP-NOW from DMA-capable buffers;
   later the OV2640 behind the same `SourceKind::Camera`.
+  - [x] ESP-NOW in the ESP base firmware (feature `espnow`, ESP32 and
+    ESP32-S3; esp-radio 1.0.0-beta.1, ported from the conagotchi badge):
+    the Wi-Fi station sits on fixed channel 1 and the middleware
+    `EspNowTransport` filters `Prefix("app")`; payload publishes on
+    `app/...` keys are broadcast, received `app/...` samples are delivered
+    to subscriptions or sink routes, and both queues drop and count when
+    full — `esp_base::radio::tests::*`
+    (`r11_r12_only_app_keys_go_over_the_air`,
+    `r11_r12_counters_saturate_and_report_on_new_losses`).
+  - [x] Source route core: the first frame is due at start and each next
+    one a period later; chunks go back to back, each broadcast awaited to
+    its send callback (one frame queued in the driver at a time); a late
+    frame starts at once and whole missed periods are skipped as dropped
+    frames (only the latest is generated); a failed broadcast abandons the
+    frame; each chunk's ESP-NOW frame (radio header, key, chunk header,
+    pattern bytes generated in place, no frame buffer) decodes back to the
+    pattern; routes take turns; results of stopped or restarted routes are
+    ignored; chunks over 167 bytes, non-`app` keys and `Camera` are
+    `Unsupported` — `esp_base::route::source::tests::*`
+    (`r11_first_frame_is_due_at_start_then_every_period`,
+    `r11_chunks_follow_back_to_back_within_a_frame`,
+    `r11_a_late_frame_starts_at_once_and_whole_missed_periods_are_dropped`,
+    `r11_a_failed_broadcast_abandons_the_frame`,
+    `r11_clock_wrap_and_large_chunks`,
+    `r11_write_frame_builds_a_radio_frame_with_the_pattern_in_place`,
+    `r11_written_frames_rebuild_the_pattern_through_a_sink`,
+    `r11_write_frame_refuses_what_does_not_fit`);
+    `route::sources::tests::*` (`r11_idle_wait_and_send`,
+    `r11_routes_take_turns`,
+    `r11_stopped_or_restarted_routes_ignore_late_results`);
+    `route::tests::r11_r12_reports_become_route_events`.
+  - [ ] On the ESP32-CAM: `cam_stream` streams the pattern over the air
+    (`./build.sh esp32` builds; not yet run on hardware); the OV2640
+    behind `SourceKind::Camera`.
 - [ ] R12 Conagotchi badge firmware (ESP32-S3, GC9A01 on SPI2: SCK 12,
   MOSI 11, CS 10, DC 13, RST 14): a sink route DMAs received chunks to the
   panel with the preamble re-sent at each frame start; the payload
   initialises the panel over `spi_open`/`spi_transfer`/GPIO.
+  - [x] Sink route core: a frame start sends every preamble segment with
+    D/C at its level and then the data with D/C high, a continuation sends
+    data only, dropped chunks send nothing and gaps abandon the frame, at
+    most `MAX_TRANSFERS` transfers per chunk; one sink per bus, D/C pin
+    and key, handles `0..4` (`NoResources` when full, `Busy` for a handle
+    not running) — `esp_base::route::sink::tests::*`
+    (`r12_frame_start_sends_the_preamble_with_dc_levels_then_data`,
+    `r12_dropped_chunks_make_no_transfer_and_gaps_abandon_the_frame`,
+    `r12_no_preamble_means_data_only_and_transfers_are_bounded`);
+    `route::table::tests::*` (`r11_r12_handles_are_allocated_and_freed`,
+    `r12_a_sink_owns_its_bus_pin_and_key`,
+    `r12_sink_state_is_stored_and_long_keys_are_refused`).
+  - [ ] On the badge (`./build.sh esp32s3` builds; not yet run on
+    hardware): chunks received over ESP-NOW or serial on the sink's key
+    skip `on_message` and are DMAed from the received buffer to SPI2
+    (`SpiBus::write_route`, no `DmaDone`); while the route runs
+    `spi_open`/`spi_transfer` on bus 0 and GPIO calls on the D/C pin are
+    `Busy` (a D/C pin the payload drives as an output is taken over);
+    `route_sink` is `Busy` while a payload transfer is in flight; a failed
+    transfer releases bus and pin and raises `RouteStopped`.
 - [ ] R13 Camera and display payloads (Rust SDK) and an end-to-end run
   between the two devices.
 

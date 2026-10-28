@@ -25,6 +25,10 @@
 //! interrupt), which takes the driver back and pushes `DmaDone(Spi0, len)`.
 //! `dma_read` copies out of the receive buffer, consuming it. The pure
 //! [`DmaState`] machine decides `Busy` and what is readable.
+//!
+//! A sink route (ABI 4) sends through [`SpiBus::write_route`] instead: the
+//! same buffers and driver, awaited in place by the controller, without
+//! touching the payload's [`DmaState`] (no `DmaDone`, nothing to read).
 
 use core::future::pending;
 
@@ -40,6 +44,7 @@ use esp_hal::time::Rate;
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{MAX_DMA, SpiConfig};
+use embassy_time::{Duration, with_timeout};
 use static_cell::ConstStaticCell;
 
 use super::irq;
@@ -80,6 +85,10 @@ static RX_DESC: ConstStaticCell<InternalMemory<[DmaDescriptor; DESCRIPTORS]>> =
     ConstStaticCell::new(InternalMemory::new([DmaDescriptor::EMPTY; DESCRIPTORS]));
 static TX_DESC: ConstStaticCell<InternalMemory<[DmaDescriptor; DESCRIPTORS]>> =
     ConstStaticCell::new(InternalMemory::new([DmaDescriptor::EMPTY; DESCRIPTORS]));
+
+/// Longest one sink-route transfer may take (a chunk at the slowest clock
+/// takes a few milliseconds).
+const ROUTE_TIMEOUT: Duration = Duration::from_millis(50);
 
 type Transfer = SpiDmaTransfer<'static, Async, (DmaRxBuf, DmaTxBuf)>;
 
@@ -130,6 +139,51 @@ impl SpiBus {
     /// Whether a transfer is running.
     pub fn busy(&self) -> bool {
         self.dma.in_flight()
+    }
+
+    /// Whether `spi_open` configured the bus.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Sends `data` for a sink route and waits for the DMA to finish
+    /// (bounded by [`ROUTE_TIMEOUT`]; a transfer that overruns it is
+    /// cancelled and reported as `Transport`). The payload's [`DmaState`]
+    /// is not touched, so no `DmaDone` event is raised and `dma_read` is
+    /// unaffected. `Busy` if the bus is closed or a payload transfer runs;
+    /// `InvalidArgument` if `data` exceeds the DMA buffer.
+    pub async fn write_route(&mut self, data: &[u8]) -> Result<(), AbiError> {
+        if !self.open || self.dma.in_flight() {
+            return Err(AbiError::Busy);
+        }
+        let Hw::Idle(mut parts) = core::mem::replace(&mut self.hw, Hw::Gone) else {
+            return Err(AbiError::Busy);
+        };
+        let n = data.len();
+        let room = parts.tx.as_mut_slice().get_mut(..n).filter(|_| n <= parts.rx.capacity());
+        let Some(room) = room else {
+            self.hw = Hw::Idle(parts);
+            return Err(AbiError::InvalidArgument);
+        };
+        room.copy_from_slice(data);
+        parts.tx.set_length(n);
+        parts.rx.set_length(n);
+        match parts.spi.transfer_buffers(n, parts.rx, n, parts.tx) {
+            Ok(transfer) => self.hw = Hw::InFlight(transfer),
+            Err((_, spi, rx, tx)) => {
+                self.hw = Hw::Idle(Parts { spi, rx, tx });
+                return Err(AbiError::Transport);
+            }
+        }
+        let mut result = Ok(());
+        if let Hw::InFlight(transfer) = &mut self.hw
+            && with_timeout(ROUTE_TIMEOUT, transfer.wait_for_done()).await.is_err()
+        {
+            transfer.cancel();
+            result = Err(AbiError::Transport);
+        }
+        self.reclaim();
+        result
     }
 
     /// Applies clock and mode (pins are routed by the caller).
