@@ -397,6 +397,7 @@ const RUST_EXAMPLES: &[&str] = &[
     "cam_view",
     "cam_jpeg_stream",
     "cam_jpeg_view",
+    "bench",
 ];
 
 #[test]

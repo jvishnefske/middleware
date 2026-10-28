@@ -1,0 +1,23 @@
+[package]
+name = "bench"
+description = "Example middleware payload: bench (interpreter speed on a board, in fuel per second)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }
+# Full scale only, as cam_jpeg_view builds it.
+mw-jpeg = { path = "../../jpeg", default-features = false }
+
+# The deploy build (scripts/build-byte-pages.sh -p bench, run by
+# scripts/check-all.sh): 1-byte pages, linear memory fixed at what the
+# payload uses: stack + data + .bss = 29 840 bytes, rounded up to 1 KiB
+# (see the crate docs, "Memory").
+[package.metadata.byte-pages]
+memory = 30720
+stack = 8192
