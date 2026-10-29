@@ -27,7 +27,8 @@
 //! # Transport
 //!
 //! [`EspNowTransport`] owns an [`EspNowRadio`] and implements
-//! [`Publisher`], [`Subscriber`] and [`Subscribe`]:
+//! [`Publisher`], [`Subscriber`] and [`Subscribe`] (and [`Split`] over
+//! [`RadioHalves`]):
 //!
 //! - **Publish** encodes a frame carrying the transport's [`Sequence`] and
 //!   broadcasts it. The sequence is per sender, shared by all keys, and
@@ -57,6 +58,17 @@
 //!   last one remembered for it.
 //! - **Sender**: every [`Sample`] carries [`SampleMeta`] with the sender
 //!   ([`SenderId::from_mac`]) and the frame's sequence number.
+//! - **No gaps**: [`SampleMeta::gap`] is always `None`. The sequence counts
+//!   every key of a sender (and the ESP base firmware numbers its route
+//!   chunks with a counter of their own), so a jump seen through the keys
+//!   one receiver selects does not tell how many of *those* were lost.
+//! - **Split**: over [`RadioHalves`] (an [`EspNowSend`] and an
+//!   [`EspNowReceive`], such as esp-radio's sender and receiver) the
+//!   transport implements [`Split`]: [`EspNowTx`] (a [`Publisher`]: the
+//!   sending half and the sequence) and [`EspNowRx`] (a [`Subscriber`] over
+//!   the filter slots: the receiving half, own address, dedup table and kept
+//!   frame), both borrowed from the transport, so one task publishes while
+//!   another waits in `recv`, without shared ownership.
 //! - **Ignored frames**: frames without the `MW` magic (other ESP-NOW
 //!   users), from our own address ([`EspNowTransport::with_own_address`]),
 //!   on keys no filter selects, or repeats are skipped. After
@@ -104,8 +116,8 @@
 use crate::dedup::{SeenTable, Sequence};
 use crate::key::{Key, KeyFilter, KeyFilterBuf};
 use crate::transport::{
-    Delivery, Limits, Overflow, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber,
-    sample_into,
+    Delivery, Limits, Overflow, Publisher, Sample, SampleMeta, SenderId, Split, Subscribe,
+    Subscriber, sample_into,
 };
 
 /// First two bytes of every middleware ESP-NOW frame.
@@ -322,108 +334,122 @@ enum Selection<'f> {
     Only(KeyFilter<'f>),
 }
 
-/// Middleware publisher and subscriber over ESP-NOW broadcast, remembering
-/// `K` (sender, key) pairs for duplicate suppression and holding up to `F`
-/// key filters. All state is inline (no heap): the radio, `F` filter slots,
-/// a `K`-entry [`SeenTable`] and one kept frame of `P` bytes (default
-/// [`MAX_FRAME`]; `P = 0` disables keeping, see the module docs).
-pub struct EspNowTransport<
-    'a,
-    R,
-    const K: usize = 16,
-    const F: usize = 8,
-    const P: usize = { MAX_FRAME },
-> {
-    radio: R,
+/// The sending half of a radio, for a transport that is [`Split`]
+/// ([`RadioHalves`]): what [`EspNowRadio::broadcast`] does.
+pub trait EspNowSend {
+    /// Binding-specific failure.
+    type Error: core::fmt::Debug;
+
+    /// Broadcasts one frame to every listening station.
+    async fn broadcast(&mut self, frame: &[u8]) -> Result<(), Self::Error>;
+}
+
+/// The receiving half of a radio, for a transport that is [`Split`]
+/// ([`RadioHalves`]): what [`EspNowRadio::receive`] and
+/// [`EspNowRadio::try_receive`] do, with the same contract (copy, never
+/// truncate; `receive` cancel-safe).
+pub trait EspNowReceive {
+    /// Binding-specific failure.
+    type Error: core::fmt::Debug;
+
+    /// Waits for the next frame, copies it into `buf` and returns it with
+    /// the sender's MAC. Must be cancel-safe.
+    async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<(&'b [u8], Mac), Self::Error>;
+
+    /// Returns the next frame if one is already queued, without waiting.
+    fn try_receive<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Option<(&'b [u8], Mac)>, Self::Error>;
+}
+
+/// A radio made of a sending and a receiving half (esp-radio's
+/// `EspNowSender` and `EspNowReceiver`, say). It is an [`EspNowRadio`], and
+/// an [`EspNowTransport`] over it implements [`Split`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RadioHalves<S, R> {
+    /// The sending half.
+    pub send: S,
+    /// The receiving half.
+    pub receive: R,
+}
+
+impl<S, R> RadioHalves<S, R> {
+    /// Joins a sending and a receiving half.
+    pub const fn new(send: S, receive: R) -> Self {
+        RadioHalves { send, receive }
+    }
+}
+
+impl<S: EspNowSend, R: EspNowReceive<Error = S::Error>> EspNowRadio for RadioHalves<S, R> {
+    type Error = S::Error;
+
+    async fn broadcast(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        self.send.broadcast(frame).await
+    }
+
+    async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<(&'b [u8], Mac), Self::Error> {
+        self.receive.receive(buf).await
+    }
+
+    fn try_receive<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Option<(&'b [u8], Mac)>, Self::Error> {
+        self.receive.try_receive(buf)
+    }
+}
+
+/// A whole radio borrowed as its receiving half (for the shared receive
+/// logic).
+struct Whole<'r, R>(&'r mut R);
+
+impl<R: EspNowRadio> EspNowReceive for Whole<'_, R> {
+    type Error = R::Error;
+
+    async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<(&'b [u8], Mac), Self::Error> {
+        EspNowRadio::receive(self.0, buf).await
+    }
+
+    fn try_receive<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Option<(&'b [u8], Mac)>, Self::Error> {
+        EspNowRadio::try_receive(self.0, buf)
+    }
+}
+
+/// Encodes a frame with the next sequence number, advancing it first (see
+/// the module docs), into `out`.
+fn encode_next<'o>(
+    seq: &mut Sequence,
+    key: Key<'_>,
+    payload: &[u8],
+    out: &'o mut [u8; MAX_FRAME],
+) -> Result<&'o [u8], FrameError> {
+    let n = Frame {
+        seq: seq.get(),
+        key,
+        payload,
+    }
+    .encode(out)?;
+    let frame = out.get(..n).ok_or(FrameError::TooLong)?;
+    *seq = seq.next();
+    Ok(frame)
+}
+
+/// Everything the receiving side keeps: filter slots, own address, the
+/// dedup table and the kept frame.
+struct RxState<'a, const K: usize, const F: usize, const P: usize> {
     filters: [Option<KeyFilter<'a>>; F],
     own: Option<Mac>,
-    seq: Sequence,
     seen: SeenTable<K>,
     pending: Option<Pending<P>>,
 }
 
-impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
-    EspNowTransport<'a, R, K, F, P>
-{
-    /// Compile-time check that the kept-frame buffer is at most a frame.
-    const KEEP_OK: () = assert!(P <= MAX_FRAME, "EspNowTransport: P exceeds MAX_FRAME");
-
-    /// A transport over `radio` with no filters (it receives nothing until
-    /// one is added) and sequence number 0.
-    pub const fn new(radio: R) -> Self {
-        let () = Self::KEEP_OK;
-        EspNowTransport {
-            radio,
-            filters: [None; F],
-            own: None,
-            seq: Sequence::new(0),
-            seen: SeenTable::new(),
-            pending: None,
-        }
-    }
-
-    /// The same transport also receiving keys matching `filter`.
-    ///
-    /// # Errors
-    ///
-    /// [`FiltersFull`] when all `F` slots are taken.
-    pub fn with_filter(mut self, filter: KeyFilter<'a>) -> Result<Self, FiltersFull> {
-        self.add_filter(filter)?;
-        Ok(self)
-    }
-
-    /// The same transport also receiving keys matching any of `filters`.
-    ///
-    /// # Errors
-    ///
-    /// [`FiltersFull`] when they do not all fit in the `F` slots.
-    pub fn with_filters(self, filters: &[KeyFilter<'a>]) -> Result<Self, FiltersFull> {
-        filters.iter().try_fold(self, |t, f| t.with_filter(*f))
-    }
-
-    /// The same transport ignoring frames whose source is `mac` (our own
-    /// station address).
-    pub fn with_own_address(self, mac: Mac) -> Self {
-        EspNowTransport {
-            own: Some(mac),
-            ..self
-        }
-    }
-
-    /// Starts receiving keys matching `filter`. Adding a filter already
-    /// present is a no-op.
-    ///
-    /// # Errors
-    ///
-    /// [`FiltersFull`] when all `F` slots are taken.
-    pub fn add_filter(&mut self, filter: KeyFilter<'a>) -> Result<(), FiltersFull> {
-        if self.filters.contains(&Some(filter)) {
-            return Ok(());
-        }
-        let slot = self
-            .filters
-            .iter_mut()
-            .find(|f| f.is_none())
-            .ok_or(FiltersFull)?;
-        *slot = Some(filter);
-        Ok(())
-    }
-
-    /// Stops receiving keys through `filter`; returns whether it was present.
-    /// A sample already kept after [`EspNowError::BufferTooSmall`] is still
-    /// delivered.
-    pub fn remove_filter(&mut self, filter: KeyFilter<'a>) -> bool {
-        match self.filters.iter_mut().find(|f| **f == Some(filter)) {
-            Some(slot) => {
-                *slot = None;
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// True if some filter selects `key`.
-    pub fn subscribed(&self, key: Key<'_>) -> bool {
+impl<const K: usize, const F: usize, const P: usize> RxState<'_, K, F, P> {
+    /// True if some filter slot selects `key`.
+    fn subscribed(&self, key: Key<'_>) -> bool {
         self.filters.iter().flatten().any(|f| f.matches(key))
     }
 
@@ -433,16 +459,6 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
             Selection::Slots => self.subscribed(key),
             Selection::Only(f) => f.matches(key),
         }
-    }
-
-    /// The sequence number the next publish will carry.
-    pub const fn sequence(&self) -> Sequence {
-        self.seq
-    }
-
-    /// Borrows the radio.
-    pub fn radio_mut(&mut self) -> &mut R {
-        &mut self.radio
     }
 
     /// Decides whether a received frame is delivered: skips our own,
@@ -470,14 +486,16 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
     /// Writes an accepted frame into `buf` as a sample with sender meta, or
     /// keeps it for the next call when `buf` is too small (dropped instead
     /// when it does not fit the `P`-byte kept buffer).
-    fn deliver<'b>(
+    fn deliver<'b, E>(
         &mut self,
         buf: &'b mut [u8],
         bytes: &[u8],
         src: Mac,
-    ) -> Result<Sample<'b>, EspNowError<R::Error>> {
+    ) -> Result<Sample<'b>, EspNowError<E>> {
         let frame = Frame::decode(bytes).map_err(EspNowError::Frame)?;
-        // One sequence counts all keys of a sender, so no gap is computed.
+        // One sequence counts all keys of a sender (and route chunks may
+        // carry another counter), so a jump does not mean a loss on the
+        // keys this receiver selects: no gap is reported.
         let meta = SampleMeta::from_sender(SenderId::from_mac(src)).with_seq(frame.seq);
         match sample_into(buf, frame.key.as_str(), frame.payload) {
             Some(sample) => Ok(sample.with_meta(meta)),
@@ -500,31 +518,19 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
         }
     }
 
-    /// Delivers a sample kept by an earlier [`EspNowError::BufferTooSmall`].
-    fn deliver_pending<'b>(
-        &mut self,
-        buf: &'b mut [u8],
-        p: Pending<P>,
-    ) -> Result<Sample<'b>, EspNowError<R::Error>> {
-        self.deliver(buf, p.bytes(), p.src)
-    }
-
     /// Waits for the next fresh sample `sel` selects.
-    async fn recv_selected<'b>(
+    async fn recv_selected<'b, Rv: EspNowReceive>(
         &mut self,
+        radio: &mut Rv,
         sel: Selection<'_>,
         buf: &'b mut [u8],
-    ) -> Result<Sample<'b>, EspNowError<R::Error>> {
+    ) -> Result<Sample<'b>, EspNowError<Rv::Error>> {
         if let Some(p) = self.take_pending(sel) {
-            return self.deliver_pending(buf, p);
+            return self.deliver(buf, p.bytes(), p.src);
         }
         let mut raw = [0u8; MAX_FRAME];
         for _ in 0..MAX_IGNORED_FRAMES {
-            let (bytes, src) = self
-                .radio
-                .receive(&mut raw)
-                .await
-                .map_err(EspNowError::Radio)?;
+            let (bytes, src) = radio.receive(&mut raw).await.map_err(EspNowError::Radio)?;
             if self.accept(sel, bytes, src).map_err(EspNowError::Frame)? {
                 return self.deliver(buf, bytes, src);
             }
@@ -534,20 +540,18 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
 
     /// Returns the next fresh sample `sel` selects among the frames already
     /// queued in the radio.
-    fn try_recv_selected<'b>(
+    fn try_recv_selected<'b, Rv: EspNowReceive>(
         &mut self,
+        radio: &mut Rv,
         sel: Selection<'_>,
         buf: &'b mut [u8],
-    ) -> Result<Option<Sample<'b>>, EspNowError<R::Error>> {
+    ) -> Result<Option<Sample<'b>>, EspNowError<Rv::Error>> {
         if let Some(p) = self.take_pending(sel) {
-            return self.deliver_pending(buf, p).map(Some);
+            return self.deliver(buf, p.bytes(), p.src).map(Some);
         }
         let mut raw = [0u8; MAX_FRAME];
         for _ in 0..MAX_IGNORED_FRAMES {
-            let Some((bytes, src)) = self
-                .radio
-                .try_receive(&mut raw)
-                .map_err(EspNowError::Radio)?
+            let Some((bytes, src)) = radio.try_receive(&mut raw).map_err(EspNowError::Radio)?
             else {
                 return Ok(None);
             };
@@ -556,6 +560,139 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
             }
         }
         Err(EspNowError::IgnoredLimit)
+    }
+}
+
+/// Middleware publisher and subscriber over ESP-NOW broadcast, remembering
+/// `K` (sender, key) pairs for duplicate suppression and holding up to `F`
+/// key filters. All state is inline (no heap): the radio, `F` filter slots,
+/// a `K`-entry [`SeenTable`] and one kept frame of `P` bytes (default
+/// [`MAX_FRAME`]; `P = 0` disables keeping, see the module docs).
+pub struct EspNowTransport<
+    'a,
+    R,
+    const K: usize = 16,
+    const F: usize = 8,
+    const P: usize = { MAX_FRAME },
+> {
+    radio: R,
+    seq: Sequence,
+    rx: RxState<'a, K, F, P>,
+}
+
+impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
+    EspNowTransport<'a, R, K, F, P>
+{
+    /// Compile-time check that the kept-frame buffer is at most a frame.
+    const KEEP_OK: () = assert!(P <= MAX_FRAME, "EspNowTransport: P exceeds MAX_FRAME");
+
+    /// A transport over `radio` with no filters (it receives nothing until
+    /// one is added) and sequence number 0.
+    pub const fn new(radio: R) -> Self {
+        let () = Self::KEEP_OK;
+        EspNowTransport {
+            radio,
+            seq: Sequence::new(0),
+            rx: RxState {
+                filters: [None; F],
+                own: None,
+                seen: SeenTable::new(),
+                pending: None,
+            },
+        }
+    }
+
+    /// The same transport also receiving keys matching `filter`.
+    ///
+    /// # Errors
+    ///
+    /// [`FiltersFull`] when all `F` slots are taken.
+    pub fn with_filter(mut self, filter: KeyFilter<'a>) -> Result<Self, FiltersFull> {
+        self.add_filter(filter)?;
+        Ok(self)
+    }
+
+    /// The same transport also receiving keys matching any of `filters`.
+    ///
+    /// # Errors
+    ///
+    /// [`FiltersFull`] when they do not all fit in the `F` slots.
+    pub fn with_filters(self, filters: &[KeyFilter<'a>]) -> Result<Self, FiltersFull> {
+        filters.iter().try_fold(self, |t, f| t.with_filter(*f))
+    }
+
+    /// The same transport ignoring frames whose source is `mac` (our own
+    /// station address).
+    pub fn with_own_address(mut self, mac: Mac) -> Self {
+        self.rx.own = Some(mac);
+        self
+    }
+
+    /// Starts receiving keys matching `filter`. Adding a filter already
+    /// present is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// [`FiltersFull`] when all `F` slots are taken.
+    pub fn add_filter(&mut self, filter: KeyFilter<'a>) -> Result<(), FiltersFull> {
+        if self.rx.filters.contains(&Some(filter)) {
+            return Ok(());
+        }
+        let slot = self
+            .rx
+            .filters
+            .iter_mut()
+            .find(|f| f.is_none())
+            .ok_or(FiltersFull)?;
+        *slot = Some(filter);
+        Ok(())
+    }
+
+    /// Stops receiving keys through `filter`; returns whether it was present.
+    /// A sample already kept after [`EspNowError::BufferTooSmall`] is still
+    /// delivered.
+    pub fn remove_filter(&mut self, filter: KeyFilter<'a>) -> bool {
+        match self.rx.filters.iter_mut().find(|f| **f == Some(filter)) {
+            Some(slot) => {
+                *slot = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// True if some filter selects `key`.
+    pub fn subscribed(&self, key: Key<'_>) -> bool {
+        self.rx.subscribed(key)
+    }
+
+    /// The sequence number the next publish will carry.
+    pub const fn sequence(&self) -> Sequence {
+        self.seq
+    }
+
+    /// Borrows the radio.
+    pub fn radio_mut(&mut self) -> &mut R {
+        &mut self.radio
+    }
+
+    async fn recv_selected<'b>(
+        &mut self,
+        sel: Selection<'_>,
+        buf: &'b mut [u8],
+    ) -> Result<Sample<'b>, EspNowError<R::Error>> {
+        self.rx
+            .recv_selected(&mut Whole(&mut self.radio), sel, buf)
+            .await
+    }
+
+    fn try_recv_selected<'b>(
+        &mut self,
+        sel: Selection<'_>,
+        buf: &'b mut [u8],
+    ) -> Result<Option<Sample<'b>>, EspNowError<R::Error>> {
+        self.rx
+            .try_recv_selected(&mut Whole(&mut self.radio), sel, buf)
     }
 }
 
@@ -570,17 +707,8 @@ impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Publisher
     /// encoded, before the radio is awaited (see the module docs).
     async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error> {
         let mut out = [0u8; MAX_FRAME];
-        let n = Frame {
-            seq: self.seq.get(),
-            key,
-            payload,
-        }
-        .encode(&mut out)
-        .map_err(EspNowError::Frame)?;
-        let frame = out
-            .get(..n)
-            .ok_or(EspNowError::Frame(FrameError::TooLong))?;
-        self.seq = self.seq.next();
+        let frame =
+            encode_next(&mut self.seq, key, payload, &mut out).map_err(EspNowError::Frame)?;
         self.radio
             .broadcast(frame)
             .await
@@ -678,6 +806,105 @@ impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Subscriber
     fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
         let sel = Selection::Only(self.filter.as_filter());
         self.transport.try_recv_selected(sel, buf)
+    }
+}
+
+/// The publishing half of a split [`EspNowTransport`]: the sending radio
+/// half and the sequence number.
+pub struct EspNowTx<'l, S> {
+    radio: &'l mut S,
+    seq: &'l mut Sequence,
+}
+
+impl<S: EspNowSend> Publisher for EspNowTx<'_, S> {
+    type Error = EspNowError<S::Error>;
+
+    const LIMITS: Limits = LIMITS;
+
+    /// As the transport's `publish` (same sequence number rule).
+    async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error> {
+        let mut out = [0u8; MAX_FRAME];
+        let frame = encode_next(self.seq, key, payload, &mut out).map_err(EspNowError::Frame)?;
+        self.radio
+            .broadcast(frame)
+            .await
+            .map_err(EspNowError::Radio)
+    }
+}
+
+/// The receiving half of a split [`EspNowTransport`]: the receiving radio
+/// half with the filter slots, own address, dedup table and kept frame.
+/// Receives what the transport's own `recv` would.
+pub struct EspNowRx<
+    'l,
+    'a,
+    R,
+    const K: usize = 16,
+    const F: usize = 8,
+    const P: usize = { MAX_FRAME },
+> {
+    radio: &'l mut R,
+    rx: &'l mut RxState<'a, K, F, P>,
+}
+
+impl<R, const K: usize, const F: usize, const P: usize> EspNowRx<'_, '_, R, K, F, P> {
+    /// True if some filter slot selects `key`.
+    pub fn subscribed(&self, key: Key<'_>) -> bool {
+        self.rx.subscribed(key)
+    }
+}
+
+impl<R: EspNowReceive, const K: usize, const F: usize, const P: usize> Subscriber
+    for EspNowRx<'_, '_, R, K, F, P>
+{
+    type Error = EspNowError<R::Error>;
+
+    /// See [`DELIVERY`].
+    const DELIVERY: Delivery = DELIVERY;
+    const LIMITS: Limits = LIMITS;
+
+    /// As the transport's `recv`.
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        self.rx
+            .recv_selected(self.radio, Selection::Slots, buf)
+            .await
+    }
+
+    /// As the transport's `try_recv`.
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        self.rx.try_recv_selected(self.radio, Selection::Slots, buf)
+    }
+}
+
+impl<'a, S, R, const K: usize, const F: usize, const P: usize> Split
+    for EspNowTransport<'a, RadioHalves<S, R>, K, F, P>
+where
+    S: EspNowSend,
+    R: EspNowReceive<Error = S::Error>,
+{
+    type Tx<'x>
+        = EspNowTx<'x, S>
+    where
+        Self: 'x;
+    type Rx<'x>
+        = EspNowRx<'x, 'a, R, K, F, P>
+    where
+        Self: 'x;
+
+    /// Borrows the sending half with the sequence number and the receiving
+    /// half with the receive state: one task publishes while another waits
+    /// in `recv`.
+    fn split(&mut self) -> (EspNowTx<'_, S>, EspNowRx<'_, 'a, R, K, F, P>) {
+        (
+            EspNowTx {
+                radio: &mut self.radio.send,
+                seq: &mut self.seq,
+            },
+            EspNowRx {
+                radio: &mut self.radio.receive,
+                rx: &mut self.rx,
+            },
+        )
     }
 }
 
@@ -1280,5 +1507,111 @@ mod tests {
         let r = block_on(s.recv(&mut buf)).unwrap();
         assert_eq!((r.key, r.payload, r.meta.seq), (HELLO, &b"hi"[..], Some(1)));
         assert!(block_on(s.recv(&mut buf)).is_err());
+    }
+
+    impl EspNowSend for FakeRadio {
+        type Error = FakeError;
+
+        async fn broadcast(&mut self, frame: &[u8]) -> Result<(), FakeError> {
+            EspNowRadio::broadcast(self, frame).await
+        }
+    }
+
+    impl EspNowReceive for FakeRadio {
+        type Error = FakeError;
+
+        async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<(&'b [u8], Mac), FakeError> {
+            EspNowRadio::receive(self, buf).await
+        }
+
+        fn try_receive<'b>(
+            &mut self,
+            buf: &'b mut [u8],
+        ) -> Result<Option<(&'b [u8], Mac)>, FakeError> {
+            EspNowRadio::try_receive(self, buf)
+        }
+    }
+
+    type Halves = RadioHalves<FakeRadio, FakeRadio>;
+
+    #[test]
+    fn k11_split_publishes_while_a_receive_waits() {
+        let receive = FakeRadio {
+            wait: true,
+            ..FakeRadio::default()
+        };
+        let mut t: EspNowTransport<'_, Halves, 4, 2> =
+            EspNowTransport::new(RadioHalves::new(FakeRadio::default(), receive))
+                .with_filter(SYNC_ONLY)
+                .unwrap()
+                .with_own_address(A);
+        let mut buf = [0u8; MAX_FRAME];
+        {
+            let (mut tx, mut rx) = t.split();
+            assert!(rx.subscribed(SYNC) && !rx.subscribed(HELLO));
+            let mut recv = pin!(rx.recv(&mut buf));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(
+                recv.as_mut().poll(&mut cx).is_pending(),
+                "nothing received yet"
+            );
+            // The publishing half works while the receive waits.
+            block_on(tx.publish(HELLO, b"out")).unwrap();
+            block_on(tx.publish(SYNC, b"out2")).unwrap();
+            assert!(recv.as_mut().poll(&mut cx).is_pending());
+        }
+        // Both publishes went out through the send half, numbered 0 and 1.
+        assert_eq!(t.sequence().get(), 2);
+        let sent = core::mem::take(&mut t.radio_mut().send.sent);
+        let seqs: Vec<u8> = sent.iter().map(|f| Frame::decode(f).unwrap().seq).collect();
+        assert_eq!(seqs, [0, 1]);
+        // The receive half keeps the transport's filters, own address and dedup.
+        t.radio_mut().receive.push(&frame(0, SYNC, b"mine"), A);
+        t.radio_mut()
+            .receive
+            .push(&frame(4, HELLO, b"unfiltered"), B);
+        t.radio_mut().receive.push(&frame(4, SYNC, b"peer"), B);
+        t.radio_mut().receive.push(&frame(4, SYNC, b"peer"), B);
+        let (_tx, mut rx) = t.split();
+        let s = block_on(rx.recv(&mut buf)).unwrap();
+        assert_eq!(
+            (s.payload, s.meta.sender),
+            (&b"peer"[..], Some(SenderId::from_mac(B)))
+        );
+        assert_eq!(rx.try_recv(&mut buf), Ok(None), "repeat dropped");
+    }
+
+    #[test]
+    fn k11_split_rx_keeps_a_sample_that_did_not_fit() {
+        let mut receive = FakeRadio::default();
+        receive.push(&frame(1, SYNC, b"0123456789"), B);
+        let mut t: EspNowTransport<'_, Halves, 4, 2> =
+            EspNowTransport::new(RadioHalves::new(FakeRadio::default(), receive))
+                .with_filter(SYNC_ONLY)
+                .unwrap();
+        let (_tx, mut rx) = t.split();
+        let mut small = [0u8; 8];
+        assert_eq!(rx.try_recv(&mut small), Err(EspNowError::BufferTooSmall));
+        let mut buf = [0u8; MAX_FRAME];
+        assert_eq!(
+            rx.try_recv(&mut buf).unwrap().unwrap().payload,
+            b"0123456789"
+        );
+        // The whole transport over halves is still a radio.
+        assert!(block_on(t.publish(SYNC, b"x")).is_ok());
+    }
+
+    #[test]
+    fn n15_sequence_jumps_are_not_reported_as_gaps() {
+        let mut radio = FakeRadio::default();
+        radio.push(&frame(0, SYNC, b"a"), A);
+        // The sender published seq 1..=4 on keys this receiver filters out.
+        radio.push(&frame(5, SYNC, b"b"), A);
+        let mut t = sub::<4>(radio, &[SYNC_ONLY]);
+        let mut buf = [0u8; 64];
+        let a = t.try_recv(&mut buf).unwrap().unwrap().meta;
+        assert_eq!((a.seq, a.gap), (Some(0), None));
+        let b = t.try_recv(&mut buf).unwrap().unwrap().meta;
+        assert_eq!((b.seq, b.gap), (Some(5), None));
     }
 }

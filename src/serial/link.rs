@@ -5,27 +5,70 @@
 //!
 //! Event loops that must handle several frame kinds call
 //! [`SerialLink::next_frame`] and [`SerialLink::send`] directly. The core
-//! traits are also implemented; each waits for the frame kind it needs and
-//! discards others, giving up after [`MAX_SKIPPED_FRAMES`] so a chatty peer
-//! cannot stall a caller forever.
+//! traits are also implemented; each waits for the frame kind it needs,
+//! giving up after [`MAX_SKIPPED_FRAMES`] frames so a chatty peer cannot
+//! stall a caller forever.
 //!
-//! # Subscriptions
+//! # Peer identity
+//!
+//! A link has one peer and the wire carries no address, so the link names
+//! the peer only when told: [`SerialLink::with_peer`] sets the
+//! [`SenderId`] put in [`SampleMeta::sender`] of every received sample and
+//! in [`RequestMeta::sender`] of every request a [`Responder::serve_one`]
+//! handler sees (for example the node id a device reported in `sys/info`).
+//! Without it both are `None`. The peer is not authenticated, so the
+//! principal is always `None`, and the wire carries no deadline.
+//!
+//! # Inbox
+//!
+//! [`Requester::request_with`] and [`Responder::serve_one`] read the
+//! stream until their frame arrives. Publications read meanwhile are kept,
+//! in arrival order, in an inbox of `I` bytes inside the link (a const
+//! generic, [`INBOX_BYTES`] by default: one maximal publication, or many
+//! small ones; each costs its raw frame length plus
+//! [`INBOX_ENTRY_OVERHEAD`]). Every receive ([`Subscriber::recv`],
+//! [`Subscriber::try_recv`], a [`Filtered`] view, [`SerialLink::next_frame`])
+//! returns queued publications before reading the stream again. A
+//! publication that does not fit the inbox's free space is dropped and
+//! counted ([`SerialLink::inbox_dropped`]); queued ones are kept. Other
+//! frames read while waiting (stale responses, requests while a request
+//! waits, responses while serving) are discarded, as before. `I = 0`
+//! keeps nothing ([`SerialLink::with_inbox`]).
+//!
+//! # Delivery
+//!
+//! [`DELIVERY`] is [`Overflow::DropNewest`] with per-sender order: the
+//! inbox drops the arriving publication when full; outside a request the
+//! link reads the stream only when asked, so what an unread stream does is
+//! the stream's: a flow-controlled one (USB CDC) makes the sender wait, a
+//! UART without flow control drops the bytes that overrun its driver's
+//! buffer (newest first; the CRC rejects a cut frame). Nothing older is
+//! ever dropped for something newer. The link has no sequence numbers, so
+//! [`SampleMeta::gap`] is always `None`.
+//!
+//! # Subscriptions and split
 //!
 //! A link is one point-to-point stream, so [`Subscriber`] on the link itself
 //! yields every publication whatever its key. [`Subscribe::subscribe`]
 //! borrows the link as a [`Filtered`] subscriber that keeps its own copy of
 //! the [`KeyFilter`] (a [`KeyFilterBuf`], no heap) and yields only matching
-//! keys, discarding the rest. The view borrows the one stream it reads from,
-//! so there is one subscriber at a time and the link cannot be used
-//! directly while it lives; drop it to publish or request again.
+//! keys, discarding the rest. The view borrows the whole link, so the link
+//! cannot be used directly while it lives; drop it to publish or request.
+//!
+//! To publish while a receive waits, build the link over a [`Duplex`]
+//! (a reading half and a writing half, as a UART driver's `split` returns)
+//! and [`Split::split`] it into a [`SerialTx`] ([`Publisher`]) and a
+//! [`SerialRx`] ([`Subscriber`], inbox first). The halves borrow disjoint
+//! parts of the link (the writer with the transmit state, the reader with
+//! the receive state and inbox): no shared ownership, no `RefCell`.
 //!
 //! # Cancel safety
 //!
-//! All receive state (the read chunk, its cursor and the frame splitter) and
-//! all transmit state (the encoded frame and how much of it was written) live
-//! in `self`, so dropping a future at any `.await` loses nothing, provided
-//! the stream's own `read` and `write` are cancel safe (a dropped call has
-//! consumed or written no bytes it did not report):
+//! All receive state (the read chunk, its cursor, the frame splitter and the
+//! inbox) and all transmit state (the encoded frame and how much of it was
+//! written) live in `self`, so dropping a future at any `.await` loses
+//! nothing, provided the stream's own `read` and `write` are cancel safe (a
+//! dropped call has consumed or written no bytes it did not report):
 //!
 //! * [`Subscriber::recv`] (and [`SerialLink::next_frame`]) dropped mid-frame
 //!   keeps the partial frame in the splitter; the next receive completes it.
@@ -34,24 +77,27 @@
 //!   own frame, so the peer never sees a torn frame and nothing is sent twice.
 //! * [`Requester::request`] dropped after sending abandons the request; its
 //!   late response is discarded by the next request (correlation ids).
+//!   Publications it had read stay in the inbox.
 //! * [`Responder::serve_one`] keeps no state across calls besides the above.
 //!
 //! [`Subscriber::try_recv`] polls the stream's `read` once with a no-op waker
 //! and drops the future if it is pending, so it relies on the same cancel
 //! safety of `read`.
 
+use super::cobs;
 use super::frame::{
-    self, FRAME_OVERHEAD, Frame, FrameError, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter,
+    self, FRAME_OVERHEAD, Frame, FrameError, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split as Cut, Splitter,
 };
 use crate::key::{Key, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
 use crate::transport::{
-    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestOptions,
-    Requester, Responder, Sample, Subscribe, Subscriber,
+    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestMeta,
+    RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId, Split, Subscribe,
+    Subscriber,
 };
 use core::future::Future;
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
-use embedded_io_async::{Read, Write};
+use embedded_io_async::{ErrorKind, ErrorType, Read, Write};
 
 /// Frames of the wrong kind a trait method discards before giving up.
 pub const MAX_SKIPPED_FRAMES: usize = 64;
@@ -71,17 +117,21 @@ const TRY_RECV_READS: usize = MAX_WIRE_FRAME.div_ceil(RX_CHUNK) + 1;
 pub const LIMITS: Limits = Limits::shared(MAX_KEY_LEN, MAX_RAW_FRAME - FRAME_OVERHEAD);
 
 /// What a serial link's subscribers deliver, as their
-/// [`Subscriber::DELIVERY`]: the link reads the byte stream only when
-/// asked, so an unread publication stays in the peer's write path and the
-/// sender waits (flow control of the underlying stream; a UART without it
-/// loses bytes in its driver, which the frame CRC then rejects). Frames
-/// arrive in the order sent.
-pub const DELIVERY: Delivery = Delivery::new(Overflow::Block, true);
+/// [`Subscriber::DELIVERY`]: the arriving publication is dropped when the
+/// inbox is full (see the module docs, "Delivery"); frames arrive in the
+/// order sent.
+pub const DELIVERY: Delivery = Delivery::new(Overflow::DropNewest, true);
 
-/// A receive buffer size that holds any frame [`Subscriber::recv`] can
-/// return. Received frames are decoded in place from their COBS form, so the
-/// buffer must hold the wire frame, not just key and payload.
-pub const RECV_BUF_LEN: usize = MAX_WIRE_FRAME;
+/// A receive buffer size that holds any publication [`Subscriber::recv`] or
+/// any frame [`SerialLink::next_frame`] can return: a received frame is
+/// copied into the caller's buffer in its raw (COBS-decoded) form.
+pub const RECV_BUF_LEN: usize = MAX_RAW_FRAME;
+
+/// Bytes an inbox entry costs beyond its raw frame (a 16-bit length).
+pub const INBOX_ENTRY_OVERHEAD: usize = 2;
+
+/// Default inbox size: one maximal publication.
+pub const INBOX_BYTES: usize = MAX_RAW_FRAME + INBOX_ENTRY_OVERHEAD;
 
 /// Failure of a [`SerialLink`] operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,70 +150,283 @@ pub enum LinkError<E> {
     SkipLimit,
 }
 
-/// Middleware endpoint over a byte stream.
-pub struct SerialLink<IO> {
-    io: IO,
+/// A byte stream made of a reading half `R` and a writing half `W`, such
+/// as the two halves a UART or USB-Serial-JTAG driver's `split` returns. A
+/// [`SerialLink`] over a `Duplex` implements [`Split`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Duplex<R, W> {
+    /// The reading half.
+    pub rx: R,
+    /// The writing half.
+    pub tx: W,
+}
+
+impl<R, W> Duplex<R, W> {
+    /// Joins a reading and a writing half.
+    pub const fn new(rx: R, tx: W) -> Self {
+        Duplex { rx, tx }
+    }
+}
+
+/// Failure of a [`Duplex`] stream: of its reading or of its writing half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplexError<R, W> {
+    /// The reading half failed.
+    Read(R),
+    /// The writing half failed.
+    Write(W),
+}
+
+impl<R: core::fmt::Debug, W: core::fmt::Debug> core::fmt::Display for DuplexError<R, W> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DuplexError::Read(e) => write!(f, "read: {e:?}"),
+            DuplexError::Write(e) => write!(f, "write: {e:?}"),
+        }
+    }
+}
+
+impl<R: core::fmt::Debug, W: core::fmt::Debug> core::error::Error for DuplexError<R, W> {}
+
+impl<R: embedded_io_async::Error, W: embedded_io_async::Error> embedded_io_async::Error
+    for DuplexError<R, W>
+{
+    fn kind(&self) -> ErrorKind {
+        match self {
+            DuplexError::Read(e) => e.kind(),
+            DuplexError::Write(e) => e.kind(),
+        }
+    }
+}
+
+impl<R: ErrorType, W: ErrorType> ErrorType for Duplex<R, W> {
+    type Error = DuplexError<R::Error, W::Error>;
+}
+
+impl<R: Read, W: Write> Read for Duplex<R, W> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.rx.read(buf).await.map_err(DuplexError::Read)
+    }
+}
+
+impl<R: Read, W: Write> Write for Duplex<R, W> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.tx.write(buf).await.map_err(DuplexError::Write)
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        self.tx.flush().await.map_err(DuplexError::Write)
+    }
+}
+
+/// Publications kept while a request or `serve_one` waits: raw publish
+/// frames, each behind a little-endian `u16` length, oldest first, in `I`
+/// bytes. Mutated in place, like the [`Splitter`]: it holds up to `I`
+/// bytes and is updated per frame.
+struct Inbox<const I: usize> {
+    buf: [u8; I],
+    used: usize,
+    dropped: u32,
+}
+
+impl<const I: usize> Inbox<I> {
+    const fn new() -> Self {
+        Inbox {
+            buf: [0; I],
+            used: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Appends `raw`, or drops and counts it when it does not fit.
+    fn push(&mut self, raw: &[u8]) {
+        let Ok(len) = u16::try_from(raw.len()) else {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        };
+        let end = self.used + INBOX_ENTRY_OVERHEAD + raw.len();
+        match self.buf.get_mut(self.used..end) {
+            Some(slot) => {
+                let (head, body) = slot.split_at_mut(INBOX_ENTRY_OVERHEAD);
+                head.copy_from_slice(&len.to_le_bytes());
+                body.copy_from_slice(raw);
+                self.used = end;
+            }
+            None => self.dropped = self.dropped.saturating_add(1),
+        }
+    }
+
+    /// The oldest entry's raw frame.
+    fn front(&self) -> Option<&[u8]> {
+        let head = self.buf.get(..INBOX_ENTRY_OVERHEAD.min(self.used))?;
+        let [lo, hi] = *head else { return None };
+        let len = usize::from(u16::from_le_bytes([lo, hi]));
+        self.buf
+            .get(INBOX_ENTRY_OVERHEAD..INBOX_ENTRY_OVERHEAD + len)
+    }
+
+    /// Removes the oldest entry (bounded by `I` bytes moved).
+    fn pop(&mut self) {
+        let Some(len) = self.front().map(<[u8]>::len) else {
+            return;
+        };
+        let next = INBOX_ENTRY_OVERHEAD + len;
+        self.buf.copy_within(next..self.used, 0);
+        self.used -= next;
+    }
+
+    /// Entries queued (bounded: every entry is at least
+    /// [`INBOX_ENTRY_OVERHEAD`] bytes).
+    fn len(&self) -> usize {
+        let mut at = 0;
+        let mut n = 0;
+        for _ in 0..=I / INBOX_ENTRY_OVERHEAD {
+            let head = self.buf.get(at..(at + INBOX_ENTRY_OVERHEAD).min(self.used));
+            let Some(Ok(head)) = head.map(<[u8; 2]>::try_from) else {
+                break;
+            };
+            at += INBOX_ENTRY_OVERHEAD + usize::from(u16::from_le_bytes(head));
+            n += 1;
+        }
+        n
+    }
+}
+
+/// Receive state: the read chunk, the splitter (whose current run is
+/// decoded in place once complete) and the inbox.
+struct RxState<const I: usize> {
     splitter: Splitter<MAX_WIRE_FRAME>,
-    rx: [u8; RX_CHUNK],
-    rx_pos: usize,
-    rx_len: usize,
-    scratch: [u8; MAX_RAW_FRAME],
-    tx: [u8; MAX_WIRE_FRAME],
-    tx_pos: usize,
-    tx_end: usize,
-    next_id: u8,
+    chunk: [u8; RX_CHUNK],
+    pos: usize,
+    len: usize,
+    /// Raw length of the splitter's current, valid frame.
+    raw: usize,
     rejected: u32,
+    inbox: Inbox<I>,
+}
+
+/// Transmit state: the encoded frame, how much of it was written, and the
+/// next correlation id.
+struct TxState {
+    scratch: [u8; MAX_RAW_FRAME],
+    wire: [u8; MAX_WIRE_FRAME],
+    pos: usize,
+    end: usize,
+    next_id: u8,
+}
+
+/// Middleware endpoint over a byte stream, with an inbox of `I` bytes (see
+/// the module docs).
+pub struct SerialLink<IO, const I: usize = INBOX_BYTES> {
+    io: IO,
+    rx: RxState<I>,
+    tx: TxState,
+    peer: Option<SenderId>,
 }
 
 impl<IO> SerialLink<IO> {
-    /// Wraps a stream.
+    /// Wraps a stream, with the default inbox ([`INBOX_BYTES`]).
     pub fn new(io: IO) -> Self {
+        Self::with_inbox(io)
+    }
+}
+
+impl<IO, const I: usize> SerialLink<IO, I> {
+    /// Wraps a stream, with an inbox of `I` bytes:
+    /// `SerialLink::<_, 0>::with_inbox(io)` keeps no publication that
+    /// arrives while a request waits.
+    pub fn with_inbox(io: IO) -> Self {
         Self {
             io,
-            splitter: Splitter::new(),
-            rx: [0; RX_CHUNK],
-            rx_pos: 0,
-            rx_len: 0,
-            scratch: [0; MAX_RAW_FRAME],
-            tx: [0; MAX_WIRE_FRAME],
-            tx_pos: 0,
-            tx_end: 0,
-            next_id: 0,
-            rejected: 0,
+            rx: RxState {
+                splitter: Splitter::new(),
+                chunk: [0; RX_CHUNK],
+                pos: 0,
+                len: 0,
+                raw: 0,
+                rejected: 0,
+                inbox: Inbox::new(),
+            },
+            tx: TxState {
+                scratch: [0; MAX_RAW_FRAME],
+                wire: [0; MAX_WIRE_FRAME],
+                pos: 0,
+                end: 0,
+                next_id: 0,
+            },
+            peer: None,
         }
+    }
+
+    /// The same link naming its peer: received samples and served requests
+    /// carry `peer` as their sender (see the module docs).
+    pub fn with_peer(self, peer: SenderId) -> Self {
+        SerialLink {
+            peer: Some(peer),
+            ..self
+        }
+    }
+
+    /// The peer named by [`SerialLink::with_peer`].
+    pub const fn peer(&self) -> Option<SenderId> {
+        self.peer
     }
 
     /// Delimited byte runs that were not valid frames (noise, ROM banners,
     /// overflow), since creation.
     pub fn rejected(&self) -> u32 {
-        self.rejected
+        self.rx.rejected
+    }
+
+    /// Publications queued in the inbox (read while a request waited).
+    pub fn inbox_len(&self) -> usize {
+        self.rx.inbox.len()
+    }
+
+    /// Publications dropped because the inbox was full, since creation.
+    pub fn inbox_dropped(&self) -> u32 {
+        self.rx.inbox.dropped
     }
 
     /// Returns the stream. Bytes of a frame whose send was cancelled and not
-    /// yet completed are discarded.
+    /// yet completed are discarded, as are queued publications.
     pub fn into_inner(self) -> IO {
         self.io
     }
 
+    fn take_id(&mut self) -> u8 {
+        let id = self.tx.next_id;
+        self.tx.next_id = id.wrapping_add(1);
+        id
+    }
+}
+
+impl<const I: usize> RxState<I> {
     /// Feeds buffered bytes to the splitter until a delimited run that
-    /// decodes is complete (returned as its COBS length, left in the
-    /// splitter) or the buffer is exhausted. Bounded by [`RX_CHUNK`].
-    fn pump(&mut self) -> Option<usize> {
-        while self.rx_pos < self.rx_len {
-            let byte = self.rx.get(self.rx_pos).copied().unwrap_or(0);
-            self.rx_pos += 1;
+    /// decodes is complete (decoded in place, its raw length kept in `raw`)
+    /// or the chunk is exhausted. Bounded by [`RX_CHUNK`].
+    fn pump(&mut self) -> bool {
+        while self.pos < self.len {
+            let byte = self.chunk.get(self.pos).copied().unwrap_or(0);
+            self.pos += 1;
             match self.splitter.push(byte) {
-                Split::Pending => {}
-                Split::Overflow => self.rejected = self.rejected.saturating_add(1),
-                Split::Frame(len) => {
-                    if self.peek_valid() {
-                        return Some(len);
+                Cut::Pending => {}
+                Cut::Overflow => self.rejected = self.rejected.saturating_add(1),
+                Cut::Frame(_) => {
+                    let run = self.splitter.frame();
+                    let valid = cobs::decode_in_place(run)
+                        .filter(|&n| run.get(..n).is_some_and(|raw| frame::decode(raw).is_ok()));
+                    match valid {
+                        Some(n) => {
+                            self.raw = n;
+                            return true;
+                        }
+                        None => self.rejected = self.rejected.saturating_add(1),
                     }
-                    self.rejected = self.rejected.saturating_add(1);
                 }
             }
         }
-        None
+        false
     }
 
     /// Records a completed read of `n` bytes into the chunk.
@@ -171,168 +434,245 @@ impl<IO> SerialLink<IO> {
         if n == 0 {
             return Err(LinkError::Closed);
         }
-        self.rx_pos = 0;
-        self.rx_len = n.min(RX_CHUNK);
+        self.pos = 0;
+        self.len = n.min(RX_CHUNK);
         Ok(())
     }
 
-    /// Checks the splitter's current run decodes, using `scratch`.
-    fn peek_valid(&mut self) -> bool {
-        self.decode_current().is_ok()
+    /// The raw bytes of the current frame (valid after `pump` returned true).
+    fn raw(&mut self) -> &[u8] {
+        let raw = self.raw;
+        self.splitter.frame().get(..raw).unwrap_or_default()
     }
 
-    /// Decodes the splitter's current run into `scratch`, for inspection.
-    fn decode_current(&mut self) -> Result<Frame<'_>, FrameError> {
-        let src = self.splitter.frame();
-        let dst = self
-            .scratch
-            .get_mut(..src.len())
-            .ok_or(FrameError::TooLarge)?;
-        dst.copy_from_slice(src);
-        frame::decode_wire(dst)
+    /// The current frame, decoded.
+    fn current(&mut self) -> Result<Frame<'_>, FrameError> {
+        frame::decode(self.raw())
     }
 
-    /// True if the current run is a publication selected by `filter`
-    /// (`None` selects every publication).
-    fn current_is_publish(&mut self, filter: Option<KeyFilter<'_>>) -> bool {
-        match self.decode_current() {
-            Ok(Frame::Publish { key, .. }) => filter.is_none_or(|f| f.matches(key)),
-            _ => false,
-        }
-    }
-
-    /// Copies the current run (a publication of COBS length `len`) into
-    /// `buf` and decodes it there.
-    fn take_publish<'b, E>(
-        &mut self,
-        buf: &'b mut [u8],
-        len: usize,
-    ) -> Result<Sample<'b>, LinkError<E>> {
-        let dst = buf.get_mut(..len).ok_or(LinkError::BufferTooSmall)?;
-        dst.copy_from_slice(self.splitter.frame());
-        match frame::decode_wire(dst) {
-            Ok(Frame::Publish { key, payload }) => Ok(Sample::new(key, payload)),
-            _ => Err(LinkError::Frame(FrameError::Malformed)),
-        }
-    }
-
-    fn take_id(&mut self) -> u8 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        id
-    }
-}
-
-impl<IO: Read + Write> SerialLink<IO> {
-    /// Encodes and writes one frame, then flushes. The rest of a frame whose
-    /// send was cancelled is written first.
-    pub async fn send(&mut self, frame: &Frame<'_>) -> Result<(), LinkError<IO::Error>> {
-        self.write_pending().await?;
-        let n = frame::encode(frame, &mut self.scratch, &mut self.tx).map_err(LinkError::Frame)?;
-        self.tx_pos = 0;
-        self.tx_end = n;
-        self.write_pending().await
-    }
-
-    /// Writes the not yet written part of the encoded frame in `tx`, then
-    /// flushes. Each write advances the cursor or fails, so the loop is
-    /// bounded by [`MAX_WIRE_FRAME`].
-    async fn write_pending(&mut self) -> Result<(), LinkError<IO::Error>> {
-        if self.tx_pos == self.tx_end {
-            return Ok(());
-        }
-        while self.tx_pos < self.tx_end {
-            let chunk = self
-                .tx
-                .get(self.tx_pos..self.tx_end)
-                .ok_or(LinkError::Frame(FrameError::TooLarge))?;
-            let n = self.io.write(chunk).await.map_err(LinkError::Io)?;
-            if n == 0 {
-                return Err(LinkError::Closed);
+    /// Queues the current frame if it is a publication.
+    fn keep_if_publish(&mut self) {
+        if matches!(self.current(), Ok(Frame::Publish { .. })) {
+            let raw = self.raw;
+            let run = self.splitter.frame();
+            if let Some(bytes) = run.get(..raw) {
+                self.inbox.push(bytes);
             }
-            self.tx_pos = (self.tx_pos + n).min(self.tx_end);
         }
-        self.io.flush().await.map_err(LinkError::Io)
     }
 
-    /// Waits for the next valid frame and decodes it into `buf`. Invalid byte
-    /// runs are counted in [`SerialLink::rejected`] and skipped.
-    pub async fn next_frame<'b>(
-        &mut self,
-        buf: &'b mut [u8],
-    ) -> Result<Frame<'b>, LinkError<IO::Error>> {
-        let len = self.next_wire_frame().await?;
-        let dst = buf.get_mut(..len).ok_or(LinkError::BufferTooSmall)?;
-        dst.copy_from_slice(self.splitter.frame());
-        // `next_wire_frame` only stops on runs that decode, so this succeeds.
-        frame::decode_wire(dst).map_err(LinkError::Frame)
-    }
-
-    /// Reads until the splitter yields a delimited run that decodes, leaving
-    /// it in the splitter. Returns its COBS length.
-    async fn next_wire_frame(&mut self) -> Result<usize, LinkError<IO::Error>> {
+    /// Waits for the next valid frame, leaving it decoded in the splitter.
+    async fn next<R: Read>(&mut self, io: &mut R) -> Result<(), LinkError<R::Error>> {
         loop {
-            if let Some(len) = self.pump() {
-                return Ok(len);
+            if self.pump() {
+                return Ok(());
             }
-            let n = self.io.read(&mut self.rx).await.map_err(LinkError::Io)?;
+            let n = io.read(&mut self.chunk).await.map_err(LinkError::Io)?;
             self.filled(n)?;
         }
     }
 
-    /// Like [`Self::next_wire_frame`] but never waits: polls `read` once per
-    /// round with a no-op waker and stops at the first pending read.
-    fn try_next_wire_frame(&mut self) -> Result<Option<usize>, LinkError<IO::Error>> {
+    /// Like [`Self::next`] but never waits: polls `read` once per round
+    /// with a no-op waker and stops at the first pending read.
+    fn try_next<R: Read>(&mut self, io: &mut R) -> Result<bool, LinkError<R::Error>> {
         for _ in 0..TRY_RECV_READS {
-            if let Some(len) = self.pump() {
-                return Ok(Some(len));
+            if self.pump() {
+                return Ok(true);
             }
             let polled = {
-                let read = pin!(self.io.read(&mut self.rx));
+                let read = pin!(io.read(&mut self.chunk));
                 read.poll(&mut Context::from_waker(Waker::noop()))
             };
             match polled {
-                Poll::Pending => return Ok(None),
+                Poll::Pending => return Ok(false),
                 Poll::Ready(r) => self.filled(r.map_err(LinkError::Io)?)?,
             }
         }
         Ok(self.pump())
     }
 
-    /// Waits for the next publication selected by `filter`.
-    async fn recv_matching<'b>(
+    /// Discards queued publications `filter` does not select, up to the
+    /// first one it does; true if there is one (bounded by the inbox size).
+    fn queued_selected(&mut self, filter: Option<KeyFilter<'_>>) -> bool {
+        for _ in 0..=I / INBOX_ENTRY_OVERHEAD {
+            let Some(raw) = self.inbox.front() else {
+                return false;
+            };
+            match frame::decode(raw) {
+                Ok(Frame::Publish { key, .. }) if filter.is_none_or(|f| f.matches(key)) => {
+                    return true;
+                }
+                _ => self.inbox.pop(),
+            }
+        }
+        false
+    }
+
+    /// Copies the oldest queued publication into `buf` as a sample and
+    /// removes it; a `buf` too small keeps it, so a retry with a larger
+    /// buffer returns it.
+    fn take_queued<'b, E>(
         &mut self,
+        buf: &'b mut [u8],
+        peer: Option<SenderId>,
+    ) -> Result<Sample<'b>, LinkError<E>> {
+        let raw = self
+            .inbox
+            .front()
+            .ok_or(LinkError::Frame(FrameError::Malformed))?;
+        let dst = buf.get_mut(..raw.len()).ok_or(LinkError::BufferTooSmall)?;
+        dst.copy_from_slice(raw);
+        self.inbox.pop();
+        publication(dst, peer)
+    }
+
+    /// Copies the current frame (a publication) into `buf` as a sample.
+    fn take_current<'b, E>(
+        &mut self,
+        buf: &'b mut [u8],
+        peer: Option<SenderId>,
+    ) -> Result<Sample<'b>, LinkError<E>> {
+        let raw = self.raw();
+        let dst = buf.get_mut(..raw.len()).ok_or(LinkError::BufferTooSmall)?;
+        dst.copy_from_slice(raw);
+        publication(dst, peer)
+    }
+
+    /// True if the current frame is a publication selected by `filter`.
+    fn current_selected(&mut self, filter: Option<KeyFilter<'_>>) -> bool {
+        match self.current() {
+            Ok(Frame::Publish { key, .. }) => filter.is_none_or(|f| f.matches(key)),
+            _ => false,
+        }
+    }
+
+    /// Waits for the next publication selected by `filter`, inbox first.
+    async fn recv_matching<'b, R: Read>(
+        &mut self,
+        io: &mut R,
         filter: Option<KeyFilter<'_>>,
         buf: &'b mut [u8],
-    ) -> Result<Sample<'b>, LinkError<IO::Error>> {
+        peer: Option<SenderId>,
+    ) -> Result<Sample<'b>, LinkError<R::Error>> {
+        if self.queued_selected(filter) {
+            return self.take_queued(buf, peer);
+        }
         for _ in 0..MAX_SKIPPED_FRAMES {
-            let len = self.next_wire_frame().await?;
-            if self.current_is_publish(filter) {
-                return self.take_publish(buf, len);
+            self.next(io).await?;
+            if self.current_selected(filter) {
+                return self.take_current(buf, peer);
             }
         }
         Err(LinkError::SkipLimit)
     }
 
-    /// Returns an already received publication selected by `filter`, if any.
-    fn try_recv_matching<'b>(
+    /// Returns an already received publication selected by `filter`, if
+    /// any, inbox first.
+    fn try_recv_matching<'b, R: Read>(
         &mut self,
+        io: &mut R,
         filter: Option<KeyFilter<'_>>,
         buf: &'b mut [u8],
-    ) -> Result<Option<Sample<'b>>, LinkError<IO::Error>> {
+        peer: Option<SenderId>,
+    ) -> Result<Option<Sample<'b>>, LinkError<R::Error>> {
+        if self.queued_selected(filter) {
+            return self.take_queued(buf, peer).map(Some);
+        }
         for _ in 0..MAX_SKIPPED_FRAMES {
-            let Some(len) = self.try_next_wire_frame()? else {
+            if !self.try_next(io)? {
                 return Ok(None);
-            };
-            if self.current_is_publish(filter) {
-                return self.take_publish(buf, len).map(Some);
+            }
+            if self.current_selected(filter) {
+                return self.take_current(buf, peer).map(Some);
             }
         }
         Ok(None)
     }
 }
 
-impl<IO: Read + Write> Publisher for SerialLink<IO> {
+/// Decodes the raw publication in `raw` (already copied into the caller's
+/// buffer) as a sample from `peer`.
+fn publication<E>(raw: &[u8], peer: Option<SenderId>) -> Result<Sample<'_>, LinkError<E>> {
+    match frame::decode(raw) {
+        Ok(Frame::Publish { key, payload }) => {
+            Ok(Sample::new(key, payload).with_meta(SampleMeta {
+                sender: peer,
+                ..SampleMeta::NONE
+            }))
+        }
+        _ => Err(LinkError::Frame(FrameError::Malformed)),
+    }
+}
+
+impl TxState {
+    /// Writes the not yet written part of the encoded frame, then flushes.
+    /// Each write advances the cursor or fails, so the loop is bounded by
+    /// [`MAX_WIRE_FRAME`].
+    async fn write_pending<W: Write>(&mut self, io: &mut W) -> Result<(), LinkError<W::Error>> {
+        if self.pos == self.end {
+            return Ok(());
+        }
+        while self.pos < self.end {
+            let chunk = self
+                .wire
+                .get(self.pos..self.end)
+                .ok_or(LinkError::Frame(FrameError::TooLarge))?;
+            let n = io.write(chunk).await.map_err(LinkError::Io)?;
+            if n == 0 {
+                return Err(LinkError::Closed);
+            }
+            self.pos = (self.pos + n).min(self.end);
+        }
+        io.flush().await.map_err(LinkError::Io)
+    }
+
+    /// Encodes and writes one frame, then flushes; the rest of a frame
+    /// whose send was cancelled is written first.
+    async fn send<W: Write>(
+        &mut self,
+        io: &mut W,
+        frame: &Frame<'_>,
+    ) -> Result<(), LinkError<W::Error>> {
+        self.write_pending(io).await?;
+        let n =
+            frame::encode(frame, &mut self.scratch, &mut self.wire).map_err(LinkError::Frame)?;
+        self.pos = 0;
+        self.end = n;
+        self.write_pending(io).await
+    }
+}
+
+impl<IO: Read + Write, const I: usize> SerialLink<IO, I> {
+    /// Encodes and writes one frame, then flushes. The rest of a frame whose
+    /// send was cancelled is written first.
+    pub async fn send(&mut self, frame: &Frame<'_>) -> Result<(), LinkError<IO::Error>> {
+        self.tx.send(&mut self.io, frame).await
+    }
+
+    /// Waits for the next valid frame and decodes it into `buf` (raw form,
+    /// [`RECV_BUF_LEN`] always suffices). Publications queued in the inbox
+    /// come first. Invalid byte runs are counted in
+    /// [`SerialLink::rejected`] and skipped.
+    pub async fn next_frame<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Frame<'b>, LinkError<IO::Error>> {
+        if let Some(raw) = self.rx.inbox.front() {
+            let dst = buf.get_mut(..raw.len()).ok_or(LinkError::BufferTooSmall)?;
+            dst.copy_from_slice(raw);
+            self.rx.inbox.pop();
+            return frame::decode(dst).map_err(LinkError::Frame);
+        }
+        self.rx.next(&mut self.io).await?;
+        let raw = self.rx.raw();
+        let dst = buf.get_mut(..raw.len()).ok_or(LinkError::BufferTooSmall)?;
+        dst.copy_from_slice(raw);
+        // `next` only stops on frames that decode, so this succeeds.
+        frame::decode(dst).map_err(LinkError::Frame)
+    }
+}
+
+impl<IO: Read + Write, const I: usize> Publisher for SerialLink<IO, I> {
     type Error = LinkError<IO::Error>;
 
     /// See [`LIMITS`]: a 128-byte key leaves room for 891 payload bytes.
@@ -345,32 +685,38 @@ impl<IO: Read + Write> Publisher for SerialLink<IO> {
     }
 }
 
-impl<IO: Read + Write> Subscriber for SerialLink<IO> {
+impl<IO: Read + Write, const I: usize> Subscriber for SerialLink<IO, I> {
     type Error = LinkError<IO::Error>;
 
     /// See [`DELIVERY`].
     const DELIVERY: Delivery = DELIVERY;
     const LIMITS: Limits = LIMITS;
 
-    /// Yields the next publication, whatever its key; other frame kinds are
-    /// discarded. Cancel safe: a partial frame stays in the splitter. `buf`
-    /// must hold the COBS wire frame ([`RECV_BUF_LEN`] always suffices); a
-    /// smaller buffer is [`LinkError::BufferTooSmall`] and drops the sample.
-    /// The sample carries no sender metadata (point-to-point link).
+    /// Yields the next publication, whatever its key: the inbox first, then
+    /// the stream, where other frame kinds are discarded. Cancel safe: a
+    /// partial frame stays in the splitter. `buf` must hold the raw frame
+    /// (key, payload and 5 bytes; [`RECV_BUF_LEN`] always suffices); a
+    /// smaller buffer is [`LinkError::BufferTooSmall`], which keeps a queued
+    /// publication and drops one read from the stream. The sample's sender
+    /// is the peer ([`SerialLink::with_peer`]); it has no sequence or gap.
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
-        self.recv_matching(None, buf).await
+        self.rx
+            .recv_matching(&mut self.io, None, buf, self.peer)
+            .await
     }
 
-    /// Returns a publication already readable without waiting: bytes left in
-    /// the read chunk, then `read` polled once per chunk with a no-op waker.
+    /// Returns a publication available without waiting: the inbox, bytes
+    /// left in the read chunk, then `read` polled once per chunk with a
+    /// no-op waker.
     fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
-        self.try_recv_matching(None, buf)
+        self.rx
+            .try_recv_matching(&mut self.io, None, buf, self.peer)
     }
 }
 
-impl<IO: Read + Write> Subscribe for SerialLink<IO> {
+impl<IO: Read + Write, const I: usize> Subscribe for SerialLink<IO, I> {
     type Subscriber<'a>
-        = Filtered<'a, IO>
+        = Filtered<'a, IO, I>
     where
         Self: 'a;
     type Error = LinkError<IO::Error>;
@@ -381,7 +727,7 @@ impl<IO: Read + Write> Subscribe for SerialLink<IO> {
     async fn subscribe<'a>(
         &'a mut self,
         filter: KeyFilter<'_>,
-    ) -> Result<Filtered<'a, IO>, Self::Error> {
+    ) -> Result<Filtered<'a, IO, I>, Self::Error> {
         // Unreachable error: a valid key is at most MAX_KEY_LEN bytes.
         let filter = filter
             .to_buf()
@@ -393,20 +739,20 @@ impl<IO: Read + Write> Subscribe for SerialLink<IO> {
 /// A [`SerialLink`] borrowed as a subscriber to the keys matching a
 /// [`KeyFilter`]; made by [`Subscribe::subscribe`]. The filter is copied
 /// into the view, so it does not borrow the caller's key. Publications on
-/// other keys, and frames of other kinds, are read and discarded.
-pub struct Filtered<'l, IO> {
-    link: &'l mut SerialLink<IO>,
+/// other keys (queued or read), and frames of other kinds, are discarded.
+pub struct Filtered<'l, IO, const I: usize = INBOX_BYTES> {
+    link: &'l mut SerialLink<IO, I>,
     filter: KeyFilterBuf<MAX_KEY_LEN>,
 }
 
-impl<IO> Filtered<'_, IO> {
+impl<IO, const I: usize> Filtered<'_, IO, I> {
     /// The filter this view applies.
     pub fn filter(&self) -> KeyFilter<'_> {
         self.filter.as_filter()
     }
 }
 
-impl<IO: Read + Write> Subscriber for Filtered<'_, IO> {
+impl<IO: Read + Write, const I: usize> Subscriber for Filtered<'_, IO, I> {
     type Error = LinkError<IO::Error>;
 
     /// See [`DELIVERY`].
@@ -416,24 +762,27 @@ impl<IO: Read + Write> Subscriber for Filtered<'_, IO> {
     /// As [`SerialLink`]'s `recv`, skipping keys the filter rejects (they
     /// count towards [`MAX_SKIPPED_FRAMES`]).
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
-        self.link
-            .recv_matching(Some(self.filter.as_filter()), buf)
+        let link = &mut *self.link;
+        link.rx
+            .recv_matching(&mut link.io, Some(self.filter.as_filter()), buf, link.peer)
             .await
     }
 
     /// As [`SerialLink`]'s `try_recv`, skipping keys the filter rejects.
     fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
-        self.link
-            .try_recv_matching(Some(self.filter.as_filter()), buf)
+        let link = &mut *self.link;
+        link.rx
+            .try_recv_matching(&mut link.io, Some(self.filter.as_filter()), buf, link.peer)
     }
 }
 
-impl<IO: Read + Write> Requester for SerialLink<IO> {
+impl<IO: Read + Write, const I: usize> Requester for SerialLink<IO, I> {
     type Error = LinkError<IO::Error>;
 
-    /// Sends a request and waits for the response with the same id; other
-    /// frames, including stale responses, are discarded. Cancelling abandons
-    /// the request; its late response is discarded by the next request.
+    /// Sends a request and waits for the response with the same id.
+    /// Publications read meanwhile go to the inbox; other frames, including
+    /// stale responses, are discarded. Cancelling abandons the request; its
+    /// late response is discarded by the next request.
     ///
     /// The link has no clock, so `options.timeout` is **not** honoured: the
     /// wait is bounded by [`MAX_SKIPPED_FRAMES`] frames, and a caller that
@@ -454,55 +803,147 @@ impl<IO: Read + Write> Requester for SerialLink<IO> {
         })
         .await?;
         for _ in 0..MAX_SKIPPED_FRAMES {
-            self.next_wire_frame().await?;
-            match self.decode_current() {
+            self.rx.next(&mut self.io).await?;
+            match self.rx.current() {
                 Ok(Frame::Response { id: got, result }) if got == id => {
                     let body = result.map_err(LinkError::Handler)?;
-                    let n = body.len();
-                    let dst = response.get_mut(..n).ok_or(LinkError::BufferTooSmall)?;
+                    let dst = response
+                        .get_mut(..body.len())
+                        .ok_or(LinkError::BufferTooSmall)?;
                     dst.copy_from_slice(body);
                     return Ok(dst);
                 }
-                _ => continue,
+                _ => self.rx.keep_if_publish(),
             }
         }
         Err(LinkError::SkipLimit)
     }
 }
 
-impl<IO: Read + Write> Responder for SerialLink<IO> {
+impl<IO: Read + Write, const I: usize> Responder for SerialLink<IO, I> {
     type Error = LinkError<IO::Error>;
 
-    /// Waits for one request, runs `handler`, and sends the response. The
-    /// request is decoded into the front of `scratch`; the response is built
-    /// in the remainder. Cancelling while waiting loses nothing; cancelling
+    /// Waits for one request, runs `handler`, and sends the response.
+    /// Publications read meanwhile go to the inbox; responses are discarded.
+    /// The request is copied into the front of `scratch` (raw form); the
+    /// response is built in the remainder. The handler sees the peer
+    /// ([`SerialLink::with_peer`]) as `RequestMeta::sender`, no principal
+    /// and no deadline. Cancelling while waiting loses nothing; cancelling
     /// while the response is written leaves it pending for the next send.
     async fn serve_one<H: Handler>(
         &mut self,
         handler: &mut H,
         scratch: &mut [u8],
     ) -> Result<(), Self::Error> {
-        let mut found = None;
+        let mut found = false;
         for _ in 0..MAX_SKIPPED_FRAMES {
-            let len = self.next_wire_frame().await?;
-            if let Ok(Frame::Request { .. }) = self.decode_current() {
-                found = Some(len);
+            self.rx.next(&mut self.io).await?;
+            if let Ok(Frame::Request { .. }) = self.rx.current() {
+                found = true;
                 break;
             }
+            self.rx.keep_if_publish();
         }
-        let len = found.ok_or(LinkError::SkipLimit)?;
+        if !found {
+            return Err(LinkError::SkipLimit);
+        }
+        let raw = self.rx.raw();
         let (req_buf, resp_buf) = scratch
-            .split_at_mut_checked(len)
+            .split_at_mut_checked(raw.len())
             .ok_or(LinkError::BufferTooSmall)?;
-        req_buf.copy_from_slice(self.splitter.frame());
-        let Ok(Frame::Request { id, key, payload }) = frame::decode_wire(req_buf) else {
+        req_buf.copy_from_slice(raw);
+        let Ok(Frame::Request { id, key, payload }) = frame::decode(req_buf) else {
             return Err(LinkError::Frame(FrameError::Malformed));
         };
-        // A serial peer is unauthenticated and sends no deadline.
+        let meta = RequestMeta {
+            sender: self.peer,
+            ..RequestMeta::NONE
+        };
         let result = handler
-            .handle(&Request::new(key, payload), resp_buf)
+            .handle(&Request::new(key, payload).with_meta(meta), resp_buf)
             .and_then(|n| resp_buf.get(..n).ok_or(HandlerError::BufferTooSmall));
         self.send(&Frame::Response { id, result }).await
+    }
+}
+
+/// The publishing half of a [`SerialLink`] over a [`Duplex`], made by
+/// [`Split::split`]: the writer and the transmit state.
+pub struct SerialTx<'l, W> {
+    io: &'l mut W,
+    tx: &'l mut TxState,
+}
+
+impl<W: Write> SerialTx<'_, W> {
+    /// Encodes and writes one frame, as [`SerialLink::send`].
+    pub async fn send(&mut self, frame: &Frame<'_>) -> Result<(), LinkError<W::Error>> {
+        self.tx.send(self.io, frame).await
+    }
+}
+
+impl<W: Write> Publisher for SerialTx<'_, W> {
+    type Error = LinkError<W::Error>;
+
+    /// See [`LIMITS`].
+    const LIMITS: Limits = LIMITS;
+
+    /// As [`SerialLink`]'s `publish`.
+    async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error> {
+        self.send(&Frame::Publish { key, payload }).await
+    }
+}
+
+/// The receiving half of a [`SerialLink`] over a [`Duplex`], made by
+/// [`Split::split`]: the reader, the receive state and the inbox. Yields
+/// every publication, inbox first, like the link's own [`Subscriber`].
+pub struct SerialRx<'l, R, const I: usize = INBOX_BYTES> {
+    io: &'l mut R,
+    rx: &'l mut RxState<I>,
+    peer: Option<SenderId>,
+}
+
+impl<R: Read, const I: usize> Subscriber for SerialRx<'_, R, I> {
+    type Error = LinkError<R::Error>;
+
+    /// See [`DELIVERY`].
+    const DELIVERY: Delivery = DELIVERY;
+    const LIMITS: Limits = LIMITS;
+
+    /// As [`SerialLink`]'s `recv`.
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        self.rx.recv_matching(self.io, None, buf, self.peer).await
+    }
+
+    /// As [`SerialLink`]'s `try_recv`.
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        self.rx.try_recv_matching(self.io, None, buf, self.peer)
+    }
+}
+
+impl<R: Read, W: Write, const I: usize> Split for SerialLink<Duplex<R, W>, I> {
+    type Tx<'a>
+        = SerialTx<'a, W>
+    where
+        Self: 'a;
+    type Rx<'a>
+        = SerialRx<'a, R, I>
+    where
+        Self: 'a;
+
+    /// Borrows the writer with the transmit state and the reader with the
+    /// receive state: a task can `publish` on the first while another waits
+    /// in `recv` on the second.
+    fn split(&mut self) -> (SerialTx<'_, W>, SerialRx<'_, R, I>) {
+        (
+            SerialTx {
+                io: &mut self.io.tx,
+                tx: &mut self.tx,
+            },
+            SerialRx {
+                io: &mut self.io.rx,
+                rx: &mut self.rx,
+                peer: self.peer,
+            },
+        )
     }
 }
 
@@ -511,6 +952,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::transport::{HandlerError, SampleMeta};
+    use core::cell::Cell;
     use futures::executor::block_on;
     use std::vec::Vec;
 
@@ -923,5 +1365,290 @@ mod tests {
             frame::encode_raw(&over, &mut raw),
             Err(FrameError::TooLarge)
         );
+    }
+
+    const PEER: SenderId = SenderId([0xA5; 8]);
+
+    fn publish(key: &'static str, payload: &'static [u8]) -> Frame<'static> {
+        Frame::Publish {
+            key: Key::from_static(key),
+            payload,
+        }
+    }
+
+    fn raw_len(f: &Frame<'_>) -> usize {
+        let mut raw = [0u8; MAX_RAW_FRAME];
+        frame::encode_raw(f, &mut raw).unwrap()
+    }
+
+    #[test]
+    fn s8_publications_during_request_are_kept_in_order() {
+        let input = wire(&[
+            publish("app/a", b"1"),
+            Frame::Response {
+                id: 7,
+                result: Ok(b"stale"),
+            },
+            publish("app/b", b"2"),
+            Frame::Response {
+                id: 0,
+                result: Ok(b"pong"),
+            },
+            publish("app/c", b"3"),
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let mut resp = [0u8; 16];
+        assert_eq!(
+            block_on(link.request(K, b"ping", &mut resp)).unwrap(),
+            b"pong"
+        );
+        assert_eq!((link.inbox_len(), link.inbox_dropped()), (2, 0));
+        let mut buf = [0u8; RECV_BUF_LEN];
+        let s = block_on(link.recv(&mut buf)).unwrap();
+        assert_eq!((s.key.as_str(), s.payload), ("app/a", &b"1"[..]));
+        let s = link.try_recv(&mut buf).unwrap().expect("queued");
+        assert_eq!((s.key.as_str(), s.payload), ("app/b", &b"2"[..]));
+        assert_eq!(link.inbox_len(), 0);
+        // Then the stream again.
+        let s = link.try_recv(&mut buf).unwrap().expect("read");
+        assert_eq!(s.key.as_str(), "app/c");
+    }
+
+    #[test]
+    fn s8_publications_during_serve_one_are_kept() {
+        let input = wire(&[
+            publish("app/a", b"1"),
+            Frame::Response {
+                id: 1,
+                result: Ok(b"ignored"),
+            },
+            Frame::Request {
+                id: 5,
+                key: K,
+                payload: b"q",
+            },
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let mut h = crate::transport::handler_fn(|_r, _out| Ok(0));
+        let mut scratch = [0u8; 64];
+        block_on(link.serve_one(&mut h, &mut scratch)).unwrap();
+        let mut buf = [0u8; RECV_BUF_LEN];
+        let s = block_on(link.recv(&mut buf)).unwrap();
+        assert_eq!(s.key.as_str(), "app/a");
+    }
+
+    #[test]
+    fn s8_full_inbox_drops_the_newest_and_counts() {
+        let a = publish("app/a", b"first");
+        let b = publish("app/b", b"second");
+        let room = raw_len(&a) + INBOX_ENTRY_OVERHEAD;
+        let input = wire(&[
+            a,
+            b,
+            Frame::Response {
+                id: 0,
+                result: Ok(b""),
+            },
+        ]);
+        // Room for exactly the first publication.
+        type Small = SerialLink<Pipe, 17>;
+        assert_eq!(room, 17);
+        let mut link = Small::with_inbox(Pipe::new(input));
+        let mut resp = [0u8; 4];
+        block_on(link.request(K, b"", &mut resp)).unwrap();
+        assert_eq!((link.inbox_len(), link.inbox_dropped()), (1, 1));
+        let mut buf = [0u8; RECV_BUF_LEN];
+        let s = link.try_recv(&mut buf).unwrap().expect("kept");
+        assert_eq!(s.payload, b"first");
+        assert_eq!(link.try_recv(&mut buf), Err(LinkError::Closed));
+    }
+
+    #[test]
+    fn s8_zero_inbox_keeps_nothing() {
+        let input = wire(&[
+            publish("app/a", b"1"),
+            Frame::Response {
+                id: 0,
+                result: Ok(b""),
+            },
+        ]);
+        let mut link = SerialLink::<_, 0>::with_inbox(Pipe::new(input));
+        let mut resp = [0u8; 4];
+        block_on(link.request(K, b"", &mut resp)).unwrap();
+        assert_eq!((link.inbox_len(), link.inbox_dropped()), (0, 1));
+    }
+
+    #[test]
+    fn s8_small_buffer_keeps_a_queued_publication() {
+        let input = wire(&[
+            publish("app/a", b"payload"),
+            Frame::Response {
+                id: 0,
+                result: Ok(b""),
+            },
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let mut resp = [0u8; 4];
+        block_on(link.request(K, b"", &mut resp)).unwrap();
+        let mut small = [0u8; 4];
+        assert_eq!(link.try_recv(&mut small), Err(LinkError::BufferTooSmall));
+        let mut buf = [0u8; RECV_BUF_LEN];
+        assert_eq!(
+            link.try_recv(&mut buf).unwrap().unwrap().payload,
+            b"payload"
+        );
+    }
+
+    #[test]
+    fn s8_filtered_view_and_next_frame_take_the_inbox_first() {
+        let input = wire(&[
+            publish("other", b"x"),
+            publish("app/a", b"1"),
+            publish("app/b", b"2"),
+            Frame::Response {
+                id: 0,
+                result: Ok(b""),
+            },
+            publish("app/c", b"3"),
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let mut resp = [0u8; 4];
+        block_on(link.request(K, b"", &mut resp)).unwrap();
+        assert_eq!(link.inbox_len(), 3);
+        let mut buf = [0u8; RECV_BUF_LEN];
+        {
+            let mut sub =
+                block_on(link.subscribe(KeyFilter::Prefix(Key::from_static("app")))).unwrap();
+            // `other` is discarded, `app/a` delivered.
+            let s = block_on(sub.recv(&mut buf)).unwrap();
+            assert_eq!(s.key.as_str(), "app/a");
+        }
+        assert_eq!(link.inbox_len(), 1);
+        assert_eq!(
+            block_on(link.next_frame(&mut buf)).unwrap(),
+            publish("app/b", b"2")
+        );
+        assert_eq!(
+            block_on(link.next_frame(&mut buf)).unwrap(),
+            publish("app/c", b"3")
+        );
+    }
+
+    #[test]
+    fn s9_peer_is_the_sender_of_samples_and_requests() {
+        let input = wire(&[
+            publish("app/a", b"1"),
+            Frame::Request {
+                id: 1,
+                key: K,
+                payload: b"",
+            },
+        ]);
+        let mut link = SerialLink::new(Pipe::new(input)).with_peer(PEER);
+        assert_eq!(link.peer(), Some(PEER));
+        let mut buf = [0u8; RECV_BUF_LEN];
+        let s = block_on(link.recv(&mut buf)).unwrap();
+        assert_eq!(s.meta, SampleMeta::from_sender(PEER));
+        let seen = Cell::new(None);
+        let mut h = crate::transport::handler_fn(|r, _out| {
+            seen.set(Some((
+                r.meta.sender,
+                r.meta.principal.is_none(),
+                r.meta.deadline_ms,
+            )));
+            Ok(0)
+        });
+        let mut scratch = [0u8; 64];
+        block_on(link.serve_one(&mut h, &mut scratch)).unwrap();
+        assert_eq!(seen.get(), Some((Some(PEER), true, None)));
+    }
+
+    #[test]
+    fn s9_without_a_peer_meta_is_empty() {
+        let input = wire(&[Frame::Request {
+            id: 1,
+            key: K,
+            payload: b"",
+        }]);
+        let mut link = SerialLink::new(Pipe::new(input));
+        let seen = Cell::new(None);
+        let mut h = crate::transport::handler_fn(|r, _out| {
+            seen.set(Some((
+                r.meta.sender,
+                r.meta.principal.is_none(),
+                r.meta.deadline_ms,
+            )));
+            Ok(0)
+        });
+        let mut scratch = [0u8; 64];
+        block_on(link.serve_one(&mut h, &mut scratch)).unwrap();
+        assert_eq!(seen.get(), Some((None, true, None)));
+    }
+
+    #[test]
+    fn k11_split_halves_publish_while_a_receive_waits() {
+        let rx = Pipe::open();
+        let tx = Pipe::new(Vec::new());
+        let mut link = SerialLink::new(Duplex::new(rx, tx)).with_peer(PEER);
+        let mut buf = [0u8; RECV_BUF_LEN];
+        {
+            let (mut tx, mut rx) = link.split();
+            let mut recv = pin!(rx.recv(&mut buf));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(
+                recv.as_mut().poll(&mut cx).is_pending(),
+                "nothing to read yet"
+            );
+            // The publishing half is usable while the receive is pending.
+            block_on(tx.publish(K, b"out")).unwrap();
+            assert!(recv.as_mut().poll(&mut cx).is_pending());
+        }
+        // The halves wrote and read through the one link.
+        let out = decode_all(&link.io.tx.output);
+        assert_eq!(out.len(), 1);
+        link.io.rx.input.extend(wire(&[publish("app/in", b"in")]));
+        let (_tx, mut rx) = link.split();
+        let s = block_on(rx.recv(&mut buf)).unwrap();
+        assert_eq!(
+            (s.key.as_str(), s.payload, s.meta.sender),
+            ("app/in", &b"in"[..], Some(PEER))
+        );
+        assert_eq!(rx.try_recv(&mut buf), Ok(None));
+    }
+
+    #[test]
+    fn k11_split_rx_drains_the_inbox_first() {
+        let input = wire(&[
+            publish("app/a", b"1"),
+            Frame::Response {
+                id: 0,
+                result: Ok(b""),
+            },
+            publish("app/b", b"2"),
+        ]);
+        let mut link = SerialLink::new(Duplex::new(Pipe::new(input), Pipe::new(Vec::new())));
+        let mut resp = [0u8; 4];
+        block_on(link.request(K, b"", &mut resp)).unwrap();
+        let (_tx, mut rx) = link.split();
+        let mut buf = [0u8; RECV_BUF_LEN];
+        assert_eq!(block_on(rx.recv(&mut buf)).unwrap().key.as_str(), "app/a");
+        assert_eq!(block_on(rx.recv(&mut buf)).unwrap().key.as_str(), "app/b");
+    }
+
+    #[test]
+    fn duplex_errors_name_their_half() {
+        use embedded_io_async::Error as _;
+        let e: DuplexError<ErrorKind, ErrorKind> = DuplexError::Write(ErrorKind::TimedOut);
+        assert_eq!(e.kind(), ErrorKind::TimedOut);
+        assert_eq!(std::format!("{e}"), "write: TimedOut");
+        let e: DuplexError<ErrorKind, ErrorKind> = DuplexError::Read(ErrorKind::Other);
+        assert_eq!(e.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn delivery_is_drop_newest_in_order() {
+        assert_eq!(DELIVERY, Delivery::new(Overflow::DropNewest, true));
+        assert_eq!(<SerialLink<Pipe> as Subscriber>::DELIVERY, DELIVERY);
+        assert_eq!(INBOX_BYTES, MAX_RAW_FRAME + 2);
     }
 }
