@@ -20,6 +20,7 @@
 - New features: `dns-sd` (unicast DNS-SD in `dns::unicast`, below) and `memory`. New dependency: `heapless` 0.9 (no default features).
 - `scripts/check-features.sh` checks that `discovery` and `dns::wire` are in the no-feature `thumbv6m-none-eabi` build, builds `dns-sd` and `memory` on the host, and asserts no embedded set enables a host feature.
 
+<<<<<<< ours
 ### gRPC / Istio (G10–G14, I6–I8)
 - **Caller identity.** `GrpcResponder` fills `RequestMeta`: `sender` from `mw-client` (requests now send it), `deadline_ms` from `grpc-timeout` (measured when the handler runs), `principal` from a configured `PrincipalSource` (new; default `None`). `ResponderService::with_principal_source(PrincipalSource::SidecarXfcc)` (feature `istio`) takes the SPIFFE ID from Envoy's `x-forwarded-client-cert` with the new pure `istio::peer_principal` (last element, quoting and escapes handled; `istio::is_spiffe_id`, `XFCC_HEADER`); use it only behind the sidecar. New `responder::call_meta`, `CallMeta`, `remaining_ms`.
 - **Timeouts and status.** `GrpcTimeout`, `TimeoutUnit`, `GRPC_TIMEOUT_HEADER` and `MAX_TIMEOUT_VALUE` moved to the new `grpc::timeout` (built with `grpc` alone); `istio` re-exports them. `request_with` writes `grpc-timeout` with it, and a server's `CANCELLED` arriving after the deadline is reported as `DEADLINE_EXCEEDED`.
@@ -29,9 +30,15 @@
 - `tests/grpc.rs` runs every conformance case against gRPC over loopback (`conformance_cases::k15_grpc_*`, feature `istio`).
 
 ### Unicast DNS-SD against Kubernetes cluster DNS (L16–L24)
+||||||| base
+### Unicast DNS-SD against Kubernetes cluster DNS (L16–L24)
+=======
+### Unicast DNS-SD against Kubernetes cluster DNS (L16–L26)
+>>>>>>> theirs
 - New `dns::unicast::UnicastDnsSd` (feature `dns-sd`, tokio UDP) implements `discovery::Browse` by polling the cluster DNS for the SRV records Kubernetes publishes per named Service port: one endpoint per SRV (one per pod of a headless Service), named by the target's first label, `Endpoint::Socket` from A/AAAA glue or follow-up A then AAAA queries, else `Endpoint::Host`; no node id. `browse` takes an exact kind or a prefix over the mapped kinds.
 - `UnicastDnsSd::builder(map)`: `nameserver(addr)` (else the first of `/etc/resolv.conf` or `resolv_conf(ResolvConf)`), `bind`, `timeout`, `attempts`, `schedule`; `build().await`. Queries carry RD, EDNS(0) for 1232 bytes and a fresh id per attempt; replies are accepted only from the nameserver with the query's id and question. A truncated reply is `UnicastError::Truncated` (no TCP fallback); NXDOMAIN is an empty Service.
 - Pure core: `ResolvConf::parse` (nameserver, search, domain, ndots/timeout/attempts; `namespace()` and `cluster_domain()` from a pod's search list); `ServiceMap` (kind → Service, namespace, port name; `srv_name` builds `_<port>._tcp.<svc>.<ns>.svc.<domain>`, default domain `cluster.local`); `answer::{check_reply, srv_answer, address_answer}`; `Tracker` (Up/Down diffs between answers, refresh Ups at 80 % of the reported TTL so a `Directory` keeps live endpoints) and `Schedule` (re-resolve at 80 % of the smallest TTL, clamped).
+- Spoofing hardening (L25, L26): each query attempt uses a new socket on a fresh ephemeral port, connected to the nameserver, with an id from the OS CSPRNG (`dns::unicast::query_id`; new optional dependency `getrandom` 0.3, already in the lockfile, enabled by `dns-sd`). Skipped datagrams no longer end an attempt (`MAX_STRAY_DATAGRAMS` is removed); only the timeout does. The builder's `bind` now takes an `IpAddr` (the port is always ephemeral), and `local_addr()` is replaced by `bind_addr()`.
 - `dns::wire` (additive): `MessageWriter::edns(udp_payload_size)`, `TYPE_OPT`, `FLAG_TC`.
 - `tests/dns_sd.rs` runs the discovery conformance cases and the resolver against a stub DNS server on 127.0.0.1 (`tests/dns_sd/stub.rs`).
 

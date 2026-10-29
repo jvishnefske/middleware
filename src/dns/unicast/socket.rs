@@ -3,7 +3,6 @@
 
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::time::Duration;
-use std::hash::{BuildHasher, RandomState};
 use std::io;
 
 use heapless::{String, Vec};
@@ -30,10 +29,6 @@ pub const MAX_ENDPOINTS: usize = 16;
 /// UDP payload size advertised with EDNS(0) (RFC 6891; the 2020 DNS flag
 /// day value, which avoids IP fragmentation).
 pub const EDNS_UDP_PAYLOAD: u16 = 1232;
-/// Datagrams that are not the reply (see
-/// [`check_reply`]) skipped while waiting for one
-/// attempt's reply before the attempt is abandoned.
-pub const MAX_STRAY_DATAGRAMS: usize = 16;
 /// Resolution rounds one [`Browse::next`] runs without an event before it
 /// returns [`UnicastError::QuietLimit`].
 pub const MAX_QUIET_ROUNDS: usize = 64;
@@ -49,11 +44,26 @@ pub const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 /// Largest query sent: header, name, type and class, and the OPT record.
 const MAX_QUERY_LEN: usize = HEADER_LEN + MAX_NAME_LEN + 4 + 11;
 
+/// A DNS query id from the operating system's CSPRNG (`getrandom`): 16
+/// unpredictable bits per query, with no generator state kept in the
+/// process for an observer of earlier ids to extrapolate from.
+pub fn query_id() -> Result<u16, UnicastError> {
+    let mut id = [0u8; 2];
+    getrandom::fill(&mut id).map_err(|e| {
+        UnicastError::Io(e.raw_os_error().map_or_else(
+            || io::Error::other("getrandom failed"),
+            io::Error::from_raw_os_error,
+        ))
+    })?;
+    Ok(u16::from_ne_bytes(id))
+}
+
 /// Failure of a [`UnicastDnsSd`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum UnicastError {
-    /// The socket, or reading the resolver configuration, failed.
+    /// The socket, reading the resolver configuration, or the operating
+    /// system's random number generator failed.
     Io(io::Error),
     /// A query could not be encoded or a reply decoded.
     Wire(WireError),
@@ -133,7 +143,7 @@ pub struct UnicastDnsSdBuilder<const M: usize> {
     map: ServiceMap<M>,
     nameserver: Option<SocketAddr>,
     conf: Option<ResolvConf>,
-    bind: Option<SocketAddr>,
+    bind: Option<IpAddr>,
     timeout: Option<Duration>,
     attempts: Option<u8>,
     schedule: Schedule,
@@ -157,9 +167,9 @@ impl<const M: usize> UnicastDnsSdBuilder<M> {
         }
     }
 
-    /// The local address to bind (default: the unspecified address of the
-    /// nameserver's family, an ephemeral port).
-    pub fn bind(self, bind: SocketAddr) -> Self {
+    /// The local address each query's socket binds, on a fresh ephemeral
+    /// port (default: the unspecified address of the nameserver's family).
+    pub fn bind(self, bind: IpAddr) -> Self {
         UnicastDnsSdBuilder {
             bind: Some(bind),
             ..self
@@ -187,7 +197,8 @@ impl<const M: usize> UnicastDnsSdBuilder<M> {
         UnicastDnsSdBuilder { schedule, ..self }
     }
 
-    /// Resolves the configuration and binds the socket. Reads
+    /// Resolves the configuration. Sockets are bound per query, so nothing
+    /// is bound here. Reads
     /// [`RESOLV_CONF_PATH`] only if neither a nameserver nor a
     /// configuration was given. Timeout and attempts: the builder's, else
     /// the configuration's (when one was given or read), else
@@ -214,20 +225,16 @@ impl<const M: usize> UnicastDnsSdBuilder<M> {
             .unwrap_or(DEFAULT_ATTEMPTS)
             .max(1);
         let bind = self.bind.unwrap_or(match server.ip() {
-            IpAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
-            IpAddr::V6(_) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+            IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+            IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
         });
-        let socket = UdpSocket::bind(bind).await?;
-        // Seeded from the std hasher's per-process random keys; nonzero.
-        let seed = RandomState::new().hash_one(server) | 1;
         Ok(UnicastDnsSd {
-            socket,
+            bind,
             server,
             timeout,
             attempts,
             schedule: self.schedule,
             map: self.map,
-            rng: seed,
             start: Instant::now(),
             kinds: Vec::new(),
             pending: Diff::default(),
@@ -248,14 +255,13 @@ struct Browsed {
 /// Unicast DNS-SD over UDP; see the parent module.
 #[derive(Debug)]
 pub struct UnicastDnsSd<const M: usize = { super::map::DEFAULT_MAP_CAPACITY }> {
-    socket: UdpSocket,
+    /// Local address of each query's socket (port 0: ephemeral).
+    bind: IpAddr,
     server: SocketAddr,
     timeout: Duration,
     attempts: u8,
     schedule: Schedule,
     map: ServiceMap<M>,
-    /// xorshift64 state for query ids.
-    rng: u64,
     start: Instant,
     kinds: Vec<Browsed, M>,
     /// Events of the last resolution not yet delivered.
@@ -279,9 +285,9 @@ impl<const M: usize> UnicastDnsSd<M> {
         }
     }
 
-    /// The bound local address.
-    pub fn local_addr(&self) -> Result<SocketAddr, UnicastError> {
-        Ok(self.socket.local_addr()?)
+    /// The local address query sockets bind (each on a fresh port).
+    pub const fn bind_addr(&self) -> IpAddr {
+        self.bind
     }
 
     /// Where queries go.
@@ -312,32 +318,33 @@ impl<const M: usize> UnicastDnsSd<M> {
         u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// A fresh query id (xorshift64, high bits).
-    fn next_id(&mut self) -> u16 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        (x >> 48) as u16
-    }
-
     /// Sends a `qtype` query for `name` with RD and EDNS(0) and waits for
-    /// its reply, retrying with a fresh id up to the configured attempts;
-    /// returns the reply's length in `self.rx`. Cancel safe: a dropped
-    /// exchange leaves at most a late reply, which the next one ignores by
-    /// id.
+    /// its reply, retrying up to the configured attempts; returns the
+    /// reply's length in `self.rx`.
+    ///
+    /// Each attempt binds a new socket on a fresh ephemeral port, connects
+    /// it to the nameserver (so the kernel drops datagrams from any other
+    /// address) and uses a query id from the operating system's CSPRNG
+    /// ([`query_id`]): an off-path attacker must guess about 32 bits (port
+    /// and id) per attempt (RFC 5452 §9.2). Datagrams that are not the
+    /// reply ([`check_reply`]) are skipped without ending the attempt; only
+    /// the deadline ends it, so a flood cannot turn into an early timeout.
+    /// An ICMP "port unreachable" (a refused `recv`) is skipped too, since
+    /// it can be spoofed. Cancel safe: the socket of a dropped exchange is
+    /// closed with it, so a late reply never reaches a later query.
     async fn exchange(&mut self, name: &str, qtype: u16) -> Result<usize, UnicastError> {
         let text = TextName::new(name)?;
         for _ in 0..self.attempts {
-            let id = self.next_id();
+            let id = query_id()?;
             let mut out = [0u8; MAX_QUERY_LEN];
             let len = MessageWriter::new(&mut out, id, FLAG_RD)?
                 .question(text, qtype, false)?
                 .edns(EDNS_UDP_PAYLOAD)?
                 .finish();
             let packet = out.get(..len).ok_or(WireError::BufferTooSmall)?;
-            self.socket.send_to(packet, self.server).await?;
+            let socket = UdpSocket::bind(SocketAddr::new(self.bind, 0)).await?;
+            socket.connect(self.server).await?;
+            socket.send(packet).await?;
             let query = Query {
                 server: self.server,
                 id,
@@ -345,13 +352,23 @@ impl<const M: usize> UnicastDnsSd<M> {
                 qtype,
             };
             let deadline = Instant::now() + self.timeout;
-            for _ in 0..=MAX_STRAY_DATAGRAMS {
-                let received =
-                    tokio::time::timeout_at(deadline, self.socket.recv_from(&mut self.rx)).await;
-                let Ok(received) = received else { break };
-                let (len, from) = received?;
+            // Bounded by the deadline: every iteration awaits a datagram
+            // or the deadline, and the deadline does not move.
+            loop {
+                let Ok(received) =
+                    tokio::time::timeout_at(deadline, socket.recv(&mut self.rx)).await
+                else {
+                    break;
+                };
+                let len = match received {
+                    Ok(len) => len,
+                    Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => continue,
+                    Err(e) => return Err(e.into()),
+                };
                 let packet = self.rx.get(..len).ok_or(WireError::Truncated)?;
-                match check_reply(&query, from, packet) {
+                // Connected: the kernel only delivers the nameserver's
+                // datagrams.
+                match check_reply(&query, self.server, packet) {
                     Verdict::Accept(_) => return Ok(len),
                     Verdict::Truncated => return Err(UnicastError::Truncated),
                     Verdict::Ignore(_) => {}
