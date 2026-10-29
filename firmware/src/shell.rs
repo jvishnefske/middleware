@@ -39,7 +39,6 @@
 //! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
 //! timer alarm ([`timer`]) and the SPI/UART drivers ([`device::HW`]).
 
-
 mod board;
 mod bus;
 #[cfg(all(feature = "esp32", feature = "wasm"))]
@@ -71,13 +70,13 @@ use esp_base::chip::FlashSettings;
 use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
 use esp_base::trust_store::TrustStore;
-use middleware::loader::trust::TrustState;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::Uart;
 use esp_storage::FlashStorage;
+use middleware::loader::trust::TrustState;
 use middleware::serial::link::SerialLink;
 use static_cell::ConstStaticCell;
 
@@ -91,6 +90,24 @@ use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 const PAYLOAD_PARTITION: &str = "payload";
 /// Label of the trust data partition in `partitions.csv`.
 const TRUST_PARTITION: &str = "trust";
+
+/// The chip's eFuse base MAC (the Wi-Fi station address).
+pub(crate) fn base_mac() -> [u8; 6] {
+    let mut mac = [0u8; 6];
+    for (dst, src) in mac
+        .iter_mut()
+        .zip(esp_hal::efuse::base_mac_address().as_bytes())
+    {
+        *dst = *src;
+    }
+    mac
+}
+
+/// The node id reported at the end of `sys/info`: the base MAC, the
+/// sender id of this device's ESP-NOW frames.
+fn node_id() -> middleware::SenderId {
+    middleware::SenderId::from_mac(base_mac())
+}
 
 /// Firmware version reported in `sys/info`.
 #[cfg(feature = "wasm")]
@@ -129,12 +146,21 @@ struct Storage {
 /// flash moves into the payload store, which then lends it back for trust
 /// saves ([`PayloadStore::flash`]).
 fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
-    let none = Storage { store: None, trust: None, state: TrustState::Unclaimed };
+    let none = Storage {
+        store: None,
+        trust: None,
+        state: TrustState::Unclaimed,
+    };
     let mut table = [0u8; PARTITION_TABLE_MAX_LEN];
     let (payload, trust) = {
-        let Ok(parts) = read_partition_table(&mut flash, &mut table) else { return none };
+        let Ok(parts) = read_partition_table(&mut flash, &mut table) else {
+            return none;
+        };
         let find = |label: &str| {
-            parts.iter().find(|e| e.label_as_str() == label).map(|e| (e.offset(), e.len()))
+            parts
+                .iter()
+                .find(|e| e.label_as_str() == label)
+                .map(|e| (e.offset(), e.len()))
         };
         (find(PAYLOAD_PARTITION), find(TRUST_PARTITION))
     };
@@ -143,7 +169,11 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
         _ => (None, TrustState::Unclaimed),
     };
     let store = payload.and_then(|(at, len)| PayloadStore::new(flash, at, len, limit).ok());
-    Storage { store, trust, state }
+    Storage {
+        store,
+        trust,
+        state,
+    }
 }
 
 /// Brings up the board and runs the firmware forever.
@@ -168,8 +198,15 @@ pub async fn run(spawner: Spawner) -> ! {
     // The bootloader's image header: the flash mode and clock code runs
     // from (read before the flash moves into the payload store).
     let mut header = [0u8; 4];
-    let flash_settings = flash.read(0, &mut header).ok().and_then(|()| FlashSettings::from_header(header));
-    let Storage { mut store, trust, state: trust_state } = open_storage(flash, profile.max_image);
+    let flash_settings = flash
+        .read(0, &mut header)
+        .ok()
+        .and_then(|()| FlashSettings::from_header(header));
+    let Storage {
+        mut store,
+        trust,
+        state: trust_state,
+    } = open_storage(flash, profile.max_image);
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
     let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state);
@@ -179,6 +216,7 @@ pub async fn run(spawner: Spawner) -> ! {
         capacity,
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
+        node: Some(node_id()),
     };
 
     bus.log(format_args!(
@@ -194,15 +232,22 @@ pub async fn run(spawner: Spawner) -> ! {
         None => bus.log(format_args!("flash: mode unknown (header {header:02x?})")),
     }
     match installed {
-        None => bus.log(format_args!("no '{PAYLOAD_PARTITION}' partition; loader disabled")),
-        Some(Ok(h)) => bus.log(format_args!("stored payload: {} bytes, crc {:08x}", h.len, h.crc)),
+        None => bus.log(format_args!(
+            "no '{PAYLOAD_PARTITION}' partition; loader disabled"
+        )),
+        Some(Ok(h)) => bus.log(format_args!(
+            "stored payload: {} bytes, crc {:08x}",
+            h.len, h.crc
+        )),
         Some(Err(e)) => bus.log(format_args!("no valid stored payload: {e}")),
     }
     match (&trust, trust_state) {
-        (None, _) => bus.log(format_args!("no '{TRUST_PARTITION}' partition; unsigned payloads only (TOFU)")),
-        (Some(_), TrustState::Unclaimed) => {
-            bus.log(format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"))
-        }
+        (None, _) => bus.log(format_args!(
+            "no '{TRUST_PARTITION}' partition; unsigned payloads only (TOFU)"
+        )),
+        (Some(_), TrustState::Unclaimed) => bus.log(format_args!(
+            "trust: unclaimed; any payload accepted until sys/trust/claim"
+        )),
         (Some(_), TrustState::Claimed { key, min_version }) => bus.log(format_args!(
             "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
             key.0[0], key.0[1], key.0[2], key.0[3], min_version.0
@@ -245,7 +290,10 @@ pub async fn run(spawner: Spawner) -> ! {
             Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),
             Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
         }
-        bus.log(format_args!("heap: {} B free after boot", esp_alloc::HEAP.free()));
+        bus.log(format_args!(
+            "heap: {} B free after boot",
+            esp_alloc::HEAP.free()
+        ));
         Controller::new(state, ctx, store, trust, bus, profile)
     };
     #[cfg(not(feature = "wasm"))]

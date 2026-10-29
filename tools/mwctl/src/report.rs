@@ -11,6 +11,7 @@
 
 use crate::device::Info;
 use crate::link::Event;
+use middleware::SenderId;
 use middleware::loader::trust::{TrustCode, TrustInfo, TrustState};
 use middleware::loader::{PayloadStatus, keys};
 use middleware::wasm_abi::ABI_VERSION;
@@ -39,8 +40,15 @@ pub fn format_info(i: &Info) -> String {
     } else {
         "none: protocol only, payloads are stored but not run"
     };
+    let node = match i.node {
+        Some(SenderId(b)) => format!(
+            "node:             {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+        ),
+        None => String::new(),
+    };
     format!(
-        "chip:             {}\nfirmware:         {}\nruntime:          {runtime}\nABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
+        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\nABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
         i.chip,
         i.firmware,
         i.capacity,
@@ -124,8 +132,10 @@ mod tests {
             status: PayloadStatus::Stopped,
             chip: "esp8266".into(),
             firmware: "0.1.0+no-wasm".into(),
+            node: None,
         };
         let s = format_info(&i);
+        assert!(!s.contains("node:"), "{s}");
         assert!(s.contains("chip:             esp8266\n"), "{s}");
         assert!(s.contains("protocol only"), "{s}");
         assert!(s.contains("65536 bytes"), "{s}");
@@ -133,10 +143,18 @@ mod tests {
         let s = format_info(&Info {
             firmware: "0.1.0".into(),
             abi_version: ABI_VERSION + 1,
-            ..i
+            ..i.clone()
         });
         assert!(s.contains("WASM (payloads run)"), "{s}");
         assert!(s.contains("mwctl expects"), "{s}");
+        let s = format_info(&Info {
+            node: Some(SenderId::from_mac([0x24, 0x6f, 0x28, 0xaa, 0xbb, 0xcc])),
+            ..i
+        });
+        assert!(
+            s.contains("firmware:         0.1.0+no-wasm\nnode:             246f28aabbcc0000\n"),
+            "{s}"
+        );
     }
 
     #[test]
