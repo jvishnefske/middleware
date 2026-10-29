@@ -1512,10 +1512,56 @@ payload): each frame is one JPEG of varying length (R14).
     frame of a boot and every 64th are mirrored on the serial links as
     `dbg/cam/jpeg` chunks — `./build.sh esp32` and `esp32s3` build, both
     chips' clippy is clean; verified on hardware (below).
-  - [ ] Payload, simulator and badge viewer: see the bullets added with
-    `cam_ov2640_stream`.
-  - [ ] On hardware (manual run, not regression-tested): see the bullet
-    below.
+  - [x] Payload `cam_ov2640_stream` (ESP32-CAM): PWDN (GPIO 32) low, XCLK
+    20 MHz on PWM timer 0 channel 0, I2C bus 0 at 100 kHz; a pure
+    sequencer then waits 10 ms, reads PID/VER (two transfers, no repeated
+    start) and logs them, soft-resets (300 ms), writes the 219-entry table
+    in slices of at most 32 writes per call — Zephyr's `default_regs`
+    (Apache-2.0), JPEG at `QS` 15, UXGA input cropped to the centred
+    1200×1200 square (offset x 200) scaled to 240×240, `CLKRC` 0x00 and
+    `R_DVP_SP` 0x08 (esp32-camera's JPEG clock; with the doubler and auto
+    divider the PCLK outran the ESP32's I2S and bytes were lost) — waits
+    30 ms and starts `Route::camera` on `app/cam/jpeg` every 500 ms
+    (2 frames/s; an 8 KiB frame is 50 chunks, 100 ESP-NOW messages a
+    second); a wrong ID or bus error backs off 100–800 ms and restarts,
+    giving up after 5 in a row; a stopped or refused route retries on the
+    2 s stats tick; stats on `app/cam/stats`. Deploy build: byte pages,
+    6 144 bytes of memory, 7 801-byte image — `cam_ov2640_stream`
+    `bringup::tests::*`, `ov2640::tests::*`, `tests::*` (27, e.g.
+    `happy_path_order_id_then_reset_then_whole_table_then_route`,
+    `wrong_id_backs_off_without_resetting_and_gives_up`,
+    `a_bus_error_mid_table_restarts_from_identify_and_rewrites_everything`,
+    `window_registers_for_240x240`, `every_pclk_setting_is_the_esp32_one`,
+    `camera_config_is_the_21_bytes_with_the_ai_thinker_pins`,
+    `an_8k_frame_at_500_ms_stays_within_the_espnow_budget`,
+    `host_stub_init_fails_cleanly`); `abi-check`
+    `rust_cam_ov2640_stream_example`,
+    `cam_ov2640_stream_deploy_build_fits_the_esp32`; `check-all.sh`
+    (reproducible build).
+  - [x] `payload-sim`: an OV2640 SCCB model at 0x30 on I2C bus 0 (banks,
+    PID 0x26 / VER 0x42, COM7 soft reset); the camera route stays
+    `Unsupported` (no image sensor model); the payload's whole bring-up
+    runs against it (222 writes, final registers 240×240 JPEG, 5 917 fuel
+    at most in one call) and retries the refused route without trapping —
+    `sim::periph::ov2640::tests::*`, `sim::periph::tests::i2c_bus_0_carries_the_ov2640`,
+    `tests/ov2640.rs` `ov2640_bring_up_writes_the_whole_table_and_tries_the_camera_route`;
+    `tests/r10.rs` (camera still `Unsupported` with a valid 21-byte config).
+  - [x] Badge viewer: frames change size from frame to frame and smaller
+    ones are centred; a smaller frame after a larger one first blacks out
+    the bands it does not cover (in transfers of at most 3 840 bytes), so no
+    stale pixels remain; frames wider or taller than the panel are refused
+    and the next drawn — `cam_jpeg_view` `pipeline::tests::*`
+    (`bands_and_image_tile_the_panel_exactly`,
+    `a_smaller_frame_after_a_larger_one_blacks_out_its_border_first`,
+    `size_changes_between_frames_draw_each_frame_in_its_own_window`,
+    `a_frame_larger_than_the_panel_is_refused_and_the_next_one_drawn`),
+    `tests::frames_changing_size_are_each_drawn_centred_on_black`. Image
+    25 714 → 26 353 bytes, memory unchanged.
+  - [ ] On hardware (manual run, not regression-tested): ESP32-CAM logs
+    PID 0x26 VER 0x42, captures 240×240 JPEGs of 2–5 KB in 80–140 ms
+    (DMA 4–12 KB per capture), streams them at 2 frames/s; the badge
+    decodes and draws them in about 2.0 s each; a mirrored frame decodes
+    with PIL to a 240×240 image. Open: re-verify after the final flash.
 
 ### JPEG decode in WASM (J…)
 

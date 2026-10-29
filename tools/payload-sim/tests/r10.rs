@@ -17,7 +17,9 @@ const PPM_HEADER: &[u8] = b"P6\n240 240\n255\n";
 
 /// A 120×120 RGB565 test-pattern source route on `app/cam/frame`, a frame
 /// every 100 ms in 166-byte chunks (chunk size 0 = default). A camera
-/// source must be refused: its result is published on `cam` (4 bytes LE).
+/// source with a well-formed config (120×120 JPEG and the AI-Thinker
+/// pins, 21 bytes) must be refused, as the simulator has no image sensor:
+/// its result is published on `cam` (4 bytes LE).
 const CAMERA: &str = r#"
 (module
   (import "mw" "publish" (func $publish (param i32 i32 i32 i32) (result i32)))
@@ -26,9 +28,10 @@ const CAMERA: &str = r#"
   (data (i32.const 0) "app/cam/frame")
   (data (i32.const 16) "\78\00\78\00\00\00\64\00\00\00")
   (data (i32.const 32) "cam")
+  (data (i32.const 80) "\78\00\78\00\01\00\64\00\00\00\05\12\13\15\24\27\22\23\19\17\16")
   (func (export "init")
     (i32.store (i32.const 64)
-      (call $route_source (i32.const 1) (i32.const 0) (i32.const 13) (i32.const 16) (i32.const 10)))
+      (call $route_source (i32.const 1) (i32.const 0) (i32.const 13) (i32.const 80) (i32.const 21)))
     (drop (call $publish (i32.const 32) (i32.const 3) (i32.const 64) (i32.const 4)))
     (drop (call $route_source (i32.const 0) (i32.const 0) (i32.const 13) (i32.const 16) (i32.const 10))))
   (func (export "on_irq") (param i32 i32 i32 i32)))
