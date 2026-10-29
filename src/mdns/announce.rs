@@ -37,7 +37,14 @@
 //! [`destination`](MdnsAnnouncerBuilder::destination) explicitly (tests on
 //! loopback) also stops the group join and selects [`OriginPolicy::Any`];
 //! both can be set again afterwards. Replies to legacy and QU queries go to
-//! the query's source.
+//! the query's source, unless that source is port 0 or an unspecified,
+//! multicast or broadcast address ([`origin::reply_target`]).
+//!
+//! A received datagram cannot stop the announcer: a reply to it that cannot
+//! be encoded or sent, or has no valid unicast target, is dropped and
+//! counted ([`dropped_replies`](MdnsAnnouncer::dropped_replies)); `step`
+//! and `announce` fail only on errors of the announcer's own socket and
+//! messages (receiving, its probes, announcements and goodbyes).
 //!
 //! # Cancel safety
 //!
@@ -187,6 +194,7 @@ impl MdnsAnnouncerBuilder {
             epoch: Instant::now(),
             rx: [0; MAX_MESSAGE_LEN],
             tx: [0; MAX_MESSAGE_LEN],
+            dropped_replies: 0,
         })
     }
 }
@@ -202,9 +210,17 @@ pub struct MdnsAnnouncer {
     epoch: Instant,
     rx: [u8; MAX_MESSAGE_LEN],
     tx: [u8; MAX_MESSAGE_LEN],
+    dropped_replies: u32,
 }
 
 impl MdnsAnnouncer {
+    /// Replies to received queries that were dropped: they could not be
+    /// encoded or sent, or their source was not a valid unicast target
+    /// ([`origin::reply_target`]). Saturating.
+    pub fn dropped_replies(&self) -> u32 {
+        self.dropped_replies
+    }
+
     /// A builder with the default responder settings.
     pub fn builder() -> MdnsAnnouncerBuilder {
         MdnsAnnouncerBuilder::default()
@@ -278,8 +294,16 @@ impl MdnsAnnouncer {
             None => self.socket.recv_from(&mut self.rx).await?,
         };
         let (len, from) = received;
+        self.handle_datagram(len, from).await;
+        Ok(true)
+    }
+
+    /// Handles the datagram of `len` bytes from `from` in the receive
+    /// buffer. Infallible: whatever goes wrong with it or its reply is per
+    /// datagram (see the module docs).
+    async fn handle_datagram(&mut self, len: usize, from: SocketAddr) {
         let Some(packet) = self.rx.get(..len) else {
-            return Ok(true);
+            return;
         };
         let kind = match Message::parse(packet) {
             Ok(m) if m.is_response() => Kind::Response {
@@ -287,25 +311,35 @@ impl MdnsAnnouncer {
                 outstanding: None,
             },
             Ok(_) => Kind::Query,
-            Err(_) => return Ok(true),
+            Err(_) => return,
         };
         if origin::check(self.policy, &self.on_link, from, kind).is_err() {
-            return Ok(true);
+            return;
         }
         let now = self.now_ms();
         let table = core::mem::take(&mut self.table);
         let packet = self.rx.get(..len).unwrap_or_default();
         let (table, reply) = table.receive(packet, from.port(), now, &mut self.tx);
         self.table = table;
-        let reply = reply?;
-        if let Some(reply) = reply {
-            let to = match reply.to {
-                Destination::Multicast => self.destination,
-                Destination::Source => from,
-            };
-            self.send(reply.len, to).await?;
+        // Failures caused by the received datagram are per datagram: the
+        // reply is dropped and counted, the announcer carries on.
+        let Ok(Some(reply)) = reply else {
+            if reply.is_err() {
+                self.dropped_replies = self.dropped_replies.saturating_add(1);
+            }
+            return;
+        };
+        let to = match reply.to {
+            Destination::Multicast => Some(self.destination),
+            Destination::Source => origin::reply_target(&self.on_link, from),
+        };
+        let sent = match to {
+            Some(to) => self.send(reply.len, to).await.is_ok(),
+            None => false,
+        };
+        if !sent {
+            self.dropped_replies = self.dropped_replies.saturating_add(1);
         }
-        Ok(true)
     }
 
     /// Sends what is due, then waits for the next datagram or timer and
@@ -434,6 +468,40 @@ mod tests {
             }
         );
         assert!(a.table().is_empty());
+    }
+
+    #[tokio::test]
+    async fn replies_that_cannot_go_out_are_dropped_not_fatal() {
+        let (mut a, mut b) = pair().await;
+        within(a.announce(&service())).await.unwrap();
+        // A legacy PTR query, as if from spoofed sources: broadcast, port
+        // 0, multicast, and an IPv6 source the IPv4 socket cannot reach
+        // (the send fails).
+        let mut q = [0u8; 128];
+        let ty = ServiceType::new("_conf-svc._tcp.local").unwrap();
+        let n = crate::dns::wire::encode_query(9, ty, &mut q).unwrap();
+        for (i, from) in [
+            "255.255.255.255:40000",
+            "127.0.0.1:0",
+            "224.0.0.251:40000",
+            "[::1]:40000",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            a.rx[..n].copy_from_slice(&q[..n]);
+            a.handle_datagram(n, from.parse().unwrap()).await;
+            assert_eq!(a.dropped_replies(), i as u32 + 1, "{from}");
+        }
+        // The announcer still works: a real browse is answered.
+        within(b.browse(KeyFilter::Exact(KIND.key()))).await.unwrap();
+        within(a.step()).await.unwrap();
+        let mut buf = [0u8; 512];
+        // The announcement first, then the answer to the browse.
+        for _ in 0..2 {
+            assert!(matches!(within(b.next(&mut buf)).await.unwrap(), Event::Up(_)));
+        }
+        assert_eq!(a.dropped_replies(), 4);
     }
 
     #[tokio::test]

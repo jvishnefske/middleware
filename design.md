@@ -412,8 +412,9 @@ tokio shell sends them. Both sockets apply the origin policy of
   IPv6 loopback or link-local), a response only from port 5353, and a
   one-shot querier accepts only responses carrying one of its last 8 query
   ids; refused datagrams are skipped like queries and the source of the
-  last response is kept (`last_source`). The IP TTL 255 check is not done
-  (tokio exposes no `IP_RECVTTL` ancillary data) —
+  last response is kept (`last_source`). The IP TTL 255 check is not done:
+  it needs `unsafe` (socket2 has no `IP_RECVTTL` setter, and its `recvmsg`
+  hands ancillary data back as `MaybeUninit` bytes) —
   `mdns::origin::tests::proc_net_route_yields_connected_subnets_only`,
   `mdns::origin::tests::on_link_sources_are_loopback_link_local_or_connected`,
   `mdns::origin::tests::responses_need_port_5353_and_an_outstanding_id_when_on_link`,
@@ -456,6 +457,20 @@ tokio shell sends them. Both sockets apply the origin policy of
   kinds and invalid labels, and holds at most `MAX_INSTANCES` (8) —
   `mdns::announce::table::tests::withdraw_sends_a_goodbye_only_once_announced`,
   `mdns::announce::table::tests::registration_is_validated_and_bounded`.
+- [x] D17 On-link subnets come only from broadcast LAN interfaces: a
+  `/proc/net/route` route counts only if its interface is up, broadcast-
+  and multicast-capable and not point-to-point (`/sys/class/net/<if>/flags`;
+  VPN, `tun` and WireGuard routes never count, nor routes of interfaces
+  whose flags cannot be read) and its prefix is at least /8
+  (`MIN_PREFIX_LEN`) —
+  `mdns::origin::tests::proc_net_route_yields_connected_subnets_only`,
+  `mdns::origin::tests::interface_flags_select_broadcast_lans`.
+- [x] D18 A received datagram cannot stop the announcer: a reply to it that
+  cannot be encoded or sent is dropped and counted (`dropped_replies`), and
+  a reply is never unicast to port 0 or to an unspecified, multicast or
+  broadcast source (limited or a known subnet's) —
+  `mdns::origin::tests::replies_are_never_unicast_to_broadcast_multicast_or_port_0`,
+  `mdns::announce::tests::replies_that_cannot_go_out_are_dropped_not_fatal`.
 
 ### Transport contract 0.5 (K…)
 

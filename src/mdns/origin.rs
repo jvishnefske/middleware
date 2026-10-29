@@ -14,8 +14,16 @@
 //!
 //! * IPv4 loopback (127/8), IPv4 link-local (169.254/16), or inside one of
 //!   the [`OnLink`] subnets: the directly connected routes of the host's
-//!   interfaces (on Linux read from `/proc/net/route` when the socket is
-//!   built, [`OnLink::parse_proc_net_route`]) plus any configured subnet;
+//!   broadcast LAN interfaces (on Linux read from `/proc/net/route` when the
+//!   socket is built, [`OnLink::parse_proc_net_route`]) plus any configured
+//!   subnet. A route is taken only if its interface is up, broadcast- and
+//!   multicast-capable and not point-to-point (`IFF_UP`, `IFF_BROADCAST`,
+//!   `IFF_MULTICAST` set and `IFF_POINTOPOINT` clear in
+//!   `/sys/class/net/<if>/flags`, [`lan_interface`]), so routes of VPN,
+//!   `tun` and WireGuard interfaces, whose peers are not on the link, never
+//!   count; and only if its prefix is at least [`MIN_PREFIX_LEN`] (/8) long,
+//!   so a mis-set or hostile route cannot make most of the Internet
+//!   on-link. Subnets given explicitly ([`OnLink::with`]) are taken as is;
 //! * IPv6 loopback or link-local unicast (fe80::/10). Other IPv6 sources are
 //!   refused: the host's IPv6 prefixes are not read.
 //!
@@ -24,10 +32,18 @@
 //! querier (bound to a port other than 5353) accepts only responses whose id
 //! is that of one of its last [`MAX_OUTSTANDING`] queries.
 //!
-//! The RFC 6762 §11 check of the received IP TTL (255) is not done: reading
-//! it needs `IP_RECVTTL` and ancillary data, which tokio's socket does not
-//! expose. The on-link source check covers the same threat for IPv4 and
-//! link-local IPv6.
+//! The RFC 6762 §11 check of the received IP TTL (255) is not done, because
+//! it cannot be done without `unsafe`: `socket2` (0.6) has no setter for
+//! `IP_RECVTTL`, so enabling it needs a raw `setsockopt`, and its `recvmsg`
+//! returns the ancillary data in a `MaybeUninit<u8>` buffer whose bytes
+//! can only be read with `assume_init`; tokio exposes neither. The on-link
+//! source check covers the same threat for IPv4 and link-local IPv6.
+//!
+//! [`reply_target`] guards the other direction: an announcer never unicasts
+//! a reply to a source that is port 0, unspecified, multicast or a
+//! broadcast address (255.255.255.255 or the broadcast address of a known
+//! subnet), which a spoofed query could otherwise name to make it reflect
+//! traffic onto the whole link.
 //!
 //! [`OriginPolicy::Any`] (the default once a destination is set explicitly,
 //! as tests on loopback do) accepts every source.
@@ -40,6 +56,32 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use heapless::Vec;
 
 use super::MDNS_PORT;
+
+/// Shortest prefix taken from the routing table: /8.
+pub const MIN_PREFIX_LEN: u32 = 8;
+/// `IFF_UP` in `/sys/class/net/<if>/flags`.
+pub const IFF_UP: u32 = 0x1;
+/// `IFF_BROADCAST`.
+pub const IFF_BROADCAST: u32 = 0x2;
+/// `IFF_POINTOPOINT`: a VPN, `tun` or PPP link; its peers are not on-link.
+pub const IFF_POINTOPOINT: u32 = 0x10;
+/// `IFF_MULTICAST`.
+pub const IFF_MULTICAST: u32 = 0x1000;
+
+/// True if interface `flags` (as in `/sys/class/net/<if>/flags`) belong
+/// to a broadcast LAN interface whose routes may be on-link: up,
+/// broadcast, multicast, not point-to-point.
+pub const fn lan_interface(flags: u32) -> bool {
+    let need = IFF_UP | IFF_BROADCAST | IFF_MULTICAST;
+    flags & need == need && flags & IFF_POINTOPOINT == 0
+}
+
+/// Parses a `/sys/class/net/<if>/flags` value (`0x1003`).
+pub fn parse_interface_flags(text: &str) -> Option<u32> {
+    let t = text.trim();
+    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    u32::from_str_radix(hex, 16).ok()
+}
 
 /// Most subnets an [`OnLink`] holds; further routes are ignored.
 pub const MAX_SUBNETS: usize = 16;
@@ -127,9 +169,15 @@ impl OnLink {
 
     /// Adds the directly connected routes of a Linux `/proc/net/route`
     /// table: up, no gateway, not a reject route, a real interface (not
-    /// `*`), a non-zero mask. Malformed lines are skipped; at most 256
-    /// lines are read.
-    pub fn parse_proc_net_route(self, text: &str) -> Self {
+    /// `*`) for which `iface_flags` returns flags passing
+    /// [`lan_interface`], a prefix of at least [`MIN_PREFIX_LEN`].
+    /// Malformed lines are skipped; at most 256 lines are read. Pure:
+    /// `iface_flags` is the caller's lookup of an interface's flags.
+    pub fn parse_proc_net_route(
+        self,
+        text: &str,
+        iface_flags: impl Fn(&str) -> Option<u32>,
+    ) -> Self {
         let route = |line: &str| -> Option<Subnet> {
             let mut f = line.split_whitespace();
             let iface = f.next()?;
@@ -137,13 +185,14 @@ impl OnLink {
             let gateway = u32::from_str_radix(f.next()?, 16).ok()?;
             let flags = u32::from_str_radix(f.next()?, 16).ok()?;
             let mask = u32::from_str_radix(f.nth(3)?, 16).ok()?;
+            // The kernel prints the network-order address as a native u32.
+            let mask = u32::from_be_bytes(mask.to_ne_bytes());
             let on_link = iface != "*"
                 && flags & RTF_UP != 0
                 && flags & (RTF_GATEWAY | RTF_REJECT) == 0
                 && gateway == 0
-                && mask != 0;
-            // The kernel prints the network-order address as a native u32.
-            let mask = u32::from_be_bytes(mask.to_ne_bytes());
+                && mask.leading_ones() >= MIN_PREFIX_LEN
+                && iface_flags(iface).is_some_and(lan_interface);
             on_link.then(|| Subnet {
                 net: u32::from_be_bytes(dest.to_ne_bytes()) & mask,
                 mask,
@@ -154,6 +203,13 @@ impl OnLink {
             .take(MAX_ROUTE_LINES)
             .filter_map(route)
             .fold(self, OnLink::with)
+    }
+
+    /// True if `ip` is the broadcast address of a held subnet.
+    pub fn is_subnet_broadcast(&self, ip: Ipv4Addr) -> bool {
+        self.subnets
+            .iter()
+            .any(|s| s.mask != u32::MAX && u32::from(ip) == s.net | !s.mask)
     }
 
     /// The subnets held.
@@ -246,11 +302,35 @@ impl Outstanding {
     }
 }
 
+/// Where a reply to a datagram from `from` may be unicast: `from` itself,
+/// unless it is port 0 or an unspecified, multicast or broadcast address
+/// (limited broadcast, or the broadcast address of an `on_link` subnet).
+pub fn reply_target(on_link: &OnLink, from: SocketAddr) -> Option<SocketAddr> {
+    let ip = from.ip().to_canonical();
+    let bad = from.port() == 0
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || matches!(ip, IpAddr::V4(v4) if v4.is_broadcast() || on_link.is_subnet_broadcast(v4));
+    (!bad).then_some(from)
+}
+
+/// Reads the flags of interface `name` from `/sys/class/net`; `None` for a
+/// name that is not a plain file name or an unreadable value.
+fn system_interface_flags(name: &str) -> Option<u32> {
+    let plain = !name.is_empty() && name != "." && name != ".." && !name.contains('/');
+    if !plain {
+        return None;
+    }
+    let text = std::fs::read_to_string(std::format!("/sys/class/net/{name}/flags")).ok()?;
+    parse_interface_flags(&text)
+}
+
 /// The on-link subnets of this host: on Linux the connected routes of
-/// `/proc/net/route`, elsewhere none (loopback and link-local only).
+/// `/proc/net/route` on broadcast LAN interfaces, elsewhere none (loopback
+/// and link-local only).
 pub fn system_on_link() -> OnLink {
     std::fs::read_to_string("/proc/net/route")
-        .map(|t| OnLink::new().parse_proc_net_route(&t))
+        .map(|t| OnLink::new().parse_proc_net_route(&t, system_interface_flags))
         .unwrap_or_default()
 }
 
@@ -286,13 +366,30 @@ mod tests {
             line("eth0", [0, 0, 0, 0], [192, 168, 1, 254], "0003", [0, 0, 0, 0]),
             // The LAN.
             line("eth0", [192, 168, 1, 0], [0; 4], "0001", [255, 255, 255, 0]),
+            // A WireGuard / tun peer network and a VPN on a point-to-point
+            // link: never on-link.
+            line("wg0", [10, 66, 0, 0], [0; 4], "0001", [255, 255, 0, 0]),
+            line("tun0", [10, 8, 0, 0], [0; 4], "0001", [255, 255, 255, 0]),
+            // A LAN route with a prefix shorter than /8.
+            line("eth1", [64, 0, 0, 0], [0; 4], "0001", [192, 0, 0, 0]),
+            // An interface whose flags cannot be read.
+            line("gone0", [172, 16, 0, 0], [0; 4], "0001", [255, 255, 0, 0]),
             // A reject route and a device-less route.
             line("eth0", [10, 9, 0, 0], [0; 4], "0201", [255, 255, 0, 0]),
             line("*", [10, 1, 179, 192], [0; 4], "0001", [255, 255, 255, 192]),
             "garbage".into(),
         ]
         .join("\n");
-        let on_link = OnLink::new().parse_proc_net_route(&text);
+        let flags = |iface: &str| match iface {
+            // UP | BROADCAST | RUNNING | MULTICAST, as a wired NIC.
+            "eth0" | "eth1" => Some(0x1043),
+            // WireGuard: UP | POINTOPOINT | NOARP, no multicast.
+            "wg0" => Some(0x91),
+            // tun: UP | POINTOPOINT | MULTICAST.
+            "tun0" => Some(0x1091),
+            _ => None,
+        };
+        let on_link = OnLink::new().parse_proc_net_route(&text, flags);
         assert_eq!(
             on_link.subnets(),
             &[Subnet::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap()]
@@ -301,6 +398,41 @@ mod tests {
         assert!(!on_link.contains("192.168.2.1".parse().unwrap()));
         assert!(!on_link.contains("10.9.0.1".parse().unwrap()));
         assert!(!on_link.contains("10.1.179.193".parse().unwrap()));
+        for off in ["10.66.1.1", "10.8.0.2", "65.1.2.3", "172.16.0.9"] {
+            assert!(!on_link.contains(off.parse().unwrap()), "{off}");
+        }
+    }
+
+    #[test]
+    fn interface_flags_select_broadcast_lans() {
+        assert_eq!(parse_interface_flags("0x1003\n"), Some(0x1003));
+        assert_eq!(parse_interface_flags("zz"), None);
+        assert!(lan_interface(0x1003));
+        assert!(!lan_interface(0x1002), "down");
+        assert!(!lan_interface(0x1091), "point-to-point");
+        assert!(!lan_interface(0x0003), "no multicast");
+        assert!(!lan_interface(0x1001), "no broadcast");
+    }
+
+    #[test]
+    fn replies_are_never_unicast_to_broadcast_multicast_or_port_0() {
+        let on_link = OnLink::new().with(Subnet::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
+        assert_eq!(
+            reply_target(&on_link, sa("192.168.1.7:40000")),
+            Some(sa("192.168.1.7:40000"))
+        );
+        for bad in [
+            "192.168.1.7:0",
+            "0.0.0.0:5353",
+            "255.255.255.255:5353",
+            "192.168.1.255:5353",
+            "224.0.0.251:5353",
+            "[ff02::fb]:5353",
+            "[::]:5353",
+            "[::ffff:255.255.255.255]:5353",
+        ] {
+            assert_eq!(reply_target(&on_link, sa(bad)), None, "{bad}");
+        }
     }
 
     #[test]
