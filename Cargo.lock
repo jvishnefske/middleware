@@ -1668,6 +1668,7 @@ dependencies = [
  "prost",
  "serde",
  "sha2",
+ "socket2 0.6.5",
  "tokio",
  "tokio-stream",
  "tonic",

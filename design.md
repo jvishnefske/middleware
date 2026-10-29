@@ -359,7 +359,12 @@ over mDNS; since 0.5 it does so as a `discovery::Browse` (L12), and the
 built and lives in `dns::wire` since 0.5 (`mdns::wire` re-exports it); the
 tokio socket is behind the `mdns` feature and queries as a one-shot querier
 from an ephemeral port, so it coexists with a system mDNS daemon on port
-5353. The D tests below kept their names when the codec moved.
+5353. The D tests below kept their names when the codec moved. Since 0.5
+`MdnsAnnouncer` (`mdns::announce`) is the responder side, a
+`discovery::Announce`: the pure `announce::table::AnnounceTable` decides
+probes, conflict renames, announcements, answers and goodbyes, and a thin
+tokio shell sends them. Both sockets apply the origin policy of
+`mdns::origin` (D11).
 
 - [x] D1 Service types are validated (`_`-prefixed first label, `_tcp` or
   `_udp` second, ≥ 3 labels, labels ≤ 63 bytes, name ≤ 255 bytes) —
@@ -383,9 +388,13 @@ from an ephemeral port, so it coexists with a system mDNS daemon on port
   `mdns::socket::tests::browse_sends_a_ptr_query_and_recv_resolves_the_answer`,
   `mdns::socket::tests::queries_are_skipped_and_ids_advance`.
 - [x] D7 A response that does not fit the caller's buffer is an error and is
-  kept for the next call; `try_recv` is `None` when nothing has arrived; a
-  malformed datagram is an error and is dropped —
+  kept for one more call (`MAX_SHORT_BUFFER_RETRIES`); if that call's
+  buffer is too small too, the error is reported again and the response is
+  dropped, so an oversized datagram never blocks the socket;
+  `discard_kept` drops it at once; `try_recv` is `None` when nothing has
+  arrived; a malformed datagram is an error and is dropped —
   `mdns::socket::tests::try_recv_is_none_when_empty_and_keeps_an_oversized_response`,
+  `mdns::socket::tests::an_oversized_response_is_dropped_after_one_retry`,
   `mdns::socket::tests::malformed_datagrams_are_errors_then_dropped`.
 - [x] D8 Every receive call is bounded in datagrams (`MAX_IGNORED_DATAGRAMS`)
   and a cancelled `recv` loses no response —
@@ -394,7 +403,59 @@ from an ephemeral port, so it coexists with a system mDNS daemon on port
 - [x] D9 The pure core builds for `thumbv6m-none-eabi`; `mdns` enables `std`
   and no embedded feature — `scripts/check-features.sh`.
 - [x] D10 Tests put no multicast traffic on the network: the socket is
-  aimed at a loopback responder — `mdns::socket::tests::*`.
+  aimed at a loopback responder, and the announcer at a loopback browser or
+  rival with an explicit destination (which also skips the group join) —
+  `mdns::socket::tests::*`, `mdns::announce::tests::*`, `tests/mdns.rs`.
+- [x] D11 Origin validation (RFC 6762 §11): unless a destination was set
+  explicitly, a datagram is accepted only from an on-link source (IPv4
+  loopback, link-local, or a connected subnet read from `/proc/net/route`;
+  IPv6 loopback or link-local), a response only from port 5353, and a
+  one-shot querier accepts only responses carrying one of its last 8 query
+  ids; refused datagrams are skipped like queries and the source of the
+  last response is kept (`last_source`). The IP TTL 255 check is not done
+  (tokio exposes no `IP_RECVTTL` ancillary data) —
+  `mdns::origin::tests::proc_net_route_yields_connected_subnets_only`,
+  `mdns::origin::tests::on_link_sources_are_loopback_link_local_or_connected`,
+  `mdns::origin::tests::responses_need_port_5353_and_an_outstanding_id_when_on_link`,
+  `mdns::origin::tests::outstanding_keeps_the_last_ids`,
+  `mdns::socket::tests::on_link_policy_refuses_wrong_port_and_unknown_ids`.
+- [x] D12 No datagram wedges `Browse::next`: one that does not parse is
+  skipped, an instance whose event cannot be built (label not UTF-8, host
+  name too long) or needs more than `MAX_EVENT_LEN` (1024) bytes is
+  skipped, and an event too large for the caller's buffer is kept for one
+  retry and then skipped —
+  `mdns::socket::tests::poison_datagrams_do_not_wedge_browse`.
+- [x] D13 The announcer probes an instance name three times 250 ms apart
+  (query type ANY, QU bit, proposed SRV and TXT in the authority section),
+  then announces it twice 1 s apart (PTR, SRV, TXT, A/AAAA in the answer
+  section, cache-flush on the unique records); `announce` returns after the
+  first announcement, `step` sends the second; re-registering an announced
+  instance re-announces without probing —
+  `mdns::announce::table::tests::probes_three_times_then_announces_twice`,
+  `mdns::announce::table::tests::re_registering_an_announced_instance_announces_without_probing`,
+  `mdns::announce::tests::announces_after_probing_and_answers_a_browse`.
+- [x] D14 A response carrying a record of the probed name with other data
+  is a conflict: the instance is renamed `name (2)` … `name (9)` and probed
+  again, and after 8 renames `announce` fails with
+  `AnnounceError::Conflict`; our own records looped back are not
+  conflicts —
+  `mdns::announce::table::tests::a_conflict_while_probing_renames_and_probes_again`,
+  `mdns::announce::table::tests::renames_fit_a_label`,
+  `mdns::announce::tests::a_rival_answer_while_probing_renames_the_instance`.
+- [x] D15 Announced instances answer PTR, SRV, TXT, A/AAAA (and ANY)
+  queries: multicast by default, unicast to the source for QU questions,
+  legacy unicast (id and question echoed, TTL ≤ 10 s, no cache-flush) for
+  queries from a port other than 5353; PTRs the query lists as known
+  answers with at least half the TTL are suppressed; probing instances and
+  malformed queries get no answer —
+  `mdns::announce::table::tests::announced_instances_answer_queries`,
+  `mdns::announce::table::tests::known_answers_are_suppressed`.
+- [x] D16 Withdraw sends a goodbye (PTR, SRV, TXT with TTL 0) for an
+  announced instance and nothing for one still probing or unknown;
+  registration refuses locators, `Local`, unspecified addresses, unmappable
+  kinds and invalid labels, and holds at most `MAX_INSTANCES` (8) —
+  `mdns::announce::table::tests::withdraw_sends_a_goodbye_only_once_announced`,
+  `mdns::announce::table::tests::registration_is_validated_and_bounded`.
 
 ### Transport contract 0.5 (K…)
 
@@ -558,7 +619,8 @@ encoder; `MdnsSocket` implements `Browse`.
 - [x] L12 `MdnsSocket` implements `Browse`: an exact kind is browsed as its
   DNS-SD type in `.local`, a prefix is refused, resolved instances are `Up`
   (socket address, or SRV host when no address record came), goodbyes are
-  `Down`, and an event too large for the buffer is kept —
+  `Down`, and an event too large for the buffer is kept for one retry
+  (D12) —
   `mdns::socket::tests::browse_maps_the_kind_and_reports_up_then_down`,
   `mdns::socket::tests::browse_reports_an_unaddressed_instance_by_host`
   *(mdns)*.
@@ -568,6 +630,11 @@ encoder; `MdnsSocket` implements `Browse`.
 - [ ] L14 *(phase 2)* An mDNS announcer (`Announce` on `MdnsSocket`) and
   a unicast DNS-SD resolver (`dns::unicast`, feature `dns-sd`) pass the
   discovery conformance cases on loopback.
+  - [x] mDNS half: `MdnsAnnouncer` (the `Announce` side, a type of its own
+    rather than `MdnsSocket`) announcing to an `MdnsSocket` browser over
+    loopback passes every discovery case — `tests/mdns.rs`
+    (`l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+    `l_directory_expiry`) *(mdns)*.
 - [x] L15 `dns-sd` enables `std` and no embedded feature, and no embedded
   feature set enables it (or any host feature) —
   `scripts/check-features.sh`.
