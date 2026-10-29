@@ -231,7 +231,7 @@ fn x3_pwm_open_set_stop_and_bad_args() {
            (call $report (call $pwm_stop (i32.const 5)))
            (call $report (call $pwm_open (i32.const 6) (i32.const 1000)))
            (call $report (call $pwm_open (i32.const 0) (i32.const 0)))
-           (call $report (call $pwm_open (i32.const 0) (i32.const 1000001)))
+           (call $report (call $pwm_open (i32.const 0) (i32.const 40000001)))
            (call $report (call $pwm_set (i32.const 0) (i32.const 4) (i32.const 1)))
            (call $report (call $pwm_set (i32.const 0) (i32.const 0) (i32.const 65536)))
            (call $report (call $pwm_set (i32.const 0) (i32.const 0) (i32.const -1)))

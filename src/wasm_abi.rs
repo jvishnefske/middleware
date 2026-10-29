@@ -55,7 +55,7 @@
 //!
 //! | name           | params                                   | result            |
 //! |----------------|------------------------------------------|-------------------|
-//! | `route_source` | `source, key_ptr, key_len, cfg_ptr, cfg_len` ([`route::SourceKind`], [`route::SourceConfig`]) | handle ≥ 0 or error |
+//! | `route_source` | `source, key_ptr, key_len, cfg_ptr, cfg_len` ([`route::SourceKind`], [`route::SourceConfig`], camera pins [`route::CameraPins`]) | handle ≥ 0 or error |
 //! | `route_sink`   | `key_ptr, key_len, bus, cfg_ptr, cfg_len` ([`route::SinkConfig`]) | handle ≥ 0 or error |
 //! | `route_stop`   | `handle`                                 | 0 or error        |
 //! | `route_stat`   | `handle, stat` ([`route::RouteStat`])     | count ≥ 0 (saturating) or error |

@@ -184,9 +184,13 @@ impl PwmTable {
         PwmTable { timers: [None; LEDC_TIMERS] }
     }
 
-    /// Opens or retunes `spec.timer`.
+    /// Opens or retunes `spec.timer`; `Unsupported` for a timer the board
+    /// maps no pin to (the ESP32-CAM wires timers 0–1 only).
     pub fn open(self, profile: &Profile, spec: PwmSpec) -> Result<(Self, OpenStep), AbiError> {
         let t = ledc_timer(spec.timer)?;
+        if (0..LEDC_OUTPUTS as u8).all(|c| profile.pwm_pin(spec.timer, c).is_none()) {
+            return Err(AbiError::Unsupported);
+        }
         let res = resolution(profile, spec.freq_hz)?;
         let (duty, routed) = self.timers[t].map_or(([0; LEDC_OUTPUTS], [false; LEDC_OUTPUTS]), |o| (o.duty, o.routed));
         let channel = |c: usize| (spec.timer * LEDC_OUTPUTS as u8 + c as u8, duty_raw(duty[c], res.bits));
@@ -257,11 +261,12 @@ mod tests {
             assert_eq!(ledc_channel(t, c), Err(AbiError::Unsupported), "({t},{c})");
         }
         let pins = |p: &Profile| {
-            (0..4u8).flat_map(|t| (0..2u8).map(move |c| (t, c))).map(|(t, c)| p.pwm_pin(t, c).unwrap()).collect::<heapless::Vec<u8, 8>>()
+            (0..4u8).flat_map(|t| (0..2u8).map(move |c| (t, c))).filter_map(|(t, c)| p.pwm_pin(t, c)).collect::<heapless::Vec<u8, 8>>()
         };
-        assert_eq!(pins(&ESP32), [4, 13, 18, 19, 23, 25, 26, 27]);
+        assert_eq!(pins(&ESP32), [0, 4, 13, 14]);
         assert_eq!(pins(&ESP32S3), [11, 12, 13, 14, 15, 16, 17, 18]);
         assert_eq!(ESP32.pwm_pin(4, 0), None);
+        assert_eq!(ESP32.pwm_pin(2, 0), None, "the ESP32-CAM maps timers 0-1");
         assert_eq!(ESP32S3.pwm_pin(0, 2), None);
         assert_eq!(ESP32C3.pwm_pin(0, 0), None);
         assert_eq!(ESP8266.pwm_pin(0, 0), None);
@@ -270,18 +275,21 @@ mod tests {
     #[test]
     fn x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c() {
         use crate::chip::Direction;
-        // The default I2C pins (ESP32 21/22, ESP32-S3 8/9); strapping pins
-        // come from the profile.
-        let i2c: [(&Profile, &[u8]); 2] = [(&ESP32, &[21, 22]), (&ESP32S3, &[8, 9])];
-        for (p, avoid) in i2c {
+        // The default I2C pins (ESP32-CAM SCCB 26/27, ESP32-S3 8/9);
+        // strapping pins come from the profile. The ESP32-CAM's XCLK
+        // (GPIO 0) is the one strapping pin on purpose: the sensor's clock
+        // is wired there (R15).
+        let i2c: [(&Profile, &[u8], &[u8], usize); 2] =
+            [(&ESP32, &[26, 27], &[0], 4), (&ESP32S3, &[8, 9], &[], LEDC_CHANNELS)];
+        for (p, avoid, strapping_ok, len) in i2c {
             for &pin in p.pwm_pins {
-                assert!(!p.is_strapping(pin), "{} {pin} is a strapping pin", p.name);
+                assert!(!p.is_strapping(pin) || strapping_ok.contains(&pin), "{} {pin} is a strapping pin", p.name);
                 assert_eq!(p.check_pin(pin, Direction::Output), Ok(()), "{} {pin}", p.name);
                 assert!(!p.has_adc(pin), "{} {pin} is ADC1", p.name);
                 assert!(!avoid.contains(&pin), "{} {pin}", p.name);
                 assert_eq!(p.pwm_pins.iter().filter(|&&q| q == pin).count(), 1, "{} {pin} twice", p.name);
             }
-            assert_eq!(p.pwm_pins.len(), LEDC_CHANNELS, "{}", p.name);
+            assert_eq!(p.pwm_pins.len(), len, "{}", p.name);
         }
     }
 
@@ -357,6 +365,9 @@ mod tests {
         assert_eq!(t.set(&ESP32, 4, 0, 1), Err(AbiError::Unsupported));
         assert_eq!(t.open(&ESP32, spec(4, 1000)).map(|_| ()), Err(AbiError::Unsupported));
         assert_eq!(t.open(&ESP32, spec(5, 1000)).map(|_| ()), Err(AbiError::Unsupported));
+        for timer in [2, 3] {
+            assert_eq!(t.open(&ESP32, spec(timer, 1000)).map(|_| ()), Err(AbiError::Unsupported), "ESP32-CAM timer {timer}");
+        }
         assert_eq!(t.stop(&ESP32, 5).map(|_| ()), Err(AbiError::Unsupported));
         assert_eq!(t.open(&ESP32S3, spec(0, 3)).map(|_| ()), Err(AbiError::Unsupported), "no clock reaches 3 Hz");
         assert_eq!(t.open(&ESP32C3, spec(0, 1000)).map(|_| ()), Err(AbiError::Unsupported));
@@ -367,16 +378,21 @@ mod tests {
 
     #[test]
     fn x11_stop_returns_routed_pins_and_closes_the_timer() {
-        let (t, _) = PwmTable::new().open(&ESP32, spec(3, 50)).unwrap();
-        let (t, _) = t.set(&ESP32, 3, 1, 100).unwrap();
-        let (t, stop) = t.stop(&ESP32, 3).unwrap();
-        assert_eq!(stop, Some(StopStep { channels: [6, 7], pins: [None, Some(27)] }));
+        let (t, _) = PwmTable::new().open(&ESP32S3, spec(3, 50)).unwrap();
+        let (t, _) = t.set(&ESP32S3, 3, 1, 100).unwrap();
+        let (t, stop) = t.stop(&ESP32S3, 3).unwrap();
+        assert_eq!(stop, Some(StopStep { channels: [6, 7], pins: [None, Some(18)] }));
         assert_eq!(t, PwmTable::new());
-        assert_eq!(t.set(&ESP32, 3, 1, 1), Err(AbiError::Busy));
-        assert_eq!(t.stop(&ESP32, 3), Ok((t, None)), "stopping a closed timer is a no-op");
+        assert_eq!(t.set(&ESP32S3, 3, 1, 1), Err(AbiError::Busy));
+        assert_eq!(t.stop(&ESP32S3, 3), Ok((t, None)), "stopping a closed timer is a no-op");
         // Reopening after stop starts from duty 0 with nothing routed.
-        let (t, step) = t.open(&ESP32, spec(3, 50)).unwrap();
+        let (t, step) = t.open(&ESP32S3, spec(3, 50)).unwrap();
         assert_eq!(step.channels, [(6, 0), (7, 0)]);
-        assert_eq!(t.set(&ESP32, 3, 1, 1).unwrap().1.route, Some(27));
+        assert_eq!(t.set(&ESP32S3, 3, 1, 1).unwrap().1.route, Some(18));
+        // The ESP32-CAM's timer 1 drives GPIO 13 and 14.
+        let (t, _) = PwmTable::new().open(&ESP32, spec(1, 50)).unwrap();
+        let (t, _) = t.set(&ESP32, 1, 1, 100).unwrap();
+        let (_, stop) = t.stop(&ESP32, 1).unwrap();
+        assert_eq!(stop, Some(StopStep { channels: [2, 3], pins: [None, Some(14)] }));
     }
 }

@@ -324,6 +324,51 @@ fn cam_jpeg_view_deploy_build_declares_exactly_its_memory() {
 }
 
 #[test]
+fn rust_cam_ov2640_stream_example() {
+    // Sets the OV2640 up itself (PWDN, XCLK, SCCB with a one-shot timer
+    // pacing the steps), then starts the camera source route.
+    let r = validate(&release("cam_ov2640_stream"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(
+        &r.imports,
+        &[
+            "gpio_output",
+            "gpio_write",
+            "pwm_open",
+            "pwm_set",
+            "i2c_open",
+            "i2c_transfer",
+            "timer_start",
+            "route_source",
+            "set_tick",
+            "publish",
+        ]
+    ));
+}
+
+#[test]
+fn cam_ov2640_stream_deploy_build_fits_the_esp32() {
+    // The ESP32-CAM's deploy build (check-all.sh: build-byte-pages.sh -p
+    // cam_ov2640_stream): 1-byte pages fixed at the crate's
+    // [package.metadata.byte-pages] memory (stack 4 KiB + 1 696 bytes of
+    // data and .bss, rounded up to 1 KiB), and an image well under the
+    // ESP32's 24 KiB limit (7 801 bytes when written).
+    let Some(r) = byte_pages("cam_ov2640_stream") else {
+        eprintln!(
+            "cam_ov2640_stream: no byte-page build; run scripts/build-byte-pages.sh -p cam_ov2640_stream"
+        );
+        return;
+    };
+    assert_eq!(r.memory_page_bytes, Some(1));
+    assert_eq!(r.memory_pages, Some((6_144, Some(6_144))));
+    let path =
+        root().join("target/byte-pages/wasm32-unknown-unknown/release/cam_ov2640_stream.wasm");
+    let len = std::fs::metadata(path).expect("built").len();
+    assert!(len <= 12 * 1024, "cam_ov2640_stream.wasm is {len} bytes");
+    assert!(len < 24 * 1024);
+}
+
+#[test]
 fn p7_sdk_payloads_link_no_panic_formatting() {
     // blink logs through LogLine and receives nothing: with the SDK's
     // panic-free LogLine and delivery path it links no core::fmt panic
@@ -397,6 +442,7 @@ const RUST_EXAMPLES: &[&str] = &[
     "cam_view",
     "cam_jpeg_stream",
     "cam_jpeg_view",
+    "cam_ov2640_stream",
     "bench",
 ];
 

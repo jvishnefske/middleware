@@ -1,7 +1,7 @@
 //! Pin claims: which pins the SPI bus, the secondary UART, GPIO
-//! interrupts, PWM outputs and ADC inputs hold.
+//! interrupts, PWM outputs, ADC inputs, the I2C bus and the camera hold.
 //!
-//! A [`Claims`] value is five pin bitmasks, one per [`Owner`]. Every
+//! A [`Claims`] value is one pin bitmask per [`Owner`]. Every
 //! transition is a function from a claims value to a new one, applied only
 //! when it succeeds:
 //!
@@ -20,9 +20,15 @@
 //! * [`Claims::claim_adc`] takes an ADC1 pin on its first `adc_read`; it
 //!   stays analog until the payload stops. A pin without an ADC1 channel is
 //!   `Unsupported` (X12, X13).
-//! * [`Claims::check_gpio`] guards plain `gpio_*` calls: pins routed to
-//!   SPI, UART or PWM, and analog ADC pins, are off limits until the payload
-//!   stops (or, for PWM, until `pwm_stop`).
+//! * [`Claims::claim_i2c`] and [`Claims::claim_camera`] (ABI 3 I2C, R15
+//!   camera) take the I2C bus's SDA and SCL (both driven open drain and
+//!   read back) and the camera's eleven input pins; each is checked against
+//!   the profile in its direction and refused when another owner holds it.
+//!   [`Claims::release`] drops one owner's pins.
+//! * [`Claims::check_gpio`] guards plain `gpio_*` calls: pins routed to a
+//!   peripheral (SPI, UART, PWM, I2C, camera), and analog ADC pins, are off
+//!   limits until the payload stops or the peripheral lets them go (for
+//!   PWM, `pwm_stop`).
 //!
 //! Errors follow the ABI: a pin that does not exist is
 //! [`AbiError::InvalidArgument`], a reserved pin (or an output on an
@@ -31,6 +37,7 @@
 
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::periph::{SpiConfig, UartConfig};
+use middleware::wasm_abi::route::CameraPins;
 
 use crate::chip::{Direction, Profile};
 
@@ -47,6 +54,10 @@ pub enum Owner {
     Pwm,
     /// An ADC1 input.
     Adc,
+    /// I2C bus 0's SDA and SCL (ABI 3).
+    I2c,
+    /// The camera's parallel port (R15).
+    Camera,
 }
 
 /// Pin ownership for one payload session.
@@ -57,6 +68,8 @@ pub struct Claims {
     uart: u64,
     pwm: u64,
     adc: u64,
+    i2c: u64,
+    camera: u64,
 }
 
 const fn bit(pin: u8) -> u64 {
@@ -71,7 +84,7 @@ pub fn pins(mask: u64) -> impl Iterator<Item = u8> {
 impl Claims {
     /// Nothing claimed.
     pub const fn new() -> Self {
-        Claims { irq: 0, spi: 0, uart: 0, pwm: 0, adc: 0 }
+        Claims { irq: 0, spi: 0, uart: 0, pwm: 0, adc: 0, i2c: 0, camera: 0 }
     }
 
     /// Who holds `pin`, if anyone.
@@ -89,8 +102,38 @@ impl Claims {
             Some(Owner::Pwm)
         } else if self.adc & b != 0 {
             Some(Owner::Adc)
+        } else if self.i2c & b != 0 {
+            Some(Owner::I2c)
+        } else if self.camera & b != 0 {
+            Some(Owner::Camera)
         } else {
             None
+        }
+    }
+
+    /// The pins `owner` holds.
+    pub const fn pins_of(&self, owner: Owner) -> u64 {
+        match owner {
+            Owner::Irq => self.irq,
+            Owner::Spi => self.spi,
+            Owner::Uart => self.uart,
+            Owner::Pwm => self.pwm,
+            Owner::Adc => self.adc,
+            Owner::I2c => self.i2c,
+            Owner::Camera => self.camera,
+        }
+    }
+
+    /// The claims without any of `owner`'s pins.
+    pub const fn release(self, owner: Owner) -> Self {
+        match owner {
+            Owner::Irq => Claims { irq: 0, ..self },
+            Owner::Spi => Claims { spi: 0, ..self },
+            Owner::Uart => Claims { uart: 0, ..self },
+            Owner::Pwm => Claims { pwm: 0, ..self },
+            Owner::Adc => Claims { adc: 0, ..self },
+            Owner::I2c => Claims { i2c: 0, ..self },
+            Owner::Camera => Claims { camera: 0, ..self },
         }
     }
 
@@ -166,6 +209,33 @@ impl Claims {
         Ok(Claims { uart, ..self })
     }
 
+    /// Claims I2C bus 0's `sda` and `scl`, replacing its previous pins.
+    /// Both are driven (open drain) and read back, so both must be able to
+    /// drive.
+    pub fn claim_i2c(self, profile: &Profile, sda: u8, scl: u8) -> Result<Self, AbiError> {
+        if sda == scl {
+            return Err(AbiError::InvalidArgument);
+        }
+        let i2c = self.check(
+            profile,
+            Owner::I2c,
+            &[(Some(sda), Direction::Output), (Some(scl), Direction::Output)],
+        )?;
+        Ok(Claims { i2c, ..self })
+    }
+
+    /// Claims the camera's eleven input pins (data, VSYNC, HREF, PCLK),
+    /// replacing its previous pins; input-only pins are fine.
+    pub fn claim_camera(self, profile: &Profile, pins: &CameraPins) -> Result<Self, AbiError> {
+        let all = pins.validated()?.all();
+        let mut wanted = [(None, Direction::Input); 11];
+        for (slot, pin) in wanted.iter_mut().zip(all) {
+            *slot = (Some(pin), Direction::Input);
+        }
+        let camera = self.check(profile, Owner::Camera, &wanted)?;
+        Ok(Claims { camera, ..self })
+    }
+
     /// Enables (`on`) or disables the interrupt claim on `pin`.
     pub fn set_irq(self, profile: &Profile, pin: u8, on: bool) -> Result<Self, AbiError> {
         if !on {
@@ -198,13 +268,15 @@ impl Claims {
         Ok(Claims { adc: self.adc | adc, ..self })
     }
 
-    /// Whether a plain `gpio_*` call may touch `pin` (SPI, UART and PWM
-    /// pins and ADC inputs are refused; interrupt pins are allowed, the
-    /// shell drops the interrupt when the pin is reconfigured).
+    /// Whether a plain `gpio_*` call may touch `pin` (pins routed to a
+    /// peripheral are refused; interrupt pins are allowed, the shell drops
+    /// the interrupt when the pin is reconfigured).
     pub const fn check_gpio(&self, pin: u8) -> Result<(), AbiError> {
         match self.owner(pin) {
-            Some(Owner::Spi | Owner::Uart | Owner::Pwm | Owner::Adc) => Err(AbiError::InvalidArgument),
-            _ => Ok(()),
+            Some(Owner::Spi | Owner::Uart | Owner::Pwm | Owner::Adc | Owner::I2c | Owner::Camera) => {
+                Err(AbiError::InvalidArgument)
+            }
+            Some(Owner::Irq) | None => Ok(()),
         }
     }
 }
@@ -349,5 +421,42 @@ mod tests {
         assert_eq!((c.owner(4), c.check_gpio(4)), (None, Ok(())));
         assert_eq!(c.owner(34), Some(Owner::Adc));
         assert_eq!(pins(c.pwm_pins()).count(), 0);
+    }
+
+    #[test]
+    fn r15_pwm_i2c_and_camera_pins_are_owned_and_exclusive() {
+        let cam = CameraPins::AI_THINKER;
+        let c = Claims::new().claim_camera(&ESP32, &cam).unwrap();
+        // Input-only data pins (34-39) are fine for the camera.
+        for p in cam.all() {
+            assert_eq!(c.owner(p), Some(Owner::Camera), "pin {p}");
+            assert_eq!(c.check_gpio(p), Err(AbiError::InvalidArgument));
+        }
+        assert_eq!(pins(c.pins_of(Owner::Camera)).count(), 11);
+        let c = c.claim_pwm(&ESP32, 0).unwrap().claim_i2c(&ESP32, 26, 27).unwrap();
+        assert_eq!(c.owner(0), Some(Owner::Pwm));
+        assert_eq!(c.owner(26), Some(Owner::I2c));
+        assert_eq!(c.check_gpio(27), Err(AbiError::InvalidArgument));
+        // Nobody takes another owner's pin.
+        assert_eq!(c.claim_pwm(&ESP32, 22), Err(AbiError::InvalidArgument), "PCLK");
+        assert_eq!(c.claim_i2c(&ESP32, 0, 13), Err(AbiError::InvalidArgument), "XCLK");
+        assert_eq!(c.claim_spi(&ESP32, &spi(14, 13, 26, 15)), Err(AbiError::InvalidArgument));
+        assert_eq!(c.set_irq(&ESP32, 25, true), Err(AbiError::InvalidArgument), "VSYNC");
+        assert_eq!(Claims::new().claim_pwm(&ESP32, 36), Err(AbiError::Unsupported), "input-only");
+        assert_eq!(Claims::new().claim_i2c(&ESP32, 26, 34), Err(AbiError::Unsupported));
+        assert_eq!(Claims::new().claim_i2c(&ESP32, 26, 26), Err(AbiError::InvalidArgument));
+        assert_eq!(Claims::new().claim_camera(&ESP32, &CameraPins { pclk: 1, ..cam }), Err(AbiError::Unsupported), "console");
+        assert_eq!(Claims::new().claim_camera(&ESP32, &CameraPins { pclk: 5, ..cam }), Err(AbiError::InvalidArgument), "repeat");
+        // A second PWM pin adds; re-claiming I2C or the camera replaces.
+        let c = c.claim_pwm(&ESP32, 4).unwrap();
+        assert_eq!(pins(c.pins_of(Owner::Pwm)).collect::<heapless::Vec<u8, 2>>(), [0, 4]);
+        let c = c.claim_i2c(&ESP32, 14, 15).unwrap();
+        assert_eq!(c.owner(26), None);
+        // Release drops one owner only.
+        let c = c.release(Owner::Camera);
+        assert_eq!(c.owner(22), None);
+        assert_eq!(c.check_gpio(22), Ok(()));
+        assert_eq!(c.owner(0), Some(Owner::Pwm));
+        assert_eq!(c.release(Owner::Pwm).owner(4), None);
     }
 }
