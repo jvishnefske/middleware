@@ -50,7 +50,7 @@
 use crate::dedup::{Sequence, fnv1a32};
 use crate::discovery::ServiceKind;
 use crate::key::Key;
-use crate::transport::{HandlerError, SampleMeta, SenderId};
+use crate::transport::{HandlerError, SampleMeta, SenderId, Target};
 
 const MAGIC: [u8; 2] = [b'm', b'w'];
 const KIND_PUB_V1: u8 = 1;
@@ -188,6 +188,16 @@ pub fn decode_reply_error(payload: &[u8]) -> (HandlerError, Option<SenderId>) {
     (error, sender)
 }
 
+/// True if a reply whose replier claims to be `replier` is accepted for a
+/// request to `target`: any reply for [`Target::Any`], only replies naming
+/// the node for [`Target::Node`]. The claim itself is self-asserted. Pure.
+pub fn accepts(target: Target, replier: Option<SenderId>) -> bool {
+    match target {
+        Target::Any => true,
+        Target::Node(id) => replier == Some(id),
+    }
+}
+
 /// True if a reply-error payload is Zenoh's own query timeout, not a
 /// responder's error.
 pub fn is_timeout_error(payload: &[u8]) -> bool {
@@ -317,6 +327,16 @@ mod tests {
             assert!(!is_timeout_error(&encode_reply_error(e, ID)));
             assert!(!is_timeout_error(&[e.code()]));
         }
+    }
+
+    #[test]
+    fn node_targets_accept_only_replies_naming_the_node() {
+        let other = SenderId([9; 8]);
+        assert!(accepts(Target::Any, None));
+        assert!(accepts(Target::Any, Some(other)));
+        assert!(accepts(Target::Node(ID), Some(ID)));
+        assert!(!accepts(Target::Node(ID), Some(other)));
+        assert!(!accepts(Target::Node(ID), None));
     }
 
     #[test]

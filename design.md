@@ -312,7 +312,7 @@ u8 | key length u8 | key | payload, at most 250 bytes.
 - [x] Z8 Cancelling `recv` loses no sample —
   `z8_cancelled_recv_loses_no_sample`.
 
-The 0.5 additions (Z9–Z16). Unit tests are in `zenoh::{wire, subscriber,
+The 0.5 additions (Z9–Z18). Unit tests are in `zenoh::{wire, subscriber,
 responder, discovery}::tests`; the rest are in `tests/zenoh.rs`, which also
 runs every conformance case over sessions joined on one loopback endpoint
 with scouting off. All run under `--features zenoh`.
@@ -381,6 +381,28 @@ with scouting off. All run under `--features zenoh`.
   `k_overload_matches_declared_delivery`, `k_gap_is_reported`,
   `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
   `l_directory_expiry`.
+- [x] Z17 Trust model: Zenoh session ids, attachments, tokens and
+  queryables are self-asserted, so `Reply::sender`, `RequestMeta::sender`
+  and `SampleMeta::sender` are the peer's claim. A `Target::Node(id)`
+  request (and gather) accepts only replies whose replier id is `id`, so a
+  peer squatting on `@mw/node/<zid16>/<key>` without claiming the id is
+  ignored; one that also claims it is not detected. Authenticated identity
+  needs Zenoh access control and authentication (router ACLs on
+  `@mw/node/**`, `@mw/svc/**` and application keys), which the middleware
+  does not configure —
+  `z17_target_node_drops_replies_not_naming_the_node`,
+  `zenoh::wire::tests::node_targets_accept_only_replies_naming_the_node`.
+- [x] Z18 A browser's record fetch collects every reply until the query
+  ends and keeps only successful replies on exactly the token's key whose
+  record names the key's kind and instance; if two such records differ the
+  service is refused (`ConflictingRecords`, no `Up`) instead of taking the
+  first. The stable Zenoh API cannot tell which session owns a token, so a
+  forger answering alone, or with identical bytes, is not detected (same
+  trust model as Z17) —
+  `z18_conflicting_service_records_are_refused`,
+  `z18_records_for_another_service_are_ignored`,
+  `zenoh::discovery::tests::differing_records_conflict_and_equal_ones_agree`,
+  `zenoh::discovery::tests::records_must_name_the_token_kind_and_instance`.
 
 ### gRPC (`grpc`)
 
