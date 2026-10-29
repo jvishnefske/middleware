@@ -34,7 +34,9 @@
 //! text with `\.` and `\\` escapes, the form [`Name::write_text`] produces,
 //! or an instance label joined to a [`ServiceType`]. [`encode_query`] (one
 //! PTR question, mDNS browse) and [`encode_query_for`] (any type, optional
-//! recursion desired, for a unicast resolver) are shorthands. Nothing is
+//! recursion desired, for a unicast resolver) are shorthands;
+//! [`MessageWriter::edns`] adds the EDNS(0) OPT pseudo-record a unicast
+//! query uses to accept replies over 512 bytes. Nothing is
 //! truncated: a full buffer is [`WireError::BufferTooSmall`].
 //!
 //! [`TxtWriter`] builds TXT RDATA (`key=value` strings, RFC 6763 §6) and
@@ -74,6 +76,10 @@ pub const TYPE_TXT: u16 = 16;
 pub const TYPE_AAAA: u16 = 28;
 /// Record type SRV (DNS-SD: instance → host and port).
 pub const TYPE_SRV: u16 = 33;
+/// Pseudo-record type OPT (EDNS(0), RFC 6891): its class is the largest
+/// UDP payload the sender accepts. Written by [`MessageWriter::edns`];
+/// decoded as [`Rdata::Other`].
+pub const TYPE_OPT: u16 = 41;
 /// Class IN.
 pub const CLASS_IN: u16 = 1;
 
@@ -81,6 +87,9 @@ pub const CLASS_IN: u16 = 1;
 pub const FLAG_QR: u16 = 0x8000;
 /// Header flag: authoritative answer (every mDNS response sets it).
 pub const FLAG_AA: u16 = 0x0400;
+/// Header flag: the message was truncated to fit the transport (a
+/// unicast resolver's reply over UDP that did not fit).
+pub const FLAG_TC: u16 = 0x0200;
 /// Header flag: recursion desired (unicast queries to a resolver).
 pub const FLAG_RD: u16 = 0x0100;
 /// Header flag: recursion available (set by resolvers in responses).
@@ -744,6 +753,28 @@ impl<'o> MessageWriter<'o> {
             .get_mut(len_at..len_at + 2)
             .ok_or(WireError::BufferTooSmall)?
             .copy_from_slice(&rdlen.to_be_bytes());
+        self.count(index)?;
+        Ok(self)
+    }
+
+    /// Adds an EDNS(0) OPT pseudo-record (RFC 6891) to the additional
+    /// section: root owner, type [`TYPE_OPT`], class `udp_payload_size`
+    /// (the largest UDP reply the sender accepts), extended RCODE, version
+    /// and flags 0, no options. Like [`MessageWriter::record`], only
+    /// additional records may follow it, and it counts towards
+    /// [`MAX_RECORDS`].
+    pub fn edns(mut self, udp_payload_size: u16) -> Result<Self, WireError> {
+        let index = Section::Additional.index();
+        if usize::from(self.counts[1]) + usize::from(self.counts[2]) + usize::from(self.counts[3])
+            >= MAX_RECORDS
+        {
+            return Err(WireError::TooManyRecords);
+        }
+        self.section = index;
+        self.put(&[0])?;
+        self.put(&TYPE_OPT.to_be_bytes())?;
+        self.put(&udp_payload_size.to_be_bytes())?;
+        self.put(&[0; 6])?;
         self.count(index)?;
         Ok(self)
     }
@@ -1737,6 +1768,51 @@ mod tests {
         assert_eq!(
             &out[..n],
             b"\x12\x34\0\0\0\x01\0\0\0\0\0\0\x05_http\x04_tcp\x05local\0\0\x0c\0\x01"
+        );
+    }
+
+    #[test]
+    fn edns_opt_is_written_and_decoded() {
+        let mut out = [0u8; 64];
+        let name = TextName::new("_http._tcp.svc.ns.svc.cluster.local").unwrap();
+        let n = MessageWriter::new(&mut out, 7, FLAG_RD)
+            .unwrap()
+            .question(name, TYPE_SRV, false)
+            .unwrap()
+            .edns(1232)
+            .unwrap()
+            .finish();
+        let m = Message::parse(&out[..n]).unwrap();
+        let recs: Vec<_> = m.records().collect();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].class, 1232);
+        assert_eq!(recs[0].ttl, 0);
+        assert!(recs[0].name.labels().next().is_none(), "root owner");
+        assert_eq!(
+            recs[0].data,
+            Rdata::Other {
+                rtype: TYPE_OPT,
+                data: &[]
+            }
+        );
+        // Additional only: an answer after it is out of order.
+        let w = MessageWriter::new(&mut out, 7, 0)
+            .unwrap()
+            .edns(512)
+            .unwrap();
+        let a = RecordOut {
+            name,
+            ttl: 1,
+            cache_flush: false,
+            data: RecordData::A(Ipv4Addr::LOCALHOST),
+        };
+        assert_eq!(
+            w.record(Section::Answer, &a).unwrap_err(),
+            WireError::SectionOrder
+        );
+        assert_eq!(
+            FLAG_TC & (FLAG_QR | FLAG_AA | FLAG_RD | FLAG_RA | RCODE_MASK),
+            0
         );
     }
 
