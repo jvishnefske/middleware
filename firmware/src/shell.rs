@@ -20,7 +20,9 @@
 //!    BOOT button for the re-key window.
 //! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
 //!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
-//!    ([`uart1`]), all without pins until a payload opens them.
+//!    ([`uart1`]), and on the ESP32 LEDC ([`pwm`]), I2C0 ([`i2c`]) and the
+//!    I2S0 camera receiver ([`camera`]), all without pins until a payload
+//!    opens them.
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
 //!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
 //!    publishes go out over ESP-NOW, `app/...` samples come in, and source
@@ -40,15 +42,21 @@
 
 mod board;
 mod bus;
+#[cfg(all(feature = "esp32", feature = "wasm"))]
+mod camera;
 mod controller;
 #[cfg(feature = "wasm")]
 mod device;
 #[cfg(feature = "wasm")]
 mod gpio;
+#[cfg(all(feature = "esp32", feature = "wasm"))]
+mod i2c;
 #[cfg(feature = "wasm")]
 mod irq;
 mod link;
 mod presence;
+#[cfg(all(feature = "esp32", feature = "wasm"))]
+mod pwm;
 #[cfg(feature = "espnow")]
 mod radio;
 #[cfg(feature = "wasm")]
@@ -216,7 +224,22 @@ pub async fn run(spawner: Spawner) -> ! {
                 if uart.is_some() { "ok" } else { "failed" },
             ));
         }
-        device::HW.put(device::Hw { spi, uart });
+        #[cfg(feature = "esp32")]
+        let (pwm, i2c) = {
+            let cam = board.payload.cam;
+            if !camera::install(cam.i2s0, cam.dma_i2s0) {
+                bus.log(format_args!("camera: I2S0 camera receiver failed to start"));
+            }
+            (Some(pwm::Pwm::new(cam.ledc)), cam.i2c0.map(i2c::Bus0::new))
+        };
+        device::HW.put(device::Hw {
+            spi,
+            uart,
+            #[cfg(feature = "esp32")]
+            pwm,
+            #[cfg(feature = "esp32")]
+            i2c,
+        });
         #[cfg(feature = "espnow")]
         match radio::start(board.wifi) {
             Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),

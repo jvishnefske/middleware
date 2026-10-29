@@ -16,6 +16,8 @@
 //! * [`dma_hw`] — who holds a DMA peripheral's driver and buffers (idle,
 //!   or the running transfer), so a payload stop in any state returns them
 //!   (D6, R12).
+//! * [`pwm`] — the LEDC frequency plan (duty bits per frequency) and the
+//!   ABI duty's mapping onto them (ABI 3 PWM, R15 camera clock).
 //! * [`ring`] — the fixed UART receive ring that drops and counts bytes
 //!   beyond its capacity (D7).
 //!
@@ -27,6 +29,7 @@
 pub mod claims;
 pub mod dma;
 pub mod dma_hw;
+pub mod pwm;
 pub mod ring;
 pub mod timers;
 

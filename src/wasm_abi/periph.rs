@@ -44,7 +44,12 @@ pub const PWM_CHANNELS: usize = 4;
 
 /// Accepted PWM frequency range, in Hz (ABI 3). The board may refuse a
 /// frequency inside it that its timer clock cannot reach (`Unsupported`).
-pub const PWM_FREQ_HZ: core::ops::RangeInclusive<i32> = 1..=1_000_000;
+/// The ceiling is 40 MHz so a payload can clock a camera sensor (an OV2640
+/// takes a 6–24 MHz XCLK; R15); at such rates a timer has only a bit or two
+/// of duty resolution, so the duty is rounded to what the board can do.
+/// (ABI 3 as first released capped this at 1 MHz; raising the cap admits
+/// more requests and refuses none that were valid.)
+pub const PWM_FREQ_HZ: core::ops::RangeInclusive<i32> = 1..=40_000_000;
 
 /// Largest raw `adc_read` result: readings are 12-bit (`0..=ADC_MAX`), so
 /// boards with a different resolution scale to this range (ABI 3).
@@ -529,13 +534,15 @@ mod tests {
         );
         assert!(PwmSpec::parse(0, 1).is_ok());
         assert!(PwmSpec::parse(0, 1_000_000).is_ok());
+        assert!(PwmSpec::parse(0, 20_000_000).is_ok(), "camera XCLK");
+        assert!(PwmSpec::parse(0, 40_000_000).is_ok());
         assert!(
             PwmSpec::parse(MAX_PWM_TIMERS as i32, 1000).is_err(),
             "timer"
         );
         assert!(PwmSpec::parse(-1, 1000).is_err(), "timer");
         assert!(PwmSpec::parse(0, 0).is_err(), "freq");
-        assert!(PwmSpec::parse(0, 1_000_001).is_err(), "freq");
+        assert!(PwmSpec::parse(0, 40_000_001).is_err(), "freq");
         assert!(PwmSpec::parse(0, -5).is_err(), "freq");
         assert_eq!(
             PwmDuty::parse(1, 3, 65_535),

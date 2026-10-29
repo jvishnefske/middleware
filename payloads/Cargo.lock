@@ -63,6 +63,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cam_ov2640_stream"
+version = "0.1.0"
+dependencies = [
+ "middleware",
+ "mw-payload",
+]
+
+[[package]]
 name = "cam_stream"
 version = "0.1.0"
 dependencies = [

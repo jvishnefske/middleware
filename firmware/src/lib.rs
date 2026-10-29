@@ -7,6 +7,9 @@
 //!   largest payload image, and the GPIO tables that decide which pins a
 //!   payload may touch (flash/PSRAM, USB D+/D-, and console UART pins are
 //!   refused).
+//! * [`camera`] — the R15 camera capture decisions: the ESP32 I2S
+//!   camera-mode sample layout ([`camera::extract`]) and the JPEG frame
+//!   assembler that finds `FF D8` … `FF D9` across DMA buffers.
 //! * [`image`] — layout of the payload flash partition: two slots, each a
 //!   header sector (magic, length, CRC-32, generation) followed by the
 //!   image, the boot-slot choice by generation, erase spans, and a
@@ -48,6 +51,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod camera;
 pub mod chip;
 pub mod dispatch;
 pub mod image;

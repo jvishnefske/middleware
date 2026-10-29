@@ -17,7 +17,10 @@
 //! events: PWM records each channel's duty (printed as an event line), ADC
 //! pins read values set by
 //! `!adc` commands, and each I2C bus carries a register device at
-//! [`periph::I2C_DEVICE_ADDR`].
+//! [`periph::I2C_DEVICE_ADDR`]. Bus 0 also carries an OV2640's SCCB
+//! registers ([`periph::ov2640`]), so a camera payload's sensor set-up
+//! runs; [`SimDevice::sensor_summary`] reports what it wrote. There is no
+//! image sensor model: the camera source route is `Unsupported`.
 //!
 //! The ABI 4 DMA routes (requirement R10) run in [`route`]: a test-pattern
 //! source route publishes each due frame as chunks (one printed summary
@@ -46,7 +49,7 @@ use middleware::stream::{Action, FrameSource, Sink};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
-    RouteStat, SinkConfig, SourceConfig, SourceKind, SpiConfig, TimerSpec, UartConfig,
+    RouteStat, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec, UartConfig,
 };
 
 use panel::Panel;
@@ -437,6 +440,28 @@ impl SimDevice {
         &self.panel
     }
 
+    /// The OV2640 model's state once a payload has written to it: one line
+    /// with its write and soft-reset counts, then one per bank with the
+    /// registers that differ from their defaults (`reg=value` in hex).
+    /// Empty if nothing was written.
+    pub fn sensor_summary(&self) -> Vec<String> {
+        let cam = self.i2c.ov2640();
+        if cam.writes() == 0 {
+            return Vec::new();
+        }
+        let regs = |bank| {
+            cam.changed(bank)
+                .iter()
+                .map(|(r, v)| format!(" {r:02x}={v:02x}"))
+                .collect::<String>()
+        };
+        vec![
+            format!("ov2640 writes {} resets {}", cam.writes(), cam.resets()),
+            format!("ov2640 dsp{}", regs(periph::ov2640::Bank::Dsp)),
+            format!("ov2640 sensor{}", regs(periph::ov2640::Bank::Sensor)),
+        ]
+    }
+
     /// One line per running route with its counters.
     pub fn route_summary(&self) -> Vec<String> {
         self.routes
@@ -812,17 +837,18 @@ impl Device for SimDevice {
         result
     }
 
-    /// Only the test pattern; the camera is `Unsupported`. RGB565 configs
+    /// Only the test pattern; the camera is `Unsupported` (the OV2640
+    /// model has registers but no image sensor). RGB565 configs
     /// stream the generated pattern, JPEG configs the baked 240×240 or
     /// 120×120 frames (other JPEG sizes are `InvalidArgument`). The first
     /// frame is due one period from now.
     fn route_source(
         &mut self,
-        source: SourceKind,
+        source: Source,
         key: Key<'_>,
         cfg: SourceConfig,
     ) -> Result<u8, AbiError> {
-        if source != SourceKind::TestPattern {
+        if source != Source::TestPattern {
             return Err(AbiError::Unsupported);
         }
         let frames = FrameSource::test_pattern(&cfg)?;
@@ -835,7 +861,8 @@ impl Device for SimDevice {
             stats: Default::default(),
         }))?;
         self.event(format!(
-            "route{handle} source {source:?} {}x{} {:?} every {} ms on {key} ({} B chunks)",
+            "route{handle} source {:?} {}x{} {:?} every {} ms on {key} ({} B chunks)",
+            source.kind(),
             cfg.width, cfg.height, cfg.format, cfg.period_ms, cfg.chunk_data
         ));
         Ok(handle)
@@ -887,6 +914,7 @@ impl Device for SimDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_host::CameraPins;
 
     #[test]
     fn parses_arguments() {
@@ -1239,10 +1267,10 @@ mod tests {
             .unwrap();
         let mut cam = SimDevice::default();
         assert_eq!(
-            cam.route_source(SourceKind::Camera, key, cfg),
+            cam.route_source(Source::Camera(CameraPins::AI_THINKER), key, cfg),
             Err(AbiError::Unsupported)
         );
-        assert_eq!(cam.route_source(SourceKind::TestPattern, key, cfg), Ok(0));
+        assert_eq!(cam.route_source(Source::TestPattern, key, cfg), Ok(0));
         let mut view = SimDevice::default();
         let window = Preamble::mipi_window(X0, Y0, X0 + W - 1, Y0 + H - 1).unwrap();
         let sink = SinkConfig::new(13, cfg.frame_len())
@@ -1404,11 +1432,11 @@ mod tests {
         let mut cam = SimDevice::default();
         let odd = SourceConfig::jpeg(200, 200, 100).unwrap();
         assert_eq!(
-            cam.route_source(SourceKind::TestPattern, key, odd),
+            cam.route_source(Source::TestPattern, key, odd),
             Err(AbiError::InvalidArgument)
         );
         let cfg = SourceConfig::jpeg(240, 240, 100).unwrap();
-        assert_eq!(cam.route_source(SourceKind::TestPattern, key, cfg), Ok(0));
+        assert_eq!(cam.route_source(Source::TestPattern, key, cfg), Ok(0));
         for n in 0..10u32 {
             cam.advance_to(u64::from(n + 1) * 100_000);
             let want = fixtures::JPEG_240.frame(n);

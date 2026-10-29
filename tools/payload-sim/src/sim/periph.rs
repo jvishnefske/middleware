@@ -23,8 +23,10 @@
 //! * [`I2c`] — buses `0..I2C_BUSES`, each with a 256-byte register device
 //!   at [`I2C_DEVICE_ADDR`]: a write `[reg, data...]` stores `data` from
 //!   `reg` and sets the register pointer to `reg`; a read returns registers
-//!   from the pointer, auto-incrementing (wrapping at 256). Any other
-//!   address does not acknowledge ([`AbiError::Transport`]).
+//!   from the pointer, auto-incrementing (wrapping at 256). Bus 0 also
+//!   carries an OV2640's SCCB registers at [`ov2640::OV2640_ADDR`]
+//!   ([`ov2640::Ov2640`]: ID, banks, soft reset; no image sensor). Any
+//!   other address does not acknowledge ([`AbiError::Transport`]).
 //!
 //! Using a peripheral before opening it, or starting a transfer while one
 //! is in flight, is [`AbiError::Busy`].
@@ -39,6 +41,10 @@ use wasm_host::{
 };
 
 use super::PINS;
+
+pub mod ov2640;
+
+use ov2640::{OV2640_ADDR, Ov2640};
 
 /// One running timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,10 +391,11 @@ impl Default for I2cBus {
     }
 }
 
-/// The I2C buses.
+/// The I2C buses, and the OV2640 on bus 0.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct I2c {
     buses: [I2cBus; I2C_BUSES as usize],
+    camera: Ov2640,
 }
 
 impl I2c {
@@ -404,6 +411,11 @@ impl I2c {
             .ok_or(AbiError::InvalidArgument)
     }
 
+    /// The OV2640 register model on bus 0.
+    pub fn ov2640(&self) -> &Ov2640 {
+        &self.camera
+    }
+
     /// Writes `tx`, then reads `rx`, from the device at `addr`.
     pub fn transfer(
         &mut self,
@@ -415,6 +427,9 @@ impl I2c {
         let b = self.bus(bus)?;
         if b.config.is_none() {
             return Err(AbiError::Busy);
+        }
+        if bus == 0 && addr == OV2640_ADDR {
+            return self.camera.transfer(tx, rx);
         }
         if addr != I2C_DEVICE_ADDR {
             return Err(AbiError::Transport);
@@ -582,5 +597,37 @@ mod tests {
         assert_eq!(two, [1, 2], "read-only continues from the pointer");
         assert_eq!(i.transfer(0, 0x51, &[0], &mut rx), Err(AbiError::Transport));
         assert_eq!(i.transfer(1, 0x50, &[0], &mut rx), Err(AbiError::Busy));
+    }
+
+    #[test]
+    fn i2c_bus_0_carries_the_ov2640() {
+        let mut i = I2c::default();
+        let mut id = [0u8; 1];
+        assert_eq!(
+            i.transfer(0, OV2640_ADDR, &[0xFF, 1], &mut []),
+            Err(AbiError::Busy),
+            "bus not open"
+        );
+        for bus in 0..2 {
+            i.open(I2cConfig {
+                bus,
+                freq_hz: 100_000,
+            })
+            .unwrap();
+        }
+        i.transfer(0, OV2640_ADDR, &[0xFF, 1], &mut []).unwrap();
+        i.transfer(0, OV2640_ADDR, &[0x0A], &mut []).unwrap();
+        i.transfer(0, OV2640_ADDR, &[], &mut id).unwrap();
+        assert_eq!(id, [ov2640::PID]);
+        assert_eq!(i.ov2640().writes(), 1);
+        assert_eq!(
+            i.transfer(1, OV2640_ADDR, &[0x0A], &mut id),
+            Err(AbiError::Transport),
+            "only on bus 0"
+        );
+        // The register device is unaffected.
+        i.transfer(0, I2C_DEVICE_ADDR, &[0x0A, 7], &mut []).unwrap();
+        i.transfer(0, I2C_DEVICE_ADDR, &[0x0A], &mut id).unwrap();
+        assert_eq!(id, [7]);
     }
 }

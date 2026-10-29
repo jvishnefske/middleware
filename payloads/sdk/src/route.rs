@@ -42,8 +42,9 @@ use crate::spi::Spi;
 use crate::{AbiError, check, len_i32, ptr_i32, sys};
 pub use middleware::stream::{ESPNOW_CHUNK_DATA, MAX_CHUNK_DATA, MAX_FRAME_BYTES};
 pub use middleware::wasm_abi::route::{
-    MAX_DIM, MAX_PREAMBLE, MAX_ROUTES, MAX_SEGMENTS, MAX_SINK_CFG_LEN, MIN_PERIOD_MS, PixelFormat,
-    Preamble, RouteStat, Segment, SinkConfig, SourceConfig, SourceKind, route_handle,
+    CAMERA_CFG_LEN, CAMERA_PINS_LEN, CameraPins, MAX_DIM, MAX_PREAMBLE, MAX_ROUTES, MAX_SEGMENTS,
+    MAX_SINK_CFG_LEN, MIN_PERIOD_MS, PixelFormat, Preamble, RouteStat, Segment, SinkConfig, Source,
+    SourceConfig, SourceKind, route_handle,
 };
 
 /// What happened to a route, from [`Route::on_event`].
@@ -76,14 +77,42 @@ impl Route {
     /// [`SourceConfig::validated`]; from the host, `InvalidKey` for a
     /// reserved or malformed key, `Unsupported` for a source the board
     /// lacks, `NoResources` when [`MAX_ROUTES`] are running.
+    /// [`SourceKind::Camera`] needs its pins, so it is `InvalidArgument`
+    /// here; start a camera with [`Route::camera`].
     pub fn source(source: SourceKind, key: &str, cfg: &SourceConfig) -> Result<Self, AbiError> {
-        let cfg = cfg.validated()?.encode();
+        match source {
+            SourceKind::TestPattern => Self::start(Source::TestPattern, key, cfg),
+            // The camera needs its pins: use `Route::camera`.
+            SourceKind::Camera => Err(AbiError::InvalidArgument),
+        }
+    }
+
+    /// Starts a source route publishing the frames of the camera wired to
+    /// `pins` on `key` (R15). The payload configures the sensor first
+    /// (power, clock, registers over [`I2c`](crate::i2c::I2c)); `cfg` must
+    /// be JPEG with the size the sensor was set to, and its period is the
+    /// shortest interval between published frames.
+    ///
+    /// `InvalidArgument` (before calling the host) for a config other than
+    /// JPEG, one that breaks a rule of [`SourceConfig::validated`] or pins
+    /// that repeat; from the host, `Unsupported` without a camera or for
+    /// pins the board cannot use, plus the errors of [`Route::source`].
+    pub fn camera(key: &str, cfg: &SourceConfig, pins: CameraPins) -> Result<Self, AbiError> {
+        if cfg.format != PixelFormat::Jpeg {
+            return Err(AbiError::InvalidArgument);
+        }
+        Self::start(Source::Camera(pins.validated()?), key, cfg)
+    }
+
+    fn start(source: Source, key: &str, cfg: &SourceConfig) -> Result<Self, AbiError> {
+        let (bytes, len) = source.encode(&cfg.validated()?);
+        let bytes = bytes.get(..len).ok_or(AbiError::InvalidArgument)?;
         Self::started(sys::route_source(
-            source as i32,
+            source.kind() as i32,
             ptr_i32(key.as_bytes()),
             len_i32(key.len())?,
-            ptr_i32(&cfg),
-            len_i32(cfg.len())?,
+            ptr_i32(bytes),
+            len_i32(bytes.len())?,
         ))
     }
 
@@ -164,6 +193,36 @@ mod tests {
         let ok = SourceConfig::new(120, 120, 100).expect("valid");
         assert_eq!(
             Route::source(SourceKind::TestPattern, "app/cam/frame", &ok),
+            Err(AbiError::Unsupported),
+            "host stub"
+        );
+    }
+
+    #[test]
+    fn camera_needs_jpeg_and_distinct_pins_and_reaches_the_host() {
+        let jpeg = SourceConfig::jpeg(240, 240, 500).expect("valid");
+        let bad = Err(AbiError::InvalidArgument);
+        assert_eq!(
+            Route::source(SourceKind::Camera, "app/cam/jpeg", &jpeg),
+            bad,
+            "camera without pins"
+        );
+        let rgb = SourceConfig::new(120, 120, 100).expect("valid");
+        assert_eq!(
+            Route::camera("app/cam/jpeg", &rgb, CameraPins::AI_THINKER),
+            bad
+        );
+        let mut dup = CameraPins::AI_THINKER;
+        dup.pclk = dup.href;
+        assert_eq!(Route::camera("app/cam/jpeg", &jpeg, dup), bad);
+        let mut slow = jpeg;
+        slow.period_ms = 1;
+        assert_eq!(
+            Route::camera("app/cam/jpeg", &slow, CameraPins::AI_THINKER),
+            bad
+        );
+        assert_eq!(
+            Route::camera("app/cam/jpeg", &jpeg, CameraPins::AI_THINKER),
             Err(AbiError::Unsupported),
             "host stub"
         );

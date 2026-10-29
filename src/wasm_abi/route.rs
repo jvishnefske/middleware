@@ -29,6 +29,27 @@
 //! | 2     | frame period in ms, `MIN_PERIOD_MS..`                          |
 //! | 2     | chunk data bytes, `1..=MAX_CHUNK_DATA`, 0 = [`ESPNOW_CHUNK_DATA`] |
 //!
+//! For [`SourceKind::Camera`] the config is [`CAMERA_CFG_LEN`] bytes: the
+//! same ten bytes (the format must be JPEG: width and height are the frame
+//! size the payload configured on the sensor, the period is the minimum
+//! interval between frames) followed by the camera's parallel-port pins
+//! ([`CameraPins`], one byte each):
+//!
+//! | bytes | field                                                         |
+//! |-------|---------------------------------------------------------------|
+//! | 10    | the source config above, format 1 (JPEG)                       |
+//! | 8     | data pins D0..D7                                               |
+//! | 1     | VSYNC pin                                                      |
+//! | 1     | HREF pin                                                       |
+//! | 1     | PCLK pin                                                       |
+//!
+//! The eleven pins must be distinct; they are inputs, so a board may accept
+//! input-only pins for them. The payload sets the sensor up itself (power,
+//! clock, register writes over `i2c_transfer`) before it starts the route;
+//! the host only receives the frames ([`parse_source`] checks the layout,
+//! the board checks the pins). [`TestPattern`](SourceKind::TestPattern)
+//! takes exactly [`SOURCE_CFG_LEN`] bytes ([`source_cfg_len`]).
+//!
 //! For RGB565 every frame is exactly `width * height * 2` bytes, at most
 //! [`MAX_FRAME_BYTES`]. For JPEG, width and height describe the image and
 //! the frame length varies from frame to frame: each frame's length is the
@@ -83,6 +104,13 @@ pub const MIN_PERIOD_MS: u16 = 10;
 /// Exact length of a `route_source` config.
 pub const SOURCE_CFG_LEN: usize = 10;
 
+/// Bytes of a [`CameraPins`] block.
+pub const CAMERA_PINS_LEN: usize = 11;
+
+/// Exact length of a `route_source` config for [`SourceKind::Camera`]: the
+/// [`SourceConfig`] followed by the [`CameraPins`].
+pub const CAMERA_CFG_LEN: usize = SOURCE_CFG_LEN + CAMERA_PINS_LEN;
+
 /// Fixed part of a `route_sink` config, before the segments.
 pub const SINK_HEADER_LEN: usize = 7;
 
@@ -114,6 +142,145 @@ impl SourceKind {
             1 => Ok(SourceKind::Camera),
             _ => Err(AbiError::InvalidArgument),
         }
+    }
+}
+
+/// The `cfg_len` `route_source` requires for `kind`: [`SOURCE_CFG_LEN`]
+/// for the test pattern, [`CAMERA_CFG_LEN`] for the camera.
+pub const fn source_cfg_len(kind: SourceKind) -> usize {
+    match kind {
+        SourceKind::TestPattern => SOURCE_CFG_LEN,
+        SourceKind::Camera => CAMERA_CFG_LEN,
+    }
+}
+
+/// The parallel-port pins of a camera source (8-bit DVP: data, frame and
+/// line strobes, pixel clock), all inputs to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CameraPins {
+    /// D0..D7, least significant bit first.
+    pub data: [u8; 8],
+    /// Frame strobe (VSYNC).
+    pub vsync: u8,
+    /// Line strobe: data is valid while it is high (HREF).
+    pub href: u8,
+    /// Pixel clock: data is sampled on its rising edge (PCLK).
+    pub pclk: u8,
+}
+
+impl CameraPins {
+    /// The AI-Thinker ESP32-CAM's OV2640 port: D0..D7 = 5, 18, 19, 21, 36,
+    /// 39, 34, 35; VSYNC 25, HREF 23, PCLK 22.
+    pub const AI_THINKER: CameraPins = CameraPins {
+        data: [5, 18, 19, 21, 36, 39, 34, 35],
+        vsync: 25,
+        href: 23,
+        pclk: 22,
+    };
+
+    /// Every pin, in wire order (D0..D7, VSYNC, HREF, PCLK).
+    pub const fn all(&self) -> [u8; CAMERA_PINS_LEN] {
+        let d = self.data;
+        [d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], self.vsync, self.href, self.pclk]
+    }
+
+    /// The pin block bytes ([`CameraPins::all`]).
+    pub const fn encode(&self) -> [u8; CAMERA_PINS_LEN] {
+        self.all()
+    }
+
+    /// The pins, if they are distinct; `InvalidArgument` otherwise.
+    pub const fn validated(self) -> Result<Self, AbiError> {
+        let all = self.all();
+        let mut i = 0;
+        while i < CAMERA_PINS_LEN {
+            let mut j = i + 1;
+            while j < CAMERA_PINS_LEN {
+                if all[i] == all[j] {
+                    return Err(AbiError::InvalidArgument);
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        Ok(self)
+    }
+
+    /// Parses a pin block of exactly [`CAMERA_PINS_LEN`] distinct pins.
+    pub fn parse(bytes: &[u8]) -> Result<Self, AbiError> {
+        let b: &[u8; CAMERA_PINS_LEN] = bytes.try_into().map_err(|_| AbiError::InvalidArgument)?;
+        let [d0, d1, d2, d3, d4, d5, d6, d7, vsync, href, pclk] = *b;
+        CameraPins {
+            data: [d0, d1, d2, d3, d4, d5, d6, d7],
+            vsync,
+            href,
+            pclk,
+        }
+        .validated()
+    }
+}
+
+/// A data source with what it needs to run: the parsed `source` argument of
+/// `route_source` together with its source-specific config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// [`SourceKind::TestPattern`].
+    TestPattern,
+    /// [`SourceKind::Camera`] on these pins.
+    Camera(CameraPins),
+}
+
+impl Source {
+    /// The source's kind.
+    pub const fn kind(&self) -> SourceKind {
+        match self {
+            Source::TestPattern => SourceKind::TestPattern,
+            Source::Camera(_) => SourceKind::Camera,
+        }
+    }
+
+    /// The `cfg` bytes of `route_source` for this source and `cfg`; returns
+    /// the buffer and the length to pass ([`source_cfg_len`]).
+    pub const fn encode(&self, cfg: &SourceConfig) -> ([u8; CAMERA_CFG_LEN], usize) {
+        let head = cfg.encode();
+        let mut out = [0u8; CAMERA_CFG_LEN];
+        let mut i = 0;
+        while i < SOURCE_CFG_LEN {
+            out[i] = head[i];
+            i += 1;
+        }
+        match self {
+            Source::TestPattern => (out, SOURCE_CFG_LEN),
+            Source::Camera(pins) => {
+                let p = pins.encode();
+                let mut j = 0;
+                while j < CAMERA_PINS_LEN {
+                    out[SOURCE_CFG_LEN + j] = p[j];
+                    j += 1;
+                }
+                (out, CAMERA_CFG_LEN)
+            }
+        }
+    }
+}
+
+/// Parses the `cfg` bytes of `route_source` for a source of `kind`: the
+/// [`SourceConfig`], plus for the camera its [`CameraPins`]. A camera config
+/// must be JPEG (the sensor's compressed output); anything else, or a
+/// length other than [`source_cfg_len`], is `InvalidArgument`.
+pub fn parse_source(kind: SourceKind, cfg: &[u8]) -> Result<(Source, SourceConfig), AbiError> {
+    let bad = AbiError::InvalidArgument;
+    if cfg.len() != source_cfg_len(kind) {
+        return Err(bad);
+    }
+    let (head, pins) = cfg.split_at_checked(SOURCE_CFG_LEN).ok_or(bad)?;
+    let config = SourceConfig::parse(head)?;
+    match kind {
+        SourceKind::TestPattern => Ok((Source::TestPattern, config)),
+        SourceKind::Camera if config.format == PixelFormat::Jpeg => {
+            Ok((Source::Camera(CameraPins::parse(pins)?), config))
+        }
+        SourceKind::Camera => Err(bad),
     }
 }
 
@@ -598,6 +765,54 @@ mod tests {
             SourceConfig::parse(&[240, 0, 240, 0, 1, 1, 200, 0, 166, 0]),
             bad,
             "flags"
+        );
+    }
+
+    #[test]
+    fn camera_config_layout_and_rules() {
+        let cfg = SourceConfig::jpeg(240, 240, 500).expect("valid");
+        let cam = Source::Camera(CameraPins::AI_THINKER);
+        let (bytes, len) = cam.encode(&cfg);
+        assert_eq!(len, CAMERA_CFG_LEN);
+        assert_eq!(CAMERA_CFG_LEN, 21);
+        assert_eq!(
+            bytes,
+            [
+                240, 0, 240, 0, 1, 0, 0xF4, 1, 166, 0, // 240x240 JPEG, 500 ms, 166
+                5, 18, 19, 21, 36, 39, 34, 35, // D0..D7
+                25, 23, 22, // VSYNC, HREF, PCLK
+            ]
+        );
+        assert_eq!(parse_source(SourceKind::Camera, &bytes), Ok((cam, cfg)));
+        assert_eq!(cam.kind(), SourceKind::Camera);
+        assert_eq!(source_cfg_len(SourceKind::Camera), CAMERA_CFG_LEN);
+        assert_eq!(source_cfg_len(SourceKind::TestPattern), SOURCE_CFG_LEN);
+        // The test pattern takes the ten bytes alone.
+        let (tp, n) = Source::TestPattern.encode(&cfg);
+        assert_eq!(n, SOURCE_CFG_LEN);
+        assert_eq!(
+            parse_source(SourceKind::TestPattern, &tp[..n]),
+            Ok((Source::TestPattern, cfg))
+        );
+        let bad = Err(AbiError::InvalidArgument);
+        assert_eq!(parse_source(SourceKind::TestPattern, &bytes), bad, "pins on a pattern");
+        assert_eq!(parse_source(SourceKind::Camera, &bytes[..20]), bad, "short");
+        assert_eq!(parse_source(SourceKind::Camera, &tp[..n]), bad, "no pins");
+        let mut rgb = bytes;
+        rgb[4] = 0;
+        rgb[0] = 120;
+        rgb[2] = 120;
+        assert_eq!(parse_source(SourceKind::Camera, &rgb), bad, "camera must be JPEG");
+        let mut dup = bytes;
+        dup[20] = 5; // PCLK on D0's pin
+        assert_eq!(parse_source(SourceKind::Camera, &dup), bad, "pins must differ");
+        let mut flags = bytes;
+        flags[5] = 1;
+        assert_eq!(parse_source(SourceKind::Camera, &flags), bad, "head rules apply");
+        assert_eq!(CameraPins::parse(&[0; 10]), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            CameraPins::parse(&CameraPins::AI_THINKER.encode()),
+            Ok(CameraPins::AI_THINKER)
         );
     }
 

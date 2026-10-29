@@ -122,7 +122,8 @@ mod tests {
         let bad = Err(AbiError::InvalidArgument);
         assert_eq!(Pwm::open(MAX_PWM_TIMERS as u8, 1000), bad);
         assert_eq!(Pwm::open(0, 0), bad);
-        assert_eq!(Pwm::open(0, 1_000_001), bad);
+        assert_eq!(Pwm::open(0, 40_000_001), bad);
+        assert_eq!(Pwm::open(0, 20_000_000), Err(AbiError::Unsupported), "valid; no host");
         assert_eq!(Pwm::open(0, u32::MAX), bad);
         assert_eq!(Pwm::open(5, 20_000), Err(AbiError::Unsupported));
         assert_eq!(

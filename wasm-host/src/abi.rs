@@ -46,7 +46,7 @@ use middleware::Key;
 
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
-use middleware::wasm_abi::route::{self, SinkConfig, SourceConfig, SourceKind};
+use middleware::wasm_abi::route::{self, SinkConfig, Source, SourceConfig, SourceKind};
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
 
 use crate::{LoadError, Ticked};
@@ -538,8 +538,8 @@ pub fn i2c_transfer(
 /// A validated `route_source` request (ABI 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePlan<'m> {
-    /// The data source.
-    pub source: SourceKind,
+    /// The data source (with the camera's pins).
+    pub source: Source,
     /// The publish key (not under `sys/`).
     pub key: Key<'m>,
     /// Frame geometry, rate and chunk size.
@@ -547,14 +547,15 @@ pub struct SourcePlan<'m> {
 }
 
 /// Plans `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` against
-/// linear memory `mem`: the source kind and config length first, then the
-/// key and config pointers, then their contents.
+/// linear memory `mem`: the source kind and config length
+/// ([`route::source_cfg_len`]: 10 bytes, 21 for the camera) first, then
+/// the key and config pointers, then their contents.
 pub fn route_source(
     (source, kp, kl, cp, cl): (i32, i32, i32, i32, i32),
     mem: &[u8],
 ) -> Result<SourcePlan<'_>, AbiError> {
-    let source = SourceKind::from_i32(source)?;
-    if usize::try_from(cl).ok() != Some(route::SOURCE_CFG_LEN) {
+    let kind = SourceKind::from_i32(source)?;
+    if usize::try_from(cl).ok() != Some(route::source_cfg_len(kind)) {
         return Err(AbiError::InvalidArgument);
     }
     let key = mem
@@ -563,11 +564,9 @@ pub fn route_source(
     let cfg = mem
         .get(wasm_abi::guest_range(cp, cl, mem.len())?)
         .ok_or(AbiError::OutOfBounds)?;
-    Ok(SourcePlan {
-        source,
-        key: payload_key(key)?,
-        cfg: SourceConfig::parse(cfg)?,
-    })
+    let key = payload_key(key)?;
+    let (source, cfg) = route::parse_source(kind, cfg)?;
+    Ok(SourcePlan { source, key, cfg })
 }
 
 /// A validated `route_sink` request (ABI 4).
@@ -1094,7 +1093,7 @@ mod tests {
         let cfg = SourceConfig::new(120, 120, 100).expect("valid").encode();
         mem[16..26].copy_from_slice(&cfg);
         let plan = route_source((0, 0, 7, 16, 10), &mem).expect("valid");
-        assert_eq!(plan.source, SourceKind::TestPattern);
+        assert_eq!(plan.source, Source::TestPattern);
         assert_eq!(plan.key.as_str(), "app/cam");
         assert_eq!(plan.cfg.frame_len(), 28_800);
         let bad = Err(AbiError::InvalidArgument);
@@ -1125,6 +1124,16 @@ mod tests {
         mem[20] = 1; // JPEG
         let jpeg = route_source((0, 0, 7, 16, 10), &mem).expect("JPEG is valid");
         assert_eq!(jpeg.cfg.format, route::PixelFormat::Jpeg);
+        // The camera takes 21 bytes: the JPEG config, then its pins.
+        assert_eq!(route_source((1, 0, 7, 16, 10), &mem), bad, "camera needs pins");
+        mem[26..37].copy_from_slice(&route::CameraPins::AI_THINKER.encode());
+        let cam = route_source((1, 0, 7, 16, 21), &mem).expect("camera is valid");
+        assert_eq!(cam.source, Source::Camera(route::CameraPins::AI_THINKER));
+        assert_eq!(cam.cfg.format, route::PixelFormat::Jpeg);
+        assert_eq!(route_source((0, 0, 7, 16, 21), &mem), bad, "pattern takes 10");
+        assert_eq!(route_source((1, 0, 7, 500, 10), &mem), bad, "cam len first");
+        mem[36] = 5; // PCLK on D0's pin
+        assert_eq!(route_source((1, 0, 7, 16, 21), &mem), bad, "pins differ");
     }
 
     #[test]

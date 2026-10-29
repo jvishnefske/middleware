@@ -21,8 +21,14 @@
 //! The ABI 3 PWM and I2C imports print `pwm<t> open <f> Hz`,
 //! `pwm<t>.<ch> duty <d>`, `pwm<t> stop`, `i2c<bus> open <f> Hz` and
 //! `i2c<bus> <addr> w <bytes> r <bytes>` (or the error). Each I2C bus has a
-//! 256-byte register device at address 0x50; other addresses do not
-//! acknowledge.
+//! 256-byte register device at address 0x50. Bus 0 also has an OV2640's
+//! SCCB registers at 0x30 (two banks selected by register 0xFF, `PID` 0x26
+//! and `VER` 0x42 in the sensor bank, `COM7` bit 7 a soft reset); once a
+//! payload has written to it, the run ends with `ov2640 writes <n> resets
+//! <r>` and the registers each bank holds that differ from their defaults
+//! (`ov2640 dsp <reg>=<value> ...`, `ov2640 sensor ...`). Other addresses
+//! do not acknowledge. There is no image sensor: a camera source route is
+//! `Unsupported`.
 //!
 //! Hardware timers run on the simulator clock. `spi_transfer` loops the
 //! transmitted bytes back (or returns `--spi-pattern`, repeated) and
@@ -291,6 +297,9 @@ impl Bench {
     fn finish(&mut self, opts: &Options) {
         for n in &mut self.nodes {
             for line in n.device().route_summary() {
+                n.device().note(line);
+            }
+            for line in n.device().sensor_summary() {
                 n.device().note(line);
             }
             let fuel = n.payload.fuel_stats();

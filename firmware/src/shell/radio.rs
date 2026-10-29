@@ -20,9 +20,17 @@
 //!   broadcast through the transport;
 //! * a source-route chunk due in [`SOURCES`]: written into the frame buffer
 //!   by `esp_base::route::source::write_frame` (radio header, key, chunk
-//!   header, then the pattern bytes generated in place or the JPEG bytes
-//!   copied from the flash-resident fixture) and broadcast with the radio
-//!   directly.
+//!   header, then the pattern bytes generated in place, the JPEG bytes
+//!   copied from the flash-resident fixture, or the camera frame's bytes
+//!   copied from the camera's frame buffer) and broadcast with the radio
+//!   directly;
+//! * a camera frame due (ESP32, R15): captured by `super::camera::capture`
+//!   in this task (bounded, yielding while the DMA fills), then sent chunk
+//!   by chunk like any other frame. The first captures and every 16th are
+//!   logged on `sys/log` with their length, time and DMA byte count, and
+//!   the first captured frame and every 64th are also published on the
+//!   serial links as `dbg/cam/jpeg` chunks (a debug mirror, paced at one
+//!   chunk per 25 ms), so a host can decode what the camera sees.
 //!
 //! Every broadcast is awaited until esp-radio's send callback, bounded by
 //! `SEND_TIMEOUT_MS`, so at most one frame waits in the Wi-Fi driver: that
@@ -60,12 +68,15 @@ use esp_base::radio::{
     TX_PAYLOAD,
 };
 use esp_base::perf::RadioTime;
-use esp_base::route::sources::{Due, Job, SourceTable};
-use esp_base::route::{Report, source::write_frame};
+use esp_base::route::source::{Feed, write_frame};
+use esp_base::route::sources::{Capture, Due, Job, SourceTable};
+use esp_base::route::Report;
 use esp_radio::esp_now::{BROADCAST_ADDRESS, EspNowError, EspNowReceiver, EspNowSender};
 use esp_radio::wifi::{ControllerConfig, SecondaryChannel, WifiController, WifiError};
 use heapless::{String, Vec};
 use middleware::espnow::{EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, Mac};
+#[cfg(feature = "esp32")]
+use middleware::stream::{FrameSet, FrameSource};
 use middleware::{AsKey, Key, Publisher, Sample, Subscriber};
 use static_cell::StaticCell;
 
@@ -113,6 +124,19 @@ fn add_time(start_us: u64, frames: u32) {
 pub fn take_time() -> RadioTime {
     TIME.lock(|t| core::mem::take(&mut *t.borrow_mut()))
 }
+
+/// Serial key of the camera frame mirror (ESP32): the first captured frame
+/// of a boot and every [`MIRROR_EVERY`]th are also published on the serial
+/// links, so a host can see what the camera sees (`mwctl monitor`).
+#[cfg(feature = "esp32")]
+const MIRROR_KEY: Key<'static> = Key::from_static("dbg/cam/jpeg");
+/// One captured frame in this many is mirrored.
+#[cfg(feature = "esp32")]
+const MIRROR_EVERY: u32 = 64;
+/// Pause after each mirrored chunk: one ~180-byte frame takes about 16 ms
+/// at 115 200 baud.
+#[cfg(feature = "esp32")]
+const MIRROR_PACE_MS: u64 = 25;
 
 /// The running source routes, shared with the controller.
 pub static SOURCES: Mutex<CriticalSectionRawMutex, RefCell<SourceTable>> =
@@ -273,6 +297,9 @@ struct Radio {
     /// Radio sequence number of route chunks (the transport keeps its own
     /// for publishes; receivers deduplicate per sender and key).
     route_seq: u8,
+    /// Camera captures so far (for the log).
+    #[cfg(feature = "esp32")]
+    captures: u32,
     bus: &'static Bus,
 }
 
@@ -318,13 +345,81 @@ impl Radio {
         self.counters = self.counters.sent(ok);
     }
 
+    /// Captures one camera frame for `capture`'s route; folds the result
+    /// into the route and raises its events (ESP32 only; elsewhere no route
+    /// can ask).
+    async fn capture(&mut self, capture: Capture) {
+        #[cfg(feature = "esp32")]
+        let result = {
+            let (result, seen) = super::camera::capture().await;
+            self.captures = self.captures.wrapping_add(1);
+            // The first captures and then one in 16 are logged.
+            if self.captures <= 4 || self.captures.is_multiple_of(16) {
+                self.bus.log(format_args!(
+                    "camera: capture {} {:?} in {} ms (DMA {} B, skipped {} B, head {:02x?})",
+                    self.captures, result, seen.ms, seen.raw, seen.skipped, seen.head
+                ));
+            }
+            if let Ok(len) = result
+                && (self.captures == 1 || self.captures.is_multiple_of(MIRROR_EVERY))
+            {
+                self.mirror(len).await;
+            }
+            result
+        };
+        #[cfg(not(feature = "esp32"))]
+        let result = Err(esp_base::route::source::CaptureFault::Hardware);
+        let now = now_ms();
+        let time_us = irq::now_us() as u32;
+        update(|table| {
+            let (next, report) = table.captured(capture, result, now);
+            for event in report.events(capture.handle, time_us).into_iter().flatten() {
+                irq::push(event);
+            }
+            (next, ())
+        });
+    }
+
+    /// Publishes the captured frame of `len` bytes on the serial links as
+    /// [`MIRROR_KEY`] chunks (the stream wire format, 166 data bytes each),
+    /// paced so the links' outbound queue never overflows.
+    #[cfg(feature = "esp32")]
+    async fn mirror(&mut self, len: u32) {
+        let Ok(chunker) = middleware::stream::Chunker::new(0, len, middleware::stream::ESPNOW_CHUNK_DATA) else {
+            return;
+        };
+        for plan in chunker.chunks() {
+            let mut msg = [0u8; middleware::stream::HEADER_LEN + middleware::stream::ESPNOW_CHUNK_DATA];
+            let n = plan.range.len();
+            let filled = super::camera::with_frame(len, |frame| {
+                let (head, data) = msg.split_at_mut(middleware::stream::HEADER_LEN);
+                let header = plan.header.encode(n).ok()?;
+                head.copy_from_slice(&header);
+                data.get_mut(..n)?.copy_from_slice(frame.get(plan.range.clone())?);
+                Some(())
+            })
+            .flatten();
+            if filled.is_none() {
+                return;
+            }
+            if let Some(bytes) = msg.get(..middleware::stream::HEADER_LEN + n) {
+                let _ = self.bus.publish(MIRROR_KEY, bytes);
+            }
+            Timer::after_millis(MIRROR_PACE_MS).await;
+        }
+    }
+
     /// Writes and broadcasts one route chunk; folds the result into the
     /// route and raises its events.
     async fn chunk(&mut self, job: Job, frame: &mut [u8; MAX_FRAME]) {
         let seq = self.route_seq;
         self.route_seq = seq.wrapping_add(1);
-        let ok = match write_frame(frame, seq, job.key.as_key(), job.frame, &job.source, &job.plan) {
-            Ok(n) => match frame.get(..n) {
+        let written = match job.feed {
+            Feed::Stored(source) => write_frame(frame, seq, job.key.as_key(), job.frame, &source, &job.plan).ok(),
+            Feed::Camera { len } => camera_chunk(frame, seq, &job, len),
+        };
+        let ok = match written {
+            Some(n) => match frame.get(..n) {
                 Some(bytes) => matches!(
                     with_timeout(
                         Duration::from_millis(SEND_TIMEOUT_MS),
@@ -335,7 +430,7 @@ impl Radio {
                 ),
                 None => false,
             },
-            Err(_) => false,
+            None => false,
         };
         self.counters = self.counters.sent(ok);
         let now = now_ms();
@@ -368,17 +463,47 @@ impl Radio {
     }
 }
 
+/// Writes the ESP-NOW frame of a camera chunk, its bytes copied from the
+/// camera's frame buffer (ESP32 only).
+fn camera_chunk(out: &mut [u8; MAX_FRAME], seq: u8, job: &Job, len: u32) -> Option<usize> {
+    #[cfg(feature = "esp32")]
+    return super::camera::with_frame(len, |bytes| {
+        let frames = [bytes];
+        let set = FrameSet::new(&frames).ok()?;
+        write_frame(out, seq, job.key.as_key(), 0, &FrameSource::Frames(set), &job.plan).ok()
+    })
+    .flatten();
+    #[cfg(not(feature = "esp32"))]
+    {
+        let _ = (out, seq, job, len);
+        None
+    }
+}
+
 /// Runs the transport and the source routes forever (see the module docs).
 #[embassy_executor::task]
 pub async fn radio_task(transport: Transport, bus: &'static Bus) {
     bus.log(format_args!("espnow: channel {CHANNEL}, keys app/..."));
-    let mut radio = Radio { transport, counters: Counters::new(), logged: (0, 0), route_seq: 0, bus };
+    let mut radio = Radio {
+        transport,
+        counters: Counters::new(),
+        logged: (0, 0),
+        route_seq: 0,
+        #[cfg(feature = "esp32")]
+        captures: 0,
+        bus,
+    };
     let mut sample = [0u8; SAMPLE_BUF];
     let mut frame = [0u8; MAX_FRAME];
     loop {
         radio.report();
         let due = update(|t| t.due(now_ms()));
         let wait = match due {
+            Due::Capture(capture) => {
+                radio.drain(&mut sample);
+                radio.capture(capture).await;
+                continue;
+            }
             Due::Send(job) => {
                 radio.drain(&mut sample);
                 if let Ok(msg) = TX.try_receive() {

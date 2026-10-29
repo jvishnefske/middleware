@@ -916,7 +916,8 @@ complete immediately. None of these raise events.
   firmware builds and passes `cargo test --lib` in `firmware/` without
   changes.
 - [x] X3 PWM arguments are validated in one place (timer `< 6`, channel
-  `< 4`, frequency 1 Hz to 1 MHz, duty a `u16` where 65535 is always on) —
+  `< 4`, frequency 1 Hz to 40 MHz (1 MHz until R15 raised it for camera
+  clocks), duty a `u16` where 65535 is always on) —
   `wasm_abi::periph::tests::pwm_rules`;
   `x3_pwm_open_set_stop_and_bad_args`.
 - [x] X4 `adc_read` returns a raw 12-bit value (device readings above 4095
@@ -1443,8 +1444,78 @@ payload): each frame is one JPEG of varying length (R14).
     `tools/payload-sim/tests/r14.rs`
     (`r14_jpeg_stream_is_decoded_bit_exactly_onto_the_panel_within_the_fuel_budget`,
     `r14_lossy_stream_drops_frames_without_trapping_or_misdrawing`).
-  - [ ] On hardware (ESP32-CAM to badge); then the OV2640 behind
-    `SourceKind::Camera`.
+  - [x] On hardware (ESP32-CAM to badge): the badge decodes and draws the
+    stream (`cam_jpeg_view: frame N drawn`); since R15 the frames are the
+    OV2640's, behind `SourceKind::Camera` (manual hardware run, see R15).
+- [ ] R15 The real camera: the ESP32-CAM's OV2640 behind
+  `SourceKind::Camera`. The payload sets the sensor up (power, XCLK on
+  PWM, SCCB registers over I2C); the host only receives what the sensor
+  clocks out, by DMA, and publishes each JPEG through the source-route
+  chunker.
+  - [x] ABI: a camera `route_source` config is 21 bytes, the JPEG
+    `SourceConfig` then `CameraPins` (D0..D7, VSYNC, HREF, PCLK, distinct);
+    the test pattern keeps exactly 10; anything else, a camera config
+    that is not JPEG, or repeated pins is `InvalidArgument` before the
+    device is called; `Device::route_source` receives a `Source` carrying
+    the pins; the PWM ceiling is 40 MHz —
+    `wasm_abi::route::tests::camera_config_layout_and_rules`;
+    `wasm_abi::periph::tests::pwm_rules`; `wasm-host`
+    `abi::tests::route_source_checks_arguments_before_pointers`,
+    `tests/abi4.rs` `r15_camera_source_passes_its_pins_and_needs_21_bytes`,
+    `tests/abi3.rs` `x3_pwm_open_set_stop_and_bad_args`; `mw-payload`
+    `route::tests::camera_needs_jpeg_and_distinct_pins_and_reaches_the_host`,
+    `pwm::tests::open_validates_before_the_host`.
+  - [x] Board pin map and claims (ESP32 = ESP32-CAM): PWM timer 0
+    channels 0..3 on GPIO 0, 4, 13, 14, I2C bus 0 on SDA 26 / SCL 27, a
+    camera port; other chips none (`Unsupported`); PWM, I2C and camera
+    pins are owned exclusively, checked in their direction (camera inputs
+    may be input-only), refused to `gpio_*`, and released per owner; the
+    LEDC plan gives each frequency the most duty bits its divider allows
+    (2 at 20 MHz) and rounds the 16-bit duty with exact ends —
+    `esp_base::chip::tests::r15_board_pin_map_wires_the_esp32_cam_sensor`;
+    `periph::claims::tests::r15_pwm_i2c_and_camera_pins_are_owned_and_exclusive`;
+    `periph::pwm::tests::*`
+    (`r15_camera_clocks_get_the_bits_the_divider_allows`,
+    `duty_rounds_to_the_nearest_step_with_exact_ends`).
+  - [x] Capture core (pure): the I2S camera-mode sample bytes are
+    extracted from whole DMA words in both FIFO layouts; the assembler
+    finds `FF D8` … `FF D9` across every split of the stream (stuffed
+    `FF 00`, fill `FF FF` and restart markers inside), stops at the end of
+    the frame, and reports a frame larger than the buffer as overflow and
+    seeks again, never a truncated frame —
+    `esp_base::camera::tests::*` (`r15_extract_takes_the_sample_bytes_of_whole_words`,
+    `r15_assembler_finds_the_frame_in_one_feed`,
+    `r15_assembler_is_split_proof`,
+    `r15_assembler_reports_overflow_and_seeks_again`,
+    `r15_assembler_through_the_dma_layout`).
+  - [x] Camera route pacing: a due frame asks for a capture; its length
+    becomes every chunk's `total`, the chunks are sent from the frame
+    buffer, one sequence number per frame; a failed capture (overflow,
+    timeout, hardware) drops the frame and whole missed periods; stale
+    capture results are ignored; a camera route needs JPEG and chunks that
+    fit one ESP-NOW message —
+    `esp_base::route::source::tests::*`
+    (`r15_camera_frames_are_captured_when_due_then_sent_from_the_buffer`,
+    `r15_a_failed_capture_drops_the_frame_and_waits_a_period`,
+    `r15_camera_routes_need_jpeg_and_air_sized_chunks`);
+    `route::sources::tests::r15_camera_routes_ask_for_a_capture_then_send_its_chunks`.
+  - [x] ESP32 shell: PWM on LEDC high-speed timer 0 (`LEDC_HS_SIG<n>` routed
+    through the pin bank), I2C on I2C0 (open drain, pull-up), and I2S0 in
+    camera mode with `DMA_I2S0` (receive FIFO mode 1, two samples per
+    32-bit word; data lines on `I2S0I_DATA_0..7` and `8..15`, HREF on
+    `H_ENABLE`, PCLK on `WS`, `H_SYNC`/`V_SYNC` held high, VSYNC claimed)
+    configured through esp-hal's I2S driver plus single-bit PAC fields, so
+    no `unsafe`; a 16 KiB DMA ring and an 8 KiB frame buffer allocated
+    once from the heap at the first camera route (`NoResources` if short);
+    capture in the radio task, bounded by 600 ms, yielding while the ring
+    is empty; overflow and overrun drop the frame; the first captured
+    frame of a boot and every 64th are mirrored on the serial links as
+    `dbg/cam/jpeg` chunks — `./build.sh esp32` and `esp32s3` build, both
+    chips' clippy is clean; verified on hardware (below).
+  - [ ] Payload, simulator and badge viewer: see the bullets added with
+    `cam_ov2640_stream`.
+  - [ ] On hardware (manual run, not regression-tested): see the bullet
+    below.
 
 ### JPEG decode in WASM (J…)
 

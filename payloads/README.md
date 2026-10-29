@@ -64,6 +64,18 @@ default target in `.cargo/config.toml`). It contains:
   firmware's baked fixture frames until the OV2640 lands: 25–29 ESP-NOW
   messages a frame, at most 290 a second of a 1 000-message budget). Stats
   on `app/cam/stats`; a stopped route is restarted.
+- `examples/cam_ov2640_stream` (ABI 4, AI-Thinker ESP32-CAM) — the real
+  camera: powers the OV2640 (PWDN GPIO 32 low), clocks it (20 MHz XCLK on
+  PWM 0.0) and sets it up over SCCB (I2C bus 0, address 0x30) with a pure,
+  host-tested sequencer: ID check (PID 0x26), soft reset, then a 219-write
+  table derived from Zephyr's driver (JPEG, quality scale 15, PCLK slowed
+  for the ESP32's I2S receiver as esp32-camera does it, the centred
+  1200×1200 window scaled to 240×240), at most 32 writes a call. Then it
+  starts the camera route on `app/cam/jpeg` (one frame per 500 ms). Stats
+  on `app/cam/stats`; a failed bring-up is retried with back-off (giving
+  up after 5 in a row), a refused or stopped route on every 2 s tick.
+  Deploy the byte-page build (`scripts/build-byte-pages.sh -p
+  cam_ov2640_stream`: 6 144 bytes of memory, 4 KiB stack, 7.8 KB image).
 - `examples/cam_jpeg_view` (ABI 4, conagotchi badge, R14) — brings the
   GC9A01 up with the shared `gc9a01` crate, subscribes to `app/cam/jpeg`,
   reassembles chunks into three 8 KiB frame slots (fill, newest ready,

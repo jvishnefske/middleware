@@ -1,8 +1,9 @@
 //! JPEG camera viewer (conagotchi badge, ESP32-S3, ABI 4, requirement
-//! R14): receives the 240×240 baseline JPEG stream on [`FRAME_KEY`] (from
-//! `cam_jpeg_stream`), reassembles each frame in linear memory, decodes it
-//! in WASM with `mw-jpeg` in bounded steps and draws it on the badge's
-//! 240×240 GC9A01 panel with its own SPI transfers.
+//! R14): receives a baseline JPEG stream on [`FRAME_KEY`] (from
+//! `cam_jpeg_stream`, or an ESP32-CAM's OV2640), reassembles each frame in
+//! linear memory, decodes it in WASM with `mw-jpeg` in bounded steps and
+//! draws it centred on the badge's 240×240 GC9A01 panel with its own SPI
+//! transfers.
 //!
 //! 1. `init` sets a [`STATS_TICK_MS`] tick, subscribes to [`FRAME_KEY`]
 //!    and brings the panel up with the shared `gc9a01` crate (reset, init
@@ -16,12 +17,27 @@
 //! 3. The decode timer ([`DECODE_TIMER`], one-shot, [`DECODE_GAP_US`])
 //!    drives the [`pipeline::Pipe`]: when idle, it takes the newest
 //!    complete frame and runs `Decoder::start` on it; then each event runs
-//!    one `decode_mcus(.., MCUS_PER_STEP)` call. A completed 16-row strip
-//!    is sent with `CASET` / `RASET` / `RAMWR` and the RGB565 pixels in at
-//!    most [`pipeline::PIXEL_PART`]-byte transfers, each started from the
-//!    previous transfer's `DmaDone`; decoding resumes after the last one.
-//!    One transfer is in flight at a time.
+//!    one `decode_mcus(.., MCUS_PER_STEP)` call. A completed strip (one
+//!    MCU row: 16 rows for 4:2:0, 8 for the OV2640's 4:2:2, fewer for the
+//!    last one) is sent with `CASET` / `RASET` / `RAMWR` and the RGB565
+//!    pixels in at most [`pipeline::PIXEL_PART`]-byte transfers, each
+//!    started from the previous transfer's `DmaDone`; decoding resumes
+//!    after the last one. One transfer is in flight at a time.
 //! 4. Every tick logs and publishes [`ViewStats`] on [`STATS_KEY`].
+//!
+//! # Frame size
+//!
+//! Frames may be any size up to 240×240 and may change size from one frame
+//! to the next (240×240, 240×176 HQVGA, 160×120 QQVGA …): the size is read
+//! from each frame's own header when its decode starts and every strip
+//! window is computed from it (see [`pipeline`], "Image size"). A smaller
+//! image is drawn centred, horizontally and vertically, on black: the
+//! shell records the area of the panel that may be lit ([`Size::NONE`]
+//! after the bring-up's black fill, the size of each frame begun,
+//! [`Size::PANEL`] after a failed frame), and a frame that does not cover
+//! it first blacks out the bands around itself. A frame wider or higher
+//! than the panel (QVGA 320×240 and up) is refused and counted as failed,
+//! and one longer than [`FRAME_CAP`] is dropped by the reassembler.
 //!
 //! # Work per call (fuel)
 //!
@@ -46,7 +62,8 @@
 //!
 //! The heap a host needs for a payload grows by about 2.75 bytes per image
 //! byte (wasmi's translated module, `wasm_host::heap`), so the image is
-//! kept small: 25 714 bytes (23.3 KB of code), down from 30 878.
+//! kept small: 26 353 bytes (23.9 KB of code), down from 30 878 (25 714
+//! before frames of any size were blacked out around, see "Frame size").
 //!
 //! * `mw-jpeg` without its `half` feature: no reduced 4×4 IDCT (only
 //!   [`Scale::Full`] is used).
@@ -75,9 +92,11 @@
 //! rounded up to 1 KiB. The stack is about 2.7 times what the fixture
 //! stream needs (an overflow traps with 2 816 bytes; 3 072 run clean).
 //! The host's heap bound charges the module's declared 48 128 bytes rather
-//! than a 64 KiB page: on the badge (32-bit) it needs 164 291 bytes free
-//! (160 195 bound + 4 096 margin), against 181 685 for the standard build
-//! (one 64 KiB page, 16 KiB stack, `.bss` up to 55 472).
+//! than a 64 KiB page: on the badge (32-bit) it needed 164 291 bytes free
+//! (160 195 bound + 4 096 margin) at 25 714 bytes of image, against
+//! 181 685 for the standard build (one 64 KiB page, 16 KiB stack, `.bss`
+//! up to 55 472); the 639 bytes of image since add about 1.7 KB to both
+//! (2.75 module bytes per image byte, `wasm_host::heap`).
 //!
 //! The big buffers live in one all-zero static ([`Buffers::EMPTY`], in
 //! `.bss`), not in the payload state, which the SDK builds on the stack.
@@ -103,7 +122,7 @@ use mw_payload::irq::Event;
 use mw_payload::timer::Timer;
 use mw_payload::{AbiError, LogLine};
 
-use pipeline::{Cmd, Pipe, Xfer};
+use pipeline::{Cmd, Pipe, Size, Xfer};
 use reasm::{Frame, Reassembler, SLOTS, Verdict};
 
 /// Key the JPEG chunks arrive on (from `cam_jpeg_stream`).
@@ -234,6 +253,10 @@ pub struct CamJpegView {
     decode_armed: bool,
     rx: Reassembler,
     pipe: Pipe,
+    /// The centred area of the panel that may be lit (see "Frame size"):
+    /// [`Size::NONE`] after the bring-up fill, a frame's size once it
+    /// began, [`Size::PANEL`] after a failed frame.
+    lit: Size,
     stats: ViewStats,
 }
 
@@ -255,6 +278,7 @@ impl CamJpegView {
             decode_armed: false,
             rx: Reassembler::new(FRAME_CAP as u32),
             pipe: Pipe::Idle,
+            lit: Size::NONE,
             stats: ViewStats::default(),
         };
         app.run(ctl, cmd);
@@ -314,6 +338,8 @@ impl CamJpegView {
             },
             CtlCmd::Start => {
                 self.ctl = self.ctl.started();
+                // The bring-up ended with a black fill.
+                self.lit = Size::NONE;
                 mw_payload::log("cam_jpeg_view: panel ready, showing app/cam/jpeg");
                 self.kick();
                 Ok(())
@@ -459,12 +485,14 @@ impl CamJpegView {
                     None => Err(Error::InputChanged),
                 };
                 match started {
-                    Ok(()) => Pipe::begin(
-                        frame,
-                        now,
-                        bufs.dec.output_width(),
-                        bufs.dec.output_height(),
-                    ),
+                    Ok(()) => {
+                        let size = Size {
+                            width: bufs.dec.output_width(),
+                            height: bufs.dec.output_height(),
+                        };
+                        let lit = core::mem::replace(&mut self.lit, size);
+                        Pipe::begin(frame, now, size, lit)
+                    }
                     Err(e) => (
                         Pipe::Idle,
                         Cmd::Failed {
@@ -519,6 +547,8 @@ impl CamJpegView {
                     return;
                 }
                 Cmd::Failed { frame, .. } => {
+                    // Drawn in part, or not at all: assume the worst.
+                    self.lit = Size::PANEL;
                     self.stats.failed = self.stats.failed.saturating_add(1);
                     log_frame(frame, "failed", None);
                     self.rx = self.rx.done();
@@ -529,7 +559,8 @@ impl CamJpegView {
         }
     }
 
-    /// Starts one strip transfer: D/C, then the bytes.
+    /// Starts one window transfer: D/C, then the bytes (zeros clocked out
+    /// for [`Xfer::Zeros`]).
     fn send(&mut self, strip: &[u8], x: Xfer) -> Result<(), AbiError> {
         let hw = self.hw.as_mut().ok_or(AbiError::Busy)?;
         hw.dc.set(x.dc())?;
@@ -542,6 +573,7 @@ impl CamJpegView {
                     .ok_or(AbiError::OutOfBounds)?;
                 hw.spi.transfer(px, 0)
             }
+            Xfer::Zeros { len } => hw.spi.transfer(&[], len),
         }
     }
 }
@@ -696,7 +728,11 @@ mod tests {
         let bytes = frame_bytes(frames, frame).expect("slot");
         dec.start(bytes, Scale::Full).expect("header");
         assert!(dec.strip_bytes::<Rgb565Be>() <= STRIP_BYTES);
-        let (mut pipe, _) = Pipe::begin(frame, 0, dec.output_width(), dec.output_height());
+        let size = Size {
+            width: dec.output_width(),
+            height: dec.output_height(),
+        };
+        let (mut pipe, _) = Pipe::begin(frame, 0, size, Size::NONE);
         let (mut calls, mut rows) = (0, 0);
         for _ in 0..1000 {
             let r = dec.decode_mcus::<Rgb565Be>(bytes, &mut strip[..], MCUS_PER_STEP);
@@ -719,6 +755,211 @@ mod tests {
         }
         assert_eq!(rows, 15);
         assert_eq!(calls, 15 * 4 + 1, "four calls a row and one for Done");
+    }
+
+    /// A camera-size fixture from `testdata/` (made by `testdata/gen.py`).
+    fn sized(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(format!("{name}.jpg"));
+        std::fs::read(path).expect("fixture")
+    }
+
+    /// The GC9A01's frame memory as the strip transfers see it: `CASET` /
+    /// `RASET` set the window, `RAMWR` starts writing at its top left, and
+    /// data bytes fill it row by row, two per RGB565 pixel.
+    struct Panel {
+        ram: Vec<u8>,
+        cmd: u8,
+        cols: (usize, usize),
+        rows: (usize, usize),
+        /// Bytes written since `RAMWR`.
+        at: usize,
+    }
+
+    impl Panel {
+        fn new(fill: u8) -> Self {
+            Panel {
+                ram: vec![fill; 240 * 240 * 2],
+                cmd: 0,
+                cols: (0, 0),
+                rows: (0, 0),
+                at: 0,
+            }
+        }
+
+        fn apply(&mut self, x: Xfer, strip: &[u8]) {
+            let data = match x {
+                Xfer::Command(c) => {
+                    (self.cmd, self.at) = (c, 0);
+                    return;
+                }
+                Xfer::Params(p) => {
+                    let a = usize::from(u16::from_be_bytes([p[0], p[1]]));
+                    let b = usize::from(u16::from_be_bytes([p[2], p[3]]));
+                    match self.cmd {
+                        gc9a01::CASET => self.cols = (a, b),
+                        gc9a01::RASET => self.rows = (a, b),
+                        c => panic!("parameters for {c:#x}"),
+                    }
+                    return;
+                }
+                Xfer::Pixels { start, len } => strip[start..start + len].to_vec(),
+                Xfer::Zeros { len } => vec![0; len],
+            };
+            assert_eq!(self.cmd, gc9a01::RAMWR);
+            let w = self.cols.1 - self.cols.0 + 1;
+            let h = self.rows.1 - self.rows.0 + 1;
+            for b in data {
+                let px = self.at / 2;
+                assert!(px < w * h, "write past the window");
+                let (x, y) = (self.cols.0 + px % w, self.rows.0 + px / w);
+                self.ram[(y * 240 + x) * 2 + self.at % 2] = b;
+                self.at += 1;
+            }
+        }
+    }
+
+    /// `jpeg` decoded whole, independently of the pipeline: (width,
+    /// height, RGB565 big-endian rows).
+    fn reference(jpeg: &[u8]) -> (usize, usize, Vec<u8>) {
+        let mut dec = Decoder::new(jpeg).expect("header");
+        let (w, h) = (
+            usize::from(dec.output_width()),
+            usize::from(dec.output_height()),
+        );
+        let mut img = vec![0u8; w * h * 2];
+        let mut strip = vec![0u8; dec.strip_bytes::<Rgb565Be>()];
+        for _ in 0..1000 {
+            match dec
+                .decode_mcu_row::<Rgb565Be>(jpeg, &mut strip)
+                .expect("decodes")
+            {
+                Step::Row(s) => {
+                    let at = usize::from(s.y) * w * 2;
+                    img[at..at + s.bytes(2)].copy_from_slice(&strip[..s.bytes(2)]);
+                }
+                Step::Done => return (w, h, img),
+                Step::Partial => unreachable!(),
+            }
+        }
+        panic!("did not finish");
+    }
+
+    /// Takes `jpeg` through the shell's decode path as the decode timer and
+    /// `DmaDone` events would (`Decoder::start` in the shared decoder,
+    /// `Pipe::begin` with the lit area, `MCUS_PER_STEP` decoder calls,
+    /// every transfer applied to `panel`), updating `lit` as
+    /// `CamJpegView` does. Returns the end command.
+    fn show(bufs: &mut Buffers, panel: &mut Panel, lit: &mut Size, jpeg: &[u8]) -> Cmd {
+        let Buffers { frames, strip, dec } = bufs;
+        frames[1][..jpeg.len()].copy_from_slice(jpeg);
+        let frame = Frame {
+            slot: 1,
+            len: jpeg.len() as u32,
+            seq: 0,
+        };
+        let bytes = frame_bytes(frames, frame).expect("fits a slot");
+        dec.start(bytes, Scale::Full).expect("header");
+        let size = Size {
+            width: dec.output_width(),
+            height: dec.output_height(),
+        };
+        let (mut pipe, mut cmd) = Pipe::begin(frame, 0, size, core::mem::replace(lit, size));
+        for _ in 0..100_000 {
+            match cmd {
+                Cmd::Send(x) => {
+                    panel.apply(x, &strip[..]);
+                    (pipe, cmd) = pipe.on_dma(Ok(x.bytes()));
+                }
+                Cmd::Continue => {
+                    let r = dec.decode_mcus::<Rgb565Be>(bytes, &mut strip[..], MCUS_PER_STEP);
+                    (pipe, cmd) = pipe.on_decode(r, 0);
+                }
+                Cmd::Failed { .. } => {
+                    *lit = Size::PANEL;
+                    return cmd;
+                }
+                Cmd::Done { .. } | Cmd::Nothing => return cmd,
+            }
+        }
+        panic!("did not finish");
+    }
+
+    /// Asserts that `panel` shows exactly `jpeg` centred, black around it.
+    fn assert_shows(panel: &Panel, jpeg: &[u8], what: &str) {
+        let (w, h, img) = reference(jpeg);
+        let (x0, y0) = ((240 - w) / 2, (240 - h) / 2);
+        for y in 0..240 {
+            for x in 0..240 {
+                let at = (y * 240 + x) * 2;
+                let got = &panel.ram[at..at + 2];
+                let inside = (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y);
+                if inside {
+                    let i = ((y - y0) * w + (x - x0)) * 2;
+                    assert_eq!(got, &img[i..i + 2], "{what}: pixel ({x}, {y})");
+                } else {
+                    assert_eq!(got, [0, 0], "{what}: pixel ({x}, {y}) not black");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frames_changing_size_are_each_drawn_centred_on_black() {
+        // An OV2640 stream changing size from frame to frame, through the
+        // real decoder and the pipeline into a model of the panel: after
+        // each frame the panel holds exactly that frame, centred, and black
+        // everywhere else (no rows or columns left over from a larger frame
+        // before it). Starts from the bring-up's black panel; the 320×240
+        // frame is refused and leaves the panel as it was.
+        let mut bufs = Box::new(Buffers::EMPTY);
+        let mut panel = Panel::new(0);
+        let mut lit = Size::NONE;
+        let f240 = fixture(0);
+        let f120 = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../fixtures/cam/jpeg120/frame_00.jpg"),
+        )
+        .expect("fixture");
+        let seq = [
+            ("240x240", f240.clone()),
+            ("240x176", sized("s240x176")),
+            ("240x240 again", fixture(1)),
+            ("160x120", sized("s160x120")),
+            ("200x150 4:2:2", sized("s200x150")),
+            ("120x120", f120),
+            ("240x176 again", sized("s240x176")),
+        ];
+        for (what, jpeg) in &seq {
+            assert!(jpeg.len() <= FRAME_CAP, "{what}");
+            let end = show(&mut bufs, &mut panel, &mut lit, jpeg);
+            assert!(matches!(end, Cmd::Done { .. }), "{what}: {end:?}");
+            assert_shows(&panel, jpeg, what);
+        }
+        let before = panel.ram.clone();
+        let end = show(&mut bufs, &mut panel, &mut lit, &sized("s320x240"));
+        assert!(
+            matches!(
+                end,
+                Cmd::Failed {
+                    why: pipeline::Failure::TooLarge,
+                    ..
+                }
+            ),
+            "{end:?}"
+        );
+        assert!(panel.ram == before, "a refused frame draws nothing");
+        assert_eq!(lit, Size::PANEL);
+        // After the failure, a small frame still lands on black, even if
+        // the panel held anything at all.
+        panel.ram.fill(0xA5);
+        let small = sized("s160x120");
+        assert!(matches!(
+            show(&mut bufs, &mut panel, &mut lit, &small),
+            Cmd::Done { .. }
+        ));
+        assert_shows(&panel, &small, "160x120 after a failure");
     }
 
     #[test]

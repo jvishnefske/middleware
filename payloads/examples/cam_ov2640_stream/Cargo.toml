@@ -1,0 +1,28 @@
+[package]
+name = "cam_ov2640_stream"
+description = "Example middleware payload: cam_ov2640_stream (OV2640 JPEG camera on the AI-Thinker ESP32-CAM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }
+
+[dev-dependencies]
+# The ABI's own `parse_source`, to check the config bytes as the host reads them.
+middleware = { path = "../../..", default-features = false }
+
+# The deploy build (scripts/build-byte-pages.sh -p cam_ov2640_stream, run by
+# scripts/check-all.sh): 1-byte pages, linear memory fixed at exactly what
+# the payload uses, so the ESP32's heap bound charges 6 144 bytes instead of
+# a whole 64 KiB page. memory = stack + data + .bss (1 696 bytes as linked;
+# __heap_base 5 792) rounded up to 1 KiB; the stack is 4 KiB, four times
+# what a payload-sim run needs (it overflows with 512 bytes, runs with
+# 1 024). See the crate docs, "Memory".
+[package.metadata.byte-pages]
+memory = 6144
+stack = 4096
