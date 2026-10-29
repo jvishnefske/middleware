@@ -36,8 +36,8 @@ use super::{GrpcSubscriberKind, MAX_PAYLOAD};
 use crate::dedup::fnv1a64;
 use crate::key::{Key, KeyFilter, MAX_KEY_LEN};
 use crate::transport::{
-    Limits, Publisher, Requester, Sample, SampleMeta, SenderId, Subscribe, Subscriber, copy_into,
-    sample_into,
+    Delivery, Limits, Overflow, Publisher, RequestOptions, Requester, Sample, SampleMeta, SenderId,
+    Subscribe, Subscriber, Target, copy_into, sample_into,
 };
 use bytes::Bytes;
 use core::pin::Pin;
@@ -226,16 +226,37 @@ where
 {
     type Error = GrpcError;
 
-    async fn request<'b>(
+    /// A unary call on `/Service/Method`. `options.timeout` is sent as the
+    /// `grpc-timeout` deadline and enforced locally: when it elapses the
+    /// call is abandoned with status `DEADLINE_EXCEEDED`
+    /// ([`HandlerError::DeadlineExceeded`](crate::HandlerError::DeadlineExceeded)
+    /// through [`GrpcError::handler_error`]). Without one, the channel's own
+    /// timeout (if configured) bounds the call. gRPC addresses services,
+    /// not nodes: [`Target::Node`] is [`GrpcError::UnsupportedTarget`].
+    async fn request_with<'b>(
         &mut self,
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
+        options: &RequestOptions,
     ) -> Result<&'b [u8], GrpcError> {
+        if options.target != Target::Any {
+            return Err(GrpcError::UnsupportedTarget);
+        }
         let path = method_path(key)?;
-        let reply = self
-            .unary(path, tonic::Request::new(Bytes::copy_from_slice(request)))
-            .await?;
+        let mut call = tonic::Request::new(Bytes::copy_from_slice(request));
+        let reply = match options.timeout {
+            Some(d) => {
+                call.set_timeout(d);
+                tokio::time::timeout(d, self.unary(path, call))
+                    .await
+                    .map_err(|_| GrpcError::Status {
+                        code: tonic::Code::DeadlineExceeded,
+                        message: "client deadline elapsed".to_owned(),
+                    })??
+            }
+            None => self.unary(path, call).await?,
+        };
         let out = copy_into(response, &reply).ok_or(GrpcError::BufferTooSmall {
             needed: reply.len(),
         })?;
@@ -299,11 +320,16 @@ fn item_into<'b>(item: &[u8], buf: &'b mut [u8]) -> Result<Sample<'b>, GrpcError
     let needed = key.as_bytes().len() + payload.len();
     let sample =
         sample_into(buf, key.as_str(), payload).ok_or(GrpcError::BufferTooSmall { needed })?;
-    Ok(sample.with_meta(SampleMeta { sender, seq: None }))
+    Ok(sample.with_meta(SampleMeta { sender, ..SampleMeta::NONE }))
 }
 
 impl Subscriber for GrpcSubscriber {
     type Error = GrpcError;
+
+    /// The bus's broadcast channel drops the oldest samples for a lagging
+    /// stream; one stream is ordered. No gap is reported (`gap: None`).
+    const DELIVERY: Delivery = Delivery::new(Overflow::DropOldest, true);
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_PAYLOAD);
 
     /// Waits for the next stream item. Cancel safe (see the module docs). A
     /// buffer too small for key plus payload is

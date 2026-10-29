@@ -8,6 +8,11 @@
 //! replaced. Transitions are immutable: [`SeenTable::observe`] returns a new
 //! table.
 //!
+//! The same table computes sample gaps: [`SeenTable::check`] classifies a
+//! sequence number as first, next (with how many were lost), repeat or
+//! behind ([`SeqCheck`]), which backends report as
+//! [`SampleMeta::gap`](crate::transport::SampleMeta::gap).
+//!
 //! Also home to [`Sequence`] (a wrapping per-sender counter) and the FNV-1a
 //! hashes the backends use for key ids.
 
@@ -74,7 +79,70 @@ struct Entry {
     stamp: u32,
 }
 
-/// Last sequence number seen per (sender, key), for up to `K` pairs.
+/// How a sequence number relates to the last one seen from the same
+/// (sender, stream), as decided by [`SeenTable::check`].
+///
+/// With 8-bit wrapping sequences, `delta = seq - last` (mod 256) is read as:
+/// 0 a repeat, 1..=128 forwards with `delta - 1` messages missing in
+/// between, 129..=255 backwards (a late, reordered message or a restarted
+/// sender). A jump of more than 128 cannot be told from going backwards, so
+/// losses that large are reported as [`SeqCheck::Behind`] (gap unknown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeqCheck {
+    /// Nothing was remembered for this pair: the gap is unknown.
+    First,
+    /// The message follows the last one; `lost` messages are missing in
+    /// between (0 when it is the very next).
+    Next {
+        /// Messages skipped, 0..=127.
+        lost: u16,
+    },
+    /// The same sequence number as last time: a repeat.
+    Repeat,
+    /// The sequence went backwards: reordered, or the sender restarted. The
+    /// table resynchronises to it.
+    Behind,
+}
+
+impl SeqCheck {
+    /// Classifies `seq` against the `last` one seen (`None`: nothing seen).
+    pub const fn classify(last: Option<u8>, seq: u8) -> SeqCheck {
+        let Some(last) = last else {
+            return SeqCheck::First;
+        };
+        match seq.wrapping_sub(last) {
+            0 => SeqCheck::Repeat,
+            d @ 1..=128 => SeqCheck::Next { lost: d as u16 - 1 },
+            _ => SeqCheck::Behind,
+        }
+    }
+
+    /// The value for [`SampleMeta::gap`](crate::transport::SampleMeta::gap):
+    /// `Some(lost)` for [`SeqCheck::Next`], `None` otherwise.
+    pub const fn gap(self) -> Option<u16> {
+        match self {
+            SeqCheck::Next { lost } => Some(lost),
+            _ => None,
+        }
+    }
+
+    /// False only for a [`SeqCheck::Repeat`]: what deduplication keeps.
+    pub const fn is_fresh(self) -> bool {
+        !matches!(self, SeqCheck::Repeat)
+    }
+}
+
+/// Last sequence number seen per (sender, stream), for up to `K` pairs.
+///
+/// A stream is normally a key ([`SeenTable::observe`], [`SeenTable::check`]);
+/// [`SeenTable::check_stream`] takes any 32-bit stream id instead, for a
+/// sender that numbers all its keys with one counter (pass a constant) or
+/// streams that are not keys.
+///
+/// A gap is only meaningful when the receiver sees every message the
+/// sender numbered in that stream: a sender with one counter over all keys,
+/// seen through a subscription to some of its keys, looks lossy. Senders
+/// that want receivers to compute gaps per key number each key separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeenTable<const K: usize> {
     entries: [Option<Entry>; K],
@@ -90,31 +158,54 @@ impl<const K: usize> Default for SeenTable<K> {
 impl<const K: usize> SeenTable<K> {
     /// A table that has seen nothing.
     pub const fn new() -> Self {
-        SeenTable { entries: [None; K], clock: 0 }
+        SeenTable {
+            entries: [None; K],
+            clock: 0,
+        }
     }
 
     /// Records `seq` from `sender` on `key`. Returns the new table and whether
     /// the message is fresh (not the same sequence as last time for that
     /// pair). A full table replaces its least recently updated entry.
     pub fn observe(self, sender: SenderId, key: Key<'_>, seq: u8) -> (Self, bool) {
-        let hash = fnv1a32(key.as_bytes());
+        let (table, check) = self.check(sender, key, seq);
+        (table, check.is_fresh())
+    }
+
+    /// Records `seq` from `sender` on `key` and classifies it against the
+    /// previous one ([`SeqCheck`]): the gap helper for backends with 8-bit
+    /// sequences. A full table replaces its least recently updated entry.
+    pub fn check(self, sender: SenderId, key: Key<'_>, seq: u8) -> (Self, SeqCheck) {
+        self.check_stream(sender, fnv1a32(key.as_bytes()), seq)
+    }
+
+    /// [`SeenTable::check`] for a caller-chosen 32-bit `stream` id.
+    pub fn check_stream(self, sender: SenderId, stream: u32, seq: u8) -> (Self, SeqCheck) {
         let clock = self.clock.wrapping_add(1);
         let mut entries = self.entries;
         let slot = entries
             .iter()
-            .position(|e| matches!(e, Some(e) if e.sender == sender && e.key == hash))
+            .position(|e| matches!(e, Some(e) if e.sender == sender && e.key == stream))
             .or_else(|| entries.iter().position(Option::is_none))
             .or_else(|| {
                 // Oldest by wrapping age relative to `clock`.
                 (0..K).max_by_key(|&i| entries[i].map_or(0, |e| clock.wrapping_sub(e.stamp)))
             });
         let Some(slot) = slot else {
-            // K == 0: nothing can be remembered, so everything is fresh.
-            return (SeenTable { entries, clock }, true);
+            // K == 0: nothing can be remembered, so everything is first.
+            return (SeenTable { entries, clock }, SeqCheck::First);
         };
-        let fresh = !matches!(entries[slot], Some(e) if e.sender == sender && e.key == hash && e.seq == seq);
-        entries[slot] = Some(Entry { sender, key: hash, seq, stamp: clock });
-        (SeenTable { entries, clock }, fresh)
+        let last = match entries[slot] {
+            Some(e) if e.sender == sender && e.key == stream => Some(e.seq),
+            _ => None,
+        };
+        entries[slot] = Some(Entry {
+            sender,
+            key: stream,
+            seq,
+            stamp: clock,
+        });
+        (SeenTable { entries, clock }, SeqCheck::classify(last, seq))
     }
 }
 
@@ -178,6 +269,34 @@ mod tests {
         assert!(!shared.fits(10, 234));
         assert!(!shared.fits(65, 0));
         assert!(Limits::UNBOUNDED.fits(128, usize::MAX - 128));
+    }
+
+    #[test]
+    fn gaps_are_computed_from_wrapping_sequences() {
+        let t = SeenTable::<4>::new();
+        let (t, c) = t.check(A, K1, 250);
+        assert_eq!((c, c.gap()), (SeqCheck::First, None));
+        let (t, c) = t.check(A, K1, 251);
+        assert_eq!(c.gap(), Some(0));
+        // 252..=255 and 0..=1 lost across the wrap.
+        let (t, c) = t.check(A, K1, 2);
+        assert_eq!(c, SeqCheck::Next { lost: 6 });
+        let (t, c) = t.check(A, K1, 2);
+        assert_eq!((c, c.is_fresh(), c.gap()), (SeqCheck::Repeat, false, None));
+        let (t, c) = t.check(A, K1, 1);
+        assert_eq!(c, SeqCheck::Behind, "late or restarted");
+        let (t, c) = t.check(A, K1, 2);
+        assert_eq!(c.gap(), Some(0), "resynchronised to the late one");
+        // Other sender and other stream are independent.
+        let (t, c) = t.check(B, K1, 9);
+        assert_eq!(c, SeqCheck::First);
+        let (_, c) = t.check_stream(A, 0, 3);
+        assert_eq!(c, SeqCheck::First);
+        assert_eq!(
+            SeqCheck::classify(Some(0), 128),
+            SeqCheck::Next { lost: 127 }
+        );
+        assert_eq!(SeqCheck::classify(Some(0), 129), SeqCheck::Behind);
     }
 
     #[test]

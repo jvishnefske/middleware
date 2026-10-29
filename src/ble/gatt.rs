@@ -91,8 +91,8 @@ use super::frame::{
 use super::uuid::{RPC_CHARACTERISTIC_UUID, Uuid128, characteristic_uuid};
 use crate::key::{Key, MAX_KEY_LEN};
 use crate::transport::{
-    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, Subscriber, copy_into,
-    sample_into,
+    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestOptions,
+    Requester, Responder, Sample, Subscriber, copy_into, sample_into,
 };
 
 /// Largest ATT payload (`517 - 3`), the default fragment buffer size `A`.
@@ -412,8 +412,9 @@ impl<L: GattServer, const N: usize, const A: usize> Responder for BleServer<L, N
                 Ok(Some(m)) => {
                     let outcome = match parse_request(m.as_bytes()) {
                         Err(_) => Err(HandlerError::InvalidRequest),
+                        // GATT gives no verified caller identity or deadline.
                         Ok((key, payload)) => handler
-                            .handle(key, payload, scratch)
+                            .handle(&Request::new(key, payload), scratch)
                             .and_then(|n| scratch.get(..n).ok_or(HandlerError::BufferTooSmall)),
                     };
                     return self.respond(m.id(), outcome).await;
@@ -605,6 +606,12 @@ fn deliver<'b, const N: usize, E>(
 impl<L: GattClient, const N: usize, const A: usize> Subscriber for BleClient<'_, L, N, A> {
     type Error = BleError<L::Error>;
 
+    /// One completed publication waits in the inbox; another completing
+    /// before it is taken is dropped. Notifications from the one peer stay
+    /// in order. No gap is reported.
+    const DELIVERY: Delivery = Delivery::new(Overflow::DropNewest, true);
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, max_message(N, A));
+
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
         if let Some(ready) = self.take_ready() {
             return deliver(buf, ready);
@@ -648,11 +655,17 @@ impl<L: GattClient, const N: usize, const A: usize> Subscriber for BleClient<'_,
 impl<L: GattClient, const N: usize, const A: usize> Requester for BleClient<'_, L, N, A> {
     type Error = BleError<L::Error>;
 
-    async fn request<'b>(
+    /// Writes the request and waits for its response. The client has no
+    /// clock, so `options.timeout` is **not** honoured: the wait is bounded
+    /// by [`MAX_EVENTS_PER_CALL`] link events, and a caller that needs a
+    /// time bound races the call against a timer (it is cancel safe). The
+    /// target is ignored: a GATT client talks to its one connected peer.
+    async fn request_with<'b>(
         &mut self,
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
+        _options: &RequestOptions,
     ) -> Result<&'b [u8], Self::Error> {
         let id = self.take_id();
         let att = att_payload::<A>(self.link.att_mtu());
@@ -891,7 +904,8 @@ mod tests {
     }
 
     /// Serves only `svc/Echo`, echoing the request.
-    fn echo(k: Key<'_>, req: &[u8], resp: &mut [u8]) -> Result<usize, HandlerError> {
+    fn echo(r: &Request<'_>, resp: &mut [u8]) -> Result<usize, HandlerError> {
+        let (k, req) = (r.key, r.body);
         if k != ECHO {
             return Err(HandlerError::NotFound);
         }

@@ -229,6 +229,7 @@ name = "middleware"
 version = "0.4.0"
 dependencies = [
  "embedded-io-async",
+ "heapless",
 ]
 
 [[package]]

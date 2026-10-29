@@ -41,8 +41,18 @@ zenoh = ["std", "dep:zenoh", "dep:tokio"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
 mdns = ["std", "dep:tokio", "tokio?/net"]
+# Unicast DNS-SD (RFC 6763 over ordinary DNS: SRV/TXT/A/AAAA lookups and
+# browsing through a resolver), `dns::unicast`. Host only, like `mdns`.
+dns-sd = ["std", "dep:tokio", "tokio?/net"]
+# The in-process backend `transport::memory` for tests and examples (host
+# only: std and tokio's timers). Integration tests enable it through the
+# self dev-dependency below.
+memory = ["std", "dep:tokio"]
 
 [dependencies]
+# Bounded owned strings and byte vectors (no heap) for the discovery
+# directory's records.
+heapless = { version = "0.9", default-features = false }
 postcard = { version = "1.1", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
@@ -61,5 +71,8 @@ http = { version = "1", optional = true }
 bytes = { version = "1", optional = true }
 
 [dev-dependencies]
+# The crate itself with `memory`, so `tests/` (the conformance harness) can
+# use the in-process backend under a plain `cargo test`.
+middleware = { path = ".", features = ["memory"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }

@@ -96,8 +96,9 @@ use ::zenoh::sample::Locality;
 use crate::dedup::{Sequence, fnv1a64};
 use crate::key::{Key, KeyError, KeyFilter, MAX_KEY_LEN};
 use crate::transport::{
-    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, SampleMeta, SenderId,
-    Subscribe, Subscriber, copy_into, sample_into,
+    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestMeta,
+    RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId, Subscribe, Subscriber,
+    Target, copy_into, sample_into,
 };
 
 /// Request timeout used by [`ZenohTransport::new`].
@@ -146,10 +147,7 @@ fn decode_attachment(bytes: &[u8]) -> SampleMeta {
             Some((SenderId(*id), *seq.first()?))
         });
     match parsed {
-        Some((sender, seq)) => SampleMeta {
-            sender: Some(sender),
-            seq: Some(seq),
-        },
+        Some((sender, seq)) => SampleMeta::from_sender(sender).with_seq(seq),
         None => SampleMeta::default(),
     }
 }
@@ -188,6 +186,8 @@ pub enum ZenohError {
     /// An endpoint string given to [`SessionConfig`] contains a character
     /// that cannot be embedded in the configuration (`"` or `\`).
     InvalidEndpoint,
+    /// A request asked for [`Target::Node`]; not supported yet.
+    UnsupportedTarget,
 }
 
 impl core::fmt::Display for ZenohError {
@@ -200,6 +200,7 @@ impl core::fmt::Display for ZenohError {
             ZenohError::InvalidKey(e) => write!(f, "received invalid key: {e:?}"),
             ZenohError::Handler(e) => write!(f, "responder returned error: {e:?}"),
             ZenohError::NoReply => f.write_str("no reply received"),
+            ZenohError::UnsupportedTarget => f.write_str("zenoh requests cannot address a node yet"),
             ZenohError::Closed => f.write_str("zenoh channel closed"),
             ZenohError::InvalidEndpoint => f.write_str("invalid endpoint string"),
         }
@@ -404,21 +405,31 @@ fn copy_checked<'b>(dst: &'b mut [u8], src: &[u8]) -> Result<&'b mut [u8], Zenoh
 impl Requester for ZenohTransport {
     type Error = ZenohError;
 
-    async fn request<'b>(
+    /// A Zenoh `get`: the first successful reply wins. Zenoh enforces the
+    /// query timeout: `options.timeout`, or the transport's
+    /// ([`DEFAULT_TIMEOUT`] unless set with `with_timeout`); no reply in
+    /// time is [`ZenohError::NoReply`]. [`Target::Node`] is
+    /// [`ZenohError::UnsupportedTarget`].
+    async fn request_with<'b>(
         &mut self,
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
+        options: &RequestOptions,
     ) -> Result<&'b [u8], ZenohError> {
+        if options.target != Target::Any {
+            return Err(ZenohError::UnsupportedTarget);
+        }
+        let timeout = options.timeout.unwrap_or(self.timeout);
         let replies = self
             .session
             .get(key.as_str())
             .payload(request)
-            .timeout(self.timeout)
+            .timeout(timeout)
             .await?;
         let mut last_error = None;
         // The channel closes once every responder has answered or the
-        // timeout elapses, so this loop is bounded by `self.timeout`.
+        // timeout elapses, so this loop is bounded by `timeout`.
         while let Ok(reply) = replies.recv_async().await {
             match reply.result() {
                 Ok(sample) => {
@@ -469,6 +480,13 @@ fn into_sample<'b>(
 impl Subscriber for ZenohSubscriber {
     type Error = ZenohError;
 
+    /// The subscriber's FIFO channel is bounded; when it is full Zenoh
+    /// stops taking samples for it and the publisher's congestion control
+    /// (drop, the default for `put`) discards the newest. Samples of one
+    /// publisher arrive in order. No gap is reported (`gap: None`).
+    const DELIVERY: Delivery = Delivery::new(Overflow::DropNewest, true);
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_PAYLOAD);
+
     /// Waits on the subscriber's FIFO channel. Cancel safe: a dropped wait
     /// leaves queued samples in the channel.
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, ZenohError> {
@@ -517,7 +535,8 @@ fn run_handler<'s, H: Handler>(
     let request_len = request.len();
     copy_into(scratch, request).ok_or(HandlerError::BufferTooSmall)?;
     let (req, resp) = scratch.split_at_mut(request_len);
-    let n = handler.handle(key, req, resp)?;
+    // Caller identity and deadline are not carried over Zenoh queries yet.
+    let n = handler.handle(&Request::new(key, req).with_meta(RequestMeta::NONE), resp)?;
     resp.get(..n).ok_or(HandlerError::BufferTooSmall)
 }
 
@@ -549,20 +568,19 @@ mod tests {
 
     #[test]
     fn reply_error_payload_decodes_code_byte() {
-        assert_eq!(
-            decode_reply_error(&[HandlerError::NotFound.code()]),
-            HandlerError::NotFound
-        );
+        for e in HandlerError::ALL {
+            assert_eq!(decode_reply_error(&[e.code()]), e);
+        }
         assert_eq!(decode_reply_error(&[]), HandlerError::Internal);
     }
 
     #[test]
     fn run_handler_splits_scratch_and_reports_errors() {
-        let mut echo = |_: Key<'_>, req: &[u8], resp: &mut [u8]| {
-            copy_into(resp, req)
+        let mut echo = crate::transport::handler_fn(|req, resp| {
+            copy_into(resp, req.body)
                 .map(|s| s.len())
                 .ok_or(HandlerError::BufferTooSmall)
-        };
+        });
         let key = Key::from_static("a/b");
         let mut scratch = [0u8; 8];
         assert_eq!(
@@ -596,10 +614,7 @@ mod tests {
         let a = encode_attachment(id, Sequence::new(9));
         assert_eq!(
             decode_attachment(&a),
-            SampleMeta {
-                sender: Some(id),
-                seq: Some(9)
-            }
+            SampleMeta::from_sender(id).with_seq(9)
         );
         assert_eq!(decode_attachment(&a[..11]), SampleMeta::default());
         assert_eq!(decode_attachment(b"xx\x01123456789"), SampleMeta::default());

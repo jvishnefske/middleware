@@ -104,7 +104,8 @@
 use crate::dedup::{SeenTable, Sequence};
 use crate::key::{Key, KeyFilter, KeyFilterBuf};
 use crate::transport::{
-    Limits, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber, sample_into,
+    Delivery, Limits, Overflow, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber,
+    sample_into,
 };
 
 /// First two bytes of every middleware ESP-NOW frame.
@@ -123,6 +124,11 @@ pub const MAX_PAYLOAD: usize = MAX_FRAME - HEADER_LEN - MAX_KEY;
 pub const MAX_IGNORED_FRAMES: usize = 256;
 /// What [`EspNowTransport`] carries, as its [`Publisher::LIMITS`].
 pub const LIMITS: Limits = Limits::shared(MAX_KEY, MAX_FRAME - HEADER_LEN);
+/// What [`EspNowTransport`] subscribers deliver, as their
+/// [`Subscriber::DELIVERY`]: frames wait in the radio binding's bounded
+/// receive queue, which drops arriving frames when full; one sender's
+/// frames arrive in the order sent.
+pub const DELIVERY: Delivery = Delivery::new(Overflow::DropNewest, true);
 
 /// A 48-bit ESP-NOW (Wi-Fi MAC) address.
 pub type Mac = [u8; 6];
@@ -471,10 +477,8 @@ impl<'a, R: EspNowRadio, const K: usize, const F: usize, const P: usize>
         src: Mac,
     ) -> Result<Sample<'b>, EspNowError<R::Error>> {
         let frame = Frame::decode(bytes).map_err(EspNowError::Frame)?;
-        let meta = SampleMeta {
-            sender: Some(SenderId::from_mac(src)),
-            seq: Some(frame.seq),
-        };
+        // One sequence counts all keys of a sender, so no gap is computed.
+        let meta = SampleMeta::from_sender(SenderId::from_mac(src)).with_seq(frame.seq);
         match sample_into(buf, frame.key.as_str(), frame.payload) {
             Some(sample) => Ok(sample.with_meta(meta)),
             None => {
@@ -589,6 +593,10 @@ impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Subscriber
 {
     type Error = EspNowError<R::Error>;
 
+    /// See [`DELIVERY`].
+    const DELIVERY: Delivery = DELIVERY;
+    const LIMITS: Limits = LIMITS;
+
     /// Waits for the next fresh sample selected by a filter slot.
     /// Cancel-safe if the radio's `receive` is (see the module docs).
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
@@ -655,6 +663,10 @@ impl<R: EspNowRadio, const K: usize, const F: usize, const P: usize> Subscriber
     for EspNowSubscriber<'_, '_, R, K, F, P>
 {
     type Error = EspNowError<R::Error>;
+
+    /// See [`DELIVERY`].
+    const DELIVERY: Delivery = DELIVERY;
+    const LIMITS: Limits = LIMITS;
 
     /// As the transport's `recv`, selecting with this view's filter only.
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
@@ -1008,10 +1020,7 @@ mod tests {
         assert_eq!((s.key, s.payload), (SYNC, &b"beacon"[..]));
         assert_eq!(
             s.meta,
-            SampleMeta {
-                sender: Some(SenderId([2, 0, 0, 0, 0, 0xA, 0, 0])),
-                seq: Some(9)
-            }
+            SampleMeta::from_sender(SenderId([2, 0, 0, 0, 0, 0xA, 0, 0])).with_seq(9)
         );
         assert_eq!(
             block_on(t.recv(&mut buf)),
