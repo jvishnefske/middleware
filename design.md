@@ -529,7 +529,8 @@ with scouting off. All run under `--features zenoh`.
 
 `MdnsSocket` browses DNS-SD service types (`_service._tcp|_udp.domain`)
 over mDNS; since 0.5 it does so as a `discovery::Browse` (L12), and the
-0.4 `ServiceDiscovery` trait is gone. The message format is pure, always
+`ServiceDiscovery` trait it had before the 0.5 release (never in a
+released version) is gone. The message format is pure, always
 built and lives in `dns::wire` since 0.5 (`mdns::wire` re-exports it); the
 tokio socket is behind the `mdns` feature and queries as a one-shot querier
 from an ephemeral port, so it coexists with a system mDNS daemon on port
@@ -744,10 +745,57 @@ crate's self dev-dependency). Tests marked *(feature)* run under
   Result<Resp, HandlerError>` into a `Handler` (undecodable request →
   `InvalidRequest`, oversized response → `BufferTooSmall`) —
   `typed::tests::typed_handler_decodes_calls_and_encodes`.
-- [ ] K15 *(phase 2)* Zenoh, gRPC, serial (`mwctl` fake) and the mDNS and
-  unicast DNS-SD backends pass every conformance case for the traits they
-  implement, with caller identity carried where the transport
-  authenticates it (Istio SPIFFE principal on gRPC).
+- [x] K15 Every backend passes every conformance case for the traits it
+  implements, with caller identity carried where the transport
+  authenticates it (Istio SPIFFE principal on gRPC):
+  - memory: `tests/memory.rs`, all ten cases (`k_round_trip`,
+    `k_timeout_is_honoured`, `k_handler_errors_round_trip`,
+    `k_handler_sees_caller_identity`, `k_gather_collects_every_responder`,
+    `k_overload_matches_declared_delivery`, `k_gap_is_reported`,
+    `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+    `l_directory_expiry`);
+  - Zenoh: `tests/zenoh.rs`, the same ten case names over loopback
+    sessions *(zenoh)*;
+  - gRPC: `tests/grpc.rs`, `conformance_cases::k15_grpc_round_trip`,
+    `k15_grpc_timeout_is_honoured`, `k15_grpc_handler_errors_round_trip`,
+    `k15_grpc_handler_sees_sender_principal_and_deadline` (SPIFFE ID from
+    the sidecar's XFCC), `k15_grpc_gather_collects_every_responder`
+    (`MeshClient`), `k15_grpc_overload_matches_declared_delivery`,
+    `k15_grpc_gap_is_reported`, `k15_grpc_announce_then_withdraw` and
+    `k15_grpc_goodbye_removes_record_at_once` (`GrpcAnnouncer` health
+    behind `MeshBrowse`), `k15_grpc_directory_expiry` *(istio)*;
+  - serial link (the in-memory fake link pair standing in for `mwctl`'s
+    port): `tests/serial.rs`, `k15_serial_round_trip`,
+    `k15_serial_timeout_is_honoured` (caller-side timer: the link has no
+    clock), `k15_serial_handler_errors_round_trip`,
+    `k15_serial_handler_sees_caller_identity`,
+    `k15_serial_overload_matches_declared_delivery`,
+    `k15_serial_gap_is_reported` (the link reports none),
+    `k15_serial_announce_then_withdraw`,
+    `k15_serial_goodbye_removes_record_at_once` (`PubSubDiscovery` over a
+    split link), `k15_serial_directory_expiry`; no `Gather` (one peer)
+    *(serial)*;
+  - mDNS: `tests/mdns.rs`, `l_announce_then_withdraw`,
+    `l_goodbye_removes_record_at_once`, `l_directory_expiry` (L14)
+    *(mdns)*;
+  - unicast DNS-SD: `tests/dns_sd.rs`, the same three (L16) *(dns-sd)*.
+
+  ESP-NOW and BLE have no async fake in `tests/`; their contract points are
+  covered by unit tests (K8, K11, N15, N16, A15, B11).
+- [x] K16 One service kind is discovered and called across backends in one
+  process on loopback: announced over Zenoh (two responder sessions) and
+  mDNS (announcer aimed at a loopback browser, no multicast), listed by a
+  stub cluster DNS server whose SRV glue points at gRPC servers serving
+  health, browsed through `MeshBrowse<UnicastDnsSd>`; every event feeds one
+  `Directory`; then Zenoh `request_with` with a timeout and `Target::Node`
+  of the discovered node, a Zenoh gather of both responders, a gRPC
+  `MeshClient` request and gather over the directory (three replies), and
+  `Target::Node` on the mesh client failing `Unavailable` (no DNS-SD
+  record names a node); withdrawals over each path empty their records.
+  The example finishes in about a second and exits 0 —
+  `examples/discover_and_call.rs`:
+  `tests::discover_and_call_finds_and_calls_every_responder` (run by
+  `cargo test --all-features`; the example declares `test = true`).
 
 ### Service discovery (L…)
 
