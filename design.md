@@ -910,11 +910,14 @@ because WASM linear memory and the wasmi interpreter require one.
   (`Context::node`; the ESP8266 build sends none) —
   `dispatch::tests::e17_info_ends_with_the_node_id_and_old_decoders_ignore_it`,
   `info_reports_device`.
-- [x] E18 The radio admits `app/...` and `disc/...` keys (`radio::FILTERS`,
-  the transport's two filter slots) in both directions; `sys/...` never.
-  Source routes stream on `app/...` keys only (`carries_routes`); received
-  beacons go to the directory, not to the payload —
-  `radio::tests::e18_discovery_beacons_are_admitted_both_ways`,
+- [x] E18 The radio receives `app/...` and `disc/...` keys
+  (`radio::FILTERS`, the transport's two filter slots); `sys/...` never.
+  A payload sends on `app/...` only: its publishes (`goes_over_air`, also
+  checked again in the radio shell's `send`) and its source routes
+  (`carries_routes`) refuse `disc/...`, which is reserved for the radio
+  task's own beacon, so a payload cannot forge discovery beacons.
+  Received beacons go to the directory, not to the payload —
+  `radio::tests::e18_beacons_are_received_but_payloads_cannot_send_them`,
   `r11_r12_only_app_keys_go_over_the_air`.
 - [x] E19 While a camera source route runs, the radio task broadcasts a
   `disc/cam/jpeg` beacon (instance `cam-` + the MAC's last three bytes in
@@ -931,13 +934,34 @@ because WASM linear memory and the wasmi interpreter require one.
   the sample's sender) and logs on `sys/log`
   `disc: up <kind> <instance> node <16 hex> ttl <n> s (<k> known)`,
   `disc: updated ...`, `disc: down <kind> <instance> (goodbye, <k> known)`,
-  `disc: down <kind> <instance> (expired)` and `disc: full, ...`;
+  and `disc: down <kind> <instance> (expired)` (refusals, E21, are not logged);
   refreshes are silent. The conagotchi badge runs this shell, so its log
   shows the ESP32-CAM's `disc: up cam/jpeg cam-...` line —
   `radio::disc::tests::e20_neighbours_log_up_refresh_down_and_expiry`,
-  `e20_neighbours_fill_in_the_sender_and_ignore_non_beacons`,
-  `e20_a_full_directory_says_so`. The line on the badge is to be read on
-  hardware.
+  `e20_neighbours_fill_in_the_sender_and_ignore_non_beacons`. The line on
+  the badge is to be read on hardware.
+- [x] E21 Directory records are bound to the frame's sender (the ESP-NOW
+  source MAC): the sender is the record's node and a beacon declaring a
+  different node is refused; a record is updated or withdrawn only by the
+  sender that created it; one sender holds at most `PER_SENDER` (2) of
+  the 4 records, and a new record finding the directory full is refused,
+  never evicting another's. Refusals are counted (`Neighbours::refused`),
+  not logged. The source MAC is not authenticated, so this stops one node
+  claiming another's identity or records, not a radio forging MACs —
+  `radio::disc::tests::e21_records_are_bound_to_the_frame_sender`,
+  `e21_one_sender_cannot_fill_the_directory`.
+- [x] E23 The serial port tasks run their links with no inbox
+  (`shell::link::INBOX` = 0): they read with `next_frame` and never wait
+  in `request_with`/`serve_one`, so nothing could be queued, and each
+  port saves 1 KiB of `.bss` (the ESP32-S3 main stack is what `.bss`
+  leaves). With the default inbox the conagotchi badge's `.stack` fell
+  to 40 920 B, under its 40 KiB check; with none it is 45 032 B —
+  conagotchi `scripts/check.sh` "firmware main stack" step (2026-10-29),
+  `firmware/build.sh esp32s3`.
+- [x] E22 The `disc:` log lines print radio-supplied kinds and instances
+  with every byte outside printable ASCII, and `\`, as `\xNN`, so a
+  beacon cannot inject terminal escapes or line breaks into `sys/log` —
+  `radio::disc::tests::e22_log_lines_escape_radio_supplied_text`.
 
 #### Interpreter speed on the badge
 
@@ -1091,6 +1115,10 @@ open).
   `start` keeps listening 2 s for the device's explanation on `sys/log`
   before reporting the error. Shell code (`tools/mwctl/src/port.rs`,
   `main.rs`); to be verified on hardware.
+- [x] H3 `mwctl monitor` prints `sys/log` lines with control characters
+  escaped (`\u{1b}`, `\r`, ...), never passed to the terminal, as
+  `[pub]` lines already did by switching to hex; printable Unicode is
+  kept — `report::tests::events_are_one_readable_line`.
 
 ### Web site (`web/`)
 

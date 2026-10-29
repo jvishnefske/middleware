@@ -77,7 +77,6 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::Uart;
 use esp_storage::FlashStorage;
 use middleware::loader::trust::TrustState;
-use middleware::serial::link::SerialLink;
 use static_cell::ConstStaticCell;
 
 use bus::{Bus, Port};
@@ -122,14 +121,14 @@ static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 #[embassy_executor::task]
 async fn uart_link(mut uart: Uart<'static, Async>, bus: &'static Bus) {
     link::prime(&mut uart).await;
-    link::serve(SerialLink::new(uart), Port::Uart, bus).await;
+    link::serve(link::PortLink::with_inbox(uart), Port::Uart, bus).await;
 }
 
 #[cfg(any(feature = "esp32s3", feature = "esp32c3"))]
 #[embassy_executor::task]
 async fn usb_link(mut usb: UsbSerialJtag<'static, Async>, bus: &'static Bus) {
     link::prime(&mut usb).await;
-    link::serve(SerialLink::new(usb), Port::Usb, bus).await;
+    link::serve(link::PortLink::with_inbox(usb), Port::Usb, bus).await;
 }
 
 /// What [`open_storage`] found on flash.

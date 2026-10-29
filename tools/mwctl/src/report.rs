@@ -101,7 +101,18 @@ fn printable(bytes: &[u8]) -> String {
 pub fn format_event(e: &Event) -> String {
     match e {
         Event::Publish { key, payload } if key == keys::LOG.as_str() => {
-            format!("[log] {}", String::from_utf8_lossy(payload).trim_end())
+            // Control characters (an ANSI escape from a radio-supplied
+            // name, say) are shown escaped, never sent to the terminal.
+            let text = String::from_utf8_lossy(payload);
+            let line: String = text
+                .trim_end()
+                .chars()
+                .flat_map(|c| {
+                    let escaped = c.is_control().then(|| c.escape_default());
+                    escaped.into_iter().flatten().chain((!c.is_control()).then_some(c))
+                })
+                .collect();
+            format!("[log] {line}")
         }
         Event::Publish { key, payload } if key == keys::STATUS.as_str() => {
             match payload.as_slice() {
@@ -180,6 +191,11 @@ mod tests {
             payload: v.to_vec(),
         };
         assert_eq!(format_event(&p("sys/log", b"hello\n")), "[log] hello");
+        assert_eq!(
+            format_event(&p("sys/log", b"disc: up x\x1b[2Jy\rz\n")),
+            "[log] disc: up x\\u{1b}[2Jy\\rz"
+        );
+        assert_eq!(format_event(&p("sys/log", "caf\u{e9}".as_bytes())), "[log] caf\u{e9}");
         assert_eq!(
             format_event(&p("sys/payload/status", &[2])),
             "[status] running"

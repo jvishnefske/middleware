@@ -44,13 +44,23 @@ pub async fn prime<IO: Write>(io: &mut IO) {
     .await;
 }
 
-async fn send<IO: Read + Write>(link: &mut SerialLink<IO>, frame: &Frame<'_>) {
+/// Inbox of each port's link: none. The task reads with `next_frame` and
+/// never waits in `request_with` or `serve_one`, so no publication can
+/// arrive while one waits; a zero inbox saves 1 KiB of RAM per port (the
+/// ESP32-S3's main stack is what is left after `.bss`, FR-53 on the
+/// conagotchi badge).
+pub const INBOX: usize = 0;
+
+/// The link one port runs.
+pub type PortLink<IO> = SerialLink<IO, INBOX>;
+
+async fn send<IO: Read + Write>(link: &mut PortLink<IO>, frame: &Frame<'_>) {
     // Failures and timeouts drop the frame; the host retries requests.
     let _ = with_timeout(SEND_TIMEOUT, link.send(frame)).await;
 }
 
 /// Runs the protocol on one port forever.
-pub async fn serve<IO: Read + Write>(mut link: SerialLink<IO>, port: Port, bus: &'static Bus) {
+pub async fn serve<IO: Read + Write>(mut link: PortLink<IO>, port: Port, bus: &'static Bus) {
     let Some(mut outbound) = bus.subscribe() else {
         bus.log(format_args!("link {port:?}: no outbound subscriber slot"));
         return;
