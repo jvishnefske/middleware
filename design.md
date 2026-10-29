@@ -51,7 +51,7 @@ characteristic UUID and a 16-bit advertising id.
   knows them; others report none —
   `tests/zenoh.rs`: `z7_no_self_delivery_and_sender_meta_present`,
   `z5_try_recv_is_none_when_empty_and_some_without_waiting`;
-  `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`;
+  `zenoh::wire::tests::publication_attachments_round_trip_and_v1_still_decodes`;
   `typed::tests::typed_try_recv_is_none_then_decodes_with_meta`;
   `serial::link::tests::try_recv_is_none_when_empty_and_some_without_waiting`
   (no meta); `g5_try_recv_is_none_when_empty_and_some_without_waiting` and
@@ -287,11 +287,11 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   handler — `z2_request_runs_handler_in_responder`,
   `z2_response_buffer_too_small_is_error`,
   `z2_request_without_responder_is_no_reply`,
-  `zenoh::tests::run_handler_splits_scratch_and_reports_errors`.
+  `zenoh::responder::tests::run_handler_splits_scratch_and_reports_errors`.
 - [x] Z3 Handler errors are returned as Zenoh reply errors and surface to the
   requester — `z3_handler_error_surfaces_at_requester`,
   `z3_oversized_request_is_buffer_too_small_reply`,
-  `zenoh::tests::reply_error_payload_decodes_code_byte`.
+  `zenoh::wire::tests::reply_error_payload_decodes_code_byte_and_sender`.
 - [x] Z4 Tests open sessions with multicast scouting disabled and connect only
   to explicit loopback endpoints —
   `z4_two_sessions_over_explicit_loopback_endpoint`,
@@ -302,14 +302,85 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `Prefix(k)` to `k/**`, which Zenoh matches against `k` itself too —
   `z6_prefix_subscription_delivers_app_x_but_not_apple`,
   `zenoh::tests::filters_map_to_key_expressions`.
-- [x] Z7 Publications carry a 12-byte attachment (`mw`, version, sender id
-  hashed from the session's Zenoh id, sequence) surfaced as `SampleMeta`;
-  subscribers use `allowed_origin(Remote)`, so a session never receives its
-  own publications (`with_local_delivery(true)` opts back in) —
+- [x] Z7 Publications carry an attachment (`mw`, kind, sender id hashed
+  from the session's Zenoh id, sequence; since 0.5 also a stream id, 16
+  bytes, see Z14; the 0.4 12-byte form still decodes) surfaced as
+  `SampleMeta`; subscribers use `allowed_origin(Remote)`, so a session never
+  receives its own publications (`with_local_delivery(true)` opts back in) —
   `z7_no_self_delivery_and_sender_meta_present`,
-  `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`.
+  `zenoh::wire::tests::publication_attachments_round_trip_and_v1_still_decodes`.
 - [x] Z8 Cancelling `recv` loses no sample —
   `z8_cancelled_recv_loses_no_sample`.
+
+The 0.5 additions (Z9–Z16). Unit tests are in `zenoh::{wire, subscriber,
+responder, discovery}::tests`; the rest are in `tests/zenoh.rs`, which also
+runs every conformance case over sessions joined on one loopback endpoint
+with scouting off. All run under `--features zenoh`.
+
+- [x] Z9 `request_with` honours `RequestOptions::timeout` as the Zenoh query
+  timeout, falling back to the transport's default (`with_timeout`, 5 s);
+  Zenoh's own `Timeout` error reply (from the querying session or the peer
+  that routed the query) is not taken for a responder's error, so the call
+  ends with `NoReply` —
+  `z9_request_with_timeout_overrides_the_default`, `k_timeout_is_honoured`,
+  `zenoh::wire::tests::reply_error_payload_decodes_code_byte_and_sender`.
+- [x] Z10 A responder also declares the per-node queryable
+  `@mw/node/<zid16>/<key>` feeding the same FIFO; `Target::Node(id)`
+  queries it, so only that node answers; a node without a responder fails
+  with `NoReply` at once (no queryable matches) —
+  `z10_target_node_reaches_only_that_node`,
+  `zenoh::wire::tests::node_and_service_keys`.
+- [x] Z11 `Gather` is a `get` with `QueryTarget::All` and no consolidation:
+  every responder's reply reaches the callback with the replier's
+  `SenderId` (reply attachment, or the 8 bytes after the code in a reply
+  error) and its result, bounded by `max_replies`, `Flow::Stop`, Zenoh
+  finalising the query and the timeout —
+  `k_gather_collects_every_responder`,
+  `z11_gather_names_repliers_and_carries_their_errors`,
+  `zenoh::wire::tests::query_and_reply_attachments_round_trip`.
+- [x] Z12 Queries carry an attachment with the requester's sender id and
+  its timeout; the handler sees them as `RequestMeta::sender` and
+  `deadline_ms` (minus the time queued at the responder); `principal` is
+  `None` (Zenoh authenticates no caller name); handler errors, including
+  `Unavailable`, `DeadlineExceeded` and `Denied`, round trip —
+  `k_handler_sees_caller_identity`, `k_handler_errors_round_trip`,
+  `k_round_trip`,
+  `zenoh::responder::tests::request_meta_carries_sender_and_remaining_deadline`.
+- [x] Z13 `ZenohSubscriber::DELIVERY` is `Block` with per-sender order:
+  Zenoh's FIFO handler blocks when full, the link stops being read and
+  `publish` uses congestion control Block, so nothing is dropped and a
+  publisher's samples arrive in order (caveats in `zenoh::subscriber`:
+  head-of-line blocking, Zenoh closes a link blocked past
+  `wait_before_close`); the FIFO depth is `with_queue_depth` (default 256) —
+  `k_overload_matches_declared_delivery`,
+  `zenoh::subscriber::tests::delivery_is_declared_block_in_order`.
+- [x] Z14 Sequences are per key per transport value (a clone starts new
+  streams) and the attachment names the stream, so `SampleMeta::gap` is
+  exact for a subscriber to any subset of keys (`SeenTable::check_stream`;
+  `None` for a stream's first sample) —
+  `k_gap_is_reported`, `z14_gaps_are_per_key`,
+  `zenoh::subscriber::tests::gaps_are_exact_per_sender_and_stream`,
+  `zenoh::subscriber::tests::foreign_and_v1_attachments_report_no_gap`,
+  `zenoh::wire::tests::stream_ids_separate_keys_and_origins`.
+- [x] Z15 `ZenohDiscovery` announces a service as a record queryable plus a
+  liveliness token on `@mw/svc/<kind>/<instance>` (record in the beacon
+  encoding; node defaults to the announcing session) and browses with a
+  liveliness subscriber with history: token appears → record fetched →
+  `Up`; token gone (withdraw, session closed) → `Down` at once —
+  `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+  `l_directory_expiry`,
+  `z15_browse_sees_services_announced_before_it_with_the_announcer_as_node`,
+  `z15_closing_the_announcer_session_is_down_and_try_next_does_not_wait`,
+  `zenoh::discovery::tests::records_and_goodbyes_decode_from_their_keys`.
+- [x] Z16 The Zenoh backend passes every conformance case of
+  `tests/conformance.rs` (`ReqRepFixture`, `GatherFixture`,
+  `PubSubFixture`, `DiscoveryFixture`) over loopback sessions —
+  `tests/zenoh.rs`: `k_round_trip`, `k_timeout_is_honoured`,
+  `k_handler_errors_round_trip`, `k_handler_sees_caller_identity`,
+  `k_gather_collects_every_responder`,
+  `k_overload_matches_declared_delivery`, `k_gap_is_reported`,
+  `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+  `l_directory_expiry`.
 
 ### gRPC (`grpc`)
 
@@ -524,7 +595,7 @@ crate's self dev-dependency). Tests marked *(feature)* run under
   `transport::reqrep::tests::handler_error_codes_round_trip`,
   `grpc::status::tests::handler_errors_round_trip_through_codes` and
   `grpc::status::tests::codes_map_back_to_handler_errors` *(grpc)*,
-  `zenoh::tests::reply_error_payload_decodes_code_byte` *(zenoh)*.
+  `zenoh::wire::tests::reply_error_payload_decodes_code_byte_and_sender` *(zenoh)*.
 - [x] K3 `RequestOptions` (timeout, `Target::{Any, Node}`) builds with
   const methods and converts its timeout to a saturating millisecond
   deadline; `Requester::request` is `request_with` with
@@ -558,8 +629,9 @@ crate's self dev-dependency). Tests marked *(feature)* run under
 - [x] K8 Every `Subscriber` declares `DELIVERY` (`Overflow::{DropNewest,
   DropOldest, Block}`, per-sender order) and `LIMITS` as required
   constants, so a backend that omits them does not compile; every in-tree
-  backend declares them (serial since its inbox (S8), ESP-NOW, BLE GATT,
-  BLE advertising, Zenoh: `DropNewest`; gRPC, memory: `DropOldest`); the
+  backend declares them (Zenoh: `Block`; serial since its inbox (S8),
+  ESP-NOW, BLE GATT, BLE advertising: `DropNewest`; gRPC, memory:
+  `DropOldest`); the
   declared behaviour holds under overload —
   `tests/conformance/pubsub.rs`: `overload_matches_declared_delivery`, run
   by `tests/memory.rs`: `k_overload_matches_declared_delivery`.
