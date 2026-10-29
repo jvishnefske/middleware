@@ -31,7 +31,12 @@
 //! [`SampleMeta::sender`](crate::SampleMeta::sender), and, as Zenoh does,
 //! does not deliver a transport's own publications to its subscribers;
 //! [`GrpcTransport::with_local_delivery`] opts back in. See [`bus`] for the
-//! wire format.
+//! wire format. Requests carry the id too.
+//!
+//! Each subscription queues [`GrpcTransport::queue_depth`] samples locally
+//! and drops the oldest when the application falls behind
+//! (`Overflow::DropOldest`); every sample's `SampleMeta::gap` counts what
+//! was lost before it, locally or in the bus (see [`client`]).
 //!
 //! [`Publisher::LIMITS`](crate::Publisher::LIMITS) is keys up to
 //! [`MAX_KEY_LEN`](crate::key::MAX_KEY_LEN) and payloads up to
@@ -46,9 +51,16 @@
 //!   its tonic half ([`responder::ResponderService`]) forwards each unary call
 //!   over a bounded channel, and [`Responder::serve_one`](crate::Responder::serve_one)
 //!   runs the caller's pure [`Handler`](crate::Handler) on it.
-//! * [`server::GrpcServer`] — one tower service routing the bus paths to the
-//!   bus and every other `/Service/Method` path to the responder, plus
-//!   [`server::serve`] to run it on a bound listener.
+//!   The handler sees the caller's `mw-client` id, its `grpc-timeout` as the
+//!   remaining deadline and, when configured for a sidecar
+//!   ([`PrincipalSource`]), its SPIFFE ID (see the [`responder`](mod@responder) module).
+//! * [`health`](mod@health) — the standard `grpc.health.v1.Health` service (`Check`,
+//!   `Watch`) hand-encoded on [`RawCodec`]: [`HealthService`],
+//!   [`GrpcAnnouncer`] (implements `discovery::Announce` by setting
+//!   statuses) and [`HealthClient`].
+//! * [`server::GrpcServer`] — one tower service routing the bus and health
+//!   paths to those services and every other `/Service/Method` path to the
+//!   responder, plus [`server::serve`] to run it on a bound listener.
 //!
 //! # Status mapping
 //!
@@ -59,23 +71,32 @@
 //! # Istio
 //!
 //! With feature `istio`, the `istio` module adds mesh authorities, trace header
-//! propagation, `grpc-timeout` formatting, retry classification and a
-//! channel builder for the sidecar.
+//! propagation, `grpc-timeout` formatting (from [`timeout`]), retry
+//! classification, a channel builder for the sidecar and the
+//! `x-forwarded-client-cert` principal; the `mesh` module adds a client
+//! that routes requests and gathers over discovered endpoints
+//! (`MeshClient`, which also honours `Target::Node`) and a health-checked
+//! browser (`MeshBrowse`).
 
 pub mod bus;
 pub mod client;
 pub mod codec;
+pub mod health;
 pub mod responder;
 pub mod server;
 pub mod status;
+pub mod timeout;
 
 #[cfg(feature = "istio")]
 pub mod istio;
+#[cfg(feature = "istio")]
+pub mod mesh;
 
 pub use bus::BusService;
 pub use client::{GrpcSubscriber, GrpcTransport};
 pub use codec::RawCodec;
-pub use responder::{GrpcResponder, ResponderService, responder};
+pub use health::{GrpcAnnouncer, HealthClient, HealthService, ServingStatus, health};
+pub use responder::{GrpcResponder, PrincipalSource, ResponderService, responder};
 pub use server::GrpcServer;
 
 use crate::transport::HandlerError;
@@ -85,8 +106,8 @@ use crate::transport::HandlerError;
 pub const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 
 /// Largest payload a publish carries: [`MAX_MESSAGE`] minus the stream
-/// item's framing ([`bus::ITEM_OVERHEAD`]: key length, sender length and
-/// sender) and a maximal key.
+/// item's framing ([`bus::ITEM_OVERHEAD`]: key length, sender length,
+/// sender and gap) and a maximal key.
 pub const MAX_PAYLOAD: usize = MAX_MESSAGE - bus::ITEM_OVERHEAD - crate::key::MAX_KEY_LEN;
 
 /// The filter kind a [`GrpcSubscriber`] was opened with.
@@ -121,15 +142,17 @@ pub enum GrpcError {
     },
     /// A key or path could not be encoded as a request header or URI path.
     InvalidHeader,
-    /// The server closed a subscription stream.
+    /// The server closed a subscription or health `Watch` stream.
     StreamEnded,
     /// A subscription stream item was not
     /// `[key_len][key][sender_len][sender][payload]` with a valid key.
     MalformedSample,
     /// Every sender feeding a [`GrpcResponder`] was dropped.
     Closed,
-    /// A request asked for [`Target::Node`](crate::Target::Node): gRPC
-    /// addresses services, not nodes.
+    /// A request on a [`GrpcTransport`] asked for
+    /// [`Target::Node`](crate::Target::Node): one channel addresses a
+    /// service, not nodes (`mesh::MeshClient`, feature `istio`, routes by
+    /// node).
     UnsupportedTarget,
 }
 
