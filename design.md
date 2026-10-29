@@ -653,6 +653,90 @@ encoder; `MdnsSocket` implements `Browse`.
 - [x] L15 `dns-sd` enables `std` and no embedded feature, and no embedded
   feature set enables it (or any host feature) —
   `scripts/check-features.sh`.
+- [x] L16 *(the unicast half of L14)* `dns::unicast::UnicastDnsSd`
+  (feature `dns-sd`) passes the discovery conformance cases on loopback,
+  against a stub DNS server whose fixture table the announcer edits —
+  `tests/dns_sd.rs`: `l_announce_then_withdraw`,
+  `l_goodbye_removes_record_at_once`, `l_directory_expiry` *(dns-sd)*.
+- [x] L17 `ResolvConf::parse` reads `nameserver` (at most 3, numeric IPv6
+  scope), `search` / `domain` (last wins, at most 6), `options ndots`,
+  `timeout`, `attempts` (clamped) and ignores comments and malformed lines;
+  a pod's namespace and cluster domain come from its search list —
+  `dns::unicast::resolv::tests::kubernetes_pod_configuration`,
+  `dns::unicast::resolv::tests::variants_comments_limits_and_malformed_lines`
+  *(dns-sd)*.
+- [x] L18 `ServiceMap` maps up to `M` kinds to a Service, namespace and
+  port name, validated as Kubernetes does (RFC 1123 labels, IANA port
+  names), and builds `_<port>._tcp.<service>.<namespace>.svc.<domain>`
+  (cluster domain configurable, default `cluster.local`, every name ≤ 253
+  bytes) —
+  `dns::unicast::map::tests::srv_names_follow_the_kubernetes_dns_schema`,
+  `dns::unicast::map::tests::invalid_parts_are_refused` *(dns-sd)*.
+- [x] L19 A reply is accepted only from the queried nameserver's address,
+  with the query's id and exactly its question; anything else is skipped
+  (a spoofed pod is never reported), and with only mismatched replies the
+  query times out after its attempts. A reply with TC is
+  `UnicastError::Truncated` (no TCP fallback); an error code is
+  `UnicastError::Answer`; neither changes the endpoints already reported —
+  `dns::unicast::answer::tests::only_the_matching_reply_is_accepted`,
+  `tests/dns_sd.rs`: `mismatched_ids_and_spoofed_sources_are_ignored`,
+  `truncated_and_failed_replies_are_errors_that_keep_endpoints`
+  *(dns-sd)*.
+- [x] L20 Queries carry RD, an EDNS(0) OPT record for 1232 bytes
+  (`MessageWriter::edns`) and a fresh id per query and attempt; each
+  attempt waits at most the timeout —
+  `dns::wire::tests::edns_opt_is_written_and_decoded`, `tests/dns_sd.rs`:
+  `targets_without_glue_are_resolved_with_a_then_aaaa`,
+  `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
+- [x] L21 Each SRV owned by the query name is one endpoint named by its
+  target's first label (one per pod of a headless Service); A/AAAA glue in
+  the reply gives `Endpoint::Socket`, else the target is resolved with A,
+  then AAAA, and without an address it is `Endpoint::Host`; the TTL is the
+  smallest used; NXDOMAIN or no SRV is an empty set, not an error —
+  `dns::unicast::answer::tests::headless_srv_answer_with_glue`,
+  `dns::unicast::answer::tests::response_codes_and_empty_answers`,
+  `dns::unicast::answer::tests::address_answers_take_the_first_of_each_family`,
+  `tests/dns_sd.rs`: `targets_without_glue_are_resolved_with_a_then_aaaa`,
+  `nxdomain_is_an_empty_service` *(dns-sd)*.
+- [x] L22 The pure `Tracker` turns successive answers into `Down` events
+  for vanished instances, then `Up` for new or changed ones; an unchanged
+  instance is silent until 80 % of the TTL it was last reported with has
+  passed, then reported again so a `Directory` fed with the events keeps
+  it; TTL 0 is reported as 1 s; capacity and over-long records are counted,
+  not reported —
+  `dns::unicast::tracker::tests::answers_become_up_and_down_diffs`,
+  `dns::unicast::tracker::tests::duplicates_ttl_zero_and_capacity`,
+  `dns::unicast::tracker::tests::unchanged_instances_are_refreshed_before_a_directory_expires_them`,
+  `tests/dns_sd.rs`: `headless_service_pods_come_and_go_across_ttl_expiries`
+  (2 → 3 → 1 pods) *(dns-sd)*.
+- [x] L23 Re-resolution is due at 80 % of the smallest resolved TTL (the
+  `Directory::next_refresh` rule), after empty answers and failures at
+  fixed intervals, all clamped to the `Schedule`'s bounds —
+  `dns::unicast::tracker::tests::re_resolution_is_due_at_80_percent_of_the_ttl_clamped`,
+  `tests/dns_sd.rs`: `headless_service_pods_come_and_go_across_ttl_expiries`
+  *(dns-sd)*.
+- [x] L24 `UnicastDnsSd::browse` takes an exact kind or a prefix and
+  browses every mapped kind it selects (none is `Unmapped`); `next` before
+  `browse` is `NotBrowsing`; the nameserver is the builder's or the
+  resolver configuration's first —
+  `tests/dns_sd.rs`: `browse_selects_mapped_kinds_by_prefix`,
+  `nameserver_from_the_resolver_configuration` *(dns-sd)*.
+- [x] L25 Transaction entropy against off-path cache poisoning (RFC 5452):
+  every attempt of every query is sent from a new socket on a fresh
+  ephemeral port, and its id comes from the operating system's CSPRNG
+  (`dns::unicast::query_id`, `getrandom`), with no generator state kept in
+  the process —
+  `tests/dns_sd.rs`: `targets_without_glue_are_resolved_with_a_then_aaaa`
+  (distinct source port and id per query), `query_ids_come_from_the_os_csprng`
+  *(dns-sd)*.
+- [x] L26 A flood of bogus datagrams cannot suppress or poison a
+  resolution: each query socket is connected to the nameserver, so the
+  kernel drops other sources, and skipped datagrams never end an attempt;
+  only its deadline does —
+  `tests/dns_sd.rs`: `a_flood_of_bogus_replies_does_not_suppress_or_poison_resolution`
+  (200 wrong-id replies from the nameserver's address and 200 bogus-pod
+  replies from another port, one attempt),
+  `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

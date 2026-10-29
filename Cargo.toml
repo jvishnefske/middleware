@@ -43,7 +43,7 @@ istio = ["grpc"]
 mdns = ["std", "dep:tokio", "tokio?/net"]
 # Unicast DNS-SD (RFC 6763 over ordinary DNS: SRV/TXT/A/AAAA lookups and
 # browsing through a resolver), `dns::unicast`. Host only, like `mdns`.
-dns-sd = ["std", "dep:tokio", "tokio?/net"]
+dns-sd = ["std", "dep:tokio", "tokio?/net", "dep:getrandom"]
 # The in-process backend `transport::memory` for tests and examples (host
 # only: std and tokio's timers). Integration tests enable it through the
 # self dev-dependency below.
@@ -65,6 +65,8 @@ ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 
 zenoh = { version = "1.10", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
+# Query ids for unicast DNS-SD (`dns-sd`), from the OS CSPRNG.
+getrandom = { version = "0.3", optional = true }
 tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = { version = "0.14", optional = true }
 http = { version = "1", optional = true }
