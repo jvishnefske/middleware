@@ -27,6 +27,25 @@
 //! attachments ([`wire`]), not taken from Zenoh's source info, which is
 //! unstable API in Zenoh 1.x.
 //!
+//! # Trust model
+//!
+//! Every identity this backend sees is **self-asserted**: a Zenoh session
+//! chooses its own id, and any peer can put any sender id in an
+//! attachment, declare a queryable on any key (including another node's
+//! `@mw/node/<zid16>/<key>` or a service's `@mw/svc/<kind>/<instance>`)
+//! and answer queries on it. The backend filters what it can without
+//! authentication: a [`Target::Node`] request accepts only replies whose
+//! replier id is the target ([`wire::accepts`]), so a peer that merely
+//! squats on the node key without claiming the id is ignored; discovery
+//! refuses conflicting records ([`discovery`]). A peer that also claims
+//! the id is not detected, and [`Reply::sender`] in a gather,
+//! [`RequestMeta::sender`](crate::transport::RequestMeta) at a responder
+//! and [`SampleMeta::sender`](crate::transport::SampleMeta) are the
+//! sender's claim, not a verified fact. Authenticated identity needs Zenoh
+//! access control and authentication (router ACLs on `@mw/node/**`,
+//! `@mw/svc/**` and the application keys, with TLS or user/password
+//! authentication), which this backend does not configure.
+//!
 //! # Publish / subscribe
 //!
 //! * [`Publisher::publish`] is a Zenoh `put` of the payload on the key with
@@ -64,9 +83,10 @@
 //!   changed with [`ZenohTransport::with_timeout`]); Zenoh enforces it as
 //!   the query timeout. [`Target::Any`] queries the key (Zenoh picks the
 //!   best matching queryable); [`Target::Node`] queries that node's
-//!   per-node key `@mw/node/<zid16>/<key>`, which only its responder
-//!   declares. The first successful reply is copied into the response
-//!   buffer. If only error replies arrive, the last one becomes
+//!   per-node key `@mw/node/<zid16>/<key>`, which its responder declares,
+//!   and accepts only replies naming that node as replier (others are
+//!   skipped, see the trust model). The first accepted successful reply is
+//!   copied into the response buffer. If only error replies arrive, the last one becomes
 //!   [`ZenohError::Handler`]. Zenoh's own timeout error (a reply error
 //!   with the payload `Timeout`, sent by the querying session or by the
 //!   peer that routed the query) is not a responder's reply and is skipped
@@ -76,8 +96,9 @@
 //!   otherwise when the timeout elapses.
 //! * [`Gather::request_each`] is the same query with `QueryTarget::All`:
 //!   every responder of the key answers, and each reply is passed to the
-//!   callback with the replier's [`SenderId`] (from the reply attachment,
-//!   or the reply-error payload) and its result. It stops after
+//!   callback with the replier's self-asserted [`SenderId`] (from the reply
+//!   attachment, or the reply-error payload) and its result; with
+//!   [`Target::Node`] only replies naming that node are passed on. It stops after
 //!   `max_replies`, on [`Flow::Stop`], when Zenoh finalises the query
 //!   (every matching queryable answered) or at the timeout.
 //! * [`ZenohTransport::responder`] declares two queryables feeding one FIFO
@@ -213,6 +234,9 @@ pub enum ZenohError {
     /// [`Browse::next`](crate::discovery::Browse::next) or `try_next` was
     /// called before [`Browse::browse`](crate::discovery::Browse::browse).
     NotBrowsing,
+    /// Peers answered a record fetch with different records for one
+    /// service, so none is trusted and no event is reported for it.
+    ConflictingRecords,
 }
 
 impl core::fmt::Display for ZenohError {
@@ -230,6 +254,9 @@ impl core::fmt::Display for ZenohError {
             ZenohError::InvalidInstance => f.write_str("instance is not a plain key chunk"),
             ZenohError::Record(e) => write!(f, "service record: {e:?}"),
             ZenohError::NotBrowsing => f.write_str("browse was not called"),
+            ZenohError::ConflictingRecords => {
+                f.write_str("peers answered with conflicting service records")
+            }
         }
     }
 }
@@ -520,8 +547,9 @@ impl Requester for ZenohTransport {
     /// A Zenoh `get` (see the module docs): the first successful reply
     /// wins; the timeout is `options.timeout` or the transport's
     /// ([`DEFAULT_TIMEOUT`] unless set with `with_timeout`), enforced by
-    /// Zenoh. No reply is [`ZenohError::NoReply`]; error replies only, the
-    /// last as [`ZenohError::Handler`].
+    /// Zenoh. With [`Target::Node`] replies not naming the target as
+    /// replier are skipped. No reply is [`ZenohError::NoReply`]; error
+    /// replies only, the last as [`ZenohError::Handler`].
     async fn request_with<'b>(
         &mut self,
         key: Key<'_>,
@@ -534,6 +562,9 @@ impl Requester for ZenohTransport {
         // The channel closes once every responder has answered or the
         // timeout elapses, so this loop is bounded by the timeout.
         while let Ok(reply) = replies.recv_async().await {
+            if !wire::accepts(options.target, replier_of(&reply)) {
+                continue;
+            }
             match reply.result() {
                 Ok(sample) => {
                     let bytes = sample.payload().to_bytes();
@@ -553,6 +584,17 @@ impl Requester for ZenohTransport {
 /// than one a responder sent ([`wire::is_timeout_error`]).
 fn is_zenoh_error(err: &::zenoh::query::ReplyError) -> bool {
     wire::is_timeout_error(&err.payload().to_bytes())
+}
+
+/// The replier a Zenoh reply claims: the reply attachment of a successful
+/// reply, the id after the code in a reply error. Self-asserted.
+fn replier_of(reply: &ZenohReply) -> Option<SenderId> {
+    match reply.result() {
+        Ok(sample) => sample
+            .attachment()
+            .and_then(|a| wire::decode_reply(&a.to_bytes())),
+        Err(err) => wire::decode_reply_error(&err.payload().to_bytes()).1,
+    }
 }
 
 /// The sender and result of one Zenoh reply, the response copied into
@@ -584,7 +626,9 @@ impl Gather for ZenohTransport {
 
     /// A Zenoh `get` with `QueryTarget::All` and no consolidation (see the
     /// module docs). Every reply, successful or an error, counts and is
-    /// passed on with its replier's [`SenderId`]. Returns when
+    /// passed on with its replier's [`SenderId`] as the replier claims it
+    /// (self-asserted, see the trust model in the module docs); with
+    /// [`Target::Node`] only replies claiming that node count. Returns when
     /// `max_replies` were seen, on [`Flow::Stop`], when Zenoh finalises the
     /// query, or at the timeout; running out of time is not an error.
     async fn request_each<F>(
@@ -610,7 +654,9 @@ impl Gather for ZenohTransport {
             let Ok(reply) = replies.recv_async().await else {
                 break;
             };
-            if reply.result().is_err_and(is_zenoh_error) {
+            if reply.result().is_err_and(is_zenoh_error)
+                || !wire::accepts(options.target, replier_of(&reply))
+            {
                 continue;
             }
             seen += 1;

@@ -34,19 +34,39 @@
 //! and every kind below it); a later call replaces it. Then
 //! [`Browse::next`]:
 //!
-//! * a token appearing (Zenoh `Put`) starts a fetch of the record from the
-//!   announcer's queryable (a `get` bounded by the discovery timeout); its
-//!   first decodable reply is [`Event::Up`] (or [`Event::Down`] for a TTL 0
-//!   record). A fetch that ends without a record is
-//!   [`ZenohError::NoReply`]; an undecodable record is
-//!   [`ZenohError::Record`]. Either way the next call goes on with the next
-//!   token change.
+//! * a token appearing (Zenoh `Put`) starts a fetch of the record from
+//!   every queryable on the token's key (a `get` with `QueryTarget::All`,
+//!   bounded by the discovery timeout). The fetch collects **every** reply
+//!   until Zenoh finalises the query or the timeout ends it, and keeps only
+//!   candidates that are successful replies on exactly the token's key and
+//!   decode as a record of the key's kind and instance ([`candidate`]).
+//!   If all candidates are byte for byte the same record it is reported as
+//!   [`Event::Up`] (or [`Event::Down`] for a TTL 0 record); if two differ
+//!   the record is refused with [`ZenohError::ConflictingRecords`] and no
+//!   event is reported for that token ([`Agreement`]). A fetch with no
+//!   candidate is [`ZenohError::NoReply`]. Either way the next call goes on
+//!   with the next token change.
 //! * a token disappearing (Zenoh `Delete`: withdrawn, session closed or
 //!   link lost) is [`Event::Down`] at once.
 //!
 //! The fetch in progress is kept in the handle, so a cancelled `next`
 //! resumes it, and [`Browse::try_next`] starts it without waiting and
-//! reports the event once the record has arrived.
+//! reports the event once the fetch has ended.
+//!
+//! # Trust model
+//!
+//! Nothing here is authenticated. Zenoh session ids, liveliness tokens,
+//! queryables and attachments are all self-asserted by whichever peer
+//! declares them, and Zenoh's stable API does not say which session
+//! declared a token or sent a reply, so a record cannot be bound to the
+//! token's owner. What the browser does enforce: the record must answer the
+//! token's own key and name the key's kind and instance, and a second peer
+//! answering with a different record makes the browser refuse it instead of
+//! taking whichever came first. A peer that answers with the same bytes, or
+//! that declares the token and the only queryable itself, is not detected.
+//! Authenticated discovery needs Zenoh access control and authentication
+//! (router ACLs restricting who may declare tokens and queryables on
+//! `@mw/svc/**`), which this module does not configure.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -76,6 +96,49 @@ struct Announced {
 struct Fetch {
     key: String,
     replies: FifoChannelHandler<Reply>,
+    agreed: Agreement,
+}
+
+/// What the replies of one record fetch have said so far.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Agreement {
+    /// No candidate record yet.
+    #[default]
+    Nothing,
+    /// Every candidate so far was this record.
+    One(Vec<u8>),
+    /// Two candidates differed: the record is refused.
+    Conflict,
+}
+
+impl Agreement {
+    /// The agreement after one more candidate record. Pure.
+    pub fn with(self, record: Vec<u8>) -> Agreement {
+        match self {
+            Agreement::Nothing => Agreement::One(record),
+            Agreement::One(r) if r == record => Agreement::One(r),
+            Agreement::One(_) | Agreement::Conflict => Agreement::Conflict,
+        }
+    }
+}
+
+/// True if `payload` is a record for the service of token `key`: it
+/// decodes as a beacon of the key's kind naming the key's instance. Pure.
+pub fn record_matches_key(key: &str, payload: &[u8]) -> bool {
+    wire::parse_service_key(key).is_some_and(|(kind, instance)| {
+        beacon::decode(kind, payload).is_ok_and(|s| s.instance == instance)
+    })
+}
+
+/// The candidate record in `reply` for token `key`: a successful reply on
+/// exactly `key` whose payload [`record_matches_key`]; `None` otherwise.
+pub fn candidate(key: &str, reply: &Reply) -> Option<Vec<u8>> {
+    let sample = reply.result().ok()?;
+    if sample.key_expr().as_str() != key {
+        return None;
+    }
+    let payload = sample.payload().to_bytes().into_owned();
+    record_matches_key(key, &payload).then_some(payload)
 }
 
 /// Announces and browses services on one Zenoh session (see the module
@@ -122,6 +185,7 @@ impl ZenohDiscovery {
         Ok(Fetch {
             key: key.to_owned(),
             replies,
+            agreed: Agreement::Nothing,
         })
     }
 
@@ -167,12 +231,13 @@ fn up_event<'b>(key: &str, payload: &[u8], buf: &'b mut [u8]) -> Result<Event<'b
     event_into(buf, &Event::from_service(service)).map_err(record_error)
 }
 
-/// The payload of a successful record reply.
-fn record_payload(reply: &Reply) -> Option<Vec<u8>> {
-    reply
-        .result()
-        .ok()
-        .map(|s| s.payload().to_bytes().into_owned())
+/// The outcome of a finished fetch for token `key`, in `buf`.
+fn fetched<'b>(key: &str, agreed: Agreement, buf: &'b mut [u8]) -> Result<Event<'b>, ZenohError> {
+    match agreed {
+        Agreement::One(p) => up_event(key, &p, buf),
+        Agreement::Nothing => Err(ZenohError::NoReply),
+        Agreement::Conflict => Err(ZenohError::ConflictingRecords),
+    }
 }
 
 impl Announce for ZenohDiscovery {
@@ -265,24 +330,20 @@ impl Browse for ZenohDiscovery {
                 TokenChange::Gone(key) => return down_event(&key, buf),
             }
         }
-        let Some(fetch) = self.pending.as_ref() else {
+        let Some(fetch) = self.pending.as_mut() else {
             return Err(ZenohError::NoReply);
         };
-        // Bounded by the fetch timeout, after which Zenoh closes the
-        // channel; error replies are skipped.
-        let payload = loop {
-            match fetch.replies.recv_async().await {
-                Ok(reply) => {
-                    if let Some(p) = record_payload(&reply) {
-                        break Some(p);
-                    }
-                }
-                Err(_) => break None,
+        // Every reply is collected; the loop ends when Zenoh finalises the
+        // query or its timeout closes the channel, so it is bounded by the
+        // fetch timeout. Non-candidates (errors, other keys, undecodable or
+        // mismatched records) are skipped.
+        while let Ok(reply) = fetch.replies.recv_async().await {
+            if let Some(p) = candidate(&fetch.key, &reply) {
+                fetch.agreed = core::mem::take(&mut fetch.agreed).with(p);
             }
-        };
-        let key = self.pending.take().map(|f| f.key).unwrap_or_default();
-        match payload {
-            Some(p) => up_event(&key, &p, buf),
+        }
+        match self.pending.take() {
+            Some(f) => fetched(&f.key, f.agreed, buf),
             None => Err(ZenohError::NoReply),
         }
     }
@@ -303,25 +364,25 @@ impl Browse for ZenohDiscovery {
                 TokenChange::Gone(key) => return down_event(&key, buf).map(Some),
             }
         }
-        let Some(fetch) = self.pending.as_ref() else {
+        let Some(fetch) = self.pending.as_mut() else {
             return Ok(None);
         };
-        // Bounded: each iteration dequeues one already arrived reply.
-        let payload = loop {
+        // Bounded: each iteration dequeues one already arrived reply; the
+        // fetch is decided only once its channel has closed.
+        loop {
             match fetch.replies.try_recv() {
                 Ok(Some(reply)) => {
-                    if let Some(p) = record_payload(&reply) {
-                        break Some(p);
+                    if let Some(p) = candidate(&fetch.key, &reply) {
+                        fetch.agreed = core::mem::take(&mut fetch.agreed).with(p);
                     }
                 }
                 Ok(None) => return Ok(None),
-                Err(_) => break None,
+                Err(_) => break,
             }
-        };
-        let key = self.pending.take().map(|f| f.key).unwrap_or_default();
-        match payload {
-            Some(p) => up_event(&key, &p, buf).map(Some),
-            None => Err(ZenohError::NoReply),
+        }
+        match self.pending.take() {
+            Some(f) => fetched(&f.key, f.agreed, buf).map(Some),
+            None => Ok(None),
         }
     }
 }
@@ -333,6 +394,50 @@ mod tests {
     use crate::transport::SenderId;
 
     const KIND: ServiceKind<'static> = ServiceKind::from_static("cam/jpeg");
+
+    #[test]
+    fn differing_records_conflict_and_equal_ones_agree() {
+        let a = b"record a".to_vec();
+        let b = b"record b".to_vec();
+        let one = Agreement::Nothing.with(a.clone());
+        assert_eq!(one, Agreement::One(a.clone()));
+        assert_eq!(one.clone().with(a.clone()), Agreement::One(a.clone()));
+        assert_eq!(one.with(b.clone()), Agreement::Conflict);
+        // Once refused, agreeing replies do not bring the record back.
+        assert_eq!(Agreement::Conflict.with(a), Agreement::Conflict);
+        let mut buf = [0u8; 64];
+        assert!(matches!(
+            fetched("@mw/svc/cam/jpeg/u", Agreement::Conflict, &mut buf),
+            Err(ZenohError::ConflictingRecords)
+        ));
+        assert!(matches!(
+            fetched("@mw/svc/cam/jpeg/u", Agreement::Nothing, &mut buf),
+            Err(ZenohError::NoReply)
+        ));
+    }
+
+    #[test]
+    fn records_must_name_the_token_kind_and_instance() {
+        let s = Service {
+            kind: KIND,
+            instance: "unit-1",
+            node: None,
+            endpoint: Endpoint::Local,
+            txt: b"",
+            ttl_s: 60,
+        };
+        let mut out = [0u8; MAX_BEACON_LEN];
+        let n = beacon::encode(&s, &mut out).expect("encode");
+        let record = &out[..n];
+        assert!(record_matches_key("@mw/svc/cam/jpeg/unit-1", record));
+        assert!(!record_matches_key("@mw/svc/cam/jpeg/unit-2", record));
+        assert!(!record_matches_key("@mw/svc/cam/jpeg", record));
+        assert!(!record_matches_key("not/a/service", record));
+        assert!(!record_matches_key(
+            "@mw/svc/cam/jpeg/unit-1",
+            b"\x09garbage"
+        ));
+    }
 
     #[test]
     fn records_and_goodbyes_decode_from_their_keys() {

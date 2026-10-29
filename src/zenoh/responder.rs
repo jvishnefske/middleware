@@ -17,7 +17,8 @@
 //! remainder of `scratch` as the response buffer and a [`RequestMeta`]:
 //!
 //! * `sender`: the requester's sender id from the query attachment
-//!   ([`wire`]); `None` for a query without it (another Zenoh
+//!   ([`wire`]), as the requester claims it (self-asserted; see the trust
+//!   model in [`super`]); `None` for a query without it (another Zenoh
 //!   client).
 //! * `deadline_ms`: the requester's timeout carried in the attachment, minus
 //!   the time the query waited in the FIFO. Time on the network is not
