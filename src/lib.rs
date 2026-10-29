@@ -33,7 +33,8 @@
 //!   ABI 4 DMA routes.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
-//!   from [`dns`]); its tokio socket, a [`discovery::Browse`], needs `mdns`.
+//!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
+//!   announcer (a [`discovery::Announce`]) need `mdns`.
 //! * Backends, each behind a cargo feature:
 //!
 //! | feature    | module      | target            | needs                     |
@@ -46,7 +47,7 @@
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |
-//! | `mdns`     | `mdns::socket` | `std`          | tokio                     |
+//! | `mdns`     | `mdns::socket`, `mdns::announce`, `mdns::origin` | `std` | tokio, socket2 |
 //! | `dns-sd`   | `dns::unicast` | `std`          | tokio                     |
 //! | `memory`   | `transport::memory` | `std`     | tokio (timers); for tests and examples |
 //! | `postcard` | `codec::postcard` | `no_std`    | serde                     |

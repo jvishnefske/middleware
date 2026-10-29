@@ -13,6 +13,12 @@
 //!   type ([`dns_sd_type`](crate::discovery::record::dns_sd_type) in
 //!   [`DOMAIN`]) and turns answers into discovery events. Its raw
 //!   `query` / `recv_response` methods hand back whole [`Response`]s.
+//! * `announce` (feature `mdns`, `std`) — `MdnsAnnouncer`, a responder
+//!   implementing [`crate::discovery::Announce`]: RFC 6762 probing with
+//!   conflict renames, announcements, answers to PTR/SRV/TXT/A/AAAA
+//!   queries and goodbyes, decided by the pure `announce::table` core.
+//! * `origin` (feature `mdns`) — which sources both accept (on-link only
+//!   unless a destination was set explicitly), a pure policy.
 //!
 //! The 0.4 `ServiceDiscovery` trait is gone: browsing is
 //! [`crate::discovery::Browse`] for every discovery backend.
@@ -33,6 +39,10 @@
 use core::net::Ipv4Addr;
 
 #[cfg(feature = "mdns")]
+pub mod announce;
+#[cfg(feature = "mdns")]
+pub mod origin;
+#[cfg(feature = "mdns")]
 pub mod socket;
 pub use crate::dns::wire;
 
@@ -44,3 +54,8 @@ pub const MDNS_PORT: u16 = 5353;
 pub const MDNS_GROUP_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 /// The mDNS domain, appended to a service kind's DNS-SD type.
 pub const DOMAIN: &str = "local";
+/// Longest DNS-SD type text of a kind in [`DOMAIN`]: the type, a dot, the
+/// domain.
+#[cfg(feature = "mdns")]
+pub(crate) const MAX_TYPE_TEXT: usize =
+    crate::discovery::record::MAX_DNS_SD_TYPE_LEN + 1 + DOMAIN.len();
