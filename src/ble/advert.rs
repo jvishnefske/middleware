@@ -53,6 +53,12 @@
 //!   both start their sequence at 0 never suppress each other, and each
 //!   sample carries [`SampleMeta`] with the sender ([`Address::sender`]) and
 //!   sequence number.
+//! * Gaps: [`SampleMeta::gap`] is always `None`. The sequence counts all of
+//!   a sender's keys, so a jump seen through the keys this scanner selects
+//!   does not tell how many of *those* were lost.
+//! * [`AdvertisingLink`] joins a publisher and a subscriber into one link
+//!   and implements [`Split`] ([`AdvertTx`], [`AdvertRx`]) so a node can
+//!   publish while a receive waits.
 //! * [`discover`] recognises a scan report advertising [`SERVICE_UUID`] as a
 //!   middleware [`Node`] and extracts its local name. A publish with a
 //!   payload leaves no room for the 128-bit service UUID, so publishing nodes
@@ -77,8 +83,8 @@ use crate::dedup::SeenTable;
 pub use crate::dedup::Sequence;
 use crate::key::{AsKey, Filter, Key, KeyBuf, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
 use crate::transport::{
-    Delivery, Limits, Overflow, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber,
-    sample_into,
+    Delivery, Limits, Overflow, Publisher, Sample, SampleMeta, SenderId, Split, Subscribe,
+    Subscriber, sample_into,
 };
 
 /// Largest legacy advertising data payload.
@@ -1366,6 +1372,132 @@ pub fn discover<'b>(report: &ScanReport<'b>) -> Option<Node<'b>> {
     })
 }
 
+/// An advertising publisher and subscriber used as one link: a node that
+/// both broadcasts and scans. It implements [`Publisher`] and
+/// [`Subscriber`] by delegation, and [`Split`] into an [`AdvertTx`] and an
+/// [`AdvertRx`] borrowing the two halves, so a task can publish while
+/// another waits in `recv` (the advertiser and the scanner are separate
+/// radio roles, so the halves share nothing).
+pub struct AdvertisingLink<
+    'a,
+    A,
+    S,
+    const K: usize,
+    const L: usize = MAX_KEY_LEN,
+    const D: usize = DEFAULT_SENDERS,
+    const F: usize = K,
+> {
+    /// The publishing half.
+    pub publisher: AdvertisingPublisher<'a, A>,
+    /// The receiving half.
+    pub subscriber: AdvertisingSubscriber<S, K, L, D, F>,
+}
+
+impl<'a, A, S, const K: usize, const L: usize, const D: usize, const F: usize>
+    AdvertisingLink<'a, A, S, K, L, D, F>
+{
+    /// Joins a publisher and a subscriber.
+    pub const fn new(
+        publisher: AdvertisingPublisher<'a, A>,
+        subscriber: AdvertisingSubscriber<S, K, L, D, F>,
+    ) -> Self {
+        AdvertisingLink {
+            publisher,
+            subscriber,
+        }
+    }
+}
+
+impl<A: Advertiser, S, const K: usize, const L: usize, const D: usize, const F: usize> Publisher
+    for AdvertisingLink<'_, A, S, K, L, D, F>
+{
+    type Error = AdvertisingError<A::Error>;
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_ADVERT_PAYLOAD);
+
+    async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error> {
+        self.publisher.publish(key, payload).await
+    }
+}
+
+impl<A, S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize> Subscriber
+    for AdvertisingLink<'_, A, S, K, L, D, F>
+{
+    type Error = AdvertisingError<S::Error>;
+    /// See [`ADVERT_DELIVERY`].
+    const DELIVERY: Delivery = ADVERT_DELIVERY;
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_ADVERT_PAYLOAD);
+
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        self.subscriber.recv(buf).await
+    }
+
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        self.subscriber.try_recv(buf)
+    }
+}
+
+/// The publishing half of a split [`AdvertisingLink`].
+pub struct AdvertTx<'l, 'a, A>(&'l mut AdvertisingPublisher<'a, A>);
+
+impl<A: Advertiser> Publisher for AdvertTx<'_, '_, A> {
+    type Error = AdvertisingError<A::Error>;
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_ADVERT_PAYLOAD);
+
+    /// As [`AdvertisingPublisher`]'s `publish`.
+    async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error> {
+        self.0.publish(key, payload).await
+    }
+}
+
+/// The receiving half of a split [`AdvertisingLink`].
+pub struct AdvertRx<
+    'l,
+    S,
+    const K: usize,
+    const L: usize = MAX_KEY_LEN,
+    const D: usize = DEFAULT_SENDERS,
+    const F: usize = K,
+>(&'l mut AdvertisingSubscriber<S, K, L, D, F>);
+
+impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize> Subscriber
+    for AdvertRx<'_, S, K, L, D, F>
+{
+    type Error = AdvertisingError<S::Error>;
+    /// See [`ADVERT_DELIVERY`].
+    const DELIVERY: Delivery = ADVERT_DELIVERY;
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_ADVERT_PAYLOAD);
+
+    /// As [`AdvertisingSubscriber`]'s `recv`.
+    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
+        self.0.recv(buf).await
+    }
+
+    /// As [`AdvertisingSubscriber`]'s `try_recv`.
+    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Sample<'b>>, Self::Error> {
+        self.0.try_recv(buf)
+    }
+}
+
+impl<'a, A: Advertiser, S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize>
+    Split for AdvertisingLink<'a, A, S, K, L, D, F>
+{
+    type Tx<'x>
+        = AdvertTx<'x, 'a, A>
+    where
+        Self: 'x;
+    type Rx<'x>
+        = AdvertRx<'x, S, K, L, D, F>
+    where
+        Self: 'x;
+
+    fn split(&mut self) -> (AdvertTx<'_, 'a, A>, AdvertRx<'_, S, K, L, D, F>) {
+        (
+            AdvertTx(&mut self.publisher),
+            AdvertRx(&mut self.subscriber),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -2329,5 +2461,35 @@ mod tests {
         async fn set_advertising_data(&mut self, _: &[u8]) -> Result<(), ()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn k11_advertising_link_splits_into_publisher_and_subscriber() {
+        let mut talker =
+            AdvertisingPublisher::new(FakeAdvertiser::default(), AdvertisementBuilder::new());
+        block_on(talker.publish(HUM, b"55%")).unwrap();
+        block_on(talker.publish(HUM, b"56%")).unwrap();
+        let heard = talker.advertiser_mut().set.clone();
+        let mut link = AdvertisingLink::new(
+            AdvertisingPublisher::new(FakeAdvertiser::default(), AdvertisementBuilder::new()),
+            exact::<2>(FakeScanner::new(heard), &[HUM]),
+        );
+        let mut buf = [0u8; 64];
+        {
+            let (mut tx, mut rx) = link.split();
+            let recv = rx.recv(&mut buf);
+            // The publishing half works while the receive is in progress.
+            block_on(tx.publish(TEMP, b"21C")).unwrap();
+            let s = block_on(recv).unwrap();
+            assert_eq!((s.key, s.payload), (HUM, &b"55%"[..]));
+            assert_eq!((s.meta.seq, s.meta.gap), (Some(0), None));
+        }
+        assert_eq!(link.publisher.advertiser().set.len(), 1);
+        assert_eq!(link.publisher.sequence().get(), 1);
+        // The whole link still publishes and receives.
+        let s = link.try_recv(&mut buf).unwrap().expect("second advert");
+        assert_eq!((s.payload, s.meta.gap), (&b"56%"[..], None));
+        block_on(link.publish(TEMP, b"22C")).unwrap();
+        assert_eq!(link.publisher.advertiser().set.len(), 2);
     }
 }

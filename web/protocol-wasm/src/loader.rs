@@ -170,6 +170,8 @@ pub struct Info {
     pub chip: String,
     /// Firmware version.
     pub firmware: String,
+    /// Node id (8 bytes), reported by middleware 0.5 firmware.
+    pub node: Option<[u8; 8]>,
 }
 
 impl Info {
@@ -182,6 +184,7 @@ impl Info {
             status: d.status as u8,
             chip: d.chip.to_owned(),
             firmware: d.firmware.to_owned(),
+            node: d.node.map(|n| n.0),
         })
     }
 
@@ -194,8 +197,9 @@ impl Info {
             status: PayloadStatus::from_byte(self.status)?,
             chip: &self.chip,
             firmware: &self.firmware,
+            node: self.node.map(middleware::SenderId),
         };
-        let mut out = vec![0u8; 8 + 2 * middleware::loader::MAX_NAME + 2];
+        let mut out = vec![0u8; middleware::loader::MAX_INFO_LEN];
         let n = info.encode(&mut out)?;
         out.truncate(n);
         Some(out)
@@ -567,9 +571,18 @@ mod tests {
             status: 2,
             chip: "esp32c3".into(),
             firmware: "0.1.0".into(),
+            node: None,
         };
         let bytes = info.encode().unwrap();
         assert_eq!(Info::decode(&bytes), Some(info.clone()));
+        // A 0.5 response with the trailing node id decodes too.
+        let with_node = Info {
+            node: Some([1, 2, 3, 4, 5, 6, 0, 0]),
+            ..info.clone()
+        };
+        let longer = with_node.encode().unwrap();
+        assert_eq!(longer.len(), bytes.len() + 8);
+        assert_eq!(Info::decode(&longer), Some(with_node));
         assert_eq!(Info::decode(&bytes[..3]), None);
         assert_eq!(Info { status: 9, ..info }.encode(), None);
         let names: Vec<_> = (0..6).map(status_name).collect();

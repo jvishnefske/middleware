@@ -58,7 +58,7 @@
 use middleware::Key;
 use middleware::loader::trust::TrustState;
 use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
-use middleware::transport::HandlerError;
+use middleware::transport::{HandlerError, Request, SenderId};
 use middleware::wasm_abi::ABI_VERSION;
 
 /// Facts for dispatch: what `sys/info` reports, plus whether the re-key
@@ -77,6 +77,10 @@ pub struct Context<'a> {
     /// Physical presence has opened the re-key window and it has not yet
     /// expired or been used. Ignored without the `trust` feature.
     pub rekey_window: bool,
+    /// The device's node id (its base MAC, [`SenderId::from_mac`]), sent
+    /// at the end of `sys/info`; the id its radio frames carry as sender.
+    /// `None` leaves it out (a pre-0.5 response).
+    pub node: Option<SenderId>,
 }
 
 /// Dispatcher state: loader progress and payload status.
@@ -226,15 +230,21 @@ impl<'a> Outcome<'a> {
     }
 }
 
-/// Dispatches one request. The response body (for `sys/info`) is written
-/// into `out`.
+/// Dispatches one request. The response body (for `sys/info`, which ends
+/// with [`Context::node`] when set) is written into `out`.
+///
+/// The request's [`RequestMeta`](middleware::RequestMeta) is what the
+/// shell knows about the caller: over the serial ports nothing (no sender,
+/// no principal, no deadline). No `sys/*` decision depends on it: the
+/// sender is not authenticated, so trust is decided by signatures and
+/// physical presence alone.
 pub fn handle_request<'a>(
     state: State,
     ctx: &Context<'_>,
-    key: Key<'_>,
-    body: &'a [u8],
+    req: &Request<'a>,
     out: &mut [u8],
 ) -> Outcome<'a> {
+    let (key, body) = (req.key, req.body);
     let cmd = match Command::parse(key, body) {
         Err(e) => return Outcome::reply(state, Err(e)),
         Ok(None) => return Outcome::reply(state, Err(HandlerError::NotFound)),
@@ -248,6 +258,7 @@ pub fn handle_request<'a>(
                 status: state.status,
                 chip: ctx.chip,
                 firmware: ctx.firmware,
+                node: ctx.node,
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
@@ -367,12 +378,19 @@ mod tests {
     use middleware::crc::Crc32;
     use middleware::loader::keys;
 
-    const CTX: Context<'static> =
-        Context { chip: "esp32c3", firmware: "0.1.0", capacity: 1024, runtime: true, rekey_window: false };
+    const NODE: SenderId = SenderId::from_mac([0x24, 0x6F, 0x28, 0xAB, 0xCD, 0xEF]);
+    const CTX: Context<'static> = Context {
+        chip: "esp32c3",
+        firmware: "0.1.0",
+        capacity: 1024,
+        runtime: true,
+        rekey_window: false,
+        node: Some(NODE),
+    };
 
-    fn req<'a>(state: State, key: Key<'_>, body: &'a [u8]) -> Outcome<'a> {
+    fn req<'a>(state: State, key: Key<'a>, body: &'a [u8]) -> Outcome<'a> {
         let mut out = [0u8; 128];
-        handle_request(state, &CTX, key, body, &mut out)
+        handle_request(state, &CTX, &Request::new(key, body), &mut out)
     }
 
     fn begin(len: u32, crc: u32) -> [u8; 8] {
@@ -390,9 +408,50 @@ mod tests {
     }
 
     #[test]
+    fn e17_info_ends_with_the_node_id_and_old_decoders_ignore_it() {
+        let mut out = [0u8; 128];
+        let n = handle_request(
+            State::boot(false),
+            &CTX,
+            &Request::new(keys::INFO, &[]),
+            &mut out,
+        )
+        .reply
+        .unwrap();
+        // The node id is the last 8 bytes, after the 0.4 fields.
+        assert_eq!(&out[n - 8..n], &NODE.0);
+        let without = Context { node: None, ..CTX };
+        let m = handle_request(
+            State::boot(false),
+            &without,
+            &Request::new(keys::INFO, &[]),
+            &mut out,
+        )
+        .reply
+        .unwrap();
+        assert_eq!(m + 8, n);
+        // A request carrying caller metadata dispatches the same.
+        let meta = middleware::RequestMeta::NONE
+            .with_sender(SenderId([7; 8]))
+            .with_deadline_ms(5);
+        let o = handle_request(
+            State::boot(false),
+            &CTX,
+            &Request::new(keys::INFO, &[]).with_meta(meta),
+            &mut out,
+        );
+        assert_eq!(o.reply, Ok(n));
+    }
+
+    #[test]
     fn info_reports_device() {
         let mut out = [0u8; 128];
-        let o = handle_request(State::boot(true), &CTX, keys::INFO, &[], &mut out);
+        let o = handle_request(
+            State::boot(true),
+            &CTX,
+            &Request::new(keys::INFO, &[]),
+            &mut out,
+        );
         let n = o.reply.unwrap();
         assert_eq!(o.action, Action::None);
         let info = DeviceInfo::decode(&out[..n]).unwrap();
@@ -401,8 +460,14 @@ mod tests {
         assert_eq!(info.status, PayloadStatus::Stopped);
         assert_eq!(info.chip, "esp32c3");
         assert_eq!(info.firmware, "0.1.0");
+        assert_eq!(info.node, Some(NODE));
         let mut tiny = [0u8; 4];
-        let o = handle_request(State::boot(true), &CTX, keys::INFO, &[], &mut tiny);
+        let o = handle_request(
+            State::boot(true),
+            &CTX,
+            &Request::new(keys::INFO, &[]),
+            &mut tiny,
+        );
         assert_eq!(o.reply, Err(HandlerError::BufferTooSmall));
     }
 
@@ -526,10 +591,15 @@ mod tests {
     fn start_without_runtime_is_refused_but_loader_works() {
         let ctx = Context { runtime: false, ..CTX };
         let mut out = [0u8; 128];
-        let o = handle_request(State::boot(true), &ctx, keys::START, &[], &mut out);
+        let o = handle_request(State::boot(true), &ctx, &Request::new(keys::START, &[]), &mut out);
         assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::NotFound)));
         let b = begin(4, 0);
-        let o = handle_request(State::boot(true), &ctx, keys::BEGIN, &b, &mut out);
+        let o = handle_request(
+            State::boot(true),
+            &ctx,
+            &Request::new(keys::BEGIN, &b),
+            &mut out,
+        );
         assert_eq!(o.action, Action::Erase { len: 4 });
     }
 
@@ -600,7 +670,7 @@ mod tests {
         fn at(state: State, ctx: &Context<'_>, k: Key<'_>, body: &[u8]) -> (Outcome<'static>, [u8; 64]) {
             let mut out = [0u8; 64];
             // Bodies here never reach the outcome's action data.
-            let o = handle_request(state, ctx, k, body, &mut out);
+            let o = handle_request(state, ctx, &Request::new(k, body), &mut out);
             (Outcome { state: o.state, reply: o.reply, action: Action::None }.with(o.action), out)
         }
 

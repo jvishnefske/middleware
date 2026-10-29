@@ -43,7 +43,7 @@ use esp_base::store::{PayloadStore, StoreError};
 use middleware::Key;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::Frame;
-use middleware::transport::HandlerError;
+use middleware::transport::{HandlerError, Request};
 use middleware::wasm_abi::MAX_LOG;
 
 use crate::flash::REGION_SIZE;
@@ -124,6 +124,8 @@ impl<F: NorFlash> Controller<F> {
             capacity,
             runtime: profile.runtime,
             rekey_window: false,
+            // The ESP8266 build runs no radio; it reports no node id.
+            node: None,
         };
         log(
             out,
@@ -164,7 +166,7 @@ impl<F: NorFlash> Controller<F> {
     /// Dispatches one request, performs its storage action, and replies.
     fn request(&mut self, id: u8, key: Key<'_>, body: &[u8], out: &mut impl Outbound) {
         let mut reply = [0u8; MAX_REPLY];
-        let outcome = handle_request(self.state, &self.ctx, key, body, &mut reply);
+        let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), &mut reply);
         let result = match self.storage(&outcome) {
             Ok(()) => {
                 if let Action::Activate { len, .. } = outcome.action {

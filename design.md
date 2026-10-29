@@ -139,6 +139,11 @@ characteristic UUID and a 16-bit advertising id.
 - [x] B10 `Publisher::LIMITS` for the GATT server is the reassembly size `N`,
   bounded by the 16-bit length and 256 fragments at the minimum MTU —
   `ble::gatt::tests::publisher_limits_follow_reassembly_size`.
+- [x] B11 A `BleServer` handler sees the connected peer's address as
+  `RequestMeta::sender` when the binding reports it (`GattServer::peer`,
+  default `None`, so existing bindings are unchanged); never a principal
+  or a deadline —
+  `ble::gatt::tests::b11_handler_sees_the_peer_address_as_sender`.
 
 ### BLE advertising (`ble`)
 
@@ -199,6 +204,11 @@ characteristic UUID and a 16-bit advertising id.
   `ScanQueue` have `const fn` constructors and builders usable in `const`
   and `static` initialisers, and `Default` impls —
   `ble::advert::tests::defaults_and_const_builders`.
+- [x] A15 `AdvertisingLink` joins a publisher and a subscriber into one
+  `Publisher` + `Subscriber` and implements `Split` (K11). Samples report
+  no gap (`SampleMeta::gap` is `None`): one sequence counts every key of a
+  sender, so a jump seen through the scanner's keys is not a loss on them —
+  `ble::advert::tests::k11_advertising_link_splits_into_publisher_and_subscriber`.
 
 ### ESP-NOW (`espnow`)
 
@@ -256,6 +266,17 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   then dropped rather than kept; `P > MAX_FRAME` does not compile —
   `espnow::tests::n14_keeping_is_optional_and_saves_a_frame_of_ram`,
   `n8_buffer_too_small_keeps_the_sample` (default `P`).
+- [x] N15 Samples report no gap (`SampleMeta::gap` is `None`) even across
+  a sequence jump: the sequence is per sender over all its keys (and the
+  ESP base firmware numbers route chunks separately), so a receiver
+  filtering some keys cannot tell a loss from the sender's other keys —
+  `espnow::tests::n15_sequence_jumps_are_not_reported_as_gaps`.
+- [x] N16 Over `RadioHalves` (an `EspNowSend` and an `EspNowReceive`,
+  itself an `EspNowRadio`) the transport implements `Split`: `EspNowTx`
+  publishes with the transport's sequence rule while `EspNowRx` receives
+  with its filter slots, own address, dedup table and kept frame —
+  `espnow::tests::k11_split_publishes_while_a_receive_waits`,
+  `k11_split_rx_keeps_a_sample_that_did_not_fit`.
 
 ### Zenoh (`zenoh`)
 
@@ -537,8 +558,8 @@ crate's self dev-dependency). Tests marked *(feature)* run under
 - [x] K8 Every `Subscriber` declares `DELIVERY` (`Overflow::{DropNewest,
   DropOldest, Block}`, per-sender order) and `LIMITS` as required
   constants, so a backend that omits them does not compile; every in-tree
-  backend declares them (serial: `Block`; ESP-NOW, BLE GATT, BLE
-  advertising, Zenoh: `DropNewest`; gRPC, memory: `DropOldest`); the
+  backend declares them (serial since its inbox (S8), ESP-NOW, BLE GATT,
+  BLE advertising, Zenoh: `DropNewest`; gRPC, memory: `DropOldest`); the
   declared behaviour holds under overload —
   `tests/conformance/pubsub.rs`: `overload_matches_declared_delivery`, run
   by `tests/memory.rs`: `k_overload_matches_declared_delivery`.
@@ -551,10 +572,19 @@ crate's self dev-dependency). Tests marked *(feature)* run under
 - [x] K10 `Target::Node` reaches only that node's responder; with no
   responder on it the request fails at once —
   `transport::memory::tests::requests_reach_a_responder_with_meta_and_honour_timeouts`.
-- [ ] K11 `Split` divides a link into a `Publisher` half and a
-  `Subscriber` half usable concurrently. (Trait defined in
-  `transport::pubsub`; the embedded implementations and their tests are
-  0.5 phase 2.)
+- [x] K11 `Split` divides a link into a `Publisher` half and a
+  `Subscriber` half usable concurrently, each borrowing disjoint parts of
+  the link (no shared ownership, no `RefCell`): the serial link over a
+  `Duplex` (`SerialTx`, `SerialRx`), ESP-NOW over `RadioHalves`
+  (`EspNowTx`, `EspNowRx`) and BLE advertising as an `AdvertisingLink`
+  (`AdvertTx`, `AdvertRx`) —
+  `serial::link::tests::k11_split_halves_publish_while_a_receive_waits`,
+  `k11_split_rx_drains_the_inbox_first`, `tests/serial.rs`:
+  `k11_serial_split_publishes_while_subscribed` *(serial)*;
+  `espnow::tests::k11_split_publishes_while_a_receive_waits`,
+  `k11_split_rx_keeps_a_sample_that_did_not_fit` *(espnow)*;
+  `ble::advert::tests::k11_advertising_link_splits_into_publisher_and_subscriber`
+  *(ble)*.
 - [x] K12 A backend plugs into the conformance harness by implementing
   `ReqRepFixture`, `GatherFixture`, `PubSubFixture` and/or
   `DiscoveryFixture` and calling the generic cases (documented in
@@ -774,6 +804,48 @@ because WASM linear memory and the wasmi interpreter require one.
   `parse_rejects_bad_bodies_and_passes_app_keys`, `device_info_round_trips`.
 - [x] S7 The payload ABI (imports, exports, error codes, bounds checks) is
   defined once in `wasm_abi` — `wasm_abi::tests::*`.
+- [x] S8 Publications that arrive while `request_with` or `serve_one`
+  waits are kept, in order, in the link's inbox of `I` bytes (const
+  generic, default `INBOX_BYTES` = one maximal raw frame + 2; each entry
+  costs its raw frame + 2 bytes) and returned first by `recv`, `try_recv`,
+  a `Filtered` view, `SerialRx` and `next_frame`. A publication that does
+  not fit is dropped and counted (`inbox_dropped`); a buffer too small for
+  a queued one keeps it; `I = 0` keeps nothing. `DELIVERY` is
+  `DropNewest` with per-sender order (was `Block`): the inbox drops the
+  arriving publication, and a UART without flow control drops what
+  overruns its driver; nothing older is dropped for something newer. No
+  gaps are reported (no sequence numbers) —
+  `serial::link::tests::s8_publications_during_request_are_kept_in_order`,
+  `s8_publications_during_serve_one_are_kept`,
+  `s8_full_inbox_drops_the_newest_and_counts`, `s8_zero_inbox_keeps_nothing`,
+  `s8_small_buffer_keeps_a_queued_publication`,
+  `s8_filtered_view_and_next_frame_take_the_inbox_first`,
+  `delivery_is_drop_newest_in_order`; `tests/serial.rs`:
+  `s8_publications_during_a_request_reach_recv_in_order`,
+  `s8_inbox_overflow_drops_the_newest`,
+  `s8_request_after_a_timeout_still_works` *(serial)*.
+- [x] S9 `SerialLink::with_peer` names the link's peer: received samples
+  carry it as `SampleMeta::sender` and `serve_one` handlers see it as
+  `RequestMeta::sender` (no principal, no deadline); without it both are
+  `None` — `serial::link::tests::s9_peer_is_the_sender_of_samples_and_requests`,
+  `s9_without_a_peer_meta_is_empty`.
+- [x] S10 `sys/info` may end with the device's 8-byte node id
+  (`DeviceInfo::node`, a `SenderId`; `MAX_INFO_LEN` 81). Every decoder
+  reads the fields it knows and ignores trailing bytes, so 0.4 hosts read
+  0.5 devices and 0.5 hosts read 0.4 devices (`node: None`). Checked:
+  `DeviceInfo::decode` (used by `mwctl`, `protocol-wasm` and so the web
+  page, the ESP8266 tests and conagotchi's `badge-mw`) —
+  `loader::tests::s10_device_info_carries_a_trailing_node_id`,
+  `device_info_round_trips`; `protocol-wasm` `loader::tests::info_round_trips_and_names_statuses`;
+  `mwctl` `device::tests::info_decodes_a_protocol_only_esp8266` (its fake
+  sends the node id), `report::tests::info_notes_protocol_only_firmware`.
+- [x] S11 The serial link passes every conformance case for the traits it
+  implements (request/response, pub/sub, and discovery as
+  `PubSubDiscovery` over a split link), over an in-memory fake link pair
+  whose pub/sub direction is lossy like a UART without flow control.
+  `timeout_is_honoured` runs with the caller-side `Bounded` wrapper the
+  link's docs prescribe (the link has no clock); `Gather` is not
+  implemented (one peer) — `tests/serial.rs`: `k15_serial_*` *(serial)*.
 
 ### WASM runtime (`wasm-host`)
 
@@ -997,6 +1069,65 @@ because WASM linear memory and the wasmi interpreter require one.
   header at flash offset 0; code runs from flash through the instruction
   cache at that speed —
   `chip::tests::flash_settings_decode_the_image_header`.
+- [x] E17 Requests reach `dispatch::handle_request` as a middleware
+  `Request` with its `RequestMeta` (empty from a serial port; no `sys/*`
+  decision depends on it, the sender being unauthenticated), and
+  `sys/info` ends with the node id from the chip's base MAC
+  (`Context::node`; the ESP8266 build sends none) —
+  `dispatch::tests::e17_info_ends_with_the_node_id_and_old_decoders_ignore_it`,
+  `info_reports_device`.
+- [x] E18 The radio receives `app/...` and `disc/...` keys
+  (`radio::FILTERS`, the transport's two filter slots); `sys/...` never.
+  A payload sends on `app/...` only: its publishes (`goes_over_air`, also
+  checked again in the radio shell's `send`) and its source routes
+  (`carries_routes`) refuse `disc/...`, which is reserved for the radio
+  task's own beacon, so a payload cannot forge discovery beacons.
+  Received beacons go to the directory, not to the payload —
+  `radio::tests::e18_beacons_are_received_but_payloads_cannot_send_them`,
+  `r11_r12_only_app_keys_go_over_the_air`.
+- [x] E19 While a camera source route runs, the radio task broadcasts a
+  `disc/cam/jpeg` beacon (instance `cam-` + the MAC's last three bytes in
+  hex, node id the MAC, endpoint local, TXT `key=<route key>`, TTL 30 s)
+  at the route's start and every 15 s, and one goodbye when it stops:
+  under 100 bytes per 15 s. Pure core `radio::disc` (`CamBeacon`,
+  `cam_beacon`, the `discovery::beacon` codec); the shell sends it —
+  `radio::disc::tests::e19_cam_beacon_names_kind_instance_node_and_route`,
+  `e19_cam_beacon_runs_with_the_camera_route`;
+  `route::sources::tests::r15_camera_routes_ask_for_a_capture_then_send_its_chunks`
+  (`camera_key`). On hardware (ESP32-CAM) still to be seen.
+- [x] E20 Every device keeps a `discovery::Directory` of 4 records fed
+  from the `disc/...` beacons it receives (a missing node id is taken from
+  the sample's sender) and logs on `sys/log`
+  `disc: up <kind> <instance> node <16 hex> ttl <n> s (<k> known)`,
+  `disc: updated ...`, `disc: down <kind> <instance> (goodbye, <k> known)`,
+  and `disc: down <kind> <instance> (expired)` (refusals, E21, are not logged);
+  refreshes are silent. The conagotchi badge runs this shell, so its log
+  shows the ESP32-CAM's `disc: up cam/jpeg cam-...` line —
+  `radio::disc::tests::e20_neighbours_log_up_refresh_down_and_expiry`,
+  `e20_neighbours_fill_in_the_sender_and_ignore_non_beacons`. The line on
+  the badge is to be read on hardware.
+- [x] E21 Directory records are bound to the frame's sender (the ESP-NOW
+  source MAC): the sender is the record's node and a beacon declaring a
+  different node is refused; a record is updated or withdrawn only by the
+  sender that created it; one sender holds at most `PER_SENDER` (2) of
+  the 4 records, and a new record finding the directory full is refused,
+  never evicting another's. Refusals are counted (`Neighbours::refused`),
+  not logged. The source MAC is not authenticated, so this stops one node
+  claiming another's identity or records, not a radio forging MACs —
+  `radio::disc::tests::e21_records_are_bound_to_the_frame_sender`,
+  `e21_one_sender_cannot_fill_the_directory`.
+- [x] E23 The serial port tasks run their links with no inbox
+  (`shell::link::INBOX` = 0): they read with `next_frame` and never wait
+  in `request_with`/`serve_one`, so nothing could be queued, and each
+  port saves 1 KiB of `.bss` (the ESP32-S3 main stack is what `.bss`
+  leaves). With the default inbox the conagotchi badge's `.stack` fell
+  to 40 920 B, under its 40 KiB check; with none it is 45 032 B —
+  conagotchi `scripts/check.sh` "firmware main stack" step (2026-10-29),
+  `firmware/build.sh esp32s3`.
+- [x] E22 The `disc:` log lines print radio-supplied kinds and instances
+  with every byte outside printable ASCII, and `\`, as `\xNN`, so a
+  beacon cannot inject terminal escapes or line breaks into `sys/log` —
+  `radio::disc::tests::e22_log_lines_escape_radio_supplied_text`.
 
 #### Interpreter speed on the badge
 
@@ -1150,6 +1281,10 @@ open).
   `start` keeps listening 2 s for the device's explanation on `sys/log`
   before reporting the error. Shell code (`tools/mwctl/src/port.rs`,
   `main.rs`); to be verified on hardware.
+- [x] H3 `mwctl monitor` prints `sys/log` lines with control characters
+  escaped (`\u{1b}`, `\r`, ...), never passed to the terminal, as
+  `[pub]` lines already did by switching to hex; printable Unicode is
+  kept — `report::tests::events_are_one_readable_line`.
 
 ### Web site (`web/`)
 
