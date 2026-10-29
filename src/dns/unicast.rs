@@ -31,13 +31,17 @@
 //! Every query goes to one nameserver: the one given to
 //! [`UnicastDnsSdBuilder::nameserver`], else the first of the resolver
 //! configuration (given, or read from [`RESOLV_CONF_PATH`] at build). It
-//! asks one question with recursion desired, carries an EDNS(0) OPT record
-//! advertising [`EDNS_UDP_PAYLOAD`] bytes, and a fresh id from a xorshift
-//! generator seeded per process from the std hasher's random keys. A
-//! reply is accepted only from the nameserver's address, with the query's
-//! id and question ([`check_reply`]); anything else is skipped, at most
-//! [`MAX_STRAY_DATAGRAMS`] per attempt. Each attempt waits at most the
-//! timeout; after the last attempt the query fails with
+//! asks one question with recursion desired and carries an EDNS(0) OPT
+//! record advertising [`EDNS_UDP_PAYLOAD`] bytes.
+//!
+//! Against off-path spoofing (RFC 5452): every attempt of every query is
+//! sent from a new socket on a fresh ephemeral port, connected to the
+//! nameserver so the kernel drops datagrams from any other address, with
+//! an id drawn from the operating system's CSPRNG ([`query_id`]). A reply
+//! is accepted only with the query's id and question ([`check_reply`]);
+//! anything else is skipped without ending the attempt, so only the
+//! timeout ends an attempt and a flood of bogus datagrams cannot make a
+//! query fail early. After the last attempt the query fails with
 //! [`UnicastError::Timeout`]. A reply with the TC bit fails with
 //! [`UnicastError::Truncated`]: there is no TCP fallback, so an answer must
 //! fit [`EDNS_UDP_PAYLOAD`] bytes (and [`MAX_RECORDS`] records, about 30
@@ -79,7 +83,8 @@
 //! Cancel safety: a resolution's events are queued in one step after all
 //! of its queries completed, and an event leaves the queue only once copied,
 //! so a dropped `next` loses none; a dropped resolution is re-run at its
-//! due time and a late reply to it is skipped by id.
+//! due time, and its socket closes with it, so a late reply reaches no
+//! later query.
 //!
 //! # Composing
 //!
@@ -112,6 +117,6 @@ pub use map::{DEFAULT_CLUSTER_DOMAIN, MapError, ServiceMap, ServiceRef};
 pub use resolv::ResolvConf;
 pub use socket::{
     DEFAULT_ATTEMPTS, DEFAULT_TIMEOUT, EDNS_UDP_PAYLOAD, MAX_ENDPOINTS, MAX_QUIET_ROUNDS,
-    MAX_STRAY_DATAGRAMS, RESOLV_CONF_PATH, UnicastDnsSd, UnicastDnsSdBuilder, UnicastError,
+    RESOLV_CONF_PATH, UnicastDnsSd, UnicastDnsSdBuilder, UnicastError, query_id,
 };
 pub use tracker::{Diff, Schedule, Tracker};
