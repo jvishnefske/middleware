@@ -128,6 +128,9 @@ pub enum GrpcError {
     MalformedSample,
     /// Every sender feeding a [`GrpcResponder`] was dropped.
     Closed,
+    /// A request asked for [`Target::Node`](crate::Target::Node): gRPC
+    /// addresses services, not nodes.
+    UnsupportedTarget,
 }
 
 impl GrpcError {
@@ -173,6 +176,7 @@ impl core::fmt::Display for GrpcError {
             GrpcError::StreamEnded => f.write_str("subscription stream ended"),
             GrpcError::MalformedSample => f.write_str("malformed subscription stream item"),
             GrpcError::Closed => f.write_str("responder channel closed"),
+            GrpcError::UnsupportedTarget => f.write_str("gRPC cannot address a node"),
         }
     }
 }

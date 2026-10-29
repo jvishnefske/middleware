@@ -14,7 +14,7 @@ use core::task::{Context, Waker};
 
 use middleware::zenoh::{SessionConfig, ZenohError, ZenohTransport};
 use middleware::{
-    Handler, HandlerError, Key, KeyFilter, Publisher, Requester, Responder, Subscribe, Subscriber,
+    Handler, HandlerError, Key, KeyFilter, Request, Publisher, Requester, Responder, Subscribe, Subscriber,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,7 +48,8 @@ async fn loopback_pair() -> (ZenohTransport, ZenohTransport) {
 }
 
 /// Echoes the request reversed; empty requests are `InvalidRequest`.
-fn reverse(_key: Key<'_>, req: &[u8], resp: &mut [u8]) -> Result<usize, HandlerError> {
+fn reverse(r: &Request<'_>, resp: &mut [u8]) -> Result<usize, HandlerError> {
+    let req = r.body;
     if req.is_empty() {
         return Err(HandlerError::InvalidRequest);
     }

@@ -97,6 +97,10 @@ pub const fn status_name(status: HandlerError) -> &'static str {
         HandlerError::BufferTooSmall => "BufferTooSmall",
         HandlerError::Internal => "Internal",
         HandlerError::Denied => "Denied",
+        HandlerError::Unavailable => "Unavailable",
+        HandlerError::DeadlineExceeded => "DeadlineExceeded",
+        // A status added to the middleware after this build.
+        _ => "Unknown",
     }
 }
 
@@ -140,6 +144,9 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
         BufferTooSmall => "the response did not fit the device's buffer",
         Internal => "the device failed internally (for example a flash error)",
         Denied => "the device refused the request by policy",
+        Unavailable => "the device cannot serve this now; try again later",
+        DeadlineExceeded => "the device did not answer within the request's deadline",
+        _ => "the device answered with a status this mwctl does not know",
     }
 }
 
@@ -216,18 +223,13 @@ mod tests {
 
     #[test]
     fn generic_explanations_cover_every_status() {
-        for s in [
-            HandlerError::NotFound,
-            HandlerError::InvalidRequest,
-            HandlerError::BufferTooSmall,
-            HandlerError::Internal,
-            HandlerError::Denied,
-        ] {
+        for s in HandlerError::ALL {
             assert!(!explain("app/x", s).is_empty());
             assert_eq!(HandlerError::from_code(s.code()), s);
             assert!(!status_name(s).is_empty());
         }
         assert_eq!(status_name(HandlerError::Denied), "Denied");
+        assert_eq!(status_name(HandlerError::DeadlineExceeded), "DeadlineExceeded");
         assert!(explain("sys/loader/commit", HandlerError::Denied).contains("--key"));
         assert!(explain("sys/trust/claim", HandlerError::Denied).contains("BOOT"));
         assert!(explain("sys/trust/info", HandlerError::NotFound).contains("trust"));
