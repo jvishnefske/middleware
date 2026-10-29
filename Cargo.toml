@@ -1,6 +1,6 @@
 [package]
 name = "middleware"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Transport-agnostic pub/sub and request/response middleware over Zenoh, gRPC (Istio mesh) and BLE"
@@ -81,3 +81,11 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 middleware = { path = ".", features = ["memory"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+# One service kind discovered over Zenoh, mDNS and cluster DNS (stub on
+# loopback), then called with request_with and Gather over Zenoh and the
+# gRPC mesh client. `test = true`: `cargo test --all-features` runs it (K16).
+[[example]]
+name = "discover_and_call"
+required-features = ["zenoh", "grpc", "istio", "dns-sd", "mdns"]
+test = true
