@@ -37,7 +37,7 @@ for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espno
     fi
 done
 
-for set in "zenoh" "grpc" "grpc,istio" "zenoh,grpc,istio,prost"; do
+for set in "zenoh" "grpc" "grpc,istio" "mdns" "zenoh,grpc,istio,prost,mdns"; do
     echo "== F2: [$set] on host"
     cargo build --quiet --no-default-features --features "$set"
     if features_of_self --no-default-features --features "$set" | grep -Eqx 'ble|espnow'; then
