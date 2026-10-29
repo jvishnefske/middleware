@@ -1,12 +1,19 @@
-//! DNS message wire format for mDNS / DNS-SD (RFC 1035 §4, RFC 6762,
-//! RFC 6763), `no_std` and allocation free.
+//! DNS message wire format for unicast DNS, mDNS and DNS-SD (RFC 1035 §4,
+//! RFC 6762, RFC 6763), `no_std` and allocation free. Moved here from
+//! `mdns::wire` in 0.5; `mdns::wire` re-exports this module.
+//!
+//! # Decoding
 //!
 //! [`Message::parse`] validates a whole message once: header, every
 //! question, every resource record, every name (labels ≤ 63 bytes, names
 //! ≤ 255 bytes, at most [`MAX_POINTER_HOPS`] compression pointers per name,
 //! so a pointer loop is an error rather than a hang) and the RDATA of the
-//! record types it knows. After that the iterators and accessors borrow the
-//! message bytes and cannot fail.
+//! record types it knows. A message with more than [`MAX_RECORDS`] resource
+//! records is refused ([`WireError::TooManyRecords`]) before any is parsed,
+//! which bounds the work of every accessor, including the
+//! O(PTR × records) join of [`Response::instances`] that a hostile peer
+//! could otherwise inflate with a 9000-byte message of PTRs. After that the
+//! iterators and accessors borrow the message bytes and cannot fail.
 //!
 //! [`Name`] is a view into the message, so compressed names are never
 //! copied; [`Name::write_text`] renders one as dotted text when a string is
@@ -15,16 +22,39 @@
 //! Records are reported from the answer, authority and additional sections
 //! alike ([`Message::records`]); mDNS responders spread one instance's
 //! records over the answer and additional sections.
+//!
+//! # Encoding
+//!
+//! [`MessageWriter`] builds a message into a caller buffer: questions, then
+//! PTR, SRV, TXT, A and AAAA records ([`RecordData`]) in the answer,
+//! authority and additional sections, in that order. Owner names and the
+//! names inside PTR and SRV data are compressed against every name written
+//! before (RFC 1035 §4.1.4; RFC 6762 §18.14 allows it for SRV targets, and
+//! unicast resolvers accept it). Names to encode are [`TextName`]s: dotted
+//! text with `\.` and `\\` escapes, the form [`Name::write_text`] produces,
+//! or an instance label joined to a [`ServiceType`]. [`encode_query`] (one
+//! PTR question, mDNS browse) and [`encode_query_for`] (any type, optional
+//! recursion desired, for a unicast resolver) are shorthands. Nothing is
+//! truncated: a full buffer is [`WireError::BufferTooSmall`].
+//!
+//! [`TxtWriter`] builds TXT RDATA (`key=value` strings, RFC 6763 §6) and
+//! [`Txt::new`] validates it.
 
 use core::fmt;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
 
-/// UDP port of mDNS.
-pub const MDNS_PORT: u16 = 5353;
-/// IPv4 mDNS multicast group.
-pub const MDNS_GROUP_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
-/// Largest mDNS message (RFC 6762 §17), a sufficient receive buffer.
+/// Largest message this codec is meant for: mDNS's 9000 bytes (RFC 6762
+/// §17), above unicast DNS over UDP's 512 (or EDNS's typical 1232), so a
+/// sufficient receive buffer for both.
 pub const MAX_MESSAGE_LEN: usize = 9000;
+/// Most resource records (answer + authority + additional) a message may
+/// carry; [`Message::parse`] refuses more with
+/// [`WireError::TooManyRecords`]. A responder answering one service with a
+/// few dozen instances stays well below it.
+pub const MAX_RECORDS: usize = 64;
+/// Distinct name offsets a [`MessageWriter`] remembers as compression
+/// targets; later names compress only against these.
+pub const MAX_COMPRESSION_TARGETS: usize = 32;
 /// DNS header length.
 pub const HEADER_LEN: usize = 12;
 /// Longest label.
@@ -48,13 +78,24 @@ pub const TYPE_SRV: u16 = 33;
 pub const CLASS_IN: u16 = 1;
 
 /// Header flag: the message is a response.
-const FLAG_QR: u16 = 0x8000;
+pub const FLAG_QR: u16 = 0x8000;
+/// Header flag: authoritative answer (every mDNS response sets it).
+pub const FLAG_AA: u16 = 0x0400;
+/// Header flag: recursion desired (unicast queries to a resolver).
+pub const FLAG_RD: u16 = 0x0100;
+/// Header flag: recursion available (set by resolvers in responses).
+pub const FLAG_RA: u16 = 0x0080;
+/// Mask of the response code in the header flags (0 = no error,
+/// 3 = NXDOMAIN).
+pub const RCODE_MASK: u16 = 0x000F;
 /// Top bit of a question's class (unicast response requested) or a record's
 /// class (cache flush).
 const CLASS_TOP_BIT: u16 = 0x8000;
 
-/// Why a message could not be decoded or encoded.
+/// Why a message could not be decoded or encoded. Non-exhaustive: match
+/// with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WireError {
     /// The message ends inside a header, name or record.
     Truncated,
@@ -72,6 +113,15 @@ pub enum WireError {
     BufferTooSmall,
     /// A name rendered as text is not UTF-8.
     NotUtf8,
+    /// The message declares more than [`MAX_RECORDS`] resource records.
+    TooManyRecords,
+    /// A name given as text is not a valid name: an empty label, a label
+    /// over 63 bytes, a dangling `\\` escape, or over 255 bytes in wire form.
+    InvalidName,
+    /// A [`MessageWriter`] was asked to write into a section before one it
+    /// has already written (sections go question, answer, authority,
+    /// additional).
+    SectionOrder,
 }
 
 fn bytes_at(p: &[u8], at: usize, n: usize) -> Result<&[u8], WireError> {
@@ -339,22 +389,491 @@ impl<'o> Writer<'o> {
 
 /// Encodes a one-question mDNS query for PTR records of `service` into
 /// `out` and returns its length. `id` is echoed by responders answering a
-/// query sent from a port other than [`MDNS_PORT`] (RFC 6762 §6.7).
+/// query sent from a port other than the mDNS port (RFC 6762 §6.7).
 pub fn encode_query(id: u16, service: ServiceType<'_>, out: &mut [u8]) -> Result<usize, WireError> {
-    let mut w = Writer::new(out);
-    w.put(&id.to_be_bytes())?;
-    w.put(&0u16.to_be_bytes())?; // flags: standard query
-    w.put(&1u16.to_be_bytes())?; // questions
-    w.put(&[0; 6])?; // answers, authority, additional
-    for label in service.labels() {
-        // ServiceType::new bounds labels to MAX_LABEL_LEN, so this fits u8.
-        w.put(&[u8::try_from(label.len()).map_err(|_| WireError::InvalidServiceType)?])?;
-        w.put(label)?;
+    encode_query_for(id, TextName::service(service), TYPE_PTR, false, out)
+}
+
+/// Encodes a one-question query for `qtype` records of `name` (class IN),
+/// with the recursion-desired bit when `recursion_desired` (a query to a
+/// unicast resolver), and returns its length.
+pub fn encode_query_for(
+    id: u16,
+    name: TextName<'_>,
+    qtype: u16,
+    recursion_desired: bool,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    let flags = if recursion_desired { FLAG_RD } else { 0 };
+    Ok(MessageWriter::new(out, id, flags)?
+        .question(name, qtype, false)?
+        .finish())
+}
+
+/// A domain name given as text, to encode.
+///
+/// Either dotted text with `\.` and `\\` escapes for a literal dot or
+/// backslash inside a label (what [`Name::write_text`] produces; a trailing
+/// dot is ignored; `""` is the root), or a raw first label joined to a
+/// [`ServiceType`] ([`TextName::instance`]), the form of a DNS-SD instance
+/// name like `My.Printer._http._tcp.local` whose first label contains a dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextName<'a> {
+    /// A raw, unescaped first label.
+    first: Option<&'a [u8]>,
+    /// The rest as escaped dotted text without a trailing dot.
+    rest: &'a str,
+}
+
+/// One label of a [`TextName`], possibly escaped.
+#[derive(Debug, Clone, Copy)]
+struct TextLabel<'a> {
+    raw: &'a [u8],
+    escaped: bool,
+}
+
+impl<'a> TextLabel<'a> {
+    /// The label's bytes with escapes removed.
+    fn bytes(self) -> impl Iterator<Item = u8> + 'a {
+        let mut escape = false;
+        self.raw.iter().filter_map(move |&b| {
+            if self.escaped && !escape && b == b'\\' {
+                escape = true;
+                None
+            } else {
+                escape = false;
+                Some(b)
+            }
+        })
     }
-    w.put(&[0])?;
-    w.put(&TYPE_PTR.to_be_bytes())?;
-    w.put(&CLASS_IN.to_be_bytes())?;
-    Ok(w.pos)
+
+    fn len(self) -> usize {
+        self.bytes().count()
+    }
+
+    fn eq_ignore_case(self, other: &[u8]) -> bool {
+        self.len() == other.len()
+            && self
+                .bytes()
+                .zip(other.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    }
+}
+
+/// Splits escaped dotted text at unescaped dots.
+fn split_escaped(text: &str) -> impl Iterator<Item = TextLabel<'_>> + Clone {
+    let mut rest = text.as_bytes();
+    core::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let mut i = 0;
+        // Bounded by the text length.
+        while i < rest.len() {
+            match rest[i] {
+                b'\\' => i += 2,
+                b'.' => break,
+                _ => i += 1,
+            }
+        }
+        let i = i.min(rest.len());
+        let (label, tail) = rest.split_at(i);
+        rest = tail.split_first().map_or(tail, |(_, t)| t);
+        Some(TextLabel {
+            raw: label,
+            escaped: true,
+        })
+    })
+}
+
+impl<'a> TextName<'a> {
+    /// The root name.
+    pub const ROOT: TextName<'static> = TextName {
+        first: None,
+        rest: "",
+    };
+
+    /// Validates escaped dotted text (see the type docs).
+    pub fn new(text: &'a str) -> Result<Self, WireError> {
+        let odd = |t: &str| t.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1;
+        // A trailing dot is the root label unless it is escaped.
+        let rest = match text.strip_suffix('.') {
+            Some(r) if !odd(r) => r,
+            _ => text,
+        };
+        if odd(rest) {
+            // A dangling escape.
+            return Err(WireError::InvalidName);
+        }
+        TextName { first: None, rest }.validated()
+    }
+
+    /// The name of a DNS-SD service type, e.g. `_http._tcp.local`.
+    pub fn service(service: ServiceType<'a>) -> Self {
+        // ServiceType labels are graphic ASCII without `\\`, ≤ 63 bytes,
+        // ≤ 255 bytes in all: already a valid name.
+        TextName {
+            first: None,
+            rest: service.as_str(),
+        }
+    }
+
+    /// The instance name `label.<service>`: `label` is taken literally
+    /// (it may contain dots and spaces), 1..=63 bytes.
+    pub fn instance(label: &'a str, service: ServiceType<'a>) -> Result<Self, WireError> {
+        TextName {
+            first: Some(label.as_bytes()),
+            rest: service.as_str(),
+        }
+        .validated()
+    }
+
+    fn validated(self) -> Result<Self, WireError> {
+        let mut wire = 1usize;
+        // Bounded: ≤ 255 bytes of text.
+        for label in self.labels() {
+            let n = label.len();
+            if n == 0 || n > MAX_LABEL_LEN {
+                return Err(WireError::InvalidName);
+            }
+            wire += n + 1;
+        }
+        if wire > MAX_NAME_LEN {
+            return Err(WireError::InvalidName);
+        }
+        Ok(self)
+    }
+
+    fn labels(&self) -> impl Iterator<Item = TextLabel<'a>> + Clone + use<'a> {
+        let first = self.first.map(|raw| TextLabel {
+            raw,
+            escaped: false,
+        });
+        first.into_iter().chain(split_escaped(self.rest))
+    }
+}
+
+/// Section of a message a record is written to, in wire order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Section {
+    /// Answers to the questions.
+    Answer,
+    /// Authority records (mDNS probes put proposed records here).
+    Authority,
+    /// Additional records (DNS-SD puts SRV, TXT and addresses here).
+    Additional,
+}
+
+impl Section {
+    const fn index(self) -> usize {
+        match self {
+            Section::Answer => 1,
+            Section::Authority => 2,
+            Section::Additional => 3,
+        }
+    }
+}
+
+/// RDATA to encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordData<'a> {
+    /// IPv4 address.
+    A(Ipv4Addr),
+    /// IPv6 address.
+    Aaaa(Ipv6Addr),
+    /// Pointer to another name (DNS-SD: service type → instance).
+    Ptr(TextName<'a>),
+    /// Service location.
+    Srv {
+        /// Lower is preferred.
+        priority: u16,
+        /// Relative weight among equal priorities.
+        weight: u16,
+        /// The port.
+        port: u16,
+        /// The host.
+        target: TextName<'a>,
+    },
+    /// Attributes: TXT RDATA as validated by [`Txt::new`] (e.g. built with
+    /// [`TxtWriter`]). Empty data is written as one empty string, the
+    /// smallest valid TXT record (RFC 6763 §6.1).
+    Txt(Txt<'a>),
+}
+
+impl RecordData<'_> {
+    /// The record type written.
+    pub const fn rtype(&self) -> u16 {
+        match self {
+            RecordData::A(_) => TYPE_A,
+            RecordData::Aaaa(_) => TYPE_AAAA,
+            RecordData::Ptr(_) => TYPE_PTR,
+            RecordData::Srv { .. } => TYPE_SRV,
+            RecordData::Txt(_) => TYPE_TXT,
+        }
+    }
+}
+
+/// One resource record to encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordOut<'a> {
+    /// The owner name.
+    pub name: TextName<'a>,
+    /// Seconds the record stays valid; 0 announces its removal (an mDNS
+    /// goodbye).
+    pub ttl: u32,
+    /// Set the mDNS cache-flush bit (RFC 6762 §10.2): for unique records
+    /// (SRV, TXT, A, AAAA), never for shared PTRs.
+    pub cache_flush: bool,
+    /// The data. The class is always IN.
+    pub data: RecordData<'a>,
+}
+
+/// Builds a DNS message into a caller buffer, without allocating.
+///
+/// A consuming builder: each call returns the writer or the error, so
+/// `MessageWriter::new(buf, 0, FLAG_QR | FLAG_AA)?.record(..)?.finish()`
+/// either yields the whole message's length or fails; there is no partial
+/// success to forget about. The header counts are kept current, so the
+/// bytes up to [`MessageWriter::len`] are always a valid message.
+#[derive(Debug)]
+pub struct MessageWriter<'o> {
+    out: &'o mut [u8],
+    pos: usize,
+    /// Highest section written so far: 0 question, 1..=3 as [`Section`].
+    section: usize,
+    counts: [u16; 4],
+    /// Offsets of labels written in place, compression targets.
+    targets: [u16; MAX_COMPRESSION_TARGETS],
+    n_targets: usize,
+}
+
+impl<'o> MessageWriter<'o> {
+    /// Starts a message with `id` and header `flags` ([`FLAG_QR`],
+    /// [`FLAG_AA`], [`FLAG_RD`], ...).
+    pub fn new(out: &'o mut [u8], id: u16, flags: u16) -> Result<Self, WireError> {
+        let header = out.get_mut(..HEADER_LEN).ok_or(WireError::BufferTooSmall)?;
+        header.fill(0);
+        header[..2].copy_from_slice(&id.to_be_bytes());
+        header[2..4].copy_from_slice(&flags.to_be_bytes());
+        Ok(MessageWriter {
+            out,
+            pos: HEADER_LEN,
+            section: 0,
+            counts: [0; 4],
+            targets: [0; MAX_COMPRESSION_TARGETS],
+            n_targets: 0,
+        })
+    }
+
+    /// Bytes written so far: a complete message.
+    pub const fn len(&self) -> usize {
+        self.pos
+    }
+
+    /// Always false: a message has at least its header.
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Finishes the message and returns its length.
+    pub fn finish(self) -> usize {
+        self.pos
+    }
+
+    /// Adds a question for `qtype` records of `name`, class IN, with the
+    /// mDNS unicast-response bit when `unicast_response`. Questions come
+    /// before every record.
+    pub fn question(
+        mut self,
+        name: TextName<'_>,
+        qtype: u16,
+        unicast_response: bool,
+    ) -> Result<Self, WireError> {
+        if self.section > 0 {
+            return Err(WireError::SectionOrder);
+        }
+        self.name(name)?;
+        let class = CLASS_IN | if unicast_response { CLASS_TOP_BIT } else { 0 };
+        self.put(&qtype.to_be_bytes())?;
+        self.put(&class.to_be_bytes())?;
+        self.count(0)?;
+        Ok(self)
+    }
+
+    /// Adds `record` to `section`. Sections are written in order: a record
+    /// for an earlier section than the last one written is
+    /// [`WireError::SectionOrder`].
+    pub fn record(mut self, section: Section, record: &RecordOut<'_>) -> Result<Self, WireError> {
+        let index = section.index();
+        if index < self.section {
+            return Err(WireError::SectionOrder);
+        }
+        if usize::from(self.counts[1]) + usize::from(self.counts[2]) + usize::from(self.counts[3])
+            >= MAX_RECORDS
+        {
+            return Err(WireError::TooManyRecords);
+        }
+        self.section = index;
+        self.name(record.name)?;
+        let class = CLASS_IN | if record.cache_flush { CLASS_TOP_BIT } else { 0 };
+        self.put(&record.data.rtype().to_be_bytes())?;
+        self.put(&class.to_be_bytes())?;
+        self.put(&record.ttl.to_be_bytes())?;
+        let len_at = self.pos;
+        self.put(&[0, 0])?;
+        match record.data {
+            RecordData::A(a) => self.put(&a.octets())?,
+            RecordData::Aaaa(a) => self.put(&a.octets())?,
+            RecordData::Ptr(name) => self.name(name)?,
+            RecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => {
+                self.put(&priority.to_be_bytes())?;
+                self.put(&weight.to_be_bytes())?;
+                self.put(&port.to_be_bytes())?;
+                self.name(target)?;
+            }
+            RecordData::Txt(txt) if txt.as_bytes().is_empty() => self.put(&[0])?,
+            RecordData::Txt(txt) => self.put(txt.as_bytes())?,
+        }
+        let rdlen = u16::try_from(self.pos - len_at - 2).map_err(|_| WireError::BadRdata)?;
+        self.out
+            .get_mut(len_at..len_at + 2)
+            .ok_or(WireError::BufferTooSmall)?
+            .copy_from_slice(&rdlen.to_be_bytes());
+        self.count(index)?;
+        Ok(self)
+    }
+
+    fn count(&mut self, index: usize) -> Result<(), WireError> {
+        let n = self.counts[index]
+            .checked_add(1)
+            .ok_or(WireError::TooManyRecords)?;
+        self.counts[index] = n;
+        let at = 4 + 2 * index;
+        self.out
+            .get_mut(at..at + 2)
+            .ok_or(WireError::BufferTooSmall)?
+            .copy_from_slice(&n.to_be_bytes());
+        Ok(())
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), WireError> {
+        let end = self.pos + bytes.len();
+        self.out
+            .get_mut(self.pos..end)
+            .ok_or(WireError::BufferTooSmall)?
+            .copy_from_slice(bytes);
+        self.pos = end;
+        Ok(())
+    }
+
+    /// The offset of an earlier name equal to `suffix`, if one is a
+    /// compression target.
+    fn find<'a>(&self, suffix: impl Iterator<Item = TextLabel<'a>> + Clone) -> Option<u16> {
+        let written = self.out.get(..self.pos)?;
+        self.targets
+            .get(..self.n_targets)?
+            .iter()
+            .copied()
+            .find(|&at| {
+                let mut walk = Walk::new(written, usize::from(at));
+                let mut want = suffix.clone();
+                // Bounded: a name has at most 128 labels.
+                for _ in 0..=MAX_NAME_LEN / 2 {
+                    match (walk.next_label(), want.next()) {
+                        (Ok(None), None) => return true,
+                        (Ok(Some(have)), Some(want)) if want.eq_ignore_case(have) => {}
+                        _ => return false,
+                    }
+                }
+                false
+            })
+    }
+
+    /// Writes `name`, compressing its longest suffix already written.
+    fn name(&mut self, name: TextName<'_>) -> Result<(), WireError> {
+        let count = name.labels().count();
+        for i in 0..count {
+            if let Some(at) = self.find(name.labels().skip(i)) {
+                return self.put(&(0xC000 | at).to_be_bytes());
+            }
+            let label = name.labels().nth(i).ok_or(WireError::InvalidName)?;
+            if self.n_targets < MAX_COMPRESSION_TARGETS
+                && let Ok(at) = u16::try_from(self.pos)
+                && at < 0x4000
+            {
+                self.targets[self.n_targets] = at;
+                self.n_targets += 1;
+            }
+            let len = u8::try_from(label.len()).map_err(|_| WireError::InvalidName)?;
+            self.put(&[len])?;
+            for b in label.bytes() {
+                self.put(&[b])?;
+            }
+        }
+        self.put(&[0])
+    }
+}
+
+/// Builds TXT RDATA (RFC 6763 §6): one length-prefixed `key=value` string
+/// per [`TxtWriter::entry`], into a caller buffer.
+#[derive(Debug)]
+pub struct TxtWriter<'o> {
+    out: &'o mut [u8],
+    pos: usize,
+}
+
+impl<'o> TxtWriter<'o> {
+    /// An empty TXT record in `out`.
+    pub fn new(out: &'o mut [u8]) -> Self {
+        TxtWriter { out, pos: 0 }
+    }
+
+    /// Appends `key=value`; an empty `value` writes `key=` (use
+    /// [`TxtWriter::flag`] for a key without `=`). The key must be non-empty
+    /// printable ASCII without `=` (RFC 6763 §6.4); key, `=` and value
+    /// together at most 255 bytes.
+    pub fn entry(self, key: &[u8], value: &[u8]) -> Result<Self, WireError> {
+        self.push(key, Some(value))
+    }
+
+    /// Appends a boolean attribute: `key` alone, no `=`.
+    pub fn flag(self, key: &[u8]) -> Result<Self, WireError> {
+        self.push(key, None)
+    }
+
+    fn push(mut self, key: &[u8], value: Option<&[u8]>) -> Result<Self, WireError> {
+        let key_ok =
+            !key.is_empty() && key.iter().all(|&b| (0x20..=0x7E).contains(&b) && b != b'=');
+        if !key_ok {
+            return Err(WireError::BadRdata);
+        }
+        let len = key.len() + value.map_or(0, |v| v.len() + 1);
+        let len = u8::try_from(len).map_err(|_| WireError::BadRdata)?;
+        let end = self.pos + 1 + usize::from(len);
+        let slot = self
+            .out
+            .get_mut(self.pos..end)
+            .ok_or(WireError::BufferTooSmall)?;
+        slot[0] = len;
+        slot[1..=key.len()].copy_from_slice(key);
+        if let Some(v) = value {
+            slot[1 + key.len()] = b'=';
+            slot[2 + key.len()..].copy_from_slice(v);
+        }
+        self.pos = end;
+        Ok(self)
+    }
+
+    /// The finished RDATA.
+    pub fn finish(self) -> Txt<'o> {
+        let out: &'o [u8] = self.out;
+        Txt(out.get(..self.pos).unwrap_or_default())
+    }
 }
 
 /// One question of a message.
@@ -401,7 +920,9 @@ pub struct Srv<'p> {
 pub struct Txt<'p>(&'p [u8]);
 
 impl<'p> Txt<'p> {
-    fn parse(data: &'p [u8]) -> Result<Self, WireError> {
+    /// Validates `data` as TXT RDATA: a sequence of length-prefixed strings
+    /// that ends exactly at the end. Empty data is accepted (no entries).
+    pub fn new(data: &'p [u8]) -> Result<Self, WireError> {
         let mut at = 0;
         // Bounded: each entry consumes at least one byte.
         while at < data.len() {
@@ -428,6 +949,11 @@ impl<'p> Txt<'p> {
                 }
             }
         })
+    }
+
+    /// The raw RDATA bytes.
+    pub const fn as_bytes(&self) -> &'p [u8] {
+        self.0
     }
 
     /// The value of the first entry whose key is `key` (ASCII case
@@ -521,7 +1047,7 @@ fn parse_record(packet: &[u8], at: usize) -> Result<(Record<'_>, usize), WireErr
                 target: name_at(6)?,
             })
         }
-        TYPE_TXT => Rdata::Txt(Txt::parse(raw)?),
+        TYPE_TXT => Rdata::Txt(Txt::new(raw)?),
         rtype => Rdata::Other { rtype, data: raw },
     };
     let rec = Record {
@@ -555,6 +1081,9 @@ impl<'p> Message<'p> {
         let records = [6, 8, 10].into_iter().try_fold(0u32, |n, at| {
             Ok::<_, WireError>(n + u32::from(u16_at(packet, at)?))
         })?;
+        if records > MAX_RECORDS as u32 {
+            return Err(WireError::TooManyRecords);
+        }
         let mut at = HEADER_LEN;
         // Bounded by the 16-bit counts; each item also consumes ≥ 5 bytes.
         for _ in 0..questions {
@@ -577,6 +1106,16 @@ impl<'p> Message<'p> {
     /// The message id (0 in multicast mDNS).
     pub const fn id(&self) -> u16 {
         self.id
+    }
+
+    /// The header flags (see [`FLAG_QR`], [`FLAG_RD`], [`RCODE_MASK`]).
+    pub const fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    /// The response code (0 = no error, 3 = NXDOMAIN).
+    pub const fn rcode(&self) -> u8 {
+        (self.flags & RCODE_MASK) as u8
     }
 
     /// True for a response, false for a query.
@@ -992,6 +1531,319 @@ mod tests {
         assert_eq!(
             i.name.write_text(&mut small),
             Err(WireError::BufferTooSmall)
+        );
+    }
+
+    fn service() -> ServiceType<'static> {
+        http()
+    }
+
+    /// The printer of `fixture::printer`, encoded with `MessageWriter`.
+    fn encoded_printer(out: &mut [u8], ttl: u32) -> usize {
+        let instance = TextName::instance("My.Printer", service()).unwrap();
+        let host = TextName::new("printer.local").unwrap();
+        let mut txt = [0u8; 32];
+        let txt = TxtWriter::new(&mut txt)
+            .entry(b"path", b"/")
+            .unwrap()
+            .flag(b"Color")
+            .unwrap()
+            .finish();
+        let rec = |name, data, cache_flush| RecordOut {
+            name,
+            ttl,
+            cache_flush,
+            data,
+        };
+        MessageWriter::new(out, 7, FLAG_QR | FLAG_AA)
+            .unwrap()
+            .record(
+                Section::Answer,
+                &rec(
+                    TextName::service(service()),
+                    RecordData::Ptr(instance),
+                    false,
+                ),
+            )
+            .unwrap()
+            .record(
+                Section::Additional,
+                &rec(
+                    instance,
+                    RecordData::Srv {
+                        priority: 1,
+                        weight: 2,
+                        port: 8080,
+                        target: host,
+                    },
+                    true,
+                ),
+            )
+            .unwrap()
+            .record(
+                Section::Additional,
+                &rec(instance, RecordData::Txt(txt), true),
+            )
+            .unwrap()
+            .record(
+                Section::Additional,
+                &rec(host, RecordData::A(Ipv4Addr::new(192, 168, 1, 20)), true),
+            )
+            .unwrap()
+            .record(
+                Section::Additional,
+                &rec(host, RecordData::Aaaa(Ipv6Addr::LOCALHOST), true),
+            )
+            .unwrap()
+            .finish()
+    }
+
+    #[test]
+    fn every_record_type_round_trips_with_compression() {
+        let mut out = [0u8; 512];
+        let n = encoded_printer(&mut out, 120);
+        let r = Response::parse(&out[..n]).unwrap().unwrap();
+        assert_eq!(
+            (r.message().id(), r.message().flags()),
+            (7, FLAG_QR | FLAG_AA)
+        );
+        let recs: Vec<_> = r.records().collect();
+        assert_eq!(recs.len(), 5);
+        let mut text = [0u8; 64];
+        match recs[0].data {
+            Rdata::Ptr(p) => {
+                assert_eq!(p.write_text(&mut text), Ok("My\\.Printer._http._tcp.local"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!recs[0].cache_flush && recs[1..].iter().all(|r| r.cache_flush));
+        match recs[1].data {
+            Rdata::Srv(srv) => {
+                assert_eq!((srv.priority, srv.weight, srv.port), (1, 2, 8080));
+                assert_eq!(srv.target.write_text(&mut text), Ok("printer.local"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let Rdata::Txt(txt) = recs[2].data else {
+            panic!()
+        };
+        assert_eq!(
+            (txt.get(b"PATH"), txt.get(b"color")),
+            (Some(&b"/"[..]), Some(&b""[..]))
+        );
+        assert_eq!(recs[3].data, Rdata::A(Ipv4Addr::new(192, 168, 1, 20)));
+        assert_eq!(recs[4].data, Rdata::Aaaa(Ipv6Addr::LOCALHOST));
+        assert!(recs.iter().all(|r| r.ttl == 120 && r.class == CLASS_IN));
+        // The DNS-SD join resolves what was written.
+        let Some(Instance::Resolved(i)) = r.instances(http()).next() else {
+            panic!()
+        };
+        assert_eq!(i.label(), Ok("My.Printer"));
+        assert_eq!(
+            i.socket_addr_v4(),
+            Some("192.168.1.20:8080".parse().unwrap())
+        );
+        assert_eq!(i.ipv6, Some(Ipv6Addr::LOCALHOST));
+        // Compressed: the same records spelled out take far more room.
+        let spelled = 12
+            + (18 + 10 + 30)
+            + (30 + 10 + 6 + 15)
+            + (30 + 10 + 13)
+            + (15 + 10 + 4)
+            + (15 + 10 + 16);
+        assert!(n < spelled - 60, "{n} bytes, uncompressed {spelled}");
+        // Goodbye: TTL 0 on the PTR.
+        let n = encoded_printer(&mut out, 0);
+        let r = Response::parse(&out[..n]).unwrap().unwrap();
+        assert!(matches!(
+            r.instances(http()).next(),
+            Some(Instance::Gone(_))
+        ));
+    }
+
+    #[test]
+    fn writer_refuses_to_truncate_and_keeps_section_order() {
+        let mut big = [0u8; 512];
+        let n = encoded_printer(&mut big, 120);
+        for cut in [0, HEADER_LEN - 1, HEADER_LEN + 3, n - 1] {
+            let mut small = std::vec![0u8; cut];
+            let r = std::panic::catch_unwind(move || {
+                let instance = TextName::instance("x", http()).unwrap();
+                MessageWriter::new(&mut small, 0, FLAG_QR)
+                    .and_then(|w| {
+                        w.record(
+                            Section::Answer,
+                            &RecordOut {
+                                name: TextName::service(http()),
+                                ttl: 1,
+                                cache_flush: false,
+                                data: RecordData::Ptr(instance),
+                            },
+                        )
+                    })
+                    .map(|w| w.finish())
+            });
+            if cut < 40 {
+                assert_eq!(r.unwrap(), Err(WireError::BufferTooSmall), "cut {cut}");
+            }
+        }
+        let a = RecordOut {
+            name: TextName::ROOT,
+            ttl: 1,
+            cache_flush: false,
+            data: RecordData::A(Ipv4Addr::LOCALHOST),
+        };
+        let w = MessageWriter::new(&mut big, 0, FLAG_QR)
+            .unwrap()
+            .record(Section::Additional, &a)
+            .unwrap();
+        assert_eq!(
+            w.record(Section::Answer, &a).unwrap_err(),
+            WireError::SectionOrder
+        );
+        let w = MessageWriter::new(&mut big, 0, 0)
+            .unwrap()
+            .record(Section::Answer, &a)
+            .unwrap();
+        assert_eq!(
+            w.question(TextName::ROOT, TYPE_A, false).unwrap_err(),
+            WireError::SectionOrder
+        );
+    }
+
+    #[test]
+    fn unicast_queries_set_rd_and_any_type() {
+        let mut out = [0u8; 64];
+        let name = TextName::new("_mw-bus._tcp.example.com.").unwrap();
+        for qtype in [TYPE_SRV, TYPE_A, TYPE_AAAA, TYPE_TXT, TYPE_PTR] {
+            let n = encode_query_for(0xBEEF, name, qtype, true, &mut out).unwrap();
+            let m = Message::parse(&out[..n]).unwrap();
+            assert_eq!(
+                (m.id(), m.flags() & FLAG_RD, m.is_response(), m.rcode()),
+                (0xBEEF, FLAG_RD, false, 0)
+            );
+            let q = m.questions().next().unwrap();
+            assert_eq!(
+                (q.qtype, q.class, q.unicast_response),
+                (qtype, CLASS_IN, false)
+            );
+            let mut text = [0u8; 64];
+            assert_eq!(q.name.write_text(&mut text), Ok("_mw-bus._tcp.example.com"));
+        }
+        let n = encode_query_for(1, name, TYPE_SRV, false, &mut out).unwrap();
+        assert_eq!(Message::parse(&out[..n]).unwrap().flags(), 0);
+        // The mDNS browse shorthand is unchanged on the wire.
+        let n = encode_query(0x1234, http(), &mut out).unwrap();
+        assert_eq!(
+            &out[..n],
+            b"\x12\x34\0\0\0\x01\0\0\0\0\0\0\x05_http\x04_tcp\x05local\0\0\x0c\0\x01"
+        );
+    }
+
+    #[test]
+    fn text_names_are_validated_and_unescaped() {
+        let mut out = [0u8; 600];
+        for (text, wire) in [
+            ("", &b"\0"[..]),
+            (".", b"\0"),
+            ("a.b", b"\x01a\x01b\0"),
+            ("a\\.b.c.", b"\x03a.b\x01c\0"),
+            ("a\\\\.c", b"\x02a\\\x01c\0"),
+            ("a\\.", b"\x02a.\0"),
+        ] {
+            let name = TextName::new(text).unwrap();
+            let n = encode_query_for(0, name, TYPE_A, false, &mut out).unwrap();
+            assert_eq!(&out[HEADER_LEN..n - 4], wire, "{text}");
+        }
+        for bad in [
+            "a..b",
+            ".a",
+            "a\\",
+            "a\\\\\\",
+            &"x".repeat(64),
+            &std::vec!["a".repeat(63); 4].join("."),
+        ] {
+            assert_eq!(TextName::new(bad), Err(WireError::InvalidName), "{bad}");
+        }
+        assert_eq!(TextName::instance("", http()), Err(WireError::InvalidName));
+        assert_eq!(
+            TextName::instance(&"x".repeat(64), http()),
+            Err(WireError::InvalidName)
+        );
+    }
+
+    #[test]
+    fn txt_writer_builds_valid_rdata() {
+        let mut buf = [0u8; 16];
+        let txt = TxtWriter::new(&mut buf)
+            .entry(b"k", b"v")
+            .unwrap()
+            .flag(b"f")
+            .unwrap()
+            .finish();
+        assert_eq!(txt.as_bytes(), b"\x03k=v\x01f");
+        assert_eq!(Txt::new(txt.as_bytes()), Ok(txt));
+        assert_eq!(txt.entries().count(), 2);
+        let mut small = [0u8; 3];
+        assert_eq!(
+            TxtWriter::new(&mut small).entry(b"k", b"v").unwrap_err(),
+            WireError::BufferTooSmall
+        );
+        for bad in [&b""[..], b"a=b", b"\x01"] {
+            assert_eq!(
+                TxtWriter::new(&mut buf).flag(bad).unwrap_err(),
+                WireError::BadRdata
+            );
+        }
+        assert_eq!(Txt::new(b"\x05ab"), Err(WireError::BadRdata));
+        assert_eq!(Txt::new(b"").map(|t| t.entries().count()), Ok(0));
+    }
+
+    #[test]
+    fn records_over_the_cap_are_refused_before_parsing() {
+        // A response declaring MAX_RECORDS + 1 PTR answers, every one present.
+        let ptrs = |count: usize| {
+            let mut p = std::vec![0, 0, 0x84, 0, 0, 0];
+            p.extend_from_slice(&(count as u16).to_be_bytes());
+            p.extend_from_slice(&[0, 0, 0, 0]);
+            let service = name(&mut p, "_http._tcp.local");
+            for i in 0..count {
+                if i > 0 {
+                    pointer(&mut p, service);
+                }
+                rr_head(&mut p, TYPE_PTR, CLASS_IN, 120);
+                let s = begin_rdata(&mut p);
+                name_ptr(&mut p, &["x"], service);
+                end_rdata(&mut p, s);
+            }
+            p
+        };
+        let ok = ptrs(MAX_RECORDS);
+        let r = Response::parse(&ok).unwrap().unwrap();
+        assert_eq!(r.instances(http()).count(), MAX_RECORDS);
+        assert_eq!(
+            Message::parse(&ptrs(MAX_RECORDS + 1)),
+            Err(WireError::TooManyRecords)
+        );
+        // A header claiming 3 × 65535 records fails on the count alone.
+        let mut huge = std::vec![0, 0, 0x84, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        huge.resize(MAX_MESSAGE_LEN, 0);
+        assert_eq!(Message::parse(&huge), Err(WireError::TooManyRecords));
+        // The writer refuses to build what the parser would refuse.
+        let mut out = std::vec![0u8; MAX_MESSAGE_LEN];
+        let a = RecordOut {
+            name: TextName::ROOT,
+            ttl: 1,
+            cache_flush: false,
+            data: RecordData::A(Ipv4Addr::LOCALHOST),
+        };
+        let mut w = MessageWriter::new(&mut out, 0, FLAG_QR).unwrap();
+        for _ in 0..MAX_RECORDS {
+            w = w.record(Section::Answer, &a).unwrap();
+        }
+        assert_eq!(
+            w.record(Section::Answer, &a).unwrap_err(),
+            WireError::TooManyRecords
         );
     }
 }

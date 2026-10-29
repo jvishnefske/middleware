@@ -24,7 +24,7 @@ use super::GrpcError;
 use super::codec::RawCodec;
 use super::status::to_status;
 use crate::key::Key;
-use crate::transport::{Handler, HandlerError, Responder};
+use crate::transport::{Handler, HandlerError, Request as MwRequest, RequestMeta, Responder};
 use bytes::Bytes;
 use core::convert::Infallible;
 use core::task::{Context, Poll};
@@ -126,19 +126,20 @@ impl UnaryService<Bytes> for UnaryMethod {
 }
 
 /// Runs `handler` for `key` with `request` copied into the front of
-/// `scratch` and the response written into the remainder. Pure apart from
-/// writing `scratch`.
+/// `scratch` and the response written into the remainder; the handler sees
+/// `meta`. Pure apart from writing `scratch`.
 pub fn run_handler<H: Handler>(
     handler: &mut H,
     key: Key<'_>,
     request: &[u8],
+    meta: RequestMeta<'_>,
     scratch: &mut [u8],
 ) -> Result<Bytes, HandlerError> {
     let (req_buf, resp_buf) = scratch
         .split_at_mut_checked(request.len())
         .ok_or(HandlerError::BufferTooSmall)?;
     req_buf.copy_from_slice(request);
-    let n = handler.handle(key, req_buf, resp_buf)?;
+    let n = handler.handle(&MwRequest::new(key, req_buf).with_meta(meta), resp_buf)?;
     let out = resp_buf.get(..n).ok_or(HandlerError::BufferTooSmall)?;
     Ok(Bytes::copy_from_slice(out))
 }
@@ -154,7 +155,9 @@ impl Responder for GrpcResponder {
 
     /// Answers one queued call. Handler failures are sent to the client as a
     /// status and still return `Ok(())`; only a closed queue is an error. A
-    /// client that disconnected before the reply is ignored.
+    /// client that disconnected before the reply is ignored. The handler
+    /// sees no [`RequestMeta`] yet (caller identity and deadline are not
+    /// carried through this responder).
     async fn serve_one<H: Handler>(
         &mut self,
         handler: &mut H,
@@ -162,7 +165,7 @@ impl Responder for GrpcResponder {
     ) -> Result<(), GrpcError> {
         let call = self.rx.recv().await.ok_or(GrpcError::Closed)?;
         let reply = match Key::new(&call.key) {
-            Ok(key) => run_handler(handler, key, &call.request, scratch).map_err(to_status),
+            Ok(key) => run_handler(handler, key, &call.request, RequestMeta::NONE, scratch).map_err(to_status),
             Err(_) => Err(Status::invalid_argument("invalid key")),
         };
         let _ = call.reply.send(reply);
@@ -188,25 +191,25 @@ mod tests {
 
     #[test]
     fn run_handler_splits_scratch() {
-        let mut echo = |_: Key<'_>, req: &[u8], resp: &mut [u8]| -> Result<usize, HandlerError> {
+        let mut echo = crate::transport::handler_fn(|req, resp| {
             let out = resp
-                .get_mut(..req.len())
+                .get_mut(..req.body.len())
                 .ok_or(HandlerError::BufferTooSmall)?;
-            out.copy_from_slice(req);
-            Ok(req.len())
-        };
+            out.copy_from_slice(req.body);
+            Ok(req.body.len())
+        });
         let k = Key::from_static("s/m");
         let mut scratch = [0u8; 6];
         assert_eq!(
-            run_handler(&mut echo, k, b"abc", &mut scratch).unwrap(),
+            run_handler(&mut echo, k, b"abc", RequestMeta::NONE, &mut scratch).unwrap(),
             Bytes::from_static(b"abc")
         );
         assert_eq!(
-            run_handler(&mut echo, k, b"abcd", &mut scratch),
+            run_handler(&mut echo, k, b"abcd", RequestMeta::NONE, &mut scratch),
             Err(HandlerError::BufferTooSmall)
         );
         assert_eq!(
-            run_handler(&mut echo, k, b"abcdefg", &mut scratch),
+            run_handler(&mut echo, k, b"abcdefg", RequestMeta::NONE, &mut scratch),
             Err(HandlerError::BufferTooSmall)
         );
     }

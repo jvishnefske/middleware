@@ -1,17 +1,21 @@
 //! Service discovery over multicast DNS (mDNS, RFC 6762) and DNS-based
 //! service discovery (DNS-SD, RFC 6763).
 //!
-//! * [`ServiceDiscovery`] — the trait: [`browse`](ServiceDiscovery::browse)
-//!   asks the network for instances of a [`ServiceType`], and
-//!   [`recv`](ServiceDiscovery::recv) / [`try_recv`](ServiceDiscovery::try_recv)
-//!   hand back the answers as a [`Response`] borrowing the caller's buffer.
-//! * [`wire`] — the DNS message format (always built, `no_std`, no heap):
+//! * [`wire`] — the DNS message format, now [`crate::dns::wire`] and
+//!   re-exported here under its old path (always built, `no_std`, no heap):
 //!   [`encode_query`](wire::encode_query), [`Message::parse`](wire::Message::parse),
 //!   and [`Response::instances`](wire::Response::instances), which joins the
 //!   PTR, SRV, TXT and A/AAAA records of one response into
 //!   [`Instance`]s.
-//! * `socket` (feature `mdns`, `std`) — `MdnsSocket`, the trait over a tokio
-//!   UDP socket.
+//! * `socket` (feature `mdns`, `std`) — `MdnsSocket`, a querier over a
+//!   tokio UDP socket. It implements [`crate::discovery::Browse`]: browsing
+//!   a [`ServiceKind`](crate::discovery::ServiceKind) queries its DNS-SD
+//!   type ([`dns_sd_type`](crate::discovery::record::dns_sd_type) in
+//!   [`DOMAIN`]) and turns answers into discovery events. Its raw
+//!   `query` / `recv_response` methods hand back whole [`Response`]s.
+//!
+//! The 0.4 `ServiceDiscovery` trait is gone: browsing is
+//! [`crate::discovery::Browse`] for every discovery backend.
 //!
 //! # Resolution
 //!
@@ -20,44 +24,23 @@
 //! (responders put SRV, TXT and addresses in the additional section, RFC 6763
 //! §12), [`Instance::Unresolved`] when it carries only the PTR, and
 //! [`Instance::Gone`] for a goodbye (PTR with TTL 0). There is no cache:
-//! a caller that wants one keeps it, keyed by instance name.
+//! a caller that wants one keeps a [`crate::discovery::Directory`].
 //!
 //! Only service types of the form `_service._tcp.domain` or
 //! `_service._udp.domain` are browsed; subtypes (`_sub`) and the
 //! `_services._dns-sd._udp` meta-query are not supported.
 
+use core::net::Ipv4Addr;
+
 #[cfg(feature = "mdns")]
 pub mod socket;
-pub mod wire;
+pub use crate::dns::wire;
 
 pub use wire::{Instance, Message, Name, Response, ServiceInstance, ServiceType, Txt, WireError};
 
-/// Finds instances of a DNS-SD service.
-///
-/// Implementations send queries and receive whole DNS messages; the decoding
-/// is the pure [`wire`] module, so the trait has the same shape on a host
-/// socket and on a microcontroller's UDP stack.
-///
-/// # Cancel safety
-///
-/// * [`recv`](ServiceDiscovery::recv): dropping the future before it is
-///   ready loses no response; the next `recv` or `try_recv` returns it.
-/// * [`browse`](ServiceDiscovery::browse): dropping may or may not have sent
-///   the query; it is never sent twice.
-pub trait ServiceDiscovery {
-    /// Transport-specific failure.
-    type Error: core::fmt::Debug;
-
-    /// Sends one query for instances of `service`. Answers arrive through
-    /// [`recv`](ServiceDiscovery::recv); call again to re-query.
-    async fn browse(&mut self, service: ServiceType<'_>) -> Result<(), Self::Error>;
-
-    /// Waits for the next mDNS response and copies it into `buf`. Queries
-    /// (including this node's own) are skipped. A message that does not fit
-    /// `buf` is an error, never a truncation.
-    async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Response<'b>, Self::Error>;
-
-    /// Returns the next response if one has already arrived, without
-    /// waiting.
-    fn try_recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Response<'b>>, Self::Error>;
-}
+/// UDP port of mDNS.
+pub const MDNS_PORT: u16 = 5353;
+/// IPv4 mDNS multicast group.
+pub const MDNS_GROUP_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
+/// The mDNS domain, appended to a service kind's DNS-SD type.
+pub const DOMAIN: &str = "local";

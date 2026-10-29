@@ -45,7 +45,8 @@ use super::frame::{
 };
 use crate::key::{Key, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
 use crate::transport::{
-    Handler, HandlerError, Limits, Publisher, Requester, Responder, Sample, Subscribe, Subscriber,
+    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestOptions,
+    Requester, Responder, Sample, Subscribe, Subscriber,
 };
 use core::future::Future;
 use core::pin::pin;
@@ -68,6 +69,14 @@ const TRY_RECV_READS: usize = MAX_WIRE_FRAME.div_ceil(RX_CHUNK) + 1;
 /// any payload up to `max_payload` fits one [`MAX_RAW_FRAME`] publish frame.
 /// (A shorter key leaves room for a longer payload, which `send` accepts.)
 pub const LIMITS: Limits = Limits::shared(MAX_KEY_LEN, MAX_RAW_FRAME - FRAME_OVERHEAD);
+
+/// What a serial link's subscribers deliver, as their
+/// [`Subscriber::DELIVERY`]: the link reads the byte stream only when
+/// asked, so an unread publication stays in the peer's write path and the
+/// sender waits (flow control of the underlying stream; a UART without it
+/// loses bytes in its driver, which the frame CRC then rejects). Frames
+/// arrive in the order sent.
+pub const DELIVERY: Delivery = Delivery::new(Overflow::Block, true);
 
 /// A receive buffer size that holds any frame [`Subscriber::recv`] can
 /// return. Received frames are decoded in place from their COBS form, so the
@@ -339,6 +348,10 @@ impl<IO: Read + Write> Publisher for SerialLink<IO> {
 impl<IO: Read + Write> Subscriber for SerialLink<IO> {
     type Error = LinkError<IO::Error>;
 
+    /// See [`DELIVERY`].
+    const DELIVERY: Delivery = DELIVERY;
+    const LIMITS: Limits = LIMITS;
+
     /// Yields the next publication, whatever its key; other frame kinds are
     /// discarded. Cancel safe: a partial frame stays in the splitter. `buf`
     /// must hold the COBS wire frame ([`RECV_BUF_LEN`] always suffices); a
@@ -396,6 +409,10 @@ impl<IO> Filtered<'_, IO> {
 impl<IO: Read + Write> Subscriber for Filtered<'_, IO> {
     type Error = LinkError<IO::Error>;
 
+    /// See [`DELIVERY`].
+    const DELIVERY: Delivery = DELIVERY;
+    const LIMITS: Limits = LIMITS;
+
     /// As [`SerialLink`]'s `recv`, skipping keys the filter rejects (they
     /// count towards [`MAX_SKIPPED_FRAMES`]).
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
@@ -417,11 +434,17 @@ impl<IO: Read + Write> Requester for SerialLink<IO> {
     /// Sends a request and waits for the response with the same id; other
     /// frames, including stale responses, are discarded. Cancelling abandons
     /// the request; its late response is discarded by the next request.
-    async fn request<'b>(
+    ///
+    /// The link has no clock, so `options.timeout` is **not** honoured: the
+    /// wait is bounded by [`MAX_SKIPPED_FRAMES`] frames, and a caller that
+    /// needs a time bound races the call against a timer (it is cancel
+    /// safe). The target is ignored: the link has one peer.
+    async fn request_with<'b>(
         &mut self,
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
+        _options: &RequestOptions,
     ) -> Result<&'b [u8], Self::Error> {
         let id = self.take_id();
         self.send(&Frame::Request {
@@ -475,8 +498,9 @@ impl<IO: Read + Write> Responder for SerialLink<IO> {
         let Ok(Frame::Request { id, key, payload }) = frame::decode_wire(req_buf) else {
             return Err(LinkError::Frame(FrameError::Malformed));
         };
+        // A serial peer is unauthenticated and sends no deadline.
         let result = handler
-            .handle(key, payload, resp_buf)
+            .handle(&Request::new(key, payload), resp_buf)
             .and_then(|n| resp_buf.get(..n).ok_or(HandlerError::BufferTooSmall));
         self.send(&Frame::Response { id, result }).await
     }
@@ -664,7 +688,8 @@ mod tests {
             },
         ]);
         let mut link = SerialLink::new(Pipe::new(input));
-        let mut upper = |_: Key<'_>, req: &[u8], resp: &mut [u8]| {
+        let mut upper = crate::transport::handler_fn(|r, resp| {
+            let req = r.body;
             if req.is_empty() {
                 return Err(HandlerError::InvalidRequest);
             }
@@ -672,7 +697,7 @@ mod tests {
                 *o = i.to_ascii_uppercase();
             }
             Ok(req.len())
-        };
+        });
         let mut scratch = [0u8; 256];
         block_on(link.serve_one(&mut upper, &mut scratch)).unwrap();
         block_on(link.serve_one(&mut upper, &mut scratch)).unwrap();

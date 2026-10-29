@@ -77,7 +77,8 @@ use crate::dedup::SeenTable;
 pub use crate::dedup::Sequence;
 use crate::key::{AsKey, Filter, Key, KeyBuf, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
 use crate::transport::{
-    Limits, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber, sample_into,
+    Delivery, Limits, Overflow, Publisher, Sample, SampleMeta, SenderId, Subscribe, Subscriber,
+    sample_into,
 };
 
 /// Largest legacy advertising data payload.
@@ -746,6 +747,14 @@ pub enum AdvertisingError<E> {
 /// different amount ([`AdvertisingPublisher::max_payload`]).
 pub const MAX_ADVERT_PAYLOAD: usize = MAX_ADV_DATA - 3 - 4 - PUBLISH_HEADER_LEN;
 
+/// What advertising subscribers deliver: the scanner reports what it hears
+/// when it is polled, and an advert not taken before the radio's report
+/// queue fills (or before the publisher replaces it) is lost, so the newest
+/// is what is dropped. Repeats are suppressed by remembering only the last
+/// sequence per (sender, key), so a late repeat of an older advert can
+/// surface after a newer one: no per-sender order is promised.
+pub const ADVERT_DELIVERY: Delivery = Delivery::new(Overflow::DropNewest, false);
+
 /// Broadcasts publications as manufacturer data.
 pub struct AdvertisingPublisher<'a, A> {
     advertiser: A,
@@ -1200,10 +1209,9 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize>
         self.seen = seen;
         fresh.then_some(Hit {
             key: owned,
-            meta: SampleMeta {
-                sender: Some(sender),
-                seq: Some(*seq),
-            },
+            // The sequence counts all of a sender's keys, so a gap cannot be
+            // told from keys this scanner filters out: none is reported.
+            meta: SampleMeta::from_sender(sender).with_seq(*seq),
             payload,
         })
     }
@@ -1255,6 +1263,10 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize>
     for AdvertisingSubscriber<S, K, L, D, F>
 {
     type Error = AdvertisingError<S::Error>;
+
+    /// See [`ADVERT_DELIVERY`].
+    const DELIVERY: Delivery = ADVERT_DELIVERY;
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_ADVERT_PAYLOAD);
 
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
         self.recv_where(buf, None).await
@@ -1316,6 +1328,10 @@ impl<S: Scanner, const K: usize, const L: usize, const D: usize, const F: usize>
     for AdvertisingSubscription<'_, S, K, L, D, F>
 {
     type Error = AdvertisingError<S::Error>;
+
+    /// See [`ADVERT_DELIVERY`].
+    const DELIVERY: Delivery = ADVERT_DELIVERY;
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_ADVERT_PAYLOAD);
 
     async fn recv<'b>(&mut self, buf: &'b mut [u8]) -> Result<Sample<'b>, Self::Error> {
         self.subscriber.recv_where(buf, Some(&self.filter)).await
@@ -1710,10 +1726,7 @@ mod tests {
                 )
             })
             .collect();
-        let meta = |seq| SampleMeta {
-            sender: Some(SenderId::from_mac(ADDR.0)),
-            seq: Some(seq),
-        };
+        let meta = |seq| SampleMeta::from_sender(SenderId::from_mac(ADDR.0)).with_seq(seq);
         assert_eq!(
             got,
             std::vec![

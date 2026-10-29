@@ -6,7 +6,7 @@ use core::time::Duration;
 use middleware::grpc::server::serve;
 use middleware::grpc::{BusService, GrpcError, GrpcServer, GrpcTransport, responder};
 use middleware::{
-    HandlerError, Key, KeyFilter, Publisher, Requester, Responder, Subscribe, Subscriber,
+    HandlerError, Key, KeyFilter, Request, Publisher, Requester, Responder, Subscribe, Subscriber,
 };
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -20,7 +20,8 @@ const BROKEN: Key<'static> = Key::from_static("test.Echo/Broken");
 const MISSING: Key<'static> = Key::from_static("test.Echo/Missing");
 
 /// Pure handler used by the responder tests.
-fn echo_handler(key: Key<'_>, req: &[u8], resp: &mut [u8]) -> Result<usize, HandlerError> {
+fn echo_handler(r: &Request<'_>, resp: &mut [u8]) -> Result<usize, HandlerError> {
+    let (key, req) = (r.key, r.body);
     match key.as_str() {
         "test.Echo/Reverse" => {
             let out = resp
@@ -310,10 +311,7 @@ async fn g5_try_recv_is_none_when_empty_and_some_without_waiting() {
     assert_eq!((key.as_str(), payload.as_slice()), ("t/try", &b"now"[..]));
     assert_eq!(
         meta,
-        middleware::SampleMeta {
-            sender: Some(c.client_id()),
-            seq: None
-        }
+        middleware::SampleMeta::from_sender(c.client_id())
     );
     assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
 }
