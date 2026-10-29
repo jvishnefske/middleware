@@ -12,10 +12,16 @@
 //! * [`key`] — validated, transport-neutral addresses (`sensor/temperature`).
 //! * [`transport`] — byte-level traits (the 0.5 contract: request metadata
 //!   and options, gather, declared delivery, gaps, split). Every call takes
-//!   caller-owned buffers, so implementations need no heap.
+//!   caller-owned buffers, so implementations need no heap. The in-process
+//!   backend `transport::memory` needs `memory`.
+//! * [`dedup`] — duplicate suppression and gap counting over 8-bit
+//!   wrapping sequence numbers (always built, pure).
 //! * [`discovery`] — service records, the `Announce` / `Browse` traits, the
 //!   pure [`discovery::Directory`] cache and pub/sub beacons (always built,
-//!   pure).
+//!   pure). Backends: `beacon::PubSubDiscovery` over any pub/sub link,
+//!   `zenoh::ZenohDiscovery`, `mdns::announce::MdnsAnnouncer` and
+//!   `mdns::socket::MdnsSocket`, `dns::unicast::UnicastDnsSd`, and gRPC
+//!   health (`grpc::GrpcAnnouncer`, `grpc::mesh::MeshBrowse`).
 //! * [`dns`] — the DNS message codec, decode and encode (always built,
 //!   pure); unicast DNS-SD in `dns::unicast` needs `dns-sd`.
 //! * [`codec`] — [`Codec`] turns typed messages into bytes; [`typed::Client`]
@@ -46,9 +52,9 @@
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
-//! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |
+//! | `istio`    | `grpc::istio`, `grpc::mesh` | `std` | `grpc`                |
 //! | `mdns`     | `mdns::socket`, `mdns::announce`, `mdns::origin` | `std` | tokio, socket2 |
-//! | `dns-sd`   | `dns::unicast` | `std`          | tokio                     |
+//! | `dns-sd`   | `dns::unicast` | `std`          | tokio, getrandom          |
 //! | `memory`   | `transport::memory` | `std`     | tokio (timers); for tests and examples |
 //! | `postcard` | `codec::postcard` | `no_std`    | serde                     |
 //! | `prost`    | `codec::prost`    | `no_std` + `alloc` | prost              |
@@ -58,6 +64,11 @@
 //! `memory` turns on `std`; the
 //! embedded features never do, so firmware never links cloud dependencies and
 //! cloud builds never compile the BLE stack unless asked.
+//!
+//! `README.md` tabulates what each backend supports (delivery, timeouts,
+//! node targeting, gather, caller identity, discovery, gaps), and
+//! `examples/discover_and_call.rs` runs discovery and calls across Zenoh,
+//! mDNS, unicast DNS-SD and gRPC on loopback.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![allow(async_fn_in_trait)]

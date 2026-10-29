@@ -28,7 +28,8 @@
 //!   where a serial link's `DropNewest` comes from in deployment (a UART
 //!   behind a CH340 has no flow control). The link reports no gaps.
 //! * Discovery: every case, with `PubSubDiscovery` over the two halves of
-//!   a split link on each side.
+//!   a split link on each side (`directory_expiry` is pure and needs no
+//!   link).
 
 #![cfg(feature = "serial")]
 
@@ -294,6 +295,11 @@ async fn k15_serial_announce_then_withdraw() {
 #[tokio::test]
 async fn k15_serial_goodbye_removes_record_at_once() {
     discovery::goodbye_removes_record_at_once(&mut Serial).await;
+}
+
+#[test]
+fn k15_serial_directory_expiry() {
+    discovery::directory_expiry();
 }
 
 const ECHO: Key<'static> = Key::from_static("svc/echo");
