@@ -351,6 +351,48 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `grpc::istio::tests::retriable_codes_match_istio_default_retry_on`.
 - [x] I5 Plaintext h2c to the sidecar; mTLS is left to the mesh —
   `grpc::istio::tests::channel_builder_targets_sidecar_with_mesh_origin`, `istio::i2_i5_interceptor_propagates_trace_and_channel_sets_mesh_authority`.
+### mDNS service discovery (`mdns`)
+
+`ServiceDiscovery` browses DNS-SD service types (`_service._tcp|_udp.domain`)
+over mDNS. The message format is pure and always built; the tokio socket is
+behind the `mdns` feature and queries as a one-shot querier from an
+ephemeral port, so it coexists with a system mDNS daemon on port 5353.
+
+- [x] D1 Service types are validated (`_`-prefixed first label, `_tcp` or
+  `_udp` second, ≥ 3 labels, labels ≤ 63 bytes, name ≤ 255 bytes) —
+  `mdns::wire::tests::service_types_are_validated`.
+- [x] D2 A browse is one PTR question, class IN, with the caller's id, and
+  is refused rather than truncated in a short buffer —
+  `mdns::wire::tests::query_encodes_one_ptr_question`.
+- [x] D3 A response's PTR, SRV, TXT and A records, with compressed names, are
+  joined into a resolved instance (label, host, port, address, TXT values,
+  ASCII case ignored in names and TXT keys) —
+  `mdns::wire::tests::response_resolves_an_instance_from_compressed_records`,
+  `mdns::wire::tests::other_services_and_queries_yield_no_instances`.
+- [x] D4 A PTR with TTL 0 is a goodbye; a PTR without its SRV is unresolved —
+  `mdns::wire::tests::goodbye_and_ptr_only_responses`.
+- [x] D5 Malformed messages are errors, never panics or hangs: every
+  truncation, pointer loops, reserved label types, bad RDATA lengths and
+  names over 255 bytes — `mdns::wire::tests::malformed_messages_are_errors`,
+  `mdns::wire::tests::write_text_refuses_to_truncate`.
+- [x] D6 `MdnsSocket` sends the query to its destination with a fresh id per
+  browse, skips queries and returns responses —
+  `mdns::socket::tests::browse_sends_a_ptr_query_and_recv_resolves_the_answer`,
+  `mdns::socket::tests::queries_are_skipped_and_ids_advance`.
+- [x] D7 A response that does not fit the caller's buffer is an error and is
+  kept for the next call; `try_recv` is `None` when nothing has arrived; a
+  malformed datagram is an error and is dropped —
+  `mdns::socket::tests::try_recv_is_none_when_empty_and_keeps_an_oversized_response`,
+  `mdns::socket::tests::malformed_datagrams_are_errors_then_dropped`.
+- [x] D8 Every receive call is bounded in datagrams (`MAX_IGNORED_DATAGRAMS`)
+  and a cancelled `recv` loses no response —
+  `mdns::socket::tests::ignored_limit_bounds_try_recv`,
+  `mdns::socket::tests::cancelled_recv_loses_no_response`.
+- [x] D9 The pure core builds for `thumbv6m-none-eabi`; `mdns` enables `std`
+  and no embedded feature — `scripts/check-features.sh`.
+- [x] D10 Tests put no multicast traffic on the network: the socket is
+  aimed at a loopback responder — `mdns::socket::tests::*`.
+
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266

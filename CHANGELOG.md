@@ -83,6 +83,10 @@
 - Fix: after any payload stopped (`sys/payload/stop`, a trap, or an upload), every later `spi_open` in that boot was `Unsupported` (seen as `cam_view` failing its bring-up with error -4 after `mwctl stop` / `mwctl start`). `SpiBus::close` called `reclaim`, which swapped the bus state for a placeholder and only put it back if a transfer had been running, so an idle bus dropped the SPI2 driver and its static DMA buffers instead of returning them. The parts are now held in the pure `esp_base::periph::dma_hw` state (`DmaHw`: idle or in the running transfer, by-value transitions in an `HwSlot`), so stopping while idle, during a payload transfer or mid sink-route write cancels what runs and returns them; starting while a transfer runs is `Busy` without dropping it.
 - `build.sh esp32` sets `ESP_HAL_CONFIG_MIN_CHIP_REVISION=100` (esp-hal defaults to 300), so the firmware boots on v1.x silicon such as the ESP32-CAM.
 
+### mDNS service discovery
+- New `mdns` module: the `ServiceDiscovery` trait (`browse`, `recv`, `try_recv`) and `mdns::wire`, a `no_std`, no-heap DNS message codec (`encode_query`, `Message`, `Response::instances` yielding `Instance::{Resolved, Unresolved, Gone}`, zero-copy `Name`, `Txt::get`). Always built. (D1–D5, D9)
+- New `mdns` feature (`std`, tokio): `mdns::socket::MdnsSocket`, a one-shot querier on an ephemeral port (optionally bound to 5353 and joined to 224.0.0.251), keeping a response that does not fit for retry and bounding each call to `MAX_IGNORED_DATAGRAMS`. (D6–D8, D10)
+
 ## 0.4.0
 
 ### Signed payloads (trust, breaking)
