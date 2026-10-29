@@ -6,7 +6,7 @@ use core::time::Duration;
 use middleware::grpc::server::serve;
 use middleware::grpc::{BusService, GrpcError, GrpcServer, GrpcTransport, responder};
 use middleware::{
-    HandlerError, Key, KeyFilter, Request, Publisher, Requester, Responder, Subscribe, Subscriber,
+    HandlerError, Key, KeyFilter, Publisher, Request, Requester, Responder, Subscribe, Subscriber,
 };
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -311,7 +311,7 @@ async fn g5_try_recv_is_none_when_empty_and_some_without_waiting() {
     assert_eq!((key.as_str(), payload.as_slice()), ("t/try", &b"now"[..]));
     assert_eq!(
         meta,
-        middleware::SampleMeta::from_sender(c.client_id())
+        middleware::SampleMeta::from_sender(c.client_id()).with_gap(Some(0))
     );
     assert!(matches!(sub.try_recv(&mut buf), Ok(None)));
 }
@@ -542,5 +542,683 @@ mod istio {
         }
         assert!(lines.contains(&"grpc-timeout=2000000u"), "{text}");
         assert!(!text.contains("must-not-leak"));
+    }
+}
+
+// ------------------------------------------------------------ 0.5 (G10–G13, I6–I8)
+
+/// Serves `server` on a fresh loopback port.
+async fn serve_on_loopback(server: GrpcServer) -> Running {
+    let (listener, addr) = bind_loopback().await;
+    let (stop, stopped) = oneshot::channel::<()>();
+    tokio::spawn(serve(server, listener, async {
+        let _ = stopped.await;
+    }));
+    Running { addr, _stop: stop }
+}
+
+/// Inserts an Envoy-style XFCC header, as a sidecar in front of the
+/// server would; tests with an untrusting responder use it to show the
+/// header is ignored.
+fn forged_xfcc(mut r: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+    r.metadata_mut().insert(
+        "x-forwarded-client-cert",
+        "By=spiffe://cluster.local/ns/test/sa/server;URI=spiffe://cluster.local/ns/test/sa/client"
+            .parse()
+            .unwrap(),
+    );
+    Ok(r)
+}
+
+#[tokio::test]
+async fn g10_handler_sees_client_id_and_deadline_but_no_untrusted_principal() {
+    let (svc, mut resp) = responder(4);
+    let srv = serve_on_loopback(GrpcServer::new().with_responder(svc)).await;
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", srv.addr))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut c = GrpcTransport::new(tonic::service::interceptor::InterceptedService::new(
+        channel,
+        forged_xfcc as fn(_) -> _,
+    ))
+    .with_client_id(middleware::SenderId([0xAB; 8]));
+    let seen = std::cell::RefCell::new(None);
+    let mut h = middleware::transport::handler_fn(|r, _out| {
+        *seen.borrow_mut() = Some((
+            r.meta.sender,
+            r.meta.principal.map(str::to_owned),
+            r.meta.deadline_ms,
+        ));
+        Ok(0)
+    });
+    let mut scratch = [0u8; 64];
+    let mut out = [0u8; 8];
+    let opts = middleware::RequestOptions::DEFAULT.with_timeout(Duration::from_millis(1500));
+    let (got, served) = within(async {
+        tokio::join!(
+            c.request_with(REVERSE, b"x", &mut out, &opts),
+            resp.serve_one(&mut h, &mut scratch)
+        )
+    })
+    .await;
+    served.unwrap();
+    got.unwrap();
+    let (sender, principal, deadline) = seen.borrow().clone().unwrap();
+    assert_eq!(sender, Some(middleware::SenderId([0xAB; 8])));
+    assert_eq!(principal, None, "XFCC is only trusted when configured");
+    let ms = deadline.expect("grpc-timeout carried");
+    assert!(ms > 1000 && ms <= 1500, "{ms}");
+
+    // No timeout: no deadline.
+    let (got, served) = within(async {
+        tokio::join!(
+            c.request(REVERSE, b"x", &mut out),
+            resp.serve_one(&mut h, &mut scratch)
+        )
+    })
+    .await;
+    served.unwrap();
+    got.unwrap();
+    assert_eq!(seen.borrow().clone().unwrap().2, None);
+}
+
+#[tokio::test]
+async fn g11_busy_responder_and_refused_connection_are_unavailable() {
+    // Queue of one, never served: the second concurrent call is refused.
+    let (svc, _idle) = responder(1);
+    let srv = serve_on_loopback(GrpcServer::new().with_responder(svc)).await;
+    let mut a = client(srv.addr).await;
+    let mut b = client(srv.addr).await;
+    let (mut x, mut y) = ([0u8; 8], [0u8; 8]);
+    let opts = middleware::RequestOptions::DEFAULT.with_timeout(Duration::from_millis(500));
+    let (first, second) = tokio::join!(a.request_with(REVERSE, b"1", &mut x, &opts), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        b.request_with(REVERSE, b"2", &mut y, &opts).await
+    });
+    assert_eq!(
+        first.unwrap_err().handler_error(),
+        Some(HandlerError::DeadlineExceeded)
+    );
+    assert_eq!(
+        second.unwrap_err().handler_error(),
+        Some(HandlerError::Unavailable)
+    );
+
+    // A port we bound and closed again: the connection is refused.
+    let (listener, addr) = bind_loopback().await;
+    drop(listener);
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect_lazy();
+    let mut c = GrpcTransport::new(channel);
+    let r = within(c.request_with(REVERSE, b"x", &mut x, &opts)).await;
+    assert_eq!(
+        r.unwrap_err().handler_error(),
+        Some(HandlerError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn g12_subscriber_queue_drops_oldest_and_reports_the_gap() {
+    let srv = start().await;
+    let mut publisher = remote_client(srv.addr).await;
+    let mut c = remote_client(srv.addr).await.with_queue_depth(3);
+    assert_eq!(c.queue_depth(), 4, "rounded up to a power of two");
+    let key = Key::from_static("g11/load");
+    let mut sub = within(c.subscribe(KeyFilter::Exact(key))).await.unwrap();
+    for n in 0u8..10 {
+        within(publisher.publish(key, &[n])).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut buf = [0u8; 32];
+    let mut got = Vec::new();
+    while let Some(s) = sub.try_recv(&mut buf).unwrap() {
+        got.push((s.payload[0], s.meta.gap));
+    }
+    assert_eq!(
+        got,
+        [(6, Some(6)), (7, Some(0)), (8, Some(0)), (9, Some(0))]
+    );
+    // A too-small buffer keeps the sample for a retry.
+    within(publisher.publish(key, b"long payload"))
+        .await
+        .unwrap();
+    let mut tiny = [0u8; 4];
+    let e = within(sub.recv(&mut tiny)).await.unwrap_err();
+    assert!(
+        matches!(e, GrpcError::BufferTooSmall { needed: 20 }),
+        "{e:?}"
+    );
+    assert_eq!(
+        within(sub.recv(&mut buf)).await.unwrap().payload,
+        b"long payload"
+    );
+}
+
+#[tokio::test]
+async fn g13_health_check_and_watch_over_loopback() {
+    use middleware::grpc::{HealthClient, ServingStatus, health};
+    let (svc, mut announcer) = health();
+    let srv = serve_on_loopback(GrpcServer::new().with_health(svc)).await;
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", srv.addr))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut hc = HealthClient::new(channel);
+    assert_eq!(within(hc.check("")).await.unwrap(), ServingStatus::Serving);
+    let e = within(hc.check("cam/jpeg")).await.unwrap_err();
+    assert!(
+        matches!(
+            e,
+            GrpcError::Status {
+                code: Code::NotFound,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    let mut w = within(hc.watch("cam/jpeg")).await.unwrap();
+    assert_eq!(
+        within(w.next()).await.unwrap(),
+        ServingStatus::ServiceUnknown
+    );
+    announcer
+        .set_status("cam/jpeg", ServingStatus::Serving)
+        .unwrap();
+    assert_eq!(within(w.next()).await.unwrap(), ServingStatus::Serving);
+    assert_eq!(
+        within(hc.check("cam/jpeg")).await.unwrap(),
+        ServingStatus::Serving
+    );
+    announcer
+        .set_status("cam/jpeg", ServingStatus::NotServing)
+        .unwrap();
+    assert_eq!(within(w.next()).await.unwrap(), ServingStatus::NotServing);
+    drop(announcer);
+    assert!(matches!(
+        within(w.next()).await,
+        Err(GrpcError::StreamEnded)
+    ));
+}
+
+#[cfg(feature = "istio")]
+mod mesh {
+    use super::*;
+    use middleware::discovery::{
+        Announce, Browse, Directory, Endpoint, Event, Service, ServiceKind,
+    };
+    use middleware::grpc::mesh::{MeshBrowse, MeshClient, MeshDialer};
+    use middleware::grpc::{PrincipalSource, health};
+    use middleware::transport::memory::MemoryBus;
+    use middleware::{Flow, Gather, RequestOptions, SenderId, Target};
+
+    const KIND: ServiceKind<'static> = ServiceKind::from_static("test/echo");
+
+    /// A responder server whose handler answers with its node byte.
+    async fn node_server(node: u8) -> Running {
+        let (svc, mut resp) = responder(8);
+        tokio::spawn(async move {
+            let mut h = middleware::transport::handler_fn(move |_r, out| {
+                *out.first_mut().ok_or(HandlerError::BufferTooSmall)? = node;
+                Ok(1)
+            });
+            let mut scratch = [0u8; 64];
+            while resp.serve_one(&mut h, &mut scratch).await.is_ok() {}
+        });
+        serve_on_loopback(
+            GrpcServer::new()
+                .with_responder(svc.with_principal_source(PrincipalSource::SidecarXfcc)),
+        )
+        .await
+    }
+
+    fn up(node: u8, addr: SocketAddr) -> Event<'static> {
+        let instance: &'static str = Box::leak(format!("n{node}").into_boxed_str());
+        Event::Up(Service {
+            kind: KIND,
+            instance,
+            node: Some(SenderId([node; 8])),
+            endpoint: Endpoint::Socket(addr),
+            txt: b"",
+            ttl_s: 60,
+        })
+    }
+
+    #[tokio::test]
+    async fn i7_mesh_client_routes_by_node_and_gathers_every_endpoint() {
+        let (a, b) = (node_server(1).await, node_server(2).await);
+        let d = Directory::<4>::new();
+        let (d, _) = d.observe(&up(1, a.addr), 0);
+        let (d, _) = d.observe(&up(2, b.addr), 0);
+        let mut c = MeshClient::<4>::new(KIND, MeshDialer::direct()).with_directory(d);
+        let mut out = [0u8; 4];
+        for node in [2u8, 1, 2] {
+            let opts = RequestOptions::DEFAULT.with_target(Target::Node(SenderId([node; 8])));
+            let r = within(c.request_with(REVERSE, b"", &mut out, &opts))
+                .await
+                .unwrap();
+            assert_eq!(r, [node]);
+        }
+        // Any: round robin over both.
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let r = within(c.request(REVERSE, b"", &mut out)).await.unwrap();
+            seen.push(r[0]);
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, [1, 2]);
+        // Gather: one reply per endpoint, sender = its node.
+        let mut replies = Vec::new();
+        let n = within(c.request_each(
+            REVERSE,
+            b"",
+            &mut out,
+            &RequestOptions::DEFAULT.with_timeout(Duration::from_secs(2)),
+            8,
+            |r| {
+                replies.push((r.sender, r.result.map(<[u8]>::to_vec)));
+                Flow::Continue
+            },
+        ))
+        .await
+        .unwrap();
+        assert_eq!(n, 2);
+        replies.sort_by_key(|(s, _)| s.map(|s| s.0));
+        assert_eq!(
+            replies,
+            [
+                (Some(SenderId([1; 8])), Ok(vec![1])),
+                (Some(SenderId([2; 8])), Ok(vec![2]))
+            ]
+        );
+        // max_replies bounds it.
+        let n = within(
+            c.request_each(REVERSE, b"", &mut out, &RequestOptions::DEFAULT, 1, |_| {
+                Flow::Continue
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn i8_mesh_browse_reports_up_only_while_serving() {
+        let (svc, mut health_state) = health();
+        let srv = serve_on_loopback(GrpcServer::new().with_health(svc)).await;
+        let bus = MemoryBus::new();
+        let mut dns = bus.node(SenderId([0xD0; 8])).discovery().unwrap();
+        let mut b: MeshBrowse<_, 4> = MeshBrowse::new(
+            bus.node(SenderId([0xB0; 8])).discovery().unwrap(),
+            // The test server stands in for the sidecar.
+            MeshDialer::via_sidecar(srv.addr.to_string()),
+        );
+        b.browse(KeyFilter::Exact(KIND.key())).await.unwrap();
+        let service = Service {
+            kind: KIND,
+            instance: "pod-1",
+            node: None,
+            endpoint: Endpoint::Host {
+                name: "echo.test.svc.cluster.local",
+                port: 50051,
+            },
+            txt: b"",
+            ttl_s: 60,
+        };
+        let mut buf = [0u8; 512];
+        // Listed by DNS but not ready: nothing yet.
+        dns.announce(&service).await.unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(300), b.next(&mut buf)).await;
+        assert!(quiet.is_err(), "Up before SERVING: {quiet:?}");
+        assert_eq!(b.tracked(), 1);
+        // Ready: Up, with the DNS record.
+        health_state
+            .set_status("test/echo", middleware::grpc::ServingStatus::Serving)
+            .unwrap();
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert_eq!(e, Event::Up(service));
+        // Not ready: Down; ready again: Up.
+        health_state.withdraw(KIND, "x").await.unwrap();
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert_eq!(
+            e,
+            Event::Down {
+                kind: KIND,
+                instance: "pod-1"
+            }
+        );
+        health_state.announce(&service).await.unwrap();
+        assert!(matches!(
+            within(b.next(&mut buf)).await.unwrap(),
+            Event::Up(_)
+        ));
+        // The health stream ends (its announcer is gone): Down.
+        drop(health_state);
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert_eq!(
+            e,
+            Event::Down {
+                kind: KIND,
+                instance: "pod-1"
+            }
+        );
+        // DNS withdraws it: forgotten.
+        dns.withdraw(KIND, "pod-1").await.unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(200), b.next(&mut buf)).await;
+        assert!(quiet.is_err(), "{quiet:?}");
+        assert_eq!(b.tracked(), 0);
+    }
+
+    #[tokio::test]
+    async fn i8_mesh_browse_reports_down_when_dns_withdraws() {
+        let (svc, mut health_state) = health();
+        // Kept alive: dropping it would end the watch.
+        let srv = serve_on_loopback(GrpcServer::new().with_health(svc)).await;
+        let bus = MemoryBus::new();
+        let mut dns = bus.node(SenderId([0xD0; 8])).discovery().unwrap();
+        let mut b: MeshBrowse<_, 4> = MeshBrowse::new(
+            bus.node(SenderId([0xB0; 8])).discovery().unwrap(),
+            MeshDialer::direct(),
+        );
+        b.browse(KeyFilter::Exact(KIND.key())).await.unwrap();
+        let service = Service {
+            kind: KIND,
+            instance: "pod-2",
+            node: None,
+            endpoint: Endpoint::Socket(srv.addr),
+            txt: b"",
+            ttl_s: 60,
+        };
+        health_state.announce(&service).await.unwrap();
+        dns.announce(&service).await.unwrap();
+        let mut buf = [0u8; 512];
+        assert!(matches!(
+            within(b.next(&mut buf)).await.unwrap(),
+            Event::Up(_)
+        ));
+        dns.withdraw(KIND, "pod-2").await.unwrap();
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert_eq!(
+            e,
+            Event::Down {
+                kind: KIND,
+                instance: "pod-2"
+            }
+        );
+        assert_eq!(b.tracked(), 0);
+    }
+}
+
+// ------------------------------------------------------------ conformance
+
+#[cfg(feature = "istio")]
+mod conformance;
+
+/// Every applicable conformance case over in-process servers on
+/// 127.0.0.1:0 (K15 for gRPC). The requester injects an Envoy-style
+/// `x-forwarded-client-cert`, standing in for the sidecar, and the
+/// responder trusts it ([`PrincipalSource::SidecarXfcc`]); gather and
+/// discovery go through `grpc::mesh`.
+#[cfg(feature = "istio")]
+mod conformance_cases {
+    use super::conformance::{
+        DiscoveryFixture, GatherFixture, PubSubFixture, ReqRepFixture, discovery, pubsub, reqrep,
+    };
+    use super::*;
+    use middleware::SenderId;
+    use middleware::discovery::{Announce, Directory, Endpoint, Event, Service, ServiceKind};
+    use middleware::grpc::mesh::{MeshBrowse, MeshClient, MeshDialer};
+    use middleware::grpc::{GrpcAnnouncer, GrpcResponder, GrpcSubscriber, PrincipalSource, health};
+    use middleware::transport::memory::{MemoryBus, MemoryDiscovery};
+    use tonic::service::interceptor::InterceptedService;
+    use tonic::transport::Channel;
+
+    const CLIENT: SenderId = SenderId([0xC1; 8]);
+    const PRINCIPAL: &str = "spiffe://cluster.local/ns/test/sa/client";
+    const XFCC: &str = "By=spiffe://cluster.local/ns/test/sa/server;\
+        Hash=468ed33be74eee6556d90c0149c1309e9ba61d6425303443c0748a02dd8de688;\
+        Subject=\"CN=client,O=test\";URI=spiffe://cluster.local/ns/test/sa/client";
+
+    type Interceptor = fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status>;
+
+    fn sidecar(mut r: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        r.metadata_mut()
+            .insert("x-forwarded-client-cert", XFCC.parse().unwrap());
+        Ok(r)
+    }
+
+    /// Keeps every server it started running.
+    #[derive(Default)]
+    struct Grpc {
+        servers: Vec<Running>,
+    }
+
+    impl Grpc {
+        async fn responder_server(&mut self) -> (GrpcResponder, SocketAddr) {
+            let (svc, resp) = responder(16);
+            let srv = serve_on_loopback(
+                GrpcServer::new()
+                    .with_responder(svc.with_principal_source(PrincipalSource::SidecarXfcc)),
+            )
+            .await;
+            let addr = srv.addr;
+            self.servers.push(srv);
+            (resp, addr)
+        }
+    }
+
+    async fn channel(addr: SocketAddr) -> Channel {
+        tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap()
+    }
+
+    impl ReqRepFixture for Grpc {
+        type Requester = GrpcTransport<InterceptedService<Channel, Interceptor>>;
+        type Responder = GrpcResponder;
+        const PROPAGATES_DEADLINE: bool = true;
+
+        async fn connect(&mut self, _key: Key<'static>) -> (Self::Requester, GrpcResponder) {
+            let (resp, addr) = self.responder_server().await;
+            let c = GrpcTransport::new(InterceptedService::new(
+                channel(addr).await,
+                sidecar as Interceptor,
+            ))
+            .with_client_id(CLIENT);
+            (c, resp)
+        }
+
+        fn handler_error(e: &GrpcError) -> Option<HandlerError> {
+            e.handler_error()
+        }
+
+        fn is_timeout(e: &GrpcError) -> bool {
+            e.handler_error() == Some(HandlerError::DeadlineExceeded)
+        }
+
+        fn expected_sender(&self) -> Option<SenderId> {
+            Some(CLIENT)
+        }
+
+        fn expected_principal(&self) -> Option<&str> {
+            Some(PRINCIPAL)
+        }
+    }
+
+    impl GatherFixture for Grpc {
+        type Gatherer = MeshClient<8>;
+        type Responder = GrpcResponder;
+
+        async fn connect(
+            &mut self,
+            key: Key<'static>,
+            n: usize,
+        ) -> (MeshClient<8>, Vec<GrpcResponder>) {
+            let kind = ServiceKind::new(key);
+            let mut directory = Directory::<8>::new();
+            let mut responders = Vec::new();
+            for i in 0..n {
+                let (resp, addr) = self.responder_server().await;
+                responders.push(resp);
+                let instance: &'static str = Box::leak(format!("r{i}").into_boxed_str());
+                let up = Event::Up(Service {
+                    kind,
+                    instance,
+                    node: Some(SenderId([i as u8 + 1; 8])),
+                    endpoint: Endpoint::Socket(addr),
+                    txt: b"",
+                    ttl_s: 60,
+                });
+                directory = directory.observe(&up, 0).0;
+            }
+            let client = MeshClient::new(kind, MeshDialer::direct())
+                .with_directory(directory)
+                .with_client_id(CLIENT);
+            (client, responders)
+        }
+    }
+
+    impl PubSubFixture for Grpc {
+        type Publisher = GrpcTransport;
+        type Subscriber = GrpcSubscriber;
+        const REPORTS_GAPS: bool = true;
+
+        async fn connect(&mut self, filter: KeyFilter<'static>) -> (GrpcTransport, GrpcSubscriber) {
+            let srv = start().await;
+            let publisher = remote_client(srv.addr).await;
+            let mut c = remote_client(srv.addr).await.with_queue_depth(4);
+            let sub = c.subscribe(filter).await.unwrap();
+            self.servers.push(srv);
+            (publisher, sub)
+        }
+
+        fn queue_depth(&self) -> usize {
+            4
+        }
+
+        async fn settle(&mut self) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// What a mesh announcement is: the DNS-SD record (in a cluster, the
+    /// Kubernetes Service; here the in-process bus) plus the pod's health.
+    /// Withdrawing only changes the health, as a pod going unready does:
+    /// the Service still lists it, and `MeshBrowse` must see it go.
+    struct MeshAnnouncer {
+        dns: MemoryDiscovery,
+        health: GrpcAnnouncer,
+    }
+
+    impl Announce for MeshAnnouncer {
+        type Error = String;
+
+        async fn announce(&mut self, service: &Service<'_>) -> Result<(), String> {
+            self.health
+                .announce(service)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.dns
+                .announce(service)
+                .await
+                .map_err(|e| format!("{e:?}"))
+        }
+
+        async fn withdraw(&mut self, kind: ServiceKind<'_>, instance: &str) -> Result<(), String> {
+            self.health
+                .withdraw(kind, instance)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    struct Discovery {
+        bus: MemoryBus,
+        servers: Vec<Running>,
+    }
+
+    impl DiscoveryFixture for Discovery {
+        type Announcer = MeshAnnouncer;
+        type Browser = MeshBrowse<MemoryDiscovery, 8>;
+
+        async fn connect(&mut self) -> (MeshAnnouncer, MeshBrowse<MemoryDiscovery, 8>) {
+            let (svc, announcer) = health();
+            let srv = serve_on_loopback(GrpcServer::new().with_health(svc)).await;
+            // The case announces 127.0.0.1:7447; the health server stands
+            // in for the sidecar that would route that authority.
+            let dialer = MeshDialer::via_sidecar(srv.addr.to_string());
+            self.servers.push(srv);
+            let a = MeshAnnouncer {
+                dns: self.bus.node(SenderId([0xA0; 8])).discovery().unwrap(),
+                health: announcer,
+            };
+            let b = MeshBrowse::new(
+                self.bus.node(SenderId([0xB0; 8])).discovery().unwrap(),
+                dialer,
+            );
+            (a, b)
+        }
+    }
+
+    fn discovery_fixture() -> Discovery {
+        Discovery {
+            bus: MemoryBus::new(),
+            servers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_round_trip() {
+        reqrep::round_trip(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_timeout_is_honoured() {
+        reqrep::timeout_is_honoured(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_handler_errors_round_trip() {
+        reqrep::handler_errors_round_trip(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_handler_sees_sender_principal_and_deadline() {
+        reqrep::handler_sees_caller_identity(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_gather_collects_every_responder() {
+        reqrep::gather_collects_every_responder(&mut Grpc::default(), 3).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_overload_matches_declared_delivery() {
+        pubsub::overload_matches_declared_delivery(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_gap_is_reported() {
+        pubsub::gap_is_reported(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_announce_then_withdraw() {
+        discovery::announce_then_withdraw(&mut discovery_fixture()).await;
+    }
+
+    #[tokio::test]
+    async fn k15_grpc_goodbye_removes_record_at_once() {
+        discovery::goodbye_removes_record_at_once(&mut discovery_fixture()).await;
+    }
+
+    #[test]
+    fn k15_grpc_directory_expiry() {
+        discovery::directory_expiry();
     }
 }

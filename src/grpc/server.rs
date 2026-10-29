@@ -1,6 +1,7 @@
 //! [`GrpcServer`]: one tower service that routes the `middleware.v1.Bus`
-//! paths to a [`BusService`] and every other path to a
-//! [`ResponderService`], and [`serve`] to run it on a bound listener.
+//! paths to a [`BusService`], the `grpc.health.v1.Health` paths to a
+//! [`HealthService`] and every other path to a [`ResponderService`], and
+//! [`serve`] to run it on a bound listener.
 //!
 //! A stock tonic `Router` matches services by a compile-time
 //! [`NamedService::NAME`](tonic::server::NamedService::NAME), which cannot
@@ -11,6 +12,7 @@
 
 use super::GrpcError;
 use super::bus::{BusService, SERVICE_NAME};
+use super::health::{HealthService, SERVICE_NAME as HEALTH_NAME};
 use super::responder::ResponderService;
 use core::convert::Infallible;
 use core::future::Future;
@@ -21,20 +23,44 @@ use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service};
 
-/// Path router over an optional bus and an optional responder. Build with
-/// [`GrpcServer::new`], [`GrpcServer::with_bus`] and
-/// [`GrpcServer::with_responder`].
+/// Path router over an optional bus, health service and responder. Build
+/// with [`GrpcServer::new`], [`GrpcServer::with_bus`],
+/// [`GrpcServer::with_health`] and [`GrpcServer::with_responder`].
 #[derive(Debug, Clone, Default)]
 pub struct GrpcServer {
     bus: Option<BusService>,
+    health: Option<HealthService>,
     responder: Option<ResponderService>,
+}
+
+/// Whether `path` addresses a method of service `name`.
+fn is_service_path(path: &str, name: &str) -> bool {
+    path.strip_prefix('/')
+        .and_then(|p| p.strip_prefix(name))
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Whether `path` addresses the bus service.
 fn is_bus_path(path: &str) -> bool {
-    path.strip_prefix('/')
-        .and_then(|p| p.strip_prefix(SERVICE_NAME))
-        .is_some_and(|rest| rest.starts_with('/'))
+    is_service_path(path, SERVICE_NAME)
+}
+
+/// Which mounted half a path goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Bus,
+    Health,
+    Responder,
+}
+
+fn route(path: &str) -> Route {
+    if is_bus_path(path) {
+        Route::Bus
+    } else if is_service_path(path, HEALTH_NAME) {
+        Route::Health
+    } else {
+        Route::Responder
+    }
 }
 
 impl GrpcServer {
@@ -47,6 +73,15 @@ impl GrpcServer {
     pub fn with_bus(self, bus: BusService) -> Self {
         Self {
             bus: Some(bus),
+            ..self
+        }
+    }
+
+    /// Returns this server with `health` mounted on
+    /// `grpc.health.v1.Health`.
+    pub fn with_health(self, health: HealthService) -> Self {
+        Self {
+            health: Some(health),
             ..self
         }
     }
@@ -70,13 +105,15 @@ impl Service<http::Request<Body>> for GrpcServer {
     }
 
     fn call(&mut self, req: http::Request<Body>) -> Self::Future {
-        let bus_path = is_bus_path(req.uri().path());
+        let route = route(req.uri().path());
         let bus = self.bus.clone();
+        let health = self.health.clone();
         let responder = self.responder.clone();
         Box::pin(async move {
-            Ok(match (bus_path, bus, responder) {
-                (true, Some(bus), _) => bus.handle(req).await,
-                (false, _, Some(r)) => r.handle(req).await,
+            Ok(match (route, bus, health, responder) {
+                (Route::Bus, Some(bus), _, _) => bus.handle(req).await,
+                (Route::Health, _, Some(h), _) => h.handle(req).await,
+                (Route::Responder, _, _, Some(r)) => r.handle(req).await,
                 _ => Status::unimplemented("no service mounted for path").into_http(),
             })
         })
@@ -109,5 +146,8 @@ mod tests {
         assert!(is_bus_path("/middleware.v1.Bus/Other"));
         assert!(!is_bus_path("/middleware.v1.BusX/Publish"));
         assert!(!is_bus_path("/pkg.Svc/Call"));
+        assert_eq!(route("/grpc.health.v1.Health/Watch"), Route::Health);
+        assert_eq!(route("/grpc.health.v1.HealthX/Watch"), Route::Responder);
+        assert_eq!(route("/middleware.v1.Bus/Publish"), Route::Bus);
     }
 }

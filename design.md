@@ -74,7 +74,7 @@ characteristic UUID and a 16-bit advertising id.
   (128-byte key + 891-byte payload fill one 1024-byte frame),
   `zenoh::tests::filters_map_to_key_expressions` (1 GiB − 1 KiB),
   `g7_limits_fit_tonic_default_message_size`,
-  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 138).
+  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 140).
 - [x] C12 Single-stream transports implement `Subscribe` with a subscriber
   that borrows the transport (`Subscriber<'a>`) and owns a copy of its
   filter (`KeyFilterBuf`, no heap), so the caller's key need not outlive
@@ -331,11 +331,61 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `grpc::client::tests::g8_fresh_client_ids_differ_and_ids_can_be_set`.
 - [x] G9 Subscribers that send no `mw-client` (0.2 clients) keep the
   `[key_len][key][payload]` item format and receive every matching sample;
-  named subscribers get `[key_len][key][sender_len][sender][payload]`, so
-  `MAX_PAYLOAD` is 4 MiB − 138 —
+  named subscribers get `[key_len][key][sender_len][sender][payload]`
+  (and 0.5 subscribers the gap too, G12), so `MAX_PAYLOAD` is 4 MiB − 140 —
   `grpc::bus::tests::g8_bus_refuses_self_delivery_and_fills_the_sender`
   (legacy stream), `grpc::bus::tests::g8_items_with_sender_round_trip_and_reject_garbage`,
   `g7_limits_fit_tonic_default_message_size`.
+- [x] G10 The responder hands the handler the caller's `RequestMeta`:
+  `sender` from `mw-client` (every `GrpcTransport` request now sends it),
+  `deadline_ms` from `grpc-timeout` turned into a deadline on arrival and
+  measured when `serve_one` runs the handler (rounded down, 0 once passed),
+  and `principal` only from a configured `PrincipalSource` (default none:
+  an `x-forwarded-client-cert` header is ignored) —
+  `grpc::responder::tests::g10_call_meta_reads_client_timeout_and_only_trusted_principals`,
+  `grpc::responder::tests::g10_remaining_ms_rounds_down_and_saturates`,
+  `tests/grpc.rs`: `g10_handler_sees_client_id_and_deadline_but_no_untrusted_principal`.
+- [x] G11 `request_with` writes `options.timeout` as `grpc-timeout`
+  (`grpc::timeout::GrpcTimeout`, shared with `istio`) and bounds the call
+  locally; expiry, and a server's own `CANCELLED` arriving after the
+  deadline, are `DEADLINE_EXCEEDED`; a full responder queue and a refused
+  connection are `UNAVAILABLE`; both map to the same `HandlerError` through a
+  real in-process server —
+  `g11_busy_responder_and_refused_connection_are_unavailable`,
+  `k15_grpc_timeout_is_honoured`, `k15_grpc_handler_errors_round_trip`.
+- [x] G12 A `GrpcSubscriber` queues `queue_depth` samples locally
+  (`with_queue_depth`, a power of two, default 64) filled by a task reading
+  the stream, drops the oldest when the application falls behind
+  (`DELIVERY = DropOldest`, ordered), keeps a sample that did not fit the
+  buffer for a retry, and reports in `SampleMeta::gap` the samples lost
+  before each one, locally or to the bus's broadcast lag (`mw-gap: report`
+  items carry a big-endian `u16` gap) —
+  `g12_subscriber_queue_drops_oldest_and_reports_the_gap`,
+  `grpc::bus::tests::g12_items_with_gap_round_trip_and_reject_garbage`,
+  `grpc::bus::tests::g12_broadcast_lag_is_carried_by_the_next_item`,
+  `k15_grpc_overload_matches_declared_delivery`, `k15_grpc_gap_is_reported`.
+- [x] G13 `grpc.health.v1.Health` `Check` and `Watch`, protobuf
+  hand-encoded on `RawCodec` (unknown fields skipped, malformed messages
+  refused), served by `HealthService` (mounted with
+  `GrpcServer::with_health`) and called with `HealthClient`; `Check` of an
+  unknown name is `NOT_FOUND`, `Watch` sends the current status and then
+  each change and ends with the announcer; `GrpcAnnouncer` implements
+  `discovery::Announce` (announce → the kind `SERVING`, withdraw of its last
+  instance → `NOT_SERVING`) —
+  `grpc::health::tests::g13_health_messages_round_trip_and_skip_unknown_fields`,
+  `grpc::health::tests::g13_malformed_health_messages_are_refused`,
+  `grpc::health::tests::g13_health_table_is_a_bounded_value`,
+  `grpc::health::tests::g13_announcer_serves_while_any_instance_is_announced`,
+  `grpc::health::tests::g13_watch_stream_sends_current_then_changes_only`,
+  `grpc::server::tests::bus_paths_are_recognised`,
+  `tests/grpc.rs`: `g13_health_check_and_watch_over_loopback`.
+- [x] G14 gRPC passes every conformance case of the traits it implements
+  (`Requester`, `Gather` through `MeshClient`, `Publisher`/`Subscriber`,
+  `Announce`/`Browse` through `GrpcAnnouncer` and `MeshBrowse`) over
+  in-process servers on 127.0.0.1:0, the handler seeing sender, SPIFFE
+  principal and deadline (the requester injects an Envoy-style XFCC
+  header in place of the sidecar) — `tests/grpc.rs`
+  `conformance_cases::k15_grpc_*` (ten cases) *(istio)*.
 
 ### Istio (`istio`)
 
@@ -351,6 +401,38 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `grpc::istio::tests::retriable_codes_match_istio_default_retry_on`.
 - [x] I5 Plaintext h2c to the sidecar; mTLS is left to the mesh —
   `grpc::istio::tests::channel_builder_targets_sidecar_with_mesh_origin`, `istio::i2_i5_interceptor_propagates_trace_and_channel_sets_mesh_authority`.
+- [x] I6 `istio::peer_principal` takes the caller's SPIFFE ID from Envoy's
+  `x-forwarded-client-cert`: the first valid `URI=spiffe://…` of the last
+  (closest) element, honouring quoting (`,` `;` `=` inside quotes, `\"`
+  escapes) and refusing unbalanced quotes and non-SPIFFE URIs; the
+  responder uses it only with `PrincipalSource::SidecarXfcc`, documented as
+  sound only behind the sidecar that sets or sanitizes the header —
+  `grpc::istio::tests::i6_peer_principal_takes_the_spiffe_uri_of_the_last_element`,
+  `grpc::istio::tests::i6_quoted_separators_do_not_split_elements_or_pairs`,
+  `grpc::istio::tests::i6_malformed_or_missing_principals_are_none`,
+  `k15_grpc_handler_sees_sender_principal_and_deadline`.
+- [x] I7 `mesh::MeshClient` routes requests to the endpoints of its kind in
+  a `Directory` (each endpoint's `:authority` through the sidecar or
+  directly, `MeshDialer`): `Target::Any` in turn, `Target::Node` to the
+  endpoint naming that node, `UNAVAILABLE` at once when none does;
+  `Gather` calls every endpoint concurrently, bounded by `max_replies`,
+  `Flow::Stop` and the timeout (default 5 s), each `Reply.sender` the
+  endpoint's node —
+  `grpc::mesh::tests::i7_endpoint_authorities`,
+  `grpc::mesh::tests::i7_targets_select_by_kind_and_node`,
+  `grpc::mesh::tests::i7_node_target_without_endpoint_is_unavailable_at_once`,
+  `tests/grpc.rs`: `mesh::i7_mesh_client_routes_by_node_and_gathers_every_endpoint`,
+  `k15_grpc_gather_collects_every_responder`.
+- [x] I8 `mesh::MeshBrowse<B: Browse>` reports an endpoint of `B` up only
+  while its health `Watch` says `SERVING`, and down on any other status,
+  when the watch ends or fails, and when `B` reports it down; at most `N`
+  endpoints are tracked and an event leaves the table only once copied
+  into the caller's buffer —
+  `grpc::mesh::tests::i8_table_reports_up_only_while_serving_and_bounds_entries`,
+  `grpc::mesh::tests::i8_status_errors_end_the_watch`,
+  `tests/grpc.rs`: `mesh::i8_mesh_browse_reports_up_only_while_serving`,
+  `mesh::i8_mesh_browse_reports_down_when_dns_withdraws`,
+  `k15_grpc_announce_then_withdraw`, `k15_grpc_goodbye_removes_record_at_once`.
 ### mDNS service discovery (`mdns`)
 
 `MdnsSocket` browses DNS-SD service types (`_service._tcp|_udp.domain`)
