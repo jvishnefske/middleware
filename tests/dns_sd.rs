@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use conformance::{DiscoveryFixture, discovery, prompt};
 use middleware::discovery::{Announce, Browse, Endpoint, Event, Service, ServiceKind};
 use middleware::dns::unicast::{
-    AnswerError, MapError, ResolvConf, Schedule, ServiceMap, ServiceRef, UnicastDnsSd, UnicastError,
+    AnswerError, MapError, ResolvConf, Schedule, ServiceMap, ServiceRef, UnicastDnsSd,
+    UnicastError, query_id,
 };
 use middleware::dns::wire::{FLAG_RD, TYPE_A, TYPE_AAAA, TYPE_SRV};
 use middleware::key::{Key, KeyFilter};
@@ -56,7 +57,7 @@ fn map() -> ServiceMap {
 async fn browser(stub: &Stub, schedule: Schedule) -> UnicastDnsSd {
     UnicastDnsSd::builder(map())
         .nameserver(stub.addr)
-        .bind("127.0.0.1:0".parse().unwrap())
+        .bind("127.0.0.1".parse().unwrap())
         .timeout(Duration::from_millis(300))
         .attempts(2)
         .schedule(schedule)
@@ -243,6 +244,44 @@ async fn targets_without_glue_are_resolved_with_a_then_aaaa() {
     );
     let ids: BTreeSet<_> = seen.iter().map(|s| s.id).collect();
     assert_eq!(ids.len(), seen.len(), "fresh id per query");
+    let ports: BTreeSet<_> = seen.iter().map(|s| s.port).collect();
+    assert_eq!(ports.len(), seen.len(), "fresh source port per query");
+}
+
+/// A flood of bogus datagrams (wrong ids from the nameserver's address,
+/// right ids with a bogus pod from another port) neither ends the attempt
+/// early nor poisons the answer: with one attempt, the real reply after
+/// the flood is still taken.
+#[tokio::test]
+async fn a_flood_of_bogus_replies_does_not_suppress_or_poison_resolution() {
+    let stub = Stub::start().await;
+    stub.set_pods(CAM_SRV, vec![pod(1, 30)]).await;
+    stub.set_mode(Mode::Flood(200)).await;
+    let mut b = UnicastDnsSd::builder(map())
+        .nameserver(stub.addr)
+        .bind("127.0.0.1".parse().unwrap())
+        .timeout(Duration::from_secs(2))
+        .attempts(1)
+        .schedule(FAST)
+        .build()
+        .await
+        .expect("build");
+    b.browse(KeyFilter::Exact(CAM.key())).await.expect("browse");
+    assert_eq!(next(&mut b).await, up("cam-1", "10.0.0.1:8080", 30));
+    let mut buf = [0u8; 512];
+    assert_eq!(b.try_next(&mut buf).ok().flatten(), None, "no bogus pod");
+    assert_eq!(stub.seen().await.len(), 1, "answered on the first attempt");
+}
+
+/// Query ids come from the OS CSPRNG: many draws are not a short cycle
+/// and use both bytes.
+#[test]
+fn query_ids_come_from_the_os_csprng() {
+    let ids: Vec<u16> = (0..256).map(|_| query_id().expect("getrandom")).collect();
+    let distinct: BTreeSet<_> = ids.iter().collect();
+    // 256 draws from 65536 values: about 0.5 collisions expected.
+    assert!(distinct.len() > 240, "{} distinct", distinct.len());
+    assert!(ids.iter().any(|&i| i > 0xFF) && ids.iter().any(|&i| i & 0xFF != 0));
 }
 
 /// NXDOMAIN (a headless Service without ready pods) is an empty set, not
@@ -463,7 +502,7 @@ impl DiscoveryFixture for DnsSd {
             .unwrap();
         let b = UnicastDnsSd::builder(map)
             .nameserver(self.stub.addr)
-            .bind("127.0.0.1:0".parse().unwrap())
+            .bind("127.0.0.1".parse().unwrap())
             .timeout(Duration::from_millis(300))
             .schedule(FAST)
             .build()

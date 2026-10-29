@@ -53,6 +53,10 @@ pub enum Mode {
     SpoofFirst,
     /// Only replies with the wrong id.
     OnlyWrongId,
+    /// `n` replies with the wrong id from the server's address and `n`
+    /// replies with the right id and a bogus pod from another port, then
+    /// the correct reply.
+    Flood(usize),
     /// Replies with TC set and no records.
     Truncate,
     /// SERVFAIL.
@@ -68,6 +72,8 @@ pub struct Seen {
     pub flags: u16,
     /// The UDP payload size of an EDNS(0) OPT record, if present.
     pub edns: Option<u16>,
+    /// The source port the query came from.
+    pub port: u16,
 }
 
 enum Command {
@@ -149,6 +155,23 @@ impl State {
                 let _ = reply.send(self.seen.clone());
             }
         }
+    }
+
+    /// This state with the pods of `srv` replaced by one bogus pod.
+    fn evil(&self, srv: &str) -> State {
+        let mut evil = State {
+            mode: Mode::Normal,
+            ..self.clone()
+        };
+        let suffix = srv.split_once("._tcp.").map_or("x", |(_, s)| s);
+        if let Some((_, pods)) = evil
+            .zones
+            .iter_mut()
+            .find(|(n, _)| n.eq_ignore_ascii_case(srv))
+        {
+            *pods = vec![Pod::v4("evil", suffix, [6, 6, 6, 6], 666, 60)];
+        }
+        evil
     }
 
     fn pod(&self, target: &str) -> Option<&Pod> {
@@ -312,6 +335,7 @@ async fn serve(socket: UdpSocket, spoof: UdpSocket, mut rx: mpsc::Receiver<Comma
                     id: query.id(),
                     flags: query.flags(),
                     edns,
+                    port: from.port(),
                 });
                 let id = query.id();
                 match state.mode {
@@ -320,17 +344,18 @@ async fn serve(socket: UdpSocket, spoof: UdpSocket, mut rx: mpsc::Receiver<Comma
                         let _ = socket.send_to(&out[..n], from).await;
                     }
                     Mode::SpoofFirst => {
-                        let mut evil = state.clone();
-                        let suffix = qname.split_once("._tcp.").map_or("x", |(_, s)| s);
-                        if let Some((_, pods)) = evil
-                            .zones
-                            .iter_mut()
-                            .find(|(n, _)| n.eq_ignore_ascii_case(&qname))
-                        {
-                            *pods = vec![Pod::v4("evil", suffix, [6, 6, 6, 6], 666, 60)];
-                        }
-                        let n = evil.reply(&mut out, id, &qname, q.qtype);
+                        let n = state.evil(&qname).reply(&mut out, id, &qname, q.qtype);
                         let _ = spoof.send_to(&out[..n], from).await;
+                    }
+                    Mode::Flood(count) => {
+                        let n = state.reply(&mut out, id.wrapping_add(1), &qname, q.qtype);
+                        for _ in 0..count {
+                            let _ = socket.send_to(&out[..n], from).await;
+                        }
+                        let n = state.evil(&qname).reply(&mut out, id, &qname, q.qtype);
+                        for _ in 0..count {
+                            let _ = spoof.send_to(&out[..n], from).await;
+                        }
                     }
                     _ => {}
                 }

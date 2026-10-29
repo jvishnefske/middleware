@@ -639,6 +639,22 @@ encoder; `MdnsSocket` implements `Browse`.
   resolver configuration's first —
   `tests/dns_sd.rs`: `browse_selects_mapped_kinds_by_prefix`,
   `nameserver_from_the_resolver_configuration` *(dns-sd)*.
+- [x] L25 Transaction entropy against off-path cache poisoning (RFC 5452):
+  every attempt of every query is sent from a new socket on a fresh
+  ephemeral port, and its id comes from the operating system's CSPRNG
+  (`dns::unicast::query_id`, `getrandom`), with no generator state kept in
+  the process —
+  `tests/dns_sd.rs`: `targets_without_glue_are_resolved_with_a_then_aaaa`
+  (distinct source port and id per query), `query_ids_come_from_the_os_csprng`
+  *(dns-sd)*.
+- [x] L26 A flood of bogus datagrams cannot suppress or poison a
+  resolution: each query socket is connected to the nameserver, so the
+  kernel drops other sources, and skipped datagrams never end an attempt;
+  only its deadline does —
+  `tests/dns_sd.rs`: `a_flood_of_bogus_replies_does_not_suppress_or_poison_resolution`
+  (200 wrong-id replies from the nameserver's address and 200 bogus-pod
+  replies from another port, one attempt),
+  `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

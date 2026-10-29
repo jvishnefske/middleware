@@ -1661,6 +1661,7 @@ dependencies = [
  "ed25519-dalek",
  "embedded-io-async",
  "futures",
+ "getrandom 0.3.4",
  "heapless",
  "http",
  "middleware",
