@@ -5,8 +5,8 @@
 use middleware::Key;
 use middleware::wasm_abi::{ABI1_IMPORTS, ABI2_IMPORTS, ABI3_IMPORTS, IMPORTS, Import};
 use wasm_host::{
-    AbiError, Device, Event, EventKind, Limits, Payload, Pull, RouteStat, SinkConfig, SourceConfig,
-    SourceKind,
+    AbiError, Device, Event, EventKind, Limits, Payload, Pull, RouteStat, SinkConfig, Source,
+    SourceConfig,
 };
 
 #[derive(Default)]
@@ -60,12 +60,16 @@ impl Device for Fake {
     }
     fn route_source(
         &mut self,
-        source: SourceKind,
+        source: Source,
         key: Key<'_>,
         cfg: SourceConfig,
     ) -> Result<u8, AbiError> {
+        let source = match source {
+            Source::TestPattern => "TestPattern".to_string(),
+            Source::Camera(pins) => format!("Camera{:?}", pins.all()),
+        };
         self.outcome(format!(
-            "source {source:?} {} {}x{} {}ms chunk={}",
+            "source {source} {} {}x{} {}ms chunk={}",
             key.as_str(),
             cfg.width,
             cfg.height,
@@ -128,7 +132,9 @@ impl Device for Abi1Board {
 /// The route imports plus `$report` (publishes an i32 on key `r`). Data:
 /// "r" at 0, the stream key "app/cam/frame" (13 bytes) at 32, a 120×120
 /// 100 ms source config at 64, a 28 800-byte sink config with D/C 13 and
-/// the centred 120×120 MIPI window (28 bytes) at 80, "sys/x" at 128.
+/// the centred 120×120 MIPI window (28 bytes) at 80, "sys/x" at 128, and
+/// a 240×240 JPEG 500 ms camera config with the AI-Thinker pins (21 bytes)
+/// at 160.
 const PRELUDE: &str = r#"
   (import "mw" "publish" (func $publish (param i32 i32 i32 i32) (result i32)))
   (import "mw" "route_source" (func $route_source (param i32 i32 i32 i32 i32) (result i32)))
@@ -141,6 +147,7 @@ const PRELUDE: &str = r#"
   (data (i32.const 64) "\78\00\78\00\00\00\64\00\00\00")
   (data (i32.const 80) "\0d\00\80\70\00\00\05\00\01\2a\01\04\00\3c\00\b3\00\01\2b\01\04\00\3c\00\b3\00\01\2c")
   (data (i32.const 128) "sys/x")
+  (data (i32.const 160) "\f0\00\f0\00\01\00\f4\01\00\00\05\12\13\15\24\27\22\23\19\17\16")
   (func $report (param $v i32)
     (i32.store (i32.const 4) (local.get $v))
     (drop (call $publish (i32.const 0) (i32.const 1) (i32.const 4) (i32.const 4))))
@@ -214,6 +221,26 @@ fn r8_route_source_passes_parsed_arguments_and_returns_the_handle() {
     assert_eq!(
         p.device().calls,
         vec!["source TestPattern app/cam/frame 120x120 100ms chunk=166"]
+    );
+}
+
+#[test]
+fn r15_camera_source_passes_its_pins_and_needs_21_bytes() {
+    let mut p = run_init(
+        r#"(call $report (call $route_source (i32.const 1) (i32.const 32) (i32.const 13) (i32.const 160) (i32.const 21)))
+           (call $report (call $route_source (i32.const 1) (i32.const 32) (i32.const 13) (i32.const 160) (i32.const 10)))
+           (call $report (call $route_source (i32.const 0) (i32.const 32) (i32.const 13) (i32.const 160) (i32.const 21)))
+           (call $report (call $route_source (i32.const 1) (i32.const 32) (i32.const 13) (i32.const 64) (i32.const 21)))"#,
+        Fake::default(),
+    );
+    // The last one reads the RGB565 pattern config plus the sink bytes as
+    // pins: a camera config must be JPEG.
+    assert_eq!(p.device().results(), vec![0, BAD, BAD, BAD]);
+    assert_eq!(
+        p.device().calls,
+        vec![
+            "source Camera[5, 18, 19, 21, 36, 39, 34, 35, 25, 23, 22] app/cam/frame 240x240 500ms chunk=166"
+        ]
     );
 }
 

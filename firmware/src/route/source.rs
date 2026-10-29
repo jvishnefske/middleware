@@ -32,6 +32,19 @@
 //! length as `total`; the chunks of skipped periods are counted with the
 //! length of the frame that follows them.
 //!
+//! # Camera routes (R15)
+//!
+//! A camera route ([`SourceRoute::camera`]) has no stored frame: when a
+//! frame is due, [`SourceRoute::next`] answers [`Next::Capture`] and the
+//! shell captures one JPEG into its frame buffer, then reports the length
+//! (or the failure) with [`SourceRoute::captured`]. A captured frame gets
+//! its chunker then (the length is every chunk header's `total`) and is
+//! sent like any other, its bytes copied from the shell's frame buffer
+//! ([`Feed::Camera`]); a failed capture drops the frame
+//! (`RouteDropped`) and the next one is due a period later. The period is
+//! thus the shortest interval between frames: capture time and air time
+//! add to it only when they overrun it.
+//!
 //! # One chunk, in place
 //!
 //! [`write_frame`] fills one ESP-NOW frame buffer: the middleware ESP-NOW
@@ -51,9 +64,36 @@ use middleware::Key;
 use super::{AIR_CHUNK_DATA, Report};
 use crate::dispatch::tick_delay;
 
+/// Where a source route's frame bytes come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feed {
+    /// Generated or stored frames: the test pattern or the JPEG fixtures.
+    Stored(FrameSource<'static>),
+    /// The camera: the shell's frame buffer holds the current frame's
+    /// `len` bytes (0 while none is captured).
+    Camera {
+        /// Bytes of the captured frame.
+        len: u32,
+    },
+}
+
+/// Why a camera capture produced no frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFault {
+    /// The frame did not fit the frame buffer.
+    Overflow,
+    /// No complete frame arrived in time (or the DMA ring overran).
+    Timeout,
+    /// The camera hardware is missing or failed.
+    Hardware,
+}
+
 /// What a source route does next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Next {
+    /// Capture a camera frame now, then report it with
+    /// [`SourceRoute::captured`].
+    Capture,
     /// Publish this chunk now.
     Send(ChunkPlan),
     /// Nothing until this many milliseconds have passed.
@@ -64,7 +104,7 @@ pub enum Next {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRoute {
     cfg: SourceConfig,
-    source: FrameSource<'static>,
+    feed: Feed,
     /// Chunker of the current frame.
     chunker: Chunker,
     /// Source frame number (one per period).
@@ -95,7 +135,37 @@ impl SourceRoute {
             return Err(AbiError::Unsupported);
         }
         let chunker = source.chunker(0, 0, data).map_err(|_| AbiError::InvalidArgument)?;
-        Ok(SourceRoute { cfg, source, chunker, frame: 0, chunk: 0, due: now_ms, stats: RouteStats::default() })
+        Ok(SourceRoute {
+            cfg,
+            feed: Feed::Stored(source),
+            chunker,
+            frame: 0,
+            chunk: 0,
+            due: now_ms,
+            stats: RouteStats::default(),
+        })
+    }
+
+    /// A camera route for `cfg` (JPEG), first frame due at `now_ms`.
+    /// `InvalidArgument` for a raw format, `Unsupported` when the chunk
+    /// size does not fit one ESP-NOW message.
+    pub fn camera(cfg: SourceConfig, now_ms: u32) -> Result<Self, AbiError> {
+        if cfg.fixed_frame_len().is_some() {
+            return Err(AbiError::InvalidArgument);
+        }
+        let data = usize::from(cfg.chunk_data);
+        if data > AIR_CHUNK_DATA {
+            return Err(AbiError::Unsupported);
+        }
+        Ok(SourceRoute {
+            cfg,
+            feed: Feed::Camera { len: 0 },
+            chunker: placeholder(0, data).ok_or(AbiError::InvalidArgument)?,
+            frame: 0,
+            chunk: 0,
+            due: now_ms,
+            stats: RouteStats::default(),
+        })
     }
 
     /// The route's config.
@@ -104,8 +174,16 @@ impl SourceRoute {
     }
 
     /// Where the route's frame bytes come from.
-    pub const fn source(&self) -> FrameSource<'static> {
-        self.source
+    pub const fn feed(&self) -> Feed {
+        self.feed
+    }
+
+    /// The stored frames, `None` for a camera route.
+    pub const fn source(&self) -> Option<FrameSource<'static>> {
+        match self.feed {
+            Feed::Stored(s) => Some(s),
+            Feed::Camera { .. } => None,
+        }
     }
 
     /// The source frame number being sent.
@@ -130,6 +208,9 @@ impl SourceRoute {
             if wait > 0 {
                 return Next::Wait(wait);
             }
+            if self.feed == (Feed::Camera { len: 0 }) {
+                return Next::Capture;
+            }
         }
         match self.chunker.chunk(self.chunk) {
             Some(plan) => Next::Send(plan),
@@ -146,6 +227,26 @@ impl SourceRoute {
             return (SourceRoute { chunk, ..self }, Report::NONE);
         }
         self.finish(now_ms, self.stats.sent(count), Report { frames: 1, dropped: 0 })
+    }
+
+    /// The state after the capture asked for by [`Next::Capture`]: a frame
+    /// of `len` bytes is in the shell's frame buffer and its chunks follow,
+    /// or the capture failed and the frame is dropped. A result for a route
+    /// that is not waiting for a capture changes nothing.
+    pub fn captured(self, now_ms: u32, result: Result<u32, CaptureFault>) -> (Self, Report) {
+        if self.feed != (Feed::Camera { len: 0 }) || self.chunk != 0 {
+            return (self, Report::NONE);
+        }
+        let data = usize::from(self.cfg.chunk_data);
+        match result.ok().and_then(|len| Chunker::new(self.chunker.seq(), len, data).ok()) {
+            Some(chunker) => {
+                (SourceRoute { feed: Feed::Camera { len: chunker.total() }, chunker, ..self }, Report::NONE)
+            }
+            None => {
+                let stats = self.stats.skipped(0, 0);
+                self.finish(now_ms, stats, Report { frames: 0, dropped: 1 })
+            }
+        }
     }
 
     /// The state after the broadcast of the chunk from
@@ -174,9 +275,14 @@ impl SourceRoute {
         // size by the config, stored frames by `FrameSet::new`), so this
         // cannot fail; if it ever did, the old chunker's length would not
         // match the frame and `write_frame` would refuse its chunks.
-        let chunker =
-            self.source.chunker(frame, seq, usize::from(self.cfg.chunk_data)).unwrap_or(self.chunker);
+        let data = usize::from(self.cfg.chunk_data);
+        let (feed, chunker) = match self.feed {
+            Feed::Stored(source) => (self.feed, source.chunker(frame, seq, data).unwrap_or(self.chunker)),
+            // The next frame is captured when due; its chunker comes then.
+            Feed::Camera { .. } => (Feed::Camera { len: 0 }, placeholder(seq, data).unwrap_or(self.chunker)),
+        };
         let next = SourceRoute {
+            feed,
             chunker,
             frame,
             chunk: 0,
@@ -186,6 +292,12 @@ impl SourceRoute {
         };
         (next, Report { dropped: report.dropped.saturating_add(missed), ..report })
     }
+}
+
+/// The chunker a camera route holds while no frame is captured: one
+/// byte, so it is valid; it is replaced before any chunk is sent.
+fn placeholder(seq: u16, data: usize) -> Option<Chunker> {
+    Chunker::new(seq, 1, data).ok()
 }
 
 /// Why [`write_frame`] could not build a frame.
@@ -270,10 +382,80 @@ mod tests {
                         return (r, rep, sent);
                     }
                 }
-                Next::Wait(_) => break,
+                Next::Wait(_) | Next::Capture => break,
             }
         }
         (r, Report::NONE, sent)
+    }
+
+    fn camera(period: u16, now: u32) -> SourceRoute {
+        SourceRoute::camera(SourceConfig::jpeg(240, 240, period).expect("valid"), now).expect("valid")
+    }
+
+    #[test]
+    fn r15_camera_frames_are_captured_when_due_then_sent_from_the_buffer() {
+        let r = camera(500, 1000);
+        assert_eq!(r.feed(), Feed::Camera { len: 0 });
+        assert_eq!(r.source(), None);
+        assert_eq!(r.next(900), Next::Wait(100));
+        assert_eq!(r.next(1000), Next::Capture);
+        // Capture took 80 ms; 400 bytes = 3 chunks of 166, 166, 68.
+        let (r, rep) = r.captured(1080, Ok(400));
+        assert_eq!(rep, Report::NONE);
+        assert_eq!(r.feed(), Feed::Camera { len: 400 });
+        assert_eq!(r.chunks_per_frame(), 3);
+        let Next::Send(first) = r.next(1080) else { panic!("send") };
+        assert_eq!((first.header.total, first.range), (400, 0..166));
+        assert_eq!(first.header.seq, 0);
+        let (r, rep, sent) = send_frame(r, 1100);
+        assert_eq!((rep, sent), (Report { frames: 1, dropped: 0 }, 3));
+        // The next frame is captured a period after the first was due.
+        assert_eq!(r.feed(), Feed::Camera { len: 0 });
+        assert_eq!(r.next(1100), Next::Wait(400));
+        assert_eq!(r.next(1500), Next::Capture);
+        let (r, _) = r.captured(1550, Ok(1000));
+        let Next::Send(p) = r.next(1550) else { panic!("send") };
+        assert_eq!((p.header.seq, p.header.total), (1, 1000), "one seq per frame");
+        assert_eq!(r.stats().frames, 1);
+        assert_eq!(r.stats().chunks, 3);
+    }
+
+    #[test]
+    fn r15_a_failed_capture_drops_the_frame_and_waits_a_period() {
+        for fault in [CaptureFault::Overflow, CaptureFault::Timeout, CaptureFault::Hardware] {
+            let r = camera(500, 0);
+            let (r, rep) = r.captured(300, Err(fault));
+            assert_eq!(rep, Report { frames: 0, dropped: 1 }, "{fault:?}");
+            assert_eq!(r.stats().frames_dropped, 1);
+            assert_eq!(r.next(300), Next::Wait(200));
+            assert_eq!(r.next(500), Next::Capture);
+        }
+        // A capture slower than whole periods skips them; the next frame,
+        // already late, is captured at once.
+        let (r, rep) = camera(100, 0).captured(350, Err(CaptureFault::Timeout));
+        assert_eq!(rep, Report { frames: 0, dropped: 3 });
+        assert_eq!(r.next(350), Next::Capture);
+        // An empty or oversize "frame" is a failed capture.
+        let (_, rep) = camera(100, 0).captured(10, Ok(0));
+        assert_eq!(rep.dropped, 1);
+        let (_, rep) = camera(100, 0).captured(10, Ok(middleware::stream::MAX_FRAME_BYTES + 1));
+        assert_eq!(rep.dropped, 1);
+        // A result nobody asked for changes nothing.
+        let (r, _) = camera(100, 0).captured(10, Ok(200));
+        assert_eq!(r.captured(20, Ok(300)), (r, Report::NONE));
+    }
+
+    #[test]
+    fn r15_camera_routes_need_jpeg_and_air_sized_chunks() {
+        assert_eq!(SourceRoute::camera(cfg(), 0), Err(AbiError::InvalidArgument), "RGB565");
+        let big = SourceConfig::jpeg(240, 240, 100).and_then(|c| c.with_chunk_data(200)).expect("valid");
+        assert_eq!(SourceRoute::camera(big, 0), Err(AbiError::Unsupported));
+        // A failed broadcast abandons a captured frame like any other.
+        let (r, _) = camera(100, 0).captured(5, Ok(400));
+        let (r, rep) = r.failed(6);
+        assert_eq!(rep, Report { frames: 0, dropped: 1 });
+        assert_eq!(r.feed(), Feed::Camera { len: 0 });
+        assert_eq!(r.stats().chunks_dropped, 3);
     }
 
     #[test]
@@ -353,7 +535,7 @@ mod tests {
         let r = SourceRoute::new(c, 0).expect("valid");
         let Next::Send(plan) = r.next(0) else { panic!("due") };
         let mut out = [0u8; MAX_FRAME];
-        let n = write_frame(&mut out, 7, KEY, 3, &r.source(), &plan).expect("fits");
+        let n = write_frame(&mut out, 7, KEY, 3, &r.source().expect("stored"), &plan).expect("fits");
         assert_eq!(n, 7 + KEY.as_str().len() + 12 + ESPNOW_CHUNK_DATA);
         let f = Frame::decode(&out[..n]).expect("radio frame");
         assert_eq!((f.seq, f.key), (7, KEY));
@@ -373,7 +555,7 @@ mod tests {
         let mut out = [0u8; MAX_FRAME];
         for i in 0..r.chunks_per_frame() {
             let Next::Send(plan) = r.next(0) else { panic!("due") };
-            let n = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source(), &plan).expect("fits");
+            let n = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
             let f = Frame::decode(&out[..n]).expect("radio frame");
             let (step, data) = sink.receive(c.frame_len(), f.payload);
             assert!(step.forwards());
@@ -425,7 +607,7 @@ mod tests {
             for i in 0..r.chunks_per_frame() {
                 let Next::Send(plan) = r.next(now) else { panic!("due") };
                 assert_eq!((plan.header.total as usize, plan.header.seq), (want.len(), n as u16));
-                let len = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source(), &plan).expect("fits");
+                let len = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
                 let f = Frame::decode(&out[..len]).expect("radio frame");
                 rebuilt.extend_from_slice(chunk::decode(f.payload).expect("chunk").data);
                 r = r.published(now).0;
@@ -455,7 +637,7 @@ mod tests {
         let r = jpeg_route(0).published(0).0;
         let Next::Send(plan) = r.next(200) else { panic!("due") };
         let mut out = [0u8; MAX_FRAME];
-        let n = write_frame(&mut out, 0, KEY, r.frame(), &r.source(), &plan).expect("fits");
+        let n = write_frame(&mut out, 0, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
         let ch = chunk::decode(Frame::decode(&out[..n]).expect("radio frame").payload).expect("chunk");
         assert_eq!(ch.data, &F1[..ESPNOW_CHUNK_DATA]);
         // A plan for a longer frame than the stored one is refused.
@@ -463,7 +645,7 @@ mod tests {
             header: middleware::stream::ChunkHeader { seq: 0, offset: 166, total: 400 },
             range: 166..332,
         };
-        assert_eq!(write_frame(&mut out, 0, KEY, 1, &r.source(), &wrong), Err(WireError::Chunk(ChunkError::Bounds)));
+        assert_eq!(write_frame(&mut out, 0, KEY, 1, &r.source().expect("stored"), &wrong), Err(WireError::Chunk(ChunkError::Bounds)));
     }
 
     #[test]
@@ -483,7 +665,7 @@ mod tests {
                 let cfg = SourceConfig::jpeg(size, size, 200).expect("valid");
                 let r = SourceRoute::new(cfg, 0).expect("fixtures");
                 let set = fixtures::jpeg(size, size).expect("fixture set");
-                assert_eq!(r.source(), FrameSource::Frames(set));
+                assert_eq!(r.source(), Some(FrameSource::Frames(set)));
                 assert_eq!(r.chunks_per_frame(), set.frame_len(0).div_ceil(166));
             }
             let _ = jpeg;

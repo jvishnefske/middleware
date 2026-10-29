@@ -132,7 +132,7 @@ pub use middleware::wasm_abi::periph::{
     Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
 pub use middleware::wasm_abi::route::{
-    Preamble, RouteStat, Segment, SinkConfig, SourceConfig, SourceKind,
+    CameraPins, Preamble, RouteStat, Segment, SinkConfig, Source, SourceConfig, SourceKind,
 };
 pub use middleware::wasm_abi::{AbiError, Pull};
 
@@ -284,11 +284,13 @@ pub trait Device {
     /// `cfg.chunk_data` bytes, one sequence number per frame. Returns the
     /// route handle (`0..MAX_ROUTES`; any other value reaches the payload as
     /// `NoResources`). Raises `RouteFrames` / `RouteDropped` events for the
-    /// handle. `Unsupported` for a source the board lacks, `NoResources`
-    /// when every route is taken.
+    /// handle. `Unsupported` for a source the board lacks (or camera pins
+    /// it cannot use), `NoResources` when every route is taken. For
+    /// [`Source::Camera`] the payload has already configured the sensor;
+    /// the device only receives its frames on the given pins.
     fn route_source(
         &mut self,
-        source: SourceKind,
+        source: Source,
         key: middleware::Key<'_>,
         cfg: SourceConfig,
     ) -> Result<u8, AbiError> {

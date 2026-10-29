@@ -21,8 +21,9 @@
 //! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
 //!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]), UART1
 //!    ([`uart1`]), the LEDC for PWM ([`pwm`]) and ADC1 ([`adc`], built
-//!    while the board is split, before the pin bank), all without pins
-//!    until a payload opens them.
+//!    while the board is split, before the pin bank), and on the ESP32
+//!    I2C0 ([`i2c`]) and the I2S0 camera receiver ([`camera`]), all without
+//!    pins until a payload opens them.
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
 //!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
 //!    publishes go out over ESP-NOW, `app/...` samples come in, and source
@@ -44,11 +45,15 @@
 mod adc;
 mod board;
 mod bus;
+#[cfg(all(feature = "esp32", feature = "wasm"))]
+mod camera;
 mod controller;
 #[cfg(feature = "wasm")]
 mod device;
 #[cfg(feature = "wasm")]
 mod gpio;
+#[cfg(all(feature = "esp32", feature = "wasm"))]
+mod i2c;
 #[cfg(feature = "wasm")]
 mod irq;
 mod link;
@@ -223,11 +228,21 @@ pub async fn run(spawner: Spawner) -> ! {
                 if uart.is_some() { "ok" } else { "failed" },
             ));
         }
+        #[cfg(feature = "esp32")]
+        let i2c = {
+            let cam = board.payload.cam;
+            if !camera::install(cam.i2s0, cam.dma_i2s0) {
+                bus.log(format_args!("camera: I2S0 camera receiver failed to start"));
+            }
+            cam.i2c0.map(i2c::Bus0::new)
+        };
         device::HW.put(device::Hw {
             spi,
             uart,
             ledc: Some(pwm::LedcHw::new(board.payload.ledc)),
             adc: Some(board.payload.adc),
+            #[cfg(feature = "esp32")]
+            i2c,
         });
         #[cfg(feature = "espnow")]
         match radio::start(board.wifi) {

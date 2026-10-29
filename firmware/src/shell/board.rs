@@ -22,7 +22,9 @@
 //! and the ABI 3 hardware: the LEDC (PWM) and ADC1 with every ADC1 pin
 //! enabled at 11 dB (ESP32 GPIO32–39, ESP32-S3 GPIO1–10). ADC1 is built
 //! before the pin bank, because building a `Flex` takes a pin back from the
-//! analog mux that enabling it for the ADC selected (see `adc.rs`).
+//! analog mux that enabling it for the ADC selected (see `adc.rs`). On the
+//! ESP32 (the ESP32-CAM) also [`CamPeripherals`]: I2C0 for ABI 3 I2C and
+//! I2S0 with `DMA_I2S0` for the camera (R15).
 //! With `espnow` (ESP32, ESP32-S3) the board also hands over `WIFI`.
 //!
 //! The heap ([`init_heap`]) is one allocator over the two regions of the
@@ -117,17 +119,33 @@ pub struct PayloadPeripherals {
     /// UART1 without pins, blocking until a payload runs; `None` if
     /// configuration failed.
     pub uart1: Option<Uart<'static, Blocking>>,
-    /// The LED controller (PWM outputs).
+    /// The LED controller (PWM outputs; on the ESP32-CAM also the sensor
+    /// clock).
     pub ledc: LEDC<'static>,
     /// ADC1 with every payload ADC1 pin enabled.
     pub adc: AdcUnit,
+    /// The ESP32-CAM's camera control and capture peripherals (R15).
+    #[cfg(feature = "esp32")]
+    pub cam: CamPeripherals,
+}
+
+/// ESP32: I2C0 without pins (SCCB) and I2S0 with its DMA channel (the
+/// camera port).
+#[cfg(feature = "esp32")]
+pub struct CamPeripherals {
+    /// I2C controller 0, configured without pins; `None` if that failed.
+    pub i2c0: Option<esp_hal::i2c::master::I2c<'static, Blocking>>,
+    /// I2S0.
+    pub i2s0: esp_hal::peripherals::I2S0<'static>,
+    /// I2S0's DMA channel.
+    pub dma_i2s0: esp_hal::peripherals::DMA_I2S0<'static>,
 }
 
 /// Builds the payload peripherals from SPI2, its DMA channel, UART1, the
 /// LEDC and the ADC1 unit built by [`adc1!`].
 #[cfg(feature = "wasm")]
 macro_rules! payload_peripherals {
-    ($p:ident, $dma:ident, $adc:ident) => {
+    ($p:ident, $dma:ident, $adc:ident $(, $field:ident: $value:expr)?) => {
         PayloadPeripherals {
             io_mux: $p.IO_MUX,
             timg1: $p.TIMG1,
@@ -135,6 +153,7 @@ macro_rules! payload_peripherals {
             uart1: Uart::new($p.UART1, UartConfig::default()).ok(),
             ledc: $p.LEDC,
             adc: $adc,
+            $($field: $value,)?
         }
     };
 }
@@ -191,7 +210,11 @@ pub fn split(mut p: Peripherals) -> Board {
         #[cfg(feature = "wasm")]
         pins,
         #[cfg(feature = "wasm")]
-        payload: payload_peripherals!(p, DMA_SPI2, adc),
+        payload: payload_peripherals!(p, DMA_SPI2, adc, cam: CamPeripherals {
+            i2c0: esp_hal::i2c::master::I2c::new(p.I2C0, Default::default()).ok(),
+            i2s0: p.I2S0,
+            dma_i2s0: p.DMA_I2S0,
+        }),
         #[cfg(feature = "espnow")]
         wifi: p.WIFI,
     }
