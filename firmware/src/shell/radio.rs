@@ -20,7 +20,8 @@
 //!   `disc: updated ...` and `disc: down ...` lines on `sys/log` (the
 //!   payload does not see beacons);
 //! * a payload publish from [`TX`] (the controller queues `app/...` keys
-//!   with [`send`], which drops and counts when the queue is full):
+//!   with [`send`], which refuses any other key, `disc/...` included, and
+//!   drops and counts when the queue is full):
 //!   broadcast through the transport;
 //! * a source-route chunk due in [`SOURCES`]: written into the frame buffer
 //!   by `esp_base::route::source::write_frame` (radio header, key, chunk
@@ -180,10 +181,14 @@ pub fn read_sources<R>(f: impl FnOnce(&SourceTable) -> R) -> R {
 }
 
 /// Queues a payload publish for broadcast; drops (and counts) it when the
-/// queue is full or it does not fit one frame.
+/// key is not one a payload may send (`esp_base::radio::goes_over_air`:
+/// `app/...` only, so never a `disc/...` beacon), the queue is full or it
+/// does not fit one frame.
 pub fn send(key: Key<'_>, data: &[u8]) {
     let mut msg = Outgoing { key: String::new(), payload: Vec::new() };
-    let fits = msg.key.push_str(key.as_str()).is_ok() && msg.payload.extend_from_slice(data).is_ok();
+    let fits = esp_base::radio::goes_over_air(key)
+        && msg.key.push_str(key.as_str()).is_ok()
+        && msg.payload.extend_from_slice(data).is_ok();
     if !fits || TX.try_send(msg).is_err() {
         TX_DROPPED.lock(|n| {
             let mut n = n.borrow_mut();

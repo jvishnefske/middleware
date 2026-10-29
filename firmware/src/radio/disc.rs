@@ -23,10 +23,16 @@
 //! # The directory
 //!
 //! Every `disc/...` sample the radio receives goes to [`Neighbours::hear`]:
-//! decoded with [`decode`], the sample's sender filling in a missing node
-//! id, and folded into a [`Directory`] of [`NEIGHBOURS`] records. A new
-//! record, a changed one, a goodbye and a full directory return a
-//! [`Heard`] whose `Display` is the `sys/log` line; refreshes are silent.
+//! decoded with [`decode`] and folded into a [`Directory`] of
+//! [`NEIGHBOURS`] records. Each record is bound to the frame's sender (its
+//! source MAC): a beacon declaring another node is refused, only the
+//! sender that created a record may update or withdraw it, and one sender
+//! holds at most [`PER_SENDER`] records, so it cannot take every slot
+//! (refusals are counted, not logged). A new record, a changed one and a
+//! goodbye return a [`Heard`] whose `Display` is the `sys/log` line;
+//! refreshes are silent. Kinds and instances come off the air, so the lines
+//! print them with every byte outside printable ASCII (and `\`) as
+//! `\xNN`: a beacon cannot put escape sequences or line breaks in the log.
 //! [`Neighbours::expired`] lists the records whose TTL has run out (their
 //! [`Expired`] lines) before [`Neighbours::expire`] drops them. The lines:
 //!
@@ -35,7 +41,6 @@
 //! disc: updated cam/jpeg cam-aabbcc node 246f28aabbcc0000 ttl 30 s (1 known)
 //! disc: down cam/jpeg cam-aabbcc (goodbye, 0 known)
 //! disc: down cam/jpeg cam-aabbcc (expired)
-//! disc: full, cam/jpeg cam-aabbcc not kept (4 known)
 //! ```
 
 use core::fmt;
@@ -190,7 +195,7 @@ impl fmt::Display for Hex {
 /// A beacon that changed the directory: the `sys/log` line (`Display`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Heard<'a> {
-    /// What the directory did: `Added`, `Updated`, `Removed` or `Full`.
+    /// What the directory did: `Added`, `Updated` or `Removed`.
     pub change: Change,
     /// The service's kind.
     pub kind: ServiceKind<'a>,
@@ -206,10 +211,9 @@ pub struct Heard<'a> {
 
 impl fmt::Display for Heard<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (kind, instance, known) = (self.kind, self.instance, self.known);
+        let (kind, instance, known) = (Safe(self.kind.as_str()), Safe(self.instance), self.known);
         match self.change {
             Change::Removed => write!(f, "disc: down {kind} {instance} (goodbye, {known} known)"),
-            Change::Full => write!(f, "disc: full, {kind} {instance} not kept ({known} known)"),
             change => {
                 let verb = if change == Change::Added {
                     "up"
@@ -226,6 +230,24 @@ impl fmt::Display for Heard<'_> {
     }
 }
 
+/// Radio-supplied text for the log: printable ASCII as is, every other
+/// byte (control characters, escape sequences, non-ASCII) and `\` as
+/// `\xNN`, so a beacon cannot inject terminal escapes or forge log lines.
+struct Safe<'a>(&'a str);
+
+impl fmt::Display for Safe<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for &b in self.0.as_bytes() {
+            if (0x20..=0x7E).contains(&b) && b != b'\\' {
+                write!(f, "{}", char::from(b))?;
+            } else {
+                write!(f, "\\x{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A record whose TTL ran out: its `sys/log` line (`Display`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Expired<'a> {
@@ -237,14 +259,19 @@ pub struct Expired<'a> {
 
 impl fmt::Display for Expired<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "disc: down {} {} (expired)", self.kind, self.instance)
+        write!(f, "disc: down {} {} (expired)", Safe(self.kind.as_str()), Safe(self.instance))
     }
 }
+
+/// Records one sender may hold, of [`NEIGHBOURS`]: a single node (or a
+/// node spoofing one MAC) cannot fill the directory.
+pub const PER_SENDER: usize = 2;
 
 /// The services this device has heard announced on the radio.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Neighbours {
     dir: Directory<NEIGHBOURS>,
+    refused: u32,
 }
 
 impl Neighbours {
@@ -252,13 +279,39 @@ impl Neighbours {
     pub const fn new() -> Self {
         Neighbours {
             dir: Directory::new(),
+            refused: 0,
         }
+    }
+
+    /// Beacons refused so far (wrong node, someone else's record, the
+    /// sender's [`PER_SENDER`] cap, a full directory); saturates.
+    pub const fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    fn refuse(self) -> Self {
+        Neighbours { refused: self.refused.saturating_add(1), ..self }
+    }
+
+    /// Records held by `node`.
+    fn held_by(&self, node: Option<SenderId>) -> usize {
+        self.dir.iter().filter(|s| s.node == node).count()
     }
 
     /// Folds one received sample on `key` (from `sender`, at `now_ms`) into
     /// the directory. Returns what to log: `None` for a sample that is not
     /// a valid beacon, a refresh, a goodbye for an unknown record, or a
-    /// record over the directory's bounds.
+    /// refused beacon (counted in [`Neighbours::refused`], not logged, so
+    /// a flood of them cannot flood `sys/log`).
+    ///
+    /// Records are bound to the frame's sender: when the transport names it
+    /// (ESP-NOW always does, by source MAC), it is the record's node and a
+    /// beacon declaring another node is refused; an existing record is only
+    /// updated or withdrawn by the sender that created it; and one sender
+    /// holds at most [`PER_SENDER`] records. The source MAC is not
+    /// authenticated (a radio can forge it), so this stops one node from
+    /// claiming another's identity or records in passing, not a determined
+    /// spoofer.
     pub fn hear<'p>(
         self,
         key: Key<'p>,
@@ -269,16 +322,26 @@ impl Neighbours {
         let Some(service) = kind_of(key).and_then(|kind| decode(kind, payload).ok()) else {
             return (self, None);
         };
-        let service = Service {
-            node: service.node.or(sender),
-            ..service
+        let node = match (sender, service.node) {
+            (Some(s), Some(n)) if n != s => return (self.refuse(), None),
+            (Some(s), _) => Some(s),
+            (None, n) => n,
         };
+        let service = Service { node, ..service };
+        match self.dir.get(service.kind, service.instance) {
+            Some(known) if known.node != node => return (self.refuse(), None),
+            None if service.ttl_s > 0 && self.held_by(node) >= PER_SENDER => {
+                return (self.refuse(), None);
+            }
+            _ => {}
+        }
+        let refused = self.refused;
         let (dir, change) = self.dir.observe(&Event::Up(service), now_ms);
+        if change == Change::Full {
+            return (Neighbours { dir, refused }.refuse(), None);
+        }
         let known = dir.len();
-        let heard = matches!(
-            change,
-            Change::Added | Change::Updated | Change::Removed | Change::Full
-        )
+        let heard = matches!(change, Change::Added | Change::Updated | Change::Removed)
         .then_some(Heard {
             change,
             kind: service.kind,
@@ -287,7 +350,7 @@ impl Neighbours {
             ttl_s: service.ttl_s,
             known,
         });
-        (Neighbours { dir }, heard)
+        (Neighbours { dir, refused }, heard)
     }
 
     /// The records whose TTL has run out at `now_ms`, for the log.
@@ -302,6 +365,7 @@ impl Neighbours {
     pub fn expire(self, now_ms: u64) -> Self {
         Neighbours {
             dir: self.dir.expire(now_ms).0,
+            ..self
         }
     }
 
@@ -391,7 +455,8 @@ mod tests {
     fn e20_neighbours_log_up_refresh_down_and_expiry() {
         let (key, out, k, n) = beacon(Some(ROUTE));
         let key = key_of(&key, k);
-        let (d, heard) = Neighbours::new().hear(key, &out[..n], Some(BADGE), 1_000);
+        let cam = Some(SenderId::from_mac(CAM_MAC));
+        let (d, heard) = Neighbours::new().hear(key, &out[..n], cam, 1_000);
         let heard = heard.expect("new record");
         assert_eq!(heard.change, Change::Added);
         assert_eq!(
@@ -399,7 +464,7 @@ mod tests {
             "disc: up cam/jpeg cam-aabbcc node 246f28aabbcc0000 ttl 30 s (1 known)"
         );
         // A refresh is silent and restarts the TTL.
-        let (d, heard) = d.hear(key, &out[..n], Some(BADGE), 20_000);
+        let (d, heard) = d.hear(key, &out[..n], cam, 20_000);
         assert_eq!(heard, None);
         assert_eq!(d.expires_in(20_000), Some(30_000));
         // Expiry, 30 s after the last beacon.
@@ -452,31 +517,80 @@ mod tests {
         assert_eq!(d.services().count(), 1);
     }
 
+    /// A beacon for `instance` of [`CAM_KIND`] declaring `node`.
+    fn svc_beacon(instance: &str, node: Option<SenderId>, ttl_s: u32, out: &mut [u8; 64]) -> usize {
+        let svc = Service { kind: CAM_KIND, instance, node, endpoint: Endpoint::Local, txt: &[], ttl_s };
+        encode(&svc, out).unwrap()
+    }
+
     #[test]
-    fn e20_a_full_directory_says_so() {
-        let mut d = Neighbours::new();
-        let mut out = [0u8; 64];
+    fn e21_records_are_bound_to_the_frame_sender() {
         let mut key = [0u8; MAX_KEY];
         let k = beacon_key(CAM_KIND, &mut key).unwrap();
-        let names = ["c0", "c1", "c2", "c3", "c4"];
-        let mut last = None;
-        for name in names {
-            let svc = Service {
-                kind: CAM_KIND,
-                instance: name,
-                node: None,
-                endpoint: Endpoint::Local,
-                txt: &[],
-                ttl_s: 10,
-            };
-            let n = encode(&svc, &mut out).unwrap();
-            let (next, heard) = d.hear(k, &out[..n], None, 0);
-            d = next;
-            last = heard.map(|h| h.to_string());
+        let mut out = [0u8; 64];
+        let cam = SenderId::from_mac(CAM_MAC);
+        // A frame from the badge's MAC claiming to be the camera: refused.
+        let n = svc_beacon("cam-1", Some(cam), 30, &mut out);
+        let (d, heard) = Neighbours::new().hear(k, &out[..n], Some(BADGE), 0);
+        assert_eq!((heard, d.refused(), d.services().count()), (None, 1, 0));
+        // From the camera itself: accepted, bound to its MAC.
+        let (d, heard) = d.hear(k, &out[..n], Some(cam), 0);
+        assert_eq!(heard.unwrap().node, Some(cam));
+        // A beacon without a node id takes the sender's.
+        let n = svc_beacon("cam-2", None, 30, &mut out);
+        let (d, heard) = d.hear(k, &out[..n], Some(cam), 0);
+        assert_eq!(heard.unwrap().node, Some(cam));
+        // Another sender can neither update nor withdraw the camera's record.
+        let n = svc_beacon("cam-1", None, 99, &mut out);
+        let (d, heard) = d.hear(k, &out[..n], Some(BADGE), 0);
+        assert_eq!((heard, d.refused()), (None, 2));
+        let n = svc_beacon("cam-1", None, 0, &mut out);
+        let (d, heard) = d.hear(k, &out[..n], Some(BADGE), 0);
+        assert_eq!((heard, d.refused(), d.services().count()), (None, 3, 2));
+        // The owner can.
+        let (d, heard) = d.hear(k, &out[..n], Some(cam), 0);
+        assert_eq!(heard.unwrap().change, Change::Removed);
+        assert_eq!(d.services().count(), 1);
+    }
+
+    #[test]
+    fn e21_one_sender_cannot_fill_the_directory() {
+        let mut key = [0u8; MAX_KEY];
+        let k = beacon_key(CAM_KIND, &mut key).unwrap();
+        let mut out = [0u8; 64];
+        let flooder = Some(SenderId::from_mac([2, 0, 0, 0, 0, 0xEE]));
+        let mut d = Neighbours::new();
+        for name in ["f0", "f1", "f2", "f3", "f4"] {
+            let n = svc_beacon(name, None, 30, &mut out);
+            d = d.hear(k, &out[..n], flooder, 0).0;
         }
+        assert_eq!((d.services().count(), d.refused()), (PER_SENDER, 3));
+        // Room is left for others; once the directory is full, a new record
+        // is refused silently, never by evicting someone else's.
+        for (i, name) in ["a", "b", "c"].into_iter().enumerate() {
+            let n = svc_beacon(name, None, 30, &mut out);
+            let sender = Some(SenderId::from_mac([2, 0, 0, 0, 1, i as u8]));
+            let (next, heard) = d.hear(k, &out[..n], sender, 0);
+            assert_eq!(heard.is_some(), i < NEIGHBOURS - PER_SENDER, "{name}");
+            d = next;
+        }
+        assert_eq!((d.services().count(), d.refused()), (NEIGHBOURS, 4));
+    }
+
+    #[test]
+    fn e22_log_lines_escape_radio_supplied_text() {
+        let mut key = [0u8; MAX_KEY];
+        let k = beacon_key(CAM_KIND, &mut key).unwrap();
+        let mut out = [0u8; 64];
+        let n = svc_beacon("x\x1b[2J\r\ndisc: up \\ \u{e9}", None, 30, &mut out);
+        let (d, heard) = Neighbours::new().hear(k, &out[..n], Some(BADGE), 0);
+        let line = heard.unwrap().to_string();
         assert_eq!(
-            last.as_deref(),
-            Some("disc: full, cam/jpeg c4 not kept (4 known)")
+            line,
+            "disc: up cam/jpeg x\\x1b[2J\\x0d\\x0adisc: up \\x5c \\xc3\\xa9 node 0201020304050000 ttl 30 s (1 known)"
         );
+        assert!(line.bytes().all(|b| (0x20..=0x7E).contains(&b)));
+        let expired: std::vec::Vec<_> = d.expired(30_000).map(|e| e.to_string()).collect();
+        assert_eq!(expired, ["disc: down cam/jpeg x\\x1b[2J\\x0d\\x0adisc: up \\x5c \\xc3\\xa9 (expired)"]);
     }
 }
