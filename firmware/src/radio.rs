@@ -5,12 +5,15 @@
 //! middleware [`EspNowTransport`](middleware::espnow::EspNowTransport) over
 //! esp-radio. Every decision it makes comes from here:
 //!
-//! * [`APP_FILTER`] (`Prefix("app")`) is the transport's only key filter, so
-//!   the radio delivers `app` and `app/...` samples and nothing else;
-//!   [`goes_over_air`] applies the same filter to the payload's publishes,
-//!   so `app/...` keys are broadcast and every other key stays on the serial
-//!   ports. System keys (`sys/...`) can therefore never leave the device by
-//!   radio, nor be injected by one.
+//! * [`FILTERS`] are the transport's key filters: [`APP_FILTER`]
+//!   (`Prefix("app")`) and [`DISC_FILTER`] (`Prefix("disc")`, the
+//!   discovery beacons, [`disc`]), so the radio delivers `app/...` and
+//!   `disc/...` samples and nothing else; [`goes_over_air`] applies the
+//!   same filters to the payload's publishes, so those keys are broadcast
+//!   and every other key stays on the serial ports. System keys
+//!   (`sys/...`) can therefore never leave the device by radio, nor be
+//!   injected by one. Source routes stream on `app/...` keys only
+//!   ([`carries_routes`]).
 //! * [`CHANNEL`] is the fixed Wi-Fi channel. There is no access point to
 //!   follow, so every device of a deployment must use the same channel;
 //!   the conagotchi badge firmware parks on the same channel 1 when it is not
@@ -24,6 +27,9 @@
 //!   source-route chunks: at most one frame is queued in the Wi-Fi driver at
 //!   any time.
 
+pub mod disc;
+
+use middleware::discovery::beacon::BEACON_PREFIX;
 use middleware::espnow::{HEADER_LEN, MAX_FRAME, MAX_KEY, MAX_PAYLOAD};
 use middleware::{Filter, Key, KeyFilter};
 
@@ -33,8 +39,15 @@ pub const CHANNEL: u8 = 1;
 /// The root of the keys that travel over ESP-NOW.
 pub const APP_ROOT: Key<'static> = Key::from_static("app");
 
-/// The transport's key filter: `app` and every key below it.
+/// The application keys: `app` and every key below it.
 pub const APP_FILTER: KeyFilter<'static> = Filter::Prefix(APP_ROOT);
+
+/// The discovery beacons: `disc/<kind>` (`middleware::discovery::beacon`).
+pub const DISC_FILTER: KeyFilter<'static> = Filter::Prefix(BEACON_PREFIX);
+
+/// The transport's key filters, in slot order: every key admitted on the
+/// radio, in either direction.
+pub const FILTERS: [KeyFilter<'static>; 2] = [APP_FILTER, DISC_FILTER];
 
 /// Messages queued from the controller to the radio task (payload
 /// publishes on `app/...` keys).
@@ -60,9 +73,20 @@ pub const RX_PAYLOAD: usize = MAX_FRAME - HEADER_LEN - 1;
 pub const REPORT_INTERVAL_MS: u32 = 5_000;
 
 /// Whether a publication on `key` is broadcast over ESP-NOW (it matches
-/// [`APP_FILTER`] and fits the frame's key limit).
+/// one of [`FILTERS`] and fits the frame's key limit).
 pub fn goes_over_air(key: Key<'_>) -> bool {
+    FILTERS.iter().any(|f| f.matches(key)) && key.as_bytes().len() <= MAX_KEY
+}
+
+/// Whether a source route may stream on `key`: an `app/...` key that fits
+/// the frame's key limit (beacons are not streams).
+pub fn carries_routes(key: Key<'_>) -> bool {
     APP_FILTER.matches(key) && key.as_bytes().len() <= MAX_KEY
+}
+
+/// Whether a received sample on `key` is a discovery beacon.
+pub fn is_beacon(key: Key<'_>) -> bool {
+    DISC_FILTER.matches(key)
 }
 
 /// Radio counters; every count saturates.
@@ -145,12 +169,27 @@ mod tests {
         assert!(!goes_over_air(k("apple/x")), "segment-wise prefix");
         assert!(!goes_over_air(k("sys/log")));
         assert!(!goes_over_air(k("demo/x")));
+        assert!(carries_routes(k("app/cam/frame")) && !carries_routes(k("disc/cam/jpeg")));
         let long = "app/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert!(long.len() > MAX_KEY);
         assert!(!goes_over_air(k(long)), "longer than an ESP-NOW key");
         assert_eq!(CHANNEL, 1);
         assert_eq!(TX_PAYLOAD, 179);
         assert_eq!(RX_PAYLOAD, 242);
+    }
+
+    #[test]
+    fn e18_discovery_beacons_are_admitted_both_ways() {
+        let k = |s| Key::new(s).expect("valid");
+        assert_eq!(FILTERS, [APP_FILTER, DISC_FILTER]);
+        assert!(goes_over_air(k("disc/cam/jpeg")));
+        assert!(is_beacon(k("disc/cam/jpeg")) && is_beacon(k("disc")));
+        assert!(!is_beacon(k("discover/x")) && !is_beacon(k("app/disc")));
+        assert!(!goes_over_air(k("discover/x")), "segment-wise prefix");
+        assert!(
+            !FILTERS.iter().any(|f| f.matches(k("sys/info"))),
+            "sys/ never admitted"
+        );
     }
 
     #[test]

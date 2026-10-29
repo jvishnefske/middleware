@@ -42,6 +42,10 @@
 //!   device stops timers, aborts DMA, disables interrupts, releases the
 //!   pins and clears the queue.
 //!
+//! Each request reaches `esp_base::dispatch::handle_request` as a
+//! middleware `Request` with its `RequestMeta` (empty: a serial port names
+//! no caller).
+//!
 //! Trust: each request is dispatched with `Context::rekey_window` taken
 //! from [`presence::window_open`]. A `Claim` action saves the trust record
 //! ([`TrustStore::save`], on the flash the payload store lends) and closes
@@ -62,7 +66,7 @@ use middleware::loader::trust::TrustState;
 use esp_storage::FlashStorage;
 use heapless::Vec;
 use middleware::Key;
-use middleware::transport::HandlerError;
+use middleware::transport::{HandlerError, Request, RequestMeta};
 
 use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Port, Reply};
 use super::presence;
@@ -241,7 +245,9 @@ impl Controller {
         };
         let mut out = [0u8; MAX_REPLY];
         let ctx = Context { rekey_window: presence::window_open(), ..self.ctx };
-        let outcome = handle_request(self.state, &ctx, key, body, &mut out);
+        // A serial port names no caller: no sender, principal or deadline.
+        let req = Request::new(key, body).with_meta(RequestMeta::NONE);
+        let outcome = handle_request(self.state, &ctx, &req, &mut out);
         if outcome.action == Action::Start {
             return Handled { reply: None, stop: false };
         }

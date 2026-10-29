@@ -91,8 +91,8 @@ use super::frame::{
 use super::uuid::{RPC_CHARACTERISTIC_UUID, Uuid128, characteristic_uuid};
 use crate::key::{Key, MAX_KEY_LEN};
 use crate::transport::{
-    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestOptions,
-    Requester, Responder, Sample, Subscriber, copy_into, sample_into,
+    Delivery, Handler, HandlerError, Limits, Overflow, Publisher, Request, RequestMeta,
+    RequestOptions, Requester, Responder, Sample, SenderId, Subscriber, copy_into, sample_into,
 };
 
 /// Largest ATT payload (`517 - 3`), the default fragment buffer size `A`.
@@ -166,6 +166,14 @@ pub trait GattServer {
     /// into `buf` (at most `A` bytes are offered). Must be cancel-safe:
     /// dropping the future before it is ready loses no event.
     async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<Inbound<'b>, Self::Error>;
+
+    /// The connected peer, as the stack identifies it (its device address,
+    /// [`SenderId::from_mac`]), or `None` when unknown (the default). A
+    /// [`BleServer`] passes it to handlers as [`RequestMeta::sender`]. It is
+    /// not authenticated (a peer can use a random address).
+    fn peer(&self) -> Option<SenderId> {
+        None
+    }
 }
 
 /// The radio in the GATT client (central) role.
@@ -412,9 +420,17 @@ impl<L: GattServer, const N: usize, const A: usize> Responder for BleServer<L, N
                 Ok(Some(m)) => {
                     let outcome = match parse_request(m.as_bytes()) {
                         Err(_) => Err(HandlerError::InvalidRequest),
-                        // GATT gives no verified caller identity or deadline.
+                        // GATT gives no verified caller identity or deadline;
+                        // the peer's address is the sender when the stack
+                        // reports it.
                         Ok((key, payload)) => handler
-                            .handle(&Request::new(key, payload), scratch)
+                            .handle(
+                                &Request::new(key, payload).with_meta(RequestMeta {
+                                    sender: self.link.peer(),
+                                    ..RequestMeta::NONE
+                                }),
+                                scratch,
+                            )
                             .and_then(|n| scratch.get(..n).ok_or(HandlerError::BufferTooSmall)),
                     };
                     return self.respond(m.id(), outcome).await;
@@ -1460,5 +1476,54 @@ mod tests {
         ));
         served.unwrap();
         assert_eq!(got.unwrap(), b"new");
+    }
+
+    /// A server link that reports its peer's address.
+    struct PeerEnd(ServerEnd, Option<SenderId>);
+
+    impl GattServer for PeerEnd {
+        type Error = FakeError;
+        fn att_mtu(&self) -> AttMtu {
+            self.0.att_mtu()
+        }
+        async fn notify(&mut self, uuid: Uuid128, data: &[u8]) -> Result<(), FakeError> {
+            self.0.notify(uuid, data).await
+        }
+        async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<Inbound<'b>, FakeError> {
+            self.0.receive(buf).await
+        }
+        fn peer(&self) -> Option<SenderId> {
+            self.1
+        }
+    }
+
+    #[test]
+    fn b11_handler_sees_the_peer_address_as_sender() {
+        let peer = SenderId::from_mac([0xC0, 1, 2, 3, 4, 5]);
+        for (known, expected) in [(Some(peer), Some(peer)), (None, None)] {
+            let (c, s) = pair(23);
+            let mut client: BleClient<'_, _, 64> = BleClient::new(c);
+            let mut server: BleServer<_, 64> = BleServer::new(PeerEnd(s, known));
+            let mut seen = None;
+            let mut h = crate::transport::handler_fn(|r, out| {
+                seen = Some((
+                    r.meta.sender,
+                    r.meta.principal.is_none(),
+                    r.meta.deadline_ms,
+                ));
+                echo(r, out)
+            });
+            let (mut resp, mut scratch) = ([0u8; 64], [0u8; 64]);
+            let (got, served) = block_on(futures::future::join(
+                client.request(ECHO, b"who", &mut resp),
+                server.serve_one(&mut h, &mut scratch),
+            ));
+            served.unwrap();
+            assert_eq!(got.unwrap(), b"who");
+            assert_eq!(seen, Some((expected, true, None)));
+        }
+        // A link that does not override `peer` reports none.
+        let (_c, s) = pair(23);
+        assert_eq!(s.peer(), None);
     }
 }
