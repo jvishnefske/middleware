@@ -23,6 +23,8 @@
 //!   pattern and looped stored frames (the fake JPEG camera), behind the
 //!   ABI 4 DMA routes.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
+//! * [`mdns`] — the [`ServiceDiscovery`](mdns::ServiceDiscovery) trait and
+//!   the pure mDNS / DNS-SD message format; its tokio socket needs `mdns`.
 //! * Backends, each behind a cargo feature:
 //!
 //! | feature    | module      | target            | needs                     |
@@ -35,11 +37,12 @@
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio` | `std`           | `grpc`                    |
+//! | `mdns`     | `mdns::socket` | `std`          | tokio                     |
 //! | `postcard` | `codec::postcard` | `no_std`    | serde                     |
 //! | `prost`    | `codec::prost`    | `no_std` + `alloc` | prost              |
 //!
 //! With no features the crate is `#![no_std]`, allocation free and builds for
-//! `thumbv6m-none-eabi`. Enabling `zenoh` or `grpc` turns on `std`; the
+//! `thumbv6m-none-eabi`. Enabling `zenoh`, `grpc` or `mdns` turns on `std`; the
 //! embedded features never do, so firmware never links cloud dependencies and
 //! cloud builds never compile the BLE stack unless asked.
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -51,6 +54,7 @@ pub mod dedup;
 pub mod crc;
 pub mod key;
 pub mod loader;
+pub mod mdns;
 pub mod serial;
 pub mod stream;
 pub mod transport;
