@@ -1,4 +1,4 @@
-//! Zenoh backend integration tests (Z1–Z16) and the 0.5 conformance cases
+//! Zenoh backend integration tests (Z1–Z18) and the 0.5 conformance cases
 //! (`tests/conformance.rs`) run against the Zenoh backend.
 //!
 //! Network conduct: every session is built with [`SessionConfig`], which
@@ -908,4 +908,134 @@ async fn z15_closing_the_announcer_session_is_down_and_try_next_does_not_wait() 
             instance: "unit"
         }
     );
+}
+
+/// Declares, on `t`'s session, a raw queryable on `expr` answering every
+/// query with `payload` and `attachment`: a peer squatting on a key.
+async fn squat(
+    t: &ZenohTransport,
+    expr: String,
+    payload: Vec<u8>,
+    attachment: Option<Vec<u8>>,
+) -> zenoh::query::Queryable<()> {
+    use zenoh::Wait;
+    t.session()
+        .declare_queryable(expr)
+        .callback(move |q| {
+            let reply = q.reply(q.key_expr().clone(), payload.clone());
+            let _ = match &attachment {
+                Some(a) => reply.attachment(a.clone()).wait(),
+                None => reply.wait(),
+            };
+        })
+        .await
+        .expect("squatting queryable")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z17_target_node_drops_replies_not_naming_the_node() {
+    const K: Key<'static> = Key::from_static("test/z17/who");
+    let (mut client, endpoint) = hub().await;
+    let victim = spoke(&endpoint).await;
+    let forger = spoke(&endpoint).await;
+    let expr = node_key(victim.sender_id(), K);
+    // One squatter names itself, one names nobody; neither is the victim.
+    let _q1 = squat(
+        &forger,
+        expr.clone(),
+        b"forged".to_vec(),
+        Some(middleware::zenoh::wire::encode_reply(forger.sender_id()).to_vec()),
+    )
+    .await;
+    let _q2 = squat(&forger, expr.clone(), b"anon".to_vec(), None).await;
+    queryable_visible(&client, &expr).await;
+    let opts = RequestOptions::DEFAULT
+        .with_timeout(Duration::from_millis(500))
+        .with_target(Target::Node(victim.sender_id()));
+    let mut out = [0u8; 16];
+    let r = client.request_with(K, b"?", &mut out, &opts).await;
+    assert!(matches!(r, Err(ZenohError::NoReply)), "{r:?}");
+    let mut buf = [0u8; 16];
+    let n = client
+        .request_each(K, b"?", &mut buf, &opts, 10, |_| Flow::Continue)
+        .await
+        .expect("gather");
+    assert_eq!(n, 0, "squatters' replies reached the gather");
+    // The victim's own responder is still heard next to the squatters.
+    let real = victim.responder(K).await.expect("responder");
+    queryable_visible(&client, K.as_str()).await;
+    let serving = serve_forever(real, named(b"real"));
+    let got = client
+        .request_with(K, b"?", &mut out, &opts)
+        .await
+        .expect("request");
+    assert_eq!(got, b"real");
+    serving.abort();
+}
+
+/// A record of `CAM` for `instance` with `txt`, encoded.
+fn cam_record(instance: &'static str, txt: &'static [u8]) -> Vec<u8> {
+    let mut out = [0u8; middleware::discovery::beacon::MAX_BEACON_LEN];
+    let s = Service {
+        txt,
+        ..cam(instance)
+    };
+    let n = middleware::discovery::beacon::encode(&s, &mut out).expect("encode");
+    out[..n].to_vec()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z18_conflicting_service_records_are_refused() {
+    let (b, endpoint) = hub().await;
+    let a = spoke(&endpoint).await;
+    let forger = spoke(&endpoint).await;
+    let key = "@mw/svc/test/cam/unit".to_owned();
+    // A forged record that decodes for this very key, but says otherwise.
+    let _forged = squat(
+        &forger,
+        key.clone(),
+        cam_record("unit", b"\x06evil=1"),
+        None,
+    )
+    .await;
+    queryable_visible(&b, &key).await;
+    let mut browser = b.discovery();
+    browser
+        .browse(KeyFilter::Exact(CAM.key()))
+        .await
+        .expect("browse");
+    let mut announcer = a.discovery();
+    announcer.announce(&cam("unit")).await.expect("announce");
+    let mut buf = [0u8; 256];
+    let r = tokio::time::timeout(TIMEOUT, browser.next(&mut buf))
+        .await
+        .expect("timeout");
+    assert!(matches!(r, Err(ZenohError::ConflictingRecords)), "{r:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn z18_records_for_another_service_are_ignored() {
+    let (b, endpoint) = hub().await;
+    let a = spoke(&endpoint).await;
+    let forger = spoke(&endpoint).await;
+    let key = "@mw/svc/test/cam/unit".to_owned();
+    // Answers on the key, but with another instance's record and junk:
+    // neither is a candidate, so the genuine record stands alone.
+    let _other = squat(&forger, key.clone(), cam_record("other", b""), None).await;
+    let _junk = squat(&forger, key.clone(), b"junk".to_vec(), None).await;
+    queryable_visible(&b, &key).await;
+    let mut browser = b.discovery();
+    browser
+        .browse(KeyFilter::Exact(CAM.key()))
+        .await
+        .expect("browse");
+    let mut announcer = a.discovery();
+    announcer.announce(&cam("unit")).await.expect("announce");
+    let mut buf = [0u8; 256];
+    let e = tokio::time::timeout(TIMEOUT, browser.next(&mut buf))
+        .await
+        .expect("timeout")
+        .expect("next");
+    let Event::Up(s) = e else { panic!("{e:?}") };
+    assert_eq!((s.instance, s.txt), ("unit", &b"\x05ver=5"[..]));
 }
