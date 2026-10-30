@@ -125,6 +125,7 @@ impl<F: NorFlash> Controller<F> {
             profile,
             runtime: profile.runtime,
             rekey_window: false,
+            staging: false,
             // The ESP8266 build runs no radio; it reports no node id.
             node: None,
         };
@@ -198,7 +199,7 @@ impl<F: NorFlash> Controller<F> {
 
     fn storage(&mut self, outcome: &Outcome<'_>) -> Result<(), StoreError> {
         match outcome.action {
-            Action::Erase { len } => self.store()?.erase(len),
+            Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
             // Built without `trust`: commits are never checked, so there is
             // never a trust record to persist.

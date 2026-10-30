@@ -20,6 +20,10 @@ name = "esp-base"
 path = "src/main.rs"
 test = false
 bench = false
+# The binary needs a chip feature (each enables `shell`); without one, host
+# commands such as `cargo clippy --lib --all-targets` skip it instead of
+# failing on the missing ESP crates.
+required-features = ["shell"]
 
 [features]
 # `trust` is on by default so `cargo test --lib` covers signed payloads; the

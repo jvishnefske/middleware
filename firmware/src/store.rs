@@ -60,8 +60,8 @@ pub enum StoreError {
     Crc,
     /// The caller's buffer does not match the image length.
     Buffer,
-    /// A trust record would lower `min_version` for the pinned key
-    /// (`trust_store::lowers_min_version`); nothing was written.
+    /// A trust record would lower `min_version` or the control counter for
+    /// the pinned key (`trust_store::lowers`); nothing was written.
     Rollback,
 }
 
@@ -416,6 +416,35 @@ mod tests {
         let mut store = reboot(store);
         assert_eq!(store.active_slot(), Some(Slot::A));
         assert_eq!(contents(&mut store), Some(vec![1, 2, 3, 4, 5]));
+    }
+
+    /// Staging (over the air) writes the inactive slot while the payload
+    /// that was started from the active one keeps running: the active image
+    /// stays loadable at every step, and a spoiled staged image never
+    /// becomes active.
+    #[test]
+    fn o14_staging_keeps_the_active_image_loadable_and_a_spoiled_one_never_activates() {
+        let mut store = open(RamFlash::new());
+        let old = pattern(3000, 1);
+        install(&mut store, &old, 217);
+        let new = pattern(5000, 2);
+        store.erase(new.len() as u32).unwrap();
+        assert_eq!(contents(&mut store), Some(old.clone()), "after the staging erase");
+        for (i, part) in new.chunks(217).enumerate() {
+            store.write((i * 217) as u32, part).unwrap();
+            assert_eq!(store.header().map(|h| h.len), Some(3000));
+        }
+        assert_eq!(contents(&mut store), Some(old.clone()), "a start mid-transfer loads the active image");
+        // A spoofed chunk spoiled it: the declared CRC does not match.
+        let mut spoiled = new.clone();
+        spoiled[100] ^= 0xFF;
+        assert_eq!(store.activate(5000, Crc32::checksum(&spoiled)), Err(StoreError::Crc));
+        assert_eq!(contents(&mut store), Some(old.clone()));
+        let mut store = reboot(store);
+        assert_eq!(contents(&mut store), Some(old));
+        // The next staging and its commit replace it.
+        install(&mut store, &new, 217);
+        assert_eq!(contents(&mut reboot(store)), Some(new));
     }
 
     #[test]
