@@ -253,5 +253,10 @@ sign every upload with the same key:
 
 The MAC is the device's Wi-Fi station MAC (`espflash board-info` prints
 it). Over the air the device accepts only `info`, `trust info`, `upload`
-(signed, version above the last), `start` and `stop`; `trust claim` is
-always refused there. Uploads go in 217-byte chunks at about 14 KB/s.
+(signed, version above the last), and `start` and `stop` signed with the
+same key (`mwctl ... --espnow <MAC> stop --key ~/.config/mw/key.bin`; a
+control request names the device and carries the host's clock in
+milliseconds as a counter that must exceed the last one accepted);
+`trust claim` is always refused there. An upload over the air is staged
+beside the running payload, which keeps running until the signed commit
+replaces it. Uploads go in 217-byte chunks at about 12-14 KB/s.

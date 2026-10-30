@@ -41,10 +41,29 @@
 //!   any signature ignored: trust on first use, so an unclaimed device is
 //!   as open as one without this feature.
 //!
+//! # Signed control requests
+//!
+//! Over a radio anyone can send a request with any source address, so a
+//! claimed device takes `sys/payload/start` and `sys/payload/stop` over
+//! the air only with a [`SignedControl`] body,
+//! `[counter u64 LE][signature 64]` (72 bytes): Ed25519 by the pinned key
+//! over the 29-byte [`control_message`]
+//! `b"mw-control-v1\0" || op u8 || target MAC 6 || counter u64 LE`, where
+//! `op` is [`ControlOp`] (1 start, 2 stop) and the target is the device's
+//! own station MAC. [`TrustState::accept_control`] accepts it only when the
+//! signature verifies and `counter` is strictly greater than the last
+//! accepted [`ControlCounter`], which the firmware persists with the trust
+//! record before acting: a captured request cannot be replayed (same or
+//! lower counter), redirected to another device (other MAC) or turned
+//! into the other command (other `op`). Hosts use the Unix time in
+//! milliseconds as the counter. Over a serial port these keys keep their
+//! empty bodies (physical access is the authority there).
+//!
 //! The value types and the codecs are always built (hosts encode requests
-//! with them); the transitions that need cryptography, [`TrustState::claim`]
-//! and [`TrustState::accept_commit`], need the `trust` feature. Everything
-//! here is pure: the firmware persists the state and asserts presence.
+//! with them); the transitions that need cryptography, [`TrustState::claim`],
+//! [`TrustState::accept_commit`] and [`TrustState::accept_control`], need
+//! the `trust` feature. Everything here is pure: the firmware persists the
+//! state and asserts presence.
 
 use crate::transport::HandlerError;
 
@@ -64,6 +83,14 @@ pub const PRESENCE_HOLD_MS: u64 = 3_000;
 pub const REKEY_WINDOW_MS: u64 = 60_000;
 /// Longest `sys/trust/info` response.
 pub const INFO_MAX: usize = 5 + KEY_LEN;
+/// Domain-separation prefix of a signed control request.
+pub const CONTROL_TAG: &[u8; 14] = b"mw-control-v1\0";
+/// Length of a control request's target: the device's station MAC.
+pub const TARGET_LEN: usize = 6;
+/// Length of [`control_message`].
+pub const CONTROL_MESSAGE_LEN: usize = CONTROL_TAG.len() + 1 + TARGET_LEN + 8;
+/// Length of a signed `sys/payload/start` or `stop` body.
+pub const SIGNED_CONTROL_LEN: usize = 8 + SIGNATURE_LEN;
 
 /// An Ed25519 public key (compressed Edwards point).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +165,80 @@ pub fn signed_message(len: u32, version: Version, sha256: &[u8; 32]) -> [u8; MES
     let (v, digest) = rest.split_at_mut(4);
     v.copy_from_slice(&version.0.to_le_bytes());
     digest.copy_from_slice(sha256);
+    m
+}
+
+/// A control request's replay counter: strictly increasing per device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct ControlCounter(pub u64);
+
+/// What a signed control request asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ControlOp {
+    /// `sys/payload/start`.
+    Start = 1,
+    /// `sys/payload/stop`.
+    Stop = 2,
+}
+
+/// The authorisation carried by a signed `sys/payload/start` or `stop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedControl {
+    /// Replay counter; must exceed the last one the device accepted.
+    pub counter: ControlCounter,
+    /// Signature over [`control_message`].
+    pub signature: Signature,
+}
+
+impl SignedControl {
+    /// Parses a start or stop body: empty is unsigned (`None`),
+    /// [`SIGNED_CONTROL_LEN`] bytes a signed request; anything else is
+    /// `InvalidRequest`.
+    pub fn parse_body(body: &[u8]) -> Result<Option<Self>, HandlerError> {
+        if body.is_empty() {
+            return Ok(None);
+        }
+        let bad = HandlerError::InvalidRequest;
+        if body.len() != SIGNED_CONTROL_LEN {
+            return Err(bad);
+        }
+        let counter = body.get(..8).and_then(|c| <[u8; 8]>::try_from(c).ok()).ok_or(bad)?;
+        let signature = body
+            .get(8..)
+            .and_then(|s| <[u8; SIGNATURE_LEN]>::try_from(s).ok())
+            .ok_or(bad)?;
+        Ok(Some(SignedControl {
+            counter: ControlCounter(u64::from_le_bytes(counter)),
+            signature: Signature(signature),
+        }))
+    }
+
+    /// The body `[counter u64 LE][signature 64]`.
+    pub fn encode(&self) -> [u8; SIGNED_CONTROL_LEN] {
+        let mut out = [0u8; SIGNED_CONTROL_LEN];
+        let (c, s) = out.split_at_mut(8);
+        c.copy_from_slice(&self.counter.0.to_le_bytes());
+        s.copy_from_slice(&self.signature.0);
+        out
+    }
+}
+
+/// The message a control signature covers:
+/// `CONTROL_TAG || op u8 || target MAC 6 || counter u64 LE` (29 bytes).
+pub fn control_message(
+    op: ControlOp,
+    target: &[u8; TARGET_LEN],
+    counter: ControlCounter,
+) -> [u8; CONTROL_MESSAGE_LEN] {
+    let mut m = [0u8; CONTROL_MESSAGE_LEN];
+    let (tag, rest) = m.split_at_mut(CONTROL_TAG.len());
+    tag.copy_from_slice(CONTROL_TAG);
+    let (o, rest) = rest.split_at_mut(1);
+    o[0] = op as u8;
+    let (t, c) = rest.split_at_mut(TARGET_LEN);
+    t.copy_from_slice(target);
+    c.copy_from_slice(&counter.0.to_le_bytes());
     m
 }
 
@@ -336,6 +437,34 @@ mod verify {
             vk.verify_strict(&message, &sig).map_err(|_| denied)?;
             Ok(TrustState::Claimed { key, min_version: auth.version })
         }
+
+        /// Decides a signed control request `op` addressed to `target`
+        /// (the device's own MAC), given the `last` counter accepted.
+        /// Accepted only when Claimed, `auth.counter > last` and the
+        /// signature over [`control_message`] verifies (strictly) against
+        /// the pinned key; returns the counter to persist before acting.
+        /// Every failure, and any request to an unclaimed device (no key
+        /// to check against), is `Denied`.
+        pub fn accept_control(
+            &self,
+            last: ControlCounter,
+            op: ControlOp,
+            target: &[u8; TARGET_LEN],
+            auth: &SignedControl,
+        ) -> Result<ControlCounter, HandlerError> {
+            let denied = HandlerError::Denied;
+            let TrustState::Claimed { key, .. } = self else {
+                return Err(denied);
+            };
+            if auth.counter <= last {
+                return Err(denied);
+            }
+            let vk = verifying_key(key).ok_or(denied)?;
+            let message = control_message(op, target, auth.counter);
+            let sig = ed25519_dalek::Signature::from_bytes(&auth.signature.0);
+            vk.verify_strict(&message, &sig).map_err(|_| denied)?;
+            Ok(auth.counter)
+        }
     }
 }
 
@@ -443,6 +572,43 @@ mod tests {
         assert!(TrustInfo::decode(&[1, 0, 0, 0, 0]).is_none(), "claimed carries a key");
         assert!(!TrustState::Unclaimed.is_claimed());
         assert!(claimed.is_claimed());
+    }
+
+    /// Control-request golden vector (TEST KEY ONLY: seed 00..1f), shared
+    /// with mwctl's `sign` tests.
+    #[cfg_attr(not(feature = "trust"), allow(dead_code))]
+    pub(crate) mod control_vector {
+        pub const TARGET: [u8; 6] = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24];
+        pub const COUNTER: u64 = 1_761_500_000_123;
+        pub const MESSAGE: &str = "6d772d636f6e74726f6c2d76310002e4b06381d3247bef94219a010000";
+        pub const SIGNATURE: &str = "aeffa9bd89e94d48b5577de27cb123b6cdd6450b3e0cf2f6c13eb07827d4938a345233eb01f44746c8c56c056c6b0cbd62544876010bc75352efaab0636b2b01";
+    }
+
+    #[test]
+    fn control_message_and_bodies_have_the_documented_layout() {
+        let m = control_message(ControlOp::Stop, &control_vector::TARGET, ControlCounter(control_vector::COUNTER));
+        assert_eq!(m.len(), 29);
+        assert_eq!(&m[..14], CONTROL_TAG);
+        assert_eq!(m[14], 2);
+        assert_eq!(&m[15..21], &control_vector::TARGET);
+        assert_eq!(&m[21..], &control_vector::COUNTER.to_le_bytes());
+        assert_eq!(control_message(ControlOp::Start, &[0; 6], ControlCounter(0))[14], 1);
+        assert_ne!(&CONTROL_TAG[..], &MESSAGE_TAG[..], "control and payload signatures never mix");
+
+        assert_eq!(SignedControl::parse_body(&[]), Ok(None));
+        let c = SignedControl { counter: ControlCounter(0x0102_0304_0506_0708), signature: Signature([9; 64]) };
+        let body = c.encode();
+        assert_eq!(body.len(), SIGNED_CONTROL_LEN);
+        assert_eq!(&body[..8], &[8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(&body[8..], &[9; 64]);
+        assert_eq!(SignedControl::parse_body(&body), Ok(Some(c)));
+        for len in [1, 8, 64, 68, 71, 73] {
+            assert_eq!(
+                SignedControl::parse_body(&[0; 80][..len]),
+                Err(HandlerError::InvalidRequest),
+                "len {len}"
+            );
+        }
     }
 
     #[cfg(feature = "trust")]
@@ -571,6 +737,62 @@ mod tests {
             bad[0] = 2;
             let broken_key = TrustState::Claimed { key: PublicKey(bad), min_version: Version(0) };
             assert_eq!(broken_key.accept_commit(&d, Some(&v10)), denied);
+        }
+
+        fn sign_control(s: &SigningKey, op: ControlOp, target: &[u8; 6], counter: u64) -> SignedControl {
+            let m = control_message(op, target, ControlCounter(counter));
+            SignedControl { counter: ControlCounter(counter), signature: Signature(s.sign(&m).to_bytes()) }
+        }
+
+        #[test]
+        fn control_golden_vector_verifies() {
+            use super::control_vector as v;
+            let s = signer();
+            let auth = sign_control(&s, ControlOp::Stop, &v::TARGET, v::COUNTER);
+            let m = control_message(ControlOp::Stop, &v::TARGET, ControlCounter(v::COUNTER));
+            assert_eq!(m, vector::hex::<CONTROL_MESSAGE_LEN>(v::MESSAGE));
+            assert_eq!(auth.signature.0, vector::hex::<64>(v::SIGNATURE));
+            assert_eq!(
+                claimed(5).accept_control(ControlCounter(v::COUNTER - 1), ControlOp::Stop, &v::TARGET, &auth),
+                Ok(ControlCounter(v::COUNTER))
+            );
+        }
+
+        #[test]
+        fn control_requests_need_the_pinned_key_this_device_this_op_and_a_new_counter() {
+            let s = signer();
+            let me = [1, 2, 3, 4, 5, 6];
+            let denied = Err(HandlerError::Denied);
+            let t = claimed(0);
+            let ok = sign_control(&s, ControlOp::Start, &me, 10);
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &me, &ok), Ok(ControlCounter(10)));
+            assert_eq!(t.accept_control(ControlCounter(9), ControlOp::Start, &me, &ok), Ok(ControlCounter(10)));
+            // Replay (same counter) and older counters.
+            assert_eq!(t.accept_control(ControlCounter(10), ControlOp::Start, &me, &ok), denied);
+            assert_eq!(t.accept_control(ControlCounter(11), ControlOp::Start, &me, &ok), denied);
+            // Another device, the other command, a bumped counter.
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &[1, 2, 3, 4, 5, 7], &ok), denied);
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Stop, &me, &ok), denied);
+            let bumped = SignedControl { counter: ControlCounter(11), ..ok };
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &me, &bumped), denied);
+            // Another key, a corrupt or non-canonical signature.
+            let mallory = SigningKey::from_bytes(&[42; 32]);
+            let forged = sign_control(&mallory, ControlOp::Start, &me, 10);
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &me, &forged), denied);
+            let mut sig = ok.signature.0;
+            sig[40] ^= 1;
+            let broken = SignedControl { signature: Signature(sig), ..ok };
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &me, &broken), denied);
+            let mut malleable = ok.signature.0;
+            add_group_order(&mut malleable[32..]);
+            let m = SignedControl { signature: Signature(malleable), ..ok };
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &me, &m), denied);
+            // A payload signature is never a control signature.
+            let commit_sig = sign(&s, &digest(b"x"), 10).signature;
+            let cross = SignedControl { counter: ControlCounter(10), signature: commit_sig };
+            assert_eq!(t.accept_control(ControlCounter(0), ControlOp::Start, &me, &cross), denied);
+            // Unclaimed: nothing to verify against.
+            assert_eq!(TrustState::Unclaimed.accept_control(ControlCounter(0), ControlOp::Start, &me, &ok), denied);
         }
 
         /// Adds the group order l to a little-endian scalar in place.
