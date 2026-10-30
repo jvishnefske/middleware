@@ -129,6 +129,13 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
              greater than the last installed (use --key, check --version); \
              the previously installed payload is kept"
         }
+        Denied if is(keys::START) || is(keys::STOP) => {
+            "over ESP-NOW a claimed device starts or stops its payload only on a control \
+             request signed by its pinned key for this device, with a counter above the last \
+             one it accepted (use --key; the default counter is this host's clock in \
+             milliseconds, so check the clock or pass a larger --counter); the payload is \
+             unchanged"
+        }
         Denied if is(keys::TRUST_CLAIM) => {
             "the device is already claimed (or the claim came over ESP-NOW, where it is never \
              accepted); hold BOOT for 3 s after boot to open the 60 s re-key window, then \
@@ -144,8 +151,8 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
         Internal => "the device failed internally (for example a flash error)",
         Denied => {
             "the device refused the request by policy (over ESP-NOW a device accepts only \
-             sys/info, sys/trust/info, sys/loader/*, sys/payload/start|stop, and only once \
-             it is claimed)"
+             sys/info, sys/trust/info, sys/loader/*, signed sys/payload/start|stop, and only \
+             once it is claimed)"
         }
     }
 }
@@ -238,6 +245,8 @@ mod tests {
         assert_eq!(status_name(HandlerError::Denied), "Denied");
         assert!(explain("sys/loader/commit", HandlerError::Denied).contains("--key"));
         assert!(explain("sys/trust/claim", HandlerError::Denied).contains("BOOT"));
+        assert!(explain("sys/payload/stop", HandlerError::Denied).contains("--counter"));
+        assert!(explain("sys/payload/start", HandlerError::Denied).contains("--key"));
         assert!(explain("sys/trust/info", HandlerError::NotFound).contains("trust"));
         assert!(explain("sys/loader/begin", HandlerError::BufferTooSmall).contains("capacity"));
     }

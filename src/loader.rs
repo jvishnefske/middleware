@@ -15,6 +15,12 @@
 //! | `sys/trust/info`    | empty                           | [`trust::TrustInfo`] |
 //! | `sys/trust/claim`   | `[public key 32]`               | empty              |
 //!
+//! [`Command::parse`] takes `sys/payload/start` and `stop` with empty
+//! bodies only. Over a radio a claimed ESP base firmware device instead
+//! requires a [`trust::SignedControl`] body (`[counter u64 LE][signature
+//! 64]`), which its over-the-air policy verifies and strips before
+//! dispatch (see [`trust`], "Signed control requests").
+//!
 //! The device publishes logs on `sys/log` and payload state changes on
 //! `sys/payload/status` ([`PayloadStatus`] as one byte). All integers are
 //! little-endian.

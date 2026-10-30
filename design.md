@@ -1100,6 +1100,16 @@ first claimant pins the key — claim a device before exposing it.
   `saves_alternate_sectors_and_survive_reopen`,
   `power_loss_at_any_operation_keeps_old_or_new_record`,
   `newest_valid_record_wins_and_a_corrupt_one_falls_back`.
+  Trust record format 2 (`firmware/src/trust_store.rs`, 60 bytes): magic
+  `MWTR`, format `2`, state (0 Unclaimed, 1 Claimed), two zero bytes,
+  sequence u32, `min_version` u32, public key 32, last accepted control
+  counter u64 (O17), CRC-32 of bytes 0..56. Format 1 (52 bytes: the same
+  without the counter, CRC-32 of bytes 0..48) still loads, with counter 0;
+  the next save writes format 2 into the other sector, so the migration
+  has the power-loss safety of any save and is never undone —
+  `trust_store::tests::format_1_records_load_with_counter_zero_and_migrate_on_the_next_save`,
+  `unknown_formats_and_an_unclaimed_record_with_a_counter_are_refused`,
+  `saves_never_lower_the_control_counter_for_the_same_key`.
 - [x] T9 A raised `min_version` reaches flash after the new image's CRC
   check and before its slot header, so the new image never boots with the
   old `min_version`; a failed save writes no header —
@@ -1152,21 +1162,69 @@ cached response to a repeat instead of running the handler again, so a
 resent `commit` or `start` never acts twice. Responses go unicast to the
 requester.
 
-**Policy** (`esp_base::ota::admit`, before dispatch, over the air only):
+**Policy** (`esp_base::ota::admit`, before dispatch, over the air only;
+from 2026-10-30, after a security review found that anyone in radio range
+could stop, restart or abort the running payload — ESP-NOW is
+unauthenticated and its source MAC spoofable — and that a non-owner's
+unsigned commit aborted the owner's transfer):
 
 | request over the air        | unclaimed | claimed |
 |-----------------------------|-----------|---------|
-| `sys/info`, `sys/trust/info` | `Denied` | allowed |
-| `sys/loader/begin`, `chunk` | `Denied`  | allowed (chunk: the transfer's owner only) |
-| `sys/loader/commit`         | `Denied`  | signed only, then `TrustState::accept_commit` (pinned key, version above the last); unsigned is `Denied` and ends the transfer |
-| `sys/payload/start`, `stop` | `Denied`  | allowed |
+| `sys/info`, `sys/trust/info` | `Denied` | allowed (read only) |
+| `sys/loader/begin`          | `Denied`  | allowed: *stages* into the inactive slot; the active image and the running payload are untouched; takes the transfer over |
+| `sys/loader/chunk`          | `Denied`  | the transfer's owner only (else `InvalidRequest`) |
+| `sys/loader/commit`         | `Denied`  | owner checked first (a non-owner gets `InvalidRequest`, loader untouched); then signed only, `TrustState::accept_commit` (pinned key, version above the last); the owner's unsigned commit is `Denied` and ends its transfer; an accepted commit activates the staged image and stops the old payload |
+| `sys/payload/start`, `stop` | `Denied`  | signed control request only (below), else `Denied` |
 | `sys/trust/claim`, anything else | `Denied` | `Denied` |
+
+Serial is unchanged (physical access is the authority there): a serial
+`begin` stops the payload and shows `Loading`, `start`/`stop` take empty
+bodies, unsigned commits follow the trust rules. `sys/info` stays refused
+over the air on an unclaimed device: an unclaimed device has no key to
+check anything against and does not advertise itself to the air.
+
+**Staging.** The running payload never reads flash after its start (the
+image buffer is only needed to compile it) and a transfer only writes the
+inactive slot, so a `begin` over the air (`Context::staging`) erases and
+fills the inactive slot while the payload keeps running; the status stays
+what it was during the transfer and when it fails. Only a commit that the
+trust rules accept writes the slot header, which activates the new image,
+and stops the old payload (`Action::Activate` stops it; status
+`Stopped`). A storage failure stops the payload only after a serial
+`begin` (`dispatch::after_storage_failure`). The worst a radio attacker
+without the key can do is a denial of service of the *update*: take the
+transfer over with a `begin`, or spoof the owner's MAC and send chunks
+that spoil the staged image, whose commit then fails its CRC or signature
+check. It can never stop, start, replace or roll back the running
+payload.
+
+**Signed control requests** (`middleware::loader::trust`): over the air
+`sys/payload/start` and `stop` carry `[counter u64 LE][signature 64]` (72
+bytes), an Ed25519 signature by the pinned key over the 29-byte message
+`b"mw-control-v1\0" || op u8 (1 start, 2 stop) || target MAC 6 ||
+counter u64 LE`, the target being the device's own station MAC.
+`TrustState::accept_control` accepts it only when the signature verifies
+(`verify_strict`) and the counter is strictly above the last accepted one;
+the controller saves the new counter with the trust record *before*
+acting (failure: `Internal`, nothing done) and then dispatches the key
+with an empty body. A captured request can therefore not be replayed
+(counter used), sent to another device (MAC signed), turned into the
+other command (op signed) or used as a payload signature (different
+tag). A claim of a new key resets the counter to 0. `mwctl` uses the Unix
+time in milliseconds as the counter (`--counter` overrides), so no read
+is needed and `sys/trust/info` is unchanged; a host whose clock lags the
+last accepted counter is refused with an explanation. `stop` stays
+available over the air (signed), because stopping a payload remotely is
+the point of the feature and the signature makes it as safe as `start`;
+`upload --start` over the air sends the commit and then a signed start.
 
 **One loader.** Serial and radio share the dispatcher's loader. The
 requester whose `begin` started the transfer owns it; a `begin` from anyone
 takes it over, and a `chunk` or `commit` from a non-owner is
-`InvalidRequest` without touching the loader. Both serial ports count as
-one requester; radio requesters are told apart by MAC.
+`InvalidRequest` without touching the loader — checked before the
+signature rule, so a non-owner's unsigned commit cannot end the owner's
+transfer. Both serial ports count as one requester; radio requesters are
+told apart by MAC.
 
 **Bridge framing** (`mwctl::bridge`, 460800 baud): COBS + CRC-16 frames,
 `Send {dst, data}` host → bridge, `Recv {src, data}`, `Hello {mac,
@@ -1222,9 +1280,9 @@ host → bridge.
   `o6_a_commit_over_the_air_must_be_signed`.
 - [x] O7 The begin's requester owns the transfer; a begin from the other
   side takes it over and the abandoned side's chunks and commit are
-  refused without disturbing it; an unsigned commit over the air ends the
-  transfer; a signed replay is `Denied` with the image kept (through the
-  real dispatcher) —
+  refused without disturbing it; the owner's unsigned commit over the air
+  ends the transfer; a signed replay is `Denied` with the image kept
+  (through the real dispatcher) —
   `ota::tests::o7_only_the_owner_continues_a_transfer`,
   `o7_begin_takes_the_transfer_and_its_end_frees_it`,
   `ota::tests::session::o7_a_serial_begin_aborts_an_air_transfer`,
@@ -1275,6 +1333,81 @@ host → bridge.
   `echo.wasm` (2686 bytes) with start in 0.32 s; no retransmission and no
   unacknowledged send in any hardware run (the retransmission path is
   covered by O4 and O9 on the host).
+- [x] O14 A transfer begun over the air stages into the inactive slot:
+  `begin` is `Erase { stop: false }`, the status (`Running` included) is
+  unchanged by begin, chunks, failures, a spoiled image or a refused
+  commit, and only an accepted commit activates the image and stops the
+  old payload; the active image stays loadable throughout; a storage
+  failure stops the payload only after a serial `begin`; a serial `begin`
+  still stops it and shows `Loading` —
+  firmware `dispatch::tests::o14_a_staged_transfer_leaves_the_running_payload_alone_until_commit`,
+  `o14_a_failed_or_spoiled_staged_transfer_keeps_the_payload_running`,
+  `o14_storage_failures_stop_the_payload_only_after_a_serial_begin`;
+  `store::tests::o14_staging_keeps_the_active_image_loadable_and_a_spoiled_one_never_activates`;
+  `ota::tests::session::o14_an_air_transfer_never_disturbs_the_running_payload_before_a_signed_commit`.
+- [x] O15 Ownership is checked before the signature rule: a non-owner's
+  unsigned commit is `InvalidRequest` (`NotOwner`) and leaves the owner's
+  transfer to complete; only the owner's unsigned commit ends it —
+  `ota::tests::o15_ownership_is_checked_before_the_signature_rule`,
+  `ota::tests::session::o15_a_non_owners_unsigned_commit_leaves_the_owners_transfer_to_complete`.
+- [x] O16 Over the air `start`/`stop` need a signed control request: empty
+  or malformed bodies are `Denied` (`UnsignedControl`), a signature by
+  another key, for another device or the other command, or with a counter
+  not above the last is `Denied` (`ControlRefused`); an accepted one acts
+  once and its replay is `Denied`; serial needs no signature —
+  `ota::tests::o16_start_and_stop_over_the_air_need_a_signed_body`,
+  `o16_a_signed_control_names_this_device_this_command_and_a_new_counter`,
+  `ota::tests::session::o16_signed_start_and_stop_act_once_and_replays_are_denied`;
+  middleware `loader::trust::tests::control_message_and_bodies_have_the_documented_layout`,
+  `crypto::control_golden_vector_verifies`,
+  `crypto::control_requests_need_the_pinned_key_this_device_this_op_and_a_new_counter`;
+  firmware `dispatch::tests::trust::reclaim_needs_the_rekey_window` (a
+  claim resets the counter, a commit keeps it).
+- [x] O17 The last accepted control counter is persisted with the trust
+  record (format 2, migrated from format 1, see T8) before the request
+  acts, and is never lowered for the same key —
+  `trust_store::tests::saves_never_lower_the_control_counter_for_the_same_key`,
+  `format_1_records_load_with_counter_zero_and_migrate_on_the_next_save`,
+  `power_loss_at_any_operation_keeps_old_or_new_record`.
+- [x] O18 `mwctl --espnow` signs `start`, `stop` and `upload --start` with
+  `--key` for the target MAC (counter `--counter` or Unix milliseconds),
+  refuses `upload`/`start`/`stop` over the air without `--key` and
+  `start`/`stop --key` over serial with a usage error, and explains a
+  `Denied` start/stop; the control signature reproduces the middleware
+  golden vector —
+  mwctl `sign::tests::golden_control_vector_is_reproduced`,
+  `default_counter_is_unix_milliseconds`;
+  `cli::tests::o9_espnow_selects_the_bridge_and_refuses_local_commands`,
+  `rejects_bad_trust_and_key_usage`; `air::tests::o9_upload_over_the_air_survives_loss_and_never_runs_a_step_twice`,
+  `o9_refusals_are_device_errors_and_attempts_are_bounded`;
+  `error::tests` (`sys/payload/stop` explanation).
+- [x] O19 On hardware (2026-10-30, same boards; firmware flashed over the
+  format-1 trust record claimed at `min_version` 3000 with `echo`
+  running, which loaded as claimed/3000/counter 0): over the air, unsigned
+  `stop` and `start`, a 72-byte zero "signature", and `trust claim` were
+  `Denied` (`refused: start/stop over the air must be signed by the pinned
+  key`, `control signature invalid ...`, `not allowed over the air`);
+  `begin` and 20 chunks of `bench.wasm` without a commit left `echo`
+  running (`ota: staging into the inactive slot; the payload keeps
+  running`); a signed `stop` stopped it, the identical replay, a signed
+  `start` with the same counter and one with an older counter were
+  `Denied`, a signed `start` started it. A signed `upload blink.wasm
+  --start` (3001) logged `new image active; stopping the payload that ran
+  the old one`, then the signed start ran blink; a signed upload of
+  `bench.wasm` (3002, 23 077 bytes, 1.85 s) staged while blink kept
+  publishing `app/blink/state` until the commit. With a serial upload in
+  progress, eight unsigned air commits got `InvalidRequest` (`another
+  requester owns the transfer`) and the serial upload installed; with an
+  air upload in progress, 49 serial unsigned commits were refused the same
+  way and the air upload installed. A signed upload with a corrupted chunk
+  failed its commit (`InvalidRequest`) with `bench` still running and
+  `min_version` unchanged. The trust partition read back as two format-2
+  records (seq 17 and 18, `min_version` 3005, counters 1793329532721 and
+  1793329644857); after a reset the replay of counter 1793329644857 was
+  `Denied`. Serial `stop`/`start` worked unsigned. After the full gate
+  the gated build was flashed again and the refusals, staging, signed
+  stop/start, replay and a signed `upload echo.wasm --start` (3006)
+  repeated with the same results.
 
 ### DMA routes (ABI 4)
 

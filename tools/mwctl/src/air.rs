@@ -25,6 +25,9 @@
 //!   (stale responses, ESP-NOW publications) is counted and skipped.
 //! * Uploads use [`middleware::rpc::CHUNK_DATA`]-byte chunks, so every
 //!   request fits one ESP-NOW frame.
+//! * Bodies pass through unchanged: a signed `start`/`stop`
+//!   ([`middleware::loader::trust::SignedControl`], 72 bytes) is built by
+//!   the caller ([`crate::sign::sign_control`]) for this link's target.
 //!
 //! [`AirStats`] counts requests, sends, retransmissions and
 //! unacknowledged sends for the throughput report.
@@ -335,7 +338,10 @@ mod tests {
     use super::*;
     use crate::bridge::tests::BRIDGE;
     use crate::device::{Device, UploadOptions};
+    use crate::sign::sign_control;
+    use crate::sign::tests::vector_seed;
     use middleware::crc::Crc32;
+    use middleware::loader::trust::{ControlCounter, ControlOp};
     use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus};
     use middleware::rpc::{Admit, Replies};
     use middleware::transport::HandlerError;
@@ -358,8 +364,11 @@ mod tests {
     }
 
     /// The bridge plus an over-the-air device running the real loader and
-    /// the real responder cache, answering synchronously.
+    /// the real responder cache, answering synchronously. Like a claimed
+    /// device it takes `start`/`stop` only with a control request signed
+    /// by the test key for [`DEV`] and a counter above the last.
     struct FakeAir {
+        control: u64,
         rx: VecDeque<u8>,
         script: VecDeque<Fate>,
         replies: Replies<8, 128>,
@@ -375,6 +384,7 @@ mod tests {
     impl FakeAir {
         fn new(script: &[Fate]) -> Self {
             FakeAir {
+                control: 0,
                 rx: VecDeque::new(),
                 script: script.iter().copied().collect(),
                 replies: Replies::new(),
@@ -399,6 +409,12 @@ mod tests {
             out: &mut [u8],
         ) -> Result<usize, HandlerError> {
             self.runs.push(key.as_str().to_owned());
+            let body = if key == keys::START || key == keys::STOP {
+                self.check_control(key, body)?;
+                &[][..]
+            } else {
+                body
+            };
             let cmd = Command::parse(key, body)?.ok_or(HandlerError::NotFound)?;
             match cmd {
                 Command::Info => DeviceInfo {
@@ -412,6 +428,10 @@ mod tests {
                 .ok_or(HandlerError::BufferTooSmall),
                 Command::Start => {
                     self.status = PayloadStatus::Running;
+                    Ok(0)
+                }
+                Command::Stop => {
+                    self.status = PayloadStatus::Stopped;
                     Ok(0)
                 }
                 Command::TrustClaim { .. } => Err(HandlerError::Denied),
@@ -430,6 +450,25 @@ mod tests {
                     Ok(0)
                 }
             }
+        }
+
+        fn check_control(&mut self, key: Key<'_>, body: &[u8]) -> Result<(), HandlerError> {
+            use ed25519_dalek::{Verifier, VerifyingKey};
+            use middleware::loader::trust::{ControlOp, SignedControl, control_message};
+            let auth = SignedControl::parse_body(body)?.ok_or(HandlerError::Denied)?;
+            let op = if key == keys::START {
+                ControlOp::Start
+            } else {
+                ControlOp::Stop
+            };
+            let vk = VerifyingKey::from_bytes(&vector_seed().public_key().0).unwrap();
+            let m = control_message(op, &DEV, auth.counter);
+            let sig = ed25519_dalek::Signature::from_bytes(&auth.signature.0);
+            if auth.counter.0 <= self.control || vk.verify(&m, &sig).is_err() {
+                return Err(HandlerError::Denied);
+            }
+            self.control = auth.counter.0;
+            Ok(())
         }
 
         fn air(&mut self, dst: Mac, data: &[u8]) {
@@ -560,10 +599,12 @@ mod tests {
             Fate::LoseResponse, // start runs once
         ];
         let mut d = device(FakeAir::new(&script));
+        let start = sign_control(&vector_seed(), ControlOp::Start, &DEV, ControlCounter(1));
         d.upload(
             &img,
             UploadOptions {
                 start: true,
+                start_auth: Some(start),
                 ..UploadOptions::default()
             },
             |_| {},
@@ -600,6 +641,20 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.status(), Some(HandlerError::Denied));
         assert!(e.to_string().contains("never"), "{e}");
+        // Unsigned, replayed, for another device or the other command.
+        let signed =
+            |op, target: &Mac, n| Some(sign_control(&vector_seed(), op, target, ControlCounter(n)));
+        let denied = |r: Result<(), Error>| r.unwrap_err().status() == Some(HandlerError::Denied);
+        assert!(denied(d.stop()));
+        assert!(denied(d.stop_signed(signed(ControlOp::Start, &DEV, 5))));
+        assert!(denied(d.stop_signed(signed(ControlOp::Stop, &BRIDGE, 5))));
+        d.stop_signed(signed(ControlOp::Stop, &DEV, 5)).unwrap();
+        let e = d
+            .start_signed(signed(ControlOp::Start, &DEV, 5))
+            .unwrap_err();
+        assert!(e.to_string().contains("counter"), "{e}");
+        d.start_signed(signed(ControlOp::Start, &DEV, 6)).unwrap();
+        assert_eq!(d.link().transport().status, PayloadStatus::Running);
         let mut d = device(FakeAir::new(&[Fate::LoseRequest; 10]));
         match d.stop() {
             Err(Error::Timeout { key, attempts }) => {

@@ -124,6 +124,7 @@ impl<F: NorFlash> Controller<F> {
             capacity,
             runtime: profile.runtime,
             rekey_window: false,
+            staging: false,
         };
         log(
             out,
@@ -195,7 +196,7 @@ impl<F: NorFlash> Controller<F> {
 
     fn storage(&mut self, outcome: &Outcome<'_>) -> Result<(), StoreError> {
         match outcome.action {
-            Action::Erase { len } => self.store()?.erase(len),
+            Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
             // Built without `trust`: commits are never checked, so there is
             // never a trust record to persist.

@@ -37,42 +37,58 @@
 //!   port, or with `espnow` a sample received over ESP-NOW) on the key of a
 //!   sink route goes to that route ([`EspDevice::route_message`], which
 //!   DMAs it to the display) and never to the payload; otherwise it is
-//!   delivered if the payload subscribed to its key. A trap, `sys/payload/stop` or a new transfer
-//!   (`sys/loader/begin`) ends the session and drops the payload, whose
-//!   device stops timers, aborts DMA, disables interrupts, releases the
-//!   pins and clears the queue.
+//!   delivered if the payload subscribed to its key. A trap,
+//!   `sys/payload/stop`, a serial `sys/loader/begin` or an activated
+//!   commit ends the session and drops the payload, whose device stops
+//!   timers, aborts DMA, disables interrupts, releases the pins and clears
+//!   the queue. A transfer begun over the air stages beside the running
+//!   payload (erase and writes of the inactive slot, `Context::staging`)
+//!   and ends the session only when its signed commit activates the new
+//!   image.
 //!
 //! Origin: every request carries where it came from
 //! ([`esp_base::ota::Origin`]: a serial port, or an ESP-NOW peer's MAC,
 //! answered by the radio task). Before dispatch [`esp_base::ota::admit`]
-//! decides whether it may run: over the air only the update keys, only on
-//! a claimed device, commits only signed; and a loader `chunk` or `commit`
-//! only from the requester whose `begin` started the transfer in progress
-//! (the controller keeps that owner, [`esp_base::ota::owner_after`]), so a
-//! `begin` from the other side aborts a transfer cleanly. Refusals are
-//! answered (`Denied`, or `InvalidRequest` for a transfer owned by someone
-//! else) and logged; an unsigned commit over the air also ends the
-//! transfer, as a refused commit does on serial; over-the-air `begin`, `commit`, `start` and `stop` are
-//! logged with the requester's MAC.
+//! decides whether it may run, from the trust state, the last accepted
+//! control counter and this device's own MAC ([`esp_base::ota::Facts`]):
+//! over the air only the update keys, only on a claimed device; a loader
+//! `chunk` or `commit` only from the requester whose `begin` started the
+//! transfer in progress (the controller keeps that owner,
+//! [`esp_base::ota::owner_after`]), so a `begin` from the other side
+//! aborts a transfer cleanly; then, over the air, commits only signed and
+//! `start`/`stop` only with a signed control body. For an accepted
+//! control request ([`esp_base::ota::Admission::Control`]) the controller
+//! first saves the new counter with the trust record (answering
+//! `Internal` and doing nothing if that fails), then dispatches the key
+//! with an empty body. Requests over the air are dispatched with
+//! `Context::staging`. Refusals are answered (`Denied`, or
+//! `InvalidRequest` for a transfer owned by someone else) and logged; the
+//! owner's unsigned commit over the air also ends the transfer, as a
+//! refused commit does on serial; over-the-air `begin`, `commit`, `start`
+//! and `stop` are logged with the requester's MAC.
 //!
 //! Trust: each request is dispatched with `Context::rekey_window` taken
 //! from [`presence::window_open`]. A `Claim` action saves the trust record
-//! ([`TrustStore::save`], on the flash the payload store lends) and closes
-//! the window. An `Activate` that raises `min_version` saves the record
-//! inside [`PayloadStore::activate_with`], after the image CRC check and
-//! before the slot header (the ordering is explained in
-//! `esp_base::trust_store`). Refused claims and commits are logged.
+//! ([`TrustStore::save`], on the flash the payload store lends; the new
+//! key's control counter starts at 0) and closes the window. An
+//! `Activate` that raises `min_version` saves the record inside
+//! [`PayloadStore::activate_with`], after the image CRC check and before
+//! the slot header (the ordering is explained in
+//! `esp_base::trust_store`). A failed storage action leaves the state of
+//! [`esp_base::dispatch::after_storage_failure`] (a running payload keeps
+//! running unless a serial `begin` stopped it) with the trust state and
+//! control counter adopted from flash. Refused claims, commits and
+//! control requests are logged.
 //!
 //! All decisions come from `esp_base::dispatch`; this module performs them.
 //! Status changes are published on `sys/payload/status`, notable events as
 //! `sys/log` lines.
 
-use esp_base::dispatch::{Action, Context, Outcome, State, handle_request};
-use esp_base::ota::{self, Origin};
-use middleware::loader::Loader;
+use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
+use esp_base::ota::{self, Admission, Facts, Mac, Origin};
 use esp_base::store::{PayloadStore, StoreError};
-use esp_base::trust_store::TrustStore;
-use middleware::loader::keys;
+use esp_base::trust_store::{Persisted, TrustStore};
+use middleware::loader::{Loader, PayloadStatus, keys};
 use middleware::loader::trust::TrustState;
 use esp_storage::FlashStorage;
 use heapless::Vec;
@@ -119,6 +135,9 @@ pub struct Controller {
     trust: Option<TrustStore>,
     /// Who started the loader transfer in progress.
     owner: Option<Origin>,
+    /// This device's ESP-NOW (station) MAC: signed control requests must
+    /// name it.
+    own: Mac,
     bus: &'static Bus,
     #[cfg(feature = "wasm")]
     profile: &'static Profile,
@@ -154,6 +173,7 @@ impl Controller {
         ctx: Context<'static>,
         store: Option<Store>,
         trust: Option<TrustStore>,
+        own: Mac,
         bus: &'static Bus,
         #[cfg(feature = "wasm")] profile: &'static Profile,
     ) -> Self {
@@ -163,6 +183,7 @@ impl Controller {
             store,
             trust,
             owner: None,
+            own,
             bus,
             #[cfg(feature = "wasm")]
             profile,
@@ -201,23 +222,40 @@ impl Controller {
     }
 
     fn storage(&mut self, outcome: &Outcome<'_>) -> Result<(), StoreError> {
+        // The counter the next state carries (reset to 0 by a claim).
+        let control = outcome.state.control();
         match outcome.action {
-            Action::Erase { len } => self.store()?.erase(len),
+            Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
             Action::Activate { len, crc, trust: None } => self.store()?.activate(len, crc),
             Action::Activate { len, crc, trust: Some(next) } => {
                 let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
                     return Err(StoreError::Flash);
                 };
-                store.activate_with(len, crc, |flash| ts.save(flash, &next))
+                store.activate_with(len, crc, |flash| ts.save(flash, &Persisted { trust: next, control }))
             }
-            Action::Claim { trust } => {
-                let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
-                    return Err(StoreError::Flash);
-                };
-                ts.save(store.flash(), &trust)
-            }
+            Action::Claim { trust } => self.save_trust(&Persisted { trust, control }),
             Action::None | Action::Start | Action::Stop => Ok(()),
+        }
+    }
+
+    /// Saves the trust record on the flash the payload store lends.
+    fn save_trust(&mut self, state: &Persisted) -> Result<(), StoreError> {
+        let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
+            return Err(StoreError::Flash);
+        };
+        ts.save(store.flash(), state)
+    }
+
+    /// The state with the trust record on flash adopted (what a reboot
+    /// would load), so RAM never trusts less than flash does.
+    fn adopt_persisted(&self, state: State) -> State {
+        match self.trust.as_ref() {
+            Some(ts) => {
+                let p = ts.persisted();
+                state.with_trust(p.trust).with_control(p.control)
+            }
+            None => state,
         }
     }
 
@@ -232,6 +270,11 @@ impl Controller {
         }
         if let Action::Activate { trust: Some(TrustState::Claimed { min_version, .. }), .. } = outcome.action {
             self.bus.log(format_args!("trust: signed payload accepted, min_version {}", min_version.0));
+        }
+        if let Action::Activate { .. } = outcome.action
+            && self.state.status() == PayloadStatus::Running
+        {
+            self.bus.log(format_args!("ota: new image active; stopping the payload that ran the old one"));
         }
         if outcome.reply == Err(HandlerError::Denied) {
             if key == keys::COMMIT.as_str() {
@@ -272,35 +315,60 @@ impl Controller {
     /// Admits, dispatches one request and performs its storage action.
     /// `None` reply means a start was requested.
     fn handle(&mut self, id: u8, origin: Origin, key: &str, body: &[u8]) -> Handled {
+        let refuse = |result: HandlerError| Handled { reply: Some(Reply { id, result: Err(result) }), stop: false };
         let Ok(key) = Key::new(key) else {
-            let reply = Reply { id, result: Err(HandlerError::InvalidRequest) };
-            return Handled { reply: Some(reply), stop: false };
+            return refuse(HandlerError::InvalidRequest);
         };
-        if let Err(refusal) = ota::admit(&self.state.trust(), self.owner, origin, key, body) {
-            self.log_origin(origin, key, Some(refusal));
-            if refusal.abandons_transfer() {
-                self.set_state(self.state.storage_failed());
-                self.owner = None;
+        let facts = Facts { trust: self.state.trust(), control: self.state.control(), own: self.own };
+        let body = match ota::admit(&facts, self.owner, origin, key, body) {
+            Err(refusal) => {
+                self.log_origin(origin, key, Some(refusal));
+                if refusal.abandons_transfer() {
+                    self.set_state(self.state.storage_failed());
+                    self.owner = None;
+                }
+                return refuse(refusal.error());
             }
-            let reply = Reply { id, result: Err(refusal.error()) };
-            return Handled { reply: Some(reply), stop: false };
-        }
-        self.log_origin(origin, key, None);
-        let handled = self.dispatch(id, key, body);
+            Ok(Admission::Control { counter }) => {
+                // Persist before acting: a captured request can never act
+                // twice, even across a power cut.
+                let next = Persisted { trust: self.state.trust(), control: counter };
+                if let Err(e) = self.save_trust(&next) {
+                    self.bus.log(format_args!("trust: control counter not saved ({e}); request ignored"));
+                    self.set_state(self.adopt_persisted(self.state));
+                    return refuse(HandlerError::Internal);
+                }
+                self.set_state(self.state.with_control(counter));
+                self.log_origin(origin, key, None);
+                self.bus.log(format_args!("trust: signed {} accepted, counter {}", key.as_str(), counter.0));
+                &[][..]
+            }
+            Ok(Admission::Dispatch) => {
+                self.log_origin(origin, key, None);
+                body
+            }
+        };
+        let staging = matches!(origin, Origin::Air(_));
+        let handled = self.dispatch(id, key, body, staging);
         let receiving = matches!(self.state.loader(), Loader::Receiving { .. });
         self.owner = ota::owner_after(self.owner, origin, key, receiving);
         handled
     }
 
     /// Dispatches one admitted request and performs its storage action.
-    fn dispatch(&mut self, id: u8, key: Key<'_>, body: &[u8]) -> Handled {
+    fn dispatch(&mut self, id: u8, key: Key<'_>, body: &[u8], staging: bool) -> Handled {
         let mut out = [0u8; MAX_REPLY];
-        let ctx = Context { rekey_window: presence::window_open(), ..self.ctx };
+        let ctx = Context { rekey_window: presence::window_open(), staging, ..self.ctx };
         let outcome = handle_request(self.state, &ctx, key, body, &mut out);
         if outcome.action == Action::Start {
             return Handled { reply: None, stop: false };
         }
-        let stop = outcome.action.stops_payload();
+        if let Action::Erase { stop: false, .. } = outcome.action
+            && self.state.status() == PayloadStatus::Running
+        {
+            self.bus.log(format_args!("ota: staging into the inactive slot; the payload keeps running"));
+        }
+        let mut stop = outcome.action.stops_payload();
         let result = match self.storage(&outcome) {
             Ok(()) => {
                 if let Action::Activate { len, .. } = outcome.action {
@@ -318,12 +386,9 @@ impl Controller {
                 // The trust record may already be on flash (saved before
                 // the slot header): trust what a reboot would load, never
                 // an older min_version.
-                let failed = self.state.storage_failed();
-                let failed = match self.trust.as_ref() {
-                    Some(ts) => failed.with_trust(ts.persisted()),
-                    None => failed,
-                };
-                self.set_state(failed);
+                let (failed, stops) = after_storage_failure(self.state, &outcome.action);
+                stop = stops;
+                self.set_state(self.adopt_persisted(failed));
                 Err(HandlerError::Internal)
             }
         };

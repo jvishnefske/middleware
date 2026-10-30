@@ -73,7 +73,7 @@ use embassy_executor::Spawner;
 use esp_base::chip::FlashSettings;
 use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
-use esp_base::trust_store::TrustStore;
+use esp_base::trust_store::{Persisted, TrustStore};
 use middleware::loader::trust::TrustState;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
@@ -123,8 +123,9 @@ struct Storage {
     store: Option<Store>,
     /// The trust partition, when present and readable.
     trust: Option<TrustStore>,
-    /// The persisted root of trust (Unclaimed without a trust partition).
-    state: TrustState,
+    /// The persisted root of trust and control counter (Unclaimed without
+    /// a trust partition).
+    state: Persisted,
 }
 
 /// Opens the payload partition named [`PAYLOAD_PARTITION`] and the trust
@@ -132,7 +133,7 @@ struct Storage {
 /// flash moves into the payload store, which then lends it back for trust
 /// saves ([`PayloadStore::flash`]).
 fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
-    let none = Storage { store: None, trust: None, state: TrustState::Unclaimed };
+    let none = Storage { store: None, trust: None, state: Persisted::default() };
     let mut table = [0u8; PARTITION_TABLE_MAX_LEN];
     let (payload, trust) = {
         let Ok(parts) = read_partition_table(&mut flash, &mut table) else { return none };
@@ -143,10 +144,24 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
     };
     let (trust, state) = match trust.map(|(at, len)| TrustStore::open(&mut flash, at, len)) {
         Some(Ok((t, s))) => (Some(t), s),
-        _ => (None, TrustState::Unclaimed),
+        _ => (None, Persisted::default()),
     };
     let store = payload.and_then(|(at, len)| PayloadStore::new(flash, at, len, limit).ok());
     Storage { store, trust, state }
+}
+
+/// This device's ESP-NOW station MAC (the eFuse base MAC), which signed
+/// control requests name.
+#[cfg(feature = "espnow")]
+fn own_mac() -> esp_base::ota::Mac {
+    radio::own_mac()
+}
+
+/// Without `espnow` nothing arrives over the air, so no request names a
+/// MAC.
+#[cfg(not(feature = "espnow"))]
+fn own_mac() -> esp_base::ota::Mac {
+    [0; 6]
 }
 
 /// Brings up the board and runs the firmware forever.
@@ -172,16 +187,19 @@ pub async fn run(spawner: Spawner) -> ! {
     // from (read before the flash moves into the payload store).
     let mut header = [0u8; 4];
     let flash_settings = flash.read(0, &mut header).ok().and_then(|()| FlashSettings::from_header(header));
-    let Storage { mut store, trust, state: trust_state } = open_storage(flash, profile.max_image);
+    let Storage { mut store, trust, state: persisted } = open_storage(flash, profile.max_image);
+    let trust_state = persisted.trust;
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
-    let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state);
+    let state =
+        State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state).with_control(persisted.control);
     let ctx = Context {
         chip: profile.name,
         firmware: FIRMWARE,
         capacity,
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
+        staging: false,
     };
 
     bus.log(format_args!(
@@ -207,8 +225,8 @@ pub async fn run(spawner: Spawner) -> ! {
             bus.log(format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"))
         }
         (Some(_), TrustState::Claimed { key, min_version }) => bus.log(format_args!(
-            "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
-            key.0[0], key.0[1], key.0[2], key.0[3], min_version.0
+            "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}, control counter {}",
+            key.0[0], key.0[1], key.0[2], key.0[3], min_version.0, persisted.control.0
         )),
     }
     spawner.spawn(presence::watch(board.boot, bus).unwrap());
@@ -249,9 +267,9 @@ pub async fn run(spawner: Spawner) -> ! {
             Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
         }
         bus.log(format_args!("heap: {} B free after boot", esp_alloc::HEAP.free()));
-        Controller::new(state, ctx, store, trust, bus, profile)
+        Controller::new(state, ctx, store, trust, own_mac(), bus, profile)
     };
     #[cfg(not(feature = "wasm"))]
-    let controller = Controller::new(state, ctx, store, trust, bus);
+    let controller = Controller::new(state, ctx, store, trust, own_mac(), bus);
     controller.run().await
 }

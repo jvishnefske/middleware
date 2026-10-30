@@ -367,8 +367,9 @@ pub fn start(wifi: esp_hal::peripherals::WIFI<'static>) -> Result<Transport, Sta
     transport.with_filter(APP_FILTER).map_err(|_| StartError::Again)
 }
 
-/// Our station MAC (the eFuse base MAC).
-fn own_mac() -> Mac {
+/// Our station MAC (the eFuse base MAC): requests over the air are
+/// addressed to it, and signed control requests must name it.
+pub fn own_mac() -> Mac {
     let mut mac = [0u8; 6];
     for (dst, src) in mac.iter_mut().zip(esp_hal::efuse::base_mac_address().as_bytes()) {
         *dst = *src;

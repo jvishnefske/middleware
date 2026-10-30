@@ -6,22 +6,25 @@
 //! over [`AirLink`] through the USB↔ESP-NOW bridge on that port (printing
 //! the bridge's MAC first and the request counters and upload rate last),
 //! and prints results to stdout, progress and
-//! errors to stderr. `key new` / `key pub` touch only the key file: `key
+//! errors to stderr. Over `--espnow`, `start`/`stop` (and `upload --start`)
+//! are signed control requests for the target MAC with `--key`
+//! ([`mwctl::sign::sign_control`], counter `--counter` or the Unix time in
+//! milliseconds). `key new` / `key pub` touch only the key file: `key
 //! new` reads 32 bytes from `/dev/urandom` and creates the file with mode
 //! 0600, refusing to overwrite one. Exit status: 0 success, 1 device or port failure, 2
 //! usage error.
 
 mod port;
 
-use middleware::loader::trust::Version;
+use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, Version};
 use mwctl::air::{AirLink, AirTiming};
-use mwctl::bridge::{Msg, format_mac};
+use mwctl::bridge::{Mac, Msg, format_mac};
 use mwctl::cli::{self, Cmd, KeyCmd, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::report::{format_event, format_info, format_trust};
-use mwctl::sign::{SEED_LEN, Seed, hex, sign_commit, version_at};
+use mwctl::sign::{SEED_LEN, Seed, counter_at, hex, sign_commit, sign_control, version_at};
 use port::SerialTransport;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -116,7 +119,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
             ..Timeouts::default()
         };
         let mut dev = Device::new(Link::new(transport, timeouts));
-        let result = command(&mut dev, cli.cmd);
+        let result = command(&mut dev, cli.cmd, None);
         print_events(&dev.take_events());
         return result;
     };
@@ -148,7 +151,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         }
     }
     let mut dev = Device::new(link);
-    let result = command(&mut dev, cli.cmd);
+    let result = command(&mut dev, cli.cmd, Some(target));
     print_events(&dev.take_events());
     let s = dev.link().stats();
     eprintln!(
@@ -158,23 +161,62 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
     result
 }
 
-/// Runs one device command over any endpoint.
-fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd) -> Result<(), Error> {
+/// Signs control request `op` for `target` with `key` (both or neither:
+/// the CLI requires `--key` exactly when `--espnow` is given).
+fn control_auth(
+    op: ControlOp,
+    target: Option<Mac>,
+    key: Option<&Path>,
+    counter: Option<u64>,
+) -> Result<Option<SignedControl>, Error> {
+    let (Some(target), Some(key)) = (target, key) else {
+        return Ok(None);
+    };
+    let seed = read_seed(key)?;
+    let counter = match counter {
+        Some(c) => ControlCounter(c),
+        None => counter_at(SystemTime::now())?,
+    };
+    eprintln!(
+        "signing {} for {} as counter {} with {}",
+        if op == ControlOp::Start {
+            "start"
+        } else {
+            "stop"
+        },
+        format_mac(&target),
+        counter.0,
+        key.display()
+    );
+    Ok(Some(sign_control(&seed, op, &target, counter)))
+}
+
+/// Runs one device command over any endpoint; `target` is the device's
+/// MAC over ESP-NOW (signed control requests name it).
+fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> Result<(), Error> {
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
-        Cmd::Start => match dev.start() {
-            Ok(()) => {
-                println!("payload started");
-                Ok(())
+        Cmd::Start { key, counter } => {
+            match control_auth(ControlOp::Start, target, key.as_deref(), counter)
+                .and_then(|auth| dev.start_signed(auth))
+            {
+                Ok(()) => {
+                    println!("payload started");
+                    Ok(())
+                }
+                Err(e) => {
+                    // The device logs why a start failed right after its reply;
+                    // show those lines before reporting the error.
+                    let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS));
+                    Err(e)
+                }
             }
-            Err(e) => {
-                // The device logs why a start failed right after its reply;
-                // show those lines before reporting the error.
-                let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS));
-                Err(e)
-            }
-        },
-        Cmd::Stop => dev.stop().map(|()| println!("payload stopped")),
+        }
+        Cmd::Stop { key, counter } => {
+            control_auth(ControlOp::Stop, target, key.as_deref(), counter)
+                .and_then(|auth| dev.stop_signed(auth))
+                .map(|()| println!("payload stopped"))
+        }
         Cmd::TrustInfo => dev.trust_info().map(|t| print!("{}", format_trust(&t))),
         Cmd::TrustClaim { key } => {
             let public = read_seed(&key)?.public_key();
@@ -192,6 +234,10 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd) -> Result<(), Error> {
             if let Some(i) = corrupt_chunk {
                 eprintln!("test hook: corrupting chunk {i}; the device must reject the commit");
             }
+            let start_auth = match start {
+                true => control_auth(ControlOp::Start, target, key.as_deref(), None)?,
+                false => None,
+            };
             let auth = match key {
                 None => None,
                 Some(k) => {
@@ -214,6 +260,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd) -> Result<(), Error> {
                     start,
                     corrupt_chunk,
                     auth,
+                    start_auth,
                 },
                 progress,
             );

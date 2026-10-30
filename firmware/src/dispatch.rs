@@ -4,22 +4,23 @@
 //! returns an [`Outcome`]: the next state, the reply (body length written
 //! into the caller's buffer, or a [`HandlerError`]), and an [`Action`] the
 //! shell must perform. It does no I/O. The shell performs the action and, if
-//! the action fails, applies [`State::storage_failed`] or
-//! [`State::trapped`] and replies `Internal` instead.
+//! the action fails, applies [`after_storage_failure`] (or
+//! [`State::trapped`] when a start fails) and replies `Internal` instead.
 //!
 //! | request              | condition            | action     | status after |
 //! |----------------------|----------------------|------------|--------------|
 //! | `sys/info`           | —                    | none       | unchanged    |
-//! | `sys/loader/begin`   | fits                 | `Erase`    | `Loading`    |
-//! | `sys/loader/chunk`   | in order, fits       | `Write`    | `Loading`    |
-//! | `sys/loader/chunk`   | resend of last chunk | none (`Ok`) | `Loading`   |
-//! | `sys/loader/commit`  | complete, CRC ok, trust allows | `Activate` | `Stopped` |
-//! | `sys/loader/commit`  | trust refuses (`Denied`) | none   | `Stopped` if an image is installed, else `Empty` |
+//! | `sys/loader/begin`   | fits                 | `Erase { stop: true }` | `Loading` |
+//! | `sys/loader/begin`   | fits, [`Context::staging`] | `Erase { stop: false }` | unchanged |
+//! | `sys/loader/chunk`   | in order, fits       | `Write`    | unchanged    |
+//! | `sys/loader/chunk`   | resend of last chunk | none (`Ok`) | unchanged   |
+//! | `sys/loader/commit`  | complete, CRC ok, trust allows | `Activate` (stops the old payload) | `Stopped` |
+//! | `sys/loader/commit`  | trust refuses (`Denied`) | none   | from `Loading`: `Stopped` if an image is installed, else `Empty`; otherwise unchanged |
 //! | `sys/trust/info`     | `trust`              | none       | unchanged    |
-//! | `sys/trust/claim`    | `trust`, allowed     | `Claim`    | unchanged    |
+//! | `sys/trust/claim`    | `trust`, allowed     | `Claim` (control counter reset to 0) | unchanged |
 //! | `sys/trust/claim`    | `trust`, claimed and window closed | none (`Denied`) | unchanged |
 //! | `sys/trust/*`        | built without `trust` | none (`NotFound`) | unchanged |
-//! | any loader failure   | transfer abandoned   | none       | `Stopped` if an image is installed, else `Empty` |
+//! | any loader failure   | transfer abandoned   | none       | from `Loading`: `Stopped` if an image is installed, else `Empty`; otherwise unchanged |
 //! | `sys/payload/start`  | `Stopped`/`Trapped`  | `Start`    | `Running` once the shell calls [`State::started`] |
 //! | `sys/payload/start`  | `Empty`/`Loading`    | none (`InvalidRequest`) | unchanged |
 //! | `sys/payload/start`  | built without runtime | none (`NotFound`) | unchanged |
@@ -32,6 +33,27 @@
 //! leaves the installed image in place. [`State`] remembers whether one is
 //! installed (from boot, and after each successful activate) and returns to
 //! `Stopped` rather than `Empty` when a transfer fails.
+//!
+//! # Staging beside the running payload
+//!
+//! The running payload never reads flash after its start (the image is
+//! read into a buffer, compiled, and the buffer freed), and the transfer
+//! only ever writes the inactive slot. So with [`Context::staging`] (the
+//! shell sets it for requests over the air) a `begin` stages the new image
+//! without touching the payload: `Erase { stop: false }`, and the status
+//! stays what it was (`Running` stays `Running`), as it does for every
+//! chunk and for a transfer that fails. Only a commit that the trust rules
+//! accept changes anything: [`Action::Activate`] makes the new slot active
+//! and stops the old payload ([`Action::stops_payload`]); the status
+//! becomes `Stopped`. A `start` while a staged transfer is in progress
+//! starts the *active* image. Without `staging` (serial) a `begin` stops
+//! the payload first and the status is `Loading` until the transfer ends,
+//! as before.
+//!
+//! When a storage action fails, [`after_storage_failure`] gives the state
+//! and whether the payload must stop: the transfer ends, a running payload
+//! keeps running (the action touched only the inactive slot), except after
+//! a serial `begin`, which stopped it before erasing.
 //!
 //! # Trust (feature `trust`)
 //!
@@ -56,7 +78,7 @@
 //! ([`route_publication`]; keys have no wildcards).
 
 use middleware::Key;
-use middleware::loader::trust::TrustState;
+use middleware::loader::trust::{ControlCounter, TrustState};
 use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::ABI_VERSION;
@@ -77,6 +99,9 @@ pub struct Context<'a> {
     /// Physical presence has opened the re-key window and it has not yet
     /// expired or been used. Ignored without the `trust` feature.
     pub rekey_window: bool,
+    /// A `sys/loader/begin` stages the image beside the running payload
+    /// instead of stopping it (requests over the air; see the module docs).
+    pub staging: bool,
 }
 
 /// Dispatcher state: loader progress and payload status.
@@ -89,6 +114,9 @@ pub struct State {
     /// The persisted root of trust.
     #[cfg(feature = "trust")]
     trust: TrustState,
+    /// The last accepted signed control request's counter.
+    #[cfg(feature = "trust")]
+    control: ControlCounter,
 }
 
 impl State {
@@ -102,6 +130,8 @@ impl State {
             installed,
             #[cfg(feature = "trust")]
             trust: TrustState::Unclaimed,
+            #[cfg(feature = "trust")]
+            control: ControlCounter(0),
         }
     }
 
@@ -117,6 +147,21 @@ impl State {
         return self.trust;
         #[cfg(not(feature = "trust"))]
         TrustState::Unclaimed
+    }
+
+    /// The same state with the last accepted control counter: read from
+    /// flash at boot, or just accepted (and persisted) by the shell.
+    #[cfg(feature = "trust")]
+    pub const fn with_control(self, control: ControlCounter) -> Self {
+        State { control, ..self }
+    }
+
+    /// The last accepted control counter (always 0 without `trust`).
+    pub const fn control(&self) -> ControlCounter {
+        #[cfg(feature = "trust")]
+        return self.control;
+        #[cfg(not(feature = "trust"))]
+        ControlCounter(0)
     }
 
     /// Status when no transfer is in progress and nothing runs.
@@ -149,11 +194,39 @@ impl State {
         State { status: PayloadStatus::Trapped, ..self }
     }
 
-    /// A storage action failed. Storage actions only touch the inactive
-    /// slot, so the transfer ends and the status returns to `Stopped` if an
-    /// image is installed, else `Empty`.
+    /// The payload no longer runs: `Running` and `Trapped` become
+    /// `Stopped`; other statuses are unchanged.
+    pub const fn stopped(self) -> Self {
+        match self.status {
+            PayloadStatus::Running | PayloadStatus::Trapped => State { status: PayloadStatus::Stopped, ..self },
+            _ => self,
+        }
+    }
+
+    /// A storage action failed, or the transfer was refused. Storage
+    /// actions only touch the inactive slot, so the transfer ends; a
+    /// serial transfer's `Loading` returns to `Stopped` if an image is
+    /// installed, else `Empty`; any other status (a payload running beside
+    /// a staged transfer, say) is unchanged.
     pub const fn storage_failed(self) -> Self {
-        State { loader: Loader::Idle, status: Self::resting(self.installed), ..self }
+        let status = match self.status {
+            PayloadStatus::Loading => Self::resting(self.installed),
+            other => other,
+        };
+        State { loader: Loader::Idle, status, ..self }
+    }
+}
+
+/// The state after `action`, dispatched from `prev`, failed in storage, and
+/// whether the payload must stop: [`State::storage_failed`] of `prev`,
+/// except that an action that stops the payload before touching flash
+/// ([`Action::stops_before_storage`]: a serial `begin`'s erase) has
+/// stopped it already.
+pub const fn after_storage_failure(prev: State, action: &Action<'_>) -> (State, bool) {
+    if action.stops_before_storage() {
+        (prev.stopped().storage_failed(), true)
+    } else {
+        (prev.storage_failed(), false)
     }
 }
 
@@ -162,11 +235,13 @@ impl State {
 pub enum Action<'a> {
     /// Nothing.
     None,
-    /// Stop the payload, then erase the inactive slot for an image of `len`
-    /// bytes.
+    /// Erase the inactive slot for an image of `len` bytes; with `stop`,
+    /// stop the payload first (serial), else leave it running (staging).
     Erase {
         /// Image length.
         len: u32,
+        /// Stop the payload before erasing.
+        stop: bool,
     },
     /// Write image bytes at `offset`.
     Write {
@@ -176,7 +251,8 @@ pub enum Action<'a> {
         data: &'a [u8],
     },
     /// Flush pending bytes, check the CRC and write the slot header: the
-    /// image is installed and its slot becomes active.
+    /// image is installed and its slot becomes active. On success the
+    /// payload that ran the old image (if any) must stop.
     Activate {
         /// Image length.
         len: u32,
@@ -199,9 +275,15 @@ pub enum Action<'a> {
 }
 
 impl Action<'_> {
-    /// Whether the payload must not run after this action.
+    /// Whether the payload must not run after this action succeeds.
     pub const fn stops_payload(&self) -> bool {
-        matches!(self, Action::Erase { .. } | Action::Stop)
+        matches!(self, Action::Erase { stop: true, .. } | Action::Stop | Action::Activate { .. })
+    }
+
+    /// Whether the payload stops before the action touches flash, so it
+    /// stays stopped even if the storage action fails.
+    pub const fn stops_before_storage(&self) -> bool {
+        matches!(self, Action::Erase { stop: true, .. } | Action::Stop)
     }
 }
 
@@ -266,7 +348,7 @@ pub fn handle_request<'a>(
             _ => Outcome::reply(state, Ok(0)),
         },
         Command::Begin { .. } | Command::Chunk { .. } | Command::Commit { .. } => {
-            transfer(state, &cmd, ctx.capacity)
+            transfer(state, &cmd, ctx.capacity, ctx.staging)
         }
         #[cfg(feature = "trust")]
         Command::TrustInfo => {
@@ -275,7 +357,9 @@ pub fn handle_request<'a>(
         }
         #[cfg(feature = "trust")]
         Command::TrustClaim { key } => match state.trust.claim(key, ctx.rekey_window) {
-            Ok(trust) => Outcome::act(State { trust, ..state }, Action::Claim { trust }),
+            Ok(trust) => {
+                Outcome::act(State { trust, control: ControlCounter(0), ..state }, Action::Claim { trust })
+            }
             Err(e) => Outcome::reply(state, Err(e)),
         },
         #[cfg(not(feature = "trust"))]
@@ -306,7 +390,7 @@ fn authorize(
     Ok((state.trust(), None))
 }
 
-fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32) -> Outcome<'a> {
+fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32, staging: bool) -> Outcome<'a> {
     let (loader, result) = state.loader.step(cmd, capacity);
     let abandoned = |state: State, loader: Loader| {
         // A failure mid-transfer abandons the partly written inactive
@@ -320,23 +404,23 @@ fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32) -> Outcome<'a> {
     };
     match result {
         Err(e) => Outcome::reply(abandoned(state, loader), Err(e)),
-        Ok(Effect::Erase { len }) => {
-            Outcome::act(State { loader, status: PayloadStatus::Loading, ..state }, Action::Erase { len })
+        Ok(Effect::Erase { len }) if staging => {
+            Outcome::act(State { loader, ..state }, Action::Erase { len, stop: false })
         }
+        Ok(Effect::Erase { len }) => Outcome::act(
+            State { loader, status: PayloadStatus::Loading, ..state },
+            Action::Erase { len, stop: true },
+        ),
         Ok(Effect::Write { offset, data }) => {
             Outcome::act(State { loader, ..state }, Action::Write { offset, data })
         }
         Ok(Effect::Activate { image, auth }) => match authorize(&state, &image, auth.as_ref()) {
-            Ok((_trust, persist)) => Outcome::act(
-                State {
-                    loader,
-                    status: PayloadStatus::Stopped,
-                    installed: true,
-                    #[cfg(feature = "trust")]
-                    trust: _trust,
-                },
-                Action::Activate { len: image.len, crc: image.crc, trust: persist },
-            ),
+            Ok((_trust, persist)) => {
+                let next = State { loader, status: PayloadStatus::Stopped, installed: true, ..state };
+                #[cfg(feature = "trust")]
+                let next = State { trust: _trust, ..next };
+                Outcome::act(next, Action::Activate { len: image.len, crc: image.crc, trust: persist })
+            }
             Err(e) => Outcome::reply(abandoned(state, loader), Err(e)),
         },
         Ok(Effect::None) => Outcome::reply(State { loader, ..state }, Ok(0)),
@@ -368,7 +452,7 @@ mod tests {
     use middleware::loader::keys;
 
     const CTX: Context<'static> =
-        Context { chip: "esp32c3", firmware: "0.1.0", capacity: 1024, runtime: true, rekey_window: false };
+        Context { chip: "esp32c3", firmware: "0.1.0", capacity: 1024, runtime: true, rekey_window: false, staging: false };
 
     fn req<'a>(state: State, key: Key<'_>, body: &'a [u8]) -> Outcome<'a> {
         let mut out = [0u8; 128];
@@ -413,7 +497,7 @@ mod tests {
         let s = State::boot(false);
         let b = begin(40, crc);
         let o = req(s, keys::BEGIN, &b);
-        assert_eq!((o.action, o.reply), (Action::Erase { len: 40 }, Ok(0)));
+        assert_eq!((o.action, o.reply), (Action::Erase { len: 40, stop: true }, Ok(0)));
         assert_eq!(o.state.status(), PayloadStatus::Loading);
         assert!(o.action.stops_payload());
         let (c, n) = chunk(0, &image[..30]);
@@ -459,7 +543,7 @@ mod tests {
     fn begin_while_running_stops_and_erases() {
         let b = begin(10, 0);
         let o = req(State::boot(true).started(), keys::BEGIN, &b);
-        assert_eq!(o.action, Action::Erase { len: 10 });
+        assert_eq!(o.action, Action::Erase { len: 10, stop: true });
         assert_eq!(o.state.status(), PayloadStatus::Loading);
     }
 
@@ -530,7 +614,7 @@ mod tests {
         assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::NotFound)));
         let b = begin(4, 0);
         let o = handle_request(State::boot(true), &ctx, keys::BEGIN, &b, &mut out);
-        assert_eq!(o.action, Action::Erase { len: 4 });
+        assert_eq!(o.action, Action::Erase { len: 4, stop: true });
     }
 
     #[test]
@@ -546,9 +630,15 @@ mod tests {
     fn storage_failure_and_traps_update_status() {
         let s = State::boot(true).started();
         assert_eq!(s.trapped().status(), PayloadStatus::Trapped);
+        // A running payload keeps running: storage touches only the
+        // inactive slot.
         let f = s.storage_failed();
+        assert_eq!((f.status(), f.loader()), (PayloadStatus::Running, Loader::Idle));
+        let f = s.stopped().storage_failed();
         assert_eq!((f.status(), f.loader()), (PayloadStatus::Stopped, Loader::Idle));
         assert!(f.startable());
+        assert_eq!(s.trapped().stopped().status(), PayloadStatus::Stopped);
+        assert_eq!(State::boot(false).stopped().status(), PayloadStatus::Empty);
         let loading = req(State::boot(false), keys::BEGIN, &begin(4, 0)).state;
         let f = loading.storage_failed();
         assert_eq!((f.status(), f.loader()), (PayloadStatus::Empty, Loader::Idle));
@@ -567,6 +657,99 @@ mod tests {
         assert!(!route_publication(&State::boot(true), k, subs.iter().copied()));
         let sys = ["sys/log"];
         assert!(!route_publication(&running, keys::LOG, sys.iter().copied()));
+    }
+
+    const STAGING: Context<'static> = Context { staging: true, ..CTX };
+
+    fn staged<'a>(state: State, key: Key<'_>, body: &'a [u8]) -> Outcome<'a> {
+        let mut out = [0u8; 128];
+        handle_request(state, &STAGING, key, body, &mut out)
+    }
+
+    #[test]
+    fn o14_a_staged_transfer_leaves_the_running_payload_alone_until_commit() {
+        let image = [0x5Au8; 40];
+        let crc = Crc32::checksum(&image);
+        let running = State::boot(true).started();
+        let bb = begin(40, crc);
+
+        let o = staged(running, keys::BEGIN, &bb);
+        assert_eq!((o.action, o.reply), (Action::Erase { len: 40, stop: false }, Ok(0)));
+        assert!(!o.action.stops_payload() && !o.action.stops_before_storage());
+        assert_eq!(o.state.status(), PayloadStatus::Running, "begin does not stop it");
+        assert!(matches!(o.state.loader(), Loader::Receiving { .. }));
+        let (c, n) = chunk(0, &image);
+        let o = staged(o.state, keys::CHUNK, &c[..n]);
+        assert_eq!(o.action, Action::Write { offset: 0, data: &image[..] });
+        assert!(!o.action.stops_payload());
+        assert_eq!(o.state.status(), PayloadStatus::Running);
+        // Start and stop still act on the running (active) payload.
+        assert_eq!(staged(o.state, keys::START, &[]).reply, Ok(0));
+        let commit = staged(o.state, keys::COMMIT, &[]);
+        assert_eq!(commit.action, Action::Activate { len: 40, crc, trust: None });
+        assert!(commit.action.stops_payload(), "the new image replaces the running one");
+        assert_eq!(commit.state.status(), PayloadStatus::Stopped);
+        assert_eq!(commit.state.loader(), Loader::Idle);
+    }
+
+    #[test]
+    fn o14_a_failed_or_spoiled_staged_transfer_keeps_the_payload_running() {
+        let running = State::boot(true).started();
+        // Out-of-order chunk: the transfer ends, the payload runs on.
+        let bb = begin(8, 0);
+
+        let o = staged(running, keys::BEGIN, &bb);
+        let (c, n) = chunk(4, &[1]);
+        let o = staged(o.state, keys::CHUNK, &c[..n]);
+        assert_eq!(o.reply, Err(HandlerError::InvalidRequest));
+        assert_eq!((o.state.status(), o.state.loader()), (PayloadStatus::Running, Loader::Idle));
+        // A spoofed chunk spoils the image: the commit fails its CRC and
+        // the payload runs on.
+        let bb = begin(4, Crc32::checksum(&[1, 2, 3, 4]));
+        let o = staged(running, keys::BEGIN, &bb);
+        let (c, n) = chunk(0, &[9, 9, 9, 9]);
+        let o = staged(o.state, keys::CHUNK, &c[..n]);
+        let o = staged(o.state, keys::COMMIT, &[]);
+        assert_eq!((o.reply, o.action), (Err(HandlerError::InvalidRequest), Action::None));
+        assert_eq!(o.state.status(), PayloadStatus::Running);
+        // A stopped or empty device keeps its status while staging too.
+        for s in [State::boot(true), State::boot(false), State::boot(true).started().trapped()] {
+            let bb = begin(8, 0);
+
+            let o = staged(s, keys::BEGIN, &bb);
+            assert_eq!(o.state.status(), s.status());
+        }
+        // A serial begin still stops the payload and shows Loading.
+        let bb = begin(8, 0);
+
+        let o = req(running, keys::BEGIN, &bb);
+        assert_eq!((o.action, o.state.status()), (Action::Erase { len: 8, stop: true }, PayloadStatus::Loading));
+    }
+
+    #[test]
+    fn o14_storage_failures_stop_the_payload_only_after_a_serial_begin() {
+        let running = State::boot(true).started();
+        let bb = begin(8, 0);
+
+        let serial = req(running, keys::BEGIN, &bb);
+        let (s, stop) = after_storage_failure(running, &serial.action);
+        assert_eq!((s.status(), s.loader(), stop), (PayloadStatus::Stopped, Loader::Idle, true));
+        let bb = begin(8, 0);
+
+        let air = staged(running, keys::BEGIN, &bb);
+        let (s, stop) = after_storage_failure(running, &air.action);
+        assert_eq!((s.status(), s.loader(), stop), (PayloadStatus::Running, Loader::Idle, false));
+        // A failed write or activate (header never written) keeps it too.
+        let receiving = air.state;
+        for action in [Action::Write { offset: 0, data: &[1] }, Action::Activate { len: 8, crc: 0, trust: None }] {
+            let (s, stop) = after_storage_failure(receiving, &action);
+            assert_eq!((s.status(), s.loader(), stop), (PayloadStatus::Running, Loader::Idle, false), "{action:?}");
+        }
+        // A serial transfer's Loading returns to resting.
+        let (s, _) = after_storage_failure(serial.state, &Action::Write { offset: 0, data: &[1] });
+        assert_eq!(s.status(), PayloadStatus::Stopped);
+        let empty = req(State::boot(false), keys::BEGIN, &begin(8, 0)).state;
+        assert_eq!(after_storage_failure(empty, &Action::None).0.status(), PayloadStatus::Empty);
     }
 
     #[cfg(feature = "trust")]
@@ -610,7 +793,7 @@ mod tests {
                 let action = match action {
                     Action::Write { .. } => Action::None,
                     Action::None => Action::None,
-                    Action::Erase { len } => Action::Erase { len },
+                    Action::Erase { len, stop } => Action::Erase { len, stop },
                     Action::Activate { len, crc, trust } => Action::Activate { len, crc, trust },
                     Action::Claim { trust } => Action::Claim { trust },
                     Action::Start => Action::Start,
@@ -675,6 +858,14 @@ mod tests {
             let (o, _) = at(s, &open, keys::TRUST_CLAIM, &key(2).0);
             let rekeyed = TrustState::Claimed { key: key(2), min_version: Version(0) };
             assert_eq!(o.action, Action::Claim { trust: rekeyed });
+            // The new key starts its control counter over; a commit keeps it.
+            let counted = s.with_control(ControlCounter(77));
+            let (o, _) = at(counted, &open, keys::TRUST_CLAIM, &key(2).0);
+            assert_eq!(o.state.control(), ControlCounter(0));
+            let img = image(10, 1);
+            let body = commit_body(1, &img[..10], 51);
+            let o = req(transfer_into(counted, &img[..10]), keys::COMMIT, &body);
+            assert_eq!((o.reply, o.state.control()), (Ok(0), ControlCounter(77)));
             assert_eq!(at(s, &CTX, keys::TRUST_CLAIM, &[0; 31]).0.reply, Err(HandlerError::InvalidRequest));
         }
 

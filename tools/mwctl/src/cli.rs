@@ -10,7 +10,11 @@
 //! command over the air to the device with that MAC (default baud
 //! [`crate::bridge::BAUD`]); only `info`, `upload`, `start`, `stop` and
 //! `trust info|claim` travel over the air (`monitor` and `reset` act on the
-//! port's own board).
+//! port's own board). Over the air `upload`, `start` and `stop` need
+//! `--key` (a claimed device accepts only signed commits and signed
+//! control requests there); `start`/`stop --key` is refused without
+//! `--espnow`, where they need no signature. `--counter` overrides the
+//! control counter (default: Unix time in milliseconds).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,11 +35,16 @@ COMMANDS:
                                    unsigned, which only an unclaimed device accepts
         --version <N>              signed version, must exceed the device's last one
                                    [default: current Unix time in seconds]
-        --start                    then send sys/payload/start
+        --start                    then send sys/payload/start (signed with --key
+                                   over --espnow)
         --corrupt-chunk <INDEX>    test hook: flip a byte in that chunk's data but
                                    declare the original CRC, so commit must fail
     start                      sys/payload/start
     stop                       sys/payload/stop
+        --key <KEYFILE>            (with --espnow, required) sign the request for the
+                                   device named by --espnow (Ed25519 control request)
+        --counter <N>              control counter, must exceed the last one the device
+                                   accepted [default: current Unix time in milliseconds]
     monitor [--seconds <N>]    Print sys/log and sys/payload/status publications
                                (and other publications) until N seconds pass or Ctrl-C
     reset                      Reboot into run mode: RTS asserted for 100 ms with DTR
@@ -59,8 +68,10 @@ OPTIONS:
                        460800]. Requests go unicast with retransmission (300 ms per
                        attempt, 5000 ms for begin/commit/start, 10 attempts); uploads use
                        217-byte chunks. The device answers only when claimed, only
-                       info, trust info, upload, start and stop, and only signed
-                       commits; trust claim is always refused over the air.
+                       info, trust info, upload, start and stop; upload, start and stop
+                       need --key (signed commit, signed control request). An upload
+                       stages beside the running payload, which keeps running until
+                       the signed commit. trust claim is always refused over the air.
                        Not for monitor or reset.
     -h, --help         Print this help
 
@@ -115,9 +126,19 @@ pub enum Cmd {
         key: PathBuf,
     },
     /// `start`.
-    Start,
+    Start {
+        /// Signing key for a control request (`--espnow` only).
+        key: Option<PathBuf>,
+        /// Control counter; `None` uses the current Unix time in ms.
+        counter: Option<u64>,
+    },
     /// `stop`.
-    Stop,
+    Stop {
+        /// Signing key for a control request (`--espnow` only).
+        key: Option<PathBuf>,
+        /// Control counter; `None` uses the current Unix time in ms.
+        counter: Option<u64>,
+    },
     /// `monitor`; `None` runs until interrupted.
     Monitor {
         /// How long to listen.
@@ -173,6 +194,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut seconds = None;
     let mut key: Option<PathBuf> = None;
     let mut version = None;
+    let mut counter = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -193,6 +215,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--seconds" => seconds = Some(number("--seconds", args.next())?),
             "--key" => key = Some(PathBuf::from(args.next().ok_or("--key needs a key file")?)),
             "--version" => version = Some(number("--version", args.next())?),
+            "--counter" => counter = Some(number("--counter", args.next())?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             _ => positional.push(a),
         }
@@ -230,10 +253,29 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only("--start", start, &["upload"])?;
     only("--corrupt-chunk", corrupt_chunk.is_some(), &["upload"])?;
     only("--seconds", seconds.is_some(), &["monitor"])?;
-    only("--key", key.is_some(), &["upload", "trust claim"])?;
+    only(
+        "--key",
+        key.is_some(),
+        &["upload", "trust claim", "start", "stop"],
+    )?;
     only("--version", version.is_some(), &["upload"])?;
+    only("--counter", counter.is_some(), &["start", "stop"])?;
     if version.is_some() && key.is_none() {
         return Err("--version needs --key (only signed commits carry a version)".into());
+    }
+    if counter.is_some() && key.is_none() {
+        return Err("--counter needs --key (only signed control requests carry a counter)".into());
+    }
+    let control = matches!(name.as_str(), "start" | "stop");
+    if control && key.is_some() && espnow.is_none() {
+        return Err(format!(
+            "'{name} --key' signs a control request for --espnow; over serial '{name}' needs no signature"
+        ));
+    }
+    if espnow.is_some() && key.is_none() && (control || name == "upload") {
+        return Err(format!(
+            "over ESP-NOW a claimed device accepts '{name}' only signed by its pinned key: pass --key <KEYFILE>"
+        ));
     }
     let local = match name.as_str() {
         "key new" => Some(KeyCmd::New {
@@ -263,8 +305,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         "trust claim" => Cmd::TrustClaim {
             key: key.ok_or("trust claim needs --key <KEYFILE>")?,
         },
-        "start" => Cmd::Start,
-        "stop" => Cmd::Stop,
+        "start" => Cmd::Start { key, counter },
+        "stop" => Cmd::Stop { key, counter },
         "monitor" => Cmd::Monitor { seconds },
         "reset" => Cmd::Reset,
         other => return Err(format!("unknown command '{other}'")),
@@ -316,6 +358,20 @@ mod tests {
             run("--port p --espnow e4:b0:63:81:d3:24 trust claim --key k").cmd,
             Cmd::TrustClaim { key: "k".into() }
         );
+        assert_eq!(
+            run("--port p --espnow e4:b0:63:81:d3:24 stop --key k").cmd,
+            Cmd::Stop {
+                key: Some("k".into()),
+                counter: None
+            }
+        );
+        assert_eq!(
+            run("--port p --espnow e4:b0:63:81:d3:24 start --key k --counter 77").cmd,
+            Cmd::Start {
+                key: Some("k".into()),
+                counter: Some(77)
+            }
+        );
         for bad in [
             "--port p --espnow e4:b0:63:81:d3 info",
             "--port p --espnow",
@@ -355,8 +411,20 @@ mod tests {
                 }
             }
         );
-        assert_eq!(run("--port p start").cmd, Cmd::Start);
-        assert_eq!(run("--port p stop").cmd, Cmd::Stop);
+        assert_eq!(
+            run("--port p start").cmd,
+            Cmd::Start {
+                key: None,
+                counter: None
+            }
+        );
+        assert_eq!(
+            run("--port p stop").cmd,
+            Cmd::Stop {
+                key: None,
+                counter: None
+            }
+        );
         assert_eq!(run("--port p reset").cmd, Cmd::Reset);
         assert_eq!(run("--port p monitor").cmd, Cmd::Monitor { seconds: None });
         assert_eq!(
@@ -441,6 +509,23 @@ mod tests {
                 "only to 'upload'",
             ),
             ("--port p upload a.wasm --key", "needs a key file"),
+            ("--port p start --key k", "needs no signature"),
+            ("--port p stop --key k --counter 5", "needs no signature"),
+            ("--port p --espnow e4:b0:63:81:d3:24 start", "pass --key"),
+            ("--port p --espnow e4:b0:63:81:d3:24 stop", "pass --key"),
+            (
+                "--port p --espnow e4:b0:63:81:d3:24 upload a.wasm",
+                "pass --key",
+            ),
+            (
+                "--port p --espnow e4:b0:63:81:d3:24 stop --counter 5",
+                "needs --key",
+            ),
+            ("--port p upload a.wasm --key k --counter 5", "only to"),
+            (
+                "--port p --espnow e4:b0:63:81:d3:24 stop --key k --counter x",
+                "not a valid number",
+            ),
         ] {
             match p(args) {
                 Err(e) => assert!(e.contains(why), "{args}: {e}"),

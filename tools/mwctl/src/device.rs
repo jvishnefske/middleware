@@ -15,14 +15,19 @@
 //!   stale commit with `Denied` and keeps its installed payload.
 //! * [`Device::trust_info`], [`Device::trust_claim`] — `sys/trust/info`
 //!   (decoded with [`TrustInfo::decode`]) and `sys/trust/claim`.
-//! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`.
+//! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`
+//!   with an empty body (serial); [`Device::start_signed`],
+//!   [`Device::stop_signed`] send a [`SignedControl`] body instead, which a
+//!   claimed device requires over ESP-NOW (see [`crate::sign::sign_control`]).
+//!   [`UploadOptions::start_auth`] signs the start after an upload.
 //! * [`Device::next_event`] — the next publication or noise run, for
 //!   `monitor`.
 
 use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
-use middleware::loader::trust::{PublicKey, SignedCommit, TrustInfo};
+use middleware::Key;
+use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
 use middleware::loader::{Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
 
@@ -74,6 +79,9 @@ pub struct UploadOptions {
     /// Sign the commit with this authorisation; `None` sends an unsigned
     /// commit.
     pub auth: Option<SignedCommit>,
+    /// Sign the start (with `start`) with this control request; `None`
+    /// sends an empty start body.
+    pub start_auth: Option<SignedControl>,
 }
 
 /// Progress after one acknowledged upload step.
@@ -135,12 +143,27 @@ impl<L: Endpoint> Device<L> {
 
     /// `sys/payload/start`.
     pub fn start(&mut self) -> Result<(), Error> {
-        self.link.command(&Command::Start).map(drop)
+        self.start_signed(None)
     }
 
     /// `sys/payload/stop`.
     pub fn stop(&mut self) -> Result<(), Error> {
-        self.link.command(&Command::Stop).map(drop)
+        self.stop_signed(None)
+    }
+
+    /// `sys/payload/start`, with a signed control body when `auth` is given.
+    pub fn start_signed(&mut self, auth: Option<SignedControl>) -> Result<(), Error> {
+        self.control(keys::START, auth)
+    }
+
+    /// `sys/payload/stop`, with a signed control body when `auth` is given.
+    pub fn stop_signed(&mut self, auth: Option<SignedControl>) -> Result<(), Error> {
+        self.control(keys::STOP, auth)
+    }
+
+    fn control(&mut self, key: Key<'static>, auth: Option<SignedControl>) -> Result<(), Error> {
+        let body = auth.map(|a| a.encode().to_vec()).unwrap_or_default();
+        self.link.request(key, &body).map(drop)
     }
 
     /// Installs `image`; calls `progress` after each acknowledged step.
@@ -172,12 +195,13 @@ impl<L: Endpoint> Device<L> {
             });
         }
         if opts.start {
-            self.start().map_err(|e| Error::Upload {
-                step: plan.len(),
-                steps,
-                key: keys::START.as_str().to_owned(),
-                cause: Box::new(e),
-            })?;
+            self.start_signed(opts.start_auth)
+                .map_err(|e| Error::Upload {
+                    step: plan.len(),
+                    steps,
+                    key: keys::START.as_str().to_owned(),
+                    cause: Box::new(e),
+                })?;
         }
         Ok(())
     }

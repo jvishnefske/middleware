@@ -55,7 +55,7 @@ pub fn extract(mode: SampleMode, raw: &[u8], out: &mut [u8]) -> (usize, usize) {
     let per_word = 4 / mode.expansion();
     let words = (raw.len() / 4).min(out.len() / per_word);
     let mut written = 0;
-    for (word, dst) in raw.chunks_exact(4).take(words).zip(out.chunks_exact_mut(per_word)) {
+    for (word, dst) in raw.as_chunks::<4>().0.iter().take(words).zip(out.chunks_exact_mut(per_word)) {
         match (mode, word, dst) {
             (SampleMode::Word, [_, _, s, _], [d]) => *d = *s,
             (SampleMode::HalfWord, [s2, _, s1, _], [d1, d2]) => {
