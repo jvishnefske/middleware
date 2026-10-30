@@ -1,4 +1,7 @@
-//! Protocol operations over a [`Link`]: the CLI commands minus printing.
+//! Protocol operations over an [`Endpoint`] (the serial
+//! [`Link`](crate::link::Link), or [`AirLink`](crate::air::AirLink) over
+//! ESP-NOW): the CLI commands minus printing. Uploads use the endpoint's
+//! chunk size.
 //!
 //! * [`Device::info`] — `sys/info`, decoded with
 //!   [`middleware::loader::DeviceInfo::decode`] into an owned [`Info`].
@@ -17,8 +20,8 @@
 //!   `monitor`.
 
 use crate::error::Error;
-use crate::link::{Event, Link, Transport};
-use crate::plan::upload_plan;
+use crate::link::{Endpoint, Event};
+use crate::plan::upload_plan_chunked;
 use middleware::loader::trust::{PublicKey, SignedCommit, TrustInfo};
 use middleware::loader::{Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
@@ -88,19 +91,19 @@ pub struct Progress {
     pub events: Vec<Event>,
 }
 
-/// A device on the other end of a transport.
-pub struct Device<T> {
-    link: Link<T>,
+/// A device on the other end of an endpoint.
+pub struct Device<L> {
+    link: L,
 }
 
-impl<T: Transport> Device<T> {
-    /// Wraps a link.
-    pub fn new(link: Link<T>) -> Self {
+impl<L: Endpoint> Device<L> {
+    /// Wraps an endpoint.
+    pub fn new(link: L) -> Self {
         Device { link }
     }
 
-    /// The underlying link.
-    pub fn link(&self) -> &Link<T> {
+    /// The underlying endpoint.
+    pub fn link(&self) -> &L {
         &self.link
     }
 
@@ -147,7 +150,8 @@ impl<T: Transport> Device<T> {
         opts: UploadOptions,
         mut progress: impl FnMut(Progress),
     ) -> Result<(), Error> {
-        let plan = upload_plan(image, opts.corrupt_chunk, opts.auth)?;
+        let plan =
+            upload_plan_chunked(image, self.link.chunk_size(), opts.corrupt_chunk, opts.auth)?;
         let total = u32::try_from(image.len()).unwrap_or(u32::MAX);
         let steps = plan.len() + usize::from(opts.start);
         for (i, s) in plan.iter().enumerate() {
@@ -188,7 +192,7 @@ impl<T: Transport> Device<T> {
 mod tests {
     use super::*;
     use crate::fake::{FakeDevice, Script};
-    use crate::link::Timeouts;
+    use crate::link::{Link, Timeouts};
     use crate::sign::sign_commit;
     use crate::sign::tests::{vector_image, vector_seed};
     use middleware::crc::Crc32;
@@ -200,7 +204,7 @@ mod tests {
         (0..n).map(|i| (i * 31 + 7) as u8).collect()
     }
 
-    fn device(fake: FakeDevice) -> Device<FakeDevice> {
+    fn device(fake: FakeDevice) -> Device<Link<FakeDevice>> {
         // Short timeouts: the fake answers synchronously, and reports a
         // dropped reply as an immediate read timeout anyway.
         let t = Timeouts {

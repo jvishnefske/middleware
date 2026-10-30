@@ -789,7 +789,9 @@ handlers); the unsafe asm stays in that vendored dependency.
 
 `mwctl --port <PATH> info|upload|start|stop|monitor|reset` drives a device
 over one named serial port, synchronously, with the same pure frame and
-loader code as the firmware. It never enumerates ports. It opens the port
+loader code as the firmware. With `--espnow <MAC>` the port is the
+USB↔ESP-NOW bridge and the request reaches that device over the air (see
+"Over-the-air payload update"). It never enumerates ports. It opens the port
 without resetting the board (verified on the CH340 board: no boot output on
 open).
 
@@ -1128,6 +1130,151 @@ first claimant pins the key — claim a device before exposing it.
   running, the trust record surviving reboot, and BOOT-held re-keying.
   Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`); not yet run on
   a board.
+
+### Over-the-air payload update (O…)
+
+A claimed ESP base firmware device (ESP32, ESP32-S3: feature `espnow`)
+accepts signed payload updates over ESP-NOW. The host reaches it through a
+USB↔ESP-NOW bridge (`tools/espnow-bridge/esp8266`, an ESP8266 running a
+dumb-radio Arduino sketch) with `mwctl --port <bridge> --espnow <MAC>`.
+Every decision is Rust: the request/response rules in `middleware::rpc`
+(always built, `no_std`, no heap), the over-the-air policy in
+`esp_base::ota`, and the host client in `mwctl::air`.
+
+**Request/response frames.** A request or response is one ESP-NOW frame,
+magic `MR` (not the publications' `MW`, so publication receivers skip it as
+foreign), version 1: `MR | 1 | kind (1 request, 2 response) | id u16 LE |
+to MAC 6 | key length u8 + key + body` (requests) or `| status u8 + body`
+(responses; status 0 or a `HandlerError` code). Key and body share 237
+bytes, so a `sys/loader/chunk` over the air carries 217 image bytes. The
+requester resends on timeout with the **same** id; the responder replays a
+cached response to a repeat instead of running the handler again, so a
+resent `commit` or `start` never acts twice. Responses go unicast to the
+requester.
+
+**Policy** (`esp_base::ota::admit`, before dispatch, over the air only):
+
+| request over the air        | unclaimed | claimed |
+|-----------------------------|-----------|---------|
+| `sys/info`, `sys/trust/info` | `Denied` | allowed |
+| `sys/loader/begin`, `chunk` | `Denied`  | allowed (chunk: the transfer's owner only) |
+| `sys/loader/commit`         | `Denied`  | signed only, then `TrustState::accept_commit` (pinned key, version above the last); unsigned is `Denied` and ends the transfer |
+| `sys/payload/start`, `stop` | `Denied`  | allowed |
+| `sys/trust/claim`, anything else | `Denied` | `Denied` |
+
+**One loader.** Serial and radio share the dispatcher's loader. The
+requester whose `begin` started the transfer owns it; a `begin` from anyone
+takes it over, and a `chunk` or `commit` from a non-owner is
+`InvalidRequest` without touching the loader. Both serial ports count as
+one requester; radio requesters are told apart by MAC.
+
+**Bridge framing** (`mwctl::bridge`, 460800 baud): COBS + CRC-16 frames,
+`Send {dst, data}` host → bridge, `Recv {src, data}`, `Hello {mac,
+channel, version}`, `Stats` (six counters) and `Sent {ok, dst}` (the
+driver's send callback: MAC-level acknowledgement) bridge → host, `Query`
+host → bridge.
+
+- [x] O1 Request and response frames have the layout above, round trip,
+  fill exactly one 250-byte frame at the limits (64-byte key with 173 body
+  bytes; 217-byte chunk; 237-byte response body), refuse larger messages
+  before sending, and reject malformed frames —
+  `rpc::tests::o1_frames_round_trip_and_layout`,
+  `o1_largest_messages_fill_one_frame_and_larger_ones_are_refused`,
+  `o1_malformed_frames_are_rejected`.
+- [x] O2 A requester accepts only the response with its call's id, from the
+  peer it asked, addressed to itself, and its attempts are bounded —
+  `rpc::tests::o2_a_call_accepts_only_its_own_response_and_bounds_attempts`.
+- [x] O3 A responder runs each request once: repeats are replayed from a
+  bounded least-recently-used cache, repeats (and other requests) while one
+  runs are dropped, an abandoned or 10 s old request frees it, and bodies
+  over the cache size are not cached —
+  `rpc::tests::o3_a_request_runs_once_and_repeats_replay_its_response`,
+  `o3_the_cache_is_bounded_least_recently_used_and_skips_large_bodies`,
+  `o3_an_abandoned_or_stale_request_frees_the_responder`.
+- [x] O4 `espnow::rpc::RpcRequester` (`Requester`) and `RpcResponder`
+  (`Responder`) work end to end over an in-memory air that loses,
+  duplicates and reorders frames: a lost request is resent with the same
+  id, a lost response is replayed without running the handler again, a
+  duplicated or delayed request runs once, a delayed response never
+  answers a later call, attempts are bounded, and frames for or from other
+  stations are ignored —
+  `espnow::rpc::tests::o4_request_and_response_end_to_end`,
+  `o4_a_lost_request_is_resent_with_the_same_id`,
+  `o4_a_lost_response_is_replayed_without_running_the_handler_again`,
+  `o4_a_duplicated_request_runs_once`, `o4_reordered_frames_never_mix_answers`,
+  `o4_attempts_are_bounded_and_other_stations_are_ignored`,
+  `o4_oversized_requests_and_small_buffers_are_errors`; `espnow` builds for
+  `thumbv6m-none-eabi` (`scripts/check-features.sh`).
+- [x] O5 The bridge framing round trips, rejects bad CRC, COBS, types and
+  lengths, and is found behind the ESP8266's delimiter-less boot banner;
+  the C++ codec of the sketch reproduces the Rust golden frames byte for
+  byte (also checked by an independent Python COBS/CRC script) —
+  mwctl `bridge::tests::o5_messages_round_trip_through_the_wire`,
+  `o5_golden_frames_match_the_bridge_firmware`, `o5_bad_frames_are_rejected`,
+  `o5_frames_split_out_of_a_noisy_stream`, `o5_macs_parse_and_format`;
+  `tools/espnow-bridge/check.sh` (`test_bridge_frame.cpp`, then the sketch
+  compiles for `esp8266:esp8266:generic`).
+- [x] O6 Over the air an unclaimed device refuses everything; a claimed one
+  allows only the update keys, never `sys/trust/claim`, and only signed
+  commits, while serial keeps its rules —
+  `ota::tests::o6_an_unclaimed_device_refuses_the_air_entirely`,
+  `o6_a_claimed_device_allows_only_the_update_keys_over_the_air`,
+  `o6_a_commit_over_the_air_must_be_signed`.
+- [x] O7 The begin's requester owns the transfer; a begin from the other
+  side takes it over and the abandoned side's chunks and commit are
+  refused without disturbing it; an unsigned commit over the air ends the
+  transfer; a signed replay is `Denied` with the image kept (through the
+  real dispatcher) —
+  `ota::tests::o7_only_the_owner_continues_a_transfer`,
+  `o7_begin_takes_the_transfer_and_its_end_frees_it`,
+  `ota::tests::session::o7_a_serial_begin_aborts_an_air_transfer`,
+  `o7_an_air_begin_aborts_a_serial_transfer_and_completes_signed`.
+- [x] O8 The radio task keeps at most four requesters registered as
+  unicast peers (least recently used replaced), and its request counters
+  saturate and are logged on change at most every 5 s —
+  `radio::tests::o8_unicast_peers_are_bounded_and_rpc_counters_saturate`.
+  The shell (`src/shell/radio.rs`) taps `MR` frames off the radio before
+  the transport, hands new requests to the controller as `Port::Radio`
+  requests tagged with the sender's MAC, and answers repeats from the
+  cache.
+- [x] O9 `mwctl --espnow <MAC>` runs `info`, `trust info|claim`, `upload`
+  (217-byte chunks, signed commit) and `start`/`stop` through the bridge
+  with the same `Device` code as serial; it learns the bridge's MAC from
+  `Hello`, retransmits with the same id (300 ms per attempt, 5 s for
+  begin/commit/start, 10 attempts, a 30 ms wait after an unacknowledged
+  send), and never runs a step twice on a lossy link; `monitor` and
+  `reset` are refused with `--espnow` —
+  mwctl `air::tests::o9_info_over_the_air_learns_the_bridge_first`,
+  `o9_upload_over_the_air_survives_loss_and_never_runs_a_step_twice`,
+  `o9_refusals_are_device_errors_and_attempts_are_bounded`;
+  `plan::tests::o9_air_plans_use_chunks_that_fit_one_espnow_frame`;
+  `cli::tests::o9_espnow_selects_the_bridge_and_refuses_local_commands`.
+- [x] O10 On hardware (2026-10-30; ESP32-S3 `e4:b0:63:81:d3:24` on
+  `/dev/ttyACM0`, bridge ESP8266EX `5c:cf:7f:72:f6:54` on `/dev/ttyUSB0`):
+  after `trust claim` over serial, `info` and `trust info` over the air
+  answered; a signed `upload echo.wasm --start` (version 1000) installed
+  and started, and the S3's own serial showed `ota: sys/loader/begin from
+  5c:cf:7f:72:f6:54`, `trust: signed payload accepted, min_version 1000`,
+  `echo: started`, status running; `mwctl --port /dev/ttyACM0 info` said
+  running.
+- [x] O11 On the same hardware, over the air: with the device unclaimed,
+  `info`, `trust info`, `upload` and `stop` were `Denied` (`ota: ...
+  refused: device unclaimed`); claimed, an unsigned upload was `Denied` at
+  commit (`commit over the air must be signed`, transfer ended, status
+  stopped), a stale (1000) and an older (999) signed version were `Denied`
+  (`needs a valid signature and version > 1000`), and `trust claim` was
+  `Denied` (`not allowed over the air`).
+- [x] O12 On the same hardware: a serial upload begun 0.6 s into an
+  over-the-air upload took over (the air side failed at step 35/109 with
+  `InvalidRequest`, the device logged `chunk from 5c:cf:... refused:
+  another requester owns the transfer`) and installed; an over-the-air
+  upload begun 0.25 s into a serial upload took over the same way (serial
+  failed at step 23/48) and installed and started.
+- [x] O13 Throughput on the same hardware: `bench.wasm` (23072 bytes, 109
+  requests) installed signed in 1.62 s, 1.62 s and 1.69 s (about 14 KB/s),
+  `echo.wasm` (2686 bytes) with start in 0.32 s; no retransmission and no
+  unacknowledged send in any hardware run (the retransmission path is
+  covered by O4 and O9 on the host).
 
 ### DMA routes (ABI 4)
 

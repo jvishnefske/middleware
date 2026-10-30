@@ -9,8 +9,16 @@
 //!   the radio delivers `app` and `app/...` samples and nothing else;
 //!   [`goes_over_air`] applies the same filter to the payload's publishes,
 //!   so `app/...` keys are broadcast and every other key stays on the serial
-//!   ports. System keys (`sys/...`) can therefore never leave the device by
-//!   radio, nor be injected by one.
+//!   ports. System keys (`sys/...`) are never published over the radio, nor
+//!   delivered from it as publications.
+//! * Requests arrive separately, as `middleware::rpc` frames (`MR`, not the
+//!   publications' `MW`) addressed to this station: the shell taps them off
+//!   the radio before the transport (which skips them as foreign), answers
+//!   repeats from a [`Replies`] cache of [`RPC_CACHE`] responses and hands
+//!   new ones to the controller, which admits only the over-the-air update
+//!   keys on a claimed device ([`crate::ota`]). Responses go back unicast to
+//!   the requester; [`Peers`] decides which of at most [`RPC_PEERS`]
+//!   requesters stay registered with the Wi-Fi driver.
 //! * [`CHANNEL`] is the fixed Wi-Fi channel. There is no access point to
 //!   follow, so every device of a deployment must use the same channel;
 //!   the conagotchi badge firmware parks on the same channel 1 when it is not
@@ -25,7 +33,11 @@
 //!   any time.
 
 use middleware::espnow::{HEADER_LEN, MAX_FRAME, MAX_KEY, MAX_PAYLOAD};
+use middleware::rpc::Replies;
 use middleware::{Filter, Key, KeyFilter};
+
+/// A 48-bit ESP-NOW (Wi-Fi MAC) address.
+pub type Mac = [u8; 6];
 
 /// Wi-Fi channel every device sends and listens on (2.412 GHz).
 pub const CHANNEL: u8 = 1;
@@ -55,6 +67,84 @@ pub const TX_PAYLOAD: usize = MAX_PAYLOAD;
 /// Largest payload the radio can receive: a whole frame minus its header
 /// and the shortest (one byte) key.
 pub const RX_PAYLOAD: usize = MAX_FRAME - HEADER_LEN - 1;
+
+/// Request frames queued from the radio receive path to the radio task.
+pub const RPC_DEPTH: usize = 4;
+
+/// Responses remembered for answering repeats.
+pub const RPC_CACHE: usize = 8;
+
+/// Largest cached response body: the controller's largest reply
+/// (`sys/info`, at most 73 bytes, fits).
+pub const RPC_BODY: usize = 128;
+
+/// Requesters kept registered as unicast peers with the Wi-Fi driver.
+pub const RPC_PEERS: usize = 4;
+
+/// Longest a unicast response may take, send callback (and the peer's MAC
+/// acknowledgement or the driver's retries) included.
+pub const RPC_SEND_TIMEOUT_MS: u64 = 50;
+
+/// The radio task's responder state.
+pub type RpcReplies = Replies<RPC_CACHE, RPC_BODY>;
+
+/// What to do with the Wi-Fi driver's peer list before a unicast send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerChange {
+    /// The peer is registered already.
+    Known,
+    /// Register it.
+    Add,
+    /// Unregister the least recently used peer, then register this one.
+    Replace(Mac),
+}
+
+/// The requesters registered as unicast peers, least recently used first
+/// out. A value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peers<const N: usize> {
+    macs: [Option<(Mac, u32)>; N],
+    clock: u32,
+}
+
+impl<const N: usize> Default for Peers<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Peers<N> {
+    /// No peers.
+    pub const fn new() -> Self {
+        Peers { macs: [None; N], clock: 0 }
+    }
+
+    /// Records a send to `mac`; returns the next table and the driver
+    /// change it needs. With `N == 0` every peer is added and never
+    /// remembered.
+    pub fn send_to(self, mac: Mac) -> (Self, PeerChange) {
+        let mut next = self;
+        next.clock = next.clock.wrapping_add(1);
+        let clock = next.clock;
+        if let Some(slot) = next.macs.iter_mut().flatten().find(|(m, _)| *m == mac) {
+            slot.1 = clock;
+            return (next, PeerChange::Known);
+        }
+        if let Some(slot) = next.macs.iter_mut().find(|s| s.is_none()) {
+            *slot = Some((mac, clock));
+            return (next, PeerChange::Add);
+        }
+        let oldest = (0..N).max_by_key(|&i| next.macs.get(i).copied().flatten().map_or(0, |(_, t)| clock.wrapping_sub(t)));
+        match oldest.and_then(|i| next.macs.get_mut(i)) {
+            Some(slot) => {
+                let old = slot.map(|(m, _)| m);
+                *slot = Some((mac, clock));
+                (next, old.map_or(PeerChange::Add, PeerChange::Replace))
+            }
+            None => (next, PeerChange::Add),
+        }
+    }
+}
 
 /// Shortest interval between two `sys/log` reports of the counters.
 pub const REPORT_INTERVAL_MS: u32 = 5_000;
@@ -133,6 +223,60 @@ impl Counters {
     }
 }
 
+/// Request/response counters of the radio task; every count saturates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RpcCounters {
+    /// Requests handed to the controller.
+    pub executed: u32,
+    /// Repeats answered from the cache.
+    pub replayed: u32,
+    /// Requests dropped while another was in flight (the requester resends).
+    pub busy: u32,
+    /// Requests dropped before the controller: the tap queue or the
+    /// controller's inbound queue was full, or the frame was malformed.
+    pub dropped: u32,
+    /// Responses whose unicast send failed or timed out.
+    pub tx_failed: u32,
+}
+
+impl RpcCounters {
+    /// No counts.
+    pub const fn new() -> Self {
+        RpcCounters { executed: 0, replayed: 0, busy: 0, dropped: 0, tx_failed: 0 }
+    }
+
+    /// One request handed to the controller.
+    pub const fn executed(self) -> Self {
+        RpcCounters { executed: self.executed.saturating_add(1), ..self }
+    }
+
+    /// One repeat answered from the cache.
+    pub const fn replayed(self) -> Self {
+        RpcCounters { replayed: self.replayed.saturating_add(1), ..self }
+    }
+
+    /// One request dropped while another was in flight.
+    pub const fn busy(self) -> Self {
+        RpcCounters { busy: self.busy.saturating_add(1), ..self }
+    }
+
+    /// `n` requests dropped before the controller.
+    pub const fn dropped(self, n: u32) -> Self {
+        RpcCounters { dropped: self.dropped.saturating_add(n), ..self }
+    }
+
+    /// One response that could not be sent.
+    pub const fn tx_failed(self) -> Self {
+        RpcCounters { tx_failed: self.tx_failed.saturating_add(1), ..self }
+    }
+
+    /// Whether to log the counters now: they changed since the last report
+    /// (`logged`) and at least [`REPORT_INTERVAL_MS`] passed since it.
+    pub fn report(&self, logged: &RpcCounters, since_ms: u32) -> bool {
+        self != logged && since_ms >= REPORT_INTERVAL_MS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +295,33 @@ mod tests {
         assert_eq!(CHANNEL, 1);
         assert_eq!(TX_PAYLOAD, 179);
         assert_eq!(RX_PAYLOAD, 242);
+    }
+
+    #[test]
+    fn o8_unicast_peers_are_bounded_and_rpc_counters_saturate() {
+        let m = |b: u8| [2, 0, 0, 0, 0, b];
+        let p = Peers::<2>::new();
+        let (p, c) = p.send_to(m(1));
+        assert_eq!(c, PeerChange::Add);
+        let (p, c) = p.send_to(m(2));
+        assert_eq!(c, PeerChange::Add);
+        let (p, c) = p.send_to(m(1));
+        assert_eq!(c, PeerChange::Known);
+        let (p, c) = p.send_to(m(3));
+        assert_eq!(c, PeerChange::Replace(m(2)), "2 is the least recently used");
+        let (p, c) = p.send_to(m(1));
+        assert_eq!(c, PeerChange::Known);
+        let (_, c) = p.send_to(m(2));
+        assert_eq!(c, PeerChange::Replace(m(3)));
+        assert_eq!(Peers::<0>::new().send_to(m(1)).1, PeerChange::Add);
+        let c = RpcCounters::new().executed().replayed().busy().dropped(2).tx_failed();
+        assert_eq!(c, RpcCounters { executed: 1, replayed: 1, busy: 1, dropped: 2, tx_failed: 1 });
+        assert!(c.report(&RpcCounters::new(), REPORT_INTERVAL_MS));
+        assert!(!c.report(&RpcCounters::new(), REPORT_INTERVAL_MS - 1), "rate limited");
+        assert!(!c.report(&c, u32::MAX), "nothing new");
+        let full = RpcCounters { executed: u32::MAX, replayed: u32::MAX, busy: u32::MAX, dropped: u32::MAX, tx_failed: u32::MAX };
+        assert_eq!(full.executed().replayed().busy().dropped(3).tx_failed(), full);
+        const { assert!(RPC_BODY >= 73, "sys/info fits the cache") };
     }
 
     #[test]

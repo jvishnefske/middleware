@@ -25,8 +25,11 @@
 //!    opens them.
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
 //!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
-//!    publishes go out over ESP-NOW, `app/...` samples come in, and source
-//!    routes stream from it. A radio that fails to start is logged and the
+//!    publishes go out over ESP-NOW, `app/...` samples come in, source
+//!    routes stream from it, and requests addressed to this station
+//!    (`middleware::rpc`) reach the controller as `bus::Port::Radio`
+//!    requests, admitted by `esp_base::ota` (signed updates on a claimed
+//!    device only). A radio that fails to start is logged and the
 //!    firmware runs without it.
 //! 6. The [`controller`] runs on the main task and starts the stored payload
 //!    if one is valid (and the `wasm` runtime is built in).

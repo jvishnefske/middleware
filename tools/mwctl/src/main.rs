@@ -2,7 +2,10 @@
 //!
 //! Parses arguments, opens the one serial port named by `--port`
 //! ([`port::SerialTransport`]), runs the command through
-//! [`mwctl::device::Device`], and prints results to stdout, progress and
+//! [`mwctl::device::Device`] over the serial [`Link`] or, with `--espnow`,
+//! over [`AirLink`] through the USB↔ESP-NOW bridge on that port (printing
+//! the bridge's MAC first and the request counters and upload rate last),
+//! and prints results to stdout, progress and
 //! errors to stderr. `key new` / `key pub` touch only the key file: `key
 //! new` reads 32 bytes from `/dev/urandom` and creates the file with mode
 //! 0600, refusing to overwrite one. Exit status: 0 success, 1 device or port failure, 2
@@ -11,10 +14,12 @@
 mod port;
 
 use middleware::loader::trust::Version;
+use mwctl::air::{AirLink, AirTiming};
+use mwctl::bridge::{Msg, format_mac};
 use mwctl::cli::{self, Cmd, KeyCmd, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
-use mwctl::link::{Event, Link, Timeouts};
+use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::report::{format_event, format_info, format_trust};
 use mwctl::sign::{SEED_LEN, Seed, hex, sign_commit, version_at};
 use port::SerialTransport;
@@ -105,12 +110,57 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         );
         return Ok(());
     }
-    let timeouts = Timeouts {
-        request: cli.timeout,
-        ..Timeouts::default()
+    let Some(target) = cli.espnow else {
+        let timeouts = Timeouts {
+            request: cli.timeout,
+            ..Timeouts::default()
+        };
+        let mut dev = Device::new(Link::new(transport, timeouts));
+        let result = command(&mut dev, cli.cmd);
+        print_events(&dev.take_events());
+        return result;
     };
-    let mut dev = Device::new(Link::new(transport, timeouts));
-    let result = match cli.cmd {
+    // A clock-derived first id, so a restarted mwctl does not reuse the ids
+    // the device has cached responses for.
+    let first_id = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(1, |d| (d.as_millis() & 0xFFFF) as u16);
+    let mut link = AirLink::new(transport, target, AirTiming::default(), first_id);
+    if let (
+        Msg::Hello {
+            mac,
+            channel,
+            version,
+        },
+        stats,
+    ) = link.query()?
+    {
+        eprintln!(
+            "bridge {} (channel {channel}, protocol {version}) -> device {} over ESP-NOW",
+            format_mac(&mac),
+            format_mac(&target)
+        );
+        if let Some(s) = stats {
+            eprintln!(
+                "bridge counters: rx {} (dropped {}), tx ok {} failed {} dropped {}, serial bad {}",
+                s.rx, s.rx_dropped, s.tx_ok, s.tx_fail, s.tx_dropped, s.serial_bad
+            );
+        }
+    }
+    let mut dev = Device::new(link);
+    let result = command(&mut dev, cli.cmd);
+    print_events(&dev.take_events());
+    let s = dev.link().stats();
+    eprintln!(
+        "air: {} request(s), {} send(s), {} retransmission(s), {} unacknowledged, {} stale frame(s) skipped",
+        s.requests, s.sends, s.retransmissions, s.nacks, s.skipped
+    );
+    result
+}
+
+/// Runs one device command over any endpoint.
+fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd) -> Result<(), Error> {
+    match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Start => match dev.start() {
             Ok(()) => {
@@ -120,7 +170,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
             Err(e) => {
                 // The device logs why a start failed right after its reply;
                 // show those lines before reporting the error.
-                let _ = monitor(&mut dev, Some(START_FAILURE_LOG_SECONDS));
+                let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS));
                 Err(e)
             }
         },
@@ -157,6 +207,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
                 }
             };
             println!("uploading {} ({} bytes)", file.display(), image.len());
+            let began = Instant::now();
             let r = dev.upload(
                 &image,
                 UploadOptions {
@@ -167,23 +218,23 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
                 progress,
             );
             eprintln!();
+            let secs = began.elapsed().as_secs_f64();
             r.map(|()| {
                 println!(
-                    "installed {} ({} bytes){}",
+                    "installed {} ({} bytes){} in {secs:.2} s ({:.0} bytes/s)",
                     file.display(),
                     image.len(),
-                    if start { " and started" } else { "" }
+                    if start { " and started" } else { "" },
+                    image.len() as f64 / secs.max(1e-6)
                 );
             })
         }
-        Cmd::Monitor { seconds } => monitor(&mut dev, seconds),
+        Cmd::Monitor { seconds } => monitor(dev, seconds),
         Cmd::Reset => Ok(()),
-    };
-    print_events(&dev.take_events());
-    result
+    }
 }
 
-fn monitor(dev: &mut Device<SerialTransport>, seconds: Option<u64>) -> Result<(), Error> {
+fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>) -> Result<(), Error> {
     let end = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     match seconds {
         Some(s) => eprintln!("monitoring for {s} s"),

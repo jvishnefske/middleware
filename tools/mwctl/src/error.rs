@@ -47,6 +47,8 @@ pub enum Error {
     Plan(PlanError),
     /// A signing key file or version could not be used.
     Key(KeyError),
+    /// The USB↔ESP-NOW bridge did not answer or misbehaved.
+    Bridge(String),
     /// One step of an upload failed.
     Upload {
         /// Zero-based step index.
@@ -128,8 +130,9 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
              the previously installed payload is kept"
         }
         Denied if is(keys::TRUST_CLAIM) => {
-            "the device is already claimed; hold BOOT for 3 s after boot to open the 60 s \
-             re-key window, then claim"
+            "the device is already claimed (or the claim came over ESP-NOW, where it is never \
+             accepted); hold BOOT for 3 s after boot to open the 60 s re-key window, then \
+             claim over the serial port"
         }
         NotFound if is(keys::TRUST_INFO) || is(keys::TRUST_CLAIM) => {
             "this firmware does not support signed payloads (built without `trust`)"
@@ -139,7 +142,11 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
         InvalidRequest => "the device rejected the request body",
         BufferTooSmall => "the response did not fit the device's buffer",
         Internal => "the device failed internally (for example a flash error)",
-        Denied => "the device refused the request by policy",
+        Denied => {
+            "the device refused the request by policy (over ESP-NOW a device accepts only \
+             sys/info, sys/trust/info, sys/loader/*, sys/payload/start|stop, and only once \
+             it is claimed)"
+        }
     }
 }
 
@@ -162,6 +169,7 @@ impl fmt::Display for Error {
             Error::Malformed { key } => write!(f, "{key}: malformed response body"),
             Error::Frame(e) => write!(f, "could not encode request frame: {e:?}"),
             Error::Plan(e) => write!(f, "{e}"),
+            Error::Bridge(e) => write!(f, "ESP-NOW bridge: {e}"),
             Error::Key(e) => write!(f, "{e}"),
             Error::Upload {
                 step,

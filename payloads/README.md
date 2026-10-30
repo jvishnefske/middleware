@@ -237,3 +237,21 @@ upload it. The page sends it with the loader protocol, shows progress, and
 starts the payload once the device has verified the CRC. The page also has an
 editor that compiles the WAT and AssemblyScript templates in the browser and
 a simulator that runs them without a device.
+
+From a terminal, `mwctl` does the same over the device's serial port:
+
+    mwctl --port /dev/ttyACM0 upload target/wasm32-unknown-unknown/release/echo.wasm --start
+
+A claimed ESP32 or ESP32-S3 also takes payloads over ESP-NOW, through the
+ESP8266 bridge in `tools/espnow-bridge` plugged into the host. Claim it over
+serial first (an unclaimed device refuses everything over the air), then
+sign every upload with the same key:
+
+    mwctl key new ~/.config/mw/key.bin
+    mwctl --port /dev/ttyACM0 trust claim --key ~/.config/mw/key.bin
+    mwctl --port /dev/ttyUSB0 --espnow e4:b0:63:81:d3:24 upload echo.wasm --key ~/.config/mw/key.bin --start
+
+The MAC is the device's Wi-Fi station MAC (`espflash board-info` prints
+it). Over the air the device accepts only `info`, `trust info`, `upload`
+(signed, version above the last), `start` and `stop`; `trust claim` is
+always refused there. Uploads go in 217-byte chunks at about 14 KB/s.

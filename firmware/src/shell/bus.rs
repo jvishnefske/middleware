@@ -5,7 +5,11 @@
 //!   buffer.
 //! * `replies` — one signal per port; the controller answers a request on
 //!   the port it came from. A link task has at most one request in flight,
-//!   so a signal (latest value wins) is enough.
+//!   so a signal (latest value wins) is enough. With `espnow` the radio task
+//!   is a third port ([`Port::Radio`]): it hands over requests received over
+//!   ESP-NOW (one at a time, tagged with the requester's MAC as
+//!   [`Origin::Air`]) without waiting, and takes the reply from its signal
+//!   in its own select loop.
 //! * `outbound` — a publish/subscribe channel with one subscriber per port,
 //!   so device publications (log lines, payload status, payload publishes)
 //!   reach every port. Publishing never blocks: a port that cannot keep up
@@ -27,9 +31,14 @@ use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 use middleware::Key;
+use esp_base::ota::Origin;
 
-/// Number of serial ports the protocol can run on.
+/// Number of serial ports the protocol can run on (each subscribes to
+/// outbound publications).
 pub const PORTS: usize = 2;
+
+/// Ports that can send requests: the serial ports and the radio task.
+const REPLY_PORTS: usize = PORTS + 1;
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
 pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
@@ -53,6 +62,9 @@ pub enum Port {
     /// The chip's native USB-Serial-JTAG (ESP32-S3, ESP32-C3).
     #[cfg_attr(feature = "esp32", allow(dead_code))]
     Usb,
+    /// The radio task: requests received over ESP-NOW (`espnow`).
+    #[cfg_attr(not(feature = "espnow"), allow(dead_code))]
+    Radio,
 }
 
 impl Port {
@@ -60,6 +72,7 @@ impl Port {
         match self {
             Port::Uart => 0,
             Port::Usb => 1,
+            Port::Radio => 2,
         }
     }
 }
@@ -78,8 +91,10 @@ pub enum Kind {
 
 /// A request or publication from a port, owned.
 pub struct Inbound {
-    /// Port it arrived on.
+    /// Port it arrived on (where the reply goes).
     pub port: Port,
+    /// Who sent it: a serial port, or an ESP-NOW peer.
+    pub origin: Origin,
     /// Request or publication.
     pub kind: Kind,
     /// Key (already validated by frame decoding).
@@ -89,12 +104,20 @@ pub struct Inbound {
 }
 
 impl Inbound {
-    /// Copies a frame's key and body; `None` if the body is too large.
+    /// Copies a serial frame's key and body; `None` if the body is too
+    /// large.
     pub fn new(port: Port, kind: Kind, key: Key<'_>, body: &[u8]) -> Option<Self> {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
-        Some(Inbound { port, kind, key: k, body })
+        Some(Inbound { port, origin: Origin::Serial, kind, key: k, body })
+    }
+
+    /// Copies a request received over ESP-NOW from `mac`, answered on
+    /// [`Port::Radio`] with bus id `id`.
+    #[cfg(feature = "espnow")]
+    pub fn from_air(mac: [u8; 6], id: u8, key: Key<'_>, body: &[u8]) -> Option<Self> {
+        Inbound::new(Port::Radio, Kind::Request { id }, key, body).map(|m| Inbound { origin: Origin::Air(mac), ..m })
     }
 }
 
@@ -122,7 +145,7 @@ pub struct TooLarge;
 /// Shared channels.
 pub struct Bus {
     inbound: Channel<Mutex, Inbound, INBOUND_DEPTH>,
-    replies: [Signal<Mutex, Reply>; PORTS],
+    replies: [Signal<Mutex, Reply>; REPLY_PORTS],
     outbound: PubSubChannel<Mutex, Outbound, OUTBOUND_DEPTH, PORTS, 0>,
 }
 
@@ -134,7 +157,7 @@ impl Bus {
     pub const fn new() -> Self {
         Bus {
             inbound: Channel::new(),
-            replies: [Signal::new(), Signal::new()],
+            replies: [Signal::new(), Signal::new(), Signal::new()],
             outbound: PubSubChannel::new(),
         }
     }
@@ -142,6 +165,29 @@ impl Bus {
     /// Queues a message for the controller, waiting while it is busy.
     pub async fn send_inbound(&self, msg: Inbound) {
         self.inbound.send(msg).await;
+    }
+
+    /// Queues a message for the controller without waiting; `false` (the
+    /// message dropped) when the queue is full.
+    #[cfg(feature = "espnow")]
+    pub fn try_send_inbound(&self, msg: Inbound) -> bool {
+        self.inbound.try_send(msg).is_ok()
+    }
+
+    /// Waits for the next reply on the radio's port, whatever its id (the
+    /// radio task matches it to the request it handed over).
+    #[cfg(feature = "espnow")]
+    pub async fn radio_reply(&self) -> Reply {
+        match self.replies.get(Port::Radio.index()) {
+            Some(signal) => signal.wait().await,
+            None => core::future::pending().await,
+        }
+    }
+
+    /// The radio port's reply, if one is waiting.
+    #[cfg(feature = "espnow")]
+    pub fn try_radio_reply(&self) -> Option<Reply> {
+        self.replies.get(Port::Radio.index()).and_then(Signal::try_take)
     }
 
     /// Waits for the next inbound message.

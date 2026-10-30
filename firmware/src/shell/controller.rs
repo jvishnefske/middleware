@@ -42,6 +42,19 @@
 //!   device stops timers, aborts DMA, disables interrupts, releases the
 //!   pins and clears the queue.
 //!
+//! Origin: every request carries where it came from
+//! ([`esp_base::ota::Origin`]: a serial port, or an ESP-NOW peer's MAC,
+//! answered by the radio task). Before dispatch [`esp_base::ota::admit`]
+//! decides whether it may run: over the air only the update keys, only on
+//! a claimed device, commits only signed; and a loader `chunk` or `commit`
+//! only from the requester whose `begin` started the transfer in progress
+//! (the controller keeps that owner, [`esp_base::ota::owner_after`]), so a
+//! `begin` from the other side aborts a transfer cleanly. Refusals are
+//! answered (`Denied`, or `InvalidRequest` for a transfer owned by someone
+//! else) and logged; an unsigned commit over the air also ends the
+//! transfer, as a refused commit does on serial; over-the-air `begin`, `commit`, `start` and `stop` are
+//! logged with the requester's MAC.
+//!
 //! Trust: each request is dispatched with `Context::rekey_window` taken
 //! from [`presence::window_open`]. A `Claim` action saves the trust record
 //! ([`TrustStore::save`], on the flash the payload store lends) and closes
@@ -55,6 +68,8 @@
 //! `sys/log` lines.
 
 use esp_base::dispatch::{Action, Context, Outcome, State, handle_request};
+use esp_base::ota::{self, Origin};
+use middleware::loader::Loader;
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::TrustStore;
 use middleware::loader::keys;
@@ -102,6 +117,8 @@ pub struct Controller {
     store: Option<Store>,
     /// The trust partition; `None` when the partition table has none.
     trust: Option<TrustStore>,
+    /// Who started the loader transfer in progress.
+    owner: Option<Origin>,
     bus: &'static Bus,
     #[cfg(feature = "wasm")]
     profile: &'static Profile,
@@ -145,6 +162,7 @@ impl Controller {
             ctx,
             store,
             trust,
+            owner: None,
             bus,
             #[cfg(feature = "wasm")]
             profile,
@@ -232,13 +250,50 @@ impl Controller {
         }
     }
 
-    /// Dispatches one request and performs its storage action. `None` reply
-    /// means a start was requested.
-    fn handle(&mut self, id: u8, key: &str, body: &[u8]) -> Handled {
+    /// Logs a refused request, or an over-the-air one worth noting.
+    fn log_origin(&self, origin: Origin, key: Key<'_>, refused: Option<ota::Refusal>) {
+        let notable = [keys::BEGIN, keys::COMMIT, keys::START, keys::STOP].contains(&key);
+        match (origin, refused) {
+            (Origin::Air(m), Some(r)) => self.bus.log(format_args!(
+                "ota: {} from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} refused: {}",
+                key.as_str(), m[0], m[1], m[2], m[3], m[4], m[5], r.reason()
+            )),
+            (Origin::Serial, Some(r)) => {
+                self.bus.log(format_args!("loader: {} from serial refused: {}", key.as_str(), r.reason()))
+            }
+            (Origin::Air(m), None) if notable => self.bus.log(format_args!(
+                "ota: {} from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                key.as_str(), m[0], m[1], m[2], m[3], m[4], m[5]
+            )),
+            _ => {}
+        }
+    }
+
+    /// Admits, dispatches one request and performs its storage action.
+    /// `None` reply means a start was requested.
+    fn handle(&mut self, id: u8, origin: Origin, key: &str, body: &[u8]) -> Handled {
         let Ok(key) = Key::new(key) else {
             let reply = Reply { id, result: Err(HandlerError::InvalidRequest) };
             return Handled { reply: Some(reply), stop: false };
         };
+        if let Err(refusal) = ota::admit(&self.state.trust(), self.owner, origin, key, body) {
+            self.log_origin(origin, key, Some(refusal));
+            if refusal.abandons_transfer() {
+                self.set_state(self.state.storage_failed());
+                self.owner = None;
+            }
+            let reply = Reply { id, result: Err(refusal.error()) };
+            return Handled { reply: Some(reply), stop: false };
+        }
+        self.log_origin(origin, key, None);
+        let handled = self.dispatch(id, key, body);
+        let receiving = matches!(self.state.loader(), Loader::Receiving { .. });
+        self.owner = ota::owner_after(self.owner, origin, key, receiving);
+        handled
+    }
+
+    /// Dispatches one admitted request and performs its storage action.
+    fn dispatch(&mut self, id: u8, key: Key<'_>, body: &[u8]) -> Handled {
         let mut out = [0u8; MAX_REPLY];
         let ctx = Context { rekey_window: presence::window_open(), ..self.ctx };
         let outcome = handle_request(self.state, &ctx, key, body, &mut out);
@@ -284,7 +339,7 @@ impl Controller {
         loop {
             let msg: Inbound = self.bus.receive_inbound().await;
             if let Kind::Request { id } = msg.kind {
-                match self.handle(id, &msg.key, &msg.body).reply {
+                match self.handle(id, msg.origin, &msg.key, &msg.body).reply {
                     Some(reply) => self.bus.reply(msg.port, reply),
                     None => return (msg.port, id),
                 }
@@ -456,7 +511,7 @@ impl Controller {
                         }
                     },
                     Kind::Request { id } => {
-                        let handled = self.handle(id, &msg.key, &msg.body);
+                        let handled = self.handle(id, msg.origin, &msg.key, &msg.body);
                         // A start while running is answered by dispatch, so
                         // a reply is always present here.
                         let reply = handled.reply.unwrap_or(Reply { id, result: Ok(Vec::new()) });

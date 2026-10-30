@@ -24,7 +24,8 @@ Feature isolation is checked by `scripts/check-features.sh`.
 |----------------------|--------------------------------------------------------------|
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
-| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info` |
+| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
+| `tools/espnow-bridge/` | ESP8266 USB↔ESP-NOW bridge sketch for `mwctl --espnow` (`check.sh`: codec test and build; upload with `arduino-cli upload --fqbn esp8266:esp8266:generic -p <port>`) |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
 | `tools/jpeg-fixtures/` | regenerate (or `--check`) the fake camera's baked JPEG frames in `fixtures/cam/` (8 frames at 240×240 and 120×120, baseline 4:2:0): `cargo run -p jpeg-fixtures` |

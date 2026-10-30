@@ -100,6 +100,15 @@
 //!
 //! Everything here is pure except the radio calls; the transport is tested
 //! on the host with an in-memory radio.
+//!
+//! # Request/response
+//!
+//! [`rpc`] adds unicast request/response on the same radio
+//! ([`rpc::EspNowUnicast`]): `MR` frames ([`crate::rpc`]) with correlation
+//! ids, retransmission and duplicate suppression. The transport here skips
+//! them as foreign frames.
+
+pub mod rpc;
 
 use crate::dedup::{SeenTable, Sequence};
 use crate::key::{Key, KeyFilter, KeyFilterBuf};
@@ -113,8 +122,9 @@ pub const MAGIC: [u8; 2] = *b"MW";
 pub const VERSION: u8 = 1;
 /// Fixed header: magic, version, short id, sequence, key length.
 pub const HEADER_LEN: usize = 7;
-/// Largest ESP-NOW v1 frame.
+/// Largest ESP-NOW v1 frame (the request/response frames share it).
 pub const MAX_FRAME: usize = 250;
+const _: () = assert!(MAX_FRAME == crate::rpc::MAX_FRAME);
 /// Longest key this transport carries.
 pub const MAX_KEY: usize = 64;
 /// Largest payload this transport carries (fits with a [`MAX_KEY`] key).

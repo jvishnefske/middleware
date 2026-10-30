@@ -5,6 +5,12 @@
 //! a [`Parsed::Help`] request. Options may appear before or after the
 //! command; command-specific options are rejected on other commands.
 //! [`HELP`] is the usage text printed by `--help` and on usage errors.
+//!
+//! `--espnow <MAC>` makes `--port` the USB↔ESP-NOW bridge and sends the
+//! command over the air to the device with that MAC (default baud
+//! [`crate::bridge::BAUD`]); only `info`, `upload`, `start`, `stop` and
+//! `trust info|claim` travel over the air (`monitor` and `reset` act on the
+//! port's own board).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,6 +21,7 @@ mwctl - talk to the middleware ESP base firmware over one serial port
 
 USAGE:
     mwctl --port <PATH> [--baud <N>] [--timeout <MS>] <COMMAND>
+    mwctl --port <BRIDGE> --espnow <MAC> <COMMAND>    (over the air, see below)
     mwctl key new <KEYFILE> | key pub <KEYFILE>
 
 COMMANDS:
@@ -47,6 +54,14 @@ OPTIONS:
     --baud <N>         Baud rate [default: 115200]
     --timeout <MS>     Per-attempt response timeout [default: 1000]; each request is
                        retried once on timeout, sys/loader/begin waits at least 5000 ms
+    --espnow <MAC>     Talk to the device with this Wi-Fi MAC over ESP-NOW, through the
+                       USB-ESP-NOW bridge (tools/espnow-bridge) on --port [baud default
+                       460800]. Requests go unicast with retransmission (300 ms per
+                       attempt, 5000 ms for begin/commit/start, 10 attempts); uploads use
+                       217-byte chunks. The device answers only when claimed, only
+                       info, trust info, upload, start and stop, and only signed
+                       commits; trust claim is always refused over the air.
+                       Not for monitor or reset.
     -h, --help         Print this help
 
 The port is opened with DTR and RTS deasserted so opening it neither resets
@@ -121,6 +136,9 @@ pub struct Cli {
     pub baud: u32,
     /// Per-attempt timeout.
     pub timeout: Duration,
+    /// Over ESP-NOW to the device with this MAC, through the bridge on
+    /// `port`.
+    pub espnow: Option<[u8; 6]>,
     /// What to do.
     pub cmd: Cmd,
 }
@@ -146,7 +164,8 @@ fn number<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, Stri
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
     let mut args = args.into_iter();
     let mut port = None;
-    let mut baud = DEFAULT_BAUD;
+    let mut baud = None;
+    let mut espnow = None;
     let mut timeout = DEFAULT_TIMEOUT;
     let mut positional: Vec<String> = Vec::new();
     let mut start = false;
@@ -158,7 +177,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--port" => port = Some(args.next().ok_or("--port needs a path")?),
-            "--baud" => baud = number("--baud", args.next())?,
+            "--baud" => baud = Some(number("--baud", args.next())?),
+            "--espnow" => {
+                let v = args
+                    .next()
+                    .ok_or("--espnow needs a MAC such as e4:b0:63:81:d3:24")?;
+                espnow = Some(
+                    crate::bridge::parse_mac(&v)
+                        .ok_or_else(|| format!("--espnow: '{v}' is not a MAC"))?,
+                );
+            }
             "--timeout" => timeout = Duration::from_millis(number("--timeout", args.next())?),
             "--start" => start = true,
             "--corrupt-chunk" => corrupt_chunk = Some(number("--corrupt-chunk", args.next())?),
@@ -169,6 +197,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             _ => positional.push(a),
         }
     }
+    let baud = baud.unwrap_or(if espnow.is_some() {
+        crate::bridge::BAUD
+    } else {
+        DEFAULT_BAUD
+    });
     if baud == 0 {
         return Err("--baud must be positive".into());
     }
@@ -239,11 +272,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     if let Some(extra) = pos.next() {
         return Err(format!("unexpected argument '{extra}'"));
     }
+    if espnow.is_some() && matches!(cmd, Cmd::Monitor { .. } | Cmd::Reset) {
+        return Err(format!(
+            "'{name}' does not go over the air; drop --espnow and use the device's own port"
+        ));
+    }
     let port = port.ok_or("--port <PATH> is required (mwctl never scans for ports)")?;
     Ok(Parsed::Run(Cli {
         port,
         baud,
         timeout,
+        espnow,
         cmd,
     }))
 }
@@ -264,6 +303,30 @@ mod tests {
     }
 
     #[test]
+    fn o9_espnow_selects_the_bridge_and_refuses_local_commands() {
+        let c = run("--port /dev/ttyUSB0 --espnow e4:b0:63:81:d3:24 upload a.wasm --key k --start");
+        assert_eq!(c.espnow, Some([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24]));
+        assert_eq!(c.baud, crate::bridge::BAUD);
+        assert_eq!(
+            run("--port p --espnow e4:b0:63:81:d3:24 --baud 115200 info").baud,
+            115_200
+        );
+        assert_eq!(run("--port p info").espnow, None);
+        assert_eq!(
+            run("--port p --espnow e4:b0:63:81:d3:24 trust claim --key k").cmd,
+            Cmd::TrustClaim { key: "k".into() }
+        );
+        for bad in [
+            "--port p --espnow e4:b0:63:81:d3 info",
+            "--port p --espnow",
+            "--port p --espnow e4:b0:63:81:d3:24 monitor",
+            "--port p --espnow e4:b0:63:81:d3:24 reset",
+        ] {
+            assert!(p(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn parses_every_command() {
         let c = run("--port /dev/ttyUSB0 info");
         assert_eq!(
@@ -272,6 +335,7 @@ mod tests {
                 port: "/dev/ttyUSB0".into(),
                 baud: 115_200,
                 timeout: DEFAULT_TIMEOUT,
+                espnow: None,
                 cmd: Cmd::Info
             }
         );
@@ -281,6 +345,7 @@ mod tests {
                 port: "p".into(),
                 baud: 921_600,
                 timeout: DEFAULT_TIMEOUT,
+                espnow: None,
                 cmd: Cmd::Upload {
                     file: "a.wasm".into(),
                     start: true,

@@ -35,7 +35,11 @@
 //!   deadline table, the DMA channel state machine, the UART receive ring,
 //!   and the events ISRs and completions push.
 //! * [`radio`] — the ESP-NOW policy: the fixed channel, the `app` key
-//!   filter for what goes over the air, queue depths and drop counters.
+//!   filter for what goes over the air, queue depths and drop counters,
+//!   the request responder's cache size and the unicast peer table.
+//! * [`ota`] — over-the-air payload updates: which requests a radio peer
+//!   may make (claimed devices only, update keys only, signed commits) and
+//!   which requester owns a loader transfer.
 //! * [`route`] — the ABI 4 DMA routes: source-route pacing and the
 //!   in-place ESP-NOW chunk frame, the sink route's bus transfers, the
 //!   route table (handles, keys, owned bus and D/C pin) and the source
@@ -55,6 +59,7 @@ pub mod camera;
 pub mod chip;
 pub mod dispatch;
 pub mod image;
+pub mod ota;
 pub mod perf;
 pub mod periph;
 pub mod presence;
