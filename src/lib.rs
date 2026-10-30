@@ -37,6 +37,10 @@
 //!   chunk wire format, the source chunker, the sink state machine, a test
 //!   pattern and looped stored frames (the fake JPEG camera), behind the
 //!   ABI 4 DMA routes.
+//! * [`rpc`] — request/response over a datagram radio (always built, pure):
+//!   the ESP-NOW request and response frames, the requester's retry rule
+//!   and the responder's duplicate suppression; `espnow::rpc` runs them
+//!   over an ESP-NOW radio.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
 //!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
@@ -81,6 +85,7 @@ pub mod dns;
 pub mod key;
 pub mod loader;
 pub mod mdns;
+pub mod rpc;
 pub mod serial;
 pub mod stream;
 pub mod transport;

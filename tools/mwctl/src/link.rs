@@ -42,6 +42,51 @@ pub trait Transport {
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
 }
 
+/// A request/response path to one device: the serial [`Link`], or
+/// [`crate::air::AirLink`] over ESP-NOW through a bridge. [`crate::device::Device`]
+/// runs the protocol operations over either.
+pub trait Endpoint {
+    /// Sends a request and returns the response body.
+    fn request(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Error>;
+
+    /// Publications and noise received since the last call.
+    fn take_events(&mut self) -> Vec<Event>;
+
+    /// Waits until `deadline` for the next publication or noise run.
+    fn next_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error>;
+
+    /// Largest `sys/loader/chunk` data this path carries in one request.
+    fn chunk_size(&self) -> usize;
+
+    /// Sends a loader/system command.
+    fn command(&mut self, cmd: &Command<'_>) -> Result<Vec<u8>, Error> {
+        let mut body = [0u8; 8 + middleware::loader::CHUNK_MAX];
+        let n = cmd
+            .encode_body(&mut body)
+            .ok_or(Error::Frame(FrameError::TooLarge))?;
+        let body = body.get(..n).ok_or(Error::Frame(FrameError::TooLarge))?;
+        self.request(cmd.key(), body)
+    }
+}
+
+impl<T: Transport> Endpoint for Link<T> {
+    fn request(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
+        Link::request(self, key, body)
+    }
+
+    fn take_events(&mut self) -> Vec<Event> {
+        Link::take_events(self)
+    }
+
+    fn next_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
+        Link::next_event(self, deadline)
+    }
+
+    fn chunk_size(&self) -> usize {
+        middleware::loader::CHUNK_MAX
+    }
+}
+
 /// Something the device sent that is not the response being waited for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -291,16 +336,6 @@ impl<T: Transport> Link<T> {
             key: key.as_str().to_owned(),
             attempts,
         })
-    }
-
-    /// Sends a loader/system command.
-    pub fn command(&mut self, cmd: &Command<'_>) -> Result<Vec<u8>, Error> {
-        let mut body = [0u8; 8 + middleware::loader::CHUNK_MAX];
-        let n = cmd
-            .encode_body(&mut body)
-            .ok_or(Error::Frame(FrameError::TooLarge))?;
-        let body = body.get(..n).ok_or(Error::Frame(FrameError::TooLarge))?;
-        self.request(cmd.key(), body)
     }
 
     /// Waits until `deadline` for the next [`Event`] (publication or noise).

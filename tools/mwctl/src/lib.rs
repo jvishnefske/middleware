@@ -16,6 +16,12 @@
 //!   such as a 74880-baud ROM banner that has no delimiter before the next
 //!   frame), matches responses by correlation id, and retries timed-out
 //!   attempts with a fresh id.
+//! * [`bridge`] — the serial framing to the USB↔ESP-NOW bridge (an
+//!   ESP8266, `tools/espnow-bridge`): COBS + CRC-16 frames carrying raw
+//!   ESP-NOW frames with their MACs, `Hello`, `Stats` and send results.
+//! * [`air`] — [`air::AirLink`], an [`link::Endpoint`] that reaches a device
+//!   over ESP-NOW through the bridge with `middleware::rpc` requests:
+//!   unicast, retransmitted with the same id, small chunks.
 //! * [`device`] — the protocol operations (`info`, `upload` signed or not,
 //!   `trust info`, `trust claim`, `start`, `stop`, monitor events) over any
 //!   transport.
@@ -31,6 +37,8 @@
 //! and the device's trust rules.
 #![forbid(unsafe_code)]
 
+pub mod air;
+pub mod bridge;
 pub mod cli;
 pub mod device;
 pub mod error;
