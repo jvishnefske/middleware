@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15):
+# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, M16):
 #   * the always-built pure core, including `discovery` and `dns::wire`,
 #     builds for thumbv6m-none-eabi with no features;
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2) '
-EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures'
+EMBEDDED_FEATURES='ble|espnow|serial|smbus|trust|cam-fixtures'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -44,7 +44,7 @@ for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.r
     ungated "${decl%%:*}" "${decl#*:}" || fail "${decl#*:} in ${decl%%:*} is missing or cfg-gated"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "smbus" "smbus,postcard"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then

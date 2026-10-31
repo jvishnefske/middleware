@@ -89,7 +89,7 @@ characteristic UUID and a 16-bit advertising id.
 ### Feature isolation
 
 - [x] F1 `ble` and `postcard` build for `thumbv6m-none-eabi` without `std` —
-  `scripts/check-features.sh` (builds `ble`, `ble,postcard`, `postcard`, `serial`, `espnow`, `espnow,postcard` for `thumbv6m-none-eabi`, asserts `std` off).
+  `scripts/check-features.sh` (builds `ble`, `ble,postcard`, `postcard`, `serial`, `espnow`, `espnow,postcard`, `smbus`, `smbus,postcard` for `thumbv6m-none-eabi`, asserts `std` off; see M16).
 - [x] F2 `zenoh`, `grpc` and `istio` build on the host without pulling in the
   `ble` module —
   `scripts/check-features.sh` (builds `zenoh`, `grpc`, `grpc,istio`, `zenoh,grpc,istio,prost`, asserts `ble` off).
@@ -991,6 +991,176 @@ encoder; `MdnsSocket` implements `Browse`.
   (200 wrong-id replies from the nameserver's address and 200 bogus-pod
   replies from another port, one attempt),
   `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
+
+### SMBus multi-master transport (M…)
+
+`smbus` (feature `smbus`, `no_std`, no heap): the middleware over one I2C
+bus shared by several microcontrollers, using SMBus conventions. Every node
+is a master when it sends (an `embedded-hal-async` 1.0 `I2c`) and a target
+at its own 7-bit address when it receives (the crate's own `I2cTarget`
+trait, since `embedded-hal` 1.0 has none, implemented by a HAL adapter);
+a `Clock` (milliseconds now, microsecond waits) times retries, timeouts and
+reassembly. Unicast (requests, replies, errors, `Target::Node`) is an SMBus
+Block Write to the destination; publications are Block Writes to a shared
+broadcast address, the I2C general call `0x00` by default. Messages larger
+than a block stream across up to 128 blocks. The pure core is
+`smbus::{address, wire, reassembly, retry}`; `smbus::node::SmbusNode` is the
+shell. Tests marked *(smbus)* run under `--features smbus` or
+`--all-features`.
+
+- [x] M1 Addresses are validated 7-bit values: a node address refuses the
+  I2C reserved ranges (UM10204 §3.1.12: `0x00..=0x07`, `0x78..=0x7F`) and
+  the SMBus reserved addresses (SMBus 2.0 appendix C: `0x08` host, `0x0C`
+  alert response, `0x28` and `0x37` ACCESS.bus, `0x61` ARP default), 107
+  addresses remain; the broadcast address is the general call or any node
+  address; a node's `SenderId` is `SMB` followed by its address and maps
+  back to it, and foreign ids map to nothing —
+  `smbus::address::tests::m1_reserved_ranges_are_refused`,
+  `m1_every_other_seven_bit_address_is_a_node`,
+  `m1_broadcast_accepts_general_call_and_node_addresses`,
+  `m1_sender_ids_round_trip_and_reject_foreign_ids`; `tests/smbus.rs`:
+  `m1_reserved_addresses_build_no_node` *(smbus)*.
+- [x] M2 Each fragment is one SMBus Block Write with PEC: command `0xC0`
+  plus the kind (publish 1, request 2, reply 3, error 4), count, then data
+  holding the sender's address, the message id, the fragment index with a
+  last flag, and the fragment's body; the block size `B` is a const generic
+  from 4 to 255 (32 by default, SMBus 2.0). Decoding checks length and
+  count, then the PEC, then the command and the sender, and never panics:
+  every single-bit corruption is rejected, the PEC binds the destination
+  address, foreign commands and reserved senders are refused, and 20 000
+  pseudo-random inputs pass through both decoders —
+  `smbus::wire::tests::m2_block_layout_is_smbus_block_write_with_pec`,
+  `m2_blocks_round_trip_for_every_kind_and_size`,
+  `m2_bad_blocks_are_rejected`,
+  `m2_foreign_commands_and_bad_sources_are_rejected_after_the_pec`,
+  `m2_encode_refuses_what_does_not_fit`, `m2_hostile_input_never_panics`
+  *(smbus)*.
+- [x] M3 The SMBus Packet Error Code is CRC-8/SMBUS (polynomial `0x07`,
+  init 0, no reflection) in `crc`, computed incrementally over the address
+  byte with R/W̄, the command, the count and the data: catalogue check
+  value `0xF4`, single-byte and Block Write vectors cross-checked with an
+  independent implementation, and a transaction followed by its PEC
+  checksums to zero — `crc::tests::reference_check_values`,
+  `crc::tests::m3_crc8_smbus_vectors`.
+- [x] M4 Message bodies: a publish is key length, key, payload; a request
+  carries the caller's deadline (32-bit milliseconds, all ones for none)
+  before its key; a reply is the response; an error is one
+  `HandlerError::code`. Bodies are cut into fragments straight from the
+  caller's key and payload (no copy of the whole message); a body needs at
+  most 128 fragments (3 712 bytes at `B` = 32) and every node also bounds it
+  by its `M` (512 by default); malformed bodies are rejected —
+  `smbus::wire::tests::m4_message_bodies_round_trip_through_fragments`,
+  `m4_fragment_counts_are_bounded`, `m4_malformed_bodies_are_rejected`
+  *(smbus)*.
+- [x] M5 Reassembly keeps up to `R` messages in `M`-byte slots keyed by
+  sender, kind and message id, so interleaved fragments of several masters
+  (and of several messages of one) reassemble independently; in-order
+  fragments are appended, index 0 restarts, a repeated fragment is ignored,
+  a skipped one abandons the message, a message over `M` is discarded, a
+  fragment with no message in progress is an orphan, a partial message
+  older than the reassembly timeout on the caller's clock is expired, and a
+  full table evicts the oldest; every discard is counted and nothing
+  partial is ever returned —
+  `smbus::reassembly::tests::m5_in_order_fragments_complete_and_free_the_slot`,
+  `m5_interleaved_masters_reassemble_independently`,
+  `m5_duplicates_are_ignored_and_gaps_abandon_the_message`,
+  `m5_index_zero_restarts_a_partial_message`,
+  `m5_oversized_messages_are_discarded`,
+  `m5_partial_messages_expire_on_the_callers_clock`,
+  `m5_a_full_table_evicts_the_oldest_message`,
+  `m5_hostile_fragment_streams_never_panic_or_return_partials` *(smbus)*.
+- [x] M6 Failed blocks are retried per block under a bounded policy: lost
+  arbitration up to 8 times, NACKs up to 3 times (counted apart, so a block
+  is written at most 10 times), a broadcast whose address nobody
+  acknowledges is dropped at once as unheard, bus errors propagate at once.
+  The backoff after the k-th failure is a whole number of slots from a
+  window that doubles per failure (up to 32 slots of 1 ms) chosen by an
+  integer hash of the node's address, plus a sub-slot offset unique to the
+  address, so two colliding masters never wait the same time; no RNG, no
+  floating point; the worst case is under 250 ms per block —
+  `smbus::retry::tests::m6_backoff_stays_within_its_window`,
+  `m6_backoff_is_deterministic_and_differs_between_addresses`,
+  `m6_arbitration_loss_is_retried_a_bounded_number_of_times`,
+  `m6_nacks_and_bus_errors`, `m6_hal_error_kinds_map_to_faults` *(smbus)*.
+- [x] M7 A node's configuration refuses a broadcast address equal to its
+  own and a default peer equal to its own or the broadcast address.
+  `Target::Node` must name an SMBus node other than itself (anything else is
+  `UnsupportedTarget`); `Target::Any` goes to the configured default peer
+  and is `NoTarget` without one (the bus has no service routing) —
+  `smbus::node::tests::m7_config_refuses_self_addressing`,
+  `m7_targets_resolve_to_node_addresses_only` *(smbus)*.
+- [x] M8 Completed publications and requests go to an inbox of `Q` entries
+  (4 by default) that every receive drains the adapter into first (up to 64
+  transactions without waiting); a full inbox drops the arriving message
+  and counts it, queued requests expire with their deadline. `DELIVERY` is
+  `DropNewest` with per-sender order. Publications carry the sender's 8-bit
+  sequence, and the gap is exact per sender: messages lost on the bus or
+  dropped by the inbox or by a full adapter show up in the next accepted
+  sample's gap; a repeated sequence is a duplicate and dropped —
+  `smbus::node::tests::m8_inbox_keeps_arrival_order_per_kind_and_drops_the_newest`,
+  `m8_queued_requests_expire_on_their_deadline`; `tests/smbus.rs`:
+  `m9_smbus_overload_matches_declared_delivery`, `m9_smbus_gap_is_reported`
+  (inbox drops), `m11_full_and_detached_targets` (adapter drops),
+  `m12_duplicate_single_block_is_delivered_once` *(smbus)*.
+- [x] M9 The SMBus node passes every conformance case for the traits it
+  implements, between nodes on a simulated multi-master bus whose target
+  adapters follow the `I2cTarget` contract: round trip, `request_with`
+  timeout honoured on the node's own clock (no caller-side wrapper), handler
+  errors, caller identity (the requester's SMBus sender id, no principal,
+  the deadline propagated), overload matching `DropNewest` on the 4-entry
+  inbox, exact gaps, and discovery as `PubSubDiscovery` over a split node
+  (announce/withdraw, goodbye, expiry); `Gather` is not implemented —
+  `tests/smbus.rs`: `m9_smbus_*` *(smbus)*.
+- [x] M10 Two masters streaming 300-byte publications (11 blocks each) at
+  once interleave their blocks on the bus and both arrive intact; with
+  contention modelled, the master that starts while the other's block is on
+  the bus loses arbitration, backs off and retries, and both messages
+  arrive — `tests/smbus.rs`:
+  `m10_interleaved_masters_stream_large_messages`,
+  `m10_contending_masters_back_off_and_both_deliver` *(smbus)*.
+- [x] M11 Over the bus, the retry bounds hold: 7 lost arbitrations still
+  deliver on the 8th write, 8 give up with `ArbitrationLost`; a request to
+  an absent or full node is written 3 times then fails with `NoAcknowledge`;
+  a publication nobody hears takes one write and is counted as unheard;
+  broadcast data NACKs are retried then reported; a bus error propagates —
+  `tests/smbus.rs`: `m11_arbitration_retries_are_bounded`,
+  `m11_nacks_and_bus_errors`, `m11_full_and_detached_targets` *(smbus)*.
+- [x] M12 A block corrupted on the bus fails its PEC and is dropped and
+  counted, the message it belonged to is never delivered, the next one is
+  and reports the loss as its gap; a block delivered twice is ignored, and a
+  single-block publication delivered twice is delivered once —
+  `tests/smbus.rs`: `m12_pec_corruption_drops_the_block_and_the_message`,
+  `m12_duplicate_single_block_is_delivered_once` *(smbus)*.
+- [x] M13 `Target::Node` reaches exactly that node and the handler sees the
+  requester's address; requests and replies of several blocks (400 and
+  450 bytes) stream both ways; a reply larger than the caller's buffer is
+  `BufferTooSmall`; a request over `M` is refused before anything is
+  written — `tests/smbus.rs`: `m13_targets`,
+  `m13_large_requests_and_replies_stream` *(smbus)*.
+- [x] M14 Publications that arrive while `request_with` waits are queued in
+  order and returned by `recv` afterwards with their sender; a request that
+  reaches a node while it waits for its own reply is queued and answered by
+  its next `serve_one` (every node is requester and responder) —
+  `tests/smbus.rs`:
+  `m14_publications_during_a_request_are_queued_in_order`,
+  `m14_requests_arriving_while_waiting_are_served_next` *(smbus)*.
+- [x] M15 `Split` borrows a node as `SmbusTx` (publisher) and `SmbusRx`
+  (subscriber) sharing the clock and configuration by reference, without
+  `RefCell`: one task publishes while another waits in `recv`; `Subscribe`
+  hands out a filtered view that skips other keys —
+  `tests/smbus.rs`: `m15_split_publishes_while_subscribed`,
+  `m15_subscribe_filters_keys` *(smbus)*.
+- [x] M16 `smbus` and `smbus,postcard` build for `thumbv6m-none-eabi`
+  without `std`, pull in no cloud dependency and enable no host feature, and
+  no host feature set enables `smbus`; clippy is clean for that target —
+  `scripts/check-features.sh` (F1 sets `smbus`, `smbus,postcard`; `smbus`
+  in the embedded feature list),
+  `cargo clippy -p middleware --no-default-features --features smbus --target thumbv6m-none-eabi -- -D warnings`.
+- [ ] M17 On hardware (not written, not regression-tested): `I2cTarget`
+  adapters for embassy-rp's I2C target driver (RP2040, general call
+  enabled) and for esp-hal's target mode, and a run of two or more boards
+  on one bus with pull-ups, exercising arbitration between real masters.
+  Open.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

@@ -8,6 +8,7 @@ request/response behind one set of traits, with pluggable transports.
 | `ble`      | BLE GATT and BLE advertising                      | `no_std`, no heap (RP2040)   |
 | `serial`   | COBS-framed link over any byte stream             | `no_std`, no heap            |
 | `espnow`   | ESP-NOW broadcast pub/sub                         | `no_std`, no heap            |
+| `smbus`    | SMBus multi-master message passing over I2C       | `no_std`, no heap (embedded-hal 1.0) |
 | `zenoh`    | Zenoh pub/sub, get/queryable, liveliness discovery | `std` + tokio               |
 | `grpc`     | gRPC unary calls, a bus service, health           | `std` + tokio + tonic        |
 | `istio`    | Istio mesh helpers and `grpc::mesh` for `grpc`    | `std`                        |
@@ -36,6 +37,7 @@ The rustdoc of each backend is the authority; this is a summary of it.
 | `grpc` (`GrpcTransport`, `GrpcResponder`) | yes (bus service) | drop oldest, per-sender order | `grpc-timeout` plus local deadline | no (`UnsupportedTarget`) | no | `mw-client` id / SPIFFE ID from the sidecar's XFCC (`istio`, opt-in) | `GrpcAnnouncer` (health `SERVING`) | `MeshBrowse` (wraps a DNS-SD browser, checks health) | reported |
 | `grpc::mesh::MeshClient` (`istio`) | no | — | `grpc-timeout`, default 5 s | yes, if the directory record names the node | yes | client id / as above | — | — | — |
 | `serial::link` | yes | drop newest (inbox), per-sender order | no clock: caller bounds the call | ignored (one peer) | no | configured peer / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | none |
+| `smbus` | yes (broadcast, general call) | drop newest (inbox), per-sender order | honoured (node clock), default 1 s; deadline carried | yes (SMBus address) | no | node address / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | reported, per sender |
 | `espnow` | yes | drop newest, per-sender order | — (no request/response) | — | no | MAC / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | none |
 | `ble` GATT | server notifies, client subscribes | drop newest, per-sender order | no clock: caller bounds the call | ignored (one peer) | no | server sees the link's peer / none | — | — | none |
 | `ble::advert` | yes | drop newest, no per-sender order | — | — | no | advertiser address / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | none |

@@ -41,7 +41,8 @@
 //!   the ESP-NOW request and response frames, the requester's retry rule
 //!   and the responder's duplicate suppression; `espnow::rpc` runs them
 //!   over an ESP-NOW radio.
-//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
+//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images, CRC-8 for the
+//!   SMBus Packet Error Code.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
 //!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
 //!   announcer (a [`discovery::Announce`]) need `mdns`.
@@ -52,6 +53,7 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
+//! | `smbus`    | `smbus`     | `no_std`, no heap | `embedded-hal(-async)` 1.0 master, an `I2cTarget` adapter, a `Clock` |
 //! | `trust`    | `loader::sha256`, `loader::trust` checks | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
@@ -98,6 +100,8 @@ pub mod ble;
 pub mod espnow;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+#[cfg(feature = "smbus")]
+pub mod smbus;
 #[cfg(feature = "zenoh")]
 pub mod zenoh;
 
