@@ -302,7 +302,9 @@ mod tests {
             let body: &[u8] = if key == keys::COMMIT { &signed } else { &[] };
             assert_eq!(admit(&f, None, HOST, key, body), DISPATCH, "{key:?}");
         }
-        for key in [keys::TRUST_CLAIM, keys::LOG, keys::STATUS, k("sys/other"), k("app/x"), k("sys")] {
+        // Discovery beacons are publications (radio task only, E18), never
+        // requests.
+        for key in [keys::TRUST_CLAIM, keys::LOG, keys::STATUS, k("sys/other"), k("app/x"), k("sys"), k("disc/cam/jpeg")] {
             assert_eq!(admit(&f, None, HOST, key, &[7; 32]), Err(Refusal::NotOverAir), "{key:?}");
         }
         assert_eq!(admit(&f, None, Origin::Serial, keys::TRUST_CLAIM, &[7; 32]), DISPATCH, "serial may claim");
@@ -433,6 +435,7 @@ mod tests {
     mod session {
         use super::*;
         use crate::dispatch::{Action, Context, State, handle_request};
+        use middleware::transport::Request;
         use ed25519_dalek::{Signer, SigningKey};
         use middleware::crc::Crc32;
         use middleware::loader::sha256::ImageHash;
@@ -446,6 +449,7 @@ mod tests {
             runtime: true,
             rekey_window: false,
             staging: false,
+            node: None,
         };
 
         struct Dev {
@@ -483,7 +487,7 @@ mod tests {
                 };
                 let ctx = Context { staging: matches!(origin, Origin::Air(_)), ..CTX };
                 let mut out = [0u8; 128];
-                let o = handle_request(self.state, &ctx, key, body, &mut out);
+                let o = handle_request(self.state, &ctx, &Request::new(key, body), &mut out);
                 self.state = o.state;
                 if o.action.stops_payload() {
                     self.running = false;

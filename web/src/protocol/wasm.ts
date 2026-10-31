@@ -48,6 +48,8 @@ export interface DeviceInfo {
   statusName: string;
   chip: string;
   firmware: string;
+  /** Node id as 16 hex digits (middleware 0.5 firmware), if reported. */
+  node?: string;
 }
 
 export interface LoaderStepResult {

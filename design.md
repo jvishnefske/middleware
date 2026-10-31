@@ -31,7 +31,7 @@ characteristic UUID and a 16-bit advertising id.
 - [x] C4 Receiving into a too-small buffer is an error, never a truncation —
   `transport::tests::sample_into_refuses_to_truncate`.
 - [x] C5 Handler errors have stable one-byte wire codes —
-  `transport::tests::handler_error_codes_round_trip`.
+  `transport::reqrep::tests::handler_error_codes_round_trip` (see K2).
 - [x] C6 A typed client encodes requests and decodes responses through any
   codec and transport — `typed::tests::typed_request_encodes_and_decodes`,
   `typed::tests::typed_publish_then_recv`, `typed::tests::decode_failure_is_reported`.
@@ -51,7 +51,7 @@ characteristic UUID and a 16-bit advertising id.
   knows them; others report none —
   `tests/zenoh.rs`: `z7_no_self_delivery_and_sender_meta_present`,
   `z5_try_recv_is_none_when_empty_and_some_without_waiting`;
-  `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`;
+  `zenoh::wire::tests::publication_attachments_round_trip_and_v1_still_decodes`;
   `typed::tests::typed_try_recv_is_none_then_decodes_with_meta`;
   `serial::link::tests::try_recv_is_none_when_empty_and_some_without_waiting`
   (no meta); `g5_try_recv_is_none_when_empty_and_some_without_waiting` and
@@ -74,7 +74,7 @@ characteristic UUID and a 16-bit advertising id.
   (128-byte key + 891-byte payload fill one 1024-byte frame),
   `zenoh::tests::filters_map_to_key_expressions` (1 GiB − 1 KiB),
   `g7_limits_fit_tonic_default_message_size`,
-  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 138).
+  `g7_payload_at_limit_round_trips_through_subscription` (4 MiB − 140).
 - [x] C12 Single-stream transports implement `Subscribe` with a subscriber
   that borrows the transport (`Subscriber<'a>`) and owns a copy of its
   filter (`KeyFilterBuf`, no heap), so the caller's key need not outlive
@@ -139,6 +139,11 @@ characteristic UUID and a 16-bit advertising id.
 - [x] B10 `Publisher::LIMITS` for the GATT server is the reassembly size `N`,
   bounded by the 16-bit length and 256 fragments at the minimum MTU —
   `ble::gatt::tests::publisher_limits_follow_reassembly_size`.
+- [x] B11 A `BleServer` handler sees the connected peer's address as
+  `RequestMeta::sender` when the binding reports it (`GattServer::peer`,
+  default `None`, so existing bindings are unchanged); never a principal
+  or a deadline —
+  `ble::gatt::tests::b11_handler_sees_the_peer_address_as_sender`.
 
 ### BLE advertising (`ble`)
 
@@ -199,6 +204,11 @@ characteristic UUID and a 16-bit advertising id.
   `ScanQueue` have `const fn` constructors and builders usable in `const`
   and `static` initialisers, and `Default` impls —
   `ble::advert::tests::defaults_and_const_builders`.
+- [x] A15 `AdvertisingLink` joins a publisher and a subscriber into one
+  `Publisher` + `Subscriber` and implements `Split` (K11). Samples report
+  no gap (`SampleMeta::gap` is `None`): one sequence counts every key of a
+  sender, so a jump seen through the scanner's keys is not a loss on them —
+  `ble::advert::tests::k11_advertising_link_splits_into_publisher_and_subscriber`.
 
 ### ESP-NOW (`espnow`)
 
@@ -256,6 +266,17 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   then dropped rather than kept; `P > MAX_FRAME` does not compile —
   `espnow::tests::n14_keeping_is_optional_and_saves_a_frame_of_ram`,
   `n8_buffer_too_small_keeps_the_sample` (default `P`).
+- [x] N15 Samples report no gap (`SampleMeta::gap` is `None`) even across
+  a sequence jump: the sequence is per sender over all its keys (and the
+  ESP base firmware numbers route chunks separately), so a receiver
+  filtering some keys cannot tell a loss from the sender's other keys —
+  `espnow::tests::n15_sequence_jumps_are_not_reported_as_gaps`.
+- [x] N16 Over `RadioHalves` (an `EspNowSend` and an `EspNowReceive`,
+  itself an `EspNowRadio`) the transport implements `Split`: `EspNowTx`
+  publishes with the transport's sequence rule while `EspNowRx` receives
+  with its filter slots, own address, dedup table and kept frame —
+  `espnow::tests::k11_split_publishes_while_a_receive_waits`,
+  `k11_split_rx_keeps_a_sample_that_did_not_fit`.
 
 ### Zenoh (`zenoh`)
 
@@ -266,11 +287,11 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   handler — `z2_request_runs_handler_in_responder`,
   `z2_response_buffer_too_small_is_error`,
   `z2_request_without_responder_is_no_reply`,
-  `zenoh::tests::run_handler_splits_scratch_and_reports_errors`.
+  `zenoh::responder::tests::run_handler_splits_scratch_and_reports_errors`.
 - [x] Z3 Handler errors are returned as Zenoh reply errors and surface to the
   requester — `z3_handler_error_surfaces_at_requester`,
   `z3_oversized_request_is_buffer_too_small_reply`,
-  `zenoh::tests::reply_error_payload_decodes_code_byte`.
+  `zenoh::wire::tests::reply_error_payload_decodes_code_byte_and_sender`.
 - [x] Z4 Tests open sessions with multicast scouting disabled and connect only
   to explicit loopback endpoints —
   `z4_two_sessions_over_explicit_loopback_endpoint`,
@@ -281,14 +302,107 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `Prefix(k)` to `k/**`, which Zenoh matches against `k` itself too —
   `z6_prefix_subscription_delivers_app_x_but_not_apple`,
   `zenoh::tests::filters_map_to_key_expressions`.
-- [x] Z7 Publications carry a 12-byte attachment (`mw`, version, sender id
-  hashed from the session's Zenoh id, sequence) surfaced as `SampleMeta`;
-  subscribers use `allowed_origin(Remote)`, so a session never receives its
-  own publications (`with_local_delivery(true)` opts back in) —
+- [x] Z7 Publications carry an attachment (`mw`, kind, sender id hashed
+  from the session's Zenoh id, sequence; since 0.5 also a stream id, 16
+  bytes, see Z14; the 0.4 12-byte form still decodes) surfaced as
+  `SampleMeta`; subscribers use `allowed_origin(Remote)`, so a session never
+  receives its own publications (`with_local_delivery(true)` opts back in) —
   `z7_no_self_delivery_and_sender_meta_present`,
-  `zenoh::tests::attachment_round_trips_and_foreign_ones_are_ignored`.
+  `zenoh::wire::tests::publication_attachments_round_trip_and_v1_still_decodes`.
 - [x] Z8 Cancelling `recv` loses no sample —
   `z8_cancelled_recv_loses_no_sample`.
+
+The 0.5 additions (Z9–Z18). Unit tests are in `zenoh::{wire, subscriber,
+responder, discovery}::tests`; the rest are in `tests/zenoh.rs`, which also
+runs every conformance case over sessions joined on one loopback endpoint
+with scouting off. All run under `--features zenoh`.
+
+- [x] Z9 `request_with` honours `RequestOptions::timeout` as the Zenoh query
+  timeout, falling back to the transport's default (`with_timeout`, 5 s);
+  Zenoh's own `Timeout` error reply (from the querying session or the peer
+  that routed the query) is not taken for a responder's error, so the call
+  ends with `NoReply` —
+  `z9_request_with_timeout_overrides_the_default`, `k_timeout_is_honoured`,
+  `zenoh::wire::tests::reply_error_payload_decodes_code_byte_and_sender`.
+- [x] Z10 A responder also declares the per-node queryable
+  `@mw/node/<zid16>/<key>` feeding the same FIFO; `Target::Node(id)`
+  queries it, so only that node answers; a node without a responder fails
+  with `NoReply` at once (no queryable matches) —
+  `z10_target_node_reaches_only_that_node`,
+  `zenoh::wire::tests::node_and_service_keys`.
+- [x] Z11 `Gather` is a `get` with `QueryTarget::All` and no consolidation:
+  every responder's reply reaches the callback with the replier's
+  `SenderId` (reply attachment, or the 8 bytes after the code in a reply
+  error) and its result, bounded by `max_replies`, `Flow::Stop`, Zenoh
+  finalising the query and the timeout —
+  `k_gather_collects_every_responder`,
+  `z11_gather_names_repliers_and_carries_their_errors`,
+  `zenoh::wire::tests::query_and_reply_attachments_round_trip`.
+- [x] Z12 Queries carry an attachment with the requester's sender id and
+  its timeout; the handler sees them as `RequestMeta::sender` and
+  `deadline_ms` (minus the time queued at the responder); `principal` is
+  `None` (Zenoh authenticates no caller name); handler errors, including
+  `Unavailable`, `DeadlineExceeded` and `Denied`, round trip —
+  `k_handler_sees_caller_identity`, `k_handler_errors_round_trip`,
+  `k_round_trip`,
+  `zenoh::responder::tests::request_meta_carries_sender_and_remaining_deadline`.
+- [x] Z13 `ZenohSubscriber::DELIVERY` is `Block` with per-sender order:
+  Zenoh's FIFO handler blocks when full, the link stops being read and
+  `publish` uses congestion control Block, so nothing is dropped and a
+  publisher's samples arrive in order (caveats in `zenoh::subscriber`:
+  head-of-line blocking, Zenoh closes a link blocked past
+  `wait_before_close`); the FIFO depth is `with_queue_depth` (default 256) —
+  `k_overload_matches_declared_delivery`,
+  `zenoh::subscriber::tests::delivery_is_declared_block_in_order`.
+- [x] Z14 Sequences are per key per transport value (a clone starts new
+  streams) and the attachment names the stream, so `SampleMeta::gap` is
+  exact for a subscriber to any subset of keys (`SeenTable::check_stream`;
+  `None` for a stream's first sample) —
+  `k_gap_is_reported`, `z14_gaps_are_per_key`,
+  `zenoh::subscriber::tests::gaps_are_exact_per_sender_and_stream`,
+  `zenoh::subscriber::tests::foreign_and_v1_attachments_report_no_gap`,
+  `zenoh::wire::tests::stream_ids_separate_keys_and_origins`.
+- [x] Z15 `ZenohDiscovery` announces a service as a record queryable plus a
+  liveliness token on `@mw/svc/<kind>/<instance>` (record in the beacon
+  encoding; node defaults to the announcing session) and browses with a
+  liveliness subscriber with history: token appears → record fetched →
+  `Up`; token gone (withdraw, session closed) → `Down` at once —
+  `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+  `l_directory_expiry`,
+  `z15_browse_sees_services_announced_before_it_with_the_announcer_as_node`,
+  `z15_closing_the_announcer_session_is_down_and_try_next_does_not_wait`,
+  `zenoh::discovery::tests::records_and_goodbyes_decode_from_their_keys`.
+- [x] Z16 The Zenoh backend passes every conformance case of
+  `tests/conformance.rs` (`ReqRepFixture`, `GatherFixture`,
+  `PubSubFixture`, `DiscoveryFixture`) over loopback sessions —
+  `tests/zenoh.rs`: `k_round_trip`, `k_timeout_is_honoured`,
+  `k_handler_errors_round_trip`, `k_handler_sees_caller_identity`,
+  `k_gather_collects_every_responder`,
+  `k_overload_matches_declared_delivery`, `k_gap_is_reported`,
+  `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+  `l_directory_expiry`.
+- [x] Z17 Trust model: Zenoh session ids, attachments, tokens and
+  queryables are self-asserted, so `Reply::sender`, `RequestMeta::sender`
+  and `SampleMeta::sender` are the peer's claim. A `Target::Node(id)`
+  request (and gather) accepts only replies whose replier id is `id`, so a
+  peer squatting on `@mw/node/<zid16>/<key>` without claiming the id is
+  ignored; one that also claims it is not detected. Authenticated identity
+  needs Zenoh access control and authentication (router ACLs on
+  `@mw/node/**`, `@mw/svc/**` and application keys), which the middleware
+  does not configure —
+  `z17_target_node_drops_replies_not_naming_the_node`,
+  `zenoh::wire::tests::node_targets_accept_only_replies_naming_the_node`.
+- [x] Z18 A browser's record fetch collects every reply until the query
+  ends and keeps only successful replies on exactly the token's key whose
+  record names the key's kind and instance; if two such records differ the
+  service is refused (`ConflictingRecords`, no `Up`) instead of taking the
+  first. The stable Zenoh API cannot tell which session owns a token, so a
+  forger answering alone, or with identical bytes, is not detected (same
+  trust model as Z17) —
+  `z18_conflicting_service_records_are_refused`,
+  `z18_records_for_another_service_are_ignored`,
+  `zenoh::discovery::tests::differing_records_conflict_and_equal_ones_agree`,
+  `zenoh::discovery::tests::records_must_name_the_token_kind_and_instance`.
 
 ### gRPC (`grpc`)
 
@@ -331,11 +445,61 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `grpc::client::tests::g8_fresh_client_ids_differ_and_ids_can_be_set`.
 - [x] G9 Subscribers that send no `mw-client` (0.2 clients) keep the
   `[key_len][key][payload]` item format and receive every matching sample;
-  named subscribers get `[key_len][key][sender_len][sender][payload]`, so
-  `MAX_PAYLOAD` is 4 MiB − 138 —
+  named subscribers get `[key_len][key][sender_len][sender][payload]`
+  (and 0.5 subscribers the gap too, G12), so `MAX_PAYLOAD` is 4 MiB − 140 —
   `grpc::bus::tests::g8_bus_refuses_self_delivery_and_fills_the_sender`
   (legacy stream), `grpc::bus::tests::g8_items_with_sender_round_trip_and_reject_garbage`,
   `g7_limits_fit_tonic_default_message_size`.
+- [x] G10 The responder hands the handler the caller's `RequestMeta`:
+  `sender` from `mw-client` (every `GrpcTransport` request now sends it),
+  `deadline_ms` from `grpc-timeout` turned into a deadline on arrival and
+  measured when `serve_one` runs the handler (rounded down, 0 once passed),
+  and `principal` only from a configured `PrincipalSource` (default none:
+  an `x-forwarded-client-cert` header is ignored) —
+  `grpc::responder::tests::g10_call_meta_reads_client_timeout_and_only_trusted_principals`,
+  `grpc::responder::tests::g10_remaining_ms_rounds_down_and_saturates`,
+  `tests/grpc.rs`: `g10_handler_sees_client_id_and_deadline_but_no_untrusted_principal`.
+- [x] G11 `request_with` writes `options.timeout` as `grpc-timeout`
+  (`grpc::timeout::GrpcTimeout`, shared with `istio`) and bounds the call
+  locally; expiry, and a server's own `CANCELLED` arriving after the
+  deadline, are `DEADLINE_EXCEEDED`; a full responder queue and a refused
+  connection are `UNAVAILABLE`; both map to the same `HandlerError` through a
+  real in-process server —
+  `g11_busy_responder_and_refused_connection_are_unavailable`,
+  `k15_grpc_timeout_is_honoured`, `k15_grpc_handler_errors_round_trip`.
+- [x] G12 A `GrpcSubscriber` queues `queue_depth` samples locally
+  (`with_queue_depth`, a power of two, default 64) filled by a task reading
+  the stream, drops the oldest when the application falls behind
+  (`DELIVERY = DropOldest`, ordered), keeps a sample that did not fit the
+  buffer for a retry, and reports in `SampleMeta::gap` the samples lost
+  before each one, locally or to the bus's broadcast lag (`mw-gap: report`
+  items carry a big-endian `u16` gap) —
+  `g12_subscriber_queue_drops_oldest_and_reports_the_gap`,
+  `grpc::bus::tests::g12_items_with_gap_round_trip_and_reject_garbage`,
+  `grpc::bus::tests::g12_broadcast_lag_is_carried_by_the_next_item`,
+  `k15_grpc_overload_matches_declared_delivery`, `k15_grpc_gap_is_reported`.
+- [x] G13 `grpc.health.v1.Health` `Check` and `Watch`, protobuf
+  hand-encoded on `RawCodec` (unknown fields skipped, malformed messages
+  refused), served by `HealthService` (mounted with
+  `GrpcServer::with_health`) and called with `HealthClient`; `Check` of an
+  unknown name is `NOT_FOUND`, `Watch` sends the current status and then
+  each change and ends with the announcer; `GrpcAnnouncer` implements
+  `discovery::Announce` (announce → the kind `SERVING`, withdraw of its last
+  instance → `NOT_SERVING`) —
+  `grpc::health::tests::g13_health_messages_round_trip_and_skip_unknown_fields`,
+  `grpc::health::tests::g13_malformed_health_messages_are_refused`,
+  `grpc::health::tests::g13_health_table_is_a_bounded_value`,
+  `grpc::health::tests::g13_announcer_serves_while_any_instance_is_announced`,
+  `grpc::health::tests::g13_watch_stream_sends_current_then_changes_only`,
+  `grpc::server::tests::bus_paths_are_recognised`,
+  `tests/grpc.rs`: `g13_health_check_and_watch_over_loopback`.
+- [x] G14 gRPC passes every conformance case of the traits it implements
+  (`Requester`, `Gather` through `MeshClient`, `Publisher`/`Subscriber`,
+  `Announce`/`Browse` through `GrpcAnnouncer` and `MeshBrowse`) over
+  in-process servers on 127.0.0.1:0, the handler seeing sender, SPIFFE
+  principal and deadline (the requester injects an Envoy-style XFCC
+  header in place of the sidecar) — `tests/grpc.rs`
+  `conformance_cases::k15_grpc_*` (ten cases) *(istio)*.
 
 ### Istio (`istio`)
 
@@ -351,38 +515,83 @@ u8 | key length u8 | key | payload, at most 250 bytes.
   `grpc::istio::tests::retriable_codes_match_istio_default_retry_on`.
 - [x] I5 Plaintext h2c to the sidecar; mTLS is left to the mesh —
   `grpc::istio::tests::channel_builder_targets_sidecar_with_mesh_origin`, `istio::i2_i5_interceptor_propagates_trace_and_channel_sets_mesh_authority`.
+- [x] I6 `istio::peer_principal` takes the caller's SPIFFE ID from Envoy's
+  `x-forwarded-client-cert`: the first valid `URI=spiffe://…` of the last
+  (closest) element, honouring quoting (`,` `;` `=` inside quotes, `\"`
+  escapes) and refusing unbalanced quotes and non-SPIFFE URIs; the
+  responder uses it only with `PrincipalSource::SidecarXfcc`, documented as
+  sound only behind the sidecar that sets or sanitizes the header —
+  `grpc::istio::tests::i6_peer_principal_takes_the_spiffe_uri_of_the_last_element`,
+  `grpc::istio::tests::i6_quoted_separators_do_not_split_elements_or_pairs`,
+  `grpc::istio::tests::i6_malformed_or_missing_principals_are_none`,
+  `k15_grpc_handler_sees_sender_principal_and_deadline`.
+- [x] I7 `mesh::MeshClient` routes requests to the endpoints of its kind in
+  a `Directory` (each endpoint's `:authority` through the sidecar or
+  directly, `MeshDialer`): `Target::Any` in turn, `Target::Node` to the
+  endpoint naming that node, `UNAVAILABLE` at once when none does;
+  `Gather` calls every endpoint concurrently, bounded by `max_replies`,
+  `Flow::Stop` and the timeout (default 5 s), each `Reply.sender` the
+  endpoint's node —
+  `grpc::mesh::tests::i7_endpoint_authorities`,
+  `grpc::mesh::tests::i7_targets_select_by_kind_and_node`,
+  `grpc::mesh::tests::i7_node_target_without_endpoint_is_unavailable_at_once`,
+  `tests/grpc.rs`: `mesh::i7_mesh_client_routes_by_node_and_gathers_every_endpoint`,
+  `k15_grpc_gather_collects_every_responder`.
+- [x] I8 `mesh::MeshBrowse<B: Browse>` reports an endpoint of `B` up only
+  while its health `Watch` says `SERVING`, and down on any other status,
+  when the watch ends or fails, and when `B` reports it down; at most `N`
+  endpoints are tracked and an event leaves the table only once copied
+  into the caller's buffer —
+  `grpc::mesh::tests::i8_table_reports_up_only_while_serving_and_bounds_entries`,
+  `grpc::mesh::tests::i8_status_errors_end_the_watch`,
+  `tests/grpc.rs`: `mesh::i8_mesh_browse_reports_up_only_while_serving`,
+  `mesh::i8_mesh_browse_reports_down_when_dns_withdraws`,
+  `k15_grpc_announce_then_withdraw`, `k15_grpc_goodbye_removes_record_at_once`.
 ### mDNS service discovery (`mdns`)
 
-`ServiceDiscovery` browses DNS-SD service types (`_service._tcp|_udp.domain`)
-over mDNS. The message format is pure and always built; the tokio socket is
-behind the `mdns` feature and queries as a one-shot querier from an
-ephemeral port, so it coexists with a system mDNS daemon on port 5353.
+`MdnsSocket` browses DNS-SD service types (`_service._tcp|_udp.domain`)
+over mDNS; since 0.5 it does so as a `discovery::Browse` (L12), and the
+`ServiceDiscovery` trait it had before the 0.5 release (never in a
+released version) is gone. The message format is pure, always
+built and lives in `dns::wire` since 0.5 (`mdns::wire` re-exports it); the
+tokio socket is behind the `mdns` feature and queries as a one-shot querier
+from an ephemeral port, so it coexists with a system mDNS daemon on port
+5353. The D tests below kept their names when the codec moved. Since 0.5
+`MdnsAnnouncer` (`mdns::announce`) is the responder side, a
+`discovery::Announce`: the pure `announce::table::AnnounceTable` decides
+probes, conflict renames, announcements, answers and goodbyes, and a thin
+tokio shell sends them. Both sockets apply the origin policy of
+`mdns::origin` (D11).
 
 - [x] D1 Service types are validated (`_`-prefixed first label, `_tcp` or
   `_udp` second, ≥ 3 labels, labels ≤ 63 bytes, name ≤ 255 bytes) —
-  `mdns::wire::tests::service_types_are_validated`.
+  `dns::wire::tests::service_types_are_validated`.
 - [x] D2 A browse is one PTR question, class IN, with the caller's id, and
   is refused rather than truncated in a short buffer —
-  `mdns::wire::tests::query_encodes_one_ptr_question`.
+  `dns::wire::tests::query_encodes_one_ptr_question`.
 - [x] D3 A response's PTR, SRV, TXT and A records, with compressed names, are
   joined into a resolved instance (label, host, port, address, TXT values,
   ASCII case ignored in names and TXT keys) —
-  `mdns::wire::tests::response_resolves_an_instance_from_compressed_records`,
-  `mdns::wire::tests::other_services_and_queries_yield_no_instances`.
+  `dns::wire::tests::response_resolves_an_instance_from_compressed_records`,
+  `dns::wire::tests::other_services_and_queries_yield_no_instances`.
 - [x] D4 A PTR with TTL 0 is a goodbye; a PTR without its SRV is unresolved —
-  `mdns::wire::tests::goodbye_and_ptr_only_responses`.
+  `dns::wire::tests::goodbye_and_ptr_only_responses`.
 - [x] D5 Malformed messages are errors, never panics or hangs: every
   truncation, pointer loops, reserved label types, bad RDATA lengths and
-  names over 255 bytes — `mdns::wire::tests::malformed_messages_are_errors`,
-  `mdns::wire::tests::write_text_refuses_to_truncate`.
+  names over 255 bytes — `dns::wire::tests::malformed_messages_are_errors`,
+  `dns::wire::tests::write_text_refuses_to_truncate`.
 - [x] D6 `MdnsSocket` sends the query to its destination with a fresh id per
   browse, skips queries and returns responses —
   `mdns::socket::tests::browse_sends_a_ptr_query_and_recv_resolves_the_answer`,
   `mdns::socket::tests::queries_are_skipped_and_ids_advance`.
 - [x] D7 A response that does not fit the caller's buffer is an error and is
-  kept for the next call; `try_recv` is `None` when nothing has arrived; a
-  malformed datagram is an error and is dropped —
+  kept for one more call (`MAX_SHORT_BUFFER_RETRIES`); if that call's
+  buffer is too small too, the error is reported again and the response is
+  dropped, so an oversized datagram never blocks the socket;
+  `discard_kept` drops it at once; `try_recv` is `None` when nothing has
+  arrived; a malformed datagram is an error and is dropped —
   `mdns::socket::tests::try_recv_is_none_when_empty_and_keeps_an_oversized_response`,
+  `mdns::socket::tests::an_oversized_response_is_dropped_after_one_retry`,
   `mdns::socket::tests::malformed_datagrams_are_errors_then_dropped`.
 - [x] D8 Every receive call is bounded in datagrams (`MAX_IGNORED_DATAGRAMS`)
   and a cancelled `recv` loses no response —
@@ -391,7 +600,397 @@ ephemeral port, so it coexists with a system mDNS daemon on port 5353.
 - [x] D9 The pure core builds for `thumbv6m-none-eabi`; `mdns` enables `std`
   and no embedded feature — `scripts/check-features.sh`.
 - [x] D10 Tests put no multicast traffic on the network: the socket is
-  aimed at a loopback responder — `mdns::socket::tests::*`.
+  aimed at a loopback responder, and the announcer at a loopback browser or
+  rival with an explicit destination (which also skips the group join) —
+  `mdns::socket::tests::*`, `mdns::announce::tests::*`, `tests/mdns.rs`.
+- [x] D11 Origin validation (RFC 6762 §11): unless a destination was set
+  explicitly, a datagram is accepted only from an on-link source (IPv4
+  loopback, link-local, or a connected subnet read from `/proc/net/route`;
+  IPv6 loopback or link-local), a response only from port 5353, and a
+  one-shot querier accepts only responses carrying one of its last 8 query
+  ids; refused datagrams are skipped like queries and the source of the
+  last response is kept (`last_source`). The IP TTL 255 check is not done:
+  it needs `unsafe` (socket2 has no `IP_RECVTTL` setter, and its `recvmsg`
+  hands ancillary data back as `MaybeUninit` bytes) —
+  `mdns::origin::tests::proc_net_route_yields_connected_subnets_only`,
+  `mdns::origin::tests::on_link_sources_are_loopback_link_local_or_connected`,
+  `mdns::origin::tests::responses_need_port_5353_and_an_outstanding_id_when_on_link`,
+  `mdns::origin::tests::outstanding_keeps_the_last_ids`,
+  `mdns::socket::tests::on_link_policy_refuses_wrong_port_and_unknown_ids`.
+- [x] D12 No datagram wedges `Browse::next`: one that does not parse is
+  skipped, an instance whose event cannot be built (label not UTF-8, host
+  name too long) or needs more than `MAX_EVENT_LEN` (1024) bytes is
+  skipped, and an event too large for the caller's buffer is kept for one
+  retry and then skipped —
+  `mdns::socket::tests::poison_datagrams_do_not_wedge_browse`.
+- [x] D13 The announcer probes an instance name three times 250 ms apart
+  (query type ANY, QU bit, proposed SRV and TXT in the authority section),
+  then announces it twice 1 s apart (PTR, SRV, TXT, A/AAAA in the answer
+  section, cache-flush on the unique records); `announce` returns after the
+  first announcement, `step` sends the second; re-registering an announced
+  instance re-announces without probing —
+  `mdns::announce::table::tests::probes_three_times_then_announces_twice`,
+  `mdns::announce::table::tests::re_registering_an_announced_instance_announces_without_probing`,
+  `mdns::announce::tests::announces_after_probing_and_answers_a_browse`.
+- [x] D14 A response carrying a record of the probed name with other data
+  is a conflict: the instance is renamed `name (2)` … `name (9)` and probed
+  again, and after 8 renames `announce` fails with
+  `AnnounceError::Conflict`; our own records looped back are not
+  conflicts —
+  `mdns::announce::table::tests::a_conflict_while_probing_renames_and_probes_again`,
+  `mdns::announce::table::tests::renames_fit_a_label`,
+  `mdns::announce::tests::a_rival_answer_while_probing_renames_the_instance`.
+- [x] D15 Announced instances answer PTR, SRV, TXT, A/AAAA (and ANY)
+  queries: multicast by default, unicast to the source for QU questions,
+  legacy unicast (id and question echoed, TTL ≤ 10 s, no cache-flush) for
+  queries from a port other than 5353; PTRs the query lists as known
+  answers with at least half the TTL are suppressed; probing instances and
+  malformed queries get no answer —
+  `mdns::announce::table::tests::announced_instances_answer_queries`,
+  `mdns::announce::table::tests::known_answers_are_suppressed`.
+- [x] D16 Withdraw sends a goodbye (PTR, SRV, TXT with TTL 0) for an
+  announced instance and nothing for one still probing or unknown;
+  registration refuses locators, `Local`, unspecified addresses, unmappable
+  kinds and invalid labels, and holds at most `MAX_INSTANCES` (8) —
+  `mdns::announce::table::tests::withdraw_sends_a_goodbye_only_once_announced`,
+  `mdns::announce::table::tests::registration_is_validated_and_bounded`.
+- [x] D17 On-link subnets come only from broadcast LAN interfaces: a
+  `/proc/net/route` route counts only if its interface is up, broadcast-
+  and multicast-capable and not point-to-point (`/sys/class/net/<if>/flags`;
+  VPN, `tun` and WireGuard routes never count, nor routes of interfaces
+  whose flags cannot be read) and its prefix is at least /8
+  (`MIN_PREFIX_LEN`) —
+  `mdns::origin::tests::proc_net_route_yields_connected_subnets_only`,
+  `mdns::origin::tests::interface_flags_select_broadcast_lans`.
+- [x] D18 A received datagram cannot stop the announcer: a reply to it that
+  cannot be encoded or sent is dropped and counted (`dropped_replies`), and
+  a reply is never unicast to port 0 or to an unspecified, multicast or
+  broadcast source (limited or a known subnet's) —
+  `mdns::origin::tests::replies_are_never_unicast_to_broadcast_multicast_or_port_0`,
+  `mdns::announce::tests::replies_that_cannot_go_out_are_dropped_not_fatal`.
+
+### Transport contract 0.5 (K…)
+
+The 0.5 core contract in `transport` (split into `transport::meta`,
+`transport::pubsub` and `transport::reqrep`, re-exported from
+`transport`): handlers take a `Request` with `RequestMeta`, requests take
+`RequestOptions` (timeout, target), scatter/gather is `Gather`, every
+subscriber declares its `Delivery`, samples report gaps, and `Split`
+divides a link into halves. `tests/conformance.rs` holds generic cases
+every backend runs; `tests/memory.rs` runs them against the in-process
+backend `transport::memory` (feature `memory`, enabled for tests by the
+crate's self dev-dependency). Tests marked *(feature)* run under
+`cargo test --all-features` (or that feature), not the default gate.
+
+- [x] K1 A `Handler` receives a `Request { key, body, meta }` and writes
+  the response into the caller's buffer; closures of that shape are
+  handlers (`handler_fn` fixes their argument types) —
+  `transport::reqrep::tests::closures_are_handlers_and_see_meta`,
+  `tests/memory.rs`: `k_round_trip`.
+- [x] K2 `HandlerError` is non-exhaustive and adds `Unavailable` (code 6)
+  and `DeadlineExceeded` (code 7); unknown codes map to `Internal`; gRPC maps
+  them to and from `UNAVAILABLE` / `DEADLINE_EXCEEDED`, Zenoh carries the
+  code byte —
+  `transport::reqrep::tests::handler_error_codes_round_trip`,
+  `grpc::status::tests::handler_errors_round_trip_through_codes` and
+  `grpc::status::tests::codes_map_back_to_handler_errors` *(grpc)*,
+  `zenoh::wire::tests::reply_error_payload_decodes_code_byte_and_sender` *(zenoh)*.
+- [x] K3 `RequestOptions` (timeout, `Target::{Any, Node}`) builds with
+  const methods and converts its timeout to a saturating millisecond
+  deadline; `Requester::request` is `request_with` with
+  `RequestOptions::DEFAULT` —
+  `transport::reqrep::tests::request_options_build_and_convert_timeouts`,
+  `transport::reqrep::tests::request_is_request_with_defaults`,
+  `typed::tests::typed_request_with_passes_options`.
+- [x] K4 `request_with` honours its timeout: with nobody serving it
+  returns the backend's timeout error no earlier than the timeout and
+  within the backend's slack —
+  `tests/conformance/reqrep.rs`: `timeout_is_honoured`, run by
+  `tests/memory.rs`: `k_timeout_is_honoured`;
+  `transport::memory::tests::requests_reach_a_responder_with_meta_and_honour_timeouts`.
+  Backends without a clock (serial link, BLE GATT client) document that
+  the caller bounds the call; Zenoh passes it as the query timeout and
+  gRPC as `grpc-timeout` plus a local deadline.
+- [x] K5 `Unavailable`, `DeadlineExceeded` and `Denied` returned by a
+  remote handler reach the requester as the same `HandlerError` —
+  `tests/conformance/reqrep.rs`: `handler_errors_round_trip`, run by
+  `tests/memory.rs`: `k_handler_errors_round_trip`.
+- [x] K6 The handler sees the caller's `RequestMeta`: sender, the
+  authenticated principal and the remaining deadline, as far as the backend
+  knows them (the fixture declares what it provides) —
+  `tests/conformance/reqrep.rs`: `handler_sees_caller_identity`, run by
+  `tests/memory.rs`: `k_handler_sees_caller_identity`.
+- [x] K7 `Gather::request_each` sends once and passes every reply to the
+  callback, bounded by `max_replies`, `Flow::Stop` and time, and returns
+  the number seen —
+  `tests/conformance/reqrep.rs`: `gather_collects_every_responder`, run
+  by `tests/memory.rs`: `k_gather_collects_every_responder`.
+- [x] K8 Every `Subscriber` declares `DELIVERY` (`Overflow::{DropNewest,
+  DropOldest, Block}`, per-sender order) and `LIMITS` as required
+  constants, so a backend that omits them does not compile; every in-tree
+  backend declares them (Zenoh: `Block`; serial since its inbox (S8),
+  ESP-NOW, BLE GATT, BLE advertising: `DropNewest`; gRPC, memory:
+  `DropOldest`); the
+  declared behaviour holds under overload —
+  `tests/conformance/pubsub.rs`: `overload_matches_declared_delivery`, run
+  by `tests/memory.rs`: `k_overload_matches_declared_delivery`.
+- [x] K9 `SampleMeta::gap` reports samples known lost before this one;
+  `dedup::SeenTable::check` / `SeqCheck` compute it from 8-bit wrapping
+  sequences per (sender, stream) (first, next with loss, repeat, behind) —
+  `dedup::tests::gaps_are_computed_from_wrapping_sequences`,
+  `tests/conformance/pubsub.rs`: `gap_is_reported`, run by
+  `tests/memory.rs`: `k_gap_is_reported`.
+- [x] K10 `Target::Node` reaches only that node's responder; with no
+  responder on it the request fails at once —
+  `transport::memory::tests::requests_reach_a_responder_with_meta_and_honour_timeouts`.
+- [x] K11 `Split` divides a link into a `Publisher` half and a
+  `Subscriber` half usable concurrently, each borrowing disjoint parts of
+  the link (no shared ownership, no `RefCell`): the serial link over a
+  `Duplex` (`SerialTx`, `SerialRx`), ESP-NOW over `RadioHalves`
+  (`EspNowTx`, `EspNowRx`) and BLE advertising as an `AdvertisingLink`
+  (`AdvertTx`, `AdvertRx`) —
+  `serial::link::tests::k11_split_halves_publish_while_a_receive_waits`,
+  `k11_split_rx_drains_the_inbox_first`, `tests/serial.rs`:
+  `k11_serial_split_publishes_while_subscribed` *(serial)*;
+  `espnow::tests::k11_split_publishes_while_a_receive_waits`,
+  `k11_split_rx_keeps_a_sample_that_did_not_fit` *(espnow)*;
+  `ble::advert::tests::k11_advertising_link_splits_into_publisher_and_subscriber`
+  *(ble)*.
+- [x] K12 A backend plugs into the conformance harness by implementing
+  `ReqRepFixture`, `GatherFixture`, `PubSubFixture` and/or
+  `DiscoveryFixture` and calling the generic cases (documented in
+  `tests/conformance.rs`) — `tests/memory.rs` (all ten cases).
+- [x] K13 The 0.5 contract (`transport::{meta, pubsub, reqrep}`) is
+  `no_std`, heap free and always built; the memory backend needs
+  `memory` (std) — `scripts/check-features.sh` (C1 and F2 sets).
+- [x] K14 `typed::TypedHandler` adapts `Fn(&Req, &RequestMeta) ->
+  Result<Resp, HandlerError>` into a `Handler` (undecodable request →
+  `InvalidRequest`, oversized response → `BufferTooSmall`) —
+  `typed::tests::typed_handler_decodes_calls_and_encodes`.
+- [x] K15 Every backend passes every conformance case for the traits it
+  implements, with caller identity carried where the transport
+  authenticates it (Istio SPIFFE principal on gRPC):
+  - memory: `tests/memory.rs`, all ten cases (`k_round_trip`,
+    `k_timeout_is_honoured`, `k_handler_errors_round_trip`,
+    `k_handler_sees_caller_identity`, `k_gather_collects_every_responder`,
+    `k_overload_matches_declared_delivery`, `k_gap_is_reported`,
+    `l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+    `l_directory_expiry`);
+  - Zenoh: `tests/zenoh.rs`, the same ten case names over loopback
+    sessions *(zenoh)*;
+  - gRPC: `tests/grpc.rs`, `conformance_cases::k15_grpc_round_trip`,
+    `k15_grpc_timeout_is_honoured`, `k15_grpc_handler_errors_round_trip`,
+    `k15_grpc_handler_sees_sender_principal_and_deadline` (SPIFFE ID from
+    the sidecar's XFCC), `k15_grpc_gather_collects_every_responder`
+    (`MeshClient`), `k15_grpc_overload_matches_declared_delivery`,
+    `k15_grpc_gap_is_reported`, `k15_grpc_announce_then_withdraw` and
+    `k15_grpc_goodbye_removes_record_at_once` (`GrpcAnnouncer` health
+    behind `MeshBrowse`), `k15_grpc_directory_expiry` *(istio)*;
+  - serial link (the in-memory fake link pair standing in for `mwctl`'s
+    port): `tests/serial.rs`, `k15_serial_round_trip`,
+    `k15_serial_timeout_is_honoured` (caller-side timer: the link has no
+    clock), `k15_serial_handler_errors_round_trip`,
+    `k15_serial_handler_sees_caller_identity`,
+    `k15_serial_overload_matches_declared_delivery`,
+    `k15_serial_gap_is_reported` (the link reports none),
+    `k15_serial_announce_then_withdraw`,
+    `k15_serial_goodbye_removes_record_at_once` (`PubSubDiscovery` over a
+    split link), `k15_serial_directory_expiry`; no `Gather` (one peer)
+    *(serial)*;
+  - mDNS: `tests/mdns.rs`, `l_announce_then_withdraw`,
+    `l_goodbye_removes_record_at_once`, `l_directory_expiry` (L14)
+    *(mdns)*;
+  - unicast DNS-SD: `tests/dns_sd.rs`, the same three (L16) *(dns-sd)*.
+
+  ESP-NOW and BLE have no async fake in `tests/`; their contract points are
+  covered by unit tests (K8, K11, N15, N16, A15, B11).
+- [x] K16 One service kind is discovered and called across backends in one
+  process on loopback: announced over Zenoh (two responder sessions) and
+  mDNS (announcer aimed at a loopback browser, no multicast), listed by a
+  stub cluster DNS server whose SRV glue points at gRPC servers serving
+  health, browsed through `MeshBrowse<UnicastDnsSd>`; every event feeds one
+  `Directory`; then Zenoh `request_with` with a timeout and `Target::Node`
+  of the discovered node, a Zenoh gather of both responders, a gRPC
+  `MeshClient` request and gather over the directory (three replies), and
+  `Target::Node` on the mesh client failing `Unavailable` (no DNS-SD
+  record names a node); withdrawals over each path empty their records.
+  The example finishes in about a second and exits 0 —
+  `examples/discover_and_call.rs`:
+  `tests::discover_and_call_finds_and_calls_every_responder` (run by
+  `cargo test --all-features`; the example declares `test = true`).
+
+### Service discovery (L…)
+
+`discovery` (always built, `no_std`, no heap): `Service` records of a
+`ServiceKind` (a middleware key) at an `Endpoint`, the `Announce` /
+`Browse` traits, the pure fixed-capacity `Directory`, and
+`beacon::PubSubDiscovery`, discovery over any pub/sub transport with a
+versioned `disc/<kind>` beacon. `dns::wire` is the DNS codec, now with an
+encoder; `MdnsSocket` implements `Browse`.
+
+- [x] L1 A kind maps to a DNS-SD type by a fixed reversible rule (`/` →
+  `-`, lowercase letters and digits kept, anything else refused, ≤ 15
+  characters with a letter, RFC 6335): `cam/jpeg` → `_cam-jpeg._tcp`
+  (`.local` with the domain), and back —
+  `discovery::record::tests::kinds_map_to_dns_sd_types_and_back`,
+  `discovery::record::tests::unmappable_kinds_are_refused`.
+- [x] L2 An announcement with TTL 0 is a `Down` event; events copy into a
+  caller buffer and fail instead of truncating —
+  `discovery::record::tests::events_follow_ttl_and_copy_into_buffers`.
+- [x] L3 `Directory::observe` is a pure value transition reporting
+  `Added`, `Refreshed`, `Updated`, `Removed` or `Ignored`; a goodbye (a
+  `Down`, or `Up` with TTL 0) removes the record at once —
+  `discovery::directory::tests::up_refresh_update_and_goodbye`,
+  `tests/conformance/discovery.rs`: `goodbye_removes_record_at_once`, run
+  by `tests/memory.rs`: `l_goodbye_removes_record_at_once`.
+- [x] L4 Records expire exactly at their TTL (`expire`, `expired`,
+  `next_expiry`) and are due for refresh at 80 % of it (`next_refresh`) —
+  `discovery::directory::tests::records_expire_on_their_ttl_and_refresh_at_80_percent`,
+  `tests/conformance/discovery.rs`: `directory_expiry`, run by
+  `tests/memory.rs`: `l_directory_expiry`.
+- [x] L5 The directory holds at most `N` records with bounded fields; a
+  new record when full is `Full`, an over-long field `Rejected`, and no
+  existing record is evicted —
+  `discovery::directory::tests::capacity_and_bounds_are_enforced`.
+- [x] L6 Beacon format version 1 round-trips every endpoint form, ignores
+  trailing bytes (later versions append), refuses other versions, unknown
+  flags or tags, bad strings and invalid TXT, and is never truncated;
+  beacon keys are `disc/<kind>` —
+  `discovery::beacon::tests::beacons_round_trip_every_endpoint`,
+  `discovery::beacon::tests::malformed_beacons_are_refused`,
+  `discovery::beacon::tests::beacon_keys_carry_the_kind`.
+- [x] L7 `PubSubDiscovery` announces (and keeps up to `A` services),
+  browses the filtered kinds, withdraws with a goodbye, and re-announces
+  every half TTL driven by the pure `due` and the `tick` shell call —
+  `discovery::beacon::tests::pubsub_discovery_announces_browses_and_reannounces`,
+  `tests/conformance/discovery.rs`: `announce_then_withdraw`, run by
+  `tests/memory.rs`: `l_announce_then_withdraw`.
+- [x] L8 `dns::wire::MessageWriter` encodes PTR, SRV, TXT, A and AAAA
+  records with name compression, keeps section order, and fails instead
+  of truncating; every encoded record decodes back, and the DNS-SD join
+  resolves it —
+  `dns::wire::tests::every_record_type_round_trips_with_compression`,
+  `dns::wire::tests::writer_refuses_to_truncate_and_keeps_section_order`.
+- [x] L9 Queries for any type with the recursion-desired bit (unicast
+  resolvers) encode correctly; text names with escapes and TXT entries are
+  validated —
+  `dns::wire::tests::unicast_queries_set_rd_and_any_type`,
+  `dns::wire::tests::text_names_are_validated_and_unescaped`,
+  `dns::wire::tests::txt_writer_builds_valid_rdata`.
+- [x] L10 Parsing is bounded against hostile messages: more than
+  `MAX_RECORDS` (64) resource records is `TooManyRecords` before any record
+  is parsed, so the PTR × records join of `Response::instances` is at most
+  64 × 64; the writer refuses to build such a message —
+  `dns::wire::tests::records_over_the_cap_are_refused_before_parsing`.
+- [x] L11 `discovery` and `dns::wire` are always built and `no_std` on
+  `thumbv6m-none-eabi` — `scripts/check-features.sh` (C1 build and the
+  check that their module declarations carry no cfg gate).
+- [x] L12 `MdnsSocket` implements `Browse`: an exact kind is browsed as its
+  DNS-SD type in `.local`, a prefix is refused, resolved instances are `Up`
+  (socket address, or SRV host when no address record came), goodbyes are
+  `Down`, and an event too large for the buffer is kept for one retry
+  (D12) —
+  `mdns::socket::tests::browse_maps_the_kind_and_reports_up_then_down`,
+  `mdns::socket::tests::browse_reports_an_unaddressed_instance_by_host`
+  *(mdns)*.
+- [x] L13 `typed::TypedBrowser` decodes a service's description from its
+  TXT entry `m=<bytes>` with a codec (`typed::encode_txt` writes it) —
+  `typed::tests::typed_browser_decodes_txt_descriptions`.
+- [x] L14 An mDNS announcer and a unicast DNS-SD resolver (`dns::unicast`,
+  feature `dns-sd`) pass the discovery conformance cases on loopback — the
+  mDNS half below, the unicast half in L16.
+  - [x] mDNS half: `MdnsAnnouncer` (the `Announce` side, a type of its own
+    rather than `MdnsSocket`) announcing to an `MdnsSocket` browser over
+    loopback passes every discovery case — `tests/mdns.rs`
+    (`l_announce_then_withdraw`, `l_goodbye_removes_record_at_once`,
+    `l_directory_expiry`) *(mdns)*.
+- [x] L15 `dns-sd` enables `std` and no embedded feature, and no embedded
+  feature set enables it (or any host feature) —
+  `scripts/check-features.sh`.
+- [x] L16 *(the unicast half of L14)* `dns::unicast::UnicastDnsSd`
+  (feature `dns-sd`) passes the discovery conformance cases on loopback,
+  against a stub DNS server whose fixture table the announcer edits —
+  `tests/dns_sd.rs`: `l_announce_then_withdraw`,
+  `l_goodbye_removes_record_at_once`, `l_directory_expiry` *(dns-sd)*.
+- [x] L17 `ResolvConf::parse` reads `nameserver` (at most 3, numeric IPv6
+  scope), `search` / `domain` (last wins, at most 6), `options ndots`,
+  `timeout`, `attempts` (clamped) and ignores comments and malformed lines;
+  a pod's namespace and cluster domain come from its search list —
+  `dns::unicast::resolv::tests::kubernetes_pod_configuration`,
+  `dns::unicast::resolv::tests::variants_comments_limits_and_malformed_lines`
+  *(dns-sd)*.
+- [x] L18 `ServiceMap` maps up to `M` kinds to a Service, namespace and
+  port name, validated as Kubernetes does (RFC 1123 labels, IANA port
+  names), and builds `_<port>._tcp.<service>.<namespace>.svc.<domain>`
+  (cluster domain configurable, default `cluster.local`, every name ≤ 253
+  bytes) —
+  `dns::unicast::map::tests::srv_names_follow_the_kubernetes_dns_schema`,
+  `dns::unicast::map::tests::invalid_parts_are_refused` *(dns-sd)*.
+- [x] L19 A reply is accepted only from the queried nameserver's address,
+  with the query's id and exactly its question; anything else is skipped
+  (a spoofed pod is never reported), and with only mismatched replies the
+  query times out after its attempts. A reply with TC is
+  `UnicastError::Truncated` (no TCP fallback); an error code is
+  `UnicastError::Answer`; neither changes the endpoints already reported —
+  `dns::unicast::answer::tests::only_the_matching_reply_is_accepted`,
+  `tests/dns_sd.rs`: `mismatched_ids_and_spoofed_sources_are_ignored`,
+  `truncated_and_failed_replies_are_errors_that_keep_endpoints`
+  *(dns-sd)*.
+- [x] L20 Queries carry RD, an EDNS(0) OPT record for 1232 bytes
+  (`MessageWriter::edns`) and a fresh id per query and attempt; each
+  attempt waits at most the timeout —
+  `dns::wire::tests::edns_opt_is_written_and_decoded`, `tests/dns_sd.rs`:
+  `targets_without_glue_are_resolved_with_a_then_aaaa`,
+  `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
+- [x] L21 Each SRV owned by the query name is one endpoint named by its
+  target's first label (one per pod of a headless Service); A/AAAA glue in
+  the reply gives `Endpoint::Socket`, else the target is resolved with A,
+  then AAAA, and without an address it is `Endpoint::Host`; the TTL is the
+  smallest used; NXDOMAIN or no SRV is an empty set, not an error —
+  `dns::unicast::answer::tests::headless_srv_answer_with_glue`,
+  `dns::unicast::answer::tests::response_codes_and_empty_answers`,
+  `dns::unicast::answer::tests::address_answers_take_the_first_of_each_family`,
+  `tests/dns_sd.rs`: `targets_without_glue_are_resolved_with_a_then_aaaa`,
+  `nxdomain_is_an_empty_service` *(dns-sd)*.
+- [x] L22 The pure `Tracker` turns successive answers into `Down` events
+  for vanished instances, then `Up` for new or changed ones; an unchanged
+  instance is silent until 80 % of the TTL it was last reported with has
+  passed, then reported again so a `Directory` fed with the events keeps
+  it; TTL 0 is reported as 1 s; capacity and over-long records are counted,
+  not reported —
+  `dns::unicast::tracker::tests::answers_become_up_and_down_diffs`,
+  `dns::unicast::tracker::tests::duplicates_ttl_zero_and_capacity`,
+  `dns::unicast::tracker::tests::unchanged_instances_are_refreshed_before_a_directory_expires_them`,
+  `tests/dns_sd.rs`: `headless_service_pods_come_and_go_across_ttl_expiries`
+  (2 → 3 → 1 pods) *(dns-sd)*.
+- [x] L23 Re-resolution is due at 80 % of the smallest resolved TTL (the
+  `Directory::next_refresh` rule), after empty answers and failures at
+  fixed intervals, all clamped to the `Schedule`'s bounds —
+  `dns::unicast::tracker::tests::re_resolution_is_due_at_80_percent_of_the_ttl_clamped`,
+  `tests/dns_sd.rs`: `headless_service_pods_come_and_go_across_ttl_expiries`
+  *(dns-sd)*.
+- [x] L24 `UnicastDnsSd::browse` takes an exact kind or a prefix and
+  browses every mapped kind it selects (none is `Unmapped`); `next` before
+  `browse` is `NotBrowsing`; the nameserver is the builder's or the
+  resolver configuration's first —
+  `tests/dns_sd.rs`: `browse_selects_mapped_kinds_by_prefix`,
+  `nameserver_from_the_resolver_configuration` *(dns-sd)*.
+- [x] L25 Transaction entropy against off-path cache poisoning (RFC 5452):
+  every attempt of every query is sent from a new socket on a fresh
+  ephemeral port, and its id comes from the operating system's CSPRNG
+  (`dns::unicast::query_id`, `getrandom`), with no generator state kept in
+  the process —
+  `tests/dns_sd.rs`: `targets_without_glue_are_resolved_with_a_then_aaaa`
+  (distinct source port and id per query), `query_ids_come_from_the_os_csprng`
+  *(dns-sd)*.
+- [x] L26 A flood of bogus datagrams cannot suppress or poison a
+  resolution: each query socket is connected to the nameserver, so the
+  kernel drops other sources, and skipped datagrams never end an attempt;
+  only its deadline does —
+  `tests/dns_sd.rs`: `a_flood_of_bogus_replies_does_not_suppress_or_poison_resolution`
+  (200 wrong-id replies from the nameserver's address and 200 bogus-pod
+  replies from another port, one attempt),
+  `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
@@ -429,6 +1028,48 @@ because WASM linear memory and the wasmi interpreter require one.
   `parse_rejects_bad_bodies_and_passes_app_keys`, `device_info_round_trips`.
 - [x] S7 The payload ABI (imports, exports, error codes, bounds checks) is
   defined once in `wasm_abi` — `wasm_abi::tests::*`.
+- [x] S8 Publications that arrive while `request_with` or `serve_one`
+  waits are kept, in order, in the link's inbox of `I` bytes (const
+  generic, default `INBOX_BYTES` = one maximal raw frame + 2; each entry
+  costs its raw frame + 2 bytes) and returned first by `recv`, `try_recv`,
+  a `Filtered` view, `SerialRx` and `next_frame`. A publication that does
+  not fit is dropped and counted (`inbox_dropped`); a buffer too small for
+  a queued one keeps it; `I = 0` keeps nothing. `DELIVERY` is
+  `DropNewest` with per-sender order (was `Block`): the inbox drops the
+  arriving publication, and a UART without flow control drops what
+  overruns its driver; nothing older is dropped for something newer. No
+  gaps are reported (no sequence numbers) —
+  `serial::link::tests::s8_publications_during_request_are_kept_in_order`,
+  `s8_publications_during_serve_one_are_kept`,
+  `s8_full_inbox_drops_the_newest_and_counts`, `s8_zero_inbox_keeps_nothing`,
+  `s8_small_buffer_keeps_a_queued_publication`,
+  `s8_filtered_view_and_next_frame_take_the_inbox_first`,
+  `delivery_is_drop_newest_in_order`; `tests/serial.rs`:
+  `s8_publications_during_a_request_reach_recv_in_order`,
+  `s8_inbox_overflow_drops_the_newest`,
+  `s8_request_after_a_timeout_still_works` *(serial)*.
+- [x] S9 `SerialLink::with_peer` names the link's peer: received samples
+  carry it as `SampleMeta::sender` and `serve_one` handlers see it as
+  `RequestMeta::sender` (no principal, no deadline); without it both are
+  `None` — `serial::link::tests::s9_peer_is_the_sender_of_samples_and_requests`,
+  `s9_without_a_peer_meta_is_empty`.
+- [x] S10 `sys/info` may end with the device's 8-byte node id
+  (`DeviceInfo::node`, a `SenderId`; `MAX_INFO_LEN` 81). Every decoder
+  reads the fields it knows and ignores trailing bytes, so 0.4 hosts read
+  0.5 devices and 0.5 hosts read 0.4 devices (`node: None`). Checked:
+  `DeviceInfo::decode` (used by `mwctl`, `protocol-wasm` and so the web
+  page, the ESP8266 tests and conagotchi's `badge-mw`) —
+  `loader::tests::s10_device_info_carries_a_trailing_node_id`,
+  `device_info_round_trips`; `protocol-wasm` `loader::tests::info_round_trips_and_names_statuses`;
+  `mwctl` `device::tests::info_decodes_a_protocol_only_esp8266` (its fake
+  sends the node id), `report::tests::info_notes_protocol_only_firmware`.
+- [x] S11 The serial link passes every conformance case for the traits it
+  implements (request/response, pub/sub, and discovery as
+  `PubSubDiscovery` over a split link), over an in-memory fake link pair
+  whose pub/sub direction is lossy like a UART without flow control.
+  `timeout_is_honoured` runs with the caller-side `Bounded` wrapper the
+  link's docs prescribe (the link has no clock); `Gather` is not
+  implemented (one peer) — `tests/serial.rs`: `k15_serial_*` *(serial)*.
 
 ### WASM runtime (`wasm-host`)
 
@@ -652,6 +1293,73 @@ because WASM linear memory and the wasmi interpreter require one.
   header at flash offset 0; code runs from flash through the instruction
   cache at that speed —
   `chip::tests::flash_settings_decode_the_image_header`.
+- [x] E17 Requests reach `dispatch::handle_request` as a middleware
+  `Request` with its `RequestMeta` (empty from a serial port; from ESP-NOW
+  (O8) the sender's MAC as `SenderId`; no `sys/*` decision depends on it,
+  the sender being unauthenticated — the over-the-air policy is
+  `esp_base::ota`, O6), and
+  `sys/info` ends with the node id from the chip's base MAC
+  (`Context::node`; the ESP8266 build sends none) —
+  `dispatch::tests::e17_info_ends_with_the_node_id_and_old_decoders_ignore_it`,
+  `info_reports_device`.
+- [x] E18 The radio receives `app/...` and `disc/...` keys
+  (`radio::FILTERS`, the transport's two filter slots); `sys/...` never.
+  A payload sends on `app/...` only: its publishes (`goes_over_air`, also
+  checked again in the radio shell's `send`) and its source routes
+  (`carries_routes`) refuse `disc/...`, which is reserved for the radio
+  task's own beacon, so a payload cannot forge discovery beacons.
+  Received beacons go to the directory, not to the payload. The only way
+  `sys/...` crosses the radio is the separate request path of the
+  over-the-air update (`MR` frames, built only by the radio task, admitted
+  by `esp_base::ota`, O6/O16); a payload's publish is always an `MW`
+  sample, even one whose payload is a whole `MR` frame, so it reaches
+  neither discovery nor the request path —
+  `radio::tests::e18_beacons_are_received_but_payloads_cannot_send_them`,
+  `e18_o6_a_payload_reaches_neither_discovery_nor_the_request_path`,
+  `r11_r12_only_app_keys_go_over_the_air`.
+- [x] E19 While a camera source route runs, the radio task broadcasts a
+  `disc/cam/jpeg` beacon (instance `cam-` + the MAC's last three bytes in
+  hex, node id the MAC, endpoint local, TXT `key=<route key>`, TTL 30 s)
+  at the route's start and every 15 s, and one goodbye when it stops:
+  under 100 bytes per 15 s. Pure core `radio::disc` (`CamBeacon`,
+  `cam_beacon`, the `discovery::beacon` codec); the shell sends it —
+  `radio::disc::tests::e19_cam_beacon_names_kind_instance_node_and_route`,
+  `e19_cam_beacon_runs_with_the_camera_route`;
+  `route::sources::tests::r15_camera_routes_ask_for_a_capture_then_send_its_chunks`
+  (`camera_key`). On hardware (ESP32-CAM) still to be seen.
+- [x] E20 Every device keeps a `discovery::Directory` of 4 records fed
+  from the `disc/...` beacons it receives (a missing node id is taken from
+  the sample's sender) and logs on `sys/log`
+  `disc: up <kind> <instance> node <16 hex> ttl <n> s (<k> known)`,
+  `disc: updated ...`, `disc: down <kind> <instance> (goodbye, <k> known)`,
+  and `disc: down <kind> <instance> (expired)` (refusals, E21, are not logged);
+  refreshes are silent. The conagotchi badge runs this shell, so its log
+  shows the ESP32-CAM's `disc: up cam/jpeg cam-...` line —
+  `radio::disc::tests::e20_neighbours_log_up_refresh_down_and_expiry`,
+  `e20_neighbours_fill_in_the_sender_and_ignore_non_beacons`. The line on
+  the badge is to be read on hardware.
+- [x] E21 Directory records are bound to the frame's sender (the ESP-NOW
+  source MAC): the sender is the record's node and a beacon declaring a
+  different node is refused; a record is updated or withdrawn only by the
+  sender that created it; one sender holds at most `PER_SENDER` (2) of
+  the 4 records, and a new record finding the directory full is refused,
+  never evicting another's. Refusals are counted (`Neighbours::refused`),
+  not logged. The source MAC is not authenticated, so this stops one node
+  claiming another's identity or records, not a radio forging MACs —
+  `radio::disc::tests::e21_records_are_bound_to_the_frame_sender`,
+  `e21_one_sender_cannot_fill_the_directory`.
+- [x] E23 The serial port tasks run their links with no inbox
+  (`shell::link::INBOX` = 0): they read with `next_frame` and never wait
+  in `request_with`/`serve_one`, so nothing could be queued, and each
+  port saves 1 KiB of `.bss` (the ESP32-S3 main stack is what `.bss`
+  leaves). With the default inbox the conagotchi badge's `.stack` fell
+  to 40 920 B, under its 40 KiB check; with none it is 45 032 B —
+  conagotchi `scripts/check.sh` "firmware main stack" step (2026-10-29),
+  `firmware/build.sh esp32s3`.
+- [x] E22 The `disc:` log lines print radio-supplied kinds and instances
+  with every byte outside printable ASCII, and `\`, as `\xNN`, so a
+  beacon cannot inject terminal escapes or line breaks into `sys/log` —
+  `radio::disc::tests::e22_log_lines_escape_radio_supplied_text`.
 
 #### Interpreter speed on the badge
 
@@ -807,6 +1515,10 @@ open).
   `start` keeps listening 2 s for the device's explanation on `sys/log`
   before reporting the error. Shell code (`tools/mwctl/src/port.rs`,
   `main.rs`); to be verified on hardware.
+- [x] H3 `mwctl monitor` prints `sys/log` lines with control characters
+  escaped (`\u{1b}`, `\r`, ...), never passed to the terminal, as
+  `[pub]` lines already did by switching to hex; printable Unicode is
+  kept — `report::tests::events_are_one_readable_line`.
 
 ### Web site (`web/`)
 
@@ -1116,7 +1828,7 @@ first claimant pins the key — claim a device before exposing it.
   firmware `store::tests::activate_with_runs_after_crc_and_before_header`.
 - [x] T10 `HandlerError::Denied` is wire code 5 and round trips through the
   one-byte code and gRPC status —
-  `transport::tests::handler_error_codes_round_trip`,
+  `transport::reqrep::tests::handler_error_codes_round_trip`,
   `grpc::status::tests::handler_errors_round_trip_through_codes`,
   `codes_map_back_to_handler_errors`.
 - [x] T11 `trust` and `trust,serial` build for `thumbv6m-none-eabi` without
@@ -1176,6 +1888,15 @@ unsigned commit aborted the owner's transfer):
 | `sys/loader/commit`         | `Denied`  | owner checked first (a non-owner gets `InvalidRequest`, loader untouched); then signed only, `TrustState::accept_commit` (pinned key, version above the last); the owner's unsigned commit is `Denied` and ends its transfer; an accepted commit activates the staged image and stops the old payload |
 | `sys/payload/start`, `stop` | `Denied`  | signed control request only (below), else `Denied` |
 | `sys/trust/claim`, anything else | `Denied` | `Denied` |
+
+**Publications and requests** (with middleware 0.5, E18): two frame
+formats cross the radio and they never mix. Publications (`MW`) are
+`app/...` from a payload and `disc/...` from the radio task's own beacon
+only, received on `app/...` and `disc/...` only; `sys/...` is never a
+publication over the radio. Requests (`MR`) are the only way `sys/...`
+crosses it, they are built only by the radio task (responses) or the host
+(requests), and the table above admits them. A payload cannot send an
+`MR` frame: whatever it publishes is wrapped in an `MW` sample.
 
 Serial is unchanged (physical access is the authority there): a serial
 `begin` stops the payload and shows `Loading`, `start`/`stop` take empty
@@ -1261,7 +1982,13 @@ host → bridge.
   `o4_a_lost_response_is_replayed_without_running_the_handler_again`,
   `o4_a_duplicated_request_runs_once`, `o4_reordered_frames_never_mix_answers`,
   `o4_attempts_are_bounded_and_other_stations_are_ignored`,
-  `o4_oversized_requests_and_small_buffers_are_errors`; `espnow` builds for
+  `o4_oversized_requests_and_small_buffers_are_errors`. On the 0.5
+  contract `RpcRequester::request_with` bounds a call with
+  `options.timeout` (`Retry::within`: shorter and fewer attempts, at least
+  one; `None` keeps `attempts` × `timeout_ms`), refuses a `Target::Node`
+  other than its peer (`WrongTarget`) before sending, and the responder's
+  handler sees the requester's MAC as `RequestMeta::sender` —
+  `o4_request_options_bound_the_call_and_target_only_the_peer`; `espnow` builds for
   `thumbv6m-none-eabi` (`scripts/check-features.sh`).
 - [x] O5 The bridge framing round trips, rejects bad CRC, COBS, types and
   lengths, and is found behind the ESP8266's delimiter-less boot banner;
@@ -1276,7 +2003,8 @@ host → bridge.
   allows only the update keys, never `sys/trust/claim`, and only signed
   commits, while serial keeps its rules —
   `ota::tests::o6_an_unclaimed_device_refuses_the_air_entirely`,
-  `o6_a_claimed_device_allows_only_the_update_keys_over_the_air`,
+  `o6_a_claimed_device_allows_only_the_update_keys_over_the_air` (also
+  `app/...` and `disc/...` keys: they are publications, never requests),
   `o6_a_commit_over_the_air_must_be_signed`.
 - [x] O7 The begin's requester owns the transfer; a begin from the other
   side takes it over and the abandoned side's chunks and commit are

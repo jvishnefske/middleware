@@ -31,6 +31,19 @@
 //!   ([`encode_item`] / [`decode_item`]) and every matching sample is
 //!   delivered, the subscriber's own included.
 //!
+//! # Gaps
+//!
+//! A `Subscribe` call with [`GAP_HEADER`] set to [`GAP_REPORT`] (0.5
+//! clients send it) gets items `[key_len][key][sender_len][sender][gap]
+//! [payload]` ([`encode_item_with_gap`] / [`decode_item_with_gap`]), where
+//! `gap` is a big-endian `u16`: how many bus samples this stream lost to
+//! broadcast lag immediately before this item (saturating). The broadcast
+//! channel does not know which samples a stream would have selected, so the
+//! count includes samples of other keys and senders that were lost with
+//! them; it is exact when one publisher feeds the subscribed keys. Without
+//! the header lost samples are skipped silently as before. Any other value
+//! is `INVALID_ARGUMENT`.
+//!
 //! [`BusService`] fans published samples out with a
 //! [`tokio::sync::broadcast`] channel; each `Subscribe` stream keeps the
 //! samples whose key its [`KeyFilter`] matches, segment-wise (a prefix
@@ -57,6 +70,7 @@ use core::task::{Context, Poll};
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tonic::body::Body;
 use tonic::codegen::{BoxFuture, Service};
 use tonic::server::{Grpc, NamedService, ServerStreamingService, UnaryService};
@@ -86,6 +100,11 @@ pub const SELF_HEADER: &str = "mw-self";
 pub const SELF_REFUSE: &str = "refuse";
 /// [`SELF_HEADER`] value: deliver own publications too.
 pub const SELF_DELIVER: &str = "deliver";
+/// Metadata entry of a `Subscribe` call asking for gap-reporting items
+/// (module docs, "Gaps").
+pub const GAP_HEADER: &str = "mw-gap";
+/// [`GAP_HEADER`] value: report gaps.
+pub const GAP_REPORT: &str = "report";
 /// Default broadcast capacity (samples buffered per lagging subscriber).
 pub const DEFAULT_CAPACITY: usize = 64;
 
@@ -205,8 +224,8 @@ pub fn decode_item(item: &[u8]) -> Option<(Key<'_>, &[u8])> {
 }
 
 /// Bytes a stream item adds to key and payload at most: the key length,
-/// the sender length and an 8-byte sender.
-pub const ITEM_OVERHEAD: usize = 2 + 8;
+/// the sender length, an 8-byte sender and the 2-byte gap.
+pub const ITEM_OVERHEAD: usize = 2 + 8 + 2;
 
 /// Encodes one stream item for a subscriber that sent [`CLIENT_HEADER`]:
 /// `[key_len][key][sender_len][sender][payload]`, `sender_len` 8 or 0.
@@ -242,6 +261,65 @@ pub fn decode_item_with_sender(item: &[u8]) -> Option<(Key<'_>, Option<SenderId>
         _ => return None,
     };
     Some((key_of(key)?, sender, payload))
+}
+
+/// Encodes one stream item for a subscriber that asked for gaps:
+/// `[key_len][key][sender_len][sender][gap: u16 BE][payload]`.
+pub fn encode_item_with_gap(
+    key: Key<'_>,
+    sender: Option<SenderId>,
+    gap: u16,
+    payload: &[u8],
+) -> Bytes {
+    let key = key.as_bytes();
+    let mut out = BytesMut::with_capacity(ITEM_OVERHEAD + key.len() + payload.len());
+    out.put_u8(u8::try_from(key.len()).unwrap_or(u8::MAX));
+    out.put_slice(key);
+    match sender {
+        Some(id) => {
+            out.put_u8(8);
+            out.put_slice(&id.0);
+        }
+        None => out.put_u8(0),
+    }
+    out.put_u16(gap);
+    out.put_slice(payload);
+    out.freeze()
+}
+
+/// One decoded [`encode_item_with_gap`] item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapItem<'a> {
+    /// The sample's key.
+    pub key: Key<'a>,
+    /// The publisher, if it named itself.
+    pub sender: Option<SenderId>,
+    /// Bus samples lost immediately before this one.
+    pub gap: u16,
+    /// The payload.
+    pub payload: &'a [u8],
+}
+
+/// Splits an [`encode_item_with_gap`] item; `None` on the same conditions
+/// as [`decode_item_with_sender`] or when the gap is cut short.
+pub fn decode_item_with_gap(item: &[u8]) -> Option<GapItem<'_>> {
+    let (key, sender, rest) = decode_item_with_sender(item)?;
+    let (gap, payload) = rest.split_first_chunk::<2>()?;
+    Some(GapItem {
+        key,
+        sender,
+        gap: u16::from_be_bytes(*gap),
+        payload,
+    })
+}
+
+/// Whether a subscriber asked for gaps, from [`GAP_HEADER`].
+fn reports_gap(value: Option<&[u8]>) -> Result<bool, Status> {
+    match value {
+        None => Ok(false),
+        Some(v) if v == GAP_REPORT.as_bytes() => Ok(true),
+        Some(_) => Err(Status::invalid_argument("unknown mw-gap")),
+    }
 }
 
 /// The `middleware.v1.Bus` server. Cheap to clone; clones share one
@@ -362,6 +440,7 @@ fn subscribe(
         FilterKind::from_header(request.metadata().get(FILTER_HEADER).map(|v| v.as_bytes()))?;
     let client = client_of(&request)?;
     let deliver_own = deliver_own(request.metadata().get(SELF_HEADER).map(|v| v.as_bytes()))?;
+    let gaps = reports_gap(request.metadata().get(GAP_HEADER).map(|v| v.as_bytes()))?;
     let key = request.into_inner();
     parse_key(&key)?;
     Ok(Response::new(KeyedStream {
@@ -369,18 +448,24 @@ fn subscribe(
         kind,
         client,
         deliver_own,
+        gaps,
+        lost: 0,
         inner: BroadcastStream::new(tx.subscribe()),
     }))
 }
 
 /// Broadcast receiver filtered by a [`KeyFilter`] and the self-delivery
-/// rule, yielding [`encode_item_with_sender`] items to a subscriber that
-/// named itself and [`encode_item`] items otherwise.
+/// rule, yielding [`encode_item_with_gap`] items to a subscriber that asked
+/// for gaps, [`encode_item_with_sender`] items to one that named itself and
+/// [`encode_item`] items otherwise. Counts broadcast lag in `lost` until
+/// the next item carries it.
 pub struct KeyedStream {
     key: Bytes,
     kind: FilterKind,
     client: Option<SenderId>,
     deliver_own: bool,
+    gaps: bool,
+    lost: u16,
     inner: BroadcastStream<Published>,
 }
 
@@ -398,12 +483,14 @@ impl KeyedStream {
         }
     }
 
-    /// The stream item for sample `p`, in this subscriber's format.
-    fn item(&self, p: &Published) -> Option<Bytes> {
+    /// The stream item for sample `p`, in this subscriber's format, with
+    /// `lost` as its gap.
+    fn item(&self, p: &Published, lost: u16) -> Option<Bytes> {
         let key = key_of(&p.key)?;
-        Some(match self.client {
-            Some(_) => encode_item_with_sender(key, p.sender, &p.payload),
-            None => encode_item(key, &p.payload),
+        Some(match (self.gaps, self.client) {
+            (true, _) => encode_item_with_gap(key, p.sender, lost, &p.payload),
+            (false, Some(_)) => encode_item_with_sender(key, p.sender, &p.payload),
+            (false, None) => encode_item(key, &p.payload),
         })
     }
 }
@@ -415,6 +502,8 @@ impl core::fmt::Debug for KeyedStream {
             .field("kind", &self.kind)
             .field("client", &self.client)
             .field("deliver_own", &self.deliver_own)
+            .field("gaps", &self.gaps)
+            .field("lost", &self.lost)
             .finish_non_exhaustive()
     }
 }
@@ -427,12 +516,19 @@ impl Stream for KeyedStream {
         // channel is pending or closed, so it is bounded by the backlog.
         loop {
             match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(p))) if self.selects(&p) => match self.item(&p) {
-                    Some(item) => return Poll::Ready(Some(Ok(item))),
+                Poll::Ready(Some(Ok(p))) if self.selects(&p) => match self.item(&p, self.lost) {
+                    Some(item) => {
+                        self.lost = 0;
+                        return Poll::Ready(Some(Ok(item)));
+                    }
                     None => continue,
                 },
-                // Other keys, and lag notifications (samples already lost).
-                Poll::Ready(Some(_)) => continue,
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
+                    let n = u16::try_from(n).unwrap_or(u16::MAX);
+                    self.lost = self.lost.saturating_add(n);
+                }
+                // Other keys and refused self-deliveries.
+                Poll::Ready(Some(Ok(_))) => continue,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
@@ -482,6 +578,8 @@ mod tests {
             kind: FilterKind::Exact,
             client: None,
             deliver_own: false,
+            gaps: false,
+            lost: 0,
             inner: BroadcastStream::new(bus.tx.subscribe()),
         };
         for (k, p) in [("x/y", "1"), ("a/b/c", "x"), ("a/b", "2")] {
@@ -672,5 +770,55 @@ mod tests {
         // A 0.2 subscriber gets every sample in the old item format.
         let old = legacy.next().await.unwrap().unwrap();
         assert_eq!(decode_item(&old), Some((t, &b"mine"[..])));
+    }
+
+    #[test]
+    fn g12_items_with_gap_round_trip_and_reject_garbage() {
+        let k = Key::from_static("a/b");
+        let id = SenderId([9; 8]);
+        let item = encode_item_with_gap(k, Some(id), 0x0102, b"xy");
+        assert_eq!(item.len(), 1 + 3 + 1 + 8 + 2 + 2);
+        assert_eq!(
+            decode_item_with_gap(&item),
+            Some(GapItem {
+                key: k,
+                sender: Some(id),
+                gap: 0x0102,
+                payload: b"xy"
+            })
+        );
+        let anon = encode_item_with_gap(k, None, 0, b"");
+        assert_eq!(
+            decode_item_with_gap(&anon).map(|i| (i.sender, i.gap)),
+            Some((None, 0))
+        );
+        // Cut inside the gap.
+        assert_eq!(decode_item_with_gap(&anon[..anon.len() - 1]), None);
+        assert_eq!(reports_gap(Some(b"report")).ok(), Some(true));
+        assert_eq!(reports_gap(None).ok(), Some(false));
+        assert!(reports_gap(Some(b"yes")).is_err());
+    }
+
+    #[tokio::test]
+    async fn g12_broadcast_lag_is_carried_by_the_next_item() {
+        use tokio_stream::StreamExt;
+        let bus = BusService::new(2);
+        let mut req = Request::new(Bytes::from_static(b"t"));
+        req.metadata_mut()
+            .insert(GAP_HEADER, GAP_REPORT.parse().unwrap());
+        let mut s = subscribe(&bus.tx, req).unwrap().into_inner();
+        publish_on(&bus, "t", "0");
+        let first = s.next().await.unwrap().unwrap();
+        assert_eq!(decode_item_with_gap(&first).map(|i| i.gap), Some(0));
+        // Capacity 2: of five unread samples the oldest three are lost.
+        for p in ["1", "2", "3", "4", "5"] {
+            publish_on(&bus, "t", p);
+        }
+        let next = s.next().await.unwrap().unwrap();
+        let next = decode_item_with_gap(&next).unwrap();
+        assert_eq!((next.payload, next.gap), (&b"4"[..], 3));
+        let last = s.next().await.unwrap().unwrap();
+        let last = decode_item_with_gap(&last).unwrap();
+        assert_eq!((last.payload, last.gap), (&b"5"[..], 0));
     }
 }

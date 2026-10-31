@@ -14,12 +14,22 @@
 //!   [`TraceContext`] (and optionally a `grpc-timeout`) into every outbound
 //!   request. Build one per inbound request and wrap a cloned channel with
 //!   it: `GrpcTransport::new(InterceptedService::new(channel.clone(), interceptor))`.
-//! * [`GrpcTimeout`] — `grpc-timeout` values per the gRPC HTTP/2 spec.
+//! * [`GrpcTimeout`] — `grpc-timeout` values per the gRPC HTTP/2 spec
+//!   (defined in `grpc::timeout`, which the client and responder use
+//!   without this feature; re-exported here).
 //! * [`retry_condition`] / [`is_retriable`] — Istio's default `retryOn` set
 //!   applied to gRPC status codes.
 //! * [`MeshChannelBuilder`] — a plaintext (h2c) channel to the local Envoy
 //!   sidecar with the mesh authority as `:authority`. mTLS between pods is
 //!   Envoy's job, so the application never configures TLS.
+//! * [`peer_principal`] — the caller's SPIFFE ID from Envoy's
+//!   `x-forwarded-client-cert` ([`XFCC_HEADER`]), which
+//!   [`ResponderService`](crate::grpc::ResponderService) puts in
+//!   `RequestMeta::principal` when built with
+//!   [`PrincipalSource::SidecarXfcc`](crate::grpc::responder::PrincipalSource).
+//! * [`mesh`](crate::grpc::mesh) (same feature) builds on these: a client
+//!   routing to discovered endpoints through the sidecar, gather over them,
+//!   and health-checked browsing.
 
 use crate::grpc::GrpcError;
 use core::time::Duration;
@@ -203,145 +213,7 @@ impl Interceptor for MeshInterceptor {
 
 // ---------------------------------------------------------------- I3
 
-/// Request header carrying the deadline.
-pub const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
-
-/// Largest `TimeoutValue`: the spec allows at most 8 ASCII digits.
-pub const MAX_TIMEOUT_VALUE: u32 = 99_999_999;
-
-/// `TimeoutUnit` of a `grpc-timeout` value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeoutUnit {
-    /// `n`
-    Nanos,
-    /// `u`
-    Micros,
-    /// `m`
-    Millis,
-    /// `S`
-    Seconds,
-    /// `M`
-    Minutes,
-    /// `H`
-    Hours,
-}
-
-impl TimeoutUnit {
-    /// Finest to coarsest.
-    const ALL: [TimeoutUnit; 6] = [
-        TimeoutUnit::Nanos,
-        TimeoutUnit::Micros,
-        TimeoutUnit::Millis,
-        TimeoutUnit::Seconds,
-        TimeoutUnit::Minutes,
-        TimeoutUnit::Hours,
-    ];
-
-    /// Length of one unit in nanoseconds.
-    pub const fn nanos(self) -> u128 {
-        match self {
-            TimeoutUnit::Nanos => 1,
-            TimeoutUnit::Micros => 1_000,
-            TimeoutUnit::Millis => 1_000_000,
-            TimeoutUnit::Seconds => 1_000_000_000,
-            TimeoutUnit::Minutes => 60_000_000_000,
-            TimeoutUnit::Hours => 3_600_000_000_000,
-        }
-    }
-
-    /// The unit's wire character.
-    pub const fn as_char(self) -> char {
-        match self {
-            TimeoutUnit::Nanos => 'n',
-            TimeoutUnit::Micros => 'u',
-            TimeoutUnit::Millis => 'm',
-            TimeoutUnit::Seconds => 'S',
-            TimeoutUnit::Minutes => 'M',
-            TimeoutUnit::Hours => 'H',
-        }
-    }
-
-    /// Inverse of [`TimeoutUnit::as_char`].
-    pub const fn from_char(c: char) -> Option<Self> {
-        match c {
-            'n' => Some(TimeoutUnit::Nanos),
-            'u' => Some(TimeoutUnit::Micros),
-            'm' => Some(TimeoutUnit::Millis),
-            'S' => Some(TimeoutUnit::Seconds),
-            'M' => Some(TimeoutUnit::Minutes),
-            'H' => Some(TimeoutUnit::Hours),
-            _ => None,
-        }
-    }
-}
-
-/// A `grpc-timeout` value: at most [`MAX_TIMEOUT_VALUE`] of a
-/// [`TimeoutUnit`]. `Display` renders the wire form, e.g. `250m`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GrpcTimeout {
-    value: u32,
-    unit: TimeoutUnit,
-}
-
-impl GrpcTimeout {
-    /// Encodes `d` in the finest unit whose value fits in 8 digits. Coarser
-    /// units round up so the peer never sees a shorter deadline than asked
-    /// for; durations beyond `99999999H` saturate there.
-    pub fn from_duration(d: Duration) -> Self {
-        let nanos = d.as_nanos();
-        for unit in TimeoutUnit::ALL {
-            let value = nanos.div_ceil(unit.nanos());
-            if let Ok(value) = u32::try_from(value)
-                && value <= MAX_TIMEOUT_VALUE
-            {
-                return Self { value, unit };
-            }
-        }
-        Self {
-            value: MAX_TIMEOUT_VALUE,
-            unit: TimeoutUnit::Hours,
-        }
-    }
-
-    /// Parses the wire form; `None` when malformed or over 8 digits.
-    pub fn parse(s: &str) -> Option<Self> {
-        let unit = TimeoutUnit::from_char(s.chars().last()?)?;
-        let digits = s.get(..s.len() - 1)?;
-        if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        Some(Self {
-            value: digits.parse().ok()?,
-            unit,
-        })
-    }
-
-    /// The numeric part.
-    pub const fn value(self) -> u32 {
-        self.value
-    }
-
-    /// The unit.
-    pub const fn unit(self) -> TimeoutUnit {
-        self.unit
-    }
-
-    /// The deadline this value represents.
-    pub fn as_duration(self) -> Duration {
-        let nanos = u128::from(self.value) * self.unit.nanos();
-        Duration::new(
-            u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX),
-            // Remainder of a division by 1e9 always fits in u32.
-            u32::try_from(nanos % 1_000_000_000).unwrap_or(0),
-        )
-    }
-}
-
-impl core::fmt::Display for GrpcTimeout {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}{}", self.value, self.unit.as_char())
-    }
-}
+pub use crate::grpc::timeout::{GRPC_TIMEOUT_HEADER, GrpcTimeout, MAX_TIMEOUT_VALUE, TimeoutUnit};
 
 // ---------------------------------------------------------------- I4
 
@@ -495,6 +367,145 @@ impl MeshChannelBuilder {
     }
 }
 
+// ---------------------------------------------------------------- I6
+
+/// The request header in which Envoy forwards the client certificate
+/// details of the connection it terminated.
+pub const XFCC_HEADER: &str = "x-forwarded-client-cert";
+
+/// Splits `s` at the first `sep` outside double quotes (inside quotes a
+/// backslash escapes the next byte). `sep` is ASCII, so both halves are
+/// valid `&str`.
+fn split_unquoted(s: &str, sep: u8) -> (&str, Option<&str>) {
+    let (mut quoted, mut escaped) = (false, false);
+    for (i, b) in s.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if quoted && b == b'\\' {
+            escaped = true;
+        } else if b == b'"' {
+            quoted = !quoted;
+        } else if b == sep && !quoted {
+            return (s.get(..i).unwrap_or(s), s.get(i + 1..));
+        }
+    }
+    (s, None)
+}
+
+/// Whether every double quote in `s` is closed and no escape is left
+/// dangling.
+fn quotes_balanced(s: &str) -> bool {
+    let (mut quoted, mut escaped) = (false, false);
+    for b in s.bytes() {
+        if escaped {
+            escaped = false;
+        } else if quoted && b == b'\\' {
+            escaped = true;
+        } else if b == b'"' {
+            quoted = !quoted;
+        }
+    }
+    !quoted && !escaped
+}
+
+/// The text of an XFCC value: a quoted value without its quotes, or the
+/// bare value. `None` for a quoted value containing an escape (a SPIFFE ID
+/// never contains `"` or `\`, so there is nothing to unescape) or a bare
+/// value containing a quote.
+fn xfcc_value(v: &str) -> Option<&str> {
+    match v.strip_prefix('"') {
+        Some(rest) => {
+            let inner = rest.strip_suffix('"')?;
+            (!inner.contains(['"', '\\'])).then_some(inner)
+        }
+        None => (!v.contains('"')).then_some(v),
+    }
+}
+
+/// Whether `s` is a SPIFFE ID as the SPIFFE ID specification defines it:
+/// `spiffe://`, a non-empty trust domain of lowercase letters, digits,
+/// `.`, `-` and `_`, then an optional path of `/`-separated non-empty
+/// segments of letters, digits, `.`, `-` and `_`, none of them `.` or
+/// `..`, and no trailing `/`.
+pub fn is_spiffe_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("spiffe://") else {
+        return false;
+    };
+    let (domain, path) = match rest.find('/') {
+        Some(i) => (rest.get(..i).unwrap_or(""), rest.get(i..)),
+        None => (rest, None),
+    };
+    let domain_ok = !domain.is_empty()
+        && domain
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
+    let segment_ok = |seg: &str| {
+        !seg.is_empty()
+            && seg != "."
+            && seg != ".."
+            && seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    domain_ok && path.is_none_or(|p| p.get(1..).is_some_and(|p| p.split('/').all(segment_ok)))
+}
+
+/// The SPIFFE ID of the peer that called this hop, from an Envoy
+/// `x-forwarded-client-cert` header value; pure.
+///
+/// The header is a `,`-separated list of elements, one per proxy that
+/// terminated a TLS connection, each a `;`-separated list of `Key=Value`
+/// pairs (`By`, `Hash`, `Cert`, `Chain`, `Subject`, `URI`, `DNS`; keys are
+/// case-insensitive). A value containing `,`, `;` or `=` is double-quoted,
+/// with `"` inside it written `\"`. Proxies append, so the **last** element
+/// describes the connection closest to this server: the local sidecar's
+/// view of its downstream peer. This returns the first `URI` value of that
+/// element that [`is_spiffe_id`]; `None` when the header is malformed
+/// (unbalanced quotes), the last element has no such URI, or it is empty.
+///
+/// # Trust
+///
+/// The header is only as trustworthy as whoever set it. Behind an Istio
+/// sidecar, Envoy sanitizes or sets XFCC on every inbound request
+/// (`forwardClientCertDetails`: `SANITIZE_SET` or `APPEND_FORWARD`, which
+/// put the verified peer certificate last), so the last element is the
+/// mTLS-authenticated caller. Without a sidecar in front of the server, any
+/// client can send any XFCC value. Use this only on servers reachable
+/// solely through the sidecar; the responder ignores the header unless
+/// configured with
+/// [`PrincipalSource::SidecarXfcc`](crate::grpc::responder::PrincipalSource).
+pub fn peer_principal(xfcc: &str) -> Option<&str> {
+    if !quotes_balanced(xfcc) {
+        return None;
+    }
+    // The last element: split at every unquoted comma, keep the tail.
+    // Each step consumes at least one byte, so this ends.
+    let mut last = xfcc;
+    let mut rest = Some(xfcc);
+    while let Some(r) = rest {
+        let (element, tail) = split_unquoted(r, b',');
+        last = element;
+        rest = tail;
+    }
+    let mut pairs = Some(last);
+    while let Some(p) = pairs {
+        let (pair, tail) = split_unquoted(p, b';');
+        pairs = tail;
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("uri") {
+            continue;
+        }
+        if let Some(v) = xfcc_value(value.trim())
+            && is_spiffe_id(v)
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +646,84 @@ mod tests {
         let e = b.endpoint().unwrap();
         assert_eq!(e.uri().to_string(), "http://127.0.0.1:15001/");
         assert!(MeshChannelBuilder::new("bad host/x").endpoint().is_err());
+    }
+
+    const CLIENT: &str = "spiffe://cluster.local/ns/test/sa/client";
+
+    #[test]
+    fn i6_peer_principal_takes_the_spiffe_uri_of_the_last_element() {
+        // One element, as Istio's sidecar sets it (SANITIZE_SET).
+        let one = "By=spiffe://cluster.local/ns/test/sa/server;\
+                   Hash=468ed33be74eee6556d90c0149c1309e9ba61d6425303443c0748a02dd8de688;\
+                   Subject=\"\";URI=spiffe://cluster.local/ns/test/sa/client";
+        assert_eq!(peer_principal(one), Some(CLIENT));
+        // Two hops: the closest (last) element wins.
+        let two = "By=spiffe://a/x;URI=spiffe://cluster.local/ns/edge/sa/gateway,\
+                   By=spiffe://cluster.local/ns/test/sa/server;URI=spiffe://cluster.local/ns/test/sa/client";
+        assert_eq!(peer_principal(two), Some(CLIENT));
+        // Keys are case-insensitive; whitespace around pairs is tolerated.
+        assert_eq!(
+            peer_principal(" uri = spiffe://cluster.local/ns/test/sa/client "),
+            Some(CLIENT)
+        );
+        // A quoted URI is unquoted.
+        assert_eq!(
+            peer_principal("URI=\"spiffe://cluster.local/ns/test/sa/client\""),
+            Some(CLIENT)
+        );
+        // Several URI SANs: the first SPIFFE one.
+        assert_eq!(
+            peer_principal(
+                "URI=https://example.com/x;URI=spiffe://cluster.local/ns/test/sa/client"
+            ),
+            Some(CLIENT)
+        );
+    }
+
+    #[test]
+    fn i6_quoted_separators_do_not_split_elements_or_pairs() {
+        // `,` `;` and `=` inside a quoted Subject belong to it.
+        let h = "By=spiffe://td/s;Subject=\"CN=x,O=y;L=z\";URI=spiffe://cluster.local/ns/test/sa/client";
+        assert_eq!(peer_principal(h), Some(CLIENT));
+        // An escaped quote inside a quoted value does not end it.
+        let h =
+            "Subject=\"CN=a\\\",URI=spiffe://evil/x\";URI=spiffe://cluster.local/ns/test/sa/client";
+        assert_eq!(peer_principal(h), Some(CLIENT));
+        // A quoted comma in an earlier element must not make its tail the
+        // last element.
+        let h = "URI=spiffe://cluster.local/ns/test/sa/client;Subject=\"a,URI=spiffe://evil/x\"";
+        assert_eq!(peer_principal(h), Some(CLIENT));
+    }
+
+    #[test]
+    fn i6_malformed_or_missing_principals_are_none() {
+        for h in [
+            "",
+            ",",
+            "By=spiffe://td/s",
+            // The last element has no URI, even though an earlier one does.
+            "URI=spiffe://cluster.local/ns/test/sa/client,By=spiffe://td/s",
+            // Unbalanced quotes: the whole header is refused.
+            "URI=spiffe://cluster.local/ns/test/sa/client;Subject=\"open",
+            "URI=\"spiffe://cluster.local/ns/test/sa/client",
+            // Not SPIFFE IDs.
+            "URI=https://cluster.local/ns/test",
+            "URI=spiffe://",
+            "URI=spiffe:///ns/x",
+            "URI=spiffe://Upper/ns",
+            "URI=spiffe://td/ns//x",
+            "URI=spiffe://td/ns/",
+            "URI=spiffe://td/./x",
+            "URI=spiffe://td/../x",
+            "URI=spiffe://td/a b",
+            "URI=spiffe://td/a\"b",
+            // A quoted value with an escape is refused, not unescaped.
+            "URI=\"spiffe://td/a\\\"b\"",
+            "URI",
+        ] {
+            assert_eq!(peer_principal(h), None, "{h:?}");
+        }
+        assert!(is_spiffe_id("spiffe://td"));
+        assert!(is_spiffe_id("spiffe://cluster.local/ns/a-b/sa/c_d.e"));
     }
 }

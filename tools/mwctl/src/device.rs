@@ -26,8 +26,8 @@
 use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
-use middleware::Key;
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
+use middleware::{Key, SenderId};
 use middleware::loader::{Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
 
@@ -47,6 +47,9 @@ pub struct Info {
     pub chip: String,
     /// Firmware version, e.g. `0.1.0+no-wasm`.
     pub firmware: String,
+    /// The device's node id (middleware 0.5 firmware; `None` from older
+    /// firmware, whose response ends after the firmware name).
+    pub node: Option<SenderId>,
 }
 
 impl Info {
@@ -59,6 +62,7 @@ impl Info {
             status: i.status,
             chip: i.chip.to_owned(),
             firmware: i.firmware.to_owned(),
+            node: i.node,
         })
     }
 
@@ -249,6 +253,7 @@ mod tests {
         assert_eq!(i.status, PayloadStatus::Empty);
         assert_eq!(i.abi_version, middleware::wasm_abi::ABI_VERSION);
         assert!(!i.runs_payloads());
+        assert_eq!(i.node, Some(crate::fake::NODE));
         assert!(Info::decode(&[1, 2, 3]).is_none());
         // The host sent one leading delimiter before the first frame.
         assert_eq!(d.link().transport().raw_rx().first(), Some(&0));

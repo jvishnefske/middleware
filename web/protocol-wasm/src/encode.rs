@@ -80,6 +80,10 @@ pub const fn status_name(status: Option<HandlerError>) -> &'static str {
         Some(HandlerError::BufferTooSmall) => "BufferTooSmall",
         Some(HandlerError::Internal) => "Internal",
         Some(HandlerError::Denied) => "Denied",
+        Some(HandlerError::Unavailable) => "Unavailable",
+        Some(HandlerError::DeadlineExceeded) => "DeadlineExceeded",
+        // A status added to the middleware after this build.
+        Some(_) => "Unknown",
     }
 }
 

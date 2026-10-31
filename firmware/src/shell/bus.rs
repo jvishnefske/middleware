@@ -43,7 +43,7 @@ const REPLY_PORTS: usize = PORTS + 1;
 /// Largest inbound body: a loader chunk with its offset, or a publication.
 pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
 
-/// Largest reply body (`sys/info` is at most 73 bytes).
+/// Largest reply body (`sys/info` is at most `MAX_INFO_LEN`, 81 bytes).
 pub const MAX_REPLY: usize = 128;
 
 /// Outbound messages buffered per port before the oldest is dropped.

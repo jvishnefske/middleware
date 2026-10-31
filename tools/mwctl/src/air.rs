@@ -423,6 +423,7 @@ mod tests {
                     status: self.status,
                     chip: "esp32s3",
                     firmware: "0.1.0",
+                    node: Some(middleware::SenderId::from_mac(DEV)),
                 }
                 .encode(out)
                 .ok_or(HandlerError::BufferTooSmall),
@@ -566,6 +567,7 @@ mod tests {
             (i.chip.as_str(), i.status),
             ("esp32s3", PayloadStatus::Empty)
         );
+        assert_eq!(i.node, Some(middleware::SenderId::from_mac(DEV)), "0.5 node id over the air");
         assert_eq!(d.link().bridge_mac(), Some(BRIDGE));
         assert_eq!(
             d.link().stats(),

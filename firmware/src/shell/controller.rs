@@ -67,6 +67,11 @@
 //! refused commit does on serial; over-the-air `begin`, `commit`, `start`
 //! and `stop` are logged with the requester's MAC.
 //!
+//! Each request reaches `esp_base::dispatch::handle_request` as a
+//! middleware `Request` with its `RequestMeta`: empty for a serial port
+//! (it names no caller), the sender's MAC as `SenderId` for a request over
+//! the air (unauthenticated; admission is the over-the-air policy's).
+//!
 //! Trust: each request is dispatched with `Context::rekey_window` taken
 //! from [`presence::window_open`]. A `Claim` action saves the trust record
 //! ([`TrustStore::save`], on the flash the payload store lends; the new
@@ -93,7 +98,7 @@ use middleware::loader::trust::TrustState;
 use esp_storage::FlashStorage;
 use heapless::Vec;
 use middleware::Key;
-use middleware::transport::HandlerError;
+use middleware::transport::{HandlerError, Request, RequestMeta, SenderId};
 
 use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Port, Reply};
 use super::presence;
@@ -348,18 +353,27 @@ impl Controller {
                 body
             }
         };
-        let staging = matches!(origin, Origin::Air(_));
-        let handled = self.dispatch(id, key, body, staging);
+        let handled = self.dispatch(id, origin, key, body);
         let receiving = matches!(self.state.loader(), Loader::Receiving { .. });
         self.owner = ota::owner_after(self.owner, origin, key, receiving);
         handled
     }
 
     /// Dispatches one admitted request and performs its storage action.
-    fn dispatch(&mut self, id: u8, key: Key<'_>, body: &[u8], staging: bool) -> Handled {
+    /// Requests over the air are dispatched with `Context::staging`.
+    fn dispatch(&mut self, id: u8, origin: Origin, key: Key<'_>, body: &[u8]) -> Handled {
+        let staging = matches!(origin, Origin::Air(_));
         let mut out = [0u8; MAX_REPLY];
         let ctx = Context { rekey_window: presence::window_open(), staging, ..self.ctx };
-        let outcome = handle_request(self.state, &ctx, key, body, &mut out);
+        // A serial port names no caller; an ESP-NOW request names its
+        // sender's MAC (unauthenticated: the over-the-air policy, not the
+        // sender, is what admitted it). No principal, no deadline.
+        let meta = match origin {
+            Origin::Serial => RequestMeta::NONE,
+            Origin::Air(mac) => RequestMeta::NONE.with_sender(SenderId::from_mac(mac)),
+        };
+        let req = Request::new(key, body).with_meta(meta);
+        let outcome = handle_request(self.state, &ctx, &req, &mut out);
         if outcome.action == Action::Start {
             return Handled { reply: None, stop: false };
         }

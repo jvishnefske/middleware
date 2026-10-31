@@ -10,7 +10,7 @@
 //!
 //! # Requester
 //!
-//! [`RpcRequester`] talks to one peer. Each [`Requester::request`] takes a
+//! [`RpcRequester`] talks to one peer. Each [`Requester::request_with`] takes a
 //! fresh correlation id (advanced before the first await, so a dropped call
 //! never makes the next one reuse its id), sends the request and waits up
 //! to its timeout ([`Delay`]) for the matching response
@@ -30,6 +30,10 @@
 //! a repeat (the requester did not hear the response) is answered from the
 //! cache without running the handler again. The handler runs synchronously
 //! between two awaits, so nothing is ever in flight across a cancellation.
+//! It sees the requester's MAC as [`RequestMeta::sender`]
+//! ([`SenderId::from_mac`]), no principal and no deadline; the MAC is not
+//! authenticated, so a handler that must authorise checks a signature in
+//! the body (as the ESP base firmware's over-the-air policy does).
 //!
 //! Tested on the host over an in-memory air that loses, duplicates and
 //! reorders frames.
@@ -37,7 +41,10 @@
 use super::{EspNowRadio, MAX_IGNORED_FRAMES, Mac};
 use crate::key::Key;
 use crate::rpc::{Admit, Call, MAX_FRAME, MAX_RESPONSE_BODY, Message, Replies, RpcError, next_id};
-use crate::transport::{Handler, HandlerError, Requester, Responder};
+use crate::transport::{
+    Handler, HandlerError, Request, RequestMeta, RequestOptions, Requester, Responder, SenderId,
+    Target,
+};
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
@@ -92,6 +99,8 @@ pub enum RpcClientError<E> {
     Timeout,
     /// The response body does not fit the caller's buffer.
     BufferTooSmall,
+    /// [`Target::Node`] named a node other than the requester's peer.
+    WrongTarget,
 }
 
 /// Retry settings of an [`RpcRequester`].
@@ -101,6 +110,21 @@ pub struct Retry {
     pub timeout_ms: u32,
     /// Sends in all, including the first (at least one).
     pub attempts: u8,
+}
+
+impl Retry {
+    /// The settings for a call the caller bounds to `budget_ms` (`None`:
+    /// these settings unchanged): each attempt waits at most the budget,
+    /// and only as many attempts are made as fit it (at least one), so the
+    /// waits add up to about `budget_ms`.
+    pub const fn within(self, budget_ms: Option<u32>) -> Retry {
+        let Some(budget) = budget_ms else { return self };
+        let timeout_ms = if budget < self.timeout_ms { budget } else { self.timeout_ms };
+        let fit = if timeout_ms == 0 { 1 } else { budget / timeout_ms };
+        let fit = if fit == 0 { 1 } else { fit };
+        let attempts = if (self.attempts as u32) < fit { self.attempts } else { fit as u8 };
+        Retry { timeout_ms, attempts: if attempts == 0 { 1 } else { attempts } }
+    }
 }
 
 /// Counters of an [`RpcRequester`].
@@ -203,12 +227,28 @@ impl<R: EspNowUnicast, D: Delay> Requester for RpcRequester<R, D> {
 
     /// Sends `request` to the peer and waits for the response, resending
     /// with the same id on timeout (see the module docs).
-    async fn request<'b>(
+    ///
+    /// `options.timeout: None` is bounded by the [`Retry`] settings
+    /// (`attempts` × `timeout_ms`); `Some(d)` bounds the call to about `d`
+    /// ([`Retry::within`]: shorter attempts, fewer of them, at least one).
+    /// The requester talks to one peer, so [`Target::Node`] must name it
+    /// ([`SenderId::from_mac`] of the peer's MAC); any other node is
+    /// [`RpcClientError::WrongTarget`] before anything is sent. The
+    /// responder's [`RequestMeta`](crate::RequestMeta) carries no deadline
+    /// (the frame has no field for one).
+    async fn request_with<'b>(
         &mut self,
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
+        options: &RequestOptions,
     ) -> Result<&'b [u8], Self::Error> {
+        if let Target::Node(node) = options.target
+            && node != SenderId::from_mac(self.peer)
+        {
+            return Err(RpcClientError::WrongTarget);
+        }
+        let retry = self.retry.within(options.timeout_ms());
         let id = self.next;
         self.next = next_id(id);
         self.stats.calls = self.stats.calls.saturating_add(1);
@@ -224,12 +264,12 @@ impl<R: EspNowUnicast, D: Delay> Requester for RpcRequester<R, D> {
         let frame = frame
             .get(..n)
             .ok_or(RpcClientError::Frame(RpcError::TooLong))?;
-        let mut call = Call::first(id, self.peer, self.retry.attempts);
+        let mut call = Call::first(id, self.peer, retry.attempts);
         loop {
             let sent = self.radio.send_to(self.peer, frame).await.is_ok();
             let outcome = if sent {
                 let wait = Self::answer(&mut self.radio, &mut self.stats, self.own, call, response);
-                match first(wait, self.delay.delay_ms(self.retry.timeout_ms)).await {
+                match first(wait, self.delay.delay_ms(retry.timeout_ms)).await {
                     First::Left(r) => Some(r?),
                     First::Right(()) => None,
                 }
@@ -387,8 +427,12 @@ impl<R: EspNowUnicast, const N: usize, const B: usize> Responder for RpcResponde
                     self.stats.executed = self.stats.executed.saturating_add(1);
                     let room = scratch.len().min(MAX_RESPONSE_BODY);
                     let out = scratch.get_mut(..room).unwrap_or_default();
+                    // The sender's MAC is unauthenticated (ESP-NOW frames
+                    // can be spoofed): it names, it does not authorise.
+                    let req = Request::new(key, body)
+                        .with_meta(RequestMeta::NONE.with_sender(SenderId::from_mac(src)));
                     let result = handler
-                        .handle(key, body, out)
+                        .handle(&req, out)
                         .and_then(|n| out.get(..n).ok_or(HandlerError::BufferTooSmall));
                     self.replies = self.replies.complete(src, id, result);
                     return self.reply(src, id, result).await;
@@ -530,19 +574,18 @@ mod tests {
 
     /// The device's handler: counts executions per key, answers `sys/info`
     /// with "esp32s3" and everything else with an empty body.
+    /// Records the sender the responder named for each request.
     #[derive(Default)]
     struct Device {
         runs: Vec<std::string::String>,
+        senders: Vec<Option<SenderId>>,
     }
 
     impl Handler for Device {
-        fn handle(
-            &mut self,
-            key: Key<'_>,
-            request: &[u8],
-            response: &mut [u8],
-        ) -> Result<usize, HandlerError> {
+        fn handle(&mut self, req: &Request<'_>, response: &mut [u8]) -> Result<usize, HandlerError> {
+            let (key, request) = (req.key, req.body);
             self.runs.push(key.as_str().into());
+            self.senders.push(req.meta.sender);
             match key.as_str() {
                 "sys/info" => {
                     response
@@ -605,10 +648,23 @@ mod tests {
         body: &[u8],
         out: &mut [u8],
     ) -> Result<std::vec::Vec<u8>, RpcClientError<()>> {
+        call_with(req, resp, dev, key, body, out, &RequestOptions::DEFAULT)
+    }
+
+    /// [`call`] with request options.
+    fn call_with(
+        req: &mut RpcRequester<Station, Polls>,
+        resp: &mut RpcResponder<Station, 4, 64>,
+        dev: &mut Device,
+        key: &str,
+        body: &[u8],
+        out: &mut [u8],
+        options: &RequestOptions,
+    ) -> Result<std::vec::Vec<u8>, RpcClientError<()>> {
         let key = Key::new(key).unwrap();
         let mut cx = Context::from_waker(Waker::noop());
         let mut scratch = [0u8; 64];
-        let mut client = pin!(req.request(key, body, out));
+        let mut client = pin!(req.request_with(key, body, out, options));
         let mut server = pin!(async {
             loop {
                 let _ = resp.serve_one(dev, &mut scratch).await;
@@ -803,6 +859,40 @@ mod tests {
             Ok(b"esp32s3".to_vec())
         );
         assert_eq!(dev.runs, ["sys/info"]);
+    }
+
+    #[test]
+    fn o4_request_options_bound_the_call_and_target_only_the_peer() {
+        use core::time::Duration;
+        // A caller's budget shortens attempts and caps how many are made.
+        assert_eq!(RETRY.within(None), RETRY);
+        assert_eq!(RETRY.within(Some(250)), Retry { timeout_ms: 100, attempts: 2 });
+        assert_eq!(RETRY.within(Some(30)), Retry { timeout_ms: 30, attempts: 1 });
+        assert_eq!(RETRY.within(Some(0)), Retry { timeout_ms: 0, attempts: 1 });
+        assert_eq!(RETRY.within(Some(u32::MAX)), RETRY);
+        let (mut req, mut resp, air) = net(&[Fate::Lose; 4]);
+        let mut dev = Device::default();
+        let mut out = [0u8; 64];
+        let budget = RequestOptions::DEFAULT.with_timeout(Duration::from_millis(250));
+        assert_eq!(
+            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &budget),
+            Err(RpcClientError::Timeout)
+        );
+        assert_eq!(air.borrow().sent, 2, "two 100 ms attempts fit 250 ms");
+        // Another node is refused before anything is sent.
+        let other = RequestOptions::DEFAULT.with_target(Target::Node(SenderId::from_mac(OTHER)));
+        assert_eq!(
+            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &other),
+            Err(RpcClientError::WrongTarget)
+        );
+        assert_eq!(air.borrow().sent, 2);
+        // The peer itself is fine, and the handler is told who asked.
+        let peer = RequestOptions::DEFAULT.with_target(Target::Node(SenderId::from_mac(DEV)));
+        assert_eq!(
+            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &peer),
+            Ok(b"esp32s3".to_vec())
+        );
+        assert_eq!(dev.senders, [Some(SenderId::from_mac(HOST))]);
     }
 
     #[test]
