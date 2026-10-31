@@ -37,7 +37,9 @@
 //!   [`MemoryError::NoResponder`]. [`Gather::request_each`] goes to every
 //!   such responder. Handlers see [`RequestMeta`] with the requesting
 //!   node's id, its principal (set with [`MemoryBus::node_with_principal`]),
-//!   and the time left of the caller's timeout; a request whose deadline
+//!   the time left of the caller's timeout, and the caller's
+//!   [`RequestOptions::trace`] and [`RequestOptions::request_id`] unchanged
+//!   (K18); a request whose deadline
 //!   passed before it was served is answered
 //!   [`HandlerError::DeadlineExceeded`] without running the handler.
 //! * **Timeouts.** `options.timeout` is honoured with tokio's timer (call
@@ -65,8 +67,8 @@ use crate::key::{Key, KeyFilter, KeyFilterBuf, MAX_KEY_LEN};
 
 use super::{
     Delivery, Flow, Gather, Handler, HandlerError, Limits, Overflow, Publisher, Reply, Request,
-    RequestMeta, RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId, Subscribe,
-    Subscriber, Target, sample_into,
+    RequestId, RequestMeta, RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId,
+    Subscribe, Subscriber, Target, TraceParent, sample_into,
 };
 
 /// Queue depth of each subscriber unless set with
@@ -137,6 +139,8 @@ struct Pending {
     sender: SenderId,
     principal: Option<String>,
     deadline: Option<Instant>,
+    trace: Option<TraceParent>,
+    request_id: Option<String>,
 }
 
 struct RespSlot {
@@ -327,7 +331,7 @@ impl MemoryNode {
         &self,
         key: Key<'_>,
         body: &[u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
         all: bool,
     ) -> Option<(u64, ReplyGuard)> {
         let mut hub = self.hub.borrow_mut();
@@ -350,6 +354,8 @@ impl MemoryNode {
                 sender: self.id,
                 principal: self.principal.clone(),
                 deadline,
+                trace: options.trace,
+                request_id: options.request_id.map(|r| r.as_str().into()),
             });
             if let Some(w) = r.waker.take() {
                 w.wake();
@@ -456,7 +462,7 @@ impl Requester for MemoryNode {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], MemoryError> {
         let (id, _guard) = self
             .send(key, request, options, false)
@@ -491,7 +497,7 @@ impl Gather for MemoryNode {
         key: Key<'_>,
         request: &[u8],
         buf: &mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
         max_replies: usize,
         mut on_reply: F,
     ) -> Result<usize, MemoryError>
@@ -683,6 +689,8 @@ impl Responder for MemoryResponder {
                     principal: pending.principal.as_deref(),
                     deadline_ms: remaining
                         .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX)),
+                    trace: pending.trace,
+                    request_id: pending.request_id.as_deref().and_then(RequestId::new),
                 };
                 let req = Request::new(key, &pending.body).with_meta(meta);
                 handler.handle(&req, scratch).and_then(|n| {

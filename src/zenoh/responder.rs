@@ -26,6 +26,9 @@
 //!   smaller.
 //! * `principal`: always `None`; Zenoh 1.x authenticates no caller name
 //!   this backend can see.
+//! * `trace` and `request_id`: from the attachment's trace extension
+//!   ([`wire`], "Query trace extension"); `None` when the requester sent
+//!   none (or is a 0.5 node). Self-asserted like `sender`.
 //!
 //! The reply goes to the key expression the query was sent to, with a reply
 //! attachment naming this responder; a handler error is a Zenoh reply error
@@ -105,14 +108,18 @@ impl<'k> ZenohResponder<'k> {
 }
 
 /// The [`RequestMeta`] of a query with `attachment` that waited
-/// `waited_ms` in the FIFO. Pure.
-pub fn request_meta(attachment: Option<&[u8]>, waited_ms: u64) -> RequestMeta<'static> {
+/// `waited_ms` in the FIFO; the request id borrows the attachment. Pure.
+pub fn request_meta(attachment: Option<&[u8]>, waited_ms: u64) -> RequestMeta<'_> {
     match attachment.and_then(wire::decode_query) {
-        Some((sender, deadline)) => {
+        Some(h) => {
             let waited = u32::try_from(waited_ms).unwrap_or(u32::MAX);
-            RequestMeta::NONE
-                .with_sender(sender)
-                .with_deadline_ms(deadline.saturating_sub(waited))
+            RequestMeta {
+                trace: h.trace,
+                request_id: h.request_id,
+                ..RequestMeta::NONE
+                    .with_sender(h.sender)
+                    .with_deadline_ms(h.deadline_ms.saturating_sub(waited))
+            }
         }
         None => RequestMeta::NONE,
     }
@@ -201,7 +208,7 @@ mod tests {
     #[test]
     fn request_meta_carries_sender_and_remaining_deadline() {
         let id = SenderId([3; 8]);
-        let a = wire::encode_query(id, 3000);
+        let a = wire::encode_query(id, 3000, None, None);
         assert_eq!(
             request_meta(Some(&a), 250),
             RequestMeta::NONE.with_sender(id).with_deadline_ms(2750)
@@ -210,5 +217,22 @@ mod tests {
         assert_eq!(request_meta(Some(&a), u64::MAX).deadline_ms, Some(0));
         assert_eq!(request_meta(None, 0), RequestMeta::NONE);
         assert_eq!(request_meta(Some(b"junk"), 0), RequestMeta::NONE);
+    }
+
+    #[test]
+    fn k18_request_meta_carries_trace_and_request_id() {
+        let id = SenderId([3; 8]);
+        let t = crate::TraceParent::new([1; 16], [2; 8], 1).unwrap();
+        let rid = crate::RequestId::new("req-1").unwrap();
+        let a = wire::encode_query(id, 3000, Some(t), Some(rid));
+        let m = request_meta(Some(&a), 0);
+        assert_eq!(
+            m,
+            RequestMeta::NONE
+                .with_sender(id)
+                .with_deadline_ms(3000)
+                .with_trace(t)
+                .with_request_id(rid)
+        );
     }
 }

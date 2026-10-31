@@ -339,7 +339,8 @@ with scouting off. All run under `--features zenoh`.
   `z11_gather_names_repliers_and_carries_their_errors`,
   `zenoh::wire::tests::query_and_reply_attachments_round_trip`.
 - [x] Z12 Queries carry an attachment with the requester's sender id and
-  its timeout; the handler sees them as `RequestMeta::sender` and
+  its timeout (since 0.6 optionally followed by the trace extension, K18,
+  K19); the handler sees them as `RequestMeta::sender` and
   `deadline_ms` (minus the time queued at the responder); `principal` is
   `None` (Zenoh authenticates no caller name); handler errors, including
   `Unavailable`, `DeadlineExceeded` and `Denied`, round trip —
@@ -819,6 +820,62 @@ crate's self dev-dependency). Tests marked *(feature)* run under
   `tests::discover_and_call_finds_and_calls_every_responder` (run by
   `cargo test --all-features`; the example declares `test = true`).
 
+#### 0.6 additions: trace context (K17–K19)
+
+Requests carry the caller's W3C trace context and Envoy request id, so a
+trace stays one trace across every hop: `transport::trace` holds the pure
+`TraceParent` and `RequestId` values, `RequestOptions` sends them and
+`RequestMeta` delivers them. gRPC carries them as the `traceparent` and
+`x-request-id` headers, Zenoh as an optional trailing field of the query
+attachment, the memory backend in process; the serial link, BLE and ESP-NOW
+carry none.
+
+- [x] K17 `TraceParent` parses and formats W3C `traceparent` values with no
+  heap: version `00` exactly 55 characters, future versions parsed by the
+  version-00 rules and re-emitted as `00`, version `ff`, all-zero ids,
+  uppercase and malformed values refused; `child` keeps the trace id and
+  flags with a new span, `is_sampled` reads the flag. `RequestId` accepts
+  1 to 64 bytes of visible ASCII only —
+  `transport::trace::tests::k17_parses_and_formats_the_spec_examples`,
+  `k17_rejects_invalid_values`, `k17_tolerates_future_versions`,
+  `k17_new_and_child_refuse_zero_ids`,
+  `k17_format_round_trips_every_byte_value`,
+  `k17_request_ids_are_visible_ascii_up_to_64_bytes`.
+- [x] K18 `RequestOptions::{trace, request_id}` (`with_trace`,
+  `with_request_id`, `propagating`) reach the handler unchanged as
+  `RequestMeta::{trace, request_id}` on every backend that can carry them:
+  - core: `transport::meta::tests::k18_request_meta_builders_set_trace_and_request_id`,
+    `transport::reqrep::tests::k18_request_options_carry_trace_and_request_id`;
+  - conformance: `tests/conformance/reqrep.rs`: `trace_is_propagated`
+    (fixture knob `PROPAGATES_TRACE`), run by `tests/memory.rs`:
+    `k_trace_is_propagated`, `tests/grpc.rs`:
+    `conformance_cases::k18_grpc_trace_is_propagated` *(istio)* and
+    `tests/zenoh.rs`: `k_trace_is_propagated` *(zenoh)*;
+  - gRPC: `grpc::trace::tests::k18_inject_then_extract_round_trips`,
+    `grpc::responder::tests::k18_call_meta_reads_traceparent_and_request_id`,
+    `grpc::istio::tests::k18_trace_context_exposes_the_typed_trace_and_request_id`
+    (both names are in `PROPAGATED_HEADERS`), and the mesh client on a
+    request and on every call of a gather, `tests/grpc.rs`:
+    `mesh::k18_mesh_client_injects_trace_on_request_and_gather` *(istio)*;
+  - Zenoh: `zenoh::wire::tests::k18_query_trace_extension_round_trips`,
+    `zenoh::responder::tests::k18_request_meta_carries_trace_and_request_id`
+    *(zenoh)*.
+- [x] K19 Trace context never breaks what does not carry it: invalid
+  header values are dropped, not forwarded; a Zenoh query without trace
+  context sends exactly the 0.5 attachment, a 0.6 responder reads 0.5
+  attachments, reserved flags and trailing bytes are ignored, and a
+  malformed extension loses only the trace fields (a 0.5 responder's
+  exact-length rule ignores the extended form entirely, so mixed fleets see
+  full metadata at 0.5 responders only for untraced queries); the serial
+  link delivers `None` —
+  `grpc::trace::tests::k19_invalid_header_values_are_dropped` *(grpc)*,
+  `zenoh::wire::tests::k19_query_extension_is_compatible_both_ways`,
+  `k19_malformed_extensions_keep_sender_and_deadline` *(zenoh)*,
+  `tests/serial.rs`: `k19_serial_trace_is_not_carried` (the
+  `trace_is_propagated` case with `PROPAGATES_TRACE = false`) *(serial)*.
+  BLE GATT and ESP-NOW build their `RequestMeta` from `RequestMeta::NONE`,
+  so both fields are `None`; they have no async fake in `tests/` (as K15).
+
 ### Service discovery (L…)
 
 `discovery` (always built, `no_std`, no heap): `Service` records of a
@@ -991,6 +1048,140 @@ encoder; `MdnsSocket` implements `Browse`.
   (200 wrong-id replies from the nameserver's address and 200 bogus-pod
   replies from another port, one attempt),
   `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
+
+### Mesh service runner (`mw-service`, M…)
+
+The workspace crate `service/` (package `mw-service`, std) turns handlers
+into a deployable mesh service: `Service::builder(name)` declares what the
+service serves, calls, admits, publishes and subscribes to; the same
+declarations become its Kubernetes manifests (`--print-manifests`), so code
+and deployment configuration cannot drift. The pure parts are the
+`ServiceSpec` (serializable, deterministic), the environment parser
+`Config::from_env`, the `Lifecycle` state machine and the per-request
+`Ctx`; the runner is the thin I/O shell around them. Handlers implement the
+async `ServiceHandler` (every plain `Handler` is one), because a mesh
+handler often awaits a downstream call, which a synchronous `Handler`
+cannot do without stalling its serve loop. Tests marked *(mw-service)* run
+under `cargo test -p mw-service` and `cargo test --workspace`.
+
+0.6 is built in phases: phase 1 defines the API and implements M1–M5;
+later phases implement the runner (M6–M10), the manifests (M11–M15), the
+ops CLI (M16) and the end-to-end run on the lab cluster (M17), each
+checking its items here. Until then `Service::run_with` and
+`manifest::render` return `ServiceError::Unimplemented`, never panic.
+
+- [x] M1 `Service::builder(name)` records `serve`, `serve_typed` (through
+  `typed::TypedHandler`), `calls`, `allow_callers`, `publishes`,
+  `subscribes`, `replicas`, `resources`, `drain_grace` and `port`, in
+  declaration order, into a `ServiceSpec`; `build` validates the whole
+  spec (the name maps to an RFC 1123 Kubernetes name, kinds are
+  `Service/Method` keys, nothing is both served and called, callers are
+  SPIFFE IDs, filters are keys or `key/**`, no duplicates, replicas ≥ 1,
+  resources non-zero with requests within limits, drain grace ≤ 10 min,
+  port ≠ 0); the spec serializes deterministically to YAML and back; the
+  command line selects run, `--print-spec` or `--print-manifests
+  [--namespace NS] [--image REF]` and refuses anything else —
+  `builder::tests::m1_builder_records_every_declaration_in_order`,
+  `m1_build_validates_the_whole_spec`, `m1_serve_typed_wraps_typed_handler`,
+  `spec::tests::m1_names_map_to_k8s_labels`,
+  `m1_filters_parse_exact_and_prefix`,
+  `m1_validate_accepts_a_full_spec_and_reports_each_rule`,
+  `m1_resources_render_as_kubernetes_quantities`,
+  `m1_yaml_is_deterministic_and_round_trips`,
+  `run::tests::m1_command_line_parses_each_command`,
+  `m1_command_line_errors`, `m1_print_spec_writes_the_yaml`,
+  `m1_run_with_checks_the_service_map_then_reports_unimplemented`
+  *(mw-service)*.
+- [x] M2 `Config::from_env` parses `MW_PORT`, `POD_NAMESPACE`, `POD_NAME`,
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `MW_ZENOH_ROUTER`, `MW_ZENOH_CREDENTIALS`,
+  `MW_SERVICE_MAP` (`kind=service.namespace:port_name,...` into a
+  `dns::unicast::ServiceMap`) and `MW_DRAIN_GRACE_MS` through a lookup
+  function, purely; unset or empty is `None`, a malformed value is a typed
+  error naming the variable, a kind mapped twice is an error; the
+  overrides apply over the spec and `unmapped_calls` lists called kinds
+  without a route —
+  `config::tests::m2_nothing_set_is_the_default`,
+  `m2_parses_every_variable`, `m2_malformed_values_name_the_variable`,
+  `m2_service_map_entries_are_validated`,
+  `m2_overrides_and_unmapped_calls` *(mw-service)*.
+- [x] M3 `Lifecycle::on(self, event, now)` is a pure state machine
+  `Starting → Serving → Draining { since, drain_grace } → Stopped`: ready
+  sets health `SERVING`; SIGTERM while serving sets `NOT_SERVING` and keeps
+  answering; a tick once the drain grace has passed stops accepting and
+  exits cleanly; a second termination, or termination before serving, stops
+  at once; a failure stops from any live state with `NOT_SERVING` and a
+  failed outcome; `Stopped` is final —
+  `lifecycle::tests::m3_sigterm_reports_not_serving_then_drains_for_the_grace_then_stops`,
+  `m3_second_terminate_or_terminate_before_serving_stops_at_once`,
+  `m3_failure_stops_from_every_live_state`,
+  `m3_monotonic_arithmetic_saturates` *(mw-service)*.
+- [x] M4 Handlers get a `Ctx`: the caller's `RequestMeta`, this handler's
+  span (`server_trace`: a child of the caller's trace, or a new sampled
+  root), the caller's request id and deadline, `client(kind)` for declared
+  dependencies only (a `Downstream`, `Requester` + `Gather`, filling unset
+  options with that span, the request id and the time left), and
+  `publisher()` refusing undeclared keys. `ServiceHandler` is async with a
+  `Send` future; every plain `Handler` is one, and a downstream crate can
+  implement it for its own types. A call through `Ctx::client` over gRPC
+  on loopback arrives with the same trace id, this span as parent, the
+  request id and a deadline within the caller's —
+  `ctx::tests::m4_server_trace_continues_or_starts_a_trace`,
+  `m4_downstream_fills_unset_options_from_the_request`,
+  `m4_ctx_exposes_meta_trace_and_declared_clients_only`,
+  `m4_plain_handlers_and_async_handlers_box_alike`,
+  `service/tests/ctx.rs`:
+  `m4_ctx_client_continues_trace_request_id_and_deadline_downstream`,
+  `m4_builder_takes_plain_and_async_handlers` *(mw-service)*.
+- [x] M5 `mw-service` enables exactly `middleware`'s host features `grpc`,
+  `istio`, `dns-sd` and `zenoh`; no embedded feature set pulls in
+  `mw-service`, tracing, OpenTelemetry or the YAML crate, and the embedded
+  core does not depend on it; OpenTelemetry's OTLP exporter uses the same
+  tonic 0.14 as `middleware` — `scripts/check-features.sh` (block "M5",
+  and those crates in `CLOUD_CRATES` for every F1 set).
+- [ ] M6 `Service::run_with` serves: binds h2c on `0.0.0.0:<port>`, runs a
+  `GrpcServer` with health and a responder taking the principal from the
+  sidecar (`PrincipalSource::SidecarXfcc`), one serve loop per served kind
+  calling its handler with a `Ctx`, reports `SERVING` once every loop is
+  up, enforces `allow_callers` in process as well, and drives `Lifecycle`
+  from SIGTERM/SIGINT or the shutdown future through drain to exit.
+  *Owner: phase 2A (runner internals).*
+- [ ] M7 Structured JSON logs on stdout; with
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, OTLP/gRPC trace export with resource
+  `service.name`, `k8s.namespace.name`, `k8s.pod.name`; one server span per
+  request whose parent is `RequestMeta::trace` and whose id is
+  `Ctx::trace`. *Owner: phase 2A.*
+- [ ] M8 Each `calls` kind gets `MeshBrowse<UnicastDnsSd>` over its
+  `MW_SERVICE_MAP` route feeding a `Directory` and a `MeshClient` through
+  the sidecar, lent to handlers in `Links`. *Owner: phase 2A.*
+- [ ] M9 Each pod reports its `SenderId` in an `mw-node` response header on
+  health `Check`, recorded by `MeshBrowse`, so `Target::Node` works for
+  DNS-discovered endpoints. *Owner: phase 2A.*
+- [ ] M10 A service that publishes or subscribes opens a Zenoh client
+  session to `MW_ZENOH_ROUTER` with the credentials in
+  `MW_ZENOH_CREDENTIALS`; subscriptions follow `subscribes`.
+  *Owners: phase 2A (session), phase 2D (router and ACLs, Z19–Z21).*
+- [ ] M11 `--print-manifests` renders ServiceAccount, Deployment (sidecar
+  injection, SPIRE template, `grpc` readiness and liveness probes on the
+  service port, termination grace above the drain grace, the `Config`
+  environment, seccomp `RuntimeDefault`, non-root, read-only root),
+  Service (port `grpc`, `appProtocol: grpc`) and a headless Service.
+  *Owner: phase 2B (manifests).*
+- [ ] M12 The manifests include an AuthorizationPolicy from
+  `allow_callers` (kubelet probes implicit, an empty list admits no
+  caller), a DestinationRule `ISTIO_MUTUAL` and a PodDisruptionBudget.
+  *Owner: phase 2B.*
+- [ ] M13 Snapshot tests pin the rendered manifests. *Owner: phase 2B.*
+- [ ] M14 The manifests validate offline with kubeconform against vendored
+  Kubernetes, Istio and SPIRE schemas. *Owner: phase 2B.*
+- [ ] M15 Every `calls` kind has a `MW_SERVICE_MAP` entry in the rendered
+  environment and every `allow_callers` entry is a SPIFFE ID.
+  *Owner: phase 2B.*
+- [ ] M16 The ops CLI `mw` (`tools/mw`) builds, loads, applies, inspects
+  and traces services from a pure, unit-tested command plan.
+  *Owner: phase 2F (CLI).*
+- [ ] M17 The end-to-end run on the lab cluster asserts identity, gather,
+  deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
+  logs. *Owners: phase 3 (e2e), on images from phase 2C (nix).*
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

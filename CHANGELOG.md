@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### 0.6: trace context (K17–K19)
+- **Breaking — `RequestOptions` has a lifetime** (`RequestOptions<'a>`, for a borrowed request id) and two new fields, `trace: Option<TraceParent>` and `request_id: Option<RequestId<'a>>`, with `with_trace`, `with_request_id` and `propagating(&meta, span_id)` (continue an inbound request's trace with a new span). `RequestOptions::DEFAULT` is `RequestOptions<'static>`. Implementors of `Requester` and `Gather` write `options: &RequestOptions<'_>` (an `async fn` does not accept the elided form); callers are unchanged.
+- **Breaking — `RequestMeta` has two new fields**, `trace: Option<TraceParent>` and `request_id: Option<RequestId<'a>>`, with `with_trace`, `with_request_id` and `with_request_id_str` (drops an invalid id). Struct literals add them or use `..RequestMeta::NONE`.
+- New `transport::trace` (no_std, no heap, re-exported from `transport` and the crate root): `TraceParent` (W3C trace-context level 1: `parse`, `format`, `Display`, `new`, `child`, `is_sampled`, `with_sampled`; ids are non-zero by construction, future versions parse) and `RequestId` (1–64 bytes of visible ASCII).
+- gRPC: new `grpc::trace` (`TRACEPARENT_HEADER`, `REQUEST_ID_HEADER`, `extract_trace`, `extract_request_id`, `inject`). `GrpcTransport::request_with` and `grpc::mesh::MeshClient` (request and every call of a gather) send the options' trace context as `traceparent` / `x-request-id`; the responder reads them into `RequestMeta`. **Breaking:** `responder::CallMeta` has `trace` and `request_id` fields. `istio::TraceContext` gains `trace_parent()` and `request_id()`.
+- Zenoh: the query attachment carries the trace context and request id in an optional trailing extension (layout in `zenoh::wire`); without either the attachment is byte for byte the 0.5 one. A 0.6 responder reads 0.5 queries. A 0.5 responder ignores the whole attachment of an extended query (it checks the exact length), so it sees no sender or deadline for traced queries from 0.6 requesters. **Breaking:** `wire::encode_query` takes the trace and request id and returns a `Vec<u8>`, and `wire::decode_query` returns a `QueryHeader`; `responder::request_meta` borrows the attachment.
+- Memory backend: carries both. Serial link, BLE and ESP-NOW: carry neither (handlers see `None`).
+- Conformance: new case `reqrep::trace_is_propagated`; **breaking for fixtures:** `ReqRepFixture` requires `const PROPAGATES_TRACE: bool`. Memory, gRPC and Zenoh propagate; the serial fixture declares `false`.
+
+### 0.6: `mw-service` API (M1–M5)
+- New workspace crate `service/` (package `mw-service`, std), the mesh service runner. Its public API is in place: `Service::builder(name)` → `ServiceBuilder` (`serve`, `serve_typed`, `calls`, `allow_callers`, `publishes`, `subscribes`, `replicas`, `resources`, `drain_grace`, `port`, `build`), `ServiceSpec` (serde, deterministic, validated), `Config::from_env` (the `MW_*` / pod environment), `Lifecycle` (start/serve/drain/stop state machine), the async `ServiceHandler` (blanket implementation for every `Handler`) with its `Ctx` (caller metadata, span, `client(kind)` continuing the trace, `publisher()`), `Command` (`--print-spec`, `--print-manifests`), `Service::main`, `run` and `run_with`.
+- `--print-spec` works. Serving (`run_with`) and manifest rendering return `ServiceError::Unimplemented` until later 0.6 phases land; nothing panics.
+- Dependencies (mw-service only): tokio with `signal`, serde, serde_norway 0.9 (maintained fork of the deprecated serde_yaml), tracing 0.1, tracing-subscriber 0.3, opentelemetry / opentelemetry_sdk / opentelemetry-otlp 0.33 (OTLP over tonic 0.14, the same tonic as `middleware`), tracing-opentelemetry 0.34. `scripts/check-features.sh` proves none reaches an embedded build (M5).
+
 ## 0.5.0
 
 ### Migration from 0.4

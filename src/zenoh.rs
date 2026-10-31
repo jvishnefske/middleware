@@ -78,7 +78,9 @@
 //!
 //! * [`Requester::request_with`] is a Zenoh `get` with no consolidation,
 //!   the request as the query payload and a query attachment carrying this
-//!   transport's sender id and the timeout in milliseconds. The timeout is
+//!   transport's sender id and the timeout in milliseconds, plus
+//!   `options.trace` and `options.request_id` in the attachment's trace
+//!   extension when either is set ([`wire`]). The timeout is
 //!   `options.timeout`, or the transport's ([`DEFAULT_TIMEOUT`] unless
 //!   changed with [`ZenohTransport::with_timeout`]); Zenoh enforces it as
 //!   the query timeout. [`Target::Any`] queries the key (Zenoh picks the
@@ -103,7 +105,8 @@
 //!   (every matching queryable answered) or at the timeout.
 //! * [`ZenohTransport::responder`] declares two queryables feeding one FIFO
 //!   ([`responder`]): one on the key and one on the per-node key. The
-//!   handler sees the requester's sender id and the deadline it carried.
+//!   handler sees the requester's sender id, the deadline, the trace
+//!   context and the request id it carried.
 //!
 //! # Cancel safety
 //!
@@ -472,7 +475,7 @@ impl ZenohTransport {
         &self,
         key: Key<'_>,
         request: &[u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
         target: QueryTarget,
     ) -> Result<FifoChannelHandler<ZenohReply>, ZenohError> {
         use ::zenoh::Wait;
@@ -485,12 +488,13 @@ impl ZenohTransport {
             Target::Any => key.as_str().to_owned(),
             Target::Node(id) => wire::node_key(id, key),
         };
-        let attachment = wire::encode_query(self.sender, deadline_ms);
+        let attachment =
+            wire::encode_query(self.sender, deadline_ms, options.trace, options.request_id);
         let replies = self
             .session
             .get(selector)
             .payload(request)
-            .attachment(attachment.to_vec())
+            .attachment(attachment)
             .target(target)
             .consolidation(ConsolidationMode::None)
             .timeout(timeout)
@@ -555,7 +559,7 @@ impl Requester for ZenohTransport {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], ZenohError> {
         let replies = self.query(key, request, options, QueryTarget::BestMatching)?;
         let mut last_error = None;
@@ -636,7 +640,7 @@ impl Gather for ZenohTransport {
         key: Key<'_>,
         request: &[u8],
         buf: &mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
         max_replies: usize,
         mut on_reply: F,
     ) -> Result<usize, ZenohError>

@@ -145,6 +145,10 @@ pub fn targets<const N: usize>(
 /// * Every call carries the client id ([`MeshClient::client_id`]) in
 ///   `mw-client` and its timeout in `grpc-timeout`; with
 ///   `RequestOptions::timeout` `None` the bound is [`DEFAULT_TIMEOUT`].
+/// * Every call, including each call of a gather, carries
+///   `RequestOptions::trace` and `request_id` as `traceparent` and
+///   `x-request-id` ([`crate::grpc::trace`]): one trace context for every
+///   endpoint of a gather (the caller's span is the parent of each).
 ///
 /// Channels are made by the [`MeshDialer`] and cached by authority, at most
 /// `N` (one per directory slot); a new one evicts first a channel whose
@@ -244,7 +248,7 @@ impl<const N: usize> Requester for MeshClient<N> {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], GrpcError> {
         let path = method_path(key)?;
         let targets = self.targets(options.target)?;
@@ -258,7 +262,11 @@ impl<const N: usize> Requester for MeshClient<N> {
         let mut t = self.transport(authority)?;
         let timeout = options.timeout.unwrap_or(DEFAULT_TIMEOUT);
         let reply = t
-            .call(path, Bytes::copy_from_slice(request), Some(timeout))
+            .call(
+                path,
+                Bytes::copy_from_slice(request),
+                &options.with_timeout(timeout),
+            )
             .await?;
         copy_into(response, &reply)
             .map(|r| &*r)
@@ -273,9 +281,9 @@ async fn gather_one(
     transport: Result<GrpcTransport<Channel>, GrpcError>,
     path: PathAndQuery,
     body: Bytes,
-    timeout: Duration,
+    options: RequestOptions<'_>,
 ) -> Result<Bytes, GrpcError> {
-    transport?.call(path, body, Some(timeout)).await
+    transport?.call(path, body, &options).await
 }
 
 impl<const N: usize> Gather for MeshClient<N> {
@@ -295,7 +303,7 @@ impl<const N: usize> Gather for MeshClient<N> {
         key: Key<'_>,
         request: &[u8],
         buf: &mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
         max_replies: usize,
         mut on_reply: F,
     ) -> Result<usize, GrpcError>
@@ -315,7 +323,12 @@ impl<const N: usize> Gather for MeshClient<N> {
             let t = self.transport(&authority);
             calls.push((
                 node,
-                Some(Box::pin(gather_one(t, path.clone(), body.clone(), timeout))),
+                Some(Box::pin(gather_one(
+                    t,
+                    path.clone(),
+                    body.clone(),
+                    options.with_timeout(timeout),
+                ))),
             ));
         }
         let mut seen = 0;

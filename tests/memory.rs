@@ -33,6 +33,7 @@ impl ReqRepFixture for Memory {
     type Requester = MemoryNode;
     type Responder = MemoryResponder;
     const PROPAGATES_DEADLINE: bool = true;
+    const PROPAGATES_TRACE: bool = true;
 
     async fn connect(&mut self, key: Key<'static>) -> (MemoryNode, MemoryResponder) {
         let client = self.bus.node_with_principal(CLIENT, PRINCIPAL);
@@ -127,6 +128,11 @@ async fn k_handler_errors_round_trip() {
 #[tokio::test]
 async fn k_handler_sees_caller_identity() {
     reqrep::handler_sees_caller_identity(&mut Memory::new()).await;
+}
+
+#[tokio::test]
+async fn k_trace_is_propagated() {
+    reqrep::trace_is_propagated(&mut Memory::new()).await;
 }
 
 #[tokio::test]

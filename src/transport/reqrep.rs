@@ -19,6 +19,14 @@
 //!
 //! [`Requester::request`] is `request_with` with [`RequestOptions::DEFAULT`].
 //!
+//! # Trace context
+//!
+//! [`RequestOptions::trace`] and [`RequestOptions::request_id`] are sent with
+//! the request by every backend that can carry them, and reach the
+//! responder's handler as [`RequestMeta::trace`] and
+//! [`RequestMeta::request_id`] unchanged (the transport adds no span of its
+//! own). A backend that cannot carry them drops them and documents it.
+//!
 //! # Targets
 //!
 //! [`Target::Any`] lets the transport pick any responder for the key (the
@@ -31,6 +39,7 @@ use core::time::Duration;
 use crate::key::Key;
 
 use super::meta::{RequestMeta, SenderId};
+use super::trace::{RequestId, TraceParent};
 
 /// One request as a [`Handler`] sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,20 +81,30 @@ pub enum Target {
 /// Per-call options of [`Requester::request_with`] and
 /// [`Gather::request_each`]. Build with the const methods:
 /// `RequestOptions::DEFAULT.with_timeout(Duration::from_millis(500))`.
+///
+/// The lifetime is that of a borrowed [`RequestId`]; options without one
+/// are `RequestOptions<'static>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RequestOptions {
+pub struct RequestOptions<'a> {
     /// How long to wait for replies; `None` uses the backend's documented
     /// default (see the module docs).
     pub timeout: Option<Duration>,
     /// Which responder(s) the request is for.
     pub target: Target,
+    /// The trace context to send (the caller's span as parent); see the
+    /// module docs.
+    pub trace: Option<TraceParent>,
+    /// The `x-request-id` to send; see the module docs.
+    pub request_id: Option<RequestId<'a>>,
 }
 
-impl RequestOptions {
-    /// No timeout of the caller's, any responder.
-    pub const DEFAULT: RequestOptions = RequestOptions {
+impl<'a> RequestOptions<'a> {
+    /// No timeout of the caller's, any responder, no trace context.
+    pub const DEFAULT: RequestOptions<'static> = RequestOptions {
         timeout: None,
         target: Target::Any,
+        trace: None,
+        request_id: None,
     };
 
     /// The same options with `timeout`.
@@ -99,6 +118,45 @@ impl RequestOptions {
     /// The same options with `target`.
     pub const fn with_target(self, target: Target) -> Self {
         RequestOptions { target, ..self }
+    }
+
+    /// The same options sending `trace`.
+    pub const fn with_trace(self, trace: TraceParent) -> Self {
+        RequestOptions {
+            trace: Some(trace),
+            ..self
+        }
+    }
+
+    /// The same options sending `request_id`.
+    pub const fn with_request_id(self, request_id: RequestId<'a>) -> Self {
+        RequestOptions {
+            request_id: Some(request_id),
+            ..self
+        }
+    }
+
+    /// The same options continuing the trace of an inbound request: its
+    /// request id copied, and its trace context as the parent of
+    /// `span_id` (the caller's new span) when both are present and
+    /// `span_id` is non-zero. Fields `meta` lacks are left as they are.
+    pub const fn propagating(self, meta: &RequestMeta<'a>, span_id: [u8; 8]) -> Self {
+        let trace = match meta.trace {
+            Some(t) => match t.child(span_id) {
+                Some(c) => Some(c),
+                None => self.trace,
+            },
+            None => self.trace,
+        };
+        let request_id = match meta.request_id {
+            Some(r) => Some(r),
+            None => self.request_id,
+        };
+        RequestOptions {
+            trace,
+            request_id,
+            ..self
+        }
     }
 
     /// The timeout in whole milliseconds, saturating at `u32::MAX`: the
@@ -134,7 +192,7 @@ pub trait Requester {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], Self::Error>;
 
     /// [`request_with`](Requester::request_with) with
@@ -193,7 +251,7 @@ pub trait Gather {
         key: Key<'_>,
         request: &[u8],
         buf: &mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
         max_replies: usize,
         on_reply: F,
     ) -> Result<usize, Self::Error>
@@ -373,8 +431,39 @@ mod tests {
         assert_eq!(huge.timeout_ms(), Some(u32::MAX));
     }
 
+    #[test]
+    fn k18_request_options_carry_trace_and_request_id() {
+        let o = RequestOptions::DEFAULT;
+        assert_eq!((o.trace, o.request_id), (None, None));
+        let t = TraceParent::new([3; 16], [4; 8], 1).unwrap();
+        let id = RequestId::new("req-7").unwrap();
+        let o = o
+            .with_timeout(Duration::from_millis(10))
+            .with_trace(t)
+            .with_request_id(id);
+        assert_eq!(o.trace, Some(t));
+        assert_eq!(o.request_id, Some(id));
+        assert_eq!(o.timeout_ms(), Some(10));
+
+        // Continuing an inbound request's trace: same trace id, new span.
+        let inbound = RequestMeta::NONE
+            .with_trace(TraceParent::new([9; 16], [8; 8], 0).unwrap())
+            .with_request_id_str("in-1");
+        let out = RequestOptions::DEFAULT.propagating(&inbound, [5; 8]);
+        let tp = out.trace.unwrap();
+        assert_eq!(
+            (tp.trace_id(), tp.span_id(), tp.flags()),
+            ([9; 16], [5; 8], 0)
+        );
+        assert_eq!(out.request_id.map(|r| r.as_str()), Some("in-1"));
+        // Nothing inbound, or a zero span: the options keep their own.
+        let own = RequestOptions::DEFAULT.with_trace(t).with_request_id(id);
+        assert_eq!(own.propagating(&RequestMeta::NONE, [5; 8]), own);
+        assert_eq!(own.propagating(&inbound, [0; 8]).trace, Some(t));
+    }
+
     /// A requester implementing only `request_with` gets `request`.
-    struct Echo(Option<RequestOptions>);
+    struct Echo(Option<RequestOptions<'static>>);
 
     impl Requester for Echo {
         type Error = ();
@@ -383,9 +472,12 @@ mod tests {
             _key: Key<'_>,
             request: &[u8],
             response: &'b mut [u8],
-            options: &RequestOptions,
+            options: &RequestOptions<'_>,
         ) -> Result<&'b [u8], ()> {
-            self.0 = Some(*options);
+            self.0 = Some(RequestOptions {
+                request_id: None,
+                ..*options
+            });
             let out = response.get_mut(..request.len()).ok_or(())?;
             out.copy_from_slice(request);
             Ok(out)

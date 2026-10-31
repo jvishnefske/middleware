@@ -11,7 +11,8 @@
 //!
 //! * [`key`] — validated, transport-neutral addresses (`sensor/temperature`).
 //! * [`transport`] — byte-level traits (the 0.5 contract: request metadata
-//!   and options, gather, declared delivery, gaps, split). Every call takes
+//!   and options, gather, declared delivery, gaps, split; 0.6 adds W3C
+//!   trace context and request ids to requests). Every call takes
 //!   caller-owned buffers, so implementations need no heap. The in-process
 //!   backend `transport::memory` needs `memory`.
 //! * [`dedup`] — duplicate suppression and gap counting over 8-bit
@@ -100,6 +101,6 @@ pub use codec::Codec;
 pub use key::{AsKey, Filter, Key, KeyBuf, KeyError, KeyFilter, KeyFilterBuf};
 pub use transport::{
     Delivery, Flow, Gather, Handler, HandlerError, Limits, Overflow, Publisher, Reply, Request,
-    RequestMeta, RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId, Split,
-    Subscribe, Subscriber, Target,
+    RequestId, RequestMeta, RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId,
+    Split, Subscribe, Subscriber, Target, TraceParent,
 };

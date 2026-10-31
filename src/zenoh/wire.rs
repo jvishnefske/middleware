@@ -11,8 +11,30 @@
 //! |------|----|----------------------|
 //! | 1 | publication (0.4) | sender id 8, sequence 1 |
 //! | 2 | publication | sender id 8, sequence 1, stream id 4 |
-//! | `0x10` | query | requester's sender id 8, deadline in ms 4 |
+//! | `0x10` | query | requester's sender id 8, deadline in ms 4, optional trace extension |
 //! | `0x11` | successful reply | replier's sender id 8 |
+//!
+//! ## Query trace extension (0.6)
+//!
+//! A query whose [`RequestOptions`](crate::RequestOptions) carry a trace
+//! context or request id appends, after the 15 bytes above:
+//!
+//! | bytes | field |
+//! |-------|-------|
+//! | 1 | extension flags: bit 0 trace, bit 1 request id, others reserved (0) |
+//! | 16 + 8 + 1 | if bit 0: W3C trace id, parent (span) id, trace flags |
+//! | 1 + n | if bit 1: request id length `n` (1..=64), then `n` bytes of visible ASCII |
+//!
+//! A query with neither sends no extension, so its attachment is exactly
+//! the 0.5 one ([`QUERY_ATTACHMENT_LEN`] bytes). [`decode_query`] reads the
+//! 0.5 form and the extended one; it ignores reserved flag bits and any
+//! bytes after the fields it knows (room for later fields), and a
+//! malformed extension (truncated, an all-zero id, an invalid request id)
+//! loses only the extension fields, never the sender and deadline. A 0.5
+//! responder accepts only the exact 0.5 length, so it ignores the whole
+//! attachment of an extended query (no sender, no deadline): mixed
+//! deployments see full metadata at 0.5 responders only for queries
+//! without trace context.
 //!
 //! A publication's sequence numbers one **stream**: one key published
 //! through one [`ZenohTransport`](super::ZenohTransport) value. The stream
@@ -50,7 +72,7 @@
 use crate::dedup::{Sequence, fnv1a32};
 use crate::discovery::ServiceKind;
 use crate::key::Key;
-use crate::transport::{HandlerError, SampleMeta, SenderId, Target};
+use crate::transport::{HandlerError, RequestId, SampleMeta, SenderId, Target, TraceParent};
 
 const MAGIC: [u8; 2] = [b'm', b'w'];
 const KIND_PUB_V1: u8 = 1;
@@ -61,8 +83,17 @@ const KIND_REPLY: u8 = 0x11;
 /// Length of a publication attachment.
 pub const PUB_ATTACHMENT_LEN: usize = 3 + 8 + 1 + 4;
 const PUB_V1_ATTACHMENT_LEN: usize = 3 + 8 + 1;
-/// Length of a query attachment.
+/// Length of a query attachment without the trace extension (the 0.5
+/// form).
 pub const QUERY_ATTACHMENT_LEN: usize = 3 + 8 + 4;
+/// Extension flag: a trace context follows.
+pub const QUERY_EXT_TRACE: u8 = 0x01;
+/// Extension flag: a request id follows (after the trace, if both).
+pub const QUERY_EXT_REQUEST_ID: u8 = 0x02;
+const TRACE_EXT_LEN: usize = 16 + 8 + 1;
+/// Longest query attachment this version writes.
+pub const QUERY_ATTACHMENT_MAX: usize =
+    QUERY_ATTACHMENT_LEN + 1 + TRACE_EXT_LEN + 1 + crate::transport::trace::MAX_REQUEST_ID_LEN;
 /// Length of a reply attachment.
 pub const REPLY_ATTACHMENT_LEN: usize = 3 + 8;
 /// Length of a reply-error payload.
@@ -131,26 +162,91 @@ pub fn decode_pub(bytes: &[u8]) -> Option<PubHeader> {
     })
 }
 
-/// The attachment of a query: who asks and how many milliseconds it waits.
-pub fn encode_query(sender: SenderId, deadline_ms: u32) -> [u8; QUERY_ATTACHMENT_LEN] {
-    let mut out = [0u8; QUERY_ATTACHMENT_LEN];
-    out[..3].copy_from_slice(&header(KIND_QUERY));
-    out[3..11].copy_from_slice(&sender.0);
-    out[11..].copy_from_slice(&deadline_ms.to_le_bytes());
+/// What a query attachment says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryHeader<'a> {
+    /// The requesting node.
+    pub sender: SenderId,
+    /// How many milliseconds it waits.
+    pub deadline_ms: u32,
+    /// Its trace context, if the extension carried a valid one.
+    pub trace: Option<TraceParent>,
+    /// Its request id, if the extension carried a valid one.
+    pub request_id: Option<RequestId<'a>>,
+}
+
+/// The attachment of a query: who asks, how many milliseconds it waits
+/// and, when either is present, the trace extension (module docs).
+pub fn encode_query(
+    sender: SenderId,
+    deadline_ms: u32,
+    trace: Option<TraceParent>,
+    request_id: Option<RequestId<'_>>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(QUERY_ATTACHMENT_MAX);
+    out.extend_from_slice(&header(KIND_QUERY));
+    out.extend_from_slice(&sender.0);
+    out.extend_from_slice(&deadline_ms.to_le_bytes());
+    if trace.is_none() && request_id.is_none() {
+        return out;
+    }
+    let flags =
+        trace.map_or(0, |_| QUERY_EXT_TRACE) | request_id.map_or(0, |_| QUERY_EXT_REQUEST_ID);
+    out.push(flags);
+    if let Some(t) = trace {
+        out.extend_from_slice(&t.trace_id());
+        out.extend_from_slice(&t.span_id());
+        out.push(t.flags());
+    }
+    if let Some(r) = request_id {
+        let id = r.as_str().as_bytes();
+        // At most MAX_REQUEST_ID_LEN (64) bytes by construction.
+        out.push(u8::try_from(id.len()).unwrap_or(0));
+        out.extend_from_slice(id);
+    }
     out
 }
 
-/// Reads a query attachment: requester and deadline in milliseconds.
-pub fn decode_query(bytes: &[u8]) -> Option<(SenderId, u32)> {
+/// Reads a query attachment, with or without the trace extension (module
+/// docs). `None` if it is not a query attachment of at least the 0.5
+/// length.
+pub fn decode_query(bytes: &[u8]) -> Option<QueryHeader<'_>> {
     let (kind, rest) = strip_header(bytes)?;
-    if kind != KIND_QUERY || rest.len() != 12 {
+    if kind != KIND_QUERY {
         return None;
     }
-    let (sender, deadline) = rest.split_first_chunk::<8>()?;
-    Some((
-        SenderId(*sender),
-        u32::from_le_bytes(deadline.try_into().ok()?),
-    ))
+    let (sender, rest) = rest.split_first_chunk::<8>()?;
+    let (deadline, ext) = rest.split_first_chunk::<4>()?;
+    let (trace, request_id) = decode_query_ext(ext).unwrap_or((None, None));
+    Some(QueryHeader {
+        sender: SenderId(*sender),
+        deadline_ms: u32::from_le_bytes(*deadline),
+        trace,
+        request_id,
+    })
+}
+
+/// The trace extension's fields; `Some((None, None))` for no extension,
+/// `None` when it is malformed.
+fn decode_query_ext(ext: &[u8]) -> Option<(Option<TraceParent>, Option<RequestId<'_>>)> {
+    let Some((&flags, mut rest)) = ext.split_first() else {
+        return Some((None, None));
+    };
+    let mut trace = None;
+    if flags & QUERY_EXT_TRACE != 0 {
+        let (trace_id, after) = rest.split_first_chunk::<16>()?;
+        let (span_id, after) = after.split_first_chunk::<8>()?;
+        let (&trace_flags, after) = after.split_first()?;
+        trace = Some(TraceParent::new(*trace_id, *span_id, trace_flags)?);
+        rest = after;
+    }
+    let mut request_id = None;
+    if flags & QUERY_EXT_REQUEST_ID != 0 {
+        let (&len, after) = rest.split_first()?;
+        let id = after.get(..usize::from(len))?;
+        request_id = Some(RequestId::from_bytes(id)?);
+    }
+    Some((trace, request_id))
 }
 
 /// The attachment of a successful reply.
@@ -284,7 +380,7 @@ mod tests {
             assert_eq!(decode_pub(bad), None, "{bad:?}");
         }
         // A query attachment is not a publication.
-        assert_eq!(decode_pub(&encode_query(ID, 5)), None);
+        assert_eq!(decode_pub(&encode_query(ID, 5, None, None)), None);
     }
 
     #[test]
@@ -296,15 +392,124 @@ mod tests {
         assert_eq!(stream_id(7, k1), stream_id(7, k1));
     }
 
+    /// `decode_query` as 0.5 shipped it: exactly 12 bytes after the kind.
+    fn decode_query_v05(bytes: &[u8]) -> Option<(SenderId, u32)> {
+        let (kind, rest) = strip_header(bytes)?;
+        if kind != KIND_QUERY || rest.len() != 12 {
+            return None;
+        }
+        let (sender, deadline) = rest.split_first_chunk::<8>()?;
+        Some((
+            SenderId(*sender),
+            u32::from_le_bytes(deadline.try_into().ok()?),
+        ))
+    }
+
+    const TP: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    fn base(h: Option<QueryHeader<'_>>) -> Option<(SenderId, u32)> {
+        h.map(|h| (h.sender, h.deadline_ms))
+    }
+
+    #[test]
+    fn k18_query_trace_extension_round_trips() {
+        let t = TraceParent::parse(TP).unwrap();
+        let id = RequestId::new("req-9").unwrap();
+        for (trace, request_id) in [
+            (Some(t), Some(id)),
+            (Some(t), None),
+            (None, Some(id)),
+            (None, None),
+        ] {
+            let a = encode_query(ID, 3000, trace, request_id);
+            assert!(a.len() <= QUERY_ATTACHMENT_MAX);
+            assert_eq!(
+                decode_query(&a),
+                Some(QueryHeader {
+                    sender: ID,
+                    deadline_ms: 3000,
+                    trace,
+                    request_id
+                })
+            );
+        }
+        let full = encode_query(ID, 1, Some(t), Some(id));
+        assert_eq!(full.len(), QUERY_ATTACHMENT_LEN + 1 + 25 + 1 + 5);
+        assert_eq!(
+            full[QUERY_ATTACHMENT_LEN],
+            QUERY_EXT_TRACE | QUERY_EXT_REQUEST_ID
+        );
+        let longest = RequestId::from_bytes(&[b'r'; 64]).unwrap();
+        assert_eq!(
+            encode_query(ID, 1, Some(t), Some(longest)).len(),
+            QUERY_ATTACHMENT_MAX
+        );
+    }
+
+    #[test]
+    fn k19_query_extension_is_compatible_both_ways() {
+        let t = TraceParent::parse(TP).unwrap();
+        let id = RequestId::new("req-9").unwrap();
+        // Without trace context the attachment is byte for byte 0.5's, so
+        // a 0.5 responder decodes it fully.
+        let plain = encode_query(ID, 3000, None, None);
+        assert_eq!(plain.len(), QUERY_ATTACHMENT_LEN);
+        assert_eq!(decode_query_v05(&plain), Some((ID, 3000)));
+        // A 0.5 responder's exact-length rule refuses the extended form
+        // (it then sees no metadata at all, as for a foreign query).
+        let extended = encode_query(ID, 3000, Some(t), Some(id));
+        assert_eq!(decode_query_v05(&extended), None);
+        // A 0.6 responder reads a 0.5 requester's attachment, with no trace.
+        let mut v05 = [0u8; QUERY_ATTACHMENT_LEN];
+        v05[..3].copy_from_slice(b"mw\x10");
+        v05[3..11].copy_from_slice(&ID.0);
+        v05[11..].copy_from_slice(&3000u32.to_le_bytes());
+        let h = decode_query(&v05).expect("0.5 attachment");
+        assert_eq!(
+            (h.sender, h.deadline_ms, h.trace, h.request_id),
+            (ID, 3000, None, None)
+        );
+        // Fields from a later version (reserved flag bits, trailing bytes)
+        // are ignored.
+        let mut later = extended.clone();
+        later[QUERY_ATTACHMENT_LEN] |= 0x80;
+        later.extend_from_slice(b"future field");
+        assert_eq!(decode_query(&later), decode_query(&extended));
+    }
+
+    #[test]
+    fn k19_malformed_extensions_keep_sender_and_deadline() {
+        let t = TraceParent::parse(TP).unwrap();
+        let id = RequestId::new("req-9").unwrap();
+        let full = encode_query(ID, 7, Some(t), Some(id));
+        for cut in QUERY_ATTACHMENT_LEN + 1..full.len() {
+            let h = decode_query(&full[..cut]).expect("base fields");
+            assert_eq!((h.sender, h.deadline_ms), (ID, 7), "cut {cut}");
+            assert_eq!((h.trace, h.request_id), (None, None), "cut {cut}");
+        }
+        // Zero ids and invalid request ids are dropped.
+        let mut zero = encode_query(ID, 7, Some(t), None);
+        zero[QUERY_ATTACHMENT_LEN + 1..QUERY_ATTACHMENT_LEN + 17].fill(0);
+        assert_eq!(decode_query(&zero).unwrap().trace, None);
+        let mut bad_id = encode_query(ID, 7, None, Some(id));
+        let last = bad_id.len() - 1;
+        bad_id[last] = b' ';
+        assert_eq!(decode_query(&bad_id).unwrap().request_id, None);
+        let mut zero_len = encode_query(ID, 7, None, Some(id));
+        zero_len[QUERY_ATTACHMENT_LEN + 1] = 0;
+        assert_eq!(decode_query(&zero_len).unwrap().request_id, None);
+    }
+
     #[test]
     fn query_and_reply_attachments_round_trip() {
-        let q = encode_query(ID, 3000);
-        assert_eq!(decode_query(&q), Some((ID, 3000)));
+        let q = encode_query(ID, 3000, None, None);
+        assert_eq!(base(decode_query(&q)), Some((ID, 3000)));
         assert_eq!(decode_query(&q[..14]), None);
         assert_eq!(decode_query(&encode_reply(ID)), None);
         let r = encode_reply(ID);
         assert_eq!(decode_reply(&r), Some(ID));
         assert_eq!(decode_reply(&q), None);
+        assert_eq!(decode_query(&r), None);
         assert_eq!(decode_reply(&r[..10]), None);
     }
 

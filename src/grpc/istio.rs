@@ -32,6 +32,7 @@
 //!   and health-checked browsing.
 
 use crate::grpc::GrpcError;
+use crate::transport::{RequestId, TraceParent};
 use core::time::Duration;
 use http::Uri;
 use tonic::metadata::{Ascii, MetadataMap, MetadataValue};
@@ -149,6 +150,20 @@ impl TraceContext {
     pub fn get(&self, name: &str) -> Option<&str> {
         let i = PROPAGATED_HEADERS.iter().position(|h| *h == name)?;
         self.values.get(i)?.as_ref()?.to_str().ok()
+    }
+
+    /// The `traceparent` header as a validated [`TraceParent`], if present
+    /// and valid.
+    pub fn trace_parent(&self) -> Option<TraceParent> {
+        self.get(crate::grpc::trace::TRACEPARENT_HEADER)
+            .and_then(TraceParent::parse)
+    }
+
+    /// The `x-request-id` header as a validated [`RequestId`], if present
+    /// and valid.
+    pub fn request_id(&self) -> Option<RequestId<'_>> {
+        self.get(crate::grpc::trace::REQUEST_ID_HEADER)
+            .and_then(RequestId::new)
     }
 
     /// Whether no trace header was present.
@@ -564,6 +579,24 @@ mod tests {
         assert_eq!(outbound.len(), 3);
         assert_eq!(outbound.get("x-b3-sampled").unwrap(), "1");
         assert!(outbound.get("authorization").is_none());
+    }
+
+    #[test]
+    fn k18_trace_context_exposes_the_typed_trace_and_request_id() {
+        use crate::grpc::trace::{REQUEST_ID_HEADER, TRACEPARENT_HEADER};
+        assert!(PROPAGATED_HEADERS.contains(&TRACEPARENT_HEADER));
+        assert!(PROPAGATED_HEADERS.contains(&REQUEST_ID_HEADER));
+        let tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let mut inbound = MetadataMap::new();
+        inbound.insert("x-request-id", "req-1".parse().unwrap());
+        inbound.insert("traceparent", tp.parse().unwrap());
+        let ctx = TraceContext::from_metadata(&inbound);
+        assert_eq!(ctx.trace_parent(), TraceParent::parse(tp));
+        assert!(ctx.trace_parent().is_some());
+        assert_eq!(ctx.request_id().map(|r| r.as_str()), Some("req-1"));
+        assert_eq!(TraceContext::default().trace_parent(), None);
+        inbound.insert("traceparent", "nope".parse().unwrap());
+        assert_eq!(TraceContext::from_metadata(&inbound).trace_parent(), None);
     }
 
     #[test]

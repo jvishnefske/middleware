@@ -45,6 +45,19 @@ The rustdoc of each backend is the authority; this is a summary of it.
 Neither DNS-SD browser reports a node id, so `Target::Node` through a
 `MeshClient` works only for directory records that came with one.
 
+Trace context (0.6): a W3C `traceparent` and an `x-request-id` set in
+`RequestOptions` reach the handler's `RequestMeta` unchanged over the
+memory backend, Zenoh (in the query attachment) and gRPC, including every
+call of a `MeshClient` gather (as headers). The serial link, ESP-NOW and
+BLE carry neither; their handlers see `None`.
+
+The workspace crate `mw-service` (in `service/`) is the mesh service
+runner being built for 0.6: a service is declared with
+`Service::builder(name)`, and the same declaration is meant to produce its
+Kubernetes manifests. Its API and pure parts are in place; serving and
+manifest rendering are not implemented yet (see design.md, "Mesh service
+runner").
+
 `examples/discover_and_call.rs` puts it together on loopback: one service
 kind announced over Zenoh, mDNS and a stub cluster DNS, every event fed
 into one `discovery::Directory`, then `request_with` and `Gather` over

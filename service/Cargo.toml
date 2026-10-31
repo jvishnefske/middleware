@@ -1,0 +1,31 @@
+[package]
+name = "mw-service"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Mesh service runner: write a Handler, get a meshed, traced, SPIFFE-authenticated gRPC service with its Kubernetes manifests"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The host backends only: gRPC through the Istio sidecar, unicast DNS-SD
+# for `calls` discovery and Zenoh for pub/sub. Never an embedded feature
+# (scripts/check-features.sh).
+middleware = { path = "..", features = ["grpc", "istio", "dns-sd", "zenoh"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+serde = { version = "1", features = ["derive"] }
+# Maintained fork of serde_yaml (0.9.34 is published as `+deprecated`);
+# same API, renders the spec and the manifests.
+serde_norway = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry"] }
+# OpenTelemetry 0.33: opentelemetry-otlp 0.33 exports over tonic 0.14, the
+# same tonic as `middleware` (one tonic in the tree, see `cargo tree -d`).
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = { version = "0.34", default-features = false }
+
+[dev-dependencies]
+middleware = { path = "..", features = ["grpc", "istio", "dns-sd", "zenoh", "postcard"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "test-util"] }
+serde = { version = "1", features = ["derive"] }

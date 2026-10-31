@@ -4,6 +4,8 @@
 //! All three are plain `Copy` values filled in by the transport at the
 //! boundary. A field the transport cannot know is `None`, never a guess.
 
+use super::trace::{RequestId, TraceParent};
+
 /// Identifies the sender of a sample as far as the transport knows it (a MAC
 /// address, a Zenoh session id, ...), zero-padded to 8 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -84,6 +86,18 @@ impl SampleMeta {
 ///   the handler** (a relative budget: the nodes share no clock). `Some(0)`
 ///   means already expired. A handler that cannot finish in time returns
 ///   [`HandlerError::DeadlineExceeded`](crate::transport::HandlerError::DeadlineExceeded).
+/// * `trace` is the caller's W3C trace context ([`TraceParent`]): the
+///   trace this request belongs to and the caller's span. A handler that
+///   calls further services passes [`TraceParent::child`] of it (with its
+///   own span id) in [`RequestOptions::trace`](crate::transport::RequestOptions)
+///   so the trace continues. `None` when the caller sent none or the
+///   transport cannot carry it (serial link, BLE, ESP-NOW).
+/// * `request_id` is the caller's `x-request-id` ([`RequestId`]), the
+///   request identifier Envoy generates and Istio asks applications to
+///   copy onto downstream calls; same availability as `trace`.
+///
+/// Like `sender`, `trace` and `request_id` are the caller's claim, not
+/// authenticated: use them for correlation, never for policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RequestMeta<'a> {
     /// The requesting node, if the transport identifies it.
@@ -92,6 +106,10 @@ pub struct RequestMeta<'a> {
     pub principal: Option<&'a str>,
     /// Remaining budget for the reply in milliseconds, if the caller set one.
     pub deadline_ms: Option<u32>,
+    /// The caller's trace context, if it sent one the transport carried.
+    pub trace: Option<TraceParent>,
+    /// The caller's request id, if it sent a valid one the transport carried.
+    pub request_id: Option<RequestId<'a>>,
 }
 
 impl<'a> RequestMeta<'a> {
@@ -100,6 +118,8 @@ impl<'a> RequestMeta<'a> {
         sender: None,
         principal: None,
         deadline_ms: None,
+        trace: None,
+        request_id: None,
     };
 
     /// The same metadata naming `sender`.
@@ -124,5 +144,53 @@ impl<'a> RequestMeta<'a> {
             deadline_ms: Some(deadline_ms),
             ..self
         }
+    }
+
+    /// The same metadata with the caller's trace context.
+    pub const fn with_trace(self, trace: TraceParent) -> Self {
+        RequestMeta {
+            trace: Some(trace),
+            ..self
+        }
+    }
+
+    /// The same metadata with the caller's request id.
+    pub const fn with_request_id(self, request_id: RequestId<'a>) -> Self {
+        RequestMeta {
+            request_id: Some(request_id),
+            ..self
+        }
+    }
+
+    /// The same metadata with `request_id` if it is a valid [`RequestId`];
+    /// an invalid one is dropped (the field becomes `None`).
+    pub const fn with_request_id_str(self, request_id: &'a str) -> Self {
+        RequestMeta {
+            request_id: RequestId::new(request_id),
+            ..self
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn k18_request_meta_builders_set_trace_and_request_id() {
+        let t = TraceParent::new([1; 16], [2; 8], 1).unwrap();
+        let m = RequestMeta::NONE
+            .with_trace(t)
+            .with_request_id_str("abc-123");
+        assert_eq!(m.trace, Some(t));
+        assert_eq!(m.request_id.map(|r| r.as_str()), Some("abc-123"));
+        assert_eq!(m.sender, None);
+        assert_eq!(RequestMeta::NONE, RequestMeta::default());
+        // An invalid id is dropped, and replaces a previous valid one.
+        let dropped = m.with_request_id_str("not valid");
+        assert_eq!(dropped.request_id, None);
+        assert_eq!(dropped.trace, Some(t));
+        let id = RequestId::new("r1").unwrap();
+        assert_eq!(RequestMeta::NONE.with_request_id(id).request_id, Some(id));
     }
 }

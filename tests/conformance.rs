@@ -6,7 +6,9 @@
 //!
 //! * [`ReqRepFixture`] → [`reqrep`]: round trip, `request_with` timeout,
 //!   `Unavailable` / `DeadlineExceeded` round trips, caller identity and
-//!   deadline in [`RequestMeta`](middleware::RequestMeta).
+//!   deadline in [`RequestMeta`](middleware::RequestMeta), and (0.6) the
+//!   caller's trace context and request id
+//!   ([`reqrep::trace_is_propagated`]).
 //! * [`GatherFixture`] → [`reqrep::gather_collects_every_responder`].
 //! * [`PubSubFixture`] → [`pubsub`]: the declared
 //!   [`Subscriber::DELIVERY`](middleware::Subscriber::DELIVERY) holds under
@@ -29,6 +31,7 @@
 //!     type Requester = ZenohTransport;
 //!     type Responder = ZenohResponder<'static>;
 //!     const PROPAGATES_DEADLINE: bool = false;
+//!     const PROPAGATES_TRACE: bool = true;
 //!     async fn connect(&mut self, key: Key<'static>) -> (Self::Requester, Self::Responder) { ... }
 //!     fn handler_error(e: &ZenohError) -> Option<HandlerError> { ... }
 //!     fn is_timeout(e: &ZenohError) -> bool { ... }
@@ -83,6 +86,11 @@ pub trait ReqRepFixture {
     /// True if the handler sees the caller's timeout as
     /// `RequestMeta::deadline_ms`.
     const PROPAGATES_DEADLINE: bool;
+
+    /// True if the handler sees the caller's `RequestOptions::trace` and
+    /// `request_id` as `RequestMeta::trace` and `request_id`; false if the
+    /// backend cannot carry them (the handler then sees `None`).
+    const PROPAGATES_TRACE: bool;
 
     /// How far past its timeout a `request_with` may return.
     const TIMEOUT_SLACK: Duration = Duration::from_millis(500);

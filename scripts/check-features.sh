@@ -7,12 +7,16 @@
 #   * cloud feature sets (including `dns-sd` and `memory`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
-#     middleware feature beyond `default` and no cloud dependency.
+#     middleware feature beyond `default` and no cloud dependency;
+#   * the mesh service runner `mw-service` (design.md M5) enables exactly
+#     the host features grpc, istio, dns-sd and zenoh of middleware, none
+#     embedded, and its runner dependencies (tracing, OpenTelemetry, YAML)
+#     appear in no embedded set.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
-CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2) '
+CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory'
 
@@ -71,6 +75,20 @@ fi
 extra="$(features_of_self -p mwctl | grep -vx default || true)"
 if [ -n "$extra" ]; then
     fail "mwctl enables middleware features: $extra"
+fi
+
+echo "== M5: mw-service enables host features only"
+cargo build --quiet -p mw-service
+svc_features="$(features_of_self -p mw-service | sort -u)"
+for want in grpc istio dns-sd zenoh; do
+    grep -qx "$want" <<<"$svc_features" || fail "mw-service does not enable middleware/$want"
+done
+if grep -Eqx "$EMBEDDED_FEATURES" <<<"$svc_features"; then
+    fail "mw-service enables an embedded feature ($EMBEDDED_FEATURES)"
+fi
+if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
+        | grep -Eq '^mw-service '; then
+    fail "the embedded core depends on mw-service"
 fi
 
 echo "OK: feature isolation holds"

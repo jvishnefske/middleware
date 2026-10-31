@@ -40,15 +40,23 @@
 //!   on arrival and handed to the handler as the milliseconds left when
 //!   [`serve_one`](Responder::serve_one) runs it (`Some(0)` once passed,
 //!   rounded down). `None` without the header or with a malformed one.
+//! * `trace` — the W3C `traceparent` header
+//!   ([`extract_trace`]); `None` when absent
+//!   or invalid.
+//! * `request_id` — the `x-request-id` header
+//!   ([`extract_request_id`]); `None`
+//!   when absent, longer than 64 bytes or not visible ASCII.
 
 use super::GrpcError;
 use super::bus::{CLIENT_HEADER, parse_client_id};
 use super::codec::RawCodec;
 use super::status::to_status;
 use super::timeout::{GRPC_TIMEOUT_HEADER, GrpcTimeout};
+use super::trace::{extract_request_id, extract_trace};
 use crate::key::Key;
 use crate::transport::{
-    Handler, HandlerError, Request as MwRequest, RequestMeta, Responder, SenderId,
+    Handler, HandlerError, Request as MwRequest, RequestId, RequestMeta, Responder, SenderId,
+    TraceParent,
 };
 use bytes::Bytes;
 use core::convert::Infallible;
@@ -87,6 +95,10 @@ pub struct CallMeta {
     pub principal: Option<String>,
     /// The `grpc-timeout` budget, measured from arrival.
     pub timeout: Option<Duration>,
+    /// From the `traceparent` header.
+    pub trace: Option<TraceParent>,
+    /// From the `x-request-id` header (validated as a [`RequestId`]).
+    pub request_id: Option<String>,
 }
 
 /// Reads [`CallMeta`] from a call's metadata; pure.
@@ -112,6 +124,8 @@ pub fn call_meta(metadata: &MetadataMap, source: PrincipalSource) -> CallMeta {
         sender,
         principal,
         timeout,
+        trace: extract_trace(metadata),
+        request_id: extract_request_id(metadata),
     }
 }
 
@@ -130,6 +144,8 @@ struct Call {
     sender: Option<SenderId>,
     principal: Option<String>,
     deadline: Option<Instant>,
+    trace: Option<TraceParent>,
+    request_id: Option<String>,
     reply: oneshot::Sender<Result<Bytes, Status>>,
 }
 
@@ -230,6 +246,8 @@ impl UnaryService<Bytes> for UnaryMethod {
             sender: meta.sender,
             principal: meta.principal,
             deadline,
+            trace: meta.trace,
+            request_id: meta.request_id,
             reply,
         };
         let queued = self.tx.try_send(call);
@@ -289,6 +307,8 @@ impl Responder for GrpcResponder {
             sender: call.sender,
             principal: call.principal.as_deref(),
             deadline_ms: call.deadline.map(|d| remaining_ms(d, Instant::now())),
+            trace: call.trace,
+            request_id: call.request_id.as_deref().and_then(RequestId::new),
         };
         let reply = match Key::new(&call.key) {
             Ok(key) => run_handler(handler, key, &call.request, meta, scratch).map_err(to_status),
@@ -367,6 +387,22 @@ mod tests {
         m.insert(GRPC_TIMEOUT_HEADER, "soon".parse().unwrap());
         let meta = call_meta(&m, PrincipalSource::None);
         assert_eq!((meta.sender, meta.timeout), (None, None));
+    }
+
+    #[test]
+    fn k18_call_meta_reads_traceparent_and_request_id() {
+        let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let mut m = MetadataMap::new();
+        m.insert("traceparent", tp.parse().unwrap());
+        m.insert("x-request-id", "abc-1".parse().unwrap());
+        let meta = call_meta(&m, PrincipalSource::None);
+        assert_eq!(meta.trace, TraceParent::parse(tp));
+        assert!(meta.trace.is_some());
+        assert_eq!(meta.request_id.as_deref(), Some("abc-1"));
+        m.insert("traceparent", "garbage".parse().unwrap());
+        m.insert("x-request-id", "two words".parse().unwrap());
+        let meta = call_meta(&m, PrincipalSource::None);
+        assert_eq!((meta.trace, meta.request_id), (None, None));
     }
 
     #[test]
