@@ -17,6 +17,7 @@
 - `payload-sim` prints `ledstrip<h> #rrggbb …` per write and each strip's colours at the end of a run; the browser simulator raises `ledstripOpen` / `ledstrip` / `ledstripClose` events, reports pin mode `ledstrip`, and offers `ledstrips()`; the editor page logs strip writes. (V6)
 - `mw-payload`: `ledstrip::LedStrip` (`open`, `write(&[Rgb])`, `write_grb`, `close`) and `Rgb` (`grb`, `scale`); no new `unsafe`. Dropping a strip does not close it. (V7)
 - New example `payloads/examples/ledstrip`: a moving rainbow on 8 LEDs on GPIO45 (the Conagotchi badge), 6 284 bytes, built with 1-byte pages in `check-all.sh`. (V8)
+- ESP32-S3: `heap_main` 152 → 148 KiB (heap 224 → 220 KiB). The shell library and the LED strip together took about 830 B of `.bss`, which left `.stack` at 40 656 B, under the conagotchi badge's 40 KiB check; the 4 KiB go back to the main stack.
 
 ## 0.5.0
 

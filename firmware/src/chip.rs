@@ -61,7 +61,7 @@
 //! | chip     | reclaimed | main    | total   | memory  | max image | radio  |
 //! |----------|-----------|---------|---------|---------|-----------|--------|
 //! | ESP32    | 96.4 KiB  | 80 KiB  | 176 KiB | 64 KiB  | 24 KiB    | 48 KiB |
-//! | ESP32-S3 | 72.0 KiB  | 152 KiB | 224 KiB | 64 KiB  | 32 KiB    | 48 KiB |
+//! | ESP32-S3 | 72.0 KiB  | 148 KiB | 220 KiB | 64 KiB  | 32 KiB    | 48 KiB |
 //! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    | 0      |
 //! | ESP8266  | 0         | 0       | 0       | 0       | 124 KiB   | 0      |
 //!
@@ -78,7 +78,9 @@
 //! (W10) then made a payload's whole bytecode resident from its start, and
 //! the ESP32-S3 gave the main stack's surplus back: `heap_main` 128 → 152
 //! KiB, leaving about 46 KiB of stack (the conagotchi badge's build checks
-//! at least 40 KiB). The radio budget is the
+//! at least 40 KiB). The shell library's board profile and the ABI 5 LED
+//! strip (0.6) took about 830 B of `.bss`, leaving 40 656 B, so the
+//! ESP32-S3 gave 4 KiB more: `heap_main` 152 → 148 KiB. The radio budget is the
 //! driver's footprint with the reduced buffer counts of the radio shell
 //! (6 static RX buffers of 1.6 KiB, no aggregation) plus margin; it is an
 //! estimate until measured on hardware.
@@ -248,7 +250,7 @@ pub const ESP32S3: Profile = Profile {
     usb_serial_jtag: true,
     runtime: true,
     heap_reclaimed: 73_744,
-    heap_main: 152 * 1024,
+    heap_main: 148 * 1024,
     max_memory_bytes: WASM_PAGE,
     radio_heap: 48 * 1024,
     max_image: 32 * 1024,
