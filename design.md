@@ -2267,6 +2267,281 @@ host → bridge.
   stop/start, replay and a signed `upload echo.wasm --start` (3006)
   repeated with the same results.
 
+### A/B firmware OTA (RP2350)
+
+The RP base firmware on a Raspberry Pi Pico 2 (RP2350) replaces its own
+firmware over the same USB CDC serial port and framing that carries
+payloads, driven by `mwctl fw`. The RP2350 bootrom does the dangerous part:
+two partitions of the partition table are linked as an A/B pair, the
+bootrom boots the valid image with the higher version, and an image
+flagged try-before-you-buy (TBYB) is booted only by a flash-update reboot,
+on trial, until the firmware calls the bootrom's explicit buy within the
+watchdog window; otherwise the next boot skips it and the previous image
+runs. The references are the RP2350 datasheet's bootrom chapter (§5.1
+"Bootrom concepts", §5.4 "Bootrom APIs", §5.9 "Metadata block details");
+the PDF was not available while this was written, so every encoding was
+taken from the pico-sdk headers that the datasheet tabulates
+(`boot/picobin.h`, `boot/bootrom_constants.h`, `pico/bootrom.h`,
+`embedded_start_block.inc.S`), and the behaviours that could not be
+checked are listed below as assumptions to verify on hardware.
+
+The Pico 1 (RP2040) bootrom has no partitions, versions or TBYB, so it is
+out of scope by design: `mwctl` refuses an RP2040 UF2 and the RP2040
+firmware does not answer `sys/fw/*`.
+
+Everything decidable on the host lives in `middleware::fw_ota` (always
+built, `no_std`, no heap): the `sys/fw/*` wire format (`wire`), the pure
+state machine `FwUpdate` (`machine`), the IMAGE_DEF parser (`picobin`), the
+persisted record (`record`) and the hardware seam `FwPlatform`
+(`platform`). The shell `FwService` (`service`, feature `trust`) runs a
+request against a platform. `fw_ota::sim` (feature `fw-sim`, host only) is
+an in-memory model of the RP2350 bootrom and flash that implements
+`FwPlatform`, so the whole lifecycle, power cuts included, is tested on
+the host; mwctl's fake device runs the real `FwService` on it.
+
+**Protocol.** Seven keys, all integers little-endian (the byte layouts are
+in the `fw_ota` module docs and `wire::FwInfo`):
+
+| key              | request body                         | response |
+|------------------|--------------------------------------|----------|
+| `sys/fw/info`    | empty                                | state, running slot, each slot's version and TBYB flag, the anti-rollback floor, node id, the update in progress (36 bytes) |
+| `sys/fw/begin`   | image length, version, SHA-256 (40 bytes) | the target slot (1 byte), always the inactive one |
+| `sys/fw/chunk`   | offset, 1 to 512 bytes               | empty |
+| `sys/fw/commit`  | empty, or an Ed25519 signature (64 bytes) | empty |
+| `sys/fw/reboot`  | empty                                | empty; flash-update reboot about 100 ms later |
+| `sys/fw/confirm` | empty                                | empty; explicit buy |
+| `sys/fw/abort`   | empty                                | empty |
+
+The version is the image's IMAGE_DEF `major << 16 | minor`; it must exceed
+both the persisted `min_version` and the running image's version, and the
+device installs an image only as the version its own IMAGE_DEF declares,
+so the bootrom's A/B choice and the anti-rollback floor always agree.
+Chunks are 512 bytes at multiples of 512 (the last one shorter), in any
+order; a chunk already received is acknowledged and not written again; a
+misaligned, overlapping or out-of-range chunk is refused. The commit
+signature uses the payload signing key pinned by `sys/trust/claim` and
+covers the 64-byte message `"mw-firmware-v1\0"`, length, version, target
+slot, the device's 8-byte node id and the image's SHA-256, so a signature
+is good for one image, one version, one slot of one device and never for a
+payload or a control request (different tags). An unclaimed device
+accepts any commit (trust on first use, as for payloads). Every request is
+idempotent on resend, and a refused request leaves the state unchanged,
+except a commit whose image fails verification, which abandons the
+transfer.
+
+**State machine.** Idle goes to Receiving on `begin` (a repeated
+identical `begin` resumes, any other restarts). When every chunk has
+arrived, `commit` checks the version and the signature, then the device
+hashes what it holds and reads the IMAGE_DEF: the hash must match and the
+image must be an RP2350 executable flagged TBYB, without an OTP rollback
+version, of the declared version, with a block of its metadata loop in
+the first sector's last page (the sentinel, below). The state is then
+Verified; the device persists `min_version` and the pending update, writes
+the image's first sector, and is Committed. `reboot` (only when Committed)
+asks the bootrom for a flash-update reboot into the new slot. That boot is
+a Trial (the bootrom reports a buy pending); `confirm` (only on trial, and
+`Unavailable` until the firmware's own self-test passed) buys the image
+and the state is Confirmed. A trial that ends without a buy (watchdog,
+reset, power cut, or `abort`, which reboots normally) comes back in the
+old slot as RolledBack. `abort` also abandons a transfer or a committed
+update (erasing the new slot's first sector). Verified is transient: it
+is where a commit stays when installing failed, and another commit
+retries.
+
+**Where the image goes.** Flash is erased in 4 KiB sectors, each just
+before its first chunk is written (computed from the received-chunk
+bitmap alone). The first sector, which holds the image's first metadata
+block, is erased at `begin` and its chunks are kept in RAM until a commit
+has passed every check and the record is saved; only then is it written.
+So the inactive slot never holds a bootable image that was not verified
+and authorized, and the running slot is never erased or written (the
+shell refuses any effect on it before touching flash).
+
+**Sentinel block.** The bootrom's explicit buy erases the image's first
+sector and programs it again with the TBYB bit clear, page by page. A
+power cut part way would leave the first pages (an IMAGE_DEF that is no
+longer TBYB) and an erased tail: with the whole block loop in those first
+pages the bootrom would boot a torn image. The power-loss test found this.
+An updatable image therefore carries a second, empty block in the last
+256-byte page of its first sector (from offset 0xF00), linked into the
+loop, so the loop closes only when the sector is complete again and a
+torn buy leaves the slot without a valid image. `picobin::image_def_block`
+and `picobin::sentinel_block` build both blocks; the device and `mwctl`
+refuse images without the sentinel.
+
+**Power loss.** Every state is recovered from flash and the bootrom at
+boot (`FwUpdate::boot`): with nothing pending the state is Idle; with an
+update pending and the bootrom reporting a buy pending it is Trial; if the
+pending slot is the one running (bought, record not yet settled) it is
+Confirmed and the record is settled; if the reboot had been requested and
+the old slot runs, it is RolledBack and the record is settled; if the
+reboot had not been requested it is Committed when the slot still hashes
+to the committed image, else Idle with the slot's first sector erased. A
+commit's version is used up once its record is saved, even when the update
+does not complete, so a captured signed commit can never be replayed.
+
+**Host.** `mwctl --port <PATH> fw info | fw update <IMAGE> [--key <KEYFILE>]
+[--version MAJOR.MINOR] [--no-reboot] | fw reboot | fw confirm | fw abort`.
+The image is a UF2 (RP2350 families, reassembled from the flash base; an
+RP2040 UF2 is refused) or a raw binary; an ELF is refused with the
+`picotool` and `objcopy` commands that convert it. The version comes from
+the image's IMAGE_DEF; `--version` is only a cross-check. `fw update`
+refuses locally an image the device would refuse, sends every chunk with
+progress (a lost reply is resent and deduplicated), signs the commit for
+the slot and node id the device reported, reboots, reopens the same port
+path for up to 12 s (it never scans), waits for the trial and confirms it,
+retrying while the self-test is still running. It waits up to 15 s for
+`sys/fw/commit` (the device hashes the whole image) and 5 s for
+`sys/fw/begin` and `sys/fw/confirm` (sector erases).
+
+- [x] Y1 The `sys/fw/*` requests and the `sys/fw/info` response encode and
+  parse symmetrically; every other body length is `InvalidRequest`, an
+  unknown `sys/fw/` key `NotFound`, any other key is not the updater's;
+  a 512-byte chunk request fits one serial frame —
+  `fw_ota::wire::tests::y1_commands_round_trip_through_parse`,
+  `y1_parse_refuses_bad_bodies_without_panicking`, `y1_info_round_trips`;
+  `fw_ota::tests::y1_slots_and_sizes`.
+- [x] Y2 The IMAGE_DEF parser follows a block loop from the first 4 KiB
+  (bounded blocks, bounded loop length), returns the last IMAGE_DEF with
+  its flags, version (and rollback version) and the loop's highest block
+  in the first sector, and treats any malformed metadata as no image,
+  never panicking —
+  `fw_ota::picobin::tests::y2_block_built_here_parses_with_version_and_tbyb`,
+  `y2_two_block_loop_like_the_pico_sdk`, `y2_rollback_version_is_read`,
+  `y2_malformed_metadata_is_no_image`, `y2_random_metadata_never_panics`,
+  `y2_sentinel_block_closes_the_loop`, `y2_read_errors_propagate`.
+- [x] Y3 The transfer targets the inactive slot, refuses an image larger
+  than the slot or not newer than the floor, accepts aligned chunks in any
+  order once each, refuses misaligned, overlapping, out-of-range and
+  wrong-length chunks without changing state, erases each sector once on
+  its first chunk and stashes the first sector, resumes on an identical
+  `begin`, and abandons the transfer when verification fails (hash,
+  missing or wrong IMAGE_DEF, not TBYB, rollback version, version
+  mismatch) — `fw_ota::machine::tests::y3_happy_path_reaches_committed_with_sector_erases_computed`,
+  `y3_chunks_are_idempotent_and_bounded`,
+  `y3_begin_targets_the_inactive_slot_and_checks_size_and_version`,
+  `y3_verification_failures_abandon_the_transfer`,
+  `y3_chunk_set_counts_and_sectors`.
+- [x] Y4 The signed message is the 64-byte layout above with its own tag;
+  a claimed device accepts a commit only with a signature by the pinned
+  key over exactly this length, version, slot, node and hash (strict
+  verification), an unclaimed one accepts any commit, and a build without
+  `trust` refuses every commit of a claimed device —
+  `fw_ota::wire::tests::y4_signed_message_layout`,
+  `fw_ota::machine::tests::y4_claimed_devices_need_a_signature_binding_slot_node_and_version`
+  *(trust)*, `y4_without_crypto_a_claimed_device_refuses_every_commit`
+  *(no features)*.
+- [x] Y5 `reboot` is accepted only when committed, `confirm` only on trial
+  (`Unavailable` before the self-test passed, idempotent once confirmed),
+  and `abort` abandons a transfer or committed update, reverts a trial
+  and is a no-op otherwise —
+  `fw_ota::machine::tests::y5_reboot_confirm_and_abort_follow_the_state`.
+- [x] Y6 The boot reconciliation maps every combination of record and
+  bootrom state to the table under "Power loss" —
+  `fw_ota::machine::tests::y6_boot_reconciles_every_record_with_the_bootrom_state`.
+- [x] Y7 On the bootrom model, through `FwService` and the wire format: an
+  update installs into B, boots on trial, is confirmed (TBYB cleared) and
+  then boots normally, and the next update goes into A; a trial without a
+  confirm rolls back and its version cannot be replayed; `abort` reverts a
+  trial and discards a committed update; refused requests (early reboot
+  or confirm, old version, oversize, unsigned or wrongly bound
+  signatures) never touch the running slot and leave no image in the
+  other; a bad image or corrupted flash fails the commit with nothing
+  persisted; resent requests are idempotent —
+  `fw_ota::sim::tests::y7_full_lifecycle_updates_both_slots_in_turn`,
+  `y7_trial_without_confirm_rolls_back_and_its_version_is_used_up`,
+  `y7_abort_rejects_a_trial_and_abandons_transfers`,
+  `y7_refusals_leave_the_running_image_alone`,
+  `y7_corrupted_flash_or_a_bad_image_fails_the_commit`,
+  `y7_resent_requests_are_idempotent` *(fw-sim)*.
+- [x] Y8 A power cut at every mutating operation of a complete update
+  (sector erases and writes, the record saves, the reboot request, the
+  bootrom's buy and the boot-time settling) leaves a device that boots,
+  boots only the factory image or a bought new one, starts the updater,
+  and completes the update when the host retries —
+  `fw_ota::sim::tests::y8_power_loss_at_every_operation_is_recoverable`,
+  `y8_power_loss_while_settling_at_boot` *(fw-sim)*.
+- [x] Y9 `mwctl fw` loads UF2 and raw images and refuses ELF, RP2040,
+  non-TBYB, sentinel-less and mismatched images with an explanation;
+  parses its commands; updates, reboots and confirms a fake Pico 2
+  running the real updater on the bootrom model, with progress, signed
+  commits, lost replies resent, refusals explained, confirm retried while
+  the self-test runs, and abort on trial rolling back; prints `fw info`;
+  waits longer for the slow requests —
+  `mwctl` `fw::tests::y9_images_load_from_bin_and_uf2_and_are_checked_like_the_device`,
+  `y9_versions_parse_as_major_minor`,
+  `y9_update_reboot_and_confirm_against_the_bootrom_model`,
+  `y9_refusals_are_explained`,
+  `y9_lost_replies_are_resent_and_the_device_deduplicates`,
+  `y9_abort_on_trial_rolls_back`; `cli::tests::y9_parses_fw_commands`;
+  `report::tests::y9_fw_info_names_slots_versions_and_progress`;
+  `link::tests::timeouts_extend_begin_only`.
+- [x] Y10 The persisted record (60 bytes: magic, format, flags, slot,
+  sequence number, `min_version`, the pending update's version, length and
+  hash, CRC-32) round trips, every single-bit error and an erased sector
+  read as no record, the newer of two copies wins, and a save that would
+  lower `min_version` is detected —
+  `fw_ota::record::tests::y10_records_round_trip_and_reject_damage`,
+  `y10_newest_takes_the_higher_sequence_and_floors_never_drop`.
+- [x] Y11 `fw_ota` is always built (its declarations carry no cfg gate);
+  the RP2350 sets (no features, `trust`, `trust,serial`,
+  `trust,serial,postcard`) build for `thumbv8m.main-none-eabihf` with no
+  cloud dependency and no host feature; `fw-sim` builds on the host and
+  is a host feature that no embedded set enables; mwctl's shipped build
+  uses no middleware feature (the model is a dev-dependency) —
+  `scripts/check-features.sh` (Y11 lines).
+
+What the RP2350 integration (`firmware-rp/`, replacing its `fw_update`
+stub) must provide, unverified until then:
+
+- [ ] Y12 `FwPlatform` on embassy-rp, blocking: `boot_info` from
+  `rom_get_sys_info(SYS_INFO_BOOT_INFO)` (the booted partition number
+  mapped to A or B of the pair, and bit 0 of `tbyb_and_update_info`, buy
+  pending, as the trial flag); slot offsets and the slot size from
+  `rom_get_partition_table_info` with `PT_INFO_PARTITION_LOCATION_AND_FLAGS`
+  (both partitions the same size); `read`, `erase` (4 KiB) and `write`
+  through embassy-rp's blocking flash at the partition's offset, never the
+  running partition; `load_record` and `persist` with the `record` format
+  in two dedicated 4 KiB sectors outside both partitions, written into
+  the sector not holding the current record, fields first and magic
+  last, the higher sequence number winning; `reboot_flash_update` as
+  `rom_reboot(REBOOT_TYPE_FLASH_UPDATE, 100, partition start, 0)` and
+  `reboot_normal` as `REBOOT_TYPE_NORMAL` with the same delay, both
+  returning so the reply is sent first; `explicit_buy` as
+  `rom_explicit_buy` with a 4 KiB word-aligned work buffer, then stopping
+  the trial watchdog. The dispatcher hands every `sys/fw/*` request to
+  `FwService::handle` before the payload loader, with a `Context` holding
+  the `sys/info` node id, the trust store's `TrustState` and the
+  firmware's self-test result, and builds the service once at boot with
+  `FwService::boot`. During a trial the firmware must not feed or disable
+  the bootrom's watchdog before the buy, so a hung image reverts.
+- [ ] Y13 The firmware image and flash layout: a partition table with two
+  equal partitions linked as an A/B pair (B's link type "A partition",
+  value A's index) accepting the RP2350 Arm secure family, plus the two
+  record sectors outside them; every build's IMAGE_DEF (in the first
+  4 KiB) is an RP2350 Arm secure executable with the TBYB flag
+  (IMAGE_TYPE flags 0x9021), a VERSION item with the build's
+  `major.minor`, and the sentinel block from offset 0xF00 linked into its
+  loop; the first image flashed at the factory is bought (TBYB clear) so it
+  boots normally. To be checked with `picotool info -a` and
+  `picotool partition info` on a built image.
+- [ ] Y14 The bootrom behaves as the model assumes, to verify on a Pico 2:
+  a normal boot skips an unbought TBYB image; a flash-update reboot boots
+  it with a buy pending; without a buy the watchdog reboot (about 16 s,
+  from memory of the datasheet) boots the other slot; the bootrom picks
+  the higher `major.minor` between A and B when neither is TBYB; explicit
+  buy rewrites only the image's first sector and clears the TBYB bit
+  without touching the other slot (no downgrade erase, since versions only
+  grow); the last IMAGE_DEF of a block loop is the one used; and a power
+  cut during the buy's rewrite leaves the slot unbootable thanks to the
+  sentinel.
+- [ ] Y15 End to end on a Pico 2 over USB CDC: `mwctl fw update` with a
+  signed image installs into the inactive slot, the port comes back after
+  the reboot within the reconnect window, the trial is confirmed, a later
+  reset boots the new image, a trial left unconfirmed reverts, and power
+  cuts during the transfer, after the commit and during the trial leave a
+  device that boots and finishes the update on a retry.
+
 ### DMA routes (ABI 4)
 
 Frame streams between devices without copying through guest memory. A

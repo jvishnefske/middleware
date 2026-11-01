@@ -49,6 +49,10 @@ pub enum Error {
     Key(KeyError),
     /// The USB↔ESP-NOW bridge did not answer or misbehaved.
     Bridge(String),
+    /// A firmware image file cannot be installed.
+    Image(crate::fw::ImageError),
+    /// A firmware update cannot proceed (checked before sending).
+    Fw(String),
     /// One step of an upload failed.
     Upload {
         /// Zero-based step index.
@@ -71,6 +75,12 @@ impl From<std::io::Error> for Error {
 impl From<PlanError> for Error {
     fn from(e: PlanError) -> Self {
         Error::Plan(e)
+    }
+}
+
+impl From<crate::fw::ImageError> for Error {
+    fn from(e: crate::fw::ImageError) -> Self {
+        Error::Image(e)
     }
 }
 
@@ -110,7 +120,37 @@ pub const fn status_name(status: HandlerError) -> &'static str {
 pub fn explain(key: &str, status: HandlerError) -> &'static str {
     use HandlerError::*;
     let is = |k: middleware::Key<'static>| key == k.as_str();
+    use middleware::fw_ota::keys as fw;
     match status {
+        Denied if is(fw::BEGIN) => {
+            "the image's version does not exceed the running firmware's or the last committed one \
+             (a committed version is used up even if its update did not complete)"
+        }
+        Denied if is(fw::COMMIT) => {
+            "the device has a pinned key: the firmware commit must be signed by it for this device and \
+             slot (use --key), with a version above the last committed; nothing was installed"
+        }
+        InvalidRequest if is(fw::BEGIN) => {
+            "an update is committed or on trial: run `fw confirm` or `fw abort` first"
+        }
+        BufferTooSmall if is(fw::BEGIN) => "the image is larger than the device's firmware partition",
+        InvalidRequest if is(fw::CHUNK) => "chunk out of range or no firmware transfer in progress",
+        InvalidRequest if is(fw::COMMIT) => {
+            "the device rejected the image: transfer incomplete, SHA-256 mismatch after writing, or its \
+             IMAGE_DEF is not an RP2350 TBYB executable of the declared version (the transfer was \
+             abandoned; the running firmware is unchanged)"
+        }
+        InvalidRequest if is(fw::REBOOT) => "nothing is committed: send the image (fw update) first",
+        InvalidRequest if is(fw::CONFIRM) => {
+            "the device is not running a new image on trial (nothing to confirm)"
+        }
+        Unavailable if is(fw::CONFIRM) => {
+            "the new firmware's self-test has not passed yet; if it never does, the bootrom's \
+             watchdog reverts to the previous image"
+        }
+        NotFound if key.starts_with("sys/fw/") => {
+            "this firmware has no A/B firmware updater (sys/fw/*): an RP2350 base firmware is needed"
+        }
         NotFound if is(keys::START) => {
             "this firmware has no WASM runtime (a `+no-wasm` build such as ESP32-C3 or ESP8266): \
              payloads are stored but cannot be started"
@@ -184,6 +224,8 @@ impl fmt::Display for Error {
             Error::Frame(e) => write!(f, "could not encode request frame: {e:?}"),
             Error::Plan(e) => write!(f, "{e}"),
             Error::Bridge(e) => write!(f, "ESP-NOW bridge: {e}"),
+            Error::Image(e) => write!(f, "{e}"),
+            Error::Fw(e) => write!(f, "firmware update: {e}"),
             Error::Key(e) => write!(f, "{e}"),
             Error::Upload {
                 step,

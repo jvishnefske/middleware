@@ -11,8 +11,17 @@
 //! ([`mwctl::sign::sign_control`], counter `--counter` or the Unix time in
 //! milliseconds). `key new` / `key pub` touch only the key file: `key
 //! new` reads 32 bytes from `/dev/urandom` and creates the file with mode
-//! 0600, refusing to overwrite one. Exit status: 0 success, 1 device or port failure, 2
-//! usage error.
+//! 0600, refusing to overwrite one.
+//!
+//! `fw update` (RP2350, serial only) loads and checks the image
+//! ([`mwctl::fw::load_image`]), sends it with progress, and unless
+//! `--no-reboot` reboots the device into it on trial; the USB CDC port
+//! disappears while the device resets, so it closes the port, reopens the
+//! **same** `--port` path (every 500 ms for up to [`RECONNECT_SECONDS`]),
+//! waits for the trial, and confirms it (retrying while the self-test is
+//! still running), all within the bootrom's trial watchdog window.
+//!
+//! Exit status: 0 success, 1 device or port failure, 2 usage error.
 
 mod port;
 
@@ -23,7 +32,9 @@ use mwctl::cli::{self, Cmd, KeyCmd, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
-use mwctl::report::{format_board, format_event, format_info, format_trust};
+use middleware::fw_ota::StateCode;
+use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
+use mwctl::report::{format_board, format_event, format_fw_info, format_info, format_trust};
 use mwctl::sign::{SEED_LEN, Seed, counter_at, hex, sign_commit, sign_control, version_at};
 use port::SerialTransport;
 use std::io::Read as _;
@@ -33,6 +44,12 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
+
+/// How long `fw update` keeps trying to reopen the port and find the
+/// device on trial after the reboot.
+const RECONNECT_SECONDS: u64 = 12;
+/// Pause between reconnect and confirm attempts.
+const RETRY_PAUSE: Duration = Duration::from_millis(500);
 
 /// How long `start` keeps listening after a refused start, for the
 /// device's `sys/log` line that explains it (sent after the reply).
@@ -118,6 +135,9 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
             request: cli.timeout,
             ..Timeouts::default()
         };
+        if is_fw(&cli.cmd) {
+            return fw_command(transport, &cli, timeouts);
+        }
         let mut dev = Device::new(Link::new(transport, timeouts));
         let result = command(&mut dev, cli.cmd, None);
         print_events(&dev.take_events());
@@ -159,6 +179,95 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         s.requests, s.sends, s.retransmissions, s.nacks, s.skipped
     );
     result
+}
+
+fn is_fw(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::FwInfo | Cmd::FwUpdate { .. } | Cmd::FwReboot | Cmd::FwConfirm | Cmd::FwAbort
+    )
+}
+
+/// `fw ...` over the serial port; `fw update` reconnects after the reboot.
+fn fw_command(transport: SerialTransport, cli: &cli::Cli, timeouts: Timeouts) -> Result<(), Error> {
+    let mut dev = Device::new(Link::new(transport, timeouts));
+    let confirm_attempts = (RECONNECT_SECONDS * 1000 / RETRY_PAUSE.as_millis() as u64) as u32;
+    let result = match &cli.cmd {
+        Cmd::FwInfo => dev.fw_info().map(|i| print!("{}", format_fw_info(&i))),
+        Cmd::FwReboot => dev.fw_reboot().map(|()| println!("rebooting into the committed image on trial")),
+        Cmd::FwConfirm => dev
+            .fw_confirm(confirm_attempts, || std::thread::sleep(RETRY_PAUSE))
+            .map(|()| println!("confirmed: the new firmware is permanent")),
+        Cmd::FwAbort => dev.fw_abort().map(|()| println!("aborted")),
+        Cmd::FwUpdate { file, key, version, reboot } => {
+            let bytes = std::fs::read(file).map_err(|e| io_context(file, e))?;
+            let image = load_image(&bytes, *version)?;
+            let seed = key.as_deref().map(read_seed).transpose()?;
+            println!(
+                "firmware {} ({} bytes{}), version {}",
+                file.display(),
+                image.bytes.len(),
+                if image.from_uf2 { ", from UF2" } else { "" },
+                format_version(image.version)
+            );
+            let began = Instant::now();
+            let r = dev.fw_update(&image, FwOptions { key: seed.as_ref(), reboot: *reboot }, progress);
+            eprintln!();
+            let done = r?;
+            println!(
+                "installed in slot {} in {:.2} s",
+                done.slot.name(),
+                began.elapsed().as_secs_f64()
+            );
+            if !done.rebooted {
+                println!("not rebooted (--no-reboot): run `fw reboot`, then `fw confirm`");
+                print_events(&dev.take_events());
+                return Ok(());
+            }
+            print_events(&dev.take_events());
+            drop(dev);
+            eprintln!("rebooting into slot {} on trial; reconnecting to {}", done.slot.name(), cli.port);
+            let mut dev = reconnect(cli, timeouts)?;
+            dev.fw_confirm(confirm_attempts, || std::thread::sleep(RETRY_PAUSE))?;
+            println!("confirmed: slot {} is the permanent firmware", done.slot.name());
+            print_events(&dev.take_events());
+            return Ok(());
+        }
+        _ => Ok(()),
+    };
+    print_events(&dev.take_events());
+    result
+}
+
+/// Reopens the same port until the device answers `sys/fw/info` on trial.
+fn reconnect(cli: &cli::Cli, timeouts: Timeouts) -> Result<Device<Link<SerialTransport>>, Error> {
+    let deadline = Instant::now() + Duration::from_secs(RECONNECT_SECONDS);
+    // The device resets about 100 ms after its reply; let it go first.
+    std::thread::sleep(RETRY_PAUSE);
+    let mut last = Error::Fw(format!("{} did not come back", cli.port));
+    // Bounded by the deadline.
+    while Instant::now() < deadline {
+        match SerialTransport::open(&cli.port, cli.baud) {
+            Ok(t) => {
+                let mut dev = Device::new(Link::new(t, timeouts));
+                match dev.fw_info() {
+                    Ok(i) if i.state == StateCode::Trial => return Ok(dev),
+                    Ok(i) => {
+                        return Err(Error::Fw(format!(
+                            "the device came back {} in slot {} instead of on trial (the bootrom \
+                             did not boot the new image)",
+                            i.state.name(),
+                            i.running.name()
+                        )));
+                    }
+                    Err(e) => last = e,
+                }
+            }
+            Err(e) => last = Error::Io(e),
+        }
+        std::thread::sleep(RETRY_PAUSE);
+    }
+    Err(last)
 }
 
 /// Signs control request `op` for `target` with `key` (both or neither:
@@ -278,7 +387,10 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
             })
         }
         Cmd::Monitor { seconds } => monitor(dev, seconds),
-        Cmd::Reset => Ok(()),
+        // Serial only, handled by `fw_command` (the CLI refuses --espnow).
+        Cmd::Reset | Cmd::FwInfo | Cmd::FwUpdate { .. } | Cmd::FwReboot | Cmd::FwConfirm | Cmd::FwAbort => {
+            Ok(())
+        }
     }
 }
 

@@ -138,6 +138,11 @@ impl<L: Endpoint> Device<L> {
         &self.link
     }
 
+    /// The underlying endpoint, mutably.
+    pub fn link_mut(&mut self) -> &mut L {
+        &mut self.link
+    }
+
     /// Publications and noise received outside [`Device::next_event`].
     pub fn take_events(&mut self) -> Vec<Event> {
         self.link.take_events()
