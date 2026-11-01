@@ -1,0 +1,208 @@
+//! Imperative shell: hardware bring-up and the tasks around the pure core.
+//!
+//! Boot sequence ([`run`]):
+//!
+//! 1. With `wasm`, the heap arena goes to the allocator ([`heap`]).
+//!    `embassy_rp::init` with the default clocks (RP2040 125 MHz, RP2350
+//!    150 MHz) and the embassy time driver.
+//! 2. The QSPI flash is opened in blocking mode and the chip's unique id
+//!    read ([`board::unique_id`]); it becomes the node id and the USB
+//!    serial number ([`rp_base::node`]).
+//! 3. USB comes up as one CDC-ACM interface ([`rp_base::usb`] identity) and
+//!    two tasks start: the USB device task and the [`link`] task, which
+//!    runs the serial protocol on the CDC port. Nothing is printed as text;
+//!    logs are `sys/log` publications.
+//! 4. The [`rp_base::service::Service`] opens the trust record and the
+//!    payload store at the chip's flash map ([`rp_base::layout`]) through
+//!    the one-sector-per-erase adapter, and the boot log reports the build,
+//!    the heap plan, the stored payload and the trust state.
+//! 5. With `wasm`, the payload hardware is set aside in [`device::HW`]: a
+//!    `Flex` for every payload pin (GPIO 0–22, 24, 25) and the ADC with
+//!    GPIO 26–28.
+//! 6. The [`controller`] runs on the main task and starts the stored
+//!    payload if one is valid (and the runtime is built in).
+//!
+//! Ownership is a tree: the main task owns the controller (service, flash,
+//! payload); the link task owns the CDC class; they meet only through the
+//! `'static` [`bus::Bus`]. The payload hardware rests in [`device::HW`]
+//! between runs.
+
+mod board;
+mod bus;
+mod controller;
+#[cfg(feature = "wasm")]
+mod device;
+#[cfg(feature = "wasm")]
+mod heap;
+mod link;
+
+use embassy_executor::Spawner;
+use embassy_rp::bind_interrupts;
+use embassy_rp::flash::Flash;
+use embassy_rp::peripherals::USB;
+use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
+use embassy_usb::{Builder, UsbDevice};
+use esp_base::trust_store::Persisted;
+use middleware::loader::trust::TrustState;
+use middleware::serial::link::{Duplex, SerialLink};
+use rp_base::node::{Serial, node_id};
+use rp_base::service::{Facts, Service};
+use rp_base::usb::{MANUFACTURER, MAX_PACKET, PRODUCT, VID, pid};
+use static_cell::{ConstStaticCell, StaticCell};
+
+use board::{FIRMWARE, PROFILE, PROFILE_REF};
+use bus::Bus;
+use controller::Controller;
+use link::{CdcWriter, UsbDriver, UsbLink};
+
+bind_interrupts!(struct Irqs {
+    USBCTRL_IRQ => InterruptHandler<USB>;
+});
+
+static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
+
+/// Buffers the USB stack borrows for the life of the firmware.
+struct UsbMemory {
+    config: [u8; 256],
+    bos: [u8; 256],
+    msos: [u8; 0],
+    control: [u8; 64],
+    rx: [u8; MAX_PACKET as usize],
+}
+
+static USB_MEMORY: ConstStaticCell<UsbMemory> = ConstStaticCell::new(UsbMemory {
+    config: [0; 256],
+    bos: [0; 256],
+    msos: [0; 0],
+    control: [0; 64],
+    rx: [0; MAX_PACKET as usize],
+});
+
+/// The CDC class state (not `Sync`, so initialised at run time).
+static CDC_STATE: StaticCell<CdcState<'static>> = StaticCell::new();
+
+static SERIAL: StaticCell<Serial> = StaticCell::new();
+
+#[embassy_executor::task]
+async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
+    device.run().await
+}
+
+#[embassy_executor::task]
+async fn link_task(link: UsbLink, bus: &'static Bus) {
+    link::serve(link, bus).await;
+}
+
+/// Brings up USB: the device task and the CDC link task.
+fn start_usb(spawner: Spawner, usb: embassy_rp::Peri<'static, USB>, serial: &'static str, bus: &'static Bus) {
+    let driver = Driver::new(usb, Irqs);
+    let mut config = embassy_usb::Config::new(VID, pid(PROFILE.chip));
+    config.manufacturer = Some(MANUFACTURER);
+    config.product = Some(PRODUCT);
+    config.serial_number = Some(serial);
+    config.max_power = 100;
+    config.max_packet_size_0 = 64;
+    let mem = USB_MEMORY.take();
+    let mut builder =
+        Builder::new(driver, config, &mut mem.config, &mut mem.bos, &mut mem.msos, &mut mem.control);
+    let class = CdcAcmClass::new(&mut builder, CDC_STATE.init(CdcState::new()), MAX_PACKET);
+    let device = builder.build();
+    let (tx, rx) = class.split();
+    let link = SerialLink::with_inbox(Duplex::new(rx.into_buffered(&mut mem.rx), CdcWriter::new(tx)));
+    spawner.spawn(usb_task(device).unwrap());
+    spawner.spawn(link_task(link, bus).unwrap());
+}
+
+/// Logs what the boot found.
+fn log_boot(bus: &Bus, uid: [u8; 8], boot: &rp_base::service::Boot, capacity: u32) {
+    bus.log(format_args!(
+        "rp-base {FIRMWARE} on {} (node {}, heap {} B, WASM memory {} B, payload capacity {} B)",
+        PROFILE.name,
+        Serial::new(uid).as_str(),
+        PROFILE.heap,
+        PROFILE.max_memory_bytes,
+        capacity,
+    ));
+    match boot.installed {
+        None => bus.log(format_args!("payload store unreadable; loader disabled")),
+        Some(Ok(h)) => bus.log(format_args!("stored payload: {} bytes, crc {:08x}", h.len, h.crc)),
+        Some(Err(e)) => bus.log(format_args!("no valid stored payload: {e}")),
+    }
+    match boot.trust {
+        None => bus.log(format_args!("trust record unreadable; unsigned payloads only (TOFU)")),
+        Some(Persisted { trust: TrustState::Unclaimed, .. }) => {
+            bus.log(format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"))
+        }
+        Some(Persisted { trust: TrustState::Claimed { key, min_version }, .. }) => bus.log(format_args!(
+            "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
+            key.0[0], key.0[1], key.0[2], key.0[3], min_version.0
+        )),
+    }
+}
+
+/// Sets the payload hardware aside: the GPIO bank and the ADC.
+#[cfg(feature = "wasm")]
+fn install_payload_hw(
+    pins: [embassy_rp::Peri<'static, embassy_rp::gpio::AnyPin>; 25],
+    adc: embassy_rp::Peri<'static, embassy_rp::peripherals::ADC>,
+    analog: [embassy_rp::adc::Channel<'static>; 3],
+) {
+    use embassy_rp::gpio::{Flex, Pin};
+    use rp_base::pins::GPIOS;
+    let mut bank: [Option<Flex<'static>>; GPIOS] = [const { None }; GPIOS];
+    for pin in pins {
+        let n = usize::from(pin.pin());
+        if let Some(slot) = bank.get_mut(n) {
+            *slot = Some(Flex::new(pin));
+        }
+    }
+    let adc = embassy_rp::adc::Adc::new_blocking(adc, embassy_rp::adc::Config::default());
+    device::HW.put(device::Hw { pins: bank, adc: device::Analog::new(adc, analog) });
+}
+
+/// Brings up the board and runs the firmware forever.
+pub async fn run(spawner: Spawner) -> ! {
+    #[cfg(feature = "wasm")]
+    heap::init();
+    let p = embassy_rp::init(Default::default());
+    let bus: &'static Bus = BUS.take();
+
+    let mut flash: board::FlashDriver = Flash::new_blocking(p.FLASH);
+    let uid = board::unique_id(&mut flash);
+    let serial: &'static Serial = SERIAL.init(Serial::new(uid));
+    start_usb(spawner, p.USB, serial.as_str(), bus);
+
+    let facts = Facts {
+        chip: PROFILE.name,
+        firmware: FIRMWARE,
+        runtime: PROFILE.runtime,
+        node: node_id(uid),
+        max_image: PROFILE.max_image,
+    };
+    let (svc, boot) =
+        Service::open(rp_base::flash::Sectored(flash), &PROFILE_REF.flash, facts, board::Fw::default());
+    log_boot(bus, uid, &boot, svc.capacity());
+
+    #[cfg(feature = "wasm")]
+    {
+        use embassy_rp::adc::Channel;
+        use embassy_rp::gpio::Pull;
+        let analog = [
+            Channel::new_pin(p.PIN_26, Pull::None),
+            Channel::new_pin(p.PIN_27, Pull::None),
+            Channel::new_pin(p.PIN_28, Pull::None),
+        ];
+        let pins = [
+            p.PIN_0.into(), p.PIN_1.into(), p.PIN_2.into(), p.PIN_3.into(), p.PIN_4.into(),
+            p.PIN_5.into(), p.PIN_6.into(), p.PIN_7.into(), p.PIN_8.into(), p.PIN_9.into(),
+            p.PIN_10.into(), p.PIN_11.into(), p.PIN_12.into(), p.PIN_13.into(), p.PIN_14.into(),
+            p.PIN_15.into(), p.PIN_16.into(), p.PIN_17.into(), p.PIN_18.into(), p.PIN_19.into(),
+            p.PIN_20.into(), p.PIN_21.into(), p.PIN_22.into(), p.PIN_24.into(), p.PIN_25.into(),
+        ];
+        install_payload_hw(pins, p.ADC, analog);
+        bus.log(format_args!("heap: {} B free after boot", heap::free()));
+    }
+
+    Controller::new(svc, bus).run().await
+}
