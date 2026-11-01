@@ -1,0 +1,257 @@
+//! Per-chip profiles and the board's pin policy.
+//!
+//! A [`Profile`] holds what the firmware needs to know about a chip and its
+//! board beyond the drivers: the name `sys/info` reports, the flash map
+//! ([`crate::layout`]), whether the image runs payloads, the heap plan, the
+//! WASM memory and image caps, and the pin tables.
+//!
+//! # Pins (Raspberry Pi Pico and Pico 2)
+//!
+//! Both boards bring out GPIO 0–22 and 26–28 on the header (the RP2040 and
+//! the RP2350A have GPIO 0–29). The rest are wired on the board:
+//!
+//! | GPIO  | board use            | payload access                   |
+//! |-------|----------------------|----------------------------------|
+//! | 23    | regulator power save | none (`Unsupported`)             |
+//! | 24    | VBUS sense           | input only                       |
+//! | 25    | on-board LED         | input and output                 |
+//! | 26–28 | ADC0–ADC2            | `adc_read` only (`Unsupported` as GPIO) |
+//! | 29    | VSYS / 3             | none (`Unsupported`)             |
+//!
+//! The QSPI flash and USB pins are dedicated pads, not GPIOs, so no payload
+//! pin can reach them. GPIO 26–28 are given to the ADC at boot (an ADC
+//! channel owns its pin), so they are analog only; [`Profile::adc_channel`]
+//! maps them to channels 0–2. [`Profile::check_pin`] returns
+//! `InvalidArgument` for a pin the chip lacks and `Unsupported` for a
+//! reserved pin or an output on an input-only pin, as esp-base does.
+//!
+//! PWM and I2C need pins bound to their peripheral at boot; this board map
+//! assigns none, so `pwm_*` and `i2c_*` are `Unsupported` (see the ABI
+//! coverage table in `design.md`).
+//!
+//! # Heap plan
+//!
+//! Only the payload runtime allocates (`wasm` feature): the heap is a fixed
+//! `.bss` arena of [`Profile::heap`] bytes holding WASM linear memory, the
+//! image while it is compiled and the wasmi module and instance. Nothing
+//! else in the firmware allocates.
+//!
+//! | chip   | SRAM    | heap    | WASM memory | max image | runtime |
+//! |--------|---------|---------|-------------|-----------|---------|
+//! | RP2040 | 264 KiB | 0       | 0           | 124 KiB (stored only) | no |
+//! | RP2350 | 520 KiB | 384 KiB | 128 KiB     | 64 KiB    | yes     |
+//!
+//! The RP2040 has no payload runtime: wasmi needs CAS atomics and
+//! `alloc::sync::Arc`, which the Cortex-M0+ target lacks, so its image
+//! stores payloads (the loader, store and trust work) but does not run
+//! them, and it has no heap at all. Its `max_image` is one store slot, as
+//! on the ESP8266.
+//!
+//! On the RP2350 the 136 KiB outside the heap hold the statics (USB, the
+//! message bus, the link buffers, the embassy task futures) and the main
+//! stack, which a payload load needs about 31 KiB of (measured on the
+//! ESP32-S3). [`Profile::plan_fits`] checks that the heap covers linear
+//! memory, the largest image and [`INTERPRETER_RESERVE`]; what one payload
+//! needs is decided before every start from its image
+//! (`wasm_host::Limits::heap_needed`, [`esp_base::start`]); see
+//! `crate::budget` (built with the runtime).
+
+use crate::layout::{self, FlashMap};
+use middleware::wasm_abi::AbiError;
+
+/// Size of one standard WASM page, for the memory caps.
+pub const WASM_PAGE: u32 = 64 * 1024;
+
+/// Heap kept for the wasmi engine, module and instance beyond linear
+/// memory and the image (esp-base's figure).
+pub const INTERPRETER_RESERVE: usize = esp_base::chip::INTERPRETER_RESERVE;
+
+/// Supported chips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    /// RP2040 (dual Cortex-M0+), on the Raspberry Pi Pico.
+    Rp2040,
+    /// RP2350A (dual Cortex-M33), on the Raspberry Pi Pico 2.
+    Rp2350,
+}
+
+/// What a payload wants to do with a pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Read the pin level.
+    Input,
+    /// Drive the pin.
+    Output,
+}
+
+/// Static description of a chip and its board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Profile {
+    /// The chip.
+    pub chip: Chip,
+    /// Name reported in `sys/info` (matches the cargo feature).
+    pub name: &'static str,
+    /// The flash map.
+    pub flash: FlashMap,
+    /// SRAM size in bytes.
+    pub sram: u32,
+    /// Whether the image includes the WASM payload runtime.
+    pub runtime: bool,
+    /// Heap arena in bytes (0 without the runtime).
+    pub heap: usize,
+    /// WASM linear-memory cap in bytes.
+    pub max_memory_bytes: u32,
+    /// Largest payload image accepted, in bytes (also capped by a store
+    /// slot).
+    pub max_image: u32,
+    /// GPIOs the chip has (`0..gpio_count`).
+    pub gpio_count: u8,
+    /// Pins a payload may not touch as GPIO.
+    reserved: u32,
+    /// Pins a payload may only read.
+    input_only: u32,
+    /// GPIOs owned by ADC channels 0, 1, 2, ...
+    adc_pins: &'static [u8],
+}
+
+/// Bit `pin` set.
+const fn bit(pin: u8) -> u32 {
+    1 << pin
+}
+
+/// GPIO 23 (power save), 26–28 (ADC) and 29 (VSYS / 3).
+const PICO_RESERVED: u32 = bit(23) | bit(26) | bit(27) | bit(28) | bit(29);
+
+/// GPIO 24 (VBUS sense).
+const PICO_INPUT_ONLY: u32 = bit(24);
+
+/// ADC0–ADC2.
+const PICO_ADC: [u8; 3] = [26, 27, 28];
+
+/// Raspberry Pi Pico.
+pub const RP2040: Profile = Profile {
+    chip: Chip::Rp2040,
+    name: "rp2040",
+    flash: layout::RP2040,
+    sram: 264 * 1024,
+    runtime: false,
+    heap: 0,
+    max_memory_bytes: 0,
+    max_image: 124 * 1024,
+    gpio_count: 30,
+    reserved: PICO_RESERVED,
+    input_only: PICO_INPUT_ONLY,
+    adc_pins: &PICO_ADC,
+};
+
+/// Raspberry Pi Pico 2.
+pub const RP2350: Profile = Profile {
+    chip: Chip::Rp2350,
+    name: "rp2350",
+    flash: layout::RP2350,
+    sram: 520 * 1024,
+    runtime: true,
+    heap: 384 * 1024,
+    max_memory_bytes: 2 * WASM_PAGE,
+    max_image: 64 * 1024,
+    gpio_count: 30,
+    reserved: PICO_RESERVED,
+    input_only: PICO_INPUT_ONLY,
+    adc_pins: &PICO_ADC,
+};
+
+impl Profile {
+    /// Whether a payload may use `pin` as `dir`: `InvalidArgument` if the
+    /// chip has no such pin, `Unsupported` if the board reserves it or it
+    /// is input only and `dir` is `Output`.
+    pub const fn check_pin(&self, pin: u8, dir: Direction) -> Result<(), AbiError> {
+        if pin >= self.gpio_count {
+            return Err(AbiError::InvalidArgument);
+        }
+        if self.reserved & bit(pin) != 0 {
+            return Err(AbiError::Unsupported);
+        }
+        if matches!(dir, Direction::Output) && self.input_only & bit(pin) != 0 {
+            return Err(AbiError::Unsupported);
+        }
+        Ok(())
+    }
+
+    /// Pins a payload may use as GPIO (inputs at least), ascending.
+    pub fn payload_pins(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..self.gpio_count).filter(|&p| self.check_pin(p, Direction::Input).is_ok())
+    }
+
+    /// The ADC channel sampling `pin`: `InvalidArgument` for a pin the chip
+    /// lacks, `Unsupported` for one without an analog input.
+    pub fn adc_channel(&self, pin: u8) -> Result<u8, AbiError> {
+        if pin >= self.gpio_count {
+            return Err(AbiError::InvalidArgument);
+        }
+        let channel = self.adc_pins.iter().position(|&p| p == pin).ok_or(AbiError::Unsupported)?;
+        u8::try_from(channel).map_err(|_| AbiError::Unsupported)
+    }
+
+    /// Whether the heap plan holds linear memory, the largest image and the
+    /// interpreter reserve (vacuously true without the runtime, which must
+    /// then have no heap).
+    pub const fn plan_fits(&self) -> bool {
+        if !self.runtime {
+            return self.heap == 0;
+        }
+        let needed = self.max_memory_bytes as usize + self.max_image as usize + INTERPRETER_RESERVE;
+        needed <= self.heap && self.max_memory_bytes >= WASM_PAGE
+    }
+
+    /// Bytes of SRAM outside the heap: statics and the main stack.
+    pub const fn sram_outside_heap(&self) -> usize {
+        (self.sram as usize).saturating_sub(self.heap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use esp_base::image::Region as Slots;
+
+    #[test]
+    fn v8_pins_follow_the_pico_board_map() {
+        for p in [RP2040, RP2350] {
+            assert_eq!(p.check_pin(30, Direction::Input), Err(AbiError::InvalidArgument));
+            assert_eq!(p.check_pin(255, Direction::Output), Err(AbiError::InvalidArgument));
+            for reserved in [23, 26, 27, 28, 29] {
+                assert_eq!(p.check_pin(reserved, Direction::Input), Err(AbiError::Unsupported));
+            }
+            assert_eq!(p.check_pin(24, Direction::Input), Ok(()));
+            assert_eq!(p.check_pin(24, Direction::Output), Err(AbiError::Unsupported));
+            for ok in [0, 8, 15, 22, 25] {
+                assert_eq!(p.check_pin(ok, Direction::Output), Ok(()));
+            }
+            assert_eq!(p.payload_pins().count(), 25);
+        }
+    }
+
+    #[test]
+    fn v8_adc_reads_gpio_26_to_28() {
+        assert_eq!(RP2350.adc_channel(26), Ok(0));
+        assert_eq!(RP2350.adc_channel(28), Ok(2));
+        assert_eq!(RP2350.adc_channel(29), Err(AbiError::Unsupported));
+        assert_eq!(RP2350.adc_channel(0), Err(AbiError::Unsupported));
+        assert_eq!(RP2350.adc_channel(40), Err(AbiError::InvalidArgument));
+    }
+
+    #[test]
+    fn v7_heap_plans_fit_and_images_fit_a_slot() {
+        for p in [RP2040, RP2350] {
+            assert!(p.plan_fits(), "{}", p.name);
+            assert!(p.max_image <= Slots::new(p.flash.payload.size).capacity(), "{}", p.name);
+        }
+        // The RP2040 runs no payloads and so has no heap.
+        assert_eq!((RP2040.runtime, RP2040.heap), (false, 0));
+        // The RP2350 keeps at least 128 KiB of SRAM for statics and stack.
+        assert!(RP2350.sram_outside_heap() >= 128 * 1024);
+        let broken = Profile { heap: 100 * 1024, ..RP2350 };
+        assert!(!broken.plan_fits());
+        assert!(!Profile { heap: 4, ..RP2040 }.plan_fits());
+    }
+}

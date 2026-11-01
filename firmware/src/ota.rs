@@ -446,7 +446,7 @@ mod tests {
             chip: "esp32s3",
             firmware: "0.1.0",
             capacity: 4096,
-            profile: &crate::chip::ESP32S3,
+            profile: Some(&crate::chip::ESP32S3),
             runtime: true,
             rekey_window: false,
             staging: false,

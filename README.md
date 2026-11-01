@@ -63,6 +63,7 @@ need the espup toolchain and are built locally.
 |----------------------|--------------------------------------------------------------|
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
+| `firmware-rp/`       | RP base firmware over USB CDC-ACM: Raspberry Pi Pico (RP2040, stores payloads only) and Pico 2 (RP2350, runs them): `./build.sh rp2040` or `./build.sh rp2350` (ELF and UF2) |
 | `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
 | `tools/espnow-bridge/` | ESP8266 USB↔ESP-NOW bridge sketch for `mwctl --espnow` (`check.sh`: codec test and build; upload with `arduino-cli upload --fqbn esp8266:esp8266:generic -p <port>`) |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
@@ -73,12 +74,14 @@ need the espup toolchain and are built locally.
 
 Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
 then load payloads over the same USB port, whether it is a CP2102/CH340
-bridge or the chip's native USB-Serial-JTAG. The ESP32-C3 and ESP8266 builds
-have no WASM runtime (the C3 lacks the atomics wasmi needs; the ESP8266 lacks
-the RAM), so they store payloads but cannot run them.
+bridge or the chip's native USB-Serial-JTAG. A Pico or Pico 2 takes the UF2
+from `firmware-rp/build.sh` in BOOTSEL mode, then speaks the same protocol
+on its USB CDC port. The ESP32-C3, ESP8266 and RP2040 builds have no WASM
+runtime (the C3 and the RP2040 lack the atomics wasmi needs; the ESP8266
+lacks the RAM), so they store payloads but cannot run them.
 
-Board support packages: each firmware describes its pins on `sys/board`
-(`mwctl board`), and `cargo run --example bsp_export -- <chip>` (in
+Board support packages: each ESP firmware describes its pins on `sys/board`
+(`mwctl board`; the RP firmware answers `NotFound`), and `cargo run --example bsp_export -- <chip>` (in
 `firmware/`) prints the same description as `mw-bsp/1` JSON. A tag
 `esp-base-v<version>` makes `.github/workflows/release.yml` attach the images,
 BSPs and an ESP Web Tools `manifest.json` to a release and mirror them to

@@ -96,8 +96,10 @@ pub struct Context<'a> {
     pub firmware: &'a str,
     /// Largest payload image in bytes.
     pub capacity: u32,
-    /// The chip profile `sys/board` describes.
-    pub profile: &'static Profile,
+    /// The chip profile `sys/board` describes; `None` on a firmware whose
+    /// chip has no esp-base profile (rp-base), which answers `sys/board`
+    /// with `NotFound` like firmware before 0.6.
+    pub profile: Option<&'static Profile>,
     /// Whether the firmware includes the WASM runtime. Without it the loader
     /// and storage work but `sys/payload/start` is refused with `NotFound`.
     pub runtime: bool,
@@ -350,10 +352,13 @@ pub fn handle_request<'a>(
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
-        Command::Board => {
-            let board = ctx.profile.board_info(ABI_VERSION);
-            Outcome::reply(state, board.encode(out).ok_or(HandlerError::BufferTooSmall))
-        }
+        Command::Board => match ctx.profile {
+            Some(profile) => {
+                let board = profile.board_info(ABI_VERSION);
+                Outcome::reply(state, board.encode(out).ok_or(HandlerError::BufferTooSmall))
+            }
+            None => Outcome::reply(state, Err(HandlerError::NotFound)),
+        },
         Command::Start if !ctx.runtime => Outcome::reply(state, Err(HandlerError::NotFound)),
         Command::Start => match state.status {
             PayloadStatus::Empty | PayloadStatus::Loading => {
@@ -477,7 +482,7 @@ mod tests {
         chip: "esp32c3",
         firmware: "0.1.0",
         capacity: 1024,
-        profile: &crate::chip::ESP32C3,
+        profile: Some(&crate::chip::ESP32C3),
         runtime: true,
         rekey_window: false,
         staging: false,
@@ -572,7 +577,7 @@ mod tests {
         use middleware::loader::BoardInfo;
         let mut out = [0u8; 128];
         let s = State::boot(true);
-        let ctx = Context { profile: &crate::chip::ESP32S3, ..CTX };
+        let ctx = Context { profile: Some(&crate::chip::ESP32S3), ..CTX };
         let o = handle_request(s, &ctx, &Request::new(keys::BOARD, &[]), &mut out);
         assert_eq!((o.state, o.action), (s, Action::None));
         let board = BoardInfo::decode(&out[..o.reply.unwrap()]).unwrap();
@@ -583,6 +588,12 @@ mod tests {
         assert_eq!(
             handle_request(s, &CTX, &Request::new(keys::BOARD, &[]), &mut tiny).reply,
             Err(HandlerError::BufferTooSmall)
+        );
+        // Without a profile (rp-base) the key is absent, as before 0.6.
+        let none = Context { profile: None, ..CTX };
+        assert_eq!(
+            handle_request(s, &none, &Request::new(keys::BOARD, &[]), &mut out).reply,
+            Err(HandlerError::NotFound)
         );
     }
 

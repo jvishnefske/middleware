@@ -995,14 +995,22 @@ encoder; `MdnsSocket` implements `Browse`.
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
-from the browser. Afterwards, application logic ships as WASM payloads loaded over the
-same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI) or
-the chip's native USB-Serial-JTAG. Payloads talk to the world through the
-middleware ABI in `wasm_abi`.
+from the browser, or onto a Raspberry Pi Pico (RP2040) or Pico 2 (RP2350)
+as a UF2 file. Afterwards, application logic ships as WASM payloads loaded over the
+same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI),
+the chip's native USB-Serial-JTAG, or the RP chips' USB CDC-ACM port.
+Payloads talk to the world through the middleware ABI in `wasm_abi`.
 
-Heap policy: the no-heap rule applies to the `middleware` crate and to RP2040
-firmware. On ESP the base firmware may use a global allocator (`esp-alloc`),
-because WASM linear memory and the wasmi interpreter require one.
+Heap policy: the no-heap rule applies to the `middleware` crate. A base
+firmware may use a global allocator for the payload interpreter only,
+because WASM linear memory and the wasmi interpreter (`wasm-host`, `no_std`
+with `alloc`) require one: on ESP `esp-alloc`; on the RP2350
+(`firmware-rp/`) a fixed 384 KiB `.bss` arena behind
+`linked_list_allocator`, which nothing but the interpreter allocates from,
+and a payload starts only when its bound (`Limits::heap_needed`) plus
+margin is free, the same check as on ESP. The RP2040 build has no payload
+runtime (wasmi needs CAS atomics and `alloc::sync::Arc`, which the
+Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
 
 ### Serial protocol and loader (`serial`, `loader`, `wasm_abi`)
 
@@ -1527,6 +1535,159 @@ handlers); the unsafe asm stays in that vendored dependency.
   said Stopped. A second good upload (into the other slot) then installed
   and survived `mwctl reset`, and a repeated corrupt upload again left
   status Stopped.
+
+### RP base firmware (`firmware-rp/`)
+
+The base firmware for the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350A,
+Arm cores), one source tree with a cargo feature per chip, on embassy-rp.
+It speaks the protocol of the ESP base firmware, unchanged, over the
+chip's USB port as one CDC-ACM interface: COBS frames, the `sys/info`,
+`sys/loader/*`, `sys/payload/*`, `sys/trust/*` and `sys/log` keys, signed
+payloads, so `mwctl --port /dev/ttyACM0` and the web console work against
+it as they do against esp-base.
+
+Shared with esp-base rather than copied: the request decisions and storage
+come from the `esp-base` library crate with its default features off and
+`trust` on, the way the ESP8266 firmware uses it: `esp_base::dispatch`
+(request table, loader state machine, payload lifecycle, trust rules),
+`esp_base::store` and `esp_base::image` (the two-slot payload store),
+`esp_base::trust_store` (the pinned key), `esp_base::start` (the heap
+check) and `esp_base::periph::timers` (the payload timer table). None of
+them changed, so esp-base's own gates are untouched. What esp-base keeps in
+its private shell (U1's finding: the shell is not exported) is ESP-specific
+and is written again for embassy-rp, kept thin: a one-port message bus, the
+CDC link task and the controller loop (`firmware-rp/src/shell/`). The RP
+pure core (`rp_base`, host tested) adds the flash maps, the chip profiles
+and pin policy, the request service that performs the storage effects over
+any NOR flash, the `sys/fw/*` seam, the one-sector erase adapter, the USB
+framing rules and the heap budget.
+
+Tasks: the USB device task, the link task (middleware's `SerialLink` over
+the CDC halves joined as a `Duplex`), and the controller on the main task,
+which owns the service (dispatcher state, payload store, trust record) and
+the running payload. They meet only through the `'static` bus.
+
+Flash maps (offsets from the start of flash; every region whole 4 KiB
+sectors, checked by `layout::FlashMap::check`):
+
+| board | firmware | firmware slot B | payload store | trust | unused |
+|---|---|---|---|---|---|
+| Pico, RP2040, 2 MiB | 0x000000, 1.5 MiB (boot2, then the image) | — | 0x180000, 256 KiB | 0x1C0000, 8 KiB | 248 KiB |
+| Pico 2, RP2350, 4 MiB | 0x000000, 1.5 MiB (slot A) | 0x180000, 1.5 MiB, reserved | 0x300000, 256 KiB | 0x340000, 8 KiB | 760 KiB, reserved for firmware OTA metadata |
+
+The payload store is the ESP partition's size, so both report the same
+124 KiB slot capacity (capped by the chip's `max_image`). On the RP2350
+the image is linked at 0x10000000 and capped 8 KiB short of slot A, so the
+A/B firmware OTA work can put a partition table in the first sectors and
+let the boot ROM map either slot at 0x10000000 without relinking.
+
+RAM: the RP2040 build has no heap (no runtime) and 22 KB of static RAM,
+leaving about 242 KiB of stack. The RP2350 build holds a 384 KiB heap arena
+in `.bss` (static RAM 416 KB in all), leaving about 113 KiB for the main
+stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
+128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
+bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
+compiling), so every image the store accepts is admitted. The byte-page
+builds of `blink` (1 992 B) and `echo` (2 700 B, 16 KiB memory,
+`payloads/scripts/build-byte-pages.sh`) are bounded at 63 and 65 KB (67
+and 69 KB with the margin); their 64 KiB-page builds, charged at the
+128 KiB cap, at 178 and 180 KB. The byte-page builds would also fit the
+RP2040's RAM; what keeps payloads off it is the missing atomics, not
+memory.
+
+Payload ABI on the RP2350 (the RP2040 runs no payloads):
+
+| ABI call | RP base |
+|---|---|
+| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes |
+| `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | yes: GPIO 0–22 and 25 (LED); 24 (VBUS sense) input only; 23 and 29 reserved |
+| `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller loop, delivered to `on_irq` |
+| `adc_read` | yes: GPIO 26–28 (ADC0–ADC2), 12-bit; those pins are analog only |
+| `gpio_irq` | `Unsupported` |
+| `spi_open`, `spi_transfer`, `dma_read`, `uart_open`, `uart_write`, `uart_read` | `Unsupported` |
+| `pwm_open`, `pwm_set`, `pwm_stop`, `i2c_open`, `i2c_transfer` | `Unsupported` (no pins bound to PWM or I2C on this board map) |
+| `route_source`, `route_sink`, `route_stop`, `route_stat` | `Unsupported` |
+
+Known gaps: neither board has a presence button wired, so there is no
+re-key window (a claimed device is re-keyed by erasing the trust region,
+for example `picotool erase` of its two sectors); the RP2040 stores
+payloads but cannot run them until wasmi supports targets without CAS
+atomics; nothing has run on silicon yet.
+
+- [x] V1 `sys/info` reports the chip (`rp2040`, `rp2350`), the firmware
+  version (`+no-wasm` on the RP2040), the store capacity and, as node id,
+  the chip's 64-bit unique id (the flash unique id on the RP2040, the OTP
+  chip id on the RP2350), which is also the USB serial number in hex —
+  `service::tests::v1_info_reports_the_rp_chip_capacity_and_node_id`,
+  `node::tests::v1_node_id_and_usb_serial_come_from_the_unique_id`.
+- [x] V2 The flash maps above are sector aligned, inside the flash, free of
+  overlaps, start with the firmware, hold the 8 KiB trust record and a
+  256 KiB payload store (124 KiB slots); the RP2350 reserves two equal
+  firmware slots below the store; the `FLASH` length of `memory-rp2040.x`
+  and `memory-rp2350.x` equals the map's linked firmware size —
+  `layout::tests::v2_both_maps_are_valid_and_keep_the_esp_payload_capacity`,
+  `v2_rp2350_reserves_two_equal_firmware_slots`,
+  `v2_memory_x_flash_lengths_match_the_maps`, `v2_check_refuses_broken_maps`.
+- [x] V3 Payloads go into the two-slot store with esp-base's semantics: an
+  upload survives a reboot and starts; a serial `begin` stops a running
+  payload; a commit with a wrong CRC, or a transfer cut by power loss,
+  keeps the previous image; an image larger than a slot is refused —
+  `service::tests::v3_an_upload_survives_a_reboot_and_runs_on_start`,
+  `v3_a_cut_or_spoiled_transfer_keeps_the_previous_image`,
+  `v3_an_image_larger_than_a_slot_is_refused` (RAM flash model with
+  power-loss injection).
+- [x] V4 Signed payloads: an unclaimed device accepts any commit; a claim
+  pins the key and survives reboots; once claimed, unsigned, foreign-key
+  and replayed commits are denied with the previous image kept; a signed
+  commit raises `min_version`, which reaches flash before the new slot
+  header (a power cut in between keeps the old image with the raised
+  `min_version`, and RAM adopts it); a second claim is denied —
+  `service::tests::v4_a_pinned_key_and_its_min_version_survive_reboots`,
+  `v4_min_version_reaches_flash_before_the_new_header`.
+- [x] V5 Flash erases are issued one 4 KiB sector per driver call, so
+  interrupts (USB) are serviced between sectors —
+  `flash::tests::v5_erases_one_sector_per_driver_call`.
+- [x] V6 `sys/fw/*` is reserved for the A/B firmware OTA backend: with the
+  `fw-update` stub (RP2350) every such key answers `Unavailable`, without
+  it (RP2040) `NotFound`, and neither touches the payload loader, store or
+  status. The backend is a generic `FwUpdate` parameter of the service —
+  `fw_update::tests::v6_the_reserved_keys_are_under_the_prefix`,
+  `service::tests::v6_sys_fw_keys_go_to_the_update_backend_only`.
+- [x] V7 Heap plan: the RP2040 has no heap; the RP2350's 384 KiB arena
+  holds linear memory, the largest image and the interpreter reserve and
+  leaves at least 128 KiB of SRAM for statics and stack; its heap check
+  admits images up to the 64 KiB cap at either 16 KiB (byte pages) or
+  128 KiB of memory (on the 64-bit host bound, which is larger, at least
+  40 KiB), and a smaller heap admits less —
+  `chip::tests::v7_heap_plans_fit_and_images_fit_a_slot`,
+  `budget::tests::v7_the_rp2350_heap_admits_images_up_to_its_cap`,
+  `v7_a_smaller_heap_admits_less`.
+- [x] V8 Pins follow the Pico board map: pins the chip lacks are
+  `InvalidArgument`, 23 and 26–29 `Unsupported` as GPIO, 24 input only;
+  `adc_read` maps GPIO 26–28 to ADC0–ADC2; GPIO modes follow esp-base's
+  rules (write needs an output, read of an unconfigured pin is
+  `InvalidArgument`) and every configured pin is listed for release —
+  `chip::tests::v8_pins_follow_the_pico_board_map`,
+  `v8_adc_reads_gpio_26_to_28`, `pins::tests::v8_gpio_modes_follow_the_esp_base_rules`.
+- [x] V9 `mwctl`, unchanged, drives the service over a byte stream:
+  `info`, `upload --start`, `stop`, `trust claim`, signed and refused
+  uploads, with the image on flash after a reboot —
+  `service::wire::v9_mwctl_info_upload_and_start_work_unchanged`,
+  `v9_mwctl_signed_upload_and_trust_work_unchanged` (mwctl's `Device` over
+  an in-process transport into the real service).
+- [x] V10 USB CDC framing: a flushed write whose last packet was a full 64
+  bytes is ended with a zero-length packet; after a send times out
+  (nobody reading the port) publications are dropped until a frame
+  arrives — `usb::tests::v10_a_frame_ending_on_a_full_packet_gets_a_zero_length_packet`,
+  `v10_publications_are_dropped_while_the_host_is_away`.
+- [x] V11 The RP2040 build stores payloads but refuses `sys/payload/start`
+  (`NotFound`), and `mwctl` sees it as a `+no-wasm` device —
+  `service::tests::v11_without_the_runtime_payloads_are_stored_but_not_started`,
+  `service::wire::v11_mwctl_sees_a_no_wasm_rp2040`.
+- [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images, the CDC port
+  enumerates, `mwctl info` reports the chip and node id, an upload survives
+  a power cycle, and on the Pico 2 `blink` toggles GPIO 8 and publishes
+  `app/blink/state`. Not yet run on hardware.
 
 ### Host tool (`tools/mwctl`)
 
