@@ -19,6 +19,10 @@
 //! borrowed from guest memory and a parsed config; no frame data crosses
 //! this layer.
 //!
+//! The ABI 5 LED-strip imports are registered by `link_abi5`;
+//! `ledstrip_write` copies the frame through a stack buffer of
+//! [`ledstrip::MAX_FRAME`] bytes before the device runs.
+//!
 //! The ABI 3 imports
 //! `i2c_transfer` is synchronous and copies through two stack buffers of
 //! [`periph::MAX_I2C`] bytes: transmit bytes leave guest memory before the
@@ -27,6 +31,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use middleware::wasm_abi::ledstrip::{self, LedStripSpec};
 use middleware::wasm_abi::periph::{
     self, I2cConfig, MAX_I2C, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
@@ -276,6 +281,37 @@ pub fn route_stat_call<D: Device>(
     Ok(abi::count_code(st.device.route_stat(handle, stat)?))
 }
 
+/// `ledstrip_open(pin, count)` (ABI 5): returns the strip handle.
+pub fn ledstrip_open_call<D: Device>(
+    st: &mut State<D>,
+    (pin, count): (i32, i32),
+) -> Result<i32, AbiError> {
+    let handle = st.device.ledstrip_open(LedStripSpec::parse(pin, count)?)?;
+    abi::ledstrip_handle_code(handle)
+}
+
+/// `ledstrip_write(handle, ptr, len)` (ABI 5): copies the frame out of
+/// guest memory into a stack buffer, then sends it.
+pub fn ledstrip_write_call<D: Device>(
+    mem: &[u8],
+    st: &mut State<D>,
+    (handle, ptr, len): (i32, i32, i32),
+) -> Result<(), AbiError> {
+    let (handle, range) = abi::ledstrip_write(handle, ptr, len, mem.len())?;
+    let src = mem.get(range).ok_or(AbiError::OutOfBounds)?;
+    let mut buf = [0u8; ledstrip::MAX_FRAME];
+    let frame = buf
+        .get_mut(..src.len())
+        .ok_or(AbiError::InvalidArgument)?;
+    frame.copy_from_slice(src);
+    st.device.ledstrip_write(handle, frame)
+}
+
+/// `ledstrip_close(handle)` (ABI 5).
+pub fn ledstrip_close_call<D: Device>(st: &mut State<D>, handle: i32) -> Result<(), AbiError> {
+    st.device.ledstrip_close(ledstrip::ledstrip_handle(handle)?)
+}
+
 /// Copies the first `reported` bytes of `buf` (clamped to its length) into
 /// guest memory at `start`; returns the count copied.
 fn copy_out(mem: &mut [u8], start: usize, buf: &[u8], reported: usize) -> Result<i32, AbiError> {
@@ -432,6 +468,7 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     link_abi2(&mut l)?;
     link_abi3(&mut l)?;
     link_abi4(&mut l)?;
+    link_abi5(&mut l)?;
     Ok(l)
 }
 
@@ -594,6 +631,35 @@ fn link_abi4<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
         "route_stat",
         |mut c: Caller<'_, State<D>>, handle: i32, stat: i32| {
             abi::result_code(route_stat_call(c.data_mut(), (handle, stat)))
+        },
+    )?;
+    Ok(())
+}
+
+/// Registers the ABI 5 imports (LED strips).
+fn link_abi5<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    let m = IMPORT_MODULE;
+    l.func_wrap(
+        m,
+        "ledstrip_open",
+        |mut c: Caller<'_, State<D>>, pin: i32, count: i32| {
+            abi::result_code(ledstrip_open_call(c.data_mut(), (pin, count)))
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "ledstrip_write",
+        |c: Caller<'_, State<D>>, handle: i32, ptr: i32, len: i32| {
+            with_memory(c, |mem, st| {
+                ok0(ledstrip_write_call(mem, st, (handle, ptr, len)))
+            })
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "ledstrip_close",
+        |mut c: Caller<'_, State<D>>, handle: i32| {
+            abi::result_code(ok0(ledstrip_close_call(c.data_mut(), handle)))
         },
     )?;
     Ok(())

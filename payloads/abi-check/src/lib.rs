@@ -16,7 +16,7 @@
 //!   `timer_start`, `spi_transfer`, `uart_write`, and the ABI 4 route
 //!   starters `route_source`, `route_sink`) exports `on_irq`, without which
 //!   its interrupts, DMA completions and route events could never be
-//!   delivered.
+//!   delivered. The ABI 5 LED-strip imports raise no events.
 //!
 //! Other exports (e.g. `__data_end` from rustc) are allowed and listed in the
 //! [`Report`]. [`load`] accepts `.wasm` bytes or WAT text. The `abi-check`
@@ -302,7 +302,8 @@ mod tests {
     #[test]
     fn follows_the_import_table_including_abi3() {
         // Built from `IMPORTS`, so every entry added to the table (ABI 3
-        // PWM, ADC, I2C included) is accepted with its listed signature.
+        // PWM, ADC, I2C, ABI 4 routes and ABI 5 LED strips included) is
+        // accepted with its listed signature.
         let decls: String = IMPORTS
             .iter()
             .map(|i| {
@@ -320,6 +321,7 @@ mod tests {
         ))
         .expect("valid");
         assert_eq!(r.imports.len(), IMPORTS.len());
+        assert!(r.imports.iter().any(|i| i == "ledstrip_write"));
         // ABI 3 imports raise no events, so they need no on_irq.
         let r = run(r#"(module
             (import "mw" "pwm_set" (func (param i32 i32 i32) (result i32)))
@@ -361,6 +363,27 @@ mod tests {
             (memory (export "memory") 1))"#)
         .expect_err("wrong arity");
         assert_eq!(errs.len(), 1, "{errs:?}");
+    }
+
+    #[test]
+    fn ledstrip_imports_need_no_on_irq() {
+        // ABI 5 strips are written synchronously and raise no events.
+        let r = run(r#"(module
+            (import "mw" "ledstrip_open" (func (param i32 i32) (result i32)))
+            (import "mw" "ledstrip_write" (func (param i32 i32 i32) (result i32)))
+            (import "mw" "ledstrip_close" (func (param i32) (result i32)))
+            (memory (export "memory") 1))"#)
+        .expect("valid");
+        assert_eq!(
+            r.imports,
+            ["ledstrip_open", "ledstrip_write", "ledstrip_close"]
+        );
+        let errs = run(r#"(module
+            (import "mw" "ledstrip_write" (func (param i32 i32) (result i32)))
+            (import "mw" "ledstrip_close" (func (param i32)))
+            (memory (export "memory") 1))"#)
+        .expect_err("wrong signatures");
+        assert_eq!(errs.len(), 2, "{errs:?}");
     }
 
     #[test]

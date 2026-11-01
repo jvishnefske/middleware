@@ -27,7 +27,8 @@
 //! interrupt handler), TIMG1 (payload timer alarm), SPI2 with its DMA
 //! channel (`DMA_SPI2` on ESP32, GDMA `DMA_CH0` on ESP32-S3) and UART1; on
 //! the ESP32 (the ESP32-CAM) also [`CamPeripherals`]: LEDC for ABI 3 PWM,
-//! I2C0 for ABI 3 I2C, and I2S0 with `DMA_I2S0` for the camera (R15).
+//! I2C0 for ABI 3 I2C, and I2S0 with `DMA_I2S0` for the camera (R15);
+//! and the RMT for ABI 5 LED strips.
 //! With `espnow` (ESP32, ESP32-S3) the board also hands over `WIFI`.
 //!
 //! The heap ([`init_heap`]) is one allocator over the two regions of the
@@ -117,6 +118,8 @@ pub struct PayloadPeripherals {
     /// The ESP32-CAM's camera control and capture peripherals (R15).
     #[cfg(feature = "esp32")]
     pub cam: CamPeripherals,
+    /// The RMT, for ABI 5 LED strips (channel 0).
+    pub rmt: esp_hal::peripherals::RMT<'static>,
 }
 
 /// ESP32: LEDC (PWM, the sensor clock), I2C0 without pins (SCCB) and I2S0
@@ -142,6 +145,7 @@ macro_rules! payload_peripherals {
             timg1: $p.TIMG1,
             spi: Spi::new($p.SPI2, SpiConfig::default()).ok().map(|s| s.with_dma($p.$dma)),
             uart1: Uart::new($p.UART1, UartConfig::default()).ok(),
+            rmt: $p.RMT,
             $($field: $value,)?
         }
     };

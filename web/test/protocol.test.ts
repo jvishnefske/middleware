@@ -153,6 +153,9 @@ describe("ABI constants", () => {
       "route_sink",
       "route_stop",
       "route_stat",
+      "ledstrip_open",
+      "ledstrip_write",
+      "ledstrip_close",
     ]);
     expect(abi.imports.find((i) => i.name === "publish")).toEqual({ name: "publish", params: 4, returns: true });
     expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq" });

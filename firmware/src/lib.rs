@@ -38,6 +38,9 @@
 //! * [`perf`] — the payload loop's time accounting: wall time and fuel per
 //!   payload operation, waits, yields and the radio task's time, folded into
 //!   a reporting window and logged as two `sys/log` lines.
+//! * [`ledstrip`] — the ABI 5 LED strips: the WS2812 pulse encoder (G, R,
+//!   B bytes to RMT pulse codes), the chain length that fits RMT channel
+//!   RAM, the transmit deadline and latch wait, and the strip table.
 //! * [`periph`] — the ABI 2 peripheral decisions: pin claims, the timer
 //!   deadline table, the DMA channel state machine, the UART receive ring,
 //!   and the events ISRs and completions push.
@@ -88,6 +91,7 @@ pub mod camera;
 pub mod chip;
 pub mod dispatch;
 pub mod image;
+pub mod ledstrip;
 pub mod ota;
 pub mod perf;
 pub mod periph;

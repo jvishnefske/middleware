@@ -43,7 +43,8 @@
 //!    handler, the timer alarm on TIMG1, SPI2 with DMA (`spi`) and UART1
 //!    (`uart1`), and on the ESP32 LEDC (`pwm`), I2C0 (`i2c`) and the
 //!    I2S0 camera receiver (`camera`), all without pins until a payload
-//!    opens them. Before them, the board's safe-mode pin, if any, is
+//!    opens them; RMT channel 0 drives ABI 5 LED strips (`ledstrip`).
+//!    Before them, the board's safe-mode pin, if any, is
 //!    sampled once through the pin bank (pull-up enabled, a blocking
 //!    `SAFE_MODE_SETTLE_MS` wait, read, returned to high impedance).
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
@@ -88,6 +89,8 @@ mod gpio;
 mod i2c;
 #[cfg(feature = "wasm")]
 mod irq;
+#[cfg(feature = "wasm")]
+mod ledstrip;
 mod link;
 mod presence;
 #[cfg(all(feature = "esp32", feature = "wasm"))]
@@ -388,6 +391,7 @@ pub async fn run(spawner: Spawner, board: &'static Board) -> ! {
             pwm,
             #[cfg(feature = "esp32")]
             i2c,
+            ledstrip: ledstrip::LedStrip::new(hw.payload.rmt),
         });
         #[cfg(feature = "espnow")]
         match radio::start(hw.wifi) {

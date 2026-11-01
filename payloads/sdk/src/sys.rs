@@ -27,7 +27,8 @@ mod imports {
     // memory during these calls (`spi_transfer` and `uart_write` copy into
     // firmware-owned DMA buffers before returning; the ABI 4 route imports
     // copy the key and config out and never touch guest memory again, since
-    // frame data stays in host memory), and reports problems as
+    // frame data stays in host memory; the ABI 5 `ledstrip_write` copies
+    // the frame into a host buffer before sending it), and reports problems as
     // negative codes. `dma_read` and `uart_read` *write* `len` bytes at `ptr`,
     // and `i2c_transfer` writes `rx_len` bytes at `rx_ptr`, so they stay
     // `unsafe` and are only called through the wrappers below.
@@ -93,6 +94,11 @@ mod imports {
         ) -> i32;
         pub safe fn route_stop(handle: i32) -> i32;
         pub safe fn route_stat(handle: i32, stat: i32) -> i32;
+        // ABI 5 (`ledstrip_write` reads the frame only: the host copies it
+        // out before sending)
+        pub safe fn ledstrip_open(pin: i32, count: i32) -> i32;
+        pub safe fn ledstrip_write(handle: i32, ptr: i32, len: i32) -> i32;
+        pub safe fn ledstrip_close(handle: i32) -> i32;
     }
 }
 
@@ -190,13 +196,22 @@ mod imports {
     pub fn route_stat(_h: i32, _s: i32) -> i32 {
         UNSUPPORTED
     }
+    pub fn ledstrip_open(_pin: i32, _count: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn ledstrip_write(_h: i32, _p: i32, _l: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn ledstrip_close(_h: i32) -> i32 {
+        UNSUPPORTED
+    }
 }
 
 pub(crate) use imports::{
     adc_read, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
-    log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, route_sink, route_source,
-    route_stat, route_stop, set_tick, spi_open, spi_transfer, subscribe, timer_start, timer_stop,
-    uart_open, uart_write,
+    ledstrip_close, ledstrip_open, ledstrip_write, log, now_ms, now_us, publish, pwm_open, pwm_set,
+    pwm_stop, route_sink, route_source, route_stat, route_stop, set_tick, spi_open, spi_transfer,
+    subscribe, timer_start, timer_stop, uart_open, uart_write,
 };
 
 /// `(ptr, len)` of an exclusively borrowed guest buffer, or `None` if the

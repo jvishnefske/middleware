@@ -83,7 +83,7 @@ fn byte_pages(name: &str) -> Option<abi_check::Report> {
 
 #[test]
 fn rust_examples_with_one_byte_pages() {
-    for name in ["blink", "echo"] {
+    for name in ["blink", "echo", "ledstrip"] {
         let Some(r) = byte_pages(name) else {
             eprintln!("{name}: no byte-page build; run scripts/build-byte-pages.sh");
             continue;
@@ -368,6 +368,70 @@ fn cam_ov2640_stream_deploy_build_fits_the_esp32() {
     assert!(len < 24 * 1024);
 }
 
+// ABI 5: LED strips.
+
+#[test]
+fn rust_ledstrip_example() {
+    let r = validate(&release("ledstrip"));
+    assert!(has(&r.exports, ALL_EXPORTS));
+    assert!(has(
+        &r.imports,
+        &["ledstrip_open", "ledstrip_write", "set_tick", "log"]
+    ));
+    // Strips raise no events, and the example uses nothing else of ABI 2-4.
+    let abi5 = &middleware::wasm_abi::IMPORTS[middleware::wasm_abi::ABI4_IMPORTS..];
+    let abi1 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI1_IMPORTS];
+    assert!(
+        r.imports
+            .iter()
+            .all(|i| abi1.iter().chain(abi5).any(|a| a.name == i)),
+        "{:?}",
+        r.imports
+    );
+}
+
+#[test]
+fn ledstrip_fits_the_badge() {
+    // conagotchi: 16 KiB fixed memory and a 16 KiB image limit.
+    let Some(r) = byte_pages("ledstrip") else {
+        eprintln!("ledstrip: no byte-page build; run scripts/build-byte-pages.sh -p ledstrip");
+        return;
+    };
+    assert_eq!(r.memory_page_bytes, Some(1));
+    assert_eq!(r.initial_memory_bytes(), Some(16_384));
+    assert!(has(&r.imports, &["ledstrip_open", "ledstrip_write"]));
+    let path = root().join("target/byte-pages/wasm32-unknown-unknown/release/ledstrip.wasm");
+    let len = std::fs::metadata(path).expect("built").len();
+    assert!(len <= 16 * 1024, "ledstrip.wasm is {len} bytes");
+}
+
+#[test]
+fn abi4_examples_import_no_abi5_functions() {
+    // ABI 4 payloads keep loading on ABI 4 firmware.
+    for name in [
+        "blink",
+        "echo",
+        "button",
+        "spi_loopback",
+        "uart_echo",
+        "dimmer",
+        "cam_stream",
+        "cam_view",
+        "cam_jpeg_stream",
+        "cam_jpeg_view",
+        "cam_ov2640_stream",
+        "bench",
+    ] {
+        let r = validate(&release(name));
+        let abi4 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI4_IMPORTS];
+        assert!(
+            r.imports.iter().all(|i| abi4.iter().any(|a| a.name == i)),
+            "{name}: {:?}",
+            r.imports
+        );
+    }
+}
+
 #[test]
 fn p7_sdk_payloads_link_no_panic_formatting() {
     // blink logs through LogLine and receives nothing: with the SDK's
@@ -438,6 +502,7 @@ const RUST_EXAMPLES: &[&str] = &[
     "spi_loopback",
     "uart_echo",
     "dimmer",
+    "ledstrip",
     "cam_stream",
     "cam_view",
     "cam_jpeg_stream",

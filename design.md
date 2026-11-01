@@ -2670,6 +2670,101 @@ payload): each frame is one JPEG of varying length (R14).
     decodes and draws them in about 2.0 s each; a mirrored frame decodes
     with PIL to a 240×240 image. Open: re-verify after the final flash.
 
+### LED strips (ABI 5, V…)
+
+Payloads drive WS2812-style one-wire RGB LED chains (WS2812B, SK6812 and
+compatibles), such as the Conagotchi badge's eight LEDs on GPIO45
+(conagotchi-badge-ui FR-57, upstream item U4). The payload names the data
+pin and the chain length and sends whole frames of G, R, B bytes; the host
+generates the pulse train, so a payload never times a pulse and the
+interpreter's speed does not matter. A write is synchronous and bounded:
+at most `ledstrip::MAX_LEDS` (64) LEDs of about 30 µs each, plus the
+`ledstrip::RESET_US` (300 µs) latch gap the host waits out before a frame
+that follows the previous one too closely. The contract is
+`wasm_abi::ledstrip`; strips raise no events.
+
+- [x] V1 ABI 5 is a superset of ABI 4: `ledstrip_open` (2 params),
+  `ledstrip_write` (3) and `ledstrip_close` (1) are appended to
+  `wasm_abi::IMPORTS` (`ABI4_IMPORTS` marks the ABI 4 prefix),
+  `ABI_VERSION` is 5, and ABI 1–4 modules still load because imports are
+  checked by name and signature only —
+  `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`;
+  `wasm-host/tests/abi5.rs` `v1_every_import_links_and_abi4_payloads_still_load`,
+  `v1_wrong_signatures_are_refused`; `wasm-host/tests/abi4.rs`
+  `r1_every_import_links_and_older_revisions_still_load`; `abi-check`
+  `tests/payloads.rs` `abi4_examples_import_no_abi5_functions`.
+- [x] V2 Arguments are validated in one place before any pointer: pin
+  `0..=255`, count `1..=MAX_LEDS`, handle `< MAX_LEDSTRIPS` (2), frame
+  length a non-zero multiple of 3 of at most `MAX_FRAME` (192) bytes; the
+  frame is copied out of guest memory into a host buffer before the device
+  runs; device errors reach the payload as codes, a device handle outside
+  `0..MAX_LEDSTRIPS` as `NoResources`, and a board without strips answers
+  `Unsupported` — `wasm_abi::ledstrip::tests::*`;
+  `abi::tests::v2_ledstrip_write_checks_arguments_before_pointer`;
+  `wasm-host/tests/abi5.rs`
+  `v2_open_write_close_pass_parsed_arguments_and_frame_bytes`,
+  `v2_bad_arguments_never_reach_the_device`,
+  `v2_device_errors_rogue_handles_and_defaults_reach_the_payload_as_codes`.
+- [x] V3 The ESP firmware's pure encoder turns G, R, B bytes into RMT pulse
+  codes, one per bit, most significant bit first, with the WS2812 timing
+  at 80 MHz (T0H 400 ns / T0L 850 ns, T1H 800 ns / T1L 450 ns) and the last
+  code's low phase of length 0 as the end marker; a frame that does not
+  fit the output is refused, and the latch wait is bounded by `RESET_US`
+  and the transmit wait by the frame's wire time plus a margin —
+  `esp_base::ledstrip::tests::v3_*` (`v3_timing_is_whole_ticks_at_80_mhz`,
+  `v3_code_values_match_the_rmt_layout`,
+  `v3_bytes_are_sent_msb_first_with_an_end_marker`,
+  `v3_a_whole_led_is_24_codes_in_grb_order`,
+  `v3_a_frame_that_does_not_fit_is_refused`,
+  `v3_encode_into_builds_the_callers_code_type`,
+  `v3_deadline_covers_the_wire_time`,
+  `v3_latch_wait_is_bounded_and_wrapping_safe`).
+- [x] V4 The firmware checks the data pin like `gpio_output` and claims
+  it for the strip (a pin held by SPI, UART, PWM, I2C, the camera or a
+  route is refused, and `gpio_*` on a strip pin is refused), drives one
+  strip on RMT channel 0 with the whole frame in channel memory (no CPU
+  refills a radio interrupt could delay), refuses a longer chain with
+  `Unsupported` (8 LEDs on ESP32-S3, 10 on ESP32: four 48- or 64-word
+  blocks), and releases the pin when the strip closes or the payload
+  stops — `esp_base::ledstrip::tests::v4_*`
+  (`v4_capacity_is_what_fits_channel_ram`, `v4_limits_are_validated`,
+  `v4_handles_are_bounded`, `v4_open_reopen_and_close`,
+  `v4_two_strip_boards_hand_out_two_handles`,
+  `v4_frames_are_checked_against_the_strip`);
+  `periph::claims::tests::v4_ledstrip_pins_are_driven_owned_and_exclusive`.
+  The release on payload stop is the pin lease's drop in the shell and is
+  not regression-tested.
+- [x] V5 The ESP firmware builds for ESP32 and ESP32-S3 with strips, and for
+  ESP32-C3 (no payload runtime there, so no strip import is served) —
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3`.
+- [x] V6 Both simulators implement strips, so payloads using them can be
+  tested off hardware: `payload-sim` and the browser simulator record each
+  strip's last frame and make it observable (`payload-sim` prints a
+  `ledstrip<h> #rrggbb …` line per write and the final colours at the end
+  of a run; the browser simulator raises `ledstripOpen` / `ledstrip` /
+  `ledstripClose` events and answers `ledstrips()`) — `payload-sim`
+  `sim::ledstrip::tests::*`, `tests/v6.rs`
+  `v6_ledstrip_frames_in_the_simulator`; `protocol-wasm`
+  `simulator::tests::v6_device_strips_record_frames_and_hold_their_pin`,
+  `v6_payload_drives_a_strip`, `simulator::ledstrip::tests::*`;
+  `web/test/ledstrip.test.ts`.
+- [x] V7 The payload SDK offers a safe LED-strip wrapper that validates
+  with the ABI parsers before calling the host and encodes colours into a
+  fixed buffer, with no new `unsafe` — `mw-payload` `ledstrip::tests::*`
+  (`grb_is_wire_order`, `encode_writes_grb_per_led`,
+  `encode_refuses_empty_and_oversized_frames`,
+  `open_validates_before_the_host`, `writes_validate_before_the_host`,
+  `frames_are_checked_against_the_strip`); `abi-check`
+  `tests::ledstrip_imports_need_no_on_irq`.
+- [x] V8 The `ledstrip` example (a moving rainbow on `COUNT` LEDs, data pin
+  from a constant) builds for `wasm32` with the payload scripts and
+  validates against the ABI — `ledstrip` `tests::*`
+  (`wheel_hits_the_primaries`, `rainbow_moves_with_the_offset`, …);
+  `abi-check` `tests/payloads.rs` `rust_ledstrip_example`,
+  `ledstrip_fits_the_badge`; `payloads/scripts/check-all.sh`.
+- [ ] V9 On hardware (manual run, not regression-tested): the badge shows
+  the rainbow on its eight LEDs on GPIO45.
+
 ### JPEG decode in WASM (J…)
 
 `payloads/jpeg` (`mw-jpeg`): the badge-side decoder of R14, a `no_std`,

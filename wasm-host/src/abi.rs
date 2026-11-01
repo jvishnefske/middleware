@@ -34,6 +34,9 @@
 //!   bus and the config length, then the key and config pointers, parsing
 //!   with the shared [`wasm_abi::route`] parsers; [`route_handle_code`]
 //!   checks the handle a device hands back.
+//! * ABI 5: [`ledstrip_write`] validates the strip handle and frame length
+//!   with [`wasm_abi::ledstrip`] before the pointer;
+//!   [`ledstrip_handle_code`] checks the handle a device hands back.
 //!
 //! For the pointer-carrying ABI 2 and 3 imports, arguments are checked
 //! before the pointer: a bad port, bus, address or length is
@@ -45,6 +48,7 @@ use core::ops::Range;
 use middleware::Key;
 
 use middleware::wasm_abi::events::DmaChannel;
+use middleware::wasm_abi::ledstrip;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
 use middleware::wasm_abi::route::{self, SinkConfig, Source, SourceConfig, SourceKind};
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
@@ -615,6 +619,31 @@ pub fn route_handle_code(handle: u8) -> Result<i32, AbiError> {
     }
 }
 
+/// Plans `ledstrip_write(handle, ptr, len)` (ABI 5) against `mem_len`
+/// bytes of linear memory: the handle and frame length first, then the
+/// pointer. Returns the handle and the frame's guest range.
+pub fn ledstrip_write(
+    handle: i32,
+    ptr: i32,
+    len: i32,
+    mem_len: usize,
+) -> Result<(u8, Range<usize>), AbiError> {
+    let handle = ledstrip::ledstrip_handle(handle)?;
+    ledstrip::frame_len(len)?;
+    Ok((handle, wasm_abi::guest_range(ptr, len, mem_len)?))
+}
+
+/// The import result for a strip handle a device returned (ABI 5): the
+/// handle, or `NoResources` if the device answered outside
+/// `0..MAX_LEDSTRIPS`.
+pub fn ledstrip_handle_code(handle: u8) -> Result<i32, AbiError> {
+    if usize::from(handle) < ledstrip::MAX_LEDSTRIPS {
+        Ok(i32::from(handle))
+    } else {
+        Err(AbiError::NoResources)
+    }
+}
+
 /// The guest range a read import (`dma_read`, `uart_read`) may fill: the
 /// whole `(ptr, len)` must lie in memory, and at most `cap` bytes (the host
 /// buffer size) are written from its start.
@@ -1174,6 +1203,26 @@ mod tests {
         );
         assert_eq!(route_handle_code(3), Ok(3));
         assert_eq!(route_handle_code(4), Err(AbiError::NoResources));
+    }
+
+    #[test]
+    fn v2_ledstrip_write_checks_arguments_before_pointer() {
+        let mem = 1024;
+        assert_eq!(ledstrip_write(0, 16, 24, mem), Ok((0, 16..40)));
+        assert_eq!(ledstrip_write(1, 0, 192, mem), Ok((1, 0..192)));
+        let bad = Err(AbiError::InvalidArgument);
+        assert_eq!(ledstrip_write(2, 5000, 24, mem), bad, "handle first");
+        assert_eq!(ledstrip_write(-1, 0, 24, mem), bad);
+        assert_eq!(ledstrip_write(0, 5000, 25, mem), bad, "length first");
+        assert_eq!(ledstrip_write(0, 0, 0, mem), bad, "empty frame");
+        assert_eq!(ledstrip_write(0, 0, 195, mem), bad, "over MAX_FRAME");
+        assert_eq!(
+            ledstrip_write(0, 1020, 24, mem),
+            Err(AbiError::OutOfBounds)
+        );
+        assert_eq!(ledstrip_write(0, -1, 24, mem), Err(AbiError::OutOfBounds));
+        assert_eq!(ledstrip_handle_code(1), Ok(1));
+        assert_eq!(ledstrip_handle_code(2), Err(AbiError::NoResources));
     }
 
     #[test]

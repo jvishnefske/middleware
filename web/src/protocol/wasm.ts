@@ -142,12 +142,27 @@ export type SimEvent =
   | { kind: "write"; pin: number; high: boolean }
   | { kind: "spi"; tx: Uint8Array; rx: Uint8Array }
   | { kind: "uart"; data: Uint8Array }
+  | { kind: "ledstripOpen"; handle: number; pin: number; count: number }
+  /** A frame sent to an LED strip: G, R, B bytes per LED, nearest the pin first. */
+  | { kind: "ledstrip"; handle: number; pin: number; grb: Uint8Array }
+  | { kind: "ledstripClose"; handle: number; pin: number }
   | IrqEvent;
 
 export interface PinState {
-  mode: "unused" | "output" | "input";
+  mode: "unused" | "output" | "input" | "ledstrip";
   high?: boolean;
   pull?: "none" | "up" | "down";
+  /** The LED strip whose data pin this is (mode "ledstrip"). */
+  handle?: number;
+}
+
+/** An open LED strip (ABI 5) and the colours its LEDs last received. */
+export interface LedStripState {
+  handle: number;
+  pin: number;
+  count: number;
+  /** G, R, B bytes per LED (`count * 3`). */
+  grb: Uint8Array;
 }
 
 /** A payload running in wasm-host against a virtual device. */
@@ -161,6 +176,7 @@ export interface Simulator {
   /** Empty selects loopback; otherwise the pattern repeats. */
   setSpiPattern(pattern: Uint8Array): void;
   timers(): TimerState[];
+  ledstrips(): LedStripState[];
   /** Events dropped from the full queue since load. */
   readonly dropped: number;
   readonly pending: number;

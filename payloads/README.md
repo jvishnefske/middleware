@@ -5,8 +5,9 @@ runs in a fuel-metered sandbox. They talk to the device only through the ABI
 defined in `src/wasm_abi.rs` of the `middleware` crate: host functions
 imported from module `mw` (log, publish, subscribe, time, tick period, GPIO,
 since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA, since
-ABI 3 PWM, ADC and I2C, and since ABI 4 DMA routes that stream frames
-between a key and a camera or SPI display, `mw_payload::route`) and the
+ABI 3 PWM, ADC and I2C, since ABI 4 DMA routes that stream frames
+between a key and a camera or SPI display, `mw_payload::route`, and since
+ABI 5 WS2812-style LED strips, `mw_payload::ledstrip`) and the
 exports `memory`, `init`, `tick`, `mw_alloc`, `on_message` and `on_irq`.
 
 This directory is a Cargo workspace of its own, excluded from the parent
@@ -41,6 +42,14 @@ default target in `.cargo/config.toml`). It contains:
   `app/dimmer/adc`, and reads the temperature register of an LM75-style
   sensor at I2C address 0x48 through `embedded-hal`'s `I2c`, publishing it
   on `app/dimmer/temp`. The board decides which pins those are.
+- `examples/ledstrip` (ABI 5, conagotchi badge) — opens an LED strip of
+  `COUNT` (8) WS2812 LEDs on data pin `PIN` (GPIO45, the badge's LEDs) and
+  every 50 ms sends a frame of a moving rainbow: the LEDs spread evenly
+  around an integer 256-step hue wheel, dimmed to brightness 32 of 255,
+  the pattern turning once every 6.4 s. The SDK encodes the colours to the
+  wire's G, R, B order in a fixed stack buffer and the host times the
+  pulses. A strip that cannot be opened is logged and the payload stays
+  idle. Built with 1-byte pages it fits the badge (16 KiB memory).
 - `examples/cam_stream` (ABI 4, ESP32-CAM) — starts a source route that
   publishes 120×120 RGB565 frames on `app/cam/frame` every 200 ms as
   166-byte chunks, one ESP-NOW message each (174 per frame, 870 messages a
@@ -118,7 +127,7 @@ From this directory, `cargo build --release` produces one `.wasm` file per
 example in `target/wasm32-unknown-unknown/release/`. The release profile
 optimises for size, uses link-time optimisation, aborts on panic and strips
 symbols; the examples come out at 5 to 13 KiB. An example that uses no ABI 2
-(or ABI 3, or ABI 4) feature imports no function of that revision, so it still loads
+(or ABI 3, 4 or 5) feature imports no function of that revision, so it still loads
 on older firmware. The linker
 flags in `.cargo/config.toml` give every payload exactly one 64 KiB page of
 linear memory that cannot grow, with a 16 KiB stack, because the target
@@ -148,14 +157,14 @@ the host's byte cap (`wasm_host::Limits::bytes`) has to be at least
 host's heap bound (`Limits::heap_needed`) charges exactly it instead of
 the whole cap, so a payload sized to its real need starts with less free
 heap. `scripts/check-all.sh` builds and validates blink, echo, cam_view,
-cam_jpeg_view and bench both ways.
+ledstrip, cam_jpeg_view and bench both ways.
 
 The byte-page build is reproducible: it passes `--remap-path-prefix` for
 the home directory, the cargo registry and the repository, so no absolute
 build path ends up in the module. `scripts/check-reproducible.sh [package...]`
 builds here and in a copy of the sources at another path and fails unless
 the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink,
-echo and cam_view, and for cam_jpeg_view and bench with their own sizes.
+echo, cam_view and ledstrip, and for cam_jpeg_view and bench with their own sizes.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.
@@ -173,7 +182,7 @@ have the right signatures.
 It also requires an `on_irq` export from any module that imports an event
 source (`gpio_irq`, `timer_start`, `spi_transfer`, `uart_write`, and since
 ABI 4 `route_source` and `route_sink`), since the events would otherwise
-have nowhere to go.
+have nowhere to go. The ABI 5 LED-strip imports raise no events.
 
 `cargo test -p abi-check --target x86_64-unknown-linux-gnu` runs the same
 checks on the WAT templates, on the built examples (build them first) and on

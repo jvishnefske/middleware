@@ -53,6 +53,12 @@
 //!   frame data never passes through guest memory or this crate. Handles
 //!   the device returns outside `0..MAX_ROUTES` reach the payload as
 //!   `NoResources`, and `route_stat` counts saturate at `i32::MAX`.
+//! * `ledstrip_write` (ABI 5) checks the handle and frame length
+//!   ([`wasm_abi::ledstrip::frame_len`]) before the pointer and copies the
+//!   frame through a stack buffer of
+//!   [`ledstrip::MAX_FRAME`](wasm_abi::ledstrip::MAX_FRAME) bytes, so the
+//!   device never sees guest memory. Handles the device returns outside
+//!   `0..MAX_LEDSTRIPS` reach the payload as `NoResources`.
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
 //!   `on_irq`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
@@ -128,6 +134,7 @@ use wasmi::{
 pub use abi::FuelStats;
 pub use error::{INIT_LOG_LINES, InitLog, LoadError, Trap};
 pub use middleware::wasm_abi::events::{DmaChannel, Event, EventKind};
+pub use middleware::wasm_abi::ledstrip::{LedCount, LedStripSpec};
 pub use middleware::wasm_abi::periph::{
     Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
@@ -148,10 +155,11 @@ use link::{Exports, State};
 /// `Busy`).
 ///
 /// The ABI 2 methods (from [`Device::now_us`] on), the ABI 3 methods
-/// (from [`Device::pwm_open`] on) and the ABI 4 route methods (from
-/// [`Device::route_source`] on) have defaults (`Unsupported`, or a derived
-/// clock) so a board without interrupts, DMA, PWM, ADC, I2C or routes
-/// keeps compiling; see the crate docs.
+/// (from [`Device::pwm_open`] on), the ABI 4 route methods (from
+/// [`Device::route_source`] on) and the ABI 5 LED-strip methods (from
+/// [`Device::ledstrip_open`] on) have defaults (`Unsupported`, or a derived
+/// clock) so a board without interrupts, DMA, PWM, ADC, I2C, routes or LED
+/// strips keeps compiling; see the crate docs.
 pub trait Device {
     /// A payload log line (UTF-8, at most [`wasm_abi::MAX_LOG`] bytes).
     fn log(&mut self, line: &str);
@@ -325,6 +333,36 @@ pub trait Device {
     /// running. Larger values reach the payload saturated to `i32::MAX`.
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
         let _ = (handle, stat);
+        Err(AbiError::Unsupported)
+    }
+
+    /// Opens a WS2812-style LED strip of `spec.count` LEDs on `spec.pin`
+    /// (ABI 5) and returns its handle (`0..MAX_LEDSTRIPS`; any other value
+    /// reaches the payload as `NoResources`). The pin is checked as for
+    /// [`Device::gpio_output`]; a pin another peripheral holds is
+    /// `InvalidArgument`. Opening the pin of an open strip changes its
+    /// length and returns the same handle. `NoResources` when the board
+    /// drives no further strip, `Unsupported` for a chain longer than it
+    /// can send. Sends nothing.
+    fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {
+        let _ = spec;
+        Err(AbiError::Unsupported)
+    }
+    /// Sends one frame (ABI 5): `grb` holds 3 bytes per LED (G, R, B), a
+    /// non-zero multiple of 3 of at most
+    /// [`ledstrip::MAX_FRAME`](wasm_abi::ledstrip::MAX_FRAME) bytes, already
+    /// checked by the runtime. The device refuses a frame longer than the
+    /// strip ([`LedStripSpec::check_frame`], `InvalidArgument`) and returns
+    /// once it is on the wire. `Busy` if the handle is not open,
+    /// `Transport` if transmission failed.
+    fn ledstrip_write(&mut self, handle: u8, grb: &[u8]) -> Result<(), AbiError> {
+        let _ = (handle, grb);
+        Err(AbiError::Unsupported)
+    }
+    /// Closes a strip and returns its pin to idle GPIO (ABI 5); `Busy` if
+    /// the handle is not open.
+    fn ledstrip_close(&mut self, handle: u8) -> Result<(), AbiError> {
+        let _ = handle;
         Err(AbiError::Unsupported)
     }
 }
