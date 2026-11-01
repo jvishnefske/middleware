@@ -67,6 +67,19 @@
 //! [`events::EventKind::RouteDropped`], [`events::EventKind::RouteStopped`]),
 //! so `route_source` and `route_sink` are event sources.
 //!
+//! Added in ABI 5 (WS2812-style LED strips; arguments, frame layout and
+//! timing in [`ledstrip`]):
+//!
+//! | name             | params                                 | result            |
+//! |------------------|----------------------------------------|-------------------|
+//! | `ledstrip_open`  | `pin, count` (LEDs, `1..=ledstrip::MAX_LEDS`) | handle ≥ 0 or error |
+//! | `ledstrip_write` | `handle, ptr, len` (G, R, B bytes per LED) | 0 (sent) or error |
+//! | `ledstrip_close` | `handle`                               | 0 or error        |
+//!
+//! `ledstrip_write` is synchronous and bounded (about 30 µs per LED plus
+//! the latch gap); the host encodes the pulse train, so the payload never
+//! times a pulse. The data pin passes the same checks as `gpio_output`.
+//!
 //! The firmware owns the pin mapping for PWM and I2C: a PWM `(timer,
 //! channel)` and an I2C `bus` drive fixed, board-documented pins, so a
 //! payload never names them. `adc_read` takes a board pin number and fails
@@ -121,6 +134,7 @@
 //! offsets either way.
 
 pub mod events;
+pub mod ledstrip;
 pub mod periph;
 pub mod route;
 
@@ -129,8 +143,8 @@ pub mod route;
 /// the runtime checks each import by name and signature against
 /// [`IMPORTS`], and an older payload simply imports a subset. Revision 2
 /// added interrupts, timers, SPI and UART DMA; revision 3 added PWM, ADC
-/// and I2C; revision 4 added DMA routes.
-pub const ABI_VERSION: u16 = 4;
+/// and I2C; revision 4 added DMA routes; revision 5 added LED strips.
+pub const ABI_VERSION: u16 = 5;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -318,6 +332,22 @@ pub const IMPORTS: &[Import] = &[
         params: 2,
         returns: true,
     },
+    // ABI 5
+    Import {
+        name: "ledstrip_open",
+        params: 2,
+        returns: true,
+    },
+    Import {
+        name: "ledstrip_write",
+        params: 3,
+        returns: true,
+    },
+    Import {
+        name: "ledstrip_close",
+        params: 1,
+        returns: true,
+    },
 ];
 
 /// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
@@ -329,6 +359,10 @@ pub const ABI2_IMPORTS: usize = 20;
 /// Number of imports in ABI 3 (the prefix of [`IMPORTS`] up to
 /// `i2c_transfer`).
 pub const ABI3_IMPORTS: usize = 26;
+
+/// Number of imports in ABI 4 (the prefix of [`IMPORTS`] up to
+/// `route_stat`).
+pub const ABI4_IMPORTS: usize = 30;
 
 /// Looks up an import by name.
 pub fn import(name: &str) -> Option<&'static Import> {
@@ -471,13 +505,24 @@ mod tests {
             ("route_stat", 2),
         ];
         assert!(
-            IMPORTS[ABI3_IMPORTS..]
+            IMPORTS[ABI3_IMPORTS..ABI4_IMPORTS]
                 .iter()
                 .map(|i| (i.name, i.params))
                 .eq(abi4)
         );
+        let abi5 = [
+            ("ledstrip_open", 2),
+            ("ledstrip_write", 3),
+            ("ledstrip_close", 1),
+        ];
+        assert!(
+            IMPORTS[ABI4_IMPORTS..]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq(abi5)
+        );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI_VERSION, 4);
+        assert_eq!(ABI_VERSION, 5);
     }
 
     #[test]
