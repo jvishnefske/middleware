@@ -33,6 +33,11 @@
 //!   payloads on a device over any transport; [`loader::trust`] holds the
 //!   signed-payload wire types and rules (its crypto needs `trust`).
 //! * [`wasm_abi`] — the import/export contract between payloads and firmware.
+//! * [`fw_ota`] — A/B firmware update for the RP2350 (always built, pure):
+//!   the `sys/fw/*` wire format, the update state machine, the IMAGE_DEF
+//!   parser, the persisted record and the `FwPlatform` hardware seam; its
+//!   shell `fw_ota::service` needs `trust`, its bootrom model
+//!   `fw_ota::sim` needs `fw-sim` (host only).
 //! * [`stream`] — chunked frame streams over keys (always built, pure): the
 //!   chunk wire format, the source chunker, the sink state machine, a test
 //!   pattern and looped stored frames (the fake JPEG camera), behind the
@@ -52,7 +57,8 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
-//! | `trust`    | `loader::sha256`, `loader::trust` checks | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `trust`    | `loader::sha256`, `loader::trust` checks, `fw_ota::service` | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
@@ -82,6 +88,7 @@ pub mod dedup;
 pub mod discovery;
 pub mod crc;
 pub mod dns;
+pub mod fw_ota;
 pub mod key;
 pub mod loader;
 pub mod mdns;

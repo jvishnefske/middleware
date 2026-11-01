@@ -25,8 +25,11 @@
 //! * [`device`] — the protocol operations (`info`, `upload` signed or not,
 //!   `trust info`, `trust claim`, `start`, `stop`, monitor events) over any
 //!   transport.
-//! * [`report`] — human-readable formatting of device info and
-//!   publications.
+//! * [`fw`] — RP2350 A/B firmware updates (`fw info|update|confirm|abort|reboot`):
+//!   the image file (UF2 or raw binary, checked as the device checks it),
+//!   firmware commit signatures, and the `sys/fw/*` requests.
+//! * [`report`] — human-readable formatting of device info, firmware
+//!   update state and publications.
 //! * [`error`] — [`error::Error`], with context-specific explanations of
 //!   device status codes.
 //!
@@ -42,6 +45,7 @@ pub mod bridge;
 pub mod cli;
 pub mod device;
 pub mod error;
+pub mod fw;
 pub mod link;
 pub mod plan;
 pub mod report;

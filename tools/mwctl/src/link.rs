@@ -161,7 +161,10 @@ pub fn decode_run(run: &[u8]) -> Option<(usize, Incoming)> {
 pub struct Timeouts {
     /// Per-attempt response timeout.
     pub request: Duration,
-    /// Floor for `sys/loader/begin`, which erases flash before answering.
+    /// Floor for requests that erase or program flash before answering:
+    /// `sys/loader/begin`, `sys/fw/begin` and `sys/fw/confirm` (the
+    /// bootrom's buy rewrites a sector); `sys/fw/commit`, which hashes the
+    /// whole image and writes its first sector, waits three times as long.
     pub begin: Duration,
     /// Additional attempts after a timeout.
     pub retries: u32,
@@ -180,7 +183,10 @@ impl Default for Timeouts {
 impl Timeouts {
     /// The per-attempt timeout for a request on `key`.
     pub fn for_key(&self, key: Key<'_>) -> Duration {
-        if key == middleware::loader::keys::BEGIN {
+        use middleware::fw_ota::keys as fw;
+        if key == fw::COMMIT {
+            self.request.max(self.begin * 3)
+        } else if key == middleware::loader::keys::BEGIN || key == fw::BEGIN || key == fw::CONFIRM {
             self.request.max(self.begin)
         } else {
             self.request
@@ -226,6 +232,11 @@ impl<T: Transport> Link<T> {
     /// The transport.
     pub fn transport(&self) -> &T {
         &self.io
+    }
+
+    /// The transport, mutably.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.io
     }
 
     /// The timing in use.
@@ -427,5 +438,10 @@ mod tests {
             ..t
         };
         assert_eq!(slow.for_key(keys::BEGIN), Duration::from_secs(9));
+        use middleware::fw_ota::keys as fw;
+        assert_eq!(t.for_key(fw::BEGIN), Duration::from_millis(5000));
+        assert_eq!(t.for_key(fw::CONFIRM), Duration::from_millis(5000));
+        assert_eq!(t.for_key(fw::COMMIT), Duration::from_millis(15000));
+        assert_eq!(t.for_key(fw::CHUNK), Duration::from_millis(1000));
     }
 }

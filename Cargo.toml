@@ -31,6 +31,9 @@ espnow = []
 # streams in, Ed25519 verification of signed commits, and the pure trust
 # state transitions. The wire types are always built; this adds the crypto.
 trust = ["dep:sha2", "dep:ed25519-dalek"]
+# The in-memory RP2350 bootrom and flash model (`fw_ota::sim`) for host
+# tests of A/B firmware updates (here and in mwctl's fake device). Host only.
+fw-sim = ["std", "trust"]
 # The fake JPEG camera's baked frames (`stream::frames::fixtures`, about
 # 53 KB of `include_bytes!` data from `fixtures/cam`), served by
 # `SourceKind::TestPattern` for JPEG configs. no_std, no heap.
