@@ -9,7 +9,7 @@
 //! [`install`] (boot) builds esp-hal's I2S0 receiver with DMA channel
 //! `DMA_I2S0` and no pins: 16-bit mono receive, which makes esp-hal set the
 //! receive FIFO to mode 1 (two samples per 32-bit word,
-//! `esp_base::camera::SampleMode::HalfWord`) and the channel mode to 1, and a
+//! `crate::camera::SampleMode::HalfWord`) and the channel mode to 1, and a
 //! 312.5 kHz "sample rate" whose 256× master clock puts the I2S module
 //! clock at 80 MHz (divider 2), fast enough to sample PCLK. (FIFO mode 3,
 //! one sample per word as esp32-camera uses for JPEG, lost every other
@@ -40,7 +40,7 @@
 //! that never start a camera route never pay for them. A capture
 //! ([`capture`], radio task) starts the DMA, and while it runs takes each
 //! filled stretch of the ring in place (`peek`), extracts the sample bytes
-//! straight into a 256-byte scratch block (`esp_base::camera::extract`),
+//! straight into a 256-byte scratch block (`crate::camera::extract`),
 //! runs them through the `Assembler` into the frame buffer, and hands the
 //! stretch back to the DMA (`consume`). Each camera byte is thus copied
 //! twice before the radio: DMA word → scratch → frame buffer (the
@@ -62,8 +62,8 @@ use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
-use esp_base::camera::{Assembler, SampleMode, Status, extract};
-use esp_base::route::source::CaptureFault;
+use crate::camera::{Assembler, SampleMode, Status, extract};
+use crate::route::source::CaptureFault;
 use esp_hal::Blocking;
 use esp_hal::dma::aligned::DmaAlignedMut;
 use esp_hal::dma::{DmaDescriptor, DmaRxStreamBuf};

@@ -1,7 +1,7 @@
 //! I2C for payloads on the ESP32 (ABI 3 `i2c_open` / `i2c_transfer`):
 //! controller I2C0 as bus 0.
 //!
-//! The board pin map (`esp_base::chip`, ESP32-CAM) wires bus 0 to SDA
+//! The board pin map (`crate::chip`, ESP32-CAM) wires bus 0 to SDA
 //! GPIO26 and SCL GPIO27, the camera sensor's SCCB. The esp-hal driver is
 //! built at boot without pins (blocking: transfers are synchronous and at
 //! most `MAX_I2C` bytes each way, so a call blocks for a few milliseconds

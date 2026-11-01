@@ -1,11 +1,30 @@
-//! Imperative shell: hardware bring-up and the tasks around the pure core.
+//! Imperative shell: hardware bring-up and the tasks around the pure core
+//! (feature `shell`, enabled by each chip feature).
+//!
+//! The shell is part of the library so that a board crate can run it with
+//! its own [`Board`] (E24): the `esp-base` binary is a thin `main` that
+//! calls [`run`] with [`Board::chip_default`] of [`CHIP`] and its own
+//! version, and a board firmware does the same with its board. The caller
+//! provides what the binary crate must own:
+//!
+//! * the `#[esp_rtos::main]` entry point and the ESP-IDF application
+//!   descriptor (`esp_bootloader_esp_idf::esp_app_desc!()`), both of which
+//!   need the binary crate's identity;
+//! * `-Tlinkall.x` as a link argument of its binary (cargo passes link
+//!   arguments only from the binary's own build script);
+//! * a `static` [`Board`] built from [`CHIP`] (or [`Board::chip_default`]).
+//!
+//! The shell links `esp-backtrace` as the panic handler. Calling [`run`]
+//! more than once is a bug: it takes the peripherals and its statics.
 //!
 //! Boot sequence ([`run`]):
 //!
 //! 1. `esp_hal::init` at maximum CPU clock; heap regions per
-//!    [`board::PROFILE`]; `esp-rtos` scheduler and embassy time driver on
-//!    TIMG0.
-//! 2. One [`link`] task per serial port: UART0 at 115200 baud on every chip,
+//!    `board::PROFILE` (the compiled chip's heap plan, which a board
+//!    cannot change); `esp-rtos` scheduler and embassy time driver on
+//!    TIMG0. A board built from another chip's profile is replaced by the
+//!    chip default and the mismatch logged ([`crate::board::for_chip`]).
+//! 2. One `link` task per serial port: UART0 at 115200 baud on every chip,
 //!    plus USB-Serial-JTAG on ESP32-S3 and ESP32-C3. Nothing is printed as
 //!    plain text after this point; logs are `sys/log` publications. Each
 //!    link first writes one `0x00` delimiter to separate its frames from
@@ -13,34 +32,48 @@
 //! 3. The partition table is read and the `payload` and `trust` data
 //!    partitions located (see `partitions.csv`), and the SPI flash mode and
 //!    clock read from the bootloader's image header logged
-//!    ([`esp_base::chip::FlashSettings`]: code runs from flash through the
+//!    ([`crate::chip::FlashSettings`]: code runs from flash through the
 //!    cache at that speed); the stored image header is
 //!    CRC verified and the pinned signing key, if any, read
-//!    ([`esp_base::trust_store`]). The [`presence`] task starts watching the
-//!    BOOT button for the re-key window.
+//!    ([`crate::trust_store`]). `sys/info` reports the board's name and
+//!    firmware version ([`Board::profile`], [`Board::firmware`]). The
+//!    `presence` task starts watching the board's presence button for
+//!    the re-key window.
 //! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
-//!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
-//!    ([`uart1`]), and on the ESP32 LEDC ([`pwm`]), I2C0 ([`i2c`]) and the
-//!    I2S0 camera receiver ([`camera`]), all without pins until a payload
-//!    opens them.
+//!    handler, the timer alarm on TIMG1, SPI2 with DMA (`spi`) and UART1
+//!    (`uart1`), and on the ESP32 LEDC (`pwm`), I2C0 (`i2c`) and the
+//!    I2S0 camera receiver (`camera`), all without pins until a payload
+//!    opens them. Before them, the board's safe-mode pin, if any, is
+//!    sampled once through the pin bank (pull-up enabled, a blocking
+//!    `SAFE_MODE_SETTLE_MS` wait, read, returned to high impedance).
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
-//!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
+//!    the fixed ESP-NOW channel and the `radio` task starts: `app/...`
 //!    publishes go out over ESP-NOW, `app/...` samples come in, source
 //!    routes stream from it, and requests addressed to this station
 //!    (`middleware::rpc`) reach the controller as `bus::Port::Radio`
-//!    requests, admitted by `esp_base::ota` (signed updates on a claimed
+//!    requests, admitted by `crate::ota` (signed updates on a claimed
 //!    device only). A radio that fails to start is logged and the
 //!    firmware runs without it.
-//! 6. The [`controller`] runs on the main task and starts the stored payload
-//!    if one is valid (and the `wasm` runtime is built in).
+//! 6. The `controller` runs on the main task and starts the stored payload
+//!    if one is valid (and the `wasm` runtime is built in), unless the
+//!    safe-mode pin read low ([`crate::board::autostart`]): then the
+//!    payload stays installed and stopped, and `sys/log` says
+//!    `safe mode: GPIOn held at boot; stored payload not started`.
+//!    Payloads run with the board's fuel per call
+//!    ([`Board::fuel_per_call`]).
+//!
+//! Without `wasm` no payload ever starts, so the safe-mode pin is not
+//! sampled.
 //!
 //! Ownership is a tree: the main task owns the controller (state, flash
 //! store, trust store, payload); each link task owns its port. They meet
-//! only through the `'static` [`bus::Bus`] channels; the presence task and
-//! the controller share the re-key window through [`presence::WINDOW`]. With `wasm`, the payload's
+//! only through the `'static` `bus::Bus` channels; the presence task and
+//! the controller share the re-key window through `presence::WINDOW`. With `wasm`, the payload's
 //! peripherals rest in statics shared with their ISRs or between runs: the
-//! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
-//! timer alarm ([`timer`]) and the SPI/UART drivers ([`device::HW`]).
+//! pin bank (`gpio::PINS`), the interrupt event queue (`irq`), the
+//! timer alarm (`timer`) and the SPI/UART drivers (`device::HW`).
+
+use esp_backtrace as _;
 
 mod board;
 mod bus;
@@ -69,10 +102,14 @@ mod timer;
 mod uart1;
 
 use embassy_executor::Spawner;
-use esp_base::chip::FlashSettings;
-use esp_base::dispatch::{Context, State};
-use esp_base::store::PayloadStore;
-use esp_base::trust_store::{Persisted, TrustStore};
+use crate::board::{Board, SafeMode, autostart, for_chip};
+#[cfg(feature = "wasm")]
+use crate::board::Autostart;
+use crate::chip::Profile;
+use crate::chip::FlashSettings;
+use crate::dispatch::{Context, State};
+use crate::store::PayloadStore;
+use crate::trust_store::{Persisted, TrustStore};
 use middleware::loader::trust::TrustState;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
@@ -111,13 +148,13 @@ fn node_id() -> middleware::SenderId {
     middleware::SenderId::from_mac(base_mac())
 }
 
-/// Firmware version reported in `sys/info`.
+/// The compiled chip's profile: the base of every [`Board`] this shell
+/// runs.
+pub const CHIP: Profile = board::PROFILE;
+
+/// How long the safe-mode pin's pull-up settles before it is read.
 #[cfg(feature = "wasm")]
-const FIRMWARE: &str = env!("CARGO_PKG_VERSION");
-/// Firmware version reported in `sys/info`; the suffix marks a build
-/// without the WASM runtime.
-#[cfg(not(feature = "wasm"))]
-const FIRMWARE: &str = concat!(env!("CARGO_PKG_VERSION"), "+no-wasm");
+pub const SAFE_MODE_SETTLE_MS: u32 = 1;
 
 static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 
@@ -178,36 +215,82 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
 /// This device's ESP-NOW station MAC (the eFuse base MAC), which signed
 /// control requests name.
 #[cfg(feature = "espnow")]
-fn own_mac() -> esp_base::ota::Mac {
+fn own_mac() -> crate::ota::Mac {
     radio::own_mac()
 }
 
 /// Without `espnow` nothing arrives over the air, so no request names a
 /// MAC.
 #[cfg(not(feature = "espnow"))]
-fn own_mac() -> esp_base::ota::Mac {
+fn own_mac() -> crate::ota::Mac {
     [0; 6]
 }
 
-/// Brings up the board and runs the firmware forever.
-pub async fn run(spawner: Spawner) -> ! {
+/// Samples the board's safe-mode pin once through the installed pin bank,
+/// before anything can claim it. The wait is blocking, so this boot-only
+/// delay adds nothing to the main task's future.
+#[cfg(feature = "wasm")]
+fn sample_safe_mode(board: &Board) -> SafeMode {
+    match board.safe_mode() {
+        None => SafeMode::NoPin,
+        Some(pin) => {
+            gpio::PINS.settle_pull_up(pin);
+            esp_hal::delay::Delay::new().delay_millis(SAFE_MODE_SETTLE_MS);
+            SafeMode::from_sample(gpio::PINS.boot_button(pin))
+        }
+    }
+}
+
+/// The boot decision ([`autostart`]) for the boot `state`, with the
+/// safe-mode pin sampled ([`sample_safe_mode`]) and the outcome logged.
+#[cfg(feature = "wasm")]
+fn boot_autostart(board: &Board, state: State, bus: &Bus) -> Autostart {
+    let safe = sample_safe_mode(board);
+    let start = autostart(state.startable(), safe);
+    match (board.safe_mode(), safe, start) {
+        (Some(pin), _, Autostart::SafeMode) => {
+            bus.log(format_args!("safe mode: GPIO{pin} held at boot; stored payload not started"))
+        }
+        (Some(pin), SafeMode::Unreadable, _) => {
+            bus.log(format_args!("safe mode: GPIO{pin} unreadable at boot; ignored"))
+        }
+        _ => {}
+    }
+    start
+}
+
+/// The board run when the caller's was built from another chip's profile.
+static WRONG_BOARD: Board = match Board::chip_default(&CHIP, concat!(env!("CARGO_PKG_VERSION"), "+wrong-board")) {
+    Ok(b) => b,
+    Err(e) => panic!("{}", e.as_str()),
+};
+
+/// Brings up the hardware and runs the firmware forever as `board` (see
+/// the module docs). `board` must be built from [`CHIP`]; otherwise the
+/// chip default runs, reporting firmware `<esp-base version>+wrong-board`,
+/// and the boot log names both chips.
+pub async fn run(spawner: Spawner, board: &'static Board) -> ! {
+    let (board, wrong_chip) = match for_chip(board, CHIP.chip) {
+        Ok(b) => (b, None),
+        Err(chip) => (&WRONG_BOARD, Some(chip)),
+    };
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     board::init_heap();
-    let board = board::split(peripherals);
-    let timg0 = TimerGroup::new(board.timg0);
-    esp_rtos::start(timg0.timer0, board.sw_int);
+    let hw = board::split(peripherals, board);
+    let timg0 = TimerGroup::new(hw.timg0);
+    esp_rtos::start(timg0.timer0, hw.sw_int);
 
     let bus: &'static Bus = BUS.take();
-    let profile = board::profile();
+    let profile = board.profile();
 
-    let uart_ok = board.uart.is_ok();
-    if let Ok(uart) = board.uart {
+    let uart_ok = hw.uart.is_ok();
+    if let Ok(uart) = hw.uart {
         spawner.spawn(uart_link(uart, bus).unwrap());
     }
     #[cfg(any(feature = "esp32s3", feature = "esp32c3"))]
-    spawner.spawn(usb_link(board.usb, bus).unwrap());
+    spawner.spawn(usb_link(hw.usb, bus).unwrap());
 
-    let mut flash = FlashStorage::new(board.flash);
+    let mut flash = FlashStorage::new(hw.flash);
     // The bootloader's image header: the flash mode and clock code runs
     // from (read before the flash moves into the payload store).
     let mut header = [0u8; 4];
@@ -220,7 +303,7 @@ pub async fn run(spawner: Spawner) -> ! {
         State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state).with_control(persisted.control);
     let ctx = Context {
         chip: profile.name,
-        firmware: FIRMWARE,
+        firmware: board.firmware(),
         capacity,
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
@@ -229,13 +312,20 @@ pub async fn run(spawner: Spawner) -> ! {
     };
 
     bus.log(format_args!(
-        "esp-base {FIRMWARE} on {} (heap {} B, WASM memory {} B, radio {} B, uart {})",
+        "esp-base {} on {} (heap {} B, WASM memory {} B, radio {} B, uart {})",
+        board.firmware(),
         profile.name,
         profile.heap_total(),
         profile.max_memory_bytes,
         profile.radio_heap,
         if uart_ok { "ok" } else { "failed" },
     ));
+    if let Some(chip) = wrong_chip {
+        bus.log(format_args!(
+            "board: built for {chip:?}, this firmware is for {:?}; running the chip default",
+            CHIP.chip
+        ));
+    }
     match flash_settings {
         Some(s) => bus.log(format_args!("flash: {s} (bootloader header)")),
         None => bus.log(format_args!("flash: mode unknown (header {header:02x?})")),
@@ -262,15 +352,20 @@ pub async fn run(spawner: Spawner) -> ! {
             key.0[0], key.0[1], key.0[2], key.0[3], min_version.0, persisted.control.0
         )),
     }
-    spawner.spawn(presence::watch(board.boot, bus).unwrap());
+    spawner.spawn(presence::watch(hw.boot, bus).unwrap());
 
     #[cfg(feature = "wasm")]
+    gpio::PINS.install(hw.pins);
+    // `state` by value: borrowing it here would keep its 192 bytes in the
+    // main task's future across the controller's await.
+    #[cfg(feature = "wasm")]
+    let start = boot_autostart(board, state, bus);
+    #[cfg(feature = "wasm")]
     let controller = {
-        gpio::PINS.install(board.pins);
-        gpio::init(board.payload.io_mux);
-        timer::init(TimerGroup::new(board.payload.timg1).timer0);
-        let spi = board.payload.spi.and_then(spi::SpiParts::new);
-        let uart = board.payload.uart1.and_then(uart1::Uart1Parts::new);
+        gpio::init(hw.payload.io_mux);
+        timer::init(TimerGroup::new(hw.payload.timg1).timer0);
+        let spi = hw.payload.spi.and_then(spi::SpiParts::new);
+        let uart = hw.payload.uart1.and_then(uart1::Uart1Parts::new);
         if spi.is_none() || uart.is_none() {
             bus.log(format_args!(
                 "payload peripherals: spi {}, uart1 {}",
@@ -280,7 +375,7 @@ pub async fn run(spawner: Spawner) -> ! {
         }
         #[cfg(feature = "esp32")]
         let (pwm, i2c) = {
-            let cam = board.payload.cam;
+            let cam = hw.payload.cam;
             if !camera::install(cam.i2s0, cam.dma_i2s0) {
                 bus.log(format_args!("camera: I2S0 camera receiver failed to start"));
             }
@@ -295,14 +390,17 @@ pub async fn run(spawner: Spawner) -> ! {
             i2c,
         });
         #[cfg(feature = "espnow")]
-        match radio::start(board.wifi) {
+        match radio::start(hw.wifi) {
             Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),
             Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
         }
         bus.log(format_args!("heap: {} B free after boot", esp_alloc::HEAP.free()));
-        Controller::new(state, ctx, store, trust, own_mac(), bus, profile)
+        Controller::new(state, ctx, store, trust, own_mac(), bus, board)
     };
+    // Without the runtime nothing starts, so the pin is not sampled.
+    #[cfg(not(feature = "wasm"))]
+    let start = autostart(false, SafeMode::NoPin);
     #[cfg(not(feature = "wasm"))]
     let controller = Controller::new(state, ctx, store, trust, own_mac(), bus);
-    controller.run().await
+    controller.run(start).await
 }

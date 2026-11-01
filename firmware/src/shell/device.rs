@@ -19,7 +19,7 @@
 //! releases every pin (interrupts off, signals detached) and clears the
 //! event queue. Both peripherals go back to [`HW`] whatever state they were
 //! in: SPI through [`SpiBus::close`] (idle, payload transfer or sink-route
-//! write in flight; see `esp_base::periph::dma_hw`), UART by value, so the
+//! write in flight; see `crate::periph::dma_hw`), UART by value, so the
 //! next payload can open them again.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
@@ -28,7 +28,7 @@
 //! # Routes (ABI 4)
 //!
 //! The device keeps the payload's [`Routes`] (handles, keys, what each sink
-//! owns); all decisions are in `esp_base::route`.
+//! owns); all decisions are in `crate::route`.
 //!
 //! * `route_source` (feature `espnow`): `TestPattern` only (`Camera` is
 //!   `Unsupported` until the OV2640 driver lands): the generated pattern
@@ -62,11 +62,11 @@ use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
-use esp_base::chip::{Direction, Profile};
-use esp_base::periph::claims::{Claims, pins};
-use esp_base::route::sink::{SinkRoute, transfers};
-use esp_base::route::table::{Kind, Routes};
-use esp_base::route::stopped_event;
+use crate::chip::{Direction, Profile};
+use crate::periph::claims::{Claims, pins};
+use crate::route::sink::{SinkRoute, transfers};
+use crate::route::table::{Kind, Routes};
+use crate::route::stopped_event;
 use middleware::Key;
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
@@ -79,7 +79,7 @@ use {
     super::camera,
     super::i2c::{self, Bus0},
     super::pwm::{self, Pwm},
-    esp_base::periph::claims::Owner,
+    crate::periph::claims::Owner,
     wasm_host::{CameraPins, I2cConfig, PwmSpec},
 };
 
@@ -199,8 +199,8 @@ impl EspDevice {
         if self.camera.is_some() {
             return Err(AbiError::Busy);
         }
-        let route = esp_base::route::SourceRoute::camera(cfg, now_ms())?;
-        let route_key = esp_base::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
+        let route = crate::route::SourceRoute::camera(cfg, now_ms())?;
+        let route_key = crate::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
         if pins.all().into_iter().any(|p| self.routes.owns_pin(p)) {
             return Err(AbiError::Busy);
         }
@@ -397,7 +397,7 @@ impl Device for EspDevice {
             return Err(AbiError::InvalidKey);
         }
         #[cfg(feature = "espnow")]
-        if esp_base::radio::goes_over_air(key) {
+        if crate::radio::goes_over_air(key) {
             super::radio::send(key, data);
         }
         self.bus.publish(key, data).map_err(|_| AbiError::Transport)
@@ -595,7 +595,7 @@ impl Device for EspDevice {
 
     #[cfg(feature = "espnow")]
     fn route_source(&mut self, source: Source, key: Key<'_>, cfg: SourceConfig) -> Result<u8, AbiError> {
-        if !esp_base::radio::carries_routes(key) {
+        if !crate::radio::carries_routes(key) {
             return Err(AbiError::Unsupported);
         }
         match source {
@@ -605,8 +605,8 @@ impl Device for EspDevice {
             #[cfg(not(feature = "esp32"))]
             Source::Camera(_) => return Err(AbiError::Unsupported),
         }
-        let route = esp_base::route::SourceRoute::new(cfg, now_ms())?;
-        let route_key = esp_base::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
+        let route = crate::route::SourceRoute::new(cfg, now_ms())?;
+        let route_key = crate::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
         let (routes, handle) = self.routes.add(key, Kind::Source)?;
         self.routes = routes;
         super::radio::with_sources(|t| t.start(handle, route_key, route));

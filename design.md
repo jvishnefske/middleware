@@ -1243,7 +1243,7 @@ because WASM linear memory and the wasmi interpreter require one.
 
 - [x] E1 Builds for `esp32`, `esp32s3` and `esp32c3` from one source tree
   via cargo features —
-  `firmware/build.sh esp32`, `esp32s3`, `esp32c3` release builds; `compile_error!` in `firmware/src/main.rs` unless exactly one chip feature is set.
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3` release builds; `compile_error!` in `firmware/src/lib.rs` unless exactly one chip feature is set when the shell is built.
 - [ ] E2 Serves the protocol on UART0 (bridge chips) on all chips and on
   USB-Serial-JTAG on S3 and C3. Implemented (`firmware/src/shell/board.rs`,
   `link.rs`) and builds. Hardware evidence so far: UART0 behind a CH340 on an
@@ -1360,6 +1360,63 @@ because WASM linear memory and the wasmi interpreter require one.
   with every byte outside printable ASCII, and `\`, as `\xNN`, so a
   beacon cannot inject terminal escapes or line breaks into `sys/log` —
   `radio::disc::tests::e22_log_lines_escape_radio_supplied_text`.
+- [x] E24 The imperative shell is part of the `esp_base` library
+  (`esp_base::shell`, feature `shell`, enabled by each chip feature), so
+  a board crate depends on `esp-base` with a chip feature and calls
+  `esp_base::shell::run(spawner, &BOARD)` instead of compiling the
+  shell's sources by path. The `esp-base` binary is that call with the
+  chip default. The firmware version and chip name in `sys/info` and the
+  boot log are the caller's (`Board::firmware`, `Board::profile().name`),
+  not the `CARGO_PKG_VERSION` of whichever crate compiles the shell. A
+  board built from another chip's profile runs the chip default instead,
+  reporting `<esp-base version>+wrong-board` and logging both chips. The
+  binary crate keeps the entry point, the application descriptor and the
+  `-Tlinkall.x` link argument. Moving the shell left the ESP32-S3
+  `.bss` unchanged (218 560 B); `.stack` went from 41 480 to 41 448 B
+  (`.data` +32 B) —
+  `board::tests::e24_board_must_match_the_compiled_chip`;
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3`; a scratch board crate
+  depending on `esp-base` by path with `features = ["esp32s3"]` built
+  with its own board (2026-11-01). On hardware still to be seen.
+- [x] E25 A board profile (`esp_base::board::Board`) is constructible
+  outside the crate with `const fn` builders on a chip profile: the
+  `sys/info` name (at most 32 bytes), the firmware version, extra
+  reserved pins, released pins (only those a chip reserves for module
+  flash or PSRAM some boards lack: ESP32-S3 GPIO33–37, ESP32 GPIO16/17;
+  never the console UART, USB D-/D+ or SPI flash pins), the presence
+  button (default BOOT: GPIO0, or GPIO9 on the ESP32-C3), an optional
+  safe-mode pin, the image cap (within one payload slot and, with the
+  runtime, the heap plan) and fuel per call. `build` returns the first
+  problem as a `BoardError`, so a bad `static` board is a compile error.
+  `Board::chip_default` reproduces every chip's behaviour before boards
+  existed. The shell builds its pin bank from the board and never makes a
+  `Flex` for a reserved pin —
+  `board::tests::e25_chip_default_reproduces_every_chip_profile`,
+  `e25_board_names_itself_and_reports_the_callers_firmware`,
+  `e25_reserve_keeps_pins_from_payloads`,
+  `e25_release_opens_module_psram_pins_only`,
+  `e25_presence_and_safe_mode_must_be_payload_pins`,
+  `e25_max_image_fits_a_slot_and_the_heap`,
+  `e25_first_error_wins_and_errors_describe_themselves`;
+  `chip::tests::e25_releasable_pins_are_reserved_module_memory_pins`;
+  the `esp_base::board` doctest (a conagotchi-style board as a `static`).
+- [x] E26 Safe mode: a board's optional safe-mode pin is sampled once at
+  boot through the pin bank (pull-up enabled, 1 ms blocking settle,
+  read, returned to high impedance), active low. Held, the stored
+  payload stays installed and `Stopped` but is not autostarted, and
+  `sys/log` says `safe mode: GPIO<n> held at boot; stored payload not
+  started`; `sys/payload/start` still starts it. An unreadable pin is
+  logged and does not block the start. Without `wasm` nothing autostarts,
+  so the pin is not sampled. The decision is the pure
+  `board::autostart` —
+  `board::tests::e26_safe_mode_held_at_boot_skips_autostart_only`,
+  `e26_safe_mode_keeps_the_payload_installed`. On hardware still to be
+  seen.
+- [x] E27 Fuel per call is a board field (`Board::fuel_per_call`,
+  default `wasm_abi::FUEL_PER_CALL`, never zero); the controller meters
+  every call into the payload with it —
+  `board::tests::e27_fuel_per_call_is_a_board_field`,
+  `e25_chip_default_reproduces_every_chip_profile`.
 
 #### Interpreter speed on the badge
 

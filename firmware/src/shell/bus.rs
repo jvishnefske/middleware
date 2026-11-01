@@ -31,7 +31,7 @@ use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 use middleware::Key;
-use esp_base::ota::Origin;
+use crate::ota::Origin;
 
 /// Number of serial ports the protocol can run on (each subscribes to
 /// outbound publications).

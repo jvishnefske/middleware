@@ -12,6 +12,15 @@
 //!   or module PSRAM, the USB D-/D+ pair, and UART0 TX/RX (the protocol
 //!   port).
 //! * `input_only` — pins without an output driver (ESP32 GPIO34–39).
+//! * `releasable` — reserved pins that only some modules wire to flash or
+//!   PSRAM (ESP32 GPIO16/17, PSRAM on WROVER modules; ESP32-S3 GPIO33–37,
+//!   octal flash/PSRAM). A board without that memory may open them to
+//!   payloads with [`crate::board::BoardBuilder::release`]; the chip
+//!   profiles keep them reserved.
+//!
+//! The chip profiles are the defaults; a board adapts one (name, pins,
+//! image cap) through [`crate::board::Board`], which is what the shell runs
+//! with.
 //!
 //! # Board pin map (ABI 3 PWM and I2C, R15 camera)
 //!
@@ -183,6 +192,8 @@ pub struct Profile {
     gpio: u64,
     reserved: u64,
     input_only: u64,
+    /// Reserved pins a board may release (see the module docs).
+    releasable: u64,
     /// Output pin of PWM timer 0's channels 0..3 (see the board pin map).
     pwm0: [Option<u8>; 4],
     /// I2C bus 0's (SDA, SCL).
@@ -223,6 +234,7 @@ pub const ESP32: Profile = Profile {
     gpio: span(0, 19) | span(21, 23) | span(25, 27) | span(32, 39),
     reserved: bit(1) | bit(3) | span(6, 11) | bit(16) | bit(17),
     input_only: span(34, 39),
+    releasable: bit(16) | bit(17),
     pwm0: [Some(0), Some(4), Some(13), Some(14)],
     i2c0: Some((26, 27)),
     camera: true,
@@ -245,6 +257,7 @@ pub const ESP32S3: Profile = Profile {
     gpio: span(0, 21) | span(26, 48),
     reserved: bit(19) | bit(20) | span(26, 37) | bit(43) | bit(44),
     input_only: 0,
+    releasable: span(33, 37),
     pwm0: [None; 4],
     i2c0: None,
     camera: false,
@@ -267,6 +280,7 @@ pub const ESP32C3: Profile = Profile {
     gpio: span(0, 21),
     reserved: span(12, 17) | bit(18) | bit(19) | bit(20) | bit(21),
     input_only: 0,
+    releasable: 0,
     pwm0: [None; 4],
     i2c0: None,
     camera: false,
@@ -291,6 +305,7 @@ pub const ESP8266: Profile = Profile {
     gpio: span(0, 16),
     reserved: span(6, 11) | bit(1) | bit(3),
     input_only: 0,
+    releasable: 0,
     pwm0: [None; 4],
     i2c0: None,
     camera: false,
@@ -308,7 +323,7 @@ impl Chip {
     }
 }
 
-fn has(mask: u64, pin: u8) -> bool {
+const fn has(mask: u64, pin: u8) -> bool {
     pin < 64 && mask & (1u64 << pin) != 0
 }
 
@@ -319,13 +334,32 @@ impl Profile {
     }
 
     /// Whether `pin` exists on the chip.
-    pub fn exists(&self, pin: u8) -> bool {
+    pub const fn exists(&self, pin: u8) -> bool {
         has(self.gpio, pin)
     }
 
     /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
-    pub fn is_reserved(&self, pin: u8) -> bool {
+    pub const fn is_reserved(&self, pin: u8) -> bool {
         has(self.reserved, pin)
+    }
+
+    /// Whether `pin` is reserved only for module flash or PSRAM that some
+    /// boards lack, so a board may release it
+    /// ([`crate::board::BoardBuilder::release`]).
+    pub const fn is_releasable(&self, pin: u8) -> bool {
+        has(self.releasable, pin)
+    }
+
+    /// The same profile with `pin` (below 64) reserved or not.
+    pub(crate) const fn with_reserved(mut self, pin: u8, reserved: bool) -> Profile {
+        if pin < 64 {
+            if reserved {
+                self.reserved |= 1u64 << pin;
+            } else {
+                self.reserved &= !(1u64 << pin);
+            }
+        }
+        self
     }
 
     /// Whether `pin` exists and has an output driver (ESP32 GPIO34–39 do
@@ -521,6 +555,21 @@ mod tests {
         }
         assert_eq!(ESP8266.payload_pins().count(), 9);
         assert!(ESP32S3.payload_pins().all(|p| !ESP32S3.is_reserved(p)));
+    }
+
+    #[test]
+    fn e25_releasable_pins_are_reserved_module_memory_pins() {
+        for p in ALL {
+            for pin in 0..64 {
+                if p.is_releasable(pin) {
+                    assert!(p.is_reserved(pin), "{} {pin}", p.name);
+                }
+            }
+        }
+        assert!((33..=37).all(|pin| ESP32S3.is_releasable(pin)));
+        assert!((26..=32).all(|pin| !ESP32S3.is_releasable(pin)));
+        assert!(ESP32.is_releasable(16) && ESP32.is_releasable(17) && !ESP32.is_releasable(6));
+        assert!((0..64).all(|pin| !ESP32C3.is_releasable(pin) && !ESP8266.is_releasable(pin)));
     }
 
     #[test]

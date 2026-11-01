@@ -1,8 +1,15 @@
-//! Pure core of the ESP base firmware.
+//! The ESP base firmware: its pure core and (feature `shell`) its
+//! imperative shell.
 //!
-//! Everything here is deterministic decision logic with no hardware access,
-//! so it is unit tested on the host (`cargo test --lib`, no chip feature):
+//! Everything outside `shell` is deterministic decision logic with no
+//! hardware access, so it is unit tested on the host (`cargo test --lib`,
+//! no chip feature):
 //!
+//! * [`board`] — board profiles: a chip [`chip::Profile`] adapted to a
+//!   board (`sys/info` name and firmware version, reserved and released
+//!   pins, presence button, safe-mode pin, image cap, fuel per call), with
+//!   `const fn` builders a board crate uses, and the boot decision whether
+//!   the stored payload autostarts (safe mode).
 //! * [`chip`] — per-chip profiles: name, heap plan, WASM memory limit,
 //!   largest payload image, and the GPIO tables that decide which pins a
 //!   payload may touch (flash/PSRAM, USB D+/D-, and console UART pins are
@@ -48,13 +55,35 @@
 //!   cover the payload's bound (`wasm_host::Limits::heap_needed`) plus
 //!   a margin.
 //!
-//! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
-//! with a chip feature (`esp32`, `esp32s3`, `esp32c3`). It owns the UARTs,
-//! USB-Serial-JTAG, flash and GPIO, performs the [`dispatch::Action`]s and
-//! runs the payload.
+//! The imperative shell (`shell`, `src/shell/`) is only compiled with a
+//! chip feature (`esp32`, `esp32s3`, `esp32c3`, each of which enables
+//! `shell`). It owns the UARTs, USB-Serial-JTAG, flash and GPIO, performs
+//! the [`dispatch::Action`]s and runs the payload. It is a library module
+//! so a board crate can run it with its own [`board::Board`]
+//! (`shell::run`); the `esp-base` binary (`src/main.rs`) is the same call
+//! with the chip default.
 #![no_std]
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::mem_forget,
+    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
+    holding buffers for the duration of a data transfer."
+)]
 
+#[cfg(all(feature = "shell", not(any(feature = "esp32", feature = "esp32s3", feature = "esp32c3"))))]
+compile_error!("the shell needs exactly one chip feature: esp32, esp32s3 or esp32c3");
+
+#[cfg(any(
+    all(feature = "esp32", feature = "esp32s3"),
+    all(feature = "esp32", feature = "esp32c3"),
+    all(feature = "esp32s3", feature = "esp32c3"),
+))]
+compile_error!("enable exactly one chip feature: esp32, esp32s3 or esp32c3");
+
+#[cfg(feature = "shell")]
+extern crate alloc;
+
+pub mod board;
 pub mod camera;
 pub mod chip;
 pub mod dispatch;
@@ -67,6 +96,8 @@ pub mod radio;
 #[cfg(test)]
 mod ram_flash;
 pub mod route;
+#[cfg(feature = "shell")]
+pub mod shell;
 pub mod start;
 pub mod store;
 pub mod trust_store;

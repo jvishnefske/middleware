@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### ESP base firmware as a library: board profiles, safe mode (E24–E27)
+- The imperative shell moved from the `esp-base` binary into the library as `esp_base::shell` (feature `shell`, enabled by each chip feature). A board crate depends on `esp-base` with `features = ["esp32s3"]` (or `esp32`, `esp32c3`) and calls `esp_base::shell::run(spawner, &BOARD).await` from its own `#[esp_rtos::main]`; it keeps the application descriptor (`esp_bootloader_esp_idf::esp_app_desc!()`), the `-Tlinkall.x` link argument in its build script, and direct dependencies on `esp-hal`, `esp-rtos`, `esp-bootloader-esp-idf` and `embassy-executor` with the chip feature (the entry-point macro names them). The library links `esp-backtrace` as the panic handler. `esp_base::shell::CHIP` is the compiled chip's profile. The `esp-base` binary is now that call with the chip default.
+- New `esp_base::board`: `Board` (a chip `Profile` adapted to a board) with `const fn` builders `Board::builder(&chip, firmware)`, `.name`, `.reserve(&[pins])`, `.release(&[pins])`, `.presence(pin)`, `.safe_mode(pin)`, `.max_image(bytes)`, `.fuel_per_call(fuel)` and `.build() -> Result<Board, BoardError>`; `Board::chip_default` keeps every chip's previous behaviour. Releasable pins are those a chip reserves only for module memory: ESP32-S3 GPIO33–37 and ESP32 GPIO16/17 (`Profile::is_releasable`). `Profile::exists` and `is_reserved` are now `const fn`.
+- `sys/info` reports the board's name and firmware version, not `CARGO_PKG_VERSION` of the crate compiling the shell. A board built from another chip's profile runs the chip default and reports `<version>+wrong-board`.
+- Safe mode: a board's safe-mode pin held low at boot keeps the stored payload installed but not started (`safe mode: GPIO<n> held at boot; stored payload not started` on `sys/log`). Pure decision `board::autostart`.
+- Fuel per call comes from the board (`Board::fuel_per_call`, default `wasm_abi::FUEL_PER_CALL`).
+- ESP32-S3 `.bss` unchanged (218 560 B), `.stack` 41 448 B (was 41 480 B).
+
 ## 0.5.0
 
 ### Migration from 0.4

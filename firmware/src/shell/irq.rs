@@ -21,7 +21,7 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use esp_base::periph::overflow_report as report;
+use crate::periph::overflow_report as report;
 use middleware::wasm_abi::events::{Event, EventKind, EventQueue, MAX_EVENTS, Pushed};
 
 struct Queue {

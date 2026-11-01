@@ -1,12 +1,12 @@
 //! PWM for payloads on the ESP32 (ABI 3 `pwm_open` / `pwm_set` /
 //! `pwm_stop`): LEDC high-speed timer 0 and its channels 0..3.
 //!
-//! The board pin map (`esp_base::chip`, ESP32-CAM) wires PWM timer 0's
+//! The board pin map (`crate::chip`, ESP32-CAM) wires PWM timer 0's
 //! channels to GPIO 0 (the camera's XCLK), 4 (the flash LED), 13 and 14.
 //! [`Pwm::new`] takes the LEDC peripheral and turns its clock on through
 //! esp-hal's [`Ledc`] (which never turns it off again); [`Pwm`] then keeps
 //! only the frequency plan of the open timer
-//! (`esp_base::periph::pwm::plan`: the most duty bits the frequency
+//! (`crate::periph::pwm::plan`: the most duty bits the frequency
 //! allows, 2 at 20 MHz), so it can rest in the device's static home.
 //! esp-hal's LEDC timer and channel handles borrow the register block and
 //! each other, so they are rebuilt for each call (they are register
@@ -17,9 +17,9 @@
 //! the bank and is released with it.
 //!
 //! The duty is the ABI's 16-bit fraction rounded to the timer's resolution
-//! (`esp_base::periph::pwm::duty_counts`).
+//! (`crate::periph::pwm::duty_counts`).
 
-use esp_base::periph::pwm::{APB_HZ, Plan, duty_counts, plan};
+use crate::periph::pwm::{APB_HZ, Plan, duty_counts, plan};
 use esp_hal::gpio::{DriveMode, NoPin, OutputSignal};
 use esp_hal::ledc::channel::{self, ChannelHW, ChannelIFace};
 use esp_hal::ledc::timer::{self, TimerIFace};

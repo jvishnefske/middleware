@@ -4,8 +4,12 @@
 //! [`PinBank`] owns every pin a payload may use, as an `esp_hal` [`Flex`]
 //! indexed by GPIO number; pins the chip profile reserves (flash, PSRAM,
 //! USB, console UART) are never inserted. Every operation is first checked
-//! against [`Profile::check_pin`], so the pure policy in `esp_base::chip`
+//! against [`Profile::check_pin`], so the pure policy in `crate::chip`
 //! decides what a payload may touch.
+//!
+//! [`PinBank::boot_button`] samples the board's presence button for the
+//! re-key window; preceded by [`PinHome::settle_pull_up`] and a short wait
+//! it also reads the board's safe-mode pin once at boot (`super::run`).
 //!
 //! # Where the bank lives
 //!
@@ -23,7 +27,7 @@
 //! esp-hal GPIO interrupt handler. For each pin with an edge enabled —
 //! O(pins), no allocation — the ISR checks the pin's interrupt status,
 //! reads the level, clears the status, and pushes an event when
-//! [`Edge::matches`] the level (via `esp_base::periph::gpio_event`),
+//! [`Edge::matches`] the level (via `crate::periph::gpio_event`),
 //! timestamped in microseconds. A pin must be an input (`gpio_input`)
 //! before `gpio_irq`; reconfiguring it drops the interrupt.
 //!
@@ -43,8 +47,8 @@ use core::cell::RefCell;
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use esp_base::chip::{Direction, Profile};
-use esp_base::periph::gpio_event;
+use crate::chip::{Direction, Profile};
+use crate::periph::gpio_event;
 use esp_hal::gpio::{
     Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal, Pull as HalPull,
 };
@@ -158,6 +162,19 @@ impl PinBank {
             }
             Mode::Input if slot.pull_up => Some(slot.pin.is_low()),
             Mode::Input | Mode::Output | Mode::Peripheral => None,
+        }
+    }
+
+    /// Enables the pull-up and input buffer of idle pin `n` without
+    /// changing its mode, so a [`boot_button`](Self::boot_button) sample
+    /// taken after the line settles reads it pulled up (the boot-time
+    /// safe-mode sample). A pin that is not idle is left alone.
+    pub fn settle_pull_up(&mut self, n: u8) {
+        if let Some(Some(slot)) = self.slots.get_mut(usize::from(n))
+            && slot.mode == Mode::Idle
+        {
+            slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::Up));
+            slot.pin.set_input_enable(true);
         }
     }
 
@@ -324,6 +341,11 @@ impl PinHome {
     /// `None` before the bank is installed or while it is borrowed.
     pub fn boot_button(&self, n: u8) -> Option<bool> {
         self.with_home(|h| h.bank.as_mut().and_then(|b| b.boot_button(n))).flatten()
+    }
+
+    /// Pulls idle pin `n` up ahead of a sample ([`PinBank::settle_pull_up`]).
+    pub fn settle_pull_up(&self, n: u8) {
+        self.with_home(|h| h.bank.as_mut().map(|b| b.settle_pull_up(n)));
     }
 
     /// Takes the lease for a payload, with every pin released; `None` when

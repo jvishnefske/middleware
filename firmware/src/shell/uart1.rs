@@ -36,9 +36,9 @@
 use core::future::pending;
 
 use embassy_futures::select::{Either, select};
-use esp_base::periph::dma::DmaState;
-use esp_base::periph::ring::RxRing;
-use esp_base::periph::{dma_done_event, uart_rx_event};
+use crate::periph::dma::DmaState;
+use crate::periph::ring::RxRing;
+use crate::periph::{dma_done_event, uart_rx_event};
 use esp_hal::{Async, Blocking};
 use esp_hal::gpio::{InputSignal, Level, OutputSignal};
 use esp_hal::uart::{Config, Uart};

@@ -1,27 +1,30 @@
-//! Physical presence: the BOOT button task and the shared re-key window.
+//! Physical presence: the presence-button task and the shared re-key
+//! window.
 //!
-//! [`watch`] samples the BOOT button every
-//! [`POLL_MS`](esp_base::presence::POLL_MS) and runs the pure
+//! [`watch`] samples the board's presence button
+//! ([`crate::board::Board::presence`], by default the BOOT button) every
+//! [`POLL_MS`](crate::presence::POLL_MS) and runs the pure
 //! [`Hold`] detector. When the button has been held for
-//! [`PRESENCE_HOLD_MS`](esp_base::presence::PRESENCE_HOLD_MS) (pressed
+//! [`PRESENCE_HOLD_MS`](crate::presence::PRESENCE_HOLD_MS) (pressed
 //! after boot), it opens the re-key [`Window`] for
 //! [`REKEY_WINDOW_MS`](middleware::loader::trust::REKEY_WINDOW_MS) and logs
 //! it on `sys/log`; when the window times out it closes it and logs that.
 //! The controller reads the window per request ([`window_open`]) and closes
 //! it after a successful claim ([`close`]).
 //!
-//! The button is GPIO0 on ESP32 and ESP32-S3 and GPIO9 on ESP32-C3. With
-//! `wasm` the pin stays in the payload pin bank (payloads use it as a
-//! button) and is sampled through [`PINS`](super::gpio::PINS), which
-//! refuses to report it while a payload drives it or pulls it down. On
-//! ESP32-C3 (no runtime) the shell owns it as a pulled-up input.
+//! By default the button is GPIO0 on ESP32 and ESP32-S3 and GPIO9 on
+//! ESP32-C3. With `wasm` the pin stays in the payload pin bank (payloads
+//! use it as a button) and is sampled through
+//! [`PINS`](super::gpio::PINS), which refuses to report it while a payload
+//! drives it or pulls it down. On ESP32-C3 (no runtime) the shell owns it
+//! as a pulled-up input.
 
 use core::cell::Cell;
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Ticker};
-use esp_base::presence::{Hold, POLL_MS};
+use crate::presence::{Hold, POLL_MS};
 use middleware::loader::trust::Window;
 
 use super::bus::Bus;
@@ -45,12 +48,13 @@ pub fn close() {
     WINDOW.lock(|w| w.set(Window::Closed));
 }
 
-/// The BOOT button.
+/// The presence button.
 pub struct BootButton {
     #[cfg(feature = "wasm")]
     pin: u8,
+    /// `None` reads as never pressed.
     #[cfg(not(feature = "wasm"))]
-    pin: esp_hal::gpio::Input<'static>,
+    pin: Option<esp_hal::gpio::Input<'static>>,
 }
 
 impl BootButton {
@@ -60,9 +64,9 @@ impl BootButton {
         BootButton { pin }
     }
 
-    /// An input owned by the shell.
+    /// An input owned by the shell (`None`: no readable pin).
     #[cfg(not(feature = "wasm"))]
-    pub fn owned(pin: esp_hal::gpio::Input<'static>) -> Self {
+    pub fn owned(pin: Option<esp_hal::gpio::Input<'static>>) -> Self {
         BootButton { pin }
     }
 
@@ -71,11 +75,11 @@ impl BootButton {
         #[cfg(feature = "wasm")]
         return super::gpio::PINS.boot_button(self.pin);
         #[cfg(not(feature = "wasm"))]
-        Some(self.pin.is_low())
+        self.pin.as_ref().map(|p| p.is_low())
     }
 }
 
-/// Watches the BOOT button forever (see the module docs).
+/// Watches the presence button forever (see the module docs).
 #[embassy_executor::task]
 pub async fn watch(mut boot: BootButton, bus: &'static Bus) {
     let mut hold = Hold::default();
