@@ -647,3 +647,79 @@ fn m1_reserved_addresses_build_no_node() {
     assert!(Address::node(0x61).is_err());
     assert!(Address::node(0x7F).is_err());
 }
+
+/// A master flooding a node with requests that claim a deadline of a day
+/// cannot starve its publications: requests take at most `Q - 1` inbox
+/// entries, the rest are dropped, a publication still finds room, and the
+/// queued requests are gone after the node's own cap.
+#[tokio::test]
+async fn m18_request_flood_cannot_starve_publications() {
+    let bus = bus::bus();
+    let mut attacker = node(&bus, 0x10);
+    let mut publisher = node(&bus, 0x11);
+    let mut victim = node_with(
+        &bus,
+        0x12,
+        Config::new(addr(0x12)).with_max_request_queue_ms(100),
+    );
+    let day = RequestOptions::DEFAULT
+        .with_target(Target::Node(victim.sender_id()))
+        .with_timeout(Duration::from_secs(86_400));
+    let mut out = [0u8; 16];
+    for _ in 0..5 {
+        // Send, then abandon the wait (request_with is cancel safe).
+        let r = tokio::time::timeout(
+            Duration::from_millis(20),
+            attacker.request_with(KA, b"park", &mut out, &day),
+        )
+        .await;
+        assert!(r.is_err(), "nobody answers");
+    }
+    publisher
+        .publish(KB, b"still heard")
+        .await
+        .expect("publish");
+    let got = drain(&mut victim);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].2, b"still heard");
+    let q = middleware::smbus::node::DEFAULT_INBOX;
+    assert_eq!(victim.inbox_len(), q - 1, "requests hold all but one entry");
+    assert_eq!(victim.stats().rx.inbox_dropped as usize, 5 - (q - 1));
+    // The node's 100 ms cap applies, not the requester's day.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(drain(&mut victim).is_empty());
+    assert_eq!(victim.inbox_len(), 0);
+    assert_eq!(victim.stats().rx.expired_requests as usize, q - 1);
+}
+
+/// A node configured not to serve drops requests on arrival (the requester
+/// times out, no reply is written) and refuses `serve_one`; publications
+/// are unaffected.
+#[tokio::test]
+async fn m18_a_node_that_does_not_serve_refuses_requests() {
+    let bus = bus::bus();
+    let mut client = node(&bus, CLIENT);
+    let mut sensor = node_with(&bus, DEVICE, Config::new(addr(DEVICE)).serving(false));
+    let to = RequestOptions::DEFAULT
+        .with_target(Target::Node(sensor.sender_id()))
+        .with_timeout(Duration::from_millis(100));
+    let mut out = [0u8; 16];
+    let mut buf = [0u8; 64];
+    let (got, polled) = tokio::join!(client.request_with(KA, b"x", &mut out, &to), async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        sensor.try_recv(&mut buf).map(|s| s.is_none())
+    });
+    assert_eq!(got.expect_err("refused"), SmbusError::Timeout);
+    assert_eq!(polled, Ok(true));
+    assert_eq!(sensor.stats().rx.refused_requests, 1);
+    assert_eq!(sensor.inbox_len(), 0);
+    assert_eq!(bus.borrow().writes(DEVICE, CLIENT), 0, "no reply written");
+    let mut scratch = [0u8; 64];
+    let e = sensor
+        .serve_one(&mut handler_fn(echo), &mut scratch)
+        .await
+        .expect_err("not serving");
+    assert_eq!(e, SmbusError::NotServing);
+    client.publish(KB, b"data").await.expect("publish");
+    assert_eq!(drain(&mut sensor).len(), 1);
+}

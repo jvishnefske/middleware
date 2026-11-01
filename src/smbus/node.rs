@@ -16,7 +16,8 @@
 //!
 //! `B` is the block size (data bytes per block, 32 for SMBus 2.0, up to 255
 //! for SMBus 3.x), `M` the largest message body a node sends or
-//! reassembles, `R` the reassembly slots and `Q` the inbox entries. Every
+//! reassembles, `R` the reassembly slots and `Q` the inbox entries (at
+//! least 2: requests may take all but one). Every
 //! node on a bus must use the same `B` and the same `M` (a node drops
 //! messages over its own `M`). With the defaults (32, 512, 4, 4) a node
 //! holds about 5.6 KB besides its master, target and clock: `M × (R + Q)`
@@ -38,10 +39,27 @@
 //!   responder, same correlation id); any other reply is stale and counted.
 //!
 //! `recv` and `try_recv` return the oldest queued publication; `serve_one`
-//! takes the oldest queued request. A queued request whose deadline (or,
-//! without one, [`Config::default_timeout_ms`]) has passed is dropped: its
-//! requester has given up. Publications and requests share the inbox; a
-//! node that never serves should not be sent requests.
+//! takes the oldest queued request.
+//!
+//! # Request admission
+//!
+//! Any master on the bus can send requests, so the node, not the
+//! requester, bounds what they cost:
+//!
+//! * requests occupy at most `Q - 1` inbox entries (a further request is
+//!   dropped and counted in [`RxStats::inbox_dropped`]), so at least one
+//!   entry is always left for publications;
+//! * a queued request is dropped ([`RxStats::expired_requests`]) once it
+//!   has waited `min(its deadline, `[`Config::max_request_queue_ms`]`)`, or
+//!   the cap alone when it carries no deadline; the cap defaults to
+//!   [`Config::default_timeout_ms`], so a requester claiming a deadline of
+//!   days cannot park requests in the inbox;
+//! * a node configured with [`Config::serving`]`(false)` drops every
+//!   request on arrival and counts it ([`RxStats::refused_requests`]); it
+//!   sends no error reply, because a refusal would make the receive path
+//!   write to the bus on any master's behalf (the receive half has no
+//!   master at all), so the requester sees [`SmbusError::Timeout`]. Its
+//!   `serve_one` fails at once with [`SmbusError::NotServing`].
 //!
 //! # Delivery and gaps
 //!
@@ -218,6 +236,8 @@ pub enum SmbusError<ME, TE> {
     /// [`MAX_IDLE_TRANSACTIONS`] transactions passed without what the call
     /// waits for.
     SkipLimit,
+    /// `serve_one` on a node configured with [`Config::serving`]`(false)`.
+    NotServing,
     /// A queued message failed to decode (not expected: messages are
     /// checked before they are queued).
     Malformed,
@@ -242,6 +262,8 @@ pub struct Config {
     retry: RetryPolicy,
     reassembly_timeout_ms: u32,
     default_timeout_ms: u32,
+    max_request_queue_ms: Option<u32>,
+    serving: bool,
 }
 
 impl Config {
@@ -255,6 +277,8 @@ impl Config {
             retry: RetryPolicy::DEFAULT,
             reassembly_timeout_ms: DEFAULT_REASSEMBLY_TIMEOUT_MS,
             default_timeout_ms: DEFAULT_TIMEOUT_MS,
+            max_request_queue_ms: None,
+            serving: true,
         }
     }
 
@@ -305,6 +329,24 @@ impl Config {
         }
     }
 
+    /// The same configuration keeping a received request queued at most
+    /// `ms` before `serve_one` takes it, whatever deadline the requester
+    /// claims (see the module docs, "Request admission"). Unset, the cap is
+    /// [`Config::default_timeout_ms`].
+    pub const fn with_max_request_queue_ms(self, ms: u32) -> Config {
+        Config {
+            max_request_queue_ms: Some(ms),
+            ..self
+        }
+    }
+
+    /// The same configuration accepting requests (`true`, the default) or
+    /// dropping every request on arrival (`false`, for a node that never
+    /// calls `serve_one`; see the module docs, "Request admission").
+    pub const fn serving(self, serving: bool) -> Config {
+        Config { serving, ..self }
+    }
+
     /// The node's own address.
     pub const fn address(&self) -> Address {
         self.address
@@ -333,6 +375,21 @@ impl Config {
     /// The request timeout used when the caller sets none.
     pub const fn default_timeout_ms(&self) -> u32 {
         self.default_timeout_ms
+    }
+
+    /// The longest a request stays queued: the value set by
+    /// [`Config::with_max_request_queue_ms`], else
+    /// [`Config::default_timeout_ms`].
+    pub const fn max_request_queue_ms(&self) -> u32 {
+        match self.max_request_queue_ms {
+            Some(ms) => ms,
+            None => self.default_timeout_ms,
+        }
+    }
+
+    /// Whether the node accepts requests.
+    pub const fn is_serving(&self) -> bool {
+        self.serving
     }
 }
 
@@ -369,6 +426,8 @@ pub struct RxStats {
     pub expired_requests: u32,
     /// Replies nobody was waiting for.
     pub stale_replies: u32,
+    /// Requests dropped on arrival by a node not serving.
+    pub refused_requests: u32,
 }
 
 /// Both directions' counters.
@@ -451,8 +510,12 @@ impl<const Q: usize, const M: usize> Inbox<Q, M> {
         }
     }
 
-    /// Queues a message; false (nothing changed) when full or too long.
+    /// Queues a message; false (nothing changed) when full, too long, or a
+    /// request when requests already hold `Q - 1` entries.
     fn push(&mut self, head: Head, gap: Option<u16>, now_ms: u64, body: &[u8]) -> bool {
+        if head.kind == Kind::Request && self.count(Kind::Request) + 1 >= Q {
+            return false;
+        }
         let Some(slot) = self.entries.iter_mut().find(|e| e.is_none()) else {
             return false;
         };
@@ -500,9 +563,19 @@ impl<const Q: usize, const M: usize> Inbox<Q, M> {
         self.entries.iter().flatten().count()
     }
 
-    /// Drops queued requests whose deadline (or `default_ms`) has passed at
-    /// `now_ms`; returns how many.
-    fn expire_requests(&mut self, now_ms: u64, default_ms: u32) -> u32 {
+    /// Entries of `kind`.
+    fn count(&self, kind: Kind) -> usize {
+        self.entries
+            .iter()
+            .flatten()
+            .filter(|e| e.kind == kind)
+            .count()
+    }
+
+    /// Drops queued requests that have waited longer than
+    /// `min(deadline, max_ms)` (or `max_ms` without a deadline) at `now_ms`;
+    /// returns how many.
+    fn expire_requests(&mut self, now_ms: u64, max_ms: u32) -> u32 {
         let mut n = 0;
         for e in self.entries.iter_mut() {
             let expired = e.as_ref().is_some_and(|e| {
@@ -511,8 +584,8 @@ impl<const Q: usize, const M: usize> Inbox<Q, M> {
                         Ok(Message::Request {
                             deadline_ms: Some(d),
                             ..
-                        }) => d,
-                        _ => default_ms,
+                        }) => d.min(max_ms),
+                        _ => max_ms,
                     };
                     now_ms.saturating_sub(e.arrived_ms) > u64::from(budget)
                 }
@@ -571,6 +644,7 @@ impl<const M: usize, const R: usize, const Q: usize> RxState<M, R, Q> {
                 inbox_dropped: 0,
                 expired_requests: 0,
                 stale_replies: 0,
+                refused_requests: 0,
             },
         }
     }
@@ -645,7 +719,9 @@ impl<const M: usize, const R: usize, const Q: usize> RxState<M, R, Q> {
                 Got::Nothing
             }
             Message::Request { .. } => {
-                if !inbox.push(head, None, now_ms, body) {
+                if !cfg.serving {
+                    stats.refused_requests = stats.refused_requests.saturating_add(1);
+                } else if !inbox.push(head, None, now_ms, body) {
                     stats.inbox_dropped = stats.inbox_dropped.saturating_add(1);
                 }
                 Got::Nothing
@@ -684,7 +760,7 @@ impl<const M: usize, const R: usize, const Q: usize> RxState<M, R, Q> {
         }
         let n = self
             .inbox
-            .expire_requests(ctx.clock.now_ms(), ctx.cfg.default_timeout_ms);
+            .expire_requests(ctx.clock.now_ms(), ctx.cfg.max_request_queue_ms());
         self.stats.expired_requests = self.stats.expired_requests.saturating_add(n);
         Ok(())
     }
@@ -1013,8 +1089,8 @@ impl<I2C, T, C, const B: usize, const M: usize, const R: usize, const Q: usize>
             && B <= MAX_BLOCK
             && M <= wire::max_body(B)
             && M > MAX_KEY_LEN + REQUEST_HEAD
-            && Q >= 1,
-        "SmbusNode: need 4 <= B <= 255, MAX_KEY_LEN + 5 < M <= 128 * (B - 3), Q >= 1"
+            && Q >= 2,
+        "SmbusNode: need 4 <= B <= 255, MAX_KEY_LEN + 5 < M <= 128 * (B - 3), Q >= 2"
     );
 
     /// A node mastering `i2c`, receiving through `target`, timed by
@@ -1283,7 +1359,9 @@ impl<
     /// with [`HandlerError::BufferTooSmall`] and reported as
     /// [`SmbusError::BufferTooSmall`], as is a response over `M` bytes
     /// (answered likewise). The handler sees the requester's [`SenderId`]
-    /// and the remaining deadline.
+    /// and the remaining deadline. On a node configured with
+    /// [`Config::serving`]`(false)` it fails at once with
+    /// [`SmbusError::NotServing`].
     async fn serve_one<H: Handler>(
         &mut self,
         handler: &mut H,
@@ -1297,6 +1375,9 @@ impl<
             tx,
             rx,
         } = self;
+        if !config.serving {
+            return Err(SmbusError::NotServing);
+        }
         let ctx = Ctx::new(&*clock, &*config, B, M);
         let i = rx.next_request(target, ctx).await?;
         let entry = rx.inbox.get(i).ok_or(SmbusError::Malformed)?;
@@ -1543,6 +1624,55 @@ mod tests {
             b"r0"
         );
         assert_eq!(q.len(), 3);
+    }
+
+    #[test]
+    fn m18_requests_leave_an_inbox_entry_for_publications() {
+        let mut q = Inbox::<3, 8>::new();
+        assert!(q.push(head(0x10, Kind::Request, 0), None, 0, b"r0"));
+        assert!(q.push(head(0x11, Kind::Request, 0), None, 0, b"r1"));
+        assert!(!q.push(head(0x12, Kind::Request, 0), None, 0, b"r2"));
+        assert!(q.push(head(0x10, Kind::Publish, 0), None, 0, b"p0"));
+        assert_eq!((q.count(Kind::Request), q.count(Kind::Publish)), (2, 1));
+        // Publications may still fill the whole inbox when no request waits.
+        let mut p = Inbox::<2, 8>::new();
+        assert!(p.push(head(0x10, Kind::Publish, 0), None, 0, b"a"));
+        assert!(p.push(head(0x10, Kind::Publish, 1), None, 0, b"b"));
+    }
+
+    #[test]
+    fn m18_queue_residency_is_capped_by_the_node() {
+        let mut q = Inbox::<3, 32>::new();
+        let mut body = [0u8; 32];
+        for (i, d) in [Some(u32::MAX - 1), None].into_iter().enumerate() {
+            let req = Message::Request {
+                deadline_ms: d,
+                key: Key::from_static("a"),
+                body: b"",
+            };
+            let n = Body::of(&req).copy_from(0, &mut body);
+            assert!(q.push(
+                head(0x10 + i as u8, Kind::Request, 0),
+                None,
+                1_000,
+                &body[..n]
+            ));
+        }
+        // A claimed deadline of ~49 days is cut to the node's 200 ms.
+        assert_eq!(q.expire_requests(1_200, 200), 0);
+        assert_eq!(q.expire_requests(1_201, 200), 2);
+        assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn m18_config_admission_defaults() {
+        let c = Config::new(a(0x20));
+        assert!(c.is_serving());
+        assert_eq!(c.max_request_queue_ms(), DEFAULT_TIMEOUT_MS);
+        let c = c.with_default_timeout_ms(300);
+        assert_eq!(c.max_request_queue_ms(), 300);
+        let c = c.with_max_request_queue_ms(50).serving(false);
+        assert_eq!((c.max_request_queue_ms(), c.is_serving()), (50, false));
     }
 
     #[test]

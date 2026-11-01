@@ -1092,7 +1092,7 @@ shell. Tests marked *(smbus)* run under `--features smbus` or
 - [x] M8 Completed publications and requests go to an inbox of `Q` entries
   (4 by default) that every receive drains the adapter into first (up to 64
   transactions without waiting); a full inbox drops the arriving message
-  and counts it, queued requests expire with their deadline. `DELIVERY` is
+  and counts it, queued requests expire (see M18). `DELIVERY` is
   `DropNewest` with per-sender order. Publications carry the sender's 8-bit
   sequence, and the gap is exact per sender: messages lost on the bus or
   dropped by the inbox or by a full adapter show up in the next accepted
@@ -1161,6 +1161,21 @@ shell. Tests marked *(smbus)* run under `--features smbus` or
   enabled) and for esp-hal's target mode, and a run of two or more boards
   on one bus with pull-ups, exercising arbitration between real masters.
   Open.
+- [x] M18 Request admission is bounded by the node, not by the requester:
+  requests occupy at most `Q - 1` inbox entries (`Q` must be at least 2),
+  so a publication always finds room; a queued request is dropped once it
+  has waited the smaller of its claimed deadline and
+  `Config::with_max_request_queue_ms` (default: the node's default request
+  timeout), so a deadline of days cannot park it; a node configured with
+  `Config::serving(false)` drops every request on arrival, counts it and
+  writes no reply (the requester times out; a refusal reply would make the
+  receive path transmit on any master's behalf), and its `serve_one` fails
+  with `NotServing` —
+  `smbus::node::tests::m18_requests_leave_an_inbox_entry_for_publications`,
+  `m18_queue_residency_is_capped_by_the_node`,
+  `m18_config_admission_defaults`; `tests/smbus.rs`:
+  `m18_request_flood_cannot_starve_publications`,
+  `m18_a_node_that_does_not_serve_refuses_requests` *(smbus)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
