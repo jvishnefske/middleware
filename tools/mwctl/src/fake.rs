@@ -21,6 +21,15 @@
 //! (`esp_base` itself is not used: it requires rustc 1.95 through its own
 //! toolchain file, which the host workspace does not use.)
 //!
+//! With [`FakeDevice::with_fw`] it is also a Pico 2: `sys/fw/*` requests
+//! go to the real `middleware::fw_ota::service::FwService` running on the
+//! in-memory RP2350 bootrom model (`fw_ota::sim::Rp2350Sim`, feature
+//! `fw-sim`, enabled for mwctl's tests only), with the fake's trust state
+//! and node id. When a request schedules a reboot the fake sends its reply,
+//! then resets the model (as the bootrom does after the reboot delay) and
+//! boots a fresh updater; [`FakeDevice::fw_reset`] resets it at any time
+//! (the trial watchdog, a reset button).
+//!
 //! A [`Script`] injects faults by request ordinal (1-based, counting every
 //! request frame received): drop the request, drop its reply, or hold the
 //! reply back until the next reply is sent. A read with nothing queued
@@ -34,6 +43,8 @@ use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_messag
 use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
+use middleware::fw_ota::service::{Context, FwService};
+use middleware::fw_ota::sim::Rp2350Sim;
 use middleware::wasm_abi::ABI_VERSION;
 use std::collections::VecDeque;
 use std::io;
@@ -74,6 +85,30 @@ pub struct FakeDevice {
     trust: TrustState,
     rekey_open: bool,
     board: Option<Vec<u8>>,
+    fw: Option<Fw>,
+}
+
+/// The firmware updater on the bootrom model.
+struct Fw {
+    sim: Rp2350Sim,
+    svc: FwService,
+    self_test_ok: bool,
+}
+
+impl Fw {
+    fn boot(mut sim: Rp2350Sim, self_test_ok: bool) -> Fw {
+        if sim.booted().is_none() {
+            sim.power_on().expect("a bootable image");
+        }
+        let svc = FwService::boot(&mut sim).expect("updater boots");
+        Fw { sim, svc, self_test_ok }
+    }
+
+    fn reset(self) -> Fw {
+        let mut sim = self.sim;
+        sim.reset().expect("a bootable image");
+        Fw::boot(sim, self.self_test_ok)
+    }
 }
 
 impl FakeDevice {
@@ -97,6 +132,7 @@ impl FakeDevice {
             trust: TrustState::Unclaimed,
             rekey_open: false,
             board: None,
+            fw: None,
         }
     }
 
@@ -106,6 +142,28 @@ impl FakeDevice {
         FakeDevice {
             board: Some(body),
             ..self
+        }
+    }
+
+    /// A Pico 2 with the A/B firmware updater on `sim` (powered on here if
+    /// it is not).
+    pub fn with_fw(self, sim: Rp2350Sim) -> Self {
+        FakeDevice {
+            fw: Some(Fw::boot(sim, true)),
+            ..self
+        }
+    }
+
+    /// Resets the bootrom model now (watchdog or reset button) and boots a
+    /// fresh updater.
+    pub fn fw_reset(&mut self) {
+        self.fw = self.fw.take().map(Fw::reset);
+    }
+
+    /// Sets whether the firmware's self-test passed.
+    pub fn fw_self_test(&mut self, ok: bool) {
+        if let Some(fw) = &mut self.fw {
+            fw.self_test_ok = ok;
         }
     }
 
@@ -207,6 +265,16 @@ impl FakeDevice {
 
     /// Mirrors `dispatch::handle_request` plus the shell's actions.
     fn handle(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Result<usize, HandlerError> {
+        if let Some(fw) = &mut self.fw {
+            let ctx = Context {
+                node: NODE,
+                trust: self.trust,
+                self_test_ok: fw.self_test_ok,
+            };
+            if let Some(r) = fw.svc.handle(&mut fw.sim, &ctx, key, body, out) {
+                return r;
+            }
+        }
         let cmd = Command::parse(key, body)?.ok_or(HandlerError::NotFound)?;
         match cmd {
             Command::Info => DeviceInfo {
@@ -301,7 +369,7 @@ impl FakeDevice {
         }
     }
 
-    fn on_frame(&mut self, cobs: &mut [u8]) {
+    fn on_request(&mut self, cobs: &mut [u8]) {
         let Ok(Frame::Request { id, key, payload }) = frame::decode_wire(cobs) else {
             return;
         };
@@ -324,6 +392,15 @@ impl FakeDevice {
         let held = std::mem::take(&mut self.held);
         self.tx.extend(held);
         self.tx.extend(bytes);
+    }
+
+    fn on_frame(&mut self, cobs: &mut [u8]) {
+        self.on_request(cobs);
+        // A reboot the updater scheduled fires after the reply is out (or
+        // lost).
+        if self.fw.as_ref().is_some_and(|fw| fw.sim.scheduled().is_some()) {
+            self.fw_reset();
+        }
     }
 }
 

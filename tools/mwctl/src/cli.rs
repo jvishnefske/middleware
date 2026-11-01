@@ -6,6 +6,11 @@
 //! command; command-specific options are rejected on other commands.
 //! [`HELP`] is the usage text printed by `--help` and on usage errors.
 //!
+//! `fw info|update|confirm|abort|reboot` drive the RP2350 A/B firmware
+//! updater over the serial port only (`--espnow` is refused). `fw update`
+//! takes `--key` (sign the commit), `--version MAJOR.MINOR` (a cross-check
+//! of the image's own version) and `--no-reboot` (stop after the commit).
+//!
 //! `--espnow <MAC>` makes `--port` the USB↔ESP-NOW bridge and sends the
 //! command over the air to the device with that MAC (default baud
 //! [`crate::bridge::BAUD`]); only `info`, `upload`, `start`, `stop` and
@@ -56,6 +61,17 @@ COMMANDS:
     trust claim --key <KEYFILE>
                                Pin KEYFILE's public key (sys/trust/claim). Accepted when
                                unclaimed, or within 60 s after BOOT was held for 3 s
+    fw info                    RP2350: firmware update state, running slot, slot versions
+    fw update <IMAGE>          RP2350: install a firmware image (UF2 or raw .bin) in the
+                               inactive A/B slot, reboot into it on trial, reconnect to the
+                               same --port and confirm it once its self-test passes
+        --key <KEYFILE>            sign the commit (a claimed device requires it)
+        --version <MAJOR.MINOR>    expected image version (checked against its IMAGE_DEF)
+        --no-reboot                stop after the commit (then fw reboot, fw confirm)
+    fw reboot                  RP2350: reboot into the committed image on trial
+    fw confirm                 RP2350: keep the image on trial (explicit buy)
+    fw abort                   RP2350: abandon a transfer or a committed update, or
+                               reject the image on trial (reboot into the previous one)
     key new <KEYFILE>          Create a signing key: 32 random bytes (the Ed25519 seed),
                                mode 0600, never overwriting; prints the public key
     key pub <KEYFILE>          Print a key file's public key (hex)
@@ -150,6 +166,25 @@ pub enum Cmd {
     },
     /// `reset`.
     Reset,
+    /// `fw info`.
+    FwInfo,
+    /// `fw update`.
+    FwUpdate {
+        /// Image file (UF2 or raw binary).
+        file: PathBuf,
+        /// Signing key file.
+        key: Option<PathBuf>,
+        /// Expected version.
+        version: Option<middleware::loader::trust::Version>,
+        /// Reboot into the new image and confirm it.
+        reboot: bool,
+    },
+    /// `fw reboot`.
+    FwReboot,
+    /// `fw confirm`.
+    FwConfirm,
+    /// `fw abort`.
+    FwAbort,
 }
 
 /// Parsed arguments.
@@ -197,8 +232,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut corrupt_chunk = None;
     let mut seconds = None;
     let mut key: Option<PathBuf> = None;
-    let mut version = None;
+    let mut version: Option<String> = None;
     let mut counter = None;
+    let mut no_reboot = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -218,7 +254,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--corrupt-chunk" => corrupt_chunk = Some(number("--corrupt-chunk", args.next())?),
             "--seconds" => seconds = Some(number("--seconds", args.next())?),
             "--key" => key = Some(PathBuf::from(args.next().ok_or("--key needs a key file")?)),
-            "--version" => version = Some(number("--version", args.next())?),
+            "--version" => version = Some(args.next().ok_or("--version needs a value")?),
+            "--no-reboot" => no_reboot = true,
             "--counter" => counter = Some(number("--counter", args.next())?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             _ => positional.push(a),
@@ -239,7 +276,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let first = pos.next().ok_or("no command given")?;
     // Two-word commands are named "trust info", "key new", ...
     let name = match first.as_str() {
-        "trust" | "key" => {
+        "trust" | "key" | "fw" => {
             let sub = pos
                 .next()
                 .ok_or_else(|| format!("'{first}' needs a subcommand"))?;
@@ -260,9 +297,25 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only(
         "--key",
         key.is_some(),
-        &["upload", "trust claim", "start", "stop"],
+        &["upload", "trust claim", "start", "stop", "fw update"],
     )?;
-    only("--version", version.is_some(), &["upload"])?;
+    only("--version", version.is_some(), &["upload", "fw update"])?;
+    only("--no-reboot", no_reboot, &["fw update"])?;
+    let fw_version = match (&version, name.as_str()) {
+        (Some(v), "fw update") => Some(crate::fw::parse_version(v).ok_or_else(|| {
+            format!("--version: '{v}' is not MAJOR.MINOR (each 0..65535)")
+        })?),
+        _ => None,
+    };
+    let version: Option<u32> = match (version, name.as_str()) {
+        (Some(v), "upload") => Some(number("--version", Some(v))?),
+        _ => None,
+    };
+    if name.starts_with("fw ") && espnow.is_some() {
+        return Err(format!(
+            "'{name}' goes over the serial port only; drop --espnow and use the device's own port"
+        ));
+    }
     only("--counter", counter.is_some(), &["start", "stop"])?;
     if version.is_some() && key.is_none() {
         return Err("--version needs --key (only signed commits carry a version)".into());
@@ -314,6 +367,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         "stop" => Cmd::Stop { key, counter },
         "monitor" => Cmd::Monitor { seconds },
         "reset" => Cmd::Reset,
+        "fw info" => Cmd::FwInfo,
+        "fw update" => Cmd::FwUpdate {
+            file: PathBuf::from(pos.next().ok_or("fw update needs an image file (.uf2 or .bin)")?),
+            key,
+            version: fw_version,
+            reboot: !no_reboot,
+        },
+        "fw reboot" => Cmd::FwReboot,
+        "fw confirm" => Cmd::FwConfirm,
+        "fw abort" => Cmd::FwAbort,
         other => return Err(format!("unknown command '{other}'")),
     };
     if let Some(extra) = pos.next() {
@@ -532,6 +595,49 @@ mod tests {
                 "--port p --espnow e4:b0:63:81:d3:24 stop --key k --counter x",
                 "not a valid number",
             ),
+        ] {
+            match p(args) {
+                Err(e) => assert!(e.contains(why), "{args}: {e}"),
+                Ok(v) => panic!("{args}: accepted as {v:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn y9_parses_fw_commands() {
+        use middleware::loader::trust::Version;
+        assert_eq!(run("--port p fw info").cmd, Cmd::FwInfo);
+        assert_eq!(run("--port p fw confirm").cmd, Cmd::FwConfirm);
+        assert_eq!(run("--port p fw abort").cmd, Cmd::FwAbort);
+        assert_eq!(run("--port p fw reboot").cmd, Cmd::FwReboot);
+        assert_eq!(
+            run("--port p fw update fw.uf2").cmd,
+            Cmd::FwUpdate {
+                file: "fw.uf2".into(),
+                key: None,
+                version: None,
+                reboot: true
+            }
+        );
+        assert_eq!(
+            run("fw update fw.bin --key k --version 1.2 --no-reboot --port p").cmd,
+            Cmd::FwUpdate {
+                file: "fw.bin".into(),
+                key: Some("k".into()),
+                version: Some(Version(0x0001_0002)),
+                reboot: false
+            }
+        );
+        for (args, why) in [
+            ("--port p fw update", "needs an image"),
+            ("--port p fw update a --version 3", "MAJOR.MINOR"),
+            ("--port p fw info --no-reboot", "only to 'fw update'"),
+            ("--port p upload a.wasm --no-reboot", "only to 'fw update'"),
+            ("--port p fw confirm --key k", "only to"),
+            ("--port p fw frob", "unknown command"),
+            ("--port p fw", "needs a subcommand"),
+            ("--port p --espnow e4:b0:63:81:d3:24 fw info", "serial port only"),
+            ("--port p fw info extra", "unexpected"),
         ] {
             match p(args) {
                 Err(e) => assert!(e.contains(why), "{args}: {e}"),

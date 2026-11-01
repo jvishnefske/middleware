@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### A/B firmware OTA for the RP2350 (Y1–Y11)
+- New `fw_ota` module (always built, `no_std`, no heap): A/B firmware updates for the Raspberry Pi Pico 2 over the serial loader framing, using the RP2350 bootrom's A/B partitions, versions and try-before-you-buy. `sys/fw/info`, `begin`, `chunk`, `commit`, `reboot`, `confirm`, `abort` (`fw_ota::wire`); the pure state machine `FwUpdate` (Idle, Receiving, Verified, Committed, Trial, Confirmed, RolledBack; `fw_ota::machine`); the IMAGE_DEF / block-loop parser and block builders (`fw_ota::picobin`); the persisted anti-rollback record (`fw_ota::record`); and the `FwPlatform` trait the RP2350 integration implements (`fw_ota::platform`). The shell `fw_ota::service::FwService` needs `trust` (SHA-256 of the received image read back from flash, Ed25519).
+- Firmware commits are signed by the payload key pinned with `sys/trust/claim` over a new 64-byte message, `"mw-firmware-v1\0"`, length, version, slot, node id and SHA-256 (a domain distinct from payload and control signatures). Unclaimed devices accept any commit, as for payloads. A new image's version (its IMAGE_DEF `major << 16 | minor`, which the device checks) must exceed the running image's and the last committed one.
+- The new image's first sector is written only after the whole image is verified and authorized, so the inactive slot never holds a bootable unauthorized image; images must be TBYB and carry a sentinel block in the first sector's last page so a power cut during the bootrom's explicit buy cannot leave a torn image bootable.
+- New feature `fw-sim` (host only; implies `std`, `trust`): `fw_ota::sim::Rp2350Sim`, an in-memory RP2350 bootrom and flash model (A/B selection by version, TBYB trial and revert, explicit buy, torn erases and writes) used by the lifecycle and power-loss tests and by mwctl's fake device.
+- `mwctl fw info | fw update <IMAGE> [--key] [--version MAJOR.MINOR] [--no-reboot] | fw reboot | fw confirm | fw abort` (serial only). Images are UF2 or raw binaries, checked as the device checks them; `fw update` reboots the device, reopens the same port and confirms the trial. Longer timeouts for `sys/fw/commit` (15 s), `begin` and `confirm` (5 s). New `Error::Image` and `Error::Fw` variants.
+- `scripts/check-features.sh` also builds the RP2350 sets for `thumbv8m.main-none-eabihf` and `fw-sim` on the host.
+- The RP2040 (Pico 1) has no bootrom A/B support and is out of scope; `mwctl` refuses an RP2040 UF2.
+- Not yet done: the RP base firmware integration (`FwPlatform` on embassy-rp, partition table, image metadata) and the hardware checks (design.md Y12–Y15).
+
 ## 0.5.0
 
 ### Migration from 0.4
