@@ -1,4 +1,4 @@
-//! Desktop payload simulator (requirements W7, D10, X7 and R10).
+//! Desktop payload simulator (requirements W7, D10, X7, R10 and V6).
 //!
 //! `payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]
 //! [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE] [--seed S]
@@ -29,6 +29,15 @@
 //! (`ov2640 dsp <reg>=<value> ...`, `ov2640 sensor ...`). Other addresses
 //! do not acknowledge. There is no image sensor: a camera source route is
 //! `Unsupported`.
+//!
+//! The ABI 5 LED strips (V6) print `ledstrip<h> open pin <p> <n> leds`,
+//! one `ledstrip<h> #rrggbb #rrggbb ...` line per `ledstrip_write` (the
+//! LEDs written, nearest the pin first, in RGB order although the payload
+//! sends G, R, B bytes) and `ledstrip<h> close`. A strip's data pin is
+//! not plain GPIO while it is open (`gpio_*` on it is `InvalidArgument`).
+//! When the run ends, each open strip prints the colour every LED last
+//! received as `ledstrip<h> pin <p>: #rrggbb ...` (LEDs never written
+//! show `#000000`).
 //!
 //! Hardware timers run on the simulator clock. `spi_transfer` loops the
 //! transmitted bytes back (or returns `--spi-pattern`, repeated) and
@@ -292,14 +301,17 @@ impl Bench {
         }
     }
 
-    /// Prints the route counters, fuel use and bus summary, and dumps the
-    /// panel.
+    /// Prints the route counters, sensor and LED-strip state, fuel use and
+    /// bus summary, and dumps the panel.
     fn finish(&mut self, opts: &Options) {
         for n in &mut self.nodes {
             for line in n.device().route_summary() {
                 n.device().note(line);
             }
             for line in n.device().sensor_summary() {
+                n.device().note(line);
+            }
+            for line in n.device().ledstrip_summary() {
                 n.device().note(line);
             }
             let fuel = n.payload.fuel_stats();

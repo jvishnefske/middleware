@@ -36,8 +36,19 @@
 //! payload's own and a source route's chunks, is also queued in an outbox
 //! ([`SimDevice::take_outbox`]) that the shell hands to a `--peer` payload
 //! over a [`bus::Bus`].
+//!
+//! The ABI 5 LED strips (requirement V6) are synchronous and raise no
+//! events: [`ledstrip::LedStrips`] records each strip's LEDs, every write
+//! prints the colours it set, and [`SimDevice::ledstrip_summary`] reports
+//! each open strip's LEDs at the end of a run. A strip's data pin passes
+//! the `gpio_output` checks (a pin past [`PINS`] is `Unsupported`, a sink
+//! route's D/C pin `InvalidArgument`); while the strip is open the pin is
+//! no plain GPIO, so every `gpio_*` call on it and a sink route naming it
+//! as D/C pin are `InvalidArgument`, as on the firmware. Closing the strip
+//! returns the pin to idle.
 
 pub mod bus;
+pub mod ledstrip;
 pub mod panel;
 pub mod periph;
 pub mod route;
@@ -48,10 +59,11 @@ use middleware::Key;
 use middleware::stream::{Action, FrameSource, Sink};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
-    RouteStat, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec, UartConfig,
+    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, LedStripSpec, Limits, Pull,
+    PwmSpec, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec, UartConfig,
 };
 
+use ledstrip::{LedStrips, render_rgb};
 use panel::Panel;
 use periph::{Adc, I2c, Pwm, Spi, Timers, Uart};
 use route::{Route, Routes, SinkRoute, SourceRoute};
@@ -323,6 +335,7 @@ pub struct SimDevice {
     pwm: Pwm,
     adc: Adc,
     i2c: I2c,
+    strips: LedStrips,
 }
 
 impl Default for SimDevice {
@@ -353,6 +366,7 @@ impl SimDevice {
             pwm: Pwm::default(),
             adc: Adc::default(),
             i2c: I2c::default(),
+            strips: LedStrips::default(),
         }
     }
 
@@ -460,6 +474,21 @@ impl SimDevice {
             format!("ov2640 dsp{}", regs(periph::ov2640::Bank::Dsp)),
             format!("ov2640 sensor{}", regs(periph::ov2640::Bank::Sensor)),
         ]
+    }
+
+    /// One line per open LED strip with the colour each LED last received:
+    /// `ledstrip<h> pin <p>: #rrggbb ...`, nearest the pin first.
+    pub fn ledstrip_summary(&self) -> Vec<String> {
+        self.strips
+            .iter()
+            .map(|(h, spec, grb)| format!("ledstrip{h} pin {}: {}", spec.pin, render_rgb(grb)))
+            .collect()
+    }
+
+    /// The G, R, B bytes every LED of strip `handle` last received.
+    #[cfg(test)]
+    pub fn ledstrip_colours(&self, handle: u8) -> Option<&[u8]> {
+        self.strips.colours(handle)
     }
 
     /// One line per running route with its counters.
@@ -625,10 +654,20 @@ impl SimDevice {
         });
     }
 
-    /// `Busy` if a sink route owns `pin` as its D/C pin.
+    /// `Busy` if a sink route owns `pin` as its D/C pin,
+    /// `InvalidArgument` if an LED strip drives it.
     fn pin_free(&self, pin: u8) -> Result<(), AbiError> {
         if self.routes.owns_pin(pin) {
             Err(AbiError::Busy)
+        } else {
+            self.strip_free(pin)
+        }
+    }
+
+    /// `InvalidArgument` if an open LED strip drives `pin`.
+    fn strip_free(&self, pin: u8) -> Result<(), AbiError> {
+        if self.strips.owns_pin(pin) {
+            Err(AbiError::InvalidArgument)
         } else {
             Ok(())
         }
@@ -686,6 +725,7 @@ impl Device for SimDevice {
     /// Outputs read back their level; inputs read the level set by `!gpio`,
     /// or their pull (up = high) until one is set.
     fn gpio_read(&mut self, pin: u8) -> Result<bool, AbiError> {
+        self.strip_free(pin)?;
         match *self.pin(pin)? {
             Mode::Output(level) => Ok(level),
             Mode::Input(_) => self.input_level(pin).ok_or(AbiError::InvalidArgument),
@@ -703,6 +743,7 @@ impl Device for SimDevice {
 
     /// Only input pins take interrupts; [`Edge::Off`] purges pending edges.
     fn gpio_irq(&mut self, pin: u8, edge: Edge) -> Result<(), AbiError> {
+        self.strip_free(pin)?;
         if !matches!(*self.pin(pin)?, Mode::Input(_)) {
             return Err(AbiError::InvalidArgument);
         }
@@ -863,7 +904,11 @@ impl Device for SimDevice {
         self.event(format!(
             "route{handle} source {:?} {}x{} {:?} every {} ms on {key} ({} B chunks)",
             source.kind(),
-            cfg.width, cfg.height, cfg.format, cfg.period_ms, cfg.chunk_data
+            cfg.width,
+            cfg.height,
+            cfg.format,
+            cfg.period_ms,
+            cfg.chunk_data
         ));
         Ok(handle)
     }
@@ -908,6 +953,44 @@ impl Device for SimDevice {
 
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
         Ok(stat.of(&self.routes.stats(handle)?))
+    }
+
+    /// The pin is checked like [`Device::gpio_output`], except that a sink
+    /// route's D/C pin is `InvalidArgument`; reopening a strip's own pin
+    /// resizes it. The pin stops being plain GPIO (its mode becomes unused
+    /// and its interrupt off). Prints
+    /// `ledstrip<h> open pin <p> <n> leds`.
+    fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {
+        self.pin(spec.pin)?;
+        if self.routes.owns_pin(spec.pin) {
+            return Err(AbiError::InvalidArgument);
+        }
+        let handle = self.strips.open(spec)?;
+        *self.pin(spec.pin)? = Mode::Unused;
+        self.set_edge(spec.pin, Edge::Off);
+        self.event(format!(
+            "ledstrip{handle} open pin {} {} leds",
+            spec.pin,
+            spec.count.get()
+        ));
+        Ok(handle)
+    }
+
+    /// Records the frame and prints `ledstrip<h> <#rrggbb> ...`, one colour
+    /// per LED written (RGB order, converted from the G, R, B wire bytes).
+    fn ledstrip_write(&mut self, handle: u8, grb: &[u8]) -> Result<(), AbiError> {
+        self.strips.write(handle, grb)?;
+        self.event(format!("ledstrip{handle} {}", render_rgb(grb)));
+        Ok(())
+    }
+
+    /// Frees the handle and returns the pin to idle; prints
+    /// `ledstrip<h> close`.
+    fn ledstrip_close(&mut self, handle: u8) -> Result<(), AbiError> {
+        let pin = self.strips.close(handle)?;
+        *self.pin(pin)? = Mode::Unused;
+        self.event(format!("ledstrip{handle} close"));
+        Ok(())
     }
 }
 
@@ -1204,6 +1287,75 @@ mod tests {
         assert_eq!(d.gpio_output(200), Err(AbiError::Unsupported));
         assert_eq!(d.events.len(), 3);
         assert!(d.events[1].ends_with("gpio 2 = high"));
+    }
+
+    fn strip(pin: u8, count: i32) -> LedStripSpec {
+        LedStripSpec::parse(i32::from(pin), count).unwrap()
+    }
+
+    #[test]
+    fn ledstrips_record_frames_and_hold_their_pin() {
+        let mut d = SimDevice::default();
+        d.gpio_input(5, Pull::Up).unwrap();
+        d.gpio_irq(5, Edge::Rising).unwrap();
+        assert_eq!(d.ledstrip_open(strip(5, 3)), Ok(0));
+        assert!(
+            d.events
+                .last()
+                .unwrap()
+                .ends_with("ledstrip0 open pin 5 3 leds")
+        );
+        d.ledstrip_write(0, &[0, 0xff, 0, 0xff, 0, 0]).unwrap();
+        assert!(
+            d.events
+                .last()
+                .unwrap()
+                .ends_with("ledstrip0 #ff0000 #00ff00")
+        );
+        assert_eq!(
+            d.ledstrip_colours(0),
+            Some(&[0, 0xff, 0, 0xff, 0, 0, 0, 0, 0][..])
+        );
+        assert_eq!(
+            d.ledstrip_write(0, &[0; 12]),
+            Err(AbiError::InvalidArgument),
+            "longer than the strip"
+        );
+        assert_eq!(d.ledstrip_write(1, &[0; 3]), Err(AbiError::Busy));
+        // The pin is the strip's, not GPIO, until closed.
+        assert_eq!(d.gpio_output(5), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_input(5, Pull::Up), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_write(5, true), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_read(5), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_irq(5, Edge::Rising), Err(AbiError::InvalidArgument));
+        assert_eq!(d.ledstrip_open(strip(5, 1)), Ok(0), "reopen resizes");
+        assert_eq!(d.ledstrip_open(strip(6, 1)), Ok(1));
+        assert_eq!(d.ledstrip_open(strip(7, 1)), Err(AbiError::NoResources));
+        assert_eq!(d.ledstrip_open(strip(200, 1)), Err(AbiError::Unsupported));
+        assert_eq!(
+            d.ledstrip_summary(),
+            ["ledstrip0 pin 5: #ff0000", "ledstrip1 pin 6: #000000"]
+        );
+        d.ledstrip_close(0).unwrap();
+        assert!(d.events.last().unwrap().ends_with("ledstrip0 close"));
+        assert_eq!(d.ledstrip_close(0), Err(AbiError::Busy));
+        assert_eq!(d.gpio_read(5), Err(AbiError::InvalidArgument), "idle");
+        d.gpio_output(5).unwrap();
+        assert_eq!(d.ledstrip_summary().len(), 1);
+    }
+
+    #[test]
+    fn ledstrips_and_sink_routes_do_not_share_pins() {
+        let mut d = SimDevice::default();
+        d.spi_open(spi_cfg()).unwrap();
+        let cfg = SinkConfig::new(9, 64).unwrap();
+        let key = Key::new("px").unwrap();
+        d.route_sink(key, 0, &cfg).unwrap();
+        assert_eq!(d.ledstrip_open(strip(9, 1)), Err(AbiError::InvalidArgument));
+        d.ledstrip_open(strip(10, 1)).unwrap();
+        let cfg = SinkConfig::new(10, 64).unwrap();
+        d.route_stop(0).unwrap();
+        assert_eq!(d.route_sink(key, 0, &cfg), Err(AbiError::InvalidArgument));
     }
 
     #[test]

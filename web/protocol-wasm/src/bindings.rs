@@ -520,6 +520,23 @@ mod sim {
                 set(&o, "kind", "uart");
                 set(&o, "data", bytes(data));
             }
+            SimEvent::LedStripOpen { handle, pin, count } => {
+                set(&o, "kind", "ledstripOpen");
+                set(&o, "handle", *handle);
+                set(&o, "pin", *pin);
+                set(&o, "count", *count as u32);
+            }
+            SimEvent::LedStrip { handle, pin, grb } => {
+                set(&o, "kind", "ledstrip");
+                set(&o, "handle", *handle);
+                set(&o, "pin", *pin);
+                set(&o, "grb", bytes(grb));
+            }
+            SimEvent::LedStripClose { handle, pin } => {
+                set(&o, "kind", "ledstripClose");
+                set(&o, "handle", *handle);
+                set(&o, "pin", *pin);
+            }
             SimEvent::Irq { event, handled } => {
                 set(&o, "kind", "irq");
                 set(&o, "irq", format!("{:?}", event.kind));
@@ -546,9 +563,12 @@ mod sim {
     /// virtual device. Events — `{kind: "log", line}`, `{kind: "publish",
     /// key, data}`, `{kind: "output", pin}`, `{kind: "input", pin, pull}`,
     /// `{kind: "write", pin, high}`, `{kind: "spi", tx, rx}`, `{kind:
-    /// "uart", data}` (UART 1 transmit) and `{kind: "irq", irq, code,
-    /// source, value, timeUs, handled}` (an event popped for `on_irq`) —
-    /// are passed to `onEvent` after each call.
+    /// "uart", data}` (UART 1 transmit), `{kind: "ledstripOpen", handle,
+    /// pin, count}`, `{kind: "ledstrip", handle, pin, grb}` (a frame sent
+    /// to an LED strip, G, R, B bytes per LED), `{kind: "ledstripClose",
+    /// handle, pin}` and `{kind: "irq", irq, code, source, value, timeUs,
+    /// handled}` (an event popped for `on_irq`) — are passed to `onEvent`
+    /// after each call.
     #[wasm_bindgen(js_name = Simulator)]
     pub struct JsSimulator {
         sim: Simulator,
@@ -634,6 +654,23 @@ mod sim {
                 .collect()
         }
 
+        /// Open LED strips: `[{handle, pin, count, grb}]`, `grb` holding the
+        /// G, R, B bytes each LED last received (`count * 3` bytes).
+        pub fn ledstrips(&mut self) -> Array {
+            self.sim
+                .ledstrips()
+                .iter()
+                .map(|s| {
+                    let o = Object::new();
+                    set(&o, "handle", s.handle);
+                    set(&o, "pin", s.pin);
+                    set(&o, "count", s.count as u32);
+                    set(&o, "grb", bytes(&s.grb));
+                    o
+                })
+                .collect()
+        }
+
         /// Events dropped from the full queue since load (not reset by the
         /// payload's `irq_overflow`).
         #[wasm_bindgen(getter)]
@@ -686,8 +723,9 @@ mod sim {
             self.sim.set_input(pin, high)
         }
 
-        /// `{mode: "unused"|"output"|"input", high?, pull?}` for a pin, or
-        /// `undefined` if out of range.
+        /// `{mode: "unused"|"output"|"input"|"ledstrip", high?, pull?,
+        /// handle?}` for a pin (`handle` for the data pin of an open LED
+        /// strip), or `undefined` if out of range.
         pub fn pin(&mut self, pin: u8) -> Option<Object> {
             let o = Object::new();
             match self.sim.pin(pin)? {
@@ -700,6 +738,10 @@ mod sim {
                     set(&o, "mode", "input");
                     set(&o, "pull", pull_name(pull));
                     set(&o, "high", level.unwrap_or(pull == Pull::Up));
+                }
+                PinMode::LedStrip(handle) => {
+                    set(&o, "mode", "ledstrip");
+                    set(&o, "handle", handle);
                 }
             }
             Some(o)

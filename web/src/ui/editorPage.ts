@@ -10,7 +10,7 @@ import { checkAbi } from "../editor/abiCheck";
 import { type Language, compile } from "../editor/compile";
 import { template, templateNames } from "../editor/templates";
 import type { PinState, SimEvent } from "../protocol/wasm";
-import { type PeripheralView, SimSession } from "../sim/session";
+import { type PeripheralView, SimSession, ledColours } from "../sim/session";
 import type { App } from "./app";
 import { errorText, formatBytes, h, parseHex } from "./dom";
 
@@ -253,6 +253,9 @@ export function editorPage(app: App): HTMLElement {
     else if (e.kind === "publish") logLine(`pub  ${e.key} ${formatBytes(e.data)}`);
     else if (e.kind === "uart") uartLine("->", e.data);
     else if (e.kind === "spi") logLine(`spi  tx ${hex(e.tx)} rx ${hex(e.rx)}`);
+    else if (e.kind === "ledstripOpen") logLine(`strip ${e.handle} open pin ${e.pin}, ${e.count} LEDs`);
+    else if (e.kind === "ledstrip") logLine(`strip ${e.handle} ${ledColours(e.grb).join(" ")}`);
+    else if (e.kind === "ledstripClose") logLine(`strip ${e.handle} close`);
     // Timer alarms are counted in the timers view rather than logged.
     else if (e.kind === "irq" && e.irq !== "Timer") logLine(`irq  ${e.irq} source ${e.source} value ${e.value}`);
   }
