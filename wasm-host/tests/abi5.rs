@@ -1,4 +1,4 @@
-//! End-to-end tests of the ABI 5 LED-strip imports (requirements V1–V3),
+//! End-to-end tests of the ABI 5 LED-strip imports (requirements V1, V2),
 //! with WAT payloads and a fake device that records each strip call with
 //! its parsed arguments and the frame bytes it received.
 

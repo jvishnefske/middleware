@@ -1206,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_ledstrip_write_checks_arguments_before_pointer() {
+    fn v2_ledstrip_write_checks_arguments_before_pointer() {
         let mem = 1024;
         assert_eq!(ledstrip_write(0, 16, 24, mem), Ok((0, 16..40)));
         assert_eq!(ledstrip_write(1, 0, 192, mem), Ok((1, 0..192)));

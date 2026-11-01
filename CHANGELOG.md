@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Payload ABI 5: WS2812 LED strips (V1–V8)
+- `wasm_abi::ABI_VERSION` is 5. Three imports appended to `IMPORTS` (new `ABI4_IMPORTS` = 30 marks the ABI 4 prefix): `ledstrip_open(pin, count)` → handle, `ledstrip_write(handle, ptr, len)` (G, R, B bytes per LED, synchronous), `ledstrip_close(handle)`. ABI 1–4 payloads load unchanged. New `wasm_abi::ledstrip`: `MAX_LEDSTRIPS` = 2, `MAX_LEDS` = 64, `MAX_FRAME` = 192, `RESET_US` = 300, `LedCount`, `LedStripSpec`, `frame_len`, `ledstrip_handle`. (V1, V2)
+- `wasm-host`: `Device::ledstrip_open`, `ledstrip_write`, `ledstrip_close` (default `Unsupported`), linked as `mw` imports; the frame is copied through a stack buffer, arguments are checked before the pointer, and a device handle outside `0..MAX_LEDSTRIPS` reaches the payload as `NoResources`. Re-exports `LedStripSpec`, `LedCount`. (V2)
+- ESP base firmware (ESP32, ESP32-S3): one strip on RMT channel 0 (80 MHz, four memory blocks, the whole frame in channel RAM: 8 LEDs on ESP32-S3, 10 on ESP32), the data pin routed through the pin bank and claimed like other peripherals (`claims::Owner::LedStrip`), the transmit wait bounded by the frame's wire time plus 200 µs and the latch gap by `RESET_US`. New pure module `esp_base::ledstrip` (encoder to RMT pulse codes, capacity, latch wait, strip table). ESP32-C3 builds unchanged (no payload runtime). (V3–V5)
+- `payload-sim` prints `ledstrip<h> #rrggbb …` per write and each strip's colours at the end of a run; the browser simulator raises `ledstripOpen` / `ledstrip` / `ledstripClose` events, reports pin mode `ledstrip`, and offers `ledstrips()`; the editor page logs strip writes. (V6)
+- `mw-payload`: `ledstrip::LedStrip` (`open`, `write(&[Rgb])`, `write_grb`, `close`) and `Rgb` (`grb`, `scale`); no new `unsafe`. Dropping a strip does not close it. (V7)
+- New example `payloads/examples/ledstrip`: a moving rainbow on 8 LEDs on GPIO45 (the Conagotchi badge), 6 284 bytes, built with 1-byte pages in `check-all.sh`. (V8)
+
 ## 0.5.0
 
 ### Migration from 0.4
