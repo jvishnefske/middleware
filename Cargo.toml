@@ -12,7 +12,7 @@ license = "MIT OR Apache-2.0"
 # workspaces because they build for other targets and toolchains.
 [workspace]
 members = [".", "wasm-host", "tools/payload-sim", "tools/mwctl", "tools/jpeg-fixtures", "web/protocol-wasm"]
-exclude = ["firmware", "firmware-esp8266", "payloads"]
+exclude = ["firmware", "firmware-esp8266", "firmware-rp", "payloads"]
 
 [features]
 default = []

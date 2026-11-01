@@ -1,0 +1,105 @@
+[package]
+name = "rp-base"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "RP base firmware (Raspberry Pi Pico / Pico 2): serves the middleware serial protocol over USB CDC-ACM and runs WASM payloads"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone workspace: cross-compiled for thumbv6m-none-eabi (RP2040) and
+# thumbv8m.main-none-eabihf (RP2350) with a chip feature, so it stays out of
+# the parent (host) workspace, like `firmware/`.
+[workspace]
+
+[lib]
+# The pure core (`rp_base`): flash map, chip profiles, request routing (the
+# `sys/fw/*` seam), the request service over any NOR flash, heap budget.
+# No RP dependencies; unit tested on the host with `cargo test --lib`.
+path = "src/lib.rs"
+
+[[bin]]
+name = "rp-base"
+path = "src/main.rs"
+test = false
+bench = false
+# The binary needs a chip feature (each enables `shell`); without one, host
+# commands such as `cargo clippy --lib --all-targets` skip it.
+required-features = ["shell"]
+
+[features]
+default = []
+# Exactly one chip feature must be enabled to build the binary.
+#
+# RP2040 (Pico): Cortex-M0+, no CAS atomics. wasmi 2.0 needs CAS atomics
+# and `alloc::sync::Arc`, which `thumbv6m-none-eabi` lacks (the same reason
+# esp-base builds the ESP32-C3 without `wasm`), so this build has no
+# payload runtime: it serves sys/info, the loader, the flash store and
+# trust, reports firmware `<ver>+no-wasm` and refuses sys/payload/start.
+rp2040 = ["shell", "embassy-rp/rp2040", "dep:portable-atomic"]
+# RP2350 (Pico 2, RP2350A): Cortex-M33, runs payloads.
+rp2350 = ["shell", "wasm", "fw-update", "embassy-rp/rp235xa"]
+# The WASM payload runtime (wasm-host / wasmi) and its bounded heap.
+wasm = ["dep:wasm-host", "dep:linked_list_allocator"]
+# The seam for A/B firmware OTA (RP2350): reserves the `sys/fw/*` keys. The
+# stub answers every one `Unavailable` (see src/fw_update.rs).
+fw-update = []
+# Internal: the imperative shell's dependencies, pulled in by a chip feature.
+shell = [
+  "dep:embassy-rp",
+  "dep:embassy-executor",
+  "dep:embassy-time",
+  "dep:embassy-sync",
+  "dep:embassy-futures",
+  "dep:embassy-usb",
+  "dep:static_cell",
+  "dep:cortex-m",
+  "dep:cortex-m-rt",
+  "dep:embedded-io-async",
+]
+
+[dependencies]
+# The pure core of the ESP base firmware, shared rather than copied:
+# request dispatch (`dispatch`), the two-slot payload store (`store`,
+# `image`), the trust record (`trust_store`) and the heap check (`start`).
+# Default features off (no chip, no esp-hal); `trust` for signed payloads.
+esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
+middleware = { path = "..", features = ["serial", "trust"] }
+heapless = { version = "0.9", default-features = false }
+embedded-storage = "0.3.2"
+
+wasm-host = { path = "../wasm-host", optional = true }
+# Global allocator for the interpreter (`wasm` only). `init_from_slice`
+# takes a `&'static mut` arena, so the heap comes up without `unsafe`.
+linked_list_allocator = { version = "0.10.6", optional = true }
+
+embassy-rp = { version = "0.10.0", features = ["time-driver", "critical-section-impl"], optional = true }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"], optional = true }
+embassy-time = { version = "0.5.1", optional = true }
+embassy-sync = { version = "0.8.0", optional = true }
+embassy-futures = { version = "0.1.2", optional = true }
+embassy-usb = { version = "0.6.0", default-features = false, optional = true }
+static_cell = { version = "2.1.1", optional = true }
+cortex-m = { version = "0.7.7", optional = true }
+cortex-m-rt = { version = "0.7.5", optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+# RP2040 only: CAS for static_cell's atomics through critical sections
+# (thumbv6m has no CAS instructions).
+portable-atomic = { version = "1.11", features = ["critical-section"], optional = true }
+
+[dev-dependencies]
+# Host tests sign commits with a test key; the firmware only verifies.
+ed25519-dalek = { version = "2.2", default-features = false }
+# The heap budget tests compute `Limits::heap_needed` on the host.
+wasm-host = { path = "../wasm-host" }
+# mwctl runs unchanged against the service over an in-process link.
+mwctl = { path = "../tools/mwctl" }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
