@@ -8,8 +8,10 @@
 //!   returned on drop, because `wasm_host::Payload` needs a `'static`
 //!   device and drops it inside a failed load (esp-hal's async drivers are
 //!   not `Send`, so only the blocking parts can rest in a static);
-//! * the pure [`Claims`] table that decides which pins SPI, UART and GPIO
-//!   interrupts may hold.
+//! * the pure [`Claims`] table that decides which pins SPI, UART, GPIO
+//!   interrupts, PWM, I2C, the camera and LED strips may hold;
+//! * the RMT channel 0 WS2812 transmitter ([`LedStrip`]) and the pure
+//!   [`Strips`] table, see *LED strips (ABI 5)* below.
 //!
 //! The four payload timers ([`super::timer`]) and the event queue
 //! ([`super::irq`]) are firmware-wide statics shared with their ISRs.
@@ -20,7 +22,9 @@
 //! event queue. Both peripherals go back to [`HW`] whatever state they were
 //! in: SPI through [`SpiBus::close`] (idle, payload transfer or sink-route
 //! write in flight; see `esp_base::periph::dma_hw`), UART by value, so the
-//! next payload can open them again.
+//! next payload can open them again. The LED-strip transmitter goes back
+//! by value too; its strips are forgotten and their pins released with
+//! the others.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.
@@ -55,6 +59,36 @@
 //! * `route_stop` releases the route and purges its pending events;
 //!   `route_stat` reads the sink's counters or the source's in the table.
 //!   Dropping the device clears every route.
+//!
+//! # LED strips (ABI 5)
+//!
+//! The decisions are in `esp_base::ledstrip` ([`Strips`], the encoder,
+//! the deadline and latch wait); the transmitter is [`super::ledstrip`].
+//! The board drives one strip of at most [`ledstrip::LEDS`] LEDs on RMT
+//! channel 0 (8 on the ESP32-S3, 10 on the ESP32).
+//!
+//! * `ledstrip_open`: `Unsupported` if the RMT did not come up at boot.
+//!   The pin is checked and claimed as
+//!   [`LedStrip`](esp_base::periph::claims::Owner::LedStrip)
+//!   ([`Claims::claim_ledstrip`]: a missing pin is `InvalidArgument`, a
+//!   reserved or input-only one `Unsupported`, one held by SPI, UART, PWM,
+//!   I2C, the camera or an armed interrupt `InvalidArgument`), and a pin a
+//!   sink route drives as D/C is `InvalidArgument` too. Then the table
+//!   decides: the open strip's pin gets the same handle with the new
+//!   length, a second pin is `NoResources`, a chain longer than
+//!   [`ledstrip::LEDS`] `Unsupported`. A new pin is first driven low as a
+//!   plain output, then `RMT_SIG_0` is routed to it ([`PinBank::route_out`];
+//!   the RMT idles low). Nothing is sent.
+//! * `ledstrip_write`: `Busy` for a handle that is not open,
+//!   `InvalidArgument` for a frame longer than the strip, then
+//!   [`LedStrip::send`] (latch wait, transmit, bounded wait); a failed or
+//!   late transmission is `Transport`.
+//! * `ledstrip_close`: `Busy` for a handle that is not open; the pin is
+//!   unrouted to idle plain GPIO and its claim dropped (the LEDs keep their
+//!   colours). Dropping the device closes every strip.
+//! * While a strip is open, `gpio_*` and `gpio_irq` on its pin are refused
+//!   (`InvalidArgument`), and SPI, UART, PWM, I2C, the camera and sink
+//!   routes cannot take it.
 
 use core::cell::RefCell;
 
@@ -63,6 +97,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 use esp_base::chip::{Direction, Profile};
+use esp_base::ledstrip::{StripHandle, Strips};
 use esp_base::periph::claims::{Claims, pins};
 use esp_base::route::sink::{SinkRoute, transfers};
 use esp_base::route::table::{Kind, Routes};
@@ -71,8 +106,8 @@ use middleware::Key;
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Pull, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig,
-    TimerSpec, UartConfig,
+    AbiError, Device, DmaChannel, Edge, LedStripSpec, Pull, RouteStat, SinkConfig, Source, SourceConfig,
+    SpiConfig, TimerSpec, UartConfig,
 };
 #[cfg(feature = "esp32")]
 use {
@@ -85,6 +120,7 @@ use {
 
 use super::bus::Bus;
 use super::gpio::{PINS, PinBank, PinLease};
+use super::ledstrip::{self, LedStrip};
 use super::spi::{self, SpiBus, SpiParts};
 use super::uart1::{self, Uart1Parts, Uart1Port};
 use super::{irq, timer};
@@ -101,6 +137,8 @@ pub struct Hw {
     /// I2C bus 0 (ESP32).
     #[cfg(feature = "esp32")]
     pub i2c: Option<Bus0>,
+    /// RMT channel 0 as the LED-strip transmitter, if it came up at boot.
+    pub ledstrip: Option<LedStrip>,
 }
 
 /// The same peripherals, async, during a payload run.
@@ -111,6 +149,7 @@ struct Live {
     pwm: Option<Pwm>,
     #[cfg(feature = "esp32")]
     i2c: Option<Bus0>,
+    ledstrip: Option<LedStrip>,
 }
 
 /// Where [`Hw`] rests between payload runs.
@@ -145,6 +184,7 @@ pub struct EspDevice {
     hw: Option<Live>,
     claims: Claims,
     routes: Routes,
+    strips: Strips,
     /// The camera source route's handle, while one runs.
     #[cfg(feature = "esp32")]
     camera: Option<u8>,
@@ -165,6 +205,7 @@ impl EspDevice {
             pwm: h.pwm,
             #[cfg(feature = "esp32")]
             i2c: h.i2c,
+            ledstrip: h.ledstrip,
         });
         #[cfg(feature = "espnow")]
         super::radio::with_sources(|t| t.clear());
@@ -173,6 +214,7 @@ impl EspDevice {
             hw,
             claims: Claims::new(),
             routes: Routes::new(),
+            strips: Strips::new(ledstrip::LIMITS),
             #[cfg(feature = "esp32")]
             camera: None,
             profile,
@@ -238,6 +280,10 @@ impl EspDevice {
             })
             .ok();
         }
+    }
+
+    fn ledstrip(&mut self) -> Result<&mut LedStrip, AbiError> {
+        self.hw.as_mut().and_then(|h| h.ledstrip.as_mut()).ok_or(AbiError::Unsupported)
     }
 
     fn spi(&mut self) -> Result<&mut SpiBus, AbiError> {
@@ -366,6 +412,7 @@ impl Drop for EspDevice {
                 pwm,
                 #[cfg(feature = "esp32")]
                 i2c: live.i2c.map(Bus0::close),
+                ledstrip: live.ledstrip,
             });
         }
         irq::clear();
@@ -656,5 +703,40 @@ impl Device for EspDevice {
             Kind::Source => return Err(AbiError::Busy),
         };
         Ok(stat.of(&stats))
+    }
+
+    fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {
+        self.ledstrip()?;
+        let pin = spec.pin;
+        let claims = self.claims.claim_ledstrip(self.profile, pin)?;
+        // A sink route's D/C pin is held by another peripheral.
+        self.check_route_pin(pin).map_err(|_| AbiError::InvalidArgument)?;
+        let reopen = self.strips.on_pin(pin).is_some();
+        let (strips, handle) = self.strips.open(spec)?;
+        if !reopen {
+            // Low first, so connecting the RMT (idle low) makes no pulse.
+            self.pins.with(|b| {
+                b.output(pin)?;
+                b.route_out(pin, ledstrip::SIGNAL)
+            })?;
+        }
+        self.claims = claims;
+        self.strips = strips;
+        Ok(handle.get())
+    }
+
+    fn ledstrip_write(&mut self, handle: u8, grb: &[u8]) -> Result<(), AbiError> {
+        self.strips.frame(StripHandle::new(handle)?, grb.len())?;
+        self.ledstrip()?.send(grb)
+    }
+
+    fn ledstrip_close(&mut self, handle: u8) -> Result<(), AbiError> {
+        let (strips, spec) = self.strips.close(StripHandle::new(handle)?)?;
+        self.strips = strips;
+        self.claims = self.claims.release_ledstrip(spec.pin);
+        self.pins.with(|b| {
+            b.unroute(spec.pin);
+            Ok(())
+        })
     }
 }
