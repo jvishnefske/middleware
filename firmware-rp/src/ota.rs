@@ -27,6 +27,19 @@
 //! `Unavailable` as well when the payload store, which lends the flash,
 //! could not be opened.
 //!
+//! The backend fails closed when the trust record could not be read
+//! ([`crate::fw_update::FwContext::trust`] is `None`): `begin`, `chunk`
+//! and `commit`, the requests that put an image into a slot, are answered
+//! `Unavailable` before the updater sees them ([`needs_trust`]), since
+//! the root of trust that decides whether a commit must be signed is
+//! unknown. `info` (read only), `abort` (only abandons a transfer, erases
+//! the inactive slot's first sector, or reverts a trial to the image that
+//! booted before) and `reboot` (only of an image already committed, so
+//! authorized while the record was readable) still work; `confirm` passes
+//! this rule (the trial image was authorized when it was committed) but is
+//! held back by the self-test, which needs the trust record open, so such
+//! a trial is never bought and reverts at the next reset.
+//!
 //! The firmware's self-test ([`crate::fw_update::SelfTest`]) gates
 //! `sys/fw/confirm`: until it passes, a confirm is `Unavailable` and
 //! `mwctl` retries; a trial that is never confirmed is reverted by the next
@@ -46,6 +59,7 @@ use embedded_storage::nor_flash::NorFlash;
 use middleware::Key;
 use middleware::fw_ota::service::{Context, FwService};
 use middleware::fw_ota::{BootInfo, FwRecord, FwUpdate as FwState};
+use middleware::loader::trust::TrustState;
 use middleware::transport::HandlerError;
 
 use crate::fw_update::{FwContext, FwUpdate};
@@ -99,6 +113,13 @@ impl<R: Rom> AbUpdate<R> {
     }
 }
 
+/// Whether `key` installs firmware and so needs a known root of trust:
+/// `begin`, `chunk` and `commit`.
+pub fn needs_trust(key: Key<'_>) -> bool {
+    use middleware::fw_ota::keys;
+    key == keys::BEGIN || key == keys::CHUNK || key == keys::COMMIT
+}
+
 impl<F: NorFlash, R: Rom> FwUpdate<F> for AbUpdate<R> {
     fn handle(
         &mut self,
@@ -111,9 +132,15 @@ impl<F: NorFlash, R: Rom> FwUpdate<F> for AbUpdate<R> {
         let (Some(svc), Some(flash)) = (self.svc.as_mut(), flash) else {
             return Err(HandlerError::Unavailable);
         };
+        let Some(trust) = ctx.trust.or_else(|| (!needs_trust(key)).then_some(TrustState::Unclaimed)) else {
+            return Err(HandlerError::Unavailable);
+        };
         let running = Some(svc.boot_info().running);
         let mut p = RpPlatform::new(flash, &mut self.rom, self.ab, running);
-        let c = Context { node: ctx.node, trust: ctx.trust, self_test_ok: ctx.self_test.ok() };
+        // With the record unreadable only requests that authorize nothing
+        // get here; the placeholder trust is never consulted by them (the
+        // updater checks signatures at commit only).
+        let c = Context { node: ctx.node, trust, self_test_ok: ctx.self_test.ok() };
         svc.handle(&mut p, &c, key, body, out).unwrap_or(Err(HandlerError::NotFound))
     }
 }

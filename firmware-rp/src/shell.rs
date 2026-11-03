@@ -155,7 +155,7 @@ fn log_boot(bus: &Bus, uid: [u8; 8], boot: &rp_base::service::Boot, capacity: u3
         Some(Err(e)) => bus.log(format_args!("no valid stored payload: {e}")),
     }
     match boot.trust {
-        None => bus.log(format_args!("trust record unreadable; unsigned payloads only (TOFU)")),
+        None => bus.log(format_args!("trust record unreadable; payload and firmware installs refused")),
         Some(Persisted { trust: TrustState::Unclaimed, .. }) => {
             bus.log(format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"))
         }

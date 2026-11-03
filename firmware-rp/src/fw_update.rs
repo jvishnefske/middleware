@@ -8,7 +8,8 @@
 //!   payload loader, the payload store or the payload status.
 //! * The backend gets the flash (lent by the payload store, `None` when the
 //!   store could not be opened), a [`FwContext`] (node id, the trust
-//!   store's root of trust, the [`SelfTest`]), the key, the body and the
+//!   store's root of trust or `None` if it is unknown, the [`SelfTest`]),
+//!   the key, the body and the
 //!   reply buffer, and returns the reply length or a [`HandlerError`]. It
 //!   is a generic parameter of the service (monomorphised, no `dyn`).
 //!
@@ -69,8 +70,11 @@ impl SelfTest {
 pub struct FwContext {
     /// The node id `sys/info` reports (bound into firmware signatures).
     pub node: SenderId,
-    /// The root of trust (the pinned payload key signs firmware too).
-    pub trust: TrustState,
+    /// The root of trust (the pinned payload key signs firmware too);
+    /// `None` when the trust record could not be read. The backend must
+    /// then refuse anything that installs firmware (fail closed): reading
+    /// it as `Unclaimed` would accept any unsigned image.
+    pub trust: Option<TrustState>,
     /// The self-test.
     pub self_test: SelfTest,
 }
@@ -122,7 +126,7 @@ mod tests {
         assert!(!is_fw_key(Key::from_static("sys/fwx")));
         assert!(!is_fw_key(Key::from_static("app/sys/fw/info")));
         let mut out = [0u8; 4];
-        let ctx = FwContext { node: SenderId([0; 8]), trust: TrustState::Unclaimed, self_test: SelfTest::default() };
+        let ctx = FwContext { node: SenderId([0; 8]), trust: Some(TrustState::Unclaimed), self_test: SelfTest::default() };
         let r = FwUpdate::<()>::handle(&mut Unsupported, None, &ctx, keys::BEGIN, b"x", &mut out);
         assert_eq!(r, Err(HandlerError::Unavailable));
         let r = FwUpdate::<()>::handle(&mut Absent, None, &ctx, keys::BEGIN, b"x", &mut out);
