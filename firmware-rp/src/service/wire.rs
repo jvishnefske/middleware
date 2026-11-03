@@ -33,7 +33,7 @@ struct Wire<'f, U> {
     tx: VecDeque<u8>,
 }
 
-impl<'f, U: FwUpdate> Wire<'f, U> {
+impl<'f, U: FwUpdate<&'f mut Flash>> Wire<'f, U> {
     fn new(flash: &'f mut Flash, facts: Facts, fw: U) -> Self {
         let (svc, _) = Service::open(flash, &MAP, facts, fw);
         Wire { svc, splitter: Splitter::new(), tx: VecDeque::new() }
@@ -74,7 +74,7 @@ impl<'f, U: FwUpdate> Wire<'f, U> {
     }
 }
 
-impl<U: FwUpdate> Transport for Wire<'_, U> {
+impl<'f, U: FwUpdate<&'f mut Flash>> Transport for Wire<'f, U> {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         for &b in bytes {
             if let Split::Frame(_) = self.splitter.push(b) {
@@ -94,7 +94,7 @@ impl<U: FwUpdate> Transport for Wire<'_, U> {
     }
 }
 
-fn device<U: FwUpdate>(wire: Wire<'_, U>) -> Device<Link<Wire<'_, U>>> {
+fn device<'f, U: FwUpdate<&'f mut Flash>>(wire: Wire<'f, U>) -> Device<Link<Wire<'f, U>>> {
     let t = Timeouts { request: Duration::from_millis(50), begin: Duration::from_millis(50), retries: 1 };
     Device::new(Link::new(wire, t))
 }

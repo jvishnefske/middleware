@@ -11,18 +11,24 @@
 //! exports without any ESP dependency (as it does for the ESP8266
 //! firmware). This crate adds what differs on the RP chips:
 //!
-//! * [`layout`] — the flash maps: firmware (two slots reserved on the
-//!   RP2350 for A/B firmware OTA), payload store and trust record, checked
-//!   against `memory-rp2040.x` and `memory-rp2350.x`.
+//! * [`layout`] — the flash maps: firmware (on the RP2350 a partition
+//!   table, A/B slots and the update record), payload store and trust
+//!   record, checked against `memory-rp2040.x` and `memory-rp2350.x`.
 //! * [`chip`] — per-chip profiles: name, flash map, heap plan, WASM memory
 //!   and image caps, the Pico board's pin policy and ADC pins.
 //! * [`node`] — the node id and USB serial number from the chip unique id.
 //! * [`pins`] — the payload's GPIO modes under the board policy (the
 //!   esp-base pin bank's rules), as a value the device shell applies.
-//! * [`fw_update`] — the `sys/fw/*` seam for A/B firmware updates: the
-//!   reserved keys and the backend trait, with the `Unavailable` stub.
-//! * [`flash`] — a NOR flash adapter that erases one sector per driver call,
-//!   so interrupts (USB) are serviced between sectors.
+//! * [`fw_update`] — the `sys/fw/*` seam for firmware updates: the
+//!   reserved keys, the backend trait, the context a backend gets and the
+//!   self-test that gates confirming a trial.
+//! * [`ota`] — A/B firmware OTA on the RP2350: the image metadata the
+//!   build places in the first sector, the partition table, the factory
+//!   image, the boot ROM seam and `FwPlatform` on the flash, and the
+//!   backend that runs `middleware::fw_ota`.
+//! * [`flash`] — NOR flash adapters: one sector per erase call, so
+//!   interrupts (USB) are serviced between sectors, and reads through the
+//!   RP2350's untranslated flash window.
 //! * [`service`] — the request service: `sys/fw/*` to the update backend,
 //!   everything else through `esp_base::dispatch`, with the storage actions
 //!   performed on the flash and notes for `sys/log`.
@@ -44,6 +50,7 @@ pub mod flash;
 pub mod fw_update;
 pub mod layout;
 pub mod node;
+pub mod ota;
 pub mod pins;
 #[cfg(test)]
 mod ram_flash;

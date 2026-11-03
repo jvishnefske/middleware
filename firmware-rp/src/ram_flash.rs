@@ -1,4 +1,5 @@
-//! RAM NOR flash model for the host unit tests (test builds only).
+//! RAM NOR flash models for the host unit tests (test builds only):
+//! [`RamFlash`] (an array) and [`VecFlash`] (on the heap).
 //!
 //! [`RamFlash`] behaves like the QSPI flash behind
 //! `embassy_rp::flash::Flash`, with the stricter 4-byte read and write
@@ -84,6 +85,109 @@ impl<const N: usize> NorFlash for RamFlash<N> {
         if !offset.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
             return Err(NorFlashErrorKind::NotAligned);
         }
+        let admitted = self.admit(bytes.len());
+        let n = admitted.unwrap_or_else(|n| n);
+        let dst = self.mem.get_mut(offset as usize..offset as usize + bytes.len());
+        for (d, s) in dst.ok_or(NorFlashErrorKind::OutOfBounds)?.iter_mut().zip(bytes).take(n) {
+            *d &= *s;
+        }
+        admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
+    }
+
+    fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        if !from.is_multiple_of(SECTOR) || !to.is_multiple_of(SECTOR) || from > to {
+            return Err(NorFlashErrorKind::NotAligned);
+        }
+        let len = self.mem.get(from as usize..to as usize).ok_or(NorFlashErrorKind::OutOfBounds)?.len();
+        self.erase_calls += 1;
+        let admitted = self.admit(len);
+        let n = admitted.unwrap_or_else(|n| n);
+        if let Some(part) = self.mem.get_mut(from as usize..from as usize + n) {
+            part.fill(0xFF);
+        }
+        admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
+    }
+}
+
+extern crate std;
+
+/// [`RamFlash`] on the heap, for flash maps too large for a test's stack
+/// (the Pico 2's 4 MiB): the same alignment, erase, bit-clearing and
+/// power-loss rules.
+pub struct VecFlash {
+    /// The contents.
+    pub mem: std::vec::Vec<u8>,
+    /// Erase calls made (including torn ones).
+    pub erase_calls: usize,
+    /// Write calls made (including torn ones).
+    pub write_calls: usize,
+    ops: usize,
+    cut: Option<usize>,
+}
+
+impl VecFlash {
+    /// `mem` as the flash contents, no fault armed.
+    pub fn new(mem: std::vec::Vec<u8>) -> Self {
+        VecFlash { mem, erase_calls: 0, write_calls: 0, ops: 0, cut: None }
+    }
+
+    /// Erased flash of `n` bytes.
+    pub fn erased(n: usize) -> Self {
+        VecFlash::new(std::vec![0xFF; n])
+    }
+
+    /// Arms power loss at the `op`-th erase or write from now.
+    pub fn cut_at(&mut self, op: usize) {
+        self.ops = 0;
+        self.cut = Some(op);
+    }
+
+    /// Power is back: no more faults.
+    pub fn restore(&mut self) {
+        self.cut = None;
+    }
+
+    fn admit(&mut self, len: usize) -> Result<usize, usize> {
+        let op = self.ops;
+        self.ops += 1;
+        match self.cut {
+            Some(cut) if op == cut => Err(len / 2),
+            Some(cut) if op > cut => Err(0),
+            _ => Ok(len),
+        }
+    }
+}
+
+impl ErrorType for VecFlash {
+    type Error = NorFlashErrorKind;
+}
+
+impl ReadNorFlash for VecFlash {
+    const READ_SIZE: usize = 4;
+
+    fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        if !offset.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
+            return Err(NorFlashErrorKind::NotAligned);
+        }
+        let src = self.mem.get(offset as usize..offset as usize + bytes.len());
+        bytes.copy_from_slice(src.ok_or(NorFlashErrorKind::OutOfBounds)?);
+        Ok(())
+    }
+
+    fn capacity(&self) -> usize {
+        self.mem.len()
+    }
+}
+
+impl NorFlash for VecFlash {
+    const WRITE_SIZE: usize = 4;
+    const ERASE_SIZE: usize = SECTOR as usize;
+
+    fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        if !offset.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
+            return Err(NorFlashErrorKind::NotAligned);
+        }
+        self.write_calls += 1;
         let admitted = self.admit(bytes.len());
         let n = admitted.unwrap_or_else(|n| n);
         let dst = self.mem.get_mut(offset as usize..offset as usize + bytes.len());

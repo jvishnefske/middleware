@@ -1,4 +1,5 @@
-//! A NOR flash adapter that erases one sector per driver call.
+//! NOR flash adapters: one sector per erase call ([`Sectored`]), and reads
+//! through an untranslated window ([`Window`], RP2350).
 //!
 //! `embassy_rp::flash::Flash::blocking_erase` erases its whole range in one
 //! call that runs from RAM with interrupts disabled and the XIP cache off.
@@ -8,9 +9,100 @@
 //! sector (about 45 ms each), so interrupts are serviced between sectors;
 //! reads and writes pass through unchanged (a write is at most one loader
 //! chunk). The loop runs at most `capacity / SECTOR` times.
+//!
+//! On the RP2350 the boot ROM maps the booted partition at `0x1000_0000`
+//! (QMI address translation, window 0) and faults any access past its end,
+//! while the ROM's erase and program functions take physical flash offsets.
+//! `embassy_rp::flash::Flash::blocking_read` reads at `0x1000_0000 +
+//! offset`, so under a partition table it would read the running slot, not
+//! the payload store. The shell maps the whole flash, untranslated, at
+//! window 1 (`0x1040_0000`, QMI `ATRANS1`) and [`Window`] reads at
+//! `read_base + offset` there, so every offset this firmware uses (payload
+//! store, trust record, both firmware slots, the update record) is a
+//! physical offset for reads, erases and writes alike.
 
-use embedded_storage::nor_flash::{ErrorType, NorFlash, ReadNorFlash};
+use embedded_storage::nor_flash::{ErrorType, NorFlash, NorFlashError, NorFlashErrorKind, ReadNorFlash};
 use esp_base::image::SECTOR;
+
+/// `F` with reads shifted by `read_base` and every access bounded by
+/// `size` (the physical flash); erases and writes pass through unchanged.
+pub struct Window<F> {
+    inner: F,
+    read_base: u32,
+    size: u32,
+}
+
+impl<F> Window<F> {
+    /// `inner`, reading at `read_base + offset`, for a `size`-byte flash.
+    pub const fn new(inner: F, read_base: u32, size: u32) -> Self {
+        Window { inner, read_base, size }
+    }
+
+    /// The wrapped driver.
+    pub fn inner(&mut self) -> &mut F {
+        &mut self.inner
+    }
+
+    fn check(&self, offset: u32, len: usize) -> Result<(), NorFlashErrorKind> {
+        let end = u32::try_from(len).ok().and_then(|n| offset.checked_add(n));
+        match end {
+            Some(end) if end <= self.size => Ok(()),
+            _ => Err(NorFlashErrorKind::OutOfBounds),
+        }
+    }
+}
+
+/// A [`Window`] failure: out of the physical flash, or the driver's error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowError<E> {
+    /// The access does not fit the physical flash.
+    OutOfBounds,
+    /// The driver failed.
+    Flash(E),
+}
+
+impl<E: NorFlashError> NorFlashError for WindowError<E> {
+    fn kind(&self) -> NorFlashErrorKind {
+        match self {
+            WindowError::OutOfBounds => NorFlashErrorKind::OutOfBounds,
+            WindowError::Flash(e) => e.kind(),
+        }
+    }
+}
+
+impl<F: ErrorType> ErrorType for Window<F> {
+    type Error = WindowError<F::Error>;
+}
+
+impl<F: ReadNorFlash> ReadNorFlash for Window<F> {
+    const READ_SIZE: usize = F::READ_SIZE;
+
+    fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        self.check(offset, bytes.len()).map_err(|_| WindowError::OutOfBounds)?;
+        let at = offset.checked_add(self.read_base).ok_or(WindowError::OutOfBounds)?;
+        self.inner.read(at, bytes).map_err(WindowError::Flash)
+    }
+
+    fn capacity(&self) -> usize {
+        self.size as usize
+    }
+}
+
+impl<F: NorFlash> NorFlash for Window<F> {
+    const WRITE_SIZE: usize = F::WRITE_SIZE;
+    const ERASE_SIZE: usize = F::ERASE_SIZE;
+
+    fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        let len = to.checked_sub(from).ok_or(WindowError::OutOfBounds)?;
+        self.check(from, len as usize).map_err(|_| WindowError::OutOfBounds)?;
+        self.inner.erase(from, to).map_err(WindowError::Flash)
+    }
+
+    fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.check(offset, bytes.len()).map_err(|_| WindowError::OutOfBounds)?;
+        self.inner.write(offset, bytes).map_err(WindowError::Flash)
+    }
+}
 
 /// `F`, with erases split into single sectors.
 pub struct Sectored<F>(pub F);
@@ -84,5 +176,29 @@ mod tests {
         f.read(SECTOR, &mut b).unwrap();
         assert_eq!(b, [1, 2, 3, 4]);
         assert_eq!(f.capacity(), 8 * SECTOR as usize);
+    }
+
+    #[test]
+    fn y12_window_reads_through_the_untranslated_alias_and_writes_physically() {
+        // A 4-sector flash whose untranslated alias is the upper half of an
+        // 8-sector model: reads see the alias, writes go to the low half.
+        const N: usize = 4 * SECTOR as usize;
+        let mut f = Window::new(RamFlash::<{ 2 * N }>::new(), N as u32, N as u32);
+        f.inner().mem[N + 8..N + 12].copy_from_slice(&[9, 8, 7, 6]);
+        let mut b = [0u8; 4];
+        f.read(8, &mut b).unwrap();
+        assert_eq!(b, [9, 8, 7, 6], "read at read_base + offset");
+        f.erase(0, SECTOR).unwrap();
+        f.write(8, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(&f.inner().mem[8..12], &[1, 2, 3, 4], "written at offset");
+        assert_eq!(&f.inner().mem[N + 8..N + 12], &[9, 8, 7, 6]);
+        // Nothing past the physical flash, in any direction.
+        assert_eq!(f.read(N as u32 - 2, &mut b), Err(WindowError::OutOfBounds));
+        assert_eq!(f.write(N as u32, &[0; 4]), Err(WindowError::OutOfBounds));
+        assert_eq!(f.erase(N as u32, N as u32 + SECTOR), Err(WindowError::OutOfBounds));
+        assert_eq!(f.erase(SECTOR, 0), Err(WindowError::OutOfBounds));
+        assert_eq!(f.read(u32::MAX, &mut b), Err(WindowError::OutOfBounds));
+        assert_eq!(f.capacity(), N);
+        assert_eq!(WindowError::<NorFlashErrorKind>::OutOfBounds.kind(), NorFlashErrorKind::OutOfBounds);
     }
 }

@@ -37,10 +37,13 @@ pub trait FwPlatform {
     /// Platform failure.
     type Error: core::fmt::Debug;
 
-    /// This boot: `rom_get_sys_info(SYS_INFO_BOOT_INFO)` gives the booted
-    /// partition number (map it to [`Slot::A`] or [`Slot::B`] of the A/B
-    /// pair) and `tbyb_and_update_info` (bit 0, buy pending, is
-    /// [`BootInfo::trial`]).
+    /// This boot: the booted partition of the A/B pair ([`Slot::A`] or
+    /// [`Slot::B`]) and whether a buy is pending ([`BootInfo::trial`]), the
+    /// facts `rom_get_sys_info(SYS_INFO_BOOT_INFO)` reports (partition
+    /// number, bit 0 of `tbyb_and_update_info`). The RP base firmware
+    /// derives them without that `unsafe` call: the partition the ROM maps
+    /// at `0x1000_0000` (QMI `ATRANS0`) and the running image's own TBYB
+    /// flag (`rp_base::ota::rom`).
     fn boot_info(&mut self) -> Result<BootInfo, Self::Error>;
 
     /// The size of each slot's partition in bytes (both are equal). Images
@@ -82,9 +85,10 @@ pub trait FwPlatform {
     /// bootrom skips an unbought TBYB image and boots the other slot.
     fn reboot_normal(&mut self) -> Result<(), Self::Error>;
 
-    /// Buys the running trial image: `rom_explicit_buy` with a 4 KiB work
-    /// buffer (it clears the TBYB flag by rewriting the image's first
-    /// sector), then stops the bootrom's trial watchdog from resetting the
-    /// chip. Only called on a trial boot.
+    /// Buys the running trial image: clears its TBYB flag by rewriting the
+    /// image's first sector (what `rom_explicit_buy` does with a 4 KiB work
+    /// buffer; the RP base firmware rewrites the sector itself through its
+    /// flash driver, `rp_base::ota::platform`), then stops the bootrom's
+    /// trial watchdog from resetting the chip. Only called on a trial boot.
     fn explicit_buy(&mut self) -> Result<(), Self::Error>;
 }
