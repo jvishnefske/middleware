@@ -12,10 +12,15 @@
 //!    two tasks start: the USB device task and the [`link`] task, which
 //!    runs the serial protocol on the CDC port. Nothing is printed as text;
 //!    logs are `sys/log` publications.
-//! 4. The [`rp_base::service::Service`] opens the trust record and the
-//!    payload store at the chip's flash map ([`rp_base::layout`]) through
-//!    the one-sector-per-erase adapter, and the boot log reports the build,
-//!    the heap plan, the stored payload and the trust state.
+//! 4. On the RP2350 the whole flash is mapped untranslated at XIP window 1
+//!    ([`rom::map_untranslated_window`]) for the flash adapter's reads,
+//!    and the firmware updater starts ([`rp_base::ota::AbUpdate::boot`]:
+//!    which slot booted, on trial or not, and the persisted record,
+//!    reconciled). The [`rp_base::service::Service`] then opens the trust
+//!    record and the payload store at the chip's flash map
+//!    ([`rp_base::layout`]) through the one-sector-per-erase adapter, and
+//!    the boot log reports the build, the heap plan, the stored payload,
+//!    the trust state and the updater's state.
 //! 5. With `wasm`, the payload hardware is set aside in [`device::HW`]: a
 //!    `Flex` for every payload pin (GPIO 0–22, 24, 25) and the ADC with
 //!    GPIO 26–28.
@@ -35,6 +40,8 @@ mod device;
 #[cfg(feature = "wasm")]
 mod heap;
 mod link;
+#[cfg(all(feature = "fw-update", feature = "rp2350"))]
+mod rom;
 
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
@@ -42,7 +49,7 @@ use embassy_rp::flash::Flash;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
-use embassy_usb::{Builder, UsbDevice};
+use embassy_usb::{Builder, Handler, UsbDevice};
 use esp_base::trust_store::Persisted;
 use middleware::loader::trust::TrustState;
 use middleware::serial::link::{Duplex, SerialLink};
@@ -84,6 +91,23 @@ static CDC_STATE: StaticCell<CdcState<'static>> = StaticCell::new();
 
 static SERIAL: StaticCell<Serial> = StaticCell::new();
 
+/// Tells the bus when the host configures (or deconfigures) the device.
+struct UsbState {
+    bus: &'static Bus,
+}
+
+impl Handler for UsbState {
+    fn configured(&mut self, configured: bool) {
+        self.bus.set_usb_configured(configured);
+    }
+
+    fn reset(&mut self) {
+        self.bus.set_usb_configured(false);
+    }
+}
+
+static USB_STATE: StaticCell<UsbState> = StaticCell::new();
+
 #[embassy_executor::task]
 async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
     device.run().await
@@ -106,6 +130,7 @@ fn start_usb(spawner: Spawner, usb: embassy_rp::Peri<'static, USB>, serial: &'st
     let mem = USB_MEMORY.take();
     let mut builder =
         Builder::new(driver, config, &mut mem.config, &mut mem.bos, &mut mem.msos, &mut mem.control);
+    builder.handler(USB_STATE.init(UsbState { bus }));
     let class = CdcAcmClass::new(&mut builder, CDC_STATE.init(CdcState::new()), MAX_PACKET);
     let device = builder.build();
     let (tx, rx) = class.split();
@@ -139,6 +164,36 @@ fn log_boot(bus: &Bus, uid: [u8; 8], boot: &rp_base::service::Boot, capacity: u3
             key.0[0], key.0[1], key.0[2], key.0[3], min_version.0
         )),
     }
+}
+
+/// The A/B slots of the RP2350 map (a compile-time error if it had none).
+#[cfg(all(feature = "fw-update", feature = "rp2350"))]
+const AB: rp_base::layout::AbMap = match PROFILE.flash.ab() {
+    Some(ab) => ab,
+    None => panic!("the RP2350 flash map has A/B slots"),
+};
+
+/// Starts the firmware updater on the flash and logs what it found.
+#[cfg(all(feature = "fw-update", feature = "rp2350"))]
+fn open_fw(
+    mut flash: board::StoreFlash,
+    watchdog: embassy_rp::Peri<'static, embassy_rp::peripherals::WATCHDOG>,
+    bus: &Bus,
+) -> (board::StoreFlash, board::Fw) {
+    let (fw, boot) = rp_base::ota::AbUpdate::boot(&mut flash, rom::RpRom::new(watchdog), AB);
+    match (boot, fw.state(), fw.record()) {
+        (Ok(b), Some(state), Some(record)) => bus.log(format_args!(
+            "fw: booted slot {}{}, state {}, min_version {}.{}",
+            b.running.name(),
+            if b.trial { " on trial" } else { "" },
+            state.code().name(),
+            record.min_version.0 >> 16,
+            record.min_version.0 & 0xffff,
+        )),
+        (Err(e), _, _) => bus.log(format_args!("fw: updater unavailable ({e:?}); flash the factory UF2")),
+        _ => bus.log(format_args!("fw: updater unavailable")),
+    }
+    (flash, fw)
 }
 
 /// Sets the payload hardware aside: the GPIO bank and the ADC.
@@ -180,8 +235,11 @@ pub async fn run(spawner: Spawner) -> ! {
         node: node_id(uid),
         max_image: PROFILE.max_image,
     };
-    let (svc, boot) =
-        Service::open(rp_base::flash::Sectored(flash), &PROFILE_REF.flash, facts, board::Fw::default());
+    #[cfg(all(feature = "fw-update", feature = "rp2350"))]
+    let (flash, fw) = open_fw(board::store_flash(flash), p.WATCHDOG, bus);
+    #[cfg(not(all(feature = "fw-update", feature = "rp2350")))]
+    let (flash, fw) = (board::store_flash(flash), board::Fw::default());
+    let (svc, boot) = Service::open(flash, &PROFILE_REF.flash, facts, fw);
     log_boot(bus, uid, &boot, svc.capacity());
 
     #[cfg(feature = "wasm")]

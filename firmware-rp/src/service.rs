@@ -5,7 +5,11 @@
 //! record. [`Service::handle`] takes one request and:
 //!
 //! 1. hands a `sys/fw/*` key to the firmware-update backend
-//!    ([`crate::fw_update`]), which never touches anything below;
+//!    ([`crate::fw_update`]) with the flash (lent by the payload store),
+//!    the node id, the trust store's root of trust and the
+//!    [`SelfTest`](crate::fw_update::SelfTest) (USB configured, store and
+//!    trust record open); the backend never touches the payload loader
+//!    state;
 //! 2. otherwise decides it with `esp_base::dispatch::handle_request`, the
 //!    ESP base firmware's own pure dispatcher (the same request table,
 //!    loader state machine, staging and trust rules), with no re-key window
@@ -40,7 +44,7 @@ use middleware::loader::{PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
-use crate::fw_update::{self, FwUpdate};
+use crate::fw_update::{self, FwContext, FwUpdate, SelfTest};
 use crate::layout::FlashMap;
 
 /// What `sys/info` reports about this build, besides the store capacity.
@@ -172,9 +176,10 @@ pub struct Service<F, U> {
     store: Option<PayloadStore<F>>,
     trust: Option<TrustStore>,
     fw: U,
+    usb_configured: bool,
 }
 
-impl<F: NorFlash, U: FwUpdate> Service<F, U> {
+impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
     /// Opens the trust record and then the payload store at the regions of
     /// `map` (the trust record is read before the flash moves into the
     /// store, which lends it back for every trust save), verifies the
@@ -199,7 +204,7 @@ impl<F: NorFlash, U: FwUpdate> Service<F, U> {
             staging: false,
             node: Some(facts.node),
         };
-        (Service { state, ctx, store, trust, fw }, Boot { installed, trust: persisted })
+        (Service { state, ctx, store, trust, fw, usb_configured: false }, Boot { installed, trust: persisted })
     }
 
     /// The dispatcher state.
@@ -220,6 +225,26 @@ impl<F: NorFlash, U: FwUpdate> Service<F, U> {
     /// The payload store, to read the installed image for a start.
     pub fn store_mut(&mut self) -> Option<&mut PayloadStore<F>> {
         self.store.as_mut()
+    }
+
+    /// The firmware-update backend.
+    pub fn fw(&self) -> &U {
+        &self.fw
+    }
+
+    /// Records whether the host has configured USB (an input of the
+    /// [`SelfTest`]).
+    pub fn set_usb_configured(&mut self, configured: bool) {
+        self.usb_configured = configured;
+    }
+
+    /// The self-test a trial firmware must pass before it is confirmed.
+    pub fn self_test(&self) -> SelfTest {
+        SelfTest {
+            usb_configured: self.usb_configured,
+            store_open: self.store.is_some(),
+            trust_open: self.trust.is_some(),
+        }
     }
 
     /// The payload was loaded and runs.
@@ -243,7 +268,13 @@ impl<F: NorFlash, U: FwUpdate> Service<F, U> {
     /// Handles one request; a reply body is written into `out`.
     pub fn handle(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
         if fw_update::is_fw_key(key) {
-            return Handled::now(self.fw.handle(key, body, out));
+            let ctx = FwContext {
+                node: self.ctx.node.unwrap_or(SenderId([0; 8])),
+                trust: self.state.trust(),
+                self_test: self.self_test(),
+            };
+            let flash = self.store.as_mut().map(PayloadStore::flash);
+            return Handled::now(self.fw.handle(flash, &ctx, key, body, out));
         }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
         if outcome.action == Action::Start {
@@ -366,8 +397,10 @@ pub(crate) mod tests {
     pub const MAP: FlashMap = FlashMap {
         flash_size: 0x1_4000,
         boot: BootKind::ImageDef,
+        partition_table: None,
         firmware: Region::new(0, 0x2000),
         firmware_b: None,
+        fw_record: None,
         payload: Region::new(0x2000, 0x1_0000),
         trust: Region::new(0x1_2000, 0x2000),
     };
@@ -390,12 +423,12 @@ pub(crate) mod tests {
         Box::new(Flash::new())
     }
 
-    fn open<U: FwUpdate>(flash: &mut Flash, facts: Facts, fw: U) -> (Svc<'_, U>, Boot) {
+    fn open<'f, U: FwUpdate<&'f mut Flash>>(flash: &'f mut Flash, facts: Facts, fw: U) -> (Svc<'f, U>, Boot) {
         Service::open(flash, &MAP, facts, fw)
     }
 
     /// Sends one request; returns the reply with its body copied out.
-    fn call<U: FwUpdate>(s: &mut Svc<'_, U>, key: Key<'_>, body: &[u8]) -> (Result<StdVec<u8>, HandlerError>, Handled) {
+    fn call<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>, key: Key<'_>, body: &[u8]) -> (Result<StdVec<u8>, HandlerError>, Handled) {
         let mut out = [0u8; 128];
         let h = s.handle(key, body, &mut out);
         let r = match h.reply {
@@ -406,7 +439,7 @@ pub(crate) mod tests {
     }
 
     /// Sends one request that must succeed.
-    fn ok<U: FwUpdate>(s: &mut Svc<'_, U>, key: Key<'_>, body: &[u8]) {
+    fn ok<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>, key: Key<'_>, body: &[u8]) {
         let (r, _) = call(s, key, body);
         assert!(r.is_ok(), "{}: {r:?}", key.as_str());
     }
@@ -419,7 +452,7 @@ pub(crate) mod tests {
     }
 
     /// Begin and chunks of `image` (48-byte chunks); commit not sent.
-    fn transfer<U: FwUpdate>(s: &mut Svc<'_, U>, image: &[u8]) {
+    fn transfer<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>, image: &[u8]) {
         assert_eq!(call(s, keys::BEGIN, &begin(image.len(), Crc32::checksum(image))).0, Ok(StdVec::new()));
         for (i, part) in image.chunks(48).enumerate() {
             let mut c = (i as u32 * 48).to_le_bytes().to_vec();
@@ -432,7 +465,7 @@ pub(crate) mod tests {
         (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
     }
 
-    fn installed(s: &mut Svc<'_, impl FwUpdate>) -> Option<StdVec<u8>> {
+    fn installed<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>) -> Option<StdVec<u8>> {
         let store = s.store_mut()?;
         let h = store.header()?;
         let mut buf = std::vec![0u8; h.len as usize];

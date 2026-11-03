@@ -9,11 +9,16 @@
 //!   not reading, the oldest messages are dropped rather than stalling the
 //!   controller.
 //!
+//! * `usb_configured` — whether the host has configured the USB device
+//!   (set by the USB stack's handler; an input of the firmware's
+//!   self-test).
+//!
 //! This is esp-base's bus (`firmware/src/shell/bus.rs`) cut down to one
 //! port and no radio. The bus is created once at boot and shared as
 //! `&'static Bus` with the tasks, as embassy tasks require.
 
 use core::fmt::{self, Write as _};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -101,6 +106,7 @@ pub struct Bus {
     inbound: Channel<Mutex, Inbound, INBOUND_DEPTH>,
     reply: Signal<Mutex, Reply>,
     outbound: PubSubChannel<Mutex, Outbound, OUTBOUND_DEPTH, SUBSCRIBERS, 0>,
+    usb_configured: AtomicBool,
 }
 
 /// The link's view of outbound publications.
@@ -109,7 +115,22 @@ pub type OutboundSubscriber = Subscriber<'static, Mutex, Outbound, OUTBOUND_DEPT
 impl Bus {
     /// Empty channels.
     pub const fn new() -> Self {
-        Bus { inbound: Channel::new(), reply: Signal::new(), outbound: PubSubChannel::new() }
+        Bus {
+            inbound: Channel::new(),
+            reply: Signal::new(),
+            outbound: PubSubChannel::new(),
+            usb_configured: AtomicBool::new(false),
+        }
+    }
+
+    /// Records whether the host has configured the USB device.
+    pub fn set_usb_configured(&self, configured: bool) {
+        self.usb_configured.store(configured, Ordering::Relaxed);
+    }
+
+    /// Whether the host has configured the USB device.
+    pub fn usb_configured(&self) -> bool {
+        self.usb_configured.load(Ordering::Relaxed)
     }
 
     /// Queues a message for the controller, waiting while it is busy.
