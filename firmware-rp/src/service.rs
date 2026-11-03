@@ -23,6 +23,12 @@
 //!    `esp_base::dispatch::after_storage_failure` with the trust record on
 //!    flash adopted, so RAM never trusts less than a reboot would.
 //!
+//! When the trust record cannot be read at boot (either sector unreadable,
+//! or the region unusable) the service fails closed:
+//! the payload requests that install or pin anything
+//! ([`loader_needs_trust`]) and the firmware requests that install an
+//! image are `Unavailable`, rather than decided as on an unclaimed device.
+//!
 //! It returns a [`Handled`]: the reply (or [`Reply::Start`]: load and run
 //! the payload, then answer), whether a running payload must stop, and
 //! [`Note`]s for `sys/log`. The shell (`src/shell/controller.rs`) only
@@ -47,6 +53,27 @@ use middleware::{Key, SenderId};
 use crate::fw_update::{self, FwContext, FwUpdate, SelfTest};
 use crate::layout::FlashMap;
 
+/// Whether a payload request depends on the trust record: installing a
+/// payload (`begin`, `chunk`, `commit`, which a claimed device accepts
+/// only signed) and pinning a key (`sys/trust/claim`). Without a readable
+/// trust record they are refused `Unavailable` (fail closed), instead of
+/// running against an `Unclaimed` default that would accept unsigned
+/// payloads. `sys/info`, `sys/trust/info`, start and stop do not install
+/// anything and still work.
+pub fn loader_needs_trust(key: Key<'_>) -> bool {
+    key == keys::BEGIN || key == keys::CHUNK || key == keys::COMMIT || key == keys::TRUST_CLAIM
+}
+
+/// Whether both trust record sectors can be read (the record's length at
+/// the start of each, what `TrustStore::open` reads).
+fn trust_readable<F: NorFlash>(flash: &mut F, map: &FlashMap) -> bool {
+    let mut buf = [0u8; esp_base::trust_store::RECORD_LEN];
+    (0..2u32).all(|s| {
+        let at = map.trust.offset.checked_add(s * esp_base::image::SECTOR);
+        at.is_some_and(|at| flash.read(at, &mut buf).is_ok())
+    })
+}
+
 /// What `sys/info` reports about this build, besides the store capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Facts {
@@ -69,7 +96,7 @@ pub struct Boot {
     /// the payload region could not be opened (the loader is disabled).
     pub installed: Option<Result<Header, StoreError>>,
     /// The trust record read at boot; `None` when the trust region could
-    /// not be opened (unsigned payloads only).
+    /// not be read (payload and firmware installs are then refused).
     pub trust: Option<Persisted>,
 }
 
@@ -185,9 +212,16 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
     /// store, which lends it back for every trust save), verifies the
     /// installed image and builds the boot state.
     pub fn open(mut flash: F, map: &FlashMap, facts: Facts, fw: U) -> (Self, Boot) {
-        let (trust, persisted) = match TrustStore::open(&mut flash, map.trust.offset, map.trust.size) {
-            Ok((t, p)) => (Some(t), Some(p)),
-            Err(_) => (None, None),
+        // `TrustStore::open` reads a sector it cannot read as holding no
+        // record (Unclaimed); here an unreadable sector makes the trust
+        // record unavailable instead, so the service fails closed.
+        let opened = match trust_readable(&mut flash, map) {
+            true => TrustStore::open(&mut flash, map.trust.offset, map.trust.size).ok(),
+            false => None,
+        };
+        let (trust, persisted) = match opened {
+            Some((t, p)) => (Some(t), Some(p)),
+            None => (None, None),
         };
         let mut store = PayloadStore::new(flash, map.payload.offset, map.payload.size, facts.max_image).ok();
         let installed = store.as_mut().map(PayloadStore::verify);
@@ -270,11 +304,14 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
         if fw_update::is_fw_key(key) {
             let ctx = FwContext {
                 node: self.ctx.node.unwrap_or(SenderId([0; 8])),
-                trust: self.state.trust(),
+                trust: self.trust.as_ref().map(|_| self.state.trust()),
                 self_test: self.self_test(),
             };
             let flash = self.store.as_mut().map(PayloadStore::flash);
             return Handled::now(self.fw.handle(flash, &ctx, key, body, out));
+        }
+        if self.trust.is_none() && loader_needs_trust(key) {
+            return Handled::now(Err(HandlerError::Unavailable));
         }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
         if outcome.action == Action::Start {
@@ -676,6 +713,41 @@ pub(crate) mod tests {
         let mut g = flash();
         let (mut s, _) = open(&mut g, FACTS, Absent);
         assert_eq!(call(&mut s, crate::fw_update::keys::INFO, &[]).0, Err(HandlerError::NotFound));
+    }
+
+    #[test]
+    fn v13_an_unreadable_trust_record_refuses_payload_installs_and_claims() {
+        // The trust region lies outside the flash: it cannot be read.
+        let map = FlashMap { trust: Region::new(MAP.flash_size, 0x2000), ..MAP };
+        let img = image(600, 14);
+        let mut f = flash();
+        let (mut s, boot) = Service::open(&mut *f, &map, FACTS, Unsupported);
+        assert_eq!(boot.trust, None);
+        assert!(boot.installed.is_some(), "the store opened");
+        let mut chunk = 0u32.to_le_bytes().to_vec();
+        chunk.extend_from_slice(&img[..48]);
+        let claim = public(1).0;
+        for (k, body) in [
+            (keys::BEGIN, &begin(img.len(), Crc32::checksum(&img))[..]),
+            (keys::CHUNK, &chunk[..]),
+            (keys::COMMIT, &[][..]),
+            (keys::COMMIT, &signed(1, &img, 5)[..]),
+            (keys::TRUST_CLAIM, &claim[..]),
+        ] {
+            let (r, h) = call(&mut s, k, body);
+            assert_eq!(r, Err(HandlerError::Unavailable), "{}", k.as_str());
+            assert!(!h.stop && h.notes.is_empty());
+        }
+        assert_eq!(s.status(), PayloadStatus::Empty);
+        // Reads still work.
+        assert!(call(&mut s, keys::INFO, &[]).0.is_ok());
+        assert!(call(&mut s, keys::TRUST_INFO, &[]).0.is_ok());
+        assert!(!s.self_test().ok());
+        // With the record readable the same requests go through.
+        let mut g = flash();
+        let (mut s, _) = open(&mut g, FACTS, Unsupported);
+        transfer(&mut s, &img);
+        assert_eq!(call(&mut s, keys::COMMIT, &[]).0, Ok(StdVec::new()));
     }
 
     #[test]

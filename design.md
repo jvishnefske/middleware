@@ -1709,6 +1709,17 @@ atomics; nothing has run on silicon yet.
   (`NotFound`), and `mwctl` sees it as a `+no-wasm` device —
   `service::tests::v11_without_the_runtime_payloads_are_stored_but_not_started`,
   `service::wire::v11_mwctl_sees_a_no_wasm_rp2040`.
+- [x] V13 The service fails closed when the trust record cannot be read
+  at boot (either sector unreadable, or the region unusable): payload
+  `begin`, `chunk`, `commit` (signed or not) and `sys/trust/claim` answer
+  `Unavailable` and change nothing, instead of being decided as on an
+  unclaimed device (esp-base's `TrustStore::open` reads an unreadable
+  sector as holding no record, so the service probes both sectors first);
+  `sys/info`, `sys/trust/info`, start and stop still answer; the self-test
+  fails —
+  `service::tests::v13_an_unreadable_trust_record_refuses_payload_installs_and_claims`;
+  `ota::tests::y16_an_unreadable_trust_record_refuses_firmware_installs`
+  (loader part).
 - [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
   with its factory UF2), the CDC port enumerates, `mwctl info` reports the
   chip and node id, an upload survives a power cycle, and on the Pico 2
@@ -2849,6 +2860,28 @@ record.
   `RP_BASE_UPDATE_IMAGE` naming the built `-update.bin` or `-update.uf2`;
   skipped without it). `picotool info -a` on the built files shows the
   table and the blocks as described above.
+
+**Unreadable trust record.** The root of trust decides whether a commit
+must be signed, so when the trust record cannot be read the firmware does
+not treat the device as unclaimed: the request service hands the backend
+no root of trust (`FwContext::trust` is `None`) and the backend refuses
+`begin`, `chunk` and `commit` with `Unavailable` before the updater sees
+them. `info` is read only. `abort` only abandons a transfer (erasing the
+inactive slot's first sector) or reverts a trial to the image that booted
+before, so it can only move the device back to firmware it already ran.
+`reboot` only boots an image already committed, which was authorized
+while the record was readable. `confirm` passes this rule for the same
+reason, but the self-test requires the trust record open, so a trial that
+boots with the record unreadable is never bought and reverts at the next
+reset: the firmware that cannot read its root of trust never becomes
+permanent.
+
+- [x] Y16 With the trust record unreadable, firmware `begin`, `chunk` and
+  `commit` (signed or not) are `Unavailable` and leave the inactive slot
+  untouched, `info` and `abort` work, and a trial booted with the record
+  unreadable cannot be confirmed (self-test) and rolls back on reset —
+  `ota::tests::y16_an_unreadable_trust_record_refuses_firmware_installs`,
+  `y16_a_trial_booted_with_the_trust_record_unreadable_is_never_bought`.
 
 **Boot ROM questions.** Settled from the pico-sdk and picotool sources:
 the flash-update reboot's `p0` is the XIP address of the partition start
