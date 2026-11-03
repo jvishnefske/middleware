@@ -35,7 +35,7 @@ use super::image::{FwVersion, SENTINEL_OFFSET, START_BLOCK_OFFSET, UPDATE_FLAGS,
 use super::platform::{PlatformError, RpPlatform};
 use super::rom::{Reboot, Rom, XIP_BASE, XipMap};
 use super::table::partition_table_bytes;
-use crate::layout::{AbMap, RP2350, Region};
+use crate::layout::{AbMap, FlashMap, RP2350, Region};
 use crate::ram_flash::VecFlash;
 use crate::service::{Facts, Reply, Service};
 
@@ -157,21 +157,31 @@ struct Board {
     splitter: Splitter<MAX_WIRE_FRAME>,
     tx: VecDeque<u8>,
     boots: usize,
+    map: FlashMap,
 }
 
-fn start(mem: Vec<u8>, reboot: Option<Reboot>, usb: bool) -> Svc {
+/// The RP2350 map with the trust record out of the flash: it cannot be
+/// read, as after a flash fault.
+const NO_TRUST: FlashMap = FlashMap { trust: Region::new(0x40_0000, 0x2000), ..RP2350 };
+
+fn start(mem: Vec<u8>, reboot: Option<Reboot>, usb: bool, map: &FlashMap) -> Svc {
     let xip = rom_boot(&mem, reboot);
     let mut flash = VecFlash::new(mem);
     let rom = TestRom { xip: Some(xip), ..TestRom::default() };
     let (fw, _) = AbUpdate::boot(&mut flash, rom, ab());
-    let (mut svc, _) = Service::open(flash, &RP2350, FACTS, fw);
+    let (mut svc, _) = Service::open(flash, map, FACTS, fw);
     svc.set_usb_configured(usb);
     svc
 }
 
 impl Board {
     fn power_on(mem: Vec<u8>) -> Board {
-        Board { svc: start(mem, None, true), usb: true, splitter: Splitter::new(), tx: VecDeque::new(), boots: 1 }
+        Board::power_on_with(mem, RP2350)
+    }
+
+    fn power_on_with(mem: Vec<u8>, map: FlashMap) -> Board {
+        let svc = start(mem, None, true, &map);
+        Board { svc, usb: true, splitter: Splitter::new(), tx: VecDeque::new(), boots: 1, map }
     }
 
     fn mem(&mut self) -> &mut Vec<u8> {
@@ -182,7 +192,7 @@ impl Board {
     /// cycle / watchdog when `None`).
     fn reset(&mut self, reboot: Option<Reboot>) {
         let mem = core::mem::take(self.mem());
-        self.svc = start(mem, reboot, self.usb);
+        self.svc = start(mem, reboot, self.usb, &self.map);
         self.boots += 1;
     }
 
@@ -604,4 +614,53 @@ fn y13_uf2s_reassemble_to_the_images_and_the_factory_one_erases_b_and_the_record
     assert!(back[flat.len()..].iter().all(|&b| b == 0xFF));
     assert_eq!(rom_boot(&back, None).base, ab().a.offset, "the factory UF2 boots slot A");
     assert_eq!(uf2::write(uf2::update_pages(&img), FAMILY_ABSOLUTE, &mut [0u8; 100]), None);
+}
+
+#[test]
+fn y16_an_unreadable_trust_record_refuses_firmware_installs() {
+    let mut d = device(Board::power_on_with(factory(V1_0), NO_TRUST));
+    // info still answers; the self-test fails (trust record not open).
+    let i = d.fw_info().unwrap();
+    assert_eq!((i.state, i.running, i.self_test_ok), (StateCode::Idle, Slot::A, false));
+    // begin, chunk and commit are Unavailable: the device does not fall
+    // back to "unclaimed, accept anything".
+    let err = d.fw_update(&fw_image(V1_1, 1), UpdateOptions::default(), |_| {}).unwrap_err();
+    assert_eq!(err.status(), Some(HandlerError::Unavailable), "{err}");
+    let b = board(&mut d);
+    let mut out = [0u8; 64];
+    let mut chunk = vec![0u8; 4];
+    chunk.extend_from_slice(&[1; 16]);
+    for (k, body) in [(fw_keys::CHUNK, &chunk[..]), (fw_keys::COMMIT, &[][..]), (fw_keys::COMMIT, &[0u8; 64][..])] {
+        let h = b.svc.handle(k, body, &mut out);
+        assert_eq!(h.reply, Reply::Now(Err(HandlerError::Unavailable)), "{}", k.as_str());
+    }
+    assert!(b.mem()[ab().b.offset as usize..ab().b.end() as usize].iter().all(|&x| x == 0xFF), "slot B untouched");
+    // abort changes nothing that needs authorizing and still answers.
+    d.fw_abort().unwrap();
+    assert_eq!(d.fw_info().unwrap().state, StateCode::Idle);
+    // The payload loader refuses installs and claims too.
+    let b = board(&mut d);
+    for k in [middleware::loader::keys::BEGIN, middleware::loader::keys::COMMIT, middleware::loader::keys::TRUST_CLAIM] {
+        let h = b.svc.handle(k, &[0u8; 32], &mut out);
+        assert_eq!(h.reply, Reply::Now(Err(HandlerError::Unavailable)), "{}", k.as_str());
+    }
+}
+
+#[test]
+fn y16_a_trial_booted_with_the_trust_record_unreadable_is_never_bought() {
+    // Committed while the record was readable (authorized then) ...
+    let mut d = device(Board::power_on(factory(V1_0)));
+    d.fw_update(&fw_image(V1_1, 2), UpdateOptions { key: None, reboot: false }, |_| {}).unwrap();
+    // ... then the trial boot cannot read it.
+    board(&mut d).map = NO_TRUST;
+    d.fw_reboot().unwrap();
+    let i = d.fw_info().unwrap();
+    assert_eq!((i.state, i.running, i.self_test_ok), (StateCode::Trial, Slot::B, false));
+    let err = d.fw_confirm(2, || {}).unwrap_err();
+    assert_eq!(err.status(), Some(HandlerError::Unavailable));
+    // A reset reverts it.
+    board(&mut d).map = RP2350;
+    board(&mut d).reset(None);
+    let i = d.fw_info().unwrap();
+    assert_eq!((i.state, i.running), (StateCode::RolledBack, Slot::A));
 }
