@@ -120,6 +120,7 @@ impl Controller {
         };
         let before = self.svc.status();
         let mut out = [0u8; MAX_REPLY];
+        self.svc.set_usb_configured(self.bus.usb_configured());
         let Handled { reply, stop, notes } = self.svc.handle(key, body, &mut out);
         for note in &notes {
             self.bus.log(format_args!("{note}"));

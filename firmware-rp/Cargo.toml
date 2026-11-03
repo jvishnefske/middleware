@@ -27,6 +27,15 @@ bench = false
 # commands such as `cargo clippy --lib --all-targets` skip it.
 required-features = ["shell"]
 
+# Host tool: the RP2350 post-link step of build.sh (update and factory
+# images, UF2s). `cargo run --features image-tool --bin rp-image`.
+[[bin]]
+name = "rp-image"
+path = "src/bin/rp-image.rs"
+test = false
+bench = false
+required-features = ["image-tool"]
+
 [features]
 default = []
 # Exactly one chip feature must be enabled to build the binary.
@@ -37,13 +46,19 @@ default = []
 # payload runtime: it serves sys/info, the loader, the flash store and
 # trust, reports firmware `<ver>+no-wasm` and refuses sys/payload/start.
 rp2040 = ["shell", "embassy-rp/rp2040", "dep:portable-atomic"]
-# RP2350 (Pico 2, RP2350A): Cortex-M33, runs payloads.
-rp2350 = ["shell", "wasm", "fw-update", "embassy-rp/rp235xa"]
+# RP2350 (Pico 2, RP2350A): Cortex-M33, runs payloads, A/B firmware OTA.
+# embassy-rp emits no IMAGE_DEF (build.rs generates the image's own, with
+# TBYB, version and sentinel) and exposes its PAC (the QMI address
+# translation registers, read and written without `unsafe`).
+rp2350 = ["shell", "wasm", "fw-update", "embassy-rp/rp235xa", "embassy-rp/imagedef-none", "embassy-rp/unstable-pac"]
 # The WASM payload runtime (wasm-host / wasmi) and its bounded heap.
 wasm = ["dep:wasm-host", "dep:linked_list_allocator"]
-# The seam for A/B firmware OTA (RP2350): reserves the `sys/fw/*` keys. The
-# stub answers every one `Unavailable` (see src/fw_update.rs).
+# A/B firmware OTA (RP2350 only): `sys/fw/*` served by
+# `rp_base::ota::AbUpdate` (middleware::fw_ota on the RP2350's flash and
+# boot ROM). Without it `sys/fw/*` is NotFound.
 fw-update = []
+# Host only: the `rp-image` tool (std, mwctl's image checks).
+image-tool = ["dep:mwctl"]
 # Internal: the imperative shell's dependencies, pulled in by a chip feature.
 shell = [
   "dep:embassy-rp",
@@ -83,6 +98,9 @@ static_cell = { version = "2.1.1", optional = true }
 cortex-m = { version = "0.7.7", optional = true }
 cortex-m-rt = { version = "0.7.5", optional = true }
 embedded-io-async = { version = "0.7", optional = true }
+# `rp-image` only (feature `image-tool`, host): mwctl's image loading and
+# checks, so the build refuses what `mwctl fw update` would.
+mwctl = { path = "../tools/mwctl", optional = true }
 # RP2040 only: CAS for static_cell's atomics through critical sections
 # (thumbv6m has no CAS instructions).
 portable-atomic = { version = "1.11", features = ["critical-section"], optional = true }

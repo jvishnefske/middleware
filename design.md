@@ -1559,7 +1559,9 @@ and is written again for embassy-rp, kept thin: a one-port message bus, the
 CDC link task and the controller loop (`firmware-rp/src/shell/`). The RP
 pure core (`rp_base`, host tested) adds the flash maps, the chip profiles
 and pin policy, the request service that performs the storage effects over
-any NOR flash, the `sys/fw/*` seam, the one-sector erase adapter, the USB
+any NOR flash, the `sys/fw/*` seam and, on the RP2350, the A/B firmware
+updater that serves it (`rp_base::ota`, see "A/B firmware OTA (RP2350)"),
+the one-sector erase adapter and the untranslated-read window, the USB
 framing rules and the heap budget.
 
 Tasks: the USB device task, the link task (middleware's `SerialLink` over
@@ -1570,21 +1572,37 @@ the running payload. They meet only through the `'static` bus.
 Flash maps (offsets from the start of flash; every region whole 4 KiB
 sectors, checked by `layout::FlashMap::check`):
 
-| board | firmware | firmware slot B | payload store | trust | unused |
-|---|---|---|---|---|---|
-| Pico, RP2040, 2 MiB | 0x000000, 1.5 MiB (boot2, then the image) | — | 0x180000, 256 KiB | 0x1C0000, 8 KiB | 248 KiB |
-| Pico 2, RP2350, 4 MiB | 0x000000, 1.5 MiB (slot A) | 0x180000, 1.5 MiB, reserved | 0x300000, 256 KiB | 0x340000, 8 KiB | 760 KiB, reserved for firmware OTA metadata |
+| board | partition table | firmware | firmware slot B | update record | payload store | trust | unused |
+|---|---|---|---|---|---|---|---|
+| Pico, RP2040, 2 MiB | — | 0x000000, 1.5 MiB (boot2, then the image) | — | — | 0x180000, 256 KiB | 0x1C0000, 8 KiB | 248 KiB |
+| Pico 2, RP2350, 4 MiB | 0x000000, 8 KiB | 0x002000, 1528 KiB (slot A, partition 0) | 0x180000, 1528 KiB (partition 1, linked to A) | 0x2FE000, 8 KiB | 0x300000, 256 KiB | 0x340000, 8 KiB | 760 KiB |
 
 The payload store is the ESP partition's size, so both report the same
-124 KiB slot capacity (capped by the chip's `max_image`). On the RP2350
-the image is linked at 0x10000000 and capped 8 KiB short of slot A, so the
-A/B firmware OTA work can put a partition table in the first sectors and
-let the boot ROM map either slot at 0x10000000 without relinking.
+124 KiB slot capacity (capped by the chip's `max_image`). The RP2350's
+payload store and trust record kept their offsets when the A/B layout
+came, so a board flashed before keeps its payload and its pinned key. The
+RP2350 image is linked at 0x10000000 for one slot (`memory-rp2350.x`
+`FLASH` = 1528 KiB); the boot ROM maps the slot it boots there through
+the QMI's address translation (window 0), so the same image runs from
+either slot.
+
+Under that translation 0x10000000 is the running slot, and anything past
+its end faults, while the boot ROM's erase and program functions (which
+embassy-rp's flash driver calls) take physical offsets. So the shell maps
+the whole flash, untranslated, at XIP window 1 (0x10400000, QMI
+`ATRANS1` base 0, 4 MiB; a safe PAC register write) and every flash access
+of the store, the trust record and the updater goes through
+`rp_base::flash::Window`, which reads at 4 MiB + offset (the driver is
+declared 8 MiB for that) and erases and writes at the offset: every offset
+in the table above is physical for reads, erases and writes alike. On a
+board without a partition table nothing is translated and the window is
+the identity, so the same build works there (without the updater).
 
 RAM: the RP2040 build has no heap (no runtime) and 22 KB of static RAM,
 leaving about 242 KiB of stack. The RP2350 build holds a 384 KiB heap arena
-in `.bss` (static RAM 416 KB in all), leaving about 113 KiB for the main
-stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
+in `.bss` (static RAM 432 KB in all, the firmware updater's 5 KiB sector
+stash and the main task's larger future included), leaving about 97 KiB
+for the main stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
 128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
 bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
 compiling), so every image the store accepts is admitted. The byte-page
@@ -1621,12 +1639,14 @@ atomics; nothing has run on silicon yet.
   `service::tests::v1_info_reports_the_rp_chip_capacity_and_node_id`,
   `node::tests::v1_node_id_and_usb_serial_come_from_the_unique_id`.
 - [x] V2 The flash maps above are sector aligned, inside the flash, free of
-  overlaps, start with the firmware, hold the 8 KiB trust record and a
-  256 KiB payload store (124 KiB slots); the RP2350 reserves two equal
-  firmware slots below the store; the `FLASH` length of `memory-rp2040.x`
-  and `memory-rp2350.x` equals the map's linked firmware size —
+  overlaps, start at offset 0 (the firmware, or on the RP2350 the
+  partition table), hold the 8 KiB trust record and a 256 KiB payload store
+  (124 KiB slots); the RP2350 has two equal firmware slots, the partition
+  table and the two-sector update record outside both slots, and only all
+  three together; the `FLASH` length of `memory-rp2040.x` and
+  `memory-rp2350.x` equals the map's linked firmware size —
   `layout::tests::v2_both_maps_are_valid_and_keep_the_esp_payload_capacity`,
-  `v2_rp2350_reserves_two_equal_firmware_slots`,
+  `y13_rp2350_has_a_table_two_equal_slots_and_the_record_outside_them`,
   `v2_memory_x_flash_lengths_match_the_maps`, `v2_check_refuses_broken_maps`.
 - [x] V3 Payloads go into the two-slot store with esp-base's semantics: an
   upload survives a reboot and starts; a serial `begin` stops a running
@@ -1645,14 +1665,19 @@ atomics; nothing has run on silicon yet.
   `service::tests::v4_a_pinned_key_and_its_min_version_survive_reboots`,
   `v4_min_version_reaches_flash_before_the_new_header`.
 - [x] V5 Flash erases are issued one 4 KiB sector per driver call, so
-  interrupts (USB) are serviced between sectors —
-  `flash::tests::v5_erases_one_sector_per_driver_call`.
-- [x] V6 `sys/fw/*` is reserved for the A/B firmware OTA backend: with the
-  `fw-update` stub (RP2350) every such key answers `Unavailable`, without
-  it (RP2040) `NotFound`, and neither touches the payload loader, store or
-  status. The backend is a generic `FwUpdate` parameter of the service —
-  `fw_update::tests::v6_the_reserved_keys_are_under_the_prefix`,
-  `service::tests::v6_sys_fw_keys_go_to_the_update_backend_only`.
+  interrupts (USB) are serviced between sectors; on the RP2350 reads go
+  through the untranslated window and every access is bounded by the
+  physical flash — `flash::tests::v5_erases_one_sector_per_driver_call`,
+  `y12_window_reads_through_the_untranslated_alias_and_writes_physically`.
+- [x] V6 `sys/fw/*` belongs to the firmware-update backend, a generic
+  `FwUpdate<F>` parameter of the service that gets the flash (lent by the
+  payload store), the node id, the root of trust and the self-test with
+  each request: the RP2350 build's backend is the A/B updater (Y12); the
+  `Unsupported` stub answers `Unavailable`; without `fw-update` (RP2040)
+  the keys are `NotFound`; none touches the payload loader, store or
+  status — `fw_update::tests::v6_the_reserved_keys_are_under_the_prefix`,
+  `service::tests::v6_sys_fw_keys_go_to_the_update_backend_only`,
+  `ota::tests::y12_requests_reach_the_updater_and_unknown_fw_keys_are_not_found`.
 - [x] V7 Heap plan: the RP2040 has no heap; the RP2350's 384 KiB arena
   holds linear memory, the largest image and the interpreter reserve and
   leaves at least 128 KiB of SRAM for statics and stack; its heap check
@@ -1684,10 +1709,11 @@ atomics; nothing has run on silicon yet.
   (`NotFound`), and `mwctl` sees it as a `+no-wasm` device —
   `service::tests::v11_without_the_runtime_payloads_are_stored_but_not_started`,
   `service::wire::v11_mwctl_sees_a_no_wasm_rp2040`.
-- [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images, the CDC port
-  enumerates, `mwctl info` reports the chip and node id, an upload survives
-  a power cycle, and on the Pico 2 `blink` toggles GPIO 8 and publishes
-  `app/blink/state`. Not yet run on hardware.
+- [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
+  with its factory UF2), the CDC port enumerates, `mwctl info` reports the
+  chip and node id, an upload survives a power cycle, and on the Pico 2
+  `blink` toggles GPIO 8 and publishes `app/blink/state`. Not yet run on
+  hardware.
 
 ### Host tool (`tools/mwctl`)
 
@@ -2652,50 +2678,209 @@ retrying while the self-test is still running. It waits up to 15 s for
   uses no middleware feature (the model is a dev-dependency) —
   `scripts/check-features.sh` (Y11 lines).
 
-What the RP2350 integration (`firmware-rp/`, replacing its `fw_update`
-stub) must provide, unverified until then:
+**RP2350 integration** (`firmware-rp/`, `rp_base::ota`, feature
+`fw-update`, on in the `rp2350` build). The RP base firmware serves
+`sys/fw/*` with `FwService` on `rp_base::ota::platform::RpPlatform`, an
+`FwPlatform` over any NOR flash and a boot ROM seam (`rp_base::ota::rom::Rom`),
+built for each request from borrows: the flash is the payload store's, lent
+by the request service, and the ROM seam is owned by the backend
+(`rp_base::ota::AbUpdate`). `AbUpdate::boot` runs `FwService::boot` once
+at startup, before the request service opens the store; if it fails (most
+often because the board has no partition table, so the boot ROM booted no
+slot) every `sys/fw/*` request is answered `Unavailable` and the boot log
+says why. The request service hands every `sys/fw/*` key to it before the
+payload dispatcher, with the node id `sys/info` reports, the trust store's
+root of trust and the self-test.
 
-- [ ] Y12 `FwPlatform` on embassy-rp, blocking: `boot_info` from
-  `rom_get_sys_info(SYS_INFO_BOOT_INFO)` (the booted partition number
-  mapped to A or B of the pair, and bit 0 of `tbyb_and_update_info`, buy
-  pending, as the trial flag); slot offsets and the slot size from
-  `rom_get_partition_table_info` with `PT_INFO_PARTITION_LOCATION_AND_FLAGS`
-  (both partitions the same size); `read`, `erase` (4 KiB) and `write`
-  through embassy-rp's blocking flash at the partition's offset, never the
-  running partition; `load_record` and `persist` with the `record` format
-  in two dedicated 4 KiB sectors outside both partitions, written into
-  the sector not holding the current record, fields first and magic
-  last, the higher sequence number winning; `reboot_flash_update` as
-  `rom_reboot(REBOOT_TYPE_FLASH_UPDATE, 100, partition start, 0)` and
-  `reboot_normal` as `REBOOT_TYPE_NORMAL` with the same delay, both
-  returning so the reply is sent first; `explicit_buy` as
-  `rom_explicit_buy` with a 4 KiB word-aligned work buffer, then stopping
-  the trial watchdog. The dispatcher hands every `sys/fw/*` request to
-  `FwService::handle` before the payload loader, with a `Context` holding
-  the `sys/info` node id, the trust store's `TrustState` and the
-  firmware's self-test result, and builds the service once at boot with
-  `FwService::boot`. During a trial the firmware must not feed or disable
-  the bootrom's watchdog before the buy, so a hung image reverts.
-- [ ] Y13 The firmware image and flash layout: a partition table with two
-  equal partitions linked as an A/B pair (B's link type "A partition",
-  value A's index) accepting the RP2350 Arm secure family, plus the two
-  record sectors outside them; every build's IMAGE_DEF (in the first
-  4 KiB) is an RP2350 Arm secure executable with the TBYB flag
-  (IMAGE_TYPE flags 0x9021), a VERSION item with the build's
-  `major.minor`, and the sentinel block from offset 0xF00 linked into its
-  loop; the first image flashed at the factory is bought (TBYB clear) so it
-  boots normally. To be checked with `picotool info -a` and
-  `picotool partition info` on a built image.
+No `unsafe` is written and the only boot ROM function called is `reboot`.
+embassy-rp 0.10 exposes `get_sys_info` and `explicit_buy` only as
+`unsafe fn` (raw buffer pointers); rp235x-hal 0.4 has a safe `boot_info`
+wrapper but cannot be linked beside embassy-rp (it forces its PAC's `rt`
+feature, and both PACs then define the interrupt vector table
+`__INTERRUPTS`). So the integration gets the same facts safely:
+
+- the booted slot is read from the QMI's `ATRANS0` register (the boot ROM
+  maps the booted partition at 0x10000000; the register's base is that
+  partition's first sector), a safe register read through embassy-rp's PAC
+  (feature `unstable-pac`);
+- "buy pending" is the running image's own TBYB flag in its IMAGE_DEF in
+  flash. The boot ROM launches a TBYB image only on a flash-update boot of
+  its partition (otherwise it is an image condition failure), and the buy
+  clears the flag, so a running image still flagged TBYB is exactly a trial;
+- the explicit buy is done by the firmware: it reads the running image's
+  first sector into a 4 KiB stack buffer, clears the TBYB bit of the
+  IMAGE_TYPE item, and erases and programs that sector with embassy-rp's
+  safe blocking flash inside `cortex_m::interrupt::free`, checks it read
+  back, then stops the watchdog (embassy-rp's `Watchdog::stop`). That is
+  the only effect of the ROM's `explicit_buy` that applies here: its
+  downgrade erase of the other slot never applies (versions only grow) and
+  neither does the OTP rollback version (images carry none, and the chip
+  is not in secure boot). The image's first sector holds the vector table
+  and the two metadata blocks but no code (`.text` starts at 0x1000), so
+  nothing the CPU fetches is erased while interrupts are masked, and a
+  power cut part way leaves the sentinel's loop open, so the other slot
+  boots;
+- `reboot_flash_update` is `rom_data::reboot(REBOOT_TYPE_FLASH_UPDATE, 100,
+  0x10000000 + partition offset, 0)` (an XIP address, as picotool passes
+  after a load) and `reboot_normal` is `REBOOT_TYPE_NORMAL` with the same
+  delay; both return, so the reply leaves first.
+
+The platform addresses slots by partition offset through the untranslated
+window (see "RP base firmware"), bounds every access by the slot size,
+refuses an erase or write of the running slot before touching flash
+(defence in depth: the pure core never asks), erases one 4 KiB sector per
+call so USB is serviced between sectors, pads a short final write with
+`0xFF` and bounces unaligned reads. The record lives in two sectors of
+unpartitioned space after slot B (0x2FE000): a save erases the sector not
+holding the newest valid record and writes the new one there with the next
+sequence number, fields first and magic last. Nothing in the firmware
+feeds or starts the watchdog, so a hung trial image is reverted by the
+boot ROM's trial watchdog if it arms one, and by any reset otherwise.
+
+The self-test that gates `sys/fw/confirm` is `fw_update::SelfTest`: the
+host has configured USB (embassy-usb's `Handler::configured`), the payload
+store opened (its flash is readable and lends the flash to the updater)
+and the trust record opened (the key that authorizes the next update is
+readable). Until it passes, `confirm` is `Unavailable` and `mwctl`
+retries.
+
+**Image and partition table.** `build.rs` writes the image's first-sector
+metadata into the linker script (`rp2350-image.x`, included by
+`memory-rp2350.x`) from `rp_base::ota::image`: the vector table at 0x000,
+the IMAGE_DEF block at 0x200 (IMAGE_TYPE flags 0x9021, an RP2350 Arm secure
+executable with TBYB; VERSION `major.minor`), the sentinel block at 0xF00
+linked into its loop, `.text` from 0x1000; embassy-rp's own IMAGE_DEF is
+off (`imagedef-none`). The version is `build.sh rp2350 --version
+MAJOR.MINOR` (environment variable `RP_BASE_FW_VERSION`), else the crate's
+`major.minor`, and is also what `sys/info` reports. The partition table is
+built in Rust from the flash map (`rp_base::ota::table`, rather than a
+picotool JSON file, so the table, the linker script and the updater share
+one map): one block at flash offset 0 with partition 0 "A" (sectors
+0x002 to 0x17F) and partition 1 "B" (0x180 to 0x2FD, link type "A
+partition", value 0), both accepting the `rp2350-arm-s` UF2 family, all
+permissions everywhere (they only govern the ROM's own flash APIs and
+picotool), and unpartitioned space accepting the `absolute` family. The
+host tool `rp-image` (`firmware-rp/src/bin/rp-image.rs`, run by
+`build.sh rp2350` after picotool has converted the ELF to a UF2) checks the
+image as `mwctl fw update` and the device do and writes
+`rp-base-rp2350-V-update.bin` and `-update.uf2` (the TBYB image for `mwctl
+fw update`) and `rp-base-rp2350-V-factory.uf2` and `-factory.bin`: the
+partition table at offset 0, the same image with only its TBYB bit cleared
+(bought) in slot A, and erased pages at the start of slot B and of both
+record sectors, in the `absolute` family, leaving the payload store and the
+trust record as they are. `picotool info -a` on these files shows the
+partition table (A at 0x2000 to 0x180000, B at 0x180000 to 0x2FE000, "B w/
+0") and the image's two metadata blocks at 0x10000200 (image def, version,
+"not bought" on the update image) and 0x10000F00 (ignored).
+
+**Factory flashing** of a Pico 2, for version 1.0 (any version works; the
+first update must be higher). First build with `firmware-rp/build.sh
+rp2350 --version 1.0`, which leaves `rp-base-rp2350-1.0-factory.uf2` in
+`firmware-rp/target/thumbv8m.main-none-eabihf/release/`. Then put the board
+in BOOTSEL mode: hold the BOOTSEL button while plugging in USB (or, from
+the previous rp-base, any way that reaches the boot ROM's USB mode); the
+RP2350 drive and picotool see it. Optionally run `picotool partition info`
+to see what table the board holds now (a board running the pre-A/B rp-base
+has none). Load the factory UF2 with `picotool load --ignore-partitions -v
+rp-base-rp2350-1.0-factory.uf2`, which writes every block at its absolute
+address whatever table the board holds and verifies it, and start it with
+`picotool reboot`; on a board without a partition table, dragging the
+file onto the RP2350 drive does the same. `picotool partition info` (in
+BOOTSEL again) then lists partitions A and B. On the first boot the
+firmware logs `fw: booted slot A, state idle, min_version 0.0` on
+`sys/log`, and `mwctl --port <PATH> fw info` reports state idle, running
+A, slot A 1.0 (bought), slot B empty, `min_version` 0.0. The payload store
+and the pinned key, if any, are unchanged, so a claimed board still needs
+`--key` for signed commits. To start from a clean board instead,
+`picotool erase` before the load wipes everything, including the trust
+record.
+
+- [x] Y12 `FwPlatform` on the RP2350 as above: the booted slot from the
+  translated base (no slot without a partition table, and the updater is
+  then `Unavailable` while the payload side works); the trial flag from
+  the running image's TBYB flag; slots bounded and the running one never
+  erased or written; reads, erases and writes at physical offsets through
+  the untranslated window; short writes padded and odd reads bounced; the
+  record alternating between its two sectors with every power cut during
+  a save leaving the previous record; the buy clearing only the TBYB bit
+  in place with interrupts masked, then stopping the watchdog, idempotent,
+  and a torn buy leaving the slot unbootable so the other one boots;
+  flash-update reboots at the partition's XIP address; the self-test
+  (USB configured, store and trust record open) gating confirm; and the
+  whole lifecycle through `mwctl` and the request service on a model of
+  the boot ROM's A/B choice: factory 1.0 in A, a signed update to 1.1 into
+  B, trial, confirm, reboot into B, an update to 1.2 into A left
+  unconfirmed and reset (rolled back to B, 1.2 used up), then 1.3 into A —
+  `ota::tests::y12_slots_are_bounded_and_the_running_one_is_never_written`,
+  `y12_the_record_alternates_sectors_and_survives_power_cuts`,
+  `y12_explicit_buy_clears_tbyb_in_place_masked_and_stops_the_watchdog`,
+  `y12_a_torn_buy_leaves_slot_b_unbootable_and_a_boots`,
+  `y12_without_the_partition_table_the_updater_is_unavailable`,
+  `y12_mwctl_updates_confirms_and_rolls_back_a_pico_2`,
+  `y12_confirm_waits_for_the_self_test`,
+  `y12_requests_reach_the_updater_and_unknown_fw_keys_are_not_found`;
+  `ota::rom::tests::y12_the_translated_base_names_the_running_slot`;
+  `flash::tests::y12_window_reads_through_the_untranslated_alias_and_writes_physically`;
+  `fw_update::tests::y12_the_self_test_needs_usb_the_store_and_the_trust_record`
+  (firmware-rp `cargo test --lib`).
+- [x] Y13 The image and flash layout: the partition table makes the two
+  equal slots an A/B pair (B linked to A, `rp2350-arm-s` accepted), with
+  the record sectors outside both; every build's IMAGE_DEF is the 0x9021
+  block with the build's `major.minor` at 0x200, linked to the sentinel at
+  0xF00, with no code in the first sector; the linker script carries
+  exactly those words; versions parse as `MAJOR.MINOR` only; the factory
+  flash is the table plus the update image bought (one bit) in slot A and
+  boots A; images `mwctl` refuses are refused here too; the UF2s
+  reassemble to the images and the factory one erases slot B and the
+  record but not the payload store or the trust record; and the image
+  `build.sh rp2350` produced installs through `mwctl fw update
+  --no-reboot` on the board model, reboots on trial, is confirmed and is
+  then byte for byte the factory image of itself —
+  `layout::tests::y13_rp2350_has_a_table_two_equal_slots_and_the_record_outside_them`,
+  `v2_memory_x_flash_lengths_match_the_maps`;
+  `ota::table::tests::y13_partition_table_makes_slots_a_and_b_an_ab_pair`;
+  `ota::image::tests::y13_blocks_are_the_picobin_blocks_with_tbyb_and_the_sentinel_in_the_last_page`,
+  `y13_linker_script_carries_exactly_the_block_words`,
+  `y13_versions_parse_as_major_minor_only`;
+  `ota::tests::y13_factory_flash_is_the_table_and_the_update_image_bought_in_slot_a`,
+  `y13_images_mwctl_refuses_are_refused_here_too`,
+  `y13_uf2s_reassemble_to_the_images_and_the_factory_one_erases_b_and_the_record`,
+  `y13_the_built_update_image_installs_through_mwctl` (with
+  `RP_BASE_UPDATE_IMAGE` naming the built `-update.bin` or `-update.uf2`;
+  skipped without it). `picotool info -a` on the built files shows the
+  table and the blocks as described above.
+
+**Boot ROM questions.** Settled from the pico-sdk and picotool sources:
+the flash-update reboot's `p0` is the XIP address of the partition start
+(picotool's load passes `0x10000000 + start`); the A/B partition booted is
+the partition the ROM maps at 0x10000000 (`ATRANS0`), which stands in for
+`boot_info.partition`; a TBYB image is launched only on a flash-update boot
+of its own partition (rp235x-hal's documentation of the boot diagnostic
+`IMAGE_CONDITION_FAILURE`), which makes the TBYB flag the "buy pending"
+bit; the explicit buy's downgrade erase and OTP rollback never apply to
+these images. Open, for the hardware run (Y14): whether the ROM arms a
+watchdog for a trial and with which period (16.7 s is from memory), and
+whether embassy-rp's clock setup, which reprograms the watchdog's tick
+generator to 1 µs from `clk_ref`, changes that period (nothing in the
+firmware feeds or starts the watchdog); that the ROM uses the last
+IMAGE_DEF of a block loop (these images have one); that the ROM compares
+`major.minor` between A and B and boots the higher bought one; what the
+ROM does with a flash-update reboot aimed at a slot holding no valid image
+(the firmware never asks for one: `reboot` needs a committed, verified
+image); whether `ATRANS0`'s size is exactly the partition's (only its base
+is used); and that a power cut during the firmware's own buy leaves B
+unbootable on silicon as in the model.
+
 - [ ] Y14 The bootrom behaves as the model assumes, to verify on a Pico 2:
   a normal boot skips an unbought TBYB image; a flash-update reboot boots
-  it with a buy pending; without a buy the watchdog reboot (about 16 s,
-  from memory of the datasheet) boots the other slot; the bootrom picks
-  the higher `major.minor` between A and B when neither is TBYB; explicit
-  buy rewrites only the image's first sector and clears the TBYB bit
-  without touching the other slot (no downgrade erase, since versions only
-  grow); the last IMAGE_DEF of a block loop is the one used; and a power
-  cut during the buy's rewrite leaves the slot unbootable thanks to the
-  sentinel.
+  it (and maps its partition at 0x10000000); without a buy the watchdog
+  reboot (if the ROM arms one; about 16 s, from memory of the datasheet)
+  or any reset boots the other slot; the bootrom picks the higher
+  `major.minor` between A and B when neither is TBYB; the firmware's buy
+  (rewriting the image's first sector with the TBYB bit clear) makes the
+  image boot normally afterwards; the last IMAGE_DEF of a block loop is
+  the one used; and a power cut during the buy's rewrite leaves the slot
+  unbootable thanks to the sentinel.
 - [ ] Y15 End to end on a Pico 2 over USB CDC: `mwctl fw update` with a
   signed image installs into the inactive slot, the port comes back after
   the reboot within the reconnect window, the trial is confirmed, a later
