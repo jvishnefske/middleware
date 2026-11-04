@@ -25,7 +25,13 @@
 # are. Later flags win when several match, so the most specific comes last:
 # $HOME -> /home, the cargo registry -> /cargo/registry, the middleware
 # repository (the payloads' parent, which holds the `middleware` crate the
-# SDK depends on) -> /mw. scripts/check-reproducible.sh verifies that two
+# SDK depends on) -> /mw. Cargo's own crate hashes are not covered by
+# that: it hashes the absolute path of `middleware` (a path dependency
+# outside this workspace) into the `-C metadata` of it and of everything
+# that depends on it, and the symbol order follows those hashes, so the
+# build runs rustc through scripts/rustc-stable-metadata.sh, which derives
+# the wasm32 units' metadata from their path-normalized command lines
+# (see that script). scripts/check-reproducible.sh verifies that two
 # builds from different directories are byte-identical.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -64,4 +70,5 @@ RUSTFLAGS="-C link-arg=--page-size=1 \
 --remap-path-prefix=$HOME=/home \
 --remap-path-prefix=$CARGO_HOME_DIR/registry=/cargo/registry \
 --remap-path-prefix=$REPO=/mw" \
+RUSTC_WRAPPER="$(pwd -P)/scripts/rustc-stable-metadata.sh" MW_REPO="$REPO" \
   cargo build --release --target-dir target/byte-pages "$@"
