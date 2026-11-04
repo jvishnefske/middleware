@@ -19,7 +19,7 @@ import {
   uf2Detail,
 } from "../src/onboarding/boards";
 import { makeModel } from "../src/model/payload";
-import { boardDefaults, checkTable } from "../src/model/pins";
+import { boardDefaults, boardSuggestions, checkTable, findRow } from "../src/model/pins";
 import { TAB_IDS, initialTab } from "../src/ui/app";
 import { protocol } from "./fakeDevice";
 
@@ -213,5 +213,23 @@ describe("first run", () => {
     }
     expect(boardDefaults("pico2").rows[0]).toMatchObject({ label: "LED", pin: 25, func: "gpio-out" });
     expect(boardDefaults("esp32").rows[0]).toMatchObject({ label: "LED", pin: 4 });
+  });
+
+  it("suggests a BUTTON pin per board (input, pull-up) that passes its pin rules with the LED (Rust checkPins), outside the default table", () => {
+    const proto = protocol();
+    for (const b of BOARDS) {
+      const t = boardSuggestions(b.id);
+      expect(findRow(t, "BUTTON"), b.id).toMatchObject({ pin: b.button.pin, func: "gpio-in", pull: "up", note: b.button.note });
+      expect(checkTable(proto.checkPins, b.id, t), b.id).toEqual([]);
+      expect(findRow(boardDefaults(b.id), "BUTTON"), b.id).toBeUndefined();
+    }
+    expect(BOARDS.map((b) => [b.id, b.button.pin])).toEqual([
+      ["esp32", 0],
+      ["esp32s3", 0],
+      ["esp32c3", 9],
+      ["esp8266", 0],
+      ["pico2", 15],
+      ["pico", 15],
+    ]);
   });
 });

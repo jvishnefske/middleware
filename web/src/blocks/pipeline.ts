@@ -1,6 +1,9 @@
 // Blocks build pipeline: the pin table's check (protocol-wasm checkPins,
 // done by the caller and passed in; any issue stops the build at stage
-// "pins") -> workspace + pin table -> AssemblyScript (generator.ts) ->
+// "pins") -> the state machines' check (protocol-wasm checkMachines, also
+// done by the caller; an error stops the build at stage "states", a
+// warning never does) -> workspace + pin table + machines ->
+// AssemblyScript (generator.ts) ->
 // wasm (the editor's `compileAssemblyScript`, same asc options as the
 // templates) -> ABI pre-check (`checkAbi`) -> for byte-sized profiles, the
 // 1-byte-page memory rewrite (bytePages.ts).
@@ -15,6 +18,7 @@ import { compileAssemblyScript, loadWabt } from "../editor/compile";
 import type { AbiInfo } from "../protocol/wasm";
 import { toBytePages } from "./bytePages";
 import { type GenIssue, generate } from "./generator";
+import type { Machine, MachineIssue } from "../model/machines";
 import { EMPTY_PINS, type PinIssue, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
 import type { WorkspaceJson } from "./workspace";
@@ -30,7 +34,7 @@ export type BuildResult =
       memoryBytes: number;
       log: string;
     }
-  | { ok: false; source: string; stage: "pins" | "generate" | "compile" | "abi" | "memory"; errors: string[]; issues: GenIssue[] };
+  | { ok: false; source: string; stage: "pins" | "states" | "generate" | "compile" | "abi" | "memory"; errors: string[]; issues: GenIssue[] };
 
 /** Whether wasm code uses `memory.size` or `memory.grow`, whose results
  * depend on the page size. */
@@ -44,10 +48,28 @@ export async function usesMemorySize(wasm: Uint8Array): Promise<boolean> {
   }
 }
 
-/** The pin table and what checkPins said about it. */
+/** The pin table and what checkPins said about it; the state machines
+ * and what checkMachines said about them (none when absent). */
 export interface PinInput {
   pins: PinTable;
   issues: readonly PinIssue[];
+  machines?: readonly Machine[];
+  machineIssues?: readonly MachineIssue[];
+}
+
+/** A checkMachines issue as one line: `States Mode row 2: message`
+ * (`state <name>` / `event <name>` for those lists, nothing for the
+ * machine as a whole). */
+export function machineIssueText(i: MachineIssue, machines: readonly Machine[]): string {
+  const m = machines[i.machine];
+  const id = m?.id ? m.id : `machine ${i.machine + 1}`;
+  let where = "";
+  if (i.row !== null) {
+    if (i.list === "rows") where = ` row ${i.row + 1}`;
+    else if (i.list === "states") where = ` state ${m?.states[i.row]?.name || i.row + 1}`;
+    else if (i.list === "events") where = ` event ${m?.events[i.row]?.name || i.row + 1}`;
+  }
+  return `States ${id}${where}: ${i.message}`;
 }
 
 export async function buildPayload(
@@ -56,10 +78,15 @@ export async function buildPayload(
   abi: AbiInfo,
   pinInput: PinInput = { pins: EMPTY_PINS, issues: [] },
 ): Promise<BuildResult> {
-  const gen = generate(ws, profile, pinInput.pins);
+  const machines = pinInput.machines ?? [];
+  const gen = generate(ws, profile, pinInput.pins, machines);
   if (pinInput.issues.length > 0) {
     const where = (i: PinIssue) => (i.row === null ? "" : `row ${i.row + 1}${pinInput.pins.rows[i.row]?.label ? ` (${pinInput.pins.rows[i.row]?.label})` : ""}: `);
     return { ok: false, source: gen.source, stage: "pins", errors: pinInput.issues.map((i) => `Pins ${where(i)}${i.message}`), issues: [] };
+  }
+  const machineErrors = (pinInput.machineIssues ?? []).filter((i) => i.severity === "error");
+  if (machineErrors.length > 0) {
+    return { ok: false, source: gen.source, stage: "states", errors: machineErrors.map((i) => machineIssueText(i, machines)), issues: [] };
   }
   if (gen.errors.length > 0) {
     return { ok: false, source: gen.source, stage: "generate", errors: gen.errors.map((e) => e.message), issues: gen.errors };

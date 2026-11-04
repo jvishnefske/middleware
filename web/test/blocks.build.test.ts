@@ -12,6 +12,7 @@ import type { BlockJson, WorkspaceJson } from "../src/blocks/workspace";
 import { compileAssemblyScript, compileWat } from "../src/editor/compile";
 import type { SimEvent } from "../src/protocol/wasm";
 import { SimSession } from "../src/sim/session";
+import { type Machine, machinePinNeeds } from "../src/model/machines";
 import { EMPTY_PINS, type PinTable, boardDefaults, withNeeds } from "../src/model/pins";
 import { ManualClock } from "./clock";
 import { protocol } from "./fakeDevice";
@@ -21,8 +22,13 @@ const proto = protocol();
 const ws = (...blocks: BlockJson[]): WorkspaceJson => ({ blocks: { languageVersion: 0, blocks } });
 const num = (n: number) => ({ shadow: { type: "math_number", fields: { NUM: n } } });
 
-async function build(w: WorkspaceJson, profile: ProfileId, pins: PinTable = EMPTY_PINS): Promise<Extract<BuildResult, { ok: true }>> {
-  const r = await buildPayload(w, profile, proto.abi, { pins, issues: [] });
+async function build(
+  w: WorkspaceJson,
+  profile: ProfileId,
+  pins: PinTable = EMPTY_PINS,
+  machines: readonly Machine[] = [],
+): Promise<Extract<BuildResult, { ok: true }>> {
+  const r = await buildPayload(w, profile, proto.abi, { pins, issues: [], machines, machineIssues: [] });
   if (!r.ok) throw new Error(`${r.stage}: ${r.errors.join("; ")}\n${r.source}`);
   return r;
 }
@@ -44,7 +50,9 @@ describe("Blocks examples", () => {
   for (const e of EXAMPLES) {
     it(`example "${e.id}" compiles and passes checkAbi (${e.profile})`, async () => {
       const target = e.profile === "badge" ? "badge" : "pico2";
-      const r = await build(e.workspace, e.profile, withNeeds(boardDefaults(target), target, e.needs));
+      const machines = e.machines ?? [];
+      const needs = [...e.needs, ...machines.flatMap(machinePinNeeds).filter((n) => !e.needs.some((x) => x.label === n.label))];
+      const r = await build(e.workspace, e.profile, withNeeds(boardDefaults(target), target, needs), machines);
       expect(r.report.problems).toEqual([]);
       expect(r.report.warnings).toEqual([]);
       expect(r.warnings).toEqual([]);

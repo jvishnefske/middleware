@@ -2231,6 +2231,7 @@ dependencies = [
  "board-pins",
  "js-sys",
  "middleware",
+ "state-table",
  "wasm-bindgen",
  "wasm-host",
  "wat",
@@ -3047,6 +3048,10 @@ dependencies = [
  "psm",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "state-table"
+version = "0.1.0"
 
 [[package]]
 name = "static_assertions"

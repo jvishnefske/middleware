@@ -20,6 +20,14 @@
 //   Picos, the ESP32-CAM's flash LED on GPIO 4, GPIO 2 on ESP-12 modules),
 //   else a free header pin to wire one to. The tests check each against
 //   the board's pin rules (protocol-wasm checkPins).
+// * Each board also names the pin suggested for a label BUTTON (`button`,
+//   a GPIO input with the pull-up on, pressed = low): the BOOT / FLASH
+//   button where the board has one on a usable GPIO (GPIO 0 on ESP32,
+//   ESP32-S3 and ESP8266 boards, GPIO 9 on the ESP32-C3), else a free
+//   header pin to wire a push button from to GND (GPIO 15 on the Picos).
+//   It is a suggestion for examples that need a BUTTON
+//   (model/pins.ts `boardSuggestions`), not part of the default table.
+//   The tests check each against the board's pin rules too.
 // * ESP32-C3, ESP8266 and the Pico (RP2040) builds are protocol only: they
 //   store uploaded payloads but have no WASM runtime, so they do not run
 //   them (the `+no-wasm` firmware suffix; `wasm: false` in the manifest).
@@ -54,6 +62,10 @@ export interface Board {
    * to, with a note saying which. Checked against the board's pin rules
    * by the tests. */
   blink: { pin: number; note: string };
+  /** The pin suggested for a push button labelled BUTTON (input, pull-up,
+   * pressed = low), with a note saying where it is. Checked against the
+   * board's pin rules by the tests. */
+  button: { pin: number; note: string };
 }
 
 export const BOARDS: readonly Board[] = [
@@ -65,6 +77,7 @@ export const BOARDS: readonly Board[] = [
     runsPayloads: true,
     ledPin: 4,
     blink: { pin: 4, note: "ESP32-CAM flash LED (very bright)" },
+    button: { pin: 0, note: "IO0: the BOOT button of a dev board or the ESP32-CAM-MB, or a button wired to GND" },
   },
   {
     id: "esp32s3",
@@ -74,6 +87,7 @@ export const BOARDS: readonly Board[] = [
     runsPayloads: true,
     ledPin: null,
     blink: { pin: 2, note: "no plain on-board LED: wire an LED and resistor to GPIO 2" },
+    button: { pin: 0, note: "the BOOT button (GPIO 0)" },
   },
   {
     id: "esp32c3",
@@ -83,6 +97,7 @@ export const BOARDS: readonly Board[] = [
     runsPayloads: false,
     ledPin: null,
     blink: { pin: 5, note: "no plain on-board LED: wire an LED and resistor to GPIO 5" },
+    button: { pin: 9, note: "the BOOT button (GPIO 9)" },
   },
   {
     id: "esp8266",
@@ -92,6 +107,7 @@ export const BOARDS: readonly Board[] = [
     runsPayloads: false,
     ledPin: 2,
     blink: { pin: 2, note: "on-board LED of ESP-12 modules (lights when low)" },
+    button: { pin: 0, note: "the FLASH button of NodeMCU-style boards (GPIO 0)" },
   },
   {
     id: "pico2",
@@ -101,6 +117,7 @@ export const BOARDS: readonly Board[] = [
     runsPayloads: true,
     ledPin: 25,
     blink: { pin: 25, note: "on-board LED" },
+    button: { pin: 15, note: "no user button: wire a push button from GPIO 15 to GND" },
   },
   {
     id: "pico",
@@ -110,6 +127,7 @@ export const BOARDS: readonly Board[] = [
     runsPayloads: false,
     ledPin: 25,
     blink: { pin: 25, note: "on-board LED" },
+    button: { pin: 15, note: "no user button: wire a push button from GPIO 15 to GND" },
   },
 ];
 

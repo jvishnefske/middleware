@@ -1,0 +1,76 @@
+{
+  "blocks": {
+    "languageVersion": 0,
+    "blocks": [
+      {
+        "type": "mw_on_pin",
+        "id": "press",
+        "x": 20,
+        "y": 20,
+        "fields": {
+          "LABEL": "BUTTON",
+          "EDGE": "2"
+        },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "mw_sm_raise",
+              "id": "raisePress",
+              "fields": {
+                "EVENT": "Mode.PRESS"
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "mw_every",
+        "id": "tick",
+        "x": 20,
+        "y": 130,
+        "fields": {
+          "MS": 250
+        },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "mw_sm_raise",
+              "id": "raiseTick",
+              "fields": {
+                "EVENT": "Mode.TICK"
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "mw_sm_on_enter",
+        "id": "blinking",
+        "x": 20,
+        "y": 240,
+        "fields": {
+          "STATE": "Mode.Blink"
+        },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "mw_log",
+              "id": "logBlink",
+              "inputs": {
+                "TEXT": {
+                  "shadow": {
+                    "type": "text",
+                    "id": "logBlinkText",
+                    "fields": {
+                      "TEXT": "mode: blinking"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
