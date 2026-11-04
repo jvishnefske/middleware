@@ -16,11 +16,14 @@
 //! The pin lists hand pins to the [`PinBank`], which drops any the profile
 //! reserves, so the pure tables in `esp_base::chip` stay authoritative.
 //!
-//! With `wasm`, [`PayloadPeripherals`] adds the ABI 2 hardware: IO_MUX (GPIO
-//! interrupt handler), TIMG1 (payload timer alarm), SPI2 with its DMA
-//! channel (`DMA_SPI2` on ESP32, GDMA `DMA_CH0` on ESP32-S3) and UART1; on
-//! the ESP32 (the ESP32-CAM) also [`CamPeripherals`]: LEDC for ABI 3 PWM,
-//! I2C0 for ABI 3 I2C, and I2S0 with `DMA_I2S0` for the camera (R15).
+//! With `wasm` (ESP32, ESP32-S3), [`PayloadPeripherals`] adds the payload
+//! hardware: IO_MUX (GPIO interrupt handler), TIMG1 (payload timer alarm),
+//! SPI2 with its DMA channel (`DMA_SPI2` on ESP32, GDMA `DMA_CH0` on
+//! ESP32-S3), UART1 and I2C0 (ABI 3 I2C bus 0, built without pins; its
+//! pins are the profile's `i2c_pins(0)`: 26/27 on the ESP32, 5/6 on the
+//! ESP32-S3); on the ESP32 (the ESP32-CAM) also [`CamPeripherals`]: LEDC
+//! for ABI 3 PWM and I2S0 with `DMA_I2S0` for the camera (R15), whose
+//! sensor's SCCB is the same I2C0 bus 0 the payload drives.
 //! With `espnow` (ESP32, ESP32-S3) the board also hands over `WIFI`.
 //!
 //! The heap ([`init_heap`]) is one allocator over the two regions of the
@@ -40,6 +43,7 @@ use {
     esp_hal::gpio::Flex,
     esp_hal::peripherals::{IO_MUX, TIMG1},
     esp_hal::Blocking,
+    esp_hal::i2c::master::I2c,
     esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDma},
 };
 
@@ -98,7 +102,8 @@ pub struct Board {
     pub wifi: esp_hal::peripherals::WIFI<'static>,
 }
 
-/// Peripherals behind the ABI 2 imports (interrupts, timers, SPI, UART).
+/// Peripherals behind the ABI 2 imports (interrupts, timers, SPI, UART)
+/// and ABI 3 I2C.
 #[cfg(feature = "wasm")]
 pub struct PayloadPeripherals {
     /// IO MUX, for the GPIO interrupt handler.
@@ -112,26 +117,29 @@ pub struct PayloadPeripherals {
     /// UART1 without pins, blocking until a payload runs; `None` if
     /// configuration failed.
     pub uart1: Option<Uart<'static, Blocking>>,
+    /// I2C0 without pins (ABI 3 I2C bus 0; on the ESP32-CAM also the
+    /// camera sensor's SCCB), blocking; `None` if configuration failed.
+    pub i2c0: Option<I2c<'static, Blocking>>,
     /// The ESP32-CAM's camera control and capture peripherals (R15).
     #[cfg(feature = "esp32")]
     pub cam: CamPeripherals,
 }
 
-/// ESP32: LEDC (PWM, the sensor clock), I2C0 without pins (SCCB) and I2S0
-/// with its DMA channel (the camera port).
+/// ESP32: LEDC (PWM, the sensor clock) and I2S0 with its DMA channel (the
+/// camera port). The sensor's SCCB is I2C bus 0
+/// ([`PayloadPeripherals::i2c0`]).
 #[cfg(feature = "esp32")]
 pub struct CamPeripherals {
     /// LED PWM controller.
     pub ledc: esp_hal::peripherals::LEDC<'static>,
-    /// I2C controller 0, configured without pins; `None` if that failed.
-    pub i2c0: Option<esp_hal::i2c::master::I2c<'static, Blocking>>,
     /// I2S0.
     pub i2s0: esp_hal::peripherals::I2S0<'static>,
     /// I2S0's DMA channel.
     pub dma_i2s0: esp_hal::peripherals::DMA_I2S0<'static>,
 }
 
-/// Builds the payload peripherals from SPI2, its DMA channel and UART1.
+/// Builds the payload peripherals from SPI2, its DMA channel, UART1 and
+/// I2C0.
 #[cfg(feature = "wasm")]
 macro_rules! payload_peripherals {
     ($p:ident, $dma:ident $(, $field:ident: $value:expr)?) => {
@@ -140,6 +148,7 @@ macro_rules! payload_peripherals {
             timg1: $p.TIMG1,
             spi: Spi::new($p.SPI2, SpiConfig::default()).ok().map(|s| s.with_dma($p.$dma)),
             uart1: Uart::new($p.UART1, UartConfig::default()).ok(),
+            i2c0: I2c::new($p.I2C0, Default::default()).ok(),
             $($field: $value,)?
         }
     };
@@ -184,7 +193,6 @@ pub fn split(p: Peripherals) -> Board {
         #[cfg(feature = "wasm")]
         payload: payload_peripherals!(p, DMA_SPI2, cam: CamPeripherals {
             ledc: p.LEDC,
-            i2c0: esp_hal::i2c::master::I2c::new(p.I2C0, Default::default()).ok(),
             i2s0: p.I2S0,
             dma_i2s0: p.DMA_I2S0,
         }),

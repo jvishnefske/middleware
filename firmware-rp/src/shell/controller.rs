@@ -13,8 +13,9 @@
 //!   session then loops: yield once to the executor (so the USB tasks run
 //!   however busy the payload is), fire due software timers and hand at
 //!   most `MAX_EVENTS` queued events to `on_irq`, then wait for whichever
-//!   comes first: an inbound message, the payload's next tick, or the next
-//!   timer deadline. Publications go to the payload when it subscribed to
+//!   comes first: an inbound message, the payload's next tick, the next
+//!   timer deadline, or the end of a running SPI transfer, which the
+//!   device pumps meanwhile ([`RpDevice::io`]). Publications go to the payload when it subscribed to
 //!   the key (`esp_base::dispatch::route_publication`); requests are
 //!   handled as when idle. A trap, `sys/payload/stop`, a `begin` or an
 //!   activated commit ends the session and drops the payload, whose device
@@ -40,7 +41,7 @@ use {
     super::device::{RpDevice, now_ms, now_us},
     super::heap,
     alloc::vec::Vec as AllocVec,
-    embassy_futures::select::{Either, select},
+    embassy_futures::select::{Either3, select3},
     embassy_futures::yield_now,
     embassy_time::{Duration, Instant, Timer},
     esp_base::dispatch::{route_publication, tick_delay},
@@ -252,8 +253,10 @@ impl Controller {
                     None => core::future::pending::<()>().await,
                 }
             };
-            match select(self.bus.receive_inbound(), timer).await {
-                Either::Second(()) => {
+            match select3(self.bus.receive_inbound(), timer, payload.device().io()).await {
+                // An SPI transfer ended; its event is dispatched at the top.
+                Either3::Third(()) => {}
+                Either3::Second(()) => {
                     // Timers fire at the top of the loop; the tick runs
                     // only when it is due.
                     if let Err(trap) = payload.tick(now_ms()) {
@@ -261,7 +264,7 @@ impl Controller {
                         return;
                     }
                 }
-                Either::First(msg) => match msg.kind {
+                Either3::First(msg) => match msg.kind {
                     Kind::Publish => {
                         let Ok(key) = Key::new(&msg.key) else { continue };
                         if route_publication(&self.svc.state(), key, payload.subscriptions())

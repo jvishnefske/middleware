@@ -45,11 +45,14 @@ default = []
 # esp-base builds the ESP32-C3 without `wasm`), so this build has no
 # payload runtime: it serves sys/info, the loader, the flash store and
 # trust, reports firmware `<ver>+no-wasm` and refuses sys/payload/start.
-rp2040 = ["shell", "embassy-rp/rp2040", "dep:portable-atomic"]
+# `unstable-pac`: the SPI and I2C register drivers (built, not yet used,
+# so their register code is checked for this chip too).
+rp2040 = ["shell", "embassy-rp/rp2040", "embassy-rp/unstable-pac", "dep:portable-atomic"]
 # RP2350 (Pico 2, RP2350A): Cortex-M33, runs payloads, A/B firmware OTA.
 # embassy-rp emits no IMAGE_DEF (build.rs generates the image's own, with
 # TBYB, version and sentinel) and exposes its PAC (the QMI address
-# translation registers, read and written without `unsafe`).
+# translation registers and the SPI / I2C controllers, read and written
+# without `unsafe`).
 rp2350 = ["shell", "wasm", "fw-update", "embassy-rp/rp235xa", "embassy-rp/imagedef-none", "embassy-rp/unstable-pac"]
 # The WASM payload runtime (wasm-host / wasmi) and its bounded heap.
 wasm = ["dep:wasm-host", "dep:linked_list_allocator"]

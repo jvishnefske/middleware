@@ -83,7 +83,7 @@ fn byte_pages(name: &str) -> Option<abi_check::Report> {
 
 #[test]
 fn rust_examples_with_one_byte_pages() {
-    for name in ["blink", "echo"] {
+    for name in ["blink", "echo", "periph_demo"] {
         let Some(r) = byte_pages(name) else {
             eprintln!("{name}: no byte-page build; run scripts/build-byte-pages.sh");
             continue;
@@ -221,6 +221,37 @@ fn rust_dimmer_example() {
             "publish"
         ]
     ));
+}
+
+#[test]
+fn rust_periph_demo_example() {
+    // ABI 3: SPI DMA (ABI 2) and I2C (ABI 3) only, both release builds.
+    let abi3 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI3_IMPORTS];
+    let byte_pages = byte_pages("periph_demo");
+    if byte_pages.is_none() {
+        eprintln!("periph_demo: no byte-page build; run scripts/build-byte-pages.sh -p periph_demo");
+    }
+    for r in std::iter::once(validate(&release("periph_demo"))).chain(byte_pages) {
+        assert!(has(&r.exports, ALL_EXPORTS));
+        assert!(has(
+            &r.imports,
+            &[
+                "spi_open",
+                "spi_transfer",
+                "dma_read",
+                "timer_start",
+                "i2c_open",
+                "i2c_transfer",
+                "log",
+                "publish"
+            ]
+        ));
+        assert!(
+            r.imports.iter().all(|i| abi3.iter().any(|a| a.name == i)),
+            "{:?}",
+            r.imports
+        );
+    }
 }
 
 // ABI 4: DMA routes.
@@ -389,6 +420,7 @@ fn abi3_examples_import_no_abi4_functions() {
         "spi_loopback",
         "uart_echo",
         "dimmer",
+        "periph_demo",
     ] {
         let r = validate(&release(name));
         let abi3 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI3_IMPORTS];
@@ -444,6 +476,7 @@ const RUST_EXAMPLES: &[&str] = &[
     "cam_jpeg_view",
     "cam_ov2640_stream",
     "bench",
+    "periph_demo",
 ];
 
 #[test]

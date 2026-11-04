@@ -17,7 +17,8 @@
 //! events: PWM records each channel's duty (printed as an event line), ADC
 //! pins read values set by
 //! `!adc` commands, and each I2C bus carries a register device at
-//! [`periph::I2C_DEVICE_ADDR`]. Bus 0 also carries an OV2640's SCCB
+//! [`periph::I2C_DEVICE_ADDR`] whose registers `!i2c` commands can preset.
+//! Bus 0 also carries an OV2640's SCCB
 //! registers ([`periph::ov2640`]), so a camera payload's sensor set-up
 //! runs; [`SimDevice::sensor_summary`] reports what it wrote. There is no
 //! image sensor model: the camera source route is `Unsupported`.
@@ -93,7 +94,8 @@ pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [
                          [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
-`!adc <pin> <0..4095>` sets an analog input";
+`!adc <pin> <0..4095>` sets an analog input,\n\
+`!i2c <bus> <reg> <value>` presets a register of the I2C device at 0x50 (hex 0x.. or decimal)";
 
 /// Parses the arguments after the program name.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
@@ -154,6 +156,15 @@ fn number<T: std::str::FromStr>(s: &str) -> Result<T, String> {
     s.parse().map_err(|_| format!("not a number: {s}"))
 }
 
+/// Parses one byte written in hex (`0x5a`, `0X5A`) or decimal (`90`).
+pub fn byte(s: &str) -> Result<u8, String> {
+    let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(digits) => u8::from_str_radix(digits, 16).ok(),
+        None => s.parse().ok(),
+    };
+    parsed.ok_or_else(|| format!("not a byte (0..255 or 0x00..0xff): {s}"))
+}
+
 /// Parses a non-empty hex byte string (optional `0x` prefix).
 pub fn hex(s: &str) -> Result<Vec<u8>, String> {
     let digits = s.strip_prefix("0x").unwrap_or(s);
@@ -189,6 +200,16 @@ pub enum Command {
         pin: u8,
         /// Raw reading, `0..=ADC_MAX`.
         value: u16,
+    },
+    /// `!i2c <bus> <reg> <value>`: what a register of the I2C register
+    /// device on `bus` holds.
+    I2c {
+        /// Bus number.
+        bus: u8,
+        /// Register number.
+        reg: u8,
+        /// Register contents.
+        value: u8,
     },
 }
 
@@ -227,6 +248,23 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, String> {
             Ok(Some(Command::Adc {
                 pin: number(pin)?,
                 value: number(value)?,
+            }))
+        }
+        "i2c" => {
+            let usage = "!i2c needs <bus> <reg> <value>";
+            let mut it = args.split_whitespace();
+            let (bus, reg, value) = (
+                it.next().ok_or(usage)?,
+                it.next().ok_or(usage)?,
+                it.next().ok_or(usage)?,
+            );
+            if it.next().is_some() {
+                return Err(usage.to_string());
+            }
+            Ok(Some(Command::I2c {
+                bus: byte(bus)?,
+                reg: byte(reg)?,
+                value: byte(value)?,
             }))
         }
         "uart" if !args.is_empty() => Ok(Some(Command::Uart(args.as_bytes().to_vec()))),
@@ -548,7 +586,8 @@ impl SimDevice {
     /// Applies a stdin command: `!gpio` drives an input and raises an edge
     /// event when it matches the pin's interrupt setting; `!uart` buffers
     /// received bytes and raises a `UartRx` event; `!adc` sets the value an
-    /// analog pin reads.
+    /// analog pin reads; `!i2c` presets a register of a bus's I2C register
+    /// device.
     pub fn apply(&mut self, command: Command) -> Result<(), String> {
         match command {
             Command::Gpio { pin, high } => {
@@ -580,6 +619,14 @@ impl SimDevice {
             Command::Adc { pin, value } => {
                 self.adc.set(pin, value)?;
                 self.event(format!("adc {pin} <- {value}"));
+                Ok(())
+            }
+            Command::I2c { bus, reg, value } => {
+                self.i2c.preset(bus, reg, value)?;
+                self.event(format!(
+                    "i2c{bus} {:#04x} reg {reg:#04x} <- {value:#04x}",
+                    periph::I2C_DEVICE_ADDR
+                ));
                 Ok(())
             }
         }
@@ -994,6 +1041,31 @@ mod tests {
         assert!(parse_command("!adc 3").is_err());
         assert!(parse_command("!adc 3 4 5").is_err());
         assert!(parse_command("!adc 3 x").is_err());
+        assert_eq!(
+            parse_command("!i2c 0 0x00 0x5a"),
+            Ok(Some(Command::I2c {
+                bus: 0,
+                reg: 0,
+                value: 0x5A
+            }))
+        );
+        assert_eq!(
+            parse_command("!i2c 1 16 0XFF\r\n"),
+            Ok(Some(Command::I2c {
+                bus: 1,
+                reg: 16,
+                value: 255
+            })),
+            "decimal and upper-case hex"
+        );
+        assert!(parse_command("!i2c 0 0").is_err(), "missing value");
+        assert!(parse_command("!i2c 0 0 1 2").is_err(), "extra argument");
+        assert!(parse_command("!i2c 0 0 256").is_err(), "above a byte");
+        assert!(parse_command("!i2c 0 0x100 1").is_err(), "above a byte");
+        assert!(parse_command("!i2c 0 0x 1").is_err(), "no hex digits");
+        assert!(parse_command("!i2c 0 -1 1").is_err(), "negative");
+        assert!(parse_command("!i2c x 0 1").is_err());
+        assert!(parse_command("!i2c").is_err());
         assert!(parse_command("!nope").is_err());
     }
 
@@ -1245,6 +1317,51 @@ mod tests {
         assert!(d.events.last().unwrap().ends_with("Transport"));
         d.pwm_stop(1).unwrap();
         assert_eq!(d.pwm.duty(1, 2), None);
+    }
+
+    #[test]
+    fn i2c_command_presets_a_register() {
+        let mut d = SimDevice::default();
+        d.apply(Command::I2c {
+            bus: 0,
+            reg: 0x00,
+            value: 0x5A,
+        })
+        .unwrap();
+        assert!(
+            d.events
+                .last()
+                .unwrap()
+                .ends_with("i2c0 0x50 reg 0x00 <- 0x5a"),
+            "{:?}",
+            d.events
+        );
+        d.i2c_open(I2cConfig {
+            bus: 0,
+            freq_hz: 100_000,
+        })
+        .unwrap();
+        let mut rx = [0; 1];
+        d.i2c_transfer(0, periph::I2C_DEVICE_ADDR, &[0x00], &mut rx)
+            .unwrap();
+        assert_eq!(rx, [0x5A]);
+        let bad = d.apply(Command::I2c {
+            bus: 200,
+            reg: 0,
+            value: 1,
+        });
+        assert!(bad.is_err_and(|e| e.contains("no i2c bus 200")));
+    }
+
+    #[test]
+    fn parses_bytes() {
+        assert_eq!(byte("0x5a"), Ok(0x5A));
+        assert_eq!(byte("0X5A"), Ok(0x5A));
+        assert_eq!(byte("255"), Ok(255));
+        assert_eq!(byte("0"), Ok(0));
+        for bad in ["", "0x", "256", "0x1ff", "x5", "5a", "-1"] {
+            assert!(byte(bad).is_err(), "{bad:?}");
+        }
     }
 
     use middleware::stream::pattern;

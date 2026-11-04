@@ -25,9 +25,24 @@
 //! `InvalidArgument` for a pin the chip lacks and `Unsupported` for a
 //! reserved pin or an output on an input-only pin, as esp-base does.
 //!
-//! PWM and I2C need pins bound to their peripheral at boot; this board map
-//! assigns none, so `pwm_*` and `i2c_*` are `Unsupported` (see the ABI
-//! coverage table in `design.md`).
+//! # Board pin map for I2C (ABI 3)
+//!
+//! ABI 3 leaves the I2C pins to the board: `i2c_open(bus, ..)` names a bus,
+//! and the board maps it to fixed pins, the Pico and Pico 2 pinout's I2C
+//! defaults ([`Profile::i2c_pins`]):
+//!
+//! | I2C bus | controller | SDA    | SCL    |
+//! |---------|------------|--------|--------|
+//! | 0       | I2C0       | GPIO 4 | GPIO 5 |
+//! | 1       | I2C1       | GPIO 6 | GPIO 7 |
+//!
+//! Both pairs carry their controller's lines in the chips' GPIO function
+//! table ([`crate::periph::func`]). They are ordinary payload pins until a
+//! payload opens the bus; then the bus holds them ([`crate::periph::claims`]).
+//! SPI pins are the payload's choice (`spi_open`), checked against the same
+//! function table. PWM needs pins bound at boot; this board map assigns
+//! none, so `pwm_*` is `Unsupported` (see the ABI coverage table in
+//! `design.md`).
 //!
 //! # Heap plan
 //!
@@ -112,6 +127,8 @@ pub struct Profile {
     input_only: u32,
     /// GPIOs owned by ADC channels 0, 1, 2, ...
     adc_pins: &'static [u8],
+    /// (SDA, SCL) of I2C bus 0 and bus 1.
+    i2c: [(u8, u8); 2],
 }
 
 /// Bit `pin` set.
@@ -128,6 +145,9 @@ const PICO_INPUT_ONLY: u32 = bit(24);
 /// ADC0–ADC2.
 const PICO_ADC: [u8; 3] = [26, 27, 28];
 
+/// I2C0 on GPIO 4 / 5, I2C1 on GPIO 6 / 7 (SDA, SCL).
+const PICO_I2C: [(u8, u8); 2] = [(4, 5), (6, 7)];
+
 /// Raspberry Pi Pico.
 pub const RP2040: Profile = Profile {
     chip: Chip::Rp2040,
@@ -142,6 +162,7 @@ pub const RP2040: Profile = Profile {
     reserved: PICO_RESERVED,
     input_only: PICO_INPUT_ONLY,
     adc_pins: &PICO_ADC,
+    i2c: PICO_I2C,
 };
 
 /// Raspberry Pi Pico 2.
@@ -158,6 +179,7 @@ pub const RP2350: Profile = Profile {
     reserved: PICO_RESERVED,
     input_only: PICO_INPUT_ONLY,
     adc_pins: &PICO_ADC,
+    i2c: PICO_I2C,
 };
 
 impl Profile {
@@ -190,6 +212,12 @@ impl Profile {
         }
         let channel = self.adc_pins.iter().position(|&p| p == pin).ok_or(AbiError::Unsupported)?;
         u8::try_from(channel).map_err(|_| AbiError::Unsupported)
+    }
+
+    /// I2C `bus`'s (SDA, SCL) pins (board pin map); `Unsupported` for a bus
+    /// the board does not map.
+    pub fn i2c_pins(&self, bus: u8) -> Result<(u8, u8), AbiError> {
+        self.i2c.get(usize::from(bus)).copied().ok_or(AbiError::Unsupported)
     }
 
     /// Whether the heap plan holds linear memory, the largest image and the
@@ -238,6 +266,23 @@ mod tests {
         assert_eq!(RP2350.adc_channel(29), Err(AbiError::Unsupported));
         assert_eq!(RP2350.adc_channel(0), Err(AbiError::Unsupported));
         assert_eq!(RP2350.adc_channel(40), Err(AbiError::InvalidArgument));
+    }
+
+    #[test]
+    fn v16_i2c_buses_map_to_the_pico_default_pins() {
+        use crate::periph::func::{I2cBlock, I2cLine, i2c_function};
+        for p in [RP2040, RP2350] {
+            assert_eq!(p.i2c_pins(0), Ok((4, 5)));
+            assert_eq!(p.i2c_pins(1), Ok((6, 7)));
+            assert_eq!(p.i2c_pins(2), Err(AbiError::Unsupported));
+            for (bus, block) in [(0, I2cBlock::I2c0), (1, I2cBlock::I2c1)] {
+                let (sda, scl) = p.i2c_pins(bus).unwrap();
+                assert_eq!(i2c_function(sda), Some((block, I2cLine::Sda)), "bus {bus}");
+                assert_eq!(i2c_function(scl), Some((block, I2cLine::Scl)), "bus {bus}");
+                assert_eq!(p.check_pin(sda, Direction::Output), Ok(()));
+                assert_eq!(p.check_pin(scl, Direction::Output), Ok(()));
+            }
+        }
     }
 
     #[test]

@@ -18,11 +18,11 @@
 //!    CRC verified and the pinned signing key, if any, read
 //!    ([`esp_base::trust_store`]). The [`presence`] task starts watching the
 //!    BOOT button for the re-key window.
-//! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
-//!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
-//!    ([`uart1`]), and on the ESP32 LEDC ([`pwm`]), I2C0 ([`i2c`]) and the
-//!    I2S0 camera receiver ([`camera`]), all without pins until a payload
-//!    opens them.
+//! 4. With `wasm` (ESP32, ESP32-S3), the payload peripherals come up: the
+//!    GPIO interrupt handler, the timer alarm on TIMG1, SPI2 with DMA
+//!    ([`spi`]), UART1 ([`uart1`]) and I2C0 ([`i2c`]), and on the ESP32
+//!    LEDC ([`pwm`]) and the I2S0 camera receiver ([`camera`]), all without
+//!    pins until a payload opens them.
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
 //!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
 //!    publishes go out over ESP-NOW, `app/...` samples come in, source
@@ -40,7 +40,8 @@
 //! the controller share the re-key window through [`presence::WINDOW`]. With `wasm`, the payload's
 //! peripherals rest in statics shared with their ISRs or between runs: the
 //! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
-//! timer alarm ([`timer`]) and the SPI/UART drivers ([`device::HW`]).
+//! timer alarm ([`timer`]) and the SPI/UART/I2C (and on the ESP32 PWM)
+//! drivers ([`device::HW`]).
 
 mod board;
 mod bus;
@@ -51,7 +52,7 @@ mod controller;
 mod device;
 #[cfg(feature = "wasm")]
 mod gpio;
-#[cfg(all(feature = "esp32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 mod i2c;
 #[cfg(feature = "wasm")]
 mod irq;
@@ -271,27 +272,29 @@ pub async fn run(spawner: Spawner) -> ! {
         timer::init(TimerGroup::new(board.payload.timg1).timer0);
         let spi = board.payload.spi.and_then(spi::SpiParts::new);
         let uart = board.payload.uart1.and_then(uart1::Uart1Parts::new);
-        if spi.is_none() || uart.is_none() {
+        let i2c = board.payload.i2c0.map(i2c::Bus0::new);
+        if spi.is_none() || uart.is_none() || i2c.is_none() {
+            let ok = |up: bool| if up { "ok" } else { "failed" };
             bus.log(format_args!(
-                "payload peripherals: spi {}, uart1 {}",
-                if spi.is_some() { "ok" } else { "failed" },
-                if uart.is_some() { "ok" } else { "failed" },
+                "payload peripherals: spi {}, uart1 {}, i2c0 {}",
+                ok(spi.is_some()),
+                ok(uart.is_some()),
+                ok(i2c.is_some()),
             ));
         }
         #[cfg(feature = "esp32")]
-        let (pwm, i2c) = {
+        let pwm = {
             let cam = board.payload.cam;
             if !camera::install(cam.i2s0, cam.dma_i2s0) {
                 bus.log(format_args!("camera: I2S0 camera receiver failed to start"));
             }
-            (Some(pwm::Pwm::new(cam.ledc)), cam.i2c0.map(i2c::Bus0::new))
+            Some(pwm::Pwm::new(cam.ledc))
         };
         device::HW.put(device::Hw {
             spi,
             uart,
             #[cfg(feature = "esp32")]
             pwm,
-            #[cfg(feature = "esp32")]
             i2c,
         });
         #[cfg(feature = "espnow")]

@@ -41,6 +41,19 @@ default target in `.cargo/config.toml`). It contains:
   `app/dimmer/adc`, and reads the temperature register of an LM75-style
   sensor at I2C address 0x48 through `embedded-hal`'s `I2c`, publishing it
   on `app/dimmer/temp`. The board decides which pins those are.
+- `examples/periph_demo` (ABI 3, Raspberry Pi Pico 2 on `rp-base`) — at
+  start and then every second, runs one 8-byte SPI DMA loopback transfer on
+  SPI0 (SCK GP18, MOSI GP19, MISO GP16, CS GP17; jumper GP19 to GP16) and
+  one I2C register read on bus 0 (SDA GP4, SCL GP5 on `rp-base`): a
+  write-read of register 0x00 at address 0x50, the simulator's register
+  device and a 24Cxx EEPROM's address. Set `I2C_ADDR` and `I2C_REG` to a
+  device actually wired on the bus; the payload addresses only that one
+  device and writes only the register pointer, never scanning. Each result
+  is logged (`periph_demo: spi loopback ok (8 bytes)`, `periph_demo: i2c
+  0x50 reg 0x00 = 0x5a`); `ok` or `err` is published on
+  `app/periph_demo/spi` and the register byte, after a successful read
+  only, on `app/periph_demo/i2c`. On `esp-base` change the SPI pins, for
+  example to the ESP32-S3's 12 / 11 / 13 / 10.
 - `examples/cam_stream` (ABI 4, ESP32-CAM) — starts a source route that
   publishes 120×120 RGB565 frames on `app/cam/frame` every 200 ms as
   166-byte chunks, one ESP-NOW message each (174 per frame, 870 messages a
@@ -207,8 +220,15 @@ second of `spi_loopback` instantly and deterministically.
 For ABI 3, `!adc <pin> <0..4095>` sets the value an analog pin reads, PWM
 duty changes are printed, and every I2C bus carries a 256-byte register
 device at address 0x50 (write a register number followed by data to store
-it; a read returns registers from the last register number written). Other
-I2C addresses do not acknowledge.
+it; a read returns registers from the last register number written). A
+stdin line `!i2c <bus> <reg> <value>` presets what a register of that
+device holds, each number in hex (`0x5a`) or decimal, without moving its
+register pointer; as stdin is read after `init`, a read made in `init`
+still sees the initial 0. Other I2C addresses do not acknowledge. For
+example, `printf '!i2c 0 0x00 0x5a\n' | cargo run -p payload-sim --
+payloads/target/byte-pages/wasm32-unknown-unknown/release/periph_demo.wasm
+--virtual --memory-bytes 16384 --until-ms 2500` shows `periph_demo`'s read
+returning 0x5a from its first one-second repeat on.
 
 For ABI 4 the simulator runs DMA routes on its clock: a test-pattern source
 route prints one line per frame it publishes, and a sink route draws the
