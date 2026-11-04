@@ -23,6 +23,12 @@
     --warn-bg: #3a3020;
   }
 }
+html {
+  /* Phones must not inflate some text blocks (it put the generated-code
+   * line numbers out of step with the code). */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -77,6 +83,12 @@ input[type="text"] {
   border-radius: 4px;
   background: var(--panel);
   color: var(--fg);
+}
+/* A select is as wide as its longest option; never wider than its row. */
+select {
+  max-width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 button.primary {
   background: var(--accent);
@@ -335,4 +347,27 @@ button.big {
 .start .steps li.muted {
   list-style: none;
   margin-left: -22px;
+}
+.workspace-head {
+  margin: 1.2em 0 0.4em;
+}
+.workspace-head h3 {
+  margin: 0;
+}
+.toolbox-toggle {
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 0.8rem;
+}
+@media (max-width: 600px) {
+  .blockly-area {
+    height: min(560px, 70vh);
+  }
+  /* A slimmer toolbox leaves the narrow workspace room for blocks. */
+  .blockly-area .blocklyToolboxCategoryLabel {
+    font-size: 12px;
+  }
+  .blockly-area .blocklyToolboxCategory {
+    padding-right: 4px;
+  }
 }

@@ -5,7 +5,8 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { EXAMPLES, exampleWorkspace, wouldReplaceWork } from "../src/blocks/examples";
+import { EXAMPLES, exampleWorkspace } from "../src/blocks/examples";
+import { wouldReplaceWork } from "../src/blocks/replace";
 import { parseManifest } from "../src/flash/manifest";
 import { BOARDS, FIRST_EXAMPLE, boardById, gettingStarted } from "../src/onboarding/boards";
 import { TAB_IDS, initialTab } from "../src/ui/app";

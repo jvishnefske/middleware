@@ -1932,6 +1932,22 @@ open).
   protocol-only boards (ESP32-C3, ESP8266, Pico) are marked as storing
   payloads without running them, matching the manifest's `wasm` flags —
   `web/test/onboarding.test.ts`: "covers every bundled ESP image with the manifest's runtime flag", "installs the Picos from UF2, with only the Pico 2 running payloads", "gives every board install, connect and payload steps that point at real tabs", "sends ESP boards to the Flash tab and Picos to BOOTSEL and the UF2", "says protocol-only boards store payloads without running them", "opens Start without a valid saved tab and the saved tab otherwise", "tries an example that exists", "asks before replacing blocks that differ from the example, not otherwise". The click-to-blink path was checked in headless Chrome (about 1.5 s on localhost); the page itself has no DOM test.
+- [x] U17 Nothing replaces the Blocks workspace silently: the Examples menu
+  and Import JSON, like the Start tab's "Try it", load at once only when the
+  workspace is empty or generates the same code, and otherwise ask first;
+  cancelling keeps the blocks and returns the menu to its placeholder. A
+  file that is not a workspace is reported and changes nothing, and an
+  unrelated JSON object, which parses as an empty workspace, also asks —
+  `web/test/blocks.replace.test.ts`: "asks before any example replaces a different one, never for itself", "reports a file that is not a workspace and loads nothing", "asks before an unrelated JSON object, which parses as an empty workspace, wipes work", "loads straight away over an empty workspace", "asks before an import replaces different blocks", "re-importing an export of the same blocks does not ask", "judges the file under its own profile, and a bare workspace under the current one". The menu's confirm, cancel and replace path was driven in headless Chrome; there is no DOM test.
+- [ ] U18 The site works on a 390 px phone: no tab scrolls sideways, the
+  Examples menu fits its row, the generated-code line numbers stay level
+  with their lines, and the Blockly toolbox is slimmer below 600 px and can
+  be hidden ("Hide categories"); the Blocks build output is announced to
+  screen readers (`aria-live`). Verified by headless Chrome measurements
+  and screenshots only (every tab at 390×844 and 1280×800 has a page
+  `scrollWidth` no wider than the viewport; gutter and line tops match
+  once the editor has been on screen), not by a test, so it stays
+  unchecked.
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and

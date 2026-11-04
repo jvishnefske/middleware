@@ -9,8 +9,14 @@
 // the "profile" disabled reason, so switching back re-enables them). The
 // workspace and profile persist in localStorage and can be exported and
 // imported as JSON; the Examples menu loads the bundled workspaces. The
-// Start tab's "Try it" opens an example here (asking before it replaces
-// other work), compiles it and starts the simulator.
+// Start tab's "Try it", the Examples menu and Import JSON all ask before
+// they replace different blocks (src/blocks/replace.ts decides; cancelling
+// leaves the workspace and the menu as they were). "Try it" then compiles
+// the example and starts the simulator.
+//
+// A "Hide categories" toggle in the workspace heading hides the Blockly toolbox
+// to give the blocks the full width; on narrow screens the toolbox is
+// slimmer as well (style.css).
 
 import { javascript } from "@codemirror/lang-javascript";
 import { EditorState } from "@codemirror/state";
@@ -19,11 +25,12 @@ import "blockly/blocks";
 import * as Blockly from "blockly/core";
 import * as En from "blockly/msg/en";
 import { BLOCK_DEFS, blockSupported, toolbox } from "../blocks/defs";
-import { EXAMPLES, exampleWorkspace, wouldReplaceWork } from "../blocks/examples";
+import { EXAMPLES, exampleWorkspace } from "../blocks/examples";
 import { type GenIssue, generate } from "../blocks/generator";
 import { buildPayload } from "../blocks/pipeline";
 import { PROFILES, PROFILE_IDS, type ProfileId, isProfileId } from "../blocks/profiles";
-import { browserStore, load, parseSaved, save, serialize } from "../blocks/storage";
+import { type Replacement, planImport, wouldReplaceWork } from "../blocks/replace";
+import { browserStore, load, save, serialize } from "../blocks/storage";
 import type { WorkspaceJson } from "../blocks/workspace";
 import type { PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
@@ -98,7 +105,7 @@ export function blocksPage(app: App): HTMLElement {
   const profileNote = h("span", { class: "muted" }, PROFILES[profile].note);
   const exampleSel = h(
     "select",
-    {},
+    { class: "examples", "aria-label": "Load an example" },
     h("option", { value: "" }, "Examples..."),
     ...EXAMPLES.map((e) => h("option", { value: e.id }, `${e.label} (${PROFILES[e.profile].label})`)),
   );
@@ -110,7 +117,7 @@ export function blocksPage(app: App): HTMLElement {
   const exportBtn = h("button", {}, "Export JSON");
   const importFile = h("input", { type: "file", accept: ".json,application/json", hidden: true });
   const importBtn = h("button", {}, "Import JSON");
-  const out = h("pre", { class: "log" }, "Compile to see errors, size and imports.");
+  const out = h("pre", { class: "log", "aria-live": "polite" }, "Compile to see errors, size and imports.");
   const issuesEl = h("ul", { class: "issues" });
 
   const code = new EditorView({
@@ -119,6 +126,16 @@ export function blocksPage(app: App): HTMLElement {
   });
 
   const area = h("div", { class: "blockly-area" });
+  const toolboxBtn = h("button", { type: "button", class: "toolbox-toggle", "aria-pressed": "false" }, "Hide categories");
+  toolboxBtn.addEventListener("click", () => {
+    const tb = ws?.getToolbox() as Blockly.Toolbox | null | undefined;
+    if (!ws || !tb) return;
+    const hide = toolboxBtn.getAttribute("aria-pressed") !== "true";
+    tb.setVisible(!hide);
+    toolboxBtn.setAttribute("aria-pressed", String(hide));
+    toolboxBtn.textContent = hide ? "Show categories" : "Hide categories";
+    Blockly.svgResize(ws);
+  });
 
   function current(): WorkspaceJson {
     return ws ? (Blockly.serialization.workspaces.save(ws) as WorkspaceJson) : (saved?.workspace ?? {});
@@ -242,10 +259,33 @@ export function blocksPage(app: App): HTMLElement {
     renderBadge();
   });
 
-  exampleSel.addEventListener("change", () => {
+  /** True when `next` can replace the workspace: nothing would be lost,
+   * or the user confirms replacing the blocks with `what`. */
+  async function mayReplace(next: Replacement, what: string): Promise<boolean> {
+    if (!wouldReplaceWork(current(), profile, next)) return true;
+    return (await confirmReplace(what)) !== null;
+  }
+  function confirmReplace(what: string) {
+    return modal(
+      `Replace your Blocks workspace with ${what}?`,
+      [h("p", {}, "Your blocks are replaced. Export JSON first to keep them.")],
+      "Replace",
+    );
+  }
+
+  exampleSel.addEventListener("change", async () => {
     const e = exampleWorkspace(exampleSel.value);
+    if (!e) {
+      exampleSel.value = "";
+      return;
+    }
+    const ok = await mayReplace(e, e.label);
+    // The menu is a launcher: back to its placeholder whether loaded or not.
     exampleSel.value = "";
-    if (!e) return;
+    if (!ok) {
+      out.textContent = `Kept your blocks; the ${e.label} example was not loaded.`;
+      return;
+    }
     loadWorkspace(e.workspace, e.profile);
     renderBadge();
     out.textContent = `Loaded the ${e.label} example.`;
@@ -261,13 +301,17 @@ export function blocksPage(app: App): HTMLElement {
     const f = importFile.files?.[0];
     importFile.value = "";
     if (!f) return;
-    const r = parseSaved(await f.text(), profile);
-    if (!r.ok) {
-      out.textContent = `Import failed: ${r.error}`;
+    const plan = planImport(await f.text(), current(), profile);
+    if (plan.kind === "error") {
+      out.textContent = `Import failed: ${plan.error}`;
+      return;
+    }
+    if (plan.kind === "confirm" && (await confirmReplace(f.name)) === null) {
+      out.textContent = `Kept your blocks; ${f.name} was not imported.`;
       return;
     }
     try {
-      loadWorkspace(r.saved.workspace, r.saved.profile);
+      loadWorkspace(plan.saved.workspace, plan.saved.profile);
       renderBadge();
       out.textContent = `Imported ${f.name}.`;
     } catch (e) {
@@ -444,14 +488,7 @@ export function blocksPage(app: App): HTMLElement {
   app.onTryExample(async (id) => {
     const e = exampleWorkspace(id);
     if (!e) return;
-    if (wouldReplaceWork(current(), profile, e)) {
-      const ok = await modal(
-        `Replace your Blocks workspace with ${e.label}?`,
-        [h("p", {}, "Your blocks are replaced by the example. Export JSON first to keep them.")],
-        "Replace",
-      );
-      if (ok === null) return;
-    }
+    if (!(await mayReplace(e, e.label))) return;
     loadWorkspace(e.workspace, e.profile);
     renderBadge();
     if (!(await compile())) return;
@@ -504,7 +541,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "div",
       { class: "cols" },
-      h("div", {}, area, issuesEl),
+      h("div", {}, h("div", { class: "row workspace-head" }, h("h3", {}, "Workspace"), toolboxBtn), area, issuesEl),
       h(
         "div",
         {},
