@@ -70,7 +70,7 @@ need the espup toolchain and are built locally.
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
 | `tools/jpeg-fixtures/` | regenerate (or `--check`) the fake camera's baked JPEG frames in `fixtures/cam/` (8 frames at 240×240 and 120×120, baseline 4:2:0): `cargo run -p jpeg-fixtures` |
 | `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |
-| `web/`               | flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
+| `web/`               | Start guide (try Blink in the simulator, per-board setup), flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
 
 Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
 then load payloads over the same USB port, whether it is a CP2102/CH340

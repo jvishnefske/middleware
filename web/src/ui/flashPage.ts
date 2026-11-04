@@ -1,5 +1,6 @@
 // Flash tab (U1): esptool-js over Web Serial, image from the manifest by
-// detected chip or from a local .bin.
+// detected chip or from a local .bin. ESP boards only; the page points Pico
+// users to the UF2 steps on the Start tab.
 
 import { type ChosenImage, flashFirmware } from "../flash/flasher";
 import { type ManifestResult, chipKey, fetchManifest, imageForChip, runtimeNote } from "../flash/manifest";
@@ -85,6 +86,12 @@ export function flashPage(app: App): HTMLElement {
     "section",
     { class: "page" },
     h("h2", {}, "Flash base firmware"),
+    h(
+      "p",
+      { class: "muted" },
+      "For ESP32, ESP32-S3, ESP32-C3 and ESP8266 boards. A Raspberry Pi Pico or Pico 2 is not flashed here: ",
+      "hold BOOTSEL while plugging it in and copy the rp-base UF2 onto the drive it mounts (see Start).",
+    ),
     h(
       "div",
       { class: "note" },

@@ -8,7 +8,9 @@
 // does not support are disabled in the toolbox and in the workspace (with
 // the "profile" disabled reason, so switching back re-enables them). The
 // workspace and profile persist in localStorage and can be exported and
-// imported as JSON; the Examples menu loads the bundled workspaces.
+// imported as JSON; the Examples menu loads the bundled workspaces. The
+// Start tab's "Try it" opens an example here (asking before it replaces
+// other work), compiles it and starts the simulator.
 
 import { javascript } from "@codemirror/lang-javascript";
 import { EditorState } from "@codemirror/state";
@@ -17,7 +19,7 @@ import "blockly/blocks";
 import * as Blockly from "blockly/core";
 import * as En from "blockly/msg/en";
 import { BLOCK_DEFS, blockSupported, toolbox } from "../blocks/defs";
-import { EXAMPLES, exampleWorkspace } from "../blocks/examples";
+import { EXAMPLES, exampleWorkspace, wouldReplaceWork } from "../blocks/examples";
 import { type GenIssue, generate } from "../blocks/generator";
 import { buildPayload } from "../blocks/pipeline";
 import { PROFILES, PROFILE_IDS, type ProfileId, isProfileId } from "../blocks/profiles";
@@ -27,6 +29,7 @@ import type { PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
 import type { App } from "./app";
 import { errorText, formatBytes, h } from "./dom";
+import { modal } from "./trustPanel";
 
 /** Disabled reason for blocks the selected profile does not support. */
 const PROFILE_REASON = "profile";
@@ -272,7 +275,8 @@ export function blocksPage(app: App): HTMLElement {
     }
   });
 
-  compileBtn.addEventListener("click", async () => {
+  /** Compiles the workspace; true when `compiled` holds the module. */
+  async function compile(): Promise<boolean> {
     compileBtn.disabled = true;
     out.textContent = "Compiling (loading the AssemblyScript compiler the first time) ...";
     try {
@@ -281,7 +285,7 @@ export function blocksPage(app: App): HTMLElement {
         invalidate();
         out.textContent = [`${r.stage} failed:`, ...r.errors].join("\n");
         if (r.issues.length > 0) showIssues(r.issues, []);
-        return;
+        return false;
       }
       compiled = r.wasm;
       out.textContent = [
@@ -295,12 +299,15 @@ export function blocksPage(app: App): HTMLElement {
         .join("\n");
       simBtn.disabled = !proto.hasSimulator;
       uploadBtn.disabled = downloadBtn.disabled = false;
+      return true;
     } catch (e) {
       out.textContent = `Compiler failed: ${errorText(e)}`;
+      return false;
     } finally {
       compileBtn.disabled = false;
     }
-  });
+  }
+  compileBtn.addEventListener("click", () => void compile());
 
   downloadBtn.addEventListener("click", () => {
     if (!compiled) return;
@@ -406,7 +413,7 @@ export function blocksPage(app: App): HTMLElement {
     stopSimBtn.disabled = simSend.disabled = true;
   }
 
-  simBtn.addEventListener("click", () => {
+  function simulate() {
     if (!compiled) return;
     stopSim();
     msgLog.textContent = "";
@@ -429,6 +436,29 @@ export function blocksPage(app: App): HTMLElement {
       session = null;
       logLine(`load failed: ${errorText(e)}`);
     }
+  }
+  simBtn.addEventListener("click", simulate);
+
+  // Start tab: load the example (asking first if that would replace other
+  // work), compile, simulate and bring the simulated pins into view.
+  app.onTryExample(async (id) => {
+    const e = exampleWorkspace(id);
+    if (!e) return;
+    if (wouldReplaceWork(current(), profile, e)) {
+      const ok = await modal(
+        `Replace your Blocks workspace with ${e.label}?`,
+        [h("p", {}, "Your blocks are replaced by the example. Export JSON first to keep them.")],
+        "Replace",
+      );
+      if (ok === null) return;
+    }
+    loadWorkspace(e.workspace, e.profile);
+    renderBadge();
+    if (!(await compile())) return;
+    if (!proto.hasSimulator) return;
+    simulate();
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    simHeading.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
   });
   stopSimBtn.addEventListener("click", () => {
     stopSim();
@@ -447,6 +477,7 @@ export function blocksPage(app: App): HTMLElement {
     }
   });
 
+  const simHeading = h("h3", {}, "Simulator");
   renderPins(new Map());
   renderLeds(new Uint8Array(24));
   renderBadge();
@@ -481,7 +512,7 @@ export function blocksPage(app: App): HTMLElement {
         h("div", { class: "code generated" }, code.dom),
         h("h3", {}, "Build output"),
         out,
-        h("h3", {}, "Simulator"),
+        simHeading,
         proto.hasSimulator
           ? h("p", { class: "muted" }, "Runs in wasm-host, the device runtime, compiled to WASM, with its default fuel per call (the badge grants less).")
           : h("p", { class: "note" }, "This build has no simulator."),
