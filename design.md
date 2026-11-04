@@ -1227,9 +1227,13 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   `abi-check` test `p5_forbid_unsafe_code_examples_export_the_abi` (run by `check-all.sh` after the release build).
 - [x] P6 The byte-page payload build is reproducible: `build-byte-pages.sh`
   remaps the home directory, the cargo registry and the repository with
-  `--remap-path-prefix`, and builds from two different directories are
-  byte-identical —
-  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view, cam_jpeg_view and bench, run by `check-all.sh`).
+  `--remap-path-prefix`, gives the wasm32 crates a `-C metadata` derived
+  from their path-normalized rustc command lines
+  (`scripts/rustc-stable-metadata.sh`: cargo hashes the absolute path of
+  the out-of-workspace `middleware` dependency into the crate hashes,
+  which order generic instantiations), and builds from two different
+  directories are byte-identical —
+  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view, periph_demo, cam_jpeg_view, bench and cam_ov2640_stream, run by `check-all.sh`).
 - [x] P7 The SDK cannot panic on its own paths: `LogLine` (append, decimal
   numbers dropped whole when they do not fit, `log` without re-validating
   UTF-8) and the `on_message` delivery copy use checked access only, so a
