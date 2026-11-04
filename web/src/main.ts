@@ -3,6 +3,7 @@
 // last-shown tab, or Start on a first visit.
 
 import "./style.css";
+import { FIRMWARE_BASE, fetchManifest } from "./flash/manifest";
 import { loadProtocol } from "./protocol/wasm";
 import { PortManager, describePort, webSerialProblem } from "./serial/ports";
 import { type App, type PayloadHandoff, type TabId, initialTab } from "./ui/app";
@@ -55,8 +56,10 @@ async function main() {
     onTryExample: (f) => tryListeners.push(f),
   };
 
-  pages.start = startPage(app);
-  pages.flash = flashPage(app);
+  // One fetch of firmware/manifest.json for the Start (Pico UF2s) and Flash (ESP images) tabs.
+  const manifest = fetchManifest(FIRMWARE_BASE);
+  pages.start = startPage(app, manifest);
+  pages.flash = flashPage(app, manifest);
   pages.device = devicePage(app);
   pages.editor = editorPage(app);
   pages.blocks = blocksPage(app);
