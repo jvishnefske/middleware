@@ -1,8 +1,9 @@
 // Flows (model/flows.ts) lowered onto the shared statement IR (stmt.ts).
 // Pure: a flow in, its entry and body statements out; the Blocks
 // generator (generator.ts) places the body in the handler the entry names
-// (init, the tick, on_message, on_irq for a pin edge, or the machine's
-// enter function for "entered"), exactly where the equivalent hat block's
+// (init, the tick, on_message, on_irq for a pin edge, the machine's
+// enter function for "entered", or the phase server's body switch for a
+// phase entry, phaseGen.ts), exactly where the equivalent hat block's
 // body goes, and owns the host (strings, imports, pins, machines, loop
 // variables).
 //
@@ -27,7 +28,7 @@
 // left out (a bad condition reads as 0). The output is always valid
 // source.
 
-import { type EntryProps, type Flow, type FlowNode, MAX_FLOW_NODES, MAX_FLOW_WIRES, MAX_FLOWS, MAX_REPEAT, flowLog, outputs, wireFrom } from "../model/flows";
+import { type EntryProps, type Flow, type FlowNode, MAX_FLOW_NODES, MAX_FLOW_WIRES, MAX_FLOWS, MAX_REPEAT, type PhaseAction, flowLog, isPhaseAction, outputs, wireFrom } from "../model/flows";
 import { type LowerHost, type Stmt, line, lowerAction, lowerExpr, textArgs } from "./stmt";
 
 /** What lowering flows needs besides the shared lowering host. */
@@ -35,6 +36,10 @@ export interface FlowHost extends LowerHost {
   error(message: string): void;
   /** A bounded loop with a fresh loop variable (generator.ts `repeat`). */
   repeat(count: number, body: (v: string) => Stmt[]): Stmt;
+  /** A phase action (phaseGen.ts `lowerPhaseAction`); `own` is the phase
+   * whose body the flow is, if any. Without it phase actions are
+   * reported: the unit has no phases. */
+  phaseAction?(a: PhaseAction, own: string | null, fail: (msg: string) => void): Stmt[];
 }
 
 /** A flow that passed the structural checks: its entry and body. */
@@ -74,7 +79,8 @@ export function lowerFlows(flows: readonly Flow[], host: FlowHost): LoweredFlow[
     const entry = entries[0];
     if (!entry || entry.kind !== "entry") return fail("has no entry");
     if (entries.length > 1) return fail("has more than one entry");
-    out.push({ flow: f, entry: entry.props, body: new Walk(f, host, at).run(entry) });
+    const own = entry.props.on === "phase" ? entry.props.phase : null;
+    out.push({ flow: f, entry: entry.props, body: new Walk(f, host, at, own).run(entry) });
   });
   return out;
 }
@@ -87,6 +93,7 @@ class Walk {
     private readonly f: Flow,
     private readonly host: FlowHost,
     private readonly at: string,
+    private readonly own: string | null,
   ) {
     this.byId = new Map(f.nodes.map((n) => [n.id, n] as const));
   }
@@ -124,7 +131,11 @@ class Walk {
         case "entry":
           break;
         case "action":
-          out.push(...lowerAction(n.props, this.host, this.fail(n), null));
+          if (isPhaseAction(n.props)) {
+            const fail = this.fail(n);
+            if (this.host.phaseAction) out.push(...this.host.phaseAction(n.props, this.own, fail));
+            else fail(`"${n.props.phase}" is not a phase of this unit`);
+          } else out.push(...lowerAction(n.props, this.host, this.fail(n), null));
           break;
         case "branch": {
           const cond = lowerExpr(n.props.cond, this.host, this.fail(n));

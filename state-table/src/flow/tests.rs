@@ -549,3 +549,258 @@ fn repeat_counts_and_sequence_steps_are_bounded() {
     assert_eq!(NodeKind::Sequence { steps: 9 }.outputs().len(), 4);
     assert_eq!(NodeKind::Sequence { steps: -1 }.outputs().len(), 2);
 }
+
+const BLINK_PARAMS: [&str; 2] = ["period_ms", "times"];
+const PHASES: [PhaseDecl<'static>; 2] = [
+    PhaseDecl {
+        em: "LED",
+        phase: "Blink",
+        params: &BLINK_PARAMS,
+    },
+    PhaseDecl {
+        em: "ADC",
+        phase: "Measure",
+        params: &["samples"],
+    },
+];
+
+fn phase_found<'a>(flows: &[Flow<'a>]) -> Vec<(usize, At, FlowKind<'a>)> {
+    let mut out = Vec::new();
+    check_flows_in(flows, &MODE, &PINS, &PHASES, keys, &mut |i| {
+        out.push((i.flow, i.at, i.kind));
+    });
+    out
+}
+
+const fn phase_entry(
+    em: &'static str,
+    phase: &'static str,
+    state: &'static str,
+    every: Option<i64>,
+) -> NodeKind<'static> {
+    NodeKind::Entry(Entry::Phase {
+        em,
+        phase,
+        state,
+        every,
+    })
+}
+
+const fn done(after: After<'static>) -> NodeKind<'static> {
+    NodeKind::Phase(PhaseAction::Done {
+        em: "LED",
+        phase: "Blink",
+        after,
+    })
+}
+
+#[test]
+fn a_blink_body_with_done_after_a_parameter_and_a_report_is_clean() {
+    let values = [
+        PhaseValue::Runs,
+        PhaseValue::Param("times"),
+        PhaseValue::Pin("POT"),
+        PhaseValue::Const(-1),
+    ];
+    let nodes = [
+        node("e", phase_entry("LED", "Blink", "running", Some(250))),
+        node("t", NodeKind::Action(Action::Toggle { label: "LED" })),
+        node(
+            "r",
+            NodeKind::Phase(PhaseAction::Report {
+                em: "LED",
+                phase: "Blink",
+                values: &values,
+            }),
+        ),
+        node("d", done(After::Param("times"))),
+    ];
+    let wires = [
+        wire("e", "next", "t"),
+        wire("t", "next", "r"),
+        wire("r", "next", "d"),
+    ];
+    // Another flow (a button) may finish the phase at once.
+    let button = [
+        node(
+            "e",
+            NodeKind::Entry(Entry::PinEdge {
+                label: "BUTTON",
+                edge: Edge::Fall,
+            }),
+        ),
+        node("d", done(After::Now)),
+    ];
+    let hold = [
+        node("e", phase_entry("LED", "Blink", "holding", None)),
+        node("d", done(After::Count(1))),
+    ];
+    let w = [wire("e", "next", "d")];
+    let flows = [
+        flow("BlinkRun", &nodes, &wires),
+        flow("Button", &button, &w),
+        flow("BlinkHold", &hold, &w),
+    ];
+    assert_eq!(phase_found(&flows), []);
+    // A phase action node runs its next port.
+    assert_eq!(done(After::Now).outputs(), ["next"]);
+    assert!(done(After::Now).has_input());
+}
+
+#[test]
+fn phase_entries_name_a_phase_of_the_unit_and_an_acting_state() {
+    let unknown = [node("e", phase_entry("led", "blink", "running", None))];
+    let idle = [node("e", phase_entry("LED", "Blink", "idle", None))];
+    let fast = [node("e", phase_entry("ADC", "Measure", "running", Some(5)))];
+    let flows = [
+        flow("A", &unknown, &[]),
+        flow("B", &idle, &[]),
+        flow("C", &fast, &[]),
+    ];
+    assert_eq!(
+        phase_found(&flows),
+        [
+            (
+                0,
+                At::Node(0),
+                FlowKind::PhaseUnknown {
+                    em: "led",
+                    phase: "blink",
+                    near: Some(("LED", "Blink"))
+                }
+            ),
+            (
+                1,
+                At::Node(0),
+                FlowKind::PhaseStateNotActing { state: "idle" }
+            ),
+            (2, At::Node(0), FlowKind::BadPeriod { ms: 5 }),
+        ]
+    );
+    // Without phases (check_flows), every phase entry is unknown.
+    let ok = [node("e", phase_entry("LED", "Blink", "running", None))];
+    assert_eq!(
+        found(&[flow("A", &ok, &[])]),
+        [(
+            0,
+            At::Node(0),
+            FlowKind::PhaseUnknown {
+                em: "LED",
+                phase: "Blink",
+                near: None
+            }
+        )]
+    );
+}
+
+#[test]
+fn a_phase_state_has_one_body_flow() {
+    let body = [node("e", phase_entry("LED", "Blink", "stopping", None))];
+    let other = [node("e", phase_entry("LED", "Blink", "aborting", None))];
+    let flows = [
+        flow("A", &body, &[]),
+        flow("B", &other, &[]),
+        flow("C", &body, &[]),
+    ];
+    assert_eq!(
+        phase_found(&flows),
+        [(2, At::Node(0), FlowKind::PhaseBodyTaken { other: 0 })]
+    );
+}
+
+#[test]
+fn phase_actions_name_a_phase_and_its_parameters_and_count_only_in_its_body() {
+    let values = [
+        PhaseValue::Param("nope"),
+        PhaseValue::Pin("LED"),
+        PhaseValue::Pin("led2"),
+        PhaseValue::Runs,
+    ];
+    let nodes = [
+        node("e", INIT),
+        node(
+            "u",
+            NodeKind::Phase(PhaseAction::Done {
+                em: "LED",
+                phase: "Fade",
+                after: After::Now,
+            }),
+        ),
+        node("c", done(After::Count(0))),
+        node("p", done(After::Param("samples"))),
+        node(
+            "r",
+            NodeKind::Phase(PhaseAction::Report {
+                em: "LED",
+                phase: "Blink",
+                values: &values,
+            }),
+        ),
+    ];
+    let wires = [
+        wire("e", "next", "u"),
+        wire("u", "next", "c"),
+        wire("c", "next", "p"),
+        wire("p", "next", "r"),
+    ];
+    let flows = [flow("Init", &nodes, &wires)];
+    assert_eq!(
+        phase_found(&flows),
+        [
+            (
+                0,
+                At::Node(1),
+                FlowKind::PhaseUnknown {
+                    em: "LED",
+                    phase: "Fade",
+                    near: None
+                }
+            ),
+            (0, At::Node(2), FlowKind::BadAfter { count: 0 }),
+            (0, At::Node(2), FlowKind::RunsOutsideBody),
+            (
+                0,
+                At::Node(3),
+                FlowKind::PhaseParamUnknown { param: "samples" }
+            ),
+            (0, At::Node(3), FlowKind::RunsOutsideBody),
+            (
+                0,
+                At::Node(4),
+                FlowKind::PhaseParamUnknown { param: "nope" }
+            ),
+            (0, At::Node(4), FlowKind::ValuePinOutput { label: "LED" }),
+            (
+                0,
+                At::Node(4),
+                FlowKind::ValuePinUnknown {
+                    label: "led2",
+                    near: None
+                }
+            ),
+            (0, At::Node(4), FlowKind::RunsOutsideBody),
+        ]
+    );
+}
+
+#[test]
+fn a_report_carries_at_most_four_values() {
+    let values = [PhaseValue::Const(1); MAX_REPORT_VALUES + 1];
+    let nodes = [
+        node("e", phase_entry("LED", "Blink", "running", None)),
+        node(
+            "r",
+            NodeKind::Phase(PhaseAction::Report {
+                em: "LED",
+                phase: "Blink",
+                values: &values,
+            }),
+        ),
+    ];
+    let w = [wire("e", "next", "r")];
+    let flows = [flow("A", &nodes, &w)];
+    assert_eq!(
+        phase_found(&flows),
+        [(0, At::Node(1), FlowKind::TooManyValues { count: 5 })]
+    );
+}

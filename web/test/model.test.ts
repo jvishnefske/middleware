@@ -69,7 +69,7 @@ describe("payload model", () => {
       ],
       [
         (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], nodes: [{ id: "n1", kind: "entry", x: 0, y: 0, props: { on: "boot" } }] }]),
-        "logic[1].nodes[0].props.on must be one of init, every, message, pin-edge, entered",
+        "logic[1].nodes[0].props.on must be one of init, every, message, pin-edge, entered, phase",
       ],
       [
         (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], nodes: [{ id: "n1", kind: "branch", x: 0, y: 0, props: { cond: { kind: "state", machine: "Mode" } } }] }]),

@@ -11,6 +11,9 @@ wasm-host = { path = "../../wasm-host" }
 
 [dev-dependencies]
 wat = "1"
+# The S88 phase model, wire contract and engine for the phase server
+# tests (tests/phase.rs).
+recipe-core = { path = "../../recipe-core" }
 # Reference decode for the R14 end-to-end test (tests/r14.rs), host-side.
 mw-jpeg = { path = "../../payloads/jpeg" }
 # Counting global allocator for the heap measurement (tests/heap.rs).

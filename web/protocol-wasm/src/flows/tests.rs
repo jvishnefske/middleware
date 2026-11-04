@@ -219,9 +219,120 @@ fn a_flow_without_an_entry_and_a_loop_are_errors() {
     assert_eq!(
         lines(&flows),
         [
-            "0 flow error: This flow has no entry, so it never runs; add one (on start, every, on message, on pin edge or when entered).",
+            "0 flow error: This flow has no entry, so it never runs; add one (on start, every, on message, on pin edge, when entered or a phase state).",
             "0 wire 0 error: This wire closes a loop, so the flow would never end; remove it (a repeat runs its body by itself).",
             "0 wire 1 error: This wire closes a loop, so the flow would never end; remove it (a repeat runs its body by itself).",
+        ]
+    );
+}
+
+fn blink_phase() -> Vec<PhaseDeclIn> {
+    vec![PhaseDeclIn {
+        em: "LED".into(),
+        phase: "Blink".into(),
+        params: vec!["period_ms".into(), "times".into()],
+    }]
+}
+
+fn phase_lines(flows: &[FlowIn]) -> Vec<String> {
+    check_in(flows, &[mode()], &pins(), &blink_phase())
+        .into_iter()
+        .map(|i| {
+            let at = i
+                .node
+                .map_or_else(|| "flow".to_string(), |n| format!("node {n}"));
+            format!("{} {at} {}: {}", i.flow, i.severity, i.message)
+        })
+        .collect()
+}
+
+fn phase_entry(phase: &str, state: &str, every: Option<i64>) -> KindIn {
+    let (em, phase) = split_ref(phase);
+    KindIn::Entry(EntryIn::Phase {
+        em,
+        phase,
+        state: state.into(),
+        every,
+    })
+}
+
+#[test]
+fn a_phase_body_is_clean_and_phase_problems_read_plainly() {
+    let body = FlowIn {
+        id: "BlinkRun".into(),
+        nodes: vec![
+            node("e", phase_entry("LED.Blink", "running", Some(250))),
+            node(
+                "t",
+                KindIn::Action(ActionIn::Toggle {
+                    label: "LED".into(),
+                }),
+            ),
+            node(
+                "d",
+                KindIn::Phase(PhaseIn::Done {
+                    em: "LED".into(),
+                    phase: "Blink".into(),
+                    after: AfterIn::Param("times".into()),
+                }),
+            ),
+        ],
+        wires: vec![wire("e", "next", "t"), wire("t", "next", "d")],
+    };
+    assert_eq!(
+        phase_lines(std::slice::from_ref(&body)),
+        Vec::<String>::new()
+    );
+    // Without phases (plain check) the entry names no phase.
+    assert_eq!(
+        lines(std::slice::from_ref(&body)),
+        [
+            "0 node 0 error: This unit has no phase LED.Blink; add it to an equipment module's phases or choose another.",
+            "0 node 2 error: This unit has no phase LED.Blink; add it to an equipment module's phases or choose another.",
+        ]
+    );
+
+    let bad = FlowIn {
+        id: "Bad".into(),
+        nodes: vec![
+            node("e", phase_entry("led.blink", "idle", None)),
+            node(
+                "r",
+                KindIn::Phase(PhaseIn::Report {
+                    em: "LED".into(),
+                    phase: "Blink".into(),
+                    values: vec![ValueIn::Pin("LED".into()), ValueIn::Param("samples".into())],
+                }),
+            ),
+        ],
+        wires: vec![wire("e", "next", "r")],
+    };
+    let init = FlowIn {
+        id: "Init".into(),
+        nodes: vec![
+            node("e", KindIn::Entry(EntryIn::Init)),
+            node(
+                "d",
+                KindIn::Phase(PhaseIn::Done {
+                    em: "LED".into(),
+                    phase: "Blink".into(),
+                    after: AfterIn::Count(3),
+                }),
+            ),
+        ],
+        wires: vec![wire("e", "next", "d")],
+    };
+    assert_eq!(
+        phase_lines(&[body.clone(), bad, init, body]),
+        [
+            "0 flow error: The name BlinkRun is also used by flow 4; flow names must be unique (ignoring case).",
+            "1 node 0 error: A phase body runs in an acting state (running, holding, restarting, stopping, aborting or resetting), not \"idle\".",
+            "1 node 0 error: This unit has no phase led.blink. Did you mean LED.Blink?",
+            "1 node 1 error: This value reads LED, which is an output; report an input or an analog pin.",
+            "1 node 1 error: The phase's class has no parameter samples; use one of its parameters or a number.",
+            "2 node 1 error: Counting runs only works in the phase's own body flow (the one whose entry is this phase); finish at once here, or move this node there.",
+            "3 flow error: The name BlinkRun is also used by flow 1; flow names must be unique (ignoring case).",
+            "3 node 0 error: Flow 1 already runs in this phase state; a phase state has one body flow. Change the state or merge the flows.",
         ]
     );
 }
