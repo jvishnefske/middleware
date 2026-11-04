@@ -35,6 +35,12 @@
 //!   with the shared [`wasm_abi::route`] parsers; [`route_handle_code`]
 //!   checks the handle a device hands back.
 //!
+//! * ABI 5: [`serve_slot`] places a served key in the table of at most
+//!   [`serve::MAX_SERVES`]; [`node_id_target`] bounds `node_id`'s write;
+//!   [`request_ranges`] places one request's meta block, body and reply
+//!   space in the buffer `mw_alloc` returned (the layout itself is
+//!   [`serve::layout`]); [`check_export`] knows `on_request`.
+//!
 //! For the pointer-carrying ABI 2 and 3 imports, arguments are checked
 //! before the pointer: a bad port, bus, address or length is
 //! `InvalidArgument` even when the pointer is also out of range.
@@ -47,6 +53,7 @@ use middleware::Key;
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
 use middleware::wasm_abi::route::{self, SinkConfig, Source, SourceConfig, SourceKind};
+use middleware::wasm_abi::serve;
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
 
 use crate::{LoadError, Ticked};
@@ -137,6 +144,13 @@ const EXPORTS: &[(&str, Shape)] = &[
         Shape {
             params: 4,
             results: 0,
+        },
+    ),
+    (
+        wasm_abi::exports::ON_REQUEST,
+        Shape {
+            params: 6,
+            results: 1,
         },
     ),
 ];
@@ -360,12 +374,74 @@ impl Slot {
 /// Decides the slot for subscribing to `key`: re-subscribing returns the
 /// existing slot, otherwise a new one unless [`MAX_SUBSCRIPTIONS`] are taken.
 pub fn subscribe_slot(subscriptions: &[String], key: &str) -> Result<Slot, AbiError> {
-    if let Some(i) = slot_for(subscriptions, key) {
+    table_slot(subscriptions, key, MAX_SUBSCRIPTIONS)
+}
+
+/// Decides the slot for serving `key` (ABI 5): serving a key again returns
+/// its slot, otherwise a new one unless [`serve::MAX_SERVES`] are taken.
+pub fn serve_slot(serves: &[String], key: &str) -> Result<Slot, AbiError> {
+    table_slot(serves, key, serve::MAX_SERVES)
+}
+
+fn table_slot(table: &[String], key: &str, max: usize) -> Result<Slot, AbiError> {
+    if let Some(i) = slot_for(table, key) {
         Ok(Slot::Existing(i))
-    } else if subscriptions.len() >= MAX_SUBSCRIPTIONS {
+    } else if table.len() >= max {
         Err(AbiError::NoResources)
     } else {
-        Ok(Slot::New(subscriptions.len()))
+        Ok(Slot::New(table.len()))
+    }
+}
+
+/// The guest bytes `node_id(ptr)` writes (ABI 5): [`serve::NODE_ID_LEN`]
+/// bytes at `ptr`, which must lie in linear memory.
+pub fn node_id_target(ptr: i32, mem_len: usize) -> Result<Range<usize>, AbiError> {
+    wasm_abi::guest_range(ptr, serve::NODE_ID_LEN as i32, mem_len)
+}
+
+/// Where one request goes in guest memory (ABI 5), from the buffer
+/// `mw_alloc` returned at `ptr`: absolute ranges for the meta block, the
+/// request and the reply, or `None` when the guest declined (0) or the
+/// buffer does not lie in its `mem_len` bytes of memory.
+pub fn request_ranges(
+    ptr: i32,
+    layout: &serve::RequestLayout,
+    mem_len: usize,
+) -> Option<RequestRanges> {
+    let len = i32::try_from(layout.alloc_len).ok()?;
+    let all = alloc_range(ptr, len, mem_len)?;
+    let at = |off: usize, n: usize| all.start + off..all.start + off + n;
+    Some(RequestRanges {
+        meta: at(0, serve::REQUEST_META_LEN),
+        request: at(layout.req_at, layout.req_len),
+        reply: at(layout.reply_at, layout.reply_cap),
+    })
+}
+
+/// Absolute guest ranges of one request (see [`request_ranges`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestRanges {
+    /// The meta block.
+    pub meta: Range<usize>,
+    /// The request body.
+    pub request: Range<usize>,
+    /// The reply buffer.
+    pub reply: Range<usize>,
+}
+
+impl RequestRanges {
+    /// The `on_request` arguments after `slot`: `req_ptr, req_len,
+    /// meta_ptr, reply_ptr, reply_cap` (each fits `i32`: the whole buffer
+    /// was checked against an `i32` pointer and length).
+    pub fn args(&self) -> Option<(i32, i32, i32, i32, i32)> {
+        let i = |v: usize| i32::try_from(v).ok();
+        Some((
+            i(self.request.start)?,
+            i(self.request.len())?,
+            i(self.meta.start)?,
+            i(self.reply.start)?,
+            i(self.reply.len())?,
+        ))
     }
 }
 
@@ -686,6 +762,50 @@ pub const fn fuel_used(budget: u64, remaining: Option<u64>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abi5_serve_slots_node_id_and_request_ranges() {
+        let mut serves: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+        assert_eq!(serve_slot(&serves, "a/b"), Ok(Slot::New(0)));
+        serves.push("a/b".into());
+        assert_eq!(serve_slot(&serves, "a/b"), Ok(Slot::Existing(0)));
+        for i in 1..serve::MAX_SERVES {
+            serves.push(alloc::format!("k/{i}"));
+        }
+        assert_eq!(serve_slot(&serves, "x"), Err(AbiError::NoResources));
+        assert_eq!(node_id_target(8, 16), Ok(8..16));
+        assert_eq!(node_id_target(9, 16), Err(AbiError::OutOfBounds));
+        assert_eq!(node_id_target(-1, 16), Err(AbiError::OutOfBounds));
+
+        let l = serve::layout(3, 8).unwrap();
+        let r = request_ranges(100, &l, 1000).unwrap();
+        assert_eq!(r.meta, 100..116);
+        assert_eq!(r.request, 116..119);
+        assert_eq!(r.reply, 119..127);
+        assert_eq!(r.args(), Some((116, 3, 100, 119, 8)));
+        assert_eq!(request_ranges(0, &l, 1000), None, "declined");
+        assert_eq!(request_ranges(990, &l, 1000), None, "outside memory");
+        assert_eq!(
+            check_export(
+                "on_request",
+                Some(Shape {
+                    params: 6,
+                    results: 1
+                })
+            ),
+            Ok(())
+        );
+        assert!(
+            check_export(
+                "on_request",
+                Some(Shape {
+                    params: 5,
+                    results: 1
+                })
+            )
+            .is_err()
+        );
+    }
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -1125,12 +1245,20 @@ mod tests {
         let jpeg = route_source((0, 0, 7, 16, 10), &mem).expect("JPEG is valid");
         assert_eq!(jpeg.cfg.format, route::PixelFormat::Jpeg);
         // The camera takes 21 bytes: the JPEG config, then its pins.
-        assert_eq!(route_source((1, 0, 7, 16, 10), &mem), bad, "camera needs pins");
+        assert_eq!(
+            route_source((1, 0, 7, 16, 10), &mem),
+            bad,
+            "camera needs pins"
+        );
         mem[26..37].copy_from_slice(&route::CameraPins::AI_THINKER.encode());
         let cam = route_source((1, 0, 7, 16, 21), &mem).expect("camera is valid");
         assert_eq!(cam.source, Source::Camera(route::CameraPins::AI_THINKER));
         assert_eq!(cam.cfg.format, route::PixelFormat::Jpeg);
-        assert_eq!(route_source((0, 0, 7, 16, 21), &mem), bad, "pattern takes 10");
+        assert_eq!(
+            route_source((0, 0, 7, 16, 21), &mem),
+            bad,
+            "pattern takes 10"
+        );
         assert_eq!(route_source((1, 0, 7, 500, 10), &mem), bad, "cam len first");
         mem[36] = 5; // PCLK on D0's pin
         assert_eq!(route_source((1, 0, 7, 16, 21), &mem), bad, "pins differ");

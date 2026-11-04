@@ -27,6 +27,13 @@
 //!    matches the key exactly, copies the data into a buffer from
 //!    `mw_alloc`, and calls `on_message(slot, ptr, len)` (W2). `mw_alloc`
 //!    returning 0 (or an out-of-memory range) means "not delivered".
+//! 4. Requests on keys the payload serves (ABI 5, `serve`) go through
+//!    [`Payload::request`]: one `mw_alloc` buffer holds the meta block,
+//!    the body and the reply space ([`wasm_abi::serve::layout`]), then
+//!    `on_request(slot, req_ptr, req_len, meta_ptr, reply_ptr, reply_cap)`
+//!    returns the reply length or a `HandlerError` code, which
+//!    [`wasm_abi::serve::reply_result`] checks before any reply byte is
+//!    copied out.
 //!
 //! # Safety limits
 //!
@@ -53,8 +60,13 @@
 //!   frame data never passes through guest memory or this crate. Handles
 //!   the device returns outside `0..MAX_ROUTES` reach the payload as
 //!   `NoResources`, and `route_stat` counts saturate at `i32::MAX`.
+//! * ABI 5: `serve` keys follow the publish rules and take one of
+//!   [`wasm_abi::serve::MAX_SERVES`] slots reserved at load; `node_id`
+//!   checks its 8-byte target before asking the device. A request writes
+//!   only inside the `mw_alloc` buffer after checking it lies in linear
+//!   memory, and reads back at most the reply capacity.
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
-//!   `on_irq`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
+//!   `on_irq`, `on_request`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
 //!   After each call the fuel it used (the budget minus what is left; the
 //!   whole budget if it ran dry) is added to the payload's [`FuelStats`]
@@ -121,8 +133,8 @@ use alloc::vec::Vec;
 
 use middleware::wasm_abi::{self, MAX_MESSAGE};
 use wasmi::{
-    CompilationMode, Config, Engine, ExternType, FuncType, Instance, Module, Store, StoreLimitsBuilder, TrapCode,
-    ValType,
+    CompilationMode, Config, Engine, ExternType, FuncType, Instance, Module, Store,
+    StoreLimitsBuilder, TrapCode, ValType,
 };
 
 pub use abi::FuelStats;
@@ -135,6 +147,7 @@ pub use middleware::wasm_abi::route::{
     CameraPins, Preamble, RouteStat, Segment, SinkConfig, Source, SourceConfig, SourceKind,
 };
 pub use middleware::wasm_abi::{AbiError, Pull};
+pub use middleware::{HandlerError, RequestMeta, SenderId};
 
 use abi::{ImportKind, Shape};
 use link::{Exports, State};
@@ -148,10 +161,11 @@ use link::{Exports, State};
 /// `Busy`).
 ///
 /// The ABI 2 methods (from [`Device::now_us`] on), the ABI 3 methods
-/// (from [`Device::pwm_open`] on) and the ABI 4 route methods (from
-/// [`Device::route_source`] on) have defaults (`Unsupported`, or a derived
-/// clock) so a board without interrupts, DMA, PWM, ADC, I2C or routes
-/// keeps compiling; see the crate docs.
+/// (from [`Device::pwm_open`] on), the ABI 4 route methods (from
+/// [`Device::route_source`] on) and the ABI 5 methods ([`Device::serve`],
+/// [`Device::node_id`]) have defaults (`Unsupported`, or a derived clock)
+/// so a board without interrupts, DMA, PWM, ADC, I2C, routes or request
+/// routing keeps compiling; see the crate docs.
 pub trait Device {
     /// A payload log line (UTF-8, at most [`wasm_abi::MAX_LOG`] bytes).
     fn log(&mut self, line: &str);
@@ -325,6 +339,21 @@ pub trait Device {
     /// running. Larger values reach the payload saturated to `i32::MAX`.
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
         let _ = (handle, stat);
+        Err(AbiError::Unsupported)
+    }
+
+    /// The payload serves requests on `key` (ABI 5; a non-`sys` key it has
+    /// not served before). A device that routes requests to the payload
+    /// (through [`Payload::request`]) records the key and returns `Ok`;
+    /// the default, for a board that cannot, is `Unsupported`, which the
+    /// payload's `serve` returns.
+    fn serve(&mut self, key: middleware::Key<'_>) -> Result<(), AbiError> {
+        let _ = key;
+        Err(AbiError::Unsupported)
+    }
+    /// The device's node id (ABI 5), the [`SenderId`] its transports
+    /// report and `sys/info` names; `Unsupported` by default.
+    fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Err(AbiError::Unsupported)
     }
 }
@@ -546,7 +575,7 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
         abi::check_import(import.module(), import.name(), kind)?;
     }
     let mut exports = Exports::default();
-    let (mut alloc, mut on_message, mut memory) = (false, false, false);
+    let (mut alloc, mut on_message, mut on_request, mut memory) = (false, false, false, false);
     for export in module.exports() {
         match export.ty() {
             ExternType::Func(f) => {
@@ -557,6 +586,7 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
                     wasm_abi::exports::ALLOC => alloc = true,
                     wasm_abi::exports::ON_MESSAGE => on_message = true,
                     wasm_abi::exports::ON_IRQ => exports.irq = true,
+                    wasm_abi::exports::ON_REQUEST => on_request = true,
                     _ => {}
                 }
             }
@@ -572,6 +602,7 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
     let initial = abi::initial_memory_bytes(wasm).unwrap_or(u64::MAX);
     abi::check_memory(initial, limits.max_memory_bytes)?;
     exports.messages = alloc && on_message;
+    exports.requests = alloc && on_request;
     Ok(exports)
 }
 
@@ -642,9 +673,14 @@ impl<D: Device + 'static> Payload<D> {
         subscriptions
             .try_reserve_exact(wasm_abi::MAX_SUBSCRIPTIONS)
             .map_err(|_| LoadError::OutOfMemory)?;
+        let mut serves = Vec::new();
+        serves
+            .try_reserve_exact(wasm_abi::serve::MAX_SERVES)
+            .map_err(|_| LoadError::OutOfMemory)?;
         let state = State {
             device,
             subscriptions,
+            serves,
             schedule: None,
             exports,
             limits: StoreLimitsBuilder::new()
@@ -784,6 +820,110 @@ impl<D: Device + 'static> Payload<D> {
         }
         self.call::<(i32, i32, i32), ()>(wasm_abi::exports::ON_MESSAGE, (slot, ptr, len))?;
         Ok(true)
+    }
+
+    /// Keys the payload serves (ABI 5), in slot order.
+    pub fn serves(&self) -> impl Iterator<Item = &str> {
+        self.store.data().serves.iter().map(|s| s.as_str())
+    }
+
+    /// Whether the module exports `mw_alloc` and `on_request` (ABI 5).
+    pub fn handles_requests(&self) -> bool {
+        self.store.data().exports.requests
+    }
+
+    /// Hands one request to the payload (ABI 5) and copies its reply into
+    /// `reply`; `Ok(Ok(len))` is the reply length, `Ok(Err(e))` what the
+    /// device answers the caller instead:
+    ///
+    /// * `NotFound` when nothing serves `key` (exact match), without
+    ///   calling the payload;
+    /// * `InvalidRequest` for a body over
+    ///   [`wasm_abi::serve::MAX_REQUEST`], without calling the payload;
+    /// * `Unavailable` when `mw_alloc` declined the buffer (0, or a range
+    ///   outside linear memory);
+    /// * the payload's own `HandlerError`, or `Internal` for a result
+    ///   that is neither a length within the reply capacity nor a known
+    ///   code ([`wasm_abi::serve::reply_result`]).
+    ///
+    /// The reply capacity offered is `reply.len()`, at most
+    /// [`wasm_abi::serve::MAX_REPLY`]. The meta block carries `meta`'s
+    /// sender and deadline ([`wasm_abi::serve::encode_meta`]). `mw_alloc`
+    /// and `on_request` each run on a fresh fuel budget; a trap (fuel
+    /// included) poisons the payload and is the `Err`, which a device
+    /// answers as `Internal`. Nothing is allocated.
+    pub fn request(
+        &mut self,
+        key: middleware::Key<'_>,
+        body: &[u8],
+        meta: &RequestMeta<'_>,
+        reply: &mut [u8],
+    ) -> Result<Result<usize, HandlerError>, Trap> {
+        use wasm_abi::serve;
+        if self.poisoned {
+            return Err(Trap::Poisoned);
+        }
+        let Some(slot) = abi::slot_for(&self.store.data().serves, key.as_str()) else {
+            return Ok(Err(HandlerError::NotFound));
+        };
+        let layout = match serve::layout(body.len(), reply.len()) {
+            Ok(l) => l,
+            Err(e) => return Ok(Err(e)),
+        };
+        // Fits i32: at most MAX_REQUEST_BUFFER.
+        let alloc_len = layout.alloc_len as i32;
+        let ptr = self.call::<i32, i32>(wasm_abi::exports::ALLOC, alloc_len)?;
+        let Some(memory) = self
+            .instance
+            .get_memory(&self.store, wasm_abi::exports::MEMORY)
+        else {
+            return Ok(Err(HandlerError::Unavailable));
+        };
+        let placed = abi::request_ranges(ptr, &layout, memory.data_size(&self.store))
+            .and_then(|r| Some((r.args()?, r)));
+        let Some(((req_ptr, req_len, meta_ptr, reply_ptr, reply_cap), ranges)) = placed else {
+            return Ok(Err(HandlerError::Unavailable));
+        };
+        let written = memory
+            .write(
+                &mut self.store,
+                ranges.meta.start,
+                &serve::encode_meta(meta),
+            )
+            .and_then(|()| memory.write(&mut self.store, ranges.request.start, body));
+        if written.is_err() {
+            return Ok(Err(HandlerError::Unavailable));
+        }
+        // slot < MAX_SERVES.
+        let args = (
+            slot as i32,
+            req_ptr,
+            req_len,
+            meta_ptr,
+            reply_ptr,
+            reply_cap,
+        );
+        let code =
+            self.call::<(i32, i32, i32, i32, i32, i32), i32>(wasm_abi::exports::ON_REQUEST, args)?;
+        let n = match serve::reply_result(code, layout.reply_cap) {
+            Ok(n) => n,
+            Err(e) => return Ok(Err(e)),
+        };
+        let (Some(out), Some(src)) = (
+            reply.get_mut(..n),
+            ranges
+                .reply
+                .start
+                .checked_add(n)
+                .map(|end| ranges.reply.start..end),
+        ) else {
+            return Ok(Err(HandlerError::Internal));
+        };
+        // Linear memory never shrinks, so the checked range is still valid.
+        match memory.read(&self.store, src.start, out) {
+            Ok(()) => Ok(Ok(n)),
+            Err(_) => Ok(Err(HandlerError::Internal)),
+        }
     }
 
     /// Whether the module exports `on_irq` (ABI 2).
