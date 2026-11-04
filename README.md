@@ -75,8 +75,10 @@ need the espup toolchain and are built locally.
 Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
 then load payloads over the same USB port, whether it is a CP2102/CH340
 bridge or the chip's native USB-Serial-JTAG. A Pico or Pico 2 takes the UF2
-from `firmware-rp/build.sh` in BOOTSEL mode, then speaks the same protocol
-on its USB CDC port. The ESP32-C3, ESP8266 and RP2040 builds have no WASM
+from `firmware-rp/build.sh` in BOOTSEL mode (the web page's Start tab offers
+it as a checked download when the site was built after
+`firmware/build-images.sh`, which builds the ESP images and the Pico UF2s),
+then speaks the same protocol on its USB CDC port. The ESP32-C3, ESP8266 and RP2040 builds have no WASM
 runtime (the C3 and the RP2040 lack the atomics wasmi needs; the ESP8266
 lacks the RAM), so they store payloads but cannot run them.
 

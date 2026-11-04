@@ -8,7 +8,16 @@ import { describe, expect, it } from "vitest";
 import { EXAMPLES, exampleWorkspace } from "../src/blocks/examples";
 import { wouldReplaceWork } from "../src/blocks/replace";
 import { parseManifest } from "../src/flash/manifest";
-import { BOARDS, FIRST_EXAMPLE, boardById, gettingStarted } from "../src/onboarding/boards";
+import { formatSize } from "../src/flash/uf2";
+import {
+  BOARDS,
+  FIRST_EXAMPLE,
+  UF2_INTEGRITY,
+  boardById,
+  gettingStarted,
+  textSpans,
+  uf2Detail,
+} from "../src/onboarding/boards";
 import { TAB_IDS, initialTab } from "../src/ui/app";
 
 const manifest = parseManifest(JSON.parse(readFileSync(new URL("../public/firmware/manifest.json", import.meta.url), "utf8")));
@@ -37,24 +46,29 @@ describe("boards", () => {
         "Connect",
         b.runsPayloads ? "Run a payload" : "Upload a payload",
       ]);
-      for (const x of s) if (x.action) expect(TAB_IDS).toContain(x.action.tab);
-      expect(s[1]?.action?.tab).toBe("device");
-      expect(s[2]?.action?.tab).toBe("blocks");
+      for (const x of s) if (x.action?.kind === "tab") expect(TAB_IDS).toContain(x.action.tab);
+      expect(s[1]?.action).toMatchObject({ kind: "tab", tab: "device" });
+      expect(s[2]?.action).toMatchObject({ kind: "tab", tab: "blocks" });
     }
   });
 
-  it("sends ESP boards to the Flash tab and Picos to BOOTSEL and the UF2", () => {
-    for (const b of BOARDS) {
-      const [install] = gettingStarted(b);
-      if (b.install.kind === "web-serial") {
-        expect(install?.action?.tab, b.id).toBe("flash");
-      } else {
-        expect(install?.action, b.id).toBeNull();
-        expect(install?.body).toContain("BOOTSEL");
-        expect(install?.body).toContain(b.install.drive);
-        expect(install?.body).toContain(`firmware-rp/build.sh ${b.install.target}`);
+  it("sends ESP boards to the Flash tab and, without a UF2 in the manifest, Picos to the build hint", () => {
+    for (const m of [null, manifest]) {
+      for (const b of BOARDS) {
+        const [install] = gettingStarted(b, m);
+        if (b.install.kind === "web-serial") {
+          expect(install?.action, b.id).toMatchObject({ kind: "tab", tab: "flash" });
+        } else {
+          expect(install?.action, b.id).toBeNull();
+          const text = [install?.body, ...(install?.substeps ?? [])].join(" ");
+          expect(text).toContain("BOOTSEL");
+          expect(text).toContain(b.install.drive);
+          expect(text).toContain(`firmware-rp/build.sh ${b.install.target}`);
+        }
       }
     }
+    // The Pico 2's build hint names the factory UF2, not the update image.
+    expect(gettingStarted(boardById("pico2")!)[0]?.body).toContain("rp-base-rp2350-<version>-factory.uf2");
   });
 
   it("says protocol-only boards store payloads without running them", () => {
@@ -64,6 +78,94 @@ describe("boards", () => {
       expect(body).not.toContain("started");
     }
     expect(gettingStarted(boardById("pico2")!)[2]?.body).toContain("GPIO 25");
+  });
+});
+
+// U19: with the UF2s in the manifest (the output of firmware/build-images.sh
+// rp2040 rp2350), the Picos get a checked download and the BOOTSEL steps.
+const withUf2 = parseManifest(JSON.parse(readFileSync(new URL("./fixtures/manifest-uf2.json", import.meta.url), "utf8")));
+
+describe("Pico UF2 download steps", () => {
+  const picos = BOARDS.filter((b) => b.install.kind === "uf2");
+
+  it("offers the manifest's UF2 for each Pico with file name, size and version", () => {
+    expect(picos.map((b) => b.id).sort()).toEqual(["pico", "pico2"]);
+    for (const b of picos) {
+      if (b.install.kind !== "uf2") continue;
+      const img = withUf2.uf2[b.install.target]!;
+      const [install] = gettingStarted(b, withUf2);
+      expect(install?.action, b.id).toEqual({
+        kind: "download",
+        label: "Download UF2",
+        image: img,
+        detail: uf2Detail(img),
+        integrity: UF2_INTEGRITY,
+      });
+      expect(uf2Detail(img)).toBe(`${img.file} · ${formatSize(img.size)} · version ${img.version}`);
+      expect(install?.body).not.toContain("build.sh");
+      // The board's runtime agrees with the image's wasm flag.
+      expect(img.wasm, b.id).toBe(b.runsPayloads);
+    }
+    expect(uf2Detail(withUf2.uf2.rp2350!)).toMatch(/^rp-base-rp2350-0\.1-factory\.uf2 · 1\.3 MB · version 0\.1$/);
+  });
+
+  it("says what the download check proves and what it does not", () => {
+    expect(UF2_INTEGRITY).toContain("size and SHA-256");
+    expect(UF2_INTEGRITY).toContain("not a signature");
+  });
+
+  it("follows the download with BOOTSEL onto the board's drive, then drag the file, in order", () => {
+    for (const b of picos) {
+      if (b.install.kind !== "uf2") continue;
+      const img = withUf2.uf2[b.install.target]!;
+      const sub = gettingStarted(b, withUf2)[0]?.substeps ?? [];
+      expect(sub, b.id).toHaveLength(2);
+      expect(sub[0]).toContain("BOOTSEL");
+      expect(sub[0]).toContain(`named ${b.install.drive}`);
+      expect(sub[1]).toContain(`Drag \`${img.file}\` onto ${b.install.drive}`);
+    }
+    expect(gettingStarted(boardById("pico")!, withUf2)[0]?.substeps[0]).toContain("RPI-RP2");
+    expect(gettingStarted(boardById("pico2")!, withUf2)[0]?.substeps[0]).toContain("RP2350");
+  });
+
+  it("marks commands and file names as code spans", () => {
+    expect(textSpans("run `mwctl fw update` now")).toEqual([
+      ["run ", false],
+      ["mwctl fw update", true],
+      [" now", false],
+    ]);
+    expect(textSpans("`a`")).toEqual([["a", true]]);
+    expect(textSpans("plain")).toEqual([["plain", false]]);
+    expect(textSpans("odd `tail")).toEqual([
+      ["odd ", false],
+      ["tail", true],
+    ]);
+    const notes = gettingStarted(boardById("pico2")!, withUf2)[0]?.notes ?? [];
+    const code = notes.flatMap((n) => textSpans(n).filter(([, c]) => c).map(([t]) => t));
+    expect(code).toEqual(["mwctl fw update", "picotool load --ignore-partitions"]);
+  });
+
+  it("tells Pico 2 users the factory image sets up A/B and later updates use mwctl fw update", () => {
+    for (const m of [null, withUf2]) {
+      const notes = gettingStarted(boardById("pico2")!, m)[0]?.notes.join(" ") ?? "";
+      expect(notes).toContain("factory image");
+      expect(notes).toContain("A/B partition table");
+      expect(notes).toContain("first install");
+      expect(notes).toContain("mwctl fw update");
+      expect(notes).toContain("picotool load --ignore-partitions");
+      // No promise of updates from this site.
+      expect(notes).not.toMatch(/this site|the site|browser/i);
+    }
+    const pico = gettingStarted(boardById("pico")!, withUf2)[0]?.notes.join(" ") ?? "";
+    expect(pico).not.toContain("A/B");
+    expect(pico).not.toContain("mwctl");
+  });
+
+  it("falls back to the build hint for a chip the manifest has no UF2 for", () => {
+    const only2040 = { ...withUf2, uf2: { rp2040: withUf2.uf2.rp2040 } };
+    expect(gettingStarted(boardById("pico")!, only2040)[0]?.action?.kind).toBe("download");
+    expect(gettingStarted(boardById("pico2")!, only2040)[0]?.action).toBeNull();
+    expect(gettingStarted(boardById("pico2")!, only2040)[0]?.body).toContain("firmware-rp/build.sh rp2350");
   });
 });
 

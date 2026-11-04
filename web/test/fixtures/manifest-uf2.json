@@ -1,0 +1,9 @@
+{
+  "version": "0.1.0",
+  "images": {
+  },
+  "uf2": {
+    "rp2040": { "file": "rp-base-rp2040.uf2", "sha256": "110c3d9875cb6e53aaa70f0ddcf68e2a07474bc2f4721e9472b844bb3282d99c", "size": 189952, "version": "0.1.0", "familyId": 3834380118, "factory": false, "wasm": false },
+    "rp2350": { "file": "rp-base-rp2350-0.1-factory.uf2", "sha256": "c191f0aad085157988cf51c86001f44ee99b10841fd24ef59b7f335488aefdc8", "size": 1272832, "version": "0.1", "familyId": 3834380119, "factory": true, "wasm": true }
+  }
+}

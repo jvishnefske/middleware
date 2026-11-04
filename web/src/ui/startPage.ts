@@ -1,11 +1,15 @@
 // Start tab (U16): what the site is for, what a payload is, a one-click
 // path to a blinking LED in the simulator (no board needed), and the
-// steps for the board the visitor picks (src/onboarding/boards.ts). Opens
-// first on a visit with no saved tab.
+// steps for the board the visitor picks (src/onboarding/boards.ts decides
+// them from the board and the firmware manifest). Opens first on a visit
+// with no saved tab. For a Pico whose UF2 the manifest lists, "Download
+// UF2" fetches it, checks it (src/flash/uf2.ts) and only then saves it.
 
-import { BOARDS, type Board, FIRST_EXAMPLE, boardById, gettingStarted } from "../onboarding/boards";
+import { FIRMWARE_BASE, type Manifest, type ManifestResult, type Uf2Image } from "../flash/manifest";
+import { checkUf2 } from "../flash/uf2";
+import { BOARDS, type Board, FIRST_EXAMPLE, type Step, boardById, gettingStarted, textSpans } from "../onboarding/boards";
 import type { App } from "./app";
-import { h } from "./dom";
+import { errorText, h } from "./dom";
 
 const BOARD_KEY = "start-board";
 
@@ -17,24 +21,74 @@ function savedBoard(): Board | undefined {
   }
 }
 
-export function startPage(app: App): HTMLElement {
+/** Fetches the UF2, checks it against the manifest, then saves it. */
+async function downloadUf2(img: Uf2Image, status: HTMLElement, btn: HTMLButtonElement) {
+  btn.disabled = true;
+  status.textContent = `Downloading ${img.file} ...`;
+  try {
+    const r = await fetch(`${FIRMWARE_BASE}${img.file}`);
+    if (!r.ok) throw new Error(`${img.file} is not on this site (HTTP ${r.status})`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const check = await checkUf2(bytes, img);
+    if (!check.ok) throw new Error(`${check.reason}. Nothing was saved.`);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    const a = h("a", { href: url, download: img.file });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    status.textContent = `Saved ${img.file}: size and SHA-256 match the manifest. Now drag it onto the drive.`;
+  } catch (e) {
+    status.textContent = errorText(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Text with its backtick spans as <code>. */
+function rich(text: string): (Node | string)[] {
+  return textSpans(text).map(([t, code]) => (code ? h("code", {}, t) : t));
+}
+
+function renderStep({ title, body, substeps, notes, action }: Step, app: App): HTMLElement {
+  let button: HTMLElement | null = null;
+  if (action?.kind === "tab") {
+    button = h("button", { onclick: () => app.showTab(action.tab) }, action.label);
+  } else if (action?.kind === "download") {
+    const status = h("p", { class: "muted", role: "status" });
+    const btn = h("button", { class: "primary" }, action.label);
+    btn.addEventListener("click", () => void downloadUf2(action.image, status, btn));
+    button = h(
+      "div",
+      { class: "download" },
+      h("p", { class: "row" }, btn, h("span", {}, action.detail)),
+      h("p", { class: "muted sha" }, "SHA-256 ", h("code", {}, action.image.sha256)),
+      h("p", { class: "muted" }, action.integrity),
+      status,
+    );
+  }
+  return h(
+    "li",
+    {},
+    h("strong", {}, title),
+    h("p", {}, ...rich(body)),
+    button,
+    substeps.length ? h("ol", { class: "substeps" }, ...substeps.map((x) => h("li", {}, ...rich(x)))) : null,
+    ...notes.map((x) => h("p", { class: "muted" }, ...rich(x))),
+  );
+}
+
+export function startPage(app: App, manifest: Promise<ManifestResult>): HTMLElement {
   const steps = h("ol", { class: "steps" });
   const picker = h("div", { class: "boards", role: "group", "aria-labelledby": "start-board" });
   const buttons = new Map<string, HTMLButtonElement>();
+  let loaded: Manifest | null = null;
+  let chosen: Board | undefined;
 
   function choose(b: Board) {
+    chosen = b;
     for (const [id, btn] of buttons) btn.setAttribute("aria-pressed", String(id === b.id));
-    steps.replaceChildren(
-      ...gettingStarted(b).map(({ title, body, action }) =>
-        h(
-          "li",
-          {},
-          h("strong", {}, title),
-          h("p", {}, body),
-          action ? h("button", { onclick: () => app.showTab(action.tab) }, action.label) : null,
-        ),
-      ),
-    );
+    steps.replaceChildren(...gettingStarted(b, loaded).map((s) => renderStep(s, app)));
     if (!b.runsPayloads) {
       steps.append(h("li", { class: "muted" }, "Want to see payloads run on hardware? Use an ESP32, ESP32-S3 or Pico 2."));
     }
@@ -58,6 +112,10 @@ export function startPage(app: App): HTMLElement {
   const initial = savedBoard();
   if (initial) choose(initial);
   else steps.append(h("li", { class: "muted" }, "Pick your board to see its steps."));
+  void manifest.then((r) => {
+    loaded = r.ok ? r.manifest : null;
+    if (chosen) choose(chosen);
+  });
 
   const tryBtn = h("button", { class: "primary big", onclick: () => app.tryExample(FIRST_EXAMPLE) }, "Try Blink in the simulator");
 

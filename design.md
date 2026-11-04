@@ -1283,7 +1283,7 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   held by PWM or the ADC is refused to plain `gpio_*` like an SPI or UART
   pin (X13).
 - [x] E6 Produces merged flash images per chip for the web flasher —
-  `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
+  `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`. It also builds the Pico UF2s for U19 (`rp2040`, `rp2350`), which are, like the `.bin` images, build output and not committed.
 - [x] E14 (0.6) Each chip profile has a strapping-pin mask (ESP32 GPIO
   0/2/5/12/15, ESP32-S3 0/3/45/46, ESP32-C3 2/8/9, ESP8266 0/2/15). Strapping
   pins stay usable by payloads (`check_pin` allows them); hosts warn, as
@@ -1948,6 +1948,37 @@ open).
   `scrollWidth` no wider than the viewport; gutter and line tops match
   once the editor has been on screen), not by a test, so it stays
   unchecked.
+- [x] U19 Pico users install rp-base without a toolchain: the firmware
+  manifest may list `uf2.rp2040` and `uf2.rp2350` (file, SHA-256, size,
+  version, UF2 family id, factory flag, `wasm` flag), validated strictly:
+  only those two chips, family `rp2040` for the Pico and, for the Pico 2,
+  only the factory image (partition table plus slot A, family `absolute`;
+  the `rp2350-arm-s` update image is for `mwctl fw update` and is
+  refused), lower-case 64-digit SHA-256, a size in whole 512-byte blocks.
+  `firmware/build-images.sh rp2040 rp2350` builds the UF2s with
+  `firmware-rp/build.sh`, copies them next to the ESP images and writes
+  those entries; like the ESP images they are build output, not
+  committed, and the committed manifest has none. For a listed chip the
+  Start tab's install step offers "Download UF2" with the file name, size,
+  version and SHA-256, then the BOOTSEL and drag-onto-drive steps (RPI-RP2,
+  RP2350); otherwise it says how to build the file. The Pico 2 step says
+  the factory image writes the A/B partition table, so it is for the first
+  install, and that later updates go over USB with `mwctl fw update`. The
+  page saves a download only after checking its UF2 magic, size, family and
+  SHA-256 against the manifest, and says this catches a corrupted or
+  outdated file and is not a signature —
+  `web/test/manifest.test.ts`: "parses what firmware/build-images.sh rp2040 rp2350 writes" (`web/test/fixtures/manifest-uf2.json`, that script's output), "treats an absent uf2 section as none, as in the committed manifest", "rejects an unknown chip and a non-object section", "rejects a wrong family, including an entry filed under the other chip", "lists only the RP2350 factory image, not the mwctl update image", "rejects a missing or malformed sha256, size, version, wasm flag or file name"; `web/test/uf2.test.ts`: "accepts the file the manifest names, with WebCrypto's SHA-256", "refuses a truncated or padded download", "refuses a file whose SHA-256 differs from the manifest", "refuses something that is not a UF2, such as the index.html a server answers for a missing file", "refuses a UF2 of another family, such as the RP2350 update image", "formats sizes for people"; `web/test/onboarding.test.ts`: "sends ESP boards to the Flash tab and, without a UF2 in the manifest, Picos to the build hint", "offers the manifest's UF2 for each Pico with file name, size and version", "says what the download check proves and what it does not", "follows the download with BOOTSEL onto the board's drive, then drag the file, in order", "tells Pico 2 users the factory image sets up A/B and later updates use mwctl fw update", "falls back to the build hint for a chip the manifest has no UF2 for", "marks commands and file names as code spans".
+- [ ] U20 The Start tab's "Download UF2" saves a file that installs by
+  BOOTSEL drag-and-drop: on a Pico it boots rp-base, and on a Pico 2
+  without a partition table it writes the A/B table and boots slot A
+  (`mwctl fw info`: running A, slot A bought). Only partly verified, so
+  unchecked: the button's fetch-check-save path has no DOM test (in
+  headless Chrome against `vite preview` at 1280×800 and 390×844 both
+  files saved with the manifest's SHA-256, a wrong SHA-256 and a missing
+  file were refused without saving, and the Start tab kept a page
+  `scrollWidth` no wider than the viewport); `picotool info -a` on the
+  factory UF2 shows the partition table; no file was dragged onto real
+  hardware.
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and
