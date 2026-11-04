@@ -459,4 +459,39 @@ mod tests {
         assert_eq!(c.owner(0), Some(Owner::Pwm));
         assert_eq!(c.release(Owner::Pwm).owner(4), None);
     }
+
+    #[test]
+    fn e24_esp32s3_i2c_bus_0_holds_gpio_5_and_6_exclusively() {
+        let (sda, scl) = ESP32S3.i2c_pins(0).unwrap();
+        assert_eq!((sda, scl), (5, 6));
+        let c = Claims::new().claim_i2c(&ESP32S3, sda, scl).unwrap();
+        assert_eq!(c.owner(5), Some(Owner::I2c));
+        assert_eq!(c.owner(6), Some(Owner::I2c));
+        assert_eq!(pins(c.pins_of(Owner::I2c)).collect::<heapless::Vec<u8, 2>>(), [5, 6]);
+        assert_eq!(c.check_gpio(5), Err(AbiError::InvalidArgument));
+        assert_eq!(c.check_gpio(6), Err(AbiError::InvalidArgument));
+        // SPI, UART and interrupts cannot take an I2C line.
+        assert_eq!(c.claim_spi(&ESP32S3, &spi(5, 11, -1, -1)), Err(AbiError::InvalidArgument), "SCK");
+        assert_eq!(c.claim_spi(&ESP32S3, &spi(12, 11, 6, -1)), Err(AbiError::InvalidArgument), "MISO");
+        assert_eq!(c.claim_spi(&ESP32S3, &spi(12, 11, 13, 6)), Err(AbiError::InvalidArgument), "CS");
+        assert_eq!(c.claim_uart(&ESP32S3, &uart(5, -1)), Err(AbiError::InvalidArgument));
+        assert_eq!(c.set_irq(&ESP32S3, 6, true), Err(AbiError::InvalidArgument));
+        // Nor can I2C take an SPI pin.
+        let s = Claims::new().claim_spi(&ESP32S3, &spi(12, 5, -1, 10)).unwrap();
+        assert_eq!(s.claim_i2c(&ESP32S3, sda, scl), Err(AbiError::InvalidArgument), "MOSI on SDA");
+        let s = Claims::new().claim_spi(&ESP32S3, &spi(6, 11, -1, -1)).unwrap();
+        assert_eq!(s.claim_i2c(&ESP32S3, sda, scl), Err(AbiError::InvalidArgument), "SCK on SCL");
+        // Beside an SPI bus on other pins both hold.
+        let both = Claims::new().claim_spi(&ESP32S3, &spi(12, 11, 13, 10)).unwrap().claim_i2c(&ESP32S3, sda, scl).unwrap();
+        assert_eq!((both.owner(12), both.owner(5)), (Some(Owner::Spi), Some(Owner::I2c)));
+        // Release (payload stop) gives the pins back to plain GPIO.
+        let r = c.release(Owner::I2c);
+        assert_eq!((r.owner(5), r.owner(6)), (None, None));
+        assert_eq!(r.check_gpio(5), Ok(()));
+        assert_eq!(r.check_gpio(6), Ok(()));
+        assert!(r.claim_spi(&ESP32S3, &spi(5, 6, -1, -1)).is_ok());
+        assert_eq!(both.release(Owner::I2c).owner(12), Some(Owner::Spi), "release drops I2C only");
+        // The ESP32-C3 maps no bus.
+        assert_eq!(ESP32C3.i2c_pins(0), Err(AbiError::Unsupported));
+    }
 }

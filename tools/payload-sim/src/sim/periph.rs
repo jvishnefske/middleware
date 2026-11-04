@@ -23,7 +23,9 @@
 //! * [`I2c`] — buses `0..I2C_BUSES`, each with a 256-byte register device
 //!   at [`I2C_DEVICE_ADDR`]: a write `[reg, data...]` stores `data` from
 //!   `reg` and sets the register pointer to `reg`; a read returns registers
-//!   from the pointer, auto-incrementing (wrapping at 256). Bus 0 also
+//!   from the pointer, auto-incrementing (wrapping at 256);
+//!   [`I2c::preset`] (the `!i2c` command) sets a register from outside
+//!   without moving the pointer. Bus 0 also
 //!   carries an OV2640's SCCB registers at [`ov2640::OV2640_ADDR`]
 //!   ([`ov2640::Ov2640`]: ID, banks, soft reset; no image sensor). Any
 //!   other address does not acknowledge ([`AbiError::Transport`]).
@@ -411,6 +413,18 @@ impl I2c {
             .ok_or(AbiError::InvalidArgument)
     }
 
+    /// Sets register `reg` of the register device on `bus` to `value`, as
+    /// a test bench would before the payload reads it. The bus need not be
+    /// open, and the register pointer does not move.
+    pub fn preset(&mut self, bus: u8, reg: u8, value: u8) -> Result<(), String> {
+        let b = self
+            .buses
+            .get_mut(usize::from(bus))
+            .ok_or_else(|| format!("no i2c bus {bus} (buses 0..{I2C_BUSES})"))?;
+        b.regs[usize::from(reg)] = value;
+        Ok(())
+    }
+
     /// The OV2640 register model on bus 0.
     pub fn ov2640(&self) -> &Ov2640 {
         &self.camera
@@ -597,6 +611,34 @@ mod tests {
         assert_eq!(two, [1, 2], "read-only continues from the pointer");
         assert_eq!(i.transfer(0, 0x51, &[0], &mut rx), Err(AbiError::Transport));
         assert_eq!(i.transfer(1, 0x50, &[0], &mut rx), Err(AbiError::Busy));
+    }
+
+    #[test]
+    fn i2c_preset_sets_a_register_without_moving_the_pointer() {
+        let mut i = I2c::default();
+        i.preset(1, 0x10, 0x5A).unwrap();
+        i.preset(1, 0xFF, 0xA5).unwrap();
+        assert!(i.preset(I2C_BUSES as u8, 0, 1).is_err(), "no such bus");
+        i.open(I2cConfig {
+            bus: 1,
+            freq_hz: 100_000,
+        })
+        .unwrap();
+        let mut rx = [0u8; 1];
+        i.transfer(1, I2C_DEVICE_ADDR, &[0x10], &mut rx).unwrap();
+        assert_eq!(rx, [0x5A]);
+        i.preset(1, 0x00, 7).unwrap();
+        i.transfer(1, I2C_DEVICE_ADDR, &[], &mut rx).unwrap();
+        assert_eq!(rx, [0x5A], "the pointer stays at 0x10");
+        i.transfer(1, I2C_DEVICE_ADDR, &[0xFF], &mut rx).unwrap();
+        assert_eq!(rx, [0xA5]);
+        i.open(I2cConfig {
+            bus: 0,
+            freq_hz: 100_000,
+        })
+        .unwrap();
+        i.transfer(0, I2C_DEVICE_ADDR, &[0x10], &mut rx).unwrap();
+        assert_eq!(rx, [0], "other buses are unaffected");
     }
 
     #[test]

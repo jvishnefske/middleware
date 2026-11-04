@@ -25,14 +25,29 @@
 //! this firmware targets), so its PWM and I2C pins wire the camera
 //! sensor's control lines (see the PWM table below): PWM (0,0) is GPIO 0,
 //! the camera's XCLK, (0,1) GPIO 4, the flash LED; I2C bus 0 is SDA 26 /
-//! SCL 27, the sensor's SCCB; the camera port is I2S0.
+//! SCL 27, the sensor's SCCB; the camera port is I2S0. The ESP32-S3 build
+//! maps I2C bus 0 only (E24):
 //!
-//! | chip     | I2C bus 0 (SDA, SCL) | camera     |
-//! |----------|----------------------|------------|
-//! | ESP32    | 26, 27 (SCCB)        | yes (I2S0) |
-//! | other    | —                    | —          |
+//! | chip     | I2C bus 0 (SDA, SCL)   | camera     |
+//! |----------|------------------------|------------|
+//! | ESP32    | 26, 27 (SCCB)          | yes (I2S0) |
+//! | ESP32-S3 | 5, 6                   | —          |
+//! | ESP32-C3 | — (no payload runtime) | —          |
+//! | ESP8266  | — (no payload runtime) | —          |
 //!
-//! I2C bus 1 and every I2C/camera request on a chip without a map are
+//! The ESP32-S3's bus 0 pins are a [`Profile`] constant, chosen to be free
+//! on the boards this build runs on; a different board changes
+//! `ESP32S3`'s `i2c0`. GPIO 5 and 6 are not strapping pins (the S3 straps
+//! on 0, 3, 45 and 46), not flash or PSRAM (26–37), not USB (19/20) and not
+//! the UART0 console (43/44). They are free headers on the
+//! ESP32-S3-DevKitC-1, and free probe pins on the conagotchi badge (its
+//! board map in `badge-core::board` uses 0, 9, 21, 46, 47 for buttons, 2,
+//! 4, 45 for LEDs, 10–14 for the GC9A01 panel on SPI2, 39/40 for the link
+//! UART and 41/42 for IR). The ESP32-C3 and ESP8266 run no payloads (no
+//! `wasm` runtime: wasmi needs CAS atomics the C3 lacks, and the ESP8266
+//! has too little DRAM), so they map nothing.
+//!
+//! I2C bus 1 and every I2C/camera request a chip's map leaves out are
 //! `Unsupported` ([`Profile::i2c_pins`], [`Profile::camera`]). The mapped
 //! pins are ordinary payload pins until a payload opens the peripheral (and
 //! then claimed, see [`crate::periph::claims`]).
@@ -275,7 +290,8 @@ pub const ESP32: Profile = Profile {
 };
 
 /// ESP32-S3: GPIO0–21, 26–48. Flash/PSRAM on 26–32, octal flash/PSRAM on
-/// 33–37, USB D-/D+ on 19/20, UART0 on 43 (TX) / 44 (RX).
+/// 33–37, USB D-/D+ on 19/20, UART0 on 43 (TX) / 44 (RX). I2C bus 0 on
+/// GPIO 5 (SDA) / 6 (SCL) (see the board pin map).
 pub const ESP32S3: Profile = Profile {
     chip: Chip::Esp32s3,
     name: "esp32s3",
@@ -296,7 +312,7 @@ pub const ESP32S3: Profile = Profile {
     input_only: 0,
     strapping: bit(0) | bit(3) | bit(45) | bit(46),
     adc: span(1, 10),
-    i2c0: None,
+    i2c0: Some((5, 6)),
     camera: false,
 };
 
@@ -629,8 +645,10 @@ mod tests {
         assert_eq!(ESP32.i2c_pins(1), Err(AbiError::Unsupported));
         assert!(ESP32.camera());
         for p in [&ESP32S3, &ESP32C3, &ESP8266] {
-            assert_eq!(p.i2c_pins(0), Err(AbiError::Unsupported), "{}", p.name);
             assert!(!p.camera(), "{}", p.name);
+        }
+        for p in [&ESP32C3, &ESP8266] {
+            assert_eq!(p.i2c_pins(0), Err(AbiError::Unsupported), "{}", p.name);
         }
         // Every mapped pin is a payload pin that can drive, clear of the
         // camera port and SCCB.
@@ -645,6 +663,30 @@ mod tests {
         // The AI-Thinker camera port is all payload input pins.
         for pin in middleware::wasm_abi::route::CameraPins::AI_THINKER.all() {
             assert_eq!(ESP32.check_pin(pin, Direction::Input), Ok(()), "camera {pin}");
+        }
+    }
+
+    #[test]
+    fn e24_esp32s3_maps_i2c_bus_0_to_gpio_5_and_6() {
+        assert_eq!(ESP32S3.i2c_pins(0), Ok((5, 6)));
+        assert_eq!(ESP32S3.i2c_pins(1), Err(AbiError::Unsupported), "bus 1");
+        assert_eq!(ESP32C3.i2c_pins(0), Err(AbiError::Unsupported), "no runtime");
+        assert_eq!(ESP32C3.i2c_pins(1), Err(AbiError::Unsupported));
+        // Both lines are payload pins that can drive (open drain) and
+        // read: not reserved, not strapping (0, 3, 45, 46), not the
+        // console, flash/PSRAM or USB.
+        let (sda, scl) = ESP32S3.i2c_pins(0).expect("mapped");
+        for pin in [sda, scl] {
+            assert_eq!(ESP32S3.check_pin(pin, Direction::Output), Ok(()), "{pin}");
+            assert_eq!(ESP32S3.check_pin(pin, Direction::Input), Ok(()), "{pin}");
+            assert!(![0, 3, 45, 46].contains(&pin), "strapping {pin}");
+        }
+        assert_ne!(sda, scl);
+        // Every chip that maps a bus runs payloads.
+        for p in ALL {
+            if p.i2c_pins(0).is_ok() {
+                assert!(p.runtime, "{}", p.name);
+            }
         }
     }
 

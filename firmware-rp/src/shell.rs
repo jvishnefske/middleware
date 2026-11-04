@@ -22,8 +22,12 @@
 //!    the boot log reports the build, the heap plan, the stored payload,
 //!    the trust state and the updater's state.
 //! 5. With `wasm`, the payload hardware is set aside in [`device::HW`]: a
-//!    `Flex` for every payload pin (GPIO 0–22, 24, 25) and the ADC with
-//!    GPIO 26–28.
+//!    `Flex` for every payload pin (GPIO 0–22, 24, 25), the ADC with
+//!    GPIO 26–28, SPI0 and SPI1 with the 4 KiB transfer buffer
+//!    ([`spi`]), and I2C0 and I2C1 ([`i2c`]), all controllers held in
+//!    reset until a payload opens them. The SPI and I2C register drivers
+//!    ([`pads`], [`spi`], [`i2c`]) are built on the RP2040 too, which runs
+//!    no payloads, so their register code is checked for both chips.
 //! 6. The [`controller`] runs on the main task and starts the stored
 //!    payload if one is valid (and the runtime is built in).
 //!
@@ -39,9 +43,15 @@ mod controller;
 mod device;
 #[cfg(feature = "wasm")]
 mod heap;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code, reason = "the RP2040 runs no payloads yet; built so its register code is checked"))]
+mod i2c;
 mod link;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code, reason = "the RP2040 runs no payloads yet; built so its register code is checked"))]
+mod pads;
 #[cfg(all(feature = "fw-update", feature = "rp2350"))]
 mod rom;
+#[cfg_attr(not(feature = "wasm"), allow(dead_code, reason = "the RP2040 runs no payloads yet; built so its register code is checked"))]
+mod spi;
 
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
@@ -196,12 +206,27 @@ fn open_fw(
     (flash, fw)
 }
 
-/// Sets the payload hardware aside: the GPIO bank and the ADC.
+/// The SPI bus's transfer buffer.
+#[cfg(feature = "wasm")]
+static SPI_BUFFER: ConstStaticCell<spi::Buffer> = ConstStaticCell::new([0; middleware::wasm_abi::periph::MAX_DMA]);
+
+/// The payload's bus controllers.
+#[cfg(feature = "wasm")]
+struct Buses {
+    spi0: embassy_rp::Peri<'static, embassy_rp::peripherals::SPI0>,
+    spi1: embassy_rp::Peri<'static, embassy_rp::peripherals::SPI1>,
+    i2c0: embassy_rp::Peri<'static, embassy_rp::peripherals::I2C0>,
+    i2c1: embassy_rp::Peri<'static, embassy_rp::peripherals::I2C1>,
+}
+
+/// Sets the payload hardware aside: the GPIO bank, the ADC and the SPI and
+/// I2C controllers.
 #[cfg(feature = "wasm")]
 fn install_payload_hw(
     pins: [embassy_rp::Peri<'static, embassy_rp::gpio::AnyPin>; 25],
     adc: embassy_rp::Peri<'static, embassy_rp::peripherals::ADC>,
     analog: [embassy_rp::adc::Channel<'static>; 3],
+    buses: Buses,
 ) {
     use embassy_rp::gpio::{Flex, Pin};
     use rp_base::pins::GPIOS;
@@ -213,7 +238,12 @@ fn install_payload_hw(
         }
     }
     let adc = embassy_rp::adc::Adc::new_blocking(adc, embassy_rp::adc::Config::default());
-    device::HW.put(device::Hw { pins: bank, adc: device::Analog::new(adc, analog) });
+    device::HW.put(device::Hw {
+        pins: bank,
+        adc: device::Analog::new(adc, analog),
+        spi: spi::SpiBus::new(buses.spi0, buses.spi1, SPI_BUFFER.take()),
+        i2c: i2c::I2cBuses::new(buses.i2c0, buses.i2c1),
+    });
 }
 
 /// Brings up the board and runs the firmware forever.
@@ -258,7 +288,8 @@ pub async fn run(spawner: Spawner) -> ! {
             p.PIN_15.into(), p.PIN_16.into(), p.PIN_17.into(), p.PIN_18.into(), p.PIN_19.into(),
             p.PIN_20.into(), p.PIN_21.into(), p.PIN_22.into(), p.PIN_24.into(), p.PIN_25.into(),
         ];
-        install_payload_hw(pins, p.ADC, analog);
+        let buses = Buses { spi0: p.SPI0, spi1: p.SPI1, i2c0: p.I2C0, i2c1: p.I2C1 };
+        install_payload_hw(pins, p.ADC, analog, buses);
         bus.log(format_args!("heap: {} B free after boot", heap::free()));
     }
 

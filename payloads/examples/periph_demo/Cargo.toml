@@ -1,0 +1,13 @@
+[package]
+name = "periph_demo"
+description = "Example middleware payload: periph_demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }

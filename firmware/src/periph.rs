@@ -1,8 +1,8 @@
 //! Pure decision logic behind the ABI 2 peripherals (interrupts, timers,
-//! SPI and UART DMA) and the ABI 3 PWM outputs and ADC inputs.
+//! SPI and UART DMA) and the ABI 3 ones (PWM outputs, ADC inputs, I2C).
 //!
 //! The imperative shell (`src/shell/irq.rs`, `timer.rs`, `spi.rs`,
-//! `uart1.rs`, `pwm.rs`, `adc.rs`, `device.rs`) owns the esp-hal drivers and ISRs; every
+//! `uart1.rs`, `pwm.rs`, `adc.rs`, `i2c.rs`, `device.rs`) owns the esp-hal drivers and ISRs; every
 //! decision it makes comes from here, so it is unit tested on the host:
 //!
 //! * [`claims`] — which pins the SPI bus, the secondary UART, GPIO
@@ -16,6 +16,8 @@
 //! * [`dma_hw`] — who holds a DMA peripheral's driver and buffers (idle,
 //!   or the running transfer), so a payload stop in any state returns them
 //!   (D6, R12).
+//! * [`i2c`] — bus 0's accepted clocks and the per-byte timeout that
+//!   bounds a blocking transfer on a stuck bus (ABI 3 I2C, E24).
 //! * [`pwm`] — the LEDC frequency plan (duty bits per frequency) and the
 //!   ABI duty's mapping onto them (ABI 3 PWM, R15 camera clock).
 //! * [`ring`] — the fixed UART receive ring that drops and counts bytes
@@ -32,6 +34,7 @@
 pub mod claims;
 pub mod dma;
 pub mod dma_hw;
+pub mod i2c;
 pub mod pwm;
 pub mod ring;
 pub mod timers;

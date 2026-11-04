@@ -17,6 +17,10 @@
 //!   (coalesced) `UartRx` event.
 //! * `!adc <pin> <0..4095>` sets the value `adc_read(pin)` returns (ABI 3;
 //!   pins read 0 until set).
+//! * `!i2c <bus> <reg> <value>` presets register `reg` of the register
+//!   device at 0x50 on I2C bus `bus` (ABI 3; registers hold 0 until set or
+//!   written). Each number is hex (`0x5a`) or decimal; the register
+//!   pointer does not move. It prints `i2c<bus> 0x50 reg <reg> <- <value>`.
 //!
 //! The ABI 3 PWM and I2C imports print `pwm<t> open <f> Hz`,
 //! `pwm<t>.<ch> duty <d>`, `pwm<t> stop`, `i2c<bus> open <f> Hz` and

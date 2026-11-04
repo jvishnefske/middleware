@@ -37,10 +37,10 @@
 //! a direct IO MUX function the routing may have chosen. PWM outputs (X11)
 //! are routed the same way, to an LEDC low-speed signal;
 //! [`PinBank::drive_low`] turns one back into a plain GPIO output driven
-//! low on `pwm_stop`. On the ESP32, [`PinBank::route_open_drain`]
-//! connects both directions of an I2C line (open drain, pull-up), and an
-//! input may feed several peripheral inputs (the camera's data lines feed
-//! two I2S data inputs each).
+//! low on `pwm_stop`. [`PinBank::route_open_drain`] connects both
+//! directions of an I2C line (open drain, pull-up), and an input may feed
+//! several peripheral inputs (on the ESP32 the camera's data lines feed two
+//! I2S data inputs each).
 //!
 //! # Analog inputs (X12)
 //!
@@ -60,7 +60,6 @@ use esp_hal::gpio::{
     AnyPin, Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal,
     Pull as HalPull,
 };
-#[cfg(feature = "esp32")]
 use esp_hal::gpio::DriveMode;
 use esp_hal::handler;
 use esp_hal::peripherals::IO_MUX;
@@ -326,7 +325,6 @@ impl PinBank {
     /// Connects pin `n` to peripheral input `signal` and output `output` as
     /// an open-drain line with the internal pull-up, released high (I2C
     /// SDA and SCL).
-    #[cfg(feature = "esp32")]
     pub fn route_open_drain(&mut self, n: u8, input: InputSignal, output: OutputSignal) -> Result<(), AbiError> {
         let slot = self.slot(n, Direction::Output)?;
         slot.drop_irq(n);
