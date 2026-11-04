@@ -2040,6 +2040,66 @@ open).
   table scrolling 356 of 1014 px on the phone; Ctrl+Right, Ctrl+Down and
   Down moved focus as described; every control labelled; typing kept the
   caret), not by a DOM test, so it stays unchecked.
+- [x] U27 State machines are part of the payload model: version 2 adds
+  `machines` (at most 4), each with an identifier, a free-text name, an
+  initial state, states (name, note, up to 4 entry actions), events (name,
+  note) and transition rows (state, event, an optional guard, next state,
+  up to 4 actions). Guards are a closed i32 grammar of depth at most 4
+  (digital pin read by label, constant, comparison, and / or / not) and
+  actions a closed set (write or toggle a pin by label, publish constant
+  text, log, raise an event of the same machine). The shape check is
+  strict like version 1's, and a version-1 file parses to the same model
+  as version 2 with no machines and byte-for-byte the same generated
+  code — `web/test/model.test.ts`: "round-trips state machines and copies them", "migrates a version-1 model to version 2 losslessly (no machines, same code)", "rejects unknown shapes instead of dropping them"; `web/test/machines.model.test.ts`: "renaming a state or event renames every reference", "removing a state or event drops what depends on it", "the simple form round-trips through Expr within the depth limit", "lists and renames state and event references".
+- [x] U28 State machine tables are checked in Rust by a no_std, no-heap
+  crate (`state-table`, also built for `thumbv6m-none-eabi`) through
+  protocol-wasm `checkMachines`, in plain language with one-click fixes:
+  identifiers and case-insensitive uniqueness of machine ids, state and
+  event names; the initial state, every row's state, event and next state
+  existing; at most one unguarded row per state and event (an always-true
+  guard counts as one); guards in one cell that can both be true, with a
+  pin assignment that shows it (decided exactly by trying every 0/1
+  combination of up to 12 pins); guard pins that exist and are digital;
+  write and toggle on GPIO outputs; publish keys by the middleware key
+  rule and not under `sys/`; raise naming an event of the machine; at most
+  16 states, 16 events, 64 rows and 4 actions. Unreachable states, events
+  no row handles and never-true guards are warnings and do not stop
+  Compile; errors do (stage "states") — `cargo test -p state-table`: "a_valid_machine_has_no_issues", "machine_ids_must_be_identifiers_unique_ignoring_case", "state_and_event_names_must_be_identifiers_unique_ignoring_case", "initial_must_name_a_state_with_a_fix_to_the_first", "rows_must_name_known_states_and_events_with_add_fixes", "a_cell_has_at_most_one_unguarded_row", "an_always_true_guard_counts_as_the_unguarded_row", "overlapping_guards_report_a_witness_assignment", "exclusive_guards_in_one_cell_do_not_overlap", "overlap_above_twelve_pins_is_a_warning_not_checked", "guard_pins_must_exist_and_be_digital", "guards_deeper_than_four_or_malformed_are_errors", "write_and_toggle_need_an_output_pin", "publish_keys_follow_the_key_rule_and_avoid_sys", "raise_must_name_an_event_of_the_same_machine", "oversized_machines_report_the_size_and_skip_the_rest", "unreachable_states_are_warnings", "events_no_row_handles_are_dead_warnings", "a_guard_that_is_never_true_is_a_warning"; `cargo test -p protocol-wasm machines`: "cell_messages_name_the_earlier_row", "unknown_state_and_event_messages_offer_to_add_them", "flatten_cuts_deep_expressions_at_one_past_the_limit"; `web/test/machines.check.test.ts`: "a valid machine has no issues", "overlapping guards name the earlier row and a witness assignment", "warns about never-true guards, unreachable states and dead events", "a machine with 17 states reports its size and nothing else"; `web/test/blocks.machines.test.ts`: "stops the build at stage states on a machine error and never on a warning".
+- [x] U29 Machines generate bounded i32 code: per machine `SM<k>_<state>`
+  and `EV<k>_<event>` constants and a state global; per event one
+  function with a single `switch` over the states that handle it, guarded
+  rows as `if` / `else if` in table order and the unguarded row as the
+  last `else`; on a change of state the new state is set, logged
+  (`sm <id>: <from> -> <to> on <event>`) and entered (entry actions, then
+  "when <state> is entered" blocks); a self-transition runs only its
+  actions; `init` logs and enters each initial state after the pin setup.
+  No loops and no allocation; a machine no block names still compiles;
+  "raise", "is current?" and "when ... is entered" blocks name
+  `<machine>.<event or state>` and an unknown one is an error on the
+  block — `web/test/blocks.machines.test.ts`: "emits SM/EV constants per machine, its state and pending globals, and one shared smBusy", "dispatches each event with one switch over the states that have rows for it", "turns guarded rows into if / else if in table order with the unguarded row as the final else, and compiles", "on a change of state sets the state, logs the move and enters the next state (entry actions, then on-enter blocks); a self-transition only runs its actions", "init runs the machines after the pin setup, subscriptions and tick, and before the on-init stacks", "generates byte-identical code without machines", "compiles a machine that no block references (dead but valid)", "reports raise, is-current and on-enter blocks naming an unknown machine, state or event on the block", "reports an invalid table as errors naming the machine and row, leaves the bad parts out and still emits valid code"; `cargo test -p state-table step`: "step_fires_the_first_true_guarded_row_before_the_default", "step_uses_the_first_unguarded_row_and_skips_rows_naming_nothing".
+- [x] U30 Raised events are bounded: a raise while any machine is
+  stepping is queued, at most one per machine (a second is dropped and
+  logged), the queue is drained once in machine order after the outermost
+  step, and a raise during the drain is dropped and logged, so one
+  external raise runs at most 1 + (number of machines) steps —
+  `cargo test -p state-table step`: "raise_queue_holds_one_pending_event_per_machine", "dispatch_while_stepping_queues_instead_of_running", "dispatch_drains_pending_raises_once_in_machine_order", "dispatch_runs_at_most_one_plus_machines_steps"; `web/test/blocks.machines.test.ts`: "raises through the bounded queue: dropped while draining, one slot while stepping, drained once in machine order", "drops a second raise in one step and a raise chained from the drain, logs each, and stays bounded without a trap".
+- [x] U31 The "Button toggles LED mode" example (Off / On / Blink on a
+  BUTTON press, TICK every 250 ms toggling the LED in Blink) loads from
+  the Examples menu with the replace-confirm, sets its machine and adds
+  LED and BUTTON from the board's suggestions (BUTTON: a pulled-up input
+  on the board's BOOT button or, on the Picos, GPIO 15), and runs in the
+  simulator — `web/test/blocks.machines.test.ts`: "runs the mode example on pico2 (LED GPIO 25, BUTTON GPIO 15): PRESS steps Off -> On -> Blink -> Off and TICK toggles the LED in Blink", "runs the mode example on esp32 (LED GPIO 4, BUTTON GPIO 0): PRESS steps Off -> On -> Blink -> Off and TICK toggles the LED in Blink", "needs LED (output) and BUTTON (input) and raises both of its events"; `web/test/blocks.replace.test.ts`: "loading the mode example sets its machines and adds LED and BUTTON from the board's suggestions", "treats machines as work: a payload with machines but no blocks or pins asks before being replaced", "compares the generated code including the machines"; `web/test/onboarding.test.ts`: "suggests a BUTTON pin per board (input, pull-up) that passes its pin rules with the LED (Rust checkPins), outside the default table"; `web/test/blocks.build.test.ts`: `example "mode" compiles and passes checkAbi (esp-base)`.
+- [ ] U32 The States view (a sub-view beside Blocks and Pins) edits
+  machines with the Pins view's keyboard grid (shared `ui/grid.ts`): a
+  transition list by default (state, event, structured guard of up to
+  three "pin op value" terms joined by all / any, next state, up to four
+  structured actions) and an optional read-only state × event matrix
+  whose cells jump to their row or add one; problems under their row with
+  `aria-describedby`, errors and warnings styled apart, fixes as buttons;
+  renaming a state, event or machine renames the blocks that name it;
+  while simulating, the current state is highlighted in the tables and
+  named in a live line in the simulator panel. The view's decisions are
+  tested (`web/test/states.view.test.ts`: "renames the state, its rows, the initial state and the blocks when the name is valid and free", "does not merge references when the typed name collides with another state", "lists each cell's rows with next state and guard marker, and labels holes", "counts only errors on the tab, since warnings do not block compiling", "says the state and the transition that led to it"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the mode example loaded after the confirm, a duplicate unguarded row blocked Compile at stage states and switched to the view, and two BUTTON presses in the simulator showed "State: Mode = Blink (from On on PRESS)" with the Blink row highlighted), not by a DOM test, so it stays unchecked.
 
 ### Interrupts and DMA (ABI 2)
 

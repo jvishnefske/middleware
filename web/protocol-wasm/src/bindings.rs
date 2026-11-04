@@ -2,8 +2,9 @@
 //!
 //! Everything here converts between JS values and the pure modules
 //! ([`crate::decoder`], [`crate::encode`], [`crate::loader`],
-//! [`crate::simulator`]); no protocol logic lives in this file. Byte
-//! arrays cross as `Uint8Array`; structured results are plain JS objects
+//! [`crate::pins`], [`crate::machines`], [`crate::simulator`]); no
+//! protocol logic lives in this file. Byte arrays cross as `Uint8Array`;
+//! structured results are plain JS objects
 //! whose shapes are documented on each function and mirrored in
 //! `web/src/protocol/types.ts`.
 
@@ -685,6 +686,209 @@ pub fn check_pins(chip: &str, rows: Array, settings: Array) -> Result<Array, JsE
                         set(&f, "func", func.name());
                         set(&f, "bus", bus);
                         set(&f, "pin", pin.map_or(JsValue::NULL, JsValue::from));
+                    }
+                }
+                set(&o, "fix", f);
+            }
+            JsValue::from(o)
+        })
+        .collect())
+}
+
+/// The array at `o[key]`, or an empty one.
+fn array(o: &JsValue, key: &str) -> Array {
+    let v = get(o, key);
+    if Array::is_array(&v) {
+        Array::from(&v)
+    } else {
+        Array::new()
+    }
+}
+
+/// The text at `o[key]`, or empty.
+fn text(o: &JsValue, key: &str) -> String {
+    get(o, key).as_string().unwrap_or_default()
+}
+
+/// A guard `Expr` object. Recursion is bounded by the constant
+/// `MAX_GUARD_DEPTH + 1`: a subtree below that is not read, it becomes a
+/// leaf there and the check reports the guard as too deep.
+fn machine_expr(v: &JsValue, depth: u8, at: &str) -> Result<crate::machines::Expr, JsError> {
+    use crate::machines::Expr;
+    use state_table::{CmpOp, MAX_GUARD_DEPTH};
+    if depth > MAX_GUARD_DEPTH {
+        return Ok(Expr::Const(0));
+    }
+    let sub = |key: &str| -> Result<Box<Expr>, JsError> {
+        machine_expr(&get(v, key), depth + 1, &format!("{at}.{key}")).map(Box::new)
+    };
+    match text(v, "kind").as_str() {
+        "pin" => Ok(Expr::Pin(text(v, "label"))),
+        "const" => whole(&get(v, "value"))
+            .and_then(|n| i32::try_from(n).ok())
+            .map(Expr::Const)
+            .ok_or_else(|| JsError::new(&format!("{at}.value must be a whole 32-bit number"))),
+        "cmp" => {
+            let op = CmpOp::parse(&text(v, "op")).ok_or_else(|| {
+                JsError::new(&format!("{at}.op must be eq, ne, lt, le, gt or ge"))
+            })?;
+            Ok(Expr::Cmp(op, sub("a")?, sub("b")?))
+        }
+        "and" => Ok(Expr::And(sub("a")?, sub("b")?)),
+        "or" => Ok(Expr::Or(sub("a")?, sub("b")?)),
+        "not" => Ok(Expr::Not(sub("a")?)),
+        other => Err(JsError::new(&format!(
+            "{at}.kind {other:?} is not an expression"
+        ))),
+    }
+}
+
+/// An `ActionRef` list.
+fn machine_actions(list: Array, at: &str) -> Result<Vec<crate::machines::ActionIn>, JsError> {
+    use crate::machines::ActionIn;
+    list.iter()
+        .enumerate()
+        .map(|(k, a)| match text(&a, "kind").as_str() {
+            "write" => {
+                let level = get(&a, "level");
+                Ok(ActionIn::Write {
+                    label: text(&a, "label"),
+                    level: level.as_f64() == Some(1.0) || level.as_bool() == Some(true),
+                })
+            }
+            "toggle" => Ok(ActionIn::Toggle {
+                label: text(&a, "label"),
+            }),
+            "publish" => Ok(ActionIn::Publish {
+                key: text(&a, "key"),
+                text: text(&a, "text"),
+            }),
+            "log" => Ok(ActionIn::Log {
+                text: text(&a, "text"),
+            }),
+            "raise" => Ok(ActionIn::Raise {
+                event: text(&a, "event"),
+            }),
+            other => Err(JsError::new(&format!(
+                "{at}[{k}].kind {other:?} is not an action"
+            ))),
+        })
+        .collect()
+}
+
+/// Checks state machines against the pin table (see `crate::machines` and
+/// the `state-table` crate). `machines` is `[{id, name, initial, states:
+/// [{name, note, entry: ActionRef[]}], events: [{name, note}], rows:
+/// [{state, event, guard: Expr|null, next, actions: ActionRef[]}]}]` with
+/// `Expr` `{kind: "pin", label} | {kind: "const", value} | {kind: "cmp",
+/// op, a, b} | {kind: "and"|"or", a, b} | {kind: "not", a}` and `ActionRef`
+/// `{kind: "write", label, level: 0|1} | {kind: "toggle", label} | {kind:
+/// "publish", key, text} | {kind: "log", text} | {kind: "raise", event}`
+/// (`web/src/model/machines.ts`). `pins` is `[{label, func}]` with `func`
+/// a pin-table function name (`"gpio-out"`, `"gpio-in"`, ...). Expressions
+/// nested deeper than the limit are reported as issues, not read; an
+/// unknown expression or action kind, or a non-integer constant, throws.
+/// Returns `[{machine, list: "machine"|"states"|"events"|"rows", row:
+/// number|null, field, severity: "error"|"warning", message, fix?:
+/// {kind: "add-state"|"add-event"|"set-initial", name} | {kind: "add-pin",
+/// label, func}}]`.
+#[wasm_bindgen(js_name = checkMachines)]
+pub fn check_machines(machines: Array, pins: Array) -> Result<Array, JsError> {
+    use crate::machines::{MachineFix, MachineIn, PinIn, RowIn, StateIn, check, flatten};
+    use crate::pins::Func;
+    let pins: Vec<PinIn> = pins
+        .iter()
+        .map(|p| {
+            let func = text(&p, "func");
+            PinIn {
+                label: text(&p, "label"),
+                func: Func::parse(&func).ok_or(func),
+            }
+        })
+        .collect();
+    let machines: Vec<MachineIn> = machines
+        .iter()
+        .enumerate()
+        .map(|(mi, m)| {
+            let at = format!("machines[{mi}]");
+            let states = array(&m, "states")
+                .iter()
+                .enumerate()
+                .map(|(si, s)| {
+                    Ok(StateIn {
+                        name: text(&s, "name"),
+                        entry: machine_actions(
+                            array(&s, "entry"),
+                            &format!("{at}.states[{si}].entry"),
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, JsError>>()?;
+            let rows = array(&m, "rows")
+                .iter()
+                .enumerate()
+                .map(|(ri, r)| {
+                    let rat = format!("{at}.rows[{ri}]");
+                    let g = get(&r, "guard");
+                    let guard = if g.is_null() || g.is_undefined() {
+                        None
+                    } else {
+                        Some(flatten(&machine_expr(&g, 1, &format!("{rat}.guard"))?))
+                    };
+                    Ok(RowIn {
+                        state: text(&r, "state"),
+                        event: text(&r, "event"),
+                        guard,
+                        next: text(&r, "next"),
+                        actions: machine_actions(array(&r, "actions"), &format!("{rat}.actions"))?,
+                    })
+                })
+                .collect::<Result<Vec<_>, JsError>>()?;
+            Ok(MachineIn {
+                id: text(&m, "id"),
+                initial: text(&m, "initial"),
+                states,
+                events: array(&m, "events")
+                    .iter()
+                    .map(|e| text(&e, "name"))
+                    .collect(),
+                rows,
+            })
+        })
+        .collect::<Result<_, JsError>>()?;
+    Ok(check(&machines, &pins)
+        .into_iter()
+        .map(|i| {
+            let o = Object::new();
+            set(&o, "machine", i.machine as u32);
+            set(&o, "list", i.list);
+            set(
+                &o,
+                "row",
+                i.row.map_or(JsValue::NULL, |r| JsValue::from(r as u32)),
+            );
+            set(&o, "field", i.field);
+            set(&o, "severity", i.severity);
+            set(&o, "message", i.message.as_str());
+            if let Some(fix) = i.fix {
+                let f = Object::new();
+                match fix {
+                    MachineFix::AddState(name) => {
+                        set(&f, "kind", "add-state");
+                        set(&f, "name", name);
+                    }
+                    MachineFix::AddEvent(name) => {
+                        set(&f, "kind", "add-event");
+                        set(&f, "name", name);
+                    }
+                    MachineFix::SetInitial(name) => {
+                        set(&f, "kind", "set-initial");
+                        set(&f, "name", name);
+                    }
+                    MachineFix::AddPin { label, func } => {
+                        set(&f, "kind", "add-pin");
+                        set(&f, "label", label);
+                        set(&f, "func", func.name());
                     }
                 }
                 set(&o, "fix", f);

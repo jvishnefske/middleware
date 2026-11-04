@@ -5,16 +5,30 @@
 // upload, like the Editor tab.
 //
 // The tab edits one payload model (src/model/payload.ts): the board, the
-// pin table and the Blockly workspace. Two views share the toolbar
-// (board, examples, compile, simulate, upload, export, import) and the
-// right-hand column (generated code, build output, simulator): "Blocks",
-// the Blockly workspace, and "Pins", the pin table (pinTable.ts). They are
-// sub-views of one tab rather than sibling tabs because they are halves
-// of one payload: a pin change shows at once in the generated code and the
-// simulator next to it, and compile and upload act on both. The pin table
-// is re-checked with protocol-wasm `checkPins` (the firmwares' pin rules)
-// on every change; problems keep Compile from building and are counted on
-// the Pins view's tab.
+// pin table, the state machines and the Blockly workspace. Three views
+// share the toolbar (board, examples, compile, simulate, upload, export,
+// import) and the right-hand column (generated code, build output,
+// simulator): "Blocks", the Blockly workspace, "Pins", the pin table
+// (pinTable.ts), and "States", the state-machine tables (statesTable.ts).
+// They are sub-views of one tab rather than sibling tabs because they are
+// parts of one payload: a pin or table change shows at once in the
+// generated code and the simulator next to it, and compile and upload act
+// on all of them. The views are a tablist (arrow keys, Home and End move
+// between them); the last one shown is remembered. The pin table is
+// re-checked with protocol-wasm `checkPins` (the firmwares' pin rules) and
+// the machines with `checkMachines` on every pin or machine change; errors
+// keep Compile from building (it switches to the view at fault) and are
+// counted on the view's tab ("States (2 to fix)"); warnings do not block.
+//
+// Renaming a pin label, a state, an event or a machine id in a table
+// renames the blocks that refer to it in the live workspace. The machine
+// blocks name `<machine id>.<state or event>` with dropdowns of the
+// tables' names (`field_machine_state`, `field_machine_event`), keeping a
+// name the tables no longer have, marked "(not in States)". While the
+// simulator runs, the generated code's `sm <id>: ...` log lines
+// (machines.ts `parseMachineLog`) give each machine's current state: the
+// States view highlights it and a live line in the simulator says it
+// ("State: Mode = On (from Off on PRESS)").
 //
 // The board decides the profile and so which blocks are enabled: blocks
 // the profile does not support are disabled in the toolbox and in the
@@ -50,8 +64,18 @@ import { PROFILES, type ProfileId } from "../blocks/profiles";
 import { exampleModel, planImport, wouldReplaceWork } from "../blocks/replace";
 import { browserStore, load, save } from "../blocks/storage";
 import type { WorkspaceJson } from "../blocks/workspace";
-import { type PayloadModel, makeModel, profileOfModel, serializeModel, withBoard, withPins, withWorkspace } from "../model/payload";
-import { type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget } from "../model/pins";
+import {
+  MACHINE_EVENT_BLOCKS,
+  MACHINE_STATE_BLOCKS,
+  type Machine,
+  type MachineIssue,
+  machineRef,
+  machineRefsUsed,
+  parseMachineLog,
+  parseMachineRef,
+} from "../model/machines";
+import { type PayloadModel, makeModel, profileOfModel, serializeModel, withBoard, withMachines, withPins, withWorkspace } from "../model/payload";
+import { type PinFunc, type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget, withNeeds } from "../model/pins";
 import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../model/target";
 import type { BoardId } from "../onboarding/boards";
 import type { BoardPins, PinState, SimEvent } from "../protocol/wasm";
@@ -59,6 +83,8 @@ import { SimSession } from "../sim/session";
 import type { App } from "./app";
 import { errorText, formatBytes, h } from "./dom";
 import { pinTableView } from "./pinTable";
+import { type Rename, renamePinLabel, simStateText, statesTabText } from "./statesModel";
+import { statesView } from "./statesTable";
 import { modal } from "./trustPanel";
 
 /** Disabled reason for blocks the selected profile does not support. */
@@ -106,12 +132,59 @@ class PinLabelField extends Blockly.FieldDropdown {
   }
 }
 
+/** Where the machine fields get their options: the payload's machines,
+ * plus references blocks already make (kept, shown as missing). */
+const machineSource = { machines: [] as readonly Machine[], extra: { states: [] as string[], events: [] as string[] } };
+
+/** A dropdown of `<machine id>.<state>` (or `.<event>`) references that
+ * accepts any reference (the generator reports one the tables lack). */
+class MachineRefField extends Blockly.FieldDropdown {
+  private pending: string | null = null;
+  constructor(private readonly kind: "state" | "event") {
+    super(() => [["(no machine)", "Machine.Idle"]]);
+  }
+  override getOptions(): Blockly.MenuOption[] {
+    const opts: Blockly.MenuOption[] = machineSource.machines.flatMap((m) =>
+      (this.kind === "state" ? m.states : m.events).filter((x) => x.name).map((x): Blockly.MenuOption => [`${m.id}.${x.name}`, machineRef(m.id, x.name)]),
+    );
+    const current = this.pending ?? (this.getValue() as string | null);
+    const extra = this.kind === "state" ? machineSource.extra.states : machineSource.extra.events;
+    for (const v of [...extra, current ?? ""]) {
+      if (v && !opts.some((o) => o[1] === v)) opts.push([`${v} (not in States)`, v]);
+    }
+    return opts.length > 0 ? opts : [["(add a machine in States)", this.kind === "state" ? "Machine.Idle" : "Machine.GO"]];
+  }
+  protected override doClassValidation_(v?: string): string | null {
+    if (typeof v !== "string" || v === "") return null;
+    this.pending = v;
+    return v;
+  }
+}
+class MachineStateField extends MachineRefField {
+  static override fromJson(): MachineStateField {
+    return new MachineStateField();
+  }
+  constructor() {
+    super("state");
+  }
+}
+class MachineEventField extends MachineRefField {
+  static override fromJson(): MachineEventField {
+    return new MachineEventField();
+  }
+  constructor() {
+    super("event");
+  }
+}
+
 let registered = false;
 function registerBlocks(): void {
   if (registered) return;
   registered = true;
   Blockly.setLocale(En as unknown as Record<string, string>);
   Blockly.fieldRegistry.register("field_pin_label", PinLabelField);
+  Blockly.fieldRegistry.register("field_machine_state", MachineStateField);
+  Blockly.fieldRegistry.register("field_machine_event", MachineEventField);
   Blockly.defineBlocksWithJsonArray(BLOCK_DEFS as never[]);
 }
 
@@ -168,6 +241,9 @@ export function blocksPage(app: App): HTMLElement {
     })();
   let profile: ProfileId = profileOfModel(model);
   let pinIssues: PinIssue[] = [];
+  let machineIssues: MachineIssue[] = [];
+  /** Each machine's state in the running simulator, by id (null: none). */
+  let simStates: Map<string, string> | null = null;
   let boardPins: BoardPins | null = null;
   let compiled: Uint8Array | null = null;
   let session: SimSession | null = null;
@@ -237,10 +313,75 @@ export function blocksPage(app: App): HTMLElement {
     labelSource.table = model.pins.rows.map((r) => r.label).filter(Boolean);
     pinsView.render(model.board, model.pins, pinIssues, boardPins);
     pinsTab.textContent = pinIssues.length ? `Pins (${pinIssues.length} to fix)` : "Pins";
+    checkMachines();
+  }
+
+  /** Re-checks the machines against the pin table (protocol-wasm
+   * checkMachines) and redraws the States view. */
+  function checkMachines() {
+    try {
+      machineIssues = model.machines.length ? proto.checkMachines(model.machines, model.pins.rows) : [];
+    } catch (e) {
+      machineIssues = [
+        { machine: 0, list: "machine", row: null, field: "size", severity: "error", message: `Could not check the state machines: ${errorText(e)}` },
+      ];
+    }
+    machineSource.machines = model.machines;
+    renderStates();
+    statesTab.textContent = statesTabText(machineIssues);
+  }
+
+  function renderStates() {
+    statesV.render(
+      model.machines,
+      machineIssues,
+      model.pins.rows.map((r) => ({ label: r.label, func: r.func })),
+      simStates,
+    );
+  }
+
+  function setMachines(machines: readonly Machine[], rename?: Rename) {
+    model = withMachines(model, machines);
+    machineSource.machines = machines;
+    if (rename && ws) {
+      Blockly.Events.setGroup(true);
+      try {
+        for (const b of ws.getAllBlocks(false)) {
+          const field = MACHINE_STATE_BLOCKS.includes(b.type) ? "STATE" : MACHINE_EVENT_BLOCKS.includes(b.type) ? "EVENT" : null;
+          if (!field) continue;
+          if (rename.kind !== "machine" && (rename.kind === "event") !== (field === "EVENT")) continue;
+          const f = b.getField(field);
+          const ref = parseMachineRef(String(f?.getValue() ?? ""));
+          if (!f || !ref) continue;
+          if (rename.kind === "machine") {
+            if (ref.id === rename.from) f.setValue(machineRef(rename.to, ref.name));
+          } else if (ref.id === rename.id && ref.name === rename.from) f.setValue(machineRef(rename.id, rename.to));
+        }
+      } finally {
+        Blockly.Events.setGroup(false);
+      }
+    }
+    refreshMachineFields();
+    checkMachines();
+    invalidate();
+    regenerate();
+    persist();
+  }
+
+  /** Redraws the machine blocks' dropdown text (a name may have become
+   * missing or present again). */
+  function refreshMachineFields() {
+    if (!ws) return;
+    for (const b of ws.getAllBlocks(false)) {
+      const field = MACHINE_STATE_BLOCKS.includes(b.type) ? "STATE" : MACHINE_EVENT_BLOCKS.includes(b.type) ? "EVENT" : null;
+      if (field) b.getField(field)?.forceRerender();
+    }
   }
 
   function setPins(pins: PinTable, rename?: { from: string; to: string }) {
     model = withPins(model, pins);
+    // The machines' guards and pin actions follow a label rename too.
+    if (rename) model = withMachines(model, renamePinLabel(model.machines, rename.from, rename.to));
     if (rename && ws) {
       Blockly.Events.setGroup(true);
       try {
@@ -261,6 +402,13 @@ export function blocksPage(app: App): HTMLElement {
   }
 
   const pinsView = pinTableView({ onChange: setPins });
+  const statesV = statesView({
+    onChange: setMachines,
+    onAddPin: (label: string, func: PinFunc) => {
+      setPins(withNeeds(model.pins, model.board, [{ label, func }]));
+      out.textContent = `Added pin ${label} to the pin table; choose its GPIO in Pins.`;
+    },
+  });
 
   function invalidate() {
     if (compiled) out.textContent += "\n(The workspace or board changed; compile again.)";
@@ -292,7 +440,7 @@ export function blocksPage(app: App): HTMLElement {
   function regenerate() {
     regenerating = true;
     try {
-      const g = generate(currentWorkspace(), profile, model.pins);
+      const g = generate(currentWorkspace(), profile, model.pins, model.machines);
       code.dispatch({ changes: { from: 0, to: code.state.doc.length, insert: g.source } });
       showIssues(g.errors, g.warnings);
     } finally {
@@ -323,6 +471,8 @@ export function blocksPage(app: App): HTMLElement {
     profileSel.value = m.board;
     labelSource.extra = labelsUsed(m.logic[0].workspace);
     labelSource.table = m.pins.rows.map((r) => r.label).filter(Boolean);
+    machineSource.machines = m.machines;
+    machineSource.extra = machineRefsUsed(m.logic[0].workspace);
     if (ws) {
       Blockly.Events.disable();
       try {
@@ -369,6 +519,8 @@ export function blocksPage(app: App): HTMLElement {
     dark_?.addEventListener("change", (e) => ws?.setTheme(e.matches ? dark : light));
     ws.addChangeListener(Blockly.Events.disableOrphans);
     labelSource.extra = labelsUsed(model.logic[0].workspace);
+    machineSource.machines = model.machines;
+    machineSource.extra = machineRefsUsed(model.logic[0].workspace);
     try {
       Blockly.serialization.workspaces.load(model.logic[0].workspace, ws);
     } catch (e) {
@@ -405,7 +557,7 @@ export function blocksPage(app: App): HTMLElement {
   function confirmReplace(what: string) {
     return modal(
       `Replace your payload with ${what}?`,
-      [h("p", {}, "Your blocks are replaced (the pin table keeps your pins). Export JSON first to keep them.")],
+      [h("p", {}, "Your blocks and state machines are replaced (the pin table keeps your pins). Export JSON first to keep them.")],
       "Replace",
     );
   }
@@ -463,12 +615,13 @@ export function blocksPage(app: App): HTMLElement {
     out.textContent = "Compiling (loading the AssemblyScript compiler the first time) ...";
     try {
       const m = current();
-      const r = await buildPayload(m.logic[0].workspace, profile, proto.abi, { pins: m.pins, issues: pinIssues });
+      const r = await buildPayload(m.logic[0].workspace, profile, proto.abi, { pins: m.pins, issues: pinIssues, machines: m.machines, machineIssues });
       if (!r.ok) {
         invalidate();
         out.textContent = [`${r.stage} failed:`, ...r.errors].join("\n");
         if (r.issues.length > 0) showIssues(r.issues, []);
         if (r.stage === "pins") showView("pins");
+        if (r.stage === "states") showView("states");
         return false;
       }
       compiled = r.wasm;
@@ -521,6 +674,7 @@ export function blocksPage(app: App): HTMLElement {
     buttonsEl,
   );
   const msgLog = h("pre", { class: "log sim-log" });
+  const simStateEl = h("p", { id: "sim-states", class: "sim-states", "aria-live": "polite" });
   const subsEl = h("span", { class: "muted" });
   const simKey = h("input", { type: "text", value: "app/echo/in" });
   const simData = h("input", { type: "text", value: "ping" });
@@ -584,7 +738,15 @@ export function blocksPage(app: App): HTMLElement {
   );
 
   function onEvent(e: SimEvent) {
-    if (e.kind === "log") logLine(`log  ${e.line}`);
+    if (e.kind === "log") {
+      logLine(`log  ${e.line}`);
+      const p = parseMachineLog(e.line);
+      if (p) {
+        simStates = new Map(simStates ?? []).set(p.id, p.state);
+        simStateEl.textContent = simStateText(p);
+        renderStates();
+      }
+    }
     else if (e.kind === "publish") {
       logLine(`pub  ${e.key} ${formatBytes(e.data)}`);
       if (e.key === "badge/leds" && e.data.length === 24) renderLeds(e.data);
@@ -597,12 +759,18 @@ export function blocksPage(app: App): HTMLElement {
     session?.dispose();
     session = null;
     stopSimBtn.disabled = simSend.disabled = true;
+    if (simStates) {
+      simStates = null;
+      simStateEl.textContent = "";
+      renderStates();
+    }
   }
 
   function simulate() {
     if (!compiled) return;
     stopSim();
     msgLog.textContent = "";
+    simStates = new Map();
     renderLeds(new Uint8Array(24));
     screenEl.textContent = "(nothing shown)";
     petEl.textContent = "-";
@@ -661,6 +829,7 @@ export function blocksPage(app: App): HTMLElement {
   // ---- views: Blocks (Blockly) and Pins (the pin table)
   const blocksTab = h("button", { role: "tab", id: "view-blocks-tab", "aria-controls": "view-blocks", type: "button" }, "Blocks");
   const pinsTab = h("button", { role: "tab", id: "view-pins-tab", "aria-controls": "view-pins", type: "button" }, "Pins");
+  const statesTab = h("button", { role: "tab", id: "view-states-tab", "aria-controls": "view-states", type: "button" }, "States");
   const blocksView = h(
     "div",
     { role: "tabpanel", id: "view-blocks", "aria-labelledby": "view-blocks-tab" },
@@ -669,14 +838,19 @@ export function blocksPage(app: App): HTMLElement {
     issuesEl,
   );
   const pinsPanel = h("div", { role: "tabpanel", id: "view-pins", "aria-labelledby": "view-pins-tab" }, pinsView.el);
+  const statesPanel = h("div", { role: "tabpanel", id: "view-states", "aria-labelledby": "view-states-tab" }, statesV.el);
   const VIEW_KEY = "blocks-view";
-  function showView(v: "blocks" | "pins") {
+  type View = "blocks" | "pins" | "states";
+  const VIEWS: readonly { v: View; tab: HTMLButtonElement }[] = [
+    { v: "blocks", tab: blocksTab },
+    { v: "pins", tab: pinsTab },
+    { v: "states", tab: statesTab },
+  ];
+  function showView(v: View) {
     blocksView.hidden = v !== "blocks";
     pinsPanel.hidden = v !== "pins";
-    for (const [t, on] of [
-      [blocksTab, v === "blocks"],
-      [pinsTab, v === "pins"],
-    ] as const) {
+    statesPanel.hidden = v !== "states";
+    for (const [t, on] of VIEWS.map((x) => [x.tab, x.v === v] as const)) {
       t.setAttribute("aria-selected", String(on));
       t.tabIndex = on ? 0 : -1;
     }
@@ -689,13 +863,20 @@ export function blocksPage(app: App): HTMLElement {
   }
   blocksTab.addEventListener("click", () => showView("blocks"));
   pinsTab.addEventListener("click", () => showView("pins"));
-  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, blocksTab, pinsTab);
-  // Arrow keys move between the two view tabs (the tabs pattern).
+  statesTab.addEventListener("click", () => showView("states"));
+  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, blocksTab, pinsTab, statesTab);
+  // Arrow keys (wrapping), Home and End move between the view tabs (the
+  // tabs pattern, selection follows focus).
   views.addEventListener("keydown", (e) => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    const next = document.activeElement === blocksTab ? pinsTab : blocksTab;
-    next.focus();
-    next.click();
+    const at = VIEWS.findIndex((x) => x.tab === document.activeElement);
+    if (at < 0) return;
+    const n = VIEWS.length;
+    const to =
+      e.key === "ArrowRight" ? (at + 1) % n : e.key === "ArrowLeft" ? (at + n - 1) % n : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : -1;
+    const next = VIEWS[to];
+    if (!next) return;
+    next.tab.focus();
+    showView(next.v);
     e.preventDefault();
   });
   let savedView: string | null = null;
@@ -704,7 +885,7 @@ export function blocksPage(app: App): HTMLElement {
   } catch {
     /* storage unavailable */
   }
-  showView(savedView === "pins" ? "pins" : "blocks");
+  showView(VIEWS.find((x) => x.v === savedView)?.v ?? "blocks");
 
   const simHeading = h("h3", {}, "Simulator");
   renderPins(new Map());
@@ -733,7 +914,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "div",
       { class: "cols" },
-      h("div", {}, views, blocksView, pinsPanel),
+      h("div", {}, views, blocksView, pinsPanel, statesPanel),
       h(
         "div",
         {},
@@ -748,6 +929,7 @@ export function blocksPage(app: App): HTMLElement {
         pinsEl,
         badgeEl,
         subsEl,
+        simStateEl,
         simForm,
         msgLog,
       ),

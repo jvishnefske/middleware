@@ -11,8 +11,16 @@
 // * `init` (the pin table's setup first: `gpio_output` plus the initial
 //   level, `gpio_input` with its pull, `i2c_open(bus, hz)` per I2C bus,
 //   `spi_open(...)` for the SPI bus; then subscriptions, pin interrupts and
-//   `set_tick`, then the `on init` stacks), and `tick`, `mw_alloc` +
-//   `on_message` and `on_irq` only when an event block needs them.
+//   `set_tick`, then the state machines' initial states, then the `on
+//   init` stacks), and `tick`, `mw_alloc` + `on_message` and `on_irq` only
+//   when an event block needs them;
+// * for each state-machine table (model/machines.ts), its constants,
+//   globals and fixed `switch` dispatch (machineGen.ts documents the
+//   code). `raise <machine>.<event>` calls the machine's bounded raise
+//   from any handler, `<machine>.<state> is current?` compares its state,
+//   and "when <machine>.<state> is entered" blocks run after the state's
+//   entry actions; a reference to a machine, state or event the payload
+//   does not have is an error on the block.
 //
 // Pin blocks either take a pin number (`mw_gpio_*`, `mw_on_pin_edge`) or
 // name a pin-table label (`mw_pin_*`, `mw_on_pin`), which must be a row of
@@ -35,10 +43,13 @@
 // interrupt (the union of their edges) and filter on the pin level.
 //
 // Problems are reported per block (`GenIssue.blockId`) so the UI can point
-// at the block. Disabled blocks are skipped; a block the profile does not
+// at the block; problems in a state-machine table have no block and name
+// the machine and its row or state instead. Disabled blocks are skipped; a block the profile does not
 // support is an error rather than being dropped silently.
 
 import { EVENT_BLOCKS, blockSupported } from "./defs";
+import { type MachineHost, type PlannedMachine, emitMachines, inStateExpr, plannedById, planMachines, raiseCall } from "./machineGen";
+import { type Machine, parseMachineRef } from "../model/machines";
 import { EMPTY_PINS, PULL_CODES, type PinFunc, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
 import {
@@ -272,7 +283,7 @@ const BADGE_BUTTONS = "badge/buttons";
 type Ty = "number" | "text";
 
 /** What the current handler provides to value blocks. */
-type EventCtx = "init" | "tick" | "message" | "button" | "pin" | "timer";
+type EventCtx = "init" | "tick" | "message" | "button" | "pin" | "timer" | "enter";
 
 interface Ctx {
   event: EventCtx;
@@ -328,32 +339,81 @@ class Gen {
   /** Subscription keys -> slot global. */
   private readonly slots = new Map<string, string>();
   private loopVars = 0;
+  /** The machines that get code (machineGen.ts). */
+  private readonly plan: PlannedMachine[];
+  /** Bodies of "when <state> is entered" blocks by `k.state`. */
+  private readonly hats = new Map<string, string[]>();
+  /** `k.event` pairs that raise blocks name. */
+  private readonly blockRaised = new Set<string>();
+  private readonly host: MachineHost;
 
   constructor(
     private readonly ws: WorkspaceJson,
     private readonly profile: ProfileId,
     private readonly pins: PinTable,
-  ) {}
+    private readonly machines: readonly Machine[],
+  ) {
+    this.host = {
+      str: (t) => this.str(t),
+      use: (n) => this.use(n),
+      helper: (n) => this.helper(n),
+      pin: (label, funcs, what) => {
+        const r = this.labelPin(label, funcs, what);
+        return typeof r === "string" ? { problem: r } : { ident: r.ident };
+      },
+      error: (m) => this.error(undefined, m),
+      warn: (m) => this.warn(undefined, m),
+      keyProblem,
+      comment: commentText,
+    };
+    this.plan = planMachines(machines, this.host);
+  }
+
+  /** The constant naming a labelled pin when `label` names a table row
+   * whose function is one of `funcs`; the problem otherwise. */
+  private labelPin(label: string, funcs: readonly PinFunc[], what: string): { ident: string; pin: number } | string {
+    const r = this.pins.rows.find((x) => x.label === label);
+    if (!r) return `no pin is labelled "${label}" in the Pins table; add it there`;
+    if (!funcs.includes(r.func)) return `${label} is not ${what} in the Pins table`;
+    if (r.pin === null || !PIN_IDENT.test(label) || r.pin > MAX_PIN) return `${label} has no usable pin in the Pins table`;
+    return { ident: pinIdent(label), pin: r.pin };
+  }
 
   /** The constant naming a labelled pin, after checking the block's label
    * names a table row whose function is one of `funcs`; null (with an
    * error on the block) otherwise. */
   pinLabel(b: BlockJson, funcs: readonly PinFunc[], what: string): { ident: string; pin: number } | null {
-    const label = fieldText(b, "LABEL");
-    const r = this.pins.rows.find((x) => x.label === label);
-    if (!r) {
-      this.error(b, `no pin is labelled "${label}" in the Pins table; add it there`);
+    const r = this.labelPin(fieldText(b, "LABEL"), funcs, what);
+    if (typeof r === "string") {
+      this.error(b, r);
       return null;
     }
-    if (!funcs.includes(r.func)) {
-      this.error(b, `${label} is not ${what} in the Pins table`);
+    return r;
+  }
+
+  /** The machine and state or event a machine block's `field` names
+   * (`<machine id>.<name>`); null, with an error on the block, when it
+   * names nothing in the payload's machines. `planned` is null when the
+   * machine exists but gets no code (its own errors say why). */
+  machineRef(b: BlockJson, field: "STATE" | "EVENT"): { planned: PlannedMachine | null; name: string } | null {
+    const what = field === "STATE" ? "state" : "event";
+    const v = fieldText(b, field);
+    const ref = parseMachineRef(v);
+    if (!ref) {
+      this.error(b, v === "" ? `pick a state machine ${what}` : `"${v}" does not name a state machine ${what} (machine.${what})`);
       return null;
     }
-    if (r.pin === null || !PIN_IDENT.test(label) || r.pin > MAX_PIN) {
-      this.error(b, `${label} has no usable pin in the Pins table`);
+    const m = this.machines.find((x) => x.id === ref.id);
+    if (!m) {
+      this.error(b, `no state machine is named "${ref.id}"; add it under States`);
       return null;
     }
-    return { ident: pinIdent(label), pin: r.pin };
+    const names = field === "STATE" ? m.states.map((s) => s.name) : m.events.map((e) => e.name);
+    if (!names.includes(ref.name)) {
+      this.error(b, `${ref.id} has no ${what} "${ref.name}"`);
+      return null;
+    }
+    return { planned: plannedById(this.plan, ref.id) ?? null, name: ref.name };
   }
 
   error(b: BlockJson | undefined, message: string): void {
@@ -584,6 +644,10 @@ class Gen {
         this.use("gpio_read");
         return `mw_gpio_read(${p.ident})`;
       }
+      case "mw_sm_in_state": {
+        const r = this.machineRef(b, "STATE");
+        return r?.planned ? inStateExpr(r.planned.k, r.name) : "0";
+      }
       case "mw_pin_level":
         if (ctx.event !== "pin") {
           this.error(b, "pin level is only available inside on pin edge");
@@ -800,6 +864,13 @@ class Gen {
         out.push(`${pad}pinToggle(${p.ident});`);
         return;
       }
+      case "mw_sm_raise": {
+        const r = this.machineRef(b, "EVENT");
+        if (!r?.planned) return;
+        this.blockRaised.add(`${r.planned.k}.${r.name}`);
+        out.push(`${pad}${raiseCall(r.planned.k, r.name)}`);
+        return;
+      }
       case "mw_timer_start": {
         const id = this.intField(b, "ID", 0, 3, "timer");
         const ms = this.intField(b, "MS", 1, 2_000_000, "period");
@@ -967,11 +1038,19 @@ class Gen {
           this.stmts(input(b, "DO"), ctx("timer"), "    ", body);
           timers.push({ id: this.intField(b, "ID", 0, 3, "timer"), body });
           break;
+        case "mw_sm_on_enter": {
+          const r = this.machineRef(b, "STATE");
+          this.stmts(input(b, "DO"), ctx("enter"), "  ", body);
+          if (!r?.planned) break;
+          const key = `${r.planned.k}.${r.name}`;
+          this.hats.set(key, [...(this.hats.get(key) ?? []), ...body]);
+          break;
+        }
       }
     }
 
-    // init: the pin table, subscriptions, pin interrupts, tick, then the
-    // on-init stacks.
+    // init: the pin table, subscriptions, pin interrupts, tick, the state
+    // machines' initial states, then the on-init stacks.
     const pinConsts = this.tableSetup(setup, pins);
     for (const [key, slot] of this.slots) {
       const k = this.str(key);
@@ -992,7 +1071,10 @@ class Gen {
       setup.push(`  mw_set_tick(${tickMs});`);
     }
 
-    const globals: string[] = [];
+    const sm = emitMachines(this.plan, this.hats, this.blockRaised, this.host);
+    setup.push(...sm.init);
+
+    const globals: string[] = [...sm.globals];
     const fns: string[] = [];
     const exportsOut: string[] = [];
 
@@ -1095,9 +1177,10 @@ class Gen {
       );
     }
     if (pinConsts.length > 0) parts.push(["// Pins (from the Pins table).", ...pinConsts].join("\n"));
+    if (sm.consts.length > 0) parts.push(sm.consts.join("\n"));
     if (globals.length > 0) parts.push(globals.join("\n"));
     const helpers = HELPERS.filter(([n]) => this.helpers.has(n)).map(([, src]) => src);
-    parts.push(...helpers, ...fns);
+    parts.push(...helpers, ...sm.fns, ...fns);
 
     return {
       source: `${parts.join("\n\n")}\n`,
@@ -1123,9 +1206,9 @@ const FUNC_COMMENT: Readonly<Record<PinFunc, string>> = {
   "spi-cs": "SPI CS",
 };
 
-/** Generates the AssemblyScript module for a workspace and its pin table
- * (none by default: a workspace from before the table generates exactly
- * what it did). */
-export function generate(ws: WorkspaceJson, profile: ProfileId, pins: PinTable = EMPTY_PINS): GenResult {
-  return new Gen(ws, profile, pins).run();
+/** Generates the AssemblyScript module for a workspace, its pin table and
+ * its state machines (none by default: a workspace from before the table
+ * or the machines generates exactly what it did). */
+export function generate(ws: WorkspaceJson, profile: ProfileId, pins: PinTable = EMPTY_PINS, machines: readonly Machine[] = []): GenResult {
+  return new Gen(ws, profile, pins, machines).run();
 }

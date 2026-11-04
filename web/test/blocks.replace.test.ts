@@ -7,12 +7,14 @@
 import { describe, expect, it } from "vitest";
 import { EXAMPLES, exampleWorkspace } from "../src/blocks/examples";
 import { exampleModel, planImport, wouldReplaceWork } from "../src/blocks/replace";
-import { type PayloadModel, makeModel, serializeModel } from "../src/model/payload";
+import { MODE_MACHINE } from "../src/blocks/examples/mode.machine";
+import { type PayloadModel, makeModel, serializeModel, withMachines } from "../src/model/payload";
 import { boardDefaults, row } from "../src/model/pins";
 
 const blink = exampleWorkspace("blink")!;
 const echo = exampleWorkspace("echo")!;
 const chase = exampleWorkspace("chase")!;
+const mode = exampleWorkspace("mode")!;
 const empty = makeModel("pico2", {});
 const legacy = (profile: string, workspace: unknown) => JSON.stringify({ format: "middleware-blocks", version: 1, profile, workspace });
 const blinkModel: PayloadModel = exampleModel(blink, makeModel("pico2", {}, boardDefaults("pico2")), "esp32");
@@ -39,6 +41,49 @@ describe("Examples menu", () => {
     expect(exampleModel(chase, makeModel("pico2", {}, mine), "esp32").pins).toEqual(mine);
     // Back from the badge, the fallback board's defaults.
     expect(exampleModel(blink, makeModel("badge", chase.workspace), "esp32")).toMatchObject({ board: "esp32", pins: { rows: [{ label: "LED", pin: 4 }] } });
+  });
+});
+
+describe("Examples with state machines", () => {
+  it("loading the mode example sets its machines and adds LED and BUTTON from the board's suggestions", () => {
+    const m = exampleModel(mode, makeModel("pico2", {}), "esp32");
+    expect(m.machines).toEqual([MODE_MACHINE]);
+    expect(m.machines[0]).not.toBe(MODE_MACHINE);
+    expect(m.pins.rows).toEqual([
+      row("gpio-out", "LED", 25, 0, "on-board LED"),
+      { ...row("gpio-in", "BUTTON", 15, 0, "no user button: wire a push button from GPIO 15 to GND"), pull: "up" },
+    ]);
+    const esp = exampleModel(mode, makeModel("esp32", {}), "esp32");
+    expect(esp.pins.rows.map((r) => [r.label, r.pin, r.func])).toEqual([
+      ["LED", 4, "gpio-out"],
+      ["BUTTON", 0, "gpio-in"],
+    ]);
+    // A BUTTON the user already chose is kept.
+    const mine = { rows: [row("gpio-in", "BUTTON", 14)], buses: [] };
+    expect(exampleModel(mode, makeModel("pico2", {}, mine), "esp32").pins.rows[0]).toEqual(row("gpio-in", "BUTTON", 14));
+  });
+
+  it("an example without machines clears the payload's machines", () => {
+    const withMode = exampleModel(mode, makeModel("pico2", {}), "esp32");
+    expect(exampleModel(blink, withMode, "esp32").machines).toEqual([]);
+  });
+
+  it("treats machines as work: a payload with machines but no blocks or pins asks before being replaced", () => {
+    const onlyMachines = withMachines(makeModel("pico2", {}), [MODE_MACHINE]);
+    expect(wouldReplaceWork(onlyMachines, exampleModel(blink, onlyMachines, "esp32"))).toBe(true);
+    expect(wouldReplaceWork(onlyMachines, onlyMachines)).toBe(false);
+  });
+
+  it("compares the generated code including the machines", () => {
+    const loaded = exampleModel(mode, makeModel("pico2", {}), "esp32");
+    expect(wouldReplaceWork(loaded, exampleModel(mode, loaded, "esp32"))).toBe(false);
+    // Same blocks and pins, a different table: work to lose.
+    const changed = withMachines(loaded, [{ ...MODE_MACHINE, initial: "On" }]);
+    expect(wouldReplaceWork(changed, loaded)).toBe(true);
+    // Import of the same blocks as a bare workspace keeps the current machines, so it loads straight away.
+    const bare = planImport(JSON.stringify(mode.workspace), loaded, "esp32");
+    expect(bare.kind).toBe("load");
+    expect(bare.kind !== "error" && bare.model.machines).toEqual(loaded.machines);
   });
 });
 

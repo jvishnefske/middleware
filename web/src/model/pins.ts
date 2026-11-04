@@ -163,13 +163,25 @@ export interface PinNeed {
   func: PinFunc;
 }
 
+/** Rows the board suggests for labels examples use: its defaults (LED)
+ * plus BUTTON, a GPIO input with the pull-up on at the board's button
+ * pin (onboarding/boards.ts `button`). Not a starting table: only
+ * `withNeeds` adds from it, and only labels an example needs. */
+export function boardSuggestions(target: TargetId): PinTable {
+  const b = boardOf(target);
+  if (!b) return EMPTY_PINS;
+  return { rows: [...boardDefaults(target).rows, { ...row("gpio-in", "BUTTON", b.button.pin, 0, b.button.note), pull: "up" }], buses: [] };
+}
+
 /** The table with every needed label present: a missing one is added from
- * the board's defaults (or unassigned when the defaults lack it). Rows
- * already there are never changed, so loading an example never loses a
- * pin choice. */
+ * the board's suggestions (`boardSuggestions`; unassigned when the board
+ * suggests nothing for it). Rows already
+ * there are never changed, so loading an example never loses a pin
+ * choice. */
 export function withNeeds(t: PinTable, target: TargetId, needs: readonly PinNeed[]): PinTable {
-  const defaults = boardDefaults(target);
-  const missing = needs.filter((n) => !findRow(t, n.label));
+  const defaults = boardSuggestions(target);
+  // A label needed twice is added once.
+  const missing = needs.filter((n, i) => !findRow(t, n.label) && needs.findIndex((x) => x.label === n.label) === i);
   if (missing.length === 0) return t;
   return addRows(t, ...missing.map((n) => findRow(defaults, n.label) ?? row(n.func, n.label)));
 }

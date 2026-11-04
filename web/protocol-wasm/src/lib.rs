@@ -18,6 +18,9 @@
 //!   board's pin map from `board-pins` (the firmwares' own rules) and the
 //!   ABI's `i2c_open` / `spi_open` argument rules, with plain-language
 //!   messages and one-click fixes.
+//! * [`machines`] — the state-machine tables' checks: the page's machines
+//!   converted to `state-table` views, checked against the pin table, and
+//!   each issue rendered in plain language with its one-click fix.
 //! * [`simulator`] (`simulator` feature, default) — runs a payload in
 //!   `wasm-host` against a virtual device: GPIO with edge interrupts, ABI 2
 //!   hardware timers on a JS-supplied clock, an SPI device (loopback or a
@@ -25,7 +28,7 @@
 //!   feeds `on_irq`.
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
-//!   `abi()`, `boardPins`, `checkPins`, ...). It only converts values.
+//!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, ...). It only converts values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
@@ -36,6 +39,7 @@ pub mod bindings;
 pub mod decoder;
 pub mod encode;
 pub mod loader;
+pub mod machines;
 pub mod pins;
 #[cfg(feature = "simulator")]
 pub mod simulator;
