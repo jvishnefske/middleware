@@ -5,7 +5,7 @@
 // here re-implements the protocol. The raw wasm-bindgen exports return plain
 // objects typed `object`/`any`; this file gives them TypeScript shapes.
 
-import type { Flow, FlowIssue } from "../model/flows";
+import type { Flow, FlowIssue, PhaseDecl } from "../model/flows";
 import type { Machine, MachineIssue } from "../model/machines";
 import type { BusSetting, PinFunc, PinIssue, PinRow } from "../model/pins";
 import type { PhaseClass, RecipeIssue } from "../model/procedural";
@@ -121,7 +121,7 @@ export interface AbiInfo {
   minTickMs: number;
   /** Every import of every ABI revision (ABI 2 included). */
   imports: AbiImport[];
-  exports: { memory: string; init: string; tick: string; alloc: string; onMessage: string; onIrq: string };
+  exports: { memory: string; init: string; tick: string; alloc: string; onMessage: string; onIrq: string; onRequest?: string };
   errors: Record<string, number>;
   /** `on_irq` `kind` codes. */
   eventKinds: { Gpio: number; Timer: number; DmaDone: number; UartRx: number };
@@ -287,7 +287,7 @@ export interface Protocol {
   checkMachines(machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[]): MachineIssue[];
   /** Checks flows against the machines and the pin table (the
    * `state-table` crate's `flow` rules); a `FlowChecker`. */
-  checkFlows(flows: readonly Flow[], machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[]): FlowIssue[];
+  checkFlows(flows: readonly Flow[], machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[], phases?: readonly PhaseDecl[]): FlowIssue[];
   /** Checks phase classes and a master recipe (recipe-core's rules). */
   checkRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[]): RecipeIssue[];
   /** Binds a recipe's steps to units' equipment phases (plant.ts
@@ -335,7 +335,7 @@ function wrap(): Protocol {
     boardPins: (chip) => pkg.boardPins(chip) as BoardPins,
     checkPins: (chip, rows, buses) => pkg.checkPins(chip, [...rows], [...buses]) as PinIssue[],
     checkMachines: (machines, pins) => pkg.checkMachines([...machines], [...pins]) as MachineIssue[],
-    checkFlows: (flows, machines, pins) => pkg.checkFlows([...flows], [...machines], [...pins]) as FlowIssue[],
+    checkFlows: (flows, machines, pins, phases) => pkg.checkFlows([...flows], [...machines], [...pins], phases ? [...phases] : undefined) as FlowIssue[],
     checkRecipe: (recipe, classes) => pkg.checkRecipe(recipe, [...classes]) as RecipeIssue[],
     allocateRecipe: (recipe, classes, units) => pkg.allocateRecipe(recipe, [...classes], [...units]) as Allocation,
     simulateRecipe: (recipe, classes, units, script, untilMs) => pkg.simulateRecipe(recipe, [...classes], [...units], [...script], untilMs) as SimulatedRun,

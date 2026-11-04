@@ -4139,10 +4139,40 @@ a count and that many 32-bit result values (a Measure phase's reading).
 A unit publishes a report on every state change and as a heartbeat. The
 unit side of a command is a pure function: decode, check Start's arguments
 against the phase's ranges (InvalidRequest otherwise), step the phase
-state model and answer. Payloads cannot yet serve requests (the ABI has
-publish and subscribe only); the unit payload code generation in round 8
-adds that, and until then a unit that only subscribes and publishes is
-still acknowledged by its reports.
+state model and answer. Payloads serve the request keys through ABI 5
+(`serve`, `on_request`, `node_id`; section "Serving requests"), and a
+report naming a command's id still acknowledges it, for a unit that can
+only publish.
+
+#### Phase flows and the generated phase server
+
+A unit's phase logic is written as flows. A flow whose entry is `phase
+<em>.<phase> <state>` (an acting state, optionally `every N ms`) is that
+phase state's body: it runs when the phase enters the state and, with a
+period, again every period while the phase stays there. The action
+`phase done` finishes the acting state, at once or after the body has run
+a given number of times (a constant or a Start parameter); `phase report`
+stores up to four result values (constants, pin readings, Start
+parameters, the run count) for the phase's state reports. The flow check
+(`state-table` `flow::check_flows_in`, with the unit's phases) requires a
+phase of the unit, an acting state, one body flow per phase state, known
+parameters, run counts only in the phase's own body and report pins that
+are not outputs; the plant check requires each phase's `bodies` to name
+flows whose entry is exactly that phase state.
+
+For a unit with equipment phases the generator emits a phase server
+(`web/src/blocks/phaseGen.ts`): at init it reads `node_id`, writes the
+node's hex digits into each phase's keys, serves each request key and
+publishes Idle; a request is decoded exactly as `wire::decode_command`,
+Start's arguments are checked against the phase's ranges, and a bounded
+switch generated from the phase state table answers accepted with the new
+state or rejected with the current one, then enters the new state
+(clearing the run count, logging it, publishing the report and running
+its body; an acting state without a body is done at once). Done is a
+pending flag that a bounded settle pass at the end of every export
+applies through the same table, so bodies never call back into the state
+machine. Reports go out on every state change, on `phase report` and
+every second.
 
 #### IR version 4 and migration
 
@@ -4156,8 +4186,7 @@ phases and no recipes; its logic is kept as the unit's basic control, and
 the unit's payload is the original model, so its generated code is
 unchanged byte for byte. It is deliberately not wrapped in an "app" phase:
 a phase runs only when started, so wrapping would change what an existing
-payload does. The editor still opens and saves version 3 until the plant
-views exist (round 8); the version-4 reader accepts every older file.
+payload does. The version-4 reader accepts every older file.
 
 #### Requirements
 
@@ -4245,11 +4274,12 @@ views exist (round 8); the version-4 reader accepts every older file.
   and a phase table per module (class, ranges, a body flow per acting
   state) with the phase state matrix shown read-only; the editor saves
   version 4.
-- [ ] Q17 Unit payload code generation exposes the phase API: a flow entry
+- [x] Q17 Unit payload code generation exposes the phase API: a flow entry
   "phase <em>.<phase> enters <state>" and a "phase done" action, generated
   phase tables answering the wire contract (an ABI request export for
   payloads, or subscribe-and-report until it exists), heartbeat reports,
-  and argument range checks, all checked against the phase state model.
+  and argument range checks, all checked against the phase state model —
+  `cargo test -p state-table flow`: "a_blink_body_with_done_after_a_parameter_and_a_report_is_clean", "phase_entries_name_a_phase_of_the_unit_and_an_acting_state", "a_phase_state_has_one_body_flow", "phase_actions_name_a_phase_and_its_parameters_and_count_only_in_its_body", "a_report_carries_at_most_four_values"; `cargo test -p recipe-core phase`: "the_flow_checks_acting_states_are_these_acting_states_in_lower_case"; `cargo test -p protocol-wasm flows`: "a_phase_body_is_clean_and_phase_problems_read_plainly"; `web/test/phase.gen.test.ts`: "switches on the phase model's table", "leaves a unit without phases exactly as before", "generates a bounded command switch, serve per phase, reports and the heartbeat", "reports phase actions on unknown phases, parameters and run counts outside the body", "the worked example's units check clean against their phases", "compiles the payload-sim fixtures: the 77-cell matrix unit and the worked example's two units"; `web/test/plant.test.ts`: "rejects bad shapes and dangling references, naming the place"; `cargo test -p payload-sim --test phase`: "p1_every_cell_of_the_phase_model_matches_recipe_core" (all 77 cells, acknowledgements and reports byte-equal to `recipe_core::wire`), "p2_start_arguments_and_malformed_bodies_are_invalid_requests", "p3_blink_then_measure_runs_to_complete_on_the_generated_units", "p4_a_hold_mid_blink_holds_the_batch_and_restart_finishes_it", "p5_losing_the_led_unit_holds_restart_is_refused_and_abort_ends_aborted".
 - [ ] Q18 The master recipe is edited on the Flow canvas: steps as nodes
   naming a phase class and arguments, transitions as bars joining steps
   (parallel divergence and convergence), unit procedures as lanes, with

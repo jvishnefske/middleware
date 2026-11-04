@@ -20,9 +20,16 @@
 // * entry: `init` | `every` (ms) | `message` (key) | `pin-edge` (label,
 //   edge) | `entered` (`<machine>.<state>`, run after the state's entry
 //   actions, in the same enter function "when <state> is entered" blocks
-//   use);
-// * action: exactly an `ActionRef`; a raise names its machine and goes
-//   through the same bounded queue as every other raise;
+//   use) | `phase` (`<em>.<phase>`, an acting state, optional `every` ms:
+//   the body of that S88 phase state, run when the phase enters it and
+//   then every `every` ms while it stays there; plant.ts, phaseGen.ts);
+// * action: an `ActionRef` (a raise names its machine and goes through
+//   the same bounded queue as every other raise), or a phase action:
+//   `phase-done` (the phase's acting state is done; with `after`, only
+//   once the body has run that many times in the state, a count or a
+//   Start parameter) or `phase-report` (result values, at most 4, for the
+//   phase's state reports: constants, pin readings, Start parameters, the
+//   run count);
 // * branch: an `Expr` (with the `state` leaf); `then`, `else`, then `next`;
 // * repeat: `times` (1..MAX_REPEAT); `body` that many times, then `next`;
 // * sequence: `steps` (2..MAX_SEQUENCE); ports `1`, `2`, ... in order.
@@ -38,6 +45,7 @@
 
 import { type ActionRef, type Expr, MAX_EXPR_DEPTH, actionProblem, exprProblem, raisesEvent } from "./machines";
 import type { PinFunc } from "./pins";
+import { ACTING_STATES, type ActingState } from "./procedural";
 
 /** Most flows in a payload (logic sources after the Blocks workspace). */
 export const MAX_FLOWS = 8;
@@ -66,8 +74,25 @@ export type EntryProps =
   | { on: "every"; ms: number }
   | { on: "message"; key: string }
   | { on: "pin-edge"; label: string; edge: Edge }
-  | { on: "entered"; state: string };
-export const ENTRY_ONS = ["init", "every", "message", "pin-edge", "entered"] as const;
+  | { on: "entered"; state: string }
+  | { on: "phase"; phase: string; state: ActingState; every?: number };
+export const ENTRY_ONS = ["init", "every", "message", "pin-edge", "entered", "phase"] as const;
+
+/** Most values one phase report carries (recipe-core MAX_PARAMS). */
+export const MAX_REPORT_VALUES = 4;
+
+/** A value a `phase-report` publishes. */
+export type PhaseValue = { kind: "const"; value: number } | { kind: "pin"; label: string } | { kind: "param"; param: string } | { kind: "runs" };
+
+/** A phase action (flows only). `phase` is `<em>.<phase>`. */
+export type PhaseAction = { kind: "phase-done"; phase: string; after?: number | string } | { kind: "phase-report"; phase: string; values: readonly PhaseValue[] };
+
+/** What an action node does. */
+export type FlowAction = ActionRef | PhaseAction;
+
+export function isPhaseAction(a: FlowAction): a is PhaseAction {
+  return a.kind === "phase-done" || a.kind === "phase-report";
+}
 export type EntryOn = (typeof ENTRY_ONS)[number];
 
 interface At {
@@ -77,7 +102,7 @@ interface At {
 }
 export type FlowNode =
   | (At & { kind: "entry"; props: EntryProps })
-  | (At & { kind: "action"; props: ActionRef })
+  | (At & { kind: "action"; props: FlowAction })
   | (At & { kind: "branch"; props: { cond: Expr } })
   | (At & { kind: "repeat"; props: { times: number } })
   | (At & { kind: "sequence"; props: { steps: number } });
@@ -149,11 +174,21 @@ export type FlowFix =
   | { kind: "add-event"; name: string; machine?: number }
   | { kind: "add-state" | "set-initial"; name: string };
 
-/** protocol-wasm `checkFlows`. */
+/** An equipment phase of the unit, as `checkFlows` reads it. */
+export interface PhaseDecl {
+  em: string;
+  phase: string;
+  /** The class's parameter ids, in order. */
+  params: readonly string[];
+}
+
+/** protocol-wasm `checkFlows`; `phases` are the unit's equipment phases
+ * (none: every phase entry and action is reported). */
 export type FlowChecker = (
   flows: readonly Flow[],
   machines: readonly import("./machines").Machine[],
   pins: readonly { label: string; func: PinFunc }[],
+  phases?: readonly PhaseDecl[],
 ) => FlowIssue[];
 
 export function hasFlowErrors(issues: readonly FlowIssue[]): boolean {
@@ -184,6 +219,7 @@ function entryProblem(v: unknown, at: string): string | null {
     message: ["on", "key"],
     "pin-edge": ["on", "label", "edge"],
     entered: ["on", "state"],
+    phase: ["on", "phase", "state", "every"],
   };
   const allowed = typeof v.on === "string" ? keys[v.on] : undefined;
   if (!allowed) return `${at}.on must be one of ${ENTRY_ONS.join(", ")}`;
@@ -199,9 +235,47 @@ function entryProblem(v: unknown, at: string): string | null {
       return (EDGES as readonly unknown[]).includes(v.edge) ? null : `${at}.edge must be one of ${EDGES.join(", ")}`;
     case "entered":
       return text(v.state) ? null : `${at}.state must be text (machine.state)`;
+    case "phase":
+      if (!text(v.phase)) return `${at}.phase must be text (module.phase)`;
+      if (!(ACTING_STATES as readonly unknown[]).includes(v.state)) return `${at}.state must be one of ${ACTING_STATES.join(", ")}`;
+      return v.every === undefined || whole(v.every, 0, 0x7fffffff) ? null : `${at}.every must be a whole number of milliseconds`;
     default:
       return null;
   }
+}
+
+function phaseValueProblem(v: unknown, at: string): string | null {
+  if (!isObj(v)) return `${at} must be an object`;
+  const keys: Record<string, readonly string[]> = { const: ["kind", "value"], pin: ["kind", "label"], param: ["kind", "param"], runs: ["kind"] };
+  const allowed = typeof v.kind === "string" ? keys[v.kind] : undefined;
+  if (!allowed) return `${at}.kind must be one of const, pin, param, runs`;
+  const extra = extraKey(v, allowed);
+  if (extra !== undefined) return `${at} has an unknown field "${extra}"`;
+  if (v.kind === "const") return whole(v.value, -0x80000000, 0x7fffffff) ? null : `${at}.value must be a whole 32-bit number`;
+  if (v.kind === "pin") return text(v.label) ? null : `${at}.label must be text`;
+  if (v.kind === "param") return text(v.param) ? null : `${at}.param must be text`;
+  return null;
+}
+
+/** A flow action's shape: a phase action here, else the machines' rule. */
+function flowActionProblem(v: unknown, at: string): string | null {
+  if (!isObj(v) || (v.kind !== "phase-done" && v.kind !== "phase-report")) return actionProblem(v, at);
+  if (v.kind === "phase-done") {
+    const extra = extraKey(v, ["kind", "phase", "after"]);
+    if (extra !== undefined) return `${at} has an unknown field "${extra}"`;
+    if (!text(v.phase)) return `${at}.phase must be text (module.phase)`;
+    if (v.after === undefined || text(v.after, 24) || whole(v.after, 0, 0x7fffffff)) return null;
+    return `${at}.after must be a whole number or a parameter name`;
+  }
+  const extra = extraKey(v, ["kind", "phase", "values"]);
+  if (extra !== undefined) return `${at} has an unknown field "${extra}"`;
+  if (!text(v.phase)) return `${at}.phase must be text (module.phase)`;
+  if (!Array.isArray(v.values) || v.values.length > 16) return `${at}.values must be a list`;
+  for (const [i, x] of v.values.entries()) {
+    const p = phaseValueProblem(x, `${at}.values[${i}]`);
+    if (p) return p;
+  }
+  return null;
 }
 
 function nodeProblem(v: unknown, at: string): string | null {
@@ -216,7 +290,7 @@ function nodeProblem(v: unknown, at: string): string | null {
     case "entry":
       return entryProblem(p, pat);
     case "action":
-      return actionProblem(p, pat);
+      return flowActionProblem(p, pat);
     case "branch": {
       if (!isObj(p)) return `${pat} must be an object`;
       const e = extraKey(p, ["cond"]);
@@ -449,6 +523,8 @@ export function entryText(p: EntryProps): string {
       return `on ${p.label} ${p.edge === "rise" ? "rising" : p.edge === "fall" ? "falling" : "any"} edge`;
     case "entered":
       return `when ${p.state} is entered`;
+    case "phase":
+      return `phase ${p.phase} ${p.state}${p.every !== undefined ? `, every ${p.every} ms` : ""}`;
   }
 }
 
@@ -495,6 +571,9 @@ export function renameFlowPin(fs: readonly Flow[], from: string, to: string): Fl
   return mapNodes(fs, (n) => {
     if (n.kind === "entry" && n.props.on === "pin-edge" && n.props.label === from) return { ...n, props: { ...n.props, label: to } };
     if (n.kind === "action" && (n.props.kind === "write" || n.props.kind === "toggle") && n.props.label === from) return { ...n, props: { ...n.props, label: to } };
+    if (n.kind === "action" && n.props.kind === "phase-report" && n.props.values.some((v) => v.kind === "pin" && v.label === from)) {
+      return { ...n, props: { ...n.props, values: n.props.values.map((v) => (v.kind === "pin" && v.label === from ? { ...v, label: to } : v)) } };
+    }
     if (n.kind === "branch") return { ...n, props: { cond: renameExprPin(n.props.cond, from, to, 1) } };
     return n;
   });

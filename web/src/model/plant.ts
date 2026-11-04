@@ -39,15 +39,18 @@
 // types, an equipment module owning a pin the unit's table lacks (or a
 // pin two modules own), a phase on an unknown unit, module or class, a
 // phase without a range for every class parameter (or with one outside the
-// class's), a body naming a flow the unit does not have (or a flow used
-// as two bodies), duplicate ids. What a recipe's chart may contain and
+// class's), a body naming a flow the unit does not have, whose entry is
+// not that phase state's (`{on: "phase", phase: "<em>.<phase>", state}`;
+// so no flow is two bodies), duplicate ids. `phaseSpecs` and
+// `phaseDecls` give the generator and `checkFlows` a unit's phases. What a recipe's chart may contain and
 // whether units can run it is recipe-core's (protocol-wasm `checkRecipe`,
 // `allocateRecipe`, `simulateRecipe`).
 
 import type { ProfileId } from "../blocks/profiles";
 import type { WorkspaceJson } from "../blocks/workspace";
 import type { BoardId } from "../onboarding/boards";
-import type { Flow } from "./flows";
+import type { Flow, PhaseDecl } from "./flows";
+import type { PhaseSpec } from "../blocks/phaseGen";
 import type { Machine } from "./machines";
 import { type BlocksSource, MODEL_FORMAT, type PayloadModel, flowsOf, makeModel, modelProblem, parseModel } from "./payload";
 import { copyFlows } from "./flows";
@@ -153,6 +156,26 @@ export function phasesOf(p: PlantModel, unit: string): EquipmentPhase[] {
   return p.procedural.phases.filter((ph) => ph.unit === unit);
 }
 
+/** The unit's equipment phases as the generator serves them
+ * (phaseGen.ts): ranges in class parameter order. A phase whose class is
+ * missing gets no parameters (the plant check reports it). */
+export function phaseSpecs(p: PlantModel, unit: string): PhaseSpec[] {
+  const classes = new Map(p.procedural.classes.map((c) => [c.id, c]));
+  return phasesOf(p, unit).map((ph) => ({
+    em: ph.em,
+    id: ph.id,
+    params: (classes.get(ph.class)?.params ?? []).map((param) => {
+      const r = ph.ranges[param.id] ?? [param.min, param.max];
+      return { id: param.id, lo: r[0], hi: r[1] };
+    }),
+  }));
+}
+
+/** The unit's equipment phases as `checkFlows` reads them. */
+export function phaseDecls(p: PlantModel, unit: string): PhaseDecl[] {
+  return phaseSpecs(p, unit).map((s) => ({ em: s.em, phase: s.id, params: s.params.map((x) => x.id) }));
+}
+
 /** What allocation reads per unit (protocol-wasm `allocateRecipe`):
  * ranges in the class's parameter order. `online` says whether discovery
  * sees a unit; `runMs` how long a simulated phase runs. */
@@ -232,7 +255,6 @@ function unitProblem(v: unknown, at: string): string | null {
 
 function referencesProblem(units: readonly Unit[], proc: ProceduralModel): string | null {
   const classes = new Map<string, PhaseClass>(proc.classes.map((c) => [c.id, c]));
-  const bodyOwner = new Map<string, string>();
   const perUnit = new Map<string, number>();
   const seen = new Set<string>();
   for (const [i, ph] of proc.phases.entries()) {
@@ -255,14 +277,18 @@ function referencesProblem(units: readonly Unit[], proc: ProceduralModel): strin
     }
     const extra = Object.keys(ph.ranges).find((k) => !cls.params.some((p) => p.id === k));
     if (extra !== undefined) return `${at}.ranges.${extra} is not a parameter of ${cls.id}`;
-    const flowIds = new Set(flowsOf(unitPayloadOf(unit)).map((f) => f.id));
+    const unitFlows = flowsOf(unitPayloadOf(unit));
     for (const [state, flow] of Object.entries(ph.bodies)) {
       if (flow === undefined) continue;
-      if (!flowIds.has(flow)) return `${at}.bodies.${state} names flow "${flow}", which unit "${unit.id}" does not have`;
-      const k = `${unit.id}/${flow}`;
-      const other = bodyOwner.get(k);
-      if (other !== undefined) return `${at}.bodies.${state} uses flow "${flow}", already the body of ${other}`;
-      bodyOwner.set(k, `${ph.em}.${ph.id} ${state}`);
+      const f = unitFlows.find((x) => x.id === flow);
+      if (!f) return `${at}.bodies.${state} names flow "${flow}", which unit "${unit.id}" does not have`;
+      const entry = f.nodes.find((n) => n.kind === "entry");
+      const want = `${ph.em}.${ph.id}`;
+      if (!entry || entry.kind !== "entry" || entry.props.on !== "phase" || entry.props.phase !== want || entry.props.state !== state) {
+        return `${at}.bodies.${state} names flow "${flow}", whose entry is not "phase ${want} ${state}"`;
+      }
+      // A flow's entry names one phase state, so it is the body of at
+      // most one: no flow can serve two bodies.
     }
   }
   return null;

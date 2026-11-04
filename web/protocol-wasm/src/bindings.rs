@@ -450,6 +450,7 @@ pub fn abi() -> Object {
     set(&ex, "alloc", wasm_abi::exports::ALLOC);
     set(&ex, "onMessage", wasm_abi::exports::ON_MESSAGE);
     set(&ex, "onIrq", wasm_abi::exports::ON_IRQ);
+    set(&ex, "onRequest", wasm_abi::exports::ON_REQUEST);
     set(&o, "exports", ex);
     let errors = Object::new();
     for e in [
@@ -949,12 +950,29 @@ fn flow_kind(n: &JsValue, at: &str) -> Result<crate::flows::KindIn, JsError> {
                 let (machine, state) = split_ref(&text(&props, "state"));
                 EntryIn::Entered { machine, state }
             }
+            "phase" => {
+                let (em, phase) = split_ref(&text(&props, "phase"));
+                let every = get(&props, "every");
+                EntryIn::Phase {
+                    em,
+                    phase,
+                    state: text(&props, "state"),
+                    every: if every.is_undefined() || every.is_null() {
+                        None
+                    } else {
+                        Some(whole(&every).unwrap_or(0))
+                    },
+                }
+            }
             other => {
                 return Err(JsError::new(&format!(
                     "{at}.props.on {other:?} is not an entry"
                 )));
             }
         }),
+        "action" if text(&props, "kind").starts_with("phase-") => {
+            KindIn::Phase(flow_phase_action(&props, &format!("{at}.props"))?)
+        }
         "action" => {
             let list = Array::of1(&props);
             let mut acts = machine_actions(list, &format!("{at}.props"))?;
@@ -982,16 +1000,81 @@ fn flow_kind(n: &JsValue, at: &str) -> Result<crate::flows::KindIn, JsError> {
     })
 }
 
+/// A `phase-done` or `phase-report` action's props (`web/src/model/flows.ts`).
+fn flow_phase_action(props: &JsValue, at: &str) -> Result<crate::flows::PhaseIn, JsError> {
+    use crate::flows::{AfterIn, PhaseIn, ValueIn, split_ref};
+    let (em, phase) = split_ref(&text(props, "phase"));
+    match text(props, "kind").as_str() {
+        "phase-done" => {
+            let after = get(props, "after");
+            let after = if after.is_undefined() || after.is_null() {
+                AfterIn::Now
+            } else if let Some(p) = after.as_string() {
+                AfterIn::Param(p)
+            } else {
+                AfterIn::Count(whole(&after).ok_or_else(|| {
+                    JsError::new(&format!("{at}.after must be a whole number or a parameter"))
+                })?)
+            };
+            Ok(PhaseIn::Done { em, phase, after })
+        }
+        "phase-report" => {
+            let values = array(props, "values")
+                .iter()
+                .enumerate()
+                .map(|(i, v)| match text(&v, "kind").as_str() {
+                    "const" => whole(&get(&v, "value")).map(ValueIn::Const).ok_or_else(|| {
+                        JsError::new(&format!("{at}.values[{i}].value must be a whole number"))
+                    }),
+                    "pin" => Ok(ValueIn::Pin(text(&v, "label"))),
+                    "param" => Ok(ValueIn::Param(text(&v, "param"))),
+                    "runs" => Ok(ValueIn::Runs),
+                    other => Err(JsError::new(&format!(
+                        "{at}.values[{i}].kind {other:?} is not a report value"
+                    ))),
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(PhaseIn::Report { em, phase, values })
+        }
+        other => Err(JsError::new(&format!("{at}.kind {other:?} is not a phase action"))),
+    }
+}
+
 /// Checks flows against the machines and the pin table (see
 /// `crate::flows` and `state_table::flow`). `flows` is `[{kind: "flow",
 /// id, name, nodes: [{id, kind, x, y, props}], wires: [{from: {node,
 /// port}, to: {node, port}}]}]` (`web/src/model/flows.ts`); `machines` and
-/// `pins` as for `checkMachines`. An unknown node kind, entry or action
-/// throws. Returns `[{flow, node: number|null, wire: number|null,
-/// severity, message, fix?}]` (node and wire are indices).
+/// `pins` as for `checkMachines`; `phases` (optional) the unit's
+/// equipment phases `[{em, phase, params: [id]}]` that phase entries
+/// (`{on: "phase", phase: "<em>.<phase>", state, every?}`) and phase
+/// actions (`{kind: "phase-done", phase, after?: number | param}`,
+/// `{kind: "phase-report", phase, values: [{kind: "const", value} |
+/// {kind: "pin", label} | {kind: "param", param} | {kind: "runs"}]}`)
+/// name. An unknown node kind, entry or action throws. Returns `[{flow,
+/// node: number|null, wire: number|null, severity, message, fix?}]` (node
+/// and wire are indices).
 #[wasm_bindgen(js_name = checkFlows)]
-pub fn check_flows(flows: Array, machines: Array, pins: Array) -> Result<Array, JsError> {
-    use crate::flows::{FlowIn, NodeOwned, WireIn, check};
+pub fn check_flows(
+    flows: Array,
+    machines: Array,
+    pins: Array,
+    phases: Option<Array>,
+) -> Result<Array, JsError> {
+    use crate::flows::{FlowIn, NodeOwned, PhaseDeclIn, WireIn, check_in};
+    let phases: Vec<PhaseDeclIn> = phases
+        .map(|a| {
+            a.iter()
+                .map(|p| PhaseDeclIn {
+                    em: text(&p, "em"),
+                    phase: text(&p, "phase"),
+                    params: array(&p, "params")
+                        .iter()
+                        .map(|v| v.as_string().unwrap_or_default())
+                        .collect(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let pins = pins_in(pins);
     let machines = machines_in(machines)?;
     let flows: Vec<FlowIn> = flows
@@ -1027,7 +1110,7 @@ pub fn check_flows(flows: Array, machines: Array, pins: Array) -> Result<Array, 
             })
         })
         .collect::<Result<_, JsError>>()?;
-    Ok(check(&flows, &machines, &pins)
+    Ok(check_in(&flows, &machines, &pins, &phases)
         .into_iter()
         .map(|i| {
             let o = Object::new();

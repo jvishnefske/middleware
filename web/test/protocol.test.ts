@@ -181,9 +181,12 @@ describe("ABI constants", () => {
       "route_sink",
       "route_stop",
       "route_stat",
+      "serve",
+      "node_id",
     ]);
     expect(abi.imports.find((i) => i.name === "publish")).toEqual({ name: "publish", params: 4, returns: true });
-    expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq" });
+    expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq", onRequest: "on_request" });
+    expect(abi.version).toBe(5);
     expect(abi.errors.InvalidKey).toBe(-6);
     expect(proto.constants.keys.status).toBe("sys/payload/status");
   });
