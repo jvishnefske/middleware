@@ -4,13 +4,26 @@
 // then run in the simulator (SimSession) or handed to the Device tab for
 // upload, like the Editor tab.
 //
-// The tab edits one payload model (src/model/payload.ts): the board, the
-// pin table, the state machines and the Blockly workspace. Three views
-// share the toolbar (board, examples, compile, simulate, upload, export,
-// import) and the right-hand column (generated code, build output,
-// simulator): "Blocks", the Blockly workspace, "Pins", the pin table
-// (pinTable.ts), "States", the state-machine tables (statesTable.ts), and
-// "Flows", the flow graphs (flowsView.ts: an SVG canvas and an outline).
+// The tab edits a plant (src/model/plant.ts, IR v4: units, equipment
+// modules, phase classes and phases, recipes) and, through the unit
+// picker, one unit's payload model (src/model/payload.ts: the board, the
+// pin table, the state machines, the Blockly workspace and the flows),
+// written back into the plant on every change (model/plantEdit.ts
+// `withUnitPayload`), so switching units leaves each unit's code as it
+// was. Six views share the toolbar (unit, board, examples, compile,
+// simulate, upload, export, import) and the right-hand column (generated
+// code, build output, simulator): "Units", the plant's units
+// (plantViews.ts; bind one to the connected device's sys/info node id),
+// "Blocks", the Blockly workspace, "Pins", the pin table (pinTable.ts),
+// "States", the state-machine tables (statesTable.ts), "Flows", the flow
+// graphs (flowsView.ts: an SVG canvas and an outline; phase entries and
+// actions name the unit's phases), and "Phases", the unit's equipment
+// modules, the plant's phase classes and parameters, the unit's phases
+// and their body flows, and the read-only phase state model
+// (plantViews.ts). A unit with phases compiles to an S88 phase server
+// (blocks/phaseGen.ts); the plant's issues for it (plantEdit.ts
+// `plantIssues`, in plain words) keep Compile from building and switch
+// to Phases.
 // They are sub-views of one tab rather than sibling tabs because they are
 // parts of one payload: a pin or table change shows at once in the
 // generated code and the simulator next to it, and compile and upload act
@@ -42,9 +55,13 @@
 // the table is kept and re-checked, with fixes offered). Pin blocks that
 // name a label get a dropdown of the table's labels (`field_pin_label`).
 //
-// The model persists in localStorage (an older Blocks save is migrated,
-// src/blocks/storage.ts) and can be exported and imported as JSON; the
-// Examples menu loads the bundled workspaces, adding the pins they need.
+// The plant persists in localStorage as version 4 (a version 1-3 save or
+// an older Blocks save is migrated to a one-unit plant,
+// src/blocks/storage.ts) and is exported as plant.json; Import JSON takes
+// a plant (replacing the whole plant) or a payload file (into the selected
+// unit). The Examples menu loads the bundled workspaces into the selected
+// unit, adding the pins they need, or the worked example plant "Blink
+// then Measure".
 // The Start tab's "Try it", the Examples menu and Import JSON all ask
 // before they replace different work (src/blocks/replace.ts decides;
 // cancelling leaves everything as it was). "Try it" then compiles the
@@ -66,7 +83,11 @@ import { type GenIssue, generate } from "../blocks/generator";
 import { buildPayload } from "../blocks/pipeline";
 import { PROFILES, type ProfileId } from "../blocks/profiles";
 import { exampleModel, planImport, wouldReplaceWork } from "../blocks/replace";
-import { browserStore, load, save } from "../blocks/storage";
+import { browserStore, loadPlant, savePlant } from "../blocks/storage";
+import { type PlantModel, parsePlant, phaseDecls, phaseSpecs, plantFromPayload, serializePlant, unitPayload } from "../model/plant";
+import { type PlantIssue, nodeFromInfo, plantIssues, renameCm, withUnitPayload } from "../model/plantEdit";
+import { phasesView, unitsView } from "./plantViews";
+import { EXAMPLE_PLANT } from "../model/plantExample";
 import type { WorkspaceJson } from "../blocks/workspace";
 import {
   MACHINE_EVENT_BLOCKS,
@@ -78,7 +99,7 @@ import {
   parseMachineLog,
   parseMachineRef,
 } from "../model/machines";
-import { type PayloadModel, flowsOf, makeModel, profileOfModel, serializeModel, withBoard, withFlows, withMachines, withPins, withWorkspace } from "../model/payload";
+import { type PayloadModel, flowsOf, makeModel, profileOfModel, withBoard, withFlows, withMachines, withPins, withWorkspace } from "../model/payload";
 import { type PinFunc, type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget, withNeeds } from "../model/pins";
 import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../model/target";
 import type { BoardId } from "../onboarding/boards";
@@ -94,6 +115,10 @@ import { type Rename, renamePinLabel, simStateText, statesTabText } from "./stat
 import { statesView } from "./statesTable";
 import { modal } from "./trustPanel";
 
+/** The Examples menu entry that loads the worked example plant. */
+const PLANT_EXAMPLE = "plant:blink-measure";
+/** Where the selected unit is remembered. */
+const UNIT_KEY = "blocks-unit";
 /** Disabled reason for blocks the selected profile does not support. */
 const PROFILE_REASON = "profile";
 const BUTTONS: [number, string][] = [
@@ -236,16 +261,33 @@ function themes(): { light: Blockly.Theme; dark: Blockly.Theme } {
 export function blocksPage(app: App): HTMLElement {
   const { proto } = app;
   const store = browserStore();
-  const saved = load(store, fallbackBoard());
-  /** The model as last synced; the workspace part is refreshed from
-   * Blockly by `current()`. */
-  let model: PayloadModel =
-    saved?.model ??
-    (() => {
-      const blink = exampleWorkspace("blink");
-      const board = fallbackBoard();
-      return blink ? exampleModel(blink, makeModel(board, {}, boardDefaults(board)), board) : makeModel(board, {});
-    })();
+  const saved = loadPlant(store, fallbackBoard());
+  /** The plant (IR v4): every unit, the phases and the recipes. The
+   * selected unit's payload is `model`, written back by `syncPlant()`. */
+  let plant: PlantModel =
+    saved?.plant ??
+    plantFromPayload(
+      (() => {
+        const blink = exampleWorkspace("blink");
+        const board = fallbackBoard();
+        return blink ? exampleModel(blink, makeModel(board, {}, boardDefaults(board)), board) : makeModel(board, {});
+      })(),
+    );
+  let unitId: string = (() => {
+    try {
+      const id = localStorage.getItem(UNIT_KEY);
+      if (id && plant.physical.units.some((u) => u.id === id)) return id;
+    } catch {
+      /* storage unavailable */
+    }
+    return plant.physical.units[0]?.id ?? "";
+  })();
+  /** The selected unit's payload as last synced; the workspace part is
+   * refreshed from Blockly by `current()`. */
+  let model: PayloadModel = unitPayload(plant, unitId) as PayloadModel;
+  let plantIssueList: PlantIssue[] = [];
+  /** The node id the connected device reported, if any. */
+  let deviceNode: string | null = null;
   let profile: ProfileId = profileOfModel(model);
   let pinIssues: PinIssue[] = [];
   let machineIssues: MachineIssue[] = [];
@@ -272,6 +314,7 @@ export function blocksPage(app: App): HTMLElement {
     { class: "examples", "aria-label": "Load an example" },
     h("option", { value: "" }, "Examples..."),
     ...EXAMPLES.map((e) => h("option", { value: e.id }, `${e.label} (${PROFILES[e.profile].label})`)),
+    h("option", { value: PLANT_EXAMPLE }, "Plant: Blink then Measure (two units, S88 phases)"),
   );
   const compileBtn = h("button", { class: "primary" }, "Compile");
   const simBtn = h("button", { disabled: true }, "Simulate");
@@ -308,6 +351,11 @@ export function blocksPage(app: App): HTMLElement {
   function current(): PayloadModel {
     model = withWorkspace(model, currentWorkspace());
     return model;
+  }
+  /** The plant with the selected unit's payload as it stands. */
+  function syncPlant(): PlantModel {
+    plant = withUnitPayload(plant, unitId, current());
+    return plant;
   }
 
   /** Re-checks the pin table (protocol-wasm checkPins) and redraws it. */
@@ -347,7 +395,7 @@ export function blocksPage(app: App): HTMLElement {
   function checkFlows() {
     const flows = flowsOf(model);
     try {
-      flowIssues = flows.length ? proto.checkFlows(flows, model.machines, model.pins.rows) : [];
+      flowIssues = flows.length ? proto.checkFlows(flows, model.machines, model.pins.rows, phaseDecls(plant, unitId)) : [];
     } catch (e) {
       flowIssues = [{ flow: 0, node: null, wire: null, severity: "error", message: `Could not check the flows: ${errorText(e)}` }];
     }
@@ -362,6 +410,7 @@ export function blocksPage(app: App): HTMLElement {
       model.machines,
       model.pins.rows.map((r) => ({ label: r.label, func: r.func })),
       flowRuns,
+      phaseDecls(plant, unitId),
     );
   }
 
@@ -426,6 +475,7 @@ export function blocksPage(app: App): HTMLElement {
     // The machines' guards and pin actions follow a label rename too.
     if (rename) model = withMachines(model, renamePinLabel(model.machines, rename.from, rename.to));
     if (rename) model = withFlows(model, renameFlowPin(flowsOf(model), rename.from, rename.to));
+    if (rename) plant = renameCm(plant, unitId, rename.from, rename.to);
     if (rename && ws) {
       Blockly.Events.setGroup(true);
       try {
@@ -493,7 +543,7 @@ export function blocksPage(app: App): HTMLElement {
   function regenerate() {
     regenerating = true;
     try {
-      const g = generate(currentWorkspace(), profile, model.pins, model.machines, flowsOf(model));
+      const g = generate(currentWorkspace(), profile, model.pins, model.machines, flowsOf(model), phaseSpecs(plant, unitId));
       code.dispatch({ changes: { from: 0, to: code.state.doc.length, insert: g.source } });
       showIssues(g.errors, g.warnings);
     } finally {
@@ -503,8 +553,76 @@ export function blocksPage(app: App): HTMLElement {
 
   function persist() {
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => save(store, current()), 300);
+    saveTimer = setTimeout(() => savePlant(store, syncPlant()), 300);
+    renderPlant();
   }
+
+  // ---- the plant: units and phases
+  const unitSel = h("select", { "aria-label": "Unit the views edit" });
+  function renderUnitSel() {
+    unitSel.replaceChildren(...plant.physical.units.map((u) => h("option", { value: u.id, selected: u.id === unitId }, u.id || "(no id)")));
+    unitSel.value = unitId;
+  }
+  function renderPlant() {
+    plant = withUnitPayload(plant, unitId, model);
+    plantIssueList = plantIssues(plant);
+    unitsV.render(plant, unitId, plantIssueList, deviceNode);
+    phasesV.render(plant, unitId, plantIssueList, proto.phaseModel ? proto.phaseModel() : null);
+    renderUnitSel();
+    const units = plantIssueList.filter((i) => i.place === "units").length;
+    const mine = new Set(plant.procedural.phases.flatMap((p, i) => (p.unit === unitId ? [i] : [])));
+    const phases = plantIssueList.filter(
+      (i) => (i.place === "ems" && i.unit === unitId) || i.place === "classes" || i.place === "params" || ((i.place === "phases" || i.place === "bodies") && mine.has(i.row)),
+    ).length;
+    unitsTab.textContent = units ? `Units (${units} to fix)` : "Units";
+    phasesTab.textContent = phases ? `Phases (${phases} to fix)` : "Phases";
+  }
+  /** Switches the Blocks, Pins, States, Flows and Phases views to unit `id`. */
+  function selectUnit(id: string) {
+    if (id === unitId || !plant.physical.units.some((u) => u.id === id)) {
+      renderPlant();
+      return;
+    }
+    syncPlant();
+    unitId = id;
+    try {
+      localStorage.setItem(UNIT_KEY, id);
+    } catch {
+      /* storage unavailable */
+    }
+    loadModel(unitPayload(plant, id) as PayloadModel);
+    renderBadge();
+  }
+  /** A plant edit from the Units or Phases view. */
+  function setPlant(next: PlantModel) {
+    syncPlant();
+    const before = JSON.stringify(unitPayload(plant, unitId));
+    plant = next;
+    if (!plant.physical.units.some((u) => u.id === unitId)) unitId = plant.physical.units[0]?.id ?? "";
+    const m = unitPayload(plant, unitId) as PayloadModel;
+    if (JSON.stringify(m) !== before) loadModel(m);
+    else {
+      checkFlows();
+      invalidate();
+      regenerate();
+      persist();
+    }
+  }
+  const plantEvents = {
+    onChange: setPlant,
+    onSelect: (id: string) => selectUnit(id),
+    onOpenFlow: (id: string) => {
+      flowsV.select(id);
+      showView("flows");
+    },
+  };
+  const unitsV = unitsView(plantEvents);
+  const phasesV = phasesView(plantEvents);
+  unitSel.addEventListener("change", () => selectUnit(unitSel.value));
+  app.onDeviceInfo((i) => {
+    deviceNode = i ? nodeFromInfo(i.node) : null;
+    renderPlant();
+  });
 
   /** Disables blocks the profile does not support (and re-enables the
    * ones it does), and swaps the toolbox. */
@@ -590,7 +708,8 @@ export function blocksPage(app: App): HTMLElement {
     new ResizeObserver(() => ws && Blockly.svgResize(ws)).observe(area);
     checkPins();
     regenerate();
-    if (saved?.migrated) out.textContent = "Your saved blocks were moved to the new payload format (with a pin table, empty for now).";
+    renderPlant();
+    if (saved?.migrated) out.textContent = `Your saved payload is now unit ${unitId} of a plant (Units view); it generates the same code.`;
   }
   // Blockly needs its container in the document; main.ts appends the page
   // right after building it.
@@ -616,6 +735,21 @@ export function blocksPage(app: App): HTMLElement {
   }
 
   exampleSel.addEventListener("change", async () => {
+    if (exampleSel.value === PLANT_EXAMPLE) {
+      exampleSel.value = "";
+      const next = parsePlant(serializePlant(EXAMPLE_PLANT), fallbackBoard());
+      if (!next.ok) return;
+      if (serializePlant(syncPlant()) !== serializePlant(next.plant) && (await confirmReplace("the Blink then Measure plant")) === null) {
+        out.textContent = "Kept your plant; the example plant was not loaded.";
+        return;
+      }
+      plant = next.plant;
+      unitId = plant.physical.units[0]?.id ?? "";
+      loadModel(unitPayload(plant, unitId) as PayloadModel);
+      renderBadge();
+      out.textContent = "Loaded the Blink then Measure plant: units pico-led and esp-sense (Units view), their phases (Phases view).";
+      return;
+    }
     const e = exampleWorkspace(exampleSel.value);
     if (!e) {
       exampleSel.value = "";
@@ -635,8 +769,8 @@ export function blocksPage(app: App): HTMLElement {
   });
 
   exportBtn.addEventListener("click", () => {
-    const url = URL.createObjectURL(new Blob([serializeModel(current())], { type: "application/json" }));
-    h("a", { href: url, download: "payload.json" }).click();
+    const url = URL.createObjectURL(new Blob([serializePlant(syncPlant())], { type: "application/json" }));
+    h("a", { href: url, download: "plant.json" }).click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
   importBtn.addEventListener("click", () => importFile.click());
@@ -644,7 +778,33 @@ export function blocksPage(app: App): HTMLElement {
     const f = importFile.files?.[0];
     importFile.value = "";
     if (!f) return;
-    const plan = planImport(await f.text(), current(), fallbackBoard());
+    const text = await f.text();
+    const whole = (() => {
+      try {
+        const v = JSON.parse(text) as { version?: unknown };
+        return v !== null && typeof v === "object" && v.version === 4;
+      } catch {
+        return false;
+      }
+    })();
+    if (whole) {
+      const r = parsePlant(text, fallbackBoard());
+      if (!r.ok) {
+        out.textContent = `Import failed: ${r.error}`;
+        return;
+      }
+      if (serializePlant(syncPlant()) !== serializePlant(r.plant) && (await confirmReplace(f.name)) === null) {
+        out.textContent = `Kept your plant; ${f.name} was not imported.`;
+        return;
+      }
+      plant = r.plant;
+      unitId = plant.physical.units[0]?.id ?? "";
+      loadModel(unitPayload(plant, unitId) as PayloadModel);
+      renderBadge();
+      out.textContent = `Imported ${f.name}: ${plant.physical.units.length} unit${plant.physical.units.length === 1 ? "" : "s"}.`;
+      return;
+    }
+    const plan = planImport(text, current(), fallbackBoard());
     if (plan.kind === "error") {
       out.textContent = `Import failed: ${plan.error}`;
       return;
@@ -668,6 +828,17 @@ export function blocksPage(app: App): HTMLElement {
     out.textContent = "Compiling (loading the AssemblyScript compiler the first time) ...";
     try {
       const m = current();
+      renderPlant();
+      const mine = new Set(plant.procedural.phases.flatMap((p, i) => (p.unit === unitId ? [i] : [])));
+      const phaseProblems = plantIssueList.filter(
+        (i) => (i.place === "ems" && i.unit === unitId) || ((i.place === "phases" || i.place === "bodies") && mine.has(i.row)) || i.place === "classes" || i.place === "params",
+      );
+      if (phaseProblems.length > 0) {
+        invalidate();
+        out.textContent = ["phases failed:", ...phaseProblems.map((i) => `Phases: ${i.message}`)].join("\n");
+        showView("phases");
+        return false;
+      }
       const r = await buildPayload(m.logic[0].workspace, profile, proto.abi, {
         pins: m.pins,
         issues: pinIssues,
@@ -675,6 +846,7 @@ export function blocksPage(app: App): HTMLElement {
         machineIssues,
         flows: flowsOf(m),
         flowIssues,
+        phases: phaseSpecs(plant, unitId),
       });
       if (!r.ok) {
         invalidate();
@@ -904,6 +1076,8 @@ export function blocksPage(app: App): HTMLElement {
   });
 
   // ---- views: Blocks (Blockly) and Pins (the pin table)
+  const unitsTab = h("button", { role: "tab", id: "view-units-tab", "aria-controls": "view-units", type: "button" }, "Units");
+  const phasesTab = h("button", { role: "tab", id: "view-phases-tab", "aria-controls": "view-phases", type: "button" }, "Phases");
   const blocksTab = h("button", { role: "tab", id: "view-blocks-tab", "aria-controls": "view-blocks", type: "button" }, "Blocks");
   const pinsTab = h("button", { role: "tab", id: "view-pins-tab", "aria-controls": "view-pins", type: "button" }, "Pins");
   const statesTab = h("button", { role: "tab", id: "view-states-tab", "aria-controls": "view-states", type: "button" }, "States");
@@ -918,15 +1092,21 @@ export function blocksPage(app: App): HTMLElement {
   const pinsPanel = h("div", { role: "tabpanel", id: "view-pins", "aria-labelledby": "view-pins-tab" }, pinsView.el);
   const statesPanel = h("div", { role: "tabpanel", id: "view-states", "aria-labelledby": "view-states-tab" }, statesV.el);
   const flowsPanel = h("div", { role: "tabpanel", id: "view-flows", "aria-labelledby": "view-flows-tab" }, flowsV.el);
+  const unitsPanel = h("div", { role: "tabpanel", id: "view-units", "aria-labelledby": "view-units-tab" }, unitsV.el);
+  const phasesPanel = h("div", { role: "tabpanel", id: "view-phases", "aria-labelledby": "view-phases-tab" }, phasesV.el);
   const VIEW_KEY = "blocks-view";
-  type View = "blocks" | "pins" | "states" | "flows";
+  type View = "units" | "blocks" | "pins" | "states" | "flows" | "phases";
   const VIEWS: readonly { v: View; tab: HTMLButtonElement }[] = [
+    { v: "units", tab: unitsTab },
     { v: "blocks", tab: blocksTab },
     { v: "pins", tab: pinsTab },
     { v: "states", tab: statesTab },
     { v: "flows", tab: flowsTab },
+    { v: "phases", tab: phasesTab },
   ];
   function showView(v: View) {
+    unitsPanel.hidden = v !== "units";
+    phasesPanel.hidden = v !== "phases";
     blocksView.hidden = v !== "blocks";
     pinsPanel.hidden = v !== "pins";
     statesPanel.hidden = v !== "states";
@@ -946,7 +1126,9 @@ export function blocksPage(app: App): HTMLElement {
   pinsTab.addEventListener("click", () => showView("pins"));
   statesTab.addEventListener("click", () => showView("states"));
   flowsTab.addEventListener("click", () => showView("flows"));
-  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, blocksTab, pinsTab, statesTab, flowsTab);
+  unitsTab.addEventListener("click", () => showView("units"));
+  phasesTab.addEventListener("click", () => showView("phases"));
+  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, unitsTab, blocksTab, pinsTab, statesTab, flowsTab, phasesTab);
   // Arrow keys (wrapping), Home and End move between the view tabs (the
   // tabs pattern, selection follows focus).
   views.addEventListener("keydown", (e) => {
@@ -981,6 +1163,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "p",
       { class: "row" },
+      h("label", {}, "Unit ", unitSel),
       h("label", {}, "Board ", profileSel),
       exampleSel,
       compileBtn,
@@ -996,7 +1179,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "div",
       { class: "cols" },
-      h("div", {}, views, blocksView, pinsPanel, statesPanel, flowsPanel),
+      h("div", {}, views, unitsPanel, blocksView, pinsPanel, statesPanel, flowsPanel, phasesPanel),
       h(
         "div",
         {},

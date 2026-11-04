@@ -1,11 +1,12 @@
 // State shared by the pages: the protocol bindings, the one serial port, the
 // hand-off of compiled payloads from the Editor and Blocks tabs to the
 // Device tab, the Start tab's request to open an example in the Blocks
-// simulator, and the Start tab's board pick (the Blocks tab follows it). Also which tab opens first: the one last shown, or Start on a
+// simulator, the Start tab's board pick (the Blocks tab follows it) and
+// the connected device's sys/info (the Units view binds to its node id). Also which tab opens first: the one last shown, or Start on a
 // first visit.
 
 import type { BoardId } from "../onboarding/boards";
-import type { Protocol } from "../protocol/wasm";
+import type { DeviceInfo, Protocol } from "../protocol/wasm";
 import type { PortManager } from "../serial/ports";
 
 export const TAB_IDS = ["start", "flash", "device", "editor", "blocks"] as const;
@@ -43,4 +44,8 @@ export interface App {
    * table that is still the old board's defaults). */
   chooseBoard(id: BoardId): void;
   onBoardChosen(f: (id: BoardId) => void): void;
+  /** Device -> Blocks: what the connected device's sys/info said (null
+   * once it disconnects); the Units view binds a unit to its node id. */
+  reportDeviceInfo(i: DeviceInfo | null): void;
+  onDeviceInfo(f: (i: DeviceInfo | null) => void): void;
 }

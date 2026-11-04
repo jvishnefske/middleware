@@ -129,6 +129,8 @@ export interface FlowsView {
     trail: ReadonlyMap<string, readonly string[]> | null,
     phases?: readonly PhaseDecl[],
   ): void;
+  /** Shows flow `id` (after the next render, if it is new). */
+  select(id: string): void;
 }
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -831,8 +833,19 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
     keeper.restore();
   }
 
+  let wantFlow: string | null = null;
   return {
     el: root,
+    select(id) {
+      wantFlow = id;
+      const i = flows.findIndex((f) => f.id === id);
+      if (i >= 0) {
+        at = i;
+        wantFlow = null;
+        sel = null;
+        draw();
+      }
+    },
     render(fs, is, ms, ps, tr, phs = []) {
       // A change this view did not send (an example, an import, a fix)
       // starts a new undo history.
@@ -845,6 +858,11 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
       pins = ps;
       phases = phs;
       trail = tr;
+      if (wantFlow !== null) {
+        const i = fs.findIndex((f) => f.id === wantFlow);
+        if (i >= 0) at = i;
+        wantFlow = null;
+      }
       at = Math.max(0, Math.min(at, fs.length - 1));
       draw();
     },

@@ -4268,12 +4268,17 @@ payload does. The version-4 reader accepts every older file.
   mid-run is Held after the settle time, starts nothing new, and Restart
   completes the batch; losing the LED unit holds the batch, Restart is
   refused, and Abort ends it Aborted — `cargo test -p recipe-core sim`: "the_worked_example_runs_to_complete", "a_hold_mid_run_holds_blink_and_a_restart_finishes_the_batch", "losing_the_led_unit_holds_the_batch_and_abort_ends_it_aborted"; `web/test/recipe.check.test.ts`: "runs to Complete against simulated units: Blink first, Measure when Blink completes", "a Hold mid-run holds the batch until Restart, and losing a unit holds it until Abort ends it Aborted".
-- [ ] Q16 Physical and procedural editors: a Units view (unit list, unit
+- [x] Q16 Physical and procedural editors: a Units view (unit list, unit
   class, node binding from `sys/info`), the Pins table as each unit's
   control-module table, equipment modules as a table grouping its rows,
   and a phase table per module (class, ranges, a body flow per acting
   state) with the phase state matrix shown read-only; the editor saves
-  version 4.
+  version 4. Checked here for the model under the views: saving version
+  4 and loading version 1-3 saves, edits that keep units, modules,
+  classes, parameters, phases, bodies and recipe steps consistent, a new
+  body flow that checks clean, plain-language issues that agree with the
+  plant check, binding to the reported node id, and switching units
+  leaving every unit's code byte for byte as it was — `web/test/plantEdit.test.ts`: "saves version 4 and loads it back; version 1-3 saves load as a one-unit plant", "switching units keeps each unit's code byte for byte", "unit edits: add, rename (phases follow), bind, remove (with phases)", "module and phase edits carry names into phases and body flows", "class and parameter edits keep phases and recipe steps in step", "phases: add, ranges, bodies and a new body flow that checks clean", "issues name the place in plain words and agree with the plant check", "binds to the node id sys/info reports"; `web/test/phase.gen.test.ts`: "switches on the phase model's table" (the matrix the view shows). The views themselves are Q21.
 - [x] Q17 Unit payload code generation exposes the phase API: a flow entry
   "phase <em>.<phase> enters <state>" and a "phase done" action, generated
   phase tables answering the wire contract (an ABI request export for
@@ -4290,6 +4295,15 @@ payload does. The version-4 reader accepts every older file.
   Abort, Reset), live step and phase states, and the trace.
 - [ ] Q20 Selection (alternative) divergence: transitions with conditions
   on phase result values, keeping the termination argument.
+- [ ] Q21 The Units and Phases views (web `ui/plantViews.ts`) follow the
+  grid rules of the Pins and States views: real tables of labelled
+  controls, Ctrl + arrow keys between cells and Up / Down between rows in
+  text cells, focus kept across re-renders, each row's problems under it
+  (aria-describedby, aria-invalid), tables scrolling inside their own
+  container, no horizontal page scroll at 390 px, the tab counting the
+  problems and Compile switching to Phases while there are any; the unit
+  picker drives Blocks, Pins, States, Flows and Phases. Screenshot-checked
+  only (round 8, `round8/steps8.mjs`) until a DOM test harness exists.
 
 ## Known limitations (0.3)
 
