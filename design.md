@@ -1932,13 +1932,15 @@ open).
   protocol-only boards (ESP32-C3, ESP8266, Pico) are marked as storing
   payloads without running them, matching the manifest's `wasm` flags —
   `web/test/onboarding.test.ts`: "covers every bundled ESP image with the manifest's runtime flag", "installs the Picos from UF2, with only the Pico 2 running payloads", "gives every board install, connect and payload steps that point at real tabs", "sends ESP boards to the Flash tab and Picos to BOOTSEL and the UF2", "says protocol-only boards store payloads without running them", "opens Start without a valid saved tab and the saved tab otherwise", "tries an example that exists", "asks before replacing blocks that differ from the example, not otherwise". The click-to-blink path was checked in headless Chrome (about 1.5 s on localhost); the page itself has no DOM test.
-- [x] U17 Nothing replaces the Blocks workspace silently: the Examples menu
-  and Import JSON, like the Start tab's "Try it", load at once only when the
-  workspace is empty or generates the same code, and otherwise ask first;
-  cancelling keeps the blocks and returns the menu to its placeholder. A
-  file that is not a workspace is reported and changes nothing, and an
-  unrelated JSON object, which parses as an empty workspace, also asks —
-  `web/test/blocks.replace.test.ts`: "asks before any example replaces a different one, never for itself", "reports a file that is not a workspace and loads nothing", "asks before an unrelated JSON object, which parses as an empty workspace, wipes work", "loads straight away over an empty workspace", "asks before an import replaces different blocks", "re-importing an export of the same blocks does not ask", "judges the file under its own profile, and a bare workspace under the current one". The menu's confirm, cancel and replace path was driven in headless Chrome; there is no DOM test.
+- [x] U17 Nothing replaces the payload silently: the Examples menu and
+  Import JSON, like the Start tab's "Try it", load at once only when the
+  payload has no blocks and no pins or generates the same code, and
+  otherwise ask first; cancelling keeps everything and returns the menu to
+  its placeholder. A file that is not a payload is reported and changes
+  nothing, and an unrelated JSON object, which parses as an empty
+  workspace, also asks. Examples add the pins they name by label and never
+  change or remove a pin the user chose —
+  `web/test/blocks.replace.test.ts`: "asks before any example replaces a different one, never for itself", "adds the pins an example needs from the board, keeping the user's", "reports a file that is not a payload and loads nothing", "asks before an unrelated JSON object, which parses as an empty workspace, wipes work", "loads straight away over an empty payload", "asks before an import replaces different blocks or pins", "re-importing an export of the same payload does not ask", "a bare workspace keeps the current board and pins; a legacy export brings its profile". The menu's confirm, cancel and replace path was driven in headless Chrome; there is no DOM test.
 - [ ] U18 The site works on a 390 px phone: no tab scrolls sideways, the
   Examples menu fits its row, the generated-code line numbers stay level
   with their lines, and the Blockly toolbox is slimmer below 600 px and can
@@ -1979,6 +1981,66 @@ open).
   `scrollWidth` no wider than the viewport); `picotool info -a` on the
   factory UF2 shows the partition table; no file was dragged onto real
   hardware.
+- [x] U21 One payload model (IR) behind every editor view: a versioned
+  JSON document (`web/src/model/payload.ts`, format `middleware-payload`,
+  version 1) holding the board, the pin table (rows: label, pin, function,
+  bus, pull, initial level, note; one setting per bus in use), the logic
+  sources (version 1: exactly one Blockly workspace) and the state
+  machines (empty in version 1). Its shape check is strict: an unknown
+  field, a wrong type, a pin outside 0..63, an unknown board, function or
+  logic kind, non-empty machines or a newer version is an error naming the
+  place. The Blocks tab stores, exports and imports the model; a legacy
+  Blocks export or save and a bare Blockly workspace migrate to it with
+  the same workspace, the board their profile implies and no pins, so the
+  generated code is byte-for-byte unchanged (the legacy save is left in
+  place) — `web/test/model.test.ts`: "round-trips through JSON unchanged", "rejects unknown shapes instead of dropping them", "migrates a legacy Blocks export and a bare workspace losslessly", "maps every target to a profile and a pin-rule chip"; `web/test/blocks.storage.test.ts`: "saves and restores the model with its board and pins", "survives storage that throws, is missing or holds garbage", "migrates every legacy save losslessly: same workspace, same profile, same generated code".
+- [x] U22 The pin rules are the firmwares' own: the `board-pins` crate
+  (no_std, no dependencies) holds the pin maps of the Pico / Pico 2,
+  ESP32 (ESP32-CAM), ESP32-S3, ESP32-C3 and ESP8266 (existing, reserved
+  with a reason, input-only, ADC, board-wired I2C buses, PWM outputs, SPI
+  routing), the RP2040 / RP2350 F1 / F3 function tables and the SPI pin
+  resolution; esp-base and rp-base build their `Profile`s on it with
+  unchanged results, and protocol-wasm exposes it to the page as
+  `boardPins(chip)` and `checkPins(chip, rows, buses)`, which also applies
+  the ABI's `i2c_open` / `spi_open` argument rules. The page restates no
+  pin rule — `board-pins` unit tests (`cargo test -p board-pins`): "check_follows_exists_reserved_input_only", "every_held_pin_has_a_reason", "adc_pwm_and_i2c_maps", "board_wired_pins_are_payload_pins", "rp_pins_resolve_onto_one_block", "esp_pins_need_only_the_direction", "function_tables_match_the_datasheets"; the unchanged firmware tests (`firmware-rp` "v8_pins_follow_the_pico_board_map", "v8_adc_reads_gpio_26_to_28", "v16_i2c_buses_map_to_the_pico_default_pins", "v15_spi_pins_resolve_onto_one_block_on_both_chips", new "gpio_count_matches_the_pin_map"; `firmware` chip tests); `web/test/pins.test.ts`: "a complete Pico 2 table is clean; the board map comes from Rust".
+- [x] U23 The pin table is checked live, per row and per table, in plain
+  language with one-click fixes where obvious: missing, malformed or
+  duplicate labels (case ignored), duplicate pins, a pin the chip lacks, a
+  reserved pin (with what the board uses it for), an output on an
+  input-only pin, an ADC or PWM row off the board's analog or PWM pins, an
+  I2C row off its bus's board-wired pin or on an unwired bus, an SPI pin
+  without the signal or on the other controller than SCK, an incomplete
+  I2C pair or SPI bus, and bus clocks or modes outside the ABI's ranges;
+  any problem stops Compile before code is built —
+  `web/protocol-wasm/src/pins.rs` tests (`cargo test -p protocol-wasm pins`): "a_valid_pico_table_has_no_issues", "labels_must_be_present_valid_and_unique", "duplicate_pins_flag_both_rows", "reserved_input_only_and_missing_pins_say_why", "adc_and_pwm_follow_the_board_map", "i2c_pins_are_fixed_by_the_board_and_come_in_pairs", "spi_pins_must_have_the_signal_and_share_a_controller", "spi_bus_must_be_complete_and_configured", "unknown_functions_are_reported"; `web/test/pins.test.ts`: "reports duplicate pins and labels, reserved and incapable pins in plain language", "checks SPI controllers and incomplete buses, with fixes", "checks the bus settings against the ABI ranges"; `web/test/blocks.pins.test.ts`: "a table with problems stops the build before compiling".
+- [x] U24 Boards seed and re-check the table: each board's default table
+  (LED: GPIO 25 on the Picos, the flash LED GPIO 4 on the ESP32-CAM, a
+  named free header pin elsewhere) passes its own pin rules; picking a
+  board on the Start tab or in Blocks replaces a table that is empty or
+  still the old board's defaults and otherwise keeps it and re-checks it
+  against the new board, with fixes — `web/test/onboarding.test.ts`: "names the Blink pin per board, and every board's default pin passes its pin rules (Rust checkPins)"; `web/test/pins.test.ts`: "switching boards re-checks the same table, with the board's fixes", "seeds a board's defaults only over an empty or untouched table", "keeps one setting per bus in use", "renames labels in pin blocks and lists the labels used".
+- [x] U25 The pin table generates code and blocks name pins by label: one
+  `const PIN_<label>: i32` per row with a pin and, in `init`, `gpio_output`
+  plus the initial level, `gpio_input` with its pull (left to an edge
+  handler that configures the pin), `i2c_open(bus, hz)` per complete I2C
+  bus and `spi_open(0, sck, mosi, miso, cs, khz, mode)`; `write`, `toggle`,
+  `read` and `on ... edge` blocks name a label and require a row of the
+  right function; the numeric-pin blocks still work and an empty table
+  changes nothing; the table plus the Blink example compiles with asc and
+  blinks the label's pin in the simulator — `web/test/blocks.pins.test.ts`: "emits the pin constants and the init setup from the table", "label blocks use the constants and check the row's function", "an empty table changes nothing (numeric pin blocks keep working)", "blinks the LED label on GPIO 25 (pico2)", "blinks the LED label on GPIO 4 (esp32)"; `web/test/blocks.generator.test.ts`: "blink (esp-base) matches test/fixtures/blocks/blink.as and compiles"; `web/test/blocks.build.test.ts`: `example "blink" compiles and passes checkAbi (esp-base)`.
+- [ ] U26 The Pins view is a keyboard-editable table that fits a phone:
+  a `<table>` with column headers and a labelled control in every cell,
+  Tab across, Ctrl+arrow keys between cells, Up / Down between rows in
+  text cells, focus and caret kept while typing, problems shown under
+  their row and linked with `aria-describedby`, invalid controls marked
+  `aria-invalid`, and the table scrolling inside its container so no page
+  scrolls sideways at 390 px. Verified in headless Chrome only (at
+  1280×900 and 390×844: page `scrollWidth` equal to the viewport with the
+  table scrolling 356 of 1014 px on the phone; Ctrl+Right, Ctrl+Down and
+  Down moved focus as described; every control labelled; typing kept the
+  caret), not by a DOM test, so it stays unchecked.
+
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and

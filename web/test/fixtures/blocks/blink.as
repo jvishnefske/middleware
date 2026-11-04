@@ -22,6 +22,9 @@ const PINS: usize = memory.data(49);
 const S0: usize = memory.data<u8>([98, 108, 105, 110, 107, 58, 32, 115, 116, 97, 114, 116, 101, 100]);
 const S0_LEN: i32 = 14;
 
+// Pins (from the Pins table).
+const PIN_LED: i32 = 25; // GPIO output
+
 // Appends len bytes at ptr to TX, up to its capacity.
 function txBytes(ptr: usize, len: i32): void {
   const room = TX_CAP - txLen;
@@ -42,8 +45,9 @@ function pinToggle(pin: i32): void {
 }
 
 export function init(): void {
+  mw_gpio_output(PIN_LED);
+  pinWrite(PIN_LED, 0);
   mw_set_tick(500);
-  mw_gpio_output(8);
   txLen = 0;
   txBytes(S0, S0_LEN);
   mw_log(TX, txLen);
@@ -51,6 +55,6 @@ export function init(): void {
 
 export function tick(nowMs: i32): void {
   {
-    pinToggle(8);
+    pinToggle(PIN_LED);
   }
 }

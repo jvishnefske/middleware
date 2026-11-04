@@ -1,4 +1,6 @@
-// Blocks build pipeline: workspace -> AssemblyScript (generator.ts) ->
+// Blocks build pipeline: the pin table's check (protocol-wasm checkPins,
+// done by the caller and passed in; any issue stops the build at stage
+// "pins") -> workspace + pin table -> AssemblyScript (generator.ts) ->
 // wasm (the editor's `compileAssemblyScript`, same asc options as the
 // templates) -> ABI pre-check (`checkAbi`) -> for byte-sized profiles, the
 // 1-byte-page memory rewrite (bytePages.ts).
@@ -13,6 +15,7 @@ import { compileAssemblyScript, loadWabt } from "../editor/compile";
 import type { AbiInfo } from "../protocol/wasm";
 import { toBytePages } from "./bytePages";
 import { type GenIssue, generate } from "./generator";
+import { EMPTY_PINS, type PinIssue, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
 import type { WorkspaceJson } from "./workspace";
 
@@ -27,7 +30,7 @@ export type BuildResult =
       memoryBytes: number;
       log: string;
     }
-  | { ok: false; source: string; stage: "generate" | "compile" | "abi" | "memory"; errors: string[]; issues: GenIssue[] };
+  | { ok: false; source: string; stage: "pins" | "generate" | "compile" | "abi" | "memory"; errors: string[]; issues: GenIssue[] };
 
 /** Whether wasm code uses `memory.size` or `memory.grow`, whose results
  * depend on the page size. */
@@ -41,8 +44,23 @@ export async function usesMemorySize(wasm: Uint8Array): Promise<boolean> {
   }
 }
 
-export async function buildPayload(ws: WorkspaceJson, profile: ProfileId, abi: AbiInfo): Promise<BuildResult> {
-  const gen = generate(ws, profile);
+/** The pin table and what checkPins said about it. */
+export interface PinInput {
+  pins: PinTable;
+  issues: readonly PinIssue[];
+}
+
+export async function buildPayload(
+  ws: WorkspaceJson,
+  profile: ProfileId,
+  abi: AbiInfo,
+  pinInput: PinInput = { pins: EMPTY_PINS, issues: [] },
+): Promise<BuildResult> {
+  const gen = generate(ws, profile, pinInput.pins);
+  if (pinInput.issues.length > 0) {
+    const where = (i: PinIssue) => (i.row === null ? "" : `row ${i.row + 1}${pinInput.pins.rows[i.row]?.label ? ` (${pinInput.pins.rows[i.row]?.label})` : ""}: `);
+    return { ok: false, source: gen.source, stage: "pins", errors: pinInput.issues.map((i) => `Pins ${where(i)}${i.message}`), issues: [] };
+  }
   if (gen.errors.length > 0) {
     return { ok: false, source: gen.source, stage: "generate", errors: gen.errors.map((e) => e.message), issues: gen.errors };
   }

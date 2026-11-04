@@ -1,9 +1,10 @@
 // State shared by the pages: the protocol bindings, the one serial port, the
 // hand-off of compiled payloads from the Editor and Blocks tabs to the
-// Device tab, and the Start tab's request to open an example in the Blocks
-// simulator. Also which tab opens first: the one last shown, or Start on a
+// Device tab, the Start tab's request to open an example in the Blocks
+// simulator, and the Start tab's board pick (the Blocks tab follows it). Also which tab opens first: the one last shown, or Start on a
 // first visit.
 
+import type { BoardId } from "../onboarding/boards";
 import type { Protocol } from "../protocol/wasm";
 import type { PortManager } from "../serial/ports";
 
@@ -38,4 +39,8 @@ export interface App {
    * simulator. */
   tryExample(id: string): void;
   onTryExample(f: (id: string) => void): void;
+  /** Start -> Blocks: the visitor picked a board (Blocks re-seeds a pin
+   * table that is still the old board's defaults). */
+  chooseBoard(id: BoardId): void;
+  onBoardChosen(f: (id: BoardId) => void): void;
 }
