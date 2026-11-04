@@ -2,6 +2,7 @@
 // files in examples/ are Blockly workspace serializations, so they can
 // also be imported with "Import JSON".
 
+import { generate } from "./generator";
 import type { ProfileId } from "./profiles";
 import type { WorkspaceJson } from "./workspace";
 import blink from "./examples/blink.json";
@@ -26,4 +27,12 @@ export const EXAMPLES: readonly Example[] = [
 export function exampleWorkspace(id: string): Example | undefined {
   const e = EXAMPLES.find((x) => x.id === id);
   return e && { ...e, workspace: structuredClone(e.workspace) };
+}
+
+/** Whether loading `example` over the workspace would lose work: true when
+ * the workspace has blocks and generates different code (block ids and
+ * positions do not count, so a moved copy of the example is not work). */
+export function wouldReplaceWork(current: WorkspaceJson, profile: ProfileId, example: Example): boolean {
+  if ((current.blocks?.blocks?.length ?? 0) === 0) return false;
+  return generate(current, profile).source !== generate(example.workspace, example.profile).source;
 }
