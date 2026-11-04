@@ -23,9 +23,17 @@
 //!   [`periph::Pwm`] and are recorded as [`SimEvent::PwmOpen`],
 //!   [`SimEvent::PwmSet`] and [`SimEvent::PwmStop`] (only when they
 //!   succeed); [`Simulator::pwm`] lists the open timers. `adc_read` returns
-//!   the value JS set with [`Simulator::set_adc`] (0 until set). Every ABI
-//!   timer, channel and pin is accepted, as on the desktop simulator; the
-//!   ESP32 boards back only timers 0–3, channels 0–1, and ADC1 pins.
+//!   the value JS set with [`Simulator::set_adc`] (0 until set; the web
+//!   `SimSession` clamps to 12 bits). Every ABI timer, channel and pin
+//!   is accepted, as on the desktop simulator; the ESP32 boards back only
+//!   timers 0–3, channels 0–1, and ADC1 pins.
+//! * ABI 5: the device has a node id ([`SimDevice::with_node`], default
+//!   [`DEFAULT_NODE`], `0000000000000001` like payload-sim), `node_id`
+//!   returns it and `serve` accepts every key (recorded as
+//!   [`SimEvent::Serve`]); [`Simulator::request`] hands a request to the
+//!   payload serving its key (`Payload::request`, a [`REPLY_CAP`]-byte
+//!   reply buffer) and returns the reply or the `HandlerError` a device
+//!   would answer.
 //!
 //! [`Simulator::step`] is the main loop: it completes DMA transfers started
 //! before the step (raising `DmaDone`), raises due timer alarms, runs `tick`
@@ -41,8 +49,8 @@
 
 pub mod periph;
 
-use middleware::Key;
 use middleware::wasm_abi::events::MAX_EVENTS;
+use middleware::{HandlerError, Key, RequestMeta, SenderId};
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Event, Limits, Payload, Pull, PwmSpec, SpiConfig,
     TimerSpec, UartConfig,
@@ -56,6 +64,13 @@ pub const PIN_COUNT: usize = 49;
 /// Most `on_irq` calls one [`Simulator::step`] makes; the rest wait for
 /// the next step. One full queue.
 pub const MAX_DISPATCH_PER_STEP: usize = MAX_EVENTS;
+
+/// The node id a [`SimDevice`] has unless told otherwise (payload-sim's
+/// default too).
+pub const DEFAULT_NODE: SenderId = SenderId([0, 0, 0, 0, 0, 0, 0, 1]);
+
+/// The reply buffer [`Simulator::request`] offers (the ABI's maximum).
+pub const REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
 
 /// Configuration of one virtual pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +134,8 @@ pub enum SimEvent {
     },
     /// A PWM timer was stopped.
     PwmStop(u8),
+    /// The payload serves this key (ABI 5 `serve`).
+    Serve(String),
     /// An interrupt event was popped from the queue; `handled` is whether
     /// the payload's `on_irq` ran.
     Irq {
@@ -138,6 +155,7 @@ pub struct SimDevice {
     pwm: Pwm,
     adc: Adc,
     events: Vec<SimEvent>,
+    node: SenderId,
 }
 
 impl Default for SimDevice {
@@ -147,7 +165,8 @@ impl Default for SimDevice {
 }
 
 impl SimDevice {
-    /// A device with every pin unused, time 0, no events.
+    /// A device with every pin unused, time 0, no events, node
+    /// [`DEFAULT_NODE`].
     pub fn new() -> Self {
         Self {
             now_us: 0,
@@ -156,7 +175,18 @@ impl SimDevice {
             pwm: Pwm::default(),
             adc: Adc::default(),
             events: Vec::new(),
+            node: DEFAULT_NODE,
         }
+    }
+
+    /// The same device with node id `node`.
+    pub fn with_node(self, node: SenderId) -> Self {
+        Self { node, ..self }
+    }
+
+    /// The node id `node_id` returns.
+    pub const fn node(&self) -> SenderId {
+        self.node
     }
 
     /// Takes the recorded events.
@@ -352,6 +382,15 @@ impl Device for SimDevice {
     fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
         self.adc.read(pin)
     }
+
+    fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
+        self.events.push(SimEvent::Serve(key.as_str().to_owned()));
+        Ok(())
+    }
+
+    fn node_id(&mut self) -> Result<SenderId, AbiError> {
+        Ok(self.node)
+    }
 }
 
 /// Why a simulator call failed.
@@ -387,9 +426,20 @@ pub struct Simulator {
 
 impl Simulator {
     /// Validates and instantiates `wasm` (running its `init`), with the
-    /// default [`Limits`] unless overridden.
+    /// default [`Limits`] unless overridden, on a device with node
+    /// [`DEFAULT_NODE`].
     pub fn load(wasm: &[u8], limits: Option<Limits>) -> Result<Self, SimError> {
-        let payload = Payload::load(wasm, SimDevice::new(), limits.unwrap_or_default())
+        Self::load_on(wasm, limits, SimDevice::new())
+    }
+
+    /// [`Simulator::load`] on `device` (e.g. [`SimDevice::with_node`]:
+    /// `init` already asks for the node id).
+    pub fn load_on(
+        wasm: &[u8],
+        limits: Option<Limits>,
+        device: SimDevice,
+    ) -> Result<Self, SimError> {
+        let payload = Payload::load(wasm, device, limits.unwrap_or_default())
             .map_err(|e| SimError::Load(e.to_string()))?;
         Ok(Self {
             payload,
@@ -461,6 +511,47 @@ impl Simulator {
         let key = Key::new(key).map_err(|_| SimError::InvalidKey)?;
         let r = self.payload.deliver(key, data);
         self.trap(r)
+    }
+
+    /// Hands a request to the payload serving `key` (ABI 5) with
+    /// `deadline_ms` and `sender` in its meta block, and a [`REPLY_CAP`]
+    /// reply buffer. `Ok(Ok(reply))` is the reply, `Ok(Err(e))` what a
+    /// device answers instead (`NotFound` when nothing serves the key,
+    /// `InvalidRequest` for an oversized body, ...). A trap stops the
+    /// simulator like any other.
+    pub fn request(
+        &mut self,
+        key: &str,
+        body: &[u8],
+        deadline_ms: Option<u32>,
+        sender: Option<SenderId>,
+    ) -> Result<Result<Vec<u8>, HandlerError>, SimError> {
+        self.guard()?;
+        let key = Key::new(key).map_err(|_| SimError::InvalidKey)?;
+        let meta = RequestMeta {
+            sender,
+            principal: None,
+            deadline_ms,
+        };
+        let mut reply = [0u8; REPLY_CAP];
+        let r = self.payload.request(key, body, &meta, &mut reply);
+        let r = self.trap(r)?;
+        Ok(r.map(|n| reply.get(..n).unwrap_or_default().to_vec()))
+    }
+
+    /// Keys the payload serves (ABI 5), in slot order.
+    pub fn serves(&self) -> Vec<String> {
+        self.payload.serves().map(str::to_owned).collect()
+    }
+
+    /// Whether the payload exports `mw_alloc` and `on_request`.
+    pub fn handles_requests(&self) -> bool {
+        self.payload.handles_requests()
+    }
+
+    /// The device's node id.
+    pub fn node(&mut self) -> SenderId {
+        self.payload.device().node()
     }
 
     /// When the next tick is due, if the payload set a period.
@@ -832,6 +923,56 @@ mod tests {
         assert_eq!(d.periph().edge(3), Edge::Off);
         d.set_time_us(2_500_000);
         assert_eq!((d.now_ms(), d.now_us()), (2_500, 2_500_000));
+    }
+
+    /// The worked example's LED unit, as generated by the web editor
+    /// (kept current by web/test/phase.gen.test.ts).
+    const PICO_LED: &[u8] =
+        include_bytes!("../../../tools/payload-sim/tests/fixtures/phase/pico-led.wasm");
+
+    #[test]
+    fn q19_a_phase_unit_serves_its_phase_under_its_node_id() {
+        let node = SenderId([0x24, 0x6f, 0x28, 1, 2, 3, 0, 0]);
+        let mut sim = Simulator::load_on(PICO_LED, None, SimDevice::new().with_node(node)).unwrap();
+        let key = "unit/246f280102030000/phase/LED.Blink";
+        assert_eq!(sim.serves(), [key]);
+        assert!(sim.handles_requests());
+        assert_eq!(sim.node(), node);
+        let init = sim.drain();
+        assert!(init.contains(&SimEvent::Serve(key.into())), "{init:?}");
+        // Start #1 with period 250 ms, 3 times: accepted, now Running.
+        let mut buf = [0u8; recipe_core::wire::MAX_BODY];
+        let body =
+            recipe_core::wire::encode_command(recipe_core::Command::Start, 1, &[250, 3], &mut buf)
+                .unwrap();
+        let reply = sim.request(key, body, Some(1_000), None).unwrap().unwrap();
+        assert_eq!(
+            recipe_core::wire::decode_ack(&reply).unwrap(),
+            (
+                1,
+                recipe_core::engine::Ack::Accepted(recipe_core::PhaseState::Running)
+            )
+        );
+        // Out of the class's range: InvalidRequest, no state change.
+        let body =
+            recipe_core::wire::encode_command(recipe_core::Command::Start, 2, &[1, 3], &mut buf)
+                .unwrap();
+        assert_eq!(
+            sim.request(key, body, None, None),
+            Ok(Err(HandlerError::InvalidRequest))
+        );
+        assert_eq!(
+            sim.request("unit/246f280102030000/phase/LED.Other", &[], None, None),
+            Ok(Err(HandlerError::NotFound))
+        );
+        assert_eq!(
+            sim.request("bad//", &[], None, None),
+            Err(SimError::InvalidKey)
+        );
+        // The default node is payload-sim's.
+        let mut other = Simulator::load(PICO_LED, None).unwrap();
+        assert_eq!(other.serves(), ["unit/0000000000000001/phase/LED.Blink"]);
+        assert_eq!(other.node(), DEFAULT_NODE);
     }
 
     #[test]

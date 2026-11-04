@@ -8,8 +8,26 @@
 // earlier, raises due timers, runs `tick` and dispatches queued interrupt
 // events to `on_irq`. Input edges and UART bytes are stamped with the
 // current clock and dispatched on the next step.
+//
+// ABI 5: the virtual device has a node id (`SessionOptions.node`, default
+// 0000000000000001), so a phase unit's `node_id` and `serve` work, and
+// `request` hands a request to the payload serving its key. Several
+// sessions (one per unit) talk through a `SimBus` (bus.ts).
 
-import type { PinState, Protocol, SimEvent, Simulator, TimerState } from "../protocol/wasm";
+import type { PinState, Protocol, RequestResult, SimEvent, Simulator, TimerState } from "../protocol/wasm";
+
+/** Per-request metadata a caller may pass (`RequestMeta`). */
+export interface RequestMetaIn {
+  /** Remaining budget for the reply. */
+  deadlineMs?: number;
+  /** The requesting node (16 hex digits). */
+  sender?: string;
+}
+
+export interface SessionOptions {
+  /** The device's node id (16 hex digits). */
+  node?: string;
+}
 
 export interface Clock {
   now(): number;
@@ -59,9 +77,10 @@ export class SimSession {
     wasm: Uint8Array,
     private readonly events: SessionEvents = {},
     private readonly clock: Clock = realClock,
+    opts: SessionOptions = {},
   ) {
     this.t0 = clock.now();
-    this.sim = proto.newSimulator(wasm, (e) => this.apply(e));
+    this.sim = proto.newSimulator(wasm, (e) => this.apply(e), opts.node);
     this.events.onPins?.(this.pinTable);
   }
 
@@ -117,6 +136,20 @@ export class SimSession {
     return this.sim.subscriptions();
   }
 
+  /** Keys the payload serves (ABI 5). */
+  get serves(): string[] {
+    return this.sim.serves();
+  }
+
+  /** The virtual device's node id. */
+  get nodeId(): string {
+    return this.sim.nodeId;
+  }
+
+  get trapped(): boolean {
+    return this.sim.trapped;
+  }
+
   get running(): boolean {
     return this.stopTimer !== null;
   }
@@ -165,6 +198,32 @@ export class SimSession {
       hit = this.sim.deliver(key, data);
     });
     return hit;
+  }
+
+  /** Hands a request to the payload serving `key` at the current time.
+   * A trap stops the session (reported through `onError`) and answers
+   * `Internal`, as a device does; a stopped session answers
+   * `Unavailable`. */
+  request(key: string, body: Uint8Array, meta: RequestMetaIn = {}): RequestResult {
+    // A stopped payload cannot serve, like a poisoned one on a board.
+    if (this.sim.trapped) return { ok: false, error: "Unavailable" };
+    let r: RequestResult = { ok: false, error: "Internal" };
+    this.guard(() => {
+      this.sim.setNowUs(this.nowUs());
+      r = this.sim.request(key, body, meta.deadlineMs ?? null, meta.sender ?? null);
+    });
+    return r;
+  }
+
+  /** Sets what the payload's `adc_read(pin)` returns, clamped to 12
+   * bits; false for a pin the board does not have. */
+  setAdc(pin: number, level: number): boolean {
+    try {
+      this.sim.setAdc(pin, Math.max(0, Math.min(4095, Math.round(level))));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Drives an input; a matching armed edge queues a GPIO event for the

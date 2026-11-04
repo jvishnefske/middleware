@@ -17,6 +17,10 @@
 //!   simulated units following a [`ScriptIn`] of operator commands and
 //!   unit losses, as a [`Trace`] of timed lines.
 //!
+//! * [`run::Run`] — the engine against payloads outside this crate (the
+//!   browser simulator's sessions, later boards): commands as keyed
+//!   request bodies, replies and `/state` reports back as inputs.
+//!
 //! Everything here is pure; `crate::bindings` converts JS objects.
 
 use recipe_core::alloc::{self, AllocError, Reject, Unit, UnitPhase};
@@ -119,6 +123,45 @@ pub struct UnitIn {
     pub phases: Vec<UnitPhaseIn>,
 }
 
+/// What a one-click fix does to the recipe (the page applies it with the
+/// pure edits of `web/src/model/recipe.ts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeFix {
+    /// Set step `step`'s argument `param` to `value` (a value out of the
+    /// class's range clamped into it, or a missing one at the class's
+    /// minimum).
+    SetArg {
+        /// Step index.
+        step: usize,
+        /// Parameter name.
+        param: String,
+        /// The value.
+        value: i32,
+    },
+    /// Remove step `step`'s argument `param` (the class has no such
+    /// parameter).
+    RemoveArg {
+        /// Step index.
+        step: usize,
+        /// Parameter name.
+        param: String,
+    },
+    /// Remove transition `0` (part of a loop, or empty on one side).
+    RemoveTransition(usize),
+    /// Take step `step` off `side` (`"from"` or `"to"`) of transition
+    /// `transition` (it is on that side of another transition already).
+    RemoveFromTransition {
+        /// Transition index.
+        transition: usize,
+        /// `"from"` or `"to"`.
+        side: &'static str,
+        /// The step's id.
+        step: String,
+    },
+    /// Remove unit procedure `0` (no step runs in it).
+    RemoveUnitProc(usize),
+}
+
 /// One check result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeIssue {
@@ -132,6 +175,8 @@ pub struct RecipeIssue {
     pub severity: &'static str,
     /// What is wrong, in plain language.
     pub message: String,
+    /// A one-click fix, when there is an obvious one.
+    pub fix: Option<RecipeFix>,
 }
 
 /// Where a step runs.
@@ -401,18 +446,71 @@ fn place(at: At) -> (&'static str, Option<usize>, Option<usize>) {
     }
 }
 
+fn fix(r: &RecipeIn, classes: &[ClassIn], i: &Issue<'_>) -> Option<RecipeFix> {
+    let arg_name = |s: usize, a: usize| r.steps.get(s)?.args.get(a).map(|x| x.0.clone());
+    let step_id = |s: usize| r.steps.get(s).map(|x| x.id.clone());
+    match (i.kind, i.at) {
+        (IssueKind::OutOfRange { value, min, max }, At::Arg(s, a)) => Some(RecipeFix::SetArg {
+            step: s,
+            param: arg_name(s, a)?,
+            value: value.clamp(min, max.max(min)),
+        }),
+        (IssueKind::MissingParam(p), At::Step(s) | At::Arg(s, _)) => {
+            let class = &r.steps.get(s)?.class;
+            let min = classes
+                .iter()
+                .find(|c| &c.name == class)?
+                .params
+                .iter()
+                .find(|x| x.name == p)?
+                .min;
+            Some(RecipeFix::SetArg {
+                step: s,
+                param: p.to_string(),
+                value: min,
+            })
+        }
+        (IssueKind::UnknownParam(p), At::Arg(s, _)) => Some(RecipeFix::RemoveArg {
+            step: s,
+            param: p.to_string(),
+        }),
+        (IssueKind::Cycle | IssueKind::EmptyTransition, At::Transition(t)) => {
+            Some(RecipeFix::RemoveTransition(t))
+        }
+        (IssueKind::TwoOutgoing { step, .. }, At::Transition(t)) => {
+            Some(RecipeFix::RemoveFromTransition {
+                transition: t,
+                side: "from",
+                step: step_id(step)?,
+            })
+        }
+        (IssueKind::TwoIncoming { step, .. }, At::Transition(t)) => {
+            Some(RecipeFix::RemoveFromTransition {
+                transition: t,
+                side: "to",
+                step: step_id(step)?,
+            })
+        }
+        (IssueKind::UnusedUnitProc, At::UnitProc(u)) => Some(RecipeFix::RemoveUnitProc(u)),
+        _ => None,
+    }
+}
+
 /// Checks the classes and the recipe.
 pub fn check(r: &RecipeIn, classes: &[ClassIn]) -> Vec<RecipeIssue> {
-    let issues: Vec<(At, Severity, String)> = with_recipe(r, classes, |view, cls| {
+    type Found = (At, Severity, String, Option<RecipeFix>);
+    let issues: Vec<Found> = with_recipe(r, classes, |view, cls| {
         let mut out = Vec::new();
-        let mut push = |i: Issue<'_>| out.push((i.at, i.severity, message(r, classes, &i)));
+        let mut push = |i: Issue<'_>| {
+            out.push((i.at, i.severity, message(r, classes, &i), fix(r, classes, &i)))
+        };
         recipe::check_classes(cls, &mut push);
         recipe::check(view, cls, &mut push);
         out
     });
     issues
         .into_iter()
-        .map(|(at, severity, message)| {
+        .map(|(at, severity, message, fix)| {
             let (at, index, sub) = place(at);
             RecipeIssue {
                 at,
@@ -423,6 +521,7 @@ pub fn check(r: &RecipeIn, classes: &[ClassIn]) -> Vec<RecipeIssue> {
                     Severity::Warning => "warning",
                 },
                 message,
+                fix,
             }
         })
         .collect()
@@ -785,6 +884,8 @@ pub fn phase_model() -> PhaseModel {
             .collect(),
     )
 }
+
+pub mod run;
 
 #[cfg(test)]
 mod tests;
