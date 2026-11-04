@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 # protocol-only firmware) and `payloads/` (wasm32 guests) are separate
 # workspaces because they build for other targets and toolchains.
 [workspace]
-members = [".", "board-pins", "state-table", "wasm-host", "tools/payload-sim", "tools/mwctl", "tools/jpeg-fixtures", "web/protocol-wasm"]
+members = [".", "board-pins", "state-table", "recipe-core", "wasm-host", "tools/payload-sim", "tools/mwctl", "tools/jpeg-fixtures", "web/protocol-wasm"]
 exclude = ["firmware", "firmware-esp8266", "firmware-rp", "payloads"]
 
 [features]
@@ -83,6 +83,8 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # use the in-process backend under a plain `cargo test`.
 middleware = { path = ".", features = ["memory"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+# The S88 phase command contract on these traits (`tests/recipe_wire.rs`).
+recipe-core = { path = "recipe-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 
 # One service kind discovered over Zenoh, mDNS and cluster DNS (stub on

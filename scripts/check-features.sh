@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11):
+# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11):
 #   * the always-built pure core, including `discovery`, `dns::wire` and
-#     `fw_ota`, builds for thumbv6m-none-eabi with no features;
+#     `fw_ota`, builds for thumbv6m-none-eabi with no features, and so do
+#     the `recipe-core` and `state-table` crates (Q11);
 #   * the RP2350 set builds for thumbv8m.main-none-eabihf (Cortex-M33, the
 #     Pico 2): the pure core, `fw_ota::service` (`trust`) and the serial
 #     link, with no cloud dependency and no host feature;
@@ -37,6 +38,11 @@ features_of_self() {
 
 echo "== C1: no features, $EMBEDDED_TARGET"
 cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features
+
+# The S88 batch-control core (design.md Q11) and the state tables it shares
+# identifiers with are no_std, no-heap crates for the same target.
+echo "== Q11: recipe-core and state-table, $EMBEDDED_TARGET"
+cargo build --quiet --target "$EMBEDDED_TARGET" -p recipe-core -p state-table
 
 # The discovery core and the DNS codec are part of that build: their module
 # declarations carry no cfg gate (K13, L11).

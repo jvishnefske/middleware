@@ -1,0 +1,15 @@
+[package]
+name = "recipe-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "ISA-88 batch control for payloads: the phase state machine, master recipe checks, allocation of phase classes to units, the control-recipe engine and its wire contract, as pure functions"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# no_std, no heap, no recursion: built for wasm32 (web/protocol-wasm) and
+# for thumbv6m-none-eabi so a unit can host the same phase table. A member
+# of the root workspace, so `cargo test --workspace` runs its tests.
+[dependencies]
+# Identifier rule shared with the state tables (`ident_ok`, `MAX_IDENT`).
+state-table = { path = "../state-table" }

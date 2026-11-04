@@ -1671,6 +1671,7 @@ dependencies = [
  "middleware",
  "postcard",
  "prost",
+ "recipe-core",
  "serde",
  "sha2",
  "socket2 0.6.5",
@@ -2231,6 +2232,7 @@ dependencies = [
  "board-pins",
  "js-sys",
  "middleware",
+ "recipe-core",
  "state-table",
  "wasm-bindgen",
  "wasm-host",
@@ -2393,6 +2395,13 @@ dependencies = [
  "time",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "recipe-core"
+version = "0.1.0"
+dependencies = [
+ "state-table",
 ]
 
 [[package]]
