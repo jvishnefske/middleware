@@ -18,6 +18,7 @@ members = [
     "examples/cam_ov2640_stream",
     "examples/bench",
     "examples/periph_demo",
+    "examples/serve_echo",
     "gc9a01",
     "jpeg",
     "abi-check",
@@ -42,6 +43,7 @@ default-members = [
     "examples/cam_ov2640_stream",
     "examples/bench",
     "examples/periph_demo",
+    "examples/serve_echo",
     "gc9a01",
 ]
 

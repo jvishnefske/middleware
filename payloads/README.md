@@ -6,8 +6,10 @@ defined in `src/wasm_abi.rs` of the `middleware` crate: host functions
 imported from module `mw` (log, publish, subscribe, time, tick period, GPIO,
 since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA, since
 ABI 3 PWM, ADC and I2C, and since ABI 4 DMA routes that stream frames
-between a key and a camera or SPI display, `mw_payload::route`) and the
-exports `memory`, `init`, `tick`, `mw_alloc`, `on_message` and `on_irq`.
+between a key and a camera or SPI display, `mw_payload::route`, and since
+ABI 5 serving request keys and the device's node id, `mw_payload::serve`)
+and the exports `memory`, `init`, `tick`, `mw_alloc`, `on_message`,
+`on_irq` and (ABI 5) `on_request`.
 
 This directory is a Cargo workspace of its own, excluded from the parent
 workspace, because its crates build for `wasm32-unknown-unknown` (set as the
@@ -105,6 +107,11 @@ default target in `.cargo/config.toml`). It contains:
   heap check charges 16 KiB less than the standard build (one 64 KiB
   page, 16 KiB stack, 36 KiB of buffers in `.bss`). Its mw-jpeg is built
   without `Scale::Half` (`default-features = false`).
+- `examples/serve_echo` (ABI 5) — serves `app/serve_echo` and answers each
+  request with the device's node id followed by the request body
+  (`BufferTooSmall` when that does not fit), built with
+  `payload!(ServeEcho, serve)`. Try it with `payload-sim ... --virtual`
+  and a `!req app/serve_echo 6869` line.
 - `examples/bench` — measures a host's interpreter speed in fuel per
   second: one-shot timer steps 1 ms apart alternate integer mixing over a
   4 KiB table (196 564 fuel a step) and `mw-jpeg` decoding the fake

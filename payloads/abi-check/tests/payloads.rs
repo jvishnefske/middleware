@@ -139,6 +139,24 @@ fn assemblyscript(name: &str) -> Option<abi_check::Report> {
 }
 
 #[test]
+fn rust_serve_echo_example() {
+    let r = validate(&release("serve_echo"));
+    assert!(has(
+        &r.exports,
+        &["memory", "init", "mw_alloc", "on_request"]
+    ));
+    assert!(has(&r.imports, &["serve", "node_id"]));
+}
+
+#[test]
+fn as_serve_template() {
+    if let Some(r) = assemblyscript("serve") {
+        assert!(has(&r.exports, &["memory", "init", "mw_alloc", "on_request"]));
+        assert!(has(&r.imports, &["serve", "node_id"]));
+    }
+}
+
+#[test]
 fn as_button_template() {
     if let Some(r) = assemblyscript("button") {
         assert!(has(&r.exports, &["memory", "init", "on_irq"]));

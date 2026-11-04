@@ -17,6 +17,16 @@
 //!   (coalesced) `UartRx` event.
 //! * `!adc <pin> <0..4095>` sets the value `adc_read(pin)` returns (ABI 3;
 //!   pins read 0 until set).
+//! * `!req <key> [<hex>]` (ABI 5) sends a request with that body (empty
+//!   without hex) to the board whose payload serves `key` (the first board
+//!   when none does), with a 512-byte reply buffer, a 1000 ms deadline and
+//!   no sender, and prints `reply <key> <hex>` (`-` when empty) or `reply
+//!   <key> error <HandlerError>` (`NotFound` when nothing serves the key).
+//!   Publications the request causes are exchanged as usual. A board
+//!   prints `serve <key>` when its payload serves a key; `--node <16 hex
+//!   digits>` sets the first board's node id (`node_id`; default
+//!   `0000000000000001`), and a `--peer` board's is the same with the last
+//!   byte plus one.
 //! * `!i2c <bus> <reg> <value>` presets register `reg` of the register
 //!   device at 0x50 on I2C bus `bus` (ABI 3; registers hold 0 until set or
 //!   written). Each number is hex (`0x5a`) or decimal; the register
@@ -108,8 +118,8 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use middleware::Key;
 use middleware::wasm_abi::events::MAX_EVENTS;
+use middleware::{HandlerError, Key, RequestMeta, SenderId};
 use wasm_host::{LoadError, Payload, Trap};
 
 use sim::bus::Bus;
@@ -278,6 +288,7 @@ impl Bench {
             return Ok(());
         };
         match sim::parse_command(line) {
+            Ok(Some(sim::Command::Req { key, body })) => self.request(&key, &body),
             Ok(Some(command)) => {
                 if let Err(e) = n.device().apply(command) {
                     eprintln!("{e}");
@@ -294,6 +305,34 @@ impl Bench {
                 Ok(())
             }
         }
+    }
+
+    /// Hands a `!req` request to the board serving `key` (else the first)
+    /// and prints the reply, then exchanges what it published.
+    fn request(&mut self, key: &str, body: &[u8]) -> Result<(), Fault> {
+        let Ok(k) = Key::new(key) else {
+            return Ok(());
+        };
+        let i = self
+            .nodes
+            .iter()
+            .position(|n| n.payload.serves().any(|s| s == key))
+            .unwrap_or(0);
+        let Some(n) = self.nodes.get_mut(i) else {
+            return Ok(());
+        };
+        let meta = RequestMeta::NONE.with_deadline_ms(sim::REQ_DEADLINE_MS);
+        let mut reply = [0u8; sim::REQ_REPLY_CAP];
+        let r = n.payload.request(k, body, &meta, &mut reply);
+        let line = match &r {
+            Ok(Ok(len)) => sim::render_reply(key, Ok(reply.get(..*len).unwrap_or(&[]))),
+            Ok(Err(e)) => sim::render_reply(key, Err(*e)),
+            Err(_) => sim::render_reply(key, Err(HandlerError::Internal)),
+        };
+        n.device().note(line);
+        flush(&mut n.payload);
+        n.fault(r).map(drop)?;
+        self.pump()
     }
 
     /// Prints the route counters, fuel use and bus summary, and dumps the
@@ -509,13 +548,18 @@ fn label(path: &str) -> String {
         .map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned())
 }
 
-/// Loads one payload onto a fresh board.
-fn load(path: &str, label: Option<String>, opts: &Options) -> Result<Node, ExitCode> {
+/// Loads one payload onto a fresh board with node id `node`.
+fn load(
+    path: &str,
+    label: Option<String>,
+    node: SenderId,
+    opts: &Options,
+) -> Result<Node, ExitCode> {
     let wasm = std::fs::read(path).map_err(|e| {
         eprintln!("{path}: {e}");
         ExitCode::from(1)
     })?;
-    let device = SimDevice::new(opts.spi_pattern.clone());
+    let device = SimDevice::new(opts.spi_pattern.clone()).with_node(node);
     let device = match &label {
         Some(l) => device.with_label(l),
         None => device,
@@ -555,7 +599,8 @@ fn run(opts: &Options) -> Result<(), ExitCode> {
     };
     let nodes = labels
         .into_iter()
-        .map(|(path, label)| load(path, label, opts))
+        .zip([opts.node, sim::peer_node(opts.node)])
+        .map(|((path, label), node)| load(path, label, node, opts))
         .collect::<Result<Vec<_>, _>>()?;
     let mut bench = Bench {
         nodes,

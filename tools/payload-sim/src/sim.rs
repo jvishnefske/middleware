@@ -37,6 +37,14 @@
 //! payload's own and a source route's chunks, is also queued in an outbox
 //! ([`SimDevice::take_outbox`]) that the shell hands to a `--peer` payload
 //! over a [`bus::Bus`].
+//!
+//! ABI 5: the board has a node id ([`SimDevice::with_node`], `--node`;
+//! `node_id` returns it) and accepts every key a payload serves, printing
+//! `serve <key>`. A `!req <key> [<hex>]` line ([`Command::Req`]) is a
+//! request the shell hands to the payload serving the key
+//! (`Payload::request`, a [`REQ_REPLY_CAP`]-byte reply buffer and a
+//! [`REQ_DEADLINE_MS`] deadline); [`render_reply`] prints the outcome as
+//! `reply <key> <hex>` or `reply <key> error <HandlerError>`.
 
 pub mod bus;
 pub mod panel;
@@ -45,9 +53,9 @@ pub mod route;
 
 use std::fmt::Write as _;
 
-use middleware::Key;
 use middleware::stream::{Action, FrameSource, Sink};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
+use middleware::{HandlerError, Key, SenderId};
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
     RouteStat, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec, UartConfig,
@@ -86,16 +94,52 @@ pub struct Options {
     /// payload's own SPI transfers on bus 0 (`--panel-dc`); `None` keeps
     /// the panel fed by sink routes only.
     pub panel_dc: Option<u8>,
+    /// The first board's node id (`--node`, 16 hex digits); a `--peer`
+    /// board's is the same with the last byte plus one.
+    pub node: SenderId,
+}
+
+/// The first board's node id when `--node` is not given.
+pub const DEFAULT_NODE: SenderId = SenderId([0, 0, 0, 0, 0, 0, 0, 1]);
+
+/// Reply buffer `!req` offers the payload.
+pub const REQ_REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
+
+/// Deadline `!req` requests carry, in milliseconds.
+pub const REQ_DEADLINE_MS: u32 = 1000;
+
+/// The peer board's node: `node` with its last byte plus one (wrapping).
+pub fn peer_node(node: SenderId) -> SenderId {
+    let mut id = node.0;
+    id[7] = id[7].wrapping_add(1);
+    SenderId(id)
+}
+
+/// Prints a request's outcome: `reply <key> <hex>` (`-` for an empty
+/// reply) or `reply <key> error <HandlerError>`.
+pub fn render_reply(key: &str, outcome: Result<&[u8], HandlerError>) -> String {
+    match outcome {
+        Ok([]) => format!("reply {key} -"),
+        Ok(bytes) => {
+            let mut s = format!("reply {key} ");
+            for b in bytes {
+                let _ = write!(s, "{b:02x}");
+            }
+            s
+        }
+        Err(e) => format!("reply {key} error {e:?}"),
+    }
 }
 
 /// Usage text printed on argument errors.
 pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
                          [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE]\n\
-                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>]\n\
+                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>] [--node HEX16]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input,\n\
-`!i2c <bus> <reg> <value>` presets a register of the I2C device at 0x50 (hex 0x.. or decimal)";
+`!i2c <bus> <reg> <value>` presets a register of the I2C device at 0x50 (hex 0x.. or decimal),\n\
+`!req <key> [<hex>]` sends a request to the payload serving <key>";
 
 /// Parses the arguments after the program name.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
@@ -112,6 +156,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         seed: 1,
         dump_panel: None,
         panel_dc: None,
+        node: DEFAULT_NODE,
     };
     let mut it = args.iter().map(AsRef::as_ref);
     while let Some(arg) = it.next() {
@@ -142,6 +187,13 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
                     return Err(format!("--panel-dc pin must be below {PINS}"));
                 }
                 opts.panel_dc = Some(pin);
+            }
+            "--node" => {
+                let v = value("--node")?;
+                let id: [u8; 8] = hex(v)?
+                    .try_into()
+                    .map_err(|_| format!("--node needs 16 hex digits: {v}"))?;
+                opts.node = SenderId(id);
             }
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             path if file.is_none() => file = Some(path.to_string()),
@@ -211,6 +263,14 @@ pub enum Command {
         /// Register contents.
         value: u8,
     },
+    /// `!req <key> [<hex>]`: a request for the payload serving `key`
+    /// (ABI 5), handled by the shell rather than the board.
+    Req {
+        /// The request key.
+        key: String,
+        /// The request body (empty when no hex is given).
+        body: Vec<u8>,
+    },
 }
 
 /// Parses a command line; `Ok(None)` when the line is not a command.
@@ -265,6 +325,20 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, String> {
                 bus: byte(bus)?,
                 reg: byte(reg)?,
                 value: byte(value)?,
+            }))
+        }
+        "req" => {
+            let usage = "!req needs <key> [<hex>]";
+            let mut it = args.split_whitespace();
+            let key = it.next().ok_or(usage)?;
+            Key::new(key).map_err(|e| format!("bad key {key:?}: {e:?}"))?;
+            let body = it.next().map(hex).transpose()?.unwrap_or_default();
+            if it.next().is_some() {
+                return Err(usage.to_string());
+            }
+            Ok(Some(Command::Req {
+                key: key.to_string(),
+                body,
             }))
         }
         "uart" if !args.is_empty() => Ok(Some(Command::Uart(args.as_bytes().to_vec()))),
@@ -361,6 +435,8 @@ pub struct SimDevice {
     pwm: Pwm,
     adc: Adc,
     i2c: I2c,
+    /// What `node_id` returns.
+    node: SenderId,
 }
 
 impl Default for SimDevice {
@@ -391,7 +467,13 @@ impl SimDevice {
             pwm: Pwm::default(),
             adc: Adc::default(),
             i2c: I2c::default(),
+            node: DEFAULT_NODE,
         }
+    }
+
+    /// The same board with node id `node` (ABI 5 `node_id`).
+    pub fn with_node(self, node: SenderId) -> Self {
+        SimDevice { node, ..self }
     }
 
     /// The same board with event lines labelled `label`.
@@ -621,6 +703,7 @@ impl SimDevice {
                 self.event(format!("adc {pin} <- {value}"));
                 Ok(())
             }
+            Command::Req { key, .. } => Err(format!("!req {key}: requests go to the payload")),
             Command::I2c { bus, reg, value } => {
                 self.i2c.preset(bus, reg, value)?;
                 self.event(format!(
@@ -956,12 +1039,65 @@ impl Device for SimDevice {
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
         Ok(stat.of(&self.routes.stats(handle)?))
     }
+
+    fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
+        self.event(format!("serve {key}"));
+        Ok(())
+    }
+
+    fn node_id(&mut self) -> Result<SenderId, AbiError> {
+        Ok(self.node)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use wasm_host::CameraPins;
+
+    #[test]
+    fn abi5_req_commands_node_option_and_reply_lines() {
+        assert_eq!(
+            parse_command("!req unit/x/phase/A.B 0101000000000000"),
+            Ok(Some(Command::Req {
+                key: "unit/x/phase/A.B".to_string(),
+                body: vec![1, 1, 0, 0, 0, 0, 0, 0]
+            }))
+        );
+        assert_eq!(
+            parse_command("!req a/b"),
+            Ok(Some(Command::Req {
+                key: "a/b".to_string(),
+                body: vec![]
+            }))
+        );
+        assert!(parse_command("!req").is_err());
+        assert!(parse_command("!req a/b 0").is_err());
+        assert!(parse_command("!req a/b 00 11").is_err());
+        assert!(parse_command("!req bad//key").is_err());
+        let o = parse_args(&["p.wasm", "--node", "246f28aa01fe0000"]).unwrap();
+        assert_eq!(o.node, SenderId([0x24, 0x6f, 0x28, 0xaa, 0x01, 0xfe, 0, 0]));
+        assert!(parse_args(&["p.wasm", "--node", "24"]).is_err());
+        assert_eq!(parse_args(&["p.wasm"]).unwrap().node, DEFAULT_NODE);
+        assert_eq!(peer_node(DEFAULT_NODE), SenderId([0, 0, 0, 0, 0, 0, 0, 2]));
+        assert_eq!(render_reply("k", Ok(&[1, 0xab])), "reply k 01ab");
+        assert_eq!(render_reply("k", Ok(&[])), "reply k -");
+        assert_eq!(
+            render_reply("k", Err(HandlerError::NotFound)),
+            "reply k error NotFound"
+        );
+        let mut d = SimDevice::default().with_node(SenderId([7; 8]));
+        assert_eq!(d.node_id(), Ok(SenderId([7; 8])));
+        assert_eq!(d.serve(Key::new("a/b").unwrap()), Ok(()));
+        assert!(d.events[0].ends_with("serve a/b"));
+        assert!(
+            d.apply(Command::Req {
+                key: "a/b".into(),
+                body: vec![]
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn parses_arguments() {
