@@ -140,3 +140,16 @@ fn done_alone_from_any_acting_state_ends_in_a_quiescent_state_within_three_steps
         assert!(!cur.is_acting(), "{} keeps acting", s.name());
     }
 }
+
+#[test]
+fn the_flow_checks_acting_states_are_these_acting_states_in_lower_case() {
+    let names = state_table::flow::ACTING_STATES;
+    let mut acting = PhaseState::ALL.iter().filter(|s| s.is_acting());
+    for name in names {
+        let s = acting.next().expect("as many acting states");
+        assert!(s.name().eq_ignore_ascii_case(name), "{name}");
+        assert!(name.bytes().all(|b| b.is_ascii_lowercase()), "{name}");
+    }
+    assert_eq!(acting.next(), None);
+    assert_eq!(state_table::flow::MAX_REPORT_VALUES, crate::MAX_PARAMS);
+}

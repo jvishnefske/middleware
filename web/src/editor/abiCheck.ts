@@ -48,13 +48,24 @@ export function checkAbi(wasm: Uint8Array, abi: AbiInfo): AbiReport {
   if (!exports.some((e) => e.name === abi.exports.memory && e.kind === "memory")) {
     problems.push(`missing export "${abi.exports.memory}"`);
   }
-  for (const name of [abi.exports.init, abi.exports.tick, abi.exports.alloc, abi.exports.onMessage, abi.exports.onIrq]) {
+  const onRequest = abi.exports.onRequest ?? "on_request";
+  for (const name of [abi.exports.init, abi.exports.tick, abi.exports.alloc, abi.exports.onMessage, abi.exports.onIrq, onRequest]) {
     const e = exports.find((x) => x.name === name);
     if (e && e.kind !== "function") problems.push(`export "${name}" must be a function`);
   }
   const names = new Set(exports.map((e) => e.name));
-  if (names.has(abi.exports.onMessage) !== names.has(abi.exports.alloc)) {
+  // mw_alloc serves on_message and (ABI 5) on_request.
+  if (names.has(abi.exports.onMessage) && !names.has(abi.exports.alloc)) {
     problems.push(`"${abi.exports.onMessage}" and "${abi.exports.alloc}" must be exported together`);
+  }
+  if (names.has(onRequest) && !names.has(abi.exports.alloc)) {
+    problems.push(`"${onRequest}" needs "${abi.exports.alloc}"`);
+  }
+  if (names.has(abi.exports.alloc) && !names.has(abi.exports.onMessage) && !names.has(onRequest)) {
+    problems.push(`"${abi.exports.onMessage}" and "${abi.exports.alloc}" must be exported together`);
+  }
+  if (!names.has(onRequest) && imports.some((i) => i.module === abi.importModule && i.name === "serve")) {
+    problems.push(`imports serve but does not export "${onRequest}", so its requests could never be answered`);
   }
   const sources = imports.filter((i) => i.module === abi.importModule && EVENT_SOURCES.includes(i.name));
   if (sources.length > 0 && !names.has(abi.exports.onIrq)) {

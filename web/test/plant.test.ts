@@ -80,7 +80,7 @@ describe("plant model (IR v4)", () => {
     const led = unitPayload(EXAMPLE_PLANT, "pico-led")!;
     expect(led.board).toBe("pico2");
     expect(led.pins.rows.map((r) => r.label)).toEqual(["LED"]);
-    expect(flowsOf(led).map((f) => f.id)).toEqual(["BlinkRun"]);
+    expect(flowsOf(led).map((f) => f.id)).toEqual(["BlinkRun", "BlinkReset"]);
     expect(unitPayload(EXAMPLE_PLANT, "nope")).toBeNull();
     expect(plainPayloadOf(EXAMPLE_PLANT)).toBeNull();
     expect(code(led)).toContain("PIN_LED");
@@ -128,7 +128,15 @@ describe("plant model (IR v4)", () => {
       [(v) => (ph0(v).ranges.times = [5, 1]), "procedural.phases[0].ranges.times has its minimum above its maximum"],
       [(v) => (ph0(v).bodies = { pausing: "BlinkRun" }), "procedural.phases[0].bodies.pausing is not an acting state (one of running, holding, restarting, stopping, aborting, resetting)"],
       [(v) => (ph0(v).bodies.running = "Nope"), 'procedural.phases[0].bodies.running names flow "Nope", which unit "pico-led" does not have'],
-      [(v) => (ph0(v).bodies.holding = "BlinkRun"), 'procedural.phases[0].bodies.holding uses flow "BlinkRun", already the body of LED.Blink running'],
+      [(v) => (ph0(v).bodies.holding = "BlinkRun"), 'procedural.phases[0].bodies.holding names flow "BlinkRun", whose entry is not "phase LED.Blink holding"'],
+      [
+        (v) => {
+          const u = v.physical.units[0] as { logic: { kind: string; nodes?: { kind: string; props: { on?: string; phase?: string } }[] }[] };
+          const entry = u.logic[1]?.nodes?.[0];
+          if (entry) entry.props.phase = "LED.Fade";
+        },
+        'procedural.phases[0].bodies.running names flow "BlinkRun", whose entry is not "phase LED.Blink running"',
+      ],
       [(v) => v.procedural.phases.push({ ...ph0(v), id: "blink" }), 'procedural.phases[2] repeats phase LED.blink of unit "pico-led" (ignoring case)'],
       [(v) => (v.recipes[0].steps[0].params.times = "3"), "recipes[0].steps[0].params.times must be a whole 32-bit number"],
       [(v) => (v.recipes[0].steps[0].x = -1), "recipes[0].steps[0].x and .y must be whole numbers from 0 to 4000"],

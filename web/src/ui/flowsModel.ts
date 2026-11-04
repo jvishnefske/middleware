@@ -6,7 +6,28 @@
 // the undo history, how issues map onto nodes and wires, the tab text,
 // and what a fix does.
 
-import { type Edge, type EntryOn, type EntryProps, type Flow, type FlowFix, type FlowIssue, type FlowNode, IN_PORT, MAX_SEQUENCE, connect, entryText, hasInput, outputs, wireFrom, wouldCycle } from "../model/flows";
+import {
+  type Edge,
+  type EntryOn,
+  type EntryProps,
+  type Flow,
+  type FlowAction,
+  type FlowFix,
+  type FlowIssue,
+  type FlowNode,
+  IN_PORT,
+  MAX_SEQUENCE,
+  type PhaseAction,
+  type PhaseDecl,
+  type PhaseValue,
+  connect,
+  entryText,
+  hasInput,
+  isPhaseAction,
+  outputs,
+  wireFrom,
+  wouldCycle,
+} from "../model/flows";
 import { type ActionKind, type ActionRef, type Expr, type Machine, actionText, addEvent, event, exprText, machineRef, setMachine } from "../model/machines";
 import { type PinRef, INPUT_FUNCS, OUTPUT_FUNCS } from "./statesModel";
 
@@ -81,7 +102,73 @@ export const ENTRY_TEXT: Readonly<Record<EntryOn, string>> = {
   message: "on message",
   "pin-edge": "on pin edge",
   entered: "when a state is entered",
+  phase: "when a phase state runs",
 };
+
+/** The phase actions' kinds and how the editor names them. */
+export const PHASE_ACTION_KINDS = ["phase-done", "phase-report"] as const;
+export type PhaseActionKind = (typeof PHASE_ACTION_KINDS)[number];
+export const PHASE_ACTION_TEXT: Readonly<Record<PhaseActionKind, string>> = {
+  "phase-done": "the phase state is done",
+  "phase-report": "report phase values",
+};
+
+/** A phase's `<em>.<phase>` name. */
+export function phaseName(p: PhaseDecl): string {
+  return `${p.em}.${p.phase}`;
+}
+
+function valueText(v: PhaseValue): string {
+  switch (v.kind) {
+    case "const":
+      return String(v.value);
+    case "pin":
+      return v.label;
+    case "param":
+      return v.param;
+    case "runs":
+      return "runs";
+  }
+}
+
+/** The report values as the editor's text: comma separated. */
+export function phaseValuesText(vs: readonly PhaseValue[]): string {
+  return vs.map(valueText).join(", ");
+}
+
+/** Report values from the editor's text: each part a whole number, the
+ * word runs, one of the phase's parameters, or else a pin label. */
+export function parsePhaseValues(text: string, params: readonly string[]): PhaseValue[] {
+  return text
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t !== "")
+    .slice(0, 8)
+    .map((t): PhaseValue => {
+      if (/^-?\d+$/.test(t)) return { kind: "const", value: Number(t) };
+      if (t === "runs") return { kind: "runs" };
+      if (params.includes(t)) return { kind: "param", param: t };
+      return { kind: "pin", label: t };
+    });
+}
+
+/** What a phase action does, in a line. */
+export function phaseActionText(a: PhaseAction): string {
+  if (a.kind === "phase-report") return `report ${a.phase}: ${phaseValuesText(a.values) || "no values"}`;
+  if (a.after === undefined) return `${a.phase} done`;
+  return `${a.phase} done after ${a.after} runs`;
+}
+
+/** What any action node does, in a line. */
+export function flowActionText(a: FlowAction): string {
+  return isPhaseAction(a) ? phaseActionText(a) : actionText(a);
+}
+
+/** A phase action of `kind` for phase `phase` (keeping what applies). */
+export function phaseActionOf(kind: PhaseActionKind, prev: FlowAction, phases: readonly PhaseDecl[]): PhaseAction {
+  const phase = isPhaseAction(prev) ? prev.phase : phases[0] ? phaseName(phases[0]) : "";
+  return kind === "phase-done" ? { kind, phase } : { kind, phase, values: prev.kind === "phase-report" ? prev.values : [{ kind: "runs" }] };
+}
 
 /** One line saying what the node does. */
 export function nodeTitle(n: FlowNode): string {
@@ -89,7 +176,7 @@ export function nodeTitle(n: FlowNode): string {
     case "entry":
       return entryText(n.props);
     case "action":
-      return actionText(n.props);
+      return flowActionText(n.props);
     case "branch":
       return `if ${exprText(n.props.cond)}`;
     case "repeat":
@@ -115,7 +202,7 @@ export function stateRefs(ms: readonly Machine[]): string[] {
   return ms.flatMap((m) => m.states.filter((s) => s.name).map((s) => machineRef(m.id, s.name)));
 }
 
-export function entryOf(on: EntryOn, prev: EntryProps, pins: readonly PinRef[], ms: readonly Machine[]): EntryProps {
+export function entryOf(on: EntryOn, prev: EntryProps, pins: readonly PinRef[], ms: readonly Machine[], phases: readonly PhaseDecl[] = []): EntryProps {
   switch (on) {
     case "init":
       return { on };
@@ -127,11 +214,13 @@ export function entryOf(on: EntryOn, prev: EntryProps, pins: readonly PinRef[], 
       return { on, label: prev.on === "pin-edge" ? prev.label : firstLabel(pins, INPUT_FUNCS, "BUTTON"), edge: prev.on === "pin-edge" ? prev.edge : ("fall" satisfies Edge) };
     case "entered":
       return { on, state: prev.on === "entered" ? prev.state : (stateRefs(ms)[0] ?? "") };
+    case "phase":
+      return prev.on === "phase" ? prev : { on, phase: phases[0] ? phaseName(phases[0]) : "", state: "running" };
   }
 }
 
 /** A flow action of `kind`; a raise names a machine (the first). */
-export function flowActionOf(kind: ActionKind, prev: ActionRef, pins: readonly PinRef[], ms: readonly Machine[]): ActionRef {
+export function flowActionOf(kind: ActionKind, prev: FlowAction, pins: readonly PinRef[], ms: readonly Machine[]): ActionRef {
   const label = prev.kind === "write" || prev.kind === "toggle" ? prev.label : firstLabel(pins, OUTPUT_FUNCS, "LED");
   const txt = prev.kind === "publish" || prev.kind === "log" ? prev.text : "";
   switch (kind) {

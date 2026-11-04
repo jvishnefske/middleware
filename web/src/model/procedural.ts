@@ -35,6 +35,30 @@ export type PhaseCommand = (typeof PHASE_COMMANDS)[number];
 export const ACTING_STATES = ["running", "holding", "restarting", "stopping", "aborting", "resetting"] as const;
 export type ActingState = (typeof ACTING_STATES)[number];
 
+/** The wire code of an acting state (recipe-core `PhaseState::code`). */
+export const ACTING_CODE: Readonly<Record<ActingState, number>> = { running: 1, holding: 3, restarting: 5, stopping: 6, aborting: 8, resetting: 10 };
+
+/** The phase state model's table (recipe-core `phase::next`), the next
+ * state's code for each state (rows, in code order) and input (columns:
+ * Start, Hold, Restart, Stop, Abort, Reset, Done), -1 where the input is
+ * rejected. Generated phase servers (blocks/phaseGen.ts) switch on it;
+ * web/test/phase.gen.test.ts checks it against protocol-wasm
+ * `phaseModel()` and tools/payload-sim/tests/phase.rs the generated code
+ * against `recipe_core::phase::next`, cell by cell. */
+export const PHASE_NEXT: readonly (readonly number[])[] = [
+  [1, -1, -1, -1, -1, -1, -1],
+  [-1, 3, -1, 6, 8, -1, 2],
+  [-1, -1, -1, -1, -1, 10, -1],
+  [-1, -1, -1, 6, 8, -1, 4],
+  [-1, -1, 5, 6, 8, -1, -1],
+  [-1, 3, -1, 6, 8, -1, 1],
+  [-1, -1, -1, -1, 8, -1, 7],
+  [-1, -1, -1, -1, -1, 10, -1],
+  [-1, -1, -1, -1, -1, -1, 9],
+  [-1, -1, -1, -1, -1, 10, -1],
+  [-1, -1, -1, 6, 8, -1, 0],
+];
+
 export interface ParamDef {
   /** Identifier recipes give values for. */
   id: string;

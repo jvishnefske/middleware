@@ -71,6 +71,7 @@ import {
   raiseCall,
 } from "./machineGen";
 import { EDGE_CODE, type Flow } from "../model/flows";
+import { type PhaseBody, type PhaseCode, type PhaseHost, type PhasePlan, type PhaseSpec, REQUEST_BUFFER, emitPhases, lowerPhaseAction, planPhases } from "./phaseGen";
 import { type Machine, parseMachineRef } from "../model/machines";
 import { EMPTY_PINS, PULL_CODES, type PinFunc, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
@@ -128,7 +129,10 @@ const IMPORTS: readonly [string, string][] = [
   ["timer_start", "(id: i32, periodUs: i32, periodic: i32): i32"],
   ["timer_stop", "(id: i32): i32"],
   ["spi_open", "(bus: i32, sck: i32, mosi: i32, miso: i32, cs: i32, freqKhz: i32, mode: i32): i32"],
+  ["adc_read", "(pin: i32): i32"],
   ["i2c_open", "(bus: i32, freqHz: i32): i32"],
+  ["serve", "(keyPtr: usize, keyLen: i32): i32"],
+  ["node_id", "(ptr: usize): i32"],
 ];
 
 /** Run-time helpers, emitted when used. Order is emission order. */
@@ -291,6 +295,7 @@ const HELPER_NEEDS: Record<string, { helpers?: string[]; buffers?: string[]; imp
 
 const BUFFERS: readonly [string, string][] = [
   ["RX", `// Receive buffer handed to the host by mw_alloc.\nconst RX: usize = memory.data(${MAX_MESSAGE});`],
+  ["RQ", `// Receive buffer handed to the host by mw_alloc: a request's meta block,\n// body and reply space (ABI 5), or a message.\nconst RQ: usize = memory.data(${REQUEST_BUFFER});`],
   ["TX", `// Text being built for publish, log and show text.\nconst TX_CAP: i32 = ${MAX_MESSAGE};\nconst TX: usize = memory.data(${MAX_MESSAGE});\nlet txLen: i32 = 0;`],
   ["DIGITS", "const DIGITS: usize = memory.data(11);"],
   ["PINS", `// Last level written to each pin, for toggle.\nconst PINS: usize = memory.data(${MAX_PIN + 1});`],
@@ -368,6 +373,9 @@ class Gen {
   /** `k.event` pairs that raise blocks name. */
   private readonly blockRaised = new Set<string>();
   private readonly host: MachineHost;
+  /** The phases that get a phase server (phaseGen.ts), or null. */
+  private readonly phasePlan: PhasePlan | null;
+  private readonly phaseHost: PhaseHost;
 
   constructor(
     private readonly ws: WorkspaceJson,
@@ -375,6 +383,7 @@ class Gen {
     private readonly pins: PinTable,
     private readonly machines: readonly Machine[],
     private readonly flows: readonly Flow[] = [],
+    phases: readonly PhaseSpec[] = [],
   ) {
     this.host = {
       str: (t) => this.str(t),
@@ -390,6 +399,23 @@ class Gen {
       comment: commentText,
     };
     this.plan = planMachines(machines, this.host);
+    this.phaseHost = {
+      ...this.host,
+      inState: (m, st) => planInState(this.plan, m, st),
+      raise: (m, ev) => planRaise(this.plan, m, ev),
+      pinRead: (label) => {
+        const r = this.labelPin(label, ["gpio-in", "gpio-out", "adc"], "a GPIO or analog input");
+        if (typeof r === "string") return { problem: r };
+        const row = this.pins.rows.find((x) => x.label === label);
+        if (row?.func === "adc") {
+          this.use("adc_read");
+          return { code: `mw_adc_read(${r.ident})` };
+        }
+        this.use("gpio_read");
+        return { code: `mw_gpio_read(${r.ident})` };
+      },
+    };
+    this.phasePlan = phases.length > 0 ? planPhases(phases, this.phaseHost) : null;
   }
 
   /** The constant naming a labelled pin when `label` names a table row
@@ -1088,7 +1114,11 @@ class Gen {
         return r;
       },
       repeat: (count, body) => this.repeat(count, body),
-    };
+      ...(this.phasePlan
+        ? { phaseAction: (a, own, fail) => lowerPhaseAction(a, this.phasePlan as PhasePlan, own, this.phaseHost, fail) }
+        : {}),
+    } satisfies FlowHost;
+    const phaseBodies: PhaseBody[] = [];
     for (const { flow, entry, body } of lowerFlows(this.flows, flowHost)) {
       const fail = (msg: string) => this.error(undefined, `flow ${flow.id}: ${msg}`);
       const lines = (pad: string) => {
@@ -1143,8 +1173,17 @@ class Gen {
           this.hats.set(key, [...(this.hats.get(key) ?? []), ...lines("  ")]);
           break;
         }
+        case "phase":
+          if (!this.phasePlan) {
+            fail(`"${entry.phase}" is not a phase of this unit`);
+            break;
+          }
+          phaseBodies.push({ phase: entry.phase, state: entry.state, every: entry.every, body, fail });
+          break;
       }
     }
+    const ph: PhaseCode | null = this.phasePlan ? emitPhases(this.phasePlan, phaseBodies, this.phaseHost) : null;
+    const settle = ph ? ["  phSettle();"] : [];
 
     // init: the pin table, subscriptions, pin interrupts, tick, the state
     // machines' initial states, then the on-init stacks.
@@ -1159,8 +1198,8 @@ class Gen {
       this.use("gpio_irq");
       setup.push(`  mw_gpio_input(${pin}, ${p.pull});`, `  mw_gpio_irq(${pin}, ${p.edges});`);
     }
-    const tickMs = every.reduce((g, e) => gcd(g, e.ms), 0);
-    if (every.length > 0) {
+    const tickMs = [...every.map((e) => e.ms), ...(ph?.periods ?? [])].reduce((g, ms) => gcd(g, ms), 0);
+    if (every.length > 0 || ph) {
       if (tickMs < MIN_TICK_MS) {
         this.error(every[0]?.b, `the every periods share a ${tickMs} ms tick; periods must have a common divisor of at least ${MIN_TICK_MS} ms`);
       }
@@ -1170,17 +1209,18 @@ class Gen {
 
     const sm = emitMachines(this.plan, this.hats, this.blockRaised, this.host);
     setup.push(...sm.init);
+    if (ph) setup.push(...ph.init);
 
     const globals: string[] = [...sm.globals];
     const fns: string[] = [];
     const exportsOut: string[] = [];
 
     if (setup.length + initBody.length > 0) {
-      fns.push(["export function init(): void {", ...setup, ...initBody, "}"].join("\n"));
+      fns.push(["export function init(): void {", ...setup, ...initBody, ...settle, "}"].join("\n"));
       exportsOut.push("init");
     }
 
-    if (every.length > 0) {
+    if (every.length > 0 || ph) {
       const lines = ["export function tick(nowMs: i32): void {"];
       every.forEach((e, i) => {
         if (e.ms === tickMs) {
@@ -1190,23 +1230,38 @@ class Gen {
           lines.push(`  every${i} += ${tickMs};`, `  if (every${i} >= ${e.ms}) {`, `    every${i} = 0;`, ...e.body, "  }");
         }
       });
+      if (ph) lines.push(...ph.tick(tickMs), ...settle);
       lines.push("}");
       fns.push(lines.join("\n"));
       exportsOut.push("tick");
     }
 
-    if (this.slots.size > 0) {
-      this.buffer("RX");
-      for (const slot of this.slots.values()) globals.push(`let ${slot}: i32 = -1;`);
-      globals.push("// The message being handled.", "let msgPtr: usize = 0;", "let msgLen: i32 = 0;");
+    if (ph) {
+      this.buffer("RQ");
       fns.push(
         [
-          "// Returns the receive buffer, or 0 to decline a message that does not fit.",
+          "// Returns the receive buffer, or 0 to decline what does not fit.",
           "export function mw_alloc(len: i32): usize {",
-          `  return len < 0 || len > ${MAX_MESSAGE} ? 0 : RX;`,
+          `  return len < 0 || len > ${REQUEST_BUFFER} ? 0 : RQ;`,
           "}",
         ].join("\n"),
       );
+      exportsOut.push("mw_alloc");
+    }
+    if (this.slots.size > 0) {
+      for (const slot of this.slots.values()) globals.push(`let ${slot}: i32 = -1;`);
+      globals.push("// The message being handled.", "let msgPtr: usize = 0;", "let msgLen: i32 = 0;");
+      if (!ph) {
+        this.buffer("RX");
+        fns.push(
+          [
+            "// Returns the receive buffer, or 0 to decline a message that does not fit.",
+            "export function mw_alloc(len: i32): usize {",
+            `  return len < 0 || len > ${MAX_MESSAGE} ? 0 : RX;`,
+            "}",
+          ].join("\n"),
+        );
+      }
       const lines = ["export function on_message(slot: i32, ptr: usize, len: i32): void {", "  msgPtr = ptr;", "  msgLen = len;"];
       for (const m of messages) {
         lines.push(`  if (slot == ${this.slot(m.key)}) {`, ...m.body, "  }");
@@ -1220,9 +1275,9 @@ class Gen {
         }
         lines.push("  }");
       }
-      lines.push("}");
+      lines.push(...settle, "}");
       fns.push(lines.join("\n"));
-      exportsOut.push("mw_alloc", "on_message");
+      exportsOut.push(...(ph ? [] : ["mw_alloc"]), "on_message");
     }
 
     const needsIrq = pinBodies.length > 0 || timers.length > 0 || this.imports.has("timer_start") || this.imports.has("gpio_irq");
@@ -1237,12 +1292,17 @@ class Gen {
         lines.push(`  if (kind == 1 && source == ${p.pin}${level}) {`, ...p.body, "  }");
       }
       for (const t of timers) lines.push(`  if (kind == 2 && source == ${t.id}) {`, ...t.body, "  }");
-      lines.push("}");
+      lines.push(...settle, "}");
       fns.push(lines.join("\n"));
       exportsOut.push("on_irq");
       if (timers.length > 0 && !this.imports.has("timer_start")) {
         this.warn(undefined, "an on timer block has no start timer block, so it never runs");
       }
+    }
+
+    if (ph) {
+      fns.push(ph.onRequest);
+      exportsOut.push("on_request");
     }
 
     for (const id of this.variables.values()) globals.push(`let ${id}: i32 = 0;`);
@@ -1275,9 +1335,10 @@ class Gen {
     }
     if (pinConsts.length > 0) parts.push(["// Pins (from the Pins table).", ...pinConsts].join("\n"));
     if (sm.consts.length > 0) parts.push(sm.consts.join("\n"));
+    if (ph) parts.push(ph.consts.join("\n"));
     if (globals.length > 0) parts.push(globals.join("\n"));
     const helpers = HELPERS.filter(([n]) => this.helpers.has(n)).map(([, src]) => src);
-    parts.push(...helpers, ...sm.fns, ...fns);
+    parts.push(...helpers, ...sm.fns, ...(ph?.fns ?? []), ...fns);
 
     return {
       source: `${parts.join("\n\n")}\n`,
@@ -1304,15 +1365,17 @@ const FUNC_COMMENT: Readonly<Record<PinFunc, string>> = {
 };
 
 /** Generates the AssemblyScript module for a workspace, its pin table,
- * its state machines and its flows (none by default: a workspace from
- * before the table, the machines or the flows generates exactly what it
- * did). */
+ * its state machines, its flows and its unit's equipment phases (none by
+ * default: a workspace from before the table, the machines, the flows or
+ * the phases generates exactly what it did). With phases the module is
+ * an S88 phase server (phaseGen.ts) and needs ABI 5. */
 export function generate(
   ws: WorkspaceJson,
   profile: ProfileId,
   pins: PinTable = EMPTY_PINS,
   machines: readonly Machine[] = [],
   flows: readonly Flow[] = [],
+  phases: readonly PhaseSpec[] = [],
 ): GenResult {
-  return new Gen(ws, profile, pins, machines, flows).run();
+  return new Gen(ws, profile, pins, machines, flows, phases).run();
 }

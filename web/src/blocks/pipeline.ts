@@ -19,6 +19,7 @@ import { compileAssemblyScript, loadWabt } from "../editor/compile";
 import type { AbiInfo } from "../protocol/wasm";
 import { toBytePages } from "./bytePages";
 import { type GenIssue, generate } from "./generator";
+import type { PhaseSpec } from "./phaseGen";
 import type { Flow, FlowIssue } from "../model/flows";
 import type { Machine, MachineIssue } from "../model/machines";
 import { EMPTY_PINS, type PinIssue, type PinTable } from "../model/pins";
@@ -60,6 +61,8 @@ export interface PinInput {
   machineIssues?: readonly MachineIssue[];
   flows?: readonly Flow[];
   flowIssues?: readonly FlowIssue[];
+  /** The unit's equipment phases: the module serves them (phaseGen.ts). */
+  phases?: readonly PhaseSpec[];
 }
 
 /** A checkFlows issue as one line: `Flows Press node n2: message`
@@ -99,7 +102,7 @@ export async function buildPayload(
 ): Promise<BuildResult> {
   const machines = pinInput.machines ?? [];
   const flows = pinInput.flows ?? [];
-  const gen = generate(ws, profile, pinInput.pins, machines, flows);
+  const gen = generate(ws, profile, pinInput.pins, machines, flows, pinInput.phases ?? []);
   if (pinInput.issues.length > 0) {
     const where = (i: PinIssue) => (i.row === null ? "" : `row ${i.row + 1}${pinInput.pins.rows[i.row]?.label ? ` (${pinInput.pins.rows[i.row]?.label})` : ""}: `);
     return { ok: false, source: gen.source, stage: "pins", errors: pinInput.issues.map((i) => `Pins ${where(i)}${i.message}`), issues: [] };

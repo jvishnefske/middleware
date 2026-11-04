@@ -2,7 +2,8 @@
 //!
 //! A flow (`web/src/model/flows.ts`) is a small control-flow graph drawn
 //! on the web editor's canvas: one **entry** node (run in `init`, every
-//! N ms, on a message, on a pin edge, or when a machine enters a state),
+//! N ms, on a message, on a pin edge, when a machine enters a state, or
+//! when an S88 equipment phase enters one of its acting states),
 //! then **action** nodes (the tables' [`Action`]s, a raise naming its
 //! machine), **branch** nodes (a [`Guard`], the tables' condition grammar
 //! with state tests), **repeat** nodes (a constant count of at most
@@ -36,6 +37,16 @@
 //! * actions and branch conditions by the tables' own rules
 //!   ([`crate::check::action_issues`], [`crate::check::guard_issues`]),
 //!   except that a raise must name its machine;
+//! * phases ([`check_flows_in`] with the unit's [`PhaseDecl`]s; none for
+//!   [`check_flows`]): a phase entry names a phase of the unit and one of
+//!   its [`ACTING_STATES`], an optional `every` period like an `every`
+//!   entry, and no two flows have the same phase and state (a phase
+//!   state has one body flow); a `phase-done` or `phase-report` node names
+//!   a phase of the unit; `after` (done once the body has run that many
+//!   times, a count 1..=[`MAX_REPEAT`] or a class parameter) and the
+//!   `runs` value belong to that phase's own body flow; a report has at
+//!   most [`MAX_REPORT_VALUES`] values, each a constant, a class parameter,
+//!   `runs` or a pin-table label that is not an output;
 //! * a wire names existing nodes, an output port the source node has and
 //!   the `in` port of a node that is not an entry; each output port and
 //!   each input is wired at most once (reported on the later wire);
@@ -63,6 +74,92 @@ pub const MAX_REPEAT: i64 = 10_000;
 pub const MAX_SEQUENCE: i64 = 4;
 /// Shortest `every` period (wasm_abi::MIN_TICK_MS).
 pub const MIN_TICK_MS: i64 = 10;
+
+/// The phase states a body flow can run in (the acting states of the S88
+/// phase model, `recipe_core::phase`, which tests that these are its
+/// acting states' names in lower case).
+pub const ACTING_STATES: [&str; 6] = [
+    "running",
+    "holding",
+    "restarting",
+    "stopping",
+    "aborting",
+    "resetting",
+];
+
+/// Most values one `phase-report` carries (`recipe_core::MAX_PARAMS`).
+pub const MAX_REPORT_VALUES: usize = 4;
+
+/// An equipment phase of the unit whose flows are checked: what phase
+/// entries and actions may name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseDecl<'a> {
+    /// The equipment module's id.
+    pub em: &'a str,
+    /// The phase's id within it.
+    pub phase: &'a str,
+    /// The phase class's parameter ids, in order.
+    pub params: &'a [&'a str],
+}
+
+/// When a `phase-done` node completes its phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum After<'a> {
+    /// At once.
+    Now,
+    /// Once the body has run this many times in the current state.
+    Count(i64),
+    /// Once the body has run as many times as this Start argument says.
+    Param(&'a str),
+}
+
+/// One value a `phase-report` node publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseValue<'a> {
+    /// A constant.
+    Const(i64),
+    /// A pin's reading (a digital input's level, an analog input's raw
+    /// value).
+    Pin(&'a str),
+    /// A Start argument of the phase.
+    Param(&'a str),
+    /// How many times the body has run in the current state.
+    Runs,
+}
+
+/// A phase action node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseAction<'a> {
+    /// The phase's acting state is done (`phase-done`).
+    Done {
+        /// The equipment module.
+        em: &'a str,
+        /// The phase.
+        phase: &'a str,
+        /// When.
+        after: After<'a>,
+    },
+    /// Publish result values in the phase's reports (`phase-report`).
+    Report {
+        /// The equipment module.
+        em: &'a str,
+        /// The phase.
+        phase: &'a str,
+        /// The values, in order.
+        values: &'a [PhaseValue<'a>],
+    },
+}
+
+impl<'a> PhaseAction<'a> {
+    /// The phase it names.
+    pub const fn target(&self) -> (&'a str, &'a str) {
+        match *self {
+            PhaseAction::Done { em, phase, .. } | PhaseAction::Report { em, phase, .. } => {
+                (em, phase)
+            }
+        }
+    }
+}
 
 /// Which pin edges a pin-edge entry runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +201,19 @@ pub enum Entry<'a> {
         /// The state's name.
         state: &'a str,
     },
+    /// When equipment phase `<em>.<phase>` enters acting state `state`
+    /// (one of [`ACTING_STATES`]), and then every `every` ms while it
+    /// stays there.
+    Phase {
+        /// The equipment module.
+        em: &'a str,
+        /// The phase.
+        phase: &'a str,
+        /// The acting state.
+        state: &'a str,
+        /// The repeat period while in the state.
+        every: Option<i64>,
+    },
 }
 
 /// What a node does.
@@ -125,6 +235,8 @@ pub enum NodeKind<'a> {
         /// How many steps.
         steps: i64,
     },
+    /// A phase action (`phase-done`, `phase-report`).
+    Phase(PhaseAction<'a>),
 }
 
 const SEQ_PORTS: [&str; MAX_SEQUENCE as usize] = ["1", "2", "3", "4"];
@@ -133,7 +245,7 @@ impl NodeKind<'_> {
     /// The output ports, in the order they run.
     pub fn outputs(&self) -> &'static [&'static str] {
         match *self {
-            NodeKind::Entry(_) | NodeKind::Action(_) => &["next"],
+            NodeKind::Entry(_) | NodeKind::Action(_) | NodeKind::Phase(_) => &["next"],
             NodeKind::Branch(_) => &["then", "else", "next"],
             NodeKind::Repeat { .. } => &["body", "next"],
             NodeKind::Sequence { steps } => {
@@ -344,6 +456,54 @@ pub enum FlowKind<'a> {
     RepeatEmpty,
     /// Warning: neither `then` nor `else` is wired.
     BranchEmpty,
+    /// A phase entry or action names no phase of this unit.
+    PhaseUnknown {
+        /// The equipment module given.
+        em: &'a str,
+        /// The phase given.
+        phase: &'a str,
+        /// A phase whose `<em>.<phase>` differs only in case.
+        near: Option<(&'a str, &'a str)>,
+    },
+    /// A phase entry's state is not an acting state.
+    PhaseStateNotActing {
+        /// The state given.
+        state: &'a str,
+    },
+    /// Another flow already is the body of this phase state.
+    PhaseBodyTaken {
+        /// That flow's index.
+        other: usize,
+    },
+    /// `after` or a report value names no parameter of the phase's class.
+    PhaseParamUnknown {
+        /// The parameter given.
+        param: &'a str,
+    },
+    /// An `after` count outside 1..=[`MAX_REPEAT`].
+    BadAfter {
+        /// The count.
+        count: i64,
+    },
+    /// `after` or the `runs` value outside the phase's own body flow.
+    RunsOutsideBody,
+    /// More than [`MAX_REPORT_VALUES`] report values.
+    TooManyValues {
+        /// How many.
+        count: usize,
+    },
+    /// A report value reads a pin the table does not have.
+    ValuePinUnknown {
+        /// The label.
+        label: &'a str,
+        /// A pin whose label differs only in case.
+        near: Option<&'a str>,
+    },
+    /// A report value reads an output pin.
+    ValuePinOutput {
+        /// The label.
+        label: &'a str,
+    },
 }
 
 /// One problem with a flow.
@@ -363,11 +523,24 @@ pub struct FlowIssue<'a> {
 
 /// Checks `flows` against the machines and the pin table, calling `sink`
 /// for each issue in order (flow by flow). `keys` validates key syntax
-/// like [`crate::check()`]'s.
+/// like [`crate::check()`]'s. The unit has no phases: every phase entry
+/// and action is [`FlowKind::PhaseUnknown`]; see [`check_flows_in`].
 pub fn check_flows<'a>(
     flows: &[Flow<'a>],
     machines: &[Machine<'a>],
     pins: &[Pin<'a>],
+    keys: impl Fn(&str) -> Result<(), KeyProblem>,
+    sink: &mut impl FnMut(FlowIssue<'a>),
+) {
+    check_flows_in(flows, machines, pins, &[], keys, sink);
+}
+
+/// [`check_flows`] for a unit with equipment phases `phases`.
+pub fn check_flows_in<'a>(
+    flows: &[Flow<'a>],
+    machines: &[Machine<'a>],
+    pins: &[Pin<'a>],
+    phases: &[PhaseDecl<'a>],
     keys: impl Fn(&str) -> Result<(), KeyProblem>,
     sink: &mut impl FnMut(FlowIssue<'a>),
 ) {
@@ -390,7 +563,111 @@ pub fn check_flows<'a>(
             );
             continue;
         }
-        check_flow(flows, fi, f, machines, pins, &keys, &mut out);
+        let ctx = Ctx {
+            flows,
+            machines,
+            pins,
+            phases,
+        };
+        check_flow(&ctx, fi, f, &keys, &mut out);
+    }
+}
+
+/// What a flow is checked against.
+struct Ctx<'c, 'a> {
+    flows: &'c [Flow<'a>],
+    machines: &'c [Machine<'a>],
+    pins: &'c [Pin<'a>],
+    phases: &'c [PhaseDecl<'a>],
+}
+
+/// The phase entry of a flow, if its first entry is one.
+fn phase_entry<'a>(f: &Flow<'a>) -> Option<(&'a str, &'a str, &'a str)> {
+    f.nodes.iter().find_map(|n| match n.kind {
+        NodeKind::Entry(Entry::Phase {
+            em, phase, state, ..
+        }) => Some((em, phase, state)),
+        _ => None,
+    })
+}
+
+fn find_phase<'c, 'a>(
+    phases: &'c [PhaseDecl<'a>],
+    em: &str,
+    phase: &str,
+) -> Option<&'c PhaseDecl<'a>> {
+    phases.iter().find(|p| p.em == em && p.phase == phase)
+}
+
+fn phase_unknown<'a>(phases: &[PhaseDecl<'a>], em: &'a str, phase: &'a str) -> FlowKind<'a> {
+    let near = phases
+        .iter()
+        .find(|p| p.em.eq_ignore_ascii_case(em) && p.phase.eq_ignore_ascii_case(phase))
+        .map(|p| (p.em, p.phase));
+    FlowKind::PhaseUnknown { em, phase, near }
+}
+
+/// Checks a phase action node of flow `f`.
+fn check_phase_action<'a>(
+    ctx: &Ctx<'_, 'a>,
+    f: &Flow<'a>,
+    a: &PhaseAction<'a>,
+    emit: &mut impl FnMut(FlowKind<'a>),
+) {
+    let (em, phase) = a.target();
+    let Some(decl) = find_phase(ctx.phases, em, phase) else {
+        emit(phase_unknown(ctx.phases, em, phase));
+        return;
+    };
+    let own_body = phase_entry(f).is_some_and(|(e, p, _)| e == em && p == phase);
+    let param = |name: &'a str, emit: &mut dyn FnMut(FlowKind<'a>)| {
+        if !decl.params.contains(&name) {
+            emit(FlowKind::PhaseParamUnknown { param: name });
+        }
+    };
+    match *a {
+        PhaseAction::Done { after, .. } => match after {
+            After::Now => {}
+            After::Count(count) => {
+                if !(1..=MAX_REPEAT).contains(&count) {
+                    emit(FlowKind::BadAfter { count });
+                }
+                if !own_body {
+                    emit(FlowKind::RunsOutsideBody);
+                }
+            }
+            After::Param(name) => {
+                param(name, emit);
+                if !own_body {
+                    emit(FlowKind::RunsOutsideBody);
+                }
+            }
+        },
+        PhaseAction::Report { values, .. } => {
+            if values.len() > MAX_REPORT_VALUES {
+                emit(FlowKind::TooManyValues {
+                    count: values.len(),
+                });
+            }
+            for v in values.iter().take(MAX_REPORT_VALUES) {
+                match *v {
+                    PhaseValue::Const(_) => {}
+                    PhaseValue::Param(name) => param(name, emit),
+                    PhaseValue::Runs if !own_body => emit(FlowKind::RunsOutsideBody),
+                    PhaseValue::Runs => {}
+                    PhaseValue::Pin(label) => match ctx.pins.iter().find(|p| p.label == label) {
+                        Some(p) if p.func == PinUse::Output => {
+                            emit(FlowKind::ValuePinOutput { label });
+                        }
+                        Some(_) => {}
+                        None => emit(FlowKind::ValuePinUnknown {
+                            label,
+                            near: near(ctx.pins, label, |p| p.label),
+                        }),
+                    },
+                }
+            }
+        }
     }
 }
 
@@ -399,15 +676,14 @@ fn near<'a, T>(items: &[T], name: &str, of: impl Fn(&T) -> &'a str) -> Option<&'
 }
 
 fn check_flow<'a>(
-    flows: &[Flow<'a>],
+    ctx: &Ctx<'_, 'a>,
     fi: usize,
     f: &Flow<'a>,
-    machines: &[Machine<'a>],
-    pins: &[Pin<'a>],
     keys: &impl Fn(&str) -> Result<(), KeyProblem>,
     out: &mut impl FnMut(At, Severity, FlowKind<'a>, Option<Fix<'a>>),
 ) {
     use Severity::{Error, Warning};
+    let (flows, machines, pins) = (ctx.flows, ctx.machines, ctx.pins);
     if !ident_ok(f.id) {
         out(At::Flow, Error, FlowKind::IdInvalid { id: f.id }, None);
     } else if let Some(other) = flows
@@ -469,6 +745,24 @@ fn check_flow<'a>(
                 check_entry(e, machines, pins, keys, &mut |kind, fix| {
                     out(at, Error, kind, fix)
                 });
+                if let Entry::Phase {
+                    em, phase, state, ..
+                } = e
+                {
+                    if find_phase(ctx.phases, em, phase).is_none() {
+                        out(at, Error, phase_unknown(ctx.phases, em, phase), None);
+                    } else if let Some(other) = flows
+                        .iter()
+                        .take(fi)
+                        .position(|o| phase_entry(o) == Some((em, phase, state)))
+                        && ACTING_STATES.contains(&state)
+                    {
+                        out(at, Error, FlowKind::PhaseBodyTaken { other }, None);
+                    }
+                }
+            }
+            NodeKind::Phase(a) => {
+                check_phase_action(ctx, f, &a, &mut |kind| out(at, Error, kind, None));
             }
             NodeKind::Action(a) => {
                 action_issues(machines, None, 0, &a, pins, keys, &mut |kind, fix| {
@@ -705,6 +999,16 @@ fn check_entry<'a>(
             ),
             Some(_) => {}
         },
+        Entry::Phase { state, every, .. } => {
+            if !ACTING_STATES.contains(&state) {
+                emit(FlowKind::PhaseStateNotActing { state }, None);
+            }
+            if let Some(ms) = every
+                && !(MIN_TICK_MS..=i64::from(i32::MAX)).contains(&ms)
+            {
+                emit(FlowKind::BadPeriod { ms }, None);
+            }
+        }
     }
 }
 

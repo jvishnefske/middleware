@@ -1922,6 +1922,7 @@ dependencies = [
  "middleware",
  "mw-jpeg",
  "peak_alloc",
+ "recipe-core",
  "wasm-host",
  "wat",
 ]

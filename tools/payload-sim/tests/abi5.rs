@@ -39,7 +39,11 @@ fn run(args: &[&str], stdin: &str) -> String {
         .write_all(stdin.as_bytes())
         .expect("stdin");
     let out = child.wait_with_output().expect("runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("utf8")
 }
 

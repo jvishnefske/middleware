@@ -37,6 +37,7 @@
 // this file only renders and forwards.
 
 import { ACTION_KINDS, type ActionKind, type ActionRef, CMP_TEXT, type Machine } from "../model/machines";
+import { ACTING_STATES } from "../model/procedural";
 import {
   EDGES,
   ENTRY_ONS,
@@ -48,7 +49,9 @@ import {
   MAX_FLOWS,
   NODE_KINDS,
   type NodeKind,
+  type PhaseDecl,
   addNode,
+  isPhaseAction,
   connect,
   defaultNode,
   disconnect,
@@ -69,6 +72,13 @@ import { focusKeeper, grid } from "./grid";
 import {
   ENTRY_TEXT,
   KIND_TEXT,
+  PHASE_ACTION_KINDS,
+  PHASE_ACTION_TEXT,
+  type PhaseActionKind,
+  parsePhaseValues,
+  phaseActionOf,
+  phaseName,
+  phaseValuesText,
   NODE_H,
   NODE_W,
   PORT_R,
@@ -109,7 +119,16 @@ export interface FlowsViewEvents {
 export interface FlowsView {
   el: HTMLElement;
   /** `trail`: each flow's latest run in the simulator, by flow id. */
-  render(flows: readonly Flow[], issues: readonly FlowIssue[], machines: readonly Machine[], pins: readonly PinRef[], trail: ReadonlyMap<string, readonly string[]> | null): void;
+  /** `phases`: the unit's equipment phases, which phase entries and
+   * actions may name. */
+  render(
+    flows: readonly Flow[],
+    issues: readonly FlowIssue[],
+    machines: readonly Machine[],
+    pins: readonly PinRef[],
+    trail: ReadonlyMap<string, readonly string[]> | null,
+    phases?: readonly PhaseDecl[],
+  ): void;
 }
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -141,6 +160,7 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
   let issues: readonly FlowIssue[] = [];
   let machines: readonly Machine[] = [];
   let pins: readonly PinRef[] = [];
+  let phases: readonly PhaseDecl[] = [];
   let trail: ReadonlyMap<string, readonly string[]> | null = null;
   let at = 0;
   let sel: Selection = null;
@@ -613,10 +633,10 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
     switch (n.kind) {
       case "entry": {
         const on = select(
-          ENTRY_ONS.map((o): Option => [o, ENTRY_TEXT[o]]),
+          ENTRY_ONS.filter((o) => o !== "phase" || phases.length > 0 || n.props.on === "phase").map((o): Option => [o, ENTRY_TEXT[o]]),
           n.props.on,
         );
-        on.addEventListener("change", () => set({ ...n, props: entryOf(on.value as EntryOn, n.props, pins, machines) }));
+        on.addEventListener("change", () => set({ ...n, props: entryOf(on.value as EntryOn, n.props, pins, machines, phases) }));
         rows.push(["Starts", on]);
         const p = n.props;
         if (p.on === "every") rows.push(["Every (ms)", num(p.ms, (ms) => set({ ...n, props: { ...p, ms } }))]);
@@ -636,16 +656,70 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
           st.addEventListener("change", () => set({ ...n, props: { on: "entered", state: st.value } }));
           rows.push(["State", st]);
         }
+        if (p.on === "phase") {
+          const ph = select(nameOptions(phases.map(phaseName), p.phase, "not a phase of this unit"), p.phase);
+          ph.addEventListener("change", () => set({ ...n, props: { ...p, phase: ph.value } }));
+          const st = select(
+            ACTING_STATES.map((x): Option => [x, x]),
+            p.state,
+          );
+          st.addEventListener("change", () => set({ ...n, props: { ...p, state: st.value as (typeof ACTING_STATES)[number] } }));
+          const every = text(p.every === undefined ? "" : String(p.every), (v) => {
+            const { every: _drop, ...rest } = p;
+            const ms = Math.trunc(Number(v));
+            set({ ...n, props: v.trim() === "" || !Number.isFinite(ms) ? rest : { ...rest, every: ms } });
+          }, "number");
+          every.setAttribute("placeholder", "once");
+          rows.push(["Phase", ph], ["State", st], ["Again every (ms)", every]);
+        }
         break;
       }
       case "action": {
         const a = n.props;
+        const offerPhase = phases.length > 0 || isPhaseAction(a);
         const k = select(
-          ACTION_KINDS.map((x): Option => [x, ACTION_KIND_TEXT[x]]),
+          [
+            ...ACTION_KINDS.map((x): Option => [x, ACTION_KIND_TEXT[x]]),
+            ...(offerPhase ? PHASE_ACTION_KINDS.map((x): Option => [x, PHASE_ACTION_TEXT[x]]) : []),
+          ],
           a.kind,
         );
-        k.addEventListener("change", () => set({ ...n, props: flowActionOf(k.value as ActionKind, a, pins, machines) }));
+        k.addEventListener("change", () => {
+          const kind = k.value;
+          const next = (PHASE_ACTION_KINDS as readonly string[]).includes(kind)
+            ? phaseActionOf(kind as PhaseActionKind, a, phases)
+            : flowActionOf(kind as ActionKind, a, pins, machines);
+          set({ ...n, props: next });
+        });
         rows.push(["Does", k]);
+        if (isPhaseAction(a)) {
+          const ph = select(nameOptions(phases.map(phaseName), a.phase, "not a phase of this unit"), a.phase);
+          ph.addEventListener("change", () => set({ ...n, props: { ...a, phase: ph.value } }));
+          rows.push(["Phase", ph]);
+          const params = phases.find((x) => phaseName(x) === a.phase)?.params ?? [];
+          if (a.kind === "phase-done") {
+            const when = select(
+              [
+                ["now", "at once"],
+                ["count", "after the body ran N times"],
+                ...params.map((x): Option => [`param:${x}`, `after the body ran ${x} times`]),
+              ],
+              a.after === undefined ? "now" : typeof a.after === "number" ? "count" : `param:${a.after}`,
+            );
+            when.addEventListener("change", () => {
+              const { after: _drop, ...rest } = a;
+              const v = when.value;
+              set({ ...n, props: v === "now" ? rest : v === "count" ? { ...rest, after: typeof a.after === "number" ? a.after : 1 } : { ...rest, after: v.slice(6) } });
+            });
+            rows.push(["Done", when]);
+            if (typeof a.after === "number") rows.push(["N", num(a.after, (after) => set({ ...n, props: { ...a, after } }))]);
+          } else {
+            const vals = text(phaseValuesText(a.values), (t) => set({ ...n, props: { ...a, values: parsePhaseValues(t, params) } }));
+            vals.setAttribute("aria-description", "comma separated: numbers, runs, the phase's parameters or pin labels");
+            rows.push(["Values", vals]);
+          }
+          break;
+        }
         const put = (next: ActionRef) => set({ ...n, props: next });
         if (a.kind === "write" || a.kind === "toggle") {
           const pin = select(labelOptions(pins, OUTPUT_FUNCS, a.label, "not an output"), a.label);
@@ -759,7 +833,7 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
 
   return {
     el: root,
-    render(fs, is, ms, ps, tr) {
+    render(fs, is, ms, ps, tr, phs = []) {
       // A change this view did not send (an example, an import, a fix)
       // starts a new undo history.
       const same = (a: readonly Flow[] | null) => a !== null && JSON.stringify(a) === JSON.stringify(fs);
@@ -769,6 +843,7 @@ export function flowsView(ev: FlowsViewEvents): FlowsView {
       issues = is;
       machines = ms;
       pins = ps;
+      phases = phs;
       trail = tr;
       at = Math.max(0, Math.min(at, fs.length - 1));
       draw();

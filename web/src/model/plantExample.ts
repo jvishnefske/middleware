@@ -4,8 +4,10 @@
 // equipment module offering LED.Blink, and an ESP32 with an ADC equipment
 // module offering ADC.Measure. Allocation binds Blink to the Pico and
 // Measure to the ESP32 (web/test/recipe.check.test.ts). The phase bodies
-// are ordinary flows for now; the phase-state flow entry they will use
-// arrives with the phase codegen (round 8 in the backlog).
+// are flows with phase entries (phaseGen.ts serves them): Blink toggles
+// the LED every 250 ms and is done after `times` toggles, its resetting
+// body turns the LED off; Measure reports the potentiometer and the
+// sample count every 100 ms and is done after `samples` readings.
 
 import type { Flow } from "./flows";
 import { makePlant, type PlantModel, type Unit } from "./plant";
@@ -18,10 +20,29 @@ const BLINK_RUN: Flow = {
   id: "BlinkRun",
   name: "Blink: toggle the LED",
   nodes: [
-    { id: "n1", kind: "entry", x: 40, y: 40, props: { on: "every", ms: 250 } },
+    { id: "n1", kind: "entry", x: 40, y: 40, props: { on: "phase", phase: "LED.Blink", state: "running", every: 250 } },
     { id: "n2", kind: "action", x: 40, y: 160, props: { kind: "toggle", label: "LED" } },
+    { id: "n3", kind: "action", x: 40, y: 280, props: { kind: "phase-done", phase: "LED.Blink", after: "times" } },
   ],
-  wires: [{ from: { node: "n1", port: "next" }, to: { node: "n2", port: "in" } }],
+  wires: [
+    { from: { node: "n1", port: "next" }, to: { node: "n2", port: "in" } },
+    { from: { node: "n2", port: "next" }, to: { node: "n3", port: "in" } },
+  ],
+};
+
+const BLINK_RESET: Flow = {
+  kind: "flow",
+  id: "BlinkReset",
+  name: "Blink: LED off on reset",
+  nodes: [
+    { id: "n1", kind: "entry", x: 40, y: 40, props: { on: "phase", phase: "LED.Blink", state: "resetting" } },
+    { id: "n2", kind: "action", x: 40, y: 160, props: { kind: "write", label: "LED", level: 0 } },
+    { id: "n3", kind: "action", x: 40, y: 280, props: { kind: "phase-done", phase: "LED.Blink" } },
+  ],
+  wires: [
+    { from: { node: "n1", port: "next" }, to: { node: "n2", port: "in" } },
+    { from: { node: "n2", port: "next" }, to: { node: "n3", port: "in" } },
+  ],
 };
 
 const SAMPLE: Flow = {
@@ -29,10 +50,14 @@ const SAMPLE: Flow = {
   id: "Sample",
   name: "Measure: take a sample",
   nodes: [
-    { id: "n1", kind: "entry", x: 40, y: 40, props: { on: "every", ms: 100 } },
-    { id: "n2", kind: "action", x: 40, y: 160, props: { kind: "log", text: "sample" } },
+    { id: "n1", kind: "entry", x: 40, y: 40, props: { on: "phase", phase: "ADC.Measure", state: "running", every: 100 } },
+    { id: "n2", kind: "action", x: 40, y: 160, props: { kind: "phase-report", phase: "ADC.Measure", values: [{ kind: "pin", label: "POT" }, { kind: "runs" }] } },
+    { id: "n3", kind: "action", x: 40, y: 280, props: { kind: "phase-done", phase: "ADC.Measure", after: "samples" } },
   ],
-  wires: [{ from: { node: "n1", port: "next" }, to: { node: "n2", port: "in" } }],
+  wires: [
+    { from: { node: "n1", port: "next" }, to: { node: "n2", port: "in" } },
+    { from: { node: "n2", port: "next" }, to: { node: "n3", port: "in" } },
+  ],
 };
 
 const LED_UNIT: Unit = {
@@ -43,7 +68,7 @@ const LED_UNIT: Unit = {
   board: "pico2",
   cms: { rows: [row("gpio-out", "LED", 25)], buses: [] },
   ems: [{ id: "LED", name: "Status LED", cms: ["LED"] }],
-  logic: [{ kind: "blocks", workspace: {} }, BLINK_RUN],
+  logic: [{ kind: "blocks", workspace: {} }, BLINK_RUN, BLINK_RESET],
   machines: [],
 };
 
@@ -72,7 +97,7 @@ const PROCEDURAL: ProceduralModel = {
     { id: "Measure", name: "Take a reading", params: [{ id: "samples", name: "Samples", min: 1, max: 16, unit: "" }] },
   ],
   phases: [
-    { unit: "pico-led", em: "LED", id: "Blink", class: "Blink", ranges: { period_ms: [50, 1_000], times: [1, 10] }, bodies: { running: "BlinkRun" } },
+    { unit: "pico-led", em: "LED", id: "Blink", class: "Blink", ranges: { period_ms: [50, 1_000], times: [1, 10] }, bodies: { running: "BlinkRun", resetting: "BlinkReset" } },
     { unit: "esp-sense", em: "ADC", id: "Measure", class: "Measure", ranges: { samples: [1, 8] }, bodies: { running: "Sample" } },
   ],
 };
