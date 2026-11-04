@@ -1399,6 +1399,21 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   to 40 920 B, under its 40 KiB check; with none it is 45 032 B —
   conagotchi `scripts/check.sh` "firmware main stack" step (2026-10-29),
   `firmware/build.sh esp32s3`.
+- [x] E24 I2C bus 0 for payloads on the ESP32-S3 (ABI 3), the ESP32's
+  driver and claims: SDA GPIO 5, SCL GPIO 6 (`chip::ESP32S3`'s `i2c0`, a
+  board constant: no strapping, flash/PSRAM, USB or UART0 pin, free on the
+  ESP32-S3-DevKitC-1 and on the conagotchi badge), clocks up to 400 kHz
+  (bus 1 and faster clocks `Unsupported`); the pins are exclusive to the
+  bus while open and released on stop. On both chips each byte has a
+  software timeout of two byte times plus 100 µs (esp-hal's defaults left
+  a stuck bus on the S3 unbounded), so a 64 + 64-byte transfer returns
+  within about 37 ms at 100 kHz and 255 ms at 10 kHz. The ESP32-C3 and
+  ESP8266 run no payloads, so they have no I2C or SPI —
+  `chip::tests::e24_esp32s3_maps_i2c_bus_0_to_gpio_5_and_6`;
+  `periph::claims::tests::e24_esp32s3_i2c_bus_0_holds_gpio_5_and_6_exclusively`;
+  `periph::i2c::tests::e24_byte_timeout_is_two_byte_times_plus_slack`,
+  `e24_a_full_transfer_is_bounded`, `e24_open_plan_accepts_bus_0_up_to_fast_mode`;
+  `firmware/build.sh esp32s3`. Transfers on S3 hardware untested.
 - [x] E22 The `disc:` log lines print radio-supplied kinds and instances
   with every byte outside printable ASCII, and `\`, as `\xNN`, so a
   beacon cannot inject terminal escapes or line breaks into `sys/log` —
@@ -1600,8 +1615,8 @@ the identity, so the same build works there (without the updater).
 
 RAM: the RP2040 build has no heap (no runtime) and 22 KB of static RAM,
 leaving about 242 KiB of stack. The RP2350 build holds a 384 KiB heap arena
-in `.bss` (static RAM 432 KB in all, the firmware updater's 5 KiB sector
-stash and the main task's larger future included), leaving about 97 KiB
+in `.bss` (static RAM 436 KB in all, the firmware updater's 5 KiB sector
+stash, the 4 KiB SPI transfer buffer and the main task's larger future included), leaving about 94 KiB
 for the main stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
 128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
 bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
@@ -1618,13 +1633,37 @@ Payload ABI on the RP2350 (the RP2040 runs no payloads):
 | ABI call | RP base |
 |---|---|
 | `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes |
-| `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | yes: GPIO 0–22 and 25 (LED); 24 (VBUS sense) input only; 23 and 29 reserved |
+| `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | yes: GPIO 0–22 and 25 (LED); 24 (VBUS sense) input only; 23 and 29 reserved; `Busy` on a pin an SPI or I2C bus holds |
 | `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller loop, delivered to `on_irq` |
 | `adc_read` | yes: GPIO 26–28 (ADC0–ADC2), 12-bit; those pins are analog only |
+| `spi_open`, `spi_transfer`, `dma_read` (`Spi0`) | yes: bus 0 on SPI0 or SPI1, whichever the payload's pins select (pins checked against the GPIO function table); 1.93 kHz (RP2040) / 2.31 kHz (RP2350) to 40 MHz, never faster than asked; modes 0–3; CS any output pin, low for the whole transfer; up to 4092 bytes pumped through the FIFOs by the controller loop (no DMA), completion as `DmaDone` |
+| `i2c_open`, `i2c_transfer` | yes: bus 0 SDA GPIO 4 / SCL GPIO 5, bus 1 SDA GPIO 6 / SCL GPIO 7 (internal pull-ups on), 10 kHz–1 MHz; blocking, each transfer time bounded; NACK, arbitration loss and timeout are `Transport`; address-only probes `Unsupported` |
 | `gpio_irq` | `Unsupported` |
-| `spi_open`, `spi_transfer`, `dma_read`, `uart_open`, `uart_write`, `uart_read` | `Unsupported` |
-| `pwm_open`, `pwm_set`, `pwm_stop`, `i2c_open`, `i2c_transfer` | `Unsupported` (no pins bound to PWM or I2C on this board map) |
+| `uart_open`, `uart_write`, `uart_read`, `dma_read` (`Uart1Tx`) | `Unsupported` |
+| `pwm_open`, `pwm_set`, `pwm_stop` | `Unsupported` (no pins bound to PWM on this board map) |
 | `route_source`, `route_sink`, `route_stop`, `route_stat` | `Unsupported` |
+
+SPI and I2C on the RP base. Both chips route each peripheral signal to
+fixed GPIOs (functions F1 and F3 of the datasheets' GPIO function tables,
+identical for GPIO 0–29 on the RP2040 and RP2350): SPI0 has SCK on 2, 6,
+18, 22, TX (MOSI) on 3, 7, 19, 23 and RX (MISO) on 0, 4, 16, 20; SPI1 SCK
+on 10, 14, 26, TX on 11, 15, 27, RX on 8, 12, 24, 28; I2C0 SDA on every
+pin `n` with `n % 4 == 0`, I2C1 SDA on `n % 4 == 2`, SCL one above. The
+ABI has one SPI bus, so bus 0 lands on whichever controller its pins name;
+the board maps I2C bus 0 and 1 to the Pico pinout's defaults (GP4/GP5,
+GP6/GP7). The controllers are driven through embassy-rp's PAC, not its
+drivers: those take pins by type, which the pin bank (one `Flex` per
+payload pin for the firmware's life) cannot give, and their blocking loops
+are unbounded on a stuck bus. A bus takes a pin by switching its function
+select and gives it back as an input without pull. Pins are exclusive both
+ways (`rp_base::periph::claims`): a bus cannot take a pin another bus holds
+or one the payload configured as GPIO, and `gpio_*` on a bus pin is
+`Busy`; reserved and ADC pins are `Unsupported` for every bus. (esp-base
+answers a pin held by another peripheral with `InvalidArgument` and lets a
+peripheral take a GPIO pin.) An I2C transfer gives up after twice its bus
+time plus 2 ms (at most 237 ms) and an SPI transfer after twice its bus
+time plus 100 ms; a fault resets the controller. A stop, trap or upload
+holds every controller in reset and frees every pin.
 
 Known gaps: neither board has a presence button wired, so there is no
 re-key window (a claimed device is re-keyed by erasing the trust region,
@@ -1720,6 +1759,59 @@ atomics; nothing has run on silicon yet.
   `service::tests::v13_an_unreadable_trust_record_refuses_payload_installs_and_claims`;
   `ota::tests::y16_an_unreadable_trust_record_refuses_firmware_installs`
   (loader part).
+- [x] V14 The `periph_demo` payload (one SPI loopback transfer and one
+  register read from a configured I2C address, no address scanning) runs
+  in `payload-sim` against its SPI loopback and I2C register device, and
+  its byte-page build (16 KiB memory) fits the Pico 2 heap —
+  `tools/payload-sim/tests/periph_demo.rs`
+  (`v14_periph_demo_runs_spi_loopback_and_i2c_read_in_the_simulator`,
+  `v14_periph_demo_logs_a_mismatch_when_miso_disagrees`; 4 922-byte image);
+  `budget::tests::v7_the_rp2350_heap_admits_images_up_to_its_cap`
+  (byte-page images up to the 64 KiB cap at 16 KiB memory).
+- [x] V15 SPI pins follow the chips' GPIO function tables: SCK, MOSI and
+  MISO must carry their signal and sit on one controller (SPI0 or SPI1);
+  CS may be any output pin; a pin without the signal or signals on two
+  controllers are `Unsupported`, the board policy applying first, for the
+  RP2040 and the RP2350 alike —
+  `periph::func::tests::v15_function_tables_match_the_datasheets`,
+  `v15_spi_pins_resolve_onto_one_block_on_both_chips`.
+- [x] V16 I2C buses 0 and 1 use GPIO 4/5 and 6/7, which carry I2C0 and
+  I2C1 in the function table; every ABI clock (10 kHz–1 MHz) has a timing
+  within 1 % at 125 and 150 MHz `clk_peri`, others are refused; a transfer
+  is the writes, a repeated start and the reads with one stop at the end;
+  address-only probes are `Unsupported`; every transfer has a time bound
+  (at most 237 ms); NACK, arbitration loss, other aborts and the timeout
+  are `Transport` —
+  `chip::tests::v16_i2c_buses_map_to_the_pico_default_pins`;
+  `periph::i2c::tests::v16_every_abi_clock_has_a_timing_on_both_chips`,
+  `v16_clocks_outside_the_abi_or_the_divider_are_refused`,
+  `v16_transfers_are_writes_then_reads_after_a_repeated_start`,
+  `v16_every_transfer_is_bounded_in_time`, `v16_every_fault_is_transport`.
+- [x] V17 The SPI divider gives the fastest clock not above the request
+  (requests below the slowest divider are `Unsupported`), modes map to
+  polarity and phase, the FIFO pump moves every byte in bounded steps
+  with never more than 8 bytes in flight and receives in place, and every
+  transfer has a time bound —
+  `periph::spi::tests::v17_the_divider_never_exceeds_the_request_and_is_the_closest`,
+  `v17_clocks_below_the_slowest_divider_are_unsupported`,
+  `v17_modes_map_to_polarity_and_phase`,
+  `v17_the_pump_moves_every_byte_in_bounded_steps`,
+  `v17_every_transfer_is_bounded_in_time`.
+- [x] V18 Bus pins are exclusive: the SPI bus and each I2C bus hold their
+  pins, `gpio_*` on them is `Busy`, a bus cannot take another bus's pin or
+  a payload GPIO pin (`Busy`), reserved and ADC pins never become bus pins,
+  re-opening SPI replaces its pins and release frees one owner —
+  `periph::claims::tests::v18_buses_hold_their_pins_and_gpio_is_busy_on_them`,
+  `v18_pins_are_exclusive_between_buses_and_gpio`,
+  `v18_reopening_spi_replaces_its_pins_and_release_frees_one_owner`,
+  `v18_analog_and_reserved_pins_never_become_bus_pins`. The shell's
+  release on stop (controllers in reset, pins back to inputs) is in
+  `shell/device.rs` and untested on hardware.
+- [ ] V19 On a Pico 2, `periph_demo` with GP19 jumpered to GP16 logs
+  `spi loopback ok` every period, and with an I2C target on GP4/GP5 at the
+  configured address logs the register's value; a missing target logs
+  `Transport`; after `mwctl stop` GP4/5 and GP16–19 are GPIO inputs again.
+  Not yet run on hardware.
 - [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
   with its factory UF2), the CDC port enumerates, `mwctl info` reports the
   chip and node id, an upload survives a power cycle, and on the Pico 2
@@ -1894,6 +1986,17 @@ name fixed pins, and an ADC read names a board pin. I2C transfers are
 synchronous and bounded (`periph::MAX_I2C` = 64 bytes each way), so the
 payload SDK can offer the blocking `embedded-hal` traits; PWM and ADC calls
 complete immediately. None of these raise events.
+
+SPI (ABI 2) and I2C (ABI 3) per base firmware:
+
+| board | SPI | I2C |
+|---|---|---|
+| ESP32 (ESP32-CAM, `firmware/`) | bus 0: SPI2 with DMA, payload-chosen pins | bus 0: SDA 26 / SCL 27 (the camera's SCCB), up to 400 kHz |
+| ESP32-S3 (`firmware/`) | bus 0: SPI2 with GDMA, payload-chosen pins | bus 0: SDA 5 / SCL 6 (a `Profile` constant), up to 400 kHz (E24) |
+| ESP32-C3 (`firmware/`) | no payloads run (no `wasm` runtime: wasmi needs CAS atomics) | same |
+| ESP8266 (`firmware-esp8266/`) | no payloads run (too little DRAM for wasmi) | same |
+| Pico 2, RP2350 (`firmware-rp/`) | bus 0 on SPI0 or SPI1, pins checked against the function table, FIFO pumped (V15, V17) | buses 0 (GP4/GP5) and 1 (GP6/GP7), up to 1 MHz (V16) |
+| Pico, RP2040 (`firmware-rp/`) | no payloads run (no CAS atomics); the bus drivers are built and the pure core host tested | same |
 
 - [x] X1 ABI 3 is a superset of ABI 2 (six imports appended to
   `wasm_abi::IMPORTS`, `ABI_VERSION` 3), and ABI 1 and ABI 2 payloads still
@@ -3301,7 +3404,8 @@ payload): each frame is one JPEG of varying length (R14).
     `pwm::tests::open_validates_before_the_host`.
   - [x] Board pin map and claims (ESP32 = ESP32-CAM): PWM timer 0
     channels 0..3 on GPIO 0, 4, 13, 14, I2C bus 0 on SDA 26 / SCL 27, a
-    camera port; other chips none (`Unsupported`); PWM, I2C and camera
+    camera port; other chips none (`Unsupported`; since E24 the ESP32-S3
+    maps I2C bus 0 to SDA 5 / SCL 6); PWM, I2C and camera
     pins are owned exclusively, checked in their direction (camera inputs
     may be input-only), refused to `gpio_*`, and released per owner; the
     LEDC plan gives each frequency the most duty bits its divider allows

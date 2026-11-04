@@ -275,12 +275,13 @@ mod tests {
     #[test]
     fn x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c() {
         use crate::chip::Direction;
-        // The default I2C pins (ESP32-CAM SCCB 26/27, ESP32-S3 8/9);
+        // The I2C pins (ESP32-CAM SCCB 26/27, ESP32-S3 bus 0 on 5/6 and the
+        // esp-hal default 8/9);
         // strapping pins come from the profile. The ESP32-CAM's XCLK
         // (GPIO 0) is the one strapping pin on purpose: the sensor's clock
         // is wired there (R15).
         let i2c: [(&Profile, &[u8], &[u8], usize); 2] =
-            [(&ESP32, &[26, 27], &[0], 4), (&ESP32S3, &[8, 9], &[], LEDC_CHANNELS)];
+            [(&ESP32, &[26, 27], &[0], 4), (&ESP32S3, &[5, 6, 8, 9], &[], LEDC_CHANNELS)];
         for (p, avoid, strapping_ok, len) in i2c {
             for &pin in p.pwm_pins {
                 assert!(!p.is_strapping(pin) || strapping_ok.contains(&pin), "{} {pin} is a strapping pin", p.name);

@@ -19,6 +19,9 @@
 //! * [`node`] — the node id and USB serial number from the chip unique id.
 //! * [`pins`] — the payload's GPIO modes under the board policy (the
 //!   esp-base pin bank's rules), as a value the device shell applies.
+//! * [`periph`] — the payload SPI and I2C buses: the chips' GPIO function
+//!   tables, pin claims, I2C timing and transfer plans, the SPI divider and
+//!   FIFO pump, and the time bound of every transfer.
 //! * [`fw_update`] — the `sys/fw/*` seam for firmware updates: the
 //!   reserved keys, the backend trait, the context a backend gets and the
 //!   self-test that gates confirming a trial.
@@ -37,8 +40,8 @@
 //!   payloads run under and the largest image a heap admits.
 //!
 //! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
-//! with a chip feature (`rp2040`, `rp2350`). It owns USB, flash, GPIO and
-//! the ADC, moves messages between the CDC link and the [`service`], and
+//! with a chip feature (`rp2040`, `rp2350`). It owns USB, flash, GPIO,
+//! the ADC and the SPI and I2C controllers, moves messages between the CDC link and the [`service`], and
 //! runs the payload.
 #![no_std]
 #![forbid(unsafe_code)]
@@ -51,6 +54,7 @@ pub mod fw_update;
 pub mod layout;
 pub mod node;
 pub mod ota;
+pub mod periph;
 pub mod pins;
 #[cfg(test)]
 mod ram_flash;
