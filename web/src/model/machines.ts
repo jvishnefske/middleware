@@ -1,5 +1,5 @@
 // State machines: the payload's state-machine tables (payload model
-// version 2, `machines`). Pure data, a strict shape check and pure
+// version 2 and later, `machines`). Pure data, a strict shape check and pure
 // transitions (every change returns a new machine); what is *allowed* in a
 // table (identifier rules, uniqueness, one unguarded row per cell, guard
 // overlap, labels of the right pin function, size limits, unreachable
@@ -23,19 +23,22 @@
 // entry actions run once in `init`.
 //
 // `Expr` is a closed, i32-only grammar of bounded depth (`MAX_EXPR_DEPTH`):
-// a digital pin read by label (0 or 1), a constant, a comparison, and/or,
-// not. Because every leaf is a 0/1 pin or a constant, two guards can be
-// compared exactly by trying every pin combination, which is how the Rust
-// check decides overlap.
+// a digital pin read by label (0 or 1), a constant, a machine being in a
+// state (`state`, 0 or 1; model version 3), a comparison, and/or, not.
+// Because every leaf is a 0/1 pin, a 0/1 state test or a constant, two
+// guards can be compared exactly by trying every leaf combination (one
+// machine is never in two states), which is how the Rust check decides
+// overlap.
 //
 // `ActionRef` is a closed set too: write / toggle a pin by label, publish
-// constant text on a key, log constant text, raise an event of the same
-// machine. There is no arbitrary code, so generated dispatch stays a fixed
-// `switch` with no loops.
+// constant text on a key, log constant text, raise an event of a machine
+// (`machine` absent: the table's own; version 3 lets a raise name another
+// machine, and a flow's raise always names one). There is no arbitrary
+// code, so generated dispatch stays a fixed `switch` with no loops.
 //
 // Raised events are bounded: a raise while a machine is stepping (from a
-// row's or an entry action, or from a "when <machine> enters <state>"
-// block) is queued, at most one per machine (a second is dropped and
+// row's or an entry action, from a "when <machine> enters <state>" block,
+// or from a flow entered from a state) is queued, at most one per machine (a second is dropped and
 // logged), and the queue is drained once after the outermost step; a raise
 // during the drain is dropped and logged. So one external raise runs at
 // most 1 + (number of machines) steps. The generator implements this and
@@ -73,6 +76,8 @@ export const CMP_TEXT: Readonly<Record<CmpOp, string>> = { eq: "=", ne: "≠", l
 export type Expr =
   | { kind: "pin"; label: string }
   | { kind: "const"; value: number }
+  /** 1 while machine `machine` is in `state`, else 0 (model version 3). */
+  | { kind: "state"; machine: string; state: string }
   | { kind: "cmp"; op: CmpOp; a: Expr; b: Expr }
   | { kind: "and"; a: Expr; b: Expr }
   | { kind: "or"; a: Expr; b: Expr }
@@ -83,7 +88,8 @@ export type ActionRef =
   | { kind: "toggle"; label: string }
   | { kind: "publish"; key: string; text: string }
   | { kind: "log"; text: string }
-  | { kind: "raise"; event: string };
+  /** `machine` absent: the table's own machine (flows always name it). */
+  | { kind: "raise"; event: string; machine?: string };
 
 export const ACTION_KINDS = ["write", "toggle", "publish", "log", "raise"] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
@@ -135,7 +141,9 @@ export type MachineField = "id" | "name" | "initial" | "state" | "event" | "guar
 
 export type MachineFix =
   | { kind: "add-state"; name: string }
-  | { kind: "add-event"; name: string }
+  /** `machine`: the index of the machine to add it to, when it is not
+   * the issue's own (a raise of another machine's event). */
+  | { kind: "add-event"; name: string; machine?: number }
   | { kind: "add-pin"; label: string; func: PinFunc }
   | { kind: "set-initial"; name: string };
 
@@ -170,6 +178,7 @@ export function exprProblem(v: unknown, at: string, depth = 1): string | null {
   const keys: Record<string, readonly string[]> = {
     pin: ["kind", "label"],
     const: ["kind", "value"],
+    state: ["kind", "machine", "state"],
     cmp: ["kind", "op", "a", "b"],
     and: ["kind", "a", "b"],
     or: ["kind", "a", "b"],
@@ -184,6 +193,8 @@ export function exprProblem(v: unknown, at: string, depth = 1): string | null {
       return text(v.label) ? null : `${at}.label must be text`;
     case "const":
       return isI32(v.value) ? null : `${at}.value must be a whole 32-bit number`;
+    case "state":
+      return text(v.machine) && text(v.state) ? null : `${at} needs text machine and state`;
     case "cmp":
       if (!(CMP_OPS as readonly unknown[]).includes(v.op)) return `${at}.op must be one of ${CMP_OPS.join(", ")}`;
       return exprProblem(v.a, `${at}.a`, depth + 1) ?? exprProblem(v.b, `${at}.b`, depth + 1);
@@ -195,14 +206,14 @@ export function exprProblem(v: unknown, at: string, depth = 1): string | null {
   }
 }
 
-function actionProblem(v: unknown, at: string): string | null {
+export function actionProblem(v: unknown, at: string): string | null {
   if (!isObj(v)) return `${at} must be an object`;
   const keys: Record<string, readonly string[]> = {
     write: ["kind", "label", "level"],
     toggle: ["kind", "label"],
     publish: ["kind", "key", "text"],
     log: ["kind", "text"],
-    raise: ["kind", "event"],
+    raise: ["kind", "event", "machine"],
   };
   const allowed = typeof v.kind === "string" ? keys[v.kind] : undefined;
   if (!allowed) return `${at}.kind must be one of ${ACTION_KINDS.join(", ")}`;
@@ -210,6 +221,8 @@ function actionProblem(v: unknown, at: string): string | null {
   if (extra !== undefined) return `${at} has an unknown field "${extra}"`;
   for (const k of allowed) {
     if (k === "kind") continue;
+    // A raise's machine is optional (absent: the table's own machine).
+    if (k === "machine" && v.machine === undefined) continue;
     if (k === "level") {
       if (v.level !== 0 && v.level !== 1) return `${at}.level must be 0 or 1`;
     } else if (k === "text") {
@@ -377,8 +390,14 @@ export function addEvent(m: Machine, e: MachineEvent = event(freeName(m.events.m
   return { ...m, events: [...m.events, e] };
 }
 
-function renameRaise(actions: readonly ActionRef[], old: string, name: string): ActionRef[] {
-  return actions.map((a) => (a.kind === "raise" && a.event === old ? { ...a, event: name } : a));
+/** Whether `a` raises machine `id`'s event `ev` (a raise without a
+ * machine names the table's own, `own`). */
+export function raisesEvent(a: ActionRef, own: string, id: string, ev: string): boolean {
+  return a.kind === "raise" && a.event === ev && (a.machine ?? own) === id;
+}
+
+function renameRaise(actions: readonly ActionRef[], own: string, old: string, name: string): ActionRef[] {
+  return actions.map((a) => (raisesEvent(a, own, own, old) ? { ...a, event: name } : a));
 }
 
 /** Renames event `i` and every reference to it (rows, raise actions). */
@@ -388,8 +407,8 @@ export function renameEvent(m: Machine, i: number, name: string): Machine {
   return {
     ...m,
     events: m.events.map((e, j) => (j === i ? { ...e, name } : e)),
-    states: m.states.map((s) => ({ ...s, entry: renameRaise(s.entry, old, name) })),
-    rows: m.rows.map((r) => ({ ...r, event: r.event === old ? name : r.event, actions: renameRaise(r.actions, old, name) })),
+    states: m.states.map((s) => ({ ...s, entry: renameRaise(s.entry, m.id, old, name) })),
+    rows: m.rows.map((r) => ({ ...r, event: r.event === old ? name : r.event, actions: renameRaise(r.actions, m.id, old, name) })),
   };
 }
 
@@ -401,7 +420,7 @@ export function setEventNote(m: Machine, i: number, note: string): Machine {
 export function removeEvent(m: Machine, i: number): Machine {
   const old = m.events[i]?.name;
   if (old === undefined) return m;
-  const keep = (as: readonly ActionRef[]) => as.filter((a) => !(a.kind === "raise" && a.event === old));
+  const keep = (as: readonly ActionRef[]) => as.filter((a) => !raisesEvent(a, m.id, m.id, old));
   return {
     ...m,
     events: m.events.filter((_, j) => j !== i),
@@ -480,6 +499,8 @@ export function exprText(e: Expr): string {
       return e.label;
     case "const":
       return String(e.value);
+    case "state":
+      return `${e.machine} is ${e.state}`;
     case "cmp":
       return `${exprText(e.a)} ${CMP_TEXT[e.op]} ${exprText(e.b)}`;
     case "and":
@@ -503,7 +524,7 @@ export function actionText(a: ActionRef): string {
     case "log":
       return `log "${a.text}"`;
     case "raise":
-      return `raise ${a.event}`;
+      return a.machine === undefined ? `raise ${a.event}` : `raise ${a.machine}.${a.event}`;
   }
 }
 

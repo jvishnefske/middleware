@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { exampleWorkspace } from "../src/blocks/examples";
 import { generate } from "../src/blocks/generator";
-import { MAX_ROWS, MODEL_VERSION, makeModel, modelProblem, parseModel, serializeModel, workspaceOf } from "../src/model/payload";
+import { MODE_FLOWS } from "../src/blocks/examples/mode.flows";
+import { MAX_ROWS, MODEL_VERSION, flowsOf, makeModel, modelProblem, parseModel, serializeModel, withFlows, withWorkspace, workspaceOf } from "../src/model/payload";
 import { MAX_MACHINES, type Expr, type Machine, event, state, transition } from "../src/model/machines";
 import { boardDefaults, row } from "../src/model/pins";
 
@@ -40,7 +41,7 @@ describe("payload model", () => {
 
   it("rejects unknown shapes instead of dropping them", () => {
     const cases: [(v: Record<string, unknown>) => void, string][] = [
-      [(v) => (v.version = 3), "version 3 was written by a newer editor; this one reads version 2"],
+      [(v) => (v.version = 4), "version 4 was written by a newer editor; this one reads version 3"],
       [(v) => (v.version = "1"), "version must be a whole number"],
       [(v) => (v.colour = "red"), 'unknown field "colour"'],
       [(v) => (v.board = "arduino"), 'board "arduino" is not a known board'],
@@ -53,7 +54,31 @@ describe("payload model", () => {
       [(v) => ((v.pins as { rows: unknown[] }).rows = Array(MAX_ROWS + 1).fill(row("gpio-out", "X", 1))), "pins.rows must be a list of at most 64 rows"],
       [(v) => ((v.pins as { buses: unknown[] }).buses = [{ kind: "can", bus: 0 }]), 'pins.buses[0].kind must be "i2c" or "spi"'],
       [(v) => ((v.pins as { buses: unknown[] }).buses = [{ kind: "spi", bus: 0, khz: 1000 }]), "pins.buses[0] needs whole-number bus, khz and mode"],
-      [(v) => (v.logic = []), "logic must hold exactly one Blocks workspace"],
+      [(v) => (v.logic = []), "logic must hold one Blocks workspace and at most 8 flows"],
+      [(v) => ((v.version = 2), (v.logic = [...(v.logic as unknown[]), MODE_FLOWS[0]])), "logic must hold exactly one Blocks workspace"],
+      [(v) => (v.logic = [...(v.logic as unknown[]), ...Array(9).fill(MODE_FLOWS[0])]), "logic must hold one Blocks workspace and at most 8 flows"],
+      [(v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], colour: 1 }]), 'logic[1] has an unknown field "colour"'],
+      [(v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], kind: "graph" }]), 'logic[1].kind must be "flow"'],
+      [
+        (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], nodes: [{ id: "n1", kind: "loop", x: 0, y: 0, props: {} }] }]),
+        "logic[1].nodes[0].kind must be one of entry, action, branch, repeat, sequence",
+      ],
+      [
+        (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], nodes: [{ id: "n1", kind: "entry", x: -1, y: 0, props: { on: "init" } }] }]),
+        "logic[1].nodes[0].x and .y must be whole numbers from 0 to 4000",
+      ],
+      [
+        (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], nodes: [{ id: "n1", kind: "entry", x: 0, y: 0, props: { on: "boot" } }] }]),
+        "logic[1].nodes[0].props.on must be one of init, every, message, pin-edge, entered",
+      ],
+      [
+        (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], nodes: [{ id: "n1", kind: "branch", x: 0, y: 0, props: { cond: { kind: "state", machine: "Mode" } } }] }]),
+        "logic[1].nodes[0].props.cond needs text machine and state",
+      ],
+      [
+        (v) => (v.logic = [...(v.logic as unknown[]), { ...MODE_FLOWS[0], wires: [{ from: { node: "n1" }, to: { node: "n2", port: "in" } }] }]),
+        "logic[1].wires[0].from needs text node and port",
+      ],
       [(v) => (v.logic = [{ kind: "flow", nodes: [] }]), 'logic[0].kind must be "blocks" (other logic sources need a newer editor)'],
       [(v) => (v.logic = [{ kind: "blocks", workspace: { blocks: 3 } }]), 'logic[0].workspace is not a Blocks workspace: "blocks" must be an object'],
       [(v) => (v.machines = [{ states: [] }]), "machines[0].id must be text"],
@@ -84,15 +109,39 @@ describe("payload model", () => {
     expect(r.model.machines[0]).not.toBe(m.machines[0]);
   });
 
-  it("migrates a version-1 model to version 2 losslessly (no machines, same code)", () => {
+  it("round-trips flows, keeps them across workspace edits and copies them", () => {
+    const m = makeModel("pico2", blink, boardDefaults("pico2"), [mode()], MODE_FLOWS);
+    const r = parseModel(serializeModel(m), "esp32");
+    expect(r).toEqual({ ok: true, model: m, migrated: false });
+    if (!r.ok) return;
+    expect(flowsOf(r.model)).toEqual(MODE_FLOWS);
+    expect(flowsOf(r.model)[0]).not.toBe(MODE_FLOWS[0]);
+    expect(flowsOf(withWorkspace(m, {}))).toEqual(MODE_FLOWS);
+    expect(flowsOf(withFlows(m, Array(9).fill(MODE_FLOWS[0])))).toHaveLength(8);
+  });
+
+  it("migrates a version-2 model to version 3 losslessly (no flows, same code)", () => {
+    const v2 = { ...JSON.parse(serializeModel(makeModel("pico2", blink, boardDefaults("pico2"), [mode()]))), version: 2 };
+    const r = parseModel(JSON.stringify(v2), "esp32");
+    expect(r.ok && r.migrated).toBe(true);
+    if (!r.ok) return;
+    expect(r.model).toEqual(makeModel("pico2", blink, boardDefaults("pico2"), [mode()]));
+    expect(flowsOf(r.model)).toEqual([]);
+    expect(generate(workspaceOf(r.model), "esp-base", r.model.pins, r.model.machines, flowsOf(r.model)).source).toBe(
+      generate(blink, "esp-base", boardDefaults("pico2"), [mode()]).source,
+    );
+    expect(JSON.parse(serializeModel(r.model))).toMatchObject({ version: 3 });
+  });
+
+  it("migrates a version-1 model to version 3 losslessly (no machines, same code)", () => {
     const v1 = { ...valid(), version: 1, machines: [] };
     const r = parseModel(JSON.stringify(v1), "esp32");
     expect(r.ok && r.migrated).toBe(true);
     if (!r.ok) return;
     expect(r.model).toEqual(makeModel("pico2", blink, boardDefaults("pico2")));
-    expect(r.model.version).toBe(2);
+    expect(r.model.version).toBe(3);
     expect(generate(workspaceOf(r.model), "esp-base", r.model.pins).source).toBe(generate(blink, "esp-base", boardDefaults("pico2")).source);
-    expect(JSON.parse(serializeModel(r.model))).toMatchObject({ version: 2, machines: [] });
+    expect(JSON.parse(serializeModel(r.model))).toMatchObject({ version: 3, machines: [] });
   });
 
   it("migrates a legacy Blocks export and a bare workspace losslessly", () => {

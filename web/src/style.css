@@ -713,3 +713,262 @@ button.sm-add {
     background: color-mix(in srgb, var(--accent) 22%, var(--panel));
   }
 }
+/* Flows view (flowsView.ts): an SVG canvas that scrolls and pans inside
+ * its own box (never the page), an outline list, and a properties grid. */
+.flows-view .flow-bar {
+  gap: 6px 10px;
+  margin: 6px 0;
+}
+.flows-view .seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.flows-view .seg button[aria-pressed="true"] {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.flows-view .palette button {
+  font-size: 0.85rem;
+}
+.flow-canvas {
+  overflow: auto;
+  max-width: 100%;
+  height: 460px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--line) 80%, transparent) 1px, transparent 1px) 0 0 / 24px 24px,
+    var(--panel);
+  overscroll-behavior: contain;
+}
+.flow-svg {
+  display: block;
+  touch-action: none;
+  user-select: none;
+  font-family: inherit;
+}
+.flow-svg .fnode {
+  cursor: grab;
+}
+.flow-svg .fnode rect {
+  fill: var(--panel);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+.flow-svg .fnode.k-entry rect {
+  fill: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  stroke: var(--accent);
+}
+.flow-svg .fnode.k-branch rect,
+.flow-svg .fnode.k-repeat rect,
+.flow-svg .fnode.k-sequence rect {
+  stroke-dasharray: 0;
+  fill: color-mix(in srgb, var(--fg) 4%, var(--panel));
+}
+.flow-svg .fnode:focus {
+  outline: none;
+}
+.flow-svg .fnode:focus-visible rect,
+.flow-svg .fnode.sel rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.flow-svg .fnode.error rect {
+  stroke: #c0392b;
+  stroke-width: 2.5;
+}
+.flow-svg .fnode.warning rect {
+  stroke: #b7791f;
+  stroke-dasharray: 5 3;
+}
+.flow-svg .fnode.live rect {
+  fill: color-mix(in srgb, var(--accent) 22%, var(--panel));
+}
+.flow-svg .fnode.current rect {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+.flow-svg text {
+  fill: var(--fg);
+  font-size: 13px;
+  pointer-events: none;
+}
+.flow-svg .fkind {
+  font-size: 11px;
+  fill: var(--muted);
+  font-weight: 600;
+}
+.flow-svg .fport {
+  font-size: 10px;
+  fill: var(--muted);
+}
+.flow-svg .port {
+  fill: var(--panel);
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+.flow-svg .port.out {
+  cursor: crosshair;
+}
+.flow-svg .port.out.wired,
+.flow-svg .port.out:hover {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+.flow-svg .fwire {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+.flow-svg .fwire.live {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.flow-svg .fwire.sel {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+.flow-svg .fwire.error {
+  stroke: #c0392b;
+  stroke-dasharray: 6 4;
+}
+.flow-svg .fwire.warning {
+  stroke: #b7791f;
+  stroke-dasharray: 6 4;
+}
+.flow-svg .fwire.temp {
+  stroke: var(--accent);
+  stroke-dasharray: 4 4;
+  pointer-events: none;
+}
+.flow-svg .fwire-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  cursor: pointer;
+}
+/* The outline: one row per node in run order, indented by depth. */
+.flow-outline {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+.flow-outline .orow {
+  margin: 0 0 6px calc(var(--depth, 0) * 1.25rem);
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.flow-outline .orow.error {
+  border-left-color: #c0392b;
+}
+.flow-outline .orow.warning {
+  border-left-color: #b7791f;
+  border-left-style: dashed;
+}
+.flow-outline .orow.live {
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+.flow-outline .orow.current {
+  border-left-color: var(--accent);
+  border-left-width: 6px;
+}
+.flow-outline .onode {
+  border: none;
+  background: none;
+  padding: 2px 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.flow-outline .onode[aria-pressed="true"] {
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+.flow-outline .fkind {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.flow-outline .oports {
+  gap: 4px 12px;
+  margin-top: 4px;
+}
+.flow-outline .oport select {
+  max-width: 14em;
+}
+.flow-props-box {
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.flow-props {
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.flow-props caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 4px 0;
+}
+.flow-props th,
+.flow-props td {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+}
+.flow-props th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.flow-props [aria-invalid="true"],
+.flow-outline [aria-invalid="true"] {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px #c0392b;
+}
+.flows-view .issues .sev {
+  font-weight: 600;
+}
+.flows-view .issues .warning,
+.flow-outline .onode .warning {
+  color: #8a5a00;
+}
+.flows-view .empty {
+  max-width: 40rem;
+}
+@media (max-width: 700px) {
+  .flow-canvas {
+    height: 340px;
+  }
+  .flow-outline .orow {
+    margin-left: calc(min(var(--depth, 0), 4) * 0.75rem);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .flow-svg .fnode.error rect,
+  .flow-svg .fwire.error {
+    stroke: #ff7a6b;
+  }
+  .flow-svg .fnode.warning rect,
+  .flow-svg .fwire.warning {
+    stroke: #e0a84a;
+  }
+  .flow-outline .orow.error {
+    border-left-color: #ff7a6b;
+  }
+  .flow-outline .orow.warning {
+    border-left-color: #e0a84a;
+  }
+  .flows-view .issues .warning,
+  .flow-outline .onode .warning {
+    color: #e0a84a;
+  }
+  .flow-props [aria-invalid="true"],
+  .flow-outline [aria-invalid="true"] {
+    border-color: #ff7a6b;
+    box-shadow: 0 0 0 1px #ff7a6b;
+  }
+}

@@ -21,6 +21,9 @@
 //! * [`machines`] — the state-machine tables' checks: the page's machines
 //!   converted to `state-table` views, checked against the pin table, and
 //!   each issue rendered in plain language with its one-click fix.
+//! * [`flows`] — the flow graphs' checks: the page's flows converted to
+//!   `state-table` flow views, checked against the machines and the pin
+//!   table, each issue in plain language with its fix.
 //! * [`simulator`] (`simulator` feature, default) — runs a payload in
 //!   `wasm-host` against a virtual device: GPIO with edge interrupts, ABI 2
 //!   hardware timers on a JS-supplied clock, an SPI device (loopback or a
@@ -28,7 +31,7 @@
 //!   feeds `on_irq`.
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
-//!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, ...). It only converts values.
+//!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, ...). It only converts values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
@@ -38,6 +41,7 @@
 pub mod bindings;
 pub mod decoder;
 pub mod encode;
+pub mod flows;
 pub mod loader;
 pub mod machines;
 pub mod pins;

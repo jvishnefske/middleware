@@ -17,21 +17,30 @@
 //! copy of the key grammar), then refused under `sys/`, which belongs to
 //! the firmware.
 //!
-//! Guard overlap is decided exactly: every leaf is a 0/1 pin or a
-//! constant, so two guards overlap if and only if some assignment of their
-//! distinct pins makes both true. [`check`] tries all `2^n` assignments
-//! for `n <=` [`MAX_OVERLAP_PINS`] and reports the first one found as a
-//! [`Witness`]; above the cap it warns instead. The same enumeration over
-//! one guard's pins finds guards that are always true (they count as the
-//! cell's unguarded row) and never true (a warning).
+//! Guard overlap is decided exactly: every leaf is a 0/1 pin, a 0/1
+//! state test or a constant, so two guards overlap if and only if some
+//! assignment of their distinct leaves makes both true. [`check`] tries
+//! all `2^n` assignments for `n <=` [`MAX_OVERLAP_PINS`] (skipping those
+//! with one machine in two states, [`crate::guard::consistent`]) and
+//! reports the first one found as a [`Witness`]; above the cap it warns
+//! instead. The same enumeration over one guard's leaves finds guards that
+//! are always true (they count as the cell's unguarded row) and never true
+//! (a warning). Treating a machine's state tests as independent apart from
+//! that exclusion can only over-report: an assignment where none of a
+//! machine's tested states holds is tried even if those are all its
+//! states.
+//!
+//! The per-action and per-guard rules ([`action_issues`], [`guard_issues`])
+//! are shared with the flow checks ([`crate::flow`]).
 
-use crate::guard::{GuardError, PinSet, holds_under};
+use crate::guard::{GuardError, Leaf, LeafSet, consistent, holds_under};
 use crate::{
     Action, Guard, MAX_ACTIONS, MAX_EVENTS, MAX_ROWS, MAX_STATES, MAX_TEXT, Machine, Pin, PinUse,
     ident_ok,
 };
 
-/// Most distinct pins two guards may read together for the overlap check.
+/// Most distinct leaves (pins and state tests) two guards may read
+/// together for the overlap check.
 pub const MAX_OVERLAP_PINS: usize = 12;
 
 /// How bad an issue is: errors stop the build, warnings do not.
@@ -112,47 +121,51 @@ pub enum Fix<'a> {
     },
     /// Make this state the initial one.
     SetInitial(&'a str),
+    /// Add an event with this name to another machine (by index).
+    AddEventTo {
+        /// The machine's index.
+        machine: usize,
+        /// The event's name.
+        name: &'a str,
+    },
 }
 
-/// A pin assignment under which two guards are both true.
+/// A leaf assignment under which two guards are both true: the two
+/// guards and the assignment's bits over their joint leaves (kept as
+/// references, so an issue stays small; [`Witness::levels`] lists them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Witness<'a> {
-    labels: [&'a str; MAX_OVERLAP_PINS],
-    len: usize,
+    a: Guard<'a>,
+    b: Guard<'a>,
     high: u32,
 }
 
 impl<'a> Witness<'a> {
-    fn new(set: &PinSet<'a>, high: u32) -> Self {
-        let mut labels = [""; MAX_OVERLAP_PINS];
-        for (slot, l) in labels.iter_mut().zip(set.as_slice()) {
-            *slot = l;
-        }
-        Witness {
-            labels,
-            len: set.len().min(MAX_OVERLAP_PINS),
-            high,
-        }
+    fn new(a: Guard<'a>, b: Guard<'a>, high: u32) -> Self {
+        Witness { a, b, high }
     }
 
-    /// Each pin and its level (`true` = 1), in first-seen order.
-    pub fn levels(&self) -> impl Iterator<Item = (&'a str, bool)> + '_ {
-        self.labels
-            .iter()
-            .take(self.len)
-            .enumerate()
-            .map(|(k, l)| (*l, (self.high >> k) & 1 == 1))
+    fn set(&self) -> LeafSet<'a> {
+        self.a.leaves().with(&self.b)
     }
 
-    /// How many pins the assignment names (0 when both guards are
+    /// Each leaf and its value (`true` = 1), in first-seen order.
+    pub fn levels(&self) -> impl Iterator<Item = (Leaf<'a>, bool)> + use<'a> {
+        let set = self.set();
+        let high = self.high;
+        (0..set.len().min(MAX_OVERLAP_PINS))
+            .filter_map(move |k| set.as_slice().get(k).map(|l| (*l, (high >> k) & 1 == 1)))
+    }
+
+    /// How many leaves the assignment names (0 when both guards are
     /// constant).
-    pub const fn len(&self) -> usize {
-        self.len
+    pub fn len(&self) -> usize {
+        self.set().len().min(MAX_OVERLAP_PINS)
     }
 
-    /// Whether it names no pins.
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
+    /// Whether it names no leaves.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -223,6 +236,22 @@ pub enum IssueKind<'a> {
     },
     /// The guard's arena is malformed, too large or too deep.
     GuardMalformed(GuardError),
+    /// A state test names no machine.
+    GuardMachineUnknown {
+        /// The id given.
+        machine: &'a str,
+        /// A machine whose id differs only in case.
+        near: Option<&'a str>,
+    },
+    /// A state test names no state of its machine.
+    GuardStateUnknown {
+        /// The machine's id.
+        machine: &'a str,
+        /// The name given.
+        state: &'a str,
+        /// A state whose name differs only in case.
+        near: Option<&'a str>,
+    },
     /// A pin label the guard (`action: None`) or an action reads or drives
     /// is not in the pin table.
     UnknownPin {
@@ -268,6 +297,31 @@ pub enum IssueKind<'a> {
     RaiseUnknown {
         /// The action's index.
         action: usize,
+        /// The name given.
+        event: &'a str,
+        /// An event whose name differs only in case.
+        near: Option<&'a str>,
+    },
+    /// A raise names no machine, where one is required (flows).
+    RaiseNoMachine {
+        /// The action's index.
+        action: usize,
+    },
+    /// A raise names a machine there is none of.
+    RaiseMachineUnknown {
+        /// The action's index.
+        action: usize,
+        /// The id given.
+        machine: &'a str,
+        /// A machine whose id differs only in case.
+        near: Option<&'a str>,
+    },
+    /// A raise names no event of another machine.
+    RaiseUnknownIn {
+        /// The action's index.
+        action: usize,
+        /// The machine's id.
+        machine: &'a str,
         /// The name given.
         event: &'a str,
         /// An event whose name differs only in case.
@@ -338,12 +392,12 @@ enum Truth {
 }
 
 fn truth(g: &Guard<'_>) -> Truth {
-    let set = g.pins();
+    let set = g.leaves();
     if set.len() > MAX_OVERLAP_PINS {
         return Truth::Unknown;
     }
     let (mut any, mut all) = (false, true);
-    for bits in 0u32..(1 << set.len()) {
+    for bits in (0u32..(1 << set.len())).filter(|&b| consistent(&set, b)) {
         if holds_under(g, &set, bits) {
             any = true;
         } else {
@@ -365,13 +419,13 @@ enum Overlap<'a> {
 }
 
 fn overlap<'a>(a: &Guard<'a>, b: &Guard<'a>) -> Overlap<'a> {
-    let set = a.pins().with(b);
+    let set = a.leaves().with(b);
     if set.len() > MAX_OVERLAP_PINS {
         return Overlap::Unchecked(set.len());
     }
-    for bits in 0u32..(1 << set.len()) {
+    for bits in (0u32..(1 << set.len())).filter(|&b| consistent(&set, b)) {
         if holds_under(a, &set, bits) && holds_under(b, &set, bits) {
-            return Overlap::Both(Witness::new(&set, bits));
+            return Overlap::Both(Witness::new(*a, *b, bits));
         }
     }
     Overlap::Disjoint
@@ -518,7 +572,8 @@ fn check_machine<'a, S: FnMut(Issue<'a>)>(
     // State entries.
     for (si, s) in m.states.iter().enumerate() {
         check_actions(
-            m,
+            machines,
+            mi,
             s.entry,
             (List::States, Some(si), Field::Entry),
             pins,
@@ -551,26 +606,19 @@ fn check_machine<'a, S: FnMut(Issue<'a>)>(
             );
         }
         if let Some(g) = &row.guard {
-            if let Err(e) = g.shape() {
-                out.error(at(Field::Guard), IssueKind::GuardMalformed(e), None);
-            }
-            for &label in g.pins().as_slice() {
-                match pins.iter().find(|p| p.label == label) {
-                    Some(p) if p.func == PinUse::Other => out.error(
-                        at(Field::Guard),
-                        IssueKind::WrongPinUse {
-                            action: None,
-                            label,
-                            has: p.func,
-                        },
-                        None,
-                    ),
-                    Some(_) => {}
-                    None => unknown_pin(None, label, PinUse::Input, pins, at(Field::Guard), out),
-                }
-            }
+            guard_issues(machines, g, pins, &mut |kind, fix| {
+                out.error(at(Field::Guard), kind, fix);
+            });
         }
-        check_actions(m, row.actions, at(Field::Actions), pins, keys, out);
+        check_actions(
+            machines,
+            mi,
+            row.actions,
+            at(Field::Actions),
+            pins,
+            keys,
+            out,
+        );
     }
     check_cells(m, out);
     check_reach(m, out);
@@ -595,29 +643,186 @@ fn check_names<'a, S: FnMut(Issue<'a>)>(
     }
 }
 
-fn unknown_pin<'a, S: FnMut(Issue<'a>)>(
+/// The issue (and fix) for a label that is not in the pin table; `func`
+/// is what the fix adds.
+fn unknown_pin<'a>(
     action: Option<usize>,
     label: &'a str,
     func: PinUse,
     pins: &[Pin<'a>],
-    at: (List, Option<usize>, Field),
-    out: &mut Out<'_, 'a, S>,
-) {
+) -> (IssueKind<'a>, Option<Fix<'a>>) {
     let near = near(pins, label, |p| p.label);
     let fix = (near.is_none() && ident_ok(label)).then_some(Fix::AddPin { label, func });
-    out.error(
-        at,
+    (
         IssueKind::UnknownPin {
             action,
             label,
             near,
         },
         fix,
-    );
+    )
+}
+
+/// Every problem with guard `g`: a malformed arena, pins missing from the
+/// table or not digital, state tests naming no machine or state.
+pub fn guard_issues<'a>(
+    machines: &[Machine<'a>],
+    g: &Guard<'a>,
+    pins: &[Pin<'a>],
+    emit: &mut impl FnMut(IssueKind<'a>, Option<Fix<'a>>),
+) {
+    if let Err(e) = g.shape() {
+        emit(IssueKind::GuardMalformed(e), None);
+    }
+    for &leaf in g.leaves().as_slice() {
+        match leaf {
+            Leaf::Pin(label) => match pins.iter().find(|p| p.label == label) {
+                Some(p) if p.func == PinUse::Other => emit(
+                    IssueKind::WrongPinUse {
+                        action: None,
+                        label,
+                        has: p.func,
+                    },
+                    None,
+                ),
+                Some(_) => {}
+                None => {
+                    let (kind, fix) = unknown_pin(None, label, PinUse::Input, pins);
+                    emit(kind, fix);
+                }
+            },
+            Leaf::State { machine, state } => match machines.iter().find(|m| m.id == machine) {
+                None => emit(
+                    IssueKind::GuardMachineUnknown {
+                        machine,
+                        near: near(machines, machine, |m| m.id),
+                    },
+                    None,
+                ),
+                Some(m) if m.state_index(state).is_none() => emit(
+                    IssueKind::GuardStateUnknown {
+                        machine,
+                        state,
+                        near: near(m.states, state, |s| s.name),
+                    },
+                    None,
+                ),
+                Some(_) => {}
+            },
+        }
+    }
+}
+
+/// Every problem with action `a` (index `k` in its list). `own` is the
+/// machine a raise without a machine names (a table's own), or `None`
+/// where a raise must name one (flows).
+#[allow(clippy::too_many_arguments)]
+pub fn action_issues<'a>(
+    machines: &[Machine<'a>],
+    own: Option<usize>,
+    k: usize,
+    a: &Action<'a>,
+    pins: &[Pin<'a>],
+    keys: &impl Fn(&str) -> Result<(), KeyProblem>,
+    emit: &mut impl FnMut(IssueKind<'a>, Option<Fix<'a>>),
+) {
+    match *a {
+        Action::Write { label, .. } | Action::Toggle { label } => {
+            match pins.iter().find(|p| p.label == label) {
+                Some(p) if p.func != PinUse::Output => emit(
+                    IssueKind::WrongPinUse {
+                        action: Some(k),
+                        label,
+                        has: p.func,
+                    },
+                    None,
+                ),
+                Some(_) => {}
+                None => {
+                    let (kind, fix) = unknown_pin(Some(k), label, PinUse::Output, pins);
+                    emit(kind, fix);
+                }
+            }
+        }
+        Action::Publish { key, text } => {
+            if let Some(problem) = key_issue(key, keys) {
+                emit(
+                    IssueKind::BadKey {
+                        action: k,
+                        key,
+                        problem,
+                    },
+                    None,
+                );
+            }
+            text_len(k, text, emit);
+        }
+        Action::Log { text } => text_len(k, text, emit),
+        Action::Raise { machine, event } => {
+            let own_m = own.and_then(|i| machines.get(i).map(|m| (i, m)));
+            let target = match (machine, own_m) {
+                (None, Some(o)) => o,
+                (None, None) => return emit(IssueKind::RaiseNoMachine { action: k }, None),
+                (Some(id), _) => match machines.iter().enumerate().find(|(_, m)| m.id == id) {
+                    Some(t) => t,
+                    None => {
+                        return emit(
+                            IssueKind::RaiseMachineUnknown {
+                                action: k,
+                                machine: id,
+                                near: near(machines, id, |m| m.id),
+                            },
+                            None,
+                        );
+                    }
+                },
+            };
+            let (ti, t) = target;
+            if t.event_index(event).is_some() {
+                return;
+            }
+            let near = near(t.events, event, |e| e.name);
+            let can_add = near.is_none() && ident_ok(event) && t.events.len() < MAX_EVENTS;
+            if Some(ti) == own {
+                emit(
+                    IssueKind::RaiseUnknown {
+                        action: k,
+                        event,
+                        near,
+                    },
+                    can_add.then_some(Fix::AddEvent(event)),
+                );
+            } else {
+                emit(
+                    IssueKind::RaiseUnknownIn {
+                        action: k,
+                        machine: t.id,
+                        event,
+                        near,
+                    },
+                    can_add.then_some(Fix::AddEventTo {
+                        machine: ti,
+                        name: event,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+/// Why `key` cannot be published or subscribed to: the key rule, or
+/// `sys/`, which belongs to the firmware.
+pub fn key_issue(key: &str, keys: &impl Fn(&str) -> Result<(), KeyProblem>) -> Option<KeyProblem> {
+    match keys(key) {
+        Err(p) => Some(p),
+        Ok(()) if key == "sys" || key.starts_with("sys/") => Some(KeyProblem::System),
+        Ok(()) => None,
+    }
 }
 
 fn check_actions<'a, S: FnMut(Issue<'a>)>(
-    m: &Machine<'a>,
+    machines: &[Machine<'a>],
+    mi: usize,
     actions: &[Action<'a>],
     at: (List, Option<usize>, Field),
     pins: &[Pin<'a>],
@@ -634,71 +839,15 @@ fn check_actions<'a, S: FnMut(Issue<'a>)>(
         );
     }
     for (k, a) in actions.iter().enumerate() {
-        match *a {
-            Action::Write { label, .. } | Action::Toggle { label } => {
-                match pins.iter().find(|p| p.label == label) {
-                    Some(p) if p.func != PinUse::Output => out.error(
-                        at,
-                        IssueKind::WrongPinUse {
-                            action: Some(k),
-                            label,
-                            has: p.func,
-                        },
-                        None,
-                    ),
-                    Some(_) => {}
-                    None => unknown_pin(Some(k), label, PinUse::Output, pins, at, out),
-                }
-            }
-            Action::Publish { key, text } => {
-                let problem = match keys(key) {
-                    Err(p) => Some(p),
-                    Ok(()) if key == "sys" || key.starts_with("sys/") => Some(KeyProblem::System),
-                    Ok(()) => None,
-                };
-                if let Some(problem) = problem {
-                    out.error(
-                        at,
-                        IssueKind::BadKey {
-                            action: k,
-                            key,
-                            problem,
-                        },
-                        None,
-                    );
-                }
-                text_len(k, text, at, out);
-            }
-            Action::Log { text } => text_len(k, text, at, out),
-            Action::Raise { event } => {
-                if m.event_index(event).is_none() {
-                    let near = near(m.events, event, |e| e.name);
-                    let fix = (near.is_none() && ident_ok(event) && m.events.len() < MAX_EVENTS)
-                        .then_some(Fix::AddEvent(event));
-                    out.error(
-                        at,
-                        IssueKind::RaiseUnknown {
-                            action: k,
-                            event,
-                            near,
-                        },
-                        fix,
-                    );
-                }
-            }
-        }
+        action_issues(machines, Some(mi), k, a, pins, keys, &mut |kind, fix| {
+            out.error(at, kind, fix);
+        });
     }
 }
 
-fn text_len<'a, S: FnMut(Issue<'a>)>(
-    action: usize,
-    text: &str,
-    at: (List, Option<usize>, Field),
-    out: &mut Out<'_, 'a, S>,
-) {
+fn text_len<'a>(action: usize, text: &str, emit: &mut impl FnMut(IssueKind<'a>, Option<Fix<'a>>)) {
     if text.len() > MAX_TEXT {
-        out.error(
-            at,
+        emit(
             IssueKind::TextTooLong {
                 action,
                 len: text.len(),

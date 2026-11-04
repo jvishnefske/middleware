@@ -46,11 +46,8 @@
 // out (a bad guard reads as 0). The output is always valid source.
 
 import {
-  type ActionRef,
   type Expr,
-  MAX_ACTIONS,
   MAX_EVENTS,
-  MAX_EXPR_DEPTH,
   MAX_MACHINE_ROWS,
   MAX_MACHINES,
   MAX_STATES,
@@ -59,23 +56,14 @@ import {
   machineLogInit,
   machineLogMove,
 } from "../model/machines";
-import type { PinFunc } from "../model/pins";
+import { type LowerHost, type Stmt, line, lowerActions, lowerExpr, printStmts, textArgs } from "./stmt";
 
-/** What machine code needs from the module being generated. */
-export interface MachineHost {
-  /** Identifier of a constant byte string (`${id}_LEN` its length). */
-  str(text: string): string;
-  /** Imports host function `mw_<name>`. */
-  use(name: string): void;
-  /** Emits a run-time helper (pinWrite, pinToggle). */
-  helper(name: string): void;
-  /** The `PIN_<label>` constant for a pin-table row of one of `funcs`, or
-   * the problem. */
-  pin(label: string, funcs: readonly PinFunc[], what: string): { ident: string } | { problem: string };
+/** What machine code needs from the module being generated: the shared
+ * lowering host (stmt.ts) minus what this module answers itself (states
+ * and raises of the planned machines), plus issues and comments. */
+export interface MachineHost extends Omit<LowerHost, "inState" | "raise"> {
   error(message: string): void;
   warn(message: string): void;
-  /** Checks a publish key; the problem, or null. */
-  keyProblem(key: string): string | null;
   /** Free text made safe for a `//` comment (generator.ts `commentText`). */
   comment(text: string): string;
 }
@@ -89,12 +77,7 @@ export interface PlannedMachine {
   events: ReadonlyMap<string, number>;
 }
 
-/** Largest message text (wasm_abi::MAX_MESSAGE). */
-const MAX_TEXT_BYTES = 512;
-
 const IDENT = /^[A-Za-z][A-Za-z0-9_]*$/;
-
-const CMP_AS: Readonly<Record<string, string>> = { eq: "==", ne: "!=", lt: "<", le: "<=", gt: ">", ge: ">=" };
 
 /** How issues name a machine: `machine Mode`, or by position when its id
  * is unusable. */
@@ -157,6 +140,24 @@ export function inStateExpr(k: number, st: string): string {
   return `<i32>(sm${k} == ${stateConst(k, st)})`;
 }
 
+/** Resolves `<machine>.<state>` for an `Expr` state leaf against the
+ * planned machines: the comparison, or the problem. */
+export function planInState(plan: readonly PlannedMachine[], machine: string, st: string): { code: string } | { problem: string } {
+  const p = plannedById(plan, machine);
+  if (!p) return { problem: `no state machine "${machine}" gets code` };
+  if (!p.states.has(st)) return { problem: `${machine} has no state "${st}"` };
+  return { code: inStateExpr(p.k, st) };
+}
+
+/** Resolves a raise of `<machine>.<event>` against the planned machines:
+ * the call (and the `k.event` pair it raises), or the problem. */
+export function planRaise(plan: readonly PlannedMachine[], machine: string, ev: string): { code: string; raised: string } | { problem: string } {
+  const p = plannedById(plan, machine);
+  if (!p) return { problem: `no state machine "${machine}" gets code` };
+  if (!p.events.has(ev)) return { problem: `${machine} has no event "${ev}"` };
+  return { code: raiseCall(p.k, ev), raised: `${p.k}.${ev}` };
+}
+
 /** The machine code: constants, globals, functions and init lines. */
 export interface MachineCode {
   consts: string[];
@@ -168,16 +169,34 @@ export interface MachineCode {
 class Emitter {
   /** Events raised by table actions, as `k.event`. */
   readonly raised = new Set<string>();
+  private readonly lower: LowerHost;
 
   constructor(
     private readonly host: MachineHost,
     private readonly p: PlannedMachine,
-    /** Body lines of "when <state> is entered" blocks, by state. */
+    plan: readonly PlannedMachine[],
+    /** Body lines of "when <state> is entered" blocks and flows, by state. */
     private readonly hats: ReadonlyMap<string, readonly string[]>,
-  ) {}
+  ) {
+    this.lower = {
+      ...host,
+      inState: (machine, st) => planInState(plan, machine, st),
+      raise: (machine, ev) => {
+        // The table's own events keep their own wording.
+        if (machine === p.m.id && !p.events.has(ev)) return { problem: `raises "${ev}", which is not one of its events` };
+        const r = planRaise(plan, machine, ev);
+        if ("raised" in r) this.raised.add(r.raised);
+        return r;
+      },
+    };
+  }
 
   private get at(): string {
     return who(this.p.m, this.p.k);
+  }
+
+  private fail(where: string): (msg: string) => void {
+    return (msg) => this.host.error(`${this.at} ${where}: ${msg}`);
   }
 
   /** Whether `sm{k}_enter_<st>` exists. */
@@ -186,114 +205,16 @@ class Emitter {
     return (s?.entry.length ?? 0) > 0 || (this.hats.get(st)?.length ?? 0) > 0;
   }
 
-  expr(e: Expr, depth: number, where: string): string {
-    if (depth > MAX_EXPR_DEPTH) {
-      this.host.error(`${this.at} ${where}: the guard is nested deeper than ${MAX_EXPR_DEPTH} levels`);
-      return "0";
-    }
-    switch (e.kind) {
-      case "pin": {
-        const p = this.host.pin(e.label, ["gpio-in", "gpio-out"], "a GPIO input or output");
-        if ("problem" in p) {
-          this.host.error(`${this.at} ${where}: ${p.problem}`);
-          return "0";
-        }
-        this.host.use("gpio_read");
-        return `mw_gpio_read(${p.ident})`;
-      }
-      case "const":
-        if (!Number.isInteger(e.value) || e.value < -2147483648 || e.value > 2147483647) {
-          this.host.error(`${this.at} ${where}: ${e.value} is not a whole 32-bit number`);
-          return "0";
-        }
-        return e.value < 0 ? `(${e.value})` : String(e.value);
-      case "cmp": {
-        const op = CMP_AS[e.op];
-        if (!op) {
-          this.host.error(`${this.at} ${where}: unknown comparison "${String(e.op)}"`);
-          return "0";
-        }
-        return `<i32>(${this.expr(e.a, depth + 1, where)} ${op} ${this.expr(e.b, depth + 1, where)})`;
-      }
-      case "and":
-      case "or":
-        return `<i32>(${this.expr(e.a, depth + 1, where)} != 0 ${e.kind === "and" ? "&&" : "||"} ${this.expr(e.b, depth + 1, where)} != 0)`;
-      case "not":
-        return `<i32>(${this.expr(e.a, depth + 1, where)} == 0)`;
-      default:
-        this.host.error(`${this.at} ${where}: unknown guard`);
-        return "0";
-    }
-  }
-
-  /** Pointer and length arguments for constant text. */
-  private textArgs(text: string): string {
-    if (text === "") return "0, 0";
-    const id = this.host.str(text);
-    return `${id}, ${id}_LEN`;
-  }
-
-  actions(as: readonly ActionRef[], where: string, pad: string, out: string[]): void {
-    if (as.length > MAX_ACTIONS) this.host.error(`${this.at} ${where}: at most ${MAX_ACTIONS} actions`);
-    for (const a of as.slice(0, MAX_ACTIONS)) {
-      switch (a.kind) {
-        case "write":
-        case "toggle": {
-          const p = this.host.pin(a.label, ["gpio-out"], "a GPIO output");
-          if ("problem" in p) {
-            this.host.error(`${this.at} ${where}: ${p.problem}`);
-            break;
-          }
-          this.host.helper(a.kind === "write" ? "pinWrite" : "pinToggle");
-          out.push(a.kind === "write" ? `${pad}pinWrite(${p.ident}, ${a.level ? 1 : 0});` : `${pad}pinToggle(${p.ident});`);
-          break;
-        }
-        case "publish": {
-          const kp = this.host.keyProblem(a.key);
-          if (kp) {
-            this.host.error(`${this.at} ${where}: ${kp}`);
-            break;
-          }
-          if (new TextEncoder().encode(a.text).length > MAX_TEXT_BYTES) {
-            this.host.error(`${this.at} ${where}: the text is longer than ${MAX_TEXT_BYTES} bytes`);
-            break;
-          }
-          this.host.use("publish");
-          const k = this.host.str(a.key);
-          out.push(`${pad}mw_publish(${k}, ${k}_LEN, ${this.textArgs(a.text)});`);
-          break;
-        }
-        case "log":
-          if (new TextEncoder().encode(a.text).length > MAX_TEXT_BYTES) {
-            this.host.error(`${this.at} ${where}: the text is longer than ${MAX_TEXT_BYTES} bytes`);
-            break;
-          }
-          this.host.use("log");
-          out.push(`${pad}mw_log(${this.textArgs(a.text)});`);
-          break;
-        case "raise":
-          if (!this.p.events.has(a.event)) {
-            this.host.error(`${this.at} ${where}: raises "${a.event}", which is not one of its events`);
-            break;
-          }
-          this.raised.add(`${this.p.k}.${a.event}`);
-          out.push(`${pad}${raiseCall(this.p.k, a.event)}`);
-          break;
-        default:
-          this.host.error(`${this.at} ${where}: unknown action`);
-      }
-    }
-  }
-
   /** A row's actions and, for a change of state, the move. */
-  private rowBody(r: TransitionRow, i: number, pad: string, out: string[]): void {
+  private rowBody(r: TransitionRow, i: number): Stmt[] {
     const { k, m } = this.p;
-    this.actions(r.actions, `row ${i + 1}`, pad, out);
-    if (r.next === r.state) return;
-    out.push(`${pad}sm${k} = ${stateConst(k, r.next)};`);
+    const out = lowerActions(r.actions, this.lower, this.fail(`row ${i + 1}`), m.id);
+    if (r.next === r.state) return out;
+    out.push(line(`sm${k} = ${stateConst(k, r.next)};`));
     this.host.use("log");
-    out.push(`${pad}mw_log(${this.textArgs(machineLogMove(m.id, r.state, r.next, r.event))});`);
-    if (this.hasEnter(r.next)) out.push(`${pad}${enterFn(k, r.next)}();`);
+    out.push(line(`mw_log(${textArgs(this.lower, machineLogMove(m.id, r.state, r.next, r.event))});`));
+    if (this.hasEnter(r.next)) out.push(line(`${enterFn(k, r.next)}();`));
+    return out;
   }
 
   /** Rows that get code, by event then state, table order kept; bad rows
@@ -334,7 +255,7 @@ class Emitter {
     for (const s of m.states) {
       if (!this.hasEnter(s.name)) continue;
       const body: string[] = [];
-      this.actions(s.entry, `state ${s.name} entry`, "  ", body);
+      printStmts(lowerActions(s.entry, this.lower, this.fail(`state ${s.name} entry`), m.id), "  ", body);
       body.push(...(this.hats.get(s.name) ?? []));
       fns.push([`// Entering ${m.id}.${s.name}.`, `function ${enterFn(k, s.name)}(): void {`, ...body, "}"].join("\n"));
     }
@@ -353,18 +274,14 @@ class Emitter {
         const guarded = rows.filter((c) => c.r.guard !== null);
         const plain = rows.find((c) => c.r.guard === null);
         if (guarded.length === 0 && plain) {
-          this.rowBody(plain.r, plain.i, "      ", lines);
+          printStmts(this.rowBody(plain.r, plain.i), "      ", lines);
         } else {
-          guarded.forEach((c, j) => {
-            const g = this.expr(c.r.guard as Expr, 1, `row ${c.i + 1}`);
-            lines.push(`      ${j === 0 ? "if" : "} else if"} (${g} != 0) {`);
-            this.rowBody(c.r, c.i, "        ", lines);
+          // Each arm's guard is lowered before its body, in table order.
+          const arms = guarded.map((c) => {
+            const cond = lowerExpr(c.r.guard as Expr, this.lower, this.fail(`row ${c.i + 1}`));
+            return { cond, body: this.rowBody(c.r, c.i) };
           });
-          if (plain) {
-            lines.push("      } else {");
-            this.rowBody(plain.r, plain.i, "        ", lines);
-          }
-          lines.push("      }");
+          printStmts([{ kind: "if", arms, else: plain ? this.rowBody(plain.r, plain.i) : null }], "      ", lines);
         }
         lines.push("      break;");
       }
@@ -385,7 +302,7 @@ class Emitter {
     const drop = [`// Logs a raise of ${m.id} that the bounded queue drops.`, `function sm${k}_drop(ev: i32): void {`];
     if (m.events.length > 0) {
       drop.push("  switch (ev) {");
-      for (const e of m.events) drop.push(`    case ${eventConst(k, e.name)}:`, `      mw_log(${this.textArgs(dropLog(m.id, e.name))});`, "      break;");
+      for (const e of m.events) drop.push(`    case ${eventConst(k, e.name)}:`, `      mw_log(${textArgs(this.lower, dropLog(m.id, e.name))});`, "      break;");
       drop.push("  }");
     }
     drop.push("}");
@@ -415,7 +332,7 @@ class Emitter {
     );
     code.fns.push(...fns);
 
-    code.init.push(`  mw_log(${this.textArgs(machineLogInit(m.id, initial))});`);
+    code.init.push(`  mw_log(${textArgs(this.lower, machineLogInit(m.id, initial))});`);
     if (this.hasEnter(initial)) code.init.push(`  ${enterFn(k, initial)}();`);
   }
 }
@@ -443,7 +360,7 @@ export function emitMachines(
       const h = hats.get(`${p.k}.${s.name}`);
       if (h) mine.set(s.name, h);
     }
-    const em = new Emitter(host, p, mine);
+    const em = new Emitter(host, p, plan, mine);
     em.emit(code);
     for (const r of em.raised) raised.add(r);
   }

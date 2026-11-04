@@ -3,7 +3,7 @@ name = "state-table"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "State-machine tables for payloads: the checks the web editor shows (identifiers, references, pin functions, one unguarded row per cell, guard overlap, sizes, unreachable states, dead events) and the reference dispatch the generated code implements"
+description = "State-machine tables and flow graphs for payloads: the checks the web editor shows (identifiers, references, pin functions, one unguarded row per cell, guard overlap, sizes, unreachable states, dead events; one entry, acyclic, wired-once ports for flows) and the reference dispatch the generated code implements"
 license = "MIT OR Apache-2.0"
 publish = false
 

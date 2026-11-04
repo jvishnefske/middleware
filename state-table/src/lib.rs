@@ -12,6 +12,9 @@
 //!   forward pass ([`Guard`], [`Node`]).
 //! * [`check`] — [`check()`]: every rule below, emitted as structured
 //!   [`Issue`]s (indices and borrowed names, no strings built).
+//! * [`flow`] — the flow graphs' checks ([`flow::check_flows`]): one
+//!   entry, acyclic, each port wired at most once, every node reachable,
+//!   and the same action and guard rules as the tables.
 //! * [`step`] — the reference dispatch ([`step()`]) and the bounded raise
 //!   queue ([`RaiseQueue`], [`dispatch`]).
 //!
@@ -29,11 +32,12 @@
 //!
 //! Actions are a closed set: write a pin high or low, toggle a pin,
 //! publish constant text on a key, log constant text, raise an event of
-//! the same machine.
+//! the same machine or (naming it) of another machine. Guards may test
+//! another machine's (or this one's) current state as a 0/1 leaf.
 //!
 //! Raised events are bounded. A raise while any machine is stepping (from
-//! a row's or an entry action, or from a "when machine enters state"
-//! block) is queued; each machine has one pending slot, so a second raise
+//! a row's or an entry action, a "when machine enters state" block or a
+//! flow entered from a state) is queued; each machine has one pending slot, so a second raise
 //! for a machine that already has one pending is dropped (and logged).
 //! After the outermost step the pending slots are drained once, in machine
 //! order; a raise during the drain is dropped. So one external raise runs
@@ -63,7 +67,9 @@
 //!   and is a `gpio-out`; a publish key passes the key rule given to
 //!   [`check()`] and is not under `sys/`; publish and log text is at most
 //!   [`MAX_TEXT`] bytes; a raise names an event of the same machine (fix:
-//!   add it);
+//!   add it) or of the machine it names, which must exist (fix: add the
+//!   event to that machine); a guard's state tests name an existing
+//!   machine and one of its states;
 //! * per cell: at most one unguarded row (a guard that is always true
 //!   counts as unguarded), reported on each later row naming the first;
 //!   two guarded rows overlap when some 0/1 assignment of their pins makes
@@ -87,13 +93,14 @@
 extern crate std;
 
 pub mod check;
+pub mod flow;
 pub mod guard;
 pub mod step;
 
 pub use check::{
     Field, Fix, Issue, IssueKind, KeyProblem, List, MAX_OVERLAP_PINS, Severity, Witness, check,
 };
-pub use guard::{CmpOp, Guard, GuardError, MAX_GUARD_DEPTH, MAX_GUARD_NODES, Node};
+pub use guard::{CmpOp, Guard, GuardError, Leaf, MAX_GUARD_DEPTH, MAX_GUARD_NODES, Node};
 pub use step::{Fired, MAX_RAISES_PER_STEP, RaiseQueue, Raised, Raises, dispatch, step};
 
 /// Longest machine id, state name or event name, in bytes (the pin
@@ -157,8 +164,11 @@ pub enum Action<'a> {
         /// The line.
         text: &'a str,
     },
-    /// Raise an event of the same machine (queued; see the crate docs).
+    /// Raise an event of a machine (queued; see the crate docs).
     Raise {
+        /// The machine's id; `None` for the table's own machine (a flow's
+        /// raise must name one).
+        machine: Option<&'a str>,
         /// The event's name.
         event: &'a str,
     },

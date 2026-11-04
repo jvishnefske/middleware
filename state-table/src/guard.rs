@@ -7,10 +7,18 @@
 //! in the node count. A tree of depth [`MAX_GUARD_DEPTH`] (a leaf alone is
 //! depth 1) has at most `2^4 - 1 = 15` nodes, which is the node limit.
 //!
-//! Values are `i32`. A pin read is 0 or 1; a comparison yields 0 or 1;
+//! Values are `i32`. A pin read is 0 or 1; a state test
+//! ([`Node::State`], "machine M is in state S") is 0 or 1; a comparison yields 0 or 1;
 //! `and` / `or` treat any non-zero value as true and yield 0 or 1; `not`
 //! yields 1 for 0 and 0 otherwise. Nothing does arithmetic, so nothing can
 //! overflow.
+//!
+//! Pins and state tests are the guard's *leaves* ([`Leaf`]): every value
+//! depends only on them, and each is 0 or 1, so trying every assignment of
+//! a guard's distinct leaves ([`LeafSet`], [`holds_under`]) decides it
+//! exactly. Two state tests of one machine naming different states cannot
+//! both be 1 (a machine is in one state), so such assignments are skipped
+//! ([`consistent`]).
 //!
 //! [`Guard::shape`] reports a malformed arena (empty, too many nodes, a
 //! child that is not earlier) and the depth; [`Guard::eval`] refuses the
@@ -81,11 +89,32 @@ impl CmpOp {
     }
 }
 
+/// A leaf a guard's value depends on: a digital pin or a machine's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leaf<'a> {
+    /// The pin with this label reads high.
+    Pin(&'a str),
+    /// The machine with this id is in this state.
+    State {
+        /// The machine's id.
+        machine: &'a str,
+        /// The state's name.
+        state: &'a str,
+    },
+}
+
 /// One node of a guard's arena. Child indices refer to earlier nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Node<'a> {
     /// A digital read of the pin with this label: 0 or 1.
     Pin(&'a str),
+    /// 1 while machine `machine` is in state `state`, else 0.
+    State {
+        /// The machine's id.
+        machine: &'a str,
+        /// The state's name.
+        state: &'a str,
+    },
     /// A constant.
     Const(i32),
     /// A comparison of two nodes: 0 or 1.
@@ -109,7 +138,7 @@ impl Node<'_> {
     /// The node's children (unused slots are `None`).
     pub const fn children(&self) -> [Option<usize>; 2] {
         match *self {
-            Node::Pin(_) | Node::Const(_) => [None, None],
+            Node::Pin(_) | Node::State { .. } | Node::Const(_) => [None, None],
             Node::Cmp { a, b, .. } | Node::And(a, b) | Node::Or(a, b) => [Some(a), Some(b)],
             Node::Not(a) => [Some(a), None],
         }
@@ -145,48 +174,59 @@ pub struct Guard<'a> {
     pub nodes: &'a [Node<'a>],
 }
 
-/// Distinct pin labels of one or two guards, in first-seen order.
+impl<'a> Node<'a> {
+    /// The leaf this node is, if it is one.
+    pub const fn leaf(&self) -> Option<Leaf<'a>> {
+        match *self {
+            Node::Pin(label) => Some(Leaf::Pin(label)),
+            Node::State { machine, state } => Some(Leaf::State { machine, state }),
+            _ => None,
+        }
+    }
+}
+
+/// Distinct leaves of one or two guards, in first-seen order.
 #[derive(Debug, Clone, Copy)]
-pub struct PinSet<'a> {
-    labels: [&'a str; 2 * MAX_GUARD_NODES],
+pub struct LeafSet<'a> {
+    leaves: [Leaf<'a>; 2 * MAX_GUARD_NODES],
     len: usize,
 }
 
-impl<'a> PinSet<'a> {
+impl<'a> LeafSet<'a> {
     /// An empty set.
     pub const fn new() -> Self {
-        PinSet {
-            labels: [""; 2 * MAX_GUARD_NODES],
+        LeafSet {
+            leaves: [Leaf::Pin(""); 2 * MAX_GUARD_NODES],
             len: 0,
         }
     }
 
-    /// Adds the pins `g` reads (only the first [`MAX_GUARD_NODES`] nodes
+    /// Adds the leaves `g` reads (only the first [`MAX_GUARD_NODES`] nodes
     /// are looked at, so a set of two guards never overflows).
     pub fn with(mut self, g: &Guard<'a>) -> Self {
         for node in g.nodes.iter().take(MAX_GUARD_NODES) {
-            if let Node::Pin(label) = *node
-                && !self.contains(label)
-                && let Some(slot) = self.labels.get_mut(self.len)
+            if let Some(leaf) = node.leaf()
+                && !self.contains(leaf)
+                && let Some(slot) = self.leaves.get_mut(self.len)
             {
-                *slot = label;
+                *slot = leaf;
                 self.len += 1;
             }
         }
         self
     }
 
-    /// Whether `label` is in the set.
-    pub fn contains(&self, label: &str) -> bool {
-        self.index(label).is_some()
+    /// Whether `leaf` is in the set.
+    pub fn contains(&self, leaf: Leaf<'_>) -> bool {
+        self.index(leaf).is_some()
     }
 
-    /// The label's position, if present.
-    pub fn index(&self, label: &str) -> Option<usize> {
-        self.as_slice().iter().position(|l| *l == label)
+    /// The leaf's position, if present.
+    pub fn index(&self, leaf: Leaf<'_>) -> Option<usize> {
+        self.as_slice().iter().position(|l| *l == leaf)
     }
 
-    /// How many distinct labels.
+    /// How many distinct leaves.
     pub const fn len(&self) -> usize {
         self.len
     }
@@ -196,13 +236,21 @@ impl<'a> PinSet<'a> {
         self.len == 0
     }
 
-    /// The labels, in first-seen order.
-    pub fn as_slice(&self) -> &[&'a str] {
-        self.labels.get(..self.len).unwrap_or(&[])
+    /// The leaves, in first-seen order.
+    pub fn as_slice(&self) -> &[Leaf<'a>] {
+        self.leaves.get(..self.len).unwrap_or(&[])
+    }
+
+    /// The pin labels among the leaves, in first-seen order.
+    pub fn pins(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.as_slice().iter().filter_map(|l| match *l {
+            Leaf::Pin(label) => Some(label),
+            Leaf::State { .. } => None,
+        })
     }
 }
 
-impl Default for PinSet<'_> {
+impl Default for LeafSet<'_> {
     fn default() -> Self {
         Self::new()
     }
@@ -248,14 +296,16 @@ impl<'a> Guard<'a> {
         Ok(depth)
     }
 
-    /// The guard's value with pins read through `read` (one forward pass).
-    pub fn eval(&self, read: impl Fn(&str) -> bool) -> Result<i32, GuardError> {
+    /// The guard's value with its leaves read through `read` (one forward
+    /// pass).
+    pub fn eval(&self, read: impl Fn(Leaf<'_>) -> bool) -> Result<i32, GuardError> {
         self.depths()?;
         let mut v = [0i32; MAX_GUARD_NODES];
         for (i, node) in self.nodes.iter().enumerate() {
             let at = |j: usize| v.get(j).copied().unwrap_or(0);
             let x = match *node {
-                Node::Pin(label) => i32::from(read(label)),
+                Node::Pin(label) => i32::from(read(Leaf::Pin(label))),
+                Node::State { machine, state } => i32::from(read(Leaf::State { machine, state })),
                 Node::Const(c) => c,
                 Node::Cmp { op, a, b } => i32::from(op.apply(at(a), at(b))),
                 Node::And(a, b) => i32::from(at(a) != 0 && at(b) != 0),
@@ -269,22 +319,37 @@ impl<'a> Guard<'a> {
         Ok(v.get(self.nodes.len() - 1).copied().unwrap_or(0))
     }
 
-    /// Whether the guard is true with pins read through `read`; a
+    /// Whether the guard is true with its leaves read through `read`; a
     /// malformed arena is never true.
-    pub fn holds(&self, read: impl Fn(&str) -> bool) -> bool {
+    pub fn holds(&self, read: impl Fn(Leaf<'_>) -> bool) -> bool {
         self.eval(read).is_ok_and(|x| x != 0)
     }
 
-    /// The distinct pins the guard reads.
-    pub fn pins(&self) -> PinSet<'a> {
-        PinSet::new().with(self)
+    /// The distinct leaves the guard reads.
+    pub fn leaves(&self) -> LeafSet<'a> {
+        LeafSet::new().with(self)
     }
 }
 
-/// Whether `g` is true under assignment `bits` of the pins in `set`
-/// (bit `k` is the level of `set`'s `k`-th label; others read 0).
-pub fn holds_under(g: &Guard<'_>, set: &PinSet<'_>, bits: u32) -> bool {
-    g.holds(|label| set.index(label).is_some_and(|k| (bits >> k) & 1 == 1))
+/// Whether `g` is true under assignment `bits` of the leaves in `set`
+/// (bit `k` is the value of `set`'s `k`-th leaf; others read 0).
+pub fn holds_under(g: &Guard<'_>, set: &LeafSet<'_>, bits: u32) -> bool {
+    g.holds(|leaf| set.index(leaf).is_some_and(|k| (bits >> k) & 1 == 1))
+}
+
+/// Whether assignment `bits` of `set` can happen: no two state tests of
+/// one machine naming different states are both 1.
+pub fn consistent(set: &LeafSet<'_>, bits: u32) -> bool {
+    let on = |k: usize| (bits >> k) & 1 == 1;
+    set.as_slice().iter().enumerate().all(|(i, a)| {
+        let Leaf::State { machine, .. } = *a else {
+            return true;
+        };
+        !on(i)
+            || set.as_slice().iter().enumerate().skip(i + 1).all(|(j, b)| {
+                !(on(j) && matches!(*b, Leaf::State { machine: m, .. } if m == machine))
+            })
+    })
 }
 
 #[cfg(test)]
@@ -388,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_set_keeps_distinct_labels_in_first_seen_order() {
+    fn leaf_set_keeps_distinct_leaves_in_first_seen_order() {
         let a = [
             Node::Pin("A"),
             Node::Pin("B"),
@@ -397,11 +462,55 @@ mod tests {
             Node::Or(2, 3),
         ];
         let b = [Node::Pin("C"), Node::Pin("B"), Node::Or(0, 1)];
-        let set = Guard { nodes: &a }.pins().with(&Guard { nodes: &b });
-        assert_eq!(set.as_slice(), &["A", "B", "C"]);
+        let set = Guard { nodes: &a }.leaves().with(&Guard { nodes: &b });
+        assert_eq!(
+            set.as_slice(),
+            &[Leaf::Pin("A"), Leaf::Pin("B"), Leaf::Pin("C")]
+        );
         assert_eq!(set.len(), 3);
         assert!(!set.is_empty());
         assert!(holds_under(&Guard { nodes: &b }, &set, 0b100));
         assert!(!holds_under(&Guard { nodes: &b }, &set, 0b001));
+    }
+
+    #[test]
+    fn state_leaves_read_through_the_reader_and_exclude_each_other() {
+        let nodes = [
+            Node::State {
+                machine: "Mode",
+                state: "On",
+            },
+            Node::State {
+                machine: "Mode",
+                state: "Off",
+            },
+            Node::State {
+                machine: "Door",
+                state: "Open",
+            },
+            Node::Or(0, 1),
+            Node::And(3, 2),
+        ];
+        let g = Guard { nodes: &nodes };
+        let on = |l: Leaf<'_>| {
+            matches!(
+                l,
+                Leaf::State {
+                    state: "On" | "Open",
+                    ..
+                }
+            )
+        };
+        assert_eq!(g.eval(on), Ok(1));
+        assert_eq!(g.eval(|_| false), Ok(0));
+        assert_eq!(g.shape(), Ok(3));
+        let set = g.leaves();
+        assert_eq!(set.len(), 3);
+        assert_eq!(set.pins().count(), 0);
+        // Mode.On and Mode.Off both 1 cannot happen; with Door.Open it can.
+        assert!(!consistent(&set, 0b011));
+        assert!(consistent(&set, 0b101));
+        assert!(consistent(&set, 0b110));
+        assert!(consistent(&set, 0b000));
     }
 }

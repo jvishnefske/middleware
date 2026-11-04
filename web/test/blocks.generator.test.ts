@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { BLOCK_DEFS, BUILTIN_BLOCKS, EVENT_BLOCKS, blockSupported, featureOf, toolbox } from "../src/blocks/defs";
 import { EXAMPLES } from "../src/blocks/examples";
+import type { Flow } from "../src/model/flows";
 import { commentText, generate, keyProblem } from "../src/blocks/generator";
 import { buildPayload } from "../src/blocks/pipeline";
 import type { BlockJson, WorkspaceJson } from "../src/blocks/workspace";
@@ -184,23 +185,25 @@ const IRQ: WorkspaceJson = ws(
   },
 );
 
-/** Examples get the pins they need from the Pico 2's suggestions (Blink: LED on GPIO 25) and their state machines. */
-const GOLDEN: [string, WorkspaceJson, "esp-base" | "badge", PinTable, readonly Machine[]][] = [
-  ...EXAMPLES.map((e): [string, WorkspaceJson, "esp-base" | "badge", PinTable, readonly Machine[]] => [
+/** Examples get the pins they need from the Pico 2's suggestions (Blink: LED on GPIO 25), their state machines and their flows. */
+type Golden = [string, WorkspaceJson, "esp-base" | "badge", PinTable, readonly Machine[], readonly Flow[]];
+const GOLDEN: Golden[] = [
+  ...EXAMPLES.map((e): Golden => [
     e.id,
     e.workspace,
     e.profile,
     withNeeds(EMPTY_PINS, e.profile === "badge" ? "badge" : "pico2", e.needs),
     e.machines ?? [],
+    e.flows ?? [],
   ]),
-  ["logic", LOGIC, "esp-base", EMPTY_PINS, []],
-  ["irq", IRQ, "esp-base", EMPTY_PINS, []],
+  ["logic", LOGIC, "esp-base", EMPTY_PINS, [], []],
+  ["irq", IRQ, "esp-base", EMPTY_PINS, [], []],
 ];
 
 describe("AssemblyScript generator golden files", () => {
-  for (const [name, w, profile, pins, machines] of GOLDEN) {
+  for (const [name, w, profile, pins, machines, flows] of GOLDEN) {
     it(`${name} (${profile}) matches test/fixtures/blocks/${name}.as and compiles`, async () => {
-      const g = generate(w, profile, pins, machines);
+      const g = generate(w, profile, pins, machines, flows);
       expect(g.errors).toEqual([]);
       await expect(g.source).toMatchFileSnapshot(`./fixtures/blocks/${name}.as`);
       const r = await compileAssemblyScript(g.source);
