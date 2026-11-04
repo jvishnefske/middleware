@@ -24,6 +24,10 @@
 //! * [`flows`] — the flow graphs' checks: the page's flows converted to
 //!   `state-table` flow views, checked against the machines and the pin
 //!   table, each issue in plain language with its fix.
+//! * [`recipes`] — S88 master recipes over `recipe-core`: checks with
+//!   plain-language messages, allocation of steps to units' equipment
+//!   phases (with per-unit reasons when it fails), a simulated run against
+//!   simulated units, and the phase state model for the page.
 //! * [`simulator`] (`simulator` feature, default) — runs a payload in
 //!   `wasm-host` against a virtual device: GPIO with edge interrupts, ABI 2
 //!   hardware timers on a JS-supplied clock, an SPI device (loopback or a
@@ -31,7 +35,8 @@
 //!   feeds `on_irq`.
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
-//!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, ...). It only converts values.
+//!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, `checkRecipe`,
+//!   `allocateRecipe`, `simulateRecipe`, `phaseModel`, ...). It only converts values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
@@ -45,5 +50,6 @@ pub mod flows;
 pub mod loader;
 pub mod machines;
 pub mod pins;
+pub mod recipes;
 #[cfg(feature = "simulator")]
 pub mod simulator;
