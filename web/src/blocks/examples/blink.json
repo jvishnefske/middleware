@@ -10,14 +10,17 @@
         "inputs": {
           "DO": {
             "block": {
-              "type": "mw_gpio_output",
-              "id": "out",
-              "fields": { "PIN": 8 },
-              "next": {
-                "block": {
-                  "type": "mw_log",
-                  "id": "log",
-                  "inputs": { "TEXT": { "shadow": { "type": "text", "id": "logText", "fields": { "TEXT": "blink: started" } } } }
+              "type": "mw_log",
+              "id": "log",
+              "inputs": {
+                "TEXT": {
+                  "shadow": {
+                    "type": "text",
+                    "id": "logText",
+                    "fields": {
+                      "TEXT": "blink: started"
+                    }
+                  }
                 }
               }
             }
@@ -28,9 +31,21 @@
         "type": "mw_every",
         "id": "every",
         "x": 20,
-        "y": 160,
-        "fields": { "MS": 500 },
-        "inputs": { "DO": { "block": { "type": "mw_gpio_toggle", "id": "toggle", "fields": { "PIN": 8 } } } }
+        "y": 130,
+        "fields": {
+          "MS": 500
+        },
+        "inputs": {
+          "DO": {
+            "block": {
+              "type": "mw_pin_toggle",
+              "id": "toggle",
+              "fields": {
+                "LABEL": "LED"
+              }
+            }
+          }
+        }
       }
     ]
   }

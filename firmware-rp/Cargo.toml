@@ -82,6 +82,9 @@ shell = [
 # `image`), the trust record (`trust_store`) and the heap check (`start`).
 # Default features off (no chip, no esp-hal); `trust` for signed payloads.
 esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
+# The board pin rules (Pico pin map, RP function tables, SPI routing),
+# shared with esp-base and the web editor.
+board-pins = { path = "../board-pins" }
 middleware = { path = "..", features = ["serial", "trust"] }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"

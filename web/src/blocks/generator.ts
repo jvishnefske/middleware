@@ -7,9 +7,19 @@
 // * `@external("mw", ...)` declarations for only the host functions the
 //   blocks use, in ABI order;
 // * `memory`, which asc exports by itself;
-// * `init` (subscriptions, pin interrupts and `set_tick` first, then the
-//   `on init` stacks), and `tick`, `mw_alloc` + `on_message` and `on_irq`
-//   only when an event block needs them.
+// * one `const PIN_<label>: i32` per pin-table row with a pin;
+// * `init` (the pin table's setup first: `gpio_output` plus the initial
+//   level, `gpio_input` with its pull, `i2c_open(bus, hz)` per I2C bus,
+//   `spi_open(...)` for the SPI bus; then subscriptions, pin interrupts and
+//   `set_tick`, then the `on init` stacks), and `tick`, `mw_alloc` +
+//   `on_message` and `on_irq` only when an event block needs them.
+//
+// Pin blocks either take a pin number (`mw_gpio_*`, `mw_on_pin_edge`) or
+// name a pin-table label (`mw_pin_*`, `mw_on_pin`), which must be a row of
+// the right function (an output for write and toggle, an input for an
+// edge handler). Whether the table's pins suit the board is protocol-wasm
+// `checkPins`' question (pipeline.ts asks it before compiling); the
+// generator only turns the table into code.
 //
 // Nothing allocates at run time. Constant text is UTF-8 in data segments
 // (`memory.data<u8>([...])`), and messages land in a fixed 512-byte
@@ -29,6 +39,7 @@
 // support is an error rather than being dropped silently.
 
 import { EVENT_BLOCKS, blockSupported } from "./defs";
+import { EMPTY_PINS, PULL_CODES, type PinFunc, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
 import {
   type BlockJson,
@@ -83,6 +94,8 @@ const IMPORTS: readonly [string, string][] = [
   ["gpio_irq", "(pin: i32, edge: i32): i32"],
   ["timer_start", "(id: i32, periodUs: i32, periodic: i32): i32"],
   ["timer_stop", "(id: i32): i32"],
+  ["spi_open", "(bus: i32, sck: i32, mosi: i32, miso: i32, cs: i32, freqKhz: i32, mode: i32): i32"],
+  ["i2c_open", "(bus: i32, freqHz: i32): i32"],
 ];
 
 /** Run-time helpers, emitted when used. Order is emission order. */
@@ -295,6 +308,14 @@ export function keyProblem(key: string): string | null {
   return null;
 }
 
+/** Labels that can name a constant (checkPins enforces the same rule). */
+const PIN_IDENT = /^[A-Za-z][A-Za-z0-9_]{0,23}$/;
+
+/** The constant a pin-table label becomes. */
+export function pinIdent(label: string): string {
+  return `PIN_${label}`;
+}
+
 class Gen {
   readonly errors: GenIssue[] = [];
   readonly warnings: GenIssue[] = [];
@@ -311,7 +332,29 @@ class Gen {
   constructor(
     private readonly ws: WorkspaceJson,
     private readonly profile: ProfileId,
+    private readonly pins: PinTable,
   ) {}
+
+  /** The constant naming a labelled pin, after checking the block's label
+   * names a table row whose function is one of `funcs`; null (with an
+   * error on the block) otherwise. */
+  pinLabel(b: BlockJson, funcs: readonly PinFunc[], what: string): { ident: string; pin: number } | null {
+    const label = fieldText(b, "LABEL");
+    const r = this.pins.rows.find((x) => x.label === label);
+    if (!r) {
+      this.error(b, `no pin is labelled "${label}" in the Pins table; add it there`);
+      return null;
+    }
+    if (!funcs.includes(r.func)) {
+      this.error(b, `${label} is not ${what} in the Pins table`);
+      return null;
+    }
+    if (r.pin === null || !PIN_IDENT.test(label) || r.pin > MAX_PIN) {
+      this.error(b, `${label} has no usable pin in the Pins table`);
+      return null;
+    }
+    return { ident: pinIdent(label), pin: r.pin };
+  }
 
   error(b: BlockJson | undefined, message: string): void {
     this.errors.push({ blockId: b?.id, message });
@@ -535,6 +578,12 @@ class Gen {
         this.use("gpio_read");
         return `mw_gpio_read(${p})`;
       }
+      case "mw_pin_read": {
+        const p = this.pinLabel(b, ["gpio-in", "gpio-out"], "a GPIO input or output");
+        if (!p) return "0";
+        this.use("gpio_read");
+        return `mw_gpio_read(${p.ident})`;
+      }
       case "mw_pin_level":
         if (ctx.event !== "pin") {
           this.error(b, "pin level is only available inside on pin edge");
@@ -737,6 +786,20 @@ class Gen {
         out.push(`${pad}pinToggle(${p});`);
         return;
       }
+      case "mw_pin_write": {
+        const p = this.pinLabel(b, ["gpio-out"], "a GPIO output");
+        if (!p) return;
+        this.helper("pinWrite");
+        out.push(`${pad}pinWrite(${p.ident}, ${this.num(input(b, "LEVEL"), ctx)});`);
+        return;
+      }
+      case "mw_pin_toggle": {
+        const p = this.pinLabel(b, ["gpio-out"], "a GPIO output");
+        if (!p) return;
+        this.helper("pinToggle");
+        out.push(`${pad}pinToggle(${p.ident});`);
+        return;
+      }
       case "mw_timer_start": {
         const id = this.intField(b, "ID", 0, 3, "timer");
         const ms = this.intField(b, "MS", 1, 2_000_000, "period");
@@ -788,6 +851,45 @@ class Gen {
   }
 
   // ---- module
+
+  /** The pin table's constants (returned) and its init setup (appended to
+   * `setup`). Rows without a pin or with a label that cannot name a
+   * constant are skipped (checkPins reports them); GPIO inputs that an
+   * edge handler configures are left to it. */
+  private tableSetup(setup: string[], irqPins: ReadonlyMap<number, unknown>): string[] {
+    const consts: string[] = [];
+    const usable = this.pins.rows.filter((r) => r.pin !== null && r.pin <= MAX_PIN && PIN_IDENT.test(r.label));
+    for (const r of usable) consts.push(`const ${pinIdent(r.label)}: i32 = ${r.pin}; // ${FUNC_COMMENT[r.func]}`);
+    for (const r of usable) {
+      const id = pinIdent(r.label);
+      if (r.func === "gpio-out") {
+        this.use("gpio_output");
+        this.helper("pinWrite");
+        setup.push(`  mw_gpio_output(${id});`, `  pinWrite(${id}, ${r.initial});`);
+      } else if (r.func === "gpio-in" && r.pin !== null && !irqPins.has(r.pin)) {
+        this.use("gpio_input");
+        setup.push(`  mw_gpio_input(${id}, ${PULL_CODES[r.pull]});`);
+      }
+    }
+    for (const bus of this.pins.buses) {
+      const on = (f: PinFunc) => usable.find((r) => r.func === f && r.bus === bus.bus);
+      if (bus.kind === "i2c") {
+        if (!on("i2c-sda") || !on("i2c-scl")) continue;
+        this.use("i2c_open");
+        setup.push(`  mw_i2c_open(${bus.bus}, ${bus.hz});`);
+      } else {
+        const sck = on("spi-sck");
+        if (!sck) continue;
+        const arg = (f: PinFunc) => {
+          const r = on(f);
+          return r ? pinIdent(r.label) : "-1";
+        };
+        this.use("spi_open");
+        setup.push(`  mw_spi_open(${bus.bus}, ${pinIdent(sck.label)}, ${arg("spi-mosi")}, ${arg("spi-miso")}, ${arg("spi-cs")}, ${bus.khz}, ${bus.mode});`);
+      }
+    }
+    return consts;
+  }
 
   run(): GenResult {
     const tops = topBlocks(this.ws).filter((b) => !isDisabled(b));
@@ -848,6 +950,19 @@ class Gen {
           pinBodies.push({ pin, edge, body });
           break;
         }
+        case "mw_on_pin": {
+          const p = this.pinLabel(b, ["gpio-in"], "a GPIO input");
+          const edge = this.intField(b, "EDGE", 1, 3, "edge");
+          this.stmts(input(b, "DO"), ctx("pin"), "    ", body);
+          if (!p) break;
+          const r = this.pins.rows.find((x) => x.label === fieldText(b, "LABEL"));
+          const pull = PULL_CODES[r?.pull ?? "none"];
+          const prev = pins.get(p.pin);
+          if (prev && prev.pull !== pull) this.error(b, `pin ${p.pin} already has a handler with a different pull`);
+          pins.set(p.pin, { pull, edges: (prev?.edges ?? 0) | edge, b });
+          pinBodies.push({ pin: p.pin, edge, body });
+          break;
+        }
         case "mw_on_timer":
           this.stmts(input(b, "DO"), ctx("timer"), "    ", body);
           timers.push({ id: this.intField(b, "ID", 0, 3, "timer"), body });
@@ -855,7 +970,9 @@ class Gen {
       }
     }
 
-    // init: subscriptions, pin interrupts, tick, then the on-init stacks.
+    // init: the pin table, subscriptions, pin interrupts, tick, then the
+    // on-init stacks.
+    const pinConsts = this.tableSetup(setup, pins);
     for (const [key, slot] of this.slots) {
       const k = this.str(key);
       this.use("subscribe");
@@ -977,6 +1094,7 @@ class Gen {
           .join("\n"),
       );
     }
+    if (pinConsts.length > 0) parts.push(["// Pins (from the Pins table).", ...pinConsts].join("\n"));
     if (globals.length > 0) parts.push(globals.join("\n"));
     const helpers = HELPERS.filter(([n]) => this.helpers.has(n)).map(([, src]) => src);
     parts.push(...helpers, ...fns);
@@ -991,7 +1109,23 @@ class Gen {
   }
 }
 
-/** Generates the AssemblyScript module for a workspace. */
-export function generate(ws: WorkspaceJson, profile: ProfileId): GenResult {
-  return new Gen(ws, profile).run();
+/** What each function's constant comment says. */
+const FUNC_COMMENT: Readonly<Record<PinFunc, string>> = {
+  "gpio-out": "GPIO output",
+  "gpio-in": "GPIO input",
+  adc: "analog input (adc_read)",
+  pwm: "PWM output",
+  "i2c-sda": "I2C SDA",
+  "i2c-scl": "I2C SCL",
+  "spi-sck": "SPI SCK",
+  "spi-mosi": "SPI MOSI",
+  "spi-miso": "SPI MISO",
+  "spi-cs": "SPI CS",
+};
+
+/** Generates the AssemblyScript module for a workspace and its pin table
+ * (none by default: a workspace from before the table generates exactly
+ * what it did). */
+export function generate(ws: WorkspaceJson, profile: ProfileId, pins: PinTable = EMPTY_PINS): GenResult {
+  return new Gen(ws, profile, pins).run();
 }

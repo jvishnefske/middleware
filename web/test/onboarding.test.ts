@@ -18,7 +18,10 @@ import {
   textSpans,
   uf2Detail,
 } from "../src/onboarding/boards";
+import { makeModel } from "../src/model/payload";
+import { boardDefaults, checkTable } from "../src/model/pins";
 import { TAB_IDS, initialTab } from "../src/ui/app";
+import { protocol } from "./fakeDevice";
 
 const manifest = parseManifest(JSON.parse(readFileSync(new URL("../public/firmware/manifest.json", import.meta.url), "utf8")));
 
@@ -185,15 +188,30 @@ describe("first run", () => {
   it("asks before replacing blocks that differ from the example, not otherwise", () => {
     const blink = exampleWorkspace("blink")!;
     const echo = exampleWorkspace("echo")!;
-    expect(wouldReplaceWork({}, "esp-base", blink)).toBe(false);
-    expect(wouldReplaceWork({ blocks: { languageVersion: 0, blocks: [] } }, "esp-base", blink)).toBe(false);
-    expect(wouldReplaceWork(echo.workspace, "esp-base", blink)).toBe(true);
+    const pins = boardDefaults("pico2");
+    const next = makeModel("pico2", blink.workspace, pins);
+    expect(wouldReplaceWork(makeModel("pico2", {}), next)).toBe(false);
+    expect(wouldReplaceWork(makeModel("pico2", { blocks: { languageVersion: 0, blocks: [] } }), next)).toBe(false);
+    expect(wouldReplaceWork(makeModel("pico2", echo.workspace, pins), next)).toBe(true);
     // The same blocks, moved and with new ids, are not work.
     const moved = structuredClone(blink.workspace);
     for (const b of moved.blocks?.blocks ?? []) {
       b.x = (b.x ?? 0) + 100;
       b.id = `moved-${b.id}`;
     }
-    expect(wouldReplaceWork(moved, "esp-base", blink)).toBe(false);
+    expect(wouldReplaceWork(makeModel("pico2", moved, pins), next)).toBe(false);
+  });
+
+  it("names the Blink pin per board, and every board's default pin passes its pin rules (Rust checkPins)", () => {
+    const proto = protocol();
+    for (const b of BOARDS) {
+      const issues = checkTable(proto.checkPins, b.id, boardDefaults(b.id));
+      expect(issues, b.id).toEqual([]);
+      const run = gettingStarted(b).find((s) => s.title.startsWith("Run") || s.title.startsWith("Upload"));
+      if (b.runsPayloads) expect(run?.body, b.id).toContain(`GPIO ${b.blink.pin}`);
+      if (b.ledPin !== null) expect(b.blink.pin, b.id).toBe(b.ledPin);
+    }
+    expect(boardDefaults("pico2").rows[0]).toMatchObject({ label: "LED", pin: 25, func: "gpio-out" });
+    expect(boardDefaults("esp32").rows[0]).toMatchObject({ label: "LED", pin: 4 });
   });
 });

@@ -499,6 +499,201 @@ pub fn has_simulator() -> bool {
     cfg!(feature = "simulator")
 }
 
+fn pin_map(chip: &str) -> Result<&'static board_pins::PinMap, JsError> {
+    board_pins::boards::by_chip(chip)
+        .ok_or_else(|| JsError::new(&format!("no pin map for chip {chip:?}")))
+}
+
+fn get(o: &JsValue, key: &str) -> JsValue {
+    Reflect::get(o, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
+}
+
+/// A JS number that is a whole number, as `i64`.
+fn whole(v: &JsValue) -> Option<i64> {
+    v.as_f64()
+        .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15)
+        .map(|f| f as i64)
+}
+
+/// The board's pins for the pin table: `{chip, spiRouting: "matrix" |
+/// "rp-function-table", gpios: [{pin, reserved?: why, inputOnly, adc?:
+/// channel, pwm?: {timer, channel}, i2c?: {bus, line: "sda"|"scl"}, spi?:
+/// [{block, signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm:
+/// [{timer, channel, pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
+/// maxLabel, funcs: [name]}`. `chip` is a `sys/info` chip name; an unknown
+/// one throws.
+#[wasm_bindgen(js_name = boardPins)]
+pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
+    use board_pins::SpiRouting;
+    use board_pins::rp::{SpiBlock, SpiSignal, spi_function};
+    let map = pin_map(chip)?;
+    let o = Object::new();
+    set(&o, "chip", chip);
+    let routing = match map.spi_routing() {
+        SpiRouting::Matrix => "matrix",
+        SpiRouting::RpFunctionTable => "rp-function-table",
+    };
+    set(&o, "spiRouting", routing);
+    let wired: Vec<(u8, u8, u8)> = (0..2u8)
+        .filter_map(|b| map.i2c_pins(b).map(|(d, c)| (b, d, c)))
+        .collect();
+    let gpios: Array = map
+        .gpios()
+        .map(|p| {
+            let g = Object::new();
+            set(&g, "pin", p);
+            if map.is_reserved(p) {
+                set(&g, "reserved", map.reason(p).unwrap_or("reserved"));
+            }
+            set(&g, "inputOnly", map.is_input_only(p));
+            if let Ok(ch) = map.adc_channel(p) {
+                set(&g, "adc", ch);
+            }
+            if let Some(((timer, channel), _)) = map.pwm_pins().find(|(_, q)| *q == p) {
+                let w = Object::new();
+                set(&w, "timer", timer);
+                set(&w, "channel", channel);
+                set(&g, "pwm", w);
+            }
+            if let Some(&(bus, sda, _)) = wired.iter().find(|(_, d, c)| *d == p || *c == p) {
+                let i = Object::new();
+                set(&i, "bus", bus);
+                set(&i, "line", if sda == p { "sda" } else { "scl" });
+                set(&g, "i2c", i);
+            }
+            if routing == "rp-function-table"
+                && let Some((block, signal)) = spi_function(p)
+            {
+                let name = match signal {
+                    SpiSignal::Sck => Some("sck"),
+                    SpiSignal::Tx => Some("mosi"),
+                    SpiSignal::Rx => Some("miso"),
+                    SpiSignal::Csn => None,
+                };
+                if let Some(name) = name {
+                    let s = Object::new();
+                    set(&s, "block", if block == SpiBlock::Spi0 { 0 } else { 1 });
+                    set(&s, "signal", name);
+                    set(&g, "spi", s);
+                }
+            }
+            g
+        })
+        .map(JsValue::from)
+        .collect();
+    set(&o, "gpios", gpios);
+    let i2c: Array = wired
+        .iter()
+        .map(|&(bus, sda, scl)| {
+            let b = Object::new();
+            set(&b, "bus", bus);
+            set(&b, "sda", sda);
+            set(&b, "scl", scl);
+            JsValue::from(b)
+        })
+        .collect();
+    set(&o, "i2c", i2c);
+    let pwm: Array = map
+        .pwm_pins()
+        .map(|((timer, channel), pin)| {
+            let b = Object::new();
+            set(&b, "timer", timer);
+            set(&b, "channel", channel);
+            set(&b, "pin", pin);
+            JsValue::from(b)
+        })
+        .collect();
+    set(&o, "pwm", pwm);
+    let adc: Array = map.adc_pins().iter().map(|&p| JsValue::from(p)).collect();
+    set(&o, "adc", adc);
+    set(&o, "i2cBuses", periph::I2C_BUSES);
+    set(&o, "spiBuses", periph::SPI_BUSES);
+    let hz = Array::of2(
+        &JsValue::from(*periph::I2C_FREQ_HZ.start()),
+        &JsValue::from(*periph::I2C_FREQ_HZ.end()),
+    );
+    set(&o, "i2cHz", hz);
+    set(&o, "maxSpiKhz", periph::MAX_SPI_KHZ);
+    set(&o, "maxLabel", crate::pins::MAX_LABEL as u32);
+    let funcs: Array = crate::pins::Func::ALL
+        .iter()
+        .map(|f| JsValue::from_str(f.name()))
+        .collect();
+    set(&o, "funcs", funcs);
+    Ok(o)
+}
+
+/// Checks a pin table on `chip` (see `crate::pins`). `rows` is
+/// `[{label, pin: number|null, func, bus}]`, `settings` is
+/// `[{kind: "i2c", bus, hz} | {kind: "spi", bus, khz, mode}]`. Returns
+/// `[{row: number|null, field: "label"|"pin"|"func"|"bus"|"setting"|"table",
+/// message, fix?: {kind: "pin", pin} | {kind: "add", func, bus, pin?}}]`.
+#[wasm_bindgen(js_name = checkPins)]
+pub fn check_pins(chip: &str, rows: Array, settings: Array) -> Result<Array, JsError> {
+    use crate::pins::{BusSetting, Fix, Func, Row, check};
+    let map = pin_map(chip)?;
+    let rows: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            let func = get(&r, "func").as_string().unwrap_or_default();
+            Row {
+                label: get(&r, "label").as_string().unwrap_or_default(),
+                pin: whole(&get(&r, "pin")),
+                func: Func::parse(&func).ok_or(func),
+                bus: whole(&get(&r, "bus")).unwrap_or(0),
+            }
+        })
+        .collect();
+    let settings: Vec<BusSetting> = settings
+        .iter()
+        .filter_map(|s| {
+            let bus = whole(&get(&s, "bus"))?;
+            match get(&s, "kind").as_string().as_deref() {
+                Some("i2c") => Some(BusSetting::I2c {
+                    bus,
+                    hz: whole(&get(&s, "hz"))?,
+                }),
+                Some("spi") => Some(BusSetting::Spi {
+                    bus,
+                    khz: whole(&get(&s, "khz"))?,
+                    mode: whole(&get(&s, "mode"))?,
+                }),
+                _ => None,
+            }
+        })
+        .collect();
+    Ok(check(map, &rows, &settings)
+        .into_iter()
+        .map(|i| {
+            let o = Object::new();
+            set(
+                &o,
+                "row",
+                i.row.map_or(JsValue::NULL, |r| JsValue::from(r as u32)),
+            );
+            set(&o, "field", i.field.name());
+            set(&o, "message", i.message.as_str());
+            if let Some(fix) = i.fix {
+                let f = Object::new();
+                match fix {
+                    Fix::Pin(p) => {
+                        set(&f, "kind", "pin");
+                        set(&f, "pin", p);
+                    }
+                    Fix::AddRow { func, bus, pin } => {
+                        set(&f, "kind", "add");
+                        set(&f, "func", func.name());
+                        set(&f, "bus", bus);
+                        set(&f, "pin", pin.map_or(JsValue::NULL, JsValue::from));
+                    }
+                }
+                set(&o, "fix", f);
+            }
+            JsValue::from(o)
+        })
+        .collect())
+}
+
 #[cfg(feature = "simulator")]
 pub use sim::JsSimulator;
 

@@ -5,13 +5,17 @@
 //! it has a USB-Serial-JTAG port, whether the image includes the WASM
 //! payload runtime (`runtime`), the heap plan, the WASM memory limit in
 //! bytes (`max_memory_bytes`), the largest payload image it accepts, the
-//! console UART pins, and three GPIO bitmasks:
+//! console UART pins, whether the board has a camera port, and the board's
+//! pin map (`board_pins::PinMap`, from the board-pins crate, which the web
+//! editor also reads: `board_pins::boards::ESP32`, `ESP32S3`, `ESP32C3`,
+//! `ESP8266`). The map holds three GPIO bitmasks and the PWM and I2C board
+//! maps below:
 //!
-//! * `gpio` — pins that exist on the chip.
-//! * `reserved` — pins a payload may never touch: SPI flash and in-package
-//!   or module PSRAM, the USB D-/D+ pair, and UART0 TX/RX (the protocol
-//!   port).
-//! * `input_only` — pins without an output driver (ESP32 GPIO34–39).
+//! * the pins that exist on the chip;
+//! * the reserved pins, which a payload may never touch: SPI flash and
+//!   in-package or module PSRAM, the USB D-/D+ pair, and UART0 TX/RX (the
+//!   protocol port);
+//! * the input-only pins, without an output driver (ESP32 GPIO34–39).
 //!
 //! and a fourth, `strapping` (E14): pins whose level at reset selects the
 //! boot mode or flash voltage (ESP32 GPIO0/2/5/12/15, ESP32-S3 0/3/45/46,
@@ -35,9 +39,9 @@
 //! | ESP32-C3 | — (no payload runtime) | —          |
 //! | ESP8266  | — (no payload runtime) | —          |
 //!
-//! The ESP32-S3's bus 0 pins are a [`Profile`] constant, chosen to be free
-//! on the boards this build runs on; a different board changes
-//! `ESP32S3`'s `i2c0`. GPIO 5 and 6 are not strapping pins (the S3 straps
+//! The ESP32-S3's bus 0 pins are part of its pin map
+//! (`board_pins::boards::ESP32S3`), chosen to be free on the boards this
+//! build runs on; a different board changes that map. GPIO 5 and 6 are not strapping pins (the S3 straps
 //! on 0, 3, 45 and 46), not flash or PSRAM (26–37), not USB (19/20) and not
 //! the UART0 console (43/44). They are free headers on the
 //! ESP32-S3-DevKitC-1, and free probe pins on the conagotchi badge (its
@@ -167,8 +171,11 @@
 //! uses the `payload` partition in `partitions.csv`, the ESP8266 the region
 //! at 0x100000 (checked by a unit test).
 
+use board_pins::{PinError, PinMap, bit, boards};
 use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
 use middleware::wasm_abi::AbiError;
+
+pub use board_pins::Direction;
 
 /// Size of one standard (64 KiB) WASM linear-memory page, used to express
 /// the per-chip byte caps.
@@ -189,15 +196,6 @@ pub enum Chip {
     Esp32c3,
     /// ESP8266 (Xtensa LX106, single core, no WASM runtime).
     Esp8266,
-}
-
-/// What a payload wants to do with a pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// Read the pin level.
-    Input,
-    /// Drive the pin.
-    Output,
 }
 
 /// Static description of a chip.
@@ -231,36 +229,18 @@ pub struct Profile {
     /// UART0 RX pin.
     pub uart0_rx: u8,
     /// GPIO of each PWM output, indexed by LEDC low-speed channel
-    /// `2·timer + channel`; empty without PWM.
+    /// `2·timer + channel` (the pin map's PWM table); empty without PWM.
     pub pwm_pins: &'static [u8],
     /// Widest PWM duty resolution in bits (0 without PWM).
     pub pwm_max_bits: u8,
     /// Whether PWM timers can fall back to the 1 MHz REF_TICK.
     pub pwm_ref_tick: bool,
-    gpio: u64,
-    reserved: u64,
-    input_only: u64,
     strapping: u64,
-    adc: u64,
-    /// I2C bus 0's (SDA, SCL).
-    i2c0: Option<(u8, u8)>,
+    /// The board's pins: which exist, are reserved or input only, the ADC
+    /// inputs, and the PWM and I2C maps (see the board pin map).
+    pins: PinMap,
     /// Whether the board has a camera port (I2S0 parallel capture, R15).
     camera: bool,
-}
-
-/// Bitmask with bits `from..=to` set.
-const fn span(from: u8, to: u8) -> u64 {
-    let mut m = 0u64;
-    let mut i = from;
-    while i <= to {
-        m |= 1 << i;
-        i += 1;
-    }
-    m
-}
-
-const fn bit(pin: u8) -> u64 {
-    1 << pin
 }
 
 /// ESP32: GPIO0–19, 21–23, 25–27, 32–39. Flash on 6–11, PSRAM (WROVER) or
@@ -277,15 +257,11 @@ pub const ESP32: Profile = Profile {
     max_image: 24 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
-    gpio: span(0, 19) | span(21, 23) | span(25, 27) | span(32, 39),
-    pwm_pins: &[0, 4, 13, 14],
+    pwm_pins: boards::ESP32.pwm_table(),
     pwm_max_bits: 16,
     pwm_ref_tick: true,
-    reserved: bit(1) | bit(3) | span(6, 11) | bit(16) | bit(17),
-    input_only: span(34, 39),
     strapping: bit(0) | bit(2) | bit(5) | bit(12) | bit(15),
-    adc: span(32, 39),
-    i2c0: Some((26, 27)),
+    pins: boards::ESP32,
     camera: true,
 };
 
@@ -304,15 +280,11 @@ pub const ESP32S3: Profile = Profile {
     max_image: 32 * 1024,
     uart0_tx: 43,
     uart0_rx: 44,
-    gpio: span(0, 21) | span(26, 48),
-    pwm_pins: &[11, 12, 13, 14, 15, 16, 17, 18],
+    pwm_pins: boards::ESP32S3.pwm_table(),
     pwm_max_bits: 14,
     pwm_ref_tick: false,
-    reserved: bit(19) | bit(20) | span(26, 37) | bit(43) | bit(44),
-    input_only: 0,
     strapping: bit(0) | bit(3) | bit(45) | bit(46),
-    adc: span(1, 10),
-    i2c0: Some((5, 6)),
+    pins: boards::ESP32S3,
     camera: false,
 };
 
@@ -330,15 +302,11 @@ pub const ESP32C3: Profile = Profile {
     max_image: 64 * 1024,
     uart0_tx: 21,
     uart0_rx: 20,
-    gpio: span(0, 21),
-    pwm_pins: &[],
+    pwm_pins: boards::ESP32C3.pwm_table(),
     pwm_max_bits: 0,
     pwm_ref_tick: false,
-    reserved: span(12, 17) | bit(18) | bit(19) | bit(20) | bit(21),
-    input_only: 0,
     strapping: bit(2) | bit(8) | bit(9),
-    adc: 0,
-    i2c0: None,
+    pins: boards::ESP32C3,
     camera: false,
 };
 
@@ -358,15 +326,11 @@ pub const ESP8266: Profile = Profile {
     max_image: 124 * 1024,
     uart0_tx: 1,
     uart0_rx: 3,
-    gpio: span(0, 16),
-    pwm_pins: &[],
+    pwm_pins: boards::ESP8266.pwm_table(),
     pwm_max_bits: 0,
     pwm_ref_tick: false,
-    reserved: span(6, 11) | bit(1) | bit(3),
-    input_only: 0,
     strapping: bit(0) | bit(2) | bit(15),
-    adc: 0,
-    i2c0: None,
+    pins: boards::ESP8266,
     camera: false,
 };
 
@@ -382,34 +346,35 @@ impl Chip {
     }
 }
 
-fn has(mask: u64, pin: u8) -> bool {
-    pin < 64 && mask & (1u64 << pin) != 0
-}
-
 impl Profile {
     /// Total heap in bytes.
     pub const fn heap_total(&self) -> usize {
         self.heap_reclaimed + self.heap_main
     }
 
+    /// The board's pin map.
+    pub const fn pins(&self) -> &PinMap {
+        &self.pins
+    }
+
     /// Whether `pin` exists on the chip.
-    pub fn exists(&self, pin: u8) -> bool {
-        has(self.gpio, pin)
+    pub const fn exists(&self, pin: u8) -> bool {
+        self.pins.exists(pin)
     }
 
     /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
-    pub fn is_reserved(&self, pin: u8) -> bool {
-        has(self.reserved, pin)
+    pub const fn is_reserved(&self, pin: u8) -> bool {
+        self.pins.is_reserved(pin)
     }
 
     /// Whether `pin` is a strapping pin (usable, but read at reset).
-    pub fn is_strapping(&self, pin: u8) -> bool {
-        has(self.strapping, pin)
+    pub const fn is_strapping(&self, pin: u8) -> bool {
+        self.strapping & bit(pin) != 0
     }
 
     /// Whether `pin` has no output driver.
-    pub fn is_input_only(&self, pin: u8) -> bool {
-        has(self.input_only, pin)
+    pub const fn is_input_only(&self, pin: u8) -> bool {
+        self.pins.is_input_only(pin)
     }
 
     /// The `sys/board` description of this profile (S8), for a firmware
@@ -420,11 +385,11 @@ impl Profile {
             abi_version,
             max_image: self.max_image,
             max_memory: self.max_memory_bytes,
-            gpio: self.gpio,
-            reserved: self.reserved,
-            input_only: self.input_only,
+            gpio: self.pins.gpio_mask(),
+            reserved: self.pins.reserved_mask(),
+            input_only: self.pins.input_only_mask(),
             strapping: self.strapping,
-            adc: self.adc,
+            adc: self.pins.adc_mask(),
             pwm_max_bits: self.pwm_max_bits,
             flags: flag(self.runtime, BOARD_RUNTIME)
                 | flag(self.usb_serial_jtag, BOARD_USB_JTAG)
@@ -437,42 +402,36 @@ impl Profile {
 
     /// Whether `pin` exists and has an output driver (ESP32 GPIO34–39 do
     /// not; esp-hal panics when one is routed to an output signal).
-    pub fn can_output(&self, pin: u8) -> bool {
-        self.exists(pin) && !has(self.input_only, pin)
+    pub const fn can_output(&self, pin: u8) -> bool {
+        self.pins.can_output(pin)
     }
 
-    /// Whether a payload may use `pin` in `direction`.
-    pub fn check_pin(&self, pin: u8, direction: Direction) -> Result<(), AbiError> {
-        if !self.exists(pin) {
-            Err(AbiError::InvalidArgument)
-        } else if self.is_reserved(pin)
-            || (direction == Direction::Output && has(self.input_only, pin))
-        {
-            Err(AbiError::Unsupported)
-        } else {
-            Ok(())
+    /// Whether a payload may use `pin` in `direction`: `InvalidArgument`
+    /// for a pin the chip lacks, `Unsupported` for a reserved pin or an
+    /// output on an input-only pin.
+    pub const fn check_pin(&self, pin: u8, direction: Direction) -> Result<(), AbiError> {
+        match self.pins.check(pin, direction) {
+            Ok(()) => Ok(()),
+            Err(PinError::NoSuchPin) => Err(AbiError::InvalidArgument),
+            Err(PinError::Reserved | PinError::InputOnly) => Err(AbiError::Unsupported),
         }
     }
 
     /// Whether `pin` has an ADC1 channel a payload may read.
     pub fn has_adc(&self, pin: u8) -> bool {
-        has(self.adc, pin)
+        self.pins.adc_channel(pin).is_ok()
     }
 
     /// The GPIO of PWM output `channel` of ABI timer `timer`, if the chip
     /// maps it (timers 0–3, channels 0–1).
     pub fn pwm_pin(&self, timer: u8, channel: u8) -> Option<u8> {
-        let ch = crate::periph::pwm::ledc_channel(timer, channel).ok()?;
-        self.pwm_pins.get(usize::from(ch)).copied()
+        self.pins.pwm_pin(timer, channel)
     }
 
     /// I2C `bus`'s (SDA, SCL) pins (board pin map); `Unsupported` for a bus
     /// the board does not wire.
     pub fn i2c_pins(&self, bus: u8) -> Result<(u8, u8), AbiError> {
-        match bus {
-            0 => self.i2c0.ok_or(AbiError::Unsupported),
-            _ => Err(AbiError::Unsupported),
-        }
+        self.pins.i2c_pins(bus).ok_or(AbiError::Unsupported)
     }
 
     /// Whether the board has a camera port for `SourceKind::Camera`.
@@ -482,7 +441,7 @@ impl Profile {
 
     /// Pins a payload may use at all (exist and not reserved), ascending.
     pub fn payload_pins(&self) -> impl Iterator<Item = u8> + '_ {
-        (0u8..64).filter(|&p| self.exists(p) && !self.is_reserved(p))
+        self.pins.payload_pins()
     }
 }
 

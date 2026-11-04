@@ -101,6 +101,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-pins"
+version = "0.1.0"
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -739,6 +743,7 @@ dependencies = [
 name = "esp-base"
 version = "0.6.0"
 dependencies = [
+ "board-pins",
  "critical-section",
  "ed25519-dalek",
  "embassy-executor",
