@@ -478,6 +478,10 @@ because WASM linear memory and the wasmi interpreter require one.
 - [x] E5 Bridges payload publish/subscribe to the serial link and GPIO to
   the chip, refusing pins used by flash, USB or the console UART —
   `chip::tests::console_uart_pins_are_reserved`, `flash_psram_and_usb_pins_are_refused`, `missing_pins_are_invalid`, `esp32_input_only_pins_refuse_output`, `general_purpose_pins_are_allowed`; `dispatch::tests::publications_route_only_to_running_subscribed_payloads`. Runs payloads on ESP32 and ESP32-S3 only; the C3 has no runtime.
+  From 0.5 the same two chips also bridge the ABI 3 PWM and ADC imports,
+  on fixed pins that are never flash, USB or console pins (X9, X12); a pin
+  held by PWM or the ADC is refused to plain `gpio_*` like an SPI or UART
+  pin (X13).
 - [x] E6 Produces merged flash images per chip for the web flasher —
   `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
 
@@ -764,6 +768,91 @@ complete immediately. None of these raise events.
 - [x] X8 `wasm-host` still builds for `thumbv7em-none-eabihf` (the STM32F407
   target that implements ABI 3 on hardware) —
   `cargo build -p wasm-host --target thumbv7em-none-eabihf`.
+
+#### PWM and ADC on the ESP base firmware (0.5)
+
+The ESP32 and ESP32-S3 base firmware implement `pwm_open`, `pwm_set`,
+`pwm_stop` and `adc_read` with esp-hal 1.2's `ledc` and `analog::adc`
+drivers (both behind esp-hal's `unstable` feature). The ESP32-C3 (no
+runtime) and the ESP8266 are unchanged. The decisions are pure and host
+tested in `esp_base` (`chip`, `periph::pwm`, `periph::claims`); the
+hardware code is `firmware/src/shell/pwm.rs` and `adc.rs`. The pin tables
+below are a contract with payload generators (Skygraph) and do not change.
+
+| ABI (t,c) | (0,0) | (0,1) | (1,0) | (1,1) | (2,0) | (2,1) | (3,0) | (3,1) |
+|---|---|---|---|---|---|---|---|---|
+| ESP32 GPIO | 4 | 13 | 18 | 19 | 23 | 25 | 26 | 27 |
+| ESP32-S3 GPIO | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
+
+| chip | `adc_read` pins (ADC1, 11 dB, raw 12-bit) |
+|---|---|
+| ESP32 | GPIO32–39 |
+| ESP32-S3 | GPIO1–10 |
+
+- [x] X9 ABI PWM timers 0–3 are LEDC low-speed timers 0–3 and channel `c`
+  of timer `t` is LEDC low-speed channel `2·t + c`, on the fixed pin in the
+  table above; timers 4–5 and channels 2–3 are `Unsupported`. The pins avoid
+  strapping, flash/PSRAM, USB, UART0, ADC1 and the default I2C pins —
+  `firmware` `periph::pwm::tests::x9_abi_timers_and_channels_map_to_ledc_low_speed_channels`,
+  `x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c`;
+  `chip::tests::profiles_match_chips` (`Profile::pwm_pins`, `pwm_pin`).
+- [x] X10 A timer gets the widest duty resolution its 80 MHz APB divider
+  allows (`div = (clk << 8) / f / 2^bits ∈ 256..=0x3FFFF`, 8.8 fixed point),
+  capped at 16 bits on ESP32 and 14 on ESP32-S3; ESP32 falls back to the
+  1 MHz REF_TICK when the APB divider overflows (as esp-hal does), and
+  ESP32-S3 refuses 1–4 Hz with `Unsupported`. Duty is scaled as
+  `raw = (d·2^bits + 32767) / 65535`, so 0 is always low and 65535 always
+  high — `periph::pwm::tests::x10_resolution_is_the_widest_the_apb_divider_allows`,
+  `x10_low_frequencies_use_ref_tick_on_esp32_and_are_refused_on_esp32s3`,
+  `x10_duty_scales_with_rounding_to_the_full_range`.
+- [x] X11 `pwm_open` configures the timer and binds both its channels at
+  duty 0; reopening retunes the timer and rescales the duties it keeps.
+  `pwm_set` on a closed timer is `Busy`; a channel's first `pwm_set` claims
+  and routes its pin (`PinBank::route_out(pin, LEDC_LS_SIGn)`, the esp-hal
+  channel built with `NoPin` from short-lived handles over the stored
+  `LEDC`). `pwm_stop` zeroes both channels, drives their routed pins low as
+  GPIO outputs and frees them; stopping a closed timer is a no-op. Payload
+  stop (`EspDevice` drop) zeroes all eight channels before the pins are
+  released — `periph::pwm::tests::x11_open_binds_both_channels_at_zero_and_reopen_rescales_kept_duties`,
+  `x11_set_needs_an_open_timer_and_unmapped_ids_are_unsupported`,
+  `x11_stop_returns_routed_pins_and_closes_the_timer`; `shell/device.rs`
+  (esp32/esp32s3 builds).
+- [x] X12 `adc_read` is an ADC1 one-shot conversion at 11 dB attenuation
+  returning the raw, uncalibrated 12-bit value, on ESP32 GPIO32–39 and
+  ESP32-S3 GPIO1–10; ADC2 is never used (it conflicts with Wi-Fi). A pin that
+  does not exist is `InvalidArgument`, a pin without an ADC1 channel
+  `Unsupported`, and a conversion that does not finish within 1 ms
+  `Transport`. ADC1 is built at boot with every channel enabled, before the
+  pin bank; a read steals the pin's `GPIOn` only inside `adc_read`, with the
+  bank slot in `Mode::Analog`, and payload stop rebuilds the slot's `Flex`,
+  which takes the pad back from the analog (RTC) mux —
+  `chip::tests::x12_adc1_pins_per_chip`;
+  `claims::tests::x12_adc_claims_only_adc1_pins`; `shell/adc.rs`,
+  `shell/gpio.rs` (esp32/esp32s3 builds).
+- [x] X13 PWM and ADC pins are exclusive claims (`Owner::Pwm`,
+  `Owner::Adc`): neither can be taken by SPI, UART, a GPIO interrupt or the
+  other, a pin held elsewhere is `InvalidArgument`, and plain `gpio_*` calls
+  on them are refused until `pwm_stop` (PWM) or payload stop (ADC) —
+  `claims::tests::x13_pwm_and_adc_claims_are_exclusive`.
+- [ ] X14 On hardware (ESP32 and ESP32-S3): each of the eight PWM pins
+  shows the requested frequency and duty on a scope (including 1 Hz on
+  ESP32 via REF_TICK, 1 MHz at 6 bits, duty 0 and 65535), reopening retunes
+  without a stuck output, `pwm_stop` and payload stop leave the pins low;
+  `adc_read` reads about 0 at GND and 4095 near 3.3 V on every ADC1 pin, and
+  an ADC pin works as plain GPIO again after the payload stops. Builds
+  (`firmware/build.sh esp32`, `esp32s3`; `esp32c3` unchanged); not yet run
+  on a board.
+- [x] X15 The browser simulator implements the ABI 3 PWM and ADC imports
+  like the desktop simulator (X7): PWM records each open timer's frequency
+  and channel duties (reopen keeps them, set on a closed timer is `Busy`)
+  and reports `pwmOpen`/`pwmSet`/`pwmStop` events; `adc_read` returns the
+  value set with `setAdc(pin, value)` (0–4095, 0 until set); `pwm()` lists
+  the open timers. It accepts every ABI timer, channel and pin, not just the
+  ESP32 tables — protocol-wasm `simulator::periph::tests::x15_pwm_records_duty_per_channel_and_reopen_keeps_it`,
+  `x15_adc_values_are_settable_and_bounded`,
+  `simulator::tests::x15_device_records_pwm_events_and_reads_set_adc_values`,
+  `x15_payload_reads_adc_drives_pwm_and_stop_makes_set_busy` (fixture
+  `web/test/fixtures/pwm_adc.wat`); `web/test/abi3.test.ts`.
 
 ### Signed payloads (trust)
 

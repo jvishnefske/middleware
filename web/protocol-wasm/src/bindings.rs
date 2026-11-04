@@ -514,6 +514,25 @@ mod sim {
                 set(&o, "kind", "uart");
                 set(&o, "data", bytes(data));
             }
+            SimEvent::PwmOpen { timer, freq_hz } => {
+                set(&o, "kind", "pwmOpen");
+                set(&o, "timer", *timer);
+                set(&o, "freqHz", *freq_hz);
+            }
+            SimEvent::PwmSet {
+                timer,
+                channel,
+                duty,
+            } => {
+                set(&o, "kind", "pwmSet");
+                set(&o, "timer", *timer);
+                set(&o, "channel", *channel);
+                set(&o, "duty", *duty);
+            }
+            SimEvent::PwmStop(timer) => {
+                set(&o, "kind", "pwmStop");
+                set(&o, "timer", *timer);
+            }
             SimEvent::Irq { event, handled } => {
                 set(&o, "kind", "irq");
                 set(&o, "irq", format!("{:?}", event.kind));
@@ -540,9 +559,11 @@ mod sim {
     /// virtual device. Events — `{kind: "log", line}`, `{kind: "publish",
     /// key, data}`, `{kind: "output", pin}`, `{kind: "input", pin, pull}`,
     /// `{kind: "write", pin, high}`, `{kind: "spi", tx, rx}`, `{kind:
-    /// "uart", data}` (UART 1 transmit) and `{kind: "irq", irq, code,
-    /// source, value, timeUs, handled}` (an event popped for `on_irq`) —
-    /// are passed to `onEvent` after each call.
+    /// "uart", data}` (UART 1 transmit), `{kind: "pwmOpen", timer,
+    /// freqHz}`, `{kind: "pwmSet", timer, channel, duty}`, `{kind:
+    /// "pwmStop", timer}` (ABI 3, successful calls only) and `{kind: "irq",
+    /// irq, code, source, value, timeUs, handled}` (an event popped for
+    /// `on_irq`) — are passed to `onEvent` after each call.
     #[wasm_bindgen(js_name = Simulator)]
     pub struct JsSimulator {
         sim: Simulator,
@@ -609,6 +630,30 @@ mod sim {
         pub fn set_spi_pattern(&mut self, pattern: &[u8]) {
             self.sim
                 .set_spi_responder(SpiResponder::from_pattern(pattern));
+        }
+
+        /// Sets the value `adc_read(pin)` returns (`0..=4095`; 0 until set).
+        /// Throws for a larger value or a pin beyond `pinCount`.
+        #[wasm_bindgen(js_name = setAdc)]
+        pub fn set_adc(&mut self, pin: u8, value: u16) -> Result<(), JsError> {
+            self.sim.set_adc(pin, value).map_err(|e| JsError::new(&e))
+        }
+
+        /// Open PWM timers: `[{timer, freqHz, duty: [d0, d1, d2, d3]}]`,
+        /// duties as fractions of 65535.
+        pub fn pwm(&mut self) -> Array {
+            self.sim
+                .pwm()
+                .iter()
+                .map(|t| {
+                    let o = Object::new();
+                    set(&o, "timer", t.timer);
+                    set(&o, "freqHz", t.freq_hz);
+                    let duty: Array = t.duty.iter().map(|&d| JsValue::from(d)).collect();
+                    set(&o, "duty", duty);
+                    o
+                })
+                .collect()
         }
 
         /// Started timers: `[{id, periodUs, periodic, active, fires}]`.

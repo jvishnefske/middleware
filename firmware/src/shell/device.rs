@@ -8,16 +8,24 @@
 //!   returned on drop, because `wasm_host::Payload` needs a `'static`
 //!   device and drops it inside a failed load (esp-hal's async drivers are
 //!   not `Send`, so only the blocking parts can rest in a static);
-//! * the pure [`Claims`] table that decides which pins SPI, UART and GPIO
-//!   interrupts may hold.
+//! * the LEDC ([`LedcHw`]) and ADC1 ([`AdcUnit`]) behind the ABI 3 PWM and
+//!   ADC imports, which rest in [`HW`] the same way;
+//! * the pure [`Claims`] table that decides which pins SPI, UART, GPIO
+//!   interrupts, PWM outputs and ADC inputs may hold, and the pure
+//!   [`PwmTable`] of open PWM timers.
+//!
+//! Every peripheral import follows the same order: the pure transition
+//! first (claims, PWM table), then the hardware, then the new pure values
+//! are committed, so a refused call changes nothing.
 //!
 //! The four payload timers ([`super::timer`]) and the event queue
 //! ([`super::irq`]) are firmware-wide statics shared with their ISRs.
 //!
 //! Dropping the device (payload stop, trap, reload, failed load) stops all
 //! timers, cancels SPI DMA and UART transmit, closes both peripherals,
-//! releases every pin (interrupts off, signals detached) and clears the
-//! event queue.
+//! zeroes every PWM channel, releases every pin (interrupts off, signals
+//! detached, analog pins back on the digital mux) and clears the event
+//! queue.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.
@@ -30,12 +38,15 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 use esp_base::chip::Profile;
 use esp_base::periph::claims::{Claims, pins};
+use esp_base::periph::pwm::PwmTable;
 use middleware::Key;
 use middleware::loader::is_system_key;
-use wasm_host::{AbiError, Device, DmaChannel, Edge, Pull, SpiConfig, TimerSpec, UartConfig};
+use wasm_host::{AbiError, Device, DmaChannel, Edge, Pull, PwmSpec, SpiConfig, TimerSpec, UartConfig};
 
+use super::adc::AdcUnit;
 use super::bus::Bus;
 use super::gpio::{PINS, PinBank, PinLease};
+use super::pwm::{self, LedcHw};
 use super::spi::{self, SpiBus, SpiParts};
 use super::uart1::{self, Uart1Parts, Uart1Port};
 use super::{irq, timer};
@@ -46,12 +57,18 @@ pub struct Hw {
     pub spi: Option<SpiParts>,
     /// UART 1, if its driver came up at boot.
     pub uart: Option<Uart1Parts>,
+    /// The LED controller (PWM).
+    pub ledc: Option<LedcHw>,
+    /// ADC1.
+    pub adc: Option<AdcUnit>,
 }
 
 /// The same peripherals, async, during a payload run.
 struct Live {
     spi: Option<SpiBus>,
     uart: Option<Uart1Port>,
+    ledc: Option<LedcHw>,
+    adc: Option<AdcUnit>,
 }
 
 /// Where [`Hw`] rests between payload runs.
@@ -85,6 +102,7 @@ pub struct EspDevice {
     pins: PinLease,
     hw: Option<Live>,
     claims: Claims,
+    pwm: PwmTable,
     profile: &'static Profile,
     bus: &'static Bus,
 }
@@ -95,8 +113,13 @@ impl EspDevice {
     pub fn new(profile: &'static Profile, bus: &'static Bus) -> Option<Self> {
         let pins = PINS.lease()?;
         irq::clear();
-        let hw = HW.take().map(|h| Live { spi: h.spi.map(SpiBus::new), uart: h.uart.map(Uart1Port::new) });
-        Some(EspDevice { pins, hw, claims: Claims::new(), profile, bus })
+        let hw = HW.take().map(|h| Live {
+            spi: h.spi.map(SpiBus::new),
+            uart: h.uart.map(Uart1Port::new),
+            ledc: h.ledc,
+            adc: h.adc,
+        });
+        Some(EspDevice { pins, hw, claims: Claims::new(), pwm: PwmTable::new(), profile, bus })
     }
 
     fn spi(&mut self) -> Result<&mut SpiBus, AbiError> {
@@ -105,6 +128,10 @@ impl EspDevice {
 
     fn uart(&mut self) -> Result<&mut Uart1Port, AbiError> {
         self.hw.as_mut().and_then(|h| h.uart.as_mut()).ok_or(AbiError::Unsupported)
+    }
+
+    fn ledc(&mut self) -> Result<&mut LedcHw, AbiError> {
+        self.hw.as_mut().and_then(|h| h.ledc.as_mut()).ok_or(AbiError::Unsupported)
     }
 
     /// Drops a GPIO interrupt claim when the pin is reconfigured.
@@ -117,7 +144,7 @@ impl EspDevice {
     /// Completes SPI or UART work; pending forever when none is running.
     pub async fn io(&mut self) {
         match self.hw.as_mut() {
-            Some(Live { spi, uart }) => {
+            Some(Live { spi, uart, .. }) => {
                 let spi_done = async {
                     match spi {
                         Some(s) => s.completion().await,
@@ -140,8 +167,16 @@ impl EspDevice {
 impl Drop for EspDevice {
     fn drop(&mut self) {
         timer::stop_all();
-        if let Some(live) = self.hw.take() {
-            HW.put(Hw { spi: live.spi.and_then(SpiBus::close), uart: live.uart.map(Uart1Port::close) });
+        if let Some(mut live) = self.hw.take() {
+            if let Some(ledc) = live.ledc.as_mut() {
+                ledc.zero_all();
+            }
+            HW.put(Hw {
+                spi: live.spi.and_then(SpiBus::close),
+                uart: live.uart.map(Uart1Port::close),
+                ledc: live.ledc,
+                adc: live.adc,
+            });
         }
         irq::clear();
         // `pins` drops next and releases every pin.
@@ -293,5 +328,52 @@ impl Device for EspDevice {
 
     fn uart_read(&mut self, port: u8, out: &mut [u8]) -> Result<usize, AbiError> {
         self.uart()?.read(port, out)
+    }
+
+    fn pwm_open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
+        let (next, step) = self.pwm.open(self.profile, spec)?;
+        self.ledc()?.open(&step)?;
+        self.pwm = next;
+        Ok(())
+    }
+
+    fn pwm_set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
+        let (next, step) = self.pwm.set(self.profile, timer, channel, duty)?;
+        let claims = match step.route {
+            Some(pin) => self.claims.claim_pwm(self.profile, pin)?,
+            None => self.claims,
+        };
+        self.ledc()?.set(step.channel, step.raw);
+        if let Some(pin) = step.route {
+            self.pins.with(|b| b.route_out(pin, pwm::signal(step.channel)))?;
+        }
+        self.pwm = next;
+        self.claims = claims;
+        Ok(())
+    }
+
+    fn pwm_stop(&mut self, timer: u8) -> Result<(), AbiError> {
+        let (next, step) = self.pwm.stop(self.profile, timer)?;
+        let Some(step) = step else { return Ok(()) };
+        let ledc = self.ledc()?;
+        for ch in step.channels {
+            ledc.set(ch, 0);
+        }
+        let mut claims = self.claims;
+        for pin in step.pins.into_iter().flatten() {
+            self.pins.with(|b| b.drive_low(pin))?;
+            claims = claims.release_pwm(pin);
+        }
+        self.pwm = next;
+        self.claims = claims;
+        Ok(())
+    }
+
+    fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
+        let next = self.claims.claim_adc(self.profile, pin)?;
+        let adc = self.hw.as_mut().and_then(|h| h.adc.as_mut()).ok_or(AbiError::Unsupported)?;
+        let raw = self.pins.with(|b| b.analog(pin, || adc.read(pin)))?;
+        self.claims = next;
+        Ok(raw)
     }
 }

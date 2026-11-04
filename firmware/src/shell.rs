@@ -16,8 +16,10 @@
 //!    ([`esp_base::trust_store`]). The [`presence`] task starts watching the
 //!    BOOT button for the re-key window.
 //! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
-//!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
-//!    ([`uart1`]), all without pins until a payload opens them.
+//!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]), UART1
+//!    ([`uart1`]), the LEDC for PWM ([`pwm`]) and ADC1 ([`adc`], built
+//!    while the board is split, before the pin bank), all without pins
+//!    until a payload opens them.
 //! 5. The [`controller`] runs on the main task and starts the stored payload
 //!    if one is valid (and the `wasm` runtime is built in).
 //!
@@ -27,9 +29,11 @@
 //! the controller share the re-key window through [`presence::WINDOW`]. With `wasm`, the payload's
 //! peripherals rest in statics shared with their ISRs or between runs: the
 //! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
-//! timer alarm ([`timer`]) and the SPI/UART drivers ([`device::HW`]).
+//! timer alarm ([`timer`]) and the SPI/UART/LEDC/ADC drivers
+//! ([`device::HW`]).
 
-
+#[cfg(feature = "wasm")]
+mod adc;
 mod board;
 mod bus;
 mod controller;
@@ -41,6 +45,8 @@ mod gpio;
 mod irq;
 mod link;
 mod presence;
+#[cfg(feature = "wasm")]
+mod pwm;
 #[cfg(feature = "wasm")]
 mod spi;
 #[cfg(feature = "wasm")]
@@ -196,7 +202,12 @@ pub async fn run(spawner: Spawner) -> ! {
                 if uart.is_some() { "ok" } else { "failed" },
             ));
         }
-        device::HW.put(device::Hw { spi, uart });
+        device::HW.put(device::Hw {
+            spi,
+            uart,
+            ledc: Some(pwm::LedcHw::new(board.payload.ledc)),
+            adc: Some(board.payload.adc),
+        });
         Controller::new(state, ctx, store, trust, bus, profile)
     };
     #[cfg(not(feature = "wasm"))]

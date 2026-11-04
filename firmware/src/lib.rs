@@ -6,7 +6,7 @@
 //! * [`chip`] — per-chip profiles: name, heap plan, WASM memory limit,
 //!   largest payload image, and the GPIO tables that decide which pins a
 //!   payload may touch (flash/PSRAM, USB D+/D-, and console UART pins are
-//!   refused).
+//!   refused), plus the fixed PWM and ADC1 pins.
 //! * [`image`] — layout of the payload flash partition: two slots, each a
 //!   header sector (magic, length, CRC-32, generation) followed by the
 //!   image, the boot-slot choice by generation, erase spans, and a
@@ -25,9 +25,9 @@
 //!   version and CRC-32, safe against power loss at any flash operation.
 //! * [`presence`] — the BOOT-button hold detector that asserts physical
 //!   presence for the re-key window.
-//! * [`periph`] — the ABI 2 peripheral decisions: pin claims, the timer
-//!   deadline table, the DMA channel state machine, the UART receive ring,
-//!   and the events ISRs and completions push.
+//! * [`periph`] — the ABI 2 and ABI 3 peripheral decisions: pin claims,
+//!   the timer deadline table, the DMA channel state machine, the UART
+//!   receive ring, the PWM table, and the events ISRs and completions push.
 //!
 //! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
 //! with a chip feature (`esp32`, `esp32s3`, `esp32c3`). It owns the UARTs,

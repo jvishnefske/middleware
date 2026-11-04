@@ -132,6 +132,14 @@ export interface TimerState {
   fires: number;
 }
 
+/** An open PWM timer (ABI 3): its frequency and each channel's last duty. */
+export interface PwmState {
+  timer: number;
+  freqHz: number;
+  /** Channels 0–3, as fractions of 65535. */
+  duty: number[];
+}
+
 export type SimEvent =
   | { kind: "log"; line: string }
   | { kind: "publish"; key: string; data: Uint8Array }
@@ -140,6 +148,9 @@ export type SimEvent =
   | { kind: "write"; pin: number; high: boolean }
   | { kind: "spi"; tx: Uint8Array; rx: Uint8Array }
   | { kind: "uart"; data: Uint8Array }
+  | { kind: "pwmOpen"; timer: number; freqHz: number }
+  | { kind: "pwmSet"; timer: number; channel: number; duty: number }
+  | { kind: "pwmStop"; timer: number }
   | IrqEvent;
 
 export interface PinState {
@@ -159,6 +170,10 @@ export interface Simulator {
   /** Empty selects loopback; otherwise the pattern repeats. */
   setSpiPattern(pattern: Uint8Array): void;
   timers(): TimerState[];
+  /** Sets what `adc_read(pin)` returns (0–4095, 0 until set); throws when out of range. */
+  setAdc(pin: number, value: number): void;
+  /** Open PWM timers. */
+  pwm(): PwmState[];
   /** Events dropped from the full queue since load. */
   readonly dropped: number;
   readonly pending: number;

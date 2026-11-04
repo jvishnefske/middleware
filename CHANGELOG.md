@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0
+
+### ESP base firmware: PWM and ADC (ABI 3, breaking)
+- ESP32 and ESP32-S3 implement `pwm_open`, `pwm_set`, `pwm_stop` and `adc_read` (esp-hal 1.2 `ledc` and `analog::adc`, `unstable`). The ESP32-C3 and ESP8266 are unchanged. (X9–X13)
+- PWM: ABI timers 0–3 are LEDC low-speed timers 0–3, channel `c` of timer `t` is LEDC channel `2·t + c`; timers 4–5 and channels 2–3 are `Unsupported`. Fixed pins, (0,0)…(3,1): ESP32 GPIO 4, 13, 18, 19, 23, 25, 26, 27; ESP32-S3 GPIO 11–18. Resolution is the widest the 80 MHz APB divider allows (≤ 16 bits on ESP32, ≤ 14 on ESP32-S3); ESP32 falls back to the 1 MHz REF_TICK, ESP32-S3 refuses 1–4 Hz. `pwm_open` binds both channels at duty 0 (reopening retunes and rescales the kept duties), a channel's first `pwm_set` claims and routes its pin, `pwm_set` on a closed timer is `Busy`, `pwm_stop` drives the pins low as GPIO and frees them, payload stop zeroes every channel. (X9–X11)
+- ADC: ADC1 one-shot, 11 dB, raw uncalibrated 12-bit, on ESP32 GPIO32–39 and ESP32-S3 GPIO1–10 (never ADC2). Missing pin `InvalidArgument`, non-ADC1 pin `Unsupported`, pin held elsewhere `InvalidArgument`, conversion timeout (1 ms) `Transport`. (X12)
+- New pure `esp_base::periph::pwm` (`PwmTable` with value-returning `open`/`set`/`stop`, `resolution`, `duty_raw`, `ledc_channel`).
+- **Breaking:** `esp_base::periph::claims::Owner` has new variants `Pwm` and `Adc` (exhaustive matches need new arms); new `Claims::claim_pwm`, `release_pwm`, `claim_adc`, `pwm_pins`, `adc_pins`, and `check_gpio` refuses PWM and ADC pins. (X13)
+- **Breaking:** `esp_base::chip::Profile` has new fields `pwm_pins`, `pwm_max_bits`, `pwm_ref_tick` and a private ADC1 mask, with `Profile::has_adc` and `Profile::pwm_pin`.
+- Shell: new `shell/pwm.rs` (`LedcHw`) and `shell/adc.rs` (`AdcUnit`); `PayloadPeripherals` gains `ledc` and `adc`, ADC1 is built at boot before the pin bank (`board::adc1!`); the pin bank has `Mode::Analog`, `PinBank::analog` and `drive_low`, and rebuilds analog pins' `Flex` on release. New dependency `nb` 1.1.
+- Not yet checked on hardware. (X14)
+
+### Web simulator
+- protocol-wasm: the browser simulator implements the ABI 3 PWM and ADC imports (models copied from `payload-sim`): new `SimEvent::PwmOpen`, `PwmSet`, `PwmStop`, `Simulator::set_adc` and `Simulator::pwm`; JS `setAdc(pin, value)`, `pwm()` and `pwmOpen`/`pwmSet`/`pwmStop` events, typed in `web/src/protocol/wasm.ts`. New `web/test/abi3.test.ts` and fixture `web/test/fixtures/pwm_adc.wat`. (X15)
+- design.md: requirements X9–X15 and a note on E5.
+
 ## 0.4.0
 
 ### Signed payloads (trust, breaking)

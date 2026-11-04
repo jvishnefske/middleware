@@ -18,6 +18,30 @@
 //! not exist, `Unsupported` for a reserved pin or an output on an input-only
 //! pin.
 //!
+//! # PWM and ADC pins (ABI 3, X9, X12)
+//!
+//! The ABI 3 peripherals have fixed pins, so they are part of the profile:
+//!
+//! * `pwm_pins` — the GPIO of each LEDC low-speed channel `2·timer +
+//!   channel` (ABI timers 0–3, channels 0–1; [`Profile::pwm_pin`]). The
+//!   pins avoid strapping, flash/PSRAM, USB, UART0, ADC1 and the default
+//!   I2C pins, so a payload can use PWM, ADC and the console at once:
+//!
+//!   | ABI (t,c) | (0,0) | (0,1) | (1,0) | (1,1) | (2,0) | (2,1) | (3,0) | (3,1) |
+//!   |-----------|-------|-------|-------|-------|-------|-------|-------|-------|
+//!   | ESP32     | 4     | 13    | 18    | 19    | 23    | 25    | 26    | 27    |
+//!   | ESP32-S3  | 11    | 12    | 13    | 14    | 15    | 16    | 17    | 18    |
+//!
+//!   Empty on chips without the runtime (ESP32-C3, ESP8266).
+//! * `pwm_max_bits` — the widest LEDC duty the chip supports that the
+//!   firmware uses (16 on ESP32, 14 on ESP32-S3; 0 without PWM), and
+//!   `pwm_ref_tick` — whether the 1 MHz REF_TICK is available for
+//!   frequencies too low for the APB clock (ESP32 only). See
+//!   [`crate::periph::pwm`].
+//! * `adc` — pins with an ADC1 channel (ESP32 GPIO32–39, ESP32-S3
+//!   GPIO1–10; [`Profile::has_adc`]). ADC2 is never offered: it shares its
+//!   controller with Wi-Fi.
+//!
 //! # Heap plan
 //!
 //! The heap holds WASM linear memory, the payload image while
@@ -127,9 +151,17 @@ pub struct Profile {
     pub uart0_tx: u8,
     /// UART0 RX pin.
     pub uart0_rx: u8,
+    /// GPIO of each PWM output, indexed by LEDC low-speed channel
+    /// `2·timer + channel`; empty without PWM.
+    pub pwm_pins: &'static [u8],
+    /// Widest PWM duty resolution in bits (0 without PWM).
+    pub pwm_max_bits: u8,
+    /// Whether PWM timers can fall back to the 1 MHz REF_TICK.
+    pub pwm_ref_tick: bool,
     gpio: u64,
     reserved: u64,
     input_only: u64,
+    adc: u64,
 }
 
 /// Bitmask with bits `from..=to` set.
@@ -161,8 +193,12 @@ pub const ESP32: Profile = Profile {
     uart0_tx: 1,
     uart0_rx: 3,
     gpio: span(0, 19) | span(21, 23) | span(25, 27) | span(32, 39),
+    pwm_pins: &[4, 13, 18, 19, 23, 25, 26, 27],
+    pwm_max_bits: 16,
+    pwm_ref_tick: true,
     reserved: bit(1) | bit(3) | span(6, 11) | bit(16) | bit(17),
     input_only: span(34, 39),
+    adc: span(32, 39),
 };
 
 /// ESP32-S3: GPIO0–21, 26–48. Flash/PSRAM on 26–32, octal flash/PSRAM on
@@ -179,8 +215,12 @@ pub const ESP32S3: Profile = Profile {
     uart0_tx: 43,
     uart0_rx: 44,
     gpio: span(0, 21) | span(26, 48),
+    pwm_pins: &[11, 12, 13, 14, 15, 16, 17, 18],
+    pwm_max_bits: 14,
+    pwm_ref_tick: false,
     reserved: bit(19) | bit(20) | span(26, 37) | bit(43) | bit(44),
     input_only: 0,
+    adc: span(1, 10),
 };
 
 /// ESP32-C3: GPIO0–21. Flash on 12–17, USB D-/D+ on 18/19, UART0 on 21
@@ -197,8 +237,12 @@ pub const ESP32C3: Profile = Profile {
     uart0_tx: 21,
     uart0_rx: 20,
     gpio: span(0, 21),
+    pwm_pins: &[],
+    pwm_max_bits: 0,
+    pwm_ref_tick: false,
     reserved: span(12, 17) | bit(18) | bit(19) | bit(20) | bit(21),
     input_only: 0,
+    adc: 0,
 };
 
 /// ESP8266: GPIO0–16. Flash on 6–11, UART0 on 1 (TX) / 3 (RX) behind the
@@ -217,8 +261,12 @@ pub const ESP8266: Profile = Profile {
     uart0_tx: 1,
     uart0_rx: 3,
     gpio: span(0, 16),
+    pwm_pins: &[],
+    pwm_max_bits: 0,
+    pwm_ref_tick: false,
     reserved: span(6, 11) | bit(1) | bit(3),
     input_only: 0,
+    adc: 0,
 };
 
 impl Chip {
@@ -264,6 +312,18 @@ impl Profile {
         } else {
             Ok(())
         }
+    }
+
+    /// Whether `pin` has an ADC1 channel a payload may read.
+    pub fn has_adc(&self, pin: u8) -> bool {
+        has(self.adc, pin)
+    }
+
+    /// The GPIO of PWM output `channel` of ABI timer `timer`, if the chip
+    /// maps it (timers 0–3, channels 0–1).
+    pub fn pwm_pin(&self, timer: u8, channel: u8) -> Option<u8> {
+        let ch = crate::periph::pwm::ledc_channel(timer, channel).ok()?;
+        self.pwm_pins.get(usize::from(ch)).copied()
     }
 
     /// Pins a payload may use at all (exist and not reserved), ascending.
@@ -382,6 +442,18 @@ mod tests {
     }
 
     #[test]
+    fn x12_adc1_pins_per_chip() {
+        let adc = |p: &Profile| (0u8..64).filter(|&n| p.has_adc(n)).collect::<heapless::Vec<u8, 64>>();
+        assert_eq!(adc(&ESP32), [32, 33, 34, 35, 36, 37, 38, 39]);
+        assert_eq!(adc(&ESP32S3), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert!(adc(&ESP32C3).is_empty() && adc(&ESP8266).is_empty());
+        for p in ALL {
+            assert!((0u8..64).filter(|&n| p.has_adc(n)).all(|n| p.check_pin(n, Direction::Input).is_ok()), "{}", p.name);
+        }
+        assert!(!ESP32.has_adc(64) && !ESP32.has_adc(255));
+    }
+
+    #[test]
     fn profiles_match_chips() {
         let chips = [Chip::Esp32, Chip::Esp32s3, Chip::Esp32c3, Chip::Esp8266];
         for (chip, p) in chips.into_iter().zip(ALL) {
@@ -392,5 +464,8 @@ mod tests {
         assert_eq!(usb, [false, true, true, false]);
         let runtime: [bool; 4] = ALL.map(|p| p.runtime);
         assert_eq!(runtime, [true, true, false, false]);
+        // PWM only where payloads run.
+        let pwm: [(usize, u8, bool); 4] = ALL.map(|p| (p.pwm_pins.len(), p.pwm_max_bits, p.pwm_ref_tick));
+        assert_eq!(pwm, [(8, 16, true), (8, 14, false), (0, 0, false), (0, 0, false)]);
     }
 }

@@ -19,6 +19,13 @@
 //!   that clock, wrapped to 32 bits.
 //! * Timers, the SPI device (loopback or a pattern), UART 1 and the event
 //!   queue live in [`periph::Peripherals`].
+//! * ABI 3 (X15): `pwm_open`, `pwm_set` and `pwm_stop` update a
+//!   [`periph::Pwm`] and are recorded as [`SimEvent::PwmOpen`],
+//!   [`SimEvent::PwmSet`] and [`SimEvent::PwmStop`] (only when they
+//!   succeed); [`Simulator::pwm`] lists the open timers. `adc_read` returns
+//!   the value JS set with [`Simulator::set_adc`] (0 until set). Every ABI
+//!   timer, channel and pin is accepted, as on the desktop simulator; the
+//!   ESP32 boards back only timers 0–3, channels 0–1, and ADC1 pins.
 //!
 //! [`Simulator::step`] is the main loop: it completes DMA transfers started
 //! before the step (raising `DmaDone`), raises due timer alarms, runs `tick`
@@ -37,11 +44,11 @@ pub mod periph;
 use middleware::Key;
 use middleware::wasm_abi::events::MAX_EVENTS;
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, Limits, Payload, Pull, SpiConfig, TimerSpec,
-    UartConfig,
+    AbiError, Device, DmaChannel, Edge, Event, Limits, Payload, Pull, PwmSpec, SpiConfig,
+    TimerSpec, UartConfig,
 };
 
-use periph::{Peripherals, SpiResponder, SpiTransfer, TimerInfo};
+use periph::{Adc, Peripherals, Pwm, PwmInfo, SpiResponder, SpiTransfer, TimerInfo};
 
 /// Number of virtual GPIO pins.
 pub const PIN_COUNT: usize = 49;
@@ -94,6 +101,24 @@ pub enum SimEvent {
     Spi(SpiTransfer),
     /// Bytes transmitted on UART 1.
     Uart(Vec<u8>),
+    /// A PWM timer was opened or retuned.
+    PwmOpen {
+        /// Timer id.
+        timer: u8,
+        /// Frequency in Hz.
+        freq_hz: u32,
+    },
+    /// A PWM channel's duty was set.
+    PwmSet {
+        /// Timer id.
+        timer: u8,
+        /// Channel.
+        channel: u8,
+        /// Duty, a fraction of 65535.
+        duty: u16,
+    },
+    /// A PWM timer was stopped.
+    PwmStop(u8),
     /// An interrupt event was popped from the queue; `handled` is whether
     /// the payload's `on_irq` ran.
     Irq {
@@ -110,6 +135,8 @@ pub struct SimDevice {
     now_us: u64,
     pins: [PinMode; PIN_COUNT],
     periph: Peripherals,
+    pwm: Pwm,
+    adc: Adc,
     events: Vec<SimEvent>,
 }
 
@@ -126,6 +153,8 @@ impl SimDevice {
             now_us: 0,
             pins: [PinMode::Unused; PIN_COUNT],
             periph: Peripherals::new(),
+            pwm: Pwm::default(),
+            adc: Adc::default(),
             events: Vec::new(),
         }
     }
@@ -175,6 +204,16 @@ impl SimDevice {
     /// Feeds bytes to UART 1's receiver; returns how many were buffered.
     pub fn uart_inject(&mut self, data: &[u8]) -> usize {
         self.periph.inject_rx(data, self.now_us)
+    }
+
+    /// The PWM timers.
+    pub fn pwm(&self) -> &Pwm {
+        &self.pwm
+    }
+
+    /// Sets the value `adc_read(pin)` returns (`0..=ADC_MAX`).
+    pub fn set_adc(&mut self, pin: u8, value: u16) -> Result<(), String> {
+        self.adc.set(pin, value)
     }
 
     fn slot(&mut self, pin: u8) -> Result<&mut PinMode, AbiError> {
@@ -283,6 +322,35 @@ impl Device for SimDevice {
 
     fn uart_read(&mut self, port: u8, out: &mut [u8]) -> Result<usize, AbiError> {
         self.periph.uart_read(port, out)
+    }
+
+    fn pwm_open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
+        self.pwm.open(spec)?;
+        self.events.push(SimEvent::PwmOpen {
+            timer: spec.timer,
+            freq_hz: spec.freq_hz,
+        });
+        Ok(())
+    }
+
+    fn pwm_set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
+        self.pwm.set(timer, channel, duty)?;
+        self.events.push(SimEvent::PwmSet {
+            timer,
+            channel,
+            duty,
+        });
+        Ok(())
+    }
+
+    fn pwm_stop(&mut self, timer: u8) -> Result<(), AbiError> {
+        self.pwm.stop(timer)?;
+        self.events.push(SimEvent::PwmStop(timer));
+        Ok(())
+    }
+
+    fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
+        self.adc.read(pin)
     }
 }
 
@@ -430,6 +498,17 @@ impl Simulator {
     /// Sets what the virtual SPI device answers.
     pub fn set_spi_responder(&mut self, responder: SpiResponder) {
         self.payload.device().periph().set_responder(responder);
+    }
+
+    /// Sets the value `adc_read(pin)` returns (`0..=ADC_MAX`); an error
+    /// message for a value above it or a pin beyond [`PIN_COUNT`].
+    pub fn set_adc(&mut self, pin: u8, value: u16) -> Result<(), String> {
+        self.payload.device().set_adc(pin, value)
+    }
+
+    /// The open PWM timers with their channels' duties.
+    pub fn pwm(&mut self) -> Vec<PwmInfo> {
+        self.payload.device().pwm().timers()
     }
 
     /// Timers the payload has started.
@@ -612,6 +691,7 @@ mod tests {
     const SPI: &str = include_str!("../../test/fixtures/spi_loopback.wat");
     const UART: &str = include_str!("../../test/fixtures/uart_echo.wat");
     const OVERFLOW: &str = include_str!("../../test/fixtures/overflow.wat");
+    const PWM_ADC: &str = include_str!("../../test/fixtures/pwm_adc.wat");
 
     #[test]
     fn d10_periodic_timer_ticks_are_counted_in_virtual_time() {
@@ -765,5 +845,73 @@ mod tests {
         );
         assert!(matches!(sim.step(200), Err(SimError::Trap(_))));
         assert_eq!(sim.step(300), Err(SimError::Stopped));
+    }
+
+    #[test]
+    fn x15_device_records_pwm_events_and_reads_set_adc_values() {
+        let mut d = SimDevice::new();
+        assert_eq!(d.pwm_set(0, 0, 1), Err(AbiError::Busy), "not open");
+        assert_eq!(d.adc_read(4), Ok(0), "0 until set");
+        d.set_adc(4, 4095).unwrap();
+        assert!(d.set_adc(4, 4096).is_err());
+        assert!(d.set_adc(PIN_COUNT as u8, 1).is_err());
+        assert_eq!(d.adc_read(4), Ok(4095));
+        assert_eq!(d.adc_read(PIN_COUNT as u8), Err(AbiError::Unsupported));
+        d.pwm_open(PwmSpec::parse(5, 20_000).unwrap()).unwrap();
+        d.pwm_set(5, 3, 65_535).unwrap();
+        d.pwm_stop(5).unwrap();
+        assert_eq!(
+            d.drain(),
+            [
+                SimEvent::PwmOpen {
+                    timer: 5,
+                    freq_hz: 20_000
+                },
+                SimEvent::PwmSet {
+                    timer: 5,
+                    channel: 3,
+                    duty: 65_535
+                },
+                SimEvent::PwmStop(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn x15_payload_reads_adc_drives_pwm_and_stop_makes_set_busy() {
+        let mut sim = fixture(PWM_ADC);
+        assert_eq!(
+            sim.drain(),
+            [SimEvent::PwmOpen {
+                timer: 0,
+                freq_hz: 1000
+            }]
+        );
+        assert_eq!(
+            sim.pwm(),
+            [PwmInfo {
+                timer: 0,
+                freq_hz: 1000,
+                duty: [0; 4]
+            }]
+        );
+        sim.set_adc(4, 1000).unwrap();
+        sim.tick(10).unwrap();
+        let events = sim.drain();
+        assert_eq!(last_i32(&events, "app/adc"), Some(1000));
+        assert!(events.contains(&SimEvent::PwmSet {
+            timer: 0,
+            channel: 1,
+            duty: 16_000
+        }));
+        sim.set_adc(4, 4095).unwrap();
+        sim.tick(20).unwrap();
+        assert_eq!(last_i32(&sim.drain(), "app/adc"), Some(4095));
+        assert_eq!(sim.pwm()[0].duty, [0, 65_520, 0, 0]);
+        sim.tick(30).unwrap();
+        let events = sim.drain();
+        assert!(events.contains(&SimEvent::PwmStop(0)));
+        assert_eq!(last_i32(&events, "app/err"), Some(AbiError::Busy.code()));
+        assert!(sim.pwm().is_empty());
     }
 }
