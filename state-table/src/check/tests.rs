@@ -1,7 +1,7 @@
 //! Tests of [`super::check`]: one per rule, plus a clean table.
 
 use super::*;
-use crate::{CmpOp, Event, Node, Row, State};
+use crate::{CmpOp, Event, Leaf, Node, Row, State};
 use std::vec::Vec;
 
 const PINS: [Pin<'static>; 4] = [
@@ -585,9 +585,18 @@ fn publish_keys_follow_the_key_rule_and_avoid_sys() {
 #[test]
 fn raise_must_name_an_event_of_the_same_machine() {
     let acts = [
-        Action::Raise { event: "PRESS" },
-        Action::Raise { event: "TICK" },
-        Action::Raise { event: "press" },
+        Action::Raise {
+            machine: None,
+            event: "PRESS",
+        },
+        Action::Raise {
+            machine: None,
+            event: "TICK",
+        },
+        Action::Raise {
+            machine: None,
+            event: "press",
+        },
     ];
     let rows = [
         row("Off", "PRESS", None, "On", &acts),
@@ -758,7 +767,10 @@ fn an_always_true_guard_overlaps_every_other_guarded_row() {
         panic!("{got:?}")
     };
     assert_eq!(other, 0);
-    assert_eq!(witness.levels().collect::<Vec<_>>(), [("BUTTON", true)]);
+    assert_eq!(
+        witness.levels().collect::<Vec<_>>(),
+        [(Leaf::Pin("BUTTON"), true)]
+    );
 }
 
 #[test]
@@ -781,7 +793,7 @@ fn overlapping_guards_report_a_witness_assignment() {
     assert_eq!(witness.len(), 2);
     assert_eq!(
         witness.levels().collect::<Vec<_>>(),
-        [("BUTTON", true), ("DOOR", true)]
+        [(Leaf::Pin("BUTTON"), true), (Leaf::Pin("DOOR"), true)]
     );
 }
 
@@ -970,4 +982,150 @@ fn add_fixes_are_withheld_when_the_list_is_full() {
     };
     let unknown = issues(&[m]).into_iter().find(|i| i.field == Field::Event);
     assert_eq!(unknown.map(|i| i.fix), Some(None));
+}
+
+const MODE_ON: [Node<'static>; 1] = [Node::State {
+    machine: "Mode",
+    state: "On",
+}];
+const MODE_OFF: [Node<'static>; 1] = [Node::State {
+    machine: "Mode",
+    state: "Off",
+}];
+const DOOR_OPEN: [Node<'static>; 1] = [Node::State {
+    machine: "Door",
+    state: "On",
+}];
+
+fn door<'a>(rows: &'a [Row<'a>]) -> Machine<'a> {
+    Machine {
+        id: "Door",
+        ..machine(rows)
+    }
+}
+
+#[test]
+fn state_tests_of_one_machine_exclude_each_other_in_the_overlap_check() {
+    // Door rows guarded on Mode's state: On and Off cannot both hold.
+    let rows = [
+        row("Off", "PRESS", Some(&MODE_ON), "On", &[]),
+        row("Off", "PRESS", Some(&MODE_OFF), "Off", &[]),
+    ];
+    let m = machine(&[]);
+    fn of_door<'a>(ms: &[Machine<'a>]) -> Vec<IssueKind<'a>> {
+        issues(ms)
+            .into_iter()
+            .filter(|i| i.machine == 1)
+            .map(|i| i.kind)
+            .collect()
+    }
+    assert_eq!(of_door(&[m, door(&rows)]), []);
+    // Mode is On and Door is On can: an overlap with that witness.
+    let rows = [
+        row("Off", "PRESS", Some(&MODE_ON), "On", &[]),
+        row("Off", "PRESS", Some(&DOOR_OPEN), "Off", &[]),
+    ];
+    let got = of_door(&[m, door(&rows)]);
+    let [IssueKind::GuardOverlap { other: 0, witness }] = got.as_slice() else {
+        panic!("{got:?}")
+    };
+    assert_eq!(
+        witness.levels().collect::<Vec<_>>(),
+        [
+            (
+                Leaf::State {
+                    machine: "Mode",
+                    state: "On"
+                },
+                true
+            ),
+            (
+                Leaf::State {
+                    machine: "Door",
+                    state: "On"
+                },
+                true
+            )
+        ]
+    );
+}
+
+#[test]
+fn guard_state_tests_must_name_a_machine_and_its_state() {
+    let bad_machine = [Node::State {
+        machine: "mode",
+        state: "On",
+    }];
+    let bad_state = [Node::State {
+        machine: "Mode",
+        state: "Blink",
+    }];
+    let rows = [
+        row("Off", "PRESS", Some(&bad_machine), "On", &[]),
+        row("On", "PRESS", Some(&bad_state), "Off", &[]),
+    ];
+    let got = kinds(&[machine(&rows)]);
+    assert!(got.contains(&IssueKind::GuardMachineUnknown {
+        machine: "mode",
+        near: Some("Mode")
+    }));
+    assert!(got.contains(&IssueKind::GuardStateUnknown {
+        machine: "Mode",
+        state: "Blink",
+        near: None
+    }));
+}
+
+#[test]
+fn a_raise_naming_another_machine_needs_that_machine_and_event() {
+    let acts = [
+        Action::Raise {
+            machine: Some("Mode"),
+            event: "PRESS",
+        },
+        Action::Raise {
+            machine: Some("Lamp"),
+            event: "PRESS",
+        },
+        Action::Raise {
+            machine: Some("Mode"),
+            event: "HOLD",
+        },
+        Action::Raise {
+            machine: Some("Door"),
+            event: "PRESS",
+        },
+    ];
+    let rows = [row("Off", "PRESS", None, "On", &acts)];
+    let got = issues(&[machine(&[]), door(&rows)]);
+    let raise: Vec<_> = got
+        .iter()
+        .filter(|i| i.machine == 1 && i.field == Field::Actions)
+        .map(|i| (i.kind, i.fix))
+        .collect();
+    assert_eq!(
+        raise,
+        [
+            (
+                IssueKind::RaiseMachineUnknown {
+                    action: 1,
+                    machine: "Lamp",
+                    near: None
+                },
+                None
+            ),
+            (
+                IssueKind::RaiseUnknownIn {
+                    action: 2,
+                    machine: "Mode",
+                    event: "HOLD",
+                    near: None
+                },
+                Some(Fix::AddEventTo {
+                    machine: 0,
+                    name: "HOLD"
+                })
+            ),
+        ]
+    );
 }

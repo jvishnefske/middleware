@@ -1,19 +1,22 @@
 // The payload model (IR): one versioned document that every editor view
 // reads and writes. The Blocks view edits `logic[0]` (a Blockly workspace),
-// the Pins view edits `pins` and the States view edits `machines`; the
-// flow canvas will add `flow` logic sources. Pure: JSON in, a validated
-// model out, and back.
+// the Pins view edits `pins`, the States view edits `machines` and the
+// Flows view edits the flow logic sources after it. Pure: JSON in, a
+// validated model out, and back.
 //
-// Version 2:
+// Version 3:
 //
-//   { format: "middleware-payload", version: 2,
+//   { format: "middleware-payload", version: 3,
 //     board: TargetId,                         // target.ts
 //     pins: { rows: PinRow[], buses: BusSetting[] },   // pins.ts
-//     logic: [ { kind: "blocks", workspace } ],        // exactly one
+//     logic: [ { kind: "blocks", workspace },          // exactly one, first
+//              ...Flow[] ],                    // flows.ts, at most 8
 //     machines: Machine[] }                    // machines.ts, at most 4
 //
-// Version 1 is version 2 with `machines` always empty; a version-1 file
-// parses to the same model with `version: 2` (`migrated`), so its
+// Version 2 is version 3 with only the Blocks source in `logic` (and no
+// raise naming a machine or state-test leaf, which version 3 added to
+// machines.ts); version 1 is version 2 with `machines` always empty. Older
+// files parse to the same model with `version: 3` (`migrated`), so their
 // generated code is unchanged.
 //
 // `parseModel` is strict about the model's own shape: an unknown key, a
@@ -34,11 +37,12 @@ import { type ProfileId, isProfileId } from "../blocks/profiles";
 import { type WorkspaceJson, workspaceProblem } from "../blocks/workspace";
 import type { BoardId } from "../onboarding/boards";
 import { type BusSetting, EMPTY_PINS, PIN_FUNCS, PULLS, type PinRow, type PinTable } from "./pins";
+import { type Flow, MAX_FLOWS, copyFlows, flowProblem } from "./flows";
 import { type Machine, copyMachines, machinesProblem } from "./machines";
 import { type TargetId, isTargetId, profileOf, targetForProfile } from "./target";
 
 export const MODEL_FORMAT = "middleware-payload";
-export const MODEL_VERSION = 2;
+export const MODEL_VERSION = 3;
 /** The Blocks tab's export format before the model (still imported). */
 export const LEGACY_BLOCKS_FORMAT = "middleware-blocks";
 
@@ -53,22 +57,28 @@ export interface BlocksSource {
   workspace: WorkspaceJson;
 }
 
-/** A logic source. Version 1 has Blockly workspaces only; flows come
- * later as another kind. */
-export type LogicSource = BlocksSource;
+/** A logic source: the Blocks workspace, or a flow (version 3). */
+export type LogicSource = BlocksSource | Flow;
 
 export interface PayloadModel {
   format: typeof MODEL_FORMAT;
   version: typeof MODEL_VERSION;
   board: TargetId;
   pins: PinTable;
-  logic: [BlocksSource];
+  /** The Blocks workspace first, then the flows. */
+  logic: readonly [BlocksSource, ...Flow[]];
   /** State-machine tables (machines.ts); none in a version-1 file. */
   machines: readonly Machine[];
 }
 
-export function makeModel(board: TargetId, workspace: WorkspaceJson, pins: PinTable = EMPTY_PINS, machines: readonly Machine[] = []): PayloadModel {
-  return { format: MODEL_FORMAT, version: MODEL_VERSION, board, pins, logic: [{ kind: "blocks", workspace }], machines };
+export function makeModel(
+  board: TargetId,
+  workspace: WorkspaceJson,
+  pins: PinTable = EMPTY_PINS,
+  machines: readonly Machine[] = [],
+  flows: readonly Flow[] = [],
+): PayloadModel {
+  return { format: MODEL_FORMAT, version: MODEL_VERSION, board, pins, logic: [{ kind: "blocks", workspace }, ...flows], machines };
 }
 
 export function workspaceOf(m: PayloadModel): WorkspaceJson {
@@ -79,9 +89,20 @@ export function profileOfModel(m: PayloadModel): ProfileId {
   return profileOf(m.board);
 }
 
-/** A copy with the workspace replaced. */
+/** The flows (the logic sources after the Blocks workspace). */
+export function flowsOf(m: PayloadModel): readonly Flow[] {
+  const [, ...flows] = m.logic;
+  return flows;
+}
+
+/** A copy with the workspace replaced (the flows kept). */
 export function withWorkspace(m: PayloadModel, workspace: WorkspaceJson): PayloadModel {
-  return { ...m, logic: [{ kind: "blocks", workspace }] };
+  return { ...m, logic: [{ kind: "blocks", workspace }, ...flowsOf(m)] };
+}
+
+/** A copy with the flows replaced (at most `MAX_FLOWS` kept). */
+export function withFlows(m: PayloadModel, flows: readonly Flow[]): PayloadModel {
+  return { ...m, logic: [m.logic[0], ...flows.slice(0, MAX_FLOWS)] };
 }
 
 export function withPins(m: PayloadModel, pins: PinTable): PayloadModel {
@@ -156,8 +177,8 @@ function busProblem(v: unknown, at: string): string | null {
   return `${at}.kind must be "i2c" or "spi"`;
 }
 
-/** Checks a version-1 or version-2 model's shape; returns the problem,
- * or null. */
+/** Checks a version-1, -2 or -3 model's shape; returns the problem, or
+ * null. */
 export function modelProblem(v: unknown): string | null {
   if (!isObj(v)) return "not a JSON object";
   if (v.format !== MODEL_FORMAT) return `format must be "${MODEL_FORMAT}"`;
@@ -180,13 +201,22 @@ export function modelProblem(v: unknown): string | null {
     const p = busProblem(b, `pins.buses[${i}]`);
     if (p) return p;
   }
-  if (!Array.isArray(v.logic) || v.logic.length !== 1) return "logic must hold exactly one Blocks workspace";
+  const maxLogic = v.version >= 3 ? 1 + MAX_FLOWS : 1;
+  if (!Array.isArray(v.logic) || v.logic.length < 1 || v.logic.length > maxLogic) {
+    return v.version >= 3
+      ? `logic must hold one Blocks workspace and at most ${MAX_FLOWS} flows`
+      : "logic must hold exactly one Blocks workspace";
+  }
   const src: unknown = v.logic[0];
   if (!isObj(src) || src.kind !== "blocks") return 'logic[0].kind must be "blocks" (other logic sources need a newer editor)';
   const srcExtra = extraKey(src, ["kind", "workspace"]);
   if (srcExtra !== undefined) return `logic[0] has an unknown field "${srcExtra}"`;
   const ws = workspaceProblem(src.workspace);
   if (ws) return `logic[0].workspace is not a Blocks workspace: ${ws}`;
+  for (const [i, f] of v.logic.slice(1).entries()) {
+    const p = flowProblem(f, `logic[${i + 1}]`);
+    if (p) return p;
+  }
   if (v.version === 1) {
     if (!Array.isArray(v.machines) || v.machines.length !== 0) return "machines must be empty in version 1";
     return null;
@@ -221,6 +251,7 @@ export function parseModel(text: string, fallback: BoardId, fallbackProfile: Pro
         ...m,
         version: MODEL_VERSION,
         pins: { rows: m.pins.rows.map((r: PinRow) => ({ ...r })), buses: m.pins.buses.map((b: BusSetting) => ({ ...b })) },
+        logic: [m.logic[0], ...copyFlows(flowsOf(m))],
         machines: copyMachines(m.machines),
       },
       migrated: (value.version as number) < MODEL_VERSION,

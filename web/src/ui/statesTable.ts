@@ -246,11 +246,13 @@ export function statesView(ev: StatesViewEvents): StatesView {
       const fix = x.fix;
       const b = h("button", { type: "button", class: "fix" }, fixText(fix));
       b.addEventListener("click", () => {
-        const target = machines[x.machine];
+        // An add-event fix may name another machine (a raise of its event).
+        const mi = fix.kind === "add-event" && fix.machine !== undefined ? fix.machine : x.machine;
+        const target = machines[mi];
         if (!target) return;
         const r = applyMachineFix(target, fix);
         if ("pin" in r) ev.onAddPin(r.pin.label, r.pin.func);
-        else ev.onChange(setMachine(machines, x.machine, r.machine));
+        else ev.onChange(setMachine(machines, mi, r.machine));
       });
       li.append(" ", b);
     }

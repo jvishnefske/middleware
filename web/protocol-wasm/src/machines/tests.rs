@@ -317,9 +317,11 @@ fn raise_and_action_count_messages() {
     let mut m = mode();
     m.states[1].entry = vec![
         ActionIn::Raise {
+            machine: None,
             event: "TICK".into(),
         },
         ActionIn::Raise {
+            machine: None,
             event: "press".into(),
         },
         ActionIn::Log { text: "a".into() },

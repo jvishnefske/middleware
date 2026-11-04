@@ -9,26 +9,30 @@
 // share the toolbar (board, examples, compile, simulate, upload, export,
 // import) and the right-hand column (generated code, build output,
 // simulator): "Blocks", the Blockly workspace, "Pins", the pin table
-// (pinTable.ts), and "States", the state-machine tables (statesTable.ts).
+// (pinTable.ts), "States", the state-machine tables (statesTable.ts), and
+// "Flows", the flow graphs (flowsView.ts: an SVG canvas and an outline).
 // They are sub-views of one tab rather than sibling tabs because they are
 // parts of one payload: a pin or table change shows at once in the
 // generated code and the simulator next to it, and compile and upload act
 // on all of them. The views are a tablist (arrow keys, Home and End move
 // between them); the last one shown is remembered. The pin table is
-// re-checked with protocol-wasm `checkPins` (the firmwares' pin rules) and
-// the machines with `checkMachines` on every pin or machine change; errors
+// re-checked with protocol-wasm `checkPins` (the firmwares' pin rules),
+// the machines with `checkMachines` and the flows with `checkFlows` on
+// every pin, machine or flow change; errors
 // keep Compile from building (it switches to the view at fault) and are
 // counted on the view's tab ("States (2 to fix)"); warnings do not block.
 //
 // Renaming a pin label, a state, an event or a machine id in a table
-// renames the blocks that refer to it in the live workspace. The machine
+// renames the blocks and flows that refer to it in the live workspace. The machine
 // blocks name `<machine id>.<state or event>` with dropdowns of the
 // tables' names (`field_machine_state`, `field_machine_event`), keeping a
 // name the tables no longer have, marked "(not in States)". While the
 // simulator runs, the generated code's `sm <id>: ...` log lines
 // (machines.ts `parseMachineLog`) give each machine's current state: the
 // States view highlights it and a live line in the simulator says it
-// ("State: Mode = On (from Off on PRESS)").
+// ("State: Mode = On (from Off on PRESS)"); the flows' `flow <id>: <node>`
+// lines (flows.ts `flowTrail`) light up each flow's latest run on the
+// Flows canvas and outline.
 //
 // The board decides the profile and so which blocks are enabled: blocks
 // the profile does not support are disabled in the toolbox and in the
@@ -74,7 +78,7 @@ import {
   parseMachineLog,
   parseMachineRef,
 } from "../model/machines";
-import { type PayloadModel, makeModel, profileOfModel, serializeModel, withBoard, withMachines, withPins, withWorkspace } from "../model/payload";
+import { type PayloadModel, flowsOf, makeModel, profileOfModel, serializeModel, withBoard, withFlows, withMachines, withPins, withWorkspace } from "../model/payload";
 import { type PinFunc, type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget, withNeeds } from "../model/pins";
 import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../model/target";
 import type { BoardId } from "../onboarding/boards";
@@ -82,6 +86,9 @@ import type { BoardPins, PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
 import type { App } from "./app";
 import { errorText, formatBytes, h } from "./dom";
+import { type Flow, type FlowIssue, flowTrail, parseFlowLog, renameFlowPin, renameFlowRef } from "../model/flows";
+import { flowsTabText, flowTrailText } from "./flowsModel";
+import { flowsView } from "./flowsView";
 import { pinTableView } from "./pinTable";
 import { type Rename, renamePinLabel, simStateText, statesTabText } from "./statesModel";
 import { statesView } from "./statesTable";
@@ -242,6 +249,9 @@ export function blocksPage(app: App): HTMLElement {
   let profile: ProfileId = profileOfModel(model);
   let pinIssues: PinIssue[] = [];
   let machineIssues: MachineIssue[] = [];
+  let flowIssues: FlowIssue[] = [];
+  /** Each flow's latest run in the simulator, by id (null: not running). */
+  let flowRuns: Map<string, readonly string[]> | null = null;
   /** Each machine's state in the running simulator, by id (null: none). */
   let simStates: Map<string, string> | null = null;
   let boardPins: BoardPins | null = null;
@@ -329,6 +339,38 @@ export function blocksPage(app: App): HTMLElement {
     machineSource.machines = model.machines;
     renderStates();
     statesTab.textContent = statesTabText(machineIssues);
+    checkFlows();
+  }
+
+  /** Re-checks the flows against the machines and the pin table
+   * (protocol-wasm checkFlows) and redraws the Flows view. */
+  function checkFlows() {
+    const flows = flowsOf(model);
+    try {
+      flowIssues = flows.length ? proto.checkFlows(flows, model.machines, model.pins.rows) : [];
+    } catch (e) {
+      flowIssues = [{ flow: 0, node: null, wire: null, severity: "error", message: `Could not check the flows: ${errorText(e)}` }];
+    }
+    renderFlows();
+    flowsTab.textContent = flowsTabText(flowIssues);
+  }
+
+  function renderFlows() {
+    flowsV.render(
+      flowsOf(model),
+      flowIssues,
+      model.machines,
+      model.pins.rows.map((r) => ({ label: r.label, func: r.func })),
+      flowRuns,
+    );
+  }
+
+  function setFlows(flows: readonly Flow[]) {
+    model = withFlows(model, flows);
+    checkFlows();
+    invalidate();
+    regenerate();
+    persist();
   }
 
   function renderStates() {
@@ -342,6 +384,7 @@ export function blocksPage(app: App): HTMLElement {
 
   function setMachines(machines: readonly Machine[], rename?: Rename) {
     model = withMachines(model, machines);
+    if (rename) model = withFlows(model, renameFlowRef(flowsOf(model), rename.kind, rename.id, rename.from, rename.to));
     machineSource.machines = machines;
     if (rename && ws) {
       Blockly.Events.setGroup(true);
@@ -382,6 +425,7 @@ export function blocksPage(app: App): HTMLElement {
     model = withPins(model, pins);
     // The machines' guards and pin actions follow a label rename too.
     if (rename) model = withMachines(model, renamePinLabel(model.machines, rename.from, rename.to));
+    if (rename) model = withFlows(model, renameFlowPin(flowsOf(model), rename.from, rename.to));
     if (rename && ws) {
       Blockly.Events.setGroup(true);
       try {
@@ -404,6 +448,15 @@ export function blocksPage(app: App): HTMLElement {
   const pinsView = pinTableView({ onChange: setPins });
   const statesV = statesView({
     onChange: setMachines,
+    onAddPin: (label: string, func: PinFunc) => {
+      setPins(withNeeds(model.pins, model.board, [{ label, func }]));
+      out.textContent = `Added pin ${label} to the pin table; choose its GPIO in Pins.`;
+    },
+  });
+
+  const flowsV = flowsView({
+    onChange: setFlows,
+    onMachines: (machines) => setMachines(machines),
     onAddPin: (label: string, func: PinFunc) => {
       setPins(withNeeds(model.pins, model.board, [{ label, func }]));
       out.textContent = `Added pin ${label} to the pin table; choose its GPIO in Pins.`;
@@ -440,7 +493,7 @@ export function blocksPage(app: App): HTMLElement {
   function regenerate() {
     regenerating = true;
     try {
-      const g = generate(currentWorkspace(), profile, model.pins, model.machines);
+      const g = generate(currentWorkspace(), profile, model.pins, model.machines, flowsOf(model));
       code.dispatch({ changes: { from: 0, to: code.state.doc.length, insert: g.source } });
       showIssues(g.errors, g.warnings);
     } finally {
@@ -615,13 +668,21 @@ export function blocksPage(app: App): HTMLElement {
     out.textContent = "Compiling (loading the AssemblyScript compiler the first time) ...";
     try {
       const m = current();
-      const r = await buildPayload(m.logic[0].workspace, profile, proto.abi, { pins: m.pins, issues: pinIssues, machines: m.machines, machineIssues });
+      const r = await buildPayload(m.logic[0].workspace, profile, proto.abi, {
+        pins: m.pins,
+        issues: pinIssues,
+        machines: m.machines,
+        machineIssues,
+        flows: flowsOf(m),
+        flowIssues,
+      });
       if (!r.ok) {
         invalidate();
         out.textContent = [`${r.stage} failed:`, ...r.errors].join("\n");
         if (r.issues.length > 0) showIssues(r.issues, []);
         if (r.stage === "pins") showView("pins");
         if (r.stage === "states") showView("states");
+        if (r.stage === "flows") showView("flows");
         return false;
       }
       compiled = r.wasm;
@@ -675,6 +736,7 @@ export function blocksPage(app: App): HTMLElement {
   );
   const msgLog = h("pre", { class: "log sim-log" });
   const simStateEl = h("p", { id: "sim-states", class: "sim-states", "aria-live": "polite" });
+  const simFlowsEl = h("p", { id: "sim-flows", class: "sim-states" });
   const subsEl = h("span", { class: "muted" });
   const simKey = h("input", { type: "text", value: "app/echo/in" });
   const simData = h("input", { type: "text", value: "ping" });
@@ -739,12 +801,21 @@ export function blocksPage(app: App): HTMLElement {
 
   function onEvent(e: SimEvent) {
     if (e.kind === "log") {
-      logLine(`log  ${e.line}`);
+      // A flow's node lines drive the Flows highlight and the "Flows:"
+      // line; listing them would bury every other line (a 250 ms flow
+      // logs eight a second).
+      if (!parseFlowLog(e.line)) logLine(`log  ${e.line}`);
       const p = parseMachineLog(e.line);
       if (p) {
         simStates = new Map(simStates ?? []).set(p.id, p.state);
         simStateEl.textContent = simStateText(p);
         renderStates();
+      }
+      if (parseFlowLog(e.line)) {
+        const entries = new Map(flowsOf(model).map((f) => [f.id, f.nodes.find((n) => n.kind === "entry")?.id ?? ""] as const));
+        flowRuns = flowTrail(flowRuns ?? new Map(), e.line, entries);
+        simFlowsEl.textContent = flowTrailText(flowRuns);
+        renderFlows();
       }
     }
     else if (e.kind === "publish") {
@@ -764,6 +835,11 @@ export function blocksPage(app: App): HTMLElement {
       simStateEl.textContent = "";
       renderStates();
     }
+    if (flowRuns) {
+      flowRuns = null;
+      simFlowsEl.textContent = "";
+      renderFlows();
+    }
   }
 
   function simulate() {
@@ -771,6 +847,7 @@ export function blocksPage(app: App): HTMLElement {
     stopSim();
     msgLog.textContent = "";
     simStates = new Map();
+    flowRuns = new Map();
     renderLeds(new Uint8Array(24));
     screenEl.textContent = "(nothing shown)";
     petEl.textContent = "-";
@@ -830,6 +907,7 @@ export function blocksPage(app: App): HTMLElement {
   const blocksTab = h("button", { role: "tab", id: "view-blocks-tab", "aria-controls": "view-blocks", type: "button" }, "Blocks");
   const pinsTab = h("button", { role: "tab", id: "view-pins-tab", "aria-controls": "view-pins", type: "button" }, "Pins");
   const statesTab = h("button", { role: "tab", id: "view-states-tab", "aria-controls": "view-states", type: "button" }, "States");
+  const flowsTab = h("button", { role: "tab", id: "view-flows-tab", "aria-controls": "view-flows", type: "button" }, "Flows");
   const blocksView = h(
     "div",
     { role: "tabpanel", id: "view-blocks", "aria-labelledby": "view-blocks-tab" },
@@ -839,17 +917,20 @@ export function blocksPage(app: App): HTMLElement {
   );
   const pinsPanel = h("div", { role: "tabpanel", id: "view-pins", "aria-labelledby": "view-pins-tab" }, pinsView.el);
   const statesPanel = h("div", { role: "tabpanel", id: "view-states", "aria-labelledby": "view-states-tab" }, statesV.el);
+  const flowsPanel = h("div", { role: "tabpanel", id: "view-flows", "aria-labelledby": "view-flows-tab" }, flowsV.el);
   const VIEW_KEY = "blocks-view";
-  type View = "blocks" | "pins" | "states";
+  type View = "blocks" | "pins" | "states" | "flows";
   const VIEWS: readonly { v: View; tab: HTMLButtonElement }[] = [
     { v: "blocks", tab: blocksTab },
     { v: "pins", tab: pinsTab },
     { v: "states", tab: statesTab },
+    { v: "flows", tab: flowsTab },
   ];
   function showView(v: View) {
     blocksView.hidden = v !== "blocks";
     pinsPanel.hidden = v !== "pins";
     statesPanel.hidden = v !== "states";
+    flowsPanel.hidden = v !== "flows";
     for (const [t, on] of VIEWS.map((x) => [x.tab, x.v === v] as const)) {
       t.setAttribute("aria-selected", String(on));
       t.tabIndex = on ? 0 : -1;
@@ -864,7 +945,8 @@ export function blocksPage(app: App): HTMLElement {
   blocksTab.addEventListener("click", () => showView("blocks"));
   pinsTab.addEventListener("click", () => showView("pins"));
   statesTab.addEventListener("click", () => showView("states"));
-  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, blocksTab, pinsTab, statesTab);
+  flowsTab.addEventListener("click", () => showView("flows"));
+  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, blocksTab, pinsTab, statesTab, flowsTab);
   // Arrow keys (wrapping), Home and End move between the view tabs (the
   // tabs pattern, selection follows focus).
   views.addEventListener("keydown", (e) => {
@@ -914,7 +996,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "div",
       { class: "cols" },
-      h("div", {}, views, blocksView, pinsPanel, statesPanel),
+      h("div", {}, views, blocksView, pinsPanel, statesPanel, flowsPanel),
       h(
         "div",
         {},
@@ -930,6 +1012,7 @@ export function blocksPage(app: App): HTMLElement {
         badgeEl,
         subsEl,
         simStateEl,
+        simFlowsEl,
         simForm,
         msgLog,
       ),

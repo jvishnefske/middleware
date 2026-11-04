@@ -2078,7 +2078,7 @@ open).
   `<machine>.<event or state>` and an unknown one is an error on the
   block — `web/test/blocks.machines.test.ts`: "emits SM/EV constants per machine, its state and pending globals, and one shared smBusy", "dispatches each event with one switch over the states that have rows for it", "turns guarded rows into if / else if in table order with the unguarded row as the final else, and compiles", "on a change of state sets the state, logs the move and enters the next state (entry actions, then on-enter blocks); a self-transition only runs its actions", "init runs the machines after the pin setup, subscriptions and tick, and before the on-init stacks", "generates byte-identical code without machines", "compiles a machine that no block references (dead but valid)", "reports raise, is-current and on-enter blocks naming an unknown machine, state or event on the block", "reports an invalid table as errors naming the machine and row, leaves the bad parts out and still emits valid code"; `cargo test -p state-table step`: "step_fires_the_first_true_guarded_row_before_the_default", "step_uses_the_first_unguarded_row_and_skips_rows_naming_nothing".
 - [x] U30 Raised events are bounded: a raise while any machine is
-  stepping is queued, at most one per machine (a second is dropped and
+  stepping (from a table, a block or a flow) is queued, at most one per machine (a second is dropped and
   logged), the queue is drained once in machine order after the outermost
   step, and a raise during the drain is dropped and logged, so one
   external raise runs at most 1 + (number of machines) steps —
@@ -2100,6 +2100,71 @@ open).
   while simulating, the current state is highlighted in the tables and
   named in a live line in the simulator panel. The view's decisions are
   tested (`web/test/states.view.test.ts`: "renames the state, its rows, the initial state and the blocks when the name is valid and free", "does not merge references when the typed name collides with another state", "lists each cell's rows with next state and guard marker, and labels holes", "counts only errors on the tab, since warnings do not block compiling", "says the state and the transition that led to it"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the mode example loaded after the confirm, a duplicate unguarded row blocked Compile at stage states and switched to the view, and two BUTTON presses in the simulator showed "State: Mode = Blink (from On on PRESS)" with the Blink row highlighted), not by a DOM test, so it stays unchecked.
+
+- [x] U33 Flows are part of the payload model: version 3 makes `logic`
+  the Blocks workspace followed by at most 8 flows, each an identifier, a
+  free-text name, nodes (id, kind, canvas position 0..4000, properties)
+  and wires (output port to input port). Node kinds are a closed set
+  reusing the machines' types: entry (on start, every N ms, on a message,
+  on a pin edge by label, when `<machine>.<state>` is entered), action
+  (exactly an `ActionRef`), branch (an `Expr`), repeat (a count) and
+  sequence (2 to 4 steps). Version 3 also lets an `ActionRef` raise name
+  its machine and adds a state-test leaf to `Expr`. The shape check is
+  strict, and version-1 and version-2 files parse to version 3 with no
+  flows and byte-for-byte the same generated code — `web/test/model.test.ts`: "rejects unknown shapes instead of dropping them", "round-trips flows, keeps them across workspace edits and copies them", "migrates a version-2 model to version 3 losslessly (no flows, same code)", "migrates a version-1 model to version 3 losslessly (no machines, same code)"; `web/test/flows.model.test.ts`: "names each kind's ports in run order; a sequence has 2 to 4 steps", "connect keeps one wire per port and per input, and refuses self, entry and loop wires", "removing a node drops its wires; changing its kind drops wires from ports it lost; moves clamp", "renames pins, machines, states and events in every reference".
+- [x] U34 Flows are checked in Rust by the no_std `state-table` crate's
+  `flow` module (no heap, no recursion, built for `thumbv6m-none-eabi`)
+  through protocol-wasm `checkFlows`, with the tables' issue and fix
+  shape: at most 8 flows, 64 nodes and 128 wires; flow ids unique
+  identifiers and node ids unique identifiers; exactly one entry; every
+  period, key, pin, machine and state an entry names valid and of the
+  right pin function (an edge needs a GPIO input; fix: add it); actions
+  and branch conditions by the tables' own rules, a raise naming an
+  existing machine and event (fix: add the event to that machine);
+  repeat 1..10000, sequence 2..4; wires naming existing nodes, real
+  output ports and a non-entry input, each output port and each input
+  wired at most once; no cycles (a repeat's body loops by itself), an
+  error on each wire of one; nodes the entry does not reach, empty
+  repeats and empty branches are warnings and do not stop Compile; errors
+  do (stage "flows") — `cargo test -p state-table flow`: "the_mode_example_as_flows_has_no_issues", "every_node_kind_and_port_wired_into_a_tree_is_clean", "a_flow_has_exactly_one_entry", "flow_and_node_ids_are_identifiers_and_unique", "sizes_are_bounded_and_an_oversized_flow_is_not_checked_further", "wires_need_known_nodes_real_ports_and_no_entry_target", "each_output_port_and_each_input_is_wired_at_most_once", "a_cycle_is_an_error_on_each_of_its_wires_even_through_a_repeat_body", "nodes_the_entry_does_not_lead_to_and_empty_repeats_and_branches_are_warnings", "entries_check_their_period_key_pin_and_state", "actions_and_conditions_follow_the_table_rules_and_raises_name_their_machine", "repeat_counts_and_sequence_steps_are_bounded"; `cargo test -p protocol-wasm flows`: "the_mode_example_flows_are_clean", "graph_messages_name_the_other_wire_and_say_what_to_do", "entry_and_action_messages_use_the_tables_wording_with_fixes", "a_flow_without_an_entry_and_a_loop_are_errors"; `web/test/flows.model.test.ts`: "finds no issue in the mode example's flows", "reports a missing entry, a merge, an unknown event with an add fix and an unreachable node, by index", "checks branch conditions' state tests and pins like table guards"; `web/test/flows.gen.test.ts`: "stops the build at stage flows on a flow error and never on a warning".
+- [x] U35 Machine tables accept the version-3 additions: a guard's state
+  test ("machine M is in state S") and a raise naming another machine's
+  event, through the same bounded queue (one external raise from any
+  source still runs at most 1 + machines steps). Overlap stays exact: a
+  state test is a 0/1 leaf and assignments with one machine in two states
+  are skipped — `cargo test -p state-table`: "state_tests_of_one_machine_exclude_each_other_in_the_overlap_check", "guard_state_tests_must_name_a_machine_and_its_state", "a_raise_naming_another_machine_needs_that_machine_and_event", "state_leaves_read_through_the_reader_and_exclude_each_other"; the U30 bound tests unchanged.
+- [x] U36 One statement IR behind every logic source: Blocks, table rows
+  and entries, and flows all build `web/src/blocks/stmt.ts` statements
+  (lines, if / else if / else on i32 conditions, constant-count for) and
+  print them with one iterative printer, sharing the lowering of the
+  model's `Expr` and `ActionRef`; the Blocks output is byte-for-byte what
+  it was (verified for this change on every workspace the test suite
+  generates, and kept by the fixture tests) — `web/test/flows.gen.test.ts`: "prints nested if / else if / else and for loops with two spaces per level, iteratively", "lowers the model's expressions and actions, state tests and raises through the host", "generates byte-identical Blocks code when there are no flows"; `web/test/blocks.generator.test.ts` fixture tests ("blink (esp-base) matches test/fixtures/blocks/blink.as and compiles" and the other fixtures); `web/test/blocks.machines.test.ts`: "generates byte-identical code without machines".
+- [x] U37 Flows generate bounded code: the tree under the entry lowers to
+  straight-line statements (a branch to `if`, a repeat to a constant
+  `for`, a sequence to its steps in order) placed where the matching hat
+  block's body goes (init, the shared tick, the message handler, the pin's
+  interrupt, the state's enter function); each node outside a repeat body
+  logs `flow <id>: <node>`; a bad flow is reported and left out and the
+  output still compiles — `web/test/flows.gen.test.ts`: "lowers branch, repeat and sequence onto the shared if / for, logging each node outside repeat bodies", "places each entry's body where its hat block's would go", "reports bad flows, leaves the bad parts out and still emits valid code"; `web/test/blocks.build.test.ts`: `example "mode-flows" compiles and passes checkAbi (esp-base)`; `web/test/blocks.generator.test.ts`: "mode-flows (esp-base) matches test/fixtures/blocks/mode-flows.as and compiles".
+- [x] U38 The "Button toggles LED mode" example drawn as flows (a BUTTON
+  edge raising Mode.PRESS, every 250 ms raising Mode.TICK, entering
+  Mode.Blink logging) produces the same simulator trace as the Blocks
+  version: every log line, publish, pin setup, pin write and interrupt,
+  and the LED level after each step, apart from the flows' own `flow`
+  lines — `web/test/flows.gen.test.ts`: "produces the same simulator trace as the Blocks version on pico2", "produces the same simulator trace as the Blocks version on esp32".
+- [ ] U39 The Flows view (a sub-view beside Blocks, Pins and States)
+  edits flows on a hand-written SVG canvas (drag nodes, drag a wire from
+  an output port onto a node, select and delete nodes and wires, pan by
+  dragging the background, zoom buttons, arrow keys move the focused
+  node) and in an outline of the same flow in run order (each port a menu
+  of nodes it may lead to or a new node, Earlier / Later, Delete), with a
+  palette, Undo for the last 50 changes and a properties grid (grid.ts)
+  for the selected node; problems mark their node or wire and list with
+  fixes; while simulating, each flow's latest run is highlighted and named
+  in a line in the simulator panel; on a phone the outline is the default
+  and the canvas scrolls inside its box. The view's decisions are tested
+  (`web/test/flows.view.test.ts`: "places the input on top and outputs along the bottom in run order", "says what each node does", "makes new entries, actions and conditions from the pins and machines, keeping what applies", "offers as targets only nodes that keep the flow a tree, and reorders a chain", "keeps at most fifty undo steps", "maps issues to nodes, counts errors on the tab, and turns fixes into changes", "names the node each flow last ran in the simulator line"; `web/test/flows.model.test.ts`: "lists the outline in run order with each port's chain under its node, then nodes nothing leads to", "parses flow log lines and keeps each flow's latest run"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the canvas box 356 px wide scrolling 576 px on the phone, a real mouse drag moved a node and rewired a port, a duplicate flow name, a 5 ms period and an unreachable node were reported and blocked Compile at stage flows, two Undos restored them, and two BUTTON presses highlighted the Press flow's nodes), not by a DOM test, so it stays unchecked.
 
 ### Interrupts and DMA (ABI 2)
 
