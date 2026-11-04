@@ -4,15 +4,33 @@
 // then run in the simulator (SimSession) or handed to the Device tab for
 // upload, like the Editor tab.
 //
-// The board profile decides which blocks are enabled: blocks the profile
-// does not support are disabled in the toolbox and in the workspace (with
-// the "profile" disabled reason, so switching back re-enables them). The
-// workspace and profile persist in localStorage and can be exported and
-// imported as JSON; the Examples menu loads the bundled workspaces. The
-// Start tab's "Try it", the Examples menu and Import JSON all ask before
-// they replace different blocks (src/blocks/replace.ts decides; cancelling
-// leaves the workspace and the menu as they were). "Try it" then compiles
-// the example and starts the simulator.
+// The tab edits one payload model (src/model/payload.ts): the board, the
+// pin table and the Blockly workspace. Two views share the toolbar
+// (board, examples, compile, simulate, upload, export, import) and the
+// right-hand column (generated code, build output, simulator): "Blocks",
+// the Blockly workspace, and "Pins", the pin table (pinTable.ts). They are
+// sub-views of one tab rather than sibling tabs because they are halves
+// of one payload: a pin change shows at once in the generated code and the
+// simulator next to it, and compile and upload act on both. The pin table
+// is re-checked with protocol-wasm `checkPins` (the firmwares' pin rules)
+// on every change; problems keep Compile from building and are counted on
+// the Pins view's tab.
+//
+// The board decides the profile and so which blocks are enabled: blocks
+// the profile does not support are disabled in the toolbox and in the
+// workspace (with the "profile" disabled reason, so switching back
+// re-enables them). Picking a board here or on the Start tab re-seeds a
+// pin table that is empty or still the old board's defaults (otherwise
+// the table is kept and re-checked, with fixes offered). Pin blocks that
+// name a label get a dropdown of the table's labels (`field_pin_label`).
+//
+// The model persists in localStorage (an older Blocks save is migrated,
+// src/blocks/storage.ts) and can be exported and imported as JSON; the
+// Examples menu loads the bundled workspaces, adding the pins they need.
+// The Start tab's "Try it", the Examples menu and Import JSON all ask
+// before they replace different work (src/blocks/replace.ts decides;
+// cancelling leaves everything as it was). "Try it" then compiles the
+// example and starts the simulator.
 //
 // A "Hide categories" toggle in the workspace heading hides the Blockly toolbox
 // to give the blocks the full width; on narrow screens the toolbox is
@@ -24,18 +42,23 @@ import { EditorView, basicSetup } from "codemirror";
 import "blockly/blocks";
 import * as Blockly from "blockly/core";
 import * as En from "blockly/msg/en";
-import { BLOCK_DEFS, blockSupported, toolbox } from "../blocks/defs";
+import { BLOCK_DEFS, PIN_LABEL_BLOCKS, blockSupported, toolbox } from "../blocks/defs";
 import { EXAMPLES, exampleWorkspace } from "../blocks/examples";
 import { type GenIssue, generate } from "../blocks/generator";
 import { buildPayload } from "../blocks/pipeline";
-import { PROFILES, PROFILE_IDS, type ProfileId, isProfileId } from "../blocks/profiles";
-import { type Replacement, planImport, wouldReplaceWork } from "../blocks/replace";
-import { browserStore, load, save, serialize } from "../blocks/storage";
+import { PROFILES, type ProfileId } from "../blocks/profiles";
+import { exampleModel, planImport, wouldReplaceWork } from "../blocks/replace";
+import { browserStore, load, save } from "../blocks/storage";
 import type { WorkspaceJson } from "../blocks/workspace";
-import type { PinState, SimEvent } from "../protocol/wasm";
+import { type PayloadModel, makeModel, profileOfModel, serializeModel, withBoard, withPins, withWorkspace } from "../model/payload";
+import { type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget } from "../model/pins";
+import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../model/target";
+import type { BoardId } from "../onboarding/boards";
+import type { BoardPins, PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
 import type { App } from "./app";
 import { errorText, formatBytes, h } from "./dom";
+import { pinTableView } from "./pinTable";
 import { modal } from "./trustPanel";
 
 /** Disabled reason for blocks the selected profile does not support. */
@@ -53,12 +76,56 @@ function toolboxFor(profile: ProfileId): Blockly.utils.toolbox.ToolboxDefinition
   return toolbox(profile) as unknown as Blockly.utils.toolbox.ToolboxDefinition;
 }
 
+/** Where `field_pin_label` dropdowns get their options: the pin table's
+ * labels, plus labels blocks already name (so loading a workspace whose
+ * label is missing from the table keeps it, shown as missing). */
+const labelSource = { table: [] as string[], extra: [] as string[] };
+
+/** A dropdown of pin-table labels that accepts any label (a block may
+ * name a label the table no longer has; the generator reports it). */
+class PinLabelField extends Blockly.FieldDropdown {
+  private pending: string | null = null;
+  static override fromJson(): PinLabelField {
+    return new PinLabelField();
+  }
+  constructor() {
+    super(() => [["LED", "LED"]]);
+  }
+  override getOptions(): Blockly.MenuOption[] {
+    const opts: Blockly.MenuOption[] = labelSource.table.map((l) => [l, l]);
+    const current = this.pending ?? (this.getValue() as string | null);
+    for (const l of [...labelSource.extra, current ?? ""]) {
+      if (l && !labelSource.table.includes(l) && !opts.some((o) => o[1] === l)) opts.push([`${l} (not in Pins)`, l]);
+    }
+    return opts.length > 0 ? opts : [["LED", "LED"]];
+  }
+  protected override doClassValidation_(v?: string): string | null {
+    if (typeof v !== "string" || v === "") return null;
+    this.pending = v;
+    return v;
+  }
+}
+
 let registered = false;
 function registerBlocks(): void {
   if (registered) return;
   registered = true;
   Blockly.setLocale(En as unknown as Record<string, string>);
+  Blockly.fieldRegistry.register("field_pin_label", PinLabelField);
   Blockly.defineBlocksWithJsonArray(BLOCK_DEFS as never[]);
+}
+
+const START_BOARD_KEY = "start-board";
+/** The board for a payload that does not name one: the Start tab's pick,
+ * else the ESP32. */
+function fallbackBoard(): BoardId {
+  try {
+    const b = localStorage.getItem(START_BOARD_KEY);
+    if (isTargetId(b) && b !== "badge") return b;
+  } catch {
+    /* storage unavailable */
+  }
+  return "esp32";
 }
 
 function themes(): { light: Blockly.Theme; dark: Blockly.Theme } {
@@ -89,8 +156,19 @@ function themes(): { light: Blockly.Theme; dark: Blockly.Theme } {
 export function blocksPage(app: App): HTMLElement {
   const { proto } = app;
   const store = browserStore();
-  const saved = load(store, "esp-base");
-  let profile: ProfileId = saved?.profile ?? "esp-base";
+  const saved = load(store, fallbackBoard());
+  /** The model as last synced; the workspace part is refreshed from
+   * Blockly by `current()`. */
+  let model: PayloadModel =
+    saved?.model ??
+    (() => {
+      const blink = exampleWorkspace("blink");
+      const board = fallbackBoard();
+      return blink ? exampleModel(blink, makeModel(board, {}, boardDefaults(board)), board) : makeModel(board, {});
+    })();
+  let profile: ProfileId = profileOfModel(model);
+  let pinIssues: PinIssue[] = [];
+  let boardPins: BoardPins | null = null;
   let compiled: Uint8Array | null = null;
   let session: SimSession | null = null;
   let ws: Blockly.WorkspaceSvg | null = null;
@@ -100,8 +178,8 @@ export function blocksPage(app: App): HTMLElement {
   let regenerating = false;
 
   // ---- controls
-  const profileSel = h("select", {}, ...PROFILE_IDS.map((id) => h("option", { value: id }, PROFILES[id].label)));
-  profileSel.value = profile;
+  const profileSel = h("select", {}, ...TARGET_IDS.map((id) => h("option", { value: id }, targetLabel(id))));
+  profileSel.value = model.board;
   const profileNote = h("span", { class: "muted" }, PROFILES[profile].note);
   const exampleSel = h(
     "select",
@@ -137,9 +215,52 @@ export function blocksPage(app: App): HTMLElement {
     Blockly.svgResize(ws);
   });
 
-  function current(): WorkspaceJson {
-    return ws ? (Blockly.serialization.workspaces.save(ws) as WorkspaceJson) : (saved?.workspace ?? {});
+  function currentWorkspace(): WorkspaceJson {
+    return ws ? (Blockly.serialization.workspaces.save(ws) as WorkspaceJson) : model.logic[0].workspace;
   }
+  /** The payload as it stands (workspace read from Blockly). */
+  function current(): PayloadModel {
+    model = withWorkspace(model, currentWorkspace());
+    return model;
+  }
+
+  /** Re-checks the pin table (protocol-wasm checkPins) and redraws it. */
+  function checkPins() {
+    const chip = chipOf(model.board);
+    try {
+      boardPins = chip ? proto.boardPins(chip) : null;
+      pinIssues = checkTable(proto.checkPins, model.board, model.pins);
+    } catch (e) {
+      boardPins = null;
+      pinIssues = [{ row: null, field: "table", message: `Could not check the pins: ${errorText(e)}` }];
+    }
+    labelSource.table = model.pins.rows.map((r) => r.label).filter(Boolean);
+    pinsView.render(model.board, model.pins, pinIssues, boardPins);
+    pinsTab.textContent = pinIssues.length ? `Pins (${pinIssues.length} to fix)` : "Pins";
+  }
+
+  function setPins(pins: PinTable, rename?: { from: string; to: string }) {
+    model = withPins(model, pins);
+    if (rename && ws) {
+      Blockly.Events.setGroup(true);
+      try {
+        labelSource.table = pins.rows.map((r) => r.label).filter(Boolean);
+        for (const b of ws.getAllBlocks(false)) {
+          if (!PIN_LABEL_BLOCKS.includes(b.type)) continue;
+          const f = b.getField("LABEL");
+          if (f && f.getValue() === rename.from) f.setValue(rename.to);
+        }
+      } finally {
+        Blockly.Events.setGroup(false);
+      }
+    }
+    checkPins();
+    invalidate();
+    regenerate();
+    persist();
+  }
+
+  const pinsView = pinTableView({ onChange: setPins });
 
   function invalidate() {
     if (compiled) out.textContent += "\n(The workspace or board changed; compile again.)";
@@ -171,7 +292,7 @@ export function blocksPage(app: App): HTMLElement {
   function regenerate() {
     regenerating = true;
     try {
-      const g = generate(current(), profile);
+      const g = generate(currentWorkspace(), profile, model.pins);
       code.dispatch({ changes: { from: 0, to: code.state.doc.length, insert: g.source } });
       showIssues(g.errors, g.warnings);
     } finally {
@@ -181,7 +302,7 @@ export function blocksPage(app: App): HTMLElement {
 
   function persist() {
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => save(store, profile, current()), 300);
+    saveTimer = setTimeout(() => save(store, current()), 300);
   }
 
   /** Disables blocks the profile does not support (and re-enables the
@@ -196,22 +317,40 @@ export function blocksPage(app: App): HTMLElement {
     if (ws) for (const b of ws.getAllBlocks(false)) b.setDisabledReason(!blockSupported(b.type, profile), PROFILE_REASON);
   }
 
-  function loadWorkspace(w: WorkspaceJson, p: ProfileId) {
-    profile = p;
-    profileSel.value = p;
+  function loadModel(m: PayloadModel) {
+    model = m;
+    profile = profileOfModel(m);
+    profileSel.value = m.board;
+    labelSource.extra = labelsUsed(m.logic[0].workspace);
+    labelSource.table = m.pins.rows.map((r) => r.label).filter(Boolean);
     if (ws) {
       Blockly.Events.disable();
       try {
         ws.clear();
-        Blockly.serialization.workspaces.load(w, ws);
+        Blockly.serialization.workspaces.load(m.logic[0].workspace, ws);
       } finally {
         Blockly.Events.enable();
       }
       applyProfile();
     }
+    checkPins();
     invalidate();
     regenerate();
     persist();
+  }
+
+  /** The board changed (here or on the Start tab). */
+  function setBoard(board: TargetId) {
+    if (board === model.board) return;
+    model = withPins(withBoard(current(), board), seedForTarget(model.pins, model.board, board));
+    profile = profileOfModel(model);
+    profileSel.value = board;
+    applyProfile();
+    checkPins();
+    invalidate();
+    regenerate();
+    persist();
+    renderBadge();
   }
 
   function inject() {
@@ -229,8 +368,9 @@ export function blocksPage(app: App): HTMLElement {
     });
     dark_?.addEventListener("change", (e) => ws?.setTheme(e.matches ? dark : light));
     ws.addChangeListener(Blockly.Events.disableOrphans);
+    labelSource.extra = labelsUsed(model.logic[0].workspace);
     try {
-      Blockly.serialization.workspaces.load(saved?.workspace ?? exampleWorkspace("blink")?.workspace ?? {}, ws);
+      Blockly.serialization.workspaces.load(model.logic[0].workspace, ws);
     } catch (e) {
       out.textContent = `Could not restore the saved workspace: ${errorText(e)}`;
     }
@@ -243,32 +383,29 @@ export function blocksPage(app: App): HTMLElement {
       persist();
     });
     new ResizeObserver(() => ws && Blockly.svgResize(ws)).observe(area);
+    checkPins();
     regenerate();
+    if (saved?.migrated) out.textContent = "Your saved blocks were moved to the new payload format (with a pin table, empty for now).";
   }
   // Blockly needs its container in the document; main.ts appends the page
   // right after building it.
   queueMicrotask(inject);
 
   profileSel.addEventListener("change", () => {
-    if (!isProfileId(profileSel.value)) return;
-    profile = profileSel.value;
-    applyProfile();
-    invalidate();
-    regenerate();
-    persist();
-    renderBadge();
+    if (isTargetId(profileSel.value)) setBoard(profileSel.value);
   });
+  app.onBoardChosen((id) => setBoard(id));
 
-  /** True when `next` can replace the workspace: nothing would be lost,
-   * or the user confirms replacing the blocks with `what`. */
-  async function mayReplace(next: Replacement, what: string): Promise<boolean> {
-    if (!wouldReplaceWork(current(), profile, next)) return true;
+  /** True when `next` can replace the payload: nothing would be lost, or
+   * the user confirms replacing it with `what`. */
+  async function mayReplace(next: PayloadModel, what: string): Promise<boolean> {
+    if (!wouldReplaceWork(current(), next)) return true;
     return (await confirmReplace(what)) !== null;
   }
   function confirmReplace(what: string) {
     return modal(
-      `Replace your Blocks workspace with ${what}?`,
-      [h("p", {}, "Your blocks are replaced. Export JSON first to keep them.")],
+      `Replace your payload with ${what}?`,
+      [h("p", {}, "Your blocks are replaced (the pin table keeps your pins). Export JSON first to keep them.")],
       "Replace",
     );
   }
@@ -279,21 +416,22 @@ export function blocksPage(app: App): HTMLElement {
       exampleSel.value = "";
       return;
     }
-    const ok = await mayReplace(e, e.label);
+    const next = exampleModel(e, current(), fallbackBoard());
+    const ok = await mayReplace(next, e.label);
     // The menu is a launcher: back to its placeholder whether loaded or not.
     exampleSel.value = "";
     if (!ok) {
       out.textContent = `Kept your blocks; the ${e.label} example was not loaded.`;
       return;
     }
-    loadWorkspace(e.workspace, e.profile);
+    loadModel(next);
     renderBadge();
     out.textContent = `Loaded the ${e.label} example.`;
   });
 
   exportBtn.addEventListener("click", () => {
-    const url = URL.createObjectURL(new Blob([serialize(profile, current())], { type: "application/json" }));
-    h("a", { href: url, download: "blocks.json" }).click();
+    const url = URL.createObjectURL(new Blob([serializeModel(current())], { type: "application/json" }));
+    h("a", { href: url, download: "payload.json" }).click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
   importBtn.addEventListener("click", () => importFile.click());
@@ -301,7 +439,7 @@ export function blocksPage(app: App): HTMLElement {
     const f = importFile.files?.[0];
     importFile.value = "";
     if (!f) return;
-    const plan = planImport(await f.text(), current(), profile);
+    const plan = planImport(await f.text(), current(), fallbackBoard());
     if (plan.kind === "error") {
       out.textContent = `Import failed: ${plan.error}`;
       return;
@@ -311,7 +449,7 @@ export function blocksPage(app: App): HTMLElement {
       return;
     }
     try {
-      loadWorkspace(plan.saved.workspace, plan.saved.profile);
+      loadModel(plan.model);
       renderBadge();
       out.textContent = `Imported ${f.name}.`;
     } catch (e) {
@@ -324,11 +462,13 @@ export function blocksPage(app: App): HTMLElement {
     compileBtn.disabled = true;
     out.textContent = "Compiling (loading the AssemblyScript compiler the first time) ...";
     try {
-      const r = await buildPayload(current(), profile, proto.abi);
+      const m = current();
+      const r = await buildPayload(m.logic[0].workspace, profile, proto.abi, { pins: m.pins, issues: pinIssues });
       if (!r.ok) {
         invalidate();
         out.textContent = [`${r.stage} failed:`, ...r.errors].join("\n");
         if (r.issues.length > 0) showIssues(r.issues, []);
+        if (r.stage === "pins") showView("pins");
         return false;
       }
       compiled = r.wasm;
@@ -398,10 +538,12 @@ export function blocksPage(app: App): HTMLElement {
       ...[...pins.entries()]
         .sort(([a], [b]) => a - b)
         .map(([pin, s]) => {
-          if (s.mode === "output") return h("div", { class: "pin" }, h("span", { class: `led${s.high ? " on" : ""}` }), `GPIO ${pin}`);
+          const label = model.pins.rows.find((r) => r.pin === pin && r.label)?.label;
+          const name = label ? `${label} (GPIO ${pin})` : `GPIO ${pin}`;
+          if (s.mode === "output") return h("div", { class: "pin" }, h("span", { class: `led${s.high ? " on" : ""}` }), name);
           const sw = h("input", { type: "checkbox", checked: !!s.high });
           sw.addEventListener("change", () => session?.setInput(pin, sw.checked));
-          return h("label", { class: "pin" }, h("span", { class: "switch" }, sw), `GPIO ${pin} (pull ${s.pull})`);
+          return h("label", { class: "pin" }, h("span", { class: "switch" }, sw), `${name} (pull ${s.pull})`);
         }),
     );
     if (pins.size === 0) pinsEl.append(h("span", { class: "muted" }, "No pins configured."));
@@ -488,8 +630,10 @@ export function blocksPage(app: App): HTMLElement {
   app.onTryExample(async (id) => {
     const e = exampleWorkspace(id);
     if (!e) return;
-    if (!(await mayReplace(e, e.label))) return;
-    loadWorkspace(e.workspace, e.profile);
+    const next = exampleModel(e, current(), fallbackBoard());
+    if (!(await mayReplace(next, e.label))) return;
+    showView("blocks");
+    loadModel(next);
     renderBadge();
     if (!(await compile())) return;
     if (!proto.hasSimulator) return;
@@ -513,6 +657,54 @@ export function blocksPage(app: App): HTMLElement {
       logLine(errorText(e));
     }
   });
+
+  // ---- views: Blocks (Blockly) and Pins (the pin table)
+  const blocksTab = h("button", { role: "tab", id: "view-blocks-tab", "aria-controls": "view-blocks", type: "button" }, "Blocks");
+  const pinsTab = h("button", { role: "tab", id: "view-pins-tab", "aria-controls": "view-pins", type: "button" }, "Pins");
+  const blocksView = h(
+    "div",
+    { role: "tabpanel", id: "view-blocks", "aria-labelledby": "view-blocks-tab" },
+    h("div", { class: "row workspace-head" }, h("h3", {}, "Workspace"), toolboxBtn),
+    area,
+    issuesEl,
+  );
+  const pinsPanel = h("div", { role: "tabpanel", id: "view-pins", "aria-labelledby": "view-pins-tab" }, pinsView.el);
+  const VIEW_KEY = "blocks-view";
+  function showView(v: "blocks" | "pins") {
+    blocksView.hidden = v !== "blocks";
+    pinsPanel.hidden = v !== "pins";
+    for (const [t, on] of [
+      [blocksTab, v === "blocks"],
+      [pinsTab, v === "pins"],
+    ] as const) {
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+    }
+    if (v === "blocks" && ws) Blockly.svgResize(ws);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  blocksTab.addEventListener("click", () => showView("blocks"));
+  pinsTab.addEventListener("click", () => showView("pins"));
+  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, blocksTab, pinsTab);
+  // Arrow keys move between the two view tabs (the tabs pattern).
+  views.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const next = document.activeElement === blocksTab ? pinsTab : blocksTab;
+    next.focus();
+    next.click();
+    e.preventDefault();
+  });
+  let savedView: string | null = null;
+  try {
+    savedView = localStorage.getItem(VIEW_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+  showView(savedView === "pins" ? "pins" : "blocks");
 
   const simHeading = h("h3", {}, "Simulator");
   renderPins(new Map());
@@ -541,7 +733,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "div",
       { class: "cols" },
-      h("div", {}, h("div", { class: "row workspace-head" }, h("h3", {}, "Workspace"), toolboxBtn), area, issuesEl),
+      h("div", {}, views, blocksView, pinsPanel),
       h(
         "div",
         {},

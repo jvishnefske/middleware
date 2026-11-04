@@ -9,6 +9,7 @@ import { commentText, generate, keyProblem } from "../src/blocks/generator";
 import { buildPayload } from "../src/blocks/pipeline";
 import type { BlockJson, WorkspaceJson } from "../src/blocks/workspace";
 import { compileAssemblyScript } from "../src/editor/compile";
+import { EMPTY_PINS, type PinTable, withNeeds } from "../src/model/pins";
 import { protocol } from "./fakeDevice";
 
 const proto = protocol();
@@ -182,16 +183,22 @@ const IRQ: WorkspaceJson = ws(
   },
 );
 
-const GOLDEN: [string, WorkspaceJson, "esp-base" | "badge"][] = [
-  ...EXAMPLES.map((e): [string, WorkspaceJson, "esp-base" | "badge"] => [e.id, e.workspace, e.profile]),
-  ["logic", LOGIC, "esp-base"],
-  ["irq", IRQ, "esp-base"],
+/** Examples get the pins they need from the Pico 2's defaults (Blink: LED on GPIO 25). */
+const GOLDEN: [string, WorkspaceJson, "esp-base" | "badge", PinTable][] = [
+  ...EXAMPLES.map((e): [string, WorkspaceJson, "esp-base" | "badge", PinTable] => [
+    e.id,
+    e.workspace,
+    e.profile,
+    withNeeds(EMPTY_PINS, e.profile === "badge" ? "badge" : "pico2", e.needs),
+  ]),
+  ["logic", LOGIC, "esp-base", EMPTY_PINS],
+  ["irq", IRQ, "esp-base", EMPTY_PINS],
 ];
 
 describe("AssemblyScript generator golden files", () => {
-  for (const [name, w, profile] of GOLDEN) {
+  for (const [name, w, profile, pins] of GOLDEN) {
     it(`${name} (${profile}) matches test/fixtures/blocks/${name}.as and compiles`, async () => {
-      const g = generate(w, profile);
+      const g = generate(w, profile, pins);
       expect(g.errors).toEqual([]);
       await expect(g.source).toMatchFileSnapshot(`./fixtures/blocks/${name}.as`);
       const r = await compileAssemblyScript(g.source);

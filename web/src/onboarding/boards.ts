@@ -15,6 +15,11 @@
 //   For the Pico 2 that file is the factory image: it also writes the A/B
 //   partition table, so it is for the first install, and later firmware
 //   updates go over USB with `mwctl fw update`.
+// * Each board names the pin the Blocks pin table labels LED by default
+//   (`blink`): the on-board LED where there is a plain one (GPIO 25 on the
+//   Picos, the ESP32-CAM's flash LED on GPIO 4, GPIO 2 on ESP-12 modules),
+//   else a free header pin to wire one to. The tests check each against
+//   the board's pin rules (protocol-wasm checkPins).
 // * ESP32-C3, ESP8266 and the Pico (RP2040) builds are protocol only: they
 //   store uploaded payloads but have no WASM runtime, so they do not run
 //   them (the `+no-wasm` firmware suffix; `wasm: false` in the manifest).
@@ -44,13 +49,50 @@ export interface Board {
   /** GPIO of an on-board LED a payload can drive, when the board has a
    * fixed one. */
   ledPin: number | null;
+  /** The pin the Blocks pin table labels LED by default (what the Blink
+   * example drives): the on-board LED, or a free header pin to wire one
+   * to, with a note saying which. Checked against the board's pin rules
+   * by the tests. */
+  blink: { pin: number; note: string };
 }
 
 export const BOARDS: readonly Board[] = [
-  { id: "esp32", label: "ESP32", chip: "esp32", install: { kind: "web-serial" }, runsPayloads: true, ledPin: null },
-  { id: "esp32s3", label: "ESP32-S3", chip: "esp32s3", install: { kind: "web-serial" }, runsPayloads: true, ledPin: null },
-  { id: "esp32c3", label: "ESP32-C3", chip: "esp32c3", install: { kind: "web-serial" }, runsPayloads: false, ledPin: null },
-  { id: "esp8266", label: "ESP8266", chip: "esp8266", install: { kind: "web-serial" }, runsPayloads: false, ledPin: null },
+  {
+    id: "esp32",
+    label: "ESP32",
+    chip: "esp32",
+    install: { kind: "web-serial" },
+    runsPayloads: true,
+    ledPin: 4,
+    blink: { pin: 4, note: "ESP32-CAM flash LED (very bright)" },
+  },
+  {
+    id: "esp32s3",
+    label: "ESP32-S3",
+    chip: "esp32s3",
+    install: { kind: "web-serial" },
+    runsPayloads: true,
+    ledPin: null,
+    blink: { pin: 2, note: "no plain on-board LED: wire an LED and resistor to GPIO 2" },
+  },
+  {
+    id: "esp32c3",
+    label: "ESP32-C3",
+    chip: "esp32c3",
+    install: { kind: "web-serial" },
+    runsPayloads: false,
+    ledPin: null,
+    blink: { pin: 5, note: "no plain on-board LED: wire an LED and resistor to GPIO 5" },
+  },
+  {
+    id: "esp8266",
+    label: "ESP8266",
+    chip: "esp8266",
+    install: { kind: "web-serial" },
+    runsPayloads: false,
+    ledPin: 2,
+    blink: { pin: 2, note: "on-board LED of ESP-12 modules (lights when low)" },
+  },
   {
     id: "pico2",
     label: "Raspberry Pi Pico 2",
@@ -58,6 +100,7 @@ export const BOARDS: readonly Board[] = [
     install: { kind: "uf2", target: "rp2350", drive: "RP2350" },
     runsPayloads: true,
     ledPin: 25,
+    blink: { pin: 25, note: "on-board LED" },
   },
   {
     id: "pico",
@@ -66,6 +109,7 @@ export const BOARDS: readonly Board[] = [
     install: { kind: "uf2", target: "rp2040", drive: "RPI-RP2" },
     runsPayloads: false,
     ledPin: 25,
+    blink: { pin: 25, note: "on-board LED" },
   },
 ];
 
@@ -179,9 +223,8 @@ function connectStep(b: Board): Step {
 
 function payloadStep(b: Board): Step {
   const pin =
-    b.ledPin === null
-      ? ""
-      : ` The Blink example drives GPIO 8; set it to GPIO ${b.ledPin} for the on-board LED.`;
+    ` The Blink example drives the pin labelled LED, GPIO ${b.blink.pin} on the ${b.label} (${b.blink.note}); ` +
+    "change it under Blocks, Pins.";
   const blocks: StepAction = { kind: "tab", tab: "blocks", label: "Open Blocks" };
   if (b.runsPayloads) {
     return step(

@@ -1,19 +1,20 @@
-// Persistence for the Blocks tab: the workspace and the board profile in
-// localStorage (every access in try/catch, since storage may be missing,
-// full or blocked), and the JSON file format for export and import.
+// Persistence for the Blocks tab: the payload model (model/payload.ts) in
+// localStorage, every access in try/catch since storage may be missing,
+// full or blocked.
+//
+// The model lives under `MODEL_KEY`. A browser that only has the Blocks
+// tab's earlier save (`LEGACY_KEY`: `{format: "middleware-blocks",
+// version: 1, profile, workspace}`) gets it migrated on load (same
+// workspace, the profile's board, no pins, so the generated code is what
+// it was); the legacy entry is left in place, so an older copy of the site
+// still finds its workspace.
 
-import { type ProfileId, isProfileId } from "./profiles";
-import { type WorkspaceJson, workspaceProblem } from "./workspace";
+import type { BoardId } from "../onboarding/boards";
+import { type PayloadModel, parseModel, serializeModel } from "../model/payload";
 
-export const STORAGE_KEY = "blocks.workspace";
-
-/** What an exported file holds: the profile and the Blockly workspace. */
-export interface SavedBlocks {
-  format: "middleware-blocks";
-  version: 1;
-  profile: ProfileId;
-  workspace: WorkspaceJson;
-}
+export const MODEL_KEY = "payload.model";
+/** Where the Blocks tab saved before the payload model. */
+export const LEGACY_KEY = "blocks.workspace";
 
 /** The subset of `Storage` used, so tests can pass a map. */
 export interface KeyValueStore {
@@ -21,47 +22,29 @@ export interface KeyValueStore {
   setItem(key: string, value: string): void;
 }
 
-export function serialize(profile: ProfileId, workspace: WorkspaceJson): string {
-  const saved: SavedBlocks = { format: "middleware-blocks", version: 1, profile, workspace };
-  return JSON.stringify(saved, null, 2);
-}
-
-/** Parses an exported file, or a bare Blockly workspace (profile then
- * defaults to `fallback`). */
-export function parseSaved(text: string, fallback: ProfileId): { ok: true; saved: SavedBlocks } | { ok: false; error: string } {
-  let value: unknown;
+export function save(store: KeyValueStore | null, model: PayloadModel): boolean {
   try {
-    value = JSON.parse(text);
-  } catch (e) {
-    return { ok: false, error: `not JSON: ${e instanceof Error ? e.message : String(e)}` };
-  }
-  const v = value as Partial<SavedBlocks> | null;
-  const wrapped = v !== null && typeof v === "object" && v.format === "middleware-blocks";
-  const workspace = wrapped ? v.workspace : value;
-  const problem = workspaceProblem(workspace);
-  if (problem) return { ok: false, error: `not a Blocks workspace: ${problem}` };
-  const profile = wrapped && isProfileId(v.profile) ? v.profile : fallback;
-  return { ok: true, saved: { format: "middleware-blocks", version: 1, profile, workspace: workspace as WorkspaceJson } };
-}
-
-export function save(store: KeyValueStore | null, profile: ProfileId, workspace: WorkspaceJson): boolean {
-  try {
-    store?.setItem(STORAGE_KEY, serialize(profile, workspace));
+    store?.setItem(MODEL_KEY, serializeModel(model));
     return store !== null;
   } catch {
     return false;
   }
 }
 
-export function load(store: KeyValueStore | null, fallback: ProfileId): SavedBlocks | null {
-  try {
-    const text = store?.getItem(STORAGE_KEY);
-    if (!text) return null;
-    const r = parseSaved(text, fallback);
-    return r.ok ? r.saved : null;
-  } catch {
-    return null;
+/** The saved model, the migrated legacy save, or null. `fallback` is the
+ * board a legacy save of the esp-base profile gets. */
+export function load(store: KeyValueStore | null, fallback: BoardId): { model: PayloadModel; migrated: boolean } | null {
+  for (const key of [MODEL_KEY, LEGACY_KEY]) {
+    try {
+      const text = store?.getItem(key);
+      if (!text) continue;
+      const r = parseModel(text, fallback);
+      if (r.ok) return { model: r.model, migrated: r.migrated };
+    } catch {
+      return null;
+    }
   }
+  return null;
 }
 
 /** `window.localStorage`, or null where reading the property throws. */

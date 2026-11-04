@@ -234,6 +234,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-pins"
+version = "0.1.0"
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2224,6 +2228,7 @@ dependencies = [
 name = "protocol-wasm"
 version = "0.1.0"
 dependencies = [
+ "board-pins",
  "js-sys",
  "middleware",
  "wasm-bindgen",

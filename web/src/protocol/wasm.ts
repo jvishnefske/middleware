@@ -5,6 +5,7 @@
 // here re-implements the protocol. The raw wasm-bindgen exports return plain
 // objects typed `object`/`any`; this file gives them TypeScript shapes.
 
+import type { BusSetting, PinIssue, PinRow } from "../model/pins";
 import init, * as pkg from "../pkg/protocol_wasm.js";
 
 /** A frame decoded from the serial line. */
@@ -176,6 +177,38 @@ export interface Simulator {
   free(): void;
 }
 
+/** One GPIO of a board, from protocol-wasm `boardPins` (board-pins). */
+export interface GpioInfo {
+  pin: number;
+  /** Why the board keeps it from payloads, when it does. */
+  reserved?: string;
+  inputOnly: boolean;
+  /** ADC channel. */
+  adc?: number;
+  /** PWM timer 0 channel. */
+  pwm?: number;
+  /** The board-wired I2C line. */
+  i2c?: { bus: number; line: "sda" | "scl" };
+  /** RP2040/RP2350 F1 SPI signal. */
+  spi?: { block: number; signal: "sck" | "mosi" | "miso" };
+}
+
+/** A board's pin map: what the pin table offers and checks against. */
+export interface BoardPins {
+  chip: string;
+  spiRouting: "matrix" | "rp-function-table";
+  gpios: GpioInfo[];
+  i2c: { bus: number; sda: number; scl: number }[];
+  pwm: { channel: number; pin: number }[];
+  adc: number[];
+  i2cBuses: number;
+  spiBuses: number;
+  i2cHz: [number, number];
+  maxSpiKhz: number;
+  maxLabel: number;
+  funcs: string[];
+}
+
 /** A streaming decoder for the serial line. */
 export interface Decoder {
   push(bytes: Uint8Array): LineEvent[];
@@ -202,6 +235,11 @@ export interface Protocol {
   readonly constants: ProtocolConstants;
   readonly abi: AbiInfo;
   readonly hasSimulator: boolean;
+  /** The pin map of a `sys/info` chip name; throws for an unknown one. */
+  boardPins(chip: string): BoardPins;
+  /** Checks a pin table on a chip (board-pins rules + the ABI's bus
+   * argument rules); throws for an unknown chip. */
+  checkPins(chip: string, rows: readonly PinRow[], buses: readonly BusSetting[]): PinIssue[];
   /** Loads a payload into the simulator; throws on rejection or init trap. */
   newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void): Simulator;
 }
@@ -236,6 +274,8 @@ function wrap(): Protocol {
     constants,
     abi,
     hasSimulator,
+    boardPins: (chip) => pkg.boardPins(chip) as BoardPins,
+    checkPins: (chip, rows, buses) => pkg.checkPins(chip, [...rows], [...buses]) as PinIssue[],
     newSimulator: (wasm, onEvent) => {
       // `Simulator` exists only when protocol-wasm was built with the
       // `simulator` feature (the default).

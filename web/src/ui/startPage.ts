@@ -4,6 +4,8 @@
 // them from the board and the firmware manifest). Opens first on a visit
 // with no saved tab. For a Pico whose UF2 the manifest lists, "Download
 // UF2" fetches it, checks it (src/flash/uf2.ts) and only then saves it.
+// Picking a board also sets the Blocks tab's board, which seeds its pin
+// table with that board's defaults (the LED: GPIO 25 on the Picos).
 
 import { FIRMWARE_BASE, type Manifest, type ManifestResult, type Uf2Image } from "../flash/manifest";
 import { checkUf2 } from "../flash/uf2";
@@ -85,7 +87,7 @@ export function startPage(app: App, manifest: Promise<ManifestResult>): HTMLElem
   let loaded: Manifest | null = null;
   let chosen: Board | undefined;
 
-  function choose(b: Board) {
+  function choose(b: Board, picked = false) {
     chosen = b;
     for (const [id, btn] of buttons) btn.setAttribute("aria-pressed", String(id === b.id));
     steps.replaceChildren(...gettingStarted(b, loaded).map((s) => renderStep(s, app)));
@@ -97,12 +99,14 @@ export function startPage(app: App, manifest: Promise<ManifestResult>): HTMLElem
     } catch {
       /* storage unavailable */
     }
+    // A click (not the restore at load) also sets the Blocks board.
+    if (picked) app.chooseBoard(b.id);
   }
 
   for (const b of BOARDS) {
     const btn = h(
       "button",
-      { "aria-pressed": "false", type: "button", onclick: () => choose(b) },
+      { "aria-pressed": "false", type: "button", onclick: () => choose(b, true) },
       b.label,
       h("span", { class: "muted" }, b.runsPayloads ? "runs payloads" : "stores payloads only"),
     );

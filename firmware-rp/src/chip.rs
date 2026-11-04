@@ -3,7 +3,10 @@
 //! A [`Profile`] holds what the firmware needs to know about a chip and its
 //! board beyond the drivers: the name `sys/info` reports, the flash map
 //! ([`crate::layout`]), whether the image runs payloads, the heap plan, the
-//! WASM memory and image caps, and the pin tables.
+//! WASM memory and image caps, and the pin map. Both chips use
+//! `board_pins::boards::PICO` (the board-pins crate, which the web editor
+//! also reads), so the tables below are that map's; [`Profile::check_pin`]
+//! and the other pin methods apply it and map its errors to [`AbiError`].
 //!
 //! # Pins (Raspberry Pi Pico and Pico 2)
 //!
@@ -72,7 +75,10 @@
 //! `crate::budget` (built with the runtime).
 
 use crate::layout::{self, FlashMap};
+use board_pins::{AdcError, PinError, PinMap, boards};
 use middleware::wasm_abi::AbiError;
+
+pub use board_pins::Direction;
 
 /// Size of one standard WASM page, for the memory caps.
 pub const WASM_PAGE: u32 = 64 * 1024;
@@ -88,15 +94,6 @@ pub enum Chip {
     Rp2040,
     /// RP2350A (dual Cortex-M33), on the Raspberry Pi Pico 2.
     Rp2350,
-}
-
-/// What a payload wants to do with a pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// Read the pin level.
-    Input,
-    /// Drive the pin.
-    Output,
 }
 
 /// Static description of a chip and its board.
@@ -119,34 +116,12 @@ pub struct Profile {
     /// Largest payload image accepted, in bytes (also capped by a store
     /// slot).
     pub max_image: u32,
-    /// GPIOs the chip has (`0..gpio_count`).
+    /// GPIOs the chip has (`0..gpio_count`; the pin map's GPIOs).
     pub gpio_count: u8,
-    /// Pins a payload may not touch as GPIO.
-    reserved: u32,
-    /// Pins a payload may only read.
-    input_only: u32,
-    /// GPIOs owned by ADC channels 0, 1, 2, ...
-    adc_pins: &'static [u8],
-    /// (SDA, SCL) of I2C bus 0 and bus 1.
-    i2c: [(u8, u8); 2],
+    /// The board's pins: reserved and input-only pins, the ADC and I2C
+    /// maps, SPI routing (`board_pins::boards::PICO`).
+    pins: PinMap,
 }
-
-/// Bit `pin` set.
-const fn bit(pin: u8) -> u32 {
-    1 << pin
-}
-
-/// GPIO 23 (power save), 26–28 (ADC) and 29 (VSYS / 3).
-const PICO_RESERVED: u32 = bit(23) | bit(26) | bit(27) | bit(28) | bit(29);
-
-/// GPIO 24 (VBUS sense).
-const PICO_INPUT_ONLY: u32 = bit(24);
-
-/// ADC0–ADC2.
-const PICO_ADC: [u8; 3] = [26, 27, 28];
-
-/// I2C0 on GPIO 4 / 5, I2C1 on GPIO 6 / 7 (SDA, SCL).
-const PICO_I2C: [(u8, u8); 2] = [(4, 5), (6, 7)];
 
 /// Raspberry Pi Pico.
 pub const RP2040: Profile = Profile {
@@ -159,10 +134,7 @@ pub const RP2040: Profile = Profile {
     max_memory_bytes: 0,
     max_image: 124 * 1024,
     gpio_count: 30,
-    reserved: PICO_RESERVED,
-    input_only: PICO_INPUT_ONLY,
-    adc_pins: &PICO_ADC,
-    i2c: PICO_I2C,
+    pins: boards::PICO,
 };
 
 /// Raspberry Pi Pico 2.
@@ -176,48 +148,44 @@ pub const RP2350: Profile = Profile {
     max_memory_bytes: 2 * WASM_PAGE,
     max_image: 64 * 1024,
     gpio_count: 30,
-    reserved: PICO_RESERVED,
-    input_only: PICO_INPUT_ONLY,
-    adc_pins: &PICO_ADC,
-    i2c: PICO_I2C,
+    pins: boards::PICO,
 };
 
 impl Profile {
+    /// The board's pin map.
+    pub const fn pins(&self) -> &PinMap {
+        &self.pins
+    }
+
     /// Whether a payload may use `pin` as `dir`: `InvalidArgument` if the
     /// chip has no such pin, `Unsupported` if the board reserves it or it
     /// is input only and `dir` is `Output`.
     pub const fn check_pin(&self, pin: u8, dir: Direction) -> Result<(), AbiError> {
-        if pin >= self.gpio_count {
-            return Err(AbiError::InvalidArgument);
+        match self.pins.check(pin, dir) {
+            Ok(()) => Ok(()),
+            Err(PinError::NoSuchPin) => Err(AbiError::InvalidArgument),
+            Err(PinError::Reserved | PinError::InputOnly) => Err(AbiError::Unsupported),
         }
-        if self.reserved & bit(pin) != 0 {
-            return Err(AbiError::Unsupported);
-        }
-        if matches!(dir, Direction::Output) && self.input_only & bit(pin) != 0 {
-            return Err(AbiError::Unsupported);
-        }
-        Ok(())
     }
 
     /// Pins a payload may use as GPIO (inputs at least), ascending.
     pub fn payload_pins(&self) -> impl Iterator<Item = u8> + '_ {
-        (0..self.gpio_count).filter(|&p| self.check_pin(p, Direction::Input).is_ok())
+        self.pins.payload_pins()
     }
 
     /// The ADC channel sampling `pin`: `InvalidArgument` for a pin the chip
     /// lacks, `Unsupported` for one without an analog input.
     pub fn adc_channel(&self, pin: u8) -> Result<u8, AbiError> {
-        if pin >= self.gpio_count {
-            return Err(AbiError::InvalidArgument);
-        }
-        let channel = self.adc_pins.iter().position(|&p| p == pin).ok_or(AbiError::Unsupported)?;
-        u8::try_from(channel).map_err(|_| AbiError::Unsupported)
+        self.pins.adc_channel(pin).map_err(|e| match e {
+            AdcError::NoSuchPin => AbiError::InvalidArgument,
+            AdcError::NotAnalog => AbiError::Unsupported,
+        })
     }
 
     /// I2C `bus`'s (SDA, SCL) pins (board pin map); `Unsupported` for a bus
     /// the board does not map.
     pub fn i2c_pins(&self, bus: u8) -> Result<(u8, u8), AbiError> {
-        self.i2c.get(usize::from(bus)).copied().ok_or(AbiError::Unsupported)
+        self.pins.i2c_pins(bus).ok_or(AbiError::Unsupported)
     }
 
     /// Whether the heap plan holds linear memory, the largest image and the
@@ -256,6 +224,14 @@ mod tests {
                 assert_eq!(p.check_pin(ok, Direction::Output), Ok(()));
             }
             assert_eq!(p.payload_pins().count(), 25);
+        }
+    }
+
+    #[test]
+    fn gpio_count_matches_the_pin_map() {
+        for p in [RP2040, RP2350] {
+            assert_eq!(usize::from(p.gpio_count), p.pins().gpios().count(), "{}", p.name);
+            assert!(p.pins().gpios().all(|g| g < p.gpio_count), "{}", p.name);
         }
     }
 

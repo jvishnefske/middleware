@@ -19,89 +19,31 @@
 //! 20, 24, 28 and SCL one above each; I2C1 SDA on 2, 6, 10, 14, 18, 22,
 //! 26 and SCL one above each.
 //!
-//! [`SpiRoute::resolve`] maps a validated [`SpiConfig`] onto one block:
-//! SCK, MOSI and MISO must each sit on a GPIO with that signal, all on the
-//! same block (the block is whichever SCK selects). The chip select is not
-//! the block's CSn: the shell drives it as a plain output for the whole
-//! transfer (see [`super::spi`]), so any payload output pin may be CS.
-//! Errors follow the board policy ([`Profile::check_pin`]): a pin the chip
-//! lacks is `InvalidArgument`, a reserved pin (or an output on an
-//! input-only pin) `Unsupported`; a pin without the needed signal, or
-//! signals on two different blocks, is `Unsupported` (the hardware cannot
-//! do it).
+//! The tables (the enums, [`spi_function`], [`i2c_function`] and
+//! [`TABLE_GPIOS`]) are `board_pins::rp`'s, re-exported here so the
+//! firmware and the web editor read one copy.
+//!
+//! [`SpiRoute::resolve`] maps a validated [`SpiConfig`] onto one block with
+//! `board_pins::spi::route` on the profile's pin map: SCK, MOSI and MISO
+//! must each sit on a GPIO with that signal, all on the same block (the
+//! block is whichever SCK selects). The chip select is not the block's
+//! CSn: the shell drives it as a plain output for the whole transfer (see
+//! [`super::spi`]), so any payload output pin may be CS. The pins are
+//! checked in the order SCK, MOSI, MISO, CS, each against the board policy
+//! ([`Profile::check_pin`]) first and the function table second, and the
+//! first problem decides the error: a pin the chip lacks is
+//! `InvalidArgument`, a reserved pin (or an output on an input-only pin)
+//! `Unsupported`; a pin without the needed signal, or signals on two
+//! different blocks, is `Unsupported` (the hardware cannot do it).
 
+use board_pins::PinError;
+use board_pins::spi::{SpiPins, SpiProblem, route};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::periph::SpiConfig;
 
-use crate::chip::{Direction, Profile};
+pub use board_pins::rp::{I2cBlock, I2cLine, SpiBlock, SpiSignal, TABLE_GPIOS, i2c_function, spi_function};
 
-/// One of the two SPI controllers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpiBlock {
-    /// SPI0.
-    Spi0,
-    /// SPI1.
-    Spi1,
-}
-
-/// An SPI signal a GPIO can carry (function F1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpiSignal {
-    /// Controller in (MISO).
-    Rx,
-    /// The block's hardware chip select (not used: CS is driven as GPIO).
-    Csn,
-    /// Clock.
-    Sck,
-    /// Controller out (MOSI).
-    Tx,
-}
-
-/// One of the two I2C controllers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum I2cBlock {
-    /// I2C0.
-    I2c0,
-    /// I2C1.
-    I2c1,
-}
-
-/// An I2C line a GPIO can carry (function F3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum I2cLine {
-    /// Data.
-    Sda,
-    /// Clock.
-    Scl,
-}
-
-/// GPIOs covered by the tables (both chips have GPIO 0–29).
-pub const TABLE_GPIOS: u8 = 30;
-
-/// The SPI block and signal of `pin`'s F1 function; `None` past GPIO 29.
-pub const fn spi_function(pin: u8) -> Option<(SpiBlock, SpiSignal)> {
-    if pin >= TABLE_GPIOS {
-        return None;
-    }
-    let block = if (pin / 8).is_multiple_of(2) { SpiBlock::Spi0 } else { SpiBlock::Spi1 };
-    let signal = match pin % 4 {
-        0 => SpiSignal::Rx,
-        1 => SpiSignal::Csn,
-        2 => SpiSignal::Sck,
-        _ => SpiSignal::Tx,
-    };
-    Some((block, signal))
-}
-
-/// The I2C block and line of `pin`'s F3 function; `None` past GPIO 29.
-pub const fn i2c_function(pin: u8) -> Option<(I2cBlock, I2cLine)> {
-    if pin >= TABLE_GPIOS {
-        return None;
-    }
-    let block = if (pin / 2).is_multiple_of(2) { I2cBlock::I2c0 } else { I2cBlock::I2c1 };
-    let line = if pin.is_multiple_of(2) { I2cLine::Sda } else { I2cLine::Scl };
-    Some((block, line))
-}
+use crate::chip::Profile;
 
 /// A payload's SPI pins resolved onto one block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,21 +63,14 @@ pub struct SpiRoute {
 impl SpiRoute {
     /// Resolves `cfg`'s pins on `profile` (see the module docs).
     pub fn resolve(profile: &Profile, cfg: &SpiConfig) -> Result<Self, AbiError> {
-        profile.check_pin(cfg.sck, Direction::Output)?;
-        let (block, _) = signal_on(cfg.sck, SpiSignal::Sck)?;
-        let on_block = |pin: Option<u8>, signal: SpiSignal, dir: Direction| -> Result<(), AbiError> {
-            let Some(pin) = pin else { return Ok(()) };
-            profile.check_pin(pin, dir)?;
-            match signal_on(pin, signal)? {
-                (b, _) if b == block => Ok(()),
-                _ => Err(AbiError::Unsupported),
-            }
-        };
-        on_block(cfg.mosi, SpiSignal::Tx, Direction::Output)?;
-        on_block(cfg.miso, SpiSignal::Rx, Direction::Input)?;
-        if let Some(cs) = cfg.cs {
-            profile.check_pin(cs, Direction::Output)?;
-        }
+        let pins = SpiPins { sck: cfg.sck, mosi: cfg.mosi, miso: cfg.miso, cs: cfg.cs };
+        let block = route(profile.pins(), &pins).map_err(|e| match e.problem {
+            SpiProblem::Pin(PinError::NoSuchPin) => AbiError::InvalidArgument,
+            _ => AbiError::Unsupported,
+        })?;
+        // The Pico map routes through the RP function table, which always
+        // names SCK's block; a map without one cannot carry this route.
+        let block = block.ok_or(AbiError::Unsupported)?;
         Ok(SpiRoute { block, sck: cfg.sck, mosi: cfg.mosi, miso: cfg.miso, cs: cfg.cs })
     }
 
@@ -147,14 +82,6 @@ impl SpiRoute {
     /// Every pin the bus holds, chip select included.
     pub fn pins(&self) -> impl Iterator<Item = u8> {
         [Some(self.sck), self.mosi, self.miso, self.cs].into_iter().flatten()
-    }
-}
-
-/// `pin`'s F1 function if it is `signal`, else `Unsupported`.
-fn signal_on(pin: u8, signal: SpiSignal) -> Result<(SpiBlock, SpiSignal), AbiError> {
-    match spi_function(pin) {
-        Some((block, s)) if s == signal => Ok((block, s)),
-        _ => Err(AbiError::Unsupported),
     }
 }
 
