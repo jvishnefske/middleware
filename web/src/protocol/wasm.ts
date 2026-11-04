@@ -180,7 +180,12 @@ export type SimEvent =
   | { kind: "pwmOpen"; timer: number; freqHz: number }
   | { kind: "pwmSet"; timer: number; channel: number; duty: number }
   | { kind: "pwmStop"; timer: number }
+  | { kind: "serve"; key: string }
   | IrqEvent;
+
+/** What a served request came back with (ABI 5): the reply, or the
+ * `HandlerError` name a device answers instead. */
+export type RequestResult = { ok: true; reply: Uint8Array } | { ok: false; error: string };
 
 export interface PinState {
   mode: "unused" | "output" | "input";
@@ -215,7 +220,50 @@ export interface Simulator {
   pin(pin: number): PinState | undefined;
   readonly pinCount: number;
   readonly trapped: boolean;
+  /** Hands a request to the payload serving `key` (ABI 5); throws on a
+   * trap (the payload stops) or a malformed key. */
+  request(key: string, body: Uint8Array, deadlineMs?: number | null, sender?: string | null): RequestResult;
+  /** Keys the payload serves, in slot order. */
+  serves(): string[];
+  readonly handlesRequests: boolean;
+  /** The device's node id (16 hex digits). */
+  readonly nodeId: string;
   free(): void;
+}
+
+/** A unit as a recipe run reads it: allocation's view plus its node id. */
+export type RunUnit = AllocUnit & { node: string };
+
+/** An input to a `RecipeRun`. */
+export type RunInput =
+  | { kind: "operator"; command: string }
+  | ({ kind: "reply"; id: number } & RequestResult)
+  | { kind: "report"; key: string; data: Uint8Array }
+  | { kind: "lost" | "found"; unit: string }
+  | { kind: "tick" };
+
+/** What a `RecipeRun` asks for or says. */
+export type RunEffect =
+  | { kind: "send"; id: number; unit: string; key: string; body: Uint8Array; timeoutMs: number; command: string; step: string }
+  | { kind: "trace"; t: number; type: string; text: string };
+
+export type StepStatus = "inactive" | "active" | "started" | "done";
+
+/** recipe-core's engine over keyed requests (protocol-wasm `RecipeRun`). */
+export interface RecipeRunHandle {
+  on(nowMs: number, input: RunInput): RunEffect[];
+  readonly state: string;
+  steps(): { id: string; status: StepStatus }[];
+  phases(): { unit: string; em: string; phase: string; state: string | null; values: number[] }[];
+  bindings(): { step: string; unit: string; em: string; phase: string }[];
+  nextDeadline(): number | undefined;
+  free(): void;
+}
+
+export interface RunConfig {
+  ackTimeoutMs?: number;
+  settleTimeoutMs?: number;
+  maxCommands?: number;
 }
 
 /** One GPIO of a board, from protocol-wasm `boardPins` (board-pins). */
@@ -297,8 +345,13 @@ export interface Protocol {
   simulateRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly AllocUnit[], script: readonly ScriptEvent[], untilMs: number): SimulatedRun;
   /** The S88 phase state model: states, commands, and next[state][command..., Done]. */
   phaseModel(): { states: string[]; commands: string[]; next: (string | null)[][] };
-  /** Loads a payload into the simulator; throws on rejection or init trap. */
-  newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void): Simulator;
+  /** Loads a payload into the simulator on a device with node id `node`
+   * (16 hex digits; default 0000000000000001); throws on rejection or
+   * init trap. */
+  newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void, node?: string): Simulator;
+  /** Compiles, allocates and builds a control recipe run; throws with the
+   * allocation failure's message. */
+  newRecipeRun(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly RunUnit[], config?: RunConfig): RecipeRunHandle;
 }
 
 function wrap(): Protocol {
@@ -340,14 +393,16 @@ function wrap(): Protocol {
     allocateRecipe: (recipe, classes, units) => pkg.allocateRecipe(recipe, [...classes], [...units]) as Allocation,
     simulateRecipe: (recipe, classes, units, script, untilMs) => pkg.simulateRecipe(recipe, [...classes], [...units], [...script], untilMs) as SimulatedRun,
     phaseModel: () => pkg.phaseModel() as { states: string[]; commands: string[]; next: (string | null)[][] },
-    newSimulator: (wasm, onEvent) => {
+    newSimulator: (wasm, onEvent, node) => {
       // `Simulator` exists only when protocol-wasm was built with the
       // `simulator` feature (the default).
-      const Ctor = (pkg as unknown as { Simulator?: new (w: Uint8Array, f: (e: unknown) => void) => Simulator })
+      const Ctor = (pkg as unknown as { Simulator?: new (w: Uint8Array, f: (e: unknown) => void, node?: string) => Simulator })
         .Simulator;
       if (!hasSimulator || !Ctor) throw new Error("protocol-wasm was built without the simulator feature");
-      return new Ctor(wasm, (e) => onEvent(e as SimEvent));
+      return new Ctor(wasm, (e) => onEvent(e as SimEvent), node);
     },
+    newRecipeRun: (recipe, classes, units, config) =>
+      new pkg.RecipeRun(recipe, [...classes], [...units], config ?? {}) as unknown as RecipeRunHandle,
   };
 }
 

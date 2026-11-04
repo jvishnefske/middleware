@@ -1036,7 +1036,9 @@ fn flow_phase_action(props: &JsValue, at: &str) -> Result<crate::flows::PhaseIn,
                 .collect::<Result<_, _>>()?;
             Ok(PhaseIn::Report { em, phase, values })
         }
-        other => Err(JsError::new(&format!("{at}.kind {other:?} is not a phase action"))),
+        other => Err(JsError::new(&format!(
+            "{at}.kind {other:?} is not a phase action"
+        ))),
     }
 }
 
@@ -1288,7 +1290,8 @@ fn alloc_failure_object(f: &crate::recipes::AllocFailure) -> JsValue {
 
 /// Checks phase classes and a master recipe (`recipe-core`'s rules).
 /// Returns `[{at: "recipe"|"class"|"unitProc"|"step"|"transition", index:
-/// number|null, sub: number|null, severity: "error"|"warning", message}]`.
+/// number|null, sub: number|null, severity: "error"|"warning", message,
+/// fix?}]` (`fix`: see `recipe_fix_object`).
 #[wasm_bindgen(js_name = checkRecipe)]
 pub fn check_recipe(recipe: JsValue, classes: Array) -> Result<Array, JsError> {
     let r = recipe_in(&recipe)?;
@@ -1302,9 +1305,53 @@ pub fn check_recipe(recipe: JsValue, classes: Array) -> Result<Array, JsError> {
             set(&o, "sub", index_or_null(i.sub));
             set(&o, "severity", i.severity);
             set(&o, "message", i.message.as_str());
+            if let Some(f) = &i.fix {
+                set(&o, "fix", recipe_fix_object(f));
+            }
             JsValue::from(o)
         })
         .collect())
+}
+
+/// `{kind: "setArg", step, param, value}`, `{kind: "removeArg", step,
+/// param}`, `{kind: "removeTransition", transition}`, `{kind:
+/// "removeFromTransition", transition, side, step}` (a step id) or
+/// `{kind: "removeUnitProc", unitProc}`.
+fn recipe_fix_object(f: &crate::recipes::RecipeFix) -> Object {
+    use crate::recipes::RecipeFix;
+    let o = Object::new();
+    match f {
+        RecipeFix::SetArg { step, param, value } => {
+            set(&o, "kind", "setArg");
+            set(&o, "step", *step as u32);
+            set(&o, "param", param.as_str());
+            set(&o, "value", *value);
+        }
+        RecipeFix::RemoveArg { step, param } => {
+            set(&o, "kind", "removeArg");
+            set(&o, "step", *step as u32);
+            set(&o, "param", param.as_str());
+        }
+        RecipeFix::RemoveTransition(t) => {
+            set(&o, "kind", "removeTransition");
+            set(&o, "transition", *t as u32);
+        }
+        RecipeFix::RemoveFromTransition {
+            transition,
+            side,
+            step,
+        } => {
+            set(&o, "kind", "removeFromTransition");
+            set(&o, "transition", *transition as u32);
+            set(&o, "side", *side);
+            set(&o, "step", step.as_str());
+        }
+        RecipeFix::RemoveUnitProc(u) => {
+            set(&o, "kind", "removeUnitProc");
+            set(&o, "unitProc", *u as u32);
+        }
+    }
+    o
 }
 
 /// Binds every step of `recipe` to an equipment phase of `units`. Returns
@@ -1397,6 +1444,218 @@ pub fn simulate_recipe(
     )
 }
 
+/// 16 lower- or upper-case hex digits to a node id.
+fn parse_node(hex: &str) -> Option<middleware::SenderId> {
+    let b = hex.as_bytes();
+    if b.len() != 16 {
+        return None;
+    }
+    let mut id = [0u8; 8];
+    for (i, out) in id.iter_mut().enumerate() {
+        let pair = core::str::from_utf8(b.get(2 * i..2 * i + 2)?).ok()?;
+        *out = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(middleware::SenderId(id))
+}
+
+/// A node id as 16 lower-case hex digits.
+fn node_hex(id: middleware::SenderId) -> String {
+    id.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A control recipe run against payloads the page drives
+/// (`crate::recipes::run`): recipe-core's engine whose commands come out
+/// as `{kind: "send", id, unit, key, body, timeoutMs, command, step}` for
+/// the page to hand to the unit serving `key`, and whose other effects
+/// are `{kind: "trace", t, type, text}` lines.
+#[wasm_bindgen]
+pub struct RecipeRun {
+    run: Option<crate::recipes::run::Run>,
+}
+
+fn run_effect_object(e: &crate::recipes::run::RunEffect) -> JsValue {
+    use crate::recipes::run::RunEffect;
+    let o = Object::new();
+    match e {
+        RunEffect::Send(s) => {
+            set(&o, "kind", "send");
+            set(&o, "id", s.id);
+            set(&o, "unit", s.unit.as_str());
+            set(&o, "key", s.key.as_str());
+            set(&o, "body", bytes(&s.body));
+            set(&o, "timeoutMs", s.timeout_ms);
+            set(&o, "command", s.command);
+            set(&o, "step", s.step.as_str());
+        }
+        RunEffect::Line(l) => {
+            set(&o, "kind", "trace");
+            set(&o, "t", l.t as f64);
+            set(&o, "type", l.kind);
+            set(&o, "text", l.text.as_str());
+        }
+    }
+    JsValue::from(o)
+}
+
+#[wasm_bindgen]
+impl RecipeRun {
+    /// Compiles and allocates `recipe` on `units` (as `allocateRecipe`,
+    /// each unit also with `node`: 16 hex digits) and builds an Idle
+    /// engine; `config` is `{ackTimeoutMs, settleTimeoutMs, maxCommands}`
+    /// (recipe-core's defaults for those left out). Throws with the
+    /// allocation failure's message, or for a missing node id.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        recipe: JsValue,
+        classes: Array,
+        units: Array,
+        config: JsValue,
+    ) -> Result<RecipeRun, JsError> {
+        use recipe_core::engine::Config;
+        let r = recipe_in(&recipe)?;
+        let c = classes_in(&classes);
+        let u = units_in(&units);
+        let nodes = units
+            .iter()
+            .map(|x| parse_node(&text(&x, "node")).map(|n| n.0))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| js_err("every unit needs a node id (16 hex digits)"))?;
+        let num = |k: &str| whole(&get(&config, k)).and_then(|v| u32::try_from(v).ok());
+        let cfg = Config {
+            ack_timeout_ms: num("ackTimeoutMs").unwrap_or(Config::DEFAULT.ack_timeout_ms),
+            settle_timeout_ms: num("settleTimeoutMs").unwrap_or(Config::DEFAULT.settle_timeout_ms),
+            max_commands: num("maxCommands")
+                .and_then(|v| u8::try_from(v).ok())
+                .unwrap_or(Config::DEFAULT.max_commands),
+        };
+        let run = crate::recipes::run::Run::new(r, c, u, nodes, cfg).map_err(|e| match e {
+            crate::recipes::run::RunError::Alloc(f) => js_err(&f.message),
+            crate::recipes::run::RunError::Nodes => js_err("one node id per unit"),
+        })?;
+        Ok(RecipeRun { run: Some(run) })
+    }
+
+    fn get(&self) -> Result<&crate::recipes::run::Run, JsError> {
+        self.run
+            .as_ref()
+            .ok_or_else(|| js_err("the run failed earlier"))
+    }
+
+    /// One input at `nowMs`: `{kind: "operator", command}` (`"start"`,
+    /// ...), `{kind: "reply", id, ok, reply?, error?}` (what the
+    /// simulator's `request` returned), `{kind: "report", key, data}` (a
+    /// publication), `{kind: "lost"|"found", unit}` or `{kind: "tick"}`.
+    /// Returns the effects in order. Throws for an unknown kind or
+    /// command.
+    pub fn on(&mut self, now_ms: f64, input: JsValue) -> Result<Array, JsError> {
+        use crate::recipes::run::RunInput;
+        let kind = text(&input, "kind");
+        let i = match kind.as_str() {
+            "operator" => {
+                let c = text(&input, "command");
+                RunInput::Operator(
+                    crate::recipes::command_named(&c)
+                        .ok_or_else(|| js_err(&format!("no command {c:?}")))?,
+                )
+            }
+            "reply" => RunInput::Reply {
+                id: whole(&get(&input, "id"))
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(0),
+                result: if get(&input, "ok").as_bool().unwrap_or(false) {
+                    Ok(Uint8Array::new(&get(&input, "reply")).to_vec())
+                } else {
+                    Err(text(&input, "error"))
+                },
+            },
+            "report" => RunInput::Report {
+                key: text(&input, "key"),
+                body: Uint8Array::new(&get(&input, "data")).to_vec(),
+            },
+            "lost" => RunInput::Lost(text(&input, "unit")),
+            "found" => RunInput::Found(text(&input, "unit")),
+            "tick" => RunInput::Tick,
+            other => return Err(js_err(&format!("no input kind {other:?}"))),
+        };
+        self.get()?;
+        let run = self
+            .run
+            .take()
+            .ok_or_else(|| js_err("the run failed earlier"))?;
+        let now = if now_ms.is_finite() && now_ms > 0.0 {
+            now_ms as u64
+        } else {
+            0
+        };
+        let (run, fx) = run.on(now, i);
+        self.run = Some(run);
+        Ok(fx.iter().map(run_effect_object).collect())
+    }
+
+    /// The procedure's state name (`"Idle"`, `"Running"`, ...).
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> Result<String, JsError> {
+        Ok(self.get()?.state().to_string())
+    }
+
+    /// `[{id, status: "inactive"|"active"|"started"|"done"}]` in step
+    /// order.
+    pub fn steps(&self) -> Result<Array, JsError> {
+        Ok(self
+            .get()?
+            .steps()
+            .into_iter()
+            .map(|(id, status)| {
+                let o = Object::new();
+                set(&o, "id", id.as_str());
+                set(&o, "status", status);
+                JsValue::from(o)
+            })
+            .collect())
+    }
+
+    /// `[{unit, em, phase, state: name|null, values: [number]}]` for the
+    /// bound phases.
+    pub fn phases(&self) -> Result<Array, JsError> {
+        Ok(self
+            .get()?
+            .phases()
+            .into_iter()
+            .map(|p| {
+                let o = Object::new();
+                set(&o, "unit", p.unit.as_str());
+                set(&o, "em", p.em.as_str());
+                set(&o, "phase", p.phase.as_str());
+                set(
+                    &o,
+                    "state",
+                    p.state.map_or(JsValue::NULL, JsValue::from_str),
+                );
+                set(
+                    &o,
+                    "values",
+                    p.values
+                        .iter()
+                        .map(|v| JsValue::from(*v))
+                        .collect::<Array>(),
+                );
+                JsValue::from(o)
+            })
+            .collect())
+    }
+
+    /// `[{step, unit, em, phase}]`.
+    pub fn bindings(&self) -> Result<Array, JsError> {
+        Ok(self.get()?.bindings().iter().map(binding_object).collect())
+    }
+
+    /// When the engine next needs a tick (ms), or `undefined`.
+    #[wasm_bindgen(js_name = nextDeadline)]
+    pub fn next_deadline(&self) -> Result<Option<f64>, JsError> {
+        Ok(self.get()?.next_deadline().map(|t| t as f64))
+    }
+}
+
 /// The S88 phase state model: `{states: [name], commands: [name], next:
 /// [[name|null]]}` with `next[state][input]` for the commands in order and
 /// then Done.
@@ -1436,8 +1695,9 @@ pub use sim::JsSimulator;
 #[cfg(feature = "simulator")]
 mod sim {
     use super::{bytes, set};
+    use super::{node_hex, parse_node};
     use crate::simulator::periph::SpiResponder;
-    use crate::simulator::{PIN_COUNT, PinMode, SimEvent, Simulator};
+    use crate::simulator::{PIN_COUNT, PinMode, SimDevice, SimEvent, Simulator};
     use js_sys::{Array, Function, Object};
     use middleware::wasm_abi::Pull;
     use wasm_bindgen::prelude::*;
@@ -1504,6 +1764,10 @@ mod sim {
                 set(&o, "kind", "pwmStop");
                 set(&o, "timer", *timer);
             }
+            SimEvent::Serve(key) => {
+                set(&o, "kind", "serve");
+                set(&o, "key", key.as_str());
+            }
             SimEvent::Irq { event, handled } => {
                 set(&o, "kind", "irq");
                 set(&o, "irq", format!("{:?}", event.kind));
@@ -1532,9 +1796,11 @@ mod sim {
     /// `{kind: "write", pin, high}`, `{kind: "spi", tx, rx}`, `{kind:
     /// "uart", data}` (UART 1 transmit), `{kind: "pwmOpen", timer,
     /// freqHz}`, `{kind: "pwmSet", timer, channel, duty}`, `{kind:
-    /// "pwmStop", timer}` (ABI 3, successful calls only) and `{kind: "irq",
-    /// irq, code, source, value, timeUs, handled}` (an event popped for
-    /// `on_irq`) — are passed to `onEvent` after each call.
+    /// "pwmStop", timer}` (ABI 3, successful calls only), `{kind: "serve",
+    /// key}` (ABI 5) and `{kind: "irq", irq, code, source, value, timeUs,
+    /// handled}` (an event popped for `on_irq`) — are passed to `onEvent`
+    /// after each call. The device's node id is `node` (16 hex digits) or
+    /// `0000000000000001`.
     #[wasm_bindgen(js_name = Simulator)]
     pub struct JsSimulator {
         sim: Simulator,
@@ -1543,12 +1809,24 @@ mod sim {
 
     #[wasm_bindgen(js_class = Simulator)]
     impl JsSimulator {
-        /// Loads `wasm`, running its `init`. Events raised by `init` are
-        /// delivered before this returns. Throws on rejection or trap.
+        /// Loads `wasm`, running its `init`, on a device with node id
+        /// `node` (16 hex digits; the default when omitted). Events raised
+        /// by `init` are delivered before this returns. Throws on
+        /// rejection, trap or a malformed node id.
         #[wasm_bindgen(constructor)]
-        pub fn new(module_bytes: &[u8], on_event: Function) -> Result<JsSimulator, JsError> {
-            let sim =
-                Simulator::load(module_bytes, None).map_err(|e| JsError::new(&e.describe()))?;
+        pub fn new(
+            module_bytes: &[u8],
+            on_event: Function,
+            node: Option<String>,
+        ) -> Result<JsSimulator, JsError> {
+            let mut device = SimDevice::new();
+            if let Some(hex) = node {
+                let id =
+                    parse_node(&hex).ok_or_else(|| JsError::new("a node id is 16 hex digits"))?;
+                device = device.with_node(id);
+            }
+            let sim = Simulator::load_on(module_bytes, None, device)
+                .map_err(|e| JsError::new(&e.describe()))?;
             let mut s = JsSimulator { sim, on_event };
             s.flush();
             Ok(s)
@@ -1667,6 +1945,51 @@ mod sim {
         pub fn deliver(&mut self, key: &str, data: &[u8]) -> Result<bool, JsError> {
             let r = self.sim.deliver(key, data);
             self.finish(r)
+        }
+
+        /// Hands a request to the payload serving `key` (ABI 5) with an
+        /// optional deadline and sender (16 hex digits): `{ok: true,
+        /// reply}` or `{ok: false, error}` with the `HandlerError` name a
+        /// device would answer (`"NotFound"` when nothing serves the key).
+        /// Throws on a trap (the payload stops) or a malformed key.
+        pub fn request(
+            &mut self,
+            key: &str,
+            body: &[u8],
+            deadline_ms: Option<u32>,
+            sender: Option<String>,
+        ) -> Result<Object, JsError> {
+            let sender = sender.as_deref().and_then(parse_node);
+            let r = self.sim.request(key, body, deadline_ms, sender);
+            let o = Object::new();
+            match self.finish(r)? {
+                Ok(reply) => {
+                    set(&o, "ok", true);
+                    set(&o, "reply", bytes(&reply));
+                }
+                Err(e) => {
+                    set(&o, "ok", false);
+                    set(&o, "error", crate::encode::status_name(Some(e)));
+                }
+            }
+            Ok(o)
+        }
+
+        /// Keys the payload serves, in slot order.
+        pub fn serves(&self) -> Array {
+            self.sim.serves().into_iter().map(JsValue::from).collect()
+        }
+
+        /// Whether the payload exports `mw_alloc` and `on_request`.
+        #[wasm_bindgen(getter, js_name = handlesRequests)]
+        pub fn handles_requests(&self) -> bool {
+            self.sim.handles_requests()
+        }
+
+        /// The device's node id (16 hex digits).
+        #[wasm_bindgen(getter, js_name = nodeId)]
+        pub fn node_id(&mut self) -> String {
+            node_hex(self.sim.node())
         }
 
         /// Sets the time reported by `now_ms` without ticking.

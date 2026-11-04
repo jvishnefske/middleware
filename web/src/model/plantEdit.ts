@@ -17,6 +17,7 @@ import { type PayloadModel, flowsOf } from "./payload";
 import { type EquipmentModule, MAX_EMS, MAX_UNITS, type PlantModel, type Unit, makePlant } from "./plant";
 import { boardDefaults } from "./pins";
 import { ACTING_STATES, type ActingState, type EquipmentPhase, MAX_CLASSES, MAX_PARAMS, MAX_UNIT_PHASES, type ParamDef, type PhaseClass, isIdent } from "./procedural";
+import { MAX_RECIPES, type MasterRecipe, newRecipe } from "./recipe";
 import type { TargetId } from "./target";
 
 const lower = (s: string) => s.toLowerCase();
@@ -45,6 +46,25 @@ function withPhases(p: PlantModel, phases: readonly EquipmentPhase[]): PlantMode
 
 function withClasses(p: PlantModel, classes: readonly PhaseClass[], phases = p.procedural.phases): PlantModel {
   return makePlant(p.physical.units, { classes, phases }, p.recipes);
+}
+
+// ---- recipes (the Recipe view edits one with model/recipe.ts)
+
+/** Recipe `i` replaced by `r`. */
+export function setRecipe(p: PlantModel, i: number, r: MasterRecipe): PlantModel {
+  if (!p.recipes[i]) return p;
+  return makePlant(p.physical.units, p.procedural, p.recipes.map((x, j) => (j === i ? r : x)));
+}
+
+/** A new empty recipe at the end (at most MAX_RECIPES). */
+export function addRecipe(p: PlantModel): PlantModel {
+  if (p.recipes.length >= MAX_RECIPES) return p;
+  return makePlant(p.physical.units, p.procedural, [...p.recipes, newRecipe(p.recipes)]);
+}
+
+export function removeRecipe(p: PlantModel, i: number): PlantModel {
+  if (!p.recipes[i]) return p;
+  return makePlant(p.physical.units, p.procedural, p.recipes.filter((_, j) => j !== i));
 }
 
 // ---- units
