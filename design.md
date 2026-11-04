@@ -1835,7 +1835,7 @@ open).
   `protocol-wasm` `simulator::tests::simulator_runs_payload_with_virtual_gpio_and_messages`, `simulator_reports_rejection_and_traps`; `web/test/editor.test.ts` runs the blink/echo templates (WAT and AssemblyScript) in wasm-host compiled to WASM.
 - [x] U7 Automated tests cover the protocol bindings and the upload flow
   against a mocked serial port —
-  `npm test` in `web/` (115 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
+  `npm test` in `web/` (123 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
 - [x] U8 The manifest carries each image's `wasm` flag (absent means `true`)
   and the UI marks protocol-only images; the device page disables "start
   after upload" and Start for `+no-wasm` firmware —
@@ -1884,6 +1884,14 @@ open).
   and refused before sending anything when the device pins another key;
   claim is offered when unclaimed or in the re-key window —
   `web/test/trustUpload.test.ts` against a fake device modelling the trust contract in TypeScript in front of the Rust loader: "uploads unsigned to an unclaimed device after asking", "sends nothing when the unsigned upload is declined", "uploads unsigned to firmware without sys/trust and says why", "claims an unclaimed device and denies a second claim", "signs the commit for a device that pins this key, and the device accepts it", "a commit signed by another key is Denied and the old image stays active", "a replayed version is Denied; a clock behind the device bumps past min_version", "re-keys only while the window opened by holding BOOT is open".
+- [x] U16 First run: a Start tab, opened when no tab is saved, says what the
+  site does and what a payload is, runs the Blink example in the Blocks
+  simulator in one click (asking before it replaces different blocks), and
+  gives per-board steps: ESP32, ESP32-S3, ESP32-C3 and ESP8266 flash from
+  the Flash tab; Pico and Pico 2 take the rp-base UF2 in BOOTSEL mode;
+  protocol-only boards (ESP32-C3, ESP8266, Pico) are marked as storing
+  payloads without running them, matching the manifest's `wasm` flags —
+  `web/test/onboarding.test.ts`: "covers every bundled ESP image with the manifest's runtime flag", "installs the Picos from UF2, with only the Pico 2 running payloads", "gives every board install, connect and payload steps that point at real tabs", "sends ESP boards to the Flash tab and Picos to BOOTSEL and the UF2", "says protocol-only boards store payloads without running them", "opens Start without a valid saved tab and the saved tab otherwise", "tries an example that exists", "asks before replacing blocks that differ from the example, not otherwise". The click-to-blink path was checked in headless Chrome (about 1.5 s on localhost); the page itself has no DOM test.
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and
