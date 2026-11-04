@@ -54,6 +54,7 @@ export function devicePage(app: App): HTMLElement {
   const statusEl = h("span", { class: "badge" }, "disconnected");
 
   function showInfo(i: DeviceInfo | null) {
+    app.reportDeviceInfo(i);
     infoEl.replaceChildren();
     if (!i) {
       applyRuntime(null);
