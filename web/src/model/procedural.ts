@@ -98,6 +98,15 @@ export interface ProceduralModel {
 
 export const EMPTY_PROCEDURAL: ProceduralModel = { classes: [], phases: [] };
 
+/** A one-click fix for a recipe issue (protocol-wasm `RecipeFix`);
+ * recipe.ts `applyRecipeFix` applies it. */
+export type RecipeFix =
+  | { kind: "setArg"; step: number; param: string; value: number }
+  | { kind: "removeArg"; step: number; param: string }
+  | { kind: "removeTransition"; transition: number }
+  | { kind: "removeFromTransition"; transition: number; side: "from" | "to"; step: string }
+  | { kind: "removeUnitProc"; unitProc: number };
+
 /** One issue `checkRecipe` reports (protocol-wasm `recipes::RecipeIssue`). */
 export interface RecipeIssue {
   at: "recipe" | "class" | "unitProc" | "step" | "transition";
@@ -105,6 +114,7 @@ export interface RecipeIssue {
   sub: number | null;
   severity: "error" | "warning";
   message: string;
+  fix?: RecipeFix;
 }
 
 type Obj = Record<string, unknown>;

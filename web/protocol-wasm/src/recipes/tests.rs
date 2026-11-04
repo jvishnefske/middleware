@@ -4,6 +4,18 @@
 use super::*;
 
 fn classes() -> Vec<ClassIn> {
+    example_classes()
+}
+
+fn recipe() -> RecipeIn {
+    example_recipe()
+}
+
+fn units() -> Vec<UnitIn> {
+    example_units()
+}
+
+pub(super) fn example_classes() -> Vec<ClassIn> {
     let p = |name: &str, min, max| ParamIn {
         name: name.into(),
         min,
@@ -21,7 +33,7 @@ fn classes() -> Vec<ClassIn> {
     ]
 }
 
-fn recipe() -> RecipeIn {
+pub(super) fn example_recipe() -> RecipeIn {
     RecipeIn {
         id: "BlinkThenMeasure".into(),
         unit_procs: vec![
@@ -55,7 +67,7 @@ fn recipe() -> RecipeIn {
     }
 }
 
-fn units() -> Vec<UnitIn> {
+pub(super) fn example_units() -> Vec<UnitIn> {
     vec![
         UnitIn {
             id: "pico-led".into(),
@@ -125,6 +137,58 @@ fn check_messages_name_the_step_and_the_rule() {
             "transition Some(0) error: there is no step \"Ghost\"",
         ]
     );
+}
+
+#[test]
+fn q18_issues_carry_one_click_fixes() {
+    let mut r = recipe();
+    r.steps[0].args = vec![("period_ms".into(), 5), ("speed".into(), 1)];
+    r.transitions.push(TransitionIn {
+        from: vec!["TakeReading".into()],
+        to: vec!["BlinkLed".into()],
+    });
+    r.transitions.push(TransitionIn {
+        from: vec!["BlinkLed".into()],
+        to: vec!["TakeReading".into()],
+    });
+    r.unit_procs.push(UnitProcIn {
+        id: "Spare".into(),
+        unit_class: None,
+    });
+    let fixes: Vec<(String, Option<RecipeFix>)> = check(&r, &classes())
+        .into_iter()
+        .map(|i| (i.message, i.fix))
+        .collect();
+    let has = |f: RecipeFix| fixes.iter().any(|(_, x)| x.as_ref() == Some(&f));
+    assert!(
+        has(RecipeFix::SetArg {
+            step: 0,
+            param: "period_ms".into(),
+            value: 10
+        }),
+        "{fixes:#?}"
+    );
+    assert!(has(RecipeFix::SetArg {
+        step: 0,
+        param: "times".into(),
+        value: 1
+    }));
+    assert!(has(RecipeFix::RemoveArg {
+        step: 0,
+        param: "speed".into()
+    }));
+    assert!(has(RecipeFix::RemoveFromTransition {
+        transition: 2,
+        side: "from",
+        step: "BlinkLed".into()
+    }));
+    assert!(has(RecipeFix::RemoveFromTransition {
+        transition: 2,
+        side: "to",
+        step: "TakeReading".into()
+    }));
+    assert!(has(RecipeFix::RemoveTransition(1)));
+    assert!(has(RecipeFix::RemoveUnitProc(2)));
 }
 
 #[test]
