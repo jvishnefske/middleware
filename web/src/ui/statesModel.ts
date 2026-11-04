@@ -288,12 +288,13 @@ export function simStateText(p: { id: string; state: string; from?: string; even
 
 // ---- pin labels
 
-function renameInExpr(e: Expr, from: string, to: string, depth: number): Expr {
+export function renameInExpr(e: Expr, from: string, to: string, depth: number): Expr {
   if (depth > MAX_EXPR_DEPTH) return e;
   switch (e.kind) {
     case "pin":
       return e.label === from ? { ...e, label: to } : e;
     case "const":
+    case "state":
       return e;
     case "not":
       return { ...e, a: renameInExpr(e.a, from, to, depth + 1) };
@@ -301,7 +302,7 @@ function renameInExpr(e: Expr, from: string, to: string, depth: number): Expr {
       return { ...e, a: renameInExpr(e.a, from, to, depth + 1), b: renameInExpr(e.b, from, to, depth + 1) };
   }
 }
-function renameInActions(as: readonly ActionRef[], from: string, to: string): ActionRef[] {
+export function renameInActions(as: readonly ActionRef[], from: string, to: string): ActionRef[] {
   return as.map((a) => ((a.kind === "write" || a.kind === "toggle") && a.label === from ? { ...a, label: to } : a));
 }
 

@@ -12,6 +12,7 @@ import type { BlockJson, WorkspaceJson } from "../src/blocks/workspace";
 import { compileAssemblyScript, compileWat } from "../src/editor/compile";
 import type { SimEvent } from "../src/protocol/wasm";
 import { SimSession } from "../src/sim/session";
+import { type Flow, flowPinNeeds } from "../src/model/flows";
 import { type Machine, machinePinNeeds } from "../src/model/machines";
 import { EMPTY_PINS, type PinTable, boardDefaults, withNeeds } from "../src/model/pins";
 import { ManualClock } from "./clock";
@@ -27,8 +28,9 @@ async function build(
   profile: ProfileId,
   pins: PinTable = EMPTY_PINS,
   machines: readonly Machine[] = [],
+  flows: readonly Flow[] = [],
 ): Promise<Extract<BuildResult, { ok: true }>> {
-  const r = await buildPayload(w, profile, proto.abi, { pins, issues: [], machines, machineIssues: [] });
+  const r = await buildPayload(w, profile, proto.abi, { pins, issues: [], machines, machineIssues: [], flows, flowIssues: [] });
   if (!r.ok) throw new Error(`${r.stage}: ${r.errors.join("; ")}\n${r.source}`);
   return r;
 }
@@ -51,8 +53,9 @@ describe("Blocks examples", () => {
     it(`example "${e.id}" compiles and passes checkAbi (${e.profile})`, async () => {
       const target = e.profile === "badge" ? "badge" : "pico2";
       const machines = e.machines ?? [];
-      const needs = [...e.needs, ...machines.flatMap(machinePinNeeds).filter((n) => !e.needs.some((x) => x.label === n.label))];
-      const r = await build(e.workspace, e.profile, withNeeds(boardDefaults(target), target, needs), machines);
+      const flows = e.flows ?? [];
+      const needs = [...e.needs, ...[...machines.flatMap(machinePinNeeds), ...flowPinNeeds(flows)].filter((n) => !e.needs.some((x) => x.label === n.label))];
+      const r = await build(e.workspace, e.profile, withNeeds(boardDefaults(target), target, needs), machines, flows);
       expect(r.report.problems).toEqual([]);
       expect(r.report.warnings).toEqual([]);
       expect(r.warnings).toEqual([]);

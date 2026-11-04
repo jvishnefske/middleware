@@ -724,6 +724,7 @@ fn machine_expr(v: &JsValue, depth: u8, at: &str) -> Result<crate::machines::Exp
     };
     match text(v, "kind").as_str() {
         "pin" => Ok(Expr::Pin(text(v, "label"))),
+        "state" => Ok(Expr::State(text(v, "machine"), text(v, "state"))),
         "const" => whole(&get(v, "value"))
             .and_then(|n| i32::try_from(n).ok())
             .map(Expr::Const)
@@ -767,6 +768,7 @@ fn machine_actions(list: Array, at: &str) -> Result<Vec<crate::machines::ActionI
                 text: text(&a, "text"),
             }),
             "raise" => Ok(ActionIn::Raise {
+                machine: get(&a, "machine").as_string(),
                 event: text(&a, "event"),
             }),
             other => Err(JsError::new(&format!(
@@ -776,28 +778,11 @@ fn machine_actions(list: Array, at: &str) -> Result<Vec<crate::machines::ActionI
         .collect()
 }
 
-/// Checks state machines against the pin table (see `crate::machines` and
-/// the `state-table` crate). `machines` is `[{id, name, initial, states:
-/// [{name, note, entry: ActionRef[]}], events: [{name, note}], rows:
-/// [{state, event, guard: Expr|null, next, actions: ActionRef[]}]}]` with
-/// `Expr` `{kind: "pin", label} | {kind: "const", value} | {kind: "cmp",
-/// op, a, b} | {kind: "and"|"or", a, b} | {kind: "not", a}` and `ActionRef`
-/// `{kind: "write", label, level: 0|1} | {kind: "toggle", label} | {kind:
-/// "publish", key, text} | {kind: "log", text} | {kind: "raise", event}`
-/// (`web/src/model/machines.ts`). `pins` is `[{label, func}]` with `func`
-/// a pin-table function name (`"gpio-out"`, `"gpio-in"`, ...). Expressions
-/// nested deeper than the limit are reported as issues, not read; an
-/// unknown expression or action kind, or a non-integer constant, throws.
-/// Returns `[{machine, list: "machine"|"states"|"events"|"rows", row:
-/// number|null, field, severity: "error"|"warning", message, fix?:
-/// {kind: "add-state"|"add-event"|"set-initial", name} | {kind: "add-pin",
-/// label, func}}]`.
-#[wasm_bindgen(js_name = checkMachines)]
-pub fn check_machines(machines: Array, pins: Array) -> Result<Array, JsError> {
-    use crate::machines::{MachineFix, MachineIn, PinIn, RowIn, StateIn, check, flatten};
+/// The pin table's `[{label, func}]` as the checks read it.
+fn pins_in(pins: Array) -> Vec<crate::machines::PinIn> {
+    use crate::machines::PinIn;
     use crate::pins::Func;
-    let pins: Vec<PinIn> = pins
-        .iter()
+    pins.iter()
         .map(|p| {
             let func = text(&p, "func");
             PinIn {
@@ -805,8 +790,13 @@ pub fn check_machines(machines: Array, pins: Array) -> Result<Array, JsError> {
                 func: Func::parse(&func).ok_or(func),
             }
         })
-        .collect();
-    let machines: Vec<MachineIn> = machines
+        .collect()
+}
+
+/// The page's machines (see `checkMachines`) as the checks read them.
+fn machines_in(machines: Array) -> Result<Vec<crate::machines::MachineIn>, JsError> {
+    use crate::machines::{MachineIn, RowIn, StateIn, flatten};
+    machines
         .iter()
         .enumerate()
         .map(|(mi, m)| {
@@ -855,43 +845,198 @@ pub fn check_machines(machines: Array, pins: Array) -> Result<Array, JsError> {
                 rows,
             })
         })
-        .collect::<Result<_, JsError>>()?;
-    Ok(check(&machines, &pins)
+        .collect()
+}
+
+/// A table or flow fix as `{kind: "add-state"|"add-event"|"set-initial",
+/// name, machine?} | {kind: "add-pin", label, func}` (`machine`: the index
+/// of the machine an event is added to, when it is not the issue's own).
+fn fix_object(fix: crate::machines::MachineFix) -> Object {
+    use crate::machines::MachineFix;
+    let f = Object::new();
+    match fix {
+        MachineFix::AddState(name) => {
+            set(&f, "kind", "add-state");
+            set(&f, "name", name);
+        }
+        MachineFix::AddEvent(name) => {
+            set(&f, "kind", "add-event");
+            set(&f, "name", name);
+        }
+        MachineFix::AddEventTo { machine, name } => {
+            set(&f, "kind", "add-event");
+            set(&f, "name", name);
+            set(&f, "machine", machine as u32);
+        }
+        MachineFix::SetInitial(name) => {
+            set(&f, "kind", "set-initial");
+            set(&f, "name", name);
+        }
+        MachineFix::AddPin { label, func } => {
+            set(&f, "kind", "add-pin");
+            set(&f, "label", label);
+            set(&f, "func", func.name());
+        }
+    }
+    f
+}
+
+fn index_or_null(i: Option<usize>) -> JsValue {
+    i.map_or(JsValue::NULL, |r| JsValue::from(r as u32))
+}
+
+/// Checks state machines against the pin table (see `crate::machines` and
+/// the `state-table` crate). `machines` is `[{id, name, initial, states:
+/// [{name, note, entry: ActionRef[]}], events: [{name, note}], rows:
+/// [{state, event, guard: Expr|null, next, actions: ActionRef[]}]}]` with
+/// `Expr` `{kind: "pin", label} | {kind: "const", value} | {kind: "state",
+/// machine, state} | {kind: "cmp", op, a, b} | {kind: "and"|"or", a, b} |
+/// {kind: "not", a}` and `ActionRef` `{kind: "write", label, level: 0|1} |
+/// {kind: "toggle", label} | {kind: "publish", key, text} | {kind: "log",
+/// text} | {kind: "raise", event, machine?}` (`web/src/model/machines.ts`).
+/// `pins` is `[{label, func}]` with `func` a pin-table function name
+/// (`"gpio-out"`, `"gpio-in"`, ...). Expressions nested deeper than the
+/// limit are reported as issues, not read; an unknown expression or action
+/// kind, or a non-integer constant, throws. Returns `[{machine, list:
+/// "machine"|"states"|"events"|"rows", row: number|null, field, severity:
+/// "error"|"warning", message, fix?}]` with `fix` as `fix_object` makes.
+#[wasm_bindgen(js_name = checkMachines)]
+pub fn check_machines(machines: Array, pins: Array) -> Result<Array, JsError> {
+    let pins = pins_in(pins);
+    let machines = machines_in(machines)?;
+    Ok(crate::machines::check(&machines, &pins)
         .into_iter()
         .map(|i| {
             let o = Object::new();
             set(&o, "machine", i.machine as u32);
             set(&o, "list", i.list);
-            set(
-                &o,
-                "row",
-                i.row.map_or(JsValue::NULL, |r| JsValue::from(r as u32)),
-            );
+            set(&o, "row", index_or_null(i.row));
             set(&o, "field", i.field);
             set(&o, "severity", i.severity);
             set(&o, "message", i.message.as_str());
             if let Some(fix) = i.fix {
-                let f = Object::new();
-                match fix {
-                    MachineFix::AddState(name) => {
-                        set(&f, "kind", "add-state");
-                        set(&f, "name", name);
+                set(&o, "fix", fix_object(fix));
+            }
+            JsValue::from(o)
+        })
+        .collect())
+}
+
+/// A flow node's kind and `props` (`web/src/model/flows.ts`).
+fn flow_kind(n: &JsValue, at: &str) -> Result<crate::flows::KindIn, JsError> {
+    use crate::flows::{EntryIn, KindIn, split_ref};
+    use crate::machines::flatten;
+    use state_table::flow::Edge;
+    let props = get(n, "props");
+    let number = |key: &str| whole(&get(&props, key)).unwrap_or(0);
+    Ok(match text(n, "kind").as_str() {
+        "entry" => KindIn::Entry(match text(&props, "on").as_str() {
+            "init" => EntryIn::Init,
+            "every" => EntryIn::Every { ms: number("ms") },
+            "message" => EntryIn::Message {
+                key: text(&props, "key"),
+            },
+            "pin-edge" => EntryIn::PinEdge {
+                label: text(&props, "label"),
+                edge: match text(&props, "edge").as_str() {
+                    "rise" => Edge::Rise,
+                    "fall" => Edge::Fall,
+                    _ => Edge::Both,
+                },
+            },
+            "entered" => {
+                let (machine, state) = split_ref(&text(&props, "state"));
+                EntryIn::Entered { machine, state }
+            }
+            other => {
+                return Err(JsError::new(&format!(
+                    "{at}.props.on {other:?} is not an entry"
+                )));
+            }
+        }),
+        "action" => {
+            let list = Array::of1(&props);
+            let mut acts = machine_actions(list, &format!("{at}.props"))?;
+            KindIn::Action(
+                acts.pop()
+                    .ok_or_else(|| JsError::new(&format!("{at}.props is not an action")))?,
+            )
+        }
+        "branch" => KindIn::Branch(flatten(&machine_expr(
+            &get(&props, "cond"),
+            1,
+            &format!("{at}.props.cond"),
+        )?)),
+        "repeat" => KindIn::Repeat {
+            times: number("times"),
+        },
+        "sequence" => KindIn::Sequence {
+            steps: number("steps"),
+        },
+        other => {
+            return Err(JsError::new(&format!(
+                "{at}.kind {other:?} is not a node kind"
+            )));
+        }
+    })
+}
+
+/// Checks flows against the machines and the pin table (see
+/// `crate::flows` and `state_table::flow`). `flows` is `[{kind: "flow",
+/// id, name, nodes: [{id, kind, x, y, props}], wires: [{from: {node,
+/// port}, to: {node, port}}]}]` (`web/src/model/flows.ts`); `machines` and
+/// `pins` as for `checkMachines`. An unknown node kind, entry or action
+/// throws. Returns `[{flow, node: number|null, wire: number|null,
+/// severity, message, fix?}]` (node and wire are indices).
+#[wasm_bindgen(js_name = checkFlows)]
+pub fn check_flows(flows: Array, machines: Array, pins: Array) -> Result<Array, JsError> {
+    use crate::flows::{FlowIn, NodeOwned, WireIn, check};
+    let pins = pins_in(pins);
+    let machines = machines_in(machines)?;
+    let flows: Vec<FlowIn> = flows
+        .iter()
+        .enumerate()
+        .map(|(fi, f)| {
+            let nodes = array(&f, "nodes")
+                .iter()
+                .enumerate()
+                .map(|(ni, n)| {
+                    Ok(NodeOwned {
+                        id: text(&n, "id"),
+                        kind: flow_kind(&n, &format!("flows[{fi}].nodes[{ni}]"))?,
+                    })
+                })
+                .collect::<Result<Vec<_>, JsError>>()?;
+            let wires = array(&f, "wires")
+                .iter()
+                .map(|w| {
+                    let (from, to) = (get(&w, "from"), get(&w, "to"));
+                    WireIn {
+                        from: text(&from, "node"),
+                        from_port: text(&from, "port"),
+                        to: text(&to, "node"),
+                        to_port: text(&to, "port"),
                     }
-                    MachineFix::AddEvent(name) => {
-                        set(&f, "kind", "add-event");
-                        set(&f, "name", name);
-                    }
-                    MachineFix::SetInitial(name) => {
-                        set(&f, "kind", "set-initial");
-                        set(&f, "name", name);
-                    }
-                    MachineFix::AddPin { label, func } => {
-                        set(&f, "kind", "add-pin");
-                        set(&f, "label", label);
-                        set(&f, "func", func.name());
-                    }
-                }
-                set(&o, "fix", f);
+                })
+                .collect();
+            Ok(FlowIn {
+                id: text(&f, "id"),
+                nodes,
+                wires,
+            })
+        })
+        .collect::<Result<_, JsError>>()?;
+    Ok(check(&flows, &machines, &pins)
+        .into_iter()
+        .map(|i| {
+            let o = Object::new();
+            set(&o, "flow", i.flow as u32);
+            set(&o, "node", index_or_null(i.node));
+            set(&o, "wire", index_or_null(i.wire));
+            set(&o, "severity", i.severity);
+            set(&o, "message", i.message.as_str());
+            if let Some(fix) = i.fix {
+                set(&o, "fix", fix_object(fix));
             }
             JsValue::from(o)
         })

@@ -19,7 +19,7 @@
 use crate::pins::{Func, MAX_LABEL};
 use middleware::{Key, KeyError};
 use state_table::{
-    Action, CmpOp, Event, Field, Fix, Guard, GuardError, Issue, IssueKind, KeyProblem, List,
+    Action, CmpOp, Event, Field, Fix, Guard, GuardError, Issue, IssueKind, KeyProblem, Leaf, List,
     MAX_ACTIONS, MAX_EVENTS, MAX_GUARD_DEPTH, MAX_GUARD_NODES, MAX_OVERLAP_PINS, MAX_ROWS,
     MAX_STATES, MAX_TEXT, Machine, Node, Pin, PinUse, Row, Severity, State,
 };
@@ -29,6 +29,8 @@ use state_table::{
 pub enum Expr {
     /// A digital pin read by label.
     Pin(String),
+    /// Machine (first) is in state (second).
+    State(String, String),
     /// A constant.
     Const(i32),
     /// A comparison.
@@ -46,6 +48,8 @@ pub enum Expr {
 pub enum NodeIn {
     /// A pin read.
     Pin(String),
+    /// A state test: machine, state.
+    State(String, String),
     /// A constant.
     Const(i32),
     /// A comparison of two earlier nodes.
@@ -59,9 +63,10 @@ pub enum NodeIn {
 }
 
 impl NodeIn {
-    fn view(&self) -> Node<'_> {
+    pub(crate) fn view(&self) -> Node<'_> {
         match *self {
             NodeIn::Pin(ref l) => Node::Pin(l),
+            NodeIn::State(ref machine, ref state) => Node::State { machine, state },
             NodeIn::Const(c) => Node::Const(c),
             NodeIn::Cmp(op, a, b) => Node::Cmp { op, a, b },
             NodeIn::And(a, b) => Node::And(a, b),
@@ -82,6 +87,7 @@ pub fn flatten(e: &Expr) -> Vec<NodeIn> {
         } else {
             match e {
                 Expr::Pin(l) => NodeIn::Pin(l.clone()),
+                Expr::State(m, st) => NodeIn::State(m.clone(), st.clone()),
                 Expr::Const(c) => NodeIn::Const(*c),
                 Expr::Cmp(op, a, b) => {
                     let (a, b) = (go(a, depth + 1, out), go(b, depth + 1, out));
@@ -135,6 +141,8 @@ pub enum ActionIn {
     },
     /// Raise an event.
     Raise {
+        /// The machine's id; `None` for the table's own.
+        machine: Option<String>,
         /// Event name.
         event: String,
     },
@@ -150,7 +158,10 @@ impl ActionIn {
             ActionIn::Toggle { label } => Action::Toggle { label },
             ActionIn::Publish { key, text } => Action::Publish { key, text },
             ActionIn::Log { text } => Action::Log { text },
-            ActionIn::Raise { event } => Action::Raise { event },
+            ActionIn::Raise { machine, event } => Action::Raise {
+                machine: machine.as_deref(),
+                event,
+            },
         }
     }
 }
@@ -219,6 +230,14 @@ pub enum MachineFix {
     },
     /// `{kind: "set-initial", name}`.
     SetInitial(String),
+    /// `{kind: "add-event", name, machine}`: add the event to the machine
+    /// with this index (a raise of another machine's event).
+    AddEventTo {
+        /// The machine's index.
+        machine: usize,
+        /// The event's name.
+        name: String,
+    },
 }
 
 /// One issue, as the page shows it (`MachineIssue` in machines.ts).
@@ -264,14 +283,14 @@ fn field_name(f: Field) -> &'static str {
     }
 }
 
-fn severity_name(s: Severity) -> &'static str {
+pub(crate) fn severity_name(s: Severity) -> &'static str {
     match s {
         Severity::Error => "error",
         Severity::Warning => "warning",
     }
 }
 
-fn pin_use(f: &Result<Func, String>) -> PinUse {
+pub(crate) fn pin_use(f: &Result<Func, String>) -> PinUse {
     match f {
         Ok(Func::GpioOut) => PinUse::Output,
         Ok(Func::GpioIn) => PinUse::Input,
@@ -280,7 +299,7 @@ fn pin_use(f: &Result<Func, String>) -> PinUse {
 }
 
 /// "a GPIO input", "an analog input", ... for the pin with this label.
-fn func_text(pins: &[PinIn], label: &str) -> &'static str {
+pub(crate) fn func_text(pins: &[PinIn], label: &str) -> &'static str {
     match pins.iter().find(|p| p.label == label).map(|p| &p.func) {
         Some(Ok(Func::GpioOut)) => "a GPIO output",
         Some(Ok(Func::GpioIn)) => "a GPIO input",
@@ -292,7 +311,7 @@ fn func_text(pins: &[PinIn], label: &str) -> &'static str {
     }
 }
 
-fn key_problem(key: &str) -> Result<(), KeyProblem> {
+pub(crate) fn key_problem(key: &str) -> Result<(), KeyProblem> {
     Key::new(key).map(|_| ()).map_err(|e| match e {
         KeyError::Empty => KeyProblem::Empty,
         KeyError::TooLong => KeyProblem::TooLong,
@@ -301,7 +320,16 @@ fn key_problem(key: &str) -> Result<(), KeyProblem> {
     })
 }
 
-fn did_you_mean(near: Option<&str>) -> String {
+/// `BUTTON = 1`, `Mode is On`, `Mode is not On`.
+pub(crate) fn leaf_text(l: Leaf<'_>, high: bool) -> String {
+    match l {
+        Leaf::Pin(label) => format!("{label} = {}", u8::from(high)),
+        Leaf::State { machine, state } if high => format!("{machine} is {state}"),
+        Leaf::State { machine, state } => format!("{machine} is not {state}"),
+    }
+}
+
+pub(crate) fn did_you_mean(near: Option<&str>) -> String {
     near.map(|n| format!(" Did you mean {n}?"))
         .unwrap_or_default()
 }
@@ -393,6 +421,73 @@ fn message(m: &Machine<'_>, pins: &[PinIn], i: &Issue<'_>) -> String {
                 format!("There is no event {name}; add it or choose another.")
             }
         }
+        IssueKind::TooManyActions { count } => {
+            let whose = if in_entry {
+                "This state's entry"
+            } else {
+                "This row"
+            };
+            format!("{whose} has {count} actions; at most {MAX_ACTIONS} are allowed.")
+        }
+        IssueKind::GuardMalformed(_)
+        | IssueKind::GuardMachineUnknown { .. }
+        | IssueKind::GuardStateUnknown { .. }
+        | IssueKind::UnknownPin { .. }
+        | IssueKind::WrongPinUse { .. }
+        | IssueKind::BadKey { .. }
+        | IssueKind::TextTooLong { .. }
+        | IssueKind::RaiseUnknown { .. }
+        | IssueKind::RaiseNoMachine { .. }
+        | IssueKind::RaiseMachineUnknown { .. }
+        | IssueKind::RaiseUnknownIn { .. } => {
+            part_message(pins, &i.kind, action_text).unwrap_or_default()
+        }
+        IssueKind::DuplicateUnguarded { first } => {
+            let (st, ev) = row_cell(first);
+            format!(
+                "Row {} already handles {ev} in {st} without a condition; give this row a condition or remove one of them.",
+                first + 1
+            )
+        }
+        IssueKind::GuardOverlap { other, witness } => {
+            let when: Vec<String> = witness
+                .levels()
+                .map(|(l, high)| leaf_text(l, high))
+                .collect();
+            let when = if when.is_empty() {
+                String::new()
+            } else {
+                format!(" (when {})", when.join(" and "))
+            };
+            format!(
+                "This condition and row {}'s can both be true{when}, so which row fires depends on their order; make them exclusive.",
+                other + 1
+            )
+        }
+        IssueKind::OverlapUnchecked { other, pins } => format!(
+            "This condition and row {}'s read {pins} pins together, too many (over {MAX_OVERLAP_PINS}) to check that they cannot both be true.",
+            other + 1
+        ),
+        IssueKind::GuardNeverTrue => "This condition is never true, so the row never fires.".into(),
+        IssueKind::Unreachable { name } => format!(
+            "No row leads from the initial state {} to {name}, so the machine never enters it.",
+            m.initial
+        ),
+        IssueKind::DeadEvent { name } => {
+            format!("No row handles {name}, so raising it does nothing.")
+        }
+    }
+}
+
+/// The message for an issue with an action or a condition, which tables
+/// and flows share; `act(k)` names action `k` ("Action 2", "This action").
+/// `None` for the other kinds.
+pub(crate) fn part_message(
+    pins: &[PinIn],
+    kind: &IssueKind<'_>,
+    act: impl Fn(usize) -> String,
+) -> Option<String> {
+    Some(match *kind {
         IssueKind::GuardMalformed(GuardError::TooDeep { .. }) => format!(
             "This condition is nested more than {MAX_GUARD_DEPTH} levels deep; simplify it."
         ),
@@ -422,7 +517,7 @@ fn message(m: &Machine<'_>, pins: &[PinIn], i: &Issue<'_>) -> String {
             label,
             near,
         } => {
-            let a = action_text(k);
+            let a = act(k);
             if label.is_empty() {
                 format!("{a}: choose a pin.")
             } else if near.is_some() {
@@ -447,23 +542,15 @@ fn message(m: &Machine<'_>, pins: &[PinIn], i: &Issue<'_>) -> String {
             ..
         } => format!(
             "{} drives {label}, which is {}; only a GPIO output can be written or toggled.",
-            action_text(k),
+            act(k),
             func_text(pins, label)
         ),
-        IssueKind::TooManyActions { count } => {
-            let whose = if in_entry {
-                "This state's entry"
-            } else {
-                "This row"
-            };
-            format!("{whose} has {count} actions; at most {MAX_ACTIONS} are allowed.")
-        }
         IssueKind::BadKey {
             action,
             key,
             problem,
         } => {
-            let a = action_text(action);
+            let a = act(action);
             match problem {
                 KeyProblem::Empty => {
                     format!("{a} publishes on no key; give it one, for example led/state.")
@@ -488,14 +575,14 @@ fn message(m: &Machine<'_>, pins: &[PinIn], i: &Issue<'_>) -> String {
         }
         IssueKind::TextTooLong { action, len } => format!(
             "{}'s text is {len} bytes; at most {MAX_TEXT} fit in a message.",
-            action_text(action)
+            act(action)
         ),
         IssueKind::RaiseUnknown {
             action,
             event,
             near,
         } => {
-            let a = action_text(action);
+            let a = act(action);
             if event.is_empty() {
                 format!("{a}: choose the event to raise.")
             } else if near.is_some() {
@@ -509,44 +596,75 @@ fn message(m: &Machine<'_>, pins: &[PinIn], i: &Issue<'_>) -> String {
                 )
             }
         }
-        IssueKind::DuplicateUnguarded { first } => {
-            let (st, ev) = row_cell(first);
-            format!(
-                "Row {} already handles {ev} in {st} without a condition; give this row a condition or remove one of them.",
-                first + 1
-            )
-        }
-        IssueKind::GuardOverlap { other, witness } => {
-            let when: Vec<String> = witness
-                .levels()
-                .map(|(l, high)| format!("{l} = {}", u8::from(high)))
-                .collect();
-            let when = if when.is_empty() {
-                String::new()
+        IssueKind::GuardMachineUnknown { machine, near } => {
+            if near.is_some() {
+                format!("There is no state machine {machine}.{}", did_you_mean(near))
             } else {
-                format!(" (when {})", when.join(" and "))
-            };
-            format!(
-                "This condition and row {}'s can both be true{when}, so which row fires depends on their order; make them exclusive.",
-                other + 1
-            )
+                format!(
+                    "The condition tests {machine}, which is not a state machine; add it under States or choose another."
+                )
+            }
         }
-        IssueKind::OverlapUnchecked { other, pins } => format!(
-            "This condition and row {}'s read {pins} pins together, too many (over {MAX_OVERLAP_PINS}) to check that they cannot both be true.",
-            other + 1
-        ),
-        IssueKind::GuardNeverTrue => "This condition is never true, so the row never fires.".into(),
-        IssueKind::Unreachable { name } => format!(
-            "No row leads from the initial state {} to {name}, so the machine never enters it.",
-            m.initial
-        ),
-        IssueKind::DeadEvent { name } => {
-            format!("No row handles {name}, so raising it does nothing.")
+        IssueKind::GuardStateUnknown {
+            machine,
+            state,
+            near,
+        } => {
+            if state.is_empty() {
+                format!("Choose the state of {machine} this condition tests.")
+            } else if near.is_some() {
+                format!("{machine} has no state {state}.{}", did_you_mean(near))
+            } else {
+                format!(
+                    "The condition tests {machine} is {state}, but {machine} has no state {state}."
+                )
+            }
         }
-    }
+        IssueKind::RaiseNoMachine { action } => {
+            format!("{}: choose the machine whose event to raise.", act(action))
+        }
+        IssueKind::RaiseMachineUnknown {
+            action,
+            machine,
+            near,
+        } => {
+            let a = act(action);
+            if near.is_some() {
+                format!(
+                    "{a} raises an event of {machine}, which is not a state machine.{}",
+                    did_you_mean(near)
+                )
+            } else {
+                format!(
+                    "{a} raises an event of {machine}, which is not a state machine; add it under States or choose another."
+                )
+            }
+        }
+        IssueKind::RaiseUnknownIn {
+            action,
+            machine,
+            event,
+            near,
+        } => {
+            let a = act(action);
+            if event.is_empty() {
+                format!("{a}: choose the event of {machine} to raise.")
+            } else if near.is_some() {
+                format!(
+                    "{a} raises {event}, which is not an event of {machine}.{}",
+                    did_you_mean(near)
+                )
+            } else {
+                format!(
+                    "{a} raises {event}, which is not an event of {machine}; add it or choose another."
+                )
+            }
+        }
+        _ => return None,
+    })
 }
 
-fn fix(f: Fix<'_>) -> MachineFix {
+pub(crate) fn fix(f: Fix<'_>) -> MachineFix {
     match f {
         Fix::AddState(n) => MachineFix::AddState(n.into()),
         Fix::AddEvent(n) => MachineFix::AddEvent(n.into()),
@@ -559,14 +677,24 @@ fn fix(f: Fix<'_>) -> MachineFix {
             },
         },
         Fix::SetInitial(n) => MachineFix::SetInitial(n.into()),
+        Fix::AddEventTo { machine, name } => MachineFix::AddEventTo {
+            machine,
+            name: name.into(),
+        },
     }
 }
 
 /// A row's actions and guard nodes, viewed.
 type RowParts<'a> = (Vec<Action<'a>>, Option<Vec<Node<'a>>>);
 
-/// Checks `machines` against the pin table `pins`; see the module docs.
-pub fn check(machines: &[MachineIn], pins: &[PinIn]) -> Vec<MachineIssue> {
+/// Runs `f` on the `state-table` views of `machines` and `pins` (the
+/// views borrow from nested vectors built here, so they live only for the
+/// call).
+pub(crate) fn with_views<R>(
+    machines: &[MachineIn],
+    pins: &[PinIn],
+    f: impl FnOnce(&[Machine<'_>], &[Pin<'_>]) -> R,
+) -> R {
     let pin_views: Vec<Pin<'_>> = pins
         .iter()
         .map(|p| Pin {
@@ -644,22 +772,29 @@ pub fn check(machines: &[MachineIn], pins: &[PinIn]) -> Vec<MachineIssue> {
             rows: rows.get(i).map_or(&[], Vec::as_slice),
         })
         .collect();
-    let mut out = Vec::new();
-    state_table::check(&views, &pin_views, key_problem, &mut |i| {
-        let Some(m) = views.get(i.machine) else {
-            return;
-        };
-        out.push(MachineIssue {
-            machine: i.machine,
-            list: list_name(i.list),
-            row: i.index,
-            field: field_name(i.field),
-            severity: severity_name(i.severity),
-            message: message(m, pins, &i),
-            fix: i.fix.map(fix),
+    f(&views, &pin_views)
+}
+
+/// Checks `machines` against the pin table `pins`; see the module docs.
+pub fn check(machines: &[MachineIn], pins: &[PinIn]) -> Vec<MachineIssue> {
+    with_views(machines, pins, |views, pin_views| {
+        let mut out = Vec::new();
+        state_table::check(views, pin_views, key_problem, &mut |i| {
+            let Some(m) = views.get(i.machine) else {
+                return;
+            };
+            out.push(MachineIssue {
+                machine: i.machine,
+                list: list_name(i.list),
+                row: i.index,
+                field: field_name(i.field),
+                severity: severity_name(i.severity),
+                message: message(m, pins, &i),
+                fix: i.fix.map(fix),
+            });
         });
-    });
-    out
+        out
+    })
 }
 
 #[cfg(test)]

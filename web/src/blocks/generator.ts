@@ -20,7 +20,16 @@
 //   from any handler, `<machine>.<state> is current?` compares its state,
 //   and "when <machine>.<state> is entered" blocks run after the state's
 //   entry actions; a reference to a machine, state or event the payload
-//   does not have is an error on the block.
+//   does not have is an error on the block;
+// * each flow (model/flows.ts, lowered by flowGen.ts) adds its body where
+//   the matching hat block's would go: `init`, the shared tick, the
+//   message handler, `on_irq` for a pin edge (sharing the pin's
+//   interrupt), or the state's enter function, after the blocks' own.
+//
+// Every source builds the shared statement IR (stmt.ts: lines, if / else
+// if / else, constant-count for) and prints it with one printer: blocks
+// here, table rows and entries in machineGen.ts, flows in flowGen.ts. Loop
+// variables are numbered across all of them (`repeat`).
 //
 // Pin blocks either take a pin number (`mw_gpio_*`, `mw_on_pin_edge`) or
 // name a pin-table label (`mw_pin_*`, `mw_on_pin`), which must be a row of
@@ -48,7 +57,20 @@
 // support is an error rather than being dropped silently.
 
 import { EVENT_BLOCKS, blockSupported } from "./defs";
-import { type MachineHost, type PlannedMachine, emitMachines, inStateExpr, plannedById, planMachines, raiseCall } from "./machineGen";
+import { type Stmt, line, printStmts, toggleStmt, writeStmt } from "./stmt";
+import { type FlowHost, lowerFlows } from "./flowGen";
+import {
+  type MachineHost,
+  type PlannedMachine,
+  emitMachines,
+  inStateExpr,
+  planInState,
+  planMachines,
+  planRaise,
+  plannedById,
+  raiseCall,
+} from "./machineGen";
+import { EDGE_CODE, type Flow } from "../model/flows";
 import { type Machine, parseMachineRef } from "../model/machines";
 import { EMPTY_PINS, PULL_CODES, type PinFunc, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
@@ -352,6 +374,7 @@ class Gen {
     private readonly profile: ProfileId,
     private readonly pins: PinTable,
     private readonly machines: readonly Machine[],
+    private readonly flows: readonly Flow[] = [],
   ) {
     this.host = {
       str: (t) => this.str(t),
@@ -673,12 +696,12 @@ class Gen {
   }
 
   /** Statements appending a value to TX (numbers as decimal). */
-  text(b: BlockJson | undefined, ctx: Ctx, pad: string, out: string[]): void {
+  text(b: BlockJson | undefined, ctx: Ctx, out: Stmt[]): void {
     if (!b || isDisabled(b)) return;
     if (!this.supported(b)) return;
     if (this.typeOf(b) === "number") {
       this.helper("txNum");
-      out.push(`${pad}txNum(${this.num(b, ctx)});`);
+      out.push(line(`txNum(${this.num(b, ctx)});`));
       return;
     }
     switch (b.type) {
@@ -687,12 +710,12 @@ class Gen {
         if (s === "") return;
         const id = this.str(s);
         this.helper("txBytes");
-        out.push(`${pad}txBytes(${id}, ${id}_LEN);`);
+        out.push(line(`txBytes(${id}, ${id}_LEN);`));
         return;
       }
       case "text_join": {
         const count = Number((b.extraState as { itemCount?: unknown } | undefined)?.itemCount ?? 2);
-        for (let i = 0; i < Math.min(count, 64); i++) this.text(input(b, `ADD${i}`), ctx, pad, out);
+        for (let i = 0; i < Math.min(count, 64); i++) this.text(input(b, `ADD${i}`), ctx, out);
         return;
       }
       case "mw_message_text":
@@ -701,7 +724,7 @@ class Gen {
           return;
         }
         this.helper("txBytes");
-        out.push(`${pad}txBytes(msgPtr, msgLen);`);
+        out.push(line(`txBytes(msgPtr, msgLen);`));
         return;
       default:
         this.error(b, `block "${b.type}" is not supported by the generator`);
@@ -709,10 +732,10 @@ class Gen {
   }
 
   /** Builds a value into TX: resets it, then appends. */
-  buildText(b: BlockJson | undefined, ctx: Ctx, pad: string, out: string[]): void {
+  buildText(b: BlockJson | undefined, ctx: Ctx, out: Stmt[]): void {
     this.buffer("TX");
-    out.push(`${pad}txLen = 0;`);
-    this.text(b, ctx, pad, out);
+    out.push(line(`txLen = 0;`));
+    this.text(b, ctx, out);
   }
 
   publishConst(key: string, b: BlockJson): string {
@@ -724,29 +747,36 @@ class Gen {
 
   // ---- statements
 
-  stmts(first: BlockJson | undefined, ctx: Ctx, pad: string, out: string[]): void {
+  /** A bounded loop: a fresh loop variable, then the body built with it
+   * (allocated before the body, so nested loops number outside-in). */
+  repeat(count: number, body: (v: string) => Stmt[]): Stmt {
+    const v = `i${this.loopVars++}`;
+    return { kind: "for", v, count, body: body(v) };
+  }
+
+  /** A block stack as statements. */
+  stmts(first: BlockJson | undefined, ctx: Ctx): Stmt[] {
+    const out: Stmt[] = [];
     for (let b = first; b; b = nextBlock(b)) {
       if (isDisabled(b)) continue;
       if (!this.supported(b)) continue;
-      this.stmt(b, ctx, pad, out);
+      this.stmt(b, ctx, out);
     }
+    return out;
   }
 
-  private stmt(b: BlockJson, ctx: Ctx, pad: string, out: string[]): void {
-    const inner = `${pad}  `;
+  private stmt(b: BlockJson, ctx: Ctx, out: Stmt[]): void {
     switch (b.type) {
       case "controls_if": {
         const st = (b.extraState ?? {}) as { elseIfCount?: number; hasElse?: boolean };
         const branches = 1 + Math.min(Number(st.elseIfCount ?? 0), 64);
+        const arms: { cond: string; body: Stmt[] }[] = [];
         for (let i = 0; i < branches; i++) {
-          out.push(`${pad}${i === 0 ? "if" : "} else if"} (${this.num(input(b, `IF${i}`), ctx)} != 0) {`);
-          this.stmts(input(b, `DO${i}`), ctx, inner, out);
+          const cond = this.num(input(b, `IF${i}`), ctx);
+          arms.push({ cond, body: this.stmts(input(b, `DO${i}`), ctx) });
         }
-        if (st.hasElse || b.inputs?.ELSE) {
-          out.push(`${pad}} else {`);
-          this.stmts(input(b, "ELSE"), ctx, inner, out);
-        }
-        out.push(`${pad}}`);
+        const otherwise = st.hasElse || b.inputs?.ELSE ? this.stmts(input(b, "ELSE"), ctx) : null;
+        out.push({ kind: "if", arms, else: otherwise });
         return;
       }
       case "controls_repeat":
@@ -757,10 +787,7 @@ class Gen {
           return;
         }
         if (n > MAX_LOOP) this.error(b, `repeat at most ${MAX_LOOP} times`);
-        const i = `i${this.loopVars++}`;
-        out.push(`${pad}for (let ${i}: i32 = 0; ${i} < ${Math.max(0, Math.min(n, MAX_LOOP))}; ${i}++) {`);
-        this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 }, inner, out);
-        out.push(`${pad}}`);
+        out.push(this.repeat(Math.max(0, Math.min(n, MAX_LOOP)), () => this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 })));
         return;
       }
       case "controls_for": {
@@ -781,11 +808,12 @@ class Gen {
           return;
         }
         const signed = from <= to ? step : -step;
-        const i = `i${this.loopVars++}`;
-        out.push(`${pad}for (let ${i}: i32 = 0; ${i} < ${count}; ${i}++) {`);
-        out.push(`${inner}${v} = ${from < 0 ? `(${from})` : from} + ${i} * ${signed < 0 ? `(${signed})` : signed};`);
-        this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 }, inner, out);
-        out.push(`${pad}}`);
+        out.push(
+          this.repeat(count, (i) => [
+            line(`${v} = ${from < 0 ? `(${from})` : from} + ${i} * ${signed < 0 ? `(${signed})` : signed};`),
+            ...this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 }),
+          ]),
+        );
         return;
       }
       case "controls_flow_statements":
@@ -793,7 +821,7 @@ class Gen {
           this.error(b, "break and continue must be inside a loop");
           return;
         }
-        out.push(`${pad}${fieldText(b, "FLOW") === "CONTINUE" ? "continue" : "break"};`);
+        out.push(line(`${fieldText(b, "FLOW") === "CONTINUE" ? "continue" : "break"};`));
         return;
       case "variables_set": {
         const v = this.variable(b);
@@ -801,19 +829,19 @@ class Gen {
           this.error(b, "variables hold numbers; text can only be published, logged or shown");
           return;
         }
-        if (v) out.push(`${pad}${v} = ${this.num(input(b, "VALUE"), ctx)};`);
+        if (v) out.push(line(`${v} = ${this.num(input(b, "VALUE"), ctx)};`));
         return;
       }
       case "math_change": {
         const v = this.variable(b);
-        if (v) out.push(`${pad}${v} += ${this.num(input(b, "DELTA"), ctx)};`);
+        if (v) out.push(line(`${v} += ${this.num(input(b, "DELTA"), ctx)};`));
         return;
       }
       case "text_print":
       case "mw_log":
-        this.buildText(input(b, "TEXT"), ctx, pad, out);
+        this.buildText(input(b, "TEXT"), ctx, out);
         this.use("log");
-        out.push(`${pad}mw_log(TX, txLen);`);
+        out.push(line(`mw_log(TX, txLen);`));
         return;
       case "mw_publish": {
         const key = fieldText(b, "KEY");
@@ -821,54 +849,54 @@ class Gen {
         if (this.profile === "badge" && key.startsWith("badge/")) {
           this.warn(b, `use the badge blocks for ${key}; a malformed payload there is refused`);
         }
-        this.buildText(input(b, "DATA"), ctx, pad, out);
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, TX, txLen);`);
+        this.buildText(input(b, "DATA"), ctx, out);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, TX, txLen);`));
         return;
       }
       case "mw_gpio_output": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         this.use("gpio_output");
-        out.push(`${pad}mw_gpio_output(${p});`);
+        out.push(line(`mw_gpio_output(${p});`));
         return;
       }
       case "mw_gpio_input": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         const pl = this.intField(b, "PULL", 0, 2, "pull");
         this.use("gpio_input");
-        out.push(`${pad}mw_gpio_input(${p}, ${pl});`);
+        out.push(line(`mw_gpio_input(${p}, ${pl});`));
         return;
       }
       case "mw_gpio_write": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         this.helper("pinWrite");
-        out.push(`${pad}pinWrite(${p}, ${this.num(input(b, "LEVEL"), ctx)});`);
+        out.push(writeStmt(String(p), this.num(input(b, "LEVEL"), ctx)));
         return;
       }
       case "mw_gpio_toggle": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         this.helper("pinToggle");
-        out.push(`${pad}pinToggle(${p});`);
+        out.push(toggleStmt(String(p)));
         return;
       }
       case "mw_pin_write": {
         const p = this.pinLabel(b, ["gpio-out"], "a GPIO output");
         if (!p) return;
         this.helper("pinWrite");
-        out.push(`${pad}pinWrite(${p.ident}, ${this.num(input(b, "LEVEL"), ctx)});`);
+        out.push(writeStmt(p.ident, this.num(input(b, "LEVEL"), ctx)));
         return;
       }
       case "mw_pin_toggle": {
         const p = this.pinLabel(b, ["gpio-out"], "a GPIO output");
         if (!p) return;
         this.helper("pinToggle");
-        out.push(`${pad}pinToggle(${p.ident});`);
+        out.push(toggleStmt(p.ident));
         return;
       }
       case "mw_sm_raise": {
         const r = this.machineRef(b, "EVENT");
         if (!r?.planned) return;
         this.blockRaised.add(`${r.planned.k}.${r.name}`);
-        out.push(`${pad}${raiseCall(r.planned.k, r.name)}`);
+        out.push(line(raiseCall(r.planned.k, r.name)));
         return;
       }
       case "mw_timer_start": {
@@ -876,43 +904,43 @@ class Gen {
         const ms = this.intField(b, "MS", 1, 2_000_000, "period");
         const periodic = this.intField(b, "MODE", 0, 1, "mode");
         this.use("timer_start");
-        out.push(`${pad}mw_timer_start(${id}, ${ms * 1000}, ${periodic});`);
+        out.push(line(`mw_timer_start(${id}, ${ms * 1000}, ${periodic});`));
         return;
       }
       case "mw_timer_stop": {
         const id = this.intField(b, "ID", 0, 3, "timer");
         this.use("timer_stop");
-        out.push(`${pad}mw_timer_stop(${id});`);
+        out.push(line(`mw_timer_stop(${id});`));
         return;
       }
       case "badge_led":
         this.helper("ledSet");
         out.push(
-          `${pad}ledSet(${this.num(input(b, "INDEX"), ctx)}, ${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`,
+          line(`ledSet(${this.num(input(b, "INDEX"), ctx)}, ${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`),
         );
         return;
       case "badge_leds_fill":
         this.helper("ledFill");
-        out.push(`${pad}ledFill(${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`);
+        out.push(line(`ledFill(${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`));
         return;
       case "badge_set_leds": {
         const k = this.publishConst(BADGE_LEDS, b);
         this.buffer("LEDS");
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, LEDS, 24);`);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, LEDS, 24);`));
         return;
       }
       case "badge_show_text": {
         const k = this.publishConst(BADGE_TEXT, b);
-        this.buildText(input(b, "TEXT"), ctx, pad, out);
+        this.buildText(input(b, "TEXT"), ctx, out);
         this.helper("textCap");
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, TX, textCap(${MAX_BADGE_TEXT}));`);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, TX, textCap(${MAX_BADGE_TEXT}));`));
         return;
       }
       case "badge_pet_mode": {
         const mode = this.intField(b, "MODE", 0, 5, "pet mode");
         const k = this.publishConst(BADGE_PET, b);
         const m = this.str(String.fromCharCode(mode));
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, ${m}, 1);`);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, ${m}, 1);`));
         return;
       }
       default:
@@ -966,10 +994,10 @@ class Gen {
     const tops = topBlocks(this.ws).filter((b) => !isDisabled(b));
     const initBody: string[] = [];
     const setup: string[] = [];
-    const every: { b: BlockJson; ms: number; body: string[] }[] = [];
+    const every: { b?: BlockJson; ms: number; body: string[] }[] = [];
     const messages: { key: string; body: string[] }[] = [];
     const buttons: { button: number; action: number; body: string[] }[] = [];
-    const pins = new Map<number, { pull: number; edges: number; b: BlockJson }>();
+    const pins = new Map<number, { pull: number; edges: number; b?: BlockJson }>();
     const pinBodies: { pin: number; edge: number; body: string[] }[] = [];
     const timers: { id: number; body: string[] }[] = [];
 
@@ -983,12 +1011,12 @@ class Gen {
       const ctx = (event: EventCtx): Ctx => ({ event, loops: 0 });
       switch (b.type) {
         case "mw_on_init":
-          this.stmts(input(b, "DO"), ctx("init"), "  ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("init")), "  ", body);
           initBody.push(...body);
           break;
         case "mw_every": {
           const ms = this.intField(b, "MS", MIN_TICK_MS, 2_147_483_647, "period");
-          this.stmts(input(b, "DO"), ctx("tick"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("tick")), "    ", body);
           every.push({ b, ms, body });
           break;
         }
@@ -997,13 +1025,13 @@ class Gen {
           const p = keyProblem(key);
           if (p) this.error(b, p);
           this.slot(key);
-          this.stmts(input(b, "DO"), ctx("message"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("message")), "    ", body);
           messages.push({ key, body });
           break;
         }
         case "badge_on_button":
           this.slot(BADGE_BUTTONS);
-          this.stmts(input(b, "DO"), ctx("button"), "      ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("button")), "      ", body);
           buttons.push({
             button: this.intField(b, "BUTTON", 0, 5, "button"),
             action: this.intField(b, "ACTION", 0, 2, "action"),
@@ -1017,14 +1045,14 @@ class Gen {
           const prev = pins.get(pin);
           if (prev && prev.pull !== pull) this.error(b, `pin ${pin} already has a handler with a different pull`);
           pins.set(pin, { pull, edges: (prev?.edges ?? 0) | edge, b });
-          this.stmts(input(b, "DO"), ctx("pin"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("pin")), "    ", body);
           pinBodies.push({ pin, edge, body });
           break;
         }
         case "mw_on_pin": {
           const p = this.pinLabel(b, ["gpio-in"], "a GPIO input");
           const edge = this.intField(b, "EDGE", 1, 3, "edge");
-          this.stmts(input(b, "DO"), ctx("pin"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("pin")), "    ", body);
           if (!p) break;
           const r = this.pins.rows.find((x) => x.label === fieldText(b, "LABEL"));
           const pull = PULL_CODES[r?.pull ?? "none"];
@@ -1035,15 +1063,84 @@ class Gen {
           break;
         }
         case "mw_on_timer":
-          this.stmts(input(b, "DO"), ctx("timer"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("timer")), "    ", body);
           timers.push({ id: this.intField(b, "ID", 0, 3, "timer"), body });
           break;
         case "mw_sm_on_enter": {
           const r = this.machineRef(b, "STATE");
-          this.stmts(input(b, "DO"), ctx("enter"), "  ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("enter")), "  ", body);
           if (!r?.planned) break;
           const key = `${r.planned.k}.${r.name}`;
           this.hats.set(key, [...(this.hats.get(key) ?? []), ...body]);
+          break;
+        }
+      }
+    }
+
+    // Flows (flowGen.ts): each body goes where its entry's hat block's
+    // would, after the blocks' own.
+    const flowHost: FlowHost = {
+      ...this.host,
+      inState: (m, st) => planInState(this.plan, m, st),
+      raise: (m, ev) => {
+        const r = planRaise(this.plan, m, ev);
+        if ("raised" in r) this.blockRaised.add(r.raised);
+        return r;
+      },
+      repeat: (count, body) => this.repeat(count, body),
+    };
+    for (const { flow, entry, body } of lowerFlows(this.flows, flowHost)) {
+      const fail = (msg: string) => this.error(undefined, `flow ${flow.id}: ${msg}`);
+      const lines = (pad: string) => {
+        const out: string[] = [];
+        printStmts(body, pad, out);
+        return out;
+      };
+      switch (entry.on) {
+        case "init":
+          initBody.push(...lines("  "));
+          break;
+        case "every":
+          if (!Number.isInteger(entry.ms) || entry.ms < MIN_TICK_MS || entry.ms > 2_147_483_647) {
+            fail(`the period must be a whole number from ${MIN_TICK_MS} to 2147483647 ms`);
+            break;
+          }
+          every.push({ ms: entry.ms, body: lines("    ") });
+          break;
+        case "message": {
+          const p = keyProblem(entry.key);
+          if (p) {
+            fail(p);
+            break;
+          }
+          this.slot(entry.key);
+          messages.push({ key: entry.key, body: lines("    ") });
+          break;
+        }
+        case "pin-edge": {
+          const p = this.labelPin(entry.label, ["gpio-in"], "a GPIO input");
+          if (typeof p === "string") {
+            fail(p);
+            break;
+          }
+          const edge = EDGE_CODE[entry.edge] ?? 3;
+          const r = this.pins.rows.find((x) => x.label === entry.label);
+          const pull = PULL_CODES[r?.pull ?? "none"];
+          const prev = pins.get(p.pin);
+          if (prev && prev.pull !== pull) fail(`pin ${p.pin} already has a handler with a different pull`);
+          pins.set(p.pin, { pull, edges: (prev?.edges ?? 0) | edge, b: prev?.b });
+          pinBodies.push({ pin: p.pin, edge, body: lines("    ") });
+          break;
+        }
+        case "entered": {
+          const ref = parseMachineRef(entry.state);
+          const planned = ref ? plannedById(this.plan, ref.id) : undefined;
+          if (!ref || !planned || !planned.states.has(ref.name)) {
+            fail(`"${entry.state}" is not a state of a state machine that gets code`);
+            break;
+          }
+          const key = `${planned.k}.${ref.name}`;
+          this.hats.set(key, [...(this.hats.get(key) ?? []), ...lines("  ")]);
           break;
         }
       }
@@ -1206,9 +1303,16 @@ const FUNC_COMMENT: Readonly<Record<PinFunc, string>> = {
   "spi-cs": "SPI CS",
 };
 
-/** Generates the AssemblyScript module for a workspace, its pin table and
- * its state machines (none by default: a workspace from before the table
- * or the machines generates exactly what it did). */
-export function generate(ws: WorkspaceJson, profile: ProfileId, pins: PinTable = EMPTY_PINS, machines: readonly Machine[] = []): GenResult {
-  return new Gen(ws, profile, pins, machines).run();
+/** Generates the AssemblyScript module for a workspace, its pin table,
+ * its state machines and its flows (none by default: a workspace from
+ * before the table, the machines or the flows generates exactly what it
+ * did). */
+export function generate(
+  ws: WorkspaceJson,
+  profile: ProfileId,
+  pins: PinTable = EMPTY_PINS,
+  machines: readonly Machine[] = [],
+  flows: readonly Flow[] = [],
+): GenResult {
+  return new Gen(ws, profile, pins, machines, flows).run();
 }

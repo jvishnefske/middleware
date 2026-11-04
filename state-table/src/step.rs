@@ -13,7 +13,7 @@
 //! the drain are dropped. It returns how many steps ran, which is at most
 //! `1 + M` for `M` machines.
 
-use crate::{MAX_ACTIONS, Machine};
+use crate::{Leaf, MAX_ACTIONS, Machine};
 
 /// Which row fired, and the state the machine is in after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,11 +25,11 @@ pub struct Fired {
 }
 
 /// The row that fires when `event` (an index into `machine.events`) is
-/// raised in `state` (an index into `machine.states`), reading pins
-/// through `read`; see the module docs.
+/// raised in `state` (an index into `machine.states`), reading guard
+/// leaves (pins, machines' states) through `read`; see the module docs.
 pub fn step(
     machine: &Machine<'_>,
-    read: impl Fn(&str) -> bool,
+    read: impl Fn(Leaf<'_>) -> bool,
     state: usize,
     event: usize,
 ) -> Option<Fired> {
@@ -251,12 +251,10 @@ mod tests {
         ];
         let m = machine(&rows);
         let read = |door: bool, button: bool| {
-            move |l: &str| {
-                if l == "DOOR" {
-                    door
-                } else {
-                    l == "BUTTON" && button
-                }
+            move |l: Leaf<'_>| match l {
+                Leaf::Pin("DOOR") => door,
+                Leaf::Pin("BUTTON") => button,
+                _ => false,
             }
         };
         assert_eq!(
