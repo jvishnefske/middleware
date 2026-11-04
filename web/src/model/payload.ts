@@ -1,16 +1,20 @@
 // The payload model (IR): one versioned document that every editor view
-// reads and writes. The Blocks view edits `logic[0]` (a Blockly workspace)
-// and the Pins view edits `pins`; the state-machine table (round 5) and
-// the flow canvas (round 6) will add `machines` entries and `flow` logic
-// sources. Pure: JSON in, a validated model out, and back.
+// reads and writes. The Blocks view edits `logic[0]` (a Blockly workspace),
+// the Pins view edits `pins` and the States view edits `machines`; the
+// flow canvas will add `flow` logic sources. Pure: JSON in, a validated
+// model out, and back.
 //
-// Version 1:
+// Version 2:
 //
-//   { format: "middleware-payload", version: 1,
+//   { format: "middleware-payload", version: 2,
 //     board: TargetId,                         // target.ts
 //     pins: { rows: PinRow[], buses: BusSetting[] },   // pins.ts
-//     logic: [ { kind: "blocks", workspace } ],        // exactly one in v1
-//     machines: [] }                           // reserved; empty in v1
+//     logic: [ { kind: "blocks", workspace } ],        // exactly one
+//     machines: Machine[] }                    // machines.ts, at most 4
+//
+// Version 1 is version 2 with `machines` always empty; a version-1 file
+// parses to the same model with `version: 2` (`migrated`), so its
+// generated code is unchanged.
 //
 // `parseModel` is strict about the model's own shape: an unknown key, a
 // wrong type, a pin that is not a whole number 0..63 or a version newer
@@ -30,10 +34,11 @@ import { type ProfileId, isProfileId } from "../blocks/profiles";
 import { type WorkspaceJson, workspaceProblem } from "../blocks/workspace";
 import type { BoardId } from "../onboarding/boards";
 import { type BusSetting, EMPTY_PINS, PIN_FUNCS, PULLS, type PinRow, type PinTable } from "./pins";
+import { type Machine, copyMachines, machinesProblem } from "./machines";
 import { type TargetId, isTargetId, profileOf, targetForProfile } from "./target";
 
 export const MODEL_FORMAT = "middleware-payload";
-export const MODEL_VERSION = 1;
+export const MODEL_VERSION = 2;
 /** The Blocks tab's export format before the model (still imported). */
 export const LEGACY_BLOCKS_FORMAT = "middleware-blocks";
 
@@ -58,12 +63,12 @@ export interface PayloadModel {
   board: TargetId;
   pins: PinTable;
   logic: [BlocksSource];
-  /** State machines (round 5); always empty in version 1. */
-  machines: [];
+  /** State-machine tables (machines.ts); none in a version-1 file. */
+  machines: readonly Machine[];
 }
 
-export function makeModel(board: TargetId, workspace: WorkspaceJson, pins: PinTable = EMPTY_PINS): PayloadModel {
-  return { format: MODEL_FORMAT, version: MODEL_VERSION, board, pins, logic: [{ kind: "blocks", workspace }], machines: [] };
+export function makeModel(board: TargetId, workspace: WorkspaceJson, pins: PinTable = EMPTY_PINS, machines: readonly Machine[] = []): PayloadModel {
+  return { format: MODEL_FORMAT, version: MODEL_VERSION, board, pins, logic: [{ kind: "blocks", workspace }], machines };
 }
 
 export function workspaceOf(m: PayloadModel): WorkspaceJson {
@@ -81,6 +86,10 @@ export function withWorkspace(m: PayloadModel, workspace: WorkspaceJson): Payloa
 
 export function withPins(m: PayloadModel, pins: PinTable): PayloadModel {
   return { ...m, pins };
+}
+
+export function withMachines(m: PayloadModel, machines: readonly Machine[]): PayloadModel {
+  return { ...m, machines };
 }
 
 export function withBoard(m: PayloadModel, board: TargetId): PayloadModel {
@@ -147,7 +156,8 @@ function busProblem(v: unknown, at: string): string | null {
   return `${at}.kind must be "i2c" or "spi"`;
 }
 
-/** Checks a version-1 model's shape; returns the problem, or null. */
+/** Checks a version-1 or version-2 model's shape; returns the problem,
+ * or null. */
 export function modelProblem(v: unknown): string | null {
   if (!isObj(v)) return "not a JSON object";
   if (v.format !== MODEL_FORMAT) return `format must be "${MODEL_FORMAT}"`;
@@ -170,15 +180,18 @@ export function modelProblem(v: unknown): string | null {
     const p = busProblem(b, `pins.buses[${i}]`);
     if (p) return p;
   }
-  if (!Array.isArray(v.logic) || v.logic.length !== 1) return "logic must hold exactly one Blocks workspace in version 1";
+  if (!Array.isArray(v.logic) || v.logic.length !== 1) return "logic must hold exactly one Blocks workspace";
   const src: unknown = v.logic[0];
   if (!isObj(src) || src.kind !== "blocks") return 'logic[0].kind must be "blocks" (other logic sources need a newer editor)';
   const srcExtra = extraKey(src, ["kind", "workspace"]);
   if (srcExtra !== undefined) return `logic[0] has an unknown field "${srcExtra}"`;
   const ws = workspaceProblem(src.workspace);
   if (ws) return `logic[0].workspace is not a Blocks workspace: ${ws}`;
-  if (!Array.isArray(v.machines) || v.machines.length !== 0) return "machines must be empty in version 1 (state machines need a newer editor)";
-  return null;
+  if (v.version === 1) {
+    if (!Array.isArray(v.machines) || v.machines.length !== 0) return "machines must be empty in version 1";
+    return null;
+  }
+  return machinesProblem(v.machines);
 }
 
 /** The model from a legacy Blocks export or a bare workspace: same
@@ -200,9 +213,18 @@ export function parseModel(text: string, fallback: BoardId, fallbackProfile: Pro
   if (isObj(value) && value.format === MODEL_FORMAT) {
     const p = modelProblem(value);
     if (p) return { ok: false, error: `not a payload model: ${p}` };
-    // Shape checked above; copy the bus list so later edits never alias the input.
+    // Shape checked above; copy the lists so later edits never alias the input.
     const m = value as unknown as PayloadModel;
-    return { ok: true, model: { ...m, pins: { rows: m.pins.rows.map((r: PinRow) => ({ ...r })), buses: m.pins.buses.map((b: BusSetting) => ({ ...b })) } }, migrated: false };
+    return {
+      ok: true,
+      model: {
+        ...m,
+        version: MODEL_VERSION,
+        pins: { rows: m.pins.rows.map((r: PinRow) => ({ ...r })), buses: m.pins.buses.map((b: BusSetting) => ({ ...b })) },
+        machines: copyMachines(m.machines),
+      },
+      migrated: (value.version as number) < MODEL_VERSION,
+    };
   }
   const legacy = isObj(value) && value.format === LEGACY_BLOCKS_FORMAT;
   const workspace = legacy ? (value as Obj).workspace : value;

@@ -1,5 +1,5 @@
 // The Pins view of the Blocks tab: the payload's pin table as a keyboard-
-// editable grid. Every cell is a labelled form control in a real <table>
+// editable grid (grid.ts: ids `pin-<row>-<column>`, keys, focus). Every cell is a labelled form control in a real <table>
 // (caption, column headers); Tab moves through the cells, Ctrl+arrow keys
 // move between cells in any direction, and Up / Down move between rows in
 // the text cells. Each change goes to `onChange` as a new table (the page
@@ -36,6 +36,7 @@ import {
 import { type TargetId, boardOf, targetLabel } from "../model/target";
 import type { BoardPins, GpioInfo } from "../protocol/wasm";
 import { h } from "./dom";
+import { focusKeeper, grid } from "./grid";
 
 const LABEL_RE = /^[A-Za-z][A-Za-z0-9_]{0,23}$/;
 const COLS = ["label", "pin", "func", "bus", "pull", "initial", "note", "remove"] as const;
@@ -136,10 +137,11 @@ export function pinTableView(ev: PinTableEvents): PinTableView {
     if (edit && !(t.dataset.c === "label" && Number(t.dataset.r) === edit.row)) edit = null;
   });
 
+  const g = grid<Col>("pin", COLS, "label");
+  const keeper = focusKeeper(tableEl);
   /** Cell to focus after the next render. */
-  let pendingFocus: { r: number; c: Col; start?: number | null; end?: number | null } | null = null;
   function focusCell(r: number, c: Col) {
-    pendingFocus = { r, c };
+    keeper.want(g.cellId(r, c), g.cellId(r, "label"));
   }
 
   function change(next: PinTable, rename?: { from: string; to: string }) {
@@ -180,18 +182,7 @@ export function pinTableView(ev: PinTableEvents): PinTableView {
     }
   });
 
-  function cellId(r: number, c: Col) {
-    return `pin-${r}-${c}`;
-  }
-
-  function control<E extends HTMLElement>(r: number, c: Col, el: E, label: string, described: string | null): E {
-    el.id = cellId(r, c);
-    el.dataset.r = String(r);
-    el.dataset.c = c;
-    el.setAttribute("aria-label", label);
-    if (described) el.setAttribute("aria-describedby", described);
-    return el;
-  }
+  const control = <E extends HTMLElement>(r: number, c: Col, el: E, label: string, described: string | null): E => g.control(r, c, el, label, described);
 
   function issueItem(x: PinIssue): HTMLElement {
     const li = h("li", { class: "error" }, x.message);
@@ -210,7 +201,7 @@ export function pinTableView(ev: PinTableEvents): PinTableView {
 
   function rowEls(r: PinRow, i: number, rowIssues: readonly PinIssue[]): HTMLElement[] {
     const name = r.label || `row ${i + 1}`;
-    const issueId = rowIssues.length ? `pin-issues-${i}` : null;
+    const issueId = rowIssues.length ? g.issuesId(i) : null;
     const mark = <E extends HTMLElement>(el: E, f: PinIssue["field"]): E => {
       if (rowIssues.some((x) => x.field === f)) el.setAttribute("aria-invalid", "true");
       return el;
@@ -294,15 +285,7 @@ export function pinTableView(ev: PinTableEvents): PinTableView {
         h("td", {}, remove),
       ),
     ];
-    if (issueId) {
-      out.push(
-        h(
-          "tr",
-          { class: "pin-issue-row" },
-          h("td", { colspan: COLS.length }, h("ul", { class: "issues", id: issueId }, ...rowIssues.map(issueItem))),
-        ),
-      );
-    }
+    if (issueId) out.push(g.issueRow(i, rowIssues.map(issueItem), "pin-issue-row"));
     return out;
   }
 
@@ -320,46 +303,11 @@ export function pinTableView(ev: PinTableEvents): PinTableView {
   }
 
   // Keyboard movement between cells.
-  tableEl.addEventListener("keydown", (e) => {
-    const t = e.target as HTMLElement;
-    const r = Number(t.dataset.r);
-    const c = COLS.indexOf(t.dataset.c as Col);
-    if (Number.isNaN(r) || c < 0) return;
-    const text = t instanceof HTMLInputElement && t.type === "text";
-    let dr = 0;
-    let dc = 0;
-    if (e.ctrlKey || e.metaKey) {
-      if (e.key === "ArrowUp") dr = -1;
-      else if (e.key === "ArrowDown") dr = 1;
-      else if (e.key === "ArrowLeft") dc = -1;
-      else if (e.key === "ArrowRight") dc = 1;
-    } else if (text && !e.altKey && !e.shiftKey) {
-      if (e.key === "ArrowUp") dr = -1;
-      else if (e.key === "ArrowDown") dr = 1;
-    }
-    if (dr === 0 && dc === 0) return;
-    // The next cell with a control (some cells show a dash); moving rows
-    // into a dash cell lands on that row's label.
-    for (let k = 1; k <= COLS.length; k++) {
-      const nr = r + dr * k;
-      const nc = c + dc * k;
-      if (nr < 0 || nr >= table.rows.length || nc < 0 || nc >= COLS.length) break;
-      const el = document.getElementById(cellId(nr, COLS[nc] as Col)) ?? (dr !== 0 ? document.getElementById(cellId(nr, "label")) : null);
-      if (el) {
-        e.preventDefault();
-        el.focus();
-        return;
-      }
-    }
-  });
+  g.attachKeys(tableEl, () => table.rows.length);
 
   function render(t: TargetId, next: PinTable, issues: readonly PinIssue[], board: BoardPins | null) {
     // Remember the focused cell (and caret) to restore it.
-    const active = document.activeElement as HTMLElement | null;
-    if (!pendingFocus && active && tableEl.contains(active) && active.dataset.r !== undefined) {
-      const input = active instanceof HTMLInputElement ? active : null;
-      pendingFocus = { r: Number(active.dataset.r), c: active.dataset.c as Col, start: input?.selectionStart, end: input?.selectionEnd };
-    }
+    keeper.remember();
     target = t;
     table = next;
     info = board;
@@ -382,15 +330,7 @@ export function pinTableView(ev: PinTableEvents): PinTableView {
     summary.className = `pin-summary ${n ? "bad" : "good"}`;
     renderAdd();
     addSel.disabled = !b;
-    if (pendingFocus) {
-      const f = pendingFocus;
-      pendingFocus = null;
-      const el = document.getElementById(cellId(f.r, f.c)) ?? document.getElementById(cellId(f.r, "label"));
-      if (el) {
-        el.focus();
-        if (el instanceof HTMLInputElement && el.type === "text" && f.start != null) el.setSelectionRange(f.start, f.end ?? f.start);
-      }
-    }
+    keeper.restore();
   }
 
   const el = h("div", { class: "pins-view" }, heading, intro, summary, scroller, empty, tableIssues, busesEl, h("p", { class: "row" }, addSel), keys);

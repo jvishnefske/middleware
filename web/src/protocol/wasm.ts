@@ -5,7 +5,8 @@
 // here re-implements the protocol. The raw wasm-bindgen exports return plain
 // objects typed `object`/`any`; this file gives them TypeScript shapes.
 
-import type { BusSetting, PinIssue, PinRow } from "../model/pins";
+import type { Machine, MachineIssue } from "../model/machines";
+import type { BusSetting, PinFunc, PinIssue, PinRow } from "../model/pins";
 import init, * as pkg from "../pkg/protocol_wasm.js";
 
 /** A frame decoded from the serial line. */
@@ -277,6 +278,9 @@ export interface Protocol {
   /** Checks a pin table on a chip (board-pins rules + the ABI's bus
    * argument rules); throws for an unknown chip. */
   checkPins(chip: string, rows: readonly PinRow[], buses: readonly BusSetting[]): PinIssue[];
+  /** Checks state machines against the pin table's labels and functions
+   * (the `state-table` crate's rules); a `MachineChecker`. */
+  checkMachines(machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[]): MachineIssue[];
   /** Loads a payload into the simulator; throws on rejection or init trap. */
   newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void): Simulator;
 }
@@ -314,6 +318,7 @@ function wrap(): Protocol {
     hasSimulator,
     boardPins: (chip) => pkg.boardPins(chip) as BoardPins,
     checkPins: (chip, rows, buses) => pkg.checkPins(chip, [...rows], [...buses]) as PinIssue[],
+    checkMachines: (machines, pins) => pkg.checkMachines([...machines], [...pins]) as MachineIssue[],
     newSimulator: (wasm, onEvent) => {
       // `Simulator` exists only when protocol-wasm was built with the
       // `simulator` feature (the default).

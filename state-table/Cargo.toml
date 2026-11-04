@@ -1,0 +1,13 @@
+[package]
+name = "state-table"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "State-machine tables for payloads: the checks the web editor shows (identifiers, references, pin functions, one unguarded row per cell, guard overlap, sizes, unreachable states, dead events) and the reference dispatch the generated code implements"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# no_std, no dependencies, no heap: built for wasm32 (web/protocol-wasm) and
+# for thumbv6m-none-eabi so a firmware can run the same tables. A member of
+# the root workspace, so `cargo test --workspace` runs its tests on the host.
+[dependencies]

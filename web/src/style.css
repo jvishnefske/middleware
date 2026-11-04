@@ -507,3 +507,209 @@ button.fix {
     color: #ff7a6b;
   }
 }
+/* States view: the state-machine grids (statesTable.ts). They scroll
+ * inside .pin-scroll boxes like the pin table, so a phone never scrolls
+ * the page sideways. */
+.states-view h4 {
+  font-size: 0.85rem;
+  margin: 1em 0 0.3em;
+}
+.sm-table {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 0.9rem;
+}
+.sm-table th,
+.sm-table td {
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.sm-table thead th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.sm-table input[type="text"] {
+  width: 8.5em;
+}
+.sm-table input.sm-text {
+  width: 10em;
+}
+.sm-table input.sm-num {
+  width: 5em;
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+}
+.sm-table select {
+  max-width: 12em;
+}
+.sm-table .sticky {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+.sm-table .sm-num-col {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.8rem;
+  padding-top: 9px;
+}
+.sm-table button.icon {
+  padding: 0 8px;
+}
+/* A cell's editor: one line per guard term or action, then its add button. */
+.sm-editor {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.sm-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+button.sm-add {
+  font-size: 0.8rem;
+  padding: 1px 8px;
+}
+.sm-tag {
+  font-size: 0.7rem;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.sm-tag.now {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.sm-table tr.has-issue td,
+.sm-table tr.has-issue th {
+  border-bottom: none;
+}
+.sm-table .grid-issue-row td {
+  white-space: normal;
+  padding-top: 0;
+}
+.sm-table .grid-issue-row ul {
+  position: sticky;
+  left: 0;
+  max-width: min(36rem, calc(100vw - 64px));
+  margin: 0 0 4px;
+}
+/* Errors block compiling (red, aria-invalid); warnings do not (amber,
+ * dashed). The words "Error" / "Warning" lead each message, so colour is
+ * never the only sign. */
+.sm-table [aria-invalid="true"],
+.sm-meta [aria-invalid="true"] {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px #c0392b;
+}
+.has-warning {
+  border-color: #b7791f;
+  border-style: dashed;
+}
+.states-view .issues .sev {
+  font-weight: 600;
+}
+.states-view .issues .warning {
+  color: #8a5a00;
+}
+/* The simulator's current state: its States row, its matrix row header
+ * and the transitions leaving it. */
+.sm-table tr.current td,
+.sm-table tr.current td.sticky,
+.sm-table tr.from-current td,
+.sm-table tr.from-current th,
+.sm-matrix th.current {
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+.sm-table tr.current td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.sm-rows-head h4 {
+  margin: 0;
+}
+.sm-rows-head {
+  margin: 1em 0 0.3em;
+}
+#sm-matrix-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+/* The matrix overview: read-only, one button per (state, event) cell. */
+.sm-matrix-scroll {
+  margin-bottom: 8px;
+}
+.sm-matrix {
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.sm-matrix th,
+.sm-matrix td {
+  border: 1px solid var(--line);
+  padding: 2px;
+  white-space: nowrap;
+  text-align: center;
+}
+.sm-matrix th {
+  padding: 4px 8px;
+  font-weight: 600;
+}
+.sm-matrix tbody th {
+  text-align: left;
+}
+.sm-matrix button {
+  width: 100%;
+  min-width: 4.5em;
+  border: none;
+  background: none;
+  padding: 4px 6px;
+}
+.sm-matrix button.hole {
+  color: var(--muted);
+}
+.sm-matrix button:hover,
+.sm-matrix button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+}
+.sim-states {
+  font-weight: 600;
+  margin: 4px 0;
+}
+.sim-states:empty {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  .sm-table [aria-invalid="true"],
+  .sm-meta [aria-invalid="true"] {
+    border-color: #ff7a6b;
+    box-shadow: 0 0 0 1px #ff7a6b;
+  }
+  .has-warning {
+    border-color: #e0a84a;
+  }
+  .states-view .issues .warning {
+    color: #e0a84a;
+  }
+  .sm-tag.now {
+    color: #111;
+  }
+  .sm-table tr.current td,
+  .sm-table tr.current td.sticky,
+  .sm-table tr.from-current td,
+  .sm-table tr.from-current th,
+  .sm-matrix th.current {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel));
+  }
+}
