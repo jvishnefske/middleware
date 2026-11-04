@@ -344,6 +344,20 @@ button.big {
   box-shadow: inset 0 0 0 1px var(--accent);
   font-weight: 600;
 }
+.start .substeps {
+  padding-left: 22px;
+  margin: 4px 0 6px;
+}
+.start .substeps li {
+  margin: 0 0 4px;
+}
+.start .download p {
+  overflow-wrap: anywhere;
+}
+.start .download .sha {
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+}
 .start .steps li.muted {
   list-style: none;
   margin-left: -22px;
