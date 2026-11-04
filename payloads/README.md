@@ -172,10 +172,18 @@ cam_jpeg_view and bench both ways.
 
 The byte-page build is reproducible: it passes `--remap-path-prefix` for
 the home directory, the cargo registry and the repository, so no absolute
-build path ends up in the module. `scripts/check-reproducible.sh [package...]`
+build path ends up in the module, and runs rustc through
+`scripts/rustc-stable-metadata.sh`, which gives the wasm32 crates a
+`-C metadata` derived from their path-normalized command lines: cargo
+hashes the absolute path of `middleware` (a path dependency outside this
+workspace, rust-lang/cargo#7645) into the crate hashes of it and of
+everything above it, and rustc orders generic instantiations by those
+hashes, so periph_demo's code and data order changed with the checkout
+path. `scripts/check-reproducible.sh [package...]`
 builds here and in a copy of the sources at another path and fails unless
 the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink,
-echo and cam_view, and for cam_jpeg_view and bench with their own sizes.
+echo, cam_view and periph_demo, and for cam_jpeg_view, bench and
+cam_ov2640_stream with their own sizes.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.
