@@ -8,6 +8,9 @@
 import type { Flow, FlowIssue } from "../model/flows";
 import type { Machine, MachineIssue } from "../model/machines";
 import type { BusSetting, PinFunc, PinIssue, PinRow } from "../model/pins";
+import type { PhaseClass, RecipeIssue } from "../model/procedural";
+import type { Allocation, MasterRecipe, ScriptEvent, SimulatedRun } from "../model/recipe";
+import type { AllocUnit } from "../model/plant";
 import init, * as pkg from "../pkg/protocol_wasm.js";
 
 /** A frame decoded from the serial line. */
@@ -285,6 +288,15 @@ export interface Protocol {
   /** Checks flows against the machines and the pin table (the
    * `state-table` crate's `flow` rules); a `FlowChecker`. */
   checkFlows(flows: readonly Flow[], machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[]): FlowIssue[];
+  /** Checks phase classes and a master recipe (recipe-core's rules). */
+  checkRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[]): RecipeIssue[];
+  /** Binds a recipe's steps to units' equipment phases (plant.ts
+   * `allocationUnits`), or says per unit why not. */
+  allocateRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly AllocUnit[]): Allocation;
+  /** Allocates and runs a recipe against simulated units until `untilMs`. */
+  simulateRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly AllocUnit[], script: readonly ScriptEvent[], untilMs: number): SimulatedRun;
+  /** The S88 phase state model: states, commands, and next[state][command..., Done]. */
+  phaseModel(): { states: string[]; commands: string[]; next: (string | null)[][] };
   /** Loads a payload into the simulator; throws on rejection or init trap. */
   newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void): Simulator;
 }
@@ -324,6 +336,10 @@ function wrap(): Protocol {
     checkPins: (chip, rows, buses) => pkg.checkPins(chip, [...rows], [...buses]) as PinIssue[],
     checkMachines: (machines, pins) => pkg.checkMachines([...machines], [...pins]) as MachineIssue[],
     checkFlows: (flows, machines, pins) => pkg.checkFlows([...flows], [...machines], [...pins]) as FlowIssue[],
+    checkRecipe: (recipe, classes) => pkg.checkRecipe(recipe, [...classes]) as RecipeIssue[],
+    allocateRecipe: (recipe, classes, units) => pkg.allocateRecipe(recipe, [...classes], [...units]) as Allocation,
+    simulateRecipe: (recipe, classes, units, script, untilMs) => pkg.simulateRecipe(recipe, [...classes], [...units], [...script], untilMs) as SimulatedRun,
+    phaseModel: () => pkg.phaseModel() as { states: string[]; commands: string[]; next: (string | null)[][] },
     newSimulator: (wasm, onEvent) => {
       // `Simulator` exists only when protocol-wasm was built with the
       // `simulator` feature (the default).

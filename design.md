@@ -3863,6 +3863,339 @@ wasmi's per-call fuel budget into RGB565 strips for the GC9A01.
   warnings denied, and the `fuel_probe` payload validated by `abi-check` —
   `payloads/scripts/check-all.sh`.
 
+### S88 recipe model (Q…)
+
+The payload editor began with one model per payload: a board, its pin
+table and its logic. That suits one board doing one job. It does not
+describe a procedure that spans several boards ("blink the status light,
+then take a reading on the sensor board"), and it ties the procedure to
+pins. The plant is now described the way ISA-88 (S88, IEC 61512-1) batch
+control describes a plant: three models plus the procedural control
+model. The rules live in the `recipe-core` crate (no_std, no heap, no
+recursion, built for `thumbv6m-none-eabi` and for the browser through
+protocol-wasm); the shapes live in the web model (`web/src/model/plant.ts`,
+`procedural.ts`, `recipe.ts`).
+
+From the top: the master recipe (process model, `recipe.ts`) names phase
+classes; allocation rules (`recipe-core` `alloc`) instantiate it as a
+control recipe (runtime binding, executed by the `recipe-core` engine over
+the wire contract), which maps abstract phases to unit-specific phases;
+those belong to the physical model of units, equipment modules and
+control modules (`plant.ts`).
+
+#### The models
+
+- **Physical model.** A *unit* is one board: an id, a name, a *unit
+  class* (an identifier recipes may constrain to), the node id
+  `sys/info` reports once the unit is bound to a board (16 hex digits, or
+  unbound), its board target, and its payload (Blocks workspace, flows,
+  state machines). Its *control modules* are the rows of its pin table,
+  checked by the firmwares' own pin rules as before. An *equipment
+  module* is a named group of control modules on the unit (a control
+  module belongs to at most one).
+- **Procedural control model.** A *phase class* is the
+  equipment-independent interface recipes ask for: an identifier and up
+  to four whole-number parameters, each with a range (for example
+  Blink(period_ms 10..10000, times 1..100), Measure(samples 1..16)). An
+  *equipment phase* is a unit's implementation of a class on one of its
+  equipment modules: a name, the range it accepts for every class
+  parameter (inside the class's), and for each acting state of the phase
+  state model optionally a flow of that unit's logic as the state's body.
+  Every equipment phase runs the phase state model below on the unit.
+- **Master recipe (process model).** A procedure of *unit procedures*
+  (each optionally constrained to a unit class) and *steps*. A step runs
+  one phase class with a value for every parameter inside one unit
+  procedure; an *operation* label groups steps for the reader. Steps are
+  joined by *transitions* into a sequential function chart. A step never
+  names a board, a pin or a unit.
+- **Control recipe.** A master recipe bound by allocation: each unit
+  procedure to one unit, each step to one equipment phase of that unit.
+  The engine executes it by commanding the bound phases.
+
+Deviation from the coordinator's mapping: equipment phases live in the
+procedural section of the document, keyed by unit and equipment module,
+rather than inside each equipment module. Phase classes are shared by
+recipes and units, so they cannot live in either; keeping the phases next
+to them makes the procedural model one list the phase editor (round 8)
+reads, and the references (unit, module, class, body flow) are checked
+like any other.
+
+#### Phase state model
+
+The states and commands follow the example procedural-element state model
+of ISA-88.00.01 §5.2 (IEC 61512-1, the figure of states and commands for
+procedural elements). Pausing and Paused are left out: a phase here has no
+breakpoints, and Hold covers stop-and-resume. Resetting is taken from the
+PackML state model (ISA-TR88.00.02): ISA-88 resets straight to Idle, which
+leaves the phase no state in which to put its equipment back. Every state
+is *acting* (its logic runs and ends by reporting Done: Running, Holding,
+Restarting, Stopping, Aborting, Resetting) or *quiescent* (Idle, Held,
+Complete, Stopped, Aborted). Complete, Stopped and Aborted are *final*.
+The recipe procedure follows the same model.
+
+| state      | Start   | Hold    | Restart    | Stop     | Abort    | Reset     | Done     |
+|------------|---------|---------|------------|----------|----------|-----------|----------|
+| Idle       | Running |         |            |          |          |           |          |
+| Running    |         | Holding |            | Stopping | Aborting |           | Complete |
+| Complete   |         |         |            |          |          | Resetting |          |
+| Holding    |         |         |            | Stopping | Aborting |           | Held     |
+| Held       |         |         | Restarting | Stopping | Aborting |           |          |
+| Restarting |         | Holding |            | Stopping | Aborting |           | Running  |
+| Stopping   |         |         |            |          | Aborting |           | Stopped  |
+| Stopped    |         |         |            |          |          | Resetting |          |
+| Aborting   |         |         |            |          |          |           | Aborted  |
+| Aborted    |         |         |            |          |          | Resetting |          |
+| Resetting  |         |         |            | Stopping | Aborting |           | Idle     |
+
+An empty cell rejects the input and leaves the state unchanged. States
+have wire codes 0..10 in the order listed; commands 1..6 in column order.
+
+#### Master recipe rules
+
+The chart has no selection (alternative) divergence: a transition's only
+condition is that its `from` steps' phases are Complete, a step ends at
+most one transition and is started by at most one, and the chart is
+acyclic. Parallel divergence (one transition starting several steps) and
+convergence (one waiting for several) are allowed. The *initial* steps are
+those no transition starts. These rules make the chart a marked graph in
+which, by induction in topological order, every step runs exactly once
+when every phase completes, which is the engine's termination argument.
+Identifiers are unique ignoring case; arguments must name class
+parameters, each once, every parameter given and in the class's range;
+limits are 16 phase classes, 4 parameters, 4 unit procedures, 16 steps and
+16 transitions. A unit procedure no step uses is a warning.
+
+#### Allocation rules
+
+A unit can host a unit procedure when it is online in discovery, is of
+the unit class the procedure asks for (if any), and has, for every step of
+the procedure, an equipment phase of the step's class whose ranges hold the
+step's arguments. Among several such phases the smallest (equipment
+module, phase name) by byte order wins; two steps that may be active at
+the same time never share a phase, so the later one takes the next
+suitable phase. Each unit hosts at most one unit procedure of a recipe (an
+S88 unit runs one unit procedure at a time). Units are tried in byte order
+of their ids and the first assignment in that order wins, so the result
+depends only on ids and capabilities, never on listing order; the search is
+an iterative depth-first search with a fixed move bound. A failure names
+the first unit procedure no unit can host and, per unit, the first reason
+(offline, wrong unit class, no phase of the class, an argument outside the
+phase's range, every suitable phase taken by a concurrent step), or reports
+contention when every procedure has candidates but there are too few
+distinct units. Allocation assumes the bound phases are Idle.
+
+#### Control-recipe engine
+
+The engine is a pure state machine. Each input (an operator command, a
+command's acknowledgement, a phase's state report, a unit leaving or
+rejoining the discovery directory, or the passage of time) is applied at
+the current time and yields the next engine and a bounded list of effects
+(send a command to a phase, the procedure or a step changed, a command was
+refused, a failure, an input ignored).
+
+- **Steps.** Start activates the initial steps. An active step's phase is
+  sent Start, with the step's arguments in class parameter order, once
+  the phase is Idle; the step is *started* when that command is
+  acknowledged and *done* when its phase reports Complete. A done step's
+  phase is sent Reset to release it. A transition fires once, when all
+  its `from` steps are done. The procedure is Complete when every step is
+  done and every bound phase is back to Idle or unreachable.
+- **Commands are level-triggered.** After every input the engine compares
+  each bound phase's last known state with what the procedure's state asks
+  for and sends at most one command per phase, only when none is
+  outstanding, the unit is online, the state is known and the phase state
+  model allows it. Holding or Held asks running phases to Hold; Restarting
+  asks held phases to Restart; Stopping asks phases doing something to
+  Stop; Aborting asks them to Abort; Resetting asks final phases to Reset.
+  Hold, Restart, Stop and Abort go only to the phases of *involved* steps
+  (active and started, or with a Start outstanding). The procedure moves
+  on (Holding to Held, Stopping to Stopped, Aborting to Aborted, Restarting
+  to Running, Resetting to Idle) when its involved phases have caught up.
+- **Acknowledgement.** A command is acknowledged by its reply (accepted
+  with the new state, or rejected with the current state) or by a state
+  report naming its id, so a unit that can only publish still completes
+  the handshake. Command ids increase; a report naming an id older than
+  the last applied command is ignored as stale.
+- **Failure policy.** A failure is *resumable* when the phase can still be
+  held and restarted (no acknowledgement before the deadline, a transient
+  state that does not settle in time, a reply of Unavailable,
+  DeadlineExceeded or a transport error, a phase that holds itself, a
+  unit with unfinished steps leaving the directory), and *unresumable*
+  otherwise (NotFound, InvalidRequest, a started phase found Stopped,
+  Aborted, Resetting or Idle without being told to, a phase exceeding its
+  command budget). A resumable failure while Running or Restarting holds
+  the procedure; an unresumable one while Running, Restarting, Holding or
+  Held aborts it; otherwise a failure is only reported. A rejected command
+  only updates the known state.
+- **Timeouts.** Every command carries the acknowledgement timeout, which
+  is also the request's timeout and so reaches the unit as its deadline.
+  A transient state (Holding, Restarting, Stopping, Aborting, Resetting)
+  has a settle timeout. A phase whose deadline passes becomes
+  *unreachable*: its state is unknown, it no longer blocks Holding,
+  Stopping or Aborting from finishing, and it blocks Restart until a
+  report makes it known again. Running has no timeout.
+- **Unit loss.** When the directory loses a unit (goodbye or TTL expiry),
+  its phases become unreachable and nothing more is sent to it. If any of
+  its steps is unfinished the procedure holds; Restart is refused while
+  the unit is offline, and after it rejoins until its heartbeat reports
+  its phases. A rejoined unit whose phase is still running is told to
+  Hold, and Restart then resumes the batch. Abort ends a held batch
+  Aborted; a lost phase's state is reported unknown. A unit whose steps
+  are all done is only reported.
+- **Bounds.** One input runs a fixed number of settle passes, each
+  transition fires at most once per run, each phase gets at most a fixed
+  number of commands per run, and every wait ends by a report, an
+  acknowledgement, a deadline or the operator. So after Abort and the two
+  timeouts every run is in a final state.
+
+#### Wire contract
+
+A unit serves each equipment phase on the request key
+`unit/<node>/phase/<em>.<phase>` and publishes the phase's state on
+`unit/<node>/phase/<em>.<phase>/state`, where `<node>` is the 8-byte node
+id (the middleware `SenderId`) in lowercase hex. The engine's shell sends
+each command with `Requester::request_with`, a timeout of the
+acknowledgement deadline (which transports carry to the unit as
+`RequestMeta::deadline_ms`) and `Target::Node` of the unit's node, so a
+backend that can address nodes asks no one else; the key names the node
+too, so key-routed backends reach the same unit. A unit's `HandlerError`
+maps to the engine's acknowledgement errors (NotFound, InvalidRequest,
+Unavailable, DeadlineExceeded; anything else is a transport error). Units
+announce themselves in discovery as service kind `s88/unit` with the unit
+id as instance and the unit class in TXT, which feeds the directory events
+the engine sees as unit loss and return.
+
+Bodies are fixed binary, version 1, integers little-endian: a command is
+the version, the command code, a 32-bit id, a count and that many 32-bit
+arguments (only Start carries arguments); an acknowledgement is the
+version, accepted or rejected, the phase state code and the id; a state
+report is the version, the state code, the id of the last applied command,
+a count and that many 32-bit result values (a Measure phase's reading).
+A unit publishes a report on every state change and as a heartbeat. The
+unit side of a command is a pure function: decode, check Start's arguments
+against the phase's ranges (InvalidRequest otherwise), step the phase
+state model and answer. Payloads cannot yet serve requests (the ABI has
+publish and subscribe only); the unit payload code generation in round 8
+adds that, and until then a unit that only subscribes and publishes is
+still acknowledged by its reports.
+
+#### IR version 4 and migration
+
+The saved document becomes a *plant*: `physical` (units, each with its
+control modules, equipment modules and payload logic), `procedural`
+(phase classes and equipment phases) and `recipes` (master recipes). A
+unit's payload is exactly the version-3 model restricted to that unit, and
+that is what the generator compiles. A version 1-3 payload migrates to a
+plant of one unbound unit of class "Unit" with no equipment modules, no
+phases and no recipes; its logic is kept as the unit's basic control, and
+the unit's payload is the original model, so its generated code is
+unchanged byte for byte. It is deliberately not wrapped in an "app" phase:
+a phase runs only when started, so wrapping would change what an existing
+payload does. The editor still opens and saves version 3 until the plant
+views exist (round 8); the version-4 reader accepts every older file.
+
+#### Requirements
+
+- [x] Q1 The phase state model is a pure transition function over 11
+  states, 6 commands and Done, exactly the table above (empty cells reject
+  and keep the state); Abort is accepted wherever something is still
+  happening; final states reset to Idle through Resetting; every state is
+  reachable from Idle and returns to it; Done alone ends any acting state
+  within three steps — `cargo test -p recipe-core phase`: "every_cell_of_the_command_matrix_matches_the_table", "acting_states_and_only_they_accept_done", "abort_is_accepted_wherever_something_is_still_happening", "final_states_reset_to_idle_through_resetting", "every_state_is_reachable_from_idle_and_every_state_reaches_idle", "done_alone_from_any_acting_state_ends_in_a_quiescent_state_within_three_steps".
+- [x] Q2 States and commands have stable wire codes (0..10, 1..6) and
+  names, mirrored by the web model and exposed to the page as the phase
+  model — `cargo test -p recipe-core phase`: "codes_round_trip_and_unknown_codes_are_none"; `cargo test -p protocol-wasm recipes`: "the_phase_model_lists_states_commands_and_the_matrix"; `web/test/plant.test.ts`: "mirrors the Rust phase model's names"; `web/test/recipe.check.test.ts`: "exposes the phase state model matching the page's names".
+- [x] Q3 Master recipes are checked by the rules above (identifiers unique
+  ignoring case; known unit procedures and classes; every parameter given
+  once and in range; known steps, non-empty sides, no repeats; a step in at
+  most one transition per side; no cycle; limits; unused unit procedures
+  warn) and compile to a bounded chart with initial steps, transition
+  masks and a "done before" relation for concurrency — `cargo test -p recipe-core recipe`: "the_worked_example_has_no_issues_and_compiles_to_a_two_step_chain", "ids_must_be_identifiers_unique_ignoring_case", "class_rules_cover_names_parameter_count_and_ranges", "a_step_needs_a_known_unit_procedure_and_class", "arguments_name_class_parameters_once_cover_all_and_lie_in_range", "transitions_need_both_sides_known_steps_and_no_repeats", "a_step_ends_at_most_one_transition_and_starts_from_at_most_one", "cycles_are_errors_on_each_of_their_transitions", "a_convergence_waiting_on_its_own_successor_is_a_cycle", "parallel_divergence_and_convergence_compile_with_concurrency", "a_recipe_needs_steps_and_respects_its_limits", "an_unused_unit_procedure_is_only_a_warning", "compile_refuses_a_recipe_with_errors".
+- [x] Q4 Allocation follows the rules above: candidates by presence, unit
+  class, phase class and ranges; exclusive units found by a bounded
+  backtracking search; ties by unit id, then module and phase name;
+  concurrent steps never share a phase; failures name the procedure and
+  each unit's reason, or contention — `cargo test -p recipe-core alloc`: "the_worked_example_binds_blink_to_the_led_unit_and_measure_to_the_sensor", "the_result_does_not_depend_on_the_order_units_are_listed_in", "an_offline_or_wrong_class_unit_is_rejected_with_its_reason", "a_unit_without_the_class_or_with_a_narrower_range_is_rejected", "two_procedures_cannot_share_one_unit", "the_search_backtracks_to_find_an_exclusive_assignment", "ties_go_to_the_smallest_unit_id_and_the_smallest_module_and_phase", "concurrent_steps_take_different_phases_and_sequential_ones_may_share", "too_many_units_is_refused".
+- [x] Q5 The engine runs steps and transitions as above with
+  level-triggered commands (at most one outstanding per phase), releases
+  done phases with Reset, completes only when every phase is back to Idle,
+  accepts a report naming a command's id as its acknowledgement, ignores
+  stale reports, and moves the procedure by the phase state model
+  (operator commands outside it are refused) — `cargo test -p recipe-core engine`: "the_worked_example_runs_blink_then_measure_and_releases_both_phases", "a_report_naming_the_command_acknowledges_it", "reports_older_than_the_last_applied_command_are_ignored", "operator_commands_follow_the_phase_table", "hold_holds_the_running_phase_and_restart_resumes_it", "stop_and_abort_end_the_run_in_stopped_and_aborted", "a_rejected_command_updates_the_known_state_and_is_retried".
+- [x] Q6 Failures follow the policy above: resumable ones hold, unresumable
+  ones abort, rejections only update the state, and a phase over its
+  command budget aborts — `cargo test -p recipe-core engine`: "a_missing_acknowledgement_holds_the_recipe_and_makes_the_phase_unknown", "not_found_and_invalid_request_abort_while_unavailable_holds", "a_phase_that_holds_itself_holds_the_recipe_and_one_that_aborts_aborts_it", "a_rejected_command_updates_the_known_state_and_is_retried", "a_phase_that_keeps_rejecting_exhausts_its_budget_and_aborts".
+- [x] Q7 Losing a unit with unfinished steps holds the batch, nothing is
+  sent to it, Restart is refused while it is offline and until its
+  heartbeat makes its phases known, a rejoined unit's running phase is
+  held and Restart then completes the batch, Abort ends it Aborted; losing
+  a unit whose steps are done is only reported — `cargo test -p recipe-core engine`: "losing_a_unit_with_unfinished_steps_holds_and_restart_waits_for_it", "losing_a_unit_whose_steps_are_done_is_only_reported"; `cargo test -p recipe-core sim`: "losing_the_led_unit_holds_the_batch_and_abort_ends_it_aborted", "a_lost_unit_that_comes_back_is_held_and_the_batch_restarts_to_complete".
+- [x] Q8 Timeouts are deadlines: every command carries the acknowledgement
+  timeout, which reaches the unit as `RequestMeta::deadline_ms`; a missed
+  acknowledgement or an unsettled transient state makes the phase
+  unreachable and holds the batch — `cargo test -p recipe-core engine`: "a_missing_acknowledgement_holds_the_recipe_and_makes_the_phase_unknown", "a_transient_state_that_never_settles_times_out"; `cargo test -p recipe-core sim`: "a_phase_stuck_holding_times_out_and_the_batch_is_held_with_it_unknown"; `cargo test --test recipe_wire`: "the_worked_example_runs_to_complete_over_request_with_and_pub_sub".
+- [x] Q9 Termination: for 3000 random interleavings of operator commands,
+  unit losses and returns and stuck phases on the worked example, followed
+  by Abort, every run is Complete, Stopped, Aborted (or Idle, never
+  started or reset) within the acknowledgement plus settle timeouts, no
+  input overflows its effects, no command goes to a unit the engine was
+  told is offline, and every ending and the hold path occur; without
+  failures every ordering of unit speeds completes — `cargo test -p recipe-core sim`: "every_run_ends_complete_stopped_or_aborted_after_abort_and_two_timeouts", "without_failures_every_ordering_of_unit_speeds_completes".
+- [x] Q10 The wire contract is as above: keys with the node in hex that
+  parse back, version-1 command, acknowledgement and report bodies that
+  round-trip and refuse malformed input, and a pure unit side that checks
+  Start's arguments against the phase's ranges; over the middleware 0.5
+  traits (memory backend) the engine's commands go out with
+  `request_with`, a timeout and `Target::Node`, units answer through a
+  `Handler`, reports come back over pub/sub, the worked example
+  completes, a command addressed to another node fails and holds, and an
+  out-of-range Start is InvalidRequest — `cargo test -p recipe-core wire`: "keys_name_the_node_in_hex_and_parse_back", "malformed_keys_and_identifiers_are_refused", "command_ack_and_report_bodies_round_trip", "malformed_bodies_are_refused", "serve_applies_the_table_and_checks_start_arguments_against_ranges"; `cargo test --test recipe_wire`: "the_worked_example_runs_to_complete_over_request_with_and_pub_sub", "a_command_addressed_to_another_node_fails_and_holds_the_batch", "a_start_outside_the_phase_range_is_an_invalid_request_that_aborts".
+- [x] Q11 `recipe-core` is no_std with no heap, no `unsafe` and no
+  recursion, and builds for `thumbv6m-none-eabi` — `scripts/check-features.sh` (the Q11 build of `recipe-core` and `state-table` for `thumbv6m-none-eabi`).
+- [x] Q12 The plant document (IR version 4) splits the model into
+  physical, procedural and recipes as above, with a strict shape and
+  reference check naming the place (units, node ids, control and
+  equipment modules, classes, phase ranges for every class parameter
+  inside the class's, body flows of the same unit used once, recipes) and
+  a JSON round trip that copies — `web/test/plant.test.ts`: "the worked example is a valid plant and round-trips through JSON as a copy", "rejects bad shapes and dangling references, naming the place", "each unit's payload is its own board, control modules, logic and machines", "lists allocation units with ranges in class parameter order", "a payload with no logic beyond its own still makes a plant of one unit".
+- [x] Q13 Version 1-3 payloads and legacy Blocks exports migrate to a
+  one-unit plant whose unit payload equals the original model and
+  generates the same code byte for byte, also after saving and reading
+  the plant — `web/test/plant.test.ts`: "migrates version-3 payloads to one unit whose payload generates the same code byte for byte", "migrates version-1 and -2 files and legacy Blocks exports through the version-3 reader".
+- [x] Q14 The page reaches the rules through protocol-wasm: `checkRecipe`
+  (plain-language messages by place), `allocateRecipe` (bindings, or per
+  unit reasons), `simulateRecipe` (a timed trace against simulated units
+  following a script of operator commands and unit losses) and
+  `phaseModel` — `cargo test -p protocol-wasm recipes`: "the_worked_example_checks_clean_and_binds_each_step", "check_messages_name_the_step_and_the_rule", "allocation_failures_say_per_unit_why", "a_simulated_run_completes_and_a_hold_and_a_unit_loss_show_in_the_trace"; `web/test/recipe.check.test.ts`: "the worked example checks clean and allocates Blink to the LED unit, Measure to the sensor unit", "reports recipe errors in plain language, by place", "an allocation failure says, per unit, why it cannot host the procedure", "an unknown script kind throws".
+- [x] Q15 The worked example "Blink then Measure" (classes Blink and
+  Measure; a Pico 2 unit with an LED module and an ESP32 unit with an ADC
+  module) allocates Blink to the LED unit and Measure to the sensor unit
+  and runs to Complete with Measure started when Blink completes; a Hold
+  mid-run is Held after the settle time, starts nothing new, and Restart
+  completes the batch; losing the LED unit holds the batch, Restart is
+  refused, and Abort ends it Aborted — `cargo test -p recipe-core sim`: "the_worked_example_runs_to_complete", "a_hold_mid_run_holds_blink_and_a_restart_finishes_the_batch", "losing_the_led_unit_holds_the_batch_and_abort_ends_it_aborted"; `web/test/recipe.check.test.ts`: "runs to Complete against simulated units: Blink first, Measure when Blink completes", "a Hold mid-run holds the batch until Restart, and losing a unit holds it until Abort ends it Aborted".
+- [ ] Q16 Physical and procedural editors: a Units view (unit list, unit
+  class, node binding from `sys/info`), the Pins table as each unit's
+  control-module table, equipment modules as a table grouping its rows,
+  and a phase table per module (class, ranges, a body flow per acting
+  state) with the phase state matrix shown read-only; the editor saves
+  version 4.
+- [ ] Q17 Unit payload code generation exposes the phase API: a flow entry
+  "phase <em>.<phase> enters <state>" and a "phase done" action, generated
+  phase tables answering the wire contract (an ABI request export for
+  payloads, or subscribe-and-report until it exists), heartbeat reports,
+  and argument range checks, all checked against the phase state model.
+- [ ] Q18 The master recipe is edited on the Flow canvas: steps as nodes
+  naming a phase class and arguments, transitions as bars joining steps
+  (parallel divergence and convergence), unit procedures as lanes, with
+  `checkRecipe` issues on their nodes.
+- [ ] Q19 Allocation and execution in the browser: an allocation panel
+  against units from discovery or simulated units, and the engine running
+  the control recipe with operator buttons (Start, Hold, Restart, Stop,
+  Abort, Reset), live step and phase states, and the trace.
+- [ ] Q20 Selection (alternative) divergence: transitions with conditions
+  on phase result values, keeping the termination argument.
+
 ## Known limitations (0.3)
 
 - **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.

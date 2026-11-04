@@ -2,7 +2,8 @@
 //!
 //! Everything here converts between JS values and the pure modules
 //! ([`crate::decoder`], [`crate::encode`], [`crate::loader`],
-//! [`crate::pins`], [`crate::machines`], [`crate::simulator`]); no
+//! [`crate::pins`], [`crate::machines`], [`crate::recipes`],
+//! [`crate::simulator`]); no
 //! protocol logic lives in this file. Byte arrays cross as `Uint8Array`;
 //! structured results are plain JS objects
 //! whose shapes are documented on each function and mirrored in
@@ -1041,6 +1042,309 @@ pub fn check_flows(flows: Array, machines: Array, pins: Array) -> Result<Array, 
             JsValue::from(o)
         })
         .collect())
+}
+
+/// `{id, name?, params: [{id, min, max}]}` phase classes
+/// (`web/src/model/procedural.ts`) as the recipe checks read them.
+fn classes_in(classes: &Array) -> Vec<crate::recipes::ClassIn> {
+    use crate::recipes::{ClassIn, ParamIn};
+    classes
+        .iter()
+        .map(|c| ClassIn {
+            name: text(&c, "id"),
+            params: array(&c, "params")
+                .iter()
+                .map(|p| ParamIn {
+                    name: text(&p, "id"),
+                    min: whole(&get(&p, "min"))
+                        .and_then(|v| i32::try_from(v).ok())
+                        .unwrap_or(0),
+                    max: whole(&get(&p, "max"))
+                        .and_then(|v| i32::try_from(v).ok())
+                        .unwrap_or(-1),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// A master recipe (`web/src/model/recipe.ts`): `{id, unitProcedures:
+/// [{id, unitClass: string|null}], steps: [{id, unitProcedure, class,
+/// params: {name: number}}], transitions: [{from: [id], to: [id]}]}`. A
+/// parameter value that is not a whole `i32` throws.
+fn recipe_in(r: &JsValue) -> Result<crate::recipes::RecipeIn, JsError> {
+    use crate::recipes::{RecipeIn, StepIn, TransitionIn, UnitProcIn};
+    let ids = |v: JsValue| -> Vec<String> {
+        if Array::is_array(&v) {
+            Array::from(&v)
+                .iter()
+                .filter_map(|x| x.as_string())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+    let steps = array(r, "steps")
+        .iter()
+        .enumerate()
+        .map(|(si, s)| {
+            let params = get(&s, "params");
+            let args = if params.is_object() {
+                Object::entries(&Object::from(params))
+                    .iter()
+                    .map(|e| {
+                        let pair = Array::from(&e);
+                        let name = pair.get(0).as_string().unwrap_or_default();
+                        let value = whole(&pair.get(1))
+                            .and_then(|v| i32::try_from(v).ok())
+                            .ok_or_else(|| {
+                                JsError::new(&format!(
+                                    "steps[{si}].params.{name} must be a whole number"
+                                ))
+                            })?;
+                        Ok((name, value))
+                    })
+                    .collect::<Result<Vec<_>, JsError>>()?
+            } else {
+                Vec::new()
+            };
+            Ok(StepIn {
+                id: text(&s, "id"),
+                unit_proc: text(&s, "unitProcedure"),
+                class: text(&s, "class"),
+                args,
+            })
+        })
+        .collect::<Result<Vec<_>, JsError>>()?;
+    Ok(RecipeIn {
+        id: text(r, "id"),
+        unit_procs: array(r, "unitProcedures")
+            .iter()
+            .map(|u| UnitProcIn {
+                id: text(&u, "id"),
+                unit_class: get(&u, "unitClass").as_string(),
+            })
+            .collect(),
+        steps,
+        transitions: array(r, "transitions")
+            .iter()
+            .map(|t| TransitionIn {
+                from: ids(get(&t, "from")),
+                to: ids(get(&t, "to")),
+            })
+            .collect(),
+    })
+}
+
+/// Allocation units (`web/src/model/plant.ts` `allocationUnits`): `[{id,
+/// class, online, phases: [{em, name, class, ranges: [[min, max]], runMs?}]}]`.
+fn units_in(units: &Array) -> Vec<crate::recipes::UnitIn> {
+    use crate::recipes::{UnitIn, UnitPhaseIn};
+    let int = |v: JsValue| whole(&v).and_then(|v| i32::try_from(v).ok());
+    units
+        .iter()
+        .map(|u| UnitIn {
+            id: text(&u, "id"),
+            class: text(&u, "class"),
+            online: get(&u, "online").as_bool().unwrap_or(false),
+            phases: array(&u, "phases")
+                .iter()
+                .map(|p| UnitPhaseIn {
+                    em: text(&p, "em"),
+                    name: text(&p, "name"),
+                    class: text(&p, "class"),
+                    ranges: array(&p, "ranges")
+                        .iter()
+                        .map(|r| {
+                            let r = Array::from(&r);
+                            (int(r.get(0)).unwrap_or(1), int(r.get(1)).unwrap_or(0))
+                        })
+                        .collect(),
+                    run_ms: whole(&get(&p, "runMs"))
+                        .and_then(|v| u32::try_from(v).ok())
+                        .unwrap_or(100),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn binding_object(b: &crate::recipes::Binding) -> JsValue {
+    let o = Object::new();
+    set(&o, "step", b.step.as_str());
+    set(&o, "unit", b.unit.as_str());
+    set(&o, "em", b.em.as_str());
+    set(&o, "phase", b.phase.as_str());
+    JsValue::from(o)
+}
+
+fn alloc_failure_object(f: &crate::recipes::AllocFailure) -> JsValue {
+    let o = Object::new();
+    set(&o, "ok", false);
+    set(&o, "message", f.message.as_str());
+    set(
+        &o,
+        "unitProcedure",
+        f.unit_proc
+            .as_deref()
+            .map_or(JsValue::NULL, JsValue::from_str),
+    );
+    let reasons: Array = f
+        .reasons
+        .iter()
+        .map(|(unit, why)| {
+            let r = Object::new();
+            set(&r, "unit", unit.as_str());
+            set(&r, "reason", why.as_str());
+            JsValue::from(r)
+        })
+        .collect();
+    set(&o, "reasons", reasons);
+    JsValue::from(o)
+}
+
+/// Checks phase classes and a master recipe (`recipe-core`'s rules).
+/// Returns `[{at: "recipe"|"class"|"unitProc"|"step"|"transition", index:
+/// number|null, sub: number|null, severity: "error"|"warning", message}]`.
+#[wasm_bindgen(js_name = checkRecipe)]
+pub fn check_recipe(recipe: JsValue, classes: Array) -> Result<Array, JsError> {
+    let r = recipe_in(&recipe)?;
+    let c = classes_in(&classes);
+    Ok(crate::recipes::check(&r, &c)
+        .into_iter()
+        .map(|i| {
+            let o = Object::new();
+            set(&o, "at", i.at);
+            set(&o, "index", index_or_null(i.index));
+            set(&o, "sub", index_or_null(i.sub));
+            set(&o, "severity", i.severity);
+            set(&o, "message", i.message.as_str());
+            JsValue::from(o)
+        })
+        .collect())
+}
+
+/// Binds every step of `recipe` to an equipment phase of `units`. Returns
+/// `{ok: true, bindings: [{step, unit, em, phase}]}` or `{ok: false,
+/// message, unitProcedure: string|null, reasons: [{unit, reason}]}`.
+#[wasm_bindgen(js_name = allocateRecipe)]
+pub fn allocate_recipe(recipe: JsValue, classes: Array, units: Array) -> Result<JsValue, JsError> {
+    let r = recipe_in(&recipe)?;
+    let c = classes_in(&classes);
+    let u = units_in(&units);
+    Ok(match crate::recipes::allocate(&r, &c, &u) {
+        Ok(bindings) => {
+            let o = Object::new();
+            set(&o, "ok", true);
+            set(
+                &o,
+                "bindings",
+                bindings.iter().map(binding_object).collect::<Array>(),
+            );
+            JsValue::from(o)
+        }
+        Err(f) => alloc_failure_object(&f),
+    })
+}
+
+/// Allocates `recipe` and runs it against simulated units until
+/// `untilMs`, following `script: [{at, kind: "start"|"hold"|"restart"|
+/// "stop"|"abort"|"reset"|"lose"|"find", unit?}]` (`unit`: a unit id, for
+/// lose and find). Returns `{ok: true, state, bindings, lines: [{t, kind,
+/// text}]}` or an allocation failure as `allocateRecipe`. An unknown
+/// script kind throws.
+#[wasm_bindgen(js_name = simulateRecipe)]
+pub fn simulate_recipe(
+    recipe: JsValue,
+    classes: Array,
+    units: Array,
+    script: Array,
+    until_ms: u32,
+) -> Result<JsValue, JsError> {
+    use crate::recipes::{ScriptEventIn, command_named};
+    let r = recipe_in(&recipe)?;
+    let c = classes_in(&classes);
+    let u = units_in(&units);
+    let script = script
+        .iter()
+        .map(|s| {
+            let at = whole(&get(&s, "at"))
+                .and_then(|v| u64::try_from(v).ok())
+                .unwrap_or(0);
+            let kind = text(&s, "kind");
+            let event = match kind.as_str() {
+                "lose" => ScriptEventIn::Lose(text(&s, "unit")),
+                "find" => ScriptEventIn::Find(text(&s, "unit")),
+                other => ScriptEventIn::Operator(command_named(other).ok_or_else(|| {
+                    JsError::new(&format!(
+                        "script kind {other:?} is not a command, lose or find"
+                    ))
+                })?),
+            };
+            Ok((at, event))
+        })
+        .collect::<Result<Vec<_>, JsError>>()?;
+    Ok(
+        match crate::recipes::simulate(&r, &c, &u, &script, u64::from(until_ms)) {
+            Ok(t) => {
+                let o = Object::new();
+                set(&o, "ok", true);
+                set(&o, "state", t.state);
+                set(
+                    &o,
+                    "bindings",
+                    t.bindings.iter().map(binding_object).collect::<Array>(),
+                );
+                let lines: Array = t
+                    .lines
+                    .iter()
+                    .map(|l| {
+                        let x = Object::new();
+                        set(&x, "t", l.t as f64);
+                        set(&x, "kind", l.kind);
+                        set(&x, "text", l.text.as_str());
+                        JsValue::from(x)
+                    })
+                    .collect();
+                set(&o, "lines", lines);
+                JsValue::from(o)
+            }
+            Err(f) => alloc_failure_object(&f),
+        },
+    )
+}
+
+/// The S88 phase state model: `{states: [name], commands: [name], next:
+/// [[name|null]]}` with `next[state][input]` for the commands in order and
+/// then Done.
+#[wasm_bindgen(js_name = phaseModel)]
+pub fn phase_model() -> Object {
+    let (states, commands, next) = crate::recipes::phase_model();
+    let o = Object::new();
+    set(
+        &o,
+        "states",
+        states.into_iter().map(JsValue::from_str).collect::<Array>(),
+    );
+    set(
+        &o,
+        "commands",
+        commands
+            .into_iter()
+            .map(JsValue::from_str)
+            .collect::<Array>(),
+    );
+    let rows: Array = next
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|n| n.map_or(JsValue::NULL, JsValue::from_str))
+                .collect::<Array>()
+        })
+        .map(JsValue::from)
+        .collect();
+    set(&o, "next", rows);
+    o
 }
 
 #[cfg(feature = "simulator")]
