@@ -10,8 +10,11 @@
 //!   (the custom-page-sizes proposal, enabled in the validator);
 //! * the optional exports `init () -> ()`, `tick (i32) -> ()`,
 //!   `mw_alloc (i32) -> i32`, `on_message (i32 i32 i32) -> ()` and (ABI 2)
-//!   `on_irq (i32 i32 i32 i32) -> ()` have those signatures, and
-//!   `on_message` and `mw_alloc` come as a pair;
+//!   `on_irq (i32 i32 i32 i32) -> ()` and (ABI 5)
+//!   `on_request (i32 i32 i32 i32 i32 i32) -> i32` have those signatures,
+//!   `on_message` and `mw_alloc` come as a pair (or `mw_alloc` with
+//!   `on_request` alone), and `on_request` comes with `mw_alloc`;
+//! * a module that imports `serve` (ABI 5) exports `on_request`;
 //! * a module that imports an event source ([`EVENT_SOURCES`]: `gpio_irq`,
 //!   `timer_start`, `spi_transfer`, `uart_write`, and the ABI 4 route
 //!   starters `route_source`, `route_sink`) exports `on_irq`, without which
@@ -83,6 +86,7 @@ fn export_sig(name: &str) -> Option<(usize, bool)> {
         exports::ALLOC => Some((1, true)),
         exports::ON_MESSAGE => Some((3, false)),
         exports::ON_IRQ => Some((4, false)),
+        exports::ON_REQUEST => Some((6, true)),
         _ => None,
     }
 }
@@ -195,8 +199,16 @@ pub fn check(wasm: &[u8]) -> Result<Report, Vec<String>> {
             ));
         }
     }
-    if has(exports::ON_MESSAGE) != has(exports::ALLOC) {
+    if has(exports::ON_MESSAGE) != has(exports::ALLOC)
+        && !(has(exports::ALLOC) && has(exports::ON_REQUEST))
+    {
         errors.push("exports on_message and mw_alloc must both be present or both absent".into());
+    }
+    if has(exports::ON_REQUEST) && !has(exports::ALLOC) {
+        errors.push("export on_request: requires the mw_alloc export".into());
+    }
+    if !has(exports::ON_REQUEST) && report.imports.iter().any(|i| i == "serve") {
+        errors.push("import mw.serve: requires the on_request export to receive requests".into());
     }
     if !has(exports::ON_IRQ) {
         for source in EVENT_SOURCES {
@@ -221,6 +233,26 @@ mod tests {
 
     fn run(wat: &str) -> Result<Report, Vec<String>> {
         check(&load(wat.as_bytes()).expect("wat"))
+    }
+
+    #[test]
+    fn abi5_serve_needs_on_request_and_mw_alloc() {
+        let ok = r#"(module (import "mw" "serve" (func (param i32 i32) (result i32)))
+            (import "mw" "node_id" (func (param i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "mw_alloc") (param i32) (result i32) (i32.const 0))
+            (func (export "on_request") (param i32 i32 i32 i32 i32 i32) (result i32) (i32.const 0)))"#;
+        assert!(run(ok).is_ok());
+        let no_handler = r#"(module (import "mw" "serve" (func (param i32 i32) (result i32)))
+            (memory (export "memory") 1))"#;
+        assert!(run(no_handler).unwrap_err()[0].contains("on_request"));
+        let no_alloc = r#"(module (memory (export "memory") 1)
+            (func (export "on_request") (param i32 i32 i32 i32 i32 i32) (result i32) (i32.const 0)))"#;
+        assert!(run(no_alloc).unwrap_err()[0].contains("mw_alloc"));
+        let bad = r#"(module (memory (export "memory") 1)
+            (func (export "mw_alloc") (param i32) (result i32) (i32.const 0))
+            (func (export "on_request") (param i32 i32 i32) (result i32) (i32.const 0)))"#;
+        assert!(run(bad).is_err());
     }
 
     #[test]
@@ -316,7 +348,9 @@ mod tests {
             .collect();
         let r = run(&format!(
             r#"(module {decls} (memory (export "memory") 1)
-                (func (export "on_irq") (param i32 i32 i32 i32)))"#
+                (func (export "on_irq") (param i32 i32 i32 i32))
+                (func (export "mw_alloc") (param i32) (result i32) (i32.const 0))
+                (func (export "on_request") (param i32 i32 i32 i32 i32 i32) (result i32) (i32.const 0)))"#
         ))
         .expect("valid");
         assert_eq!(r.imports.len(), IMPORTS.len());

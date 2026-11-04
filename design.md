@@ -3744,6 +3744,71 @@ payload): each frame is one JPEG of varying length (R14).
     decodes and draws them in about 2.0 s each; a mirrored frame decodes
     with PIL to a 240×240 image. Open: re-verify after the final flash.
 
+### Serving requests (ABI 5, M…)
+
+Payloads answer requests, not only publish and subscribe, so a unit's
+payload can implement a request contract such as the S88 phase commands
+(`unit/<node>/phase/<em>.<phase>`). A payload registers a key with
+`serve`, learns its device's node id with `node_id`, and answers in its
+`on_request` export; the device routes requests on served keys to
+`wasm_host::Payload::request` and answers the caller with the reply or
+the payload's `HandlerError`. Nothing is allocated per request: the
+payload's `mw_alloc` provides one buffer holding a 16-byte meta block
+(sender and deadline; never a principal), the body and the reply space.
+The contract is `wasm_abi::serve`, pure and heap-free.
+
+- [x] M1 ABI 5 is a superset of ABI 4: `serve` (2 params) and `node_id`
+  (1) are appended to `wasm_abi::IMPORTS`, `on_request` is an optional
+  export of six `i32` parameters and an `i32` result, `ABI_VERSION` is 5,
+  ABI 1–4 modules load unchanged, and an ABI 4 host (the ABI 4 prefix)
+  does not know the new imports, so such a payload fails to load with an
+  unknown import instead of running half wired —
+  `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`,
+  `an_abi4_host_does_not_know_the_abi5_imports`;
+  `wasm-host/tests/abi4.rs` `r1_every_import_links_and_older_revisions_still_load`;
+  `wasm-host/tests/abi5.rs` `s10_abi5_imports_are_unknown_to_an_abi4_host`.
+- [x] M2 The request rules are pure and tested without an interpreter:
+  the buffer layout (meta, body, reply), the meta block encoding (flags,
+  deadline, sender; unknown flags and short blocks refused), the result
+  code (a length within the offered capacity, a negated `HandlerError`
+  code, anything else `Internal`), the served-key table and the
+  `node_id` target range — `wasm_abi::serve::tests::*`;
+  `wasm-host` `abi::tests::abi5_serve_slots_node_id_and_request_ranges`,
+  `link::tests::serve_needs_request_exports_and_the_device`,
+  `node_id_checks_the_range_and_the_device`.
+- [x] M3 `wasm-host` serves a request end to end: the body and meta reach
+  the slot, the reply comes back; an unserved key is `NotFound` and an
+  oversized body `InvalidRequest` without calling the payload; a declined
+  or out-of-memory buffer is `Unavailable`; a reply longer than offered or
+  an unknown code is `Internal` and copies nothing; running out of fuel in
+  `on_request` traps and poisons; `serve` checks keys, bounds, the eight
+  slots, the exports and the device; a board without the ABI 5 methods
+  answers `Unsupported` — `wasm-host/tests/abi5.rs` `s1`–`s9`.
+- [x] M4 `payload-sim` takes `!req <key> [<hex>]`, hands it to the board
+  serving the key and prints the reply or the error; `--node` sets the
+  node id — `payload-sim` `sim::tests::abi5_req_commands_node_option_and_reply_lines`;
+  `tools/payload-sim/tests/abi5.rs` `s11_req_reaches_the_serving_payload_and_prints_the_reply`,
+  `s11_the_default_node_is_one`.
+- [x] M5 The Rust SDK serves safely: `serve::serve`, `serve::node_id`
+  (the one new `unsafe` call site, writing exactly an owned 8-byte
+  array), `Payload::on_request` with a `Request` (body, meta) and a reply
+  slice, and `payload!(App, serve)` whose `on_request` only accepts
+  regions inside its receive buffer; `payload!(App)` modules are unchanged
+  — `mw-payload` `rt::tests::on_request_answers_from_the_receive_buffer`,
+  `request_parts_bounds_every_region`, `alloc_follows_the_buffer_size`,
+  `serve::tests::slots_hex_and_host_stubs`; example `serve_echo`
+  (`tests::answers_node_then_body_or_buffer_too_small`); `abi-check`
+  `tests::abi5_serve_needs_on_request_and_mw_alloc`, `tests/payloads.rs`
+  `rust_serve_echo_example`.
+- [x] M6 AssemblyScript authors have the same contract: `templates/serve.ts`
+  and the template README's ABI 5 section, compiled and validated by
+  `payloads/scripts/check-all.sh` — `abi-check` `tests/payloads.rs`
+  `as_serve_template`.
+- [ ] M7 Firmware routes requests on served keys to the payload (esp-base,
+  rp-base, conagotchi): `Device::serve` registers the key with the
+  device's responder, `node_id` returns the `sys/info` node id, and the
+  shell answers with `Payload::request`'s reply (a trap as `Internal`).
+
 ### JPEG decode in WASM (J…)
 
 `payloads/jpeg` (`mw-jpeg`): the badge-side decoder of R14, a `no_std`,

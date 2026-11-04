@@ -8,9 +8,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 HOST=x86_64-unknown-linux-gnu
 
-EXAMPLES=(blink echo button spi_loopback uart_echo dimmer cam_stream cam_view cam_jpeg_stream cam_jpeg_view cam_ov2640_stream bench periph_demo)
+EXAMPLES=(blink echo button spi_loopback uart_echo dimmer cam_stream cam_view cam_jpeg_stream cam_jpeg_view cam_ov2640_stream bench periph_demo serve_echo)
 TEMPLATES=(blink echo button timer)   # .wat
-AS_TEMPLATES=(blink echo button spi)  # .ts
+AS_TEMPLATES=(blink echo button spi serve)  # .ts
 
 cargo build --release
 # mw-jpeg's fuel_probe example is a payload too (see jpeg/src/lib.rs).
@@ -34,7 +34,7 @@ scripts/check-reproducible.sh bench
 # cam_ov2640_stream (the ESP32-CAM's OV2640 set-up): its deploy build
 # likewise, memory and stack from its manifest.
 scripts/check-reproducible.sh cam_ov2640_stream
-cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view -p cam_ov2640_stream -p bench -p periph_demo -p gc9a01 --target "$HOST"
+cargo test -p mw-payload -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view -p cam_ov2640_stream -p bench -p periph_demo -p serve_echo -p gc9a01 --target "$HOST"
 cargo test -p mw-jpeg --target "$HOST"
 # Without `half` (as cam_jpeg_view builds it): Scale::Half is refused.
 cargo test -p mw-jpeg --no-default-features --target "$HOST"
@@ -44,7 +44,7 @@ cargo clippy -p mw-jpeg --release --examples -- -D warnings
 cargo clippy -p mw-jpeg --target "$HOST" --all-targets -- -D warnings
 cargo clippy -p mw-jpeg --no-default-features --target "$HOST" --all-targets -- -D warnings
 # The examples are no_std cdylibs: on the host only their tests build.
-cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view -p cam_ov2640_stream -p bench -p periph_demo --target "$HOST" --tests -- -D warnings
+cargo clippy -p button -p spi_loopback -p uart_echo -p dimmer -p cam_stream -p cam_view -p cam_jpeg_stream -p cam_jpeg_view -p cam_ov2640_stream -p bench -p periph_demo -p serve_echo --target "$HOST" --tests -- -D warnings
 cargo clippy -p gc9a01 --target "$HOST" --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc -p gc9a01 -p cam_jpeg_view -p cam_ov2640_stream -p bench -p periph_demo --no-deps --document-private-items --target "$HOST"
 RUSTDOCFLAGS="-D warnings" cargo doc -p mw-payload --no-deps

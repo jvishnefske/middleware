@@ -81,6 +81,16 @@
 //!   [`irq::Event::RouteFrames`], [`irq::Event::RouteDropped`] and
 //!   [`irq::Event::RouteStopped`].
 //!
+//! Added with ABI 5 (requires firmware implementing [`ABI_VERSION`] 5):
+//!
+//! * [`serve::serve`] registers a request key; requests arrive in
+//!   [`Payload::on_request`] with the body and
+//!   [`RequestMeta`](serve::RequestMeta) and answer with a reply length or
+//!   a [`HandlerError`](serve::HandlerError). Build with
+//!   `payload!(App, serve)`.
+//! * [`serve::node_id`] — the device's 8-byte node id ([`serve::node_hex`]
+//!   formats it for keys).
+//!
 //! Received messages are copied by the host into one fixed receive buffer of
 //! [`MAX_MESSAGE`] bytes that `mw_alloc` hands out; there is no heap.
 //!
@@ -99,8 +109,9 @@
 //!    `uart_write` copy into firmware-owned DMA buffers; the ABI 4 route
 //!    imports copy the key and config out and move frames in host memory
 //!    only).
-//! 2. Three `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
-//!    `uart_read` and the ABI 3 import `i2c_transfer`, which *write* into
+//! 2. Four `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
+//!    `uart_read`, the ABI 3 import `i2c_transfer` and the ABI 5 import
+//!    `node_id`, which *write* into
 //!    guest memory and are therefore declared without `safe`. Each sits in a
 //!    private wrapper that takes the destination as `&mut [u8]` and passes
 //!    exactly that slice's pointer and length, so the host can only write
@@ -109,7 +120,8 @@
 //!    without the `atomics` target feature, where there is exactly one
 //!    thread. This lets payload state live in a `static` `RefCell`.
 //! 4. The [`payload!`] macro, defined in `sys`, whose expansion carries
-//!    `#[unsafe(no_mangle)]` on the five generated exports. `no_mangle` is
+//!    `#[unsafe(no_mangle)]` on the five generated exports (six with
+//!    `serve`). `no_mangle` is
 //!    an unsafe attribute only because of symbol clashes; the names are the
 //!    fixed ABI names. The attribute is written in this crate and the
 //!    expansion has no `#[allow(unsafe_code)]`, so a payload crate may be
@@ -140,6 +152,7 @@ mod panic;
 pub mod pwm;
 pub mod route;
 pub mod rt;
+pub mod serve;
 pub mod spi;
 #[allow(unsafe_code)]
 mod sys;
@@ -283,6 +296,20 @@ pub trait Payload: Sized {
     /// see [`irq`] for the model. Events the SDK cannot decode are dropped
     /// before reaching this method.
     fn on_irq(&mut self, _event: irq::Event) {}
+
+    /// Called with each request on a [`serve::serve`]d key (ABI 5; only
+    /// with `payload!(App, serve)`): write the reply into `reply` (the
+    /// caller's capacity) and return its length, or the
+    /// [`HandlerError`](serve::HandlerError) to answer. The default answers
+    /// `NotFound`.
+    fn on_request(
+        &mut self,
+        _slot: serve::ServeSlot,
+        _req: &serve::Request<'_>,
+        _reply: &mut [u8],
+    ) -> Result<usize, serve::HandlerError> {
+        Err(serve::HandlerError::NotFound)
+    }
 }
 
 #[cfg(test)]

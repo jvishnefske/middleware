@@ -14,7 +14,7 @@
 //!    [`abi::memory_reach`](crate::abi::memory_reach)), the value
 //!    stack (allocated once, in full), the call frame list up to the depth
 //!    cap, and the fixed host state: linker, store, instance, the DMA copy
-//!    buffer, the subscription list and `init`'s bounded log
+//!    buffer, the subscription and served-key lists and `init`'s bounded log
 //!    ([`run_bytes`]). The image is not counted: the caller frees it
 //!    between the phases.
 //!
@@ -39,6 +39,7 @@
 //! which the firmware covers with its own margin.
 
 use middleware::wasm_abi::periph::MAX_DMA;
+use middleware::wasm_abi::serve::MAX_SERVES;
 use middleware::wasm_abi::{MAX_LOG, MAX_SUBSCRIPTIONS};
 
 use crate::error::INIT_LOG_LINES;
@@ -70,7 +71,8 @@ pub const PER_CALL_DEPTH: u32 = 3 * FRAME_BYTES;
 
 /// Fixed host state while the payload runs: the linker (one entry per
 /// `mw` import), store, instance and engine, the DMA copy buffer
-/// ([`MAX_DMA`] bytes), the subscription list with its keys, `init`'s
+/// ([`MAX_DMA`] bytes), the subscription and (ABI 5) served-key lists
+/// with their keys, `init`'s
 /// bounded log, and a trap message: 19.7 KB on 32-bit targets, 32.2 KB
 /// on 64-bit ones. Measured (instantiation or run peak minus module,
 /// memory and value stack, call frames included) at most 19.7 KB and
@@ -78,6 +80,7 @@ pub const PER_CALL_DEPTH: u32 = 3 * FRAME_BYTES;
 /// build), simulator allocations inside its calls included.
 pub const RUNTIME_FIXED: u32 = MAX_DMA as u32
     + (MAX_SUBSCRIPTIONS as u32) * (middleware::key::MAX_KEY_LEN as u32 + 4 * PTR)
+    + (MAX_SERVES as u32) * (middleware::key::MAX_KEY_LEN as u32 + 4 * PTR)
     + (INIT_LOG_LINES as u32) * (MAX_LOG as u32 + 4 * PTR)
     + 3072 * PTR;
 
