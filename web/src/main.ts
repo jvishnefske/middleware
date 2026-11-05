@@ -32,6 +32,9 @@ async function main() {
   const tryListeners: ((id: string) => void)[] = [];
   const boardListeners: ((id: BoardId) => void)[] = [];
   const infoListeners: ((i: import("./protocol/wasm").DeviceInfo | null) => void)[] = [];
+  const connectedListeners: ((b: import("./ui/app").ConnectedBoard | null) => void)[] = [];
+  const plantListeners: ((p: import("./model/plant").PlantModel) => void)[] = [];
+  let lastPlant: import("./model/plant").PlantModel | null = null;
   const tabs: Record<TabId, HTMLButtonElement> = {} as Record<TabId, HTMLButtonElement>;
   const pages: Record<TabId, HTMLElement> = {} as Record<TabId, HTMLElement>;
 
@@ -61,6 +64,16 @@ async function main() {
     onBoardChosen: (f) => boardListeners.push(f),
     reportDeviceInfo: (i) => infoListeners.forEach((f) => f(i)),
     onDeviceInfo: (f) => infoListeners.push(f),
+    reportBoard: (b) => connectedListeners.forEach((f) => f(b)),
+    onBoard: (f) => connectedListeners.push(f),
+    reportPlant(p) {
+      lastPlant = p;
+      plantListeners.forEach((f) => f(p));
+    },
+    onPlant(f) {
+      plantListeners.push(f);
+      if (lastPlant) f(lastPlant);
+    },
   };
 
   // One fetch of firmware/manifest.json for the Start (Pico UF2s) and Flash (ESP images) tabs.

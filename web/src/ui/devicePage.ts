@@ -4,12 +4,23 @@
 // Blocks tabs) go through `trustedUpload`: signed when the device pins this
 // browser's key, unsigned after a confirmation when it is unclaimed, and
 // unsigned with a note when its firmware predates trust.
+//
+// Plant units (Q23): the units of the Blocks tab's plant bound to this
+// board's node id are listed with an Upload button each, which compiles
+// the unit's phase server and installs it with the same signed upload,
+// then starts it. The connected board is also offered to the Recipe view
+// as a unit link (device/requester.ts: requests over this client, its
+// publications, and its port closing as the unit leaving), so a recipe
+// run drives a unit bound to it on the board.
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { DeviceClient } from "../device/client";
 import { firmwareRunsPayloads, trustedUpload } from "../device/upload";
+import { SerialRequester } from "../device/requester";
+import { boardUnitsNote, unitsOnBoard, uploadUnit } from "../device/unitUpload";
+import type { PlantModel } from "../model/plant";
 import { indexedDbStorage } from "../trust/keyStore";
 import type { DeviceInfo } from "../protocol/wasm";
 import { describePort } from "../serial/ports";
@@ -31,6 +42,10 @@ export function devicePage(app: App): HTMLElement {
   // each connection.
   let unsignedOk = false;
   const trust = trustPanel(indexedDbStorage());
+  /** The connected board as a recipe unit (when it reports a node id). */
+  let requester: SerialRequester | null = null;
+  let info: DeviceInfo | null = null;
+  let plant: PlantModel | null = null;
 
   // ---- console
   const termEl = h("div", { class: "terminal" });
@@ -54,7 +69,20 @@ export function devicePage(app: App): HTMLElement {
   const statusEl = h("span", { class: "badge" }, "disconnected");
 
   function showInfo(i: DeviceInfo | null) {
+    info = i;
     app.reportDeviceInfo(i);
+    if (i && client && i.node) {
+      // The same board after a reconnect keeps its requester, so a run
+      // it was a unit of sees it come back; another board gets a new one.
+      if (requester?.node !== i.node.toLowerCase()) {
+        requester?.closed();
+        requester = new SerialRequester(client, i);
+      } else if (!requester.connected) {
+        requester.reopened(client, i);
+      }
+      app.reportBoard({ info: i, requester });
+    }
+    renderUnits();
     infoEl.replaceChildren();
     if (!i) {
       applyRuntime(null);
@@ -65,6 +93,7 @@ export function devicePage(app: App): HTMLElement {
       ["Firmware", i.firmware],
       ["ABI", `v${i.abiVersion}${i.abiVersion === proto.abi.version ? "" : ` (site expects v${proto.abi.version})`}`],
       ["Payload capacity", `${i.capacity} bytes`],
+      ["Serves phases", i.serves ? "yes (requests reach the payload)" : "no (firmware too old to pass requests to the payload)"],
     ]) {
       infoEl.append(h("dt", {}, k), h("dd", {}, v));
     }
@@ -194,6 +223,42 @@ export function devicePage(app: App): HTMLElement {
       await trust.refresh();
     }
   });
+  // ---- plant units bound to this board
+  const unitsNote = h("p", { class: "muted", id: "device-units-note" });
+  const unitsList = h("ul", { class: "device-units" });
+  const unitsMsg = h("p", { class: "muted", role: "status", "aria-live": "polite" });
+  function renderUnits() {
+    unitsNote.textContent = boardUnitsNote(plant, info);
+    const units = unitsOnBoard(plant, info?.node);
+    unitsList.replaceChildren(
+      ...units.map((u) => {
+        const b = h("button", { type: "button", id: `device-unit-${u.id}`, disabled: !client }, `Upload ${u.id}'s payload`);
+        b.addEventListener("click", async () => {
+          const c = client;
+          const p = plant;
+          if (!c || !p) return;
+          b.disabled = true;
+          unitsMsg.textContent = `Compiling and uploading ${u.id} ...`;
+          try {
+            const sent = await uploadUnit(c, proto, p, u.id, trust.key(), { onProgress: (d, t) => upBar.set(d, t), confirmUnsigned });
+            unitsMsg.textContent = `Installed and started ${u.id} (${sent.kind === "signed" ? `signed, version ${sent.version}` : "unsigned"}). Run the recipe from Blocks → Recipe.`;
+            await refreshInfo();
+          } catch (e) {
+            unitsMsg.textContent = errorText(e);
+          } finally {
+            b.disabled = !client;
+            await trust.refresh();
+          }
+        });
+        return h("li", {}, `${u.id} (${u.name}) `, b);
+      }),
+    );
+  }
+  app.onPlant((p) => {
+    plant = p;
+    renderUnits();
+  });
+
   startBtn.addEventListener("click", () => client?.startPayload().catch((e) => note(errorText(e))));
   stopBtn.addEventListener("click", () => client?.stopPayload().catch((e) => note(errorText(e))));
 
@@ -222,6 +287,11 @@ export function devicePage(app: App): HTMLElement {
     const p = port;
     client = null;
     port = null;
+    // The board leaves any recipe run it is a unit of.
+    requester?.closed();
+    info = null;
+    app.reportBoard(null);
+    renderUnits();
     await c?.close();
     try {
       await p?.close();
@@ -244,6 +314,7 @@ export function devicePage(app: App): HTMLElement {
     client = new DeviceClient({ readable: p.readable, writable: p.writable }, proto, {
       onText: (t) => term.write(t),
       onPublish: (key, payload) => {
+        requester?.publication(key, payload);
         if (key === keys.log) term.writeln(`\x1b[33m[log]\x1b[0m ${new TextDecoder().decode(payload)}`);
         else if (key === keys.status && payload.length === 1) {
           setStatus(proto.payloadStatusName(payload[0]) ?? `status ${payload[0]}`);
@@ -312,6 +383,8 @@ export function devicePage(app: App): HTMLElement {
       upBar.el,
       upMsg,
     ),
+    h("h3", {}, "Plant units on this board"),
+    h("div", { class: "upload" }, unitsNote, unitsList, unitsMsg),
     h("h3", {}, "Recent publications"),
     h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Time"), h("th", {}, "Key"), h("th", {}, "Payload"))), rows),
   );

@@ -110,7 +110,7 @@ import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../m
 import type { BoardId } from "../onboarding/boards";
 import type { BoardPins, PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
-import type { App } from "./app";
+import type { App, ConnectedBoard } from "./app";
 import { errorText, formatBytes, h } from "./dom";
 import { type Flow, type FlowIssue, flowTrail, parseFlowLog, renameFlowPin, renameFlowRef } from "../model/flows";
 import { flowsTabText, flowTrailText } from "./flowsModel";
@@ -293,6 +293,8 @@ export function blocksPage(app: App): HTMLElement {
   let plantIssueList: PlantIssue[] = [];
   /** The node id the connected device reported, if any. */
   let deviceNode: string | null = null;
+  /** The Device tab's board as a recipe unit (Recipe view runs). */
+  let board: ConnectedBoard | null = null;
   let profile: ProfileId = profileOfModel(model);
   let pinIssues: PinIssue[] = [];
   let machineIssues: MachineIssue[] = [];
@@ -581,8 +583,9 @@ export function blocksPage(app: App): HTMLElement {
     ).length;
     unitsTab.textContent = units ? `Units (${units} to fix)` : "Units";
     phasesTab.textContent = phases ? `Phases (${phases} to fix)` : "Phases";
-    recipeV.render(plant, deviceNode);
+    recipeV.render(plant, deviceNode, board);
     recipeTab.textContent = recipeTabText(recipeV.issues(plant));
+    app.reportPlant(plant);
   }
   /** Switches the Blocks, Pins, States, Flows and Phases views to unit `id`. */
   function selectUnit(id: string) {
@@ -629,6 +632,10 @@ export function blocksPage(app: App): HTMLElement {
   unitSel.addEventListener("change", () => selectUnit(unitSel.value));
   app.onDeviceInfo((i) => {
     deviceNode = i ? nodeFromInfo(i.node) : null;
+    renderPlant();
+  });
+  app.onBoard((b) => {
+    board = b;
     renderPlant();
   });
 

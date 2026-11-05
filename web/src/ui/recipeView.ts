@@ -25,16 +25,23 @@
 // * Problems: recipe-core's check (protocol-wasm `checkRecipe`) marks the
 //   step, bar or lane, and lists under the chart with one-click fixes.
 // * Allocation: per unit "online (simulated)" (default on), and whether a
-//   unit's bound node is the board the Device tab sees; `allocateRecipe`
+//   unit's bound node is the board the Device tab sees, and whether that
+//   board can serve phases (its `sys/info` capability bit; otherwise the
+//   plain-language reason and the unit runs simulated); `allocateRecipe`
 //   as one row per unit (what it runs, or why it cannot).
-// * Run in the simulator: compiles every unit (the generated phase
-//   servers), loads each on a SimBus session, sets each analog input of
-//   the pin tables to the level in its field, and runs recipe-core's
-//   engine (sim/recipeRun.ts). Start, Hold, Restart, Stop, Abort and
-//   Reset are enabled exactly where the phase model accepts them in the
-//   procedure's state (`operatorButtons`); Lose / Find take a unit off
-//   the simulated network and back. Step status and phase state show on
-//   the canvas and in the outline; the trace lists what happened.
+// * Run: a unit bound to the Device tab's board, when the board serves
+//   phases, runs on the board (Q23: its payload uploaded from the Device
+//   tab, commands over Web Serial, its `/state` reports fed back); every
+//   other unit is compiled (the generated phase servers) and loaded on a
+//   SimBus session, each analog input of the pin tables set to the level
+//   in its field (sim/net.ts MixedNet joins both). recipe-core's engine
+//   (sim/recipeRun.ts) runs the recipe. Start, Hold, Restart, Stop, Abort
+//   and Reset are enabled exactly where the phase model accepts them in
+//   the procedure's state (`operatorButtons`); Lose / Find take a unit
+//   off the network and back (a board: stop and resume talking to it;
+//   pulling its cable does the same by itself). Step status and phase
+//   state show on the canvas and in the outline; the trace lists what
+//   happened.
 //
 // All decisions are elsewhere (recipeModel.ts, model/recipe.ts, the Rust
 // check, allocation and engine); this file renders and forwards.
@@ -64,7 +71,10 @@ import {
   setUnitProcedure,
 } from "../model/recipe";
 import type { Protocol, StepStatus } from "../protocol/wasm";
+import { canServe, serveProblem } from "../device/requester";
 import { SimBus } from "../sim/bus";
+import { MixedNet } from "../sim/net";
+import type { ConnectedBoard } from "./app";
 import { RecipeRunner, buildUnit, operatorButtons } from "../sim/recipeRun";
 import { realClock } from "../sim/session";
 import { errorText, h } from "./dom";
@@ -100,8 +110,9 @@ export interface RecipeViewEvents {
 
 export interface RecipeView {
   el: HTMLElement;
-  /** `deviceNode`: the node id of the board the Device tab sees. */
-  render(plant: PlantModel, deviceNode: string | null): void;
+  /** `deviceNode`: the node id of the board the Device tab sees;
+   * `board`: that board as a unit link (runs a unit bound to it there). */
+  render(plant: PlantModel, deviceNode: string | null, board?: ConnectedBoard | null): void;
   /** The check's problems of every recipe (for the tab text). */
   issues(plant: PlantModel): RecipeIssue[];
 }
@@ -133,6 +144,7 @@ type Selection = { step: string } | { transition: number } | { lane: number } | 
 interface Live {
   recipe: number;
   bus: SimBus;
+  net: MixedNet;
   runner: RecipeRunner;
   sig: string;
 }
@@ -140,6 +152,10 @@ interface Live {
 export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
   let plant: PlantModel | null = null;
   let deviceNode: string | null = null;
+  let board: ConnectedBoard | null = null;
+  /** The board `u` runs on: bound to the Device tab's board, which serves. */
+  const onBoard = (u: { node: string | null }): ConnectedBoard | null =>
+    board && u.node && board.requester.node === u.node.toLowerCase() && canServe(board.info) && board.requester.connected ? board : null;
   let at = 0;
   let sel: Selection = null;
   let zoom = 1;
@@ -783,9 +799,17 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
         keeper.want(`ralloc-on-${u.id}`);
         draw();
       });
-      const board = u.node ? (deviceNode === u.node ? `bound to ${u.node}: the board on the Device tab` : `bound to ${u.node}: not seen on the Device tab`) : "not bound (Units view)";
+      const here = board && u.node && board.info.node === u.node ? board : null;
+      const problem = here ? serveProblem(here.info) : null;
+      const boardText = u.node
+        ? deviceNode === u.node
+          ? problem
+            ? `bound to ${u.node}: the board on the Device tab, which cannot serve phases (runs in the simulator). ${problem}`
+            : `bound to ${u.node}: the board on the Device tab${here ? " (runs on the board)" : ""}`
+          : `bound to ${u.node}: not seen on the Device tab`
+        : "not bound (Units view)";
       const row = rows.find((x) => x.unit === u.id);
-      table.append(h("tr", { class: row && !row.ok ? "error" : "" }, h("th", { scope: "row" }, u.id), h("td", {}, on), h("td", { class: "muted" }, board), h("td", {}, row?.text ?? "—")));
+      table.append(h("tr", { class: row && !row.ok ? "error" : "" }, h("th", { scope: "row" }, u.id), h("td", {}, on), h("td", { class: problem ? "warning" : "muted" }, boardText), h("td", {}, row?.text ?? "—")));
     }
     sec.append(table);
     if (hasErrors) sec.append(h("p", { class: "note" }, "Fix the recipe's errors to bind it to units."));
@@ -796,6 +820,7 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
   function stopRun() {
     if (!live) return;
     live.runner.dispose();
+    live.net.dispose();
     live.bus.dispose();
     live = null;
   }
@@ -812,15 +837,22 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
       // Compile every unit first, so the sessions start their clocks
       // together (a session loaded before a slow compile would run its
       // overdue ticks back to back).
+      // A unit on the Device tab's board runs there (its payload is the
+      // one uploaded from the Device tab); the others in the simulator.
       const built: { u: (typeof p.physical.units)[number]; wasm: Uint8Array }[] = [];
-      for (const u of p.physical.units) built.push({ u, wasm: await buildUnit(p, u.id, proto.abi) });
+      for (const u of p.physical.units) if (!onBoard(u)) built.push({ u, wasm: await buildUnit(p, u.id, proto.abi) });
       const bus = new SimBus(proto, realClock);
+      const net = new MixedNet(bus);
+      for (const u of p.physical.units) {
+        const b = onBoard(u);
+        if (b) net.attach(u.id, b.requester);
+      }
       for (const { u, wasm } of built) {
         const session = bus.add(u.id, wasm, { node: u.node });
         for (const row of u.cms.rows) if (row.func === "adc" && row.pin !== null) session.setAdc(row.pin, levels.get(`${u.id}/${row.label}`) ?? 2048);
-        if (offline.has(u.id)) bus.setOnline(u.id, false);
       }
-      const runner = new RecipeRunner(proto, p, r, bus, realClock, {
+      for (const u of p.physical.units) if (offline.has(u.id)) net.setOnline(u.id, false);
+      const runner = new RecipeRunner(proto, p, r, net, realClock, {
         onChange: () => {
           const l = live;
           if (!l) return;
@@ -831,9 +863,10 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
           }
         },
       });
-      live = { recipe: at, bus, runner, sig: "" };
+      live = { recipe: at, bus, net, runner, sig: "" };
       runner.start(10);
-      status = "Running in the simulator: press Start.";
+      const real = net.boards;
+      status = real.length ? `Ready: ${real.join(", ")} on the board, the rest in the simulator. Press Start.` : "Running in the simulator: press Start.";
     } catch (e) {
       runError = errorText(e);
       status = "";
@@ -854,10 +887,12 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
 
   function runPanel(hasErrors: boolean): HTMLElement {
     const p = plant!;
-    const sec = h("section", { class: "recipe-run", "aria-labelledby": "recipe-run-h" }, h("h4", { id: "recipe-run-h" }, "Run in the simulator"));
+    const real = p.physical.units.filter((u) => onBoard(u)).map((u) => u.id);
+    const title = real.length ? `Run (${real.join(", ")} on the board)` : "Run in the simulator";
+    const sec = h("section", { class: "recipe-run", "aria-labelledby": "recipe-run-h" }, h("h4", { id: "recipe-run-h" }, title));
     const l = liveFor();
     const bar = h("div", { class: "row" });
-    const runBtn = h("button", { type: "button", id: "recipe-run", disabled: hasErrors || building || !proto.hasSimulator }, l ? "Restart simulation" : "Run in simulator");
+    const runBtn = h("button", { type: "button", id: "recipe-run", disabled: hasErrors || building || !proto.hasSimulator }, l ? "Restart simulation" : real.length ? "Run" : "Run in simulator");
     runBtn.addEventListener("click", () => void startRun());
     bar.append(runBtn);
     if (l) {
@@ -902,8 +937,9 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
     }
     sec.append(h("p", { class: "row" }, h("strong", { class: `rstate st-${state.toLowerCase()}`, role: "status", "aria-live": "polite" }, `Procedure: ${state}`), ops));
     const units = h("div", { class: "row" });
-    for (const u of l.bus.all) {
-      const on = u.online;
+    for (const u of p.physical.units) {
+      const on = l.net.online(u.id);
+      const where = l.net.simulated(u.id) ? "" : " (board)";
       const b = h("button", { type: "button", id: `recipe-net-${u.id}` }, on ? `Lose ${u.id}` : `Find ${u.id}`);
       b.addEventListener("click", () => {
         keeper.want(`recipe-net-${u.id}`);
@@ -911,7 +947,7 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
         else l.runner.find(u.id);
         draw();
       });
-      units.append(h("span", { class: on ? "" : "warning" }, `${u.id} ${on ? "online" : "offline"} `), b);
+      units.append(h("span", { class: on ? "" : "warning" }, `${u.id}${where} ${on ? "online" : "offline"} `), b);
     }
     sec.append(units);
     const phases = h("ul", { class: "recipe-phases" }, ...l.runner.phases().map((ph) => h("li", {}, `${ph.unit}/${ph.em}.${ph.phase}: ${ph.state ?? "unknown"}${ph.values.length ? ` — reported ${ph.values.join(", ")}` : ""}`)));
@@ -952,9 +988,10 @@ export function recipeView(proto: Protocol, ev: RecipeViewEvents): RecipeView {
 
   return {
     el: root,
-    render(p, node) {
+    render(p, node, b) {
       plant = p;
       deviceNode = node;
+      board = b ?? null;
       if (at >= p.recipes.length) at = Math.max(0, p.recipes.length - 1);
       if (sel && "step" in sel && !p.recipes[at]?.steps.some((x) => x.id === (sel as { step: string }).step)) sel = null;
       draw();
