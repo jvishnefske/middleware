@@ -1,20 +1,25 @@
-// A control recipe run in the browser (design.md Q19): recipe-core's
-// engine (protocol-wasm `RecipeRun`) driving the plant's units as
-// simulated payloads on a SimBus (bus.ts). DOM-free; the clock is
-// injected so tests run in virtual time.
+// A control recipe run in the browser (design.md Q19, Q23): recipe-core's
+// engine (protocol-wasm `RecipeRun`) driving the plant's units: simulated
+// payloads on a SimBus (bus.ts) and real boards over Web Serial
+// (device/requester.ts), mixed freely, through one `PlantNet` (net.ts).
+// DOM-free; the clock is injected so tests run in virtual time.
 //
 //   operator / lose / find / tick ──► RecipeRun.on ──► effects
 //        ▲                                  │ send {key, body, timeoutMs}
 //        │ reply                             ▼
-//        └──────────── SimBus.request ──► the unit's SimSession (on_request)
-//   SimBus publications on ".../state" ──► RecipeRun.on(report)
+//        └──────────── PlantNet.request ──► SimSession.on_request (sync)
+//                                       └─► SerialRequester (Promise)
+//   publications on ".../state" (bus and boards) ──► RecipeRun.on(report)
+//   a board's port closing / reopening ──► RecipeRun.on(lost / found)
 //
 // Inputs are queued and handled one at a time (a request's reply and the
 // reports it publishes arrive while the engine's effects are being
 // carried out); one drain handles at most MAX_INPUTS, then traces that
-// the inputs did not settle. A request to a unit that is offline (or that
-// no unit serves) is lost: the engine's acknowledgement deadline notices,
-// as on a real network. `start` runs every unit's main loop and the
+// the inputs did not settle. A simulated unit's reply is queued at once,
+// a board's when its response arrives (its `sent` outcome is "pending"
+// until then). A request to a unit that is offline (or that no unit
+// serves) is lost: the engine's acknowledgement deadline notices, as on a
+// real network. `start` runs every simulated unit's main loop and the
 // engine's clock every `pollMs` (10 ms: the payload-sim tests' step).
 //
 // `operatorButtons` is the pure part the page's Start/Hold/... buttons
@@ -28,6 +33,7 @@ import { type PlantModel, allocationUnits, phaseSpecs, unitPayload } from "../mo
 import type { MasterRecipe } from "../model/recipe";
 import { PHASE_COMMANDS } from "../model/procedural";
 import { type SimBus, defaultNode } from "./bus";
+import { type NetReply, type PlantNet, plantNet } from "./net";
 import type { Clock } from "./session";
 
 /** Most inputs one drain handles. */
@@ -87,27 +93,36 @@ export class RecipeRunner {
   private queue: RunInput[] = [];
   private draining = false;
   private stopTimer: (() => void) | null = null;
-  private readonly unlisten: () => void;
+  private readonly unlisten: (() => void)[];
+  private disposed = false;
+  /** The plant's network (a SimBus alone is a network of simulated units). */
+  readonly net: PlantNet;
 
-  /** Allocates `recipe` on the plant's units as they are on `bus` (online,
+  /** Allocates `recipe` on the plant's units as they are on `net` (online,
    * node ids) and builds an Idle run. Throws with allocation's message. */
   constructor(
     proto: Protocol,
     plant: PlantModel,
     recipe: MasterRecipe,
-    private readonly bus: SimBus,
+    net: SimBus | PlantNet,
     private readonly clock: Clock,
     private readonly opts: RunnerOptions = {},
   ) {
     this.t0 = clock.now();
-    const units: RunUnit[] = allocationUnits(plant, (u) => bus.online(u.id)).map((u, i) => ({
+    const n = plantNet(net);
+    this.net = n;
+    const units: RunUnit[] = allocationUnits(plant, (u) => n.online(u.id)).map((u, i) => ({
       ...u,
-      node: bus.unit(u.id)?.session.nodeId ?? plant.physical.units[i]?.node ?? defaultNode(i),
+      node: n.node(u.id) ?? plant.physical.units[i]?.node ?? defaultNode(i),
     }));
     this.run = proto.newRecipeRun(recipe, plant.procedural.classes, units, opts.config);
-    this.unlisten = bus.onPublish((_unit, key, data) => {
-      if (key.endsWith("/state")) this.input({ kind: "report", key, data });
-    });
+    this.unlisten = [
+      n.onPublish((_unit, key, data) => {
+        if (key.endsWith("/state")) this.input({ kind: "report", key, data });
+      }),
+      // A board that left by itself (its port closed) or came back.
+      n.onPresence((unit, online) => this.input(online ? { kind: "found", unit } : { kind: "lost", unit })),
+    ];
   }
 
   /** Milliseconds since the run was built. */
@@ -131,8 +146,10 @@ export class RecipeRunner {
     return this.run.bindings();
   }
 
-  /** Queues one input and handles everything it leads to. */
+  /** Queues one input and handles everything it leads to (nothing after
+   * `dispose`: a board's late reply is dropped). */
   input(i: RunInput): void {
+    if (this.disposed) return;
     this.queue.push(i);
     this.drain();
   }
@@ -142,15 +159,16 @@ export class RecipeRunner {
     this.input({ kind: "operator", command: command.toLowerCase() });
   }
 
-  /** Takes a unit off the network and tells the engine. */
+  /** Takes a unit off the network (a board: stops talking to it) and
+   * tells the engine. */
   lose(unit: string): void {
-    this.bus.setOnline(unit, false);
+    this.net.setOnline(unit, false);
     this.input({ kind: "lost", unit });
   }
 
   /** Brings a unit back and tells the engine. */
   find(unit: string): void {
-    this.bus.setOnline(unit, true);
+    this.net.setOnline(unit, true);
     this.input({ kind: "found", unit });
   }
 
@@ -163,11 +181,23 @@ export class RecipeRunner {
       this.trace.push({ t: e.t, type: e.type, text: e.text });
       return;
     }
-    const r = this.bus.online(e.unit) ? this.bus.request(e.key, e.body, { deadlineMs: e.timeoutMs }, true) : null;
-    this.sent.push({ unit: e.unit, command: e.command, outcome: r === null ? "lost" : r.result.ok ? "ok" : r.result.error });
+    const r = this.net.online(e.unit) ? this.net.request(e.unit, e.key, e.body, { deadlineMs: e.timeoutMs }) : null;
+    const outcome = (x: NetReply) => (x === null ? "lost" : x.ok ? "ok" : x.error);
+    if (r instanceof Promise) {
+      // A board: the reply joins the queue when it arrives.
+      const entry = { unit: e.unit, command: e.command, outcome: "pending" };
+      this.sent.push(entry);
+      void r.then((x) => {
+        entry.outcome = outcome(x);
+        if (x) this.input({ kind: "reply", id: e.id, ...x });
+        else this.opts.onChange?.();
+      });
+      return;
+    }
+    this.sent.push({ unit: e.unit, command: e.command, outcome: outcome(r) });
     // The reply first, then the reports the request caused.
-    if (r) this.queue.push({ kind: "reply", id: e.id, ...r.result });
-    this.bus.flush();
+    if (r) this.queue.push({ kind: "reply", id: e.id, ...r });
+    this.net.flush();
   }
 
   private drain(): void {
@@ -193,7 +223,7 @@ export class RecipeRunner {
   start(pollMs = 10): void {
     if (this.stopTimer) return;
     this.stopTimer = this.clock.every(pollMs, () => {
-      this.bus.step();
+      this.net.step();
       this.tick();
     });
   }
@@ -208,8 +238,10 @@ export class RecipeRunner {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.stop();
-    this.unlisten();
+    for (const off of this.unlisten) off();
+    this.disposed = true;
     this.run.free();
   }
 }

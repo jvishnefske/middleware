@@ -2,11 +2,22 @@
 // the protocol-wasm encoders and the Rust loader state machine, plus
 // `FakeTrust`, a TypeScript model of the device's trust contract
 // (`sys/trust/*` and the signed commit) for the U13 tests.
+//
+// With `runs` the fake is a board that runs what it was sent and routes
+// requests on served keys to it, as rp-base and esp-base do since M7
+// (`esp_base::serve`): `sys/payload/start` loads the uploaded image into a
+// browser-simulator session (on the script's clock, with the script's
+// node id), `sys/info` reports that node and the capability bits (1:
+// requests reach the payload), a request on a key the running payload
+// serves goes to its `on_request` and the payload's publications go out as
+// publish frames after the response; a stopped payload's keys answer
+// Unavailable, other application keys NotFound, `sys/` keys the loader.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ByteStreams } from "../src/device/client";
 import { loadProtocolSync, type Protocol } from "../src/protocol/wasm";
+import { type Clock, SimSession } from "../src/sim/session";
 import { sha256, verifySignature } from "../src/trust/crypto";
 import {
   DENIED_CODE,
@@ -21,6 +32,16 @@ import {
 
 const NOT_FOUND = 1;
 const INVALID_REQUEST = 2;
+/** `HandlerError::code` by name (middleware transport/reqrep.rs). */
+const HANDLER_CODES: Record<string, number> = {
+  NotFound: 1,
+  InvalidRequest: 2,
+  BufferTooSmall: 3,
+  Internal: 4,
+  Denied: 5,
+  Unavailable: 6,
+  DeadlineExceeded: 7,
+};
 export const BOOT_HOLD_MS = 3000;
 export const REKEY_WINDOW_MS = 60_000;
 
@@ -123,6 +144,19 @@ export interface FakeDeviceScript {
   /** `sys/board` body (e.g. `bsp_export --wire`); without it the device
    * predates 0.6 and answers NotFound. */
   board?: Uint8Array;
+  /** Runs uploaded payloads and routes served keys to them (see above). */
+  runs?: FakeRuntime;
+}
+
+export interface FakeRuntime {
+  /** The session's clock (steps every 10 ms). */
+  clock: Clock;
+  /** Node id (16 hex digits) for `sys/info` and the payload's `node_id`. */
+  node: string;
+  /** Capability bits in `sys/info` (default 1: requests are routed). */
+  caps?: number;
+  /** Called with each session the board starts (to set analog levels). */
+  onSession?(s: SimSession): void;
 }
 
 /** A device speaking the serial protocol with the real loader rules. */
@@ -138,6 +172,13 @@ export class FakeDevice {
   private readonly done: Promise<void>;
   private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
   private index = 0;
+  /** The running payload (with `runs`). */
+  session: SimSession | null = null;
+  /** The keys the last run served. */
+  private lastServes: string[] = [];
+  /** Publications held while a request is being answered. */
+  private holding: Uint8Array[] | null = null;
+  private closed = false;
 
   constructor(
     private readonly proto: Protocol,
@@ -158,6 +199,42 @@ export class FakeDevice {
 
   publish(key: string, payload: Uint8Array): Promise<void> {
     return this.send(this.proto.encodePublish(key, payload));
+  }
+
+  /** A payload publication: after the response being sent, if any. */
+  private payloadPublish(key: string, data: Uint8Array): void {
+    if (this.closed) return;
+    const frame = this.proto.encodePublish(key, data);
+    if (this.holding) this.holding.push(frame);
+    else void this.send(frame).catch(() => {});
+  }
+
+  private startSession(rt: FakeRuntime): void {
+    this.stopSession();
+    const s = new SimSession(this.proto, Uint8Array.from(this.image), { onEvent: (e) => e.kind === "publish" && this.payloadPublish(e.key, e.data) }, rt.clock, { node: rt.node });
+    rt.onSession?.(s);
+    s.start(10);
+    this.session = s;
+  }
+
+  private stopSession(): void {
+    if (!this.session) return;
+    this.lastServes = this.session.serves;
+    this.session.dispose();
+    this.session = null;
+  }
+
+  /** The firmware's routing (`esp_base::serve::route_request`) for an
+   * application key: the payload's answer, or the error code. */
+  private serve(req: ReceivedRequest): { code: number; body: Uint8Array } {
+    const errors = HANDLER_CODES;
+    const s = this.session;
+    if (s && !s.trapped && s.serves.includes(req.key)) {
+      const r = s.request(req.key, req.body);
+      return r.ok ? { code: 0, body: r.reply } : { code: errors[r.error] ?? errors.Internal!, body: new Uint8Array() };
+    }
+    const known = (s?.serves ?? []).includes(req.key) || this.lastServes.includes(req.key);
+    return { code: known ? errors.Unavailable! : NOT_FOUND, body: new Uint8Array() };
   }
 
   private async run(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
@@ -182,6 +259,15 @@ export class FakeDevice {
     if (delay) await new Promise((r) => setTimeout(r, delay));
     const forced = this.script.forceStatus?.(req);
     if (forced) return this.send(this.proto.encodeResponse(req.id, forced, new Uint8Array()));
+    if (this.script.runs && !req.key.startsWith("sys/")) {
+      this.holding = [];
+      const r = this.serve(req);
+      const held = this.holding;
+      this.holding = null;
+      if (!silent) await this.send(this.proto.encodeResponse(req.id, r.code, r.body));
+      for (const f of held) await this.send(f).catch(() => {});
+      return;
+    }
     let loaderBody = req.body;
     let accepted: number | undefined;
     const trust = this.script.trust;
@@ -215,8 +301,9 @@ export class FakeDevice {
             abiVersion: this.proto.abi.version,
             capacity: this.script.capacity ?? 65536,
             status: this.status,
-            chip: "esp32c3",
+            chip: this.script.runs ? "rp2350" : "esp32c3",
             firmware: "0.1.0-fake",
+            ...(this.script.runs ? { node: this.script.runs.node, caps: this.script.runs.caps ?? 1 } : {}),
           });
           break;
         case "board":
@@ -226,6 +313,8 @@ export class FakeDevice {
           body = this.script.board;
           break;
         case "erase":
+          this.stopSession();
+          this.lastServes = [];
           this.image.length = 0;
           this.status = 4;
           break;
@@ -233,6 +322,8 @@ export class FakeDevice {
           this.image.push(...(r.data ?? []));
           break;
         case "activate":
+          this.stopSession();
+          this.lastServes = [];
           trust?.accept(accepted);
           this.activated = { len: r.len ?? 0, crc: r.crc ?? 0 };
           this.status = 1;
@@ -240,8 +331,10 @@ export class FakeDevice {
         case "start":
           this.started = true;
           this.status = 2;
+          if (this.script.runs) this.startSession(this.script.runs);
           break;
         case "stop":
+          this.stopSession();
           this.status = 1;
           break;
         default:
@@ -255,7 +348,11 @@ export class FakeDevice {
     }
   }
 
+  /** The cable is pulled: the payload stops with the board, both
+   * directions end. */
   async close(): Promise<void> {
+    this.closed = true;
+    this.stopSession();
     await this.reader.cancel().catch(() => {});
     await this.writer.close().catch(() => {});
     await this.done;

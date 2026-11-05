@@ -16,6 +16,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { PlantModel } from "../src/model/plant";
 import { EXAMPLE_PLANT } from "../src/model/plantExample";
 import { recipeView } from "../src/ui/recipeView";
+import { SerialRequester } from "../src/device/requester";
+import { bindNode } from "../src/model/plantEdit";
+import type { DeviceInfo } from "../src/protocol/wasm";
 import { loadProtocolSync } from "../src/protocol/wasm";
 
 // jsdom's URL is not node's, so fakeDevice's file-URL loader does not
@@ -167,4 +170,32 @@ describe("allocation and a run in the browser (Q19)", () => {
     (q(el, "#recipe-run-stop") as HTMLButtonElement).click();
     expect(q(el, "#recipe-op-start")).toBeNull();
   }, 30_000);
+});
+
+describe("a unit on the Device tab's board (Q23)", () => {
+  const node = "e6613852831f2a0b";
+  const info = (serves: boolean): DeviceInfo => ({ abiVersion: 5, capacity: 65536, status: 2, statusName: "running", chip: "rp2350", firmware: "0.1.0", node, caps: serves ? 1 : 0, serves });
+  const board = (serves: boolean) => {
+    const i = info(serves);
+    return { info: i, requester: new SerialRequester({ request: async () => new Uint8Array() }, i) };
+  };
+  const boardCell = (el: Element) => (all(el, ".alloc tr")[1]!.children[2] as HTMLElement);
+
+  it("runs a bound unit on a board that serves, and says why not on one that cannot", () => {
+    const plant = bindNode(EXAMPLE_PLANT, "pico-led", node);
+    const v = recipeView(proto, { onChange: () => {} });
+    document.body.replaceChildren(v.el);
+    v.render(plant, node, board(true));
+    expect(boardCell(v.el).textContent).toBe(`bound to ${node}: the board on the Device tab (runs on the board)`);
+    expect(q(v.el, "#recipe-run-h")!.textContent).toBe("Run (pico-led on the board)");
+    v.render(plant, node, board(false));
+    expect(boardCell(v.el).className).toBe("warning");
+    expect(boardCell(v.el).textContent).toBe(
+      `bound to ${node}: the board on the Device tab, which cannot serve phases (runs in the simulator). This board (rp2350 0.1.0) cannot serve phases: its firmware does not pass requests to the payload. Update its firmware on the Flash tab, or run this unit in the simulator.`,
+    );
+    expect(q(v.el, "#recipe-run-h")!.textContent).toBe("Run in the simulator");
+    // No board on the Device tab: as before.
+    v.render(plant, null, null);
+    expect(boardCell(v.el).textContent).toBe(`bound to ${node}: not seen on the Device tab`);
+  });
 });
