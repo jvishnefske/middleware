@@ -3812,6 +3812,13 @@ The contract is `wasm_abi::serve`, pure and heap-free.
   rp-base, conagotchi): `Device::serve` registers the key with the
   device's responder, `node_id` returns the `sys/info` node id, and the
   shell answers with `Payload::request`'s reply (a trap as `Internal`).
+- [x] M8 The browser simulator serves requests like a board: each device
+  has a node id (default `0000000000000001`, a `SimBus` gives every unit
+  the next), `serve` is accepted, `adc_read` reads a level set from the
+  page, and `request(key, body, meta)` answers through
+  `Payload::request`; a `SimBus` routes requests by the key's node id,
+  delivers publications between units and to listeners after the
+  publishing call returns, and takes units off the network — `cargo test -p protocol-wasm simulator`: "q19_a_phase_unit_serves_its_phase_under_its_node_id", "adc_levels_are_set_from_js_and_clamped"; `web/test/recipe.run.test.ts`: "gives each unit a distinct node and routes requests by the key's node", "publishes each unit's state reports on the bus and delivers to other units' subscriptions".
 
 ### JPEG decode in WASM (J…)
 
@@ -4289,25 +4296,50 @@ payload does. The version-4 reader accepts every older file.
   payloads, or subscribe-and-report until it exists), heartbeat reports,
   and argument range checks, all checked against the phase state model —
   `cargo test -p state-table flow`: "a_blink_body_with_done_after_a_parameter_and_a_report_is_clean", "phase_entries_name_a_phase_of_the_unit_and_an_acting_state", "a_phase_state_has_one_body_flow", "phase_actions_name_a_phase_and_its_parameters_and_count_only_in_its_body", "a_report_carries_at_most_four_values"; `cargo test -p recipe-core phase`: "the_flow_checks_acting_states_are_these_acting_states_in_lower_case"; `cargo test -p protocol-wasm flows`: "a_phase_body_is_clean_and_phase_problems_read_plainly"; `web/test/phase.gen.test.ts`: "switches on the phase model's table", "leaves a unit without phases exactly as before", "generates a bounded command switch, serve per phase, reports and the heartbeat", "reports phase actions on unknown phases, parameters and run counts outside the body", "the worked example's units check clean against their phases", "compiles the payload-sim fixtures: the 77-cell matrix unit and the worked example's two units"; `web/test/plant.test.ts`: "rejects bad shapes and dangling references, naming the place"; `cargo test -p payload-sim --test phase`: "p1_every_cell_of_the_phase_model_matches_recipe_core" (all 77 cells, acknowledgements and reports byte-equal to `recipe_core::wire`), "p2_start_arguments_and_malformed_bodies_are_invalid_requests", "p3_blink_then_measure_runs_to_complete_on_the_generated_units", "p4_a_hold_mid_blink_holds_the_batch_and_restart_finishes_it", "p5_losing_the_led_unit_holds_restart_is_refused_and_abort_ends_aborted".
-- [ ] Q18 The master recipe is edited on the Flow canvas: steps as nodes
+- [x] Q18 The master recipe is edited on the Flow canvas: steps as nodes
   naming a phase class and arguments, transitions as bars joining steps
   (parallel divergence and convergence), unit procedures as lanes, with
-  `checkRecipe` issues on their nodes.
-- [ ] Q19 Allocation and execution in the browser: an allocation panel
-  against units from discovery or simulated units, and the engine running
-  the control recipe with operator buttons (Start, Hold, Restart, Stop,
-  Abort, Reset), live step and phase states, and the trace.
+  `checkRecipe` issues on their nodes. The Recipe view (web
+  `ui/recipeView.ts`, built from the Flows canvas and outline pieces) has
+  an outline editor in run order for keyboards and phones, argument fields
+  carrying the class's range, and one-click fixes from the check; its pure
+  edits keep round 7's chart rules by construction (connecting extends a
+  step's transition into a divergence or convergence and refuses a loop
+  or a second transition on one side; no choice, Q20) —
+  `web/test/recipe.edit.test.ts`: "adds a step at the class minimums below its lane, and it checks clean", "connect makes a transition, a parallel divergence and a convergence; never a loop or a choice", "detach and remove keep transitions non-empty", "renames carry to transitions; class changes keep arguments in range", "unit procedures: add, rename (steps follow), remove only when unused", "applies the check's fixes until the recipe is clean", "plant recipes: add, set, remove"; `web/test/recipe.view.test.ts` (jsdom): "draws a lane per unit procedure, a step per step and a bar per transition", "selects a step from the keyboard; arguments carry the class range and the check's issues, with a fix", "+ Step after a selected step makes a parallel divergence drawn with a double line", "the outline lists steps in run order and its menu connects, refusing a loop"; `cargo test -p protocol-wasm recipes`: "q18_issues_carry_one_click_fixes". The chart's look on a desktop and a phone is Q22.
+- [x] Q19 Allocation and execution in the browser against simulated units:
+  an allocation panel (per unit online in the simulator, whether its
+  bound node is the board the Device tab sees, and what it runs or why it
+  cannot), and recipe-core's engine (protocol-wasm `RecipeRun`) running
+  the control recipe on the units' generated phase servers in the browser
+  simulator (one session per unit on a `SimBus`, requests routed by the
+  key's node id, `/state` reports fed back), with operator buttons (Start,
+  Hold, Restart, Stop, Abort, Reset) enabled exactly where the phase model
+  accepts them in the procedure's state, lose / find unit, live step and
+  phase states, and the trace. The browser path reproduces payload-sim's
+  p3-p5 — `web/test/recipe.run.test.ts`: "p3: Blink then Measure runs to Complete", "p4: a Hold mid-Blink holds the batch and Restart finishes it", "p5: losing the LED unit holds, Restart is refused, Abort ends Aborted", "are enabled exactly where the phase model accepts the command"; `web/test/recipe.view.test.ts` (jsdom): "lists per unit what it runs, or why it cannot", "runs the recipe on the simulated units to Complete, buttons following the phase model"; `cargo test -p protocol-wasm recipes::run`: "q19_start_sends_the_step_arguments_to_the_bound_phase_key", "foreign_reports_errors_and_unknown_units_are_ignored_lines", "nodes_must_match_units". Real boards as units are Q23.
 - [ ] Q20 Selection (alternative) divergence: transitions with conditions
   on phase result values, keeping the termination argument.
-- [ ] Q21 The Units and Phases views (web `ui/plantViews.ts`) follow the
+- [x] Q21 The Units and Phases views (web `ui/plantViews.ts`) follow the
   grid rules of the Pins and States views: real tables of labelled
   controls, Ctrl + arrow keys between cells and Up / Down between rows in
   text cells, focus kept across re-renders, each row's problems under it
   (aria-describedby, aria-invalid), tables scrolling inside their own
-  container, no horizontal page scroll at 390 px, the tab counting the
-  problems and Compile switching to Phases while there are any; the unit
-  picker drives Blocks, Pins, States, Flows and Phases. Screenshot-checked
-  only (round 8, `round8/steps8.mjs`) until a DOM test harness exists.
+  container; the unit picker drives the other views —
+  `web/test/plant.view.test.ts` (jsdom): "is a table of labelled controls in its own scroller", "moves between cells with Ctrl + arrows and between rows with Up / Down in text cells", "keeps focus across a re-render and puts a row's problems under it", "the unit picker and Bind drive the plant", "tables of labelled controls per model, problems under their row, focus kept".
+- [ ] Q22 Page layout and wiring of the plant views (Units, Phases,
+  Recipe): no horizontal page scroll at 390 px, the canvas scrolling
+  inside its own box, the Units / Phases / Recipe tabs counting their
+  problems, Compile switching to Phases while there are any, and the
+  Recipe chart, allocation panel and run panel readable on a desktop and
+  a phone. Screenshot-checked only (round 8 `round8/steps8.mjs`, round 9
+  `round9/steps9.mjs`: desktop 1280 px and phone 390 px, page width equal
+  to the viewport in every step); jsdom has no layout.
+- [ ] Q23 Real boards as units: allocation sees units from discovery
+  (`s88/unit` announcements or bound boards answering `sys/info`), the
+  Device tab uploads each unit's payload to its bound board, and the
+  engine's commands go over Web Serial (a `Requester` with response
+  correlation) while the boards' `/state` reports feed it; needs M7.
 
 ## Known limitations (0.3)
 
