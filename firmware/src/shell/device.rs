@@ -31,6 +31,14 @@
 //! Bus 1, and I2C on a profile without a map, is `Unsupported`. The pins
 //! stay claimed until the payload stops.
 //!
+//! # Serving requests (ABI 5)
+//!
+//! `serve` accepts any key a payload may serve
+//! ([`esp_base::serve::servable`]: not `sys/...`); wasm-host keeps the live
+//! table and the controller routes serial requests on it to
+//! `Payload::request`. `node_id` answers the node `sys/info` reports (the
+//! base MAC, zero-padded).
+//!
 //! The four payload timers ([`super::timer`]) and the event queue
 //! ([`super::irq`]) are firmware-wide statics shared with their ISRs.
 //!
@@ -90,7 +98,7 @@ use esp_base::periph::pwm::PwmTable;
 use esp_base::route::sink::{SinkRoute, transfers};
 use esp_base::route::table::{Kind, Routes};
 use esp_base::route::stopped_event;
-use middleware::Key;
+use middleware::{Key, SenderId};
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
 use wasm_host::{
@@ -175,12 +183,14 @@ pub struct EspDevice {
     camera: Option<u8>,
     profile: &'static Profile,
     bus: &'static Bus,
+    /// What `node_id` answers.
+    node: SenderId,
 }
 
 impl EspDevice {
     /// A device for one payload run; `None` while another device holds the
-    /// pins.
-    pub fn new(profile: &'static Profile, bus: &'static Bus) -> Option<Self> {
+    /// pins. `node` is the node id `sys/info` reports.
+    pub fn new(profile: &'static Profile, bus: &'static Bus, node: SenderId) -> Option<Self> {
         let pins = PINS.lease()?;
         irq::clear();
         let hw = HW.take().map(|h| Live {
@@ -202,6 +212,7 @@ impl EspDevice {
             camera: None,
             profile,
             bus,
+            node,
         })
     }
 
@@ -689,5 +700,13 @@ impl Device for EspDevice {
             Kind::Source => return Err(AbiError::Busy),
         };
         Ok(stat.of(&stats))
+    }
+
+    fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
+        esp_base::serve::servable(key)
+    }
+
+    fn node_id(&mut self) -> Result<SenderId, AbiError> {
+        Ok(self.node)
     }
 }

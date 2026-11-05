@@ -126,8 +126,10 @@ impl<F: NorFlash> Controller<F> {
             runtime: profile.runtime,
             rekey_window: false,
             staging: false,
-            // The ESP8266 build runs no radio; it reports no node id.
+            // The ESP8266 build runs no radio; it reports no node id, and
+            // without a runtime nothing serves requests.
             node: None,
+            caps: middleware::loader::Caps::NONE,
         };
         log(
             out,

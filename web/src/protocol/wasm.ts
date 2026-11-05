@@ -56,6 +56,10 @@ export interface DeviceInfo {
   firmware: string;
   /** Node id as 16 hex digits (middleware 0.5 firmware), if reported. */
   node?: string;
+  /** Capability bits after the node id (middleware 0.6 firmware); 0 when absent. */
+  caps: number;
+  /** Bit 0: requests on the payload's served keys reach the payload (S88 phases can run on it). */
+  serves: boolean;
 }
 
 /** A decoded `sys/board` body: pin classes as ascending GPIO numbers,
@@ -318,7 +322,7 @@ export interface Protocol {
   crc32(data: Uint8Array): number;
   uploadPlan(image: Uint8Array, chunk?: number): UploadStep[];
   decodeDeviceInfo(data: Uint8Array): DeviceInfo | undefined;
-  encodeDeviceInfo(info: Omit<DeviceInfo, "statusName">): Uint8Array;
+  encodeDeviceInfo(info: Omit<DeviceInfo, "statusName" | "caps" | "serves"> & { caps?: number }): Uint8Array;
   decodeBoardInfo(data: Uint8Array): BoardInfo | undefined;
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
@@ -371,7 +375,8 @@ function wrap(): Protocol {
     uploadPlan: (image, chunk) => pkg.uploadPlan(image, chunk ?? constants.chunkMax) as UploadStep[],
     decodeDeviceInfo: (data) => pkg.decodeDeviceInfo(data) as DeviceInfo | undefined,
     decodeBoardInfo: (data) => pkg.decodeBoardInfo(data) as BoardInfo | undefined,
-    encodeDeviceInfo: (i) => pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware),
+    encodeDeviceInfo: (i) =>
+      pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware, i.node, i.caps),
     payloadStatusName: pkg.payloadStatusName,
     newDeviceLoader: (capacity) => {
       const l = new pkg.DeviceLoader(capacity);

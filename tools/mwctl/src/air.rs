@@ -424,6 +424,7 @@ mod tests {
                     chip: "esp32s3",
                     firmware: "0.1.0",
                     node: Some(middleware::SenderId::from_mac(DEV)),
+                    caps: middleware::loader::Caps::NONE,
                 }
                 .encode(out)
                 .ok_or(HandlerError::BufferTooSmall),

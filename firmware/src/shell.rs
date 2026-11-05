@@ -79,6 +79,7 @@ use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
 use esp_base::trust_store::{Persisted, TrustStore};
 use middleware::loader::trust::TrustState;
+use middleware::loader::Caps;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
@@ -232,6 +233,9 @@ pub async fn run(spawner: Spawner) -> ! {
         rekey_window: false,
         staging: false,
         node: Some(node_id()),
+        // With the runtime the controller routes requests on served keys
+        // to the payload (`esp_base::serve`); `node_id` answers this node.
+        caps: if cfg!(feature = "wasm") { Caps::SERVE } else { Caps::NONE },
     };
 
     bus.log(format_args!(
