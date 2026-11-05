@@ -137,13 +137,13 @@ describe("allocation and a run in the browser (Q19)", () => {
   it("lists per unit what it runs, or why it cannot", () => {
     const { el } = mount();
     const rows = () => all(el, ".alloc tr").slice(1).map((tr) => [...tr.children].map((c) => c.textContent).filter((_, i) => i !== 1).join(" | "));
-    expect(rows()).toEqual(["pico-led | not bound (Units view) | Signal: BlinkLed on LED.Blink", "esp-sense | not bound (Units view) | Sense: TakeReading on ADC.Measure"]);
-    const on = q(el, "#ralloc-on-esp-sense") as HTMLInputElement;
+    expect(rows()).toEqual(["pico-led | not bound (Units view) | Signal: BlinkLed on LED.Blink", "pico-sense | not bound (Units view) | Sense: TakeReading on ADC.Measure"]);
+    const on = q(el, "#ralloc-on-pico-sense") as HTMLInputElement;
     on.checked = false;
     on.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(rows()[1]).toBe("esp-sense | not bound (Units view) | cannot run Sense: offline (discovery does not see it)");
+    expect(rows()[1]).toBe("pico-sense | not bound (Units view) | cannot run Sense: offline (discovery does not see it)");
     expect(rows()[0]).toBe("pico-led | not bound (Units view) | cannot run Sense: not of the unit class the procedure asks for");
-    expect(document.activeElement?.id).toBe("ralloc-on-esp-sense");
+    expect(document.activeElement?.id).toBe("ralloc-on-pico-sense");
   });
 
   it("runs the recipe on the simulated units to Complete, buttons following the phase model", async () => {
@@ -163,7 +163,7 @@ describe("allocation and a run in the browser (Q19)", () => {
     const trace = all(el, ".recipe-trace li").map((l) => l.textContent!.replace(/^\s*[\d.]+ s\s+/, ""));
     expect(trace[0]).toBe("recipe Idle -> Running");
     expect(trace.at(-1)).toBe("recipe Running -> Complete");
-    expect(q(el, ".recipe-phases")!.textContent).toContain("esp-sense/ADC.Measure: Idle — reported 2048, 4");
+    expect(q(el, ".recipe-phases")!.textContent).toContain("pico-sense/ADC.Measure: Idle — reported 2048, 4");
     (q(el, "#recipe-run-stop") as HTMLButtonElement).click();
     expect(q(el, "#recipe-op-start")).toBeNull();
   }, 30_000);

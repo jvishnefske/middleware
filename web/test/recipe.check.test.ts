@@ -23,7 +23,7 @@ describe("S88 recipes (Rust)", () => {
       ok: true,
       bindings: [
         { step: "BlinkLed", unit: "pico-led", em: "LED", phase: "Blink" },
-        { step: "TakeReading", unit: "esp-sense", em: "ADC", phase: "Measure" },
+        { step: "TakeReading", unit: "pico-sense", em: "ADC", phase: "Measure" },
       ],
     });
   });
@@ -43,14 +43,14 @@ describe("S88 recipes (Rust)", () => {
   });
 
   it("an allocation failure says, per unit, why it cannot host the procedure", () => {
-    const r = proto.allocateRecipe(BLINK_THEN_MEASURE, classes, units((id) => id !== "esp-sense"));
+    const r = proto.allocateRecipe(BLINK_THEN_MEASURE, classes, units((id) => id !== "pico-sense"));
     expect(r).toEqual({
       ok: false,
       unitProcedure: "Sense",
-      message: 'no unit can run unit procedure "Sense" (pico-led: not of the unit class the procedure asks for; esp-sense: offline (discovery does not see it))',
+      message: 'no unit can run unit procedure "Sense" (pico-led: not of the unit class the procedure asks for; pico-sense: offline (discovery does not see it))',
       reasons: [
         { unit: "pico-led", reason: "not of the unit class the procedure asks for" },
-        { unit: "esp-sense", reason: "offline (discovery does not see it)" },
+        { unit: "pico-sense", reason: "offline (discovery does not see it)" },
       ],
     });
   });
@@ -60,7 +60,7 @@ describe("S88 recipes (Rust)", () => {
     expect(r.ok && r.state).toBe("Complete");
     if (!r.ok) return;
     const sends = r.lines.filter((l) => l.kind === "send" && l.text.startsWith("Start")).map((l) => `${l.t} ${l.text}`);
-    expect(sends).toEqual(['0 Start -> pico-led/LED.Blink (#1, step "BlinkLed")', '300 Start -> esp-sense/ADC.Measure (#3, step "TakeReading")']);
+    expect(sends).toEqual(['0 Start -> pico-led/LED.Blink (#1, step "BlinkLed")', '300 Start -> pico-sense/ADC.Measure (#3, step "TakeReading")']);
   });
 
   it("a Hold mid-run holds the batch until Restart, and losing a unit holds it until Abort ends it Aborted", () => {

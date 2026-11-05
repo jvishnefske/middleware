@@ -79,24 +79,24 @@ describe("the editor on the plant", () => {
     // What the page does on a switch: write the shown unit back, show another.
     let p = withUnitPayload(EXAMPLE_PLANT, "pico-led", unitPayload(EXAMPLE_PLANT, "pico-led")!);
     expect(p).toEqual(EXAMPLE_PLANT);
-    p = withUnitPayload(p, "esp-sense", unitPayload(p, "esp-sense")!);
+    p = withUnitPayload(p, "pico-sense", unitPayload(p, "pico-sense")!);
     expect(EXAMPLE_PLANT.physical.units.map((u) => code(p, u.id))).toEqual(before);
     // Editing one unit's flows leaves the other unit's code alone.
-    const sense = unitPayload(p, "esp-sense")!;
-    p = withUnitPayload(p, "esp-sense", withFlows(sense, flowsOf(sense).map((f) => ({ ...f, name: "renamed" }))));
+    const sense = unitPayload(p, "pico-sense")!;
+    p = withUnitPayload(p, "pico-sense", withFlows(sense, flowsOf(sense).map((f) => ({ ...f, name: "renamed" }))));
     expect(code(p, "pico-led")).toBe(before[0]);
     expect(plantProblem(JSON.parse(serializePlant(p)))).toBeNull();
   });
 
   it("unit edits: add, rename (phases follow), bind, remove (with phases)", () => {
     let p = addUnit(EXAMPLE_PLANT, "esp32");
-    expect(p.physical.units.map((u) => u.id)).toEqual(["pico-led", "esp-sense", "unit"]);
+    expect(p.physical.units.map((u) => u.id)).toEqual(["pico-led", "pico-sense", "unit"]);
     p = setUnit(p, "pico-led", "id", "led-board");
-    expect(p.procedural.phases.map((ph) => ph.unit)).toEqual(["led-board", "esp-sense"]);
+    expect(p.procedural.phases.map((ph) => ph.unit)).toEqual(["led-board", "pico-sense"]);
     p = bindNode(p, "led-board", "246f28aa01fe0000");
     expect(p.physical.units[0]?.node).toBe("246f28aa01fe0000");
     expect(plantProblem(JSON.parse(serializePlant(p)))).toBeNull();
-    p = removeUnit(p, "esp-sense");
+    p = removeUnit(p, "pico-sense");
     expect(p.procedural.phases.map((ph) => ph.unit)).toEqual(["led-board"]);
     expect(removeUnit(plantFromPayload(makeModel("pico2", {})), "unit1").physical.units).toHaveLength(1);
   });
@@ -121,7 +121,7 @@ describe("the editor on the plant", () => {
     p = setEm(p, "pico-led", 1, { cms: ["LED"] });
     expect(plantIssues(p).map((i) => i.message)).toEqual(["Pin LED already belongs to module LED; a pin belongs to one module."]);
     p = removeEm(EXAMPLE_PLANT, "pico-led", 0);
-    expect(p.procedural.phases.map((x) => x.unit)).toEqual(["esp-sense"]);
+    expect(p.procedural.phases.map((x) => x.unit)).toEqual(["pico-sense"]);
   });
 
   it("class and parameter edits keep phases and recipe steps in step", () => {
@@ -166,7 +166,7 @@ describe("the editor on the plant", () => {
   it("issues name the place in plain words and agree with the plant check", () => {
     expect(plantIssues(EXAMPLE_PLANT)).toEqual([]);
     const cases: [PlantModel, string][] = [
-      [setUnit(EXAMPLE_PLANT, "esp-sense", "id", "Pico-LED"), "Unit 1 already has the id Pico-LED; unit ids must be unique (ignoring case)."],
+      [setUnit(EXAMPLE_PLANT, "pico-sense", "id", "Pico-LED"), "Unit 1 already has the id Pico-LED; unit ids must be unique (ignoring case)."],
       [setUnit(EXAMPLE_PLANT, "pico-led", "class", "led unit"), 'The unit class "led unit" starts with a letter and has only letters, digits and _ (at most 24); recipes ask for units by class.'],
       [setParam(EXAMPLE_PLANT, 1, 0, { min: 9, max: 1 }), "The minimum 9 is above the maximum 1."],
       [setRange(EXAMPLE_PLANT, 1, "samples", [1, 99]), "The range of samples, 1 to 99, must lie within Measure's 1 to 16."],
@@ -177,7 +177,7 @@ describe("the editor on the plant", () => {
       expect(plantIssues(p).map((i) => i.message)).toContain(message);
       expect(plantProblem(JSON.parse(serializePlant(p)))).not.toBeNull();
     }
-    const two = bindNode(bindNode(EXAMPLE_PLANT, "pico-led", "00000000000000aa"), "esp-sense", "00000000000000aa");
+    const two = bindNode(bindNode(EXAMPLE_PLANT, "pico-led", "00000000000000aa"), "pico-sense", "00000000000000aa");
     expect(plantIssues(two)).toEqual([{ place: "units", row: 1, message: "Unit pico-led is bound to the same device; a device runs one unit." }]);
   });
 
