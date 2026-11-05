@@ -109,6 +109,9 @@ describe("recipe edits", () => {
     expect(back.steps[1]!.params).toEqual({ samples: 4 });
     expect(moveStep(r0, "BlinkLed", -5).steps[0]!.y).toBe(0);
     expect(setStepLane(r0, "BlinkLed", "Sense").steps[0]!.unitProcedure).toBe("Sense");
+    // Into a lane with a step on the same row: below that lane's lowest.
+    const clash = setStepLane(moveStep(r0, "BlinkLed", 190), "BlinkLed", "Sense").steps[0]!;
+    expect([clash.unitProcedure, clash.y]).toEqual(["Sense", 320]);
     expect(setStepLane(r0, "BlinkLed", "Nowhere")).toBe(r0);
   });
 

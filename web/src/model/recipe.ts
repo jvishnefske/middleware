@@ -328,10 +328,16 @@ export function moveStep(r: MasterRecipe, id: string, y: number): MasterRecipe {
   return mapStep(r, id, (s) => ({ ...s, y: Math.max(0, Math.min(MAX_COORD, Math.round(y))) }));
 }
 
-/** Moves a step into unit procedure `up`'s lane. */
+/** Moves a step into unit procedure `up`'s lane, at its row unless a
+ * step there is within a row of it (then below that lane's lowest). */
 export function setStepLane(r: MasterRecipe, id: string, up: string): MasterRecipe {
   if (!r.unitProcedures.some((u) => u.id === up)) return r;
-  return mapStep(r, id, (s) => ({ ...s, unitProcedure: up }));
+  const others = r.steps.filter((s) => s.unitProcedure === up && s.id !== id);
+  return mapStep(r, id, (s) => {
+    const clash = others.some((o) => Math.abs(o.y - s.y) < STEP_ROW * 0.75);
+    const y = clash ? Math.min(MAX_COORD, others.reduce((m, o) => Math.max(m, o.y + STEP_ROW), 0)) : s.y;
+    return { ...s, unitProcedure: up, y };
+  });
 }
 
 export function addUnitProcedure(r: MasterRecipe): MasterRecipe {
