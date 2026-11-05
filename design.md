@@ -1072,7 +1072,7 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   `None` — `serial::link::tests::s9_peer_is_the_sender_of_samples_and_requests`,
   `s9_without_a_peer_meta_is_empty`.
 - [x] S10 `sys/info` may end with the device's 8-byte node id
-  (`DeviceInfo::node`, a `SenderId`; `MAX_INFO_LEN` 81). Every decoder
+  (`DeviceInfo::node`, a `SenderId`; 81 bytes at most before S12). Every decoder
   reads the fields it knows and ignores trailing bytes, so 0.4 hosts read
   0.5 devices and 0.5 hosts read 0.4 devices (`node: None`). Checked:
   `DeviceInfo::decode` (used by `mwctl`, `protocol-wasm` and so the web
@@ -1088,6 +1088,32 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   `timeout_is_honoured` runs with the caller-side `Bounded` wrapper the
   link's docs prescribe (the link has no clock); `Gather` is not
   implemented (one peer) — `tests/serial.rs`: `k15_serial_*` *(serial)*.
+- [x] S12 `sys/info` may continue after the node id with a capability
+  bitset (`DeviceInfo::caps`, `loader::Caps`, `u32` little-endian;
+  `MAX_INFO_LEN` 85): bit 0 `Caps::SERVE` says requests on keys the
+  payload serves reach its `on_request` (M7), the other bits are reserved,
+  sent as 0 and kept by decoders. The ABI version says what the runtime
+  links; the bit says what the shell does with it (an ABI 5 firmware
+  without routing links `serve` but answers its keys `NotFound`). An
+  empty set is not sent, so a 0.5 device's response is unchanged; a
+  missing or cut bitset decodes as none; capabilities are only sent after
+  a node id (`encode` refuses them without one). Decoders checked: the
+  middleware's own (`DeviceInfo::decode`, used by `mwctl`, which prints
+  "requests: routed to the payload (serve)", by `protocol-wasm`, which
+  gives the page `caps` and `serves`, and by the ESP8266 tests, whose
+  firmware sends none); conagotchi's `badge-mw` constructs `DeviceInfo`
+  and needs `caps: Caps::NONE` when it next moves to this middleware
+  (it builds from tag v2026.10.31 today) —
+  `loader::tests::m7_device_info_carries_trailing_capabilities_after_the_node_id`,
+  `s10_device_info_carries_a_trailing_node_id`; `protocol-wasm`
+  `loader::tests::info_round_trips_and_names_statuses`; `mwctl`
+  `device::tests::info_decodes_a_protocol_only_esp8266`,
+  `report::tests::info_notes_protocol_only_firmware`;
+  `web/test/protocol.test.ts`: "round-trips sys/info"; esp-base
+  `dispatch::tests::e17_info_ends_with_the_node_id_and_old_decoders_ignore_it`,
+  `info_reports_device`; rp-base
+  `requests::tests::m7_without_the_runtime_sys_info_reports_no_capability`;
+  `firmware-esp8266/test.sh`.
 
 ### WASM runtime (`wasm-host`)
 
@@ -1422,6 +1448,31 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   with every byte outside printable ASCII, and `\`, as `\xNN`, so a
   beacon cannot inject terminal escapes or line breaks into `sys/log` —
   `radio::disc::tests::e22_log_lines_escape_radio_supplied_text`.
+- [x] E25 Requests on keys the payload serves (ABI 5, M7) are routed by
+  `esp_base::serve`, the pure core rp-base shares: `sys/...` always to the
+  dispatcher and never servable (`Device::serve` refuses them
+  `InvalidKey`), a key the running payload serves to `Payload::request`
+  with a 512-byte reply (the serial bus's `MAX_REPLY`) and the request's
+  meta (serial: no sender, no deadline), a trap answered `Internal` and
+  the session ended, a stopped or trapped payload's keys `Unavailable`
+  (the controller keeps the last run's keys, cleared when an upload
+  changes the image), and other application keys `NotFound` as before;
+  `node_id` is the base MAC zero-padded, the node `sys/info` reports, and
+  `sys/info` sends `Caps::SERVE` on the builds with the runtime (ESP32,
+  ESP32-S3; not the ESP32-C3 or ESP8266). Requests over ESP-NOW are not
+  routed: over the air only the update keys are admitted (O6), and
+  answering a payload's keys for unauthenticated radio peers would widen
+  that policy, so they stay `NotOverAir` refusals. The conagotchi badge
+  compiles this shell and gets the routing when it moves to this
+  middleware —
+  `serve::tests::m7_sys_keys_always_go_to_the_dispatcher_and_can_never_be_served`,
+  `m7_served_keys_reach_a_running_payload_and_others_are_not_found`,
+  `m7_a_stopped_trapped_or_loading_payload_is_unavailable_on_its_keys`,
+  `m7_a_trap_answers_internal_and_stops_the_payload`,
+  `m7_the_table_is_bounded_deduplicated_and_cleared_when_the_image_changes`;
+  `dispatch::tests::info_reports_device`; chip clippy and
+  `firmware/build.sh esp32`, `esp32s3`. The shell's routing
+  (`shell/controller.rs`) is untested on hardware.
 
 #### Interpreter speed on the badge
 
@@ -1617,10 +1668,11 @@ in the table above is physical for reads, erases and writes alike. On a
 board without a partition table nothing is translated and the window is
 the identity, so the same build works there (without the updater).
 
-RAM: the RP2040 build has no heap (no runtime) and 22 KB of static RAM,
-leaving about 242 KiB of stack. The RP2350 build holds a 384 KiB heap arena
-in `.bss` (static RAM 436 KB in all, the firmware updater's 5 KiB sector
-stash, the 4 KiB SPI transfer buffer and the main task's larger future included), leaving about 94 KiB
+RAM: the RP2040 build has no heap (no runtime) and 26 KB of static RAM,
+leaving about 238 KiB of stack. The RP2350 build holds a 384 KiB heap arena
+in `.bss` (static RAM 440 KB in all, the firmware updater's 5 KiB sector
+stash, the 4 KiB SPI transfer buffer, the 512-byte reply a served request
+may need (V20) and the main task's larger future included), leaving about 90 KiB
 for the main stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
 128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
 bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
@@ -1646,6 +1698,7 @@ Payload ABI on the RP2350 (the RP2040 runs no payloads):
 | `uart_open`, `uart_write`, `uart_read`, `dma_read` (`Uart1Tx`) | `Unsupported` |
 | `pwm_open`, `pwm_set`, `pwm_stop` | `Unsupported` (no pins bound to PWM on this board map) |
 | `route_source`, `route_sink`, `route_stop`, `route_stat` | `Unsupported` |
+| `serve`, `node_id` (ABI 5) | yes: any non-`sys` key; serial requests on served keys reach `on_request` (`rp_base::requests`, V20); `node_id` is the chip unique id `sys/info` reports |
 
 SPI and I2C on the RP base. Both chips route each peripheral signal to
 fixed GPIOs (functions F1 and F3 of the datasheets' GPIO function tables,
@@ -1816,6 +1869,30 @@ atomics; nothing has run on silicon yet.
   configured address logs the register's value; a missing target logs
   `Transport`; after `mwctl stop` GP4/5 and GP16–19 are GPIO inputs again.
   Not yet run on hardware.
+- [x] V20 Requests on served keys (ABI 5, M7) go through
+  `rp_base::requests::handle` over any `wasm_host::Device`, the routing of
+  `esp_base::serve` (E25): `sys/...` and unserved keys to the service, a
+  served key of the running payload to `Payload::request` with a 512-byte
+  reply (the bus's `MAX_REPLY`, up from 128) and the link's meta (its peer
+  as sender, if it has one; serial frames carry no deadline), a trap
+  answered `Internal` with the payload marked trapped and stopped, the
+  keys of a stopped or trapped payload `Unavailable` until the next run or
+  an upload, and `sys/info` with `Caps::SERVE` on the RP2350 (none on the
+  RP2040, which runs no payloads); `RpDevice::node_id` is the chip unique
+  id. The round 8 `pico-led` phase server
+  (`tools/payload-sim/tests/fixtures/phase/`), installed through the
+  loader and started, runs over serial frames (requests in as
+  `Frame::Request`, replies out as `Frame::Response`, its reports out as
+  `[pub]` frames decoded with `recipe_core::wire`): Start(250 ms, 3) is
+  accepted Running, a second Start rejected Running, an out-of-range one
+  `InvalidRequest`, three toggles later Complete, Reset to Idle with the
+  LED off; after `stop` the key is `Unavailable`, after a new upload
+  `NotFound` —
+  `requests::tests::m7_the_pico_led_phase_server_runs_blink_to_complete_through_the_request_service`,
+  `m7_a_trap_answers_internal_stops_the_payload_and_its_key_is_then_unavailable`,
+  `m7_without_the_runtime_sys_info_reports_no_capability`; clippy rp2350
+  and rp2040, `firmware-rp/build.sh rp2350`. The controller's use of it
+  (`shell/controller.rs`) is untested on hardware.
 - [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
   with its factory UF2), the CDC port enumerates, `mwctl info` reports the
   chip and node id, an upload survives a power cycle, and on the Pico 2
@@ -3808,10 +3885,18 @@ The contract is `wasm_abi::serve`, pure and heap-free.
   and the template README's ABI 5 section, compiled and validated by
   `payloads/scripts/check-all.sh` — `abi-check` `tests/payloads.rs`
   `as_serve_template`.
-- [ ] M7 Firmware routes requests on served keys to the payload (esp-base,
-  rp-base, conagotchi): `Device::serve` registers the key with the
-  device's responder, `node_id` returns the `sys/info` node id, and the
-  shell answers with `Payload::request`'s reply (a trap as `Internal`).
+- [x] M7 Firmware routes requests on served keys to the payload (esp-base,
+  rp-base; conagotchi runs esp-base's shell and gets it when it moves to
+  this middleware): `Device::serve` accepts any non-`sys` key
+  (`esp_base::serve::servable`; wasm-host keeps the live table of eight),
+  `node_id` returns the `sys/info` node id, and the shell answers with
+  `Payload::request`'s reply through the shared pure routing
+  `esp_base::serve` (sys keys first, a trap as `Internal` and the payload
+  stopped, a stopped payload's keys `Unavailable`), and says so in
+  `sys/info` (`Caps::SERVE`, S12). Serial requests only: ESP-NOW admits
+  update keys alone (E25). On hardware: Q24-Q27 —
+  esp-base `serve::tests::m7_*` (E25); rp-base `requests::tests::m7_*`
+  (V20); `loader::tests::m7_device_info_carries_trailing_capabilities_after_the_node_id` (S12).
 - [x] M8 The browser simulator serves requests like a board: each device
   has a node id (default `0000000000000001`, a `SimBus` gives every unit
   the next), `serve` is accepted, `adc_read` reads a level set from the
@@ -4139,7 +4224,9 @@ maps to the engine's acknowledgement errors (NotFound, InvalidRequest,
 Unavailable, DeadlineExceeded; anything else is a transport error). Units
 announce themselves in discovery as service kind `s88/unit` with the unit
 id as instance and the unit class in TXT, which feeds the directory events
-the engine sees as unit loss and return.
+the engine sees as unit loss and return (not yet: Q28; the page binds units
+to boards by their `sys/info` node id instead, and a board's port closing
+is its loss).
 
 Bodies are fixed binary, version 1, integers little-endian: a command is
 the version, the command code, a 32-bit id, a count and that many 32-bit
@@ -4273,7 +4360,7 @@ payload does. The version-4 reader accepts every older file.
   following a script of operator commands and unit losses) and
   `phaseModel` — `cargo test -p protocol-wasm recipes`: "the_worked_example_checks_clean_and_binds_each_step", "check_messages_name_the_step_and_the_rule", "allocation_failures_say_per_unit_why", "a_simulated_run_completes_and_a_hold_and_a_unit_loss_show_in_the_trace"; `web/test/recipe.check.test.ts`: "the worked example checks clean and allocates Blink to the LED unit, Measure to the sensor unit", "reports recipe errors in plain language, by place", "an allocation failure says, per unit, why it cannot host the procedure", "an unknown script kind throws".
 - [x] Q15 The worked example "Blink then Measure" (classes Blink and
-  Measure; a Pico 2 unit with an LED module and an ESP32 unit with an ADC
+  Measure; a Pico 2 unit with an LED module and a second Pico 2 unit with an ADC
   module) allocates Blink to the LED unit and Measure to the sensor unit
   and runs to Complete with Measure started when Blink completes; a Hold
   mid-run is Held after the settle time, starts nothing new, and Restart
@@ -4335,11 +4422,74 @@ payload does. The version-4 reader accepts every older file.
   a phone. Screenshot-checked only (round 8 `round8/steps8.mjs`, round 9
   `round9/steps9.mjs`: desktop 1280 px and phone 390 px, page width equal
   to the viewport in every step); jsdom has no layout.
-- [ ] Q23 Real boards as units: allocation sees units from discovery
-  (`s88/unit` announcements or bound boards answering `sys/info`), the
-  Device tab uploads each unit's payload to its bound board, and the
-  engine's commands go over Web Serial (a `Requester` with response
-  correlation) while the boards' `/state` reports feed it; needs M7.
+- [x] Q23 Real boards as units: a unit bound to the board the Device tab
+  is connected to (its `sys/info` node id, Q16) runs on that board when
+  the board serves phases (`sys/info` capability bit, S12; otherwise the
+  allocation row says in plain words that its firmware cannot serve
+  phases and the unit runs in the simulator); the Device tab lists the
+  plant's units bound to the board and uploads each one's compiled phase
+  server through the signed upload, then starts it; the engine's commands
+  go over Web Serial through a requester with SimBus's request shape
+  (`device/requester.ts`: the device's `HandlerError` by name, no answer
+  within the acknowledgement deadline `DeadlineExceeded`, lost once the
+  port closes) and the board's `/state` publications feed the run after
+  the reply that preceded them; `RecipeRunner` drives a `PlantNet`
+  (`sim/net.ts`) mixing simulated and real units, a board's port closing
+  is the unit's loss and its reopening (same node) its return. Checked
+  against the fake serial device extended to run what it is sent and route
+  served keys as M7 does: a mixed plant (pico-led on the "board",
+  pico-sense simulated) reproduces payload-sim p3-p5 — `web/test/recipe.serial.test.ts`: "installs a unit's payload through the Device tab's upload; sys/info says the board serves phases", "answers like SimBus: the payload's reply or error by name, DeadlineExceeded, NotFound, Unavailable, lost once closed", "a board without the capability bit cannot serve phases, in plain words", "p3: Blink then Measure runs to Complete", "p4: a Hold mid-Blink holds the batch and Restart finishes it", "p5: pulling the board's cable holds, Restart is refused, Abort ends Aborted", "reopened on the same node tells the run it is found; another node is refused"; `web/test/recipe.view.test.ts` (jsdom): "runs a bound unit on a board that serves, and says why not on one that cannot"; `web/test/recipe.run.test.ts` (the simulated path through the same runner): "p3: Blink then Measure runs to Complete", "p4: a Hold mid-Blink holds the batch and Restart finishes it", "p5: losing the LED unit holds, Restart is refused, Abort ends Aborted". The page has one serial port, so at most one unit runs on a board at a time; two boards at once is Q28's discovery or a second port. On hardware: Q24-Q27.
+- [ ] Q24 On hardware, flash and bind (one Pico 2 as the LED unit, the
+  sensor unit simulated). (1) Build: `firmware-rp/build.sh rp2350
+  --version <V>` with V above the board's current version (`mwctl --port
+  /dev/serial/by-id/usb-middleware_rp-base_<ID>-if00 fw info`). (2) Flash:
+  on a Pico 2 running A/B rp-base, `mwctl --port <that path> fw update
+  firmware-rp/target/thumbv8m.main-none-eabihf/release/rp-base-rp2350-<V>-update.uf2
+  [--key <KEYFILE>]` (it reboots, reopens the same path and confirms);
+  on a blank one, hold BOOTSEL while plugging in and `picotool load
+  --ignore-partitions -v rp-base-rp2350-<V>-factory.uf2`, then replug.
+  (3) `mwctl --port <path> info` shows `node: <16 hex>` and `requests:
+  routed to the payload (serve)`. (4) In the page (`web`, `npm run dev`,
+  Chrome): Device tab, Connect, pick the Pico 2's port; Device info shows
+  "Serves phases: yes". (5) Blocks tab, Examples, "Plant: Blink then
+  Measure"; Units view, pico-led's row, "Bind to <node>": the node is the
+  one `mwctl info` printed (Disconnect in the Device tab before using
+  `mwctl` on the same port, and back). (6) Device tab, "Plant units on this
+  board" lists pico-led; Upload pico-led's payload (unsigned on an
+  unclaimed board after the confirmation, signed on a claimed one): it
+  says "Installed and started pico-led" and the payload status is
+  running; Recent publications show `unit/<node>/phase/LED.Blink/state`
+  (the Idle report, then a heartbeat every second).
+  (7) Bind pico-sense to the Pico 1 (RP2040) or any board without the
+  bit instead, for the negative case: Recipe view, the allocation row says
+  it "cannot serve phases" in plain words and the run keeps it simulated.
+- [ ] Q25 On hardware, after Q24, run Blink then Measure to Complete: Blocks
+  tab, Recipe view; the allocation row of pico-led reads "bound to <node>:
+  the board on the Device tab (runs on the board)" and the run panel
+  "Run (pico-led on the board)". Press Run, then Start: the Pico 2's LED
+  (GPIO 25) toggles three times at 250 ms, the procedure goes Running ->
+  Complete within about 2 s, Measure starts only after Blink completes
+  (trace), the phases list ends "pico-led/LED.Blink: Idle" and
+  "pico-sense/ADC.Measure: Idle — reported 2048, 4", and the Device tab's
+  console shows `[log] phase LED.Blink: Running`, `Complete`,
+  `Resetting`, `Idle`.
+- [ ] Q26 On hardware, Hold and Restart: Run, Start, and press Hold during
+  the first second (while the LED blinks): the procedure goes Holding ->
+  Held, the LED stops toggling, nothing is sent to pico-sense; Restart:
+  Restarting -> Running, the blinks finish, then Measure, then Complete
+  (trace: Start, Hold, Restart, Reset to pico-led).
+- [ ] Q27 On hardware, unplug mid-run: Run, Start, and pull the Pico 2's
+  USB cable while the LED blinks: the Device tab shows disconnected,
+  the trace says "unit pico-led left the network (resumable: hold)", the
+  procedure goes Held; Restart is refused ("Restart refused: unit
+  pico-led is offline"); Abort ends it Aborted; nothing more is sent to
+  pico-led. Replug, Connect again: the requester reopens on the same node.
+- [ ] Q28 Units announce themselves in discovery (`s88/unit`, unit id as
+  instance, unit class in TXT) so allocation sees online units without a
+  binding, and the page can drive several boards at once (a port per
+  board). Firmware has no `s88/unit` announcement yet (rp-base has no
+  discovery at all; esp-base's beacons would need the payload to name its
+  unit).
 
 ## Known limitations (0.3)
 
