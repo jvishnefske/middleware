@@ -82,11 +82,11 @@ describe("the Units view (Q21)", () => {
     const radios = [...el.querySelectorAll('input[name="unit-pick"]')] as HTMLInputElement[];
     expect(radios.map((r) => [r.checked, r.getAttribute("aria-label")])).toEqual([
       [true, "Edit pico-led in the other views"],
-      [false, "Edit esp-sense in the other views"],
+      [false, "Edit pico-sense in the other views"],
     ]);
     radios[1]!.checked = true;
     radios[1]!.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(selected).toEqual(["esp-sense"]);
+    expect(selected).toEqual(["pico-sense"]);
     (el.querySelector("#unit-0-node") as HTMLButtonElement).click();
     expect(plant().physical.units[0]!.node).toBe("246f280102030000");
     expect(document.activeElement?.id).toBe("unit-0-node");

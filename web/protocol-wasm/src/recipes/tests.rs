@@ -82,7 +82,7 @@ pub(super) fn example_units() -> Vec<UnitIn> {
             }],
         },
         UnitIn {
-            id: "esp-sense".into(),
+            id: "pico-sense".into(),
             class: "SensorUnit".into(),
             online: true,
             phases: vec![UnitPhaseIn {
@@ -111,7 +111,7 @@ fn the_worked_example_checks_clean_and_binds_each_step() {
             },
             Binding {
                 step: "TakeReading".into(),
-                unit: "esp-sense".into(),
+                unit: "pico-sense".into(),
                 em: "ADC".into(),
                 phase: "Measure".into()
             },
@@ -199,7 +199,7 @@ fn allocation_failures_say_per_unit_why() {
     assert_eq!(f.unit_proc.as_deref(), Some("Sense"));
     assert_eq!(
         f.message,
-        "no unit can run unit procedure \"Sense\" (pico-led: not of the unit class the procedure asks for; esp-sense: offline (discovery does not see it))"
+        "no unit can run unit procedure \"Sense\" (pico-led: not of the unit class the procedure asks for; pico-sense: offline (discovery does not see it))"
     );
     let mut r = recipe();
     r.steps[0].args[0].1 = 5_000;
@@ -207,7 +207,7 @@ fn allocation_failures_say_per_unit_why() {
     assert!(f.message.contains("pico-led: its Blink phase takes period_ms 50..1000, but step \"BlinkLed\" asks for 5000"), "{}", f.message);
     assert!(
         f.message
-            .contains("esp-sense: has no Blink phase for step \"BlinkLed\""),
+            .contains("pico-sense: has no Blink phase for step \"BlinkLed\""),
         "{}",
         f.message
     );
@@ -226,7 +226,7 @@ fn a_simulated_run_completes_and_a_hold_and_a_unit_loss_show_in_the_trace() {
     assert_eq!(t.state, "Complete");
     assert_eq!(t.lines[0].text, "recipe Idle -> Running");
     assert!(t.lines.iter().any(
-        |l| l.t == 300 && l.text == "Start -> esp-sense/ADC.Measure (#3, step \"TakeReading\")"
+        |l| l.t == 300 && l.text == "Start -> pico-sense/ADC.Measure (#3, step \"TakeReading\")"
     ));
 
     let script = vec![

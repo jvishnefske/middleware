@@ -25,7 +25,7 @@ function plant() {
   const clock = new ManualClock();
   const bus = new SimBus(proto, clock);
   const led: boolean[] = [];
-  const logs: Record<string, string[]> = { "pico-led": [], "esp-sense": [] };
+  const logs: Record<string, string[]> = { "pico-led": [], "pico-sense": [] };
   for (const u of EXAMPLE_PLANT.physical.units) {
     bus.add(u.id, wasm[u.id]!, {
       events: {
@@ -36,7 +36,7 @@ function plant() {
       },
     });
   }
-  bus.unit("esp-sense")!.session.setAdc(34, 2048);
+  bus.unit("pico-sense")!.session.setAdc(26, 2048);
   const run = new RecipeRunner(proto, EXAMPLE_PLANT, BLINK_THEN_MEASURE, bus, clock);
   run.start(10);
   const to = (t: number) => clock.advance(t - clock.t);
@@ -49,9 +49,9 @@ describe("the simulator serves phases", () => {
     const { bus } = plant();
     expect(bus.all.map((u) => u.session.nodeId)).toEqual([defaultNode(0), defaultNode(1)]);
     expect(bus.unit("pico-led")!.session.serves).toEqual(["unit/0000000000000001/phase/LED.Blink"]);
-    expect(bus.unit("esp-sense")!.session.serves).toEqual(["unit/0000000000000002/phase/ADC.Measure"]);
+    expect(bus.unit("pico-sense")!.session.serves).toEqual(["unit/0000000000000002/phase/ADC.Measure"]);
     expect(keyNode("unit/0000000000000002/phase/ADC.Measure")).toBe("0000000000000002");
-    expect(bus.route("unit/0000000000000002/phase/ADC.Measure")?.id).toBe("esp-sense");
+    expect(bus.route("unit/0000000000000002/phase/ADC.Measure")?.id).toBe("pico-sense");
     // A malformed body is the payload's InvalidRequest; an unserved key on
     // a known node is NotFound; nobody takes an unknown node.
     expect(bus.request("unit/0000000000000001/phase/LED.Blink", new Uint8Array([9]))?.result).toEqual({ ok: false, error: "InvalidRequest" });
@@ -89,17 +89,17 @@ describe("the recipe engine in the browser drives the simulated units (payload-s
     expect(p.led).toEqual([false, true, false, true, false]);
     expect(p.run.phases().map((ph) => [ph.unit, ph.state, ph.values])).toEqual([
       ["pico-led", "Idle", expect.any(Array)],
-      ["esp-sense", "Idle", [2048, 4]],
+      ["pico-sense", "Idle", [2048, 4]],
     ]);
     expect(p.run.sent).toEqual([
       { unit: "pico-led", command: "Start", outcome: "ok" },
       { unit: "pico-led", command: "Reset", outcome: "ok" },
-      { unit: "esp-sense", command: "Start", outcome: "ok" },
-      { unit: "esp-sense", command: "Reset", outcome: "ok" },
+      { unit: "pico-sense", command: "Start", outcome: "ok" },
+      { unit: "pico-sense", command: "Reset", outcome: "ok" },
     ]);
-    const measureAt = p.run.trace.find((l) => l.type === "send" && l.text.startsWith("Start -> esp-sense"))!.t;
+    const measureAt = p.run.trace.find((l) => l.type === "send" && l.text.startsWith("Start -> pico-sense"))!.t;
     expect(measureAt).toBeGreaterThanOrEqual(500);
-    expect(p.logs["esp-sense"]).toContain("phase ADC.Measure: Complete");
+    expect(p.logs["pico-sense"]).toContain("phase ADC.Measure: Complete");
     // Replies arrive before the reports they cause: nothing is ignored.
     expect(p.run.trace.filter((l) => l.type === "ignored")).toEqual([]);
     expect(p.run.steps()).toEqual([
@@ -108,7 +108,7 @@ describe("the recipe engine in the browser drives the simulated units (payload-s
     ]);
     expect(p.run.bindings()).toEqual([
       { step: "BlinkLed", unit: "pico-led", em: "LED", phase: "Blink" },
-      { step: "TakeReading", unit: "esp-sense", em: "ADC", phase: "Measure" },
+      { step: "TakeReading", unit: "pico-sense", em: "ADC", phase: "Measure" },
     ]);
   });
 
@@ -119,7 +119,7 @@ describe("the recipe engine in the browser drives the simulated units (payload-s
     p.run.operator("Hold");
     p.to(1_000);
     expect(p.run.state).toBe("Held");
-    expect(p.run.sent.some((s) => s.unit === "esp-sense")).toBe(false);
+    expect(p.run.sent.some((s) => s.unit === "pico-sense")).toBe(false);
     p.run.operator("Restart");
     p.to(4_000);
     expect(p.run.state).toBe("Complete");

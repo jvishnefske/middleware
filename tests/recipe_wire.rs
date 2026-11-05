@@ -130,7 +130,7 @@ fn units() -> [Unit<'static>; 2] {
             phases: &LED,
         },
         Unit {
-            id: "esp-sense",
+            id: "pico-sense",
             class: "SensorUnit",
             online: true,
             phases: &ADC,

@@ -98,7 +98,7 @@ pub const SENSOR_PHASES: [UnitPhase<'static>; 1] = [UnitPhase {
 /// Listed sensor first: allocation must not depend on the order.
 pub const UNITS: [Unit<'static>; 2] = [
     Unit {
-        id: "esp-sense",
+        id: "pico-sense",
         class: "SensorUnit",
         online: true,
         phases: &SENSOR_PHASES,
