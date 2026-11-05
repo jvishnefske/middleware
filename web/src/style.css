@@ -1018,3 +1018,141 @@ button.sm-add {
     padding: 6px 9px;
   }
 }
+/* Recipe view (recipeView.ts): lanes per unit procedure, steps, bars,
+ * and the live run's step status and procedure state. Reuses the Flows
+ * canvas and outline styles. */
+.recipe-svg .lane-bg {
+  fill: color-mix(in srgb, var(--fg) 3%, transparent);
+  stroke: var(--line);
+  stroke-dasharray: 4 4;
+}
+.recipe-svg .lane-head {
+  fill: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  stroke: var(--line);
+  cursor: pointer;
+}
+.recipe-svg .rlane:focus {
+  outline: none;
+}
+.recipe-svg .rlane:focus-visible .lane-head,
+.recipe-svg .rlane.sel .lane-head {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.recipe-svg .rlane.error .lane-head {
+  stroke: #c0392b;
+  stroke-width: 2.5;
+}
+.recipe-svg .rlane.warning .lane-head {
+  stroke: #b7791f;
+  stroke-dasharray: 5 3;
+}
+.recipe-svg .rbar {
+  cursor: pointer;
+}
+.recipe-svg .rbar:focus {
+  outline: none;
+}
+.recipe-svg .rbar-hit {
+  fill: transparent;
+}
+.recipe-svg .rbar-line {
+  fill: var(--fg);
+}
+.recipe-svg .rbar.sel .rbar-line,
+.recipe-svg .rbar:focus-visible .rbar-line {
+  fill: var(--accent);
+}
+.recipe-svg .rbar.error .rbar-line {
+  fill: #c0392b;
+}
+.recipe-svg .rbar.warning .rbar-line {
+  fill: #b7791f;
+}
+.recipe-svg .rbar.live .fwire {
+  stroke: var(--accent);
+}
+.recipe-svg .rdouble {
+  stroke: var(--fg);
+  stroke-width: 1.5;
+}
+.recipe-svg .fnode.st-active rect,
+.recipe-outline .orow.st-active {
+  fill: color-mix(in srgb, #b7791f 16%, var(--panel));
+  background: color-mix(in srgb, #b7791f 16%, var(--panel));
+}
+.recipe-svg .fnode.st-started rect,
+.recipe-outline .orow.st-started {
+  fill: color-mix(in srgb, var(--accent) 26%, var(--panel));
+  background: color-mix(in srgb, var(--accent) 26%, var(--panel));
+}
+.recipe-svg .fnode.st-started rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.recipe-svg .fnode.st-done rect,
+.recipe-outline .orow.st-done {
+  fill: color-mix(in srgb, var(--fg) 8%, var(--panel));
+  background: color-mix(in srgb, var(--fg) 8%, var(--panel));
+}
+.recipe-outline .rstatus {
+  font-weight: 600;
+}
+.recipe-view .recipe-props,
+.recipe-view .recipe-alloc,
+.recipe-view .recipe-run {
+  margin-top: 10px;
+}
+.recipe-view .grid.props th {
+  text-align: left;
+  font-weight: 500;
+  padding-right: 8px;
+}
+.recipe-view .grid.alloc {
+  width: 100%;
+}
+.recipe-view .grid.alloc tr.error td {
+  color: #c0392b;
+}
+.recipe-view .operator button:not(:disabled) {
+  border-color: var(--accent);
+}
+.recipe-view .rstate {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 8%, var(--panel));
+}
+.recipe-view .rstate.st-running,
+.recipe-view .rstate.st-complete {
+  background: color-mix(in srgb, var(--accent) 22%, var(--panel));
+}
+.recipe-view .rstate.st-held,
+.recipe-view .rstate.st-holding {
+  background: color-mix(in srgb, #b7791f 22%, var(--panel));
+}
+.recipe-view .rstate.st-aborted,
+.recipe-view .rstate.st-aborting,
+.recipe-view .rstate.st-stopped {
+  background: color-mix(in srgb, #c0392b 18%, var(--panel));
+}
+.recipe-view .recipe-trace {
+  max-height: 240px;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  padding-left: 1.5rem;
+}
+.recipe-view .recipe-trace li.failed,
+.recipe-view .recipe-trace li.refused {
+  color: #c0392b;
+}
+.recipe-view button.small {
+  font-size: 0.8rem;
+  padding: 1px 6px;
+}
+@media (max-width: 700px) {
+  .recipe-view .grid.alloc th:nth-child(3),
+  .recipe-view .grid.alloc td:nth-child(3) {
+    display: none;
+  }
+}
