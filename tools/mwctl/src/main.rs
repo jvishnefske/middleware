@@ -15,7 +15,7 @@ use mwctl::cli::{self, Cmd, KeyCmd, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
 use mwctl::link::{Event, Link, Timeouts};
-use mwctl::report::{format_event, format_info, format_trust};
+use mwctl::report::{format_board, format_event, format_info, format_trust};
 use mwctl::sign::{SEED_LEN, Seed, hex, sign_commit, version_at};
 use port::SerialTransport;
 use std::io::Read as _;
@@ -108,6 +108,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
     let mut dev = Device::new(Link::new(transport, timeouts));
     let result = match cli.cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
+        Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
         Cmd::Start => dev.start().map(|()| println!("payload started")),
         Cmd::Stop => dev.stop().map(|()| println!("payload stopped")),
         Cmd::TrustInfo => dev.trust_info().map(|t| print!("{}", format_trust(&t))),

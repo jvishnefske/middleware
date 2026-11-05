@@ -209,6 +209,9 @@ pub enum Action {
     App,
     /// `sys/info`.
     Info,
+    /// `sys/board`: the device answers with its board description (the
+    /// loader holds none).
+    Board,
     /// `sys/payload/start`.
     Start,
     /// `sys/payload/stop`.
@@ -342,6 +345,7 @@ impl DeviceLoader {
                 let action = match cmd {
                     Command::Start => Action::Start,
                     Command::Stop => Action::Stop,
+                    Command::Board => Action::Board,
                     _ => Action::Info,
                 };
                 (next, Ok(action))
@@ -415,6 +419,7 @@ mod tests {
     fn device_loader_passes_system_and_app_commands() {
         let d = DeviceLoader::new(8);
         assert_eq!(d.step("sys/info", &[]).1, Ok(Action::Info));
+        assert_eq!(d.step("sys/board", &[]).1, Ok(Action::Board));
         assert_eq!(d.step("sys/payload/start", &[]).1, Ok(Action::Start));
         assert_eq!(d.step("sys/payload/stop", &[]).1, Ok(Action::Stop));
         assert_eq!(d.step("app/led", &[1]).1, Ok(Action::App));

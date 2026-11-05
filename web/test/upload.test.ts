@@ -51,6 +51,12 @@ describe("device client", () => {
     expect(texts.join("")).toContain("ESP-ROM:esp32c3");
   });
 
+  it("reads sys/board, or null from firmware that predates it", async () => {
+    const board = Uint8Array.from([1, 3, 0, ...new Array(50).fill(0), 0x2b, 0x2c, 0]);
+    expect(await rig({ board }).client.board()).toMatchObject({ abiVersion: 3, uartTx: 0x2b, pwmPins: [] });
+    expect(await rig().client.board()).toBeNull();
+  });
+
   it("delivers device publications and sends host publications", async () => {
     const { client, device, pubs } = rig();
     await device.publish("sys/log", new TextEncoder().encode("hello"));

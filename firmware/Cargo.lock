@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "esp-base"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "critical-section",
  "ed25519-dalek",

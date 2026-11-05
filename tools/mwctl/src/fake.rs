@@ -70,6 +70,7 @@ pub struct FakeDevice {
     declared_crc: Option<u32>,
     trust: TrustState,
     rekey_open: bool,
+    board: Option<Vec<u8>>,
 }
 
 impl FakeDevice {
@@ -92,6 +93,16 @@ impl FakeDevice {
             declared_crc: None,
             trust: TrustState::Unclaimed,
             rekey_open: false,
+            board: None,
+        }
+    }
+
+    /// Answers `sys/board` with `body`; without it the key is `NotFound`,
+    /// as on firmware older than 0.6.
+    pub fn with_board(self, body: Vec<u8>) -> Self {
+        FakeDevice {
+            board: Some(body),
+            ..self
         }
     }
 
@@ -204,6 +215,11 @@ impl FakeDevice {
             }
             .encode(out)
             .ok_or(HandlerError::BufferTooSmall),
+            Command::Board => {
+                let body = self.board.as_deref().ok_or(HandlerError::NotFound)?;
+                out.get_mut(..body.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(body);
+                Ok(body.len())
+            }
             Command::Start if !self.runtime => Err(HandlerError::NotFound),
             Command::Start => match self.status {
                 PayloadStatus::Empty | PayloadStatus::Loading => Err(HandlerError::InvalidRequest),

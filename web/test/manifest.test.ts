@@ -43,6 +43,31 @@ describe("firmware manifest", () => {
     expect(() => parseManifest({ version: "1", images: { esp32: { file: "a.bin", wasm: 0 } } })).toThrow(/boolean/);
   });
 
+  it("U16: parses the ESP Web Tools manifest to the same images, with the BSP", () => {
+    const tools = {
+      name: "esp-base",
+      version: "0.6.0",
+      new_install_prompt_erase: false,
+      builds: [
+        { chipFamily: "ESP32-S3", parts: [{ path: "esp32s3.bin", offset: 0 }], wasm: true, bsp: "esp32s3.bsp.json" },
+        { chipFamily: "ESP32-C3", parts: [{ path: "esp32c3.bin", offset: 0 }], wasm: false },
+        { chipFamily: "ESP8266", parts: [{ path: "esp8266.bin", offset: 0 }] },
+      ],
+    };
+    const m = parseManifest(tools);
+    expect(m.version).toBe("0.6.0");
+    expect(imageForChip(m, "ESP32-S3")).toEqual({ file: "esp32s3.bin", offset: 0, wasm: true, bsp: "esp32s3.bsp.json" });
+    expect(imageForChip(m, "ESP32-C3")).toEqual({ file: "esp32c3.bin", offset: 0, wasm: false });
+    expect(imageForChip(m, "ESP8266")?.wasm).toBe(true);
+    const build = (b: object) => ({ version: "1", builds: [{ chipFamily: "ESP32", ...b }] });
+    expect(() => parseManifest({ version: "1", builds: {} })).toThrow(/array/);
+    expect(() => parseManifest(build({ parts: [] }))).toThrow(/exactly one/);
+    expect(() => parseManifest(build({ parts: [{ path: "a.bin" }, { path: "b.bin" }] }))).toThrow(/exactly one/);
+    expect(() => parseManifest(build({ parts: [{ path: "https://x/a.bin" }] }))).toThrow(/relative/);
+    expect(() => parseManifest(build({ parts: [{ path: "a.bin" }], bsp: "../a.json" }))).toThrow(/bsp/);
+    expect(() => parseManifest({ version: "1", builds: [{ parts: [{ path: "a.bin" }] }] })).toThrow(/chipFamily/);
+  });
+
   it("rejects malformed manifests and unsafe file names", () => {
     expect(() => parseManifest(null)).toThrow();
     expect(() => parseManifest({ images: {} })).toThrow(/version/);

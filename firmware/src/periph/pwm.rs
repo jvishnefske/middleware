@@ -270,10 +270,12 @@ mod tests {
     #[test]
     fn x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c() {
         use crate::chip::Direction;
-        // Strapping, then the default I2C pins (ESP32 21/22, ESP32-S3 8/9).
-        let avoid: [(&Profile, &[u8]); 2] = [(&ESP32, &[0, 2, 5, 12, 15, 21, 22]), (&ESP32S3, &[0, 3, 45, 46, 8, 9])];
-        for (p, avoid) in avoid {
+        // The default I2C pins (ESP32 21/22, ESP32-S3 8/9); strapping pins
+        // come from the profile.
+        let i2c: [(&Profile, &[u8]); 2] = [(&ESP32, &[21, 22]), (&ESP32S3, &[8, 9])];
+        for (p, avoid) in i2c {
             for &pin in p.pwm_pins {
+                assert!(!p.is_strapping(pin), "{} {pin} is a strapping pin", p.name);
                 assert_eq!(p.check_pin(pin, Direction::Output), Ok(()), "{} {pin}", p.name);
                 assert!(!p.has_adc(pin), "{} {pin} is ADC1", p.name);
                 assert!(!avoid.contains(&pin), "{} {pin}", p.name);

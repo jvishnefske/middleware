@@ -35,3 +35,11 @@ then load payloads over the same USB port, whether it is a CP2102/CH340
 bridge or the chip's native USB-Serial-JTAG. The ESP32-C3 and ESP8266 builds
 have no WASM runtime (the C3 lacks the atomics wasmi needs; the ESP8266 lacks
 the RAM), so they store payloads but cannot run them.
+
+Board support packages: each firmware describes its pins on `sys/board`
+(`mwctl board`), and `cargo run --example bsp_export -- <chip>` (in
+`firmware/`) prints the same description as `mw-bsp/1` JSON. A tag
+`esp-base-v<version>` makes `.github/workflows/release.yml` attach the images,
+BSPs and an ESP Web Tools `manifest.json` to a release and mirror them to
+GitHub Pages under `firmware/<version>/` and `firmware/latest/`, where
+browsers (the web flasher, Skygraph) can fetch them.

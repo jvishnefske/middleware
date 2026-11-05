@@ -4,6 +4,8 @@
 //!   protocol-only (`+no-wasm`) firmware and an ABI mismatch.
 //! * [`format_trust`] — `sys/trust/info`: the state, the last signed
 //!   version and the pinned key in hex.
+//! * [`format_board`] — `sys/board`: limits, flags and each pin class as a
+//!   GPIO list, then the PWM table.
 //! * [`format_event`] — one line per publication: `sys/log` as text,
 //!   `sys/payload/status` by name, anything else as UTF-8 or hex; noise runs
 //!   as their length and printable characters.
@@ -12,7 +14,9 @@
 use crate::device::Info;
 use crate::link::Event;
 use middleware::loader::trust::{TrustCode, TrustInfo, TrustState};
-use middleware::loader::{PayloadStatus, keys};
+use middleware::loader::{
+    BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo, PayloadStatus, keys,
+};
 use middleware::wasm_abi::ABI_VERSION;
 use std::fmt::Write as _;
 
@@ -46,6 +50,41 @@ pub fn format_info(i: &Info) -> String {
         i.capacity,
         status_name(i.status)
     )
+}
+
+fn pin_list(mask: u64) -> String {
+    let pins: Vec<String> = (0..64).filter(|n| mask >> n & 1 == 1).map(|n: u32| n.to_string()).collect();
+    if pins.is_empty() { "-".into() } else { pins.join(" ") }
+}
+
+/// `sys/board` for printing.
+pub fn format_board(b: &BoardInfo<'_>) -> String {
+    let yes = |f: u8| if b.flags & f != 0 { "yes" } else { "no" };
+    let mut s = format!(
+        "ABI:              v{}\nmax image:        {} bytes\nmax memory:       {} bytes\nruntime:          {}\nUSB-Serial-JTAG:  {}\nconsole UART:     tx {} rx {}\n",
+        b.abi_version,
+        b.max_image,
+        b.max_memory,
+        yes(BOARD_RUNTIME),
+        yes(BOARD_USB_JTAG),
+        b.uart_tx,
+        b.uart_rx,
+    );
+    for (name, mask) in [
+        ("gpio", b.gpio),
+        ("reserved", b.reserved),
+        ("input only", b.input_only),
+        ("strapping", b.strapping),
+        ("ADC1", b.adc),
+    ] {
+        let _ = writeln!(s, "{:<18}{}", format!("{name}:"), pin_list(mask));
+    }
+    let _ = write!(s, "PWM:              {} bits, REF_TICK {}", b.pwm_max_bits, yes(BOARD_PWM_REF_TICK));
+    for (i, pin) in b.pwm_pins.iter().enumerate() {
+        let _ = write!(s, "{}({},{})={pin}", if i == 0 { "; " } else { " " }, i / 2, i % 2);
+    }
+    s.push('\n');
+    s
 }
 
 /// `sys/trust/info` for printing.
@@ -137,6 +176,31 @@ mod tests {
         });
         assert!(s.contains("WASM (payloads run)"), "{s}");
         assert!(s.contains("mwctl expects"), "{s}");
+    }
+
+    #[test]
+    fn board_lists_pin_classes_and_pwm_table() {
+        let b = BoardInfo {
+            abi_version: 3,
+            max_image: 81920,
+            max_memory: 131072,
+            gpio: 0b1111,
+            reserved: 0b10,
+            input_only: 0,
+            strapping: 0b1,
+            adc: 0,
+            pwm_max_bits: 14,
+            flags: BOARD_RUNTIME | BOARD_USB_JTAG,
+            uart_tx: 43,
+            uart_rx: 44,
+            pwm_pins: &[2, 3],
+        };
+        let s = format_board(&b);
+        assert!(s.contains("gpio:             0 1 2 3\n"), "{s}");
+        assert!(s.contains("strapping:        0\n"), "{s}");
+        assert!(s.contains("input only:       -\n"), "{s}");
+        assert!(s.contains("USB-Serial-JTAG:  yes"), "{s}");
+        assert!(s.contains("14 bits, REF_TICK no; (0,0)=2 (0,1)=3\n"), "{s}");
     }
 
     #[test]

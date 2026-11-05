@@ -13,6 +13,12 @@
 //!   port).
 //! * `input_only` — pins without an output driver (ESP32 GPIO34–39).
 //!
+//! and a fourth, `strapping` (E14): pins whose level at reset selects the
+//! boot mode or flash voltage (ESP32 GPIO0/2/5/12/15, ESP32-S3 0/3/45/46,
+//! ESP32-C3 2/8/9, ESP8266 0/2/15). A payload may use them —
+//! [`Profile::check_pin`] does not refuse them — but a host warns about an
+//! assignment that drives one, as ESPHome does (`ignore_strapping_warning`).
+//!
 //! [`Profile::check_pin`] applies the policy and returns the
 //! [`AbiError`] a host import reports: `InvalidArgument` for a pin that does
 //! not exist, `Unsupported` for a reserved pin or an output on an input-only
@@ -92,6 +98,7 @@
 //! uses the `payload` partition in `partitions.csv`, the ESP8266 the region
 //! at 0x100000 (checked by a unit test).
 
+use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
 use middleware::wasm_abi::AbiError;
 
 /// Size of one standard (64 KiB) WASM linear-memory page, used to express
@@ -161,6 +168,7 @@ pub struct Profile {
     gpio: u64,
     reserved: u64,
     input_only: u64,
+    strapping: u64,
     adc: u64,
 }
 
@@ -198,6 +206,7 @@ pub const ESP32: Profile = Profile {
     pwm_ref_tick: true,
     reserved: bit(1) | bit(3) | span(6, 11) | bit(16) | bit(17),
     input_only: span(34, 39),
+    strapping: bit(0) | bit(2) | bit(5) | bit(12) | bit(15),
     adc: span(32, 39),
 };
 
@@ -220,6 +229,7 @@ pub const ESP32S3: Profile = Profile {
     pwm_ref_tick: false,
     reserved: bit(19) | bit(20) | span(26, 37) | bit(43) | bit(44),
     input_only: 0,
+    strapping: bit(0) | bit(3) | bit(45) | bit(46),
     adc: span(1, 10),
 };
 
@@ -242,6 +252,7 @@ pub const ESP32C3: Profile = Profile {
     pwm_ref_tick: false,
     reserved: span(12, 17) | bit(18) | bit(19) | bit(20) | bit(21),
     input_only: 0,
+    strapping: bit(2) | bit(8) | bit(9),
     adc: 0,
 };
 
@@ -266,6 +277,7 @@ pub const ESP8266: Profile = Profile {
     pwm_ref_tick: false,
     reserved: span(6, 11) | bit(1) | bit(3),
     input_only: 0,
+    strapping: bit(0) | bit(2) | bit(15),
     adc: 0,
 };
 
@@ -299,6 +311,39 @@ impl Profile {
     /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
     pub fn is_reserved(&self, pin: u8) -> bool {
         has(self.reserved, pin)
+    }
+
+    /// Whether `pin` is a strapping pin (usable, but read at reset).
+    pub fn is_strapping(&self, pin: u8) -> bool {
+        has(self.strapping, pin)
+    }
+
+    /// Whether `pin` has no output driver.
+    pub fn is_input_only(&self, pin: u8) -> bool {
+        has(self.input_only, pin)
+    }
+
+    /// The `sys/board` description of this profile (S8), for a firmware
+    /// implementing ABI `abi_version`.
+    pub fn board_info(&self, abi_version: u16) -> BoardInfo<'static> {
+        let flag = |on: bool, f: u8| if on { f } else { 0 };
+        BoardInfo {
+            abi_version,
+            max_image: self.max_image,
+            max_memory: self.max_memory_bytes,
+            gpio: self.gpio,
+            reserved: self.reserved,
+            input_only: self.input_only,
+            strapping: self.strapping,
+            adc: self.adc,
+            pwm_max_bits: self.pwm_max_bits,
+            flags: flag(self.runtime, BOARD_RUNTIME)
+                | flag(self.usb_serial_jtag, BOARD_USB_JTAG)
+                | flag(self.pwm_ref_tick, BOARD_PWM_REF_TICK),
+            uart_tx: self.uart0_tx,
+            uart_rx: self.uart0_rx,
+            pwm_pins: self.pwm_pins,
+        }
     }
 
     /// Whether a payload may use `pin` in `direction`.
@@ -467,5 +512,39 @@ mod tests {
         // PWM only where payloads run.
         let pwm: [(usize, u8, bool); 4] = ALL.map(|p| (p.pwm_pins.len(), p.pwm_max_bits, p.pwm_ref_tick));
         assert_eq!(pwm, [(8, 16, true), (8, 14, false), (0, 0, false), (0, 0, false)]);
+    }
+
+    #[test]
+    fn e14_strapping_pins_per_chip_are_allowed() {
+        let strap = |p: &Profile| (0u8..64).filter(|&n| p.is_strapping(n)).collect::<heapless::Vec<u8, 64>>();
+        assert_eq!(strap(&ESP32), [0, 2, 5, 12, 15]);
+        assert_eq!(strap(&ESP32S3), [0, 3, 45, 46]);
+        assert_eq!(strap(&ESP32C3), [2, 8, 9]);
+        assert_eq!(strap(&ESP8266), [0, 2, 15]);
+        for p in ALL {
+            for n in strap(p) {
+                assert_eq!(p.check_pin(n, Direction::Output), Ok(()), "{} {n}", p.name);
+            }
+        }
+        assert!(!ESP32.is_strapping(64) && !ESP32.is_strapping(255));
+    }
+
+    #[test]
+    fn s8_board_info_matches_profile() {
+        use middleware::loader::{BOARD_INFO_MAX, BoardInfo};
+        for p in ALL {
+            let b = p.board_info(3);
+            let mut buf = [0u8; BOARD_INFO_MAX];
+            let n = b.encode(&mut buf).unwrap();
+            assert_eq!(BoardInfo::decode(&buf[..n]), Some(b), "{}", p.name);
+            assert_eq!((b.max_image, b.uart_tx, b.uart_rx), (p.max_image, p.uart0_tx, p.uart0_rx));
+            assert_eq!(b.pwm_pins, p.pwm_pins);
+            assert!((0u8..64).all(|n| (b.gpio >> n & 1 == 1) == p.exists(n)));
+        }
+        let flags: [u8; 4] = ALL.map(|p| p.board_info(3).flags);
+        assert_eq!(flags, [0b101, 0b011, 0b010, 0]);
+        // The protocol crate's golden fixture is the ESP32-S3.
+        assert_eq!(ESP32S3.board_info(3).strapping, 0x0000_6000_0000_0009);
+        assert_eq!(ESP32S3.board_info(3).reserved, 0x0000_183F_FC18_0000);
     }
 }

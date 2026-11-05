@@ -160,6 +160,7 @@ pub async fn run(spawner: Spawner) -> ! {
         chip: profile.name,
         firmware: FIRMWARE,
         capacity,
+        profile,
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
     };

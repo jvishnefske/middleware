@@ -387,6 +387,16 @@ because WASM linear memory and the wasmi interpreter require one.
   `parse_rejects_bad_bodies_and_passes_app_keys`, `device_info_round_trips`.
 - [x] S7 The payload ABI (imports, exports, error codes, bounds checks) is
   defined once in `wasm_abi` — `wasm_abi::tests::*`.
+- [x] S8 (0.6) `sys/board` (empty request) answers the board the firmware
+  was built for, as `loader::BoardInfo`: `[ver u8=1][abi u16][max_image
+  u32][max_memory u32][gpio u64][reserved u64][input_only u64][strapping
+  u64][adc u64][pwm_max_bits u8][flags u8: runtime|usb_jtag|pwm_ref_tick]
+  [uart_tx u8][uart_rx u8][n_pwm u8][pwm_pins…]`, little-endian, bit `n` of
+  a mask for GPIO `n`, `pwm_pins[2·timer + channel]`; at most 96 bytes
+  (40 PWM pins), so it fits the firmware's 128-byte reply. A host checks
+  its pin assignment against it before sending a payload; firmware before
+  0.6 answers `NotFound` —
+  `loader::tests::board_info_round_trips`, `board_info_golden_bytes`, `commands_round_trip_through_parse`, `parse_rejects_bad_bodies_and_passes_app_keys`; `firmware` `dispatch::tests::s8_board_reports_profile`, `chip::tests::s8_board_info_matches_profile`; `protocol-wasm` `decodeBoardInfo` (`web/test/protocol.test.ts`: "decodes the bsp_export --wire fixture (ESP32-S3)"); `mwctl board` (`device::tests::board_is_decoded_or_not_found_on_older_firmware`, `report::tests::board_lists_pin_classes_and_pwm_table`).
 
 ### WASM runtime (`wasm-host`)
 
@@ -484,6 +494,27 @@ because WASM linear memory and the wasmi interpreter require one.
   pin (X13).
 - [x] E6 Produces merged flash images per chip for the web flasher —
   `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
+- [x] E14 (0.6) Each chip profile has a strapping-pin mask (ESP32 GPIO
+  0/2/5/12/15, ESP32-S3 0/3/45/46, ESP32-C3 2/8/9, ESP8266 0/2/15). Strapping
+  pins stay usable by payloads (`check_pin` allows them); hosts warn, as
+  ESPHome does with `ignore_strapping_warning`. The PWM pins avoid them —
+  `chip::tests::e14_strapping_pins_per_chip_are_allowed`; `periph::pwm::tests::x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c` (uses the mask instead of a hand list).
+- [ ] E15 (0.6) Board support packages: `cargo run --example bsp_export --
+  <chip>` prints the chip's `mw-bsp/1` JSON (`format, chip, firmware, abi,
+  runtime, maxImage, maxMemory, console {usbJtag, uartTx, uartRx}, pins
+  {gpio, reserved, inputOnly, strapping, adc1}, pwm {maxBits, refTick, table
+  [{timer, channel, gpio}]}`) from the same `Profile` that `sys/board`
+  serves, and `--wire` the `sys/board` body as hex (the golden fixture
+  `web/test/fixtures/esp32s3.board.hex`, also used by Skygraph). A BSP is
+  identified as `<chip>@<firmware>`. `build-images.sh` writes
+  `<chip>.bsp.json` next to each image and an ESP Web Tools manifest whose
+  builds carry `wasm` and `bsp`. `.github/workflows/release.yml` builds the
+  images on a tag `esp-base-v<version>`, attaches `.bin`, `.bsp.json` and
+  `manifest.json` to the release, and mirrors every release to GitHub
+  Pages (`firmware/<version>/`, `firmware/latest/`), because release assets
+  are not readable cross-origin from a browser. Partial: the exporter and
+  the manifest writer are checked locally; the workflow is linted
+  (actionlint) but has not run yet.
 
 ### ESP8266 base firmware (`firmware-esp8266/`)
 
@@ -654,6 +685,10 @@ open).
   and refused before sending anything when the device pins another key;
   claim is offered when unclaimed or in the re-key window —
   `web/test/trustUpload.test.ts` against a fake device modelling the trust contract in TypeScript in front of the Rust loader: "uploads unsigned to an unclaimed device after asking", "sends nothing when the unsigned upload is declined", "uploads unsigned to firmware without sys/trust and says why", "claims an unclaimed device and denies a second claim", "signs the commit for a device that pins this key, and the device accepts it", "a commit signed by another key is Denied and the old image stays active", "a replayed version is Denied; a clock behind the device bumps past min_version", "re-keys only while the window opened by holding BOOT is open".
+- [x] U16 (0.6) The flasher reads both manifest formats: the ESP Web Tools
+  shape (`builds[].chipFamily`, exactly one `parts` entry, plus `wasm` and
+  `bsp`) and the older `{version, images}` map, to the same images —
+  `web/test/manifest.test.ts`: "U16: parses the ESP Web Tools manifest to the same images, with the BSP", "parses the wasm runtime flag, defaulting to true when absent".
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and

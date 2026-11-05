@@ -10,6 +10,7 @@
 //! | request              | condition            | action     | status after |
 //! |----------------------|----------------------|------------|--------------|
 //! | `sys/info`           | —                    | none       | unchanged    |
+//! | `sys/board`          | —                    | none (reply [`Profile::board_info`]) | unchanged |
 //! | `sys/loader/begin`   | fits                 | `Erase`    | `Loading`    |
 //! | `sys/loader/chunk`   | in order, fits       | `Write`    | `Loading`    |
 //! | `sys/loader/chunk`   | resend of last chunk | none (`Ok`) | `Loading`   |
@@ -61,6 +62,8 @@ use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, is_
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::ABI_VERSION;
 
+use crate::chip::Profile;
+
 /// Facts for dispatch: what `sys/info` reports, plus whether the re-key
 /// window is open at the time of the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +74,8 @@ pub struct Context<'a> {
     pub firmware: &'a str,
     /// Largest payload image in bytes.
     pub capacity: u32,
+    /// The chip profile `sys/board` describes.
+    pub profile: &'static Profile,
     /// Whether the firmware includes the WASM runtime. Without it the loader
     /// and storage work but `sys/payload/start` is refused with `NotFound`.
     pub runtime: bool,
@@ -226,7 +231,8 @@ impl<'a> Outcome<'a> {
     }
 }
 
-/// Dispatches one request. The response body (for `sys/info`) is written
+/// Dispatches one request. The response body (for `sys/info`, `sys/board`
+/// and `sys/trust/info`) is written
 /// into `out`.
 pub fn handle_request<'a>(
     state: State,
@@ -250,6 +256,10 @@ pub fn handle_request<'a>(
                 firmware: ctx.firmware,
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
+        }
+        Command::Board => {
+            let board = ctx.profile.board_info(ABI_VERSION);
+            Outcome::reply(state, board.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
         Command::Start if !ctx.runtime => Outcome::reply(state, Err(HandlerError::NotFound)),
         Command::Start => match state.status {
@@ -368,7 +378,14 @@ mod tests {
     use middleware::loader::keys;
 
     const CTX: Context<'static> =
-        Context { chip: "esp32c3", firmware: "0.1.0", capacity: 1024, runtime: true, rekey_window: false };
+        Context {
+            chip: "esp32c3",
+            firmware: "0.1.0",
+            capacity: 1024,
+            profile: &crate::chip::ESP32C3,
+            runtime: true,
+            rekey_window: false,
+        };
 
     fn req<'a>(state: State, key: Key<'_>, body: &'a [u8]) -> Outcome<'a> {
         let mut out = [0u8; 128];
@@ -404,6 +421,21 @@ mod tests {
         let mut tiny = [0u8; 4];
         let o = handle_request(State::boot(true), &CTX, keys::INFO, &[], &mut tiny);
         assert_eq!(o.reply, Err(HandlerError::BufferTooSmall));
+    }
+
+    #[test]
+    fn s8_board_reports_profile() {
+        use middleware::loader::BoardInfo;
+        let mut out = [0u8; 128];
+        let s = State::boot(true);
+        let o = handle_request(s, &Context { profile: &crate::chip::ESP32S3, ..CTX }, keys::BOARD, &[], &mut out);
+        assert_eq!((o.state, o.action), (s, Action::None));
+        let board = BoardInfo::decode(&out[..o.reply.unwrap()]).unwrap();
+        assert_eq!(board, crate::chip::ESP32S3.board_info(ABI_VERSION));
+        assert_eq!(board.pwm_pins, [11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(req(s, keys::BOARD, b"x").reply, Err(HandlerError::InvalidRequest));
+        let mut tiny = [0u8; 16];
+        assert_eq!(handle_request(s, &CTX, keys::BOARD, &[], &mut tiny).reply, Err(HandlerError::BufferTooSmall));
     }
 
     #[test]

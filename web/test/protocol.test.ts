@@ -1,5 +1,6 @@
 // U4/U7: the protocol-wasm bindings as seen from JS (wasm-pack output).
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { FrameEvent, LineEvent } from "../src/protocol/wasm";
 import { protocol } from "./fakeDevice";
@@ -114,6 +115,33 @@ describe("loader helpers", () => {
       firmware: "0.1.0",
     });
     expect(proto.decodeDeviceInfo(body.slice(0, 3))).toBeUndefined();
+  });
+});
+
+describe("sys/board", () => {
+  it("decodes the bsp_export --wire fixture (ESP32-S3)", () => {
+    const hex = readFileSync(new URL("./fixtures/esp32s3.board.hex", import.meta.url), "utf8").trim();
+    const body = Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16)));
+    const b = proto.decodeBoardInfo(body)!;
+    expect(b).toMatchObject({
+      abiVersion: proto.abi.version,
+      maxImage: 81920,
+      maxMemory: 131072,
+      inputOnly: [],
+      strapping: [0, 3, 45, 46],
+      adc: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      pwmMaxBits: 14,
+      runtime: true,
+      usbJtag: true,
+      pwmRefTick: false,
+      uartTx: 43,
+      uartRx: 44,
+      pwmPins: [11, 12, 13, 14, 15, 16, 17, 18],
+    });
+    expect(b.reserved).toEqual([19, 20, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 43, 44]);
+    expect(b.gpio).toHaveLength(45);
+    expect(proto.decodeBoardInfo(body.slice(0, -1))).toBeUndefined();
+    expect(proto.constants.keys.board).toBe("sys/board");
   });
 });
 

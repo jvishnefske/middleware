@@ -1,0 +1,152 @@
+name: Release esp-base
+
+# E15: on a tag `esp-base-v<version>`, builds the base firmware for ESP32,
+# ESP32-S3 and ESP32-C3 (and ESP8266, best effort), and attaches to the
+# GitHub release, per chip:
+#
+#   <chip>.bin        merged flash image, written at 0x0
+#   <chip>.bsp.json   mw-bsp/1 board support package (bsp_export)
+#   manifest.json     ESP Web Tools manifest listing both
+#
+# Browsers cannot fetch release assets cross-origin (the asset host sends no
+# Access-Control-Allow-Origin), so the `pages` job mirrors every release to
+# GitHub Pages, which does:
+#
+#   https://<owner>.github.io/<repo>/firmware/<version>/manifest.json
+#   https://<owner>.github.io/<repo>/firmware/latest/manifest.json
+#
+# and also copies the latest release to firmware/ next to the web flasher
+# (web/src/ui/flashPage.ts reads firmware/manifest.json). Enable Pages once
+# under Settings → Pages → Source: GitHub Actions. `workflow_dispatch` only
+# rebuilds the Pages mirror from the existing releases.
+
+on:
+  push:
+    tags: [ "esp-base-v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  esp32:
+    if: startsWith(github.ref, 'refs/tags/esp-base-v')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check the tag matches firmware/Cargo.toml
+      run: |
+        want="${GITHUB_REF_NAME#esp-base-v}"
+        have="$(sed -n 's/^version *= *"\(.*\)"/\1/p' firmware/Cargo.toml | head -n1)"
+        [[ "$want" == "$have" ]] || { echo "tag $want != firmware/Cargo.toml $have" >&2; exit 1; }
+    - name: Install the ESP Rust toolchain
+      run: |
+        cargo install espup --locked
+        cargo install espflash --locked
+        # build.sh selects `+esp-new` by default.
+        espup install --name esp-new --targets esp32,esp32s3 --export-file "$HOME/export-esp.sh"
+    - name: Host tests
+      run: |
+        cargo test --workspace
+        (cd firmware && cargo test --lib)
+    - name: Build images
+      run: OUT="$PWD/dist" firmware/build-images.sh esp32 esp32s3 esp32c3
+    - uses: actions/upload-artifact@v4
+      with:
+        name: esp32-family
+        path: dist/
+
+  esp8266:
+    if: startsWith(github.ref, 'refs/tags/esp-base-v')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install the toolchain (espup, lx106 gcc, esptool)
+      run: |
+        cargo install espup --locked
+        espup install --name esp-new --targets esp32 --export-file "$HOME/export-esp.sh"
+        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="$HOME/.local/bin" sh
+        "$HOME/.local/bin/arduino-cli" core install esp8266:esp8266@3.1.2 \
+          --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+        pipx install esptool
+    - name: Build image
+      run: OUT="$PWD/dist" ESPTOOL=esptool firmware/build-images.sh esp8266
+    - uses: actions/upload-artifact@v4
+      with:
+        name: esp8266
+        path: dist/
+
+  release:
+    needs: [ esp32, esp8266 ]
+    if: ${{ !cancelled() && needs.esp32.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+      with:
+        path: parts/
+    - name: Merge the per-job manifests
+      run: |
+        mkdir dist
+        cp parts/*/*.bin parts/*/*.bsp.json dist/
+        jq -s '.[0] + { builds: (map(.builds) | add) }' parts/*/manifest.json > dist/manifest.json
+        cat dist/manifest.json
+    - name: Create or update the release
+      run: |
+        gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+          gh release create "$GITHUB_REF_NAME" --title "esp-base ${GITHUB_REF_NAME#esp-base-v}" \
+            --notes "See CHANGELOG.md. Flash from https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/ or load the BSP in Skygraph."
+        gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+
+  pages:
+    needs: [ release ]
+    if: ${{ !cancelled() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22.x
+    - name: Build the web page
+      run: |
+        cargo install wasm-pack --locked
+        cd web && npm ci && npm run build:wasm && npm run build
+    - name: Mirror release assets
+      run: |
+        fw=web/dist/firmware
+        rm -rf "$fw" && mkdir -p "$fw"
+        # Newest first.
+        tags="$(gh release list --limit 100 --json tagName,createdAt \
+          --jq '[.[] | select(.tagName | startswith("esp-base-v"))] | sort_by(.createdAt) | reverse | .[].tagName')"
+        latest=""
+        for tag in $tags; do
+          version="${tag#esp-base-v}"
+          gh release download "$tag" --dir "$fw/$version" --pattern '*.bin' --pattern '*.json'
+          [[ -f "$fw/$version/manifest.json" ]] || { rm -rf "${fw:?}/$version"; continue; }
+          [[ -n "$latest" ]] || latest="$version"
+        done
+        if [[ -n "$latest" ]]; then
+          cp -r "$fw/$latest" "$fw/latest"
+          cp "$fw/$latest"/* "$fw/"
+        fi
+        find "$fw" -type f | sort
+    - uses: actions/configure-pages@v5
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: web/dist
+    - id: deployment
+      uses: actions/deploy-pages@v4

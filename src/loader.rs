@@ -7,6 +7,7 @@
 //! | key                 | request body                    | response body      |
 //! |---------------------|---------------------------------|--------------------|
 //! | `sys/info`          | empty                           | [`DeviceInfo`]     |
+//! | `sys/board`         | empty                           | [`BoardInfo`]      |
 //! | `sys/loader/begin`  | `[len u32 LE][crc32 u32 LE]`    | empty              |
 //! | `sys/loader/chunk`  | `[offset u32 LE][≤CHUNK_MAX bytes]` | empty          |
 //! | `sys/loader/commit` | empty, or `[version u32 LE][signature 64]` | empty   |
@@ -52,6 +53,8 @@ pub mod keys {
 
     /// Device description request.
     pub const INFO: Key<'static> = Key::from_static("sys/info");
+    /// Board description request (pin classes, limits).
+    pub const BOARD: Key<'static> = Key::from_static("sys/board");
     /// Starts a transfer.
     pub const BEGIN: Key<'static> = Key::from_static("sys/loader/begin");
     /// Carries one chunk.
@@ -77,6 +80,8 @@ pub mod keys {
 pub enum Command<'a> {
     /// `sys/info`.
     Info,
+    /// `sys/board`.
+    Board,
     /// `sys/loader/begin`.
     Begin {
         /// Total image length in bytes.
@@ -129,6 +134,7 @@ impl<'a> Command<'a> {
         };
         match key.as_str() {
             k if k == keys::INFO.as_str() => empty(Command::Info),
+            k if k == keys::BOARD.as_str() => empty(Command::Board),
             k if k == keys::COMMIT.as_str() => {
                 Ok(Some(Command::Commit { auth: SignedCommit::parse_body(body)? }))
             }
@@ -163,6 +169,7 @@ impl<'a> Command<'a> {
     pub const fn key(&self) -> Key<'static> {
         match self {
             Command::Info => keys::INFO,
+            Command::Board => keys::BOARD,
             Command::Begin { .. } => keys::BEGIN,
             Command::Chunk { .. } => keys::CHUNK,
             Command::Commit { .. } => keys::COMMIT,
@@ -197,6 +204,7 @@ impl<'a> Command<'a> {
                 Some(key.0.len())
             }
             Command::Info
+            | Command::Board
             | Command::Commit { auth: None }
             | Command::Start
             | Command::Stop
@@ -274,7 +282,7 @@ impl Loader {
     /// Applies `cmd` given a storage `capacity` in bytes. On error the
     /// returned state is [`Loader::Idle`] for transfer commands (the transfer
     /// is abandoned) and unchanged otherwise. Non-loader commands
-    /// (`Info`, `Start`, `Stop`, `TrustInfo`, `TrustClaim`) leave the state
+    /// (`Info`, `Board`, `Start`, `Stop`, `TrustInfo`, `TrustClaim`) leave the state
     /// unchanged with [`Effect::None`]; the shell handles them.
     pub fn step<'a>(
         self,
@@ -362,6 +370,7 @@ impl Loader {
             }
             (
                 Command::Info
+                | Command::Board
                 | Command::Start
                 | Command::Stop
                 | Command::TrustInfo
@@ -461,6 +470,120 @@ impl<'a> DeviceInfo<'a> {
             status,
             chip,
             firmware,
+        })
+    }
+}
+
+/// [`BoardInfo`] format version.
+pub const BOARD_INFO_VERSION: u8 = 1;
+/// Most PWM pins a [`BoardInfo`] carries.
+pub const BOARD_PWM_MAX: usize = 40;
+/// Largest encoded [`BoardInfo`] (fits the firmware's 128-byte reply).
+pub const BOARD_INFO_MAX: usize = 56 + BOARD_PWM_MAX;
+
+/// [`BoardInfo::flags`]: the image includes the WASM payload runtime.
+pub const BOARD_RUNTIME: u8 = 1 << 0;
+/// [`BoardInfo::flags`]: the chip has a USB-Serial-JTAG port the protocol serves.
+pub const BOARD_USB_JTAG: u8 = 1 << 1;
+/// [`BoardInfo::flags`]: PWM timers can fall back to the 1 MHz REF_TICK.
+pub const BOARD_PWM_REF_TICK: u8 = 1 << 2;
+
+/// `sys/board` response: the board support package the firmware was built
+/// with, so a host can check its pin assignment against the device.
+///
+/// `[ver u8=1][abi u16][max_image u32][max_memory u32][gpio u64][reserved u64]
+/// [input_only u64][strapping u64][adc u64][pwm_max_bits u8][flags u8]
+/// [uart_tx u8][uart_rx u8][n_pwm u8][pwm_pins n_pwm×u8]`.
+///
+/// The masks have bit `n` set for GPIO `n`. `pwm_pins[2·timer + channel]` is
+/// the GPIO of that PWM output. `strapping` pins are usable (a warning for
+/// hosts), `reserved` pins are not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoardInfo<'a> {
+    /// [`crate::wasm_abi::ABI_VERSION`] implemented by the firmware.
+    pub abi_version: u16,
+    /// Largest payload image in bytes.
+    pub max_image: u32,
+    /// WASM linear-memory limit in bytes (0 without the runtime).
+    pub max_memory: u32,
+    /// Pins that exist.
+    pub gpio: u64,
+    /// Pins a payload may never use (flash, PSRAM, USB, console UART).
+    pub reserved: u64,
+    /// Pins without an output driver.
+    pub input_only: u64,
+    /// Strapping pins: usable, but their level at reset selects boot modes.
+    pub strapping: u64,
+    /// Pins with an ADC1 channel.
+    pub adc: u64,
+    /// Widest PWM duty resolution in bits (0 without PWM).
+    pub pwm_max_bits: u8,
+    /// [`BOARD_RUNTIME`], [`BOARD_USB_JTAG`], [`BOARD_PWM_REF_TICK`].
+    pub flags: u8,
+    /// Console UART TX pin.
+    pub uart_tx: u8,
+    /// Console UART RX pin.
+    pub uart_rx: u8,
+    /// GPIO of each PWM output, indexed `2·timer + channel`.
+    pub pwm_pins: &'a [u8],
+}
+
+impl<'a> BoardInfo<'a> {
+    /// Encodes into `out`; `None` if `out` is too small or there are more
+    /// than [`BOARD_PWM_MAX`] PWM pins.
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        if self.pwm_pins.len() > BOARD_PWM_MAX {
+            return None;
+        }
+        let mut at = 0;
+        let mut put = |bytes: &[u8]| -> Option<()> {
+            out.get_mut(at..at + bytes.len())?.copy_from_slice(bytes);
+            at += bytes.len();
+            Some(())
+        };
+        put(&[BOARD_INFO_VERSION])?;
+        put(&self.abi_version.to_le_bytes())?;
+        put(&self.max_image.to_le_bytes())?;
+        put(&self.max_memory.to_le_bytes())?;
+        for mask in [self.gpio, self.reserved, self.input_only, self.strapping, self.adc] {
+            put(&mask.to_le_bytes())?;
+        }
+        put(&[self.pwm_max_bits, self.flags, self.uart_tx, self.uart_rx, self.pwm_pins.len() as u8])?;
+        put(self.pwm_pins)?;
+        Some(at)
+    }
+
+    /// Decodes a `sys/board` response; `None` for another format version or
+    /// a short or over-long body.
+    pub fn decode(bytes: &'a [u8]) -> Option<Self> {
+        if *bytes.first()? != BOARD_INFO_VERSION {
+            return None;
+        }
+        let u64_at = |at: usize| -> Option<u64> {
+            let b = bytes.get(at..at + 8)?;
+            let mut a = [0u8; 8];
+            a.copy_from_slice(b);
+            Some(u64::from_le_bytes(a))
+        };
+        let tail = bytes.get(51..56)?;
+        let n = usize::from(tail[4]);
+        if n > BOARD_PWM_MAX || bytes.len() != 56 + n {
+            return None;
+        }
+        Some(BoardInfo {
+            abi_version: u16::from_le_bytes([bytes[1], bytes[2]]),
+            max_image: u32_at(bytes, 3)?,
+            max_memory: u32_at(bytes, 7)?,
+            gpio: u64_at(11)?,
+            reserved: u64_at(19)?,
+            input_only: u64_at(27)?,
+            strapping: u64_at(35)?,
+            adc: u64_at(43)?,
+            pwm_max_bits: tail[0],
+            flags: tail[1],
+            uart_tx: tail[2],
+            uart_rx: tail[3],
+            pwm_pins: &bytes[56..],
         })
     }
 }
@@ -648,6 +771,7 @@ mod tests {
         let data = [1u8, 2, 3];
         for cmd in [
             Command::Info,
+            Command::Board,
             Command::Begin {
                 len: 10,
                 crc: 0xDEAD_BEEF,
@@ -678,6 +802,10 @@ mod tests {
     fn parse_rejects_bad_bodies_and_passes_app_keys() {
         assert_eq!(
             Command::parse(keys::INFO, &[1]),
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            Command::parse(keys::BOARD, &[0]),
             Err(HandlerError::InvalidRequest)
         );
         assert_eq!(
@@ -731,5 +859,56 @@ mod tests {
         assert_eq!(DeviceInfo::decode(&buf[..n]), Some(info));
         assert_eq!(DeviceInfo::decode(&buf[..n - 1]), None);
         assert!(info.encode(&mut buf[..5]).is_none());
+    }
+
+    const BOARD: BoardInfo<'static> = BoardInfo {
+        abi_version: 3,
+        max_image: 80 * 1024,
+        max_memory: 128 * 1024,
+        gpio: 0x0001_FFFF_FC3F_FFFF,
+        reserved: 0x0000_183F_FC18_0000,
+        input_only: 0,
+        strapping: 0x0000_6000_0000_0009,
+        adc: 0x0000_0000_0000_07FE,
+        pwm_max_bits: 14,
+        flags: BOARD_RUNTIME | BOARD_USB_JTAG,
+        uart_tx: 43,
+        uart_rx: 44,
+        pwm_pins: &[11, 12, 13, 14, 15, 16, 17, 18],
+    };
+
+    #[test]
+    fn board_info_round_trips() {
+        let mut buf = [0u8; BOARD_INFO_MAX];
+        let n = BOARD.encode(&mut buf).unwrap();
+        assert_eq!(n, 64);
+        assert_eq!(BoardInfo::decode(&buf[..n]), Some(BOARD));
+        assert_eq!(BoardInfo::decode(&buf[..n - 1]), None);
+        let mut longer = [0u8; BOARD_INFO_MAX];
+        longer[..n].copy_from_slice(&buf[..n]);
+        assert_eq!(BoardInfo::decode(&longer[..n + 1]), None);
+        buf[0] = 2;
+        assert_eq!(BoardInfo::decode(&buf[..n]), None);
+        assert!(BOARD.encode(&mut [0u8; 63]).is_none());
+        let many = [0u8; BOARD_PWM_MAX + 1];
+        assert!(BoardInfo { pwm_pins: &many, ..BOARD }.encode(&mut [0u8; 128]).is_none());
+        let max = BoardInfo { pwm_pins: &many[..BOARD_PWM_MAX], ..BOARD };
+        assert_eq!(max.encode(&mut [0u8; 128]), Some(BOARD_INFO_MAX));
+    }
+
+    #[test]
+    fn board_info_golden_bytes() {
+        let mut buf = [0u8; BOARD_INFO_MAX];
+        let n = BOARD.encode(&mut buf).unwrap();
+        let hex = concat!(
+            "01", "0300", "00400100", "00000200",
+            "ffff3ffcffff0100", "000018fc3f180000", "0000000000000000",
+            "0900000000600000", "fe07000000000000",
+            "0e", "03", "2b", "2c", "08", "0b0c0d0e0f101112",
+        );
+        assert_eq!(hex.len(), 2 * n);
+        for (i, b) in buf[..n].iter().enumerate() {
+            assert_eq!(u8::from_str_radix(&hex[2 * i..2 * i + 2], 16), Ok(*b), "byte {i}");
+        }
     }
 }

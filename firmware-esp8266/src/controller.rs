@@ -122,6 +122,7 @@ impl<F: NorFlash> Controller<F> {
             chip: profile.name,
             firmware: FIRMWARE,
             capacity,
+            profile,
             runtime: profile.runtime,
             rekey_window: false,
         };

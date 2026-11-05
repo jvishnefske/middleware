@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+### Board support packages and `sys/board`
+- New system key `sys/board` and `loader::BoardInfo` (`[ver u8=1][abi u16][max_image u32][max_memory u32][gpio u64][reserved u64][input_only u64][strapping u64][adc u64][pwm_max_bits u8][flags u8][uart_tx u8][uart_rx u8][n_pwm u8][pwm_pins…]`, ≤ 96 bytes), with `BOARD_RUNTIME`, `BOARD_USB_JTAG`, `BOARD_PWM_REF_TICK`, `BOARD_INFO_MAX`. (S8)
+- **Breaking:** new `Command::Board`; exhaustive matches on `Command` need a new arm.
+- ESP base firmware: `chip::Profile` has a private strapping mask with `Profile::is_strapping`, `is_input_only` and `board_info(abi)`; strapping pins stay usable by payloads. (E14)
+- **Breaking:** `dispatch::Context` has a new field `profile: &'static Profile`; the dispatcher answers `sys/board` from it. (S8)
+- `firmware/examples/bsp_export.rs`: `cargo run --example bsp_export -- <chip> [--wire]` prints the `mw-bsp/1` JSON or the `sys/board` body as hex. (E15)
+- `build-images.sh` writes `<chip>.bsp.json` and an ESP Web Tools manifest (`builds[]` with `chipFamily`, `parts`, `wasm`, `bsp`); `OUT=` selects the output directory. The web flasher reads both manifest formats. (E15, U16)
+- `.github/workflows/release.yml`: tag `esp-base-v<version>` builds ESP32, ESP32-S3, ESP32-C3 (ESP8266 best effort), attaches images, BSPs and the manifest to the release and mirrors all releases to GitHub Pages under `firmware/<version>/` and `firmware/latest/`. Not run yet. (E15)
+- `firmware` and `firmware-esp8266` crate versions are 0.6.0 (they said 0.1.0; `sys/info` reports them).
+- protocol-wasm: `decodeBoardInfo`, `protocol().keys.board`, `DeviceLoader` action `board`; web `DeviceClient.board()` (null on `NotFound`); `mwctl board`.
+
 ## 0.5.0
 
 ### ESP base firmware: PWM and ADC (ABI 3, breaking)

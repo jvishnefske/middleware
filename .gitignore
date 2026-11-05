@@ -1,3 +1,4 @@
 /target
 /web/target
 /web/public/firmware/*.bin
+/web/public/firmware/*.bsp.json

@@ -50,10 +50,30 @@ export interface DeviceInfo {
   firmware: string;
 }
 
+/** A decoded `sys/board` body: pin classes as ascending GPIO numbers,
+ * `pwmPins[2·timer + channel]`. */
+export interface BoardInfo {
+  abiVersion: number;
+  maxImage: number;
+  maxMemory: number;
+  gpio: number[];
+  reserved: number[];
+  inputOnly: number[];
+  strapping: number[];
+  adc: number[];
+  pwmMaxBits: number;
+  runtime: boolean;
+  usbJtag: boolean;
+  pwmRefTick: boolean;
+  uartTx: number;
+  uartRx: number;
+  pwmPins: number[];
+}
+
 export interface LoaderStepResult {
   statusCode: number;
   status: string;
-  action?: "app" | "info" | "start" | "stop" | "erase" | "write" | "activate";
+  action?: "app" | "info" | "board" | "start" | "stop" | "erase" | "write" | "activate";
   offset?: number;
   data?: Uint8Array;
   len?: number;
@@ -66,6 +86,7 @@ export interface ProtocolConstants {
   maxWireFrame: number;
   keys: {
     info: string;
+    board: string;
     begin: string;
     chunk: string;
     commit: string;
@@ -210,6 +231,7 @@ export interface Protocol {
   uploadPlan(image: Uint8Array, chunk?: number): UploadStep[];
   decodeDeviceInfo(data: Uint8Array): DeviceInfo | undefined;
   encodeDeviceInfo(info: Omit<DeviceInfo, "statusName">): Uint8Array;
+  decodeBoardInfo(data: Uint8Array): BoardInfo | undefined;
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
   readonly constants: ProtocolConstants;
@@ -235,6 +257,7 @@ function wrap(): Protocol {
     crc32: pkg.crc32,
     uploadPlan: (image, chunk) => pkg.uploadPlan(image, chunk ?? constants.chunkMax) as UploadStep[],
     decodeDeviceInfo: (data) => pkg.decodeDeviceInfo(data) as DeviceInfo | undefined,
+    decodeBoardInfo: (data) => pkg.decodeBoardInfo(data) as BoardInfo | undefined,
     encodeDeviceInfo: (i) => pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware),
     payloadStatusName: pkg.payloadStatusName,
     newDeviceLoader: (capacity) => {

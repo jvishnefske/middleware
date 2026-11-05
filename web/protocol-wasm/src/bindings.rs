@@ -192,6 +192,38 @@ pub fn encode_device_info(
     .ok_or_else(|| js_err("invalid device info"))
 }
 
+fn pins(mask: u64) -> Array {
+    (0u32..64).filter(|n| mask >> n & 1 == 1).map(JsValue::from).collect()
+}
+
+/// Decodes a `sys/board` body into `{abiVersion, maxImage, maxMemory, gpio,
+/// reserved, inputOnly, strapping, adc, pwmMaxBits, runtime, usbJtag,
+/// pwmRefTick, uartTx, uartRx, pwmPins}` (the pin classes as ascending GPIO
+/// number arrays, `pwmPins[2·timer + channel]`), or `undefined` when
+/// malformed.
+#[wasm_bindgen(js_name = decodeBoardInfo)]
+pub fn decode_board_info(data: &[u8]) -> Option<Object> {
+    use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
+    let b = BoardInfo::decode(data)?;
+    let o = Object::new();
+    set(&o, "abiVersion", b.abi_version);
+    set(&o, "maxImage", b.max_image);
+    set(&o, "maxMemory", b.max_memory);
+    set(&o, "gpio", pins(b.gpio));
+    set(&o, "reserved", pins(b.reserved));
+    set(&o, "inputOnly", pins(b.input_only));
+    set(&o, "strapping", pins(b.strapping));
+    set(&o, "adc", pins(b.adc));
+    set(&o, "pwmMaxBits", b.pwm_max_bits);
+    set(&o, "runtime", b.flags & BOARD_RUNTIME != 0);
+    set(&o, "usbJtag", b.flags & BOARD_USB_JTAG != 0);
+    set(&o, "pwmRefTick", b.flags & BOARD_PWM_REF_TICK != 0);
+    set(&o, "uartTx", b.uart_tx);
+    set(&o, "uartRx", b.uart_rx);
+    set(&o, "pwmPins", b.pwm_pins.iter().map(|&p| JsValue::from(p)).collect::<Array>());
+    Some(o)
+}
+
 /// SHA-256 of `data` (32 bytes), computed by the device loader's hasher.
 #[wasm_bindgen]
 pub fn sha256(data: &[u8]) -> Vec<u8> {
@@ -310,6 +342,7 @@ impl JsDeviceLoader {
             let name = match action {
                 Action::App => "app",
                 Action::Info => "info",
+                Action::Board => "board",
                 Action::Start => "start",
                 Action::Stop => "stop",
                 Action::Erase(len) => {
@@ -340,7 +373,7 @@ impl JsDeviceLoader {
 
 /// Protocol constants and system keys:
 /// `{chunkMax, maxRawFrame, maxWireFrame, signedCommitLen, rekeyWindowMs,
-/// presenceHoldMs, keys: {info, begin, chunk, commit, start, stop, log,
+/// presenceHoldMs, keys: {info, board, begin, chunk, commit, start, stop, log,
 /// status, trustInfo, trustClaim}}`.
 #[wasm_bindgen]
 pub fn protocol() -> Object {
@@ -354,6 +387,7 @@ pub fn protocol() -> Object {
     let k = Object::new();
     for (name, key) in [
         ("info", keys::INFO),
+        ("board", keys::BOARD),
         ("begin", keys::BEGIN),
         ("chunk", keys::CHUNK),
         ("commit", keys::COMMIT),
