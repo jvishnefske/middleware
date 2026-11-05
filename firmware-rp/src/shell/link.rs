@@ -127,7 +127,7 @@ pub async fn serve(mut link: UsbLink, bus: &'static Bus) {
         match select(link.next_frame(&mut buf), outbound.next_message_pure()).await {
             Either::First(Ok(Frame::Request { id, key, payload })) => {
                 host = host.after_receive();
-                let result = match Inbound::new(Kind::Request { id }, key, payload) {
+                let result = match Inbound::new(Kind::Request { id }, key, payload, link.peer()) {
                     Some(msg) => {
                         bus.send_inbound(msg).await;
                         bus.wait_reply(id).await.result
@@ -140,7 +140,7 @@ pub async fn serve(mut link: UsbLink, bus: &'static Bus) {
             }
             Either::First(Ok(Frame::Publish { key, payload })) => {
                 host = host.after_receive();
-                if let Some(msg) = Inbound::new(Kind::Publish, key, payload) {
+                if let Some(msg) = Inbound::new(Kind::Publish, key, payload, link.peer()) {
                     bus.send_inbound(msg).await;
                 }
             }

@@ -451,6 +451,7 @@ mod tests {
             rekey_window: false,
             staging: false,
             node: None,
+            caps: middleware::loader::Caps::NONE,
         };
 
         struct Dev {

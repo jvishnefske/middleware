@@ -30,7 +30,7 @@ use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
 use middleware::{Key, SenderId};
-use middleware::loader::{BoardInfo, Command, DeviceInfo, PayloadStatus, keys};
+use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
 
 /// Suffix of the firmware version of builds without the WASM runtime.
@@ -52,6 +52,9 @@ pub struct Info {
     /// The device's node id (middleware 0.5 firmware; `None` from older
     /// firmware, whose response ends after the firmware name).
     pub node: Option<SenderId>,
+    /// What the firmware can do beyond its ABI ([`Caps`]; none from
+    /// firmware older than middleware 0.6).
+    pub caps: Caps,
 }
 
 impl Info {
@@ -65,6 +68,7 @@ impl Info {
             chip: i.chip.to_owned(),
             firmware: i.firmware.to_owned(),
             node: i.node,
+            caps: i.caps,
         })
     }
 
@@ -286,7 +290,11 @@ mod tests {
         assert_eq!(i.abi_version, middleware::wasm_abi::ABI_VERSION);
         assert!(!i.runs_payloads());
         assert_eq!(i.node, Some(crate::fake::NODE));
+        assert_eq!(i.caps, Caps::NONE);
         assert!(Info::decode(&[1, 2, 3]).is_none());
+        // A firmware that routes requests to its payload says so.
+        let mut d = device(FakeDevice::new("rp2350", "0.1.0", 4096, true).with_caps(Caps::SERVE));
+        assert_eq!(d.info().unwrap().caps, Caps::SERVE);
         // The host sent one leading delimiter before the first frame.
         assert_eq!(d.link().transport().raw_rx().first(), Some(&0));
     }

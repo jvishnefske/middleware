@@ -423,19 +423,58 @@ pub const MAX_NAME: usize = 32;
 /// Bytes of the optional node id at the end of a `sys/info` response.
 pub const NODE_ID_LEN: usize = 8;
 
+/// Bytes of the optional capability bitset after the node id.
+pub const CAPS_LEN: usize = 4;
+
 /// Largest `sys/info` response [`DeviceInfo::encode`] writes.
-pub const MAX_INFO_LEN: usize = 2 + 4 + 1 + 1 + MAX_NAME + 1 + MAX_NAME + NODE_ID_LEN;
+pub const MAX_INFO_LEN: usize = 2 + 4 + 1 + 1 + MAX_NAME + 1 + MAX_NAME + NODE_ID_LEN + CAPS_LEN;
+
+/// What a firmware can do beyond its ABI version: a bitset appended to
+/// `sys/info` after the node id, little-endian `u32`.
+///
+/// The ABI version says which imports the runtime links; a capability says
+/// whether the shell around it does something with them. A firmware with
+/// ABI 5 links `serve`, but only one with [`Caps::SERVE`] routes requests
+/// on served keys to the payload. Bits without a name here are reserved:
+/// firmware sends them as 0 and decoders keep them, so a newer firmware's
+/// bits survive a round trip through an older host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Caps(pub u32);
+
+impl Caps {
+    /// No capabilities (and what a response without the bitset decodes to).
+    pub const NONE: Caps = Caps(0);
+    /// Bit 0: requests on keys the payload serves (ABI 5 `serve`) are routed
+    /// to the payload's `on_request`, and `node_id` answers the node id this
+    /// response carries.
+    pub const SERVE: Caps = Caps(1);
+
+    /// Whether every bit of `other` is set.
+    pub const fn contains(self, other: Caps) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The union of both sets.
+    pub const fn with(self, other: Caps) -> Caps {
+        Caps(self.0 | other.0)
+    }
+}
 
 /// `sys/info` response:
 /// `[abi_version u16][capacity u32][status u8][chip_len u8][chip][fw_len u8][fw]`,
 /// then, since middleware 0.5, optionally `[node id 8]`: the device's
-/// [`SenderId`] (its MAC zero-padded, [`SenderId::from_mac`]), the id it
-/// carries as a sender on its radios.
+/// [`SenderId`] (its MAC zero-padded, [`SenderId::from_mac`], or the RP
+/// chips' unique id), the id it carries as a sender on its radios; then,
+/// since 0.6, optionally `[caps u32 LE]`, the [`Caps`] bitset.
 ///
 /// Decoders read the fields they know and ignore whatever follows, so a
-/// response with the node id decodes as before on a 0.4 host, and later
-/// fields may be appended after it. A response that stops after the
-/// firmware name has no node id (`node: None`, a pre-0.5 device).
+/// response with the node id decodes as before on a 0.4 host, one with the
+/// capabilities as before on a 0.5 host, and later fields may be appended
+/// after them. A response that stops after the firmware name has no node
+/// id (`node: None`, a pre-0.5 device); one that stops after the node id
+/// has no capabilities (`caps: Caps::NONE`). The capabilities follow the
+/// node id, so they are only sent with one ([`DeviceInfo::encode`] refuses
+/// capabilities without a node).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceInfo<'a> {
     /// [`crate::wasm_abi::ABI_VERSION`] implemented by the firmware.
@@ -450,15 +489,23 @@ pub struct DeviceInfo<'a> {
     pub firmware: &'a str,
     /// The device's node id, if it reports one.
     pub node: Option<SenderId>,
+    /// What the firmware can do ([`Caps`]); sent after the node id when
+    /// not [`Caps::NONE`].
+    pub caps: Caps,
 }
 
 impl<'a> DeviceInfo<'a> {
-    /// Encodes into `out`; `None` if `out` is too small or a name exceeds
-    /// [`MAX_NAME`]. At most [`MAX_INFO_LEN`] bytes.
+    /// Encodes into `out`; `None` if `out` is too small, a name exceeds
+    /// [`MAX_NAME`], or there are capabilities without a node id. At most
+    /// [`MAX_INFO_LEN`] bytes. [`Caps::NONE`] is left out, so a 0.5
+    /// device's response is unchanged.
     pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
         let chip = self.chip.as_bytes();
         let fw = self.firmware.as_bytes();
         if chip.len() > MAX_NAME || fw.len() > MAX_NAME {
+            return None;
+        }
+        if self.node.is_none() && self.caps != Caps::NONE {
             return None;
         }
         let mut at = 0;
@@ -475,6 +522,9 @@ impl<'a> DeviceInfo<'a> {
         put(fw)?;
         if let Some(node) = self.node {
             put(&node.0)?;
+        }
+        if self.caps != Caps::NONE {
+            put(&self.caps.0.to_le_bytes())?;
         }
         Some(at)
     }
@@ -495,6 +545,10 @@ impl<'a> DeviceInfo<'a> {
             .get(fw_end..fw_end + NODE_ID_LEN)
             .and_then(|b| <[u8; NODE_ID_LEN]>::try_from(b).ok())
             .map(SenderId);
+        // Only after a whole node id; a cut bitset is ignored, never misread.
+        let caps = node
+            .and_then(|_| u32_at(bytes, fw_end + NODE_ID_LEN))
+            .map_or(Caps::NONE, Caps);
         Some(DeviceInfo {
             abi_version,
             capacity,
@@ -502,6 +556,7 @@ impl<'a> DeviceInfo<'a> {
             chip,
             firmware,
             node,
+            caps,
         })
     }
 }
@@ -905,6 +960,7 @@ mod tests {
             chip: "esp32s3",
             firmware: "0.1.0",
             node: None,
+            caps: Caps::NONE,
         };
         let mut buf = [0u8; 64];
         let n = info.encode(&mut buf).unwrap();
@@ -974,6 +1030,7 @@ mod tests {
             chip: "esp32",
             firmware: "0.1.0",
             node: None,
+            caps: Caps::NONE,
         };
         let new = DeviceInfo {
             node: Some(node),
@@ -992,7 +1049,7 @@ mod tests {
         // ignored, never misread.
         assert_eq!(DeviceInfo::decode(&a[..n_old]), Some(old));
         assert_eq!(DeviceInfo::decode(&b[..n_new - 1]), Some(old));
-        // Later fields after the node id are ignored.
+        // A cut bitset after the node id is ignored, never misread.
         let mut longer = [9u8; MAX_INFO_LEN + 3];
         longer[..n_new].copy_from_slice(&b[..n_new]);
         assert_eq!(DeviceInfo::decode(&longer[..n_new + 3]), Some(new));
@@ -1002,8 +1059,52 @@ mod tests {
         let max = DeviceInfo {
             chip: names,
             firmware: names,
+            caps: Caps(u32::MAX),
             ..new
         };
         assert_eq!(max.encode(&mut b), Some(MAX_INFO_LEN));
+    }
+
+    #[test]
+    fn m7_device_info_carries_trailing_capabilities_after_the_node_id() {
+        let node = SenderId([0xE6, 0x61, 0x38, 0x52, 0x83, 0x1F, 0x2A, 0x0B]);
+        let v05 = DeviceInfo {
+            abi_version: 5,
+            capacity: 1 << 18,
+            status: PayloadStatus::Running,
+            chip: "rp2350",
+            firmware: "0.1.0",
+            node: Some(node),
+            caps: Caps::NONE,
+        };
+        let v06 = DeviceInfo { caps: Caps::SERVE, ..v05 };
+        let mut a = [0u8; MAX_INFO_LEN];
+        let mut b = [0u8; MAX_INFO_LEN];
+        let n05 = v05.encode(&mut a).unwrap();
+        let n06 = v06.encode(&mut b).unwrap();
+        // Appended: a 0.5 decoder reads the same fields and stops.
+        assert_eq!(n06, n05 + CAPS_LEN);
+        assert_eq!(&b[..n05], &a[..n05]);
+        assert_eq!(&b[n05..n06], &[1, 0, 0, 0]);
+        assert_eq!(DeviceInfo::decode(&b[..n06]), Some(v06));
+        // Without the bitset (a 0.5 device) the capabilities are none, and
+        // a cut bitset is ignored.
+        assert_eq!(DeviceInfo::decode(&a[..n05]), Some(v05));
+        for cut in 1..CAPS_LEN {
+            assert_eq!(DeviceInfo::decode(&b[..n05 + cut]), Some(v05), "cut {cut}");
+        }
+        // Reserved bits survive a round trip; later fields are ignored.
+        let future = DeviceInfo { caps: Caps(0x8000_0003), ..v05 };
+        let n = future.encode(&mut b).unwrap();
+        let mut longer = [7u8; MAX_INFO_LEN + 5];
+        longer[..n].copy_from_slice(&b[..n]);
+        let back = DeviceInfo::decode(&longer[..n + 5]).unwrap();
+        assert_eq!(back, future);
+        assert!(back.caps.contains(Caps::SERVE));
+        assert!(!Caps::NONE.contains(Caps::SERVE));
+        assert_eq!(Caps::NONE.with(Caps::SERVE), Caps::SERVE);
+        // Capabilities need the node id they follow.
+        let orphan = DeviceInfo { node: None, ..v06 };
+        assert_eq!(orphan.encode(&mut b), None);
     }
 }

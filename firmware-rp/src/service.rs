@@ -31,7 +31,15 @@
 //!
 //! It returns a [`Handled`]: the reply (or [`Reply::Start`]: load and run
 //! the payload, then answer), whether a running payload must stop, and
-//! [`Note`]s for `sys/log`. The shell (`src/shell/controller.rs`) only
+//! [`Note`]s for `sys/log`.
+//!
+//! Requests on keys a payload serves (ABI 5) are routed before this, by
+//! [`crate::requests`] with `esp_base::serve`: the service keeps the keys
+//! of the payload run that ended ([`Service::served`], set by
+//! [`Service::run_ended`]) so they answer `Unavailable` while it does not
+//! run ([`Service::route_idle`]), and clears them when the image changes
+//! (`esp_base::serve::served_after`: a `begin` or an activated commit).
+//! With the runtime, `sys/info` reports `Caps::SERVE` after the node id. The shell (`src/shell/controller.rs`) only
 //! moves messages, publishes status changes and runs the payload, so every
 //! decision and every flash effect here is unit tested on the host, against
 //! the RAM flash model with power-loss injection, and `mwctl` runs against
@@ -42,11 +50,12 @@ use core::fmt;
 use embedded_storage::nor_flash::NorFlash;
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::image::Header;
+use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, TrustStore};
 use heapless::Vec;
 use middleware::loader::trust::TrustState;
-use middleware::loader::{PayloadStatus, keys};
+use middleware::loader::{Caps, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
@@ -81,7 +90,9 @@ pub struct Facts {
     pub chip: &'static str,
     /// Firmware version (`<ver>+no-wasm` without the runtime).
     pub firmware: &'static str,
-    /// Whether the build runs payloads.
+    /// Whether the build runs payloads. With the runtime, requests on keys
+    /// the payload serves are routed to it, and `sys/info` says so
+    /// (`Caps::SERVE`).
     pub runtime: bool,
     /// The node id ([`crate::node::node_id`]).
     pub node: SenderId,
@@ -204,6 +215,8 @@ pub struct Service<F, U> {
     trust: Option<TrustStore>,
     fw: U,
     usb_configured: bool,
+    /// The served keys of the payload run that ended.
+    served: ServedKeys,
 }
 
 impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
@@ -237,8 +250,10 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
+            caps: if facts.runtime { Caps::SERVE } else { Caps::NONE },
         };
-        (Service { state, ctx, store, trust, fw, usb_configured: false }, Boot { installed, trust: persisted })
+        let svc = Service { state, ctx, store, trust, fw, usb_configured: false, served: ServedKeys::new() };
+        (svc, Boot { installed, trust: persisted })
     }
 
     /// The dispatcher state.
@@ -249,6 +264,30 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
     /// The payload status.
     pub const fn status(&self) -> PayloadStatus {
         self.state.status()
+    }
+
+    /// The node id `sys/info` reports (and the payload's `node_id`).
+    pub fn node(&self) -> SenderId {
+        self.ctx.node.unwrap_or(SenderId([0; 8]))
+    }
+
+    /// The served keys of the payload run that ended (empty after an
+    /// upload, and before the first run).
+    pub fn served(&self) -> &ServedKeys {
+        &self.served
+    }
+
+    /// A payload run ended (stopped, trapped, replaced) having served
+    /// `keys`; their requests answer `Unavailable` until the next run or
+    /// an upload.
+    pub fn run_ended(&mut self, keys: ServedKeys) {
+        self.served = keys;
+    }
+
+    /// Where a request goes while no payload runs: `Unavailable` on the
+    /// last run's served keys, the service otherwise.
+    pub fn route_idle(&self, key: Key<'_>) -> Route {
+        route_request(key, self.status(), self.served.iter())
     }
 
     /// The largest image the store accepts (0 without a store).
@@ -323,6 +362,7 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             Ok(()) => {
                 self.note_success(key, &outcome, &mut notes);
                 self.state = outcome.state;
+                self.served = served_after(&outcome.action, core::mem::take(&mut self.served));
                 outcome.reply
             }
             Err(e) => {

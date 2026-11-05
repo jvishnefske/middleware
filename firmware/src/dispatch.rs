@@ -9,7 +9,7 @@
 //!
 //! | request              | condition            | action     | status after |
 //! |----------------------|----------------------|------------|--------------|
-//! | `sys/info`           | —                    | none       | unchanged    |
+//! | `sys/info`           | —                    | none       | unchanged (ends with [`Context::node`] and [`Context::caps`]) |
 //! | `sys/board`          | —                    | none (reply [`Profile::board_info`]) | unchanged |
 //! | `sys/loader/begin`   | fits                 | `Erase { stop: true }` | `Loading` |
 //! | `sys/loader/begin`   | fits, [`Context::staging`] | `Erase { stop: false }` | unchanged |
@@ -28,6 +28,9 @@
 //! | `sys/payload/stop`   | `Running`/`Trapped`  | `Stop`     | `Stopped`    |
 //! | other `sys/...`      | —                    | none (`NotFound`) | unchanged |
 //! | application key      | —                    | none (`NotFound`) | unchanged |
+//!
+//! Requests on keys a running payload serves (ABI 5) never get here: the
+//! shell routes them first ([`crate::serve::route_request`]).
 //!
 //! The store writes a transfer into the slot that is not active (see
 //! [`crate::store`]), so an abandoned transfer or a failed storage action
@@ -80,7 +83,7 @@
 
 use middleware::Key;
 use middleware::loader::trust::{ControlCounter, TrustState};
-use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
+use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
 use middleware::transport::{HandlerError, Request, SenderId};
 use middleware::wasm_abi::ABI_VERSION;
 
@@ -113,6 +116,11 @@ pub struct Context<'a> {
     /// at the end of `sys/info`; the id its radio frames carry as sender.
     /// `None` leaves it out (a pre-0.5 response).
     pub node: Option<SenderId>,
+    /// What the firmware can do beyond its ABI, sent after the node id
+    /// ([`Caps::SERVE`] when the shell routes requests on served keys to
+    /// the payload, [`crate::serve`]). Needs `node`: `sys/info` answers
+    /// `BufferTooSmall` for capabilities without one.
+    pub caps: Caps,
 }
 
 /// Dispatcher state: loader progress and payload status.
@@ -349,6 +357,7 @@ pub fn handle_request<'a>(
                 chip: ctx.chip,
                 firmware: ctx.firmware,
                 node: ctx.node,
+                caps: ctx.caps,
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
@@ -487,6 +496,7 @@ mod tests {
         rekey_window: false,
         staging: false,
         node: Some(NODE),
+        caps: Caps::SERVE,
     };
 
     fn req<'a>(state: State, key: Key<'a>, body: &'a [u8]) -> Outcome<'a> {
@@ -519,9 +529,10 @@ mod tests {
         )
         .reply
         .unwrap();
-        // The node id is the last 8 bytes, after the 0.4 fields.
-        assert_eq!(&out[n - 8..n], &NODE.0);
-        let without = Context { node: None, ..CTX };
+        // The node id follows the 0.4 fields, then the capability bits.
+        assert_eq!(&out[n - 12..n - 4], &NODE.0);
+        assert_eq!(&out[n - 4..n], &[1, 0, 0, 0]);
+        let without = Context { node: None, caps: Caps::NONE, ..CTX };
         let m = handle_request(
             State::boot(false),
             &without,
@@ -530,7 +541,7 @@ mod tests {
         )
         .reply
         .unwrap();
-        assert_eq!(m + 8, n);
+        assert_eq!(m + 12, n);
         // A request carrying caller metadata dispatches the same.
         let meta = middleware::RequestMeta::NONE
             .with_sender(SenderId([7; 8]))
@@ -562,6 +573,11 @@ mod tests {
         assert_eq!(info.chip, "esp32c3");
         assert_eq!(info.firmware, "0.1.0");
         assert_eq!(info.node, Some(NODE));
+        assert_eq!(info.caps, Caps::SERVE);
+        // A shell that does not route requests reports no capability.
+        let plain = Context { caps: Caps::NONE, ..CTX };
+        let n = handle_request(State::boot(true), &plain, &Request::new(keys::INFO, &[]), &mut out).reply.unwrap();
+        assert_eq!(DeviceInfo::decode(&out[..n]).unwrap().caps, Caps::NONE);
         let mut tiny = [0u8; 4];
         let o = handle_request(
             State::boot(true),

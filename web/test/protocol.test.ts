@@ -113,8 +113,19 @@ describe("loader helpers", () => {
       statusName: "running",
       chip: "esp32s3",
       firmware: "0.1.0",
+      caps: 0,
+      serves: false,
     });
     expect(proto.decodeDeviceInfo(body.slice(0, 3))).toBeUndefined();
+    // Middleware 0.6 firmware appends the capability bits after the node id.
+    const node = "e6613852831f2a0b";
+    const serving = proto.encodeDeviceInfo({ abiVersion: 5, capacity: 1, status: 1, chip: "rp2350", firmware: "0.1.0", node, caps: 1 });
+    expect(serving.length).toBe(body.length - "esp32s3".length + "rp2350".length + 8 + 4);
+    expect(proto.decodeDeviceInfo(serving)).toMatchObject({ node, caps: 1, serves: true });
+    // An 0.5 board (node id, no bits) cannot serve phases.
+    const old = proto.encodeDeviceInfo({ abiVersion: 5, capacity: 1, status: 1, chip: "rp2350", firmware: "0.1.0", node });
+    expect(proto.decodeDeviceInfo(old)).toMatchObject({ node, caps: 0, serves: false });
+    expect(() => proto.encodeDeviceInfo({ abiVersion: 5, capacity: 1, status: 1, chip: "x", firmware: "y", caps: 1 })).toThrow();
   });
 });
 

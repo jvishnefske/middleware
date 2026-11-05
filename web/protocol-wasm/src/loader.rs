@@ -172,6 +172,9 @@ pub struct Info {
     pub firmware: String,
     /// Node id (8 bytes), reported by middleware 0.5 firmware.
     pub node: Option<[u8; 8]>,
+    /// Capability bits ([`middleware::loader::Caps`]), reported after the
+    /// node id by middleware 0.6 firmware; 0 when absent.
+    pub caps: u32,
 }
 
 impl Info {
@@ -185,11 +188,12 @@ impl Info {
             chip: d.chip.to_owned(),
             firmware: d.firmware.to_owned(),
             node: d.node.map(|n| n.0),
+            caps: d.caps.0,
         })
     }
 
     /// Encodes as a `sys/info` response body; `None` for an unknown status
-    /// byte or over-long names.
+    /// byte, over-long names, or capabilities without a node id.
     pub fn encode(&self) -> Option<Vec<u8>> {
         let info = DeviceInfo {
             abi_version: self.abi_version,
@@ -198,6 +202,7 @@ impl Info {
             chip: &self.chip,
             firmware: &self.firmware,
             node: self.node.map(middleware::SenderId),
+            caps: middleware::loader::Caps(self.caps),
         };
         let mut out = vec![0u8; middleware::loader::MAX_INFO_LEN];
         let n = info.encode(&mut out)?;
@@ -577,6 +582,7 @@ mod tests {
             chip: "esp32c3".into(),
             firmware: "0.1.0".into(),
             node: None,
+            caps: 0,
         };
         let bytes = info.encode().unwrap();
         assert_eq!(Info::decode(&bytes), Some(info.clone()));
@@ -587,7 +593,13 @@ mod tests {
         };
         let longer = with_node.encode().unwrap();
         assert_eq!(longer.len(), bytes.len() + 8);
-        assert_eq!(Info::decode(&longer), Some(with_node));
+        assert_eq!(Info::decode(&longer), Some(with_node.clone()));
+        // A 0.6 response carries the capability bits after the node id.
+        let serving = Info { caps: 1, ..with_node };
+        let longest = serving.encode().unwrap();
+        assert_eq!(longest.len(), longer.len() + 4);
+        assert_eq!(Info::decode(&longest), Some(serving));
+        assert_eq!(Info { caps: 1, ..info.clone() }.encode(), None, "caps need a node");
         assert_eq!(Info::decode(&bytes[..3]), None);
         assert_eq!(Info { status: 9, ..info }.encode(), None);
         let names: Vec<_> = (0..6).map(status_name).collect();

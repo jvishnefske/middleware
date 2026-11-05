@@ -28,14 +28,18 @@ use heapless::{String, Vec};
 use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
-use middleware::transport::HandlerError;
+#[cfg(feature = "wasm")]
+use middleware::transport::RequestMeta;
+use middleware::transport::{HandlerError, SenderId};
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
 pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
 
-/// Largest reply body (`sys/info` is at most 81 bytes, `sys/trust/info` 41).
-pub const MAX_REPLY: usize = 128;
+/// Largest reply body: a payload's reply to a request on a key it serves
+/// (`esp_base::serve::REPLY_CAPACITY`, 512); `sys/info` is at most 85
+/// bytes, `sys/trust/info` 41.
+pub const MAX_REPLY: usize = esp_base::serve::REPLY_CAPACITY;
 
 /// Outbound messages buffered before the oldest is dropped.
 const OUTBOUND_DEPTH: usize = 8;
@@ -68,15 +72,28 @@ pub struct Inbound {
     pub key: String<MAX_KEY_LEN>,
     /// Body.
     pub body: Vec<u8, MAX_BODY>,
+    /// The link's peer, if it was told one: the sender a payload sees in a
+    /// request's meta. The serial frames carry no deadline.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub peer: Option<SenderId>,
 }
 
 impl Inbound {
     /// Copies a frame's key and body; `None` if the body is too large.
-    pub fn new(kind: Kind, key: Key<'_>, body: &[u8]) -> Option<Self> {
+    pub fn new(kind: Kind, key: Key<'_>, body: &[u8], peer: Option<SenderId>) -> Option<Self> {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
-        Some(Inbound { kind, key: k, body })
+        Some(Inbound { kind, key: k, body, peer })
+    }
+
+    /// What a payload may know of the request: the link's peer as sender.
+    #[cfg(feature = "wasm")]
+    pub fn meta(&self) -> RequestMeta<'static> {
+        match self.peer {
+            Some(p) => RequestMeta::NONE.with_sender(p),
+            None => RequestMeta::NONE,
+        }
     }
 }
 

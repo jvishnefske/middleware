@@ -19,7 +19,7 @@ use crate::link::Event;
 use middleware::SenderId;
 use middleware::loader::trust::{TrustCode, TrustInfo, TrustState};
 use middleware::loader::{
-    BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo, PayloadStatus, keys,
+    BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo, Caps, PayloadStatus, keys,
 };
 use middleware::wasm_abi::ABI_VERSION;
 use std::fmt::Write as _;
@@ -54,8 +54,13 @@ pub fn format_info(i: &Info) -> String {
         ),
         None => String::new(),
     };
+    let serves = if i.caps.contains(Caps::SERVE) {
+        "requests:         routed to the payload (serve)\n"
+    } else {
+        ""
+    };
     format!(
-        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\nABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
+        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\n{serves}ABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
         i.chip,
         i.firmware,
         i.capacity,
@@ -221,8 +226,10 @@ mod tests {
             chip: "esp8266".into(),
             firmware: "0.1.0+no-wasm".into(),
             node: None,
+            caps: Caps::NONE,
         };
         let s = format_info(&i);
+        assert!(!s.contains("requests:"), "{s}");
         assert!(!s.contains("node:"), "{s}");
         assert!(s.contains("chip:             esp8266\n"), "{s}");
         assert!(s.contains("protocol only"), "{s}");
@@ -237,12 +244,14 @@ mod tests {
         assert!(s.contains("mwctl expects"), "{s}");
         let s = format_info(&Info {
             node: Some(SenderId::from_mac([0x24, 0x6f, 0x28, 0xaa, 0xbb, 0xcc])),
-            ..i
+            ..i.clone()
         });
         assert!(
             s.contains("firmware:         0.1.0+no-wasm\nnode:             246f28aabbcc0000\n"),
             "{s}"
         );
+        let s = format_info(&Info { caps: Caps::SERVE, ..i });
+        assert!(s.contains("runtime:          none: protocol only, payloads are stored but not run\nrequests:         routed to the payload (serve)\n"), "{s}");
     }
 
     #[test]
