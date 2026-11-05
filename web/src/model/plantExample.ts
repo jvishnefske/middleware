@@ -1,9 +1,11 @@
 // The worked example of the S88 split (design.md, "S88 recipe model"):
 // master recipe "Blink then Measure" over phase classes Blink(period_ms,
 // times) and Measure(samples), and two units: a Pico 2 with an LED
-// equipment module offering LED.Blink, and an ESP32 with an ADC equipment
-// module offering ADC.Measure. Allocation binds Blink to the Pico and
-// Measure to the ESP32 (web/test/recipe.check.test.ts). The phase bodies
+// equipment module offering LED.Blink, and a second Pico 2 with an ADC
+// equipment module (a potentiometer on GPIO 26, ADC0) offering
+// ADC.Measure. Allocation binds Blink to the LED unit and Measure to the
+// sensor unit (web/test/recipe.check.test.ts). Both units are Pico 2s
+// because rp-base gives payloads analog inputs and esp-base does not yet. The phase bodies
 // are flows with phase entries (phaseGen.ts serves them): Blink toggles
 // the LED every 250 ms and is done after `times` toggles, its resetting
 // body turns the LED off; Measure reports the potentiometer and the
@@ -73,12 +75,12 @@ const LED_UNIT: Unit = {
 };
 
 const SENSOR_UNIT: Unit = {
-  id: "esp-sense",
-  name: "ESP32 with a potentiometer",
+  id: "pico-sense",
+  name: "Pico 2 with a potentiometer",
   class: "SensorUnit",
   node: null,
-  board: "esp32",
-  cms: { rows: [row("adc", "POT", 34)], buses: [] },
+  board: "pico2",
+  cms: { rows: [row("adc", "POT", 26)], buses: [] },
   ems: [{ id: "ADC", name: "Analog input", cms: ["POT"] }],
   logic: [{ kind: "blocks", workspace: {} }, SAMPLE],
   machines: [],
@@ -98,7 +100,7 @@ const PROCEDURAL: ProceduralModel = {
   ],
   phases: [
     { unit: "pico-led", em: "LED", id: "Blink", class: "Blink", ranges: { period_ms: [50, 1_000], times: [1, 10] }, bodies: { running: "BlinkRun", resetting: "BlinkReset" } },
-    { unit: "esp-sense", em: "ADC", id: "Measure", class: "Measure", ranges: { samples: [1, 8] }, bodies: { running: "Sample" } },
+    { unit: "pico-sense", em: "ADC", id: "Measure", class: "Measure", ranges: { samples: [1, 8] }, bodies: { running: "Sample" } },
   ],
 };
 

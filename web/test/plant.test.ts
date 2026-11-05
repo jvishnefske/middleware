@@ -87,10 +87,10 @@ describe("plant model (IR v4)", () => {
   });
 
   it("lists allocation units with ranges in class parameter order", () => {
-    const units = allocationUnits(EXAMPLE_PLANT, (u) => u.id !== "esp-sense", (ph) => (ph.class === "Blink" ? 300 : 100));
+    const units = allocationUnits(EXAMPLE_PLANT, (u) => u.id !== "pico-sense", (ph) => (ph.class === "Blink" ? 300 : 100));
     expect(units).toEqual([
       { id: "pico-led", class: "LedUnit", online: true, phases: [{ em: "LED", name: "Blink", class: "Blink", ranges: [[50, 1000], [1, 10]], runMs: 300 }] },
-      { id: "esp-sense", class: "SensorUnit", online: false, phases: [{ em: "ADC", name: "Measure", class: "Measure", ranges: [[1, 8]], runMs: 100 }] },
+      { id: "pico-sense", class: "SensorUnit", online: false, phases: [{ em: "ADC", name: "Measure", class: "Measure", ranges: [[1, 8]], runMs: 100 }] },
     ]);
   });
 

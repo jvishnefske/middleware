@@ -755,7 +755,7 @@ export function blocksPage(app: App): HTMLElement {
       unitId = plant.physical.units[0]?.id ?? "";
       loadModel(unitPayload(plant, unitId) as PayloadModel);
       renderBadge();
-      out.textContent = "Loaded the Blink then Measure plant: units pico-led and esp-sense (Units view), their phases (Phases view).";
+      out.textContent = "Loaded the Blink then Measure plant: units pico-led and pico-sense (Units view), their phases (Phases view).";
       return;
     }
     const e = exampleWorkspace(exampleSel.value);

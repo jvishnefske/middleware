@@ -11,7 +11,7 @@
 //!   bodies `recipe_core::wire` encodes;
 //! * Start's argument checks and malformed bodies: `InvalidRequest`;
 //! * the worked example "Blink then Measure" end to end: the two units'
-//!   payloads (`pico-led`, `esp-sense`) run in `wasm-host` and
+//!   payloads (`pico-led`, `pico-sense`) run in `wasm-host` and
 //!   recipe-core's engine drives them through `Payload::request` and
 //!   their published reports, to Complete; a Hold mid-run and a Restart;
 //!   losing the LED unit, a refused Restart and an Abort to Aborted.
@@ -445,7 +445,7 @@ struct Plant {
 
 impl Plant {
     fn new() -> Plant {
-        let units = ["pico-led", "esp-sense"]
+        let units = ["pico-led", "pico-sense"]
             .iter()
             .zip(NODES)
             .map(|(name, node)| {
@@ -470,7 +470,7 @@ impl Plant {
                 phases: &LED_PHASES,
             },
             Unit {
-                id: "esp-sense",
+                id: "pico-sense",
                 class: "SensorUnit",
                 online: true,
                 phases: &ADC_PHASES,
