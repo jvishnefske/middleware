@@ -27,16 +27,19 @@
 //! * [`recipes`] — S88 master recipes over `recipe-core`: checks with
 //!   plain-language messages, allocation of steps to units' equipment
 //!   phases (with per-unit reasons when it fails), a simulated run against
-//!   simulated units, and the phase state model for the page.
+//!   simulated units, a control recipe run (`recipes::run`) whose
+//!   commands are keyed request bodies for payloads the page drives, and
+//!   the phase state model for the page.
 //! * [`simulator`] (`simulator` feature, default) — runs a payload in
 //!   `wasm-host` against a virtual device: GPIO with edge interrupts, ABI 2
 //!   hardware timers on a JS-supplied clock, an SPI device (loopback or a
-//!   pattern), a UART terminal and the bounded interrupt event queue that
-//!   feeds `on_irq`.
+//!   pattern), a UART terminal, the bounded interrupt event queue that
+//!   feeds `on_irq`, analog levels, and ABI 5: a node id, served keys and
+//!   requests handed to `on_request`.
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
 //!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, `checkRecipe`,
-//!   `allocateRecipe`, `simulateRecipe`, `phaseModel`, ...). It only converts values.
+//!   `allocateRecipe`, `simulateRecipe`, `RecipeRun`, `phaseModel`, ...). It only converts values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
