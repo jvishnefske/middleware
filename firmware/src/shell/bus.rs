@@ -43,8 +43,10 @@ const REPLY_PORTS: usize = PORTS + 1;
 /// Largest inbound body: a loader chunk with its offset, or a publication.
 pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
 
-/// Largest reply body (`sys/info` is at most `MAX_INFO_LEN`, 81 bytes).
-pub const MAX_REPLY: usize = 128;
+/// Largest reply body: a payload's reply to a request on a key it serves
+/// (`esp_base::serve::REPLY_CAPACITY`, 512); `sys/info` is at most
+/// `MAX_INFO_LEN`, 85 bytes.
+pub const MAX_REPLY: usize = esp_base::serve::REPLY_CAPACITY;
 
 /// Outbound messages buffered per port before the oldest is dropped.
 const OUTBOUND_DEPTH: usize = 8;

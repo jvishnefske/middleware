@@ -12,6 +12,8 @@
 //! | `adc_read` | GPIO 26–28, ADC0–2, blocking 12-bit read |
 //! | `spi_open`, `spi_transfer`, `dma_read` (`Spi0`) | bus 0 on SPI0 or SPI1 (the pins choose, [`rp_base::periph::func`]), FIFO pumped by the controller loop, `DmaDone` on completion ([`super::spi`]) |
 //! | `i2c_open`, `i2c_transfer` | buses 0 (SDA 4 / SCL 5) and 1 (SDA 6 / SCL 7), 10 kHz–1 MHz, blocking and time bounded ([`super::i2c`]) |
+//! | `serve` (ABI 5) | accepted for any non-`sys` key (`esp_base::serve::servable`); wasm-host keeps the live table, the controller routes its requests ([`rp_base::requests`]) |
+//! | `node_id` (ABI 5) | the chip unique id, the node `sys/info` reports |
 //! | `gpio_irq`, `uart_*`, `dma_read` (`Uart1Tx`), `pwm_*`, `route_*` | `Unsupported` |
 //!
 //! Pins a bus holds are decided by [`rp_base::periph::claims`]: a bus
@@ -36,8 +38,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 use esp_base::periph::timers::Timers;
 use esp_base::periph::{dma_done_event, timer_event};
-use middleware::Key;
 use middleware::loader::is_system_key;
+use middleware::{Key, SenderId};
 use middleware::wasm_abi::events::{DmaChannel, Event, EventKind, EventQueue, MAX_EVENTS};
 use middleware::wasm_abi::periph::{I2cConfig, SpiConfig, TimerSpec};
 use middleware::wasm_abi::{AbiError, Pull};
@@ -118,11 +120,13 @@ pub struct RpDevice {
     events: EventQueue<MAX_EVENTS>,
     bus: &'static Bus,
     profile: &'static Profile,
+    node: SenderId,
 }
 
 impl RpDevice {
-    /// Takes the hardware from [`HW`]; `None` if it is missing.
-    pub fn new(bus: &'static Bus, profile: &'static Profile) -> Option<Self> {
+    /// Takes the hardware from [`HW`]; `None` if it is missing. `node` is
+    /// what `node_id` answers (the node `sys/info` reports).
+    pub fn new(bus: &'static Bus, profile: &'static Profile, node: SenderId) -> Option<Self> {
         let hw = HW.take()?;
         Some(RpDevice {
             hw: Some(hw),
@@ -132,6 +136,7 @@ impl RpDevice {
             events: EventQueue::new(),
             bus,
             profile,
+            node,
         })
     }
 
@@ -369,5 +374,15 @@ impl wasm_host::Device for RpDevice {
 
     fn i2c_transfer(&mut self, bus: u8, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), AbiError> {
         self.hw()?.i2c.transfer(bus, addr, tx, rx)
+    }
+
+    /// Accepts any key a payload may serve; the controller routes its
+    /// requests to `Payload::request`.
+    fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
+        esp_base::serve::servable(key)
+    }
+
+    fn node_id(&mut self) -> Result<SenderId, AbiError> {
+        Ok(self.node)
     }
 }

@@ -155,7 +155,9 @@ pub fn upload_plan_signed(
 }
 
 /// Decodes a `sys/info` body into
-/// `{abiVersion, capacity, status, statusName, chip, firmware}`, plus
+/// `{abiVersion, capacity, status, statusName, chip, firmware, caps, serves}`
+/// (`caps` the capability bits, 0 from firmware before middleware 0.6;
+/// `serves` whether bit 0, requests routed to the payload, is set), plus
 /// `node` (16 hex digits) when the device reports its node id, or
 /// `undefined` when malformed.
 #[wasm_bindgen(js_name = decodeDeviceInfo)]
@@ -176,10 +178,18 @@ pub fn decode_device_info(data: &[u8]) -> Option<Object> {
         let hex: String = node.iter().map(|b| format!("{b:02x}")).collect();
         set(&o, "node", hex);
     }
+    set(&o, "caps", info.caps);
+    set(
+        &o,
+        "serves",
+        middleware::loader::Caps(info.caps).contains(middleware::loader::Caps::SERVE),
+    );
     Some(o)
 }
 
-/// Encodes a `sys/info` body (for device fakes).
+/// Encodes a `sys/info` body (for device fakes): `node` as 16 hex digits
+/// (optional) and `caps` the capability bits (0 when absent; non-zero
+/// needs a node).
 #[wasm_bindgen(js_name = encodeDeviceInfo)]
 pub fn encode_device_info(
     abi_version: u16,
@@ -187,14 +197,23 @@ pub fn encode_device_info(
     status: u8,
     chip: String,
     firmware: String,
+    node: Option<String>,
+    caps: Option<u32>,
 ) -> Result<Vec<u8>, JsError> {
+    let node = match node {
+        Some(hex) => Some(
+            parse_node(&hex).map(|n| n.0).ok_or_else(|| js_err("node: 16 hex digits"))?,
+        ),
+        None => None,
+    };
     Info {
         abi_version,
         capacity,
         status,
         chip,
         firmware,
-        node: None,
+        node,
+        caps: caps.unwrap_or(0),
     }
     .encode()
     .ok_or_else(|| js_err("invalid device info"))

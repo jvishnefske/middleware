@@ -40,7 +40,7 @@ use crate::sign::image_sha256;
 use ed25519_dalek::{Signature, VerifyingKey};
 use middleware::Key;
 use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
-use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
+use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
 use middleware::fw_ota::service::{Context, FwService};
@@ -71,6 +71,7 @@ pub struct FakeDevice {
     firmware: &'static str,
     capacity: u32,
     runtime: bool,
+    caps: Caps,
     script: Script,
     splitter: Splitter<MAX_WIRE_FRAME>,
     raw_rx: Vec<u8>,
@@ -117,6 +118,7 @@ impl FakeDevice {
             firmware,
             capacity,
             runtime,
+            caps: Caps::NONE,
             script: Script::default(),
             splitter: Splitter::new(),
             raw_rx: Vec::new(),
@@ -132,6 +134,11 @@ impl FakeDevice {
             rekey_open: false,
             fw: None,
         }
+    }
+
+    /// The same device reporting `caps` in `sys/info` (none by default).
+    pub fn with_caps(self, caps: Caps) -> Self {
+        FakeDevice { caps, ..self }
     }
 
     /// A Pico 2 with the A/B firmware updater on `sim` (powered on here if
@@ -273,6 +280,7 @@ impl FakeDevice {
                 chip: self.chip,
                 firmware: self.firmware,
                 node: Some(NODE),
+                caps: self.caps,
             }
             .encode(out)
             .ok_or(HandlerError::BufferTooSmall),

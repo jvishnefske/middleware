@@ -118,6 +118,10 @@ ed25519-dalek = { version = "2.2", default-features = false }
 wasm-host = { path = "../wasm-host" }
 # mwctl runs unchanged against the service over an in-process link.
 mwctl = { path = "../tools/mwctl" }
+# The request tests decode the phase server's acknowledgements and reports
+# with recipe-core's wire contract, and build a trapping payload from WAT.
+recipe-core = { path = "../recipe-core" }
+wat = "1"
 
 [profile.dev]
 opt-level = "s"

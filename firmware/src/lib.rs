@@ -44,6 +44,9 @@
 //!   in-place ESP-NOW chunk frame, the sink route's bus transfers, the
 //!   route table (handles, keys, owned bus and D/C pin) and the source
 //!   table the radio task polls.
+//! * [`serve`] — requests on keys the payload serves (ABI 5): `sys` keys
+//!   to the dispatcher, served keys to a running payload, `Unavailable`
+//!   for a stopped or trapped one, the kept table and when it is cleared.
 //! * [`start`] — the heap check before a payload starts: free heap must
 //!   cover the payload's bound (`wasm_host::Limits::heap_needed`) plus
 //!   a margin.
@@ -67,6 +70,7 @@ pub mod radio;
 #[cfg(test)]
 mod ram_flash;
 pub mod route;
+pub mod serve;
 pub mod start;
 pub mod store;
 pub mod trust_store;

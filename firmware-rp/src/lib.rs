@@ -16,7 +16,8 @@
 //!   record, checked against `memory-rp2040.x` and `memory-rp2350.x`.
 //! * [`chip`] — per-chip profiles: name, flash map, heap plan, WASM memory
 //!   and image caps, the Pico board's pin policy and ADC pins.
-//! * [`node`] — the node id and USB serial number from the chip unique id.
+//! * [`node`] — the node id and USB serial number from the chip unique id
+//!   (`sys/info`'s node and the payload's `node_id`).
 //! * [`pins`] — the payload's GPIO modes under the board policy (the
 //!   esp-base pin bank's rules), as a value the device shell applies.
 //! * [`periph`] — the payload SPI and I2C buses: the chips' GPIO function
@@ -35,6 +36,11 @@
 //! * [`service`] — the request service: `sys/fw/*` to the update backend,
 //!   everything else through `esp_base::dispatch`, with the storage actions
 //!   performed on the flash and notes for `sys/log`.
+//! * `requests` (with the `wasm` runtime, and in tests) — one request
+//!   while a payload may run: `esp_base::serve` routing (`sys` keys and
+//!   unserved keys to the service, served keys to `Payload::request` with a
+//!   512-byte reply, `Unavailable` for a stopped or trapped payload's keys,
+//!   a trap answered `Internal` and the payload stopped).
 //! * [`usb`] — the CDC-ACM zero-length-packet rule and the USB identity.
 //! * `budget` (with the `wasm` runtime, and in tests) — the limits
 //!   payloads run under and the largest image a heap admits.
@@ -58,5 +64,7 @@ pub mod periph;
 pub mod pins;
 #[cfg(test)]
 mod ram_flash;
+#[cfg(any(test, feature = "wasm"))]
+pub mod requests;
 pub mod service;
 pub mod usb;

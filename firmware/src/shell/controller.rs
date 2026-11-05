@@ -85,12 +85,29 @@
 //! control counter adopted from flash. Refused claims, commits and
 //! control requests are logged.
 //!
-//! All decisions come from `esp_base::dispatch`; this module performs them.
+//! Serving (ABI 5, `wasm`): before admission, a serial request is routed by
+//! [`esp_base::serve::route_request`]. A key the running payload serves
+//! goes to `Payload::request` with a 512-byte reply buffer and the
+//! request's meta (serial: no sender, no deadline), and its reply or
+//! `HandlerError` is the answer; a trap answers `Internal` and ends the
+//! session like any trap. A key the last run served while no payload
+//! runs is `Unavailable`; `sys/...` and unserved keys go on to admission
+//! and dispatch as before (`NotFound` for an application key). The
+//! controller keeps the last run's keys and clears them when an upload
+//! changes the image ([`esp_base::serve::served_after`]). Requests over
+//! ESP-NOW are not routed to the payload: over the air only the update
+//! keys are admitted ([`esp_base::ota::admit`]), and serving a payload's
+//! keys to unauthenticated radio peers would widen that policy, so they
+//! stay `NotOverAir` refusals.
+//!
+//! All decisions come from `esp_base::dispatch` and `esp_base::serve`;
+//! this module performs them.
 //! Status changes are published on `sys/payload/status`, notable events as
 //! `sys/log` lines.
 
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::ota::{self, Admission, Facts, Mac, Origin};
+use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, TrustStore};
 use middleware::loader::{Loader, PayloadStatus, keys};
@@ -146,6 +163,8 @@ pub struct Controller {
     bus: &'static Bus,
     #[cfg(feature = "wasm")]
     profile: &'static Profile,
+    /// The keys the payload run that ended served (`esp_base::serve`).
+    served: ServedKeys,
 }
 
 #[cfg(feature = "wasm")]
@@ -192,6 +211,7 @@ impl Controller {
             bus,
             #[cfg(feature = "wasm")]
             profile,
+            served: ServedKeys::new(),
         }
     }
 
@@ -393,6 +413,7 @@ impl Controller {
                 }
                 self.log_trust(key.as_str(), &outcome);
                 self.set_state(outcome.state);
+                self.served = served_after(&outcome.action, core::mem::take(&mut self.served));
                 outcome.reply
             }
             Err(e) => {
@@ -412,12 +433,26 @@ impl Controller {
         Handled { reply: Some(Reply { id, result }), stop }
     }
 
+    /// Where a serial request on `key` goes, given the keys a payload
+    /// serves (the running payload's while it runs, else the last run's).
+    /// Requests over the air are never routed to the payload.
+    fn route<'s>(&self, origin: Origin, key: &str, served: impl Iterator<Item = &'s str>) -> Route {
+        match (origin, Key::new(key)) {
+            (Origin::Serial, Ok(k)) => route_request(k, self.state.status(), served),
+            _ => Route::System,
+        }
+    }
+
     /// Serves requests until a payload start is requested; returns the
     /// requester.
     async fn idle(&mut self) -> (Port, u8) {
         loop {
             let msg: Inbound = self.bus.receive_inbound().await;
             if let Kind::Request { id } = msg.kind {
+                if let Route::Refuse(e) = self.route(msg.origin, &msg.key, self.served.iter()) {
+                    self.bus.reply(msg.port, Reply { id, result: Err(e) });
+                    continue;
+                }
                 match self.handle(id, msg.origin, &msg.key, &msg.body).reply {
                     Some(reply) => self.bus.reply(msg.port, reply),
                     None => return (msg.port, id),
@@ -452,7 +487,8 @@ impl Controller {
             check_heap_holding(esp_alloc::HEAP.free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
-        let device = EspDevice::new(self.profile, self.bus).ok_or(StartError::NoPins)?;
+        let node = self.ctx.node.unwrap_or(SenderId([0; 8]));
+        let device = EspDevice::new(self.profile, self.bus, node).ok_or(StartError::NoPins)?;
         let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
@@ -523,6 +559,13 @@ impl Controller {
         };
         self.set_state(self.state.started());
         answer(self.bus, Ok(()));
+        self.session(&mut payload).await;
+        self.served = ServedKeys::from_run(payload.serves());
+    }
+
+    /// The running session's loop, until the payload traps or must stop.
+    #[cfg(feature = "wasm")]
+    async fn session(&mut self, payload: &mut Payload<EspDevice>) {
         #[cfg(feature = "espnow")]
         super::radio::clear();
         // Start the radio's count with the window.
@@ -541,7 +584,7 @@ impl Controller {
             window = self.report(window);
             for _ in 0..MAX_EVENTS {
                 let Some(event) = irq::pop() else { break };
-                let (result, cost) = timed(&mut payload, |p| p.dispatch(event));
+                let (result, cost) = timed(payload, |p| p.dispatch(event));
                 window = window.op(CallKind::Irq, cost);
                 if let Err(trap) = result {
                     self.trapped(&trap);
@@ -565,7 +608,7 @@ impl Controller {
             match woke {
                 Either4::Third(()) | Either4::Fourth(()) => {}
                 Either4::Second(()) => {
-                    let (result, cost) = timed(&mut payload, |p| p.tick(now_ms()));
+                    let (result, cost) = timed(payload, |p| p.tick(now_ms()));
                     window = window.op(CallKind::Tick, cost);
                     if let Err(trap) = result {
                         self.trapped(&trap);
@@ -573,7 +616,7 @@ impl Controller {
                     }
                 }
                 Either4::First(Either::Second((key, body))) => {
-                    match self.publication(&mut payload, &key, &body).await {
+                    match self.publication(payload, &key, &body).await {
                         Ok(cost) => window = window.op(CallKind::Message, cost),
                         Err(trap) => {
                             self.trapped(&trap);
@@ -582,7 +625,7 @@ impl Controller {
                     }
                 }
                 Either4::First(Either::First(msg)) => match msg.kind {
-                    Kind::Publish => match self.publication(&mut payload, &msg.key, &msg.body).await {
+                    Kind::Publish => match self.publication(payload, &msg.key, &msg.body).await {
                         Ok(cost) => window = window.op(CallKind::Message, cost),
                         Err(trap) => {
                             self.trapped(&trap);
@@ -590,6 +633,23 @@ impl Controller {
                         }
                     },
                     Kind::Request { id } => {
+                        match self.route(msg.origin, &msg.key, payload.serves()) {
+                            Route::Payload => {
+                                let (reply, cost) = timed(payload, |p| request(p, &msg.key, &msg.body));
+                                window = window.op(CallKind::Message, cost);
+                                self.bus.reply(msg.port, Reply { id, result: reply.result });
+                                if let Some(trap) = reply.trap {
+                                    self.trapped(&trap);
+                                    return;
+                                }
+                                continue;
+                            }
+                            Route::Refuse(e) => {
+                                self.bus.reply(msg.port, Reply { id, result: Err(e) });
+                                continue;
+                            }
+                            Route::System => {}
+                        }
                         let handled = self.handle(id, msg.origin, &msg.key, &msg.body);
                         // A start while running is answered by dispatch, so
                         // a reply is always present here.
@@ -604,6 +664,32 @@ impl Controller {
             }
         }
     }
+}
+
+/// A payload's answer to a serial request on a key it serves.
+#[cfg(feature = "wasm")]
+struct Served {
+    /// The reply, or the error to send (`Internal` for a trap).
+    result: Result<Vec<u8, MAX_REPLY>, HandlerError>,
+    /// The payload trapped.
+    trap: Option<Trap>,
+}
+
+/// Hands a serial request to the payload (`esp_base::serve::payload_reply`
+/// decides the answer); serial requests name no sender and no deadline.
+#[cfg(feature = "wasm")]
+fn request(payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Served {
+    let Ok(key) = Key::new(key) else {
+        return Served { result: Err(HandlerError::InvalidRequest), trap: None };
+    };
+    let mut out = [0u8; MAX_REPLY];
+    let result = payload.request(key, body, &RequestMeta::NONE, &mut out);
+    let trap = result.as_ref().err().cloned();
+    let answer = esp_base::serve::payload_reply(result);
+    let result = answer
+        .reply
+        .and_then(|n| out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall));
+    Served { result, trap }
 }
 
 /// Runs one payload operation; returns its result and what it cost (export

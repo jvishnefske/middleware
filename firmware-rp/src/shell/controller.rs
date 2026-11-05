@@ -16,10 +16,15 @@
 //!   comes first: an inbound message, the payload's next tick, the next
 //!   timer deadline, or the end of a running SPI transfer, which the
 //!   device pumps meanwhile ([`RpDevice::io`]). Publications go to the payload when it subscribed to
-//!   the key (`esp_base::dispatch::route_publication`); requests are
-//!   handled as when idle. A trap, `sys/payload/stop`, a `begin` or an
-//!   activated commit ends the session and drops the payload, whose device
-//!   returns the pins.
+//!   the key (`esp_base::dispatch::route_publication`); requests go
+//!   through [`rp_base::requests::handle`]: a key the payload serves
+//!   (ABI 5) to its `on_request` with a 512-byte reply and the link's
+//!   meta, everything else to the service as when idle. A trap (in a
+//!   request too, answered `Internal`), `sys/payload/stop`, a `begin` or
+//!   an activated commit ends the session and drops the payload, whose
+//!   device returns the pins; the service keeps the keys it served
+//!   ([`rp_base::requests::ended`]), so their requests answer
+//!   `Unavailable` until the next run or an upload.
 //!
 //! Without `wasm` (the RP2040) the service refuses `sys/payload/start`
 //! (`NotFound`), so the controller only ever runs the idle session.
@@ -31,6 +36,8 @@ use heapless::Vec;
 use middleware::Key;
 use middleware::transport::HandlerError;
 use rp_base::service::{Handled, Reply as Answer, Service};
+#[cfg(not(feature = "wasm"))]
+use esp_base::serve::Route;
 
 use super::board::{Fw, StoreFlash};
 use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Reply};
@@ -113,16 +120,35 @@ impl Controller {
         }
     }
 
-    /// Handles one request: the reply to send now (`None` for a start),
-    /// and whether a running payload must stop.
-    fn handle(&mut self, id: u8, key: &str, body: &[u8]) -> (Option<Reply>, bool) {
-        let Ok(key) = Key::new(key) else {
+    /// Handles one request (`payload` is the running payload): the reply
+    /// to send now (`None` for a start), and whether a running payload
+    /// must stop.
+    fn handle(
+        &mut self,
+        id: u8,
+        msg: &Inbound,
+        #[cfg(feature = "wasm")] payload: Option<&mut Payload<RpDevice>>,
+    ) -> (Option<Reply>, bool) {
+        let Ok(key) = Key::new(&msg.key) else {
             return (Some(Reply { id, result: Err(HandlerError::InvalidRequest) }), false);
         };
         let before = self.svc.status();
         let mut out = [0u8; MAX_REPLY];
         self.svc.set_usb_configured(self.bus.usb_configured());
-        let Handled { reply, stop, notes } = self.svc.handle(key, body, &mut out);
+        #[cfg(feature = "wasm")]
+        let Handled { reply, stop, notes } = {
+            let answer = rp_base::requests::handle(&mut self.svc, payload, key, &msg.body, &msg.meta(), &mut out);
+            if let Some(trap) = &answer.trapped {
+                self.bus.log(format_args!("payload trapped on request {}: {trap}", key.as_str()));
+            }
+            answer.handled
+        };
+        // Without the runtime nothing is ever served (start is NotFound).
+        #[cfg(not(feature = "wasm"))]
+        let Handled { reply, stop, notes } = match self.svc.route_idle(key) {
+            Route::Refuse(e) => Handled { reply: Answer::Now(Err(e)), stop: false, notes: Vec::new() },
+            Route::System | Route::Payload => self.svc.handle(key, &msg.body, &mut out),
+        };
         for note in &notes {
             self.bus.log(format_args!("{note}"));
         }
@@ -146,7 +172,11 @@ impl Controller {
         loop {
             let msg: Inbound = self.bus.receive_inbound().await;
             if let Kind::Request { id } = msg.kind {
-                match self.handle(id, &msg.key, &msg.body).0 {
+                #[cfg(feature = "wasm")]
+                let handled = self.handle(id, &msg, None);
+                #[cfg(not(feature = "wasm"))]
+                let handled = self.handle(id, &msg);
+                match handled.0 {
                     Some(reply) => self.bus.reply(reply),
                     None => return id,
                 }
@@ -179,7 +209,7 @@ impl Controller {
         let needed = check_heap_holding(heap::free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
-        let device = RpDevice::new(self.bus, &PROFILE_REF).ok_or(StartError::NoHardware)?;
+        let device = RpDevice::new(self.bus, &PROFILE_REF, self.svc.node()).ok_or(StartError::NoHardware)?;
         let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
@@ -223,6 +253,13 @@ impl Controller {
         self.svc.started();
         self.set_status_after(before);
         answer(self.bus, Ok(()));
+        self.session(&mut payload).await;
+        rp_base::requests::ended(&mut self.svc, &payload);
+    }
+
+    /// The running session's loop, until the payload traps or must stop.
+    #[cfg(feature = "wasm")]
+    async fn session(&mut self, payload: &mut Payload<RpDevice>) {
         let mut dropped = 0u32;
         loop {
             yield_now().await;
@@ -275,7 +312,7 @@ impl Controller {
                         }
                     }
                     Kind::Request { id } => {
-                        let (reply, stop) = self.handle(id, &msg.key, &msg.body);
+                        let (reply, stop) = self.handle(id, &msg, Some(&mut *payload));
                         // A start while running is answered by dispatch.
                         self.bus.reply(reply.unwrap_or(Reply { id, result: Ok(Vec::new()) }));
                         if stop {
