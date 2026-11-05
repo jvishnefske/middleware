@@ -10,7 +10,7 @@
 // pin table, the state machines, the Blockly workspace and the flows),
 // written back into the plant on every change (model/plantEdit.ts
 // `withUnitPayload`), so switching units leaves each unit's code as it
-// was. Six views share the toolbar (unit, board, examples, compile,
+// was. Seven views share the toolbar (unit, board, examples, compile,
 // simulate, upload, export, import) and the right-hand column (generated
 // code, build output, simulator): "Units", the plant's units
 // (plantViews.ts; bind one to the connected device's sys/info node id),
@@ -20,7 +20,10 @@
 // actions name the unit's phases), and "Phases", the unit's equipment
 // modules, the plant's phase classes and parameters, the unit's phases
 // and their body flows, and the read-only phase state model
-// (plantViews.ts). A unit with phases compiles to an S88 phase server
+// (plantViews.ts), and "Recipe", the plant's master recipes as a chart
+// and an outline, their allocation to units and a run of every unit in
+// the browser simulator under recipe-core's engine (recipeView.ts; its
+// tab counts the recipes' errors). A unit with phases compiles to an S88 phase server
 // (blocks/phaseGen.ts); the plant's issues for it (plantEdit.ts
 // `plantIssues`, in plain words) keep Compile from building and switch
 // to Phases.
@@ -87,6 +90,8 @@ import { browserStore, loadPlant, savePlant } from "../blocks/storage";
 import { type PlantModel, parsePlant, phaseDecls, phaseSpecs, plantFromPayload, serializePlant, unitPayload } from "../model/plant";
 import { type PlantIssue, nodeFromInfo, plantIssues, renameCm, withUnitPayload } from "../model/plantEdit";
 import { phasesView, unitsView } from "./plantViews";
+import { recipeView } from "./recipeView";
+import { recipeTabText } from "./recipeModel";
 import { EXAMPLE_PLANT } from "../model/plantExample";
 import type { WorkspaceJson } from "../blocks/workspace";
 import {
@@ -576,6 +581,8 @@ export function blocksPage(app: App): HTMLElement {
     ).length;
     unitsTab.textContent = units ? `Units (${units} to fix)` : "Units";
     phasesTab.textContent = phases ? `Phases (${phases} to fix)` : "Phases";
+    recipeV.render(plant, deviceNode);
+    recipeTab.textContent = recipeTabText(recipeV.issues(plant));
   }
   /** Switches the Blocks, Pins, States, Flows and Phases views to unit `id`. */
   function selectUnit(id: string) {
@@ -618,6 +625,7 @@ export function blocksPage(app: App): HTMLElement {
   };
   const unitsV = unitsView(plantEvents);
   const phasesV = phasesView(plantEvents);
+  const recipeV = recipeView(proto, { onChange: setPlant });
   unitSel.addEventListener("change", () => selectUnit(unitSel.value));
   app.onDeviceInfo((i) => {
     deviceNode = i ? nodeFromInfo(i.node) : null;
@@ -1078,6 +1086,7 @@ export function blocksPage(app: App): HTMLElement {
   // ---- views: Blocks (Blockly) and Pins (the pin table)
   const unitsTab = h("button", { role: "tab", id: "view-units-tab", "aria-controls": "view-units", type: "button" }, "Units");
   const phasesTab = h("button", { role: "tab", id: "view-phases-tab", "aria-controls": "view-phases", type: "button" }, "Phases");
+  const recipeTab = h("button", { role: "tab", id: "view-recipe-tab", "aria-controls": "view-recipe", type: "button" }, "Recipe");
   const blocksTab = h("button", { role: "tab", id: "view-blocks-tab", "aria-controls": "view-blocks", type: "button" }, "Blocks");
   const pinsTab = h("button", { role: "tab", id: "view-pins-tab", "aria-controls": "view-pins", type: "button" }, "Pins");
   const statesTab = h("button", { role: "tab", id: "view-states-tab", "aria-controls": "view-states", type: "button" }, "States");
@@ -1094,8 +1103,9 @@ export function blocksPage(app: App): HTMLElement {
   const flowsPanel = h("div", { role: "tabpanel", id: "view-flows", "aria-labelledby": "view-flows-tab" }, flowsV.el);
   const unitsPanel = h("div", { role: "tabpanel", id: "view-units", "aria-labelledby": "view-units-tab" }, unitsV.el);
   const phasesPanel = h("div", { role: "tabpanel", id: "view-phases", "aria-labelledby": "view-phases-tab" }, phasesV.el);
+  const recipePanel = h("div", { role: "tabpanel", id: "view-recipe", "aria-labelledby": "view-recipe-tab" }, recipeV.el);
   const VIEW_KEY = "blocks-view";
-  type View = "units" | "blocks" | "pins" | "states" | "flows" | "phases";
+  type View = "units" | "blocks" | "pins" | "states" | "flows" | "phases" | "recipe";
   const VIEWS: readonly { v: View; tab: HTMLButtonElement }[] = [
     { v: "units", tab: unitsTab },
     { v: "blocks", tab: blocksTab },
@@ -1103,10 +1113,12 @@ export function blocksPage(app: App): HTMLElement {
     { v: "states", tab: statesTab },
     { v: "flows", tab: flowsTab },
     { v: "phases", tab: phasesTab },
+    { v: "recipe", tab: recipeTab },
   ];
   function showView(v: View) {
     unitsPanel.hidden = v !== "units";
     phasesPanel.hidden = v !== "phases";
+    recipePanel.hidden = v !== "recipe";
     blocksView.hidden = v !== "blocks";
     pinsPanel.hidden = v !== "pins";
     statesPanel.hidden = v !== "states";
@@ -1128,7 +1140,8 @@ export function blocksPage(app: App): HTMLElement {
   flowsTab.addEventListener("click", () => showView("flows"));
   unitsTab.addEventListener("click", () => showView("units"));
   phasesTab.addEventListener("click", () => showView("phases"));
-  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, unitsTab, blocksTab, pinsTab, statesTab, flowsTab, phasesTab);
+  recipeTab.addEventListener("click", () => showView("recipe"));
+  const views = h("div", { role: "tablist", class: "subtabs", "aria-label": "Payload views" }, unitsTab, blocksTab, pinsTab, statesTab, flowsTab, phasesTab, recipeTab);
   // Arrow keys (wrapping), Home and End move between the view tabs (the
   // tabs pattern, selection follows focus).
   views.addEventListener("keydown", (e) => {
@@ -1179,7 +1192,7 @@ export function blocksPage(app: App): HTMLElement {
     h(
       "div",
       { class: "cols" },
-      h("div", {}, views, unitsPanel, blocksView, pinsPanel, statesPanel, flowsPanel, phasesPanel),
+      h("div", {}, views, unitsPanel, blocksView, pinsPanel, statesPanel, flowsPanel, phasesPanel, recipePanel),
       h(
         "div",
         {},
