@@ -1,0 +1,8 @@
+# File-based SDS: the trust domain's X.509 bundle (the SPIRE CA), which the
+# gateway's certificate must chain to. Reloaded like sds-svid.yaml.
+resources:
+  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+    name: bundle
+    validation_context:
+      trusted_ca: { filename: "@certDir@/bundle.pem" }
+      watched_directory: { path: "@certDir@" }

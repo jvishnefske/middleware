@@ -1183,6 +1183,65 @@ checking its items here. Until then `Service::run_with` and
   deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
   logs. *Owners: phase 3 (e2e), on images from phase 2C (nix).*
 
+### Containers and the robot VM (nix, M40–M49)
+
+The top-level `flake.nix` builds every service binary listed in
+`nix/binaries.nix` as a static musl executable (crane, a pinned
+rust-overlay toolchain, nixpkgs' static musl C compiler for `ring`), wraps
+each in an OCI image, and builds the emulated robot: a NixOS module
+(`nix/robot.nix`) and a QEMU VM on top of it. nixpkgs is nixos-26.05, not
+the lab repo's nixos-24.11, because 24.11 has no spiffe-helper and its
+SPIRE (1.11) is too far behind the lab's SPIRE server (1.15). Checks named
+`checks.<name>` run under `nix flake check`.
+
+- [x] M40 Every entry of `nix/binaries.nix` (cargo package plus `--example`
+  or `--bin`) builds as `packages.<name>`, a `x86_64-unknown-linux-musl`
+  executable with no ELF interpreter and no shared-library dependencies;
+  `hello` (`service/examples/hello.rs`, kind `demo/hello`, `main` is
+  `Service::main`) proves the pipeline — `checks.image-hello-contents`
+  (readelf on the entrypoint).
+- [x] M41 `packages.image-<name>` is an uncompressed docker-archive tarball
+  of image `localhost/mw/<name>:<git short rev, or dev>` holding only the
+  binary, CA certificates and zoneinfo: no shell and no `/bin`, `/sbin` or
+  `/usr`; it runs as uid/gid 65532 with the binary as entrypoint and
+  carries the labels `org.opencontainers.image.source`, `.revision` and
+  `.version` — `checks.image-hello-contents`,
+  `checks.image-zenohd-contents`.
+- [x] M42 Images are reproducible: layers and config are dated at the epoch
+  and the tarball is uncompressed, so a rebuild yields the same bytes —
+  `checks.image-hello-contents` (creation date) and
+  `nix build --rebuild .#image-hello` (bit-identical rebuild).
+- [x] M43 `packages.image-zenohd` runs zenohd built from the same zenoh
+  release as `Cargo.lock`'s `zenoh` crate (1.10.1, wire compatible with
+  the services); evaluation fails if the lock moves to another release
+  without the pin following — `checks.image-zenohd-contents` and the
+  assertion in `nix/rust.nix`.
+- [x] M44 The robot module runs spire-agent (join_token attestor, server
+  address, token and SPIFFE-format trust bundle read at run time from
+  `/var/lib/mw-robot`, so the image holds no secret), spiffe-helper as uid
+  1000 writing the SVID, key and bundle to `/run/spiffe`, Envoy (admin
+  127.0.0.1:15000, h2c 127.0.0.1:15001, Zenoh TCP 127.0.0.1:17447) and the
+  robot app as uid 1000. An unprovisioned robot boots with Envoy and the
+  app up and spire-agent held back by its path condition —
+  `checks.robot-boots` (subtest "unprovisioned robot boots").
+- [x] M45 Provisioned through `/var/lib/mw-robot` against a SPIRE server in
+  the sandbox, the robot attests, receives `spiffe://infra.local/robot/test`
+  for selector `unix:uid:1000`, Envoy loads that SVID without a restart
+  (file-based SDS, reloaded on rename), and an h2c request on 15001 and a
+  TCP stream on 17447 reach a gateway that requires a client certificate
+  from the same trust domain, the request with its `:authority` intact —
+  `checks.robot-boots`.
+- [x] M46 `nixosConfigurations.robot-vm` builds as a QEMU VM whose launcher
+  (`nix run .#robot-vm -- --tap TAP | --bridge BR [--state DIR]`) attaches
+  a second NIC with the lab MAC (static address 192.168.66.21/24) and
+  shares the state directory as `/var/lib/mw-robot`; it needs no
+  privileges itself — `checks.robot-vm`, `checks.robot-vm-launcher`.
+- [x] M47 `mw-service` and its examples pass clippy with `-D warnings` in
+  the static musl build — `checks.clippy`.
+- [x] M48 `nix run .#e2e` builds every image and prints the end-to-end
+  plan without touching the lab (Phase 3 fills in the steps) —
+  `checks.e2e-plan`.
+
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266

@@ -67,6 +67,70 @@ Zenoh and the gRPC mesh client
 Requirements and the tests that cover them are listed in `design.md`.
 Feature isolation is checked by `scripts/check-features.sh`.
 
+## Containers and the robot VM (nix)
+
+The flake at the top of the repository builds the service binaries as
+static musl executables and wraps each in a minimal OCI image. `nix build
+.#hello` gives the binary; `nix build .#image-hello` gives `result`, an
+uncompressed docker-archive tarball of the image `localhost/mw/hello:<tag>`,
+where the tag is the commit's short hash for a clean tree and `dev` for a
+dirty one. The image holds the binary, CA certificates and zoneinfo, no
+shell, and runs as uid 65532. Load it with `docker load -i result`,
+`podman load -i result`, or on a k3s node with `k3s ctr images import
+result` (containerd reads docker-archive tarballs), then run it with
+`imagePullPolicy: Never`. `nix build .#image-zenohd` is the Zenoh router,
+built from the zenoh release that `Cargo.lock` pins.
+
+Every binary is one line in `nix/binaries.nix`: the attribute name (also
+the output name, the installed executable and the image name), the cargo
+package and its directory, and either `example` or `bin`, optionally with
+`features`. Adding that line is all it takes to get `packages.<name>`,
+`packages.image-<name>` and its image check.
+
+### Robot VM
+
+`nix/robot.nix` is a NixOS module for a Linux robot: a SPIRE agent with
+the join-token attestor, spiffe-helper keeping the robot's SVID in
+`/run/spiffe`, a local Envoy that carries the robot's traffic over mTLS to
+the cluster's ingress gateway, and the robot app (`mw-robot`, or the
+`hello` placeholder until it lands) running as uid 1000. The app speaks
+plain h2c to `127.0.0.1:15001` and Zenoh TCP to `127.0.0.1:17447`; Envoy's
+admin is on `127.0.0.1:15000`. The h2c listener keeps the request's
+`:authority`, which must match the robot VirtualService's host. The Zenoh
+listener opens TLS to the gateway with SNI `zenohd.apps.infra.local`
+(`MW_ZENOH_SNI`), so the gateway needs a TLS server for that host that
+routes TCP to zenohd.
+
+Nothing site specific or secret is built in. The robot reads it at boot
+from `/var/lib/mw-robot`: `join-token` (from `just helm::robot-join <name>
+unix:uid:1000`), `bundle.spiffe` (the SPIFFE-format trust bundle from
+ConfigMap `spire-system/spire-bundle`), and optionally `robot.env`, whose
+`KEY=value` lines override `MW_SPIRE_SERVER_ADDRESS` (default
+192.168.66.11), `MW_GATEWAY_ADDRESS` (192.168.66.11), `MW_GATEWAY_PORT`
+(30443), `MW_GATEWAY_SNI` (`apps.infra.local`), `MW_ZENOH_GATEWAY_PORT`
+(30443) and `MW_ZENOH_SNI`. The SPIRE agent starts only once the token and
+bundle are there. The rest boots without them.
+
+`nix run .#robot-vm` boots the module as a QEMU guest with the console on
+the terminal (root logs in automatically). The host directory given by
+`--state` (default `./robot-state`) becomes the guest's `/var/lib/mw-robot`,
+so put the three files there before booting. To put the robot on the lab
+network, give it a tap device on the lab bridge, the same way the lab's own
+nodes are attached. Create the tap once, as root: `ip tuntap add dev
+tap-mwrobot mode tap user $USER`, then `ip link set tap-mwrobot master
+br-infra up`. After that, `nix run .#robot-vm -- --tap tap-mwrobot` adds a
+second NIC with MAC 52:54:00:66:00:21, which the guest addresses statically
+as 192.168.66.21/24. `--bridge br-infra` uses QEMU's bridge helper instead,
+which needs the setuid helper and an `allow br-infra` line in
+`/etc/qemu/bridge.conf`. `--dry-run` prints the QEMU command line without
+running it.
+
+`nix flake check` builds every image and checks its contents, runs clippy
+on `mw-service`, builds the VM, and runs `checks.robot-boots`. That is a
+NixOS test which boots the robot next to a SPIRE server and an
+mTLS-checking stand-in gateway inside the nix sandbox. It follows the
+robot from attestation through to an accepted request.
+
 ## Device platform
 
 | path                 | what                                                         |

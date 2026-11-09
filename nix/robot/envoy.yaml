@@ -1,0 +1,118 @@
+# The robot's local Envoy (nix/robot.nix). Two kinds of placeholder:
+#   at-signs       filled at build time by nix (ports, paths, trust domain)
+#   ${MW_...}      filled at service start by envsubst from the runtime
+#                  environment (/var/lib/mw-robot/robot.env over the module's
+#                  defaults), so the image carries no site addresses.
+#
+# Listeners (loopback only):
+#   @httpPort@   h2c from the robot app -> HTTP/2 over mTLS to the gateway,
+#                :authority preserved (the VirtualService host the app dials)
+#   @zenohPort@  raw TCP from the robot's Zenoh session -> TLS (mTLS, SNI
+#                ${MW_ZENOH_SNI}) to the gateway, which routes it to zenohd
+# Client identity: the robot's X509-SVID, written by spiffe-helper and copied
+# into @certDir@ by mw-envoy-certs.service (file-based SDS, reloaded when a
+# file is moved into @certDir@).
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: @adminPort@ }
+
+static_resources:
+  listeners:
+    - name: robot_h2c
+      address:
+        socket_address: { address: 127.0.0.1, port_value: @httpPort@ }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: robot_h2c
+                codec_type: AUTO
+                # gRPC streams can be long lived; deadlines are the caller's.
+                stream_idle_timeout: 0s
+                route_config:
+                  name: gateway
+                  virtual_hosts:
+                    - name: all
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: gateway, timeout: 0s }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: robot_zenoh
+      address:
+        socket_address: { address: 127.0.0.1, port_value: @zenohPort@ }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: robot_zenoh
+                cluster: zenoh
+
+  clusters:
+    - name: gateway
+      type: STRICT_DNS
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: gateway
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${MW_GATEWAY_ADDRESS}", port_value: ${MW_GATEWAY_PORT} }
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: "${MW_GATEWAY_SNI}"
+          common_tls_context:
+            alpn_protocols: ["h2"]
+            tls_certificate_sds_secret_configs:
+              - name: svid
+                sds_config: { path_config_source: { path: "@sdsSvid@" }, resource_api_version: V3 }
+            combined_validation_context:
+              default_validation_context:
+                match_typed_subject_alt_names:
+                  - san_type: URI
+                    matcher: { prefix: "spiffe://@trustDomain@/" }
+              validation_context_sds_secret_config:
+                name: bundle
+                sds_config: { path_config_source: { path: "@sdsBundle@" }, resource_api_version: V3 }
+
+    - name: zenoh
+      type: STRICT_DNS
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: zenoh
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: "${MW_GATEWAY_ADDRESS}", port_value: ${MW_ZENOH_GATEWAY_PORT} }
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: "${MW_ZENOH_SNI}"
+          common_tls_context:
+            tls_certificate_sds_secret_configs:
+              - name: svid
+                sds_config: { path_config_source: { path: "@sdsSvid@" }, resource_api_version: V3 }
+            combined_validation_context:
+              default_validation_context:
+                match_typed_subject_alt_names:
+                  - san_type: URI
+                    matcher: { prefix: "spiffe://@trustDomain@/" }
+              validation_context_sds_secret_config:
+                name: bundle
+                sds_config: { path_config_source: { path: "@sdsBundle@" }, resource_api_version: V3 }

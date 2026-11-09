@@ -16,6 +16,12 @@
 - `--print-spec` works. Serving (`run_with`) and manifest rendering return `ServiceError::Unimplemented` until later 0.6 phases land; nothing panics.
 - Dependencies (mw-service only): tokio with `signal`, serde, serde_norway 0.9 (maintained fork of the deprecated serde_yaml), tracing 0.1, tracing-subscriber 0.3, opentelemetry / opentelemetry_sdk / opentelemetry-otlp 0.33 (OTLP over tonic 0.14, the same tonic as `middleware`), tracing-opentelemetry 0.34. `scripts/check-features.sh` proves none reaches an embedded build (M5).
 
+### 0.6: nix flake, container images, robot VM (M40–M48)
+- New top-level `flake.nix` (nixos-26.05, crane, rust-overlay 1.95.0): `packages.<name>` static musl binaries for each entry of `nix/binaries.nix`, `packages.image-<name>` docker-archive images `localhost/mw/<name>:<short rev | dev>` (no shell, uid 65532, CA certificates, zoneinfo, OCI labels, reproducible), and `packages.image-zenohd` (zenohd 1.10.1, the `Cargo.lock` zenoh).
+- New example `service/examples/hello.rs` (kind `demo/hello`), the pipeline's placeholder binary.
+- New NixOS module `nixosModules.robot` (`nix/robot.nix`): spire-agent (join token), spiffe-helper, Envoy (h2c 15001 and Zenoh TCP 17447 to the gateway over mTLS, admin 15000) and the robot app as uid 1000; runtime files in `/var/lib/mw-robot`. `nixosConfigurations.robot-vm` and `nix run .#robot-vm -- --tap TAP | --bridge BR` boot it under QEMU.
+- `nix flake check`: image contents, clippy, the robot VM build and launcher, the `e2e` plan, and `checks.robot-boots` (a NixOS test of attestation and mTLS end to end). `apps.e2e` is a dry-run skeleton until Phase 3.
+
 ## 0.5.0
 
 ### Migration from 0.4
