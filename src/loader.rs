@@ -39,8 +39,8 @@
 //! shell can decide with [`trust::TrustState::accept_commit`] before it
 //! activates anything. Without `trust` the loader behaves as in 0.3: a
 //! signature in the commit body is parsed and passed on, never checked.
+//! [`sha256`] itself is always built (the rpc responder cache uses it).
 
-#[cfg(feature = "trust")]
 pub mod sha256;
 pub mod trust;
 

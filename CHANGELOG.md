@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Security: OTA reply cache bound to request content (O20)
+- `rpc::Replies` keyed its cache only by `(peer MAC, request id)`. ESP-NOW source MACs are spoofable, so a station could send a victim's next id first; the victim's genuine request with that id (a signed `start`/`stop` included) was then treated as a replay, never executed, and answered with the attacker's result. Entries and the request in flight now also carry `rpc::RequestDigest` (SHA-256 of key and body, truncated to 128 bits): only an identical request replays; the same `(peer, id)` with other content runs as a new request. Retransmissions stay idempotent. The MAC is still not authenticated; signed control requests remain the authority for start, stop and commit.
+- **Breaking:** `Replies::admit(peer, id, digest, now_ms)`, `Replies::cached(peer, id, digest)`, `Replies::complete(peer, id, digest, result)`; `InFlight` has a `digest` field. Callers compute `RequestDigest::of(key, body)` from the decoded request. Updated: `espnow::rpc::RpcResponder`, the ESP base firmware's radio task, `mwctl`'s fake air.
+- `sha2` (no_std, `compress` only) is no longer optional and `loader::sha256` is built without `trust`; `trust` now adds only `ed25519-dalek` and the loader's image hashing.
+
 ## 0.5.0
 
 ### Migration from 0.4

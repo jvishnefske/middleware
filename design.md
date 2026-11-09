@@ -1716,9 +1716,10 @@ From 0.4 a device can pin an Ed25519 public key (the root of trust, held by
 the browser or by `mwctl`) on first use; from then on it installs a payload
 only when the commit is signed by that key with a strictly increasing
 version. The rules and wire types live in `middleware::loader::trust`; the
-SHA-256 and Ed25519 checks sit behind the `trust` cargo feature (no_std, no
-heap: `sha2` 0.10.9 with `compress`, `ed25519-dalek` 2.2.0 verify only, no
-default features). The ESP base firmware (`firmware/`) enables it for every
+SHA-256 image hashing and Ed25519 checks sit behind the `trust` cargo
+feature (no_std, no heap: `sha2` 0.10.9 with `compress`, `ed25519-dalek`
+2.2.0 verify only, no default features); since O20 `sha2` and
+`loader::sha256` are built without `trust` too, for the rpc reply cache. The ESP base firmware (`firmware/`) enables it for every
 chip; the ESP8266 firmware does not.
 
 System keys (all integers little-endian; the full table, including the 0.3
@@ -1873,6 +1874,28 @@ requester resends on timeout with the **same** id; the responder replays a
 cached response to a repeat instead of running the handler again, so a
 resent `commit` or `start` never acts twice. Responses go unicast to the
 requester.
+
+**Reply cache bound to request content** (from 2026-10-31, after a
+security review found cross-request poisoning: the cache was keyed by
+`(peer MAC, id)` alone, so a station spoofing a victim's MAC could send
+the victim's next id first, have its own request run and cached, and the
+victim's genuine request with that id, a signed `start` or `stop`
+included, would be taken for a repeat, never run, and answered with the
+spoofed result). Every cache entry and the request in flight also carry a
+`rpc::RequestDigest`: SHA-256 over a domain tag, the key length, the key
+and the body, truncated to 128 bits (local state, not on the wire). Only
+a byte-identical request replays; the same `(peer, id)` with another
+digest is a different request, admitted as a new one (executed when
+nothing is in flight, busy otherwise) with its own cache entry, so a
+legitimate retransmission stays idempotent and a spoofed request can
+neither suppress nor answer for a genuine one. The other entry is kept
+until least recently used, so alternating requests do not re-run each
+other. A CRC-32 was rejected: an attacker can match any CRC. SHA-256 is
+`sha2`'s block function behind `loader::sha256`, which is therefore built
+in every configuration (no_std, no heap). This does not authenticate the
+MAC: a spoofer can still send its own requests in the victim's name, a
+spoofed request in flight delays the genuine one by a resend, and signed
+control requests remain the authority for start, stop and commit.
 
 **Policy** (`esp_base::ota::admit`, before dispatch, over the air only;
 from 2026-10-30, after a security review found that anyone in radio range
@@ -2136,6 +2159,18 @@ host → bridge.
   the gated build was flashed again and the refusals, staging, signed
   stop/start, replay and a signed `upload echo.wasm --start` (3006)
   repeated with the same results.
+- [x] O20 The responder cache is bound to the request content: a spoofed
+  request with a victim's `(peer, id)` and other content does not suppress
+  the genuine request, which runs and gets its own result (also while the
+  spoofed one is in flight); a genuine retransmission still replays without
+  running the handler; digests separate key, body and their split; entries
+  sharing a `(peer, id)` share the bounded LRU cache —
+  `rpc::tests::o20_a_spoofed_request_with_the_same_id_does_not_suppress_the_genuine_one`,
+  `o20_a_spoofed_request_in_flight_does_not_suppress_the_genuine_one`,
+  `o20_request_digests_bind_key_and_body`,
+  `o20_same_id_entries_share_the_bounded_cache`;
+  `espnow::rpc::tests::o20_a_spoofed_request_with_the_next_id_does_not_suppress_the_genuine_one`;
+  replay of retransmissions stays covered by O3 and O4.
 
 ### DMA routes (ABI 4)
 

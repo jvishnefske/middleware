@@ -30,7 +30,7 @@ espnow = []
 # Signed payload updates (no_std, no heap): SHA-256 of the image while it
 # streams in, Ed25519 verification of signed commits, and the pure trust
 # state transitions. The wire types are always built; this adds the crypto.
-trust = ["dep:sha2", "dep:ed25519-dalek"]
+trust = ["dep:ed25519-dalek"]
 # The fake JPEG camera's baked frames (`stream::frames::fixtures`, about
 # 53 KB of `include_bytes!` data from `fixtures/cam`), served by
 # `SourceKind::TestPattern` for JPEG configs. no_std, no heap.
@@ -58,8 +58,10 @@ serde = { version = "1", default-features = false, features = ["derive"], option
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
 embedded-io-async = { version = "0.7", optional = true }
 # `compress` exposes the SHA-256 block function: the loader keeps its own
-# Copy-able hashing state around it (see loader/sha256.rs).
-sha2 = { version = "0.10.9", default-features = false, features = ["compress"], optional = true }
+# Copy-able hashing state around it (see loader/sha256.rs). Always built
+# (no_std, no heap, pure Rust): the rpc responder cache binds entries to a
+# SHA-256 digest of each request, and the `trust` checks hash images.
+sha2 = { version = "0.10.9", default-features = false, features = ["compress"] }
 # Verification only: no signing, no precomputed tables, no std.
 ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 

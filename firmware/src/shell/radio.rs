@@ -54,7 +54,8 @@
 //! into [`RPC_RX`] (bounded; drops counted) before the transport, which
 //! skips them as foreign. The task decodes each one: a request addressed
 //! to our MAC goes through the responder cache
-//! (`esp_base::radio::RpcReplies`): a repeat is answered from the cache, a
+//! (`esp_base::radio::RpcReplies`): a repeat (same id, key and body, by
+//! `middleware::rpc::RequestDigest`) is answered from the cache, a
 //! repeat of the request in flight (or any request while one is in flight)
 //! is dropped, and a new one is handed to the controller on the bus as a
 //! [`Port::Radio`] request from that MAC, without waiting (a full inbound
@@ -113,7 +114,7 @@ use esp_radio::wifi::{ControllerConfig, SecondaryChannel, WifiController, WifiEr
 use heapless::{String, Vec};
 use middleware::espnow::rpc::EspNowUnicast;
 use middleware::espnow::{EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, MAX_KEY, Mac};
-use middleware::rpc::{self, Admit, Message};
+use middleware::rpc::{self, Admit, Message, RequestDigest};
 use middleware::transport::HandlerError;
 #[cfg(feature = "esp32")]
 use middleware::stream::{FrameSet, FrameSource};
@@ -641,14 +642,17 @@ impl Radio {
                 return;
             }
         };
-        let (replies, admit) = self.replies.admit(src, id, now_ms());
+        // Bound to the content: a spoofed request with this id cannot make
+        // the genuine one look like a repeat (`middleware::rpc` docs).
+        let digest = RequestDigest::of(key, body);
+        let (replies, admit) = self.replies.admit(src, id, digest, now_ms());
         self.replies = replies;
         match admit {
             Admit::Busy => self.rpc = self.rpc.busy(),
             Admit::Replay => {
                 self.rpc = self.rpc.replayed();
                 let mut copy = [0u8; RPC_BODY];
-                let result = match self.replies.cached(src, id) {
+                let result = match self.replies.cached(src, id, digest) {
                     Some(Ok(b)) => copy
                         .get_mut(..b.len())
                         .map(|c| {
@@ -676,7 +680,7 @@ impl Radio {
                     }
                     None => {
                         let result = Err(HandlerError::BufferTooSmall);
-                        self.replies = self.replies.complete(src, id, result);
+                        self.replies = self.replies.complete(src, id, digest, result);
                         self.respond(src, id, result).await;
                     }
                 }
@@ -693,7 +697,7 @@ impl Radio {
         }
         self.pending = None;
         let result = reply.result.as_ref().map(|v| v.as_slice()).map_err(|e| *e);
-        self.replies = self.replies.complete(f.peer, f.id, result);
+        self.replies = self.replies.complete(f.peer, f.id, f.digest, result);
         self.respond(f.peer, f.id, result).await;
     }
 

@@ -343,7 +343,7 @@ mod tests {
     use middleware::crc::Crc32;
     use middleware::loader::trust::{ControlCounter, ControlOp};
     use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus};
-    use middleware::rpc::{Admit, Replies};
+    use middleware::rpc::{Admit, Replies, RequestDigest};
     use middleware::transport::HandlerError;
     use std::collections::VecDeque;
     use std::io;
@@ -488,13 +488,14 @@ mod tests {
             if to != DEV || dst != DEV {
                 return;
             }
-            let (replies, admit) = self.replies.admit(BRIDGE, id, 0);
+            let digest = RequestDigest::of(key, body);
+            let (replies, admit) = self.replies.admit(BRIDGE, id, digest, 0);
             self.replies = replies;
             let mut out = [0u8; 128];
             let result = match admit {
                 Admit::Busy => return,
                 Admit::Replay => {
-                    let cached = self.replies.cached(BRIDGE, id).unwrap();
+                    let cached = self.replies.cached(BRIDGE, id, digest).unwrap();
                     cached.map(|b| {
                         out[..b.len()].copy_from_slice(b);
                         b.len()
@@ -502,7 +503,7 @@ mod tests {
                 }
                 Admit::Execute => {
                     let r = self.handle(key, body, &mut out);
-                    self.replies = self.replies.complete(BRIDGE, id, r.map(|n| &out[..n]));
+                    self.replies = self.replies.complete(BRIDGE, id, digest, r.map(|n| &out[..n]));
                     r
                 }
             };

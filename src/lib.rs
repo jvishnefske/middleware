@@ -39,7 +39,9 @@
 //!   ABI 4 DMA routes.
 //! * [`rpc`] — request/response over a datagram radio (always built, pure):
 //!   the ESP-NOW request and response frames, the requester's retry rule
-//!   and the responder's duplicate suppression; `espnow::rpc` runs them
+//!   and the responder's duplicate suppression, bound to a SHA-256 digest
+//!   of each request (`loader::sha256`, always built over `sha2`'s block
+//!   function); `espnow::rpc` runs them
 //!   over an ESP-NOW radio.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
@@ -52,7 +54,7 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
-//! | `trust`    | `loader::sha256`, `loader::trust` checks | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `trust`    | `loader::trust` checks, image hashing | `no_std`, no heap | ed25519-dalek (verify only) |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |

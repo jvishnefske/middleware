@@ -45,11 +45,16 @@
 //!
 //! # Responder ([`Replies`])
 //!
-//! [`Replies::admit`] decides what to do with a request from `(peer, id)`:
+//! [`Replies::admit`] decides what to do with a request from `(peer, id)`
+//! carrying a [`RequestDigest`] of its key and body:
 //!
-//! * a request whose response is cached (the response was lost, or the
-//!   request was duplicated or delayed) is **replayed**: the cached response
-//!   is sent again and the handler does not run;
+//! * a request whose response is cached under the same `(peer, id,
+//!   digest)` (the response was lost, or the request was duplicated or
+//!   delayed) is **replayed**: the cached response is sent again and the
+//!   handler does not run;
+//! * a request with a cached `(peer, id)` but another digest is a
+//!   **different request**, not a repeat: it is admitted like a new one
+//!   (executed when nothing is in flight) and gets its own cache entry;
 //! * a repeat of the request being executed (the requester timed out while
 //!   a slow request, such as a flash erase, runs) is **busy**: dropped, its
 //!   response follows;
@@ -65,8 +70,28 @@
 //! cached, so a repeat of that request runs again. A requester sends
 //! sequentially, so a duplicate that arrives after `N` newer responses
 //! would run again: that needs a frame delayed across `N` round trips.
+//!
+//! ## Cross-request poisoning
+//!
+//! ESP-NOW source MACs are not authenticated. Were the cache keyed by
+//! `(peer, id)` alone, a station spoofing a victim's MAC could send
+//! `(victim, next id)` first: its request would run and be cached, and the
+//! victim's genuine request with that id (a signed `start` or `stop`, say)
+//! would be taken for a repeat, never run, and answered with the spoofed
+//! request's result. Binding every cache entry and the request in flight
+//! to the [`RequestDigest`] (SHA-256 of key and body, truncated to 128
+//! bits) stops that: only a byte-identical request replays an entry, so a
+//! spoofed request cannot suppress or answer for a genuine one, while a
+//! genuine retransmission (same id, same bytes) still replays without
+//! running the handler again. A spoofed request whose id matches the
+//! request in flight is dropped as busy, like any request while one runs;
+//! the genuine requester's resend runs once the responder is free. This
+//! does not authenticate the MAC: a spoofer can still send its own
+//! requests in the victim's name, and signed control requests
+//! (`loader::trust`) remain the authority for start, stop and commit.
 
 use crate::key::Key;
+use crate::loader::sha256::ImageHash;
 use crate::transport::{HandlerError, Limits};
 
 /// First two bytes of every request/response frame.
@@ -348,13 +373,48 @@ impl Call {
     }
 }
 
+/// Domain separation for [`RequestDigest`].
+const DIGEST_DOMAIN: &[u8] = b"mw-rpc-request-v1\0";
+
+/// Identifies a request's content for the responder cache: the first 16
+/// bytes of SHA-256 over `"mw-rpc-request-v1\0" || key length u32 LE ||
+/// key || body`. The key length makes the key/body split part of the content.
+/// Local state only, never on the wire. 128 bits of a collision-resistant
+/// hash, so a station cannot craft another request that replays the cached
+/// response of a genuine one (see the module docs on poisoning); a CRC
+/// would not do, since an attacker can match any CRC at will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestDigest(pub [u8; 16]);
+
+impl RequestDigest {
+    /// The digest of a request with `key` and `body`: one SHA-256 pass,
+    /// bounded by the input (for a frame, at most [`ROOM`] + 22 bytes, five
+    /// block compressions).
+    pub fn of(key: Key<'_>, body: &[u8]) -> Self {
+        let k = key.as_bytes();
+        let len = u32::try_from(k.len()).unwrap_or(u32::MAX).to_le_bytes();
+        let full = ImageHash::new()
+            .update(DIGEST_DOMAIN)
+            .update(&len)
+            .update(k)
+            .update(body)
+            .finish();
+        let mut out = [0u8; 16];
+        if let Some(head) = full.get(..16) {
+            out.copy_from_slice(head);
+        }
+        RequestDigest(out)
+    }
+}
+
 /// What a responder does with a request ([`Replies::admit`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admit {
     /// Run the handler; the request is now in flight.
     Execute,
     /// Send the cached response again ([`Replies::cached`]); do not run the
-    /// handler.
+    /// handler. Only for a request identical to the one cached (same peer,
+    /// id and [`RequestDigest`]).
     Replay,
     /// Drop the request: it repeats the one in flight, or another one is in
     /// flight.
@@ -368,6 +428,8 @@ pub struct InFlight {
     pub peer: Mac,
     /// Its correlation id.
     pub id: u16,
+    /// Its content.
+    pub digest: RequestDigest,
     /// When it was admitted (milliseconds, wrapping).
     pub since_ms: u32,
 }
@@ -377,6 +439,7 @@ pub struct InFlight {
 struct Cached<const B: usize> {
     peer: Mac,
     id: u16,
+    digest: RequestDigest,
     /// 0 for success, else the error code.
     status: u8,
     len: u8,
@@ -429,28 +492,39 @@ impl<const N: usize, const B: usize> Replies<N, B> {
         self.in_flight
     }
 
-    fn find(&self, peer: Mac, id: u16) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|e| e.as_ref().is_some_and(|c| c.peer == peer && c.id == id))
+    fn find(&self, peer: Mac, id: u16, digest: RequestDigest) -> Option<usize> {
+        self.entries.iter().position(|e| {
+            e.as_ref()
+                .is_some_and(|c| c.peer == peer && c.id == id && c.digest == digest)
+        })
     }
 
-    /// The cached response to `(peer, id)`.
-    pub fn cached(&self, peer: Mac, id: u16) -> Option<Result<&[u8], HandlerError>> {
-        let i = self.find(peer, id)?;
+    /// The cached response to request `(peer, id)` with content `digest`.
+    /// An entry for the same `(peer, id)` with another digest is a
+    /// different request's response and is not returned.
+    pub fn cached(
+        &self,
+        peer: Mac,
+        id: u16,
+        digest: RequestDigest,
+    ) -> Option<Result<&[u8], HandlerError>> {
+        let i = self.find(peer, id, digest)?;
         self.entries.get(i)?.as_ref().map(Cached::result)
     }
 
-    /// Decides what to do with request `id` from `peer` at `now_ms` (see
-    /// the module docs).
-    pub fn admit(self, peer: Mac, id: u16, now_ms: u32) -> (Self, Admit) {
+    /// Decides what to do with request `id` from `peer`, whose key and body
+    /// hash to `digest`, at `now_ms` (see the module docs). Only an
+    /// identical cached request replays; the same `(peer, id)` with other
+    /// content is admitted as a new request, so a spoofed request cannot
+    /// suppress a genuine one.
+    pub fn admit(self, peer: Mac, id: u16, digest: RequestDigest, now_ms: u32) -> (Self, Admit) {
         let mut next = self;
         if let Some(f) = next.in_flight
             && now_ms.wrapping_sub(f.since_ms) >= IN_FLIGHT_LIMIT_MS
         {
             next.in_flight = None;
         }
-        if let Some(i) = next.find(peer, id) {
+        if let Some(i) = next.find(peer, id, digest) {
             next.clock = next.clock.wrapping_add(1);
             if let Some(Some(c)) = next.entries.get_mut(i) {
                 c.stamp = next.clock;
@@ -463,18 +537,31 @@ impl<const N: usize, const B: usize> Replies<N, B> {
         next.in_flight = Some(InFlight {
             peer,
             id,
+            digest,
             since_ms: now_ms,
         });
         (next, Admit::Execute)
     }
 
-    /// Request `(peer, id)` finished with `result`: it is no longer in
-    /// flight and its response is cached (unless the body exceeds `B`).
-    /// A completion for a request not in flight (abandoned meanwhile) is
+    /// Request `(peer, id)` with content `digest` finished with `result`:
+    /// it is no longer in flight and its response is cached under `(peer,
+    /// id, digest)` (unless the body exceeds `B`), replacing only an entry
+    /// for that same request; an entry for the same `(peer, id)` with
+    /// another digest stays until it is the least recently used. A
+    /// completion for a request not in flight (abandoned meanwhile) is
     /// still cached.
-    pub fn complete(self, peer: Mac, id: u16, result: Result<&[u8], HandlerError>) -> Self {
+    pub fn complete(
+        self,
+        peer: Mac,
+        id: u16,
+        digest: RequestDigest,
+        result: Result<&[u8], HandlerError>,
+    ) -> Self {
         let mut next = self;
-        if next.in_flight.is_some_and(|f| f.peer == peer && f.id == id) {
+        if next
+            .in_flight
+            .is_some_and(|f| f.peer == peer && f.id == id && f.digest == digest)
+        {
             next.in_flight = None;
         }
         let (status, body) = match result {
@@ -493,6 +580,7 @@ impl<const N: usize, const B: usize> Replies<N, B> {
         let entry = Cached {
             peer,
             id,
+            digest,
             status,
             len,
             body: stored,
@@ -500,7 +588,7 @@ impl<const N: usize, const B: usize> Replies<N, B> {
         };
         let clock = next.clock;
         let victim = next
-            .find(peer, id)
+            .find(peer, id, digest)
             .or_else(|| next.entries.iter().position(Option::is_none))
             .or_else(|| {
                 // Least recently used: the largest age (wrapping).
@@ -767,80 +855,171 @@ mod tests {
 
     type R = Replies<3, 8>;
 
+    /// The digest of a `sys/info` request with body `[n]`.
+    fn d(n: u8) -> RequestDigest {
+        RequestDigest::of(INFO, &[n])
+    }
+
     #[test]
     fn o3_a_request_runs_once_and_repeats_replay_its_response() {
-        let (r, a) = R::new().admit(HOST, 1, 0);
+        let (r, a) = R::new().admit(HOST, 1, d(1), 0);
         assert_eq!(a, Admit::Execute);
         assert_eq!(
             r.in_flight(),
             Some(InFlight {
                 peer: HOST,
                 id: 1,
+                digest: d(1),
                 since_ms: 0
             })
         );
-        let (r, a) = r.admit(HOST, 1, 5);
+        let (r, a) = r.admit(HOST, 1, d(1), 5);
         assert_eq!(a, Admit::Busy, "a resend while it runs");
-        let (r, a) = r.admit(OTHER, 9, 5);
+        let (r, a) = r.admit(OTHER, 9, d(9), 5);
         assert_eq!(a, Admit::Busy, "another request while one runs");
-        let r = r.complete(HOST, 1, Ok(b"done"));
+        let r = r.complete(HOST, 1, d(1), Ok(b"done"));
         assert_eq!(r.in_flight(), None);
-        let (r, a) = r.admit(HOST, 1, 6);
+        let (r, a) = r.admit(HOST, 1, d(1), 6);
         assert_eq!(a, Admit::Replay);
-        assert_eq!(r.cached(HOST, 1), Some(Ok(&b"done"[..])));
-        assert_eq!(r.cached(OTHER, 1), None, "per requester");
-        let (r, a) = r.admit(HOST, 2, 7);
+        assert_eq!(r.cached(HOST, 1, d(1)), Some(Ok(&b"done"[..])));
+        assert_eq!(r.cached(OTHER, 1, d(1)), None, "per requester");
+        let (r, a) = r.admit(HOST, 2, d(2), 7);
         assert_eq!(a, Admit::Execute);
-        let r = r.complete(HOST, 2, Err(HandlerError::Denied));
-        let (r, a) = r.admit(HOST, 2, 8);
+        let r = r.complete(HOST, 2, d(2), Err(HandlerError::Denied));
+        let (r, a) = r.admit(HOST, 2, d(2), 8);
         assert_eq!(a, Admit::Replay);
-        assert_eq!(r.cached(HOST, 2), Some(Err(HandlerError::Denied)));
+        assert_eq!(r.cached(HOST, 2, d(2)), Some(Err(HandlerError::Denied)));
         // A delayed duplicate of the first request still replays.
-        assert_eq!(r.admit(HOST, 1, 9).1, Admit::Replay);
+        assert_eq!(r.admit(HOST, 1, d(1), 9).1, Admit::Replay);
     }
 
     #[test]
     fn o3_the_cache_is_bounded_least_recently_used_and_skips_large_bodies() {
         let mut r = R::new();
         for id in 1..=3u16 {
-            let (n, a) = r.admit(HOST, id, 0);
+            let (n, a) = r.admit(HOST, id, d(id as u8), 0);
             assert_eq!(a, Admit::Execute);
-            r = n.complete(HOST, id, Ok(&[id as u8]));
+            r = n.complete(HOST, id, d(id as u8), Ok(&[id as u8]));
         }
         // Touch 1, so 2 is the least recently used.
-        r = r.admit(HOST, 1, 0).0;
-        r = r.admit(HOST, 4, 0).0.complete(HOST, 4, Ok(&[4]));
-        assert_eq!(r.cached(HOST, 2), None);
+        r = r.admit(HOST, 1, d(1), 0).0;
+        r = r.admit(HOST, 4, d(4), 0).0.complete(HOST, 4, d(4), Ok(&[4]));
+        assert_eq!(r.cached(HOST, 2, d(2)), None);
         for id in [1u16, 3, 4] {
-            assert_eq!(r.cached(HOST, id), Some(Ok(&[id as u8][..])));
+            assert_eq!(r.cached(HOST, id, d(id as u8)), Some(Ok(&[id as u8][..])));
         }
         // A body over B bytes is not cached: a repeat runs again.
-        let (n, _) = r.admit(HOST, 5, 0);
-        let r = n.complete(HOST, 5, Ok(&[0u8; 9]));
+        let (n, _) = r.admit(HOST, 5, d(5), 0);
+        let r = n.complete(HOST, 5, d(5), Ok(&[0u8; 9]));
         assert_eq!(r.in_flight(), None);
-        assert_eq!(r.admit(HOST, 5, 0).1, Admit::Execute);
+        assert_eq!(r.admit(HOST, 5, d(5), 0).1, Admit::Execute);
     }
 
     #[test]
     fn o3_an_abandoned_or_stale_request_frees_the_responder() {
-        let (r, _) = R::new().admit(HOST, 1, 100);
+        let (r, _) = R::new().admit(HOST, 1, d(1), 100);
         assert_eq!(
-            r.abandon().admit(HOST, 1, 101).1,
+            r.abandon().admit(HOST, 1, d(1), 101).1,
             Admit::Execute,
             "abandoned: a resend runs"
         );
         assert_eq!(
-            r.admit(HOST, 2, 100 + IN_FLIGHT_LIMIT_MS - 1).1,
+            r.admit(HOST, 2, d(2), 100 + IN_FLIGHT_LIMIT_MS - 1).1,
             Admit::Busy
         );
-        let (late, a) = r.admit(HOST, 2, 100 + IN_FLIGHT_LIMIT_MS);
+        let (late, a) = r.admit(HOST, 2, d(2), 100 + IN_FLIGHT_LIMIT_MS);
         assert_eq!(a, Admit::Execute, "a request in flight too long is dropped");
         // Its completion, arriving late, is cached without disturbing the new one.
-        let late = late.complete(HOST, 1, Ok(&[]));
+        let late = late.complete(HOST, 1, d(1), Ok(&[]));
         assert_eq!(late.in_flight().map(|f| f.id), Some(2));
-        assert_eq!(late.cached(HOST, 1), Some(Ok(&[][..])));
+        assert_eq!(late.cached(HOST, 1, d(1)), Some(Ok(&[][..])));
         // The clock wraps.
-        let (r, _) = R::new().admit(HOST, 1, u32::MAX - 5);
-        assert_eq!(r.admit(HOST, 2, 10).1, Admit::Busy);
+        let (r, _) = R::new().admit(HOST, 1, d(1), u32::MAX - 5);
+        assert_eq!(r.admit(HOST, 2, d(2), 10).1, Admit::Busy);
+    }
+
+    #[test]
+    fn o20_request_digests_bind_key_and_body() {
+        let stop = Key::from_static("sys/payload/stop");
+        let start = Key::from_static("sys/payload/start");
+        assert_eq!(RequestDigest::of(stop, b"sig"), RequestDigest::of(stop, b"sig"));
+        assert_ne!(RequestDigest::of(stop, b"sig"), RequestDigest::of(stop, b"sih"));
+        assert_ne!(RequestDigest::of(stop, b"sig"), RequestDigest::of(start, b"sig"));
+        // The key/body split is part of the content.
+        assert_ne!(
+            RequestDigest::of(Key::from_static("sys/a"), b"bc"),
+            RequestDigest::of(Key::from_static("sys/ab"), b"c")
+        );
+        assert_ne!(RequestDigest::of(stop, b""), RequestDigest::of(stop, &[0]));
+    }
+
+    #[test]
+    fn o20_a_spoofed_request_with_the_same_id_does_not_suppress_the_genuine_one() {
+        let spoofed = d(0xEE);
+        let genuine = d(1);
+        // The attacker, claiming HOST's MAC, gets id 7 in first.
+        let (r, a) = R::new().admit(HOST, 7, spoofed, 0);
+        assert_eq!(a, Admit::Execute);
+        let r = r.complete(HOST, 7, spoofed, Ok(b"evil"));
+        // HOST's genuine request with id 7 is not a repeat: it runs.
+        let (r, a) = r.admit(HOST, 7, genuine, 1);
+        assert_eq!(a, Admit::Execute, "a different request, not a replay");
+        assert_eq!(r.cached(HOST, 7, genuine), None, "never the spoofed result");
+        let r = r.complete(HOST, 7, genuine, Ok(b"ok"));
+        assert_eq!(r.cached(HOST, 7, genuine), Some(Ok(&b"ok"[..])));
+        // The genuine retransmission replays its own response, without running.
+        let (r, a) = r.admit(HOST, 7, genuine, 2);
+        assert_eq!(a, Admit::Replay);
+        assert_eq!(r.cached(HOST, 7, genuine), Some(Ok(&b"ok"[..])));
+        // The attacker's repeat replays its own entry and leaves the genuine one.
+        let (r, a) = r.admit(HOST, 7, spoofed, 3);
+        assert_eq!(a, Admit::Replay);
+        assert_eq!(r.cached(HOST, 7, spoofed), Some(Ok(&b"evil"[..])));
+        assert_eq!(r.admit(HOST, 7, genuine, 4).1, Admit::Replay);
+    }
+
+    #[test]
+    fn o20_a_spoofed_request_in_flight_does_not_suppress_the_genuine_one() {
+        let spoofed = d(0xEE);
+        let genuine = d(1);
+        let (r, a) = R::new().admit(HOST, 7, spoofed, 0);
+        assert_eq!(a, Admit::Execute);
+        // The genuine request arrives while the spoofed one runs: busy, as
+        // any request while one runs; it is not recorded as handled.
+        let (r, a) = r.admit(HOST, 7, genuine, 1);
+        assert_eq!(a, Admit::Busy);
+        // A completion naming the right (peer, id) but another content does
+        // not finish the request in flight.
+        let still = r.complete(HOST, 7, genuine, Ok(b"x"));
+        assert_eq!(still.in_flight().map(|f| f.digest), Some(spoofed));
+        let r = r.complete(HOST, 7, spoofed, Ok(b"evil"));
+        assert_eq!(r.in_flight(), None);
+        // The genuine resend then runs and gets its own result.
+        let (r, a) = r.admit(HOST, 7, genuine, 2);
+        assert_eq!(a, Admit::Execute);
+        assert_eq!(r.in_flight().map(|f| f.digest), Some(genuine));
+        let r = r.complete(HOST, 7, genuine, Ok(b"ok"));
+        assert_eq!(r.cached(HOST, 7, genuine), Some(Ok(&b"ok"[..])));
+        assert_eq!(r.admit(HOST, 7, genuine, 3).1, Admit::Replay);
+    }
+
+    #[test]
+    fn o20_same_id_entries_share_the_bounded_cache() {
+        // Two contents under one (peer, id) take two slots; eviction stays
+        // least recently used over all N entries.
+        let mut r = R::new();
+        for (i, n) in [(1u16, 1u8), (1, 2), (2, 3)] {
+            r = r.admit(HOST, i, d(n), 0).0.complete(HOST, i, d(n), Ok(&[n]));
+        }
+        r = r.admit(HOST, 1, d(1), 0).0; // touch (1, d1): (1, d2) is the oldest
+        r = r.admit(HOST, 3, d(4), 0).0.complete(HOST, 3, d(4), Ok(&[4]));
+        assert_eq!(r.cached(HOST, 1, d(2)), None);
+        assert_eq!(r.cached(HOST, 1, d(1)), Some(Ok(&[1][..])));
+        assert_eq!(r.cached(HOST, 2, d(3)), Some(Ok(&[3][..])));
+        assert_eq!(r.cached(HOST, 3, d(4)), Some(Ok(&[4][..])));
+        // Completing the same request again replaces its entry in place.
+        let r = r.complete(HOST, 3, d(4), Ok(&[5]));
+        assert_eq!(r.cached(HOST, 3, d(4)), Some(Ok(&[5][..])));
+        assert_eq!(r.cached(HOST, 2, d(3)), Some(Ok(&[3][..])));
     }
 }
