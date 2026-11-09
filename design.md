@@ -318,6 +318,19 @@ because WASM linear memory and the wasmi interpreter require one.
   `parse_rejects_bad_bodies_and_passes_app_keys`, `device_info_round_trips`.
 - [x] S7 The payload ABI (imports, exports, error codes, bounds checks) is
   defined once in `wasm_abi` — `wasm_abi::tests::*`.
+- [x] S8 `sys/reboot` takes a one-byte mode (0 restart the firmware, 1 enter
+  the bootloader); any other byte or body length is `InvalidRequest`. The
+  device answers first and reboots only once the reply is flushed; a mode
+  the shell cannot carry out is `NotFound` and nothing happens. The ESP32
+  family and the ESP8266 support mode 0 only —
+  `loader::tests::reboot_parses_mode_byte_and_round_trips`,
+  `commands_round_trip_through_parse`;
+  `firmware` `dispatch::tests::reboot_replies_ok_then_asks_for_the_reboot`,
+  `reboot_to_unsupported_mode_is_not_found`, `reboot_with_bad_mode_is_invalid`;
+  `firmware-esp8266` `controller::tests::reboot_replies_first_then_returns_normal_mode`;
+  `protocol-wasm` `loader::tests::device_loader_passes_system_and_app_commands`.
+  The resets themselves (ESP `software_reset`, ESP8266 short watchdog stage)
+  are untested on silicon.
 
 ### WASM runtime (`wasm-host`)
 
@@ -372,7 +385,7 @@ because WASM linear memory and the wasmi interpreter require one.
   `firmware/build.sh esp32`, `esp32s3`, `esp32c3` release builds; `compile_error!` in `firmware/src/main.rs` unless exactly one chip feature is set.
 - [ ] E2 Serves the protocol on UART0 (bridge chips) on all chips and on
   USB-Serial-JTAG on S3 and C3. Implemented (`firmware/src/shell/board.rs`,
-  `link.rs`) and builds. Hardware evidence so far: UART0 behind a CH340 on an
+  `firmware/src/embassy/link.rs`) and builds. Hardware evidence so far: UART0 behind a CH340 on an
   ESP8266EX (`firmware-esp8266`, 2026-10-25): `mwctl info`, `upload`,
   `reset` + `monitor` and `start` all ran against `/dev/ttyUSB0`, including
   recovery from the ROM's 74880-baud boot output. ESP32 family and
@@ -386,6 +399,24 @@ because WASM linear memory and the wasmi interpreter require one.
 - [x] E5 Bridges payload publish/subscribe to the serial link and GPIO to
   the chip, refusing pins used by flash, USB or the console UART —
   `chip::tests::console_uart_pins_are_reserved`, `flash_psram_and_usb_pins_are_refused`, `missing_pins_are_invalid`, `esp32_input_only_pins_refuse_output`, `general_purpose_pins_are_allowed`; `dispatch::tests::publications_route_only_to_running_subscribed_payloads`. Runs payloads on ESP32 and ESP32-S3 only; the C3 has no runtime.
+  The same profile table describes the Raspberry Pi Pico (RP2040, `rp2040`
+  in `sys/info`, protocol only, no heap) and Pico 2 (RP2350, `rp2350`, runs
+  payloads with the ESP32-S3's heap, memory and image caps), reserving the
+  boards' GP23, GP24, GP25 and GP29 and UART0 on GP0/GP1 —
+  `chip::tests::pico_board_pins_are_reserved_and_the_rest_usable`,
+  `console_uart_pins_are_reserved`, `profiles_match_chips`,
+  `heap_leaves_room_for_payload`, `heapless_profiles_have_no_linear_memory`.
+- [x] L1 The embassy half of the shell (message bus, serial link tasks,
+  controller) lives in the `esp_base` library behind the `embassy` feature,
+  free of esp-* dependencies and generic over the flash, the port set and,
+  with `wasm`, the board's payload device and interrupt event source; the
+  ESP binary instantiates it with `FlashStorage`, two ports and
+  `EspDevice` —
+  `cargo check --lib --no-default-features --features embassy --target thumbv6m-none-eabi`,
+  `cargo check --lib --no-default-features --features embassy,wasm --target thumbv8m.main-none-eabihf`
+  (in `firmware/`), and the `firmware/build.sh` release builds of every ESP
+  chip. The lifted controller has no unit tests of its own; its decisions
+  are the `dispatch` tests above.
 - [x] E6 Produces merged flash images per chip for the web flasher —
   `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
 
@@ -430,7 +461,7 @@ handlers); the unsafe asm stays in that vendored dependency.
 
 ### Host tool (`tools/mwctl`)
 
-`mwctl --port <PATH> info|upload|start|stop|monitor|reset` drives a device
+`mwctl --port <PATH> info|upload|start|stop|monitor|reboot|reset` drives a device
 over one named serial port, synchronously, with the same pure frame and
 loader code as the firmware. It never enumerates ports. It opens the port
 without resetting the board (verified on the CH340 board: no boot output on
@@ -439,6 +470,11 @@ open).
 - [x] T1 Protocol logic is tested against an in-memory device running the
   real splitter and loader —
   `device::tests::info_decodes_a_protocol_only_esp8266`, `upload_happy_path_installs_reports_progress_and_starts`, `dropped_chunk_reply_is_retried_and_the_device_deduplicates`, `dropped_request_and_late_reply_are_handled`, `exhausted_retries_time_out`, `corrupt_chunk_makes_commit_fail_on_the_device`, `start_without_runtime_is_a_clear_error`, `oversized_image_is_refused_at_begin`, `boot_garbage_before_the_first_reply_needs_no_retry`; `link::tests::garbage_without_delimiter_before_a_frame_is_skipped`, `garbage_with_delimiters_is_noise_and_frames_still_decode`; `plan::tests::*`, `cli::tests::*`.
+- [x] T2 `mwctl reboot [--bootloader]` sends `sys/reboot` with mode 0 or 1
+  and explains a `NotFound` reply; the RTS-pulse `reset` is unchanged —
+  `device::tests::reboot_sends_the_mode_byte_and_reports_unsupported_modes`,
+  `cli::tests::parses_every_command`, `rejects_bad_usage`,
+  `error::tests::generic_explanations_cover_every_status`.
 
 ### Web site (`web/`)
 

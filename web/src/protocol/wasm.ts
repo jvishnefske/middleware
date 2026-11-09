@@ -53,11 +53,12 @@ export interface DeviceInfo {
 export interface LoaderStepResult {
   statusCode: number;
   status: string;
-  action?: "app" | "info" | "start" | "stop" | "erase" | "write" | "activate";
+  action?: "app" | "info" | "start" | "stop" | "reboot" | "erase" | "write" | "activate";
   offset?: number;
   data?: Uint8Array;
   len?: number;
   crc?: number;
+  mode?: number;
 }
 
 export interface ProtocolConstants {

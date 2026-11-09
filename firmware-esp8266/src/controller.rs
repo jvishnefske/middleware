@@ -1,7 +1,7 @@
 //! The controller: dispatcher state plus the payload store, without a WASM
 //! runtime.
 //!
-//! A synchronous port of the non-`wasm` path of `firmware/src/shell/
+//! A synchronous port of the non-`wasm` path of `firmware/src/embassy/
 //! controller.rs`. All decisions come from [`esp_base::dispatch`]; this
 //! module performs the storage effects on an [`esp_base::store::
 //! PayloadStore`] and emits the replies and publications through an
@@ -15,7 +15,12 @@
 //!   `sys/payload/status`.
 //! * [`Controller::on_frame`] answers requests: `sys/info`, the loader
 //!   (`begin` erases, `chunk` writes, `commit` activates),
-//!   `sys/payload/stop` (`Ok`, nothing runs). `sys/payload/start` is
+//!   `sys/payload/stop` (`Ok`, nothing runs), and `sys/reboot`:
+//!   [`Context::reboot`] is [`RebootSupport::Normal`], so mode 0 is
+//!   answered `Ok` and [`Controller::on_frame`] then returns
+//!   [`RebootMode::Normal`] for the shell to carry out (the reply has
+//!   already been written to the port by then); mode 1 (bootloader) is
+//!   answered `NotFound`. `sys/payload/start` is
 //!   answered `NotFound` by dispatch because [`Context::runtime`] is
 //!   `false`, exactly as on the ESP32-C3 build without `wasm`. Publications
 //!   and responses from the host are ignored: there is no payload to
@@ -32,7 +37,9 @@ use core::fmt::{self, Write as _};
 
 use embedded_storage::nor_flash::NorFlash;
 use esp_base::chip::Profile;
-use esp_base::dispatch::{Action, Context, Outcome, State, handle_request};
+use esp_base::dispatch::{
+    Action, Context, Outcome, RebootMode, RebootSupport, State, handle_request,
+};
 use esp_base::store::{PayloadStore, StoreError};
 use middleware::Key;
 use middleware::loader::{PayloadStatus, keys};
@@ -117,6 +124,7 @@ impl<F: NorFlash> Controller<F> {
             firmware: FIRMWARE,
             capacity,
             runtime: profile.runtime,
+            reboot: RebootSupport::Normal,
         };
         log(
             out,
@@ -147,15 +155,26 @@ impl<F: NorFlash> Controller<F> {
         &self.ctx
     }
 
-    /// Handles one frame from the host.
-    pub fn on_frame(&mut self, frame: &Frame<'_>, out: &mut impl Outbound) {
-        if let Frame::Request { id, key, payload } = *frame {
-            self.request(id, key, payload, out);
+    /// Handles one frame from the host. Returns the reboot mode once a
+    /// `sys/reboot` request has been answered on `out`: the shell must
+    /// reboot then, after the reply.
+    #[must_use = "a returned reboot mode must be carried out"]
+    pub fn on_frame(&mut self, frame: &Frame<'_>, out: &mut impl Outbound) -> Option<RebootMode> {
+        match *frame {
+            Frame::Request { id, key, payload } => self.request(id, key, payload, out),
+            _ => None,
         }
     }
 
-    /// Dispatches one request, performs its storage action, and replies.
-    fn request(&mut self, id: u8, key: Key<'_>, body: &[u8], out: &mut impl Outbound) {
+    /// Dispatches one request, performs its storage action, and replies;
+    /// a reboot is returned only after the reply has been sent.
+    fn request(
+        &mut self,
+        id: u8,
+        key: Key<'_>,
+        body: &[u8],
+        out: &mut impl Outbound,
+    ) -> Option<RebootMode> {
         let mut reply = [0u8; MAX_REPLY];
         let outcome = handle_request(self.state, &self.ctx, key, body, &mut reply);
         let result = match self.storage(&outcome) {
@@ -180,6 +199,10 @@ impl<F: NorFlash> Controller<F> {
         };
         let body = result.and_then(|n| reply.get(..n).ok_or(HandlerError::BufferTooSmall));
         out.respond(id, body);
+        match outcome.action {
+            Action::Reboot(mode) => Some(mode),
+            _ => None,
+        }
     }
 
     fn store(&mut self) -> Result<&mut PayloadStore<F>, StoreError> {
@@ -191,7 +214,7 @@ impl<F: NorFlash> Controller<F> {
             Action::Erase { len } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
             Action::Activate { len, crc } => self.store()?.activate(len, crc),
-            Action::None | Action::Start | Action::Stop => Ok(()),
+            Action::None | Action::Start | Action::Stop | Action::Reboot(_) => Ok(()),
         }
     }
 
@@ -279,7 +302,7 @@ mod tests {
         key: Key<'static>,
         body: &[u8],
     ) -> Result<Vec<u8>, HandlerError> {
-        ctl.on_frame(
+        let reboot = ctl.on_frame(
             &Frame::Request {
                 id,
                 key,
@@ -287,6 +310,7 @@ mod tests {
             },
             rec,
         );
+        assert_eq!(reboot, None, "only sys/reboot asks for a reboot");
         let (got, result) = rec.last().clone();
         assert_eq!(got, id);
         result
@@ -456,21 +480,52 @@ mod tests {
             Err(HandlerError::NotFound)
         );
         // Publications and responses from the host get no answer.
-        ctl.on_frame(
+        let none = ctl.on_frame(
             &Frame::Publish {
                 key: Key::from_static("app/x"),
                 payload: b"",
             },
             &mut rec,
         );
-        ctl.on_frame(
+        assert_eq!(none, None);
+        let none = ctl.on_frame(
             &Frame::Response {
                 id: 5,
                 result: Ok(b""),
             },
             &mut rec,
         );
+        assert_eq!(none, None);
         assert_eq!(rec.responses.len(), 2);
+    }
+
+    #[test]
+    fn reboot_replies_first_then_returns_normal_mode() {
+        let mut ctl = Controller::boot(ram(), &ESP8266, &mut Recorder::default());
+        let mut rec = Recorder::default();
+        let frame = Frame::Request {
+            id: 7,
+            key: keys::REBOOT,
+            payload: &[0],
+        };
+        // The reply is already recorded when the mode comes back.
+        assert_eq!(ctl.on_frame(&frame, &mut rec), Some(RebootMode::Normal));
+        assert_eq!(rec.responses, vec![(7, Ok(vec![]))]);
+
+        let frame = Frame::Request {
+            id: 8,
+            key: keys::REBOOT,
+            payload: &[1],
+        };
+        assert_eq!(ctl.on_frame(&frame, &mut rec), None);
+        assert_eq!(rec.last(), &(8, Err(HandlerError::NotFound)));
+        let frame = Frame::Request {
+            id: 9,
+            key: keys::REBOOT,
+            payload: &[2],
+        };
+        assert_eq!(ctl.on_frame(&frame, &mut rec), None);
+        assert_eq!(rec.last(), &(9, Err(HandlerError::InvalidRequest)));
     }
 
     #[test]
@@ -540,7 +595,7 @@ mod tests {
             Ok(Rx::Frame(Ok(f))) => f,
             other => panic!("{other:?}"),
         };
-        ctl.on_frame(&frame, &mut Port::new(&mut link, &mut bufs));
+        assert_eq!(ctl.on_frame(&frame, &mut Port::new(&mut link, &mut bufs)), None);
         let mut tx = link.into_inner().tx;
         assert_eq!(tx.pop(), Some(0));
         match middleware::serial::frame::decode_wire(&mut tx).unwrap() {

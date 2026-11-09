@@ -62,8 +62,18 @@ esp32c3 = [
 # the firmware still serves sys/info, the loader and flash storage, reports
 # firmware version `<ver>+no-wasm`, and refuses sys/payload/start.
 wasm = ["dep:wasm-host"]
+# The portable embassy shell in the lib (`esp_base::embassy`): bus, link
+# tasks and controller, with no chip HAL, so non-ESP firmware (Raspberry Pi
+# Pico) can depend on it with `default-features = false`.
+embassy = [
+  "dep:embassy-time",
+  "dep:embassy-sync",
+  "dep:embassy-futures",
+  "dep:embedded-io-async",
+]
 # Internal: the imperative shell's dependencies, pulled in by a chip feature.
 shell = [
+  "embassy",
   "dep:esp-hal",
   "dep:esp-rtos",
   "dep:esp-bootloader-esp-idf",
@@ -72,12 +82,8 @@ shell = [
   "dep:esp-println",
   "dep:esp-storage",
   "dep:embassy-executor",
-  "dep:embassy-time",
-  "dep:embassy-sync",
-  "dep:embassy-futures",
   "dep:static_cell",
   "dep:critical-section",
-  "dep:embedded-io-async",
 ]
 
 [dependencies]

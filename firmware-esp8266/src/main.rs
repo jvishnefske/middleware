@@ -14,6 +14,12 @@
 //!    [`firmware_esp8266::link::RX_BUDGET`] bytes per pass, so the ~128-byte
 //!    RX FIFO is drained often), and hand each complete frame to the
 //!    controller, which writes its reply before the next poll.
+//! 5. When the controller returns a `sys/reboot` mode (only
+//!    [`RebootMode::Normal`]; the bootloader mode is answered `NotFound`),
+//!    its reply has already been written; the watchdog is restarted with
+//!    its shortest stage (~0.84 s, ample for the reply to leave the TX FIFO)
+//!    and no longer fed, so it resets the chip. This is the same safe
+//!    watchdog reset the panic handler relies on.
 //!
 //! All buffers (the frame splitter and the transmit buffers, about 3 KiB)
 //! live on `main`'s stack and are passed down; there is no heap and no
@@ -34,6 +40,7 @@
 use core::panic::PanicInfo;
 
 use esp_base::chip::ESP8266;
+use esp_base::dispatch::RebootMode;
 use esp8266_hal::flash::ESPFlash;
 use esp8266_hal::prelude::*;
 use esp8266_hal::target::Peripherals;
@@ -98,9 +105,22 @@ fn main() -> ! {
         watchdog.feed();
         // Receive errors (framing, overrun) only cost the current frame;
         // the splitter resynchronises at the next delimiter.
-        if let Ok(Rx::Frame(Ok(frame))) = link.poll(&mut splitter) {
-            controller.on_frame(&frame, &mut Port::new(&mut link, &mut tx));
+        if let Ok(Rx::Frame(Ok(frame))) = link.poll(&mut splitter)
+            && let Some(RebootMode::Normal | RebootMode::Bootloader) =
+                controller.on_frame(&frame, &mut Port::new(&mut link, &mut tx))
+        {
+            // Only `Normal` is advertised in the controller's context.
+            reboot(&mut watchdog);
         }
+    }
+}
+
+/// Software reset: restart the watchdog with its shortest stage and stop
+/// feeding it. Bounded by that stage (~0.84 s); the spin ends in the reset.
+fn reboot(watchdog: &mut esp8266_hal::watchdog::Watchdog) -> ! {
+    watchdog.start(StageTimeout::Stage084Sec);
+    loop {
+        core::hint::spin_loop();
     }
 }
 

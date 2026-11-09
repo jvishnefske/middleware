@@ -7,6 +7,12 @@
 //! the action fails, applies [`State::storage_failed`] or
 //! [`State::trapped`] and replies `Internal` instead.
 //!
+//! Ordering: every action except [`Action::Reboot`] is performed *before*
+//! the reply is sent, so the reply reports its result. [`Action::Reboot`]
+//! is the reverse: the shell sends the (always successful) reply, waits
+//! until it has been flushed to the host (bounded by a timeout), and only
+//! then reboots, because nothing can be sent afterwards.
+//!
 //! | request              | condition            | action     | status after |
 //! |----------------------|----------------------|------------|--------------|
 //! | `sys/info`           | —                    | none       | unchanged    |
@@ -19,6 +25,9 @@
 //! | `sys/payload/start`  | `Empty`/`Loading`    | none (`InvalidRequest`) | unchanged |
 //! | `sys/payload/start`  | built without runtime | none (`NotFound`) | unchanged |
 //! | `sys/payload/stop`   | `Running`/`Trapped`  | `Stop`     | `Stopped`    |
+//! | `sys/reboot` (mode)  | mode allowed by [`Context::reboot`] | `Reboot(mode)`, after the reply | unchanged (the device restarts) |
+//! | `sys/reboot` (mode)  | mode not supported   | none (`NotFound`) | unchanged |
+//! | `sys/reboot`         | mode byte not 0/1    | none (`InvalidRequest`) | unchanged |
 //! | other `sys/...`      | —                    | none (`NotFound`) | unchanged |
 //! | application key      | —                    | none (`NotFound`) | unchanged |
 //!
@@ -28,6 +37,7 @@
 
 use middleware::Key;
 use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
+pub use middleware::loader::RebootMode;
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::ABI_VERSION;
 
@@ -43,6 +53,31 @@ pub struct Context<'a> {
     /// Whether the firmware includes the WASM runtime. Without it the loader
     /// and storage work but `sys/payload/start` is refused with `NotFound`.
     pub runtime: bool,
+    /// Which `sys/reboot` modes the shell can carry out; others are
+    /// refused with `NotFound`.
+    pub reboot: RebootSupport,
+}
+
+/// The `sys/reboot` modes a shell implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebootSupport {
+    /// No reboot at all: every mode is `NotFound`.
+    None,
+    /// Restart the firmware only ([`RebootMode::Normal`]).
+    Normal,
+    /// Restart the firmware or enter the bootloader.
+    NormalAndBootloader,
+}
+
+impl RebootSupport {
+    /// Whether `mode` can be carried out.
+    pub const fn allows(self, mode: RebootMode) -> bool {
+        matches!(
+            (self, mode),
+            (RebootSupport::Normal | RebootSupport::NormalAndBootloader, RebootMode::Normal)
+                | (RebootSupport::NormalAndBootloader, RebootMode::Bootloader)
+        )
+    }
 }
 
 /// Dispatcher state: loader progress and payload status.
@@ -91,7 +126,9 @@ impl State {
     }
 }
 
-/// Side effect the shell performs before sending the reply.
+/// Side effect the shell performs: before sending the reply for all
+/// variants except [`Action::Reboot`], which comes after the reply is
+/// flushed (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action<'a> {
     /// Nothing.
@@ -119,6 +156,9 @@ pub enum Action<'a> {
     Start,
     /// Stop the payload.
     Stop,
+    /// Send the reply, wait until it is flushed, then reboot into the mode.
+    /// The mode is one [`Context::reboot`] allows.
+    Reboot(RebootMode),
 }
 
 impl Action<'_> {
@@ -188,6 +228,10 @@ pub fn handle_request<'a>(
             }
             _ => Outcome::reply(state, Ok(0)),
         },
+        Command::Reboot { mode } if ctx.reboot.allows(mode) => {
+            Outcome::act(state, Action::Reboot(mode))
+        }
+        Command::Reboot { .. } => Outcome::reply(state, Err(HandlerError::NotFound)),
         Command::Begin { .. } | Command::Chunk { .. } | Command::Commit => {
             transfer(state, &cmd, ctx.capacity)
         }
@@ -244,8 +288,13 @@ mod tests {
     use middleware::crc::Crc32;
     use middleware::loader::keys;
 
-    const CTX: Context<'static> =
-        Context { chip: "esp32c3", firmware: "0.1.0", capacity: 1024, runtime: true };
+    const CTX: Context<'static> = Context {
+        chip: "esp32c3",
+        firmware: "0.1.0",
+        capacity: 1024,
+        runtime: true,
+        reboot: RebootSupport::Normal,
+    };
 
     fn req<'a>(state: State, key: Key<'_>, body: &'a [u8]) -> Outcome<'a> {
         let mut out = [0u8; 128];
@@ -430,5 +479,53 @@ mod tests {
         assert_eq!(tick_delay(100, 100), 0);
         assert_eq!(tick_delay(u32::MAX - 5, 4), 10);
         assert_eq!(tick_delay(4, u32::MAX - 5), 0);
+    }
+
+    fn reboot_req<'a>(ctx: &Context<'_>, state: State, body: &'a [u8]) -> Outcome<'a> {
+        let mut out = [0u8; 128];
+        handle_request(state, ctx, keys::REBOOT, body, &mut out)
+    }
+
+    #[test]
+    fn reboot_replies_ok_then_asks_for_the_reboot() {
+        // The reply is a successful empty body; the action is what the
+        // shell performs once that reply is flushed.
+        for state in [State::boot(false), State::boot(true).started()] {
+            let o = reboot_req(&CTX, state, &[0]);
+            assert_eq!(o.reply, Ok(0));
+            assert_eq!(o.action, Action::Reboot(RebootMode::Normal));
+            assert_eq!(o.state, state, "reboot changes no dispatcher state");
+            assert!(!o.action.stops_payload());
+        }
+        let all = Context { reboot: RebootSupport::NormalAndBootloader, ..CTX };
+        let o = reboot_req(&all, State::boot(true), &[1]);
+        assert_eq!((o.action, o.reply), (Action::Reboot(RebootMode::Bootloader), Ok(0)));
+        let o = reboot_req(&all, State::boot(true), &[0]);
+        assert_eq!(o.action, Action::Reboot(RebootMode::Normal));
+    }
+
+    #[test]
+    fn reboot_to_unsupported_mode_is_not_found() {
+        // Normal-only shells (ESP32 family) refuse the bootloader mode.
+        let o = reboot_req(&CTX, State::boot(true), &[1]);
+        assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::NotFound)));
+        let none = Context { reboot: RebootSupport::None, ..CTX };
+        for body in [[0u8], [1]] {
+            let o = reboot_req(&none, State::boot(true), &body);
+            assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::NotFound)));
+        }
+        assert!(!RebootSupport::None.allows(RebootMode::Normal));
+        assert!(RebootSupport::Normal.allows(RebootMode::Normal));
+        assert!(!RebootSupport::Normal.allows(RebootMode::Bootloader));
+        assert!(RebootSupport::NormalAndBootloader.allows(RebootMode::Bootloader));
+    }
+
+    #[test]
+    fn reboot_with_bad_mode_is_invalid() {
+        let all = Context { reboot: RebootSupport::NormalAndBootloader, ..CTX };
+        for body in [&[2u8][..], &[0xFF], &[], &[0, 1]] {
+            let o = reboot_req(&all, State::boot(true), body);
+            assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::InvalidRequest)), "{body:?}");
+        }
     }
 }

@@ -12,6 +12,7 @@ use mwctl::cli::{self, Cmd, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
 use mwctl::link::{Event, Link, Timeouts};
+use middleware::loader::RebootMode;
 use mwctl::report::{format_event, format_info};
 use port::SerialTransport;
 use std::io::Write as _;
@@ -61,6 +62,15 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Start => dev.start().map(|()| println!("payload started")),
         Cmd::Stop => dev.stop().map(|()| println!("payload stopped")),
+        Cmd::Reboot { bootloader } => {
+            let mode = if bootloader {
+                RebootMode::Bootloader
+            } else {
+                RebootMode::Normal
+            };
+            dev.reboot(mode)
+                .map(|()| println!("reboot ({mode:?}) acknowledged"))
+        }
         Cmd::Upload {
             file,
             start,

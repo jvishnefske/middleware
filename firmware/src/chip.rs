@@ -2,15 +2,20 @@
 //!
 //! A [`Profile`] collects everything the firmware needs to know about a chip
 //! that is not a peripheral driver: the name reported in `sys/info`, whether
-//! it has a USB-Serial-JTAG port, whether the image includes the WASM
+//! it has a native USB port (USB-Serial-JTAG on the ESP32-S3/C3, USB
+//! CDC-ACM on the RP2040/RP2350), whether the image includes the WASM
 //! payload runtime (`runtime`), the heap plan, the WASM memory limit in
 //! bytes (`max_memory_bytes`), the largest payload image it accepts, the
 //! console UART pins, and three GPIO bitmasks:
 //!
 //! * `gpio` — pins that exist on the chip.
 //! * `reserved` — pins a payload may never touch: SPI flash and in-package
-//!   or module PSRAM, the USB D-/D+ pair, and UART0 TX/RX (the protocol
-//!   port).
+//!   or module PSRAM, the USB D-/D+ pair, UART0 TX/RX (the protocol port on
+//!   the ESP chips, the debug console on the Raspberry Pi boards), and on
+//!   the Raspberry Pi Pico and Pico 2 the board's own pins (GP23 SMPS
+//!   power-save, GP24 VBUS sense, GP25 LED, GP29 VSYS/3 ADC input). The
+//!   RP2040/RP2350 QSPI flash and USB pins are dedicated pads, not GPIOs,
+//!   so they need no entry.
 //! * `input_only` — pins without an output driver (ESP32 GPIO34–39).
 //!
 //! [`Profile::check_pin`] applies the policy and returns the
@@ -32,6 +37,8 @@
 //! | ESP32-S3 | 72.0 KiB  | 240 KiB | 312 KiB | 192 KiB | 80 KiB    |
 //! | ESP32-C3 | 64.8 KiB  | 176 KiB | 241 KiB | 128 KiB | 64 KiB    |
 //! | ESP8266  | 0         | 0       | 0       | 0       | 252 KiB   |
+//! | RP2040   | 0         | 0       | 0       | 0       | 252 KiB   |
+//! | RP2350   | 0         | 312 KiB | 312 KiB | 192 KiB | 80 KiB    |
 //!
 //! The memory limit is a byte cap (`wasm_host::Limits::bytes`): a payload
 //! with standard 64 KiB pages gets whole pages up to it, and one built with
@@ -46,6 +53,14 @@
 //! header sector; images are stored, not run. The ESP32-C3 also builds
 //! without the runtime (`runtime` is `false`, matching the absent `wasm`
 //! cargo feature), though its heap plan is kept for when it gains one.
+//!
+//! The RP2040 (Cortex-M0+, no compare-and-swap atomics, so no wasmi) is
+//! protocol-only like the ESP8266: no heap, no linear memory, and a
+//! `max_image` of the 256 KiB payload region minus the 4 KiB header
+//! sector. The RP2350 (Cortex-M33, 520 KiB SRAM) runs payloads with the ESP32-S3's caps: a 312 KiB heap in `.bss` (it has
+//! no bootloader RAM to reclaim, so `heap_reclaimed` is 0), 192 KiB of
+//! linear memory and 80 KiB images, which leaves about 200 KiB of SRAM for
+//! the stack and the rest of the firmware.
 //!
 //! The main regions are sized so the linker leaves a usable main stack
 //! (after `.bss`, measured from `_stack_end`..`_stack_start`): ESP32 about
@@ -80,6 +95,12 @@ pub enum Chip {
     Esp32c3,
     /// ESP8266 (Xtensa LX106, single core, no WASM runtime).
     Esp8266,
+    /// RP2040 (dual Cortex-M0+, native USB, no WASM runtime), on the
+    /// Raspberry Pi Pico.
+    Rp2040,
+    /// RP2350 (dual Cortex-M33, native USB, 520 KiB SRAM), on the Raspberry
+    /// Pi Pico 2.
+    Rp2350,
 }
 
 /// What a payload wants to do with a pin.
@@ -96,10 +117,13 @@ pub enum Direction {
 pub struct Profile {
     /// The chip.
     pub chip: Chip,
-    /// Name reported in `sys/info` (matches the cargo feature and
-    /// `espflash --chip`).
+    /// Name reported in `sys/info` (for the ESP chips this matches the cargo
+    /// feature and `espflash --chip`; the RP chips report `rp2040` and
+    /// `rp2350`).
     pub name: &'static str,
-    /// Whether the chip has a USB-Serial-JTAG port the protocol also serves.
+    /// Whether the chip has a native USB port the protocol also serves:
+    /// USB-Serial-JTAG on the ESP32-S3/C3, USB CDC-ACM on the RP2040/RP2350.
+    /// (The field keeps its historical name.)
     pub usb_serial_jtag: bool,
     /// Whether the image includes the WASM payload runtime (the `wasm`
     /// cargo feature). Without it payloads can be stored but not run, and
@@ -114,7 +138,8 @@ pub struct Profile {
     /// Largest payload image accepted, in bytes (also capped by the flash
     /// partition).
     pub max_image: u32,
-    /// UART0 TX pin (protocol port behind the bridge chip).
+    /// UART0 TX pin (protocol port behind the bridge chip on the ESP
+    /// boards; the debug console on the Raspberry Pi boards).
     pub uart0_tx: u8,
     /// UART0 RX pin.
     pub uart0_rx: u8,
@@ -212,6 +237,52 @@ pub const ESP8266: Profile = Profile {
     input_only: 0,
 };
 
+/// Pins the Raspberry Pi Pico and Pico 2 boards wire to their own
+/// circuits: GP23 (SMPS power-save), GP24 (VBUS sense), GP25 (LED) and GP29
+/// (VSYS/3 ADC input).
+const PICO_BOARD_PINS: u64 = bit(23) | bit(24) | bit(25) | bit(29);
+
+/// RP2040 on the Raspberry Pi Pico: GPIO0–29 (QSPI flash and USB are
+/// dedicated pads). UART0 on GP0 (TX) / GP1 (RX), board pins GP23–25 and
+/// GP29 reserved. No WASM runtime (the Cortex-M0+ lacks the CAS atomics
+/// wasmi needs), so no payload heap or linear memory; images are stored in
+/// the 256 KiB payload region (minus its 4 KiB header sector).
+pub const RP2040: Profile = Profile {
+    chip: Chip::Rp2040,
+    name: "rp2040",
+    usb_serial_jtag: true,
+    runtime: false,
+    heap_reclaimed: 0,
+    heap_main: 0,
+    max_memory_bytes: 0,
+    max_image: 252 * 1024,
+    uart0_tx: 0,
+    uart0_rx: 1,
+    gpio: span(0, 29),
+    reserved: bit(0) | bit(1) | PICO_BOARD_PINS,
+    input_only: 0,
+};
+
+/// RP2350 (RP2350A, 30 GPIOs) on the Raspberry Pi Pico 2: GPIO0–29 (QSPI
+/// flash and USB are dedicated pads). UART0 on GP0 (TX) / GP1 (RX), board
+/// pins GP23–25 and GP29 reserved. Runs payloads with the ESP32-S3's heap,
+/// memory and image caps (see the heap plan).
+pub const RP2350: Profile = Profile {
+    chip: Chip::Rp2350,
+    name: "rp2350",
+    usb_serial_jtag: true,
+    runtime: true,
+    heap_reclaimed: 0,
+    heap_main: 312 * 1024,
+    max_memory_bytes: 3 * WASM_PAGE,
+    max_image: 80 * 1024,
+    uart0_tx: 0,
+    uart0_rx: 1,
+    gpio: span(0, 29),
+    reserved: bit(0) | bit(1) | PICO_BOARD_PINS,
+    input_only: 0,
+};
+
 impl Chip {
     /// The chip's profile.
     pub const fn profile(self) -> &'static Profile {
@@ -220,6 +291,8 @@ impl Chip {
             Chip::Esp32s3 => &ESP32S3,
             Chip::Esp32c3 => &ESP32C3,
             Chip::Esp8266 => &ESP8266,
+            Chip::Rp2040 => &RP2040,
+            Chip::Rp2350 => &RP2350,
         }
     }
 }
@@ -239,7 +312,8 @@ impl Profile {
         has(self.gpio, pin)
     }
 
-    /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
+    /// Whether `pin` is reserved for flash, PSRAM, USB, the console UART or
+    /// the board.
     pub fn is_reserved(&self, pin: u8) -> bool {
         has(self.reserved, pin)
     }
@@ -267,15 +341,41 @@ impl Profile {
 mod tests {
     use super::*;
 
-    const ALL: [&Profile; 4] = [&ESP32, &ESP32S3, &ESP32C3, &ESP8266];
+    const ALL: [&Profile; 6] = [&ESP32, &ESP32S3, &ESP32C3, &ESP8266, &RP2040, &RP2350];
 
     #[test]
     fn console_uart_pins_are_reserved() {
-        for p in ALL {
+        // Each chip's own UART0 pin pair, whatever the layout: the ESP
+        // chips put it high or mid-range, the RP chips on GP0/GP1.
+        let expected: [(u8, u8); 6] = [(1, 3), (43, 44), (21, 20), (1, 3), (0, 1), (0, 1)];
+        for (p, (tx, rx)) in ALL.into_iter().zip(expected) {
+            assert_eq!((p.uart0_tx, p.uart0_rx), (tx, rx), "{}", p.name);
+            assert_ne!(p.uart0_tx, p.uart0_rx, "{}", p.name);
             assert!(p.exists(p.uart0_tx) && p.exists(p.uart0_rx), "{}", p.name);
-            assert_eq!(p.check_pin(p.uart0_tx, Direction::Output), Err(AbiError::Unsupported));
-            assert_eq!(p.check_pin(p.uart0_rx, Direction::Input), Err(AbiError::Unsupported));
+            for pin in [p.uart0_tx, p.uart0_rx] {
+                for dir in [Direction::Input, Direction::Output] {
+                    assert_eq!(p.check_pin(pin, dir), Err(AbiError::Unsupported), "{} {pin}", p.name);
+                }
+                assert!(p.payload_pins().all(|q| q != pin), "{} {pin}", p.name);
+            }
         }
+    }
+
+    #[test]
+    fn pico_board_pins_are_reserved_and_the_rest_usable() {
+        for p in [&RP2040, &RP2350] {
+            for pin in [23, 24, 25, 29] {
+                assert_eq!(p.check_pin(pin, Direction::Input), Err(AbiError::Unsupported), "{} {pin}", p.name);
+            }
+            for pin in (2..=22).chain([26, 27, 28]) {
+                assert_eq!(p.check_pin(pin, Direction::Output), Ok(()), "{} {pin}", p.name);
+            }
+            for pin in [30, 31, 47, 64, 255] {
+                assert_eq!(p.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument), "{} {pin}", p.name);
+            }
+            assert_eq!(p.payload_pins().count(), 24, "{}", p.name);
+        }
+        assert_eq!((RP2040.name, RP2350.name), ("rp2040", "rp2350"));
     }
 
     #[test]
@@ -359,21 +459,23 @@ mod tests {
             assert_eq!(p.max_memory_bytes, 0, "{}", p.name);
         }
         assert_eq!(ESP8266.heap_total(), 0);
+        assert_eq!(RP2040.heap_total(), 0);
         const REGION: u32 = 256 * 1024;
         const HEADER: u32 = 4 * 1024;
         const { assert!(ESP8266.max_image <= REGION - HEADER) };
+        const { assert!(RP2040.max_image <= REGION - HEADER) };
     }
 
     #[test]
     fn profiles_match_chips() {
-        let chips = [Chip::Esp32, Chip::Esp32s3, Chip::Esp32c3, Chip::Esp8266];
+        let chips = [Chip::Esp32, Chip::Esp32s3, Chip::Esp32c3, Chip::Esp8266, Chip::Rp2040, Chip::Rp2350];
         for (chip, p) in chips.into_iter().zip(ALL) {
             assert_eq!(chip.profile().chip, chip);
             assert_eq!(p.chip, chip);
         }
-        let usb: [bool; 4] = ALL.map(|p| p.usb_serial_jtag);
-        assert_eq!(usb, [false, true, true, false]);
-        let runtime: [bool; 4] = ALL.map(|p| p.runtime);
-        assert_eq!(runtime, [true, true, false, false]);
+        let usb: [bool; 6] = ALL.map(|p| p.usb_serial_jtag);
+        assert_eq!(usb, [false, true, true, false, true, true]);
+        let runtime: [bool; 6] = ALL.map(|p| p.runtime);
+        assert_eq!(runtime, [true, true, false, false, false, true]);
     }
 }

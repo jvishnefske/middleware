@@ -18,7 +18,7 @@
 
 use crate::link::Transport;
 use middleware::Key;
-use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
+use middleware::loader::{Command, DeviceInfo, Effect, Loader, PayloadStatus, RebootMode, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::ABI_VERSION;
@@ -55,6 +55,7 @@ pub struct FakeDevice {
     staging: Vec<u8>,
     installed: Option<Vec<u8>>,
     declared_crc: Option<u32>,
+    reboots: Vec<RebootMode>,
 }
 
 impl FakeDevice {
@@ -75,6 +76,7 @@ impl FakeDevice {
             staging: Vec::new(),
             installed: None,
             declared_crc: None,
+            reboots: Vec::new(),
         }
     }
 
@@ -98,6 +100,12 @@ impl FakeDevice {
 
     pub fn installed(&self) -> Option<&[u8]> {
         self.installed.as_deref()
+    }
+
+    /// Reboots answered `Ok`, oldest first (only `Normal` is supported, as
+    /// on the ESP32 family).
+    pub fn reboots(&self) -> &[RebootMode] {
+        &self.reboots
     }
 
     pub fn declared_crc(&self) -> Option<u32> {
@@ -152,6 +160,13 @@ impl FakeDevice {
                 }
                 Ok(0)
             }
+            Command::Reboot {
+                mode: RebootMode::Normal,
+            } => {
+                self.reboots.push(RebootMode::Normal);
+                Ok(0)
+            }
+            Command::Reboot { .. } => Err(HandlerError::NotFound),
             Command::Begin { .. } | Command::Chunk { .. } | Command::Commit => {
                 let (next, effect) = self.loader.step(&cmd, self.capacity);
                 self.loader = next;

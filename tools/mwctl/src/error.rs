@@ -94,6 +94,10 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
             "this firmware has no WASM runtime (a `+no-wasm` build such as ESP32-C3 or ESP8266): \
              payloads are stored but cannot be started"
         }
+        NotFound if is(keys::REBOOT) => {
+            "this firmware cannot reboot into that mode (the ESP32 family and ESP8266 have no \
+             bootloader entry; firmware older than sys/reboot does not know the key)"
+        }
         InvalidRequest if is(keys::START) => {
             "no payload is installed (or a transfer is in progress)"
         }
@@ -194,5 +198,6 @@ mod tests {
             assert!(!explain("app/x", s).is_empty());
         }
         assert!(explain("sys/loader/begin", HandlerError::BufferTooSmall).contains("capacity"));
+        assert!(explain("sys/reboot", HandlerError::NotFound).contains("bootloader"));
     }
 }

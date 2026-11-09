@@ -8,13 +8,15 @@
 //!   [`Error::Upload`] with its index and key. Retries and the longer
 //!   `begin` timeout come from the link's [`Timeouts`](crate::link::Timeouts).
 //! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`.
+//! * [`Device::reboot`] — `sys/reboot` with a [`RebootMode`]; the device
+//!   answers before it reboots, so success means the reboot is under way.
 //! * [`Device::next_event`] — the next publication or noise run, for
 //!   `monitor`.
 
 use crate::error::Error;
 use crate::link::{Event, Link, Transport};
 use crate::plan::upload_plan;
-use middleware::loader::{Command, DeviceInfo, PayloadStatus, keys};
+use middleware::loader::{Command, DeviceInfo, PayloadStatus, RebootMode, keys};
 use std::time::Instant;
 
 /// Suffix of the firmware version of builds without the WASM runtime.
@@ -116,6 +118,12 @@ impl<T: Transport> Device<T> {
     /// `sys/payload/stop`.
     pub fn stop(&mut self) -> Result<(), Error> {
         self.link.command(&Command::Stop).map(drop)
+    }
+
+    /// `sys/reboot` into `mode`. `NotFound` when the firmware cannot enter
+    /// that mode (for example the bootloader on the ESP32 family).
+    pub fn reboot(&mut self, mode: RebootMode) -> Result<(), Error> {
+        self.link.command(&Command::Reboot { mode }).map(drop)
     }
 
     /// Installs `image`; calls `progress` after each acknowledged step.
@@ -364,6 +372,16 @@ mod tests {
         assert_eq!(d.link().transport().status(), PayloadStatus::Running);
         d.stop().unwrap();
         assert_eq!(d.link().transport().status(), PayloadStatus::Stopped);
+    }
+
+    #[test]
+    fn reboot_sends_the_mode_byte_and_reports_unsupported_modes() {
+        let mut d = device(FakeDevice::new("esp32", "0.1.0", 4096, true));
+        d.reboot(RebootMode::Normal).unwrap();
+        assert_eq!(d.link().transport().reboots(), &[RebootMode::Normal]);
+        let err = d.reboot(RebootMode::Bootloader).unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::NotFound));
+        assert_eq!(d.link().transport().reboots(), &[RebootMode::Normal]);
     }
 
     #[test]

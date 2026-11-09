@@ -6,7 +6,8 @@
 //! never allocates and scans at most `MAX_EVENTS` entries (the queue's own
 //! bound), then signals [`WAKE`] so the controller's `select` returns.
 //!
-//! The controller drains the queue with [`pop`] (at most `MAX_EVENTS` per
+//! The controller drains the queue through [`IrqEvents`], the
+//! [`EventSource`] over [`pop`], [`overflow_report`] and [`WAKE`]: with [`pop`] (at most `MAX_EVENTS` per
 //! loop iteration) into `Payload::dispatch`, and asks [`overflow_report`]
 //! after each drain whether new drops happened since the last `sys/log`
 //! line. `irq_overflow` reads and resets the count through
@@ -21,6 +22,7 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
+use esp_base::embassy::controller::EventSource;
 use esp_base::periph::overflow_report as report;
 use middleware::wasm_abi::events::{Event, EventKind, EventQueue, MAX_EVENTS, Pushed};
 
@@ -35,6 +37,21 @@ static QUEUE: Mutex<CriticalSectionRawMutex, RefCell<Queue>> =
 
 /// Signalled on every push; the controller waits on it.
 pub static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// The controller's view of this queue ([`EventSource`]).
+pub struct IrqEvents;
+
+impl EventSource for IrqEvents {
+    fn pop(&self) -> Option<Event> {
+        pop()
+    }
+    fn overflow_report(&self) -> Option<u32> {
+        overflow_report()
+    }
+    async fn wake(&self) {
+        WAKE.wait().await;
+    }
+}
 
 /// Microseconds since boot (esp-hal system time; does not wrap in practice).
 pub fn now_us() -> u64 {

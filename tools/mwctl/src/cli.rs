@@ -25,6 +25,9 @@ COMMANDS:
     stop                       sys/payload/stop
     monitor [--seconds <N>]    Print sys/log and sys/payload/status publications
                                (and other publications) until N seconds pass or Ctrl-C
+    reboot [--bootloader]      sys/reboot: the firmware replies, then restarts itself
+                               (mode 0), or with --bootloader enters the chip's
+                               bootloader (mode 1; NotFound where unsupported)
     reset                      Reboot into run mode: RTS asserted for 100 ms with DTR
                                deasserted (EN pulse through the DTR/RTS auto-reset circuit)
 
@@ -68,6 +71,11 @@ pub enum Cmd {
         /// How long to listen.
         seconds: Option<u64>,
     },
+    /// `reboot`: `sys/reboot` over the protocol.
+    Reboot {
+        /// Enter the bootloader instead of restarting the firmware.
+        bootloader: bool,
+    },
     /// `reset`.
     Reset,
 }
@@ -110,6 +118,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut start = false;
     let mut corrupt_chunk = None;
     let mut seconds = None;
+    let mut bootloader = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -119,6 +128,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--start" => start = true,
             "--corrupt-chunk" => corrupt_chunk = Some(number("--corrupt-chunk", args.next())?),
             "--seconds" => seconds = Some(number("--seconds", args.next())?),
+            "--bootloader" => bootloader = true,
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             _ => positional.push(a),
         }
@@ -141,6 +151,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only("--start", start, "upload")?;
     only("--corrupt-chunk", corrupt_chunk.is_some(), "upload")?;
     only("--seconds", seconds.is_some(), "monitor")?;
+    only("--bootloader", bootloader, "reboot")?;
     let cmd = match name.as_str() {
         "info" => Cmd::Info,
         "upload" => Cmd::Upload {
@@ -151,6 +162,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         "start" => Cmd::Start,
         "stop" => Cmd::Stop,
         "monitor" => Cmd::Monitor { seconds },
+        "reboot" => Cmd::Reboot { bootloader },
         "reset" => Cmd::Reset,
         other => return Err(format!("unknown command '{other}'")),
     };
@@ -209,6 +221,14 @@ mod tests {
         assert_eq!(run("--port p start").cmd, Cmd::Start);
         assert_eq!(run("--port p stop").cmd, Cmd::Stop);
         assert_eq!(run("--port p reset").cmd, Cmd::Reset);
+        assert_eq!(
+            run("--port p reboot").cmd,
+            Cmd::Reboot { bootloader: false }
+        );
+        assert_eq!(
+            run("--bootloader --port p reboot").cmd,
+            Cmd::Reboot { bootloader: true }
+        );
         assert_eq!(run("--port p monitor").cmd, Cmd::Monitor { seconds: None });
         assert_eq!(
             run("--port p monitor --seconds 5").cmd,
@@ -233,6 +253,7 @@ mod tests {
             ("--port p --baud 0 info", "positive"),
             ("--port p info --start", "only to 'upload'"),
             ("--port p start --seconds 1", "only to 'monitor'"),
+            ("--port p reset --bootloader", "only to 'reboot'"),
             ("--port p info --verbose", "unknown option"),
             ("--port", "needs a path"),
         ] {

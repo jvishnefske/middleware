@@ -159,6 +159,9 @@ pub enum Action {
     Start,
     /// `sys/payload/stop`.
     Stop,
+    /// `sys/reboot` with this mode byte (0 normal, 1 bootloader); the
+    /// device replies, then reboots.
+    Reboot(u8),
     /// Erase storage for `len` bytes.
     Erase(u32),
     /// Write bytes at an offset.
@@ -209,6 +212,7 @@ impl DeviceLoader {
             (Effect::Activate { len, crc }, _) => Action::Activate(len, crc),
             (Effect::None, Command::Start) => Action::Start,
             (Effect::None, Command::Stop) => Action::Stop,
+            (Effect::None, Command::Reboot { mode }) => Action::Reboot(mode as u8),
             (Effect::None, _) => Action::Info,
         });
         (next, action)
@@ -282,6 +286,12 @@ mod tests {
         assert_eq!(d.step("sys/info", &[]).1, Ok(Action::Info));
         assert_eq!(d.step("sys/payload/start", &[]).1, Ok(Action::Start));
         assert_eq!(d.step("sys/payload/stop", &[]).1, Ok(Action::Stop));
+        assert_eq!(d.step("sys/reboot", &[0]).1, Ok(Action::Reboot(0)));
+        assert_eq!(d.step("sys/reboot", &[1]).1, Ok(Action::Reboot(1)));
+        assert_eq!(
+            d.step("sys/reboot", &[2]).1,
+            Err(HandlerError::InvalidRequest)
+        );
         assert_eq!(d.step("app/led", &[1]).1, Ok(Action::App));
         assert_eq!(d.step("sys/nope", &[]).1, Err(HandlerError::NotFound));
         assert_eq!(d.step("bad//", &[]).1, Err(HandlerError::InvalidRequest));

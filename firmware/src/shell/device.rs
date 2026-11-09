@@ -19,7 +19,7 @@
 //! releases every pin (interrupts off, signals detached) and clears the
 //! event queue.
 //!
-//! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
+//! The controller awaits [`PayloadDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.
 
 use core::cell::RefCell;
@@ -27,14 +27,16 @@ use core::cell::RefCell;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::Instant;
 use esp_base::chip::Profile;
 use esp_base::periph::claims::{Claims, pins};
 use middleware::Key;
 use middleware::loader::is_system_key;
 use wasm_host::{AbiError, Device, DmaChannel, Edge, Pull, SpiConfig, TimerSpec, UartConfig};
 
-use super::bus::Bus;
+use esp_base::embassy::controller::PayloadDevice;
+pub use esp_base::embassy::now_ms;
+
+use super::Bus;
 use super::gpio::{PINS, PinBank, PinLease};
 use super::spi::{self, SpiBus, SpiParts};
 use super::uart1::{self, Uart1Parts, Uart1Port};
@@ -75,10 +77,6 @@ impl HwHome {
     }
 }
 
-/// Milliseconds since boot, wrapping.
-pub fn now_ms() -> u32 {
-    Instant::now().as_millis() as u32
-}
 
 /// The board as a payload sees it.
 pub struct EspDevice {
@@ -115,7 +113,7 @@ impl EspDevice {
     }
 
     /// Completes SPI or UART work; pending forever when none is running.
-    pub async fn io(&mut self) {
+    async fn complete_io(&mut self) {
         match self.hw.as_mut() {
             Some(Live { spi, uart }) => {
                 let spi_done = async {
@@ -134,6 +132,15 @@ impl EspDevice {
             }
             None => core::future::pending().await,
         }
+    }
+}
+
+impl PayloadDevice<super::Port, 2> for EspDevice {
+    fn open(profile: &'static Profile, bus: &'static Bus) -> Option<Self> {
+        EspDevice::new(profile, bus)
+    }
+    async fn io(&mut self) {
+        self.complete_io().await;
     }
 }
 

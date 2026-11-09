@@ -6,30 +6,37 @@
 //! * `replies` — one signal per port; the controller answers a request on
 //!   the port it came from. A link task has at most one request in flight,
 //!   so a signal (latest value wins) is enough.
+//! * `sent` — one signal per port, raised by the link task with the
+//!   correlation id of each response once it has been written and flushed
+//!   (or abandoned after its send timeout). The controller waits on it only
+//!   for `sys/reboot`, whose reply must leave the device before the reboot.
 //! * `outbound` — a publish/subscribe channel with one subscriber per port,
 //!   so device publications (log lines, payload status, payload publishes)
 //!   reach every port. Publishing never blocks: a port that cannot keep up
 //!   (for example USB with no host reading) loses its oldest messages rather
 //!   than stalling the controller.
 //!
+//! The port set is chosen by the shell: a type implementing [`Port`] (a
+//! closed set of ports, each with a distinct index below [`Port::COUNT`])
+//! and the const generic `N`, which must equal `P::COUNT` (checked at
+//! compile time by [`Bus::new`]). The ESP shell uses two ports (UART0 and
+//! USB-Serial-JTAG); a board with one port can use [`Single`].
+//!
 //! The bus is created once at boot and shared as `&'static Bus` with the
 //! tasks; embassy tasks require `'static` arguments.
 
-use core::fmt::{self, Write as _};
+use core::fmt::{self, Debug, Write as _};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embassy_sync::signal::Signal;
 use heapless::{String, Vec};
+use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
-use middleware::Key;
-
-/// Number of serial ports the protocol can run on.
-pub const PORTS: usize = 2;
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
 pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
@@ -45,22 +52,26 @@ const INBOUND_DEPTH: usize = 2;
 
 type Mutex = CriticalSectionRawMutex;
 
-/// A serial port running the protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Port {
-    /// UART0, behind the board's USB-serial bridge chip.
-    Uart,
-    /// The chip's native USB-Serial-JTAG (ESP32-S3, ESP32-C3).
-    #[cfg_attr(feature = "esp32", allow(dead_code))]
-    Usb,
+/// The set of serial ports a shell runs the protocol on.
+///
+/// Implemented by a small `Copy` type (usually a fieldless enum) whose
+/// values map one-to-one onto the indices `0..COUNT`.
+pub trait Port: Copy + Debug + 'static {
+    /// Number of ports in the set.
+    const COUNT: usize;
+    /// This port's index, below [`Port::COUNT`].
+    fn index(self) -> usize;
 }
 
-impl Port {
-    const fn index(self) -> usize {
-        match self {
-            Port::Uart => 0,
-            Port::Usb => 1,
-        }
+/// The port set of a board with exactly one protocol port (for example
+/// the RP2040's native USB CDC-ACM).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Single;
+
+impl Port for Single {
+    const COUNT: usize = 1;
+    fn index(self) -> usize {
+        0
     }
 }
 
@@ -77,9 +88,9 @@ pub enum Kind {
 }
 
 /// A request or publication from a port, owned.
-pub struct Inbound {
+pub struct Inbound<P> {
     /// Port it arrived on.
-    pub port: Port,
+    pub port: P,
     /// Request or publication.
     pub kind: Kind,
     /// Key (already validated by frame decoding).
@@ -88,9 +99,9 @@ pub struct Inbound {
     pub body: Vec<u8, MAX_BODY>,
 }
 
-impl Inbound {
+impl<P> Inbound<P> {
     /// Copies a frame's key and body; `None` if the body is too large.
-    pub fn new(port: Port, kind: Kind, key: Key<'_>, body: &[u8]) -> Option<Self> {
+    pub fn new(port: P, kind: Kind, key: Key<'_>, body: &[u8]) -> Option<Self> {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
@@ -119,38 +130,48 @@ pub struct Outbound {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TooLarge;
 
-/// Shared channels.
-pub struct Bus {
-    inbound: Channel<Mutex, Inbound, INBOUND_DEPTH>,
-    replies: [Signal<Mutex, Reply>; PORTS],
-    outbound: PubSubChannel<Mutex, Outbound, OUTBOUND_DEPTH, PORTS, 0>,
+/// Shared channels for the port set `P` of `N` ports.
+pub struct Bus<P, const N: usize> {
+    inbound: Channel<Mutex, Inbound<P>, INBOUND_DEPTH>,
+    replies: [Signal<Mutex, Reply>; N],
+    sent: [Signal<Mutex, u8>; N],
+    outbound: PubSubChannel<Mutex, Outbound, OUTBOUND_DEPTH, N, 0>,
 }
 
 /// A port's view of outbound publications.
-pub type OutboundSubscriber = Subscriber<'static, Mutex, Outbound, OUTBOUND_DEPTH, PORTS, 0>;
+pub type OutboundSubscriber<const N: usize> =
+    Subscriber<'static, Mutex, Outbound, OUTBOUND_DEPTH, N, 0>;
 
-impl Bus {
-    /// Empty channels.
+impl<P: Port, const N: usize> Default for Bus<P, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: Port, const N: usize> Bus<P, N> {
+    /// Empty channels. Fails to compile unless `N == P::COUNT`.
     pub const fn new() -> Self {
+        const { assert!(N == P::COUNT, "Bus<P, N> needs N == P::COUNT") };
         Bus {
             inbound: Channel::new(),
-            replies: [Signal::new(), Signal::new()],
+            replies: [const { Signal::new() }; N],
+            sent: [const { Signal::new() }; N],
             outbound: PubSubChannel::new(),
         }
     }
 
     /// Queues a message for the controller, waiting while it is busy.
-    pub async fn send_inbound(&self, msg: Inbound) {
+    pub async fn send_inbound(&self, msg: Inbound<P>) {
         self.inbound.send(msg).await;
     }
 
     /// Waits for the next inbound message.
-    pub async fn receive_inbound(&self) -> Inbound {
+    pub async fn receive_inbound(&self) -> Inbound<P> {
         self.inbound.receive().await
     }
 
     /// Delivers a reply to the port that sent the request.
-    pub fn reply(&self, port: Port, reply: Reply) {
+    pub fn reply(&self, port: P, reply: Reply) {
         if let Some(signal) = self.replies.get(port.index()) {
             signal.signal(reply);
         }
@@ -158,7 +179,7 @@ impl Bus {
 
     /// Waits for the reply to this port's request with `id`; replies to
     /// other ids (none are expected) are discarded.
-    pub async fn wait_reply(&self, port: Port, id: u8) -> Reply {
+    pub async fn wait_reply(&self, port: P, id: u8) -> Reply {
         let Some(signal) = self.replies.get(port.index()) else {
             return Reply { id, result: Err(HandlerError::Internal) };
         };
@@ -170,8 +191,33 @@ impl Bus {
         }
     }
 
+    /// Forgets any earlier "response sent" notice on `port`; call before
+    /// [`Bus::reply`] when the controller will wait in [`Bus::wait_sent`].
+    pub fn clear_sent(&self, port: P) {
+        if let Some(signal) = self.sent.get(port.index()) {
+            signal.reset();
+        }
+    }
+
+    /// Called by the link task once the response to `id` has been written
+    /// and flushed, or abandoned after its send timeout.
+    pub fn mark_sent(&self, port: P, id: u8) {
+        if let Some(signal) = self.sent.get(port.index()) {
+            signal.signal(id);
+        }
+    }
+
+    /// Waits until the link task on `port` reports the response to `id`
+    /// sent. Not bounded by itself: the caller wraps it in a timeout.
+    pub async fn wait_sent(&self, port: P, id: u8) {
+        let Some(signal) = self.sent.get(port.index()) else {
+            return;
+        };
+        while signal.wait().await != id {}
+    }
+
     /// A subscriber for one port's outbound publications.
-    pub fn subscribe(&'static self) -> Option<OutboundSubscriber> {
+    pub fn subscribe(&'static self) -> Option<OutboundSubscriber<N>> {
         self.outbound.subscriber().ok()
     }
 

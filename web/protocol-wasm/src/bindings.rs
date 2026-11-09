@@ -200,8 +200,8 @@ impl JsDeviceLoader {
     }
 
     /// Handles a request. Returns `{statusCode, status, action?, offset?,
-    /// data?, len?, crc?}` where `action` is one of `app`, `info`, `start`,
-    /// `stop`, `erase`, `write`, `activate`.
+    /// data?, len?, crc?, mode?}` where `action` is one of `app`, `info`,
+    /// `start`, `stop`, `reboot` (with `mode`), `erase`, `write`, `activate`.
     pub fn step(&mut self, key: &str, body: &[u8]) -> Object {
         let (next, result) = self.0.step(key, body);
         self.0 = next;
@@ -215,6 +215,10 @@ impl JsDeviceLoader {
                 Action::Info => "info",
                 Action::Start => "start",
                 Action::Stop => "stop",
+                Action::Reboot(mode) => {
+                    set(&o, "mode", mode);
+                    "reboot"
+                }
                 Action::Erase(len) => {
                     set(&o, "len", len);
                     "erase"

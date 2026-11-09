@@ -12,6 +12,13 @@
 //! | `sys/loader/commit` | empty                           | empty              |
 //! | `sys/payload/start` | empty                           | empty              |
 //! | `sys/payload/stop`  | empty                           | empty              |
+//! | `sys/reboot`        | `[mode u8]` ([`RebootMode`])    | empty              |
+//!
+//! `sys/reboot` is answered before the device reboots: `0` restarts the
+//! firmware, `1` enters the chip's bootloader (for example the RP2040 USB
+//! mass-storage boot ROM); any other mode byte, or a body that is not one
+//! byte, is [`HandlerError::InvalidRequest`]. A device that cannot enter
+//! the requested mode answers [`HandlerError::NotFound`] and keeps running.
 //!
 //! The device publishes logs on `sys/log` and payload state changes on
 //! `sys/payload/status` ([`PayloadStatus`] as one byte). All integers are
@@ -44,10 +51,33 @@ pub mod keys {
     pub const START: Key<'static> = Key::from_static("sys/payload/start");
     /// Stops the running payload.
     pub const STOP: Key<'static> = Key::from_static("sys/payload/stop");
+    /// Reboots the device after replying.
+    pub const REBOOT: Key<'static> = Key::from_static("sys/reboot");
     /// Device log lines (published by the device, UTF-8).
     pub const LOG: Key<'static> = Key::from_static("sys/log");
     /// Payload state changes (published by the device).
     pub const STATUS: Key<'static> = Key::from_static("sys/payload/status");
+}
+
+/// What `sys/reboot` restarts into, sent as one byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RebootMode {
+    /// Restart the firmware.
+    Normal = 0,
+    /// Enter the chip's bootloader (firmware update mode).
+    Bootloader = 1,
+}
+
+impl RebootMode {
+    /// Decodes the mode byte; `None` for anything but 0 or 1.
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(RebootMode::Normal),
+            1 => Some(RebootMode::Bootloader),
+            _ => None,
+        }
+    }
 }
 
 /// A parsed system request.
@@ -75,6 +105,11 @@ pub enum Command<'a> {
     Start,
     /// `sys/payload/stop`.
     Stop,
+    /// `sys/reboot`.
+    Reboot {
+        /// What to restart into.
+        mode: RebootMode,
+    },
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
@@ -100,6 +135,12 @@ impl<'a> Command<'a> {
             k if k == keys::COMMIT.as_str() => empty(Command::Commit),
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
+            k if k == keys::REBOOT.as_str() => match body {
+                [b] => RebootMode::from_byte(*b)
+                    .map(|mode| Some(Command::Reboot { mode }))
+                    .ok_or(bad),
+                _ => Err(bad),
+            },
             k if k == keys::BEGIN.as_str() => {
                 if body.len() != 8 {
                     return Err(bad);
@@ -130,6 +171,7 @@ impl<'a> Command<'a> {
             Command::Commit => keys::COMMIT,
             Command::Start => keys::START,
             Command::Stop => keys::STOP,
+            Command::Reboot { .. } => keys::REBOOT,
         }
     }
 
@@ -146,6 +188,10 @@ impl<'a> Command<'a> {
                 out.get_mut(..4)?.copy_from_slice(&offset.to_le_bytes());
                 out.get_mut(4..4 + data.len())?.copy_from_slice(data);
                 Some(4 + data.len())
+            }
+            Command::Reboot { mode } => {
+                *out.first_mut()? = *mode as u8;
+                Some(1)
             }
             _ => Some(0),
         }
@@ -204,7 +250,7 @@ impl Loader {
     /// Applies `cmd` given a storage `capacity` in bytes. On error the
     /// returned state is [`Loader::Idle`] for transfer commands (the transfer
     /// is abandoned) and unchanged otherwise. Non-loader commands
-    /// (`Info`, `Start`, `Stop`) leave the state unchanged with
+    /// (`Info`, `Start`, `Stop`, `Reboot`) leave the state unchanged with
     /// [`Effect::None`]; the shell handles them.
     pub fn step<'a>(
         self,
@@ -276,7 +322,10 @@ impl Loader {
             (Command::Chunk { .. } | Command::Commit, Loader::Idle) => {
                 (Loader::Idle, Err(HandlerError::InvalidRequest))
             }
-            (Command::Info | Command::Start | Command::Stop, state) => (state, Ok(Effect::None)),
+            (
+                Command::Info | Command::Start | Command::Stop | Command::Reboot { .. },
+                state,
+            ) => (state, Ok(Effect::None)),
         }
     }
 }
@@ -522,6 +571,12 @@ mod tests {
             Command::Commit,
             Command::Start,
             Command::Stop,
+            Command::Reboot {
+                mode: RebootMode::Normal,
+            },
+            Command::Reboot {
+                mode: RebootMode::Bootloader,
+            },
         ] {
             let mut body = [0u8; 16];
             let n = cmd.encode_body(&mut body).unwrap();
@@ -553,7 +608,45 @@ mod tests {
         );
         assert_eq!(Command::parse(Key::from_static("app/x"), &[]), Ok(None));
         assert!(is_system_key(keys::LOG));
+        assert!(is_system_key(keys::REBOOT));
         assert!(!is_system_key(Key::from_static("system/x")));
+    }
+
+    #[test]
+    fn reboot_parses_mode_byte_and_round_trips() {
+        for (byte, mode) in [(0u8, RebootMode::Normal), (1, RebootMode::Bootloader)] {
+            assert_eq!(
+                Command::parse(keys::REBOOT, &[byte]),
+                Ok(Some(Command::Reboot { mode }))
+            );
+            let cmd = Command::Reboot { mode };
+            let mut body = [0xFFu8; 4];
+            assert_eq!(cmd.encode_body(&mut body), Some(1));
+            assert_eq!(body[0], byte);
+            assert_eq!(cmd.key().as_str(), "sys/reboot");
+            assert_eq!(RebootMode::from_byte(byte), Some(mode));
+        }
+        for bad in [&[2u8][..], &[0xFF], &[], &[0, 0]] {
+            assert_eq!(
+                Command::parse(keys::REBOOT, bad),
+                Err(HandlerError::InvalidRequest),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            Command::Reboot {
+                mode: RebootMode::Normal
+            }
+            .encode_body(&mut []),
+            None
+        );
+        let (s, e) = Loader::Idle.step(
+            &Command::Reboot {
+                mode: RebootMode::Normal,
+            },
+            64,
+        );
+        assert_eq!((s, e), (Loader::Idle, Ok(Effect::None)));
     }
 
     #[test]

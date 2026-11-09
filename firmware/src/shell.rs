@@ -5,7 +5,7 @@
 //! 1. `esp_hal::init` at maximum CPU clock; heap regions per
 //!    [`board::PROFILE`]; `esp-rtos` scheduler and embassy time driver on
 //!    TIMG0.
-//! 2. One [`link`] task per serial port: UART0 at 115200 baud on every chip,
+//! 2. One link task ([`esp_base::embassy::link::serve`]) per serial port: UART0 at 115200 baud on every chip,
 //!    plus USB-Serial-JTAG on ESP32-S3 and ESP32-C3. Nothing is printed as
 //!    plain text after this point; logs are `sys/log` publications. Each
 //!    link first writes one `0x00` delimiter to separate its frames from
@@ -15,27 +15,31 @@
 //! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
 //!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
 //!    ([`uart1`]), all without pins until a payload opens them.
-//! 5. The [`controller`] runs on the main task and starts the stored payload
-//!    if one is valid (and the `wasm` runtime is built in).
+//! 5. The portable [`Controller`] from `esp_base::embassy`, instantiated
+//!    with [`FlashStorage`], the [`Port`] set and (with `wasm`)
+//!    [`device::EspDevice`] and [`irq::IrqEvents`], runs on the main task and
+//!    starts the stored payload if one is valid (and the `wasm` runtime is
+//!    built in).
+//! 6. When the controller returns a `sys/reboot` mode (its reply already
+//!    flushed), the chip is reset with `esp_hal::system::software_reset`.
+//!    Only [`RebootSupport::Normal`] is advertised: no ROM download-mode
+//!    entry is wired, so a bootloader request is answered `NotFound` by
+//!    dispatch and never reaches the shell.
 //!
 //! Ownership is a tree: the main task owns the controller (state, flash
 //! store, payload); each link task owns its port. They meet only through
-//! the `'static` [`bus::Bus`] channels. With `wasm`, the payload's
+//! the `'static` [`Bus`] channels. With `wasm`, the payload's
 //! peripherals rest in statics shared with their ISRs or between runs: the
 //! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
 //! timer alarm ([`timer`]) and the SPI/UART drivers ([`device::HW`]).
 
-
 mod board;
-mod bus;
-mod controller;
 #[cfg(feature = "wasm")]
 mod device;
 #[cfg(feature = "wasm")]
 mod gpio;
 #[cfg(feature = "wasm")]
 mod irq;
-mod link;
 #[cfg(feature = "wasm")]
 mod spi;
 #[cfg(feature = "wasm")]
@@ -44,7 +48,9 @@ mod timer;
 mod uart1;
 
 use embassy_executor::Spawner;
-use esp_base::dispatch::{Context, State};
+use esp_base::dispatch::{Context, RebootMode, RebootSupport, State};
+use esp_base::embassy::bus::Port as PortSet;
+use esp_base::embassy::link;
 use esp_base::store::PayloadStore;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
@@ -55,8 +61,6 @@ use esp_storage::FlashStorage;
 use middleware::serial::link::SerialLink;
 use static_cell::ConstStaticCell;
 
-use bus::{Bus, Port};
-use controller::{Controller, Store};
 
 #[cfg(any(feature = "esp32s3", feature = "esp32c3"))]
 use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
@@ -71,6 +75,46 @@ const FIRMWARE: &str = env!("CARGO_PKG_VERSION");
 /// without the WASM runtime.
 #[cfg(not(feature = "wasm"))]
 const FIRMWARE: &str = concat!(env!("CARGO_PKG_VERSION"), "+no-wasm");
+
+/// A serial port running the protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Port {
+    /// UART0, behind the board's USB-serial bridge chip.
+    Uart,
+    /// The chip's native USB-Serial-JTAG (ESP32-S3, ESP32-C3).
+    #[cfg_attr(feature = "esp32", allow(dead_code))]
+    Usb,
+}
+
+impl PortSet for Port {
+    const COUNT: usize = 2;
+    fn index(self) -> usize {
+        match self {
+            Port::Uart => 0,
+            Port::Usb => 1,
+        }
+    }
+}
+
+/// The message bus over the ESP port set.
+pub type Bus = esp_base::embassy::bus::Bus<Port, { Port::COUNT }>;
+
+/// The flash-backed payload store.
+pub type Store = PayloadStore<FlashStorage<'static>>;
+
+/// The controller over the ESP flash, ports and payload device.
+#[cfg(feature = "wasm")]
+type Controller = esp_base::embassy::controller::Controller<
+    FlashStorage<'static>,
+    Port,
+    { Port::COUNT },
+    device::EspDevice,
+    irq::IrqEvents,
+>;
+/// The controller over the ESP flash and ports.
+#[cfg(not(feature = "wasm"))]
+type Controller =
+    esp_base::embassy::controller::Controller<FlashStorage<'static>, Port, { Port::COUNT }>;
 
 static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 
@@ -120,7 +164,13 @@ pub async fn run(spawner: Spawner) -> ! {
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
     let state = State::boot(matches!(installed, Some(Ok(_))));
-    let ctx = Context { chip: profile.name, firmware: FIRMWARE, capacity, runtime: cfg!(feature = "wasm") };
+    let ctx = Context {
+        chip: profile.name,
+        firmware: FIRMWARE,
+        capacity,
+        runtime: cfg!(feature = "wasm"),
+        reboot: RebootSupport::Normal,
+    };
 
     bus.log(format_args!(
         "esp-base {FIRMWARE} on {} (heap {} B, WASM memory {} B, uart {})",
@@ -150,9 +200,12 @@ pub async fn run(spawner: Spawner) -> ! {
             ));
         }
         device::HW.put(device::Hw { spi, uart });
-        Controller::new(state, ctx, store, bus, profile)
+        Controller::new(state, ctx, store, bus, profile, irq::IrqEvents)
     };
     #[cfg(not(feature = "wasm"))]
     let controller = Controller::new(state, ctx, store, bus);
-    controller.run().await
+    match controller.run().await {
+        // Dispatch only asks for modes in `ctx.reboot` (normal only).
+        RebootMode::Normal | RebootMode::Bootloader => esp_hal::system::software_reset(),
+    }
 }

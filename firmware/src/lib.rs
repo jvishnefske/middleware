@@ -21,15 +21,29 @@
 //!   deadline table, the DMA channel state machine, the UART receive ring,
 //!   and the events ISRs and completions push.
 //!
-//! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
-//! with a chip feature (`esp32`, `esp32s3`, `esp32c3`). It owns the UARTs,
-//! USB-Serial-JTAG, flash and GPIO, performs the [`dispatch::Action`]s and
-//! runs the payload.
+//!
+//! With the `embassy` feature (no chip HAL) the lib also carries the
+//! portable half of the imperative shell:
+//!
+//! * `embassy` — the message bus, serial link tasks and the controller,
+//!   generic over the flash, the port set and (with `wasm`) the board's
+//!   payload device and interrupt event source.
+//!
+//! The ESP imperative shell (`src/main.rs` and `src/shell/`) is only
+//! compiled with a chip feature (`esp32`, `esp32s3`, `esp32c3`), which also
+//! enables `embassy`. It owns the UARTs, USB-Serial-JTAG, flash and GPIO,
+//! instantiates the controller with them, implements the payload device,
+//! and performs the reboot the controller returns.
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "embassy", feature = "wasm"))]
+extern crate alloc;
+
 pub mod chip;
 pub mod dispatch;
+#[cfg(feature = "embassy")]
+pub mod embassy;
 pub mod image;
 pub mod periph;
 pub mod store;
