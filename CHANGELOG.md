@@ -16,6 +16,16 @@
 - `--print-spec` works. Serving (`run_with`) and manifest rendering return `ServiceError::Unimplemented` until later 0.6 phases land; nothing panics.
 - Dependencies (mw-service only): tokio with `signal`, serde, serde_norway 0.9 (maintained fork of the deprecated serde_yaml), tracing 0.1, tracing-subscriber 0.3, opentelemetry / opentelemetry_sdk / opentelemetry-otlp 0.33 (OTLP over tonic 0.14, the same tonic as `middleware`), tracing-opentelemetry 0.34. `scripts/check-features.sh` proves none reaches an embedded build (M5).
 
+### 0.6: Zenoh router with authentication and ACLs (Z19–Z22)
+- New `mw_service::zenoh_router`: renders a zenohd deployment from the services' `ServiceSpec`s. `principals` (who needs credentials), `plan` (router config and committable manifests, no secrets), `render_router` (plus the `usrpwd` dictionary and Secrets), `RouterOptions` (namespace, image, trust domain, listen address, extra grants, robots, robot route; serde, lab defaults), `router_locator` (`tcp/zenohd.<ns>.svc.cluster.local:7447` for `MW_ZENOH_ROUTER`).
+- `zenoh_router::acl`: the access-control model. Each principal may use exactly what its spec declares (publish, subscribe, answer and announce its served kinds, query its called kinds, browse `@mw/svc/**`), default deny; `AclModel::permits` evaluates it the way zenoh 1.10 does.
+- `zenoh_router::credentials`: the credentials file (`<user>\n<password>\n`, read from `MW_ZENOH_CREDENTIALS`, Secret `zenoh-<user>` key `credentials` mounted at `/var/run/mw/zenoh/credentials`), `Password` (redacted `Debug`), the router dictionary (Secret `zenohd-auth` key `dictionary`).
+- `zenoh_router::config`: zenohd's JSON5 config (router mode, scouting off, `usrpwd`, `access_control`) and `client_config`, a client session authenticating with a credentials file.
+- `zenoh_router::k8s`: ServiceAccount, ConfigMap, Deployment, Service (`zenoh` 7447, `appProtocol: tcp`), an L4 AuthorizationPolicy by mTLS principal, and the robots' Gateway TLS server and VirtualService `tcp` route via the ingress gateway (SNI `zenoh.infra.local` on 30443).
+- Generated `deploy/zenoh/` (config, manifests, the specs and options they come from) and the example `zenoh_router_manifests` (`--out`, `--users`, `--credentials`).
+- The Zenoh trust-model docs (`zenoh`, `zenoh::discovery`) describe what the router adds.
+- Dependencies (mw-service only): `zenoh` 1.10 (already in the tree through `middleware`) and `serde_json`.
+
 ## 0.5.0
 
 ### Migration from 0.4

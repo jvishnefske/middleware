@@ -41,10 +41,22 @@
 //! the id is not detected, and [`Reply::sender`] in a gather,
 //! [`RequestMeta::sender`](crate::transport::RequestMeta) at a responder
 //! and [`SampleMeta::sender`](crate::transport::SampleMeta) are the
-//! sender's claim, not a verified fact. Authenticated identity needs Zenoh
-//! access control and authentication (router ACLs on `@mw/node/**`,
-//! `@mw/svc/**` and the application keys, with TLS or user/password
-//! authentication), which this backend does not configure.
+//! sender's claim, not a verified fact.
+//!
+//! That is the model for sessions that meet as peers. Authentication and
+//! authorisation are the router's job, and this backend configures
+//! neither: deployed behind the zenohd that `mw-service`'s `zenoh_router`
+//! renders (design.md Z19–Z22), every session is a `client` of one router
+//! that refuses links without valid user/password credentials and checks
+//! every message against rules derived from the service's spec (default
+//! deny). There a peer is an **authenticated connection with an authorised
+//! key space**: it publishes, subscribes, answers, queries and announces
+//! only what its principal declares, so it cannot answer for a kind it does
+//! not serve, announce another service's `@mw/svc/<kind>/*` or touch keys
+//! outside its grants (`sys/**` included). Still self-asserted even then:
+//! the Zenoh id and the [`SenderId`] in attachments (zenoh's ACL cannot
+//! bind a username to a Zenoh id, so per-node keys are granted for any
+//! node), and which instance of an allowed kind a principal announces.
 //!
 //! # Publish / subscribe
 //!

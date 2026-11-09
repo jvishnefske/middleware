@@ -405,6 +405,93 @@ with scouting off. All run under `--features zenoh`.
   `zenoh::discovery::tests::differing_records_conflict_and_equal_ones_agree`,
   `zenoh::discovery::tests::records_must_name_the_token_kind_and_instance`.
 
+The 0.6 router (Z19–Z22) lifts Z17/Z18 from "self-asserted" to
+"authenticated connection, authorised key space" for sessions behind one
+zenohd. `mw-service`'s `zenoh_router` renders the router from the
+services' specs: a user/password credential per principal (the service's
+Kubernetes name, `robot-<name>` for robots), `access_control` rules with
+default deny, the router's Kubernetes manifests and a TLS route for robots
+through the ingress gateway. The middleware's Zenoh backend itself still
+configures no authentication. Unit tests are in `zenoh_router::{acl,
+credentials, k8s}::tests` and `zenoh_router::tests`; the router itself
+runs in process (zenoh 1.10, router mode, the rendered config on a
+127.0.0.1 port) in `service/tests/zenoh_router.rs` *(mw-service)*.
+
+- [x] Z19 Each principal's ACL is derived from its spec: it may `put` and
+  `delete` on its `publishes` filters, declare subscribers on and receive
+  publications from its `subscribes` filters, declare queryables and reply
+  on its `serves` kinds (and their per-node keys `@mw/node/*/<kind>`),
+  query its `calls` kinds, announce its `serves` kinds on
+  `@mw/svc/<kind>/*`, and browse `@mw/svc/**`; nothing else (`sys/**`,
+  the admin space `@/**`, other kinds' announcements) under default deny.
+  The model evaluates rules as zenoh does (a rule key expression must
+  include the message's), principals are sorted and unique, grants must be
+  key filters. Against the in-process router: a declared put reaches the
+  subscriber; undeclared puts (`app/other`, `sys/reboot`, a subscriber's
+  forged put) are dropped at ingress; a subscription outside the grant gets
+  nothing (egress); only a caller of `demo/echo` gets replies, and only
+  from its server, never from a squatting queryable; a forged
+  announcement of another principal's kind is refused, so browsers see
+  the genuine record with no `ConflictingRecords` (Z18's forger) —
+  `acl::tests::z19_a_service_publishes_its_declared_keys_only`,
+  `z19_a_service_subscribes_within_its_declared_filters_only`,
+  `z19_nobody_touches_sys_or_the_admin_space`,
+  `z19_every_principal_can_browse_discovery`,
+  `z19_only_the_server_of_a_kind_announces_and_answers_it`,
+  `z19_model_is_sorted_and_refuses_bad_input`,
+  `zenoh_router::tests::z19_principals_are_zenoh_services_and_robots`,
+  `z19_principals_refuse_inconsistent_options`,
+  `z19_config_is_deterministic_json5_zenoh_accepts`,
+  `service/tests/zenoh_router.rs`:
+  `z19_declared_puts_arrive_and_undeclared_puts_are_dropped`,
+  `z19_only_callers_query_and_only_the_server_answers`,
+  `z19_discovery_works_for_all_and_only_the_server_announces`
+  *(mw-service)*.
+- [x] Z20 Credentials: the file `MW_ZENOH_CREDENTIALS` names is exactly
+  two lines, user then password (16–256 bytes of visible ASCII), parsed
+  strictly and rendered back identically; passwords never appear in
+  `Debug` or errors; the router's `usrpwd` dictionary is one
+  `user:password` line per principal, sorted, without duplicates; one
+  credential per principal is required (missing or unknown users are
+  errors); Secrets are rendered separately from the committable output
+  (`zenohd-auth` key `dictionary`, `zenoh-<user>` key `credentials`,
+  none for robots). The in-process router refuses a wrong password, an
+  unknown user and a client with no credentials, and admits the right
+  ones —
+  `credentials::tests::z20_credentials_file_round_trips_and_is_strict`,
+  `z20_passwords_never_print`, `z20_dictionary_is_sorted_and_refuses_duplicates`,
+  `z20_from_file_reads_and_reports_io`,
+  `zenoh_router::tests::z20_render_router_needs_exactly_one_credential_per_principal`,
+  `k8s::tests::z20_secrets_hold_the_dictionary_and_service_credentials_only`,
+  `service/tests/zenoh_router.rs`:
+  `z20_wrong_unknown_or_missing_credentials_are_refused` *(mw-service)*.
+- [x] Z21 The router's manifests in namespace `apps`: ServiceAccount
+  `zenohd`; ConfigMap `zenohd-config` with the config; Deployment (one
+  replica, `Recreate`, image `localhost/mw/zenohd` with
+  `imagePullPolicy: Never`, `-c /etc/zenoh/config.json5`, the dictionary
+  Secret mounted read-only, non-root, read-only root filesystem, no
+  capabilities, seccomp `RuntimeDefault`, TCP probes on `zenoh`, a config
+  hash annotation that rolls the pod); Service port `zenoh` 7447
+  `appProtocol: tcp`; an ALLOW AuthorizationPolicy on port 7447 admitting
+  exactly the principals of the services that use Zenoh, the ingress
+  gateway (robots) and `infra.local/robot/*` —
+  `k8s::tests::z21_authorization_policy_admits_exactly_the_zenoh_principals`,
+  `z21_deployment_service_and_config_follow_the_contract` *(mw-service)*.
+- [x] Z22 Robots reach the router through the ingress gateway's port
+  15443 (NodePort 30443) on a separate Gateway server `apps/zenohd-robots`
+  (protocol `TLS`, `ISTIO_MUTUAL`, host `zenoh.infra.local`) with a
+  VirtualService `tcp` route to `zenohd.apps.svc.cluster.local:7447`; the
+  lab's `https-robots` server is `HTTPS`, where Istio applies only `http`
+  routes, so the robot selects this server by SNI `zenoh.infra.local`.
+  `deploy/zenoh/` (`config.json5`, `zenohd.yaml`) is the output for
+  `deploy/zenoh/router.yaml` and `deploy/zenoh/specs/`, regenerated with
+  the `zenoh_router_manifests` example or `MW_BLESS=1`, and validates
+  with kubeconform (`-strict`, Kubernetes 1.33 and the Istio CRD schemas) —
+  `k8s::tests::z22_robot_route_is_an_sni_tls_server_with_a_tcp_route`,
+  `service/tests/zenoh_router.rs`: `z22_deploy_zenoh_is_the_rendered_output`
+  *(mw-service)*. Not yet verified on the lab: Istio merging the TLS
+  server into the HTTPS server's port with SNI precedence (phase 3).
+
 ### gRPC (`grpc`)
 
 - [x] G1 Unary request to key `Service/Method` is a gRPC call on

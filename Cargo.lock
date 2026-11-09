@@ -1743,11 +1743,13 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "serde",
+ "serde_json",
  "serde_norway",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "zenoh",
 ]
 
 [[package]]

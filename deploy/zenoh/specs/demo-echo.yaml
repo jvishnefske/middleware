@@ -1,0 +1,19 @@
+# What `demo-echo --print-spec` declares for Zenoh (regenerate from the
+# binary once it exists; only serves/calls/publishes/subscribes matter here).
+name: demo/echo
+serves:
+- demo/echo
+calls: []
+allow_callers:
+- spiffe://infra.local/ns/apps/sa/demo-caller
+publishes:
+- app/demo/echo/**
+subscribes: []
+replicas: 3
+resources:
+  cpu_request: 50
+  cpu_limit: 500
+  memory_request: 64
+  memory_limit: 256
+drain_grace_ms: 5000
+port: 50051

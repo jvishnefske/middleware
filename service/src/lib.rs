@@ -44,6 +44,9 @@
 //! * [`run`] — the command line ([`Command`]), [`Service::main`],
 //!   [`Service::run`] and [`Service::run_with`].
 //! * [`manifest`] — `--print-manifests` rendering.
+//! * [`zenoh_router`] — the Zenoh router (zenohd): per-service
+//!   credentials, access-control rules derived from the specs, its config
+//!   and Kubernetes manifests ([`render_router`]).
 //! * [`error`] — [`ServiceError`].
 //!
 //! # Status
@@ -71,6 +74,7 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod run;
 pub mod spec;
+pub mod zenoh_router;
 
 pub use builder::{Served, Service, ServiceBuilder};
 pub use config::{Config, ConfigError};
@@ -83,3 +87,4 @@ pub use lifecycle::{Action, Event, Lifecycle, Monotonic, Outcome};
 pub use manifest::ManifestOptions;
 pub use run::{ArgsError, Command};
 pub use spec::{Mebibytes, MilliCpu, Resources, ServiceSpec, SpecError};
+pub use zenoh_router::{RouterBundle, RouterError, RouterOptions, RouterPlan, render_router};
