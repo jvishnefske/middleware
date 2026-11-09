@@ -972,6 +972,55 @@ mod mesh {
         assert_eq!(b.tracked(), 0);
     }
 
+    /// M9: an endpoint browsed without a node id gets the one its health
+    /// service sends in `mw-node`; a browser's own node id wins.
+    #[tokio::test]
+    async fn m9_mesh_browse_records_the_node_header_as_the_endpoint_node() {
+        let node = SenderId([0x42; 8]);
+        let (svc, mut health_state) = health();
+        let srv = serve_on_loopback(GrpcServer::new().with_health(svc.with_node(node))).await;
+        let bus = MemoryBus::new();
+        let mut dns = bus.node(SenderId([0xD0; 8])).discovery().unwrap();
+        let mut b: MeshBrowse<_, 4> = MeshBrowse::new(
+            bus.node(SenderId([0xB0; 8])).discovery().unwrap(),
+            MeshDialer::direct(),
+        );
+        b.browse(KeyFilter::Exact(KIND.key())).await.unwrap();
+        let service = Service {
+            kind: KIND,
+            instance: "pod-3",
+            node: None,
+            endpoint: Endpoint::Socket(srv.addr),
+            txt: b"",
+            ttl_s: 60,
+        };
+        health_state.announce(&service).await.unwrap();
+        dns.announce(&service).await.unwrap();
+        let mut buf = [0u8; 512];
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert_eq!(
+            e,
+            Event::Up(Service {
+                node: Some(node),
+                ..service
+            })
+        );
+        // Fed into a directory, Target::Node reaches it.
+        let (d, _) = Directory::<4>::new().observe(&e, 0);
+        let targets = middleware::grpc::mesh::targets(&d, KIND, Target::Node(node));
+        assert_eq!(targets, [(Some(node), srv.addr.to_string())]);
+        // A node the browser reports itself is kept.
+        let own = SenderId([0x07; 8]);
+        let named = Service {
+            instance: "pod-4",
+            node: Some(own),
+            ..service
+        };
+        dns.announce(&named).await.unwrap();
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert!(matches!(e, Event::Up(s) if s.instance == "pod-4" && s.node == Some(own)));
+    }
+
     #[tokio::test]
     async fn i8_mesh_browse_reports_down_when_dns_withdraws() {
         let (svc, mut health_state) = health();

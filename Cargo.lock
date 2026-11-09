@@ -1738,16 +1738,21 @@ dependencies = [
 name = "mw-service"
 version = "0.6.0"
 dependencies = [
+ "bytes",
+ "http",
  "middleware",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "serde",
  "serde_norway",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
+ "zenoh",
 ]
 
 [[package]]
@@ -3608,20 +3613,6 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-opentelemetry"
-version = "0.34.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a904802a1b902f43638b677ff2a650847e3b4404101b6c586d648e8c1e3e8fe"
-dependencies = [
- "js-sys",
- "opentelemetry",
- "tracing",
- "tracing-core",
- "tracing-subscriber",
- "web-time",
 ]
 
 [[package]]

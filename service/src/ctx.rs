@@ -33,14 +33,18 @@
 //!
 //! # Ownership
 //!
-//! The runner owns the long-lived connections in a [`Links`] value (one
-//! [`MeshClient`] per called kind, the Zenoh session and the declared
-//! publish filters) and lends it to each [`Ctx`] for one request: no shared
-//! ownership, no locks. Calls through a `Ctx` therefore serialize per serve
-//! loop.
+//! Each serve loop of the runner (one per served kind) owns its own
+//! long-lived connections in a [`Links`] value (one [`MeshClient`] per
+//! called kind, a clone of the Zenoh transport sharing the session, and
+//! the declared publish filters) and lends it to each [`Ctx`] for one
+//! request: no shared ownership, no locks. Calls through a `Ctx`
+//! therefore serialize per serve loop, while loops of different kinds
+//! call concurrently. The runner moves each new snapshot of a called
+//! kind's discovered endpoints into the links between requests
+//! ([`Links::with_directory`]).
 
 use middleware::Handler;
-use middleware::discovery::ServiceKind;
+use middleware::discovery::{Directory, ServiceKind};
 use middleware::grpc::GrpcError;
 use middleware::grpc::mesh::MeshClient;
 use middleware::key::{Key, KeyFilterBuf, MAX_KEY_LEN};
@@ -179,6 +183,23 @@ impl Links {
             publishes,
             ..self
         }
+    }
+
+    /// The links with `kind`'s client routing to `directory` from now on
+    /// (its cached channels and client id kept); unchanged when no client
+    /// serves `kind`. The runner applies each new snapshot of a called
+    /// kind's discovered endpoints this way.
+    pub fn with_directory(self, kind: &str, directory: Directory<DIRECTORY_SLOTS>) -> Self {
+        let mut directory = Some(directory);
+        let clients = self
+            .clients
+            .into_iter()
+            .map(|(k, c)| match directory.take_if(|_| k == kind) {
+                Some(d) => (k, c.with_directory(d)),
+                None => (k, c),
+            })
+            .collect();
+        Links { clients, ..self }
     }
 
     /// The client for `kind`, if one was added.
@@ -529,6 +550,37 @@ mod tests {
         }
         assert!(ctx.publisher().is_none(), "no zenoh session");
         assert_send(&ctx);
+    }
+
+    #[test]
+    fn m8_links_take_new_directories_per_kind() {
+        use middleware::discovery::{Endpoint, Event, Service as Record};
+        let other = ServiceKind::from_static("demo/other");
+        let links = Links::new()
+            .with_client(KIND, MeshClient::new(KIND, MeshDialer::direct()))
+            .with_client(other, MeshClient::new(other, MeshDialer::direct()));
+        let up = Event::Up(Record {
+            kind: KIND,
+            instance: "echo-0",
+            node: None,
+            endpoint: Endpoint::Socket("127.0.0.1:9".parse().unwrap()),
+            txt: b"",
+            ttl_s: 30,
+        });
+        let (d, _) = Directory::new().observe(&up, 0);
+        let mut links = links.with_directory("demo/echo", d.clone());
+        let echo = links.client_mut("demo/echo").unwrap();
+        assert_eq!(echo.directory(), &d);
+        assert!(
+            links
+                .client_mut("demo/other")
+                .unwrap()
+                .directory()
+                .is_empty()
+        );
+        // An unknown kind changes nothing.
+        let mut links = links.with_directory("nope/x", Directory::new());
+        assert_eq!(links.client_mut("demo/echo").unwrap().directory(), &d);
     }
 
     /// A handler calling a dependency: its future is `Send`, so it boxes.

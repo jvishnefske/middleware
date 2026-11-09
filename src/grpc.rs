@@ -99,8 +99,8 @@ pub mod mesh;
 pub use bus::BusService;
 pub use client::{GrpcSubscriber, GrpcTransport};
 pub use codec::RawCodec;
-pub use health::{GrpcAnnouncer, HealthClient, HealthService, ServingStatus, health};
-pub use responder::{GrpcResponder, PrincipalSource, ResponderService, responder};
+pub use health::{GrpcAnnouncer, HealthClient, HealthService, NODE_HEADER, ServingStatus, health};
+pub use responder::{GrpcResponder, PendingCall, PrincipalSource, ResponderService, responder};
 pub use server::GrpcServer;
 
 use crate::transport::HandlerError;

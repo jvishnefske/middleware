@@ -9,7 +9,7 @@
 //! order rather than the first call that made one.
 
 use middleware::Codec;
-use middleware::transport::{HandlerError, RequestMeta};
+use middleware::transport::{HandlerError, RequestMeta, Sample};
 use middleware::typed::TypedHandler;
 use std::time::Duration;
 
@@ -25,12 +25,38 @@ pub struct Served {
     pub handler: BoxedHandler,
 }
 
+/// A subscription hook: called with every sample matching `filter`
+/// ([`ServiceBuilder::on_sample`]).
+pub struct SampleHook {
+    /// The subscribed filter (`a/b` or `a/b/**`), as in
+    /// [`ServiceSpec::subscribes`].
+    pub filter: String,
+    /// The callback.
+    pub(crate) hook: Box<dyn for<'s> FnMut(Sample<'s>) + Send + 'static>,
+}
+
+impl SampleHook {
+    /// Calls the hook with `sample`.
+    pub fn call(&mut self, sample: Sample<'_>) {
+        (self.hook)(sample)
+    }
+}
+
+impl std::fmt::Debug for SampleHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SampleHook")
+            .field("filter", &self.filter)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Declares a service; see the module docs. Made by [`Service::builder`].
 #[derive(Debug)]
 #[must_use = "a builder does nothing until `build`"]
 pub struct ServiceBuilder {
     spec: ServiceSpec,
     served: Vec<Served>,
+    hooks: Vec<SampleHook>,
 }
 
 impl ServiceBuilder {
@@ -46,7 +72,11 @@ impl ServiceBuilder {
             kind: kind.to_owned(),
             handler: BoxedHandler::new(handler),
         });
-        ServiceBuilder { spec, served }
+        ServiceBuilder {
+            spec,
+            served,
+            ..self
+        }
     }
 
     /// Answers requests on `kind` with a typed function: the request is
@@ -91,9 +121,29 @@ impl ServiceBuilder {
     }
 
     /// Declares a subscription to keys matching `filter` (same form as
-    /// [`publishes`](Self::publishes)).
+    /// [`publishes`](Self::publishes)). This only declares it (manifests,
+    /// the router's ACL); to receive the samples use
+    /// [`on_sample`](Self::on_sample).
     pub fn subscribes(self, filter: &str) -> Self {
         self.with_spec(|s| s.subscribes.push(filter.to_owned()))
+    }
+
+    /// Subscribes to keys matching `filter` (declared as with
+    /// [`subscribes`](Self::subscribes)) and calls `hook` with every sample
+    /// the runner's Zenoh session receives for it, in order, from one task
+    /// per filter. The hook is synchronous: forward to a channel for async
+    /// work.
+    pub fn on_sample(
+        self,
+        filter: &str,
+        hook: impl for<'s> FnMut(Sample<'s>) + Send + 'static,
+    ) -> Self {
+        let mut next = self.subscribes(filter);
+        next.hooks.push(SampleHook {
+            filter: filter.to_owned(),
+            hook: Box::new(hook),
+        });
+        next
     }
 
     /// Runs `n` pods (default 1).
@@ -128,6 +178,7 @@ impl ServiceBuilder {
         Ok(Service {
             spec: self.spec,
             served: self.served,
+            hooks: self.hooks,
         })
     }
 
@@ -138,12 +189,14 @@ impl ServiceBuilder {
     }
 }
 
-/// A declared, validated service: its [`ServiceSpec`] and its handlers.
-/// Run it with [`Service::run`] or, from `main`, [`Service::main`].
+/// A declared, validated service: its [`ServiceSpec`], its handlers and
+/// its subscription hooks. Run it with [`Service::run`] or, from `main`,
+/// [`Service::main`].
 #[derive(Debug)]
 pub struct Service {
     spec: ServiceSpec,
     served: Vec<Served>,
+    hooks: Vec<SampleHook>,
 }
 
 impl Service {
@@ -153,6 +206,7 @@ impl Service {
         ServiceBuilder {
             spec: ServiceSpec::new(name),
             served: Vec::new(),
+            hooks: Vec::new(),
         }
     }
 
@@ -161,9 +215,16 @@ impl Service {
         &self.spec
     }
 
-    /// The spec and the handlers, in `serves` order, for a runner.
+    /// The spec and the handlers, in `serves` order, for a runner (the
+    /// subscription hooks are dropped; see [`Service::into_all_parts`]).
     pub fn into_parts(self) -> (ServiceSpec, Vec<Served>) {
         (self.spec, self.served)
+    }
+
+    /// The spec, the handlers and the subscription hooks, each in
+    /// declaration order.
+    pub fn into_all_parts(self) -> (ServiceSpec, Vec<Served>, Vec<SampleHook>) {
+        (self.spec, self.served, self.hooks)
     }
 }
 
@@ -230,6 +291,27 @@ mod tests {
         let (spec, served) = svc.into_parts();
         let kinds: Vec<_> = served.iter().map(|s| s.kind.as_str()).collect();
         assert_eq!(kinds, spec.serves);
+    }
+
+    #[test]
+    fn m10_on_sample_declares_the_subscription_and_keeps_the_hook() {
+        let mut seen = Vec::new();
+        let svc = Service::builder("demo/listen")
+            .subscribes("app/declared/**")
+            .on_sample("app/robot/**", move |s| seen.push(s.payload.to_vec()))
+            .build()
+            .expect("valid");
+        assert_eq!(svc.spec().subscribes, ["app/declared/**", "app/robot/**"]);
+        let (_, served, mut hooks) = svc.into_all_parts();
+        assert!(served.is_empty());
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].filter, "app/robot/**");
+        hooks[0].call(Sample {
+            key: middleware::Key::from_static("app/robot/pose"),
+            payload: b"p",
+            meta: middleware::transport::SampleMeta::NONE,
+        });
+        assert!(format!("{:?}", hooks[0]).starts_with("SampleHook"));
     }
 
     #[test]

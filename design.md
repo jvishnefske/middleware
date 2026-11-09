@@ -1065,10 +1065,10 @@ cannot do without stalling its serve loop. Tests marked *(mw-service)* run
 under `cargo test -p mw-service` and `cargo test --workspace`.
 
 0.6 is built in phases: phase 1 defines the API and implements M1–M5;
-later phases implement the runner (M6–M10), the manifests (M11–M15), the
-ops CLI (M16) and the end-to-end run on the lab cluster (M17), each
-checking its items here. Until then `Service::run_with` and
-`manifest::render` return `ServiceError::Unimplemented`, never panic.
+later phases implement the runner (M6–M10, with M20–M23), the manifests
+(M11–M15), the ops CLI (M16) and the end-to-end run on the lab cluster
+(M17), each checking its items here. Until its phase lands
+`manifest::render` returns `ServiceError::Unimplemented`, never panics.
 
 - [x] M1 `Service::builder(name)` records `serve`, `serve_typed` (through
   `typed::TypedHandler`), `calls`, `allow_callers`, `publishes`,
@@ -1090,7 +1090,7 @@ checking its items here. Until then `Service::run_with` and
   `m1_yaml_is_deterministic_and_round_trips`,
   `run::tests::m1_command_line_parses_each_command`,
   `m1_command_line_errors`, `m1_print_spec_writes_the_yaml`,
-  `m1_run_with_checks_the_service_map_then_reports_unimplemented`
+  `m1_run_with_checks_the_service_map_first`
   *(mw-service)*.
 - [x] M2 `Config::from_env` parses `MW_PORT`, `POD_NAMESPACE`, `POD_NAME`,
   `OTEL_EXPORTER_OTLP_ENDPOINT`, `MW_ZENOH_ROUTER`, `MW_ZENOH_CREDENTIALS`,
@@ -1138,27 +1138,84 @@ checking its items here. Until then `Service::run_with` and
   core does not depend on it; OpenTelemetry's OTLP exporter uses the same
   tonic 0.14 as `middleware` — `scripts/check-features.sh` (block "M5",
   and those crates in `CLOUD_CRATES` for every F1 set).
-- [ ] M6 `Service::run_with` serves: binds h2c on `0.0.0.0:<port>`, runs a
+- [x] M6 `Service::run_with` serves: binds h2c on `0.0.0.0:<port>`, runs a
   `GrpcServer` with health and a responder taking the principal from the
   sidecar (`PrincipalSource::SidecarXfcc`), one serve loop per served kind
   calling its handler with a `Ctx`, reports `SERVING` once every loop is
   up, enforces `allow_callers` in process as well, and drives `Lifecycle`
   from SIGTERM/SIGINT or the shutdown future through drain to exit.
-  *Owner: phase 2A (runner internals).*
-- [ ] M7 Structured JSON logs on stdout; with
+  Health starts `NOT_SERVING`; an unlisted or unidentified caller is
+  `PERMISSION_DENIED` before routing, an unserved key `UNIMPLEMENTED`;
+  kinds run concurrently, each kind one call at a time (its handler is
+  `&mut self`) with a bounded queue (full: `UNAVAILABLE`); the caller's
+  deadline bounds the handler; on shutdown health turns `NOT_SERVING` at
+  once, calls are answered through the drain grace, the call in flight
+  completes, then the server stops accepting, open health watches end
+  and the run returns `Ok` within the stop bound —
+  `service/tests/runner.rs`:
+  `m6_serves_admitted_callers_and_drains_on_shutdown`;
+  `run::serve::tests::m6_route_checks_callers_then_kinds`,
+  `m6_shell_performs_health_stop_and_exit_in_order`,
+  `run::options::tests::m6_options_default_and_override`,
+  `run::tests::m1_run_with_checks_the_service_map_first`;
+  `grpc::responder::tests::m6_next_call_hands_over_an_owned_call_answered_later`
+  *(mw-service; the last in `middleware`)*.
+- [x] M7 Structured JSON logs on stdout; with
   `OTEL_EXPORTER_OTLP_ENDPOINT`, OTLP/gRPC trace export with resource
   `service.name`, `k8s.namespace.name`, `k8s.pod.name`; one server span per
   request whose parent is `RequestMeta::trace` and whose id is
-  `Ctx::trace`. *Owner: phase 2A.*
-- [ ] M8 Each `calls` kind gets `MeshBrowse<UnicastDnsSd>` over its
+  `Ctx::trace`. The span (kind server) carries `rpc.system`,
+  `rpc.service`, `rpc.method`, `mw.kind`, and `mw.principal` /
+  `mw.request_id` when present, ends with status error when the handler
+  fails, and is flushed at shutdown within a bound; without an endpoint
+  handlers still get a span context continuing the inbound trace —
+  `service/tests/runner.rs`: `m7_server_spans_reach_the_otlp_collector`
+  (an in-process OTLP `TraceService` on 127.0.0.1);
+  `run::telemetry::tests::m7_resource_and_span_attributes`,
+  `m7_without_export_spans_still_continue_the_trace` *(mw-service)*.
+- [x] M8 Each `calls` kind gets `MeshBrowse<UnicastDnsSd>` over its
   `MW_SERVICE_MAP` route feeding a `Directory` and a `MeshClient` through
-  the sidecar, lent to handlers in `Links`. *Owner: phase 2A.*
-- [ ] M9 Each pod reports its `SenderId` in an `mw-node` response header on
+  the sidecar, lent to handlers in `Links`. One background task per kind
+  publishes directory snapshots that each serve loop's own `Links` takes
+  between requests; endpoints are dialled directly (Istio's traffic
+  capture puts the sidecar in the path). Two echo pods behind a stub
+  cluster DNS are gathered, called round robin and, when one drains,
+  dropped from the caller's directory before it stops; a call through
+  `ctx.client` continues the trace (echo's parent is the caller's server
+  span) — `service/tests/runner.rs`:
+  `m8_m9_calls_discover_pods_by_dns_and_target_them_by_node`;
+  `ctx::tests::m8_links_take_new_directories_per_kind` *(mw-service)*.
+- [x] M9 Each pod reports its `SenderId` in an `mw-node` response header on
   health `Check`, recorded by `MeshBrowse`, so `Target::Node` works for
-  DNS-discovered endpoints. *Owner: phase 2A.*
-- [ ] M10 A service that publishes or subscribes opens a Zenoh client
+  DNS-discovered endpoints. The header is 16 lowercase hex digits, also
+  on `Watch` replies (which `MeshBrowse` opens); the id is the FNV-1a hash
+  of `<POD_NAMESPACE>/<POD_NAME>`, fresh per run without a pod name; a
+  node id the browser itself reports wins —
+  `service/tests/runner.rs`:
+  `m8_m9_calls_discover_pods_by_dns_and_target_them_by_node`,
+  `m6_serves_admitted_callers_and_drains_on_shutdown`;
+  `run::node::tests::m9_node_id_hashes_the_pod_identity` *(mw-service)*;
+  `grpc::health::tests::m9_node_header_value_is_sixteen_lowercase_hex_digits`,
+  `m9_check_and_watch_replies_carry_the_node_header`, `tests/grpc.rs`:
+  `mesh::m9_mesh_browse_records_the_node_header_as_the_endpoint_node`
+  *(middleware, features `grpc`, `istio`)*.
+- [x] M10 A service that publishes or subscribes opens a Zenoh client
   session to `MW_ZENOH_ROUTER` with the credentials in
   `MW_ZENOH_CREDENTIALS`; subscriptions follow `subscribes`.
+  Runner side: client mode, no scouting, a bounded connect; no router
+  configured is an error at start; the credentials file is one
+  `user:password` line (zenohd's `usrpwd` dictionary format), never
+  echoed; wrong credentials fail the start; `ctx.publisher()` publishes
+  only declared keys; `on_sample` hooks receive their filter's samples
+  (a bare `subscribes` only declares) —
+  `service/tests/runner.rs`:
+  `m10_zenoh_session_authenticates_publishes_and_subscribes` (an
+  in-process Zenoh router with a `usrpwd` dictionary on 127.0.0.1);
+  `run::zenoh::tests::m10_credentials_file_is_one_user_password_line`,
+  `m10_router_is_required_only_when_the_spec_uses_zenoh`,
+  `m10_client_config_sets_mode_router_and_credentials`,
+  `builder::tests::m10_on_sample_declares_the_subscription_and_keeps_the_hook`
+  *(mw-service)*. Router and ACLs: Z19–Z21.
   *Owners: phase 2A (session), phase 2D (router and ACLs, Z19–Z21).*
 - [ ] M11 `--print-manifests` renders ServiceAccount, Deployment (sidecar
   injection, SPIRE template, `grpc` readiness and liveness probes on the
@@ -1182,6 +1239,34 @@ checking its items here. Until then `Service::run_with` and
 - [ ] M17 The end-to-end run on the lab cluster asserts identity, gather,
   deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
   logs. *Owners: phase 3 (e2e), on images from phase 2C (nix).*
+- [x] M20 `grpc::GrpcResponder::next_call` hands out each queued unary
+  call as an owned `PendingCall` (key, body, `RequestMeta` measured at a
+  given instant, deadline, whether the client still waits) that another
+  task answers with `reply` (a `HandlerError` becomes its status) or
+  `reply_status`; this is how the runner serves async handlers —
+  `grpc::responder::tests::m6_next_call_hands_over_an_owned_call_answered_later`
+  *(middleware, feature `grpc`)*.
+- [x] M21 `Service::run_with_options` takes `RunOptions`: an already bound
+  listener, the discovery nameserver and schedule, the downstream dialer
+  (default: direct, 2 s connect timeout), the stop bound (default 5 s)
+  and `without_sidecar` (no principal, no in-process caller check, for
+  loopback tests) — `run::options::tests::m6_options_default_and_override`,
+  and every test of `service/tests/runner.rs` *(mw-service)*.
+- [x] M22 `ServiceBuilder::on_sample(filter, hook)` declares the
+  subscription like `subscribes` and keeps a synchronous hook the runner
+  calls with every sample of the filter, in order —
+  `builder::tests::m10_on_sample_declares_the_subscription_and_keeps_the_hook`,
+  `service/tests/runner.rs`:
+  `m10_zenoh_session_authenticates_publishes_and_subscribes`
+  *(mw-service)*.
+- [x] M23 The reference services `service/examples/demo_echo.rs`
+  (`demo/echo`: pod, authenticated caller, trace id and body; three
+  replicas; admits `demo-caller`) and `service/examples/demo_caller.rs`
+  (`demo/hello`: one echo, a gather across the echo pods with their node
+  ids, or a `Target::Node` call) build and their pure parts are tested —
+  `demo_echo` `tests::answers_pod_caller_trace_and_body`, `demo_caller`
+  `tests::body_selects_gather_node_or_any`,
+  `spec_declares_the_dependency_and_callers` *(mw-service examples)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

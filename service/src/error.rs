@@ -31,6 +31,17 @@ pub enum ServiceError {
     Zenoh(middleware::zenoh::ZenohError),
     /// Setting up tracing or the OTLP exporter failed.
     Telemetry(String),
+    /// Setting up discovery of a called kind failed (no nameserver, an
+    /// unreadable `resolv.conf`).
+    Dns(middleware::dns::unicast::UnicastError),
+    /// The spec publishes or subscribes but `MW_ZENOH_ROUTER` is unset.
+    NoZenohRouter,
+    /// The `MW_ZENOH_CREDENTIALS` file is unreadable or malformed (the
+    /// reason; never the file's content).
+    ZenohCredentials(String),
+    /// The service stopped because something failed while serving (the
+    /// server ended on its own).
+    Failed(String),
 }
 
 impl fmt::Display for ServiceError {
@@ -47,6 +58,12 @@ impl fmt::Display for ServiceError {
             ServiceError::Grpc(e) => write!(f, "grpc: {e}"),
             ServiceError::Zenoh(e) => write!(f, "zenoh: {e}"),
             ServiceError::Telemetry(e) => write!(f, "telemetry: {e}"),
+            ServiceError::Dns(e) => write!(f, "discovery: {e}"),
+            ServiceError::NoZenohRouter => {
+                f.write_str("the service publishes or subscribes but MW_ZENOH_ROUTER is unset")
+            }
+            ServiceError::ZenohCredentials(e) => write!(f, "MW_ZENOH_CREDENTIALS: {e}"),
+            ServiceError::Failed(e) => write!(f, "failed while serving: {e}"),
         }
     }
 }
@@ -60,6 +77,7 @@ impl std::error::Error for ServiceError {
             ServiceError::Io(e) => Some(e),
             ServiceError::Grpc(e) => Some(e),
             ServiceError::Zenoh(e) => Some(e),
+            ServiceError::Dns(e) => Some(e),
             _ => None,
         }
     }
@@ -92,6 +110,12 @@ impl From<std::io::Error> for ServiceError {
 impl From<middleware::grpc::GrpcError> for ServiceError {
     fn from(e: middleware::grpc::GrpcError) -> Self {
         ServiceError::Grpc(e)
+    }
+}
+
+impl From<middleware::dns::unicast::UnicastError> for ServiceError {
+    fn from(e: middleware::dns::unicast::UnicastError) -> Self {
+        ServiceError::Dns(e)
     }
 }
 

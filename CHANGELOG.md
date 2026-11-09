@@ -16,6 +16,15 @@
 - `--print-spec` works. Serving (`run_with`) and manifest rendering return `ServiceError::Unimplemented` until later 0.6 phases land; nothing panics.
 - Dependencies (mw-service only): tokio with `signal`, serde, serde_norway 0.9 (maintained fork of the deprecated serde_yaml), tracing 0.1, tracing-subscriber 0.3, opentelemetry / opentelemetry_sdk / opentelemetry-otlp 0.33 (OTLP over tonic 0.14, the same tonic as `middleware`), tracing-opentelemetry 0.34. `scripts/check-features.sh` proves none reaches an embedded build (M5).
 
+### 0.6: runner internals (M6–M10, M20–M23)
+- `mw-service` serves: `Service::run` / `run_with` / new `run_with_options(config, RunOptions, shutdown)` bind h2c on `0.0.0.0:<port>`, mount health (node id in `mw-node`) and a responder trusting the sidecar's `x-forwarded-client-cert`, enforce `allow_callers` in process (`PERMISSION_DENIED`, also for unidentified callers), run one serve task per served kind (kinds concurrent, each kind serial, bounded queue, the caller's deadline bounds the handler), and drive `Lifecycle`: `NOT_SERVING` on SIGTERM/SIGINT or the shutdown future, answer through the drain grace, stop accepting, finish in-flight calls within `RunOptions::stop_timeout` (default 5 s), flush traces (2 s). A second signal stops at once.
+- Telemetry: JSON logs on stdout (`RUST_LOG`, `Service::run` only), one log line per request; with `OTEL_EXPORTER_OTLP_ENDPOINT`, OTLP/gRPC export of one server span per request (parent: the inbound `traceparent`; id: `Ctx::trace`) with resource `service.name`, `k8s.namespace.name`, `k8s.pod.name`.
+- `calls`: per called kind `UnicastDnsSd` → `MeshBrowse` → `Directory` snapshots → each serve task's `MeshClient`, dialled directly (Istio's capture inserts the sidecar). The node id is the FNV-1a hash of `<POD_NAMESPACE>/<POD_NAME>`.
+- Zenoh: a client session to `MW_ZENOH_ROUTER` (required when the spec publishes or subscribes), user/password from `MW_ZENOH_CREDENTIALS` (one `user:password` line, zenohd's dictionary format). New `ServiceBuilder::on_sample(filter, hook)`; `Service::into_all_parts`.
+- New in `middleware` (additive): `grpc::GrpcResponder::next_call` and `grpc::PendingCall` (answer calls from another task); `grpc::health::NODE_HEADER` (`mw-node`), `HealthService::with_node`, `HealthClient::check_node`, `HealthWatch::node`, `format_node` / `parse_node` / `node_of`; `grpc::mesh::MeshBrowse` reports the `mw-node` id as `Service::node` when its browser gives none.
+- `ServiceError` gains `Dns`, `NoZenohRouter`, `ZenohCredentials` and `Failed`. `mw-service` depends on `zenoh` directly (same version as `middleware`) and no longer on `tracing-opentelemetry` (spans are made with the OpenTelemetry SDK, per run).
+- Examples `service/examples/demo_echo.rs` and `demo_caller.rs`, the services of the end-to-end run.
+
 ## 0.5.0
 
 ### Migration from 0.4

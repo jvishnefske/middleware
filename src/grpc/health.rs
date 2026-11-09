@@ -33,10 +33,25 @@
 //! ([`health_name`]: the kind's key text, e.g. `cam/jpeg`), which is what
 //! `grpc::mesh::MeshBrowse` (feature `istio`) watches for each endpoint.
 //! At most [`MAX_HEALTH_ENTRIES`] names are held.
+//!
+//! # Node id
+//!
+//! A [`HealthService`] made [`with_node`](HealthService::with_node) sends
+//! its node's [`SenderId`] in the [`NODE_HEADER`] (`mw-node`) response
+//! header of every `Check` and `Watch` reply, as 16 lowercase hex digits
+//! (the `mw-client` format, [`format_node`]). [`HealthClient::check_node`]
+//! and [`HealthWatch::node`] read it back (`None` when absent or
+//! malformed). `grpc::mesh::MeshBrowse` records it as the endpoint's
+//! [`Service::node`] when its browser knows none (unicast DNS-SD has no
+//! node ids), so `Target::Node` reaches DNS-discovered endpoints. Like
+//! `mw-client` it is the server's claim; inside the mesh the channel is
+//! the sidecar's mTLS connection to the endpoint that was dialled.
 
 use super::GrpcError;
+use super::bus::parse_client_id;
 use super::codec::RawCodec;
 use crate::discovery::{Announce, Service, ServiceKind};
+use crate::transport::SenderId;
 use bytes::{BufMut, Bytes, BytesMut};
 use core::convert::Infallible;
 use core::pin::Pin;
@@ -61,6 +76,36 @@ pub const CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
 pub const WATCH_PATH: &str = "/grpc.health.v1.Health/Watch";
 /// Most service names a [`HealthTable`] holds.
 pub const MAX_HEALTH_ENTRIES: usize = 64;
+/// Response header carrying the server's node id (module docs).
+pub const NODE_HEADER: &str = "mw-node";
+
+/// `id` as the [`NODE_HEADER`] value: 16 lowercase hex digits. Pure.
+pub fn format_node(id: SenderId) -> String {
+    id.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The node id of a [`NODE_HEADER`] value, `None` unless exactly 16 hex
+/// digits. Pure.
+pub fn parse_node(value: &[u8]) -> Option<SenderId> {
+    parse_client_id(value)
+}
+
+/// The node id in `metadata`'s [`NODE_HEADER`], if valid. Pure.
+pub fn node_of(metadata: &tonic::metadata::MetadataMap) -> Option<SenderId> {
+    metadata
+        .get(NODE_HEADER)
+        .and_then(|v| parse_node(v.as_bytes()))
+}
+
+/// Adds the [`NODE_HEADER`] for `node` (if any) to `response`.
+fn with_node_header<T>(mut response: Response<T>, node: Option<SenderId>) -> Response<T> {
+    if let Some(v) =
+        node.and_then(|n| tonic::metadata::MetadataValue::try_from(format_node(n)).ok())
+    {
+        response.metadata_mut().insert(NODE_HEADER, v);
+    }
+    response
+}
 
 /// `HealthCheckResponse.ServingStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,7 +341,10 @@ impl HealthTable {
 pub fn health() -> (HealthService, GrpcAnnouncer) {
     let (tx, rx) = watch::channel(HealthTable::new());
     (
-        HealthService { table: rx },
+        HealthService {
+            table: rx,
+            node: None,
+        },
         GrpcAnnouncer {
             table: tx,
             announced: Vec::new(),
@@ -376,20 +424,47 @@ impl Announce for GrpcAnnouncer {
 #[derive(Debug, Clone)]
 pub struct HealthService {
     table: watch::Receiver<HealthTable>,
+    node: Option<SenderId>,
 }
 
 impl HealthService {
+    /// Returns this service sending `node` in the [`NODE_HEADER`] of every
+    /// reply (module docs).
+    pub fn with_node(self, node: SenderId) -> Self {
+        HealthService {
+            node: Some(node),
+            ..self
+        }
+    }
+
+    /// The node id sent with every reply, if any.
+    pub fn node(&self) -> Option<SenderId> {
+        self.node
+    }
+
     /// Handles one HTTP/2 request addressed to this service.
     pub async fn handle(self, req: http::Request<Body>) -> http::Response<Body> {
         match req.uri().path() {
             CHECK_PATH => {
                 Grpc::new(RawCodec)
-                    .unary(CheckMethod { table: self.table }, req)
+                    .unary(
+                        CheckMethod {
+                            table: self.table,
+                            node: self.node,
+                        },
+                        req,
+                    )
                     .await
             }
             WATCH_PATH => {
                 Grpc::new(RawCodec)
-                    .server_streaming(WatchMethod { table: self.table }, req)
+                    .server_streaming(
+                        WatchMethod {
+                            table: self.table,
+                            node: self.node,
+                        },
+                        req,
+                    )
                     .await
             }
             _ => Status::unimplemented("unknown health method").into_http(),
@@ -422,6 +497,7 @@ fn bad_request(e: ProtoError) -> Status {
 
 struct CheckMethod {
     table: watch::Receiver<HealthTable>,
+    node: Option<SenderId>,
 }
 
 impl UnaryService<Bytes> for CheckMethod {
@@ -434,7 +510,7 @@ impl UnaryService<Bytes> for CheckMethod {
             self.table
                 .borrow()
                 .get(name)
-                .map(|s| Response::new(encode_response(s)))
+                .map(|s| with_node_header(Response::new(encode_response(s)), self.node))
                 .ok_or_else(|| Status::not_found("unknown service"))
         });
         core::future::ready(reply)
@@ -443,6 +519,7 @@ impl UnaryService<Bytes> for CheckMethod {
 
 struct WatchMethod {
     table: watch::Receiver<HealthTable>,
+    node: Option<SenderId>,
 }
 
 impl ServerStreamingService<Bytes> for WatchMethod {
@@ -453,11 +530,12 @@ impl ServerStreamingService<Bytes> for WatchMethod {
     fn call(&mut self, request: Request<Bytes>) -> Self::Future {
         let body = request.into_inner();
         let reply = decode_request(&body).map_err(bad_request).map(|name| {
-            Response::new(StatusStream {
+            let stream = StatusStream {
                 name: name.to_owned(),
                 inner: WatchStream::new(self.table.clone()),
                 last: None,
-            })
+            };
+            with_node_header(Response::new(stream), self.node)
         });
         core::future::ready(reply)
     }
@@ -541,6 +619,15 @@ where
     /// `Check(service)`. An unknown service is the server's `NOT_FOUND`
     /// status; a malformed reply is status `INTERNAL`.
     pub async fn check(&mut self, service: &str) -> Result<ServingStatus, GrpcError> {
+        self.check_node(service).await.map(|(status, _)| status)
+    }
+
+    /// `Check(service)`, with the server's node id from the
+    /// [`NODE_HEADER`] (`None` when it sent none).
+    pub async fn check_node(
+        &mut self,
+        service: &str,
+    ) -> Result<(ServingStatus, Option<SenderId>), GrpcError> {
         self.ready().await?;
         let reply = self
             .grpc
@@ -550,7 +637,9 @@ where
                 RawCodec,
             )
             .await?;
-        decode_response(reply.get_ref()).map_err(malformed)
+        let node = node_of(reply.metadata());
+        let status = decode_response(reply.get_ref()).map_err(malformed)?;
+        Ok((status, node))
     }
 
     /// Opens `Watch(service)`; returns once the server accepted it.
@@ -564,8 +653,10 @@ where
                 RawCodec,
             )
             .await?;
+        let node = node_of(reply.metadata());
         Ok(HealthWatch {
             stream: reply.into_inner(),
+            node,
         })
     }
 }
@@ -574,9 +665,16 @@ where
 #[derive(Debug)]
 pub struct HealthWatch {
     stream: Streaming<Bytes>,
+    node: Option<SenderId>,
 }
 
 impl HealthWatch {
+    /// The server's node id from the [`NODE_HEADER`] of the reply, if it
+    /// sent one.
+    pub fn node(&self) -> Option<SenderId> {
+        self.node
+    }
+
     /// Waits for the next status. [`GrpcError::StreamEnded`] when the
     /// server closed the stream. Cancel safe (tonic's `Streaming` keeps
     /// partial messages).
@@ -691,6 +789,57 @@ mod tests {
         assert_eq!(a.status("cam/jpeg"), Some(ServingStatus::NotServing));
         a.announce(&svc("one")).await.unwrap();
         assert_eq!(a.status("cam/jpeg"), Some(ServingStatus::Serving));
+    }
+
+    #[test]
+    fn m9_node_header_value_is_sixteen_lowercase_hex_digits() {
+        let id = SenderId([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(format_node(id), "0123456789abcdef");
+        assert_eq!(parse_node(format_node(id).as_bytes()), Some(id));
+        assert_eq!(parse_node(b"0123456789ABCDEF"), Some(id));
+        for bad in [&b""[..], b"0123", b"0123456789abcdeg", b"+123456789abcdef"] {
+            assert_eq!(parse_node(bad), None);
+        }
+    }
+
+    /// Serves `svc` on 127.0.0.1 and returns a client of it.
+    async fn serve_health(svc: HealthService) -> HealthClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(super::super::server::serve(
+            super::super::GrpcServer::new().with_health(svc),
+            listener,
+            core::future::pending(),
+        ));
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect_lazy();
+        HealthClient::new(channel)
+    }
+
+    #[tokio::test]
+    async fn m9_check_and_watch_replies_carry_the_node_header() {
+        let node = SenderId([7, 6, 5, 4, 3, 2, 1, 0]);
+        let (svc, mut a) = health();
+        assert_eq!(svc.node(), None);
+        a.set_status("cam/jpeg", ServingStatus::Serving).unwrap();
+        let mut with = serve_health(svc.clone().with_node(node)).await;
+        assert_eq!(
+            with.check_node("cam/jpeg").await.unwrap(),
+            (ServingStatus::Serving, Some(node))
+        );
+        assert_eq!(with.check("").await.unwrap(), ServingStatus::Serving);
+        let mut w = with.watch("cam/jpeg").await.unwrap();
+        assert_eq!(w.node(), Some(node));
+        assert_eq!(w.next().await.unwrap(), ServingStatus::Serving);
+        // Without a node: no header.
+        let mut without = serve_health(svc).await;
+        assert_eq!(
+            without.check_node("cam/jpeg").await.unwrap(),
+            (ServingStatus::Serving, None)
+        );
+        assert_eq!(without.watch("cam/jpeg").await.unwrap().node(), None);
+        drop(a);
     }
 
     #[tokio::test]
