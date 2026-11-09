@@ -67,6 +67,43 @@ Zenoh and the gRPC mesh client
 Requirements and the tests that cover them are listed in `design.md`.
 Feature isolation is checked by `scripts/check-features.sh`.
 
+## Ops with `mw`
+
+`tools/mw` (run it as `cargo run -p mw -- <command>`; `--help` lists the
+commands and options) takes an `mw-service` binary from source to the lab
+cluster and back. `mw build` builds the binary and its container image
+with nix into `target/mw/bin/` and `target/mw/images/`. `mw load` copies
+each image to every lab node and imports it into k3s's containerd, and
+`mw apply` renders the binary's own manifests for the locally loaded image
+(pull policy `Never`) and applies them, optionally scaling the Deployment.
+`mw status`, `mw logs` (every pod, the application and its `istio-proxy`
+sidecar) and `mw down` find what apply created by its
+`app.kubernetes.io/managed-by=mw-service` and `app.kubernetes.io/name`
+labels. `mw trace` takes a trace id or an `x-request-id`, asks Tempo
+through a temporary port-forward (or `MW_TEMPO_URL`), and prints the spans
+as a tree.
+
+Two commands provision identity. `mw zenoh apply <svc>…` gives each
+service its own Zenoh user with a password drawn from the operating
+system's random source; the passwords go straight to cluster Secrets (the
+router's dictionary and one per service) and are never written to disk.
+`mw robot enroll <name>` asks the lab's SPIRE server for a single-use join
+token and installs it, the trust bundle and the server and gateway
+addresses where the robot VM reads them: a shared folder (`--robot-dir`),
+the VM itself over ssh (`--robot-host`), or a staging directory under
+`target/mw/robot/`.
+
+Every command is planned before anything runs, and `--dry-run` prints the
+plan instead of running it. Each step is one program with its argument
+vector, never a shell line, and the first failing step stops the run. The
+defaults follow the lab: nodes 192.168.66.11 and .12, the `apps`
+namespace, and the lab repository in `~/src/k8s-logstash-logging`, whose
+kubeconfig is fetched once into `target/mw/lab.yaml`. `MW_REPO`,
+`MW_LAB_DIR`, `MW_LAB_NODES`, `MW_KUBECONFIG`, `MW_TEMPO_URL`,
+`MW_IMAGE_TAG` and `MW_SSH_USER` override them. SSH to lab nodes never
+prompts and, like the lab's own scripts, does not pin host keys, because
+the VMs are rebuilt on an isolated bridge.
+
 ## Device platform
 
 | path                 | what                                                         |

@@ -1,0 +1,208 @@
+{
+  "batches": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "demo-echo"
+            }
+          },
+          {
+            "key": "k8s.namespace.name",
+            "value": {
+              "stringValue": "apps"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "mw-service"
+          },
+          "spans": [
+            {
+              "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+              "spanId": "AAAAAAAAAAU=",
+              "parentSpanId": "AAAAAAAAAAQ=",
+              "name": "mw.handle echo/ping",
+              "kind": "SPAN_KIND_SERVER",
+              "startTimeUnixNano": "1730000000001500000",
+              "endTimeUnixNano": "1730000000008750000",
+              "attributes": [
+                {
+                  "key": "guid:x-request-id",
+                  "value": {
+                    "stringValue": "6e1b4bd2-35b4-4f3c-9f6e-0c1d2e3f4a5b"
+                  }
+                }
+              ],
+              "status": {
+                "code": "STATUS_CODE_ERROR",
+                "message": "handler failed"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "demo-caller"
+            }
+          },
+          {
+            "key": "k8s.namespace.name",
+            "value": {
+              "stringValue": "apps"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "mw-service"
+          },
+          "spans": [
+            {
+              "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+              "spanId": "AAAAAAAAAAM=",
+              "parentSpanId": "AAAAAAAAAAI=",
+              "name": "mw.request echo/ping",
+              "kind": "SPAN_KIND_CLIENT",
+              "startTimeUnixNano": "1730000000000600000",
+              "endTimeUnixNano": "1730000000010800000",
+              "attributes": [],
+              "status": {}
+            },
+            {
+              "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+              "spanId": "AAAAAAAAAAI=",
+              "parentSpanId": "AAAAAAAAAAE=",
+              "name": "mw.request echo/ping",
+              "kind": "SPAN_KIND_INTERNAL",
+              "startTimeUnixNano": "1730000000000400000",
+              "endTimeUnixNano": "1730000000011400000",
+              "attributes": [],
+              "status": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "demo-echo.apps"
+            }
+          },
+          {
+            "key": "k8s.namespace.name",
+            "value": {
+              "stringValue": "apps"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "envoy"
+          },
+          "spans": [
+            {
+              "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+              "spanId": "AAAAAAAAAAQ=",
+              "parentSpanId": "AAAAAAAAAAM=",
+              "name": "demo-echo.apps.svc.cluster.local:7000/*",
+              "kind": "SPAN_KIND_SERVER",
+              "startTimeUnixNano": "1730000000001100000",
+              "endTimeUnixNano": "1730000000010100000",
+              "attributes": [
+                {
+                  "key": "guid:x-request-id",
+                  "value": {
+                    "stringValue": "6e1b4bd2-35b4-4f3c-9f6e-0c1d2e3f4a5b"
+                  }
+                },
+                {
+                  "key": "upstream_cluster",
+                  "value": {
+                    "stringValue": "inbound|7000||"
+                  }
+                },
+                {
+                  "key": "grpc.status_code",
+                  "value": {
+                    "stringValue": "0"
+                  }
+                }
+              ],
+              "status": {}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "demo-caller.apps"
+            }
+          },
+          {
+            "key": "k8s.namespace.name",
+            "value": {
+              "stringValue": "apps"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "envoy"
+          },
+          "spans": [
+            {
+              "traceId": "S/kvNXezTaajzpKdDg5HNg==",
+              "spanId": "AAAAAAAAAAE=",
+              "name": "demo-caller",
+              "kind": "SPAN_KIND_SERVER",
+              "startTimeUnixNano": "1730000000000000000",
+              "endTimeUnixNano": "1730000000012500000",
+              "attributes": [
+                {
+                  "key": "guid:x-request-id",
+                  "value": {
+                    "stringValue": "6e1b4bd2-35b4-4f3c-9f6e-0c1d2e3f4a5b"
+                  }
+                },
+                {
+                  "key": "http.status_code",
+                  "value": {
+                    "intValue": "200"
+                  }
+                }
+              ],
+              "status": {}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

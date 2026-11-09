@@ -1,0 +1,13 @@
+[package]
+name = "mw"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Cluster ops CLI for mw-service: build images, load them into the lab, apply manifests, inspect, trace and enroll robots"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Tempo's JSON and the Secret list piped to `kubectl apply`.
+serde_json = "1"
+# Zenoh passwords, generated locally and sent only to the cluster.
+getrandom = "0.3"
