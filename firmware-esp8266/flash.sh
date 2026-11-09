@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Write the release firmware to the board: builds the merged image with
-# image.sh, then writes it at offset 0x0. Run ./build.sh first.
+# image.sh, then writes it at offset 0x0. Run ./build.sh first; this writes
+# whatever it last built, so after `./build.sh --features wdt-test` rebuild
+# with plain `./build.sh` to go back to the shipped image.
 #
 # PORT (default /dev/ttyUSB0) and ESPTOOL override the port and esptool.
 # The payload region (0x100000..0x140000) is not touched, so an installed

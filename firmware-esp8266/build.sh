@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build the ESP8266 firmware (release). Extra args are passed to cargo.
+# Build the ESP8266 firmware (release). Extra args are passed to cargo, so
+# `./build.sh --features wdt-test` builds the watchdog test image; with no
+# args the default (shipped) image is built.
 # LX106_GCC_DIR overrides where xtensa-lx106-elf-gcc (the linker) lives.
 set -euo pipefail
 cd "$(dirname "$0")"

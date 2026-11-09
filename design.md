@@ -427,6 +427,21 @@ handlers); the unsafe asm stays in that vendored dependency.
   `web/public/firmware/esp8266.bin` (78508 bytes, via
   `firmware-esp8266/image.sh`) and the `esp8266` manifest entry; the same
   merged image, written by `firmware-esp8266/flash.sh`, boots on the board.
+- [x] E11 The hardware watchdog (26.8 s stage, fed every super-loop pass)
+  resets the chip when starved, and the chip boots the firmware again —
+  hardware (ESP8266EX, 2026-10-25), image built with the opt-in `wdt-test`
+  feature (`firmware-esp8266/build.sh --features wdt-test`, then `flash.sh`),
+  which runs normally for 5 s after boot, logs `wdt-test: starving watchdog`
+  and stops feeding. A timestamped pyserial capture (DTR and RTS deasserted)
+  over 130 s saw four resets, each with the ROM line `rst cause:4, boot
+  mode:(3,7)` and `wdt reset`, followed by the `sys/log` banner
+  `esp-base 0.1.0+no-wasm on esp8266`. Reset to reset took 31.865 to
+  31.867 s, and the starve log to the next reset took 26.843 to 26.844 s,
+  matching the 26.84 s stage. After a watchdog reset the PLL stays set up,
+  so the ROM log arrives at 115200 baud, not the 74880 baud of a power-on
+  boot. Rebuilt with plain `build.sh` (merged image byte-identical to the
+  one built before the feature existed) and reflashed: `mwctl info`
+  answered, and a 90 s capture saw no output and no reset.
 
 ### Host tool (`tools/mwctl`)
 

@@ -21,6 +21,13 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+default = []
+# Hardware test only, never shipped: run normally for `WDT_TEST_RUN_SECS`
+# after boot, then stop feeding the watchdog so it resets the chip. Build
+# with `./build.sh --features wdt-test`.
+wdt-test = []
+
 [dependencies]
 # Pure core of the ESP base firmware: dispatch, payload store, chip tables.
 # Default features off: no chip feature, so no esp-hal dependencies.
