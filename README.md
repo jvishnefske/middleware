@@ -67,6 +67,60 @@ Zenoh and the gRPC mesh client
 Requirements and the tests that cover them are listed in `design.md`.
 Feature isolation is checked by `scripts/check-features.sh`.
 
+## Robots and the MCU gateway
+
+Two `mw-service` binaries connect things outside the cluster (design.md,
+"Robots and MCU gateway").
+
+`mw-robot` (`robot/`) is the Linux robot application. It never handles
+TLS: the robot's spire-agent and spiffe-helper give a local Envoy the SVID
+`spiffe://infra.local/robot/<name>`, and the application talks plaintext
+to that Envoy on loopback, gRPC (h2c) to `127.0.0.1:15001` and its Zenoh
+session to `127.0.0.1:17447`. Every tick it calls `demo/echo` with a fresh
+trace and publishes its state on `app/robot/<name>/state`. Off cluster
+there is no cluster DNS, so called kinds resolve through
+`MW_STATIC_ENDPOINTS` (dial address and `:authority` per kind); without
+it the robot defaults to the Envoy listener and the kind's
+`<name>.apps.svc.cluster.local:50051` authority. Set `MW_ROBOT_NAME`; the
+other variables are in the crate docs.
+
+`mw-gateway` (`gateway/`) bridges one serial-attached device running the
+ESP base firmware to the Zenoh fabric. The device's `app/...`
+publications go to Zenoh under the same keys (or under `app/<ns>/...`
+with `MW_GATEWAY_NAMESPACE`), its `disc/<kind>` beacons become Zenoh
+discovery records whose node is the device's MAC, and the cluster reaches
+`sys/info` and the device log, and nothing else of `sys/...`, through
+the gateway's served kind `gw/sys`.
+
+### Running the gateway against the ESP32-CAM (documented, not yet run)
+
+On a workstation with the ESP32-CAM on `/dev/ttyUSB0`, the gateway needs
+a Zenoh router to connect to: `MW_ZENOH_ROUTER` names it, for example
+the cluster's zenohd reached through a port-forward or the robot Envoy's
+`tcp/127.0.0.1:17447`. The port defaults to `/dev/ttyUSB0` at 115200
+baud (`MW_GATEWAY_SERIAL`, `MW_GATEWAY_BAUD`); the gateway opens exactly
+that path, never searches for ports, and leaves DTR and RTS deasserted
+so opening it does not reset the board. Run `cargo run -p mw-gateway`
+with those variables set. Close `mwctl monitor` or any other program on
+the port first, since only one program can hold it.
+
+On start the gateway asks the device for `sys/info` and binds to the
+node id in the reply (the MAC, zero padded). From then on, a
+`disc/cam/jpeg` beacon from the device shows up in the cluster as an
+`Up` for instance `cam-xxxxxx` (the MAC's last three bytes) with that
+node, and it is withdrawn when the camera route stops or the record
+expires. Any `ZenohDiscovery` browser on `cam/jpeg` sees it, including a
+`Directory` fed from one. Camera chunks published on `app/cam/jpeg` arrive
+on Zenoh unchanged.
+
+One gap is known before the first run. Today's firmware sends its camera
+beacon only over ESP-NOW (`firmware/src/shell/radio.rs`), and its serial
+port carries `sys/log` and payload publications. So the `Up` appears only
+once the firmware also publishes the beacon on its serial link, a
+firmware change outside this crate. Until then the gateway shows the
+device's `sys/log` lines through `gw/sys`, including the `disc: up ...`
+lines of beacons the device hears on the radio.
+
 ## Device platform
 
 | path                 | what                                                         |

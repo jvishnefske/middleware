@@ -11,6 +11,7 @@
 //! | `MW_ZENOH_CREDENTIALS` | [`Config::zenoh_credentials`] | path of the mounted credentials file |
 //! | `MW_SERVICE_MAP` | [`Config::service_map`] | `kind=service.namespace:port_name,...` |
 //! | `MW_DRAIN_GRACE_MS` | [`Config::drain_grace`] | decimal milliseconds; overrides the spec's drain grace |
+//! | `MW_STATIC_ENDPOINTS` | [`Config::static_endpoints`] | `kind=[http://]dial_host:port@authority_host:port,...` ([`endpoints`](crate::endpoints)) |
 //!
 //! An unset or empty variable is `None` (an empty map for
 //! `MW_SERVICE_MAP`). A set but malformed one is a [`ConfigError`] naming
@@ -23,6 +24,13 @@
 //! `demo/echo=demo-echo.apps:grpc,cam/jpeg=cam.robots:grpc`, and becomes an
 //! entry of a [`ServiceMap`] (validated there: RFC 1123 service and
 //! namespace, IANA port name). A kind given twice is an error.
+//!
+//! `MW_STATIC_ENDPOINTS` is for services running outside the cluster (a
+//! robot behind its local Envoy): each entry maps a called kind to a fixed
+//! dial address and `:authority` instead of DNS-SD discovery (format in
+//! [`endpoints`](crate::endpoints)). A kind with a static endpoint needs no
+//! `MW_SERVICE_MAP` entry; given both, the static endpoint is used
+//! ([`Config::static_endpoint`]).
 
 use middleware::dns::unicast::{MapError, ServiceMap, ServiceRef};
 use middleware::grpc::istio::is_dns_label;
@@ -31,6 +39,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::endpoints::{ENV_STATIC_ENDPOINTS, StaticEndpoint, StaticEndpoints};
 use crate::spec::{MAX_DRAIN_GRACE_MS, ServiceSpec};
 
 /// The kinds `MW_SERVICE_MAP` can map.
@@ -57,7 +66,7 @@ pub const ENV_SERVICE_MAP: &str = "MW_SERVICE_MAP";
 pub const ENV_DRAIN_GRACE_MS: &str = "MW_DRAIN_GRACE_MS";
 
 /// Every variable [`Config::from_env`] reads, in table order.
-pub const ENV_VARS: [&str; 8] = [
+pub const ENV_VARS: [&str; 9] = [
     ENV_PORT,
     ENV_NAMESPACE,
     ENV_POD_NAME,
@@ -66,6 +75,7 @@ pub const ENV_VARS: [&str; 8] = [
     ENV_ZENOH_CREDENTIALS,
     ENV_SERVICE_MAP,
     ENV_DRAIN_GRACE_MS,
+    ENV_STATIC_ENDPOINTS,
 ];
 
 /// The settings of one deployment of a service (module docs). The fields
@@ -89,6 +99,8 @@ pub struct Config {
     pub service_map: ConfigServiceMap,
     /// Drain grace override.
     pub drain_grace: Option<Duration>,
+    /// Fixed endpoints of called kinds, for running off cluster.
+    pub static_endpoints: StaticEndpoints,
 }
 
 impl Config {
@@ -138,6 +150,10 @@ impl Config {
                 )),
             })
             .transpose()?;
+        let static_endpoints = match get(ENV_STATIC_ENDPOINTS) {
+            Some(v) => StaticEndpoints::parse(&v)?,
+            None => StaticEndpoints::new(),
+        };
         Ok(Config {
             port,
             namespace,
@@ -147,6 +163,7 @@ impl Config {
             zenoh_credentials,
             service_map,
             drain_grace,
+            static_endpoints,
         })
     }
 
@@ -165,12 +182,20 @@ impl Config {
         self.drain_grace.unwrap_or_else(|| spec.drain_grace())
     }
 
-    /// The kinds `spec` calls that the service map does not map, in the
-    /// spec's order. A runner refuses to start with any (it could not
-    /// find them). Pure.
+    /// The static endpoint of the called kind `kind`, if
+    /// `MW_STATIC_ENDPOINTS` maps it; the runner then dials it instead of
+    /// discovering the kind through `MW_SERVICE_MAP`.
+    pub fn static_endpoint(&self, kind: &str) -> Option<&StaticEndpoint> {
+        self.static_endpoints.get(kind)
+    }
+
+    /// The kinds `spec` calls that neither the service map nor the static
+    /// endpoints map, in the spec's order. A runner refuses to start with
+    /// any (it could not find them). Pure.
     pub fn unmapped_calls<'s>(&self, spec: &'s ServiceSpec) -> Vec<&'s str> {
         spec.calls
             .iter()
+            .filter(|k| self.static_endpoint(k).is_none())
             .filter(|k| {
                 Key::new(k).map_or(true, |key| {
                     self.service_map
@@ -283,6 +308,13 @@ pub enum ConfigError {
     },
     /// `MW_SERVICE_MAP` maps a kind twice.
     DuplicateKind(String),
+    /// An `MW_STATIC_ENDPOINTS` entry is malformed or repeats a kind.
+    StaticEndpoint {
+        /// The entry.
+        entry: String,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -300,6 +332,9 @@ impl fmt::Display for ConfigError {
                 error: Some(e),
             } => write!(f, "{ENV_SERVICE_MAP} entry {entry:?}: {e:?}"),
             ConfigError::DuplicateKind(k) => write!(f, "{ENV_SERVICE_MAP} maps {k:?} twice"),
+            ConfigError::StaticEndpoint { entry, reason } => {
+                write!(f, "{ENV_STATIC_ENDPOINTS} entry {entry:?}: {reason}")
+            }
         }
     }
 }
@@ -460,5 +495,26 @@ mod tests {
         };
         assert_eq!(o.port_for(&spec), 0);
         assert_eq!(o.drain_grace_for(&spec), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn v5_static_endpoints_map_calls_off_cluster() {
+        let mut spec = ServiceSpec::new("robot/r1");
+        spec.calls = vec!["demo/echo".into(), "cam/jpeg".into()];
+        let c = Config::from_env(&env(&[(
+            "MW_STATIC_ENDPOINTS",
+            "demo/echo=http://127.0.0.1:15001@demo-echo.apps.svc.cluster.local:50051",
+        )]))
+        .unwrap();
+        assert_eq!(c.unmapped_calls(&spec), ["cam/jpeg"]);
+        let e = c.static_endpoint("demo/echo").unwrap();
+        assert_eq!(e.dial(), "127.0.0.1:15001");
+        assert!(c.static_endpoint("cam/jpeg").is_none());
+        let bad = Config::from_env(&env(&[("MW_STATIC_ENDPOINTS", "demo/echo=nowhere")]));
+        let err = bad.unwrap_err();
+        assert!(
+            err.to_string().starts_with("MW_STATIC_ENDPOINTS entry"),
+            "{err}"
+        );
     }
 }

@@ -1,0 +1,23 @@
+[package]
+name = "mw-robot"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Linux robot application: an off-cluster mw-service client that calls cluster services and publishes telemetry through its local Envoy"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "mw-robot"
+path = "src/main.rs"
+
+[dependencies]
+# Host backends only; never an embedded feature set (V19).
+middleware = { path = "..", features = ["grpc", "istio", "zenoh"] }
+mw-service = { path = "../service" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Fresh trace ids for each tick's root span, from the OS CSPRNG.
+getrandom = "0.3"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }

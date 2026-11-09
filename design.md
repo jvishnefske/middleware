@@ -1183,6 +1183,160 @@ checking its items here. Until then `Service::run_with` and
   deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
   logs. *Owners: phase 3 (e2e), on images from phase 2C (nix).*
 
+### Robots and MCU gateway (V…)
+
+Two binaries bring devices outside the cluster into the same identity and
+pub/sub fabric. `mw-robot` (crate `robot/`) is the Linux robot
+application: it runs off cluster behind the robot's local Envoy, which
+holds mTLS with the robot's SVID (`spiffe://infra.local/robot/<name>`,
+issued through spire-agent's join token attestor) to the cluster's
+ingress gateway, so the application itself speaks plaintext to loopback:
+h2c to `127.0.0.1:15001` for calls and TCP to `127.0.0.1:17447` for its
+Zenoh session to zenohd. `mw-gateway` (crate `gateway/`) bridges one
+serial-attached middleware device (the ESP base firmware) to Zenoh: the
+device's `app/**` publications, its `disc/<kind>` beacons (re-announced
+as `ZenohDiscovery` services bound to the device's MAC, under the
+firmware's E21 rules) and allowlisted `sys/*` requests through the served
+kind `gw/sys`. Both are built on `mw-service`; both keep their decisions
+in pure cores (`robot::telemetry`, `gateway::bridge`) behind thin shells.
+The gateway's key mapping: without `MW_GATEWAY_NAMESPACE` device and
+cluster keys are identical (the ESP32-CAM's `app/cam/jpeg` stays
+`app/cam/jpeg`); with namespace `<ns>` the device's `app/<rest>` is the
+cluster's `app/<ns>/<rest>`. Tests marked *(mw-robot)* or *(mw-gateway)*
+run under `cargo test -p <crate>` and `cargo test --workspace`; none opens
+a serial port, and network tests use 127.0.0.1 only.
+
+- [x] V1 The robot's state counts ticks, answered and failed calls and
+  the last round trip; its telemetry on `app/robot/<name>/state` is one
+  JSON object naming the tick's trace (`traceparent` form) —
+  `telemetry::tests::v1_state_counts_ticks_and_outcomes`,
+  `v1_telemetry_is_one_json_object_with_the_trace` *(mw-robot)*.
+- [x] V2 `RobotConfig::from_env` requires `MW_ROBOT_NAME` (an RFC 1123
+  label) and parses `MW_ROBOT_PERIOD_MS` (10 ms to 1 h, default 1 s) and
+  `MW_ROBOT_CALL` (a `Service/Method` kind, default `demo/echo`); the
+  service is `robot/<name>`, calling that kind and publishing
+  `app/robot/<name>/**` —
+  `config::tests::v2_robot_config_parses_and_requires_a_name`
+  *(mw-robot)*.
+- [x] V3 Off cluster the runner configuration defaults to the local
+  Envoy: `MW_ZENOH_ROUTER` `tcp/127.0.0.1:17447`, and a called kind that
+  neither `MW_STATIC_ENDPOINTS` nor `MW_SERVICE_MAP` maps gets
+  `<kind>=127.0.0.1:15001@<kind with - for />.apps.svc.cluster.local:50051`;
+  configured values win —
+  `config::tests::v3_runner_defaults_point_at_the_local_envoy`
+  *(mw-robot)*.
+- [x] V4 Each tick the robot starts a sampled root span with request id
+  `<name>-<seq>`, calls the kind through `Ctx::client` over its static
+  endpoint with a deadline of one period, and publishes its state through
+  `Ctx::publisher`; in process (the "Envoy" a direct loopback hop to a
+  gRPC echo service, a Zenoh session on loopback for the router) the echo
+  handler sees the robot's span as `traceparent` and its request id, the
+  published state names the same trace, and a robot whose called kind has
+  no static endpoint fails at start with `ServiceError::Unmapped` —
+  `robot/tests/robot.rs`:
+  `v4_robot_calls_through_its_envoy_with_trace_and_publishes_state`,
+  `v4_robot_without_a_static_endpoint_fails_at_start` *(mw-robot)*.
+- [x] V5 `mw-service` gains static endpoints (an additive API change):
+  `MW_STATIC_ENDPOINTS=<kind>=[http://]<dial host:port>@<authority host:port>,...`
+  parses into `Config::static_endpoints` (`endpoints::StaticEndpoints`;
+  malformed entries and repeated kinds are `ConfigError::StaticEndpoint`
+  naming the entry); `StaticEndpoint::client` is a `MeshClient` dialing
+  through the address with the authority as `:authority` and a
+  one-record, never-expiring directory; `Config::static_endpoint` looks a
+  kind up and `unmapped_calls` counts statically mapped kinds as mapped —
+  `endpoints::tests::v5_static_endpoints_parse_dial_and_authority`,
+  `v5_static_endpoint_errors_name_the_entry`,
+  `v5_static_client_routes_the_kind_to_the_authority`,
+  `config::tests::v5_static_endpoints_map_calls_off_cluster`
+  *(mw-service)*. *The runner's own use of it (M8) is phase 2A's.*
+- [x] V6 `KeyMap` maps `app` and the keys below it between device and
+  cluster, identically or under one namespace segment, segment-wise (so
+  `app/benchmark` is not under `app/bench`), refusing keys that would
+  exceed the key length — `bridge::tests::v6_key_map_identity_and_namespace`
+  *(mw-gateway)*.
+- [x] V7 A device's `app/**` publication is relayed on the mapped key
+  with its payload unchanged; `sys/log` is kept in the log tail and never
+  published; any other key (`sys/payload/status`, ...) stays on the
+  device — `bridge::tests::v7_app_publications_map_and_others_stay`
+  *(mw-gateway)*.
+- [x] V8 A beacon from the bound device is announced with node = the
+  device (filled in when the beacon names none); a refresh announces
+  nothing, a changed record is re-announced, a goodbye withdraws, a
+  goodbye for an unknown record does nothing —
+  `bridge::tests::v8_beacons_announce_with_the_device_node` *(mw-gateway)*.
+- [x] V9 E21 on the serial link: the gateway learns the device's node id
+  from its `sys/info` reply (retried every 2 s, rechecked every 30 s) and
+  refuses every beacon until then; a device without a node id never
+  binds; with `MW_GATEWAY_DEVICE_MAC` only that device binds; a beacon
+  declaring another node is refused; the device holds at most 4 records
+  and a new one beyond is refused, never evicting; a different device on
+  the port withdraws the previous one's records. Refusals are counted —
+  `bridge::tests::v9_beacons_are_bound_to_the_device`,
+  `v9_device_cap_and_rebinding` *(mw-gateway)*.
+- [x] V10 Records whose TTL runs out are withdrawn —
+  `bridge::tests::v10_expiry_withdraws` *(mw-gateway)*.
+- [x] V11 Cluster samples reach the device only on the configured
+  downlink filters (at most 8, under the cluster prefix), mapped back to
+  the device's keys — `bridge::tests::v11_downlink_only_for_declared_filters`;
+  `gateway/tests/gateway.rs`:
+  `v11_cluster_samples_reach_the_device_on_declared_filters_only`
+  *(mw-gateway)*.
+- [x] V12 `gw/sys` takes `[key_len][key][body]`; only exact allowlisted
+  `sys/...` keys pass (default `sys/info`, forwarded to the device, and
+  `sys/log`, answered from the log tail); everything else, the loader and
+  trust keys included, is `Denied` and counted —
+  `bridge::tests::v12_sys_allowlist`, `v12_sys_request_body_round_trips`
+  *(mw-gateway)*.
+- [x] V13 Bounds: the log tail keeps the newest 2 KiB; at most 4 device
+  requests are outstanding, each failing with `DeadlineExceeded` at its
+  deadline; the shell's queues (uplink 32, discovery 16, commands 16) drop
+  the newest item when full and count it, never displacing a queued one;
+  a handler with no gateway answers `Unavailable` —
+  `bridge::tests::v13_log_tail_keeps_the_newest_bytes`,
+  `v13_pending_is_bounded_and_expires`,
+  `shell::tests::v13_full_queues_drop_the_newest_and_count`,
+  `v13_detached_sys_forward_is_unavailable` *(mw-gateway)*.
+- [x] V14 `io::ChannelIo` is an `embedded-io-async` byte stream over two
+  bounded channels (the serial port's two threads in the binary, an
+  in-memory cable in tests) that keeps the unread part of a chunk and
+  reports a closed peer — `io::tests::v14_pair_carries_bytes_both_ways_and_keeps_partial_chunks`
+  *(mw-gateway)*.
+- [x] V15 `GatewayConfig::from_env` parses `MW_GATEWAY_SERIAL` (default
+  `/dev/ttyUSB0`), `MW_GATEWAY_BAUD` (115200), `MW_GATEWAY_NAMESPACE`,
+  `MW_GATEWAY_DOWNLINK`, `MW_GATEWAY_SYS_ALLOW`, `MW_GATEWAY_DEVICE_MAC`,
+  `MW_GATEWAY_SYS_TIMEOUT_MS` (2000) and `MW_GATEWAY_ALLOW_CALLERS`; a
+  malformed value names its variable —
+  `config::tests::v15_defaults`, `v15_parses_every_variable`,
+  `v15_malformed_values_name_the_variable` *(mw-gateway)*.
+- [x] V16 End to end over an in-memory serial cable and Zenoh on
+  loopback: a fake device's `disc/cam/jpeg` beacon shows up in a cluster
+  session's `ZenohDiscovery` browse as `Up` with node = the device's MAC,
+  and its goodbye as `Down`; a beacon naming another node is never
+  announced while the device's own beacons are —
+  `gateway/tests/gateway.rs`:
+  `v16_device_beacon_is_announced_on_zenoh_with_the_device_node`,
+  `v16_spoofed_beacon_is_refused` *(mw-gateway)*. With the ESP32-CAM on
+  `/dev/ttyUSB0` still to be seen: today's firmware sends its beacon on
+  ESP-NOW only, so the hardware run needs the beacon on the serial port
+  too (README, "MCU gateway").
+- [x] V17 A camera frame cut into `middleware::stream` chunks (166 data
+  bytes, as the camera route) crosses the gateway byte for byte and in
+  order on `app/cam/jpeg`, and reassembles to the frame —
+  `gateway/tests/gateway.rs`: `v17_camera_chunks_cross_the_gateway_intact`
+  *(mw-gateway)*.
+- [x] V18 Through the served kind `gw/sys` (the `mw-service`
+  `ServiceHandler` the runner calls): `sys/info` reaches the device and
+  returns its `DeviceInfo`; `sys/loader/begin`, `chunk`, `commit`,
+  `sys/trust/claim` and `sys/payload/start` are `Denied` and never reach
+  the device; `sys/log` returns the device's log lines —
+  `gateway/tests/gateway.rs`:
+  `v18_sys_info_is_forwarded_and_the_loader_is_refused` *(mw-gateway)*.
+- [x] V19 Both crates are host only: no embedded feature set depends on
+  them, `mw-robot` enables no embedded feature of `middleware`, and
+  `mw-gateway` enables only `serial` (the link codec) beside `zenoh` —
+  `scripts/check-features.sh` (block "V19", and both crates in
+  `CLOUD_CRATES` for every F1 set).
+
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
