@@ -43,15 +43,16 @@
 //!   ([`Downstream`]) and the declared publisher ([`ServicePublisher`]).
 //! * [`run`] — the command line ([`Command`]), [`Service::main`],
 //!   [`Service::run`] and [`Service::run_with`].
-//! * [`manifest`] — `--print-manifests` rendering.
+//! * [`manifest`] — `--print-manifests`: the Kubernetes and Istio objects
+//!   rendered from the spec ([`manifest::render`], [`ManifestOptions`]).
 //! * [`error`] — [`ServiceError`].
 //!
 //! # Status
 //!
-//! 0.6 phase 1: the public API is complete and the pure parts (builder,
-//! spec, config, lifecycle, context, command line, `--print-spec`) are
-//! implemented and tested. Serving and manifest rendering return
-//! [`ServiceError::Unimplemented`] (never a panic) until their phase lands;
+//! The public API is complete. The pure parts are implemented and tested:
+//! the builder, spec, config, lifecycle, context, command line,
+//! `--print-spec` and `--print-manifests`. Serving returns
+//! [`ServiceError::Unimplemented`] (never a panic) until its phase lands;
 //! design.md "Mesh service runner (`mw-service`)" tracks which requirement
 //! each phase closes.
 //!
@@ -80,6 +81,6 @@ pub use ctx::{
 };
 pub use error::ServiceError;
 pub use lifecycle::{Action, Event, Lifecycle, Monotonic, Outcome};
-pub use manifest::ManifestOptions;
+pub use manifest::{ManifestError, ManifestOptions, PullPolicy, Route};
 pub use run::{ArgsError, Command};
 pub use spec::{Mebibytes, MilliCpu, Resources, ServiceSpec, SpecError};

@@ -4,6 +4,7 @@
 use std::fmt;
 
 use crate::config::ConfigError;
+use crate::manifest::ManifestError;
 use crate::run::ArgsError;
 use crate::spec::SpecError;
 
@@ -18,6 +19,8 @@ pub enum ServiceError {
     Config(ConfigError),
     /// The command line is malformed.
     Args(ArgsError),
+    /// The manifest options cannot be rendered.
+    Manifest(ManifestError),
     /// A called kind has no `MW_SERVICE_MAP` entry.
     Unmapped(String),
     /// The named part is not implemented yet (the 0.6 skeleton; each later
@@ -39,6 +42,7 @@ impl fmt::Display for ServiceError {
             ServiceError::Spec(e) => write!(f, "invalid service spec: {e}"),
             ServiceError::Config(e) => write!(f, "invalid environment: {e}"),
             ServiceError::Args(e) => write!(f, "invalid arguments: {e}"),
+            ServiceError::Manifest(e) => write!(f, "cannot render manifests: {e}"),
             ServiceError::Unmapped(k) => {
                 write!(f, "called kind {k:?} has no MW_SERVICE_MAP entry")
             }
@@ -57,6 +61,7 @@ impl std::error::Error for ServiceError {
             ServiceError::Spec(e) => Some(e),
             ServiceError::Config(e) => Some(e),
             ServiceError::Args(e) => Some(e),
+            ServiceError::Manifest(e) => Some(e),
             ServiceError::Io(e) => Some(e),
             ServiceError::Grpc(e) => Some(e),
             ServiceError::Zenoh(e) => Some(e),

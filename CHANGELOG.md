@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### 0.6: manifests derived from Rust (M11–M15, M30–M34)
+- `manifest::render` is implemented. `--print-manifests` emits one deterministic YAML stream rendered from typed serde objects:
+  - ServiceAccount, Service `<name>` and headless Service `<name>-pods`. Callers' DNS-SD SRV name is `_grpc._tcp.<name>-pods.<ns>.svc.cluster.local`.
+  - A Deployment: Istio sidecar injection, gRPC probes, drain-derived termination grace and proxy drain, the `MW_*` environment, a restricted security context.
+  - An `ALLOW` AuthorizationPolicy from `allow_callers`, `ISTIO_MUTUAL` DestinationRules, and a PodDisruptionBudget when `replicas > 1`.
+- New `ManifestOptions` fields: `pull_policy` (`PullPolicy`), `otlp_endpoint`, `zenoh_router`, `app_version`, `routes` (`Route`). There is also `ManifestOptions::new(namespace)` and `Default`. **Breaking for struct literals:** add the fields or use `..ManifestOptions::new(ns)`.
+- New `--print-manifests` flags: `--pull-policy`, `--otlp`, `--zenoh-router`, `--app-version`, `--route KIND=SERVICE[.NS]` (repeatable). New `ArgsError::InvalidValue` and `ServiceError::Manifest(ManifestError)`.
+- Zenoh contract: Secret `zenoh-<name>`, key `credentials`, mounted at `/var/run/mw/zenoh/`, with `MW_ZENOH_CREDENTIALS=/var/run/mw/zenoh/credentials`.
+- New `scripts/check-manifests.sh`: golden snapshots under `service/tests/golden/`, checked offline with `kubeconform -strict` against the schemas vendored in `deploy/schemas/` (Kubernetes 1.31, Istio v1).
+
 ### 0.6: trace context (K17–K19)
 - **Breaking — `RequestOptions` has a lifetime** (`RequestOptions<'a>`, for a borrowed request id) and two new fields, `trace: Option<TraceParent>` and `request_id: Option<RequestId<'a>>`, with `with_trace`, `with_request_id` and `propagating(&meta, span_id)` (continue an inbound request's trace with a new span). `RequestOptions::DEFAULT` is `RequestOptions<'static>`. Implementors of `Requester` and `Gather` write `options: &RequestOptions<'_>` (an `async fn` does not accept the elided form); callers are unchanged.
 - **Breaking — `RequestMeta` has two new fields**, `trace: Option<TraceParent>` and `request_id: Option<RequestId<'a>>`, with `with_trace`, `with_request_id` and `with_request_id_str` (drops an invalid id). Struct literals add them or use `..RequestMeta::NONE`.

@@ -1,0 +1,266 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-echo
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-echo
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  selector:
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/name: demo-echo
+  ports:
+  - name: grpc
+    appProtocol: grpc
+    protocol: TCP
+    port: 50051
+    targetPort: grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-echo-pods
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/name: demo-echo
+  ports:
+  - name: grpc
+    appProtocol: grpc
+    protocol: TCP
+    port: 50051
+    targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-echo
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: demo-echo
+      app.kubernetes.io/name: demo-echo
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: demo-echo
+        app.kubernetes.io/instance: demo-echo
+        app.kubernetes.io/managed-by: mw-service
+        app.kubernetes.io/name: demo-echo
+        app.kubernetes.io/version: 0.6.0
+        sidecar.istio.io/inject: 'true'
+        version: 0.6.0
+      annotations:
+        kubectl.kubernetes.io/default-container: demo-echo
+        proxy.istio.io/config: |
+          holdApplicationUntilProxyStarts: true
+          terminationDrainDuration: 7s
+          proxyMetadata:
+            EXIT_ON_ZERO_ACTIVE_CONNECTIONS: 'true'
+            MINIMUM_DRAIN_DURATION: 7s
+        sidecar.istio.io/rewriteAppHTTPProbers: 'true'
+    spec:
+      serviceAccountName: demo-echo
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: demo-echo
+        image: demo-echo:0.6.0
+        imagePullPolicy: Never
+        ports:
+        - name: grpc
+          containerPort: 50051
+          protocol: TCP
+        env:
+        - name: MW_PORT
+          value: '50051'
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://k8s-monitoring-alloy.observability.svc.cluster.local:4317
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        startupProbe:
+          grpc:
+            port: 50051
+            service: ''
+          periodSeconds: 1
+          timeoutSeconds: 1
+          failureThreshold: 60
+        readinessProbe:
+          grpc:
+            port: 50051
+            service: ''
+          periodSeconds: 2
+          timeoutSeconds: 1
+          failureThreshold: 1
+        livenessProbe:
+          grpc:
+            port: 50051
+            service: ''
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+          readOnly: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: demo-echo
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: demo-echo
+      app.kubernetes.io/name: demo-echo
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: demo-echo
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: demo-echo
+      app.kubernetes.io/name: demo-echo
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - infra.local/ns/apps/sa/demo-caller
+        - infra.local/robot/r1
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: demo-echo
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  host: demo-echo.apps.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: demo-echo-pods
+  namespace: apps
+  labels:
+    app: demo-echo
+    app.kubernetes.io/instance: demo-echo
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-echo
+    app.kubernetes.io/version: 0.6.0
+    version: 0.6.0
+spec:
+  host: demo-echo-pods.apps.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
