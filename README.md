@@ -55,7 +55,11 @@ Requirements and the tests that cover them are listed in `design.md`.
 Feature isolation is checked by `scripts/check-features.sh`. CI
 (`.github/workflows/ci.yml`) runs it, the workspace tests, the RP base
 firmware build and the web check on every pull request; the ESP firmwares
-need the espup toolchain and are built locally.
+need the espup toolchain and are built locally. Pushing a `v*` tag runs
+`.github/workflows/release.yml`: it builds every chip's image with
+`firmware/build-images.sh`, attaches them, the manifest and `SHA256SUMS` to a
+GitHub release, and deploys the web app with those images bundled to GitHub
+Pages, where the flasher reads them from its own origin.
 
 ## Device platform
 
