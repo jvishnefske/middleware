@@ -52,7 +52,10 @@ Zenoh and the gRPC mesh client
 (`cargo run --example discover_and_call --features zenoh,grpc,istio,dns-sd,mdns`).
 
 Requirements and the tests that cover them are listed in `design.md`.
-Feature isolation is checked by `scripts/check-features.sh`.
+Feature isolation is checked by `scripts/check-features.sh`. CI
+(`.github/workflows/ci.yml`) runs it, the workspace tests, the RP base
+firmware build and the web check on every pull request; the ESP firmwares
+need the espup toolchain and are built locally.
 
 ## Device platform
 

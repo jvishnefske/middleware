@@ -1,0 +1,102 @@
+# Continuous integration for the host workspace, the feature-isolation
+# rules, the RP base firmware and the web app.
+#
+# Each job runs only the checks that exist on the branch being tested,
+# so the same file works on every branch of a PR stack: the RP firmware
+# and web steps are skipped where `firmware-rp/` or `web/check.sh` is
+# absent. The ESP firmwares (`firmware/`, `firmware-esp8266/`) need the
+# espup Xtensa toolchain and are not built here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  workspace:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  features:
+    name: Feature isolation (check-features.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi,thumbv8m.main-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/check-features.sh
+
+  firmware-rp:
+    name: RP base firmware (${{ matrix.chip }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chip: rp2040
+            target: thumbv6m-none-eabi
+          - chip: rp2350
+            target: thumbv8m.main-none-eabihf
+    steps:
+      - uses: actions/checkout@v4
+      - id: present
+        run: echo "rp=$([ -f firmware-rp/Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.rp == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rust-src
+      - if: steps.present.outputs.rp == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware-rp
+      # The ELF build only: UF2 conversion (build.sh) needs picotool.
+      - if: steps.present.outputs.rp == 'true'
+        working-directory: firmware-rp
+        run: cargo build --release --target ${{ matrix.target }} --features ${{ matrix.chip }}
+
+  web:
+    name: Web (vitest, tsc, vite build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: present
+        run: echo "web=$([ -f web/check.sh ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.web == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - if: steps.present.outputs.web == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.present.outputs.web == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - if: steps.present.outputs.web == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - if: steps.present.outputs.web == 'true'
+        run: bash web/check.sh
