@@ -46,7 +46,7 @@ pub mod trust;
 
 use crate::crc::Crc32;
 use crate::key::Key;
-use crate::transport::HandlerError;
+use crate::transport::{HandlerError, SenderId};
 use trust::{PublicKey, SignedCommit};
 
 /// Largest chunk body accepted by `sys/loader/chunk`.
@@ -135,15 +135,15 @@ impl<'a> Command<'a> {
         };
         match key.as_str() {
             k if k == keys::INFO.as_str() => empty(Command::Info),
-            k if k == keys::COMMIT.as_str() => {
-                Ok(Some(Command::Commit { auth: SignedCommit::parse_body(body)? }))
-            }
+            k if k == keys::COMMIT.as_str() => Ok(Some(Command::Commit {
+                auth: SignedCommit::parse_body(body)?,
+            })),
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
             k if k == keys::TRUST_INFO.as_str() => empty(Command::TrustInfo),
-            k if k == keys::TRUST_CLAIM.as_str() => {
-                Ok(Some(Command::TrustClaim { key: PublicKey::parse_claim(body)? }))
-            }
+            k if k == keys::TRUST_CLAIM.as_str() => Ok(Some(Command::TrustClaim {
+                key: PublicKey::parse_claim(body)?,
+            })),
             k if k == keys::BEGIN.as_str() => {
                 if body.len() != 8 {
                     return Err(bad);
@@ -411,8 +411,22 @@ impl PayloadStatus {
 /// Longest chip or firmware name in [`DeviceInfo`].
 pub const MAX_NAME: usize = 32;
 
+/// Bytes of the optional node id at the end of a `sys/info` response.
+pub const NODE_ID_LEN: usize = 8;
+
+/// Largest `sys/info` response [`DeviceInfo::encode`] writes.
+pub const MAX_INFO_LEN: usize = 2 + 4 + 1 + 1 + MAX_NAME + 1 + MAX_NAME + NODE_ID_LEN;
+
 /// `sys/info` response:
-/// `[abi_version u16][capacity u32][status u8][chip_len u8][chip][fw_len u8][fw]`.
+/// `[abi_version u16][capacity u32][status u8][chip_len u8][chip][fw_len u8][fw]`,
+/// then, since middleware 0.5, optionally `[node id 8]`: the device's
+/// [`SenderId`] (its MAC zero-padded, [`SenderId::from_mac`]), the id it
+/// carries as a sender on its radios.
+///
+/// Decoders read the fields they know and ignore whatever follows, so a
+/// response with the node id decodes as before on a 0.4 host, and later
+/// fields may be appended after it. A response that stops after the
+/// firmware name has no node id (`node: None`, a pre-0.5 device).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceInfo<'a> {
     /// [`crate::wasm_abi::ABI_VERSION`] implemented by the firmware.
@@ -425,11 +439,13 @@ pub struct DeviceInfo<'a> {
     pub chip: &'a str,
     /// Firmware version string.
     pub firmware: &'a str,
+    /// The device's node id, if it reports one.
+    pub node: Option<SenderId>,
 }
 
 impl<'a> DeviceInfo<'a> {
     /// Encodes into `out`; `None` if `out` is too small or a name exceeds
-    /// [`MAX_NAME`].
+    /// [`MAX_NAME`]. At most [`MAX_INFO_LEN`] bytes.
     pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
         let chip = self.chip.as_bytes();
         let fw = self.firmware.as_bytes();
@@ -448,10 +464,14 @@ impl<'a> DeviceInfo<'a> {
         put(chip)?;
         put(&[fw.len() as u8])?;
         put(fw)?;
+        if let Some(node) = self.node {
+            put(&node.0)?;
+        }
         Some(at)
     }
 
-    /// Decodes a `sys/info` response.
+    /// Decodes a `sys/info` response, ignoring bytes after the fields it
+    /// knows (see the type docs).
     pub fn decode(bytes: &'a [u8]) -> Option<Self> {
         let abi_version = u16::from_le_bytes([*bytes.first()?, *bytes.get(1)?]);
         let capacity = u32_at(bytes, 2)?;
@@ -460,13 +480,19 @@ impl<'a> DeviceInfo<'a> {
         let chip = core::str::from_utf8(bytes.get(8..8 + chip_len)?).ok()?;
         let fw_at = 8 + chip_len;
         let fw_len = usize::from(*bytes.get(fw_at)?);
-        let firmware = core::str::from_utf8(bytes.get(fw_at + 1..fw_at + 1 + fw_len)?).ok()?;
+        let fw_end = fw_at + 1 + fw_len;
+        let firmware = core::str::from_utf8(bytes.get(fw_at + 1..fw_end)?).ok()?;
+        let node = bytes
+            .get(fw_end..fw_end + NODE_ID_LEN)
+            .and_then(|b| <[u8; NODE_ID_LEN]>::try_from(b).ok())
+            .map(SenderId);
         Some(DeviceInfo {
             abi_version,
             capacity,
             status,
             chip,
             firmware,
+            node,
         })
     }
 }
@@ -535,7 +561,10 @@ mod tests {
         let image = [0x5Au8; 1300];
         assert_eq!(
             run_transfer(&image, CHUNK_MAX),
-            Ok(Effect::Activate { image: digest(&image), auth: None })
+            Ok(Effect::Activate {
+                image: digest(&image),
+                auth: None
+            })
         );
     }
 
@@ -549,14 +578,31 @@ mod tests {
             signature: trust::Signature([5; 64]),
         };
         let (mut s, _) = Loader::Idle.step(
-            &Command::Begin { len: 1000, crc: Crc32::checksum(&image) },
+            &Command::Begin {
+                len: 1000,
+                crc: Crc32::checksum(&image),
+            },
             4096,
         );
         for (i, part) in image.chunks(97).enumerate() {
-            s = s.step(&Command::Chunk { offset: (i * 97) as u32, data: part }, 4096).0;
+            s = s
+                .step(
+                    &Command::Chunk {
+                        offset: (i * 97) as u32,
+                        data: part,
+                    },
+                    4096,
+                )
+                .0;
         }
         let (_, e) = s.step(&Command::Commit { auth: Some(auth) }, 4096);
-        assert_eq!(e, Ok(Effect::Activate { image: digest(&image), auth: Some(auth) }));
+        assert_eq!(
+            e,
+            Ok(Effect::Activate {
+                image: digest(&image),
+                auth: Some(auth)
+            })
+        );
         #[cfg(feature = "trust")]
         assert_eq!(
             activated(e).map(|d| d.sha256),
@@ -599,10 +645,7 @@ mod tests {
             },
             64,
         );
-        assert_eq!(
-            s2.step(&COMMIT, 64).1,
-            Err(HandlerError::InvalidRequest)
-        );
+        assert_eq!(s2.step(&COMMIT, 64).1, Err(HandlerError::InvalidRequest));
 
         let (s2, _) = s.step(
             &Command::Chunk {
@@ -611,10 +654,7 @@ mod tests {
             },
             64,
         );
-        assert_eq!(
-            s2.step(&COMMIT, 64).1,
-            Err(HandlerError::InvalidRequest)
-        );
+        assert_eq!(s2.step(&COMMIT, 64).1, Err(HandlerError::InvalidRequest));
 
         assert_eq!(
             Loader::Idle.step(&Command::Begin { len: 65, crc: 0 }, 64).1,
@@ -646,7 +686,10 @@ mod tests {
             64,
         );
         assert!(matches!(e, Ok(Effect::Write { offset: 6, .. })));
-        assert_eq!(activated(s.step(&COMMIT, 64).1).map(|d| (d.len, d.crc)), Some((10, crc)));
+        assert_eq!(
+            activated(s.step(&COMMIT, 64).1).map(|d| (d.len, d.crc)),
+            Some((10, crc))
+        );
     }
 
     #[test]
@@ -672,7 +715,9 @@ mod tests {
             Command::Start,
             Command::Stop,
             Command::TrustInfo,
-            Command::TrustClaim { key: trust::PublicKey([3; 32]) },
+            Command::TrustClaim {
+                key: trust::PublicKey([3; 32]),
+            },
         ] {
             let mut body = [0u8; 80];
             let n = cmd.encode_body(&mut body).unwrap();
@@ -731,11 +776,55 @@ mod tests {
             status: PayloadStatus::Running,
             chip: "esp32s3",
             firmware: "0.1.0",
+            node: None,
         };
         let mut buf = [0u8; 64];
         let n = info.encode(&mut buf).unwrap();
         assert_eq!(DeviceInfo::decode(&buf[..n]), Some(info));
         assert_eq!(DeviceInfo::decode(&buf[..n - 1]), None);
         assert!(info.encode(&mut buf[..5]).is_none());
+    }
+
+    #[test]
+    fn s10_device_info_carries_a_trailing_node_id() {
+        let node = SenderId::from_mac([0x24, 0x6F, 0x28, 1, 2, 3]);
+        let old = DeviceInfo {
+            abi_version: 4,
+            capacity: 1 << 20,
+            status: PayloadStatus::Stopped,
+            chip: "esp32",
+            firmware: "0.1.0",
+            node: None,
+        };
+        let new = DeviceInfo {
+            node: Some(node),
+            ..old
+        };
+        let mut a = [0u8; MAX_INFO_LEN];
+        let mut b = [0u8; MAX_INFO_LEN];
+        let n_old = old.encode(&mut a).unwrap();
+        let n_new = new.encode(&mut b).unwrap();
+        // The node id is appended: the old fields are unchanged.
+        assert_eq!(n_new, n_old + NODE_ID_LEN);
+        assert_eq!(&b[..n_old], &a[..n_old]);
+        assert_eq!(&b[n_old..n_new], &node.0);
+        assert_eq!(DeviceInfo::decode(&b[..n_new]), Some(new));
+        // A 0.4 response (no node id) decodes with none; a cut node id is
+        // ignored, never misread.
+        assert_eq!(DeviceInfo::decode(&a[..n_old]), Some(old));
+        assert_eq!(DeviceInfo::decode(&b[..n_new - 1]), Some(old));
+        // Later fields after the node id are ignored.
+        let mut longer = [9u8; MAX_INFO_LEN + 3];
+        longer[..n_new].copy_from_slice(&b[..n_new]);
+        assert_eq!(DeviceInfo::decode(&longer[..n_new + 3]), Some(new));
+        // The largest response fits MAX_INFO_LEN.
+        let names = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        assert_eq!(names.len(), MAX_NAME);
+        let max = DeviceInfo {
+            chip: names,
+            firmware: names,
+            ..new
+        };
+        assert_eq!(max.encode(&mut b), Some(MAX_INFO_LEN));
     }
 }

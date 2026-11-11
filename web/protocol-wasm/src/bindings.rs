@@ -153,7 +153,8 @@ pub fn upload_plan_signed(
 }
 
 /// Decodes a `sys/info` body into
-/// `{abiVersion, capacity, status, statusName, chip, firmware}`, or
+/// `{abiVersion, capacity, status, statusName, chip, firmware}`, plus
+/// `node` (16 hex digits) when the device reports its node id, or
 /// `undefined` when malformed.
 #[wasm_bindgen(js_name = decodeDeviceInfo)]
 pub fn decode_device_info(data: &[u8]) -> Option<Object> {
@@ -169,6 +170,10 @@ pub fn decode_device_info(data: &[u8]) -> Option<Object> {
     );
     set(&o, "chip", info.chip);
     set(&o, "firmware", info.firmware);
+    if let Some(node) = info.node {
+        let hex: String = node.iter().map(|b| format!("{b:02x}")).collect();
+        set(&o, "node", hex);
+    }
     Some(o)
 }
 
@@ -187,6 +192,7 @@ pub fn encode_device_info(
         status,
         chip,
         firmware,
+        node: None,
     }
     .encode()
     .ok_or_else(|| js_err("invalid device info"))

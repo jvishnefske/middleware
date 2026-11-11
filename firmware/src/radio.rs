@@ -5,20 +5,27 @@
 //! middleware [`EspNowTransport`](middleware::espnow::EspNowTransport) over
 //! esp-radio. Every decision it makes comes from here:
 //!
-//! * [`APP_FILTER`] (`Prefix("app")`) is the transport's only key filter, so
-//!   the radio delivers `app` and `app/...` samples and nothing else;
-//!   [`goes_over_air`] applies the same filter to the payload's publishes,
-//!   so `app/...` keys are broadcast and every other key stays on the serial
-//!   ports. System keys (`sys/...`) are never published over the radio, nor
-//!   delivered from it as publications.
+//! * [`FILTERS`] are the transport's key filters: [`APP_FILTER`]
+//!   (`Prefix("app")`) and [`DISC_FILTER`] (`Prefix("disc")`, the
+//!   discovery beacons, [`disc`]), so the radio delivers `app/...` and
+//!   `disc/...` samples and nothing else. A payload may only send on
+//!   `app/...`: [`goes_over_air`] (its publishes) and [`carries_routes`]
+//!   (its source routes) admit `app/...` alone, so every other key stays on
+//!   the serial ports. `disc/...` is reserved for the radio task's own
+//!   beacon ([`disc::cam_beacon`]), so a payload cannot forge discovery
+//!   beacons, and system keys (`sys/...`) are never published over the
+//!   radio, nor delivered from it as publications.
 //! * Requests arrive separately, as `middleware::rpc` frames (`MR`, not the
 //!   publications' `MW`) addressed to this station: the shell taps them off
 //!   the radio before the transport (which skips them as foreign), answers
 //!   repeats from a [`Replies`] cache of [`RPC_CACHE`] responses and hands
 //!   new ones to the controller, which admits only the over-the-air update
-//!   keys on a claimed device ([`crate::ota`]). Responses go back unicast to
-//!   the requester; [`Peers`] decides which of at most [`RPC_PEERS`]
-//!   requesters stay registered with the Wi-Fi driver.
+//!   keys on a claimed device, with signed commits and signed start/stop
+//!   ([`crate::ota`]). Responses go back unicast to the requester; [`Peers`]
+//!   decides which of at most [`RPC_PEERS`] requesters stay registered with
+//!   the Wi-Fi driver. Only the radio task builds `MR` frames: a payload's
+//!   publishes and routes are `MW` samples on `app/...` and cannot reach
+//!   the request path.
 //! * [`CHANNEL`] is the fixed Wi-Fi channel. There is no access point to
 //!   follow, so every device of a deployment must use the same channel;
 //!   the conagotchi badge firmware parks on the same channel 1 when it is not
@@ -32,6 +39,9 @@
 //!   source-route chunks: at most one frame is queued in the Wi-Fi driver at
 //!   any time.
 
+pub mod disc;
+
+use middleware::discovery::beacon::BEACON_PREFIX;
 use middleware::espnow::{HEADER_LEN, MAX_FRAME, MAX_KEY, MAX_PAYLOAD};
 use middleware::rpc::Replies;
 use middleware::{Filter, Key, KeyFilter};
@@ -45,8 +55,15 @@ pub const CHANNEL: u8 = 1;
 /// The root of the keys that travel over ESP-NOW.
 pub const APP_ROOT: Key<'static> = Key::from_static("app");
 
-/// The transport's key filter: `app` and every key below it.
+/// The application keys: `app` and every key below it.
 pub const APP_FILTER: KeyFilter<'static> = Filter::Prefix(APP_ROOT);
+
+/// The discovery beacons: `disc/<kind>` (`middleware::discovery::beacon`).
+pub const DISC_FILTER: KeyFilter<'static> = Filter::Prefix(BEACON_PREFIX);
+
+/// The transport's key filters, in slot order: every key admitted on the
+/// radio, in either direction.
+pub const FILTERS: [KeyFilter<'static>; 2] = [APP_FILTER, DISC_FILTER];
 
 /// Messages queued from the controller to the radio task (payload
 /// publishes on `app/...` keys).
@@ -75,7 +92,7 @@ pub const RPC_DEPTH: usize = 4;
 pub const RPC_CACHE: usize = 8;
 
 /// Largest cached response body: the controller's largest reply
-/// (`sys/info`, at most 73 bytes, fits).
+/// (`sys/info`, at most `MAX_INFO_LEN` = 81 bytes with the node id, fits).
 pub const RPC_BODY: usize = 128;
 
 /// Requesters kept registered as unicast peers with the Wi-Fi driver.
@@ -149,10 +166,23 @@ impl<const N: usize> Peers<N> {
 /// Shortest interval between two `sys/log` reports of the counters.
 pub const REPORT_INTERVAL_MS: u32 = 5_000;
 
-/// Whether a publication on `key` is broadcast over ESP-NOW (it matches
-/// [`APP_FILTER`] and fits the frame's key limit).
+/// Whether a payload's publication on `key` is broadcast over ESP-NOW: it
+/// matches [`APP_FILTER`] and fits the frame's key limit. `disc/...` is
+/// refused (reserved for the radio task's own beacon), as is every other
+/// key.
 pub fn goes_over_air(key: Key<'_>) -> bool {
     APP_FILTER.matches(key) && key.as_bytes().len() <= MAX_KEY
+}
+
+/// Whether a payload's source route may stream on `key`: the same
+/// `app/...` rule as [`goes_over_air`].
+pub fn carries_routes(key: Key<'_>) -> bool {
+    goes_over_air(key)
+}
+
+/// Whether a received sample on `key` is a discovery beacon.
+pub fn is_beacon(key: Key<'_>) -> bool {
+    DISC_FILTER.matches(key)
 }
 
 /// Radio counters; every count saturates.
@@ -289,6 +319,7 @@ mod tests {
         assert!(!goes_over_air(k("apple/x")), "segment-wise prefix");
         assert!(!goes_over_air(k("sys/log")));
         assert!(!goes_over_air(k("demo/x")));
+        assert!(carries_routes(k("app/cam/frame")) && !carries_routes(k("disc/cam/jpeg")));
         let long = "app/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert!(long.len() > MAX_KEY);
         assert!(!goes_over_air(k(long)), "longer than an ESP-NOW key");
@@ -321,7 +352,66 @@ mod tests {
         assert!(!c.report(&c, u32::MAX), "nothing new");
         let full = RpcCounters { executed: u32::MAX, replayed: u32::MAX, busy: u32::MAX, dropped: u32::MAX, tx_failed: u32::MAX };
         assert_eq!(full.executed().replayed().busy().dropped(3).tx_failed(), full);
-        const { assert!(RPC_BODY >= 73, "sys/info fits the cache") };
+        const { assert!(RPC_BODY >= middleware::loader::MAX_INFO_LEN, "sys/info (with the 0.5 node id) fits the cache") };
+    }
+
+    /// The combined air policy (E18 with O6/O16): a payload's publishes and
+    /// source routes are `MW` samples on `app/...` only, so a payload can
+    /// send neither a `disc/...` beacon nor any `sys/...` key, and nothing it
+    /// sends is a `MR` request frame, the only way `sys/...` requests (the
+    /// OTA keys, admitted by `crate::ota`) cross the radio.
+    #[test]
+    fn e18_o6_a_payload_reaches_neither_discovery_nor_the_request_path() {
+        use middleware::espnow::Frame;
+        use middleware::loader::keys;
+        use middleware::rpc::{Message, is_rpc};
+        let ota = [
+            keys::INFO,
+            keys::TRUST_INFO,
+            keys::TRUST_CLAIM,
+            keys::BEGIN,
+            keys::CHUNK,
+            keys::COMMIT,
+            keys::START,
+            keys::STOP,
+        ];
+        for key in ota.iter().chain(&[Key::new("disc/cam/jpeg").expect("valid")]) {
+            assert!(!goes_over_air(*key) && !carries_routes(*key), "{key:?}");
+        }
+        for key in ota {
+            assert!(!FILTERS.iter().any(|f| f.matches(key)), "{key:?} is never received as a sample");
+        }
+        // An `app/...` publish carrying a whole request frame (a would-be
+        // `sys/payload/stop` with a 72-byte body) is still a sample: its
+        // frame starts with `MW`, so the request tap never sees it.
+        let mut req = [0u8; MAX_FRAME];
+        let msg = Message::Request { id: 1, to: [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24], key: keys::STOP, body: &[0; 72] };
+        let n = msg.encode(&mut req).expect("fits");
+        let inner = req.get(..n).expect("encoded");
+        assert!(is_rpc(inner));
+        let key = Key::new("app/x").expect("valid");
+        assert!(goes_over_air(key));
+        let mut frame = [0u8; MAX_FRAME];
+        let m = Frame { seq: 0, key, payload: inner }.encode(&mut frame).expect("fits");
+        let sent = frame.get(..m).expect("encoded");
+        assert!(!is_rpc(sent) && Message::decode(sent).is_err());
+        assert_eq!(Frame::decode(sent).map(|f| f.payload), Ok(inner));
+    }
+
+    #[test]
+    fn e18_beacons_are_received_but_payloads_cannot_send_them() {
+        let k = |s| Key::new(s).expect("valid");
+        assert_eq!(FILTERS, [APP_FILTER, DISC_FILTER]);
+        assert!(FILTERS.iter().any(|f| f.matches(k("disc/cam/jpeg"))), "received");
+        assert!(!goes_over_air(k("disc/cam/jpeg")), "a payload cannot forge a beacon");
+        assert!(!goes_over_air(k("disc")) && !carries_routes(k("disc/cam/jpeg")));
+        assert!(is_beacon(k("disc/cam/jpeg")) && is_beacon(k("disc")));
+        assert!(!is_beacon(k("discover/x")) && !is_beacon(k("app/disc")));
+        assert!(!FILTERS.iter().any(|f| f.matches(k("discover/x"))), "segment-wise prefix");
+        assert!(
+            !FILTERS.iter().any(|f| f.matches(k("sys/info"))),
+            "sys/ never admitted"
+        );
     }
 
     #[test]

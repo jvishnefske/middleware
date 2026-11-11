@@ -1,6 +1,6 @@
 [package]
 name = "middleware"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Transport-agnostic pub/sub and request/response middleware over Zenoh, gRPC (Istio mesh) and BLE"
@@ -40,9 +40,19 @@ cam-fixtures = []
 zenoh = ["std", "dep:zenoh", "dep:tokio"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
-mdns = ["std", "dep:tokio", "tokio?/net"]
+mdns = ["std", "dep:tokio", "tokio?/net", "dep:socket2"]
+# Unicast DNS-SD (RFC 6763 over ordinary DNS: SRV/TXT/A/AAAA lookups and
+# browsing through a resolver), `dns::unicast`. Host only, like `mdns`.
+dns-sd = ["std", "dep:tokio", "tokio?/net", "dep:getrandom"]
+# The in-process backend `transport::memory` for tests and examples (host
+# only: std and tokio's timers). Integration tests enable it through the
+# self dev-dependency below.
+memory = ["std", "dep:tokio"]
 
 [dependencies]
+# Bounded owned strings and byte vectors (no heap) for the discovery
+# directory's records.
+heapless = { version = "0.9", default-features = false }
 postcard = { version = "1.1", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
@@ -55,11 +65,27 @@ ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 
 zenoh = { version = "1.10", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
+# Query ids for unicast DNS-SD (`dns-sd`), from the OS CSPRNG.
+getrandom = { version = "0.3", optional = true }
 tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = { version = "0.14", optional = true }
 http = { version = "1", optional = true }
 bytes = { version = "1", optional = true }
+# The mDNS announcer binds port 5353 with SO_REUSEADDR / SO_REUSEPORT so it
+# can share it with a system mDNS daemon (tokio cannot set them before bind).
+socket2 = { version = "0.6", features = ["all"], optional = true }
 
 [dev-dependencies]
+# The crate itself with `memory`, so `tests/` (the conformance harness) can
+# use the in-process backend under a plain `cargo test`.
+middleware = { path = ".", features = ["memory"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+# One service kind discovered over Zenoh, mDNS and cluster DNS (stub on
+# loopback), then called with request_with and Gather over Zenoh and the
+# gRPC mesh client. `test = true`: `cargo test --all-features` runs it (K16).
+[[example]]
+name = "discover_and_call"
+required-features = ["zenoh", "grpc", "istio", "dns-sd", "mdns"]
+test = true

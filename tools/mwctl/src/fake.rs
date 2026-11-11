@@ -5,7 +5,7 @@
 //! [`Splitter`], parsed with [`Command::parse`], transfers run through the
 //! device's [`Loader`] state machine (so resend deduplication and the
 //! commit CRC check are the firmware's own), and `sys/info` is encoded with
-//! [`DeviceInfo::encode`]. Storage is a `Vec` staged apart from the
+//! [`DeviceInfo::encode`] with the 0.5 trailing node id ([`NODE`]). Storage is a `Vec` staged apart from the
 //! installed image, like the firmware's two-slot store: a failed or
 //! refused commit keeps the previous image. Without the runtime,
 //! `sys/payload/start` answers `NotFound`, as in a `+no-wasm` build.
@@ -38,6 +38,9 @@ use middleware::wasm_abi::ABI_VERSION;
 use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
+
+/// The node id the fake reports in `sys/info` (as 0.5 firmware does).
+pub const NODE: middleware::SenderId = middleware::SenderId::from_mac([0x02, 0xFA, 0x4E, 0, 0, 1]);
 
 /// Faults to inject, by request ordinal.
 #[derive(Debug, Clone, Default)]
@@ -201,6 +204,7 @@ impl FakeDevice {
                 status: self.status,
                 chip: self.chip,
                 firmware: self.firmware,
+                node: Some(NODE),
             }
             .encode(out)
             .ok_or(HandlerError::BufferTooSmall),

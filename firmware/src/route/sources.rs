@@ -190,7 +190,13 @@ impl SourceTable {
 
     /// Whether a running route captures from the camera.
     pub fn has_camera(&self) -> bool {
-        self.slots.iter().flatten().any(|s| matches!(s.route.feed(), Feed::Camera { .. }))
+        self.camera_key().is_some()
+    }
+
+    /// The key of the first running route that captures from the camera
+    /// (what the camera beacon announces, `esp_base::radio::disc`).
+    pub fn camera_key(&self) -> Option<&RouteKey> {
+        self.slots.iter().flatten().find(|s| matches!(s.route.feed(), Feed::Camera { .. })).map(|s| &s.key)
     }
 
     /// Folds the broadcast of `job`'s chunk (`ok`, at `now_ms`) into its
@@ -255,7 +261,9 @@ mod tests {
         let cam = SourceRoute::camera(SourceConfig::jpeg(240, 240, 500).expect("valid"), 0).expect("valid");
         let t = SourceTable::new().start(1, key("app/cam/jpeg"), cam);
         assert!(t.has_camera());
+        assert_eq!(t.camera_key().map(|k| middleware::AsKey::as_key(k).as_str()), Some("app/cam/jpeg"));
         assert!(!SourceTable::new().start(0, key("app/a"), route(10, 0)).has_camera());
+        assert_eq!(SourceTable::new().start(0, key("app/a"), route(10, 0)).camera_key(), None);
         let (t, d) = t.due(0);
         let Due::Capture(c) = d else { panic!("capture, got {d:?}") };
         assert_eq!((c.handle, c.cfg.width), (1, 240));

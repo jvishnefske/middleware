@@ -11,12 +11,17 @@
 //!
 //! The task owns the transport and waits for whichever comes first:
 //!
-//! * a received sample (the transport's only filter is
-//!   [`APP_FILTER`], `Prefix("app")`): copied into [`RX`] with `try_send`,
-//!   so a slow controller loses samples (counted) instead of stalling the
-//!   radio;
+//! * a received sample (the transport's filters are
+//!   `esp_base::radio::FILTERS`, `Prefix("app")` and `Prefix("disc")`): an
+//!   `app/...` sample is copied into [`RX`] with `try_send`, so a slow
+//!   controller loses samples (counted) instead of stalling the radio; a
+//!   `disc/...` beacon goes to the directory
+//!   (`esp_base::radio::disc::Neighbours`), which logs `disc: up ...`,
+//!   `disc: updated ...` and `disc: down ...` lines on `sys/log` (the
+//!   payload does not see beacons);
 //! * a payload publish from [`TX`] (the controller queues `app/...` keys
-//!   with [`send`], which drops and counts when the queue is full):
+//!   with [`send`], which refuses any other key, `disc/...` included, and
+//!   drops and counts when the queue is full):
 //!   broadcast through the transport;
 //! * a source-route chunk due in [`SOURCES`]: written into the frame buffer
 //!   by `esp_base::route::source::write_frame` (radio header, key, chunk
@@ -62,6 +67,15 @@
 //! and replies are served between two chunks. The request counters
 //! (`esp_base::radio::RpcCounters`) are logged like the others.
 //!
+//! # Discovery
+//!
+//! Discovery (`esp_base::radio::disc`): while a camera source route runs,
+//! the task broadcasts the `disc/cam/jpeg` beacon (instance `cam-xxxxxx`,
+//! TXT `key=<route key>`, TTL 30 s) when the route starts and every 15 s,
+//! and a goodbye when it stops; records in the directory whose TTL ran out
+//! are logged as `disc: down ... (expired)` and dropped. Both are checked
+//! once per loop iteration, and the loop's timer also wakes for them.
+//!
 //! The counters (`esp_base::radio::Counters`) are logged on `sys/log` when
 //! losses rise, at most every `REPORT_INTERVAL_MS`. The time spent handling
 //! received frames (transport decode and the queue to the controller) is
@@ -82,10 +96,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
+use esp_base::radio::disc::{BeaconStep, CAM_BEACON_LEN, CamBeacon, Neighbours, cam_beacon};
 use esp_base::radio::{
-    APP_FILTER, CHANNEL, Counters, KEY_CAPACITY, PeerChange, Peers, RPC_BODY, RPC_DEPTH, RPC_PEERS,
+    CHANNEL, Counters, FILTERS, KEY_CAPACITY, PeerChange, Peers, RPC_BODY, RPC_DEPTH, RPC_PEERS,
     RPC_SEND_TIMEOUT_MS, RX_DEPTH, RX_PAYLOAD, RpcCounters, RpcReplies, SEND_TIMEOUT_MS, TX_DEPTH,
-    TX_PAYLOAD,
+    TX_PAYLOAD, is_beacon,
 };
 use esp_base::perf::RadioTime;
 use esp_base::route::source::{Feed, write_frame};
@@ -97,7 +112,7 @@ use esp_radio::esp_now::{
 use esp_radio::wifi::{ControllerConfig, SecondaryChannel, WifiController, WifiError};
 use heapless::{String, Vec};
 use middleware::espnow::rpc::EspNowUnicast;
-use middleware::espnow::{EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, Mac};
+use middleware::espnow::{EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, MAX_KEY, Mac};
 use middleware::rpc::{self, Admit, Message};
 use middleware::transport::HandlerError;
 #[cfg(feature = "esp32")]
@@ -221,10 +236,14 @@ pub fn read_sources<R>(f: impl FnOnce(&SourceTable) -> R) -> R {
 }
 
 /// Queues a payload publish for broadcast; drops (and counts) it when the
-/// queue is full or it does not fit one frame.
+/// key is not one a payload may send (`esp_base::radio::goes_over_air`:
+/// `app/...` only, so never a `disc/...` beacon), the queue is full or it
+/// does not fit one frame.
 pub fn send(key: Key<'_>, data: &[u8]) {
     let mut msg = Outgoing { key: String::new(), payload: Vec::new() };
-    let fits = msg.key.push_str(key.as_str()).is_ok() && msg.payload.extend_from_slice(data).is_ok();
+    let fits = esp_base::radio::goes_over_air(key)
+        && msg.key.push_str(key.as_str()).is_ok()
+        && msg.payload.extend_from_slice(data).is_ok();
     if !fits || TX.try_send(msg).is_err() {
         TX_DROPPED.lock(|n| {
             let mut n = n.borrow_mut();
@@ -319,10 +338,10 @@ impl EspNowRadio for EspNowLink {
     }
 }
 
-/// The transport: one filter slot, 16 remembered senders, and no kept
-/// frame (`P = 0`): every receive passes a buffer that holds any sample, so
-/// `BufferTooSmall` cannot happen.
-type Transport = EspNowTransport<'static, EspNowLink, 16, 1, 0>;
+/// The transport: two filter slots (`app/...` and `disc/...`), 16
+/// remembered senders, and no kept frame (`P = 0`): every receive passes a
+/// buffer that holds any sample, so `BufferTooSmall` cannot happen.
+type Transport = EspNowTransport<'static, EspNowLink, 16, 2, 0>;
 
 /// Room for any sample the transport delivers (key plus payload).
 const SAMPLE_BUF: usize = MAX_FRAME - HEADER_LEN;
@@ -364,17 +383,13 @@ pub fn start(wifi: esp_hal::peripherals::WIFI<'static>) -> Result<Transport, Sta
     let (manager, sender, receiver) = controller.esp_now().split();
     let link = EspNowLink { manager, sender, receiver, peers: Peers::new() };
     let transport = EspNowTransport::new(link).with_own_address(own_mac());
-    transport.with_filter(APP_FILTER).map_err(|_| StartError::Again)
+    transport.with_filters(&FILTERS).map_err(|_| StartError::Again)
 }
 
 /// Our station MAC (the eFuse base MAC): requests over the air are
 /// addressed to it, and signed control requests must name it.
 pub fn own_mac() -> Mac {
-    let mut mac = [0u8; 6];
-    for (dst, src) in mac.iter_mut().zip(esp_hal::efuse::base_mac_address().as_bytes()) {
-        *dst = *src;
-    }
-    mac
+    super::base_mac()
 }
 
 /// The radio task's state.
@@ -389,6 +404,10 @@ struct Radio {
     /// Camera captures so far (for the log).
     #[cfg(feature = "esp32")]
     captures: u32,
+    /// Services heard announced on the radio.
+    neighbours: Neighbours,
+    /// The camera beacon's schedule.
+    beacon: CamBeacon,
     bus: &'static Bus,
     /// Our station MAC: requests must be addressed to it.
     own: Mac,
@@ -403,10 +422,28 @@ struct Radio {
     rpc_logged: (RpcCounters, u32),
 }
 
+/// Milliseconds since boot, for the directory and the beacon (no wrap).
+fn uptime_ms() -> u64 {
+    embassy_time::Instant::now().as_millis()
+}
+
 impl Radio {
     /// Hands one receive outcome to the controller.
     fn received(&mut self, rx: Result<Sample<'_>, MwError<LinkError>>) {
         self.counters = match rx {
+            Ok(s) if is_beacon(s.key) => {
+                let (neighbours, heard) = core::mem::take(&mut self.neighbours).hear(
+                    s.key,
+                    s.payload,
+                    s.meta.sender,
+                    uptime_ms(),
+                );
+                self.neighbours = neighbours;
+                if let Some(heard) = heard {
+                    self.bus.log(format_args!("{heard}"));
+                }
+                self.counters.received(true)
+            }
             Ok(s) => {
                 let mut msg = Received { key: String::new(), payload: Vec::new() };
                 let fits = msg.key.push_str(s.key.as_str()).is_ok()
@@ -544,6 +581,53 @@ impl Radio {
             }
             (next, ())
         });
+    }
+
+    /// Sends the camera beacon or its goodbye when due, and logs and drops
+    /// expired directory records. Returns the milliseconds until either has
+    /// something to do again.
+    async fn discovery(&mut self) -> Option<u64> {
+        let now = uptime_ms();
+        let camera = read_sources(|t| t.camera_key().copied());
+        let (beacon, step) = self.beacon.step(camera.is_some(), now);
+        self.beacon = beacon;
+        let route = match (step, camera.as_ref()) {
+            (BeaconStep::Announce, Some(key)) => Some(Some(key.as_key())),
+            (BeaconStep::Goodbye, _) => Some(None),
+            _ => None,
+        };
+        if let Some(route) = route {
+            let mut key = [0u8; MAX_KEY];
+            let mut payload = [0u8; CAM_BEACON_LEN];
+            let ok = match cam_beacon(own_mac(), route, &mut key, &mut payload) {
+                Ok((key, n)) => match payload.get(..n) {
+                    Some(bytes) => matches!(
+                        with_timeout(
+                            Duration::from_millis(SEND_TIMEOUT_MS),
+                            self.transport.publish(key, bytes)
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ),
+                    None => false,
+                },
+                Err(_) => false,
+            };
+            self.counters = self.counters.sent(ok);
+        }
+        // Checked first: under a flood this runs once per frame, and moving
+        // the directory costs a copy of it.
+        if self.neighbours.expires_in(now) == Some(0) {
+            for expired in self.neighbours.expired(now) {
+                self.bus.log(format_args!("{expired}"));
+            }
+            self.neighbours = core::mem::take(&mut self.neighbours).expire(now);
+        }
+        let beacon = self.beacon.due_in(camera.is_some(), now);
+        match (beacon, self.neighbours.expires_in(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Handles one tapped request/response frame (see the module docs).
@@ -697,7 +781,9 @@ fn camera_chunk(out: &mut [u8; MAX_FRAME], seq: u8, job: &Job, len: u32) -> Opti
 /// Runs the transport and the source routes forever (see the module docs).
 #[embassy_executor::task]
 pub async fn radio_task(transport: Transport, bus: &'static Bus) {
-    bus.log(format_args!("espnow: channel {CHANNEL}, keys app/..."));
+    bus.log(format_args!(
+        "espnow: channel {CHANNEL}, keys app/... and disc/..."
+    ));
     let mut radio = Radio {
         transport,
         counters: Counters::new(),
@@ -705,6 +791,8 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
         route_seq: 0,
         #[cfg(feature = "esp32")]
         captures: 0,
+        neighbours: Neighbours::new(),
+        beacon: CamBeacon::new(),
         bus,
         own: own_mac(),
         replies: RpcReplies::new(),
@@ -717,6 +805,7 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
     let mut frame = [0u8; MAX_FRAME];
     loop {
         radio.report();
+        let discovery = radio.discovery().await;
         let due = update(|t| t.due(now_ms()));
         let wait = match due {
             Due::Capture(capture) => {
@@ -734,12 +823,16 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
                 radio.chunk(job, &mut frame).await;
                 continue;
             }
-            Due::Wait(ms) => Some(ms),
+            Due::Wait(ms) => Some(u64::from(ms)),
             Due::Idle => None,
+        };
+        let wait = match (wait, discovery) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         };
         let timer = async {
             match wait {
-                Some(ms) => Timer::after_millis(u64::from(ms)).await,
+                Some(ms) => Timer::after_millis(ms).await,
                 None => core::future::pending().await,
             }
         };

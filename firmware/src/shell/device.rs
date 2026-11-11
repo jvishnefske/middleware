@@ -595,7 +595,7 @@ impl Device for EspDevice {
 
     #[cfg(feature = "espnow")]
     fn route_source(&mut self, source: Source, key: Key<'_>, cfg: SourceConfig) -> Result<u8, AbiError> {
-        if !esp_base::radio::goes_over_air(key) {
+        if !esp_base::radio::carries_routes(key) {
             return Err(AbiError::Unsupported);
         }
         match source {
