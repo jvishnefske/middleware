@@ -45,11 +45,18 @@
 //!
 //! The cluster reaches the device's system keys only through the served
 //! kind `gw/sys`, whose request body is `[key_len u8][key][body]`
-//! ([`encode_sys_request`], [`parse_sys_request`]). Only keys of the
-//! [`SysAllow`] list pass ([`SysAllow::route`]); by default `sys/info`
-//! (forwarded to the device) and `sys/log` (answered from the gateway's
-//! [`LogTail`]: the device publishes its log, it does not serve it).
-//! Everything else, `sys/loader/*` and `sys/trust/*` included, is
+//! ([`encode_sys_request`], [`parse_sys_request`]). Update keys
+//! (`sys/loader/*`, `sys/payload/start|stop|status`, `sys/trust/info`,
+//! `sys/fw/*`) are decided by the [`UpdateGate`]
+//! the bridge carries ([`Bridge::with_updates`], [`Bridge::sys_update`]):
+//! only allowlisted updaters, with the device's over-the-air rules (see
+//! [`crate::update`]); without one every update request is
+//! [`HandlerError::Denied`]. `sys/trust/claim` is always `Denied`. Every
+//! other key passes only if it is in the [`SysAllow`] list
+//! ([`Bridge::sys_route`]); by default `sys/info` (forwarded to the
+//! device) and `sys/log` (answered from the gateway's [`LogTail`]: the
+//! device publishes its log, it does not serve it). The allowlist never
+//! opens an update or trust key, whatever it lists. Everything else is
 //! [`HandlerError::Denied`].
 //!
 //! # Bounds
@@ -66,6 +73,8 @@ use middleware::key::{AsKey, Key, KeyBuf, KeyFilterBuf, MAX_KEY_LEN};
 use middleware::loader::{DeviceInfo, keys};
 use middleware::transport::{HandlerError, SenderId};
 use std::collections::VecDeque;
+
+use crate::update::{Admission, Caller, SysClass, Ticket, UpdateGate, UpdateOp, classify};
 
 /// Records one device may have announced through the gateway at once.
 pub const MAX_DEVICE_SERVICES: usize = 4;
@@ -465,6 +474,7 @@ pub struct Bridge {
     services: Directory<MAX_DEVICE_SERVICES>,
     tail: LogTail,
     counters: Counters,
+    updates: UpdateGate,
 }
 
 impl Bridge {
@@ -489,7 +499,22 @@ impl Bridge {
             services: Directory::new(),
             tail: LogTail::default(),
             counters: Counters::default(),
+            updates: UpdateGate::disabled(),
         }
+    }
+
+    /// The same bridge deciding update requests with `gate` (module docs;
+    /// [`UpdateGate::disabled`] by default).
+    pub fn with_updates(self, gate: UpdateGate) -> Self {
+        Bridge {
+            updates: gate,
+            ..self
+        }
+    }
+
+    /// The update gate.
+    pub fn updates(&self) -> &UpdateGate {
+        &self.updates
     }
 
     /// The key map.
@@ -557,11 +582,17 @@ impl Bridge {
         let n = u32::try_from(withdraw.len()).unwrap_or(u32::MAX);
         let mut counters = self.counters;
         counters.withdrawn = counters.withdrawn.saturating_add(n);
+        let updates = if self.device.is_some_and(|d| d != node) {
+            self.updates.forget_device()
+        } else {
+            self.updates
+        };
         (
             Bridge {
                 device: Some(node),
                 services,
                 counters,
+                updates,
                 ..self
             },
             Bound::Node { node, withdraw },
@@ -658,7 +689,13 @@ impl Bridge {
             .collect();
         let (services, _) = self.services.expire(now_ms);
         let n = u32::try_from(gone.len()).unwrap_or(u32::MAX);
-        let b = Bridge { services, ..self }.count(|c| c.withdrawn = c.withdrawn.saturating_add(n));
+        let updates = self.updates.expire(now_ms);
+        let b = Bridge {
+            services,
+            updates,
+            ..self
+        }
+        .count(|c| c.withdrawn = c.withdrawn.saturating_add(n));
         (b, gone)
     }
 
@@ -682,12 +719,79 @@ impl Bridge {
         self.count(|c| c.downlinked = inc(c.downlinked))
     }
 
-    /// Where a `gw/sys` request for `key` goes; a denial is counted.
+    /// Where a `gw/sys` request for a plain (not update) `key` goes; update
+    /// and trust keys are always [`HandlerError::Denied`] here (they go to
+    /// [`Bridge::sys_update`]). A denial is counted.
     pub fn sys_route(self, key: Key<'_>) -> (Self, Result<SysRoute, HandlerError>) {
-        match self.allow.route(key) {
+        let route = match classify(key) {
+            SysClass::Plain => self.allow.route(key),
+            SysClass::Update(_) | SysClass::Never => Err(HandlerError::Denied),
+        };
+        match route {
             Ok(r) => (self, Ok(r)),
             Err(e) => (self.count(|c| c.sys_denied = inc(c.sys_denied)), Err(e)),
         }
+    }
+
+    /// Decides the update request `op` on `key` from `caller` with the
+    /// [`UpdateGate`] (for the bound device, at `now_ms`); a refusal is
+    /// its status, a denial is also counted in [`Counters::sys_denied`].
+    pub fn sys_update(
+        self,
+        caller: Caller<'_>,
+        op: UpdateOp,
+        key: Key<'_>,
+        body: &[u8],
+        now_ms: u64,
+    ) -> (Self, Result<Admission, HandlerError>) {
+        let (updates, r) = self
+            .updates
+            .admit(caller, op, key, body, self.device, now_ms);
+        let b = Bridge { updates, ..self };
+        match r {
+            Ok(a) => (b, Ok(a)),
+            Err(why) => {
+                let e = why.error();
+                let b = if e == HandlerError::Denied {
+                    b.count(|c| c.sys_denied = inc(c.sys_denied))
+                } else {
+                    b
+                };
+                (b, Err(e))
+            }
+        }
+    }
+
+    /// The device answered a forwarded update request
+    /// ([`UpdateGate::complete`]).
+    pub fn update_done(
+        self,
+        ticket: &Ticket,
+        result: Result<&[u8], HandlerError>,
+        now_ms: u64,
+    ) -> Self {
+        let updates = self.updates.complete(ticket, result, now_ms);
+        Bridge { updates, ..self }
+    }
+
+    /// An accepted start/stop whose counter could not be persisted was
+    /// not forwarded ([`UpdateGate::unpersisted`]).
+    pub fn update_unpersisted(self, ticket: &Ticket) -> Self {
+        let updates = self.updates.unpersisted(ticket);
+        Bridge { updates, ..self }
+    }
+
+    /// A forwarded update request got no answer ([`UpdateGate::abandon`]).
+    pub fn update_abandoned(self, ticket: &Ticket) -> Self {
+        let updates = self.updates.abandon(ticket);
+        Bridge { updates, ..self }
+    }
+
+    /// Takes the device's `sys/trust/info` answer in
+    /// ([`UpdateGate::observe_trust`]).
+    pub fn observe_trust(self, result: Result<&[u8], HandlerError>) -> Self {
+        let updates = self.updates.observe_trust(result);
+        Bridge { updates, ..self }
     }
 }
 
@@ -950,6 +1054,33 @@ mod tests {
         assert!(SysAllow::new([k("sys")]).is_none());
         let only = SysAllow::new([keys::INFO]).unwrap();
         assert_eq!(only.route(keys::LOG), Err(HandlerError::Denied));
+        // Listing an update or trust key does not open it.
+        let wide = Bridge::new(
+            KeyMap::identity(),
+            Vec::new(),
+            SysAllow::new([keys::INFO, keys::BEGIN, keys::TRUST_CLAIM, keys::TRUST_INFO]).unwrap(),
+            None,
+        );
+        let (wide, r) = wide.sys_route(keys::BEGIN);
+        assert_eq!(r, Err(HandlerError::Denied));
+        let (wide, r) = wide.sys_route(keys::TRUST_CLAIM);
+        assert_eq!(r, Err(HandlerError::Denied));
+        let (wide, r) = wide.sys_route(keys::TRUST_INFO);
+        assert_eq!(r, Err(HandlerError::Denied));
+        assert_eq!(wide.sys_route(keys::INFO).1, Ok(SysRoute::Device));
+        // Without a gate every update request is Denied and counted.
+        let (b2, r) = bridge().sys_update(
+            crate::update::Caller {
+                principal: Some("spiffe://td/u"),
+                request_id: Some("x"),
+            },
+            UpdateOp::LoaderBegin,
+            keys::BEGIN,
+            b"",
+            0,
+        );
+        assert_eq!(r, Err(HandlerError::Denied));
+        assert_eq!(b2.counters().sys_denied, 1);
         assert_eq!(only.keys().count(), 1);
         let many: Vec<String> = (0..=MAX_SYS_ALLOW).map(|i| format!("sys/k{i}")).collect();
         assert!(SysAllow::new(many.iter().map(|s| k(s))).is_none());

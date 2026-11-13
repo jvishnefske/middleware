@@ -160,8 +160,56 @@ ESP base firmware to the Zenoh fabric. The device's `app/...`
 publications go to Zenoh under the same keys (or under `app/<ns>/...`
 with `MW_GATEWAY_NAMESPACE`), its `disc/<kind>` beacons become Zenoh
 discovery records whose node is the device's MAC, and the cluster reaches
-`sys/info` and the device log, and nothing else of `sys/...`, through
-the gateway's served kind `gw/sys`.
+`sys/info` and the device log through the gateway's served kind `gw/sys`.
+Signed updates go through `gw/sys` too, for the callers listed in
+`MW_GATEWAY_UPDATERS` and nobody else (the list is empty by default, so
+updates are off).
+
+### Updating a device through the gateway
+
+The gateway reaches its device over the serial port, where the device
+treats every request as coming from someone holding the board. So the
+gateway applies the device's over-the-air rules to mesh callers before
+it forwards anything. The caller must be in `MW_GATEWAY_UPDATERS`, as
+the SPIFFE ID the gateway's sidecar reports. The device must already be
+claimed (`mwctl trust claim` on the serial port; a claim never goes
+through the gateway). One transfer runs at a time, owned by the caller
+that began it. Commits must be signed, and the device checks the
+signature. `start` and `stop` must be signed control requests, which
+the gateway verifies against the device's pinned key, the device's MAC
+and a counter above the last one it accepted. A payload `begin` through
+the gateway is a serial `begin`, so the running payload stops while the
+new one loads.
+
+The client is `mw-update` (`cargo run -p mw-gateway --bin mw-update --`).
+It finds the gateway the way an off-cluster service does, through a
+static endpoint: `--endpoint gw/sys=<dial host:port>@<authority host:port>`,
+or the `gw/sys` entry of `MW_STATIC_ENDPOINTS`. Usually that is the
+local Envoy, which presents the caller's SVID. The commands mirror
+mwctl's: `info`, `upload <FILE.wasm> --key <KEYFILE> [--version N]
+[--start]`, `start|stop --key <KEYFILE>`, and on a Pico 2 `fw info`,
+`fw update <IMAGE> --key <KEYFILE> [--no-reboot]`, `fw reboot`,
+`fw confirm` and `fw abort`. Every request carries an `x-request-id`,
+and a request that timed out is resent with the same id, which the
+gateway answers from its replay cache rather than acting twice.
+`MW_GATEWAY_UPDATE_TIMEOUT_MS` (default 20 s) is how long the gateway
+waits for the device to answer an update request. `MW_GATEWAY_STATE`
+(default `/var/lib/mw-gateway`, which must be writable and persistent)
+holds the highest signed start/stop counter the gateway has accepted,
+written before each one is forwarded. A Pi has no real-time clock, so
+until either that file exists or the clock has synced (it counts only
+from 2026-01-01 on), signed `start` and `stop` are refused as
+unavailable, and so is any whose counter cannot be written. Uploads
+still work, because the device checks a signed commit's version itself. After `fw update`
+reboots a Pico 2, its USB serial device re-enumerates and the gateway's
+stream closes. The gateway then exits and its supervisor restarts it,
+while `mw-update` keeps retrying the confirm.
+
+One gap remains: the `mw-service` runner does not serve yet (MS6;
+`Service::run_with` returns `Unimplemented`), so the `mw-gateway` binary
+cannot answer `gw/sys` over the network. A process that embeds the
+gateway can serve it with `mw_gateway::serve_sys`, which is how the
+tests run `mw-update` end to end.
 
 ### Running the gateway against the ESP32-CAM (documented, not yet run)
 

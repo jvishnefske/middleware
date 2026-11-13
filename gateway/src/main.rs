@@ -8,7 +8,8 @@
 use std::process::ExitCode;
 
 use middleware::zenoh::{SessionConfig, ZenohTransport};
-use mw_gateway::{GatewayConfig, SysForward, io, service, start};
+use mw_gateway::state::{ControlStore, floor_at_start};
+use mw_gateway::{GatewayConfig, SysForward, io, service, start_with_store};
 use mw_service::run::{USAGE, terminate_signal};
 use mw_service::{Command, Config};
 
@@ -77,9 +78,31 @@ async fn run(config: GatewayConfig) -> Result<(), String> {
         .map_err(|e| format!("zenoh: {e}"))?;
     let stream =
         io::open_serial(&config.serial, config.baud).map_err(|e| format!("serial: {e}"))?;
-    let (mut gateway, sys) = start(stream, session, config.bridge())
-        .await
-        .map_err(|e| format!("zenoh: {e}"))?;
+    // The control counter floor: the persisted counter and the clock,
+    // which counts only once it is past 2026-01-01 (no RTC on a Pi before
+    // NTP); with neither, signed start/stop stay refused (fail closed).
+    let store = ControlStore::in_dir(&config.state_dir);
+    let persisted = store.load();
+    let clock_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok());
+    let floor = floor_at_start(persisted, clock_ms);
+    if floor.is_none() {
+        eprintln!(
+            "mw-gateway: no control counter floor ({persisted:?} in {}, clock {clock_ms:?}); signed start/stop refused",
+            config.state_dir.display()
+        );
+    }
+    let (mut gateway, sys) = start_with_store(
+        stream,
+        session,
+        config.bridge_with_floor(floor),
+        config.shell_options(),
+        store,
+    )
+    .await
+    .map_err(|e| format!("zenoh: {e}"))?;
     let svc = service(&config, sys).map_err(|e| e.to_string())?;
     let (stop_runner, runner_stopped) = tokio::sync::oneshot::channel::<()>();
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {

@@ -16,6 +16,14 @@
 //!   sends the reply. Handler errors become gRPC statuses through
 //!   [`status::to_status`](super::status::to_status).
 //!
+//! A handler that must await (an async mesh handler, a gateway forwarding
+//! to a device) takes calls one at a time with
+//! [`GrpcResponder::next_call`] instead: a [`PendingCall`] exposes the
+//! key, body and [`RequestMeta`] and is answered with
+//! [`PendingCall::reply`] (or [`PendingCall::reply_status`]), so the
+//! caller's task can await between the two without holding a borrowed
+//! scratch buffer. Dropping it unanswered fails the call with `INTERNAL`.
+//!
 //! Which keys exist is the handler's decision: every non-bus path reaches
 //! it, and it answers `HandlerError::NotFound` (sent as `UNIMPLEMENTED`) for
 //! keys it does not serve.

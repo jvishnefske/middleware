@@ -52,7 +52,9 @@
 //! * [`responder::GrpcResponder`] — implements [`Responder`](crate::Responder):
 //!   its tonic half ([`responder::ResponderService`]) forwards each unary call
 //!   over a bounded channel, and [`Responder::serve_one`](crate::Responder::serve_one)
-//!   runs the caller's pure [`Handler`](crate::Handler) on it.
+//!   runs the caller's pure [`Handler`](crate::Handler) on it;
+//!   [`GrpcResponder::next_call`] hands an owned [`responder::PendingCall`] to a
+//!   handler that must await before answering.
 //!   The handler sees the caller's `mw-client` id, its `grpc-timeout` as the
 //!   remaining deadline, its `traceparent` and `x-request-id` ([`trace`])
 //!   and, when configured for a sidecar

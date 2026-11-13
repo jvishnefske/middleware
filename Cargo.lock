@@ -1728,11 +1728,16 @@ dependencies = [
 name = "mw-gateway"
 version = "0.6.0"
 dependencies = [
+ "ed25519-dalek",
  "embedded-io-async",
+ "http",
  "middleware",
  "mw-service",
+ "mwctl",
  "serialport",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
 ]
 

@@ -12,6 +12,9 @@
 //! | `MW_GATEWAY_DEVICE_MAC` | none | `aa:bb:cc:dd:ee:ff`: bind only to this device |
 //! | `MW_GATEWAY_SYS_TIMEOUT_MS` | `2000` | decimal milliseconds a `gw/sys` request waits, 1..=60000 |
 //! | `MW_GATEWAY_ALLOW_CALLERS` | none | `,`-separated SPIFFE IDs admitted to `gw/sys` |
+//! | `MW_GATEWAY_UPDATERS` | none (updates disabled) | `,`-separated SPIFFE IDs, at most 8, that may update the device through `gw/sys` ([`crate::update`]); they are admitted to `gw/sys` too |
+//! | `MW_GATEWAY_STATE` | `/var/lib/mw-gateway` | absolute directory of the gateway's durable state: the highest accepted signed start/stop counter ([`crate::state`]) |
+//! | `MW_GATEWAY_UPDATE_TIMEOUT_MS` | `20000` | decimal milliseconds the gateway waits for the device to answer an update request (a `begin` erases flash, a firmware `commit` hashes the image), 1..=120000; the caller waits at most this and its own deadline |
 //!
 //! Unset or empty is the default; a malformed value is a
 //! [`GatewayConfigError`] naming the variable.
@@ -22,6 +25,8 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::bridge::{Bridge, KeyMap, MAX_DOWNLINK_FILTERS, OwnedFilter, SysAllow};
+use crate::update::{UpdateGate, Updaters};
+use middleware::loader::trust::ControlCounter;
 
 /// `MW_GATEWAY_SERIAL`.
 pub const ENV_SERIAL: &str = "MW_GATEWAY_SERIAL";
@@ -39,6 +44,12 @@ pub const ENV_DEVICE_MAC: &str = "MW_GATEWAY_DEVICE_MAC";
 pub const ENV_SYS_TIMEOUT_MS: &str = "MW_GATEWAY_SYS_TIMEOUT_MS";
 /// `MW_GATEWAY_ALLOW_CALLERS`.
 pub const ENV_ALLOW_CALLERS: &str = "MW_GATEWAY_ALLOW_CALLERS";
+/// `MW_GATEWAY_UPDATERS`.
+pub const ENV_UPDATERS: &str = "MW_GATEWAY_UPDATERS";
+/// `MW_GATEWAY_STATE`.
+pub const ENV_STATE: &str = "MW_GATEWAY_STATE";
+/// `MW_GATEWAY_UPDATE_TIMEOUT_MS`.
+pub const ENV_UPDATE_TIMEOUT_MS: &str = "MW_GATEWAY_UPDATE_TIMEOUT_MS";
 
 /// The default serial port.
 pub const DEFAULT_SERIAL: &str = "/dev/ttyUSB0";
@@ -83,6 +94,13 @@ pub struct GatewayConfig {
     pub sys_timeout: Duration,
     /// SPIFFE IDs admitted to `gw/sys`.
     pub allow_callers: Vec<String>,
+    /// SPIFFE IDs that may update the device (none: updates disabled).
+    pub updaters: Updaters,
+    /// How long the gateway waits for the device to answer an update
+    /// request.
+    pub update_timeout: Duration,
+    /// The durable state directory.
+    pub state_dir: std::path::PathBuf,
 }
 
 impl Default for GatewayConfig {
@@ -96,6 +114,9 @@ impl Default for GatewayConfig {
             device_mac: None,
             sys_timeout: crate::shell::SYS_TIMEOUT,
             allow_callers: Vec::new(),
+            updaters: Updaters::none(),
+            update_timeout: crate::shell::UPDATE_TIMEOUT,
+            state_dir: crate::state::DEFAULT_STATE_DIR.into(),
         }
     }
 }
@@ -204,6 +225,31 @@ impl GatewayConfig {
             }
             None => Vec::new(),
         };
+        let updaters = match get(ENV_UPDATERS) {
+            Some(v) => Updaters::new(list(&v))
+                .ok_or_else(|| err(ENV_UPDATERS, &v, "not up to 8 SPIFFE IDs"))?,
+            None => d.updaters,
+        };
+        let update_timeout = match get(ENV_UPDATE_TIMEOUT_MS) {
+            Some(v) => v
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|ms| (1..=120_000).contains(ms))
+                .map(Duration::from_millis)
+                .ok_or_else(|| err(ENV_UPDATE_TIMEOUT_MS, &v, "not 1..=120000 milliseconds"))?,
+            None => d.update_timeout,
+        };
+        let state_dir = match get(ENV_STATE) {
+            Some(v) => {
+                let p = std::path::PathBuf::from(v.trim());
+                if !p.is_absolute() {
+                    return Err(err(ENV_STATE, &v, "not an absolute path"));
+                }
+                p
+            }
+            None => d.state_dir,
+        };
         Ok(GatewayConfig {
             serial,
             baud,
@@ -213,6 +259,9 @@ impl GatewayConfig {
             device_mac,
             sys_timeout,
             allow_callers,
+            updaters,
+            update_timeout,
+            state_dir,
         })
     }
 
@@ -221,14 +270,56 @@ impl GatewayConfig {
         Self::from_env(&|k| std::env::var(k).ok())
     }
 
-    /// The bridge these settings describe.
+    /// The bridge these settings describe, with no control counter floor:
+    /// signed start/stop are refused (fail closed). A running gateway uses
+    /// [`GatewayConfig::bridge_with_floor`] with
+    /// [`crate::state::floor_at_start`].
     pub fn bridge(&self) -> Bridge {
+        self.bridge_with_floor(None)
+    }
+
+    /// The bridge these settings describe, refusing signed start/stop
+    /// counters at or below `control_floor` (a known floor). Pure.
+    pub fn bridge_at(&self, control_floor: u64) -> Bridge {
+        self.bridge_with_floor(Some(ControlCounter(control_floor)))
+    }
+
+    /// The bridge these settings describe with the control counter floor
+    /// `floor` (`None`: start/stop refused until known; [`crate::update`]).
+    /// Pure.
+    pub fn bridge_with_floor(&self, floor: Option<ControlCounter>) -> Bridge {
+        let gate = if self.updaters.is_empty() {
+            UpdateGate::disabled()
+        } else {
+            UpdateGate::new(self.updaters.clone(), floor)
+        };
         Bridge::new(
             self.map.clone(),
             self.downlink.clone(),
             self.sys_allow.clone(),
             self.device_mac.map(SenderId::from_mac),
         )
+        .with_updates(gate)
+    }
+
+    /// The SPIFFE IDs admitted to `gw/sys`: `allow_callers`, then the
+    /// updaters not already listed.
+    pub fn admitted_callers(&self) -> Vec<String> {
+        let mut out = self.allow_callers.clone();
+        for u in self.updaters.iter() {
+            if !out.iter().any(|c| c == u) {
+                out.push(u.to_owned());
+            }
+        }
+        out
+    }
+
+    /// The shell's timeouts from these settings.
+    pub fn shell_options(&self) -> crate::shell::ShellOptions {
+        crate::shell::ShellOptions {
+            sys_timeout: self.sys_timeout,
+            update_timeout: self.update_timeout,
+        }
     }
 }
 
@@ -251,6 +342,9 @@ mod tests {
         assert_eq!(c, GatewayConfig::default());
         assert_eq!((c.serial.as_str(), c.baud), ("/dev/ttyUSB0", 115_200));
         assert!(c.downlink.is_empty() && c.allow_callers.is_empty());
+        assert!(c.updaters.is_empty());
+        assert_eq!(c.update_timeout, Duration::from_secs(20));
+        assert_eq!(c.bridge().updates(), &UpdateGate::disabled());
         assert_eq!(c.sys_allow, SysAllow::default());
         assert_eq!(c.bridge().device(), None);
     }
@@ -285,6 +379,43 @@ mod tests {
         assert_eq!(c.device_mac, Some([0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC]));
         assert_eq!(c.sys_timeout, Duration::from_millis(500));
         assert_eq!(c.allow_callers.len(), 1);
+    }
+
+    #[test]
+    fn rg23_updaters_and_update_timeout_parse() {
+        let caller = "spiffe://infra.local/ns/apps/sa/demo-caller";
+        let upd = "spiffe://infra.local/ns/ops/sa/updater";
+        let c = GatewayConfig::from_env(&env(&[
+            ("MW_GATEWAY_ALLOW_CALLERS", caller),
+            ("MW_GATEWAY_UPDATERS", &format!("{upd}, {caller}")),
+            ("MW_GATEWAY_UPDATE_TIMEOUT_MS", "30000"),
+        ]))
+        .unwrap();
+        assert_eq!(c.updaters.iter().collect::<Vec<_>>(), [upd, caller]);
+        assert_eq!(c.update_timeout, Duration::from_secs(30));
+        assert_eq!(c.admitted_callers(), [caller, upd]);
+        let b = c.bridge_at(1_000);
+        assert!(b.updates().updaters().contains(upd));
+        assert_eq!(b.updates().control_counter(), Some(ControlCounter(1_000)));
+        assert_eq!(c.bridge().updates().control_counter(), None, "fail closed");
+        assert_eq!(c.state_dir, std::path::Path::new("/var/lib/mw-gateway"));
+        let s = GatewayConfig::from_env(&env(&[("MW_GATEWAY_STATE", "/srv/gw")])).unwrap();
+        assert_eq!(s.state_dir, std::path::Path::new("/srv/gw"));
+        assert!(GatewayConfig::from_env(&env(&[("MW_GATEWAY_STATE", "rel/dir")])).is_err());
+        assert_eq!(c.shell_options().update_timeout, Duration::from_secs(30));
+        for (var, value) in [
+            ("MW_GATEWAY_UPDATERS", "updater"),
+            ("MW_GATEWAY_UPDATE_TIMEOUT_MS", "0"),
+            ("MW_GATEWAY_UPDATE_TIMEOUT_MS", "120001"),
+        ] {
+            let e = GatewayConfig::from_env(&env(&[(var, value)])).unwrap_err();
+            assert_eq!(e.var, var);
+        }
+        let nine = (0..9)
+            .map(|i| format!("spiffe://td/u{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(GatewayConfig::from_env(&env(&[("MW_GATEWAY_UPDATERS", &nine)])).is_err());
     }
 
     #[test]

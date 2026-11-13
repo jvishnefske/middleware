@@ -1340,8 +1340,10 @@ Zenoh session to zenohd. `mw-gateway` (crate `gateway/`) bridges one
 serial-attached middleware device (the ESP base firmware) to Zenoh: the
 device's `app/**` publications, its `disc/<kind>` beacons (re-announced
 as `ZenohDiscovery` services bound to the device's MAC, under the
-firmware's E21 rules) and allowlisted `sys/*` requests through the served
-kind `gw/sys`. Both are built on `mw-service`; both keep their decisions
+firmware's E21 rules), allowlisted `sys/*` requests through the served
+kind `gw/sys`, and signed updates (payloads, RP2350 firmware) from the
+updaters it allowlists, under the device's own over-the-air rules
+(RG20–RG27). Both are built on `mw-service`; both keep their decisions
 in pure cores (`robot::telemetry`, `gateway::bridge`) behind thin shells.
 The gateway's key mapping: without `MW_GATEWAY_NAMESPACE` device and
 cluster keys are identical (the ESP32-CAM's `app/cam/jpeg` stays
@@ -1425,10 +1427,15 @@ a serial port, and network tests use 127.0.0.1 only.
   `gateway/tests/gateway.rs`:
   `rg11_cluster_samples_reach_the_device_on_declared_filters_only`
   *(mw-gateway)*.
-- [x] RG12 `gw/sys` takes `[key_len][key][body]`; only exact allowlisted
-  `sys/...` keys pass (default `sys/info`, forwarded to the device, and
-  `sys/log`, answered from the log tail); everything else, the loader and
-  trust keys included, is `Denied` and counted —
+- [x] RG12 `gw/sys` takes `[key_len][key][body]`. Update keys
+  (`sys/loader/*`, `sys/payload/start|stop|status`, `sys/trust/info`,
+  `sys/fw/*`) are decided by the update gate (RG20) and never by the
+  plain allowlist; `sys/trust/claim` is always `Denied`. Of every other
+  key only exact allowlisted `sys/...` keys pass (default `sys/info`,
+  forwarded to the device, and `sys/log`, answered from the log tail),
+  and listing an update or trust key in `MW_GATEWAY_SYS_ALLOW` does not
+  open it; the rest is `Denied` and counted. Without updaters every
+  update request is `Denied` too —
   `bridge::tests::rg12_sys_allowlist`, `rg12_sys_request_body_round_trips`
   *(mw-gateway)*.
 - [x] RG13 Bounds: the log tail keeps the newest 2 KiB; at most 4 device
@@ -1469,17 +1476,174 @@ a serial port, and network tests use 127.0.0.1 only.
   `gateway/tests/gateway.rs`: `rg17_camera_chunks_cross_the_gateway_intact`
   *(mw-gateway)*.
 - [x] RG18 Through the served kind `gw/sys` (the `mw-service`
-  `ServiceHandler` the runner calls): `sys/info` reaches the device and
-  returns its `DeviceInfo`; `sys/loader/begin`, `chunk`, `commit`,
-  `sys/trust/claim` and `sys/payload/start` are `Denied` and never reach
-  the device; `sys/log` returns the device's log lines —
+  `ServiceHandler` the runner calls) of a gateway with no updaters (the
+  default): `sys/info` reaches the device and returns its `DeviceInfo`;
+  `sys/loader/begin`, `chunk`, `commit`, `sys/trust/claim` and
+  `sys/payload/start` are `Denied` and never reach the device; `sys/log`
+  returns the device's log lines. With updaters configured, RG25 and
+  RG26 cover what reaches the device and for whom —
   `gateway/tests/gateway.rs`:
   `rg18_sys_info_is_forwarded_and_the_loader_is_refused` *(mw-gateway)*.
 - [x] RG19 Both crates are host only: no embedded feature set depends on
   them, `mw-robot` enables no embedded feature of `middleware`, and
-  `mw-gateway` enables only `serial` (the link codec) beside `zenoh` —
+  `mw-gateway` enables only `serial` (the link codec) beside its host
+  features (`zenoh`; `grpc` and `istio` for `serve_sys`, RG22; never
+  `trust`: the update gate verifies control signatures with
+  `ed25519-dalek` itself) —
   `scripts/check-features.sh` (block "RG19", and both crates in
   `CLOUD_CRATES` for every F1 set).
+
+**Updates through the gateway (RG20–RG27).** Over its serial port the
+device grants physical-access authority (a serial `begin` stops the
+payload, `start`/`stop` are unsigned, an unclaimed device accepts any
+commit), and every `gw/sys` request reaches it that way. So the gateway's
+pure update gate (`gateway::update`) applies the device's over-the-air
+policy (`esp_base::ota::admit`, O-section) to mesh callers, with the
+caller's SPIFFE ID (`RequestMeta::principal`, from the sidecar's
+`x-forwarded-client-cert`) in place of the radio peer's MAC, and only for
+principals in `MW_GATEWAY_UPDATERS` (empty by default: updates
+disabled). The device still verifies every signed commit; the gateway
+only refuses more. Unsigned `start`/`stop` are refused for updaters as
+well: the gateway requires and verifies the signed control request the
+device requires over the air, then forwards the serial form (empty
+body).
+
+| `gw/sys` key | not an updater | updater, device not known claimed | updater, claimed device |
+|--------------|----------------|-----------------------------------|-------------------------|
+| `sys/trust/info`, `sys/fw/info`, `sys/payload/status` | `Denied` | forwarded (read only) | forwarded (read only) |
+| `sys/loader/begin`, `sys/fw/begin` | `Denied` | `Denied` | starts a transfer owned by the caller; another caller's live transfer: `InvalidRequest`, that transfer untouched |
+| `sys/loader/chunk`, `sys/fw/chunk` | `Denied` | `Denied` | the owner of a transfer of that kind only, else `InvalidRequest` |
+| `sys/loader/commit`, `sys/fw/commit` | `Denied` | `Denied` | owner first (else `InvalidRequest`, untouched); then signed only (`[version][signature]`, or the 64-byte firmware signature): unsigned is `Denied` and ends the owner's transfer; forwarded, the device checks the signature; the transfer ends with the answer |
+| `sys/fw/reboot`, `confirm`, `abort` | `Denied` | `Denied` | forwarded unless another caller's transfer is live (`InvalidRequest`) |
+| `sys/payload/start`, `stop` | `Denied` | `Denied` | a signed control request only, verified by the gateway (pinned key from `sys/trust/info`, target = the first six bytes of the device's node id, the op, counter strictly above the last accepted, persisted before forwarding, RG27); forwarded with an empty body; else `Denied`; no known floor: `Unavailable` |
+| `sys/trust/claim`, unknown `sys/fw/*`, `sys/trust/*` | `Denied` | `Denied` | `Denied` |
+
+"Claimed" is the device's last `sys/trust/info` answer: the gateway asks
+after binding and on every recheck, and forwarded answers update it; a
+different device on the port forgets it and the transfer. A transfer
+left idle for 60 s is abandoned (the next `begin` takes over). Every
+mutating request needs an `x-request-id`; a resend with the same id from
+the same principal is answered from a bounded replay cache (8 entries,
+120 s): `Unavailable` while the first copy is at the device, its answer
+afterwards, `InvalidRequest` if the id names another request, and the
+device's answer is kept even when it arrives after the caller's
+deadline. A device body that would not fit one serial frame is refused
+before it is sent. The gateway waits `MW_GATEWAY_UPDATE_TIMEOUT_MS`
+(default 20 s) for an update answer; the caller waits at most that and
+its own deadline. The client is `mw-update` (`gateway::remote`), which
+runs `mwctl`'s own `upload` and `fw_update` over a `gw/sys` endpoint.
+
+- [x] RG20 The update gate decides every row of the table above: only
+  updaters pass, a disabled gate denies all; read-only keys need no claim;
+  mutations need a claimed device; one transfer at a time, owned by its
+  caller, others' begin/chunk/commit/reboot/confirm/abort refused without
+  disturbing it, an idle transfer taken over after 60 s; commits signed
+  only (an unsigned one ends the owner's transfer); start/stop only with a
+  verified signed control request (wrong op, device, key or an old
+  counter refused, the counter used up, forwarded with an empty body); a
+  new device forgets trust and transfer; `sys/trust/claim` never passes —
+  `update::tests::rg20_keys_classify_and_claim_never_passes`,
+  `rg20_only_updaters_pass_and_disabled_denies_all`,
+  `rg20_read_only_requests_need_no_claim`,
+  `rg20_one_transfer_owned_by_its_caller`,
+  `rg20_an_idle_transfer_is_taken_over`, `rg20_commits_must_be_signed`,
+  `rg20_start_and_stop_need_a_verified_signed_control`,
+  `rg20_another_device_forgets_trust_and_transfer` *(mw-gateway)*.
+- [x] RG21 Resends act once: mutating requests need an `x-request-id`; a
+  repeat while in flight is `Unavailable`, an answered one is replayed
+  (refusals included), the same id for another request is
+  `InvalidRequest`, another principal's identical id is a different
+  request, an unanswered request is forgotten so its resend goes out
+  again; the cache is bounded (oldest answered entry dropped, in-flight
+  entries never displaced, large answers not kept) and ages out; a body
+  over one serial frame is refused and a full 512-byte chunk fits; the
+  handler waits the update timeout for update keys, cut to the caller's
+  deadline; the client resends with the same id on `DeadlineExceeded`,
+  `Unavailable` or a transport failure, at most `--attempts` times, and
+  stops at any other answer —
+  `update::tests::rg21_resends_are_answered_once_and_oversized_bodies_refused`,
+  `update::replay::tests::rg21_a_request_runs_once_and_repeats_replay_its_answer`,
+  `rg21_the_cache_is_bounded_and_expires`,
+  `shell::tests::rg21_the_wait_follows_the_key_and_the_callers_deadline`,
+  `remote::tests::rg21_resends_carry_the_same_request_id`,
+  `rg21_final_answers_and_exhausted_attempts` *(mw-gateway)*.
+- [x] RG22 The gateway's `serve_sys` answers `gw/sys` calls taken with
+  `middleware::grpc::GrpcResponder::next_call` (MS20): each owned
+  `PendingCall` gives the key, body and `RequestMeta` with the deadline
+  measured when read, and is answered with its result or the error's gRPC
+  status; any key but `gw/sys` is `NotFound` —
+  `grpc::responder::tests::ms6_next_call_hands_over_an_owned_call_answered_later`;
+  `serve_sys` through RG25 and RG26.
+- [x] RG23 `GatewayConfig::from_env` parses `MW_GATEWAY_UPDATERS` (up to
+  8 SPIFFE IDs, default none), `MW_GATEWAY_UPDATE_TIMEOUT_MS`
+  (1..=120000, default 20000) and `MW_GATEWAY_STATE` (an absolute
+  directory, default `/var/lib/mw-gateway`); updaters are admitted to
+  `gw/sys` beside `MW_GATEWAY_ALLOW_CALLERS`; `bridge_with_floor` sets
+  the control counter floor and `bridge()` has none (fail closed);
+  malformed values name the variable —
+  `config::tests::rg23_updaters_and_update_timeout_parse`,
+  `rg15_defaults` *(mw-gateway)*.
+- [x] RG24 `mw-update`'s command line (`info`, `upload --key [--version]
+  [--start [--counter]]`, `start|stop --key [--counter]`, `fw info|update
+  --key [--version] [--no-reboot]|reboot|confirm|abort`, `--endpoint` or
+  `MW_STATIC_ENDPOINTS`'s `gw/sys` entry, `--timeout`, `--attempts`)
+  parses purely, requires `--key` for every signed request and refuses
+  misplaced options; jobs load their files through an injected reader
+  and default the version and counter to the clock —
+  `remote::cli::tests::rg24_command_line_parses_each_command`,
+  `rg24_command_line_errors`, `remote::tests::rg24_jobs_load_their_inputs`
+  *(mw-gateway)*.
+- [x] RG25 End to end (in-memory cable, a claimed fake device running the
+  real loader and trust check, `gw/sys` over gRPC on 127.0.0.1 behind
+  stand-in sidecars setting `x-forwarded-client-cert`, `mw-update`'s
+  `MeshSysCall` through a static endpoint): a caller not in
+  `MW_GATEWAY_UPDATERS` is `Denied` and no loader or payload request
+  reaches the device; the updater's signed upload installs (begin, three
+  chunks, the 68-byte signed commit) and its signed start reaches the
+  device with an empty body; an unsigned (wrongly signed) start is
+  `Denied`; a replayed version is refused by the device; a resend with
+  the same request id runs once, a reused id is refused, and a device
+  answer arriving after the caller's deadline is replayed to the resend
+  instead of the request running again — `gateway/tests/updates.rs`:
+  `rg25_an_updater_uploads_a_signed_payload_and_others_are_denied`,
+  `rg25_a_resend_with_the_same_request_id_runs_once`,
+  `rg25_a_late_answer_after_the_callers_deadline_is_replayed_not_rerun`
+  *(mw-gateway)*.
+- [x] RG26 End to end as RG25 with the fake device a Pico 2 running the
+  real `FwService` on the in-memory RP2350 bootrom model: a non-updater's
+  `fw update` is `Denied`; the updater's goes through `sys/fw/info`,
+  `begin`, every 512-byte chunk, the signed `commit`, `reboot` and
+  `confirm`, and `sys/fw/info` then reports Confirmed —
+  `gateway/tests/updates.rs`:
+  `rg26_an_rp2350_firmware_update_reaches_the_device_and_is_confirmed`
+  *(mw-gateway)*. Open: the `mw-gateway` binary serves `gw/sys` only once
+  the runner does (MS6); after a real Pico 2 reboots, its USB device
+  re-enumerates and the gateway exits for its supervisor to restart (not
+  run on hardware).
+- [x] RG27 The signed start/stop counter floor survives restarts on a
+  host without a real-time clock and fails closed. Every accepted
+  counter is written to `<MW_GATEWAY_STATE>/control-counter` (temporary
+  file, fsync, rename, directory fsync; never lowered) before the request
+  is forwarded; a failed write (or no store at all) refuses the request
+  `Unavailable`, rolls the counter back, counts it and forwards nothing.
+  At start the floor is the larger of the persisted counter and the
+  clock, the clock counting only from 2026-01-01T00:00:00Z on; with no
+  state and an unsynced or unreadable clock, or an unreadable state
+  file, there is no floor and every signed start/stop is `Unavailable`,
+  never a floor of 0. Uploads stay available without a floor: the device
+  checks and persists a signed commit's version itself. One floor serves
+  the port, not one per device: a counter accepted for one device only
+  raises the bar for the next, and the signed MAC keeps a captured
+  request from working on another device —
+  `state::tests::rg27_the_floor_is_the_persisted_counter_or_a_sane_clock`,
+  `rg27_a_saved_counter_survives_a_restart_and_beats_a_backwards_clock`,
+  `rg27_a_write_failure_is_an_error`,
+  `update::tests::rg27_without_a_floor_start_and_stop_fail_closed_and_uploads_stay`,
+  `rg27_an_unpersisted_counter_is_rolled_back_and_nothing_forwarded`;
+  `gateway/tests/updates.rs`:
+  `rg27_a_start_whose_counter_cannot_be_persisted_is_refused_not_forwarded`,
+  `rg27_an_accepted_start_is_persisted_before_it_reaches_the_device`
+  *(mw-gateway)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
