@@ -37,6 +37,9 @@
 //!   environment (`MW_PORT`, `POD_NAMESPACE`, `MW_SERVICE_MAP`, ...).
 //! * [`lifecycle`] — [`Lifecycle`], the pure start/serve/drain/stop state
 //!   machine the runner drives.
+//! * [`endpoints`] — [`StaticEndpoints`] (`MW_STATIC_ENDPOINTS`): fixed
+//!   dial addresses and `:authority` for called kinds, for services running
+//!   off cluster (a robot behind its local Envoy).
 //! * [`ctx`] — [`ServiceHandler`] (async, with a blanket implementation for
 //!   every plain `Handler`) and its per-request [`Ctx`]: caller metadata,
 //!   this span's trace context, downstream clients that continue the trace
@@ -66,6 +69,7 @@
 pub mod builder;
 pub mod config;
 pub mod ctx;
+pub mod endpoints;
 pub mod error;
 pub mod lifecycle;
 pub mod manifest;
@@ -78,6 +82,7 @@ pub use ctx::{
     BoxedHandler, Ctx, Downstream, DownstreamClient, Links, PublishError, ServiceHandler,
     ServicePublisher, server_trace,
 };
+pub use endpoints::{StaticEndpoint, StaticEndpoints};
 pub use error::ServiceError;
 pub use lifecycle::{Action, Event, Lifecycle, Monotonic, Outcome};
 pub use manifest::ManifestOptions;

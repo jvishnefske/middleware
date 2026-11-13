@@ -1,0 +1,26 @@
+[package]
+name = "mw-gateway"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.88"
+description = "MCU gateway: bridges a serial-attached middleware device's app/** pub/sub, disc/* beacons and allowlisted sys/* requests to the cluster's Zenoh fabric"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "mw-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Host backends only (Zenoh for the fabric, the serial link codec); never
+# an embedded feature set (scripts/check-features.sh, V19).
+middleware = { path = "..", features = ["zenoh", "serial"] }
+mw-service = { path = "../service" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# The trait SerialLink reads and writes through.
+embedded-io-async = "0.7"
+# Opens exactly the configured port; no libudev, never enumerates.
+serialport = { version = "4.10", default-features = false }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }

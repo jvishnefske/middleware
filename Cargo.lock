@@ -1720,6 +1720,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mw-gateway"
+version = "0.6.0"
+dependencies = [
+ "embedded-io-async",
+ "middleware",
+ "mw-service",
+ "serialport",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mw-jpeg"
 version = "0.1.0"
 dependencies = [
@@ -1732,6 +1744,17 @@ version = "0.1.0"
 dependencies = [
  "embedded-hal",
  "middleware",
+]
+
+[[package]]
+name = "mw-robot"
+version = "0.6.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "middleware",
+ "mw-service",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

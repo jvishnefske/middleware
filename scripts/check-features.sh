@@ -11,12 +11,16 @@
 #   * the mesh service runner `mw-service` (design.md M5) enables exactly
 #     the host features grpc, istio, dns-sd and zenoh of middleware, none
 #     embedded, and its runner dependencies (tracing, OpenTelemetry, YAML)
-#     appear in no embedded set.
+#     appear in no embedded set;
+#   * the MCU gateway `mw-gateway` and the robot app `mw-robot` (design.md
+#     V19) are host only: no embedded set depends on them, the robot enables
+#     no embedded feature, and the gateway enables only the serial link
+#     codec (`serial`, the wire it speaks) beside its host features.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
-CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
+CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory'
 
@@ -89,6 +93,24 @@ fi
 if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
         | grep -Eq '^mw-service '; then
     fail "the embedded core depends on mw-service"
+fi
+
+echo "== V19: mw-gateway and mw-robot are host only"
+cargo build --quiet -p mw-gateway -p mw-robot
+gw_features="$(features_of_self -p mw-gateway | sort -u)"
+for want in zenoh serial; do
+    grep -qx "$want" <<<"$gw_features" || fail "mw-gateway does not enable middleware/$want"
+done
+if grep -Eqx 'ble|espnow|trust|cam-fixtures' <<<"$gw_features"; then
+    fail "mw-gateway enables an embedded feature other than serial"
+fi
+robot_features="$(features_of_self -p mw-robot | sort -u)"
+if grep -Eqx "$EMBEDDED_FEATURES" <<<"$robot_features"; then
+    fail "mw-robot enables an embedded feature ($EMBEDDED_FEATURES)"
+fi
+if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
+        | grep -Eq '^mw-(gateway|robot) '; then
+    fail "the embedded core depends on mw-gateway or mw-robot"
 fi
 
 echo "OK: feature isolation holds"
