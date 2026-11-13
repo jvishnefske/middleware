@@ -125,8 +125,8 @@ describe("sys/board", () => {
     const b = proto.decodeBoardInfo(body)!;
     expect(b).toMatchObject({
       abiVersion: proto.abi.version,
-      maxImage: 81920,
-      maxMemory: 131072,
+      maxImage: 32768,
+      maxMemory: 65536,
       inputOnly: [],
       strapping: [0, 3, 45, 46],
       adc: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
