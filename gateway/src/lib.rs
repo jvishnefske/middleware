@@ -22,9 +22,12 @@
 //!
 //! A process that drives the bridge itself (over any byte stream wrapped
 //! in an [`io::ChannelIo`], an in-memory [`io::pair`] in tests) calls
-//! [`start`] or [`start_with`] (the configured timeouts,
-//! [`GatewayConfig::shell_options`]) with [`GatewayConfig::bridge_at`] (the
-//! current Unix time in milliseconds, the update gate's counter floor),
+//! [`start_with_store`] (the configured timeouts,
+//! [`GatewayConfig::shell_options`], and a [`state::ControlStore`] for
+//! accepted start/stop counters) with [`GatewayConfig::bridge_with_floor`]
+//! and [`state::floor_at_start`] (the persisted counter and the clock;
+//! [`start`] and [`start_with`] have no store, so signed start/stop are
+//! refused there),
 //! answers `gw/sys` with the returned [`SysForward`] (as a
 //! `mw-service` handler, through [`service`], or over gRPC with
 //! [`serve_sys`]), and ends with [`Gateway::stop`].
@@ -46,6 +49,7 @@ pub mod config;
 pub mod io;
 pub mod remote;
 pub mod shell;
+pub mod state;
 pub mod update;
 
 use mw_service::{Service, SpecError};
@@ -53,6 +57,7 @@ use mw_service::{Service, SpecError};
 pub use config::GatewayConfig;
 pub use shell::{
     Gateway, Report, SYS_KIND, ShellOptions, SysForward, serve_sys, start, start_with,
+    start_with_store,
 };
 
 /// The service name.

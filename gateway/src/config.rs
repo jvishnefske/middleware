@@ -13,6 +13,7 @@
 //! | `MW_GATEWAY_SYS_TIMEOUT_MS` | `2000` | decimal milliseconds a `gw/sys` request waits, 1..=60000 |
 //! | `MW_GATEWAY_ALLOW_CALLERS` | none | `,`-separated SPIFFE IDs admitted to `gw/sys` |
 //! | `MW_GATEWAY_UPDATERS` | none (updates disabled) | `,`-separated SPIFFE IDs, at most 8, that may update the device through `gw/sys` ([`crate::update`]); they are admitted to `gw/sys` too |
+//! | `MW_GATEWAY_STATE` | `/var/lib/mw-gateway` | absolute directory of the gateway's durable state: the highest accepted signed start/stop counter ([`crate::state`]) |
 //! | `MW_GATEWAY_UPDATE_TIMEOUT_MS` | `20000` | decimal milliseconds the gateway waits for the device to answer an update request (a `begin` erases flash, a firmware `commit` hashes the image), 1..=120000; the caller waits at most this and its own deadline |
 //!
 //! Unset or empty is the default; a malformed value is a
@@ -45,6 +46,8 @@ pub const ENV_SYS_TIMEOUT_MS: &str = "MW_GATEWAY_SYS_TIMEOUT_MS";
 pub const ENV_ALLOW_CALLERS: &str = "MW_GATEWAY_ALLOW_CALLERS";
 /// `MW_GATEWAY_UPDATERS`.
 pub const ENV_UPDATERS: &str = "MW_GATEWAY_UPDATERS";
+/// `MW_GATEWAY_STATE`.
+pub const ENV_STATE: &str = "MW_GATEWAY_STATE";
 /// `MW_GATEWAY_UPDATE_TIMEOUT_MS`.
 pub const ENV_UPDATE_TIMEOUT_MS: &str = "MW_GATEWAY_UPDATE_TIMEOUT_MS";
 
@@ -96,6 +99,8 @@ pub struct GatewayConfig {
     /// How long the gateway waits for the device to answer an update
     /// request.
     pub update_timeout: Duration,
+    /// The durable state directory.
+    pub state_dir: std::path::PathBuf,
 }
 
 impl Default for GatewayConfig {
@@ -111,6 +116,7 @@ impl Default for GatewayConfig {
             allow_callers: Vec::new(),
             updaters: Updaters::none(),
             update_timeout: crate::shell::UPDATE_TIMEOUT,
+            state_dir: crate::state::DEFAULT_STATE_DIR.into(),
         }
     }
 }
@@ -234,6 +240,16 @@ impl GatewayConfig {
                 .ok_or_else(|| err(ENV_UPDATE_TIMEOUT_MS, &v, "not 1..=120000 milliseconds"))?,
             None => d.update_timeout,
         };
+        let state_dir = match get(ENV_STATE) {
+            Some(v) => {
+                let p = std::path::PathBuf::from(v.trim());
+                if !p.is_absolute() {
+                    return Err(err(ENV_STATE, &v, "not an absolute path"));
+                }
+                p
+            }
+            None => d.state_dir,
+        };
         Ok(GatewayConfig {
             serial,
             baud,
@@ -245,6 +261,7 @@ impl GatewayConfig {
             allow_callers,
             updaters,
             update_timeout,
+            state_dir,
         })
     }
 
@@ -253,22 +270,28 @@ impl GatewayConfig {
         Self::from_env(&|k| std::env::var(k).ok())
     }
 
-    /// The bridge these settings describe, with the update gate's control
-    /// counter floor at 0. A running gateway uses [`GatewayConfig::bridge_at`]
-    /// with its start time instead, so start/stop requests signed before it
-    /// started are refused.
+    /// The bridge these settings describe, with no control counter floor:
+    /// signed start/stop are refused (fail closed). A running gateway uses
+    /// [`GatewayConfig::bridge_with_floor`] with
+    /// [`crate::state::floor_at_start`].
     pub fn bridge(&self) -> Bridge {
-        self.bridge_at(0)
+        self.bridge_with_floor(None)
     }
 
     /// The bridge these settings describe, refusing signed start/stop
-    /// counters at or below `control_floor` (the current Unix time in
-    /// milliseconds when the gateway starts; [`crate::update`]). Pure.
+    /// counters at or below `control_floor` (a known floor). Pure.
     pub fn bridge_at(&self, control_floor: u64) -> Bridge {
+        self.bridge_with_floor(Some(ControlCounter(control_floor)))
+    }
+
+    /// The bridge these settings describe with the control counter floor
+    /// `floor` (`None`: start/stop refused until known; [`crate::update`]).
+    /// Pure.
+    pub fn bridge_with_floor(&self, floor: Option<ControlCounter>) -> Bridge {
         let gate = if self.updaters.is_empty() {
             UpdateGate::disabled()
         } else {
-            UpdateGate::new(self.updaters.clone(), ControlCounter(control_floor))
+            UpdateGate::new(self.updaters.clone(), floor)
         };
         Bridge::new(
             self.map.clone(),
@@ -373,7 +396,12 @@ mod tests {
         assert_eq!(c.admitted_callers(), [caller, upd]);
         let b = c.bridge_at(1_000);
         assert!(b.updates().updaters().contains(upd));
-        assert_eq!(b.updates().control_counter(), ControlCounter(1_000));
+        assert_eq!(b.updates().control_counter(), Some(ControlCounter(1_000)));
+        assert_eq!(c.bridge().updates().control_counter(), None, "fail closed");
+        assert_eq!(c.state_dir, std::path::Path::new("/var/lib/mw-gateway"));
+        let s = GatewayConfig::from_env(&env(&[("MW_GATEWAY_STATE", "/srv/gw")])).unwrap();
+        assert_eq!(s.state_dir, std::path::Path::new("/srv/gw"));
+        assert!(GatewayConfig::from_env(&env(&[("MW_GATEWAY_STATE", "rel/dir")])).is_err());
         assert_eq!(c.shell_options().update_timeout, Duration::from_secs(30));
         for (var, value) in [
             ("MW_GATEWAY_UPDATERS", "updater"),

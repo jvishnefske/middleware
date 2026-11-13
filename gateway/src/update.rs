@@ -40,11 +40,32 @@
 //! updater identity alone cannot stop or restart a payload, and a captured
 //! request cannot be replayed. The control target is the device's MAC:
 //! the first six bytes of the node id it reports in `sys/info` (the ESP
-//! base firmware's node id is its station MAC). The counter floor starts
-//! at the gateway's start time in Unix milliseconds ([`UpdateGate::new`]),
-//! so a request signed before the gateway started is refused even though
-//! the floor is not persisted; `mw-update` signs with the current Unix time
-//! in milliseconds, as `mwctl` does.
+//! base firmware's node id is its station MAC). `mw-update` signs with the
+//! current Unix time in milliseconds, as `mwctl` does.
+//!
+//! **The counter floor is persisted and fails closed.** A captured signed
+//! start/stop must never be accepted twice, also across gateway restarts
+//! on a host without a real-time clock (a Pi Zero 2 W or Pi 3 boots near
+//! 1970, or at a stale `fake-hwclock` time, until NTP syncs). So:
+//!
+//! * every accepted counter is written durably by the shell **before** the
+//!   request is forwarded ([`Ticket::persist`], [`crate::state::ControlStore`]);
+//!   if the write fails the request is refused `Unavailable` and the
+//!   counter rolled back ([`UpdateGate::unpersisted`]), never forwarded;
+//! * at start the floor is the larger of the persisted counter and the
+//!   clock, the clock counting only when it is past a sane lower bound
+//!   ([`crate::state::floor_at_start`]);
+//! * with neither (no state and an unsynced or unreadable clock, or an
+//!   unreadable state file) there is no floor and every signed start/stop
+//!   is `Unavailable` ([`Refusal::NoControlFloor`]) until a floor exists;
+//!   nothing ever falls back to 0.
+//!
+//! One floor serves whichever device is on the port: a counter accepted
+//! for one device only raises the bar for the next, and a captured request
+//! cannot be used on another device anyway (its MAC is signed). Uploads do
+//! not depend on the floor: a signed commit's version is checked (and
+//! persisted) by the device itself, so `begin`/`chunk`/`commit` stay
+//! available without one.
 //!
 //! **"Claimed" is what the device last said.** The shell asks
 //! `sys/trust/info` after binding and on every recheck, and every
@@ -293,6 +314,9 @@ pub enum Refusal {
     Unclaimed,
     /// The device's node id is not known yet (control target).
     Unbound,
+    /// No control counter floor is known (no persisted state and an
+    /// unsynced clock), or the accepted counter could not be persisted.
+    NoControlFloor,
     /// A mutating request without an `x-request-id`.
     NoRequestId,
     /// The request id names another request of this caller.
@@ -330,7 +354,9 @@ impl Refusal {
             | Refusal::Busy
             | Refusal::NotOwner
             | Refusal::TooLarge => HandlerError::InvalidRequest,
-            Refusal::Unbound | Refusal::InFlight => HandlerError::Unavailable,
+            Refusal::Unbound | Refusal::InFlight | Refusal::NoControlFloor => {
+                HandlerError::Unavailable
+            }
         }
     }
 
@@ -341,6 +367,9 @@ impl Refusal {
             Refusal::Never => "never through the gateway",
             Refusal::Unclaimed => "device not claimed; updates need a pinned key",
             Refusal::Unbound => "device node id not known yet",
+            Refusal::NoControlFloor => {
+                "no durable control counter floor (no gateway state and the clock is not set)"
+            }
             Refusal::NoRequestId => "update requests need an x-request-id",
             Refusal::ReusedId => "request id reused for another request",
             Refusal::InFlight => "the first copy of this request is still at the device",
@@ -362,12 +391,21 @@ pub struct Ticket {
     op: UpdateOp,
     principal: String,
     request_id: Option<String>,
+    /// An accepted control counter and the floor before it.
+    control: Option<(ControlCounter, ControlCounter)>,
 }
 
 impl Ticket {
     /// The request.
     pub fn op(&self) -> UpdateOp {
         self.op
+    }
+
+    /// The control counter the shell must write durably before it
+    /// forwards this request (an accepted start or stop); on failure it
+    /// reports [`UpdateGate::unpersisted`] instead of forwarding.
+    pub fn persist(&self) -> Option<ControlCounter> {
+        self.control.map(|(c, _)| c)
     }
 }
 
@@ -399,6 +437,9 @@ pub struct UpdateCounters {
     pub refused: u32,
     /// Forwarded requests the device never answered.
     pub abandoned: u32,
+    /// Accepted starts/stops refused because their counter could not be
+    /// persisted.
+    pub unpersisted: u32,
 }
 
 fn inc(n: u32) -> u32 {
@@ -411,7 +452,7 @@ pub struct UpdateGate {
     updaters: Updaters,
     trust: DeviceTrust,
     transfer: Option<Transfer>,
-    control: ControlCounter,
+    control: Option<ControlCounter>,
     replay: Replay,
     counters: UpdateCounters,
 }
@@ -439,9 +480,9 @@ impl UpdateGate {
     }
 
     /// Updates for `updaters`, with start/stop counters required above
-    /// `control_floor` (the gateway's start time in Unix milliseconds; see
-    /// the module docs).
-    pub fn new(updaters: Updaters, control_floor: ControlCounter) -> Self {
+    /// `control_floor`; `None` refuses every start/stop until a floor is
+    /// known (see the module docs and [`crate::state::floor_at_start`]).
+    pub fn new(updaters: Updaters, control_floor: Option<ControlCounter>) -> Self {
         UpdateGate {
             updaters,
             control: control_floor,
@@ -464,8 +505,9 @@ impl UpdateGate {
         self.transfer.as_ref()
     }
 
-    /// The last accepted control counter (or the floor).
-    pub fn control_counter(&self) -> ControlCounter {
+    /// The last accepted control counter (or the floor); `None` when no
+    /// floor is known.
+    pub fn control_counter(&self) -> Option<ControlCounter> {
         self.control
     }
 
@@ -540,10 +582,11 @@ impl UpdateGate {
         if FRAME_OVERHEAD + key.as_bytes().len() + body.len() > MAX_RAW_FRAME {
             return self.refuse(Refusal::TooLarge);
         }
-        let ticket = |request_id: Option<&str>| Ticket {
+        let ticket = |request_id: Option<&str>, control| Ticket {
             op,
             principal: principal.to_owned(),
             request_id: request_id.map(str::to_owned),
+            control,
         };
         if op.read_only() {
             let g = self.count(|c| c.forwarded = inc(c.forwarded));
@@ -551,7 +594,7 @@ impl UpdateGate {
                 g,
                 Ok(Admission::Forward {
                     body: body.to_vec(),
-                    ticket: ticket(None),
+                    ticket: ticket(None, None),
                 }),
             );
         }
@@ -580,6 +623,7 @@ impl UpdateGate {
         let others = held.is_some_and(|(mine, _)| !mine);
         let mut gate = self;
         let mut out = body.to_vec();
+        let mut control = None;
         if op.is_begin() {
             if others {
                 return gate.refuse(Refusal::Busy);
@@ -611,13 +655,17 @@ impl UpdateGate {
             let Ok(Some(auth)) = SignedControl::parse_body(body) else {
                 return gate.refuse(Refusal::UnsignedControl);
             };
-            if auth.counter <= gate.control
-                || !verify_control(&pinned, ctl, &control_target(node), &auth)
+            let Some(floor) = gate.control else {
+                return gate.refuse(Refusal::NoControlFloor);
+            };
+            if auth.counter <= floor || !verify_control(&pinned, ctl, &control_target(node), &auth)
             {
                 return gate.refuse(Refusal::ControlRefused);
             }
-            // Adopted before acting, as the device persists it first.
-            gate.control = auth.counter;
+            // Adopted now; the shell persists it before acting, as the
+            // device does.
+            gate.control = Some(auth.counter);
+            control = Some((auth.counter, floor));
             out = Vec::new();
         } else if others {
             // reboot, confirm, abort.
@@ -636,7 +684,7 @@ impl UpdateGate {
             gate,
             Ok(Admission::Forward {
                 body: out,
-                ticket: ticket(Some(request_id)),
+                ticket: ticket(Some(request_id), control),
             }),
         )
     }
@@ -671,6 +719,23 @@ impl UpdateGate {
         }
         if let Some(id) = &ticket.request_id {
             gate.replay = gate.replay.answer(&ticket.principal, id, result, now_ms);
+        }
+        gate
+    }
+
+    /// The shell could not persist the ticket's control counter, so the
+    /// request was not forwarded: the counter is rolled back (if nothing
+    /// newer was accepted since), the request forgotten so a resend is
+    /// decided afresh, and the refusal counted.
+    pub fn unpersisted(self, ticket: &Ticket) -> Self {
+        let mut gate = self.count(|c| c.unpersisted = inc(c.unpersisted));
+        if let Some((counter, prev)) = ticket.control
+            && gate.control == Some(counter)
+        {
+            gate.control = Some(prev);
+        }
+        if let Some(id) = &ticket.request_id {
+            gate.replay = gate.replay.forget(&ticket.principal, id);
         }
         gate
     }
@@ -718,7 +783,10 @@ mod tests {
     }
 
     fn claimed() -> UpdateGate {
-        let g = UpdateGate::new(Updaters::new([UPD, UPD2]).unwrap(), ControlCounter(FLOOR));
+        let g = UpdateGate::new(
+            Updaters::new([UPD, UPD2]).unwrap(),
+            Some(ControlCounter(FLOOR)),
+        );
         let info = trust_info(TrustState::Claimed {
             key: pinned(),
             min_version: Version(0),
@@ -847,7 +915,7 @@ mod tests {
 
     #[test]
     fn rg20_read_only_requests_need_no_claim() {
-        let unclaimed = UpdateGate::new(Updaters::new([UPD]).unwrap(), ControlCounter(0));
+        let unclaimed = UpdateGate::new(Updaters::new([UPD]).unwrap(), Some(ControlCounter(0)));
         for op in [
             UpdateOp::TrustInfo,
             UpdateOp::PayloadStatus,
@@ -1074,7 +1142,12 @@ mod tests {
         let (body, t) = forwarded(&r).unwrap();
         assert!(body.is_empty(), "serial start takes an empty body");
         let g = g.complete(t, Ok(b""), 1_000);
-        assert_eq!(g.control_counter(), ControlCounter(FLOOR + 5));
+        assert_eq!(
+            t.persist(),
+            Some(ControlCounter(FLOOR + 5)),
+            "persisted before forwarding"
+        );
+        assert_eq!(g.control_counter(), Some(ControlCounter(FLOOR + 5)));
         let (g, r) = admit(g, as_(UPD, "c-4"), UpdateOp::Start, &start);
         assert_eq!(
             r,
@@ -1133,6 +1206,54 @@ mod tests {
         let g = g.complete(forwarded(&r).unwrap().1, Ok(b"\x01"), 1_000);
         let (_, r) = admit(g, as_(UPD, "z-2"), UpdateOp::FwChunk, &chunk);
         assert!(forwarded(&r).is_some());
+    }
+
+    #[test]
+    fn rg27_without_a_floor_start_and_stop_fail_closed_and_uploads_stay() {
+        let target = control_target(NODE);
+        let info = trust_info(TrustState::Claimed {
+            key: pinned(),
+            min_version: Version(0),
+        });
+        let g = UpdateGate::new(Updaters::new([UPD]).unwrap(), None).observe_trust(Ok(&info));
+        for (op, ctl) in [
+            (UpdateOp::Start, ControlOp::Start),
+            (UpdateOp::Stop, ControlOp::Stop),
+        ] {
+            let (g2, r) = admit(
+                g.clone(),
+                as_(UPD, "n-1"),
+                op,
+                &control(ctl, FLOOR + 5, target),
+            );
+            assert_eq!(r, Err(Refusal::NoControlFloor), "{op:?}");
+            assert_eq!(Refusal::NoControlFloor.error(), HandlerError::Unavailable);
+            assert_eq!(g2.counters().refused, 1);
+            assert_eq!(g2.control_counter(), None, "never falls back to 0");
+        }
+        // Uploads rely on the device's own version check.
+        let (_, r) = admit(g, as_(UPD, "n-2"), UpdateOp::LoaderBegin, b"b");
+        assert!(forwarded(&r).is_some());
+    }
+
+    #[test]
+    fn rg27_an_unpersisted_counter_is_rolled_back_and_nothing_forwarded() {
+        let target = control_target(NODE);
+        let start = control(ControlOp::Start, FLOOR + 5, target);
+        let (g, r) = admit(claimed(), as_(UPD, "p-1"), UpdateOp::Start, &start);
+        let t = forwarded(&r).unwrap().1.clone();
+        assert_eq!(t.persist(), Some(ControlCounter(FLOOR + 5)));
+        // The shell's write failed: back to the old floor, counted.
+        let g = g.unpersisted(&t);
+        assert_eq!(g.control_counter(), Some(ControlCounter(FLOOR)));
+        assert_eq!(g.counters().unpersisted, 1);
+        // The resend is decided afresh (and may succeed once the disk does).
+        let (g, r) = admit(g, as_(UPD, "p-1"), UpdateOp::Start, &start);
+        assert!(forwarded(&r).is_some());
+        assert_eq!(g.control_counter(), Some(ControlCounter(FLOOR + 5)));
+        // Reads and uploads carry nothing to persist.
+        let (_, r) = admit(g, as_(UPD, "p-2"), UpdateOp::LoaderBegin, b"b");
+        assert_eq!(forwarded(&r).unwrap().1.persist(), None);
     }
 
     #[test]

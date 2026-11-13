@@ -30,7 +30,8 @@ use mw_gateway::bridge::encode_sys_request;
 use mw_gateway::io::{ChannelIo, pair};
 use mw_gateway::remote::mesh::MeshSysCall;
 use mw_gateway::remote::{CallError, GwEndpoint, Job, RequestIds, SysCall, execute};
-use mw_gateway::{GatewayConfig, Report, serve_sys, start_with};
+use mw_gateway::state::{ControlStore, Persisted};
+use mw_gateway::{GatewayConfig, Report, serve_sys, start_with_store};
 use mw_service::StaticEndpoints;
 use mwctl::device::Device;
 use mwctl::fw::load_image;
@@ -309,7 +310,22 @@ async fn rig() -> Rig {
     rig_with(None).await
 }
 
+/// A fresh state directory for one rig.
+fn state_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("mw-gateway-it-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    d
+}
+
 async fn rig_with(slow: Option<(Key<'static>, Duration)>) -> Rig {
+    let name = format!(
+        "{:x}",
+        SESSION.fetch_add(1000, std::sync::atomic::Ordering::Relaxed)
+    );
+    rig_in(slow, ControlStore::in_dir(state_dir(&name))).await
+}
+
+async fn rig_in(slow: Option<(Key<'static>, Duration)>, store: ControlStore) -> Rig {
     let (cluster, session) = zenoh_pair().await;
     let (device_io, gateway_io) = pair();
     let mut seen = spawn_device(device_io, claimed_pico2(), slow);
@@ -317,11 +333,12 @@ async fn rig_with(slow: Option<(Key<'static>, Duration)>) -> Rig {
         (k == "MW_GATEWAY_UPDATERS").then(|| UPDATER.to_owned())
     })
     .expect("config");
-    let (gateway, sys) = start_with(
+    let (gateway, sys) = start_with_store(
         gateway_io,
         session,
         config.bridge_at(0),
         config.shell_options(),
+        store,
     )
     .await
     .expect("start");
@@ -609,4 +626,55 @@ async fn rg26_an_rp2350_firmware_update_reaches_the_device_and_is_confirmed() {
     let info = run_job(&rig.updater, Job::FwInfo).await.expect("fw info");
     assert!(info.contains(StateCode::Confirmed.name()), "{info}");
     let _ = rig.gateway.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rg27_a_start_whose_counter_cannot_be_persisted_is_refused_not_forwarded() {
+    // The state "directory" is a regular file: every write fails.
+    let dir = state_dir("unwritable");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let file = dir.join("not-a-dir");
+    std::fs::write(&file, b"x").expect("file");
+    let mut rig = rig_in(None, ControlStore::in_dir(&file)).await;
+    let image = b"\0asm-payload".to_vec();
+    // Uploads do not need the counter: the device checks the version.
+    run_job(&rig.updater, upload(&image, false))
+        .await
+        .expect("upload");
+    rig.drain();
+    let err = run_job(
+        &rig.updater,
+        Job::Control {
+            op: middleware::loader::trust::ControlOp::Start,
+            seed: seed(),
+            counter: middleware::loader::trust::ControlCounter(1_761_500_000_500),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status(), Some(HandlerError::Unavailable), "{err}");
+    let seen = rig.drain();
+    assert!(
+        seen.iter().all(|(k, _)| k != "sys/payload/start"),
+        "{seen:?}"
+    );
+    let report = rig.gateway.stop().await;
+    assert!(report.updates.unpersisted >= 1, "{report:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rg27_an_accepted_start_is_persisted_before_it_reaches_the_device() {
+    let dir = state_dir("persisted");
+    let mut rig = rig_in(None, ControlStore::in_dir(&dir)).await;
+    run_job(&rig.updater, upload(b"\0asm-x", true))
+        .await
+        .expect("upload and start");
+    assert!(rig.drain().iter().any(|(k, _)| k == "sys/payload/start"));
+    assert_eq!(
+        ControlStore::in_dir(&dir).load(),
+        Persisted::At(middleware::loader::trust::ControlCounter(1_761_500_000_123))
+    );
+    let _ = rig.gateway.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }

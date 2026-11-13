@@ -67,6 +67,7 @@ use tokio::time::Instant;
 
 use crate::bridge::{Bound, Bridge, Counters, OwnedKey, Pending, SysRoute, Uplink};
 use crate::io::ChannelIo;
+use crate::state::ControlStore;
 use crate::update::{Admission, Caller, SysClass, Ticket, UpdateCounters, classify};
 
 /// The link task's timer period.
@@ -369,12 +370,37 @@ pub async fn start(
 }
 
 /// [`start`] with the timeouts `options` (the returned handler waits as
-/// long as the link task does).
+/// long as the link task does). No state store: signed start/stop are
+/// refused (see [`start_with_store`]).
 pub async fn start_with(
     io: ChannelIo,
     session: ZenohTransport,
     bridge: Bridge,
     options: ShellOptions,
+) -> Result<(Gateway, SysForward), ZenohError> {
+    start_inner(io, session, bridge, options, None).await
+}
+
+/// [`start_with`] persisting every accepted start/stop counter in `store`
+/// before the request is forwarded; a failed write refuses the request
+/// (`Unavailable`) instead ([`crate::update`]). The write is synchronous
+/// on the link task (one small file, fsynced).
+pub async fn start_with_store(
+    io: ChannelIo,
+    session: ZenohTransport,
+    bridge: Bridge,
+    options: ShellOptions,
+    store: ControlStore,
+) -> Result<(Gateway, SysForward), ZenohError> {
+    start_inner(io, session, bridge, options, Some(store)).await
+}
+
+async fn start_inner(
+    io: ChannelIo,
+    session: ZenohTransport,
+    bridge: Bridge,
+    options: ShellOptions,
+    store: Option<ControlStore>,
 ) -> Result<(Gateway, SysForward), ZenohError> {
     let mut session = session;
     let mut subscribers = Vec::new();
@@ -411,6 +437,7 @@ pub async fn start_with(
             sys_timeout: options.sys_timeout,
             update_timeout: options.update_timeout,
             trust_due: false,
+            store,
         }
         .run(link, command_rx, stopped.clone()),
     );
@@ -491,6 +518,8 @@ struct LinkTask {
     update_timeout: Duration,
     /// Ask `sys/trust/info` on the next tick (after a bind).
     trust_due: bool,
+    /// Where accepted start/stop counters are persisted.
+    store: Option<ControlStore>,
 }
 
 fn ms(d: Duration) -> u64 {
@@ -760,6 +789,18 @@ impl LinkTask {
                             self
                         }
                         Ok(Admission::Forward { body, ticket }) => {
+                            if let Some(counter) = ticket.persist() {
+                                let saved = match &self.store {
+                                    Some(store) => store.save(counter),
+                                    None => Err(std::io::Error::other("no state store")),
+                                };
+                                if let Err(e) = saved {
+                                    tracing::warn!(error = %e, "control counter not persisted; start/stop refused");
+                                    self.bridge = self.bridge.update_unpersisted(&ticket);
+                                    let _ = reply.send(Err(HandlerError::Unavailable));
+                                    return self;
+                                }
+                            }
                             let deadline = now.saturating_add(ms(self.update_timeout));
                             self.request_device(
                                 link,
@@ -966,6 +1007,7 @@ mod tests {
             sys_timeout: SYS_TIMEOUT,
             update_timeout: UPDATE_TIMEOUT,
             trust_due: false,
+            store: None,
         }
     }
 

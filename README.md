@@ -193,7 +193,14 @@ mwctl's: `info`, `upload <FILE.wasm> --key <KEYFILE> [--version N]
 and a request that timed out is resent with the same id, which the
 gateway answers from its replay cache rather than acting twice.
 `MW_GATEWAY_UPDATE_TIMEOUT_MS` (default 20 s) is how long the gateway
-waits for the device to answer an update request. After `fw update`
+waits for the device to answer an update request. `MW_GATEWAY_STATE`
+(default `/var/lib/mw-gateway`, which must be writable and persistent)
+holds the highest signed start/stop counter the gateway has accepted,
+written before each one is forwarded. A Pi has no real-time clock, so
+until either that file exists or the clock has synced (it counts only
+from 2026-01-01 on), signed `start` and `stop` are refused as
+unavailable, and so is any whose counter cannot be written. Uploads
+still work, because the device checks a signed commit's version itself. After `fw update`
 reboots a Pico 2, its USB serial device re-enumerates and the gateway's
 stream closes. The gateway then exits and its supervisor restarts it,
 while `mw-update` keeps retrying the confirm.

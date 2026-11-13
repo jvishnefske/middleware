@@ -1258,7 +1258,7 @@ as `ZenohDiscovery` services bound to the device's MAC, under the
 firmware's E21 rules), allowlisted `sys/*` requests through the served
 kind `gw/sys`, and signed updates (payloads, RP2350 firmware) from the
 updaters it allowlists, under the device's own over-the-air rules
-(RG20–RG26). Both are built on `mw-service`; both keep their decisions
+(RG20–RG27). Both are built on `mw-service`; both keep their decisions
 in pure cores (`robot::telemetry`, `gateway::bridge`) behind thin shells.
 The gateway's key mapping: without `MW_GATEWAY_NAMESPACE` device and
 cluster keys are identical (the ESP32-CAM's `app/cam/jpeg` stays
@@ -1408,7 +1408,7 @@ a serial port, and network tests use 127.0.0.1 only.
   `scripts/check-features.sh` (block "RG19", and both crates in
   `CLOUD_CRATES` for every F1 set).
 
-**Updates through the gateway (RG20–RG26).** Over its serial port the
+**Updates through the gateway (RG20–RG27).** Over its serial port the
 device grants physical-access authority (a serial `begin` stops the
 payload, `start`/`stop` are unsigned, an unclaimed device accepts any
 commit), and every `gw/sys` request reaches it that way. So the gateway's
@@ -1430,7 +1430,7 @@ body).
 | `sys/loader/chunk`, `sys/fw/chunk` | `Denied` | `Denied` | the owner of a transfer of that kind only, else `InvalidRequest` |
 | `sys/loader/commit`, `sys/fw/commit` | `Denied` | `Denied` | owner first (else `InvalidRequest`, untouched); then signed only (`[version][signature]`, or the 64-byte firmware signature): unsigned is `Denied` and ends the owner's transfer; forwarded, the device checks the signature; the transfer ends with the answer |
 | `sys/fw/reboot`, `confirm`, `abort` | `Denied` | `Denied` | forwarded unless another caller's transfer is live (`InvalidRequest`) |
-| `sys/payload/start`, `stop` | `Denied` | `Denied` | a signed control request only, verified by the gateway (pinned key from `sys/trust/info`, target = the first six bytes of the device's node id, the op, counter strictly above the last accepted, floor = the gateway's start time in Unix ms); forwarded with an empty body; else `Denied` |
+| `sys/payload/start`, `stop` | `Denied` | `Denied` | a signed control request only, verified by the gateway (pinned key from `sys/trust/info`, target = the first six bytes of the device's node id, the op, counter strictly above the last accepted, persisted before forwarding, RG27); forwarded with an empty body; else `Denied`; no known floor: `Unavailable` |
 | `sys/trust/claim`, unknown `sys/fw/*`, `sys/trust/*` | `Denied` | `Denied` | `Denied` |
 
 "Claimed" is the device's last `sys/trust/info` answer: the gateway asks
@@ -1490,10 +1490,12 @@ runs `mwctl`'s own `upload` and `fw_update` over a `gw/sys` endpoint.
   `grpc::responder::tests::rg22_next_call_lets_an_async_handler_answer`;
   `serve_sys` through RG25 and RG26.
 - [x] RG23 `GatewayConfig::from_env` parses `MW_GATEWAY_UPDATERS` (up to
-  8 SPIFFE IDs, default none) and `MW_GATEWAY_UPDATE_TIMEOUT_MS`
-  (1..=120000, default 20000); updaters are admitted to `gw/sys` beside
-  `MW_GATEWAY_ALLOW_CALLERS`; `bridge_at(now)` sets the control counter
-  floor; malformed values name the variable —
+  8 SPIFFE IDs, default none), `MW_GATEWAY_UPDATE_TIMEOUT_MS`
+  (1..=120000, default 20000) and `MW_GATEWAY_STATE` (an absolute
+  directory, default `/var/lib/mw-gateway`); updaters are admitted to
+  `gw/sys` beside `MW_GATEWAY_ALLOW_CALLERS`; `bridge_with_floor` sets
+  the control counter floor and `bridge()` has none (fail closed);
+  malformed values name the variable —
   `config::tests::rg23_updaters_and_update_timeout_parse`,
   `rg15_defaults` *(mw-gateway)*.
 - [x] RG24 `mw-update`'s command line (`info`, `upload --key [--version]
@@ -1533,6 +1535,30 @@ runs `mwctl`'s own `upload` and `fw_update` over a `gw/sys` endpoint.
   the runner does (MS6); after a real Pico 2 reboots, its USB device
   re-enumerates and the gateway exits for its supervisor to restart (not
   run on hardware).
+- [x] RG27 The signed start/stop counter floor survives restarts on a
+  host without a real-time clock and fails closed. Every accepted
+  counter is written to `<MW_GATEWAY_STATE>/control-counter` (temporary
+  file, fsync, rename, directory fsync; never lowered) before the request
+  is forwarded; a failed write (or no store at all) refuses the request
+  `Unavailable`, rolls the counter back, counts it and forwards nothing.
+  At start the floor is the larger of the persisted counter and the
+  clock, the clock counting only from 2026-01-01T00:00:00Z on; with no
+  state and an unsynced or unreadable clock, or an unreadable state
+  file, there is no floor and every signed start/stop is `Unavailable`,
+  never a floor of 0. Uploads stay available without a floor: the device
+  checks and persists a signed commit's version itself. One floor serves
+  the port, not one per device: a counter accepted for one device only
+  raises the bar for the next, and the signed MAC keeps a captured
+  request from working on another device —
+  `state::tests::rg27_the_floor_is_the_persisted_counter_or_a_sane_clock`,
+  `rg27_a_saved_counter_survives_a_restart_and_beats_a_backwards_clock`,
+  `rg27_a_write_failure_is_an_error`,
+  `update::tests::rg27_without_a_floor_start_and_stop_fail_closed_and_uploads_stay`,
+  `rg27_an_unpersisted_counter_is_rolled_back_and_nothing_forwarded`;
+  `gateway/tests/updates.rs`:
+  `rg27_a_start_whose_counter_cannot_be_persisted_is_refused_not_forwarded`,
+  `rg27_an_accepted_start_is_persisted_before_it_reaches_the_device`
+  *(mw-gateway)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

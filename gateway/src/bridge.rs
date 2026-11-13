@@ -774,6 +774,13 @@ impl Bridge {
         Bridge { updates, ..self }
     }
 
+    /// An accepted start/stop whose counter could not be persisted was
+    /// not forwarded ([`UpdateGate::unpersisted`]).
+    pub fn update_unpersisted(self, ticket: &Ticket) -> Self {
+        let updates = self.updates.unpersisted(ticket);
+        Bridge { updates, ..self }
+    }
+
     /// A forwarded update request got no answer ([`UpdateGate::abandon`]).
     pub fn update_abandoned(self, ticket: &Ticket) -> Self {
         let updates = self.updates.abandon(ticket);
