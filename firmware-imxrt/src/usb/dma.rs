@@ -381,6 +381,38 @@ pub fn qh_status(qh: &[AtomicU32]) -> Result<DtdStatus, Error> {
     load(qh, QH_TOKEN).map(DtdStatus::from_token)
 }
 
+/// Copies `data` into a DMA buffer of words, little-endian (byte `i` of
+/// the buffer is byte `i % 4` of word `i / 4`, as the controller reads
+/// memory). The bytes of the last word past `data` are zero.
+pub fn copy_to_words(words: &[AtomicU32], data: &[u8]) -> Result<(), Error> {
+    if data.len() > words.len().saturating_mul(4) {
+        return Err(Error::TooLong);
+    }
+    for (word, chunk) in words.iter().zip(data.chunks(4)) {
+        let mut b = [0u8; 4];
+        for (dst, src) in b.iter_mut().zip(chunk) {
+            *dst = *src;
+        }
+        word.store(u32::from_le_bytes(b), Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+/// Copies the first `out.len()` bytes of a DMA buffer of words into `out`
+/// (the layout of [`copy_to_words`]).
+pub fn copy_from_words(words: &[AtomicU32], out: &mut [u8]) -> Result<(), Error> {
+    if out.len() > words.len().saturating_mul(4) {
+        return Err(Error::TooLong);
+    }
+    for (word, chunk) in words.iter().zip(out.chunks_mut(4)) {
+        let b = word.load(Ordering::SeqCst).to_le_bytes();
+        for (dst, src) in chunk.iter_mut().zip(b) {
+            *dst = src;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +561,23 @@ mod tests {
         assert!(core::ptr::eq(dtd(&pool, 3).unwrap().as_ptr(), pool.get(24).unwrap()));
         assert_eq!(dtd(&pool, 4).err(), Some(Error::ShortMemory));
         assert_eq!(dtd(&pool, usize::MAX).err(), Some(Error::ShortMemory));
+    }
+
+    #[test]
+    fn fl2_packet_bytes_go_into_dma_words_little_endian() {
+        let buf = mem::<4>();
+        copy_to_words(&buf, &[1, 2, 3, 4, 5, 6]).unwrap();
+        assert_eq!(word(&buf, 0), 0x0403_0201);
+        assert_eq!(word(&buf, 1), 0x0000_0605, "tail zero-filled");
+        assert_eq!(word(&buf, 2), 0xDEAD_BEEF, "words past the data untouched");
+        let mut out = [0u8; 5];
+        copy_from_words(&buf, &mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 5]);
+        copy_to_words(&buf, &[]).unwrap();
+        assert_eq!(copy_to_words(&buf, &[0; 17]), Err(Error::TooLong));
+        assert_eq!(copy_from_words(&buf, &mut [0; 17]), Err(Error::TooLong));
+        let mut all = [0u8; 16];
+        copy_from_words(&buf, &mut all).unwrap();
+        assert_eq!(all.get(..4), Some(&[1, 2, 3, 4][..]));
     }
 }

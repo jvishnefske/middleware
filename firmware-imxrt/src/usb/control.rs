@@ -47,6 +47,15 @@ impl SetupPacket {
         }
     }
 
+    /// The 8 bytes of the packet, as the setup buffer holds them (what
+    /// embassy-usb's `ControlPipe::setup` returns).
+    pub const fn to_bytes(self) -> [u8; 8] {
+        let v = self.value.to_le_bytes();
+        let i = self.index.to_le_bytes();
+        let l = self.length.to_le_bytes();
+        [self.request_type, self.request, v[0], v[1], i[0], i[1], l[0], l[1]]
+    }
+
     /// The data stage's direction (`bmRequestType` bit 7); with no data
     /// stage, the status stage is IN.
     pub const fn data_dir(self) -> Dir {
@@ -258,6 +267,7 @@ mod tests {
         assert_eq!(p.length, 64);
         assert_eq!(p.data_dir(), Dir::In);
         assert_eq!(p.set_address(), None);
+        assert_eq!(p.to_bytes(), GET_DESCRIPTOR, "round trip");
     }
 
     #[test]

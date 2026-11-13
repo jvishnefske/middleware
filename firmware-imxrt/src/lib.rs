@@ -32,6 +32,7 @@ pub mod boot_header;
 #[cfg(any(feature = "wasm", test))]
 pub mod budget;
 pub mod chip;
+pub mod config;
 pub mod enet;
 pub mod hyperflash;
 pub mod layout;

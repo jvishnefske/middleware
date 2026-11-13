@@ -775,3 +775,190 @@ fn rt12_start_failures_and_traps_update_the_status() {
     assert_eq!(s.status(), PayloadStatus::Stopped);
     assert_eq!(s.capacity(), 64 * 1024);
 }
+
+/// [`BlockFlash`] whose `region` cannot be read.
+struct Unreadable<'a>(&'a mut BlockFlash, crate::layout::Region);
+
+impl ErrorType for Unreadable<'_> {
+    type Error = NorFlashErrorKind;
+}
+
+impl ReadNorFlash for Unreadable<'_> {
+    const READ_SIZE: usize = BlockFlash::READ_SIZE;
+
+    fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        if offset >= self.1.offset && offset < self.1.end() {
+            return Err(NorFlashErrorKind::Other);
+        }
+        self.0.read(offset, bytes)
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+}
+
+impl NorFlash for Unreadable<'_> {
+    const WRITE_SIZE: usize = BlockFlash::WRITE_SIZE;
+    const ERASE_SIZE: usize = BlockFlash::ERASE_SIZE;
+
+    fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.0.write(offset, bytes)
+    }
+
+    fn erase(&mut self, from: u32, to: u32) -> Result<(), Self::Error> {
+        self.0.erase(from, to)
+    }
+}
+
+const EP: &str = "tcp/192.168.1.10:7447";
+
+#[test]
+fn fl7_the_zenoh_endpoint_is_not_found_until_set_then_reads_back_across_reboots() {
+    let mut f = flash();
+    let (mut s, boot) = open(&mut f);
+    assert_eq!(boot.zenoh, Ok(None));
+    assert_eq!(s.zenoh_endpoint(), None);
+    assert_eq!(
+        call(&mut s, ZENOH_ENDPOINT, &[]).0,
+        Err(HandlerError::NotFound)
+    );
+    let (r, h) = call(&mut s, ZENOH_ENDPOINT, EP.as_bytes());
+    assert_eq!(r, Ok(StdVec::new()));
+    let ep = Endpoint::parse(EP).unwrap();
+    assert_eq!(h.notes.as_slice(), [Note::ZenohEndpoint(ep)]);
+    assert!(!h.stop && h.reset.is_none());
+    assert_eq!(s.zenoh_endpoint(), Some(ep));
+    assert_eq!(
+        call(&mut s, ZENOH_ENDPOINT, &[]).0,
+        Ok(EP.as_bytes().to_vec())
+    );
+    // The same endpoint again writes nothing.
+    let ops = s.store_mut().flash().raw().log.len();
+    let (r, h) = call(&mut s, ZENOH_ENDPOINT, EP.as_bytes());
+    assert_eq!((r, h.notes.len()), (Ok(StdVec::new()), 0));
+    assert_eq!(s.store_mut().flash().raw().log.len(), ops);
+    // A reply buffer too small for the string.
+    let mut tiny = [0u8; 8];
+    assert_eq!(
+        s.handle(ZENOH_ENDPOINT, &[], &mut tiny).reply,
+        Reply::Now(Err(HandlerError::BufferTooSmall))
+    );
+    drop(s);
+    let (mut s, boot) = open(&mut f);
+    assert_eq!(boot.zenoh, Ok(Some(ep)));
+    assert_eq!(s.zenoh_endpoint(), Some(ep));
+    // A second endpoint replaces it, also across a reboot.
+    ok(&mut s, ZENOH_ENDPOINT, b"tcp/10.0.0.2:7448");
+    drop(s);
+    let (s, _) = open(&mut f);
+    assert_eq!(s.zenoh_endpoint().map(|e| e.port), Some(7448));
+    // Only the configuration region's blocks were erased.
+    assert!(f.log.iter().all(|op| match *op {
+        Op::Erase(from, to) =>
+            !(from < MAP.config.end() && MAP.config.offset < to)
+                || (from >= MAP.config.offset && to <= MAP.config.end()),
+        Op::Write(..) => true,
+    }));
+    let config_erases = f
+        .log
+        .iter()
+        .filter(|op| matches!(op, Op::Erase(from, _) if *from >= MAP.config.offset && *from < MAP.config.end()))
+        .count();
+    assert_eq!(config_erases, 2);
+}
+
+#[test]
+fn fl7_a_malformed_endpoint_is_invalid_request_and_changes_nothing() {
+    let mut f = flash();
+    let (mut s, _) = open(&mut f);
+    ok(&mut s, ZENOH_ENDPOINT, EP.as_bytes());
+    let before = s.store_mut().flash().raw().log.len();
+    let long = [b'1'; 65];
+    for body in [
+        &b"udp/192.168.1.10:7447"[..],
+        b"tcp/router.local:7447",
+        b"tcp/192.168.1.10",
+        b"tcp/192.168.1.10:0",
+        b"tcp/192.168.1.300:7447",
+        b"tcp/[::1]:7447",
+        &[0xff, 0xfe, 0xfd],
+        &long,
+    ] {
+        let (r, h) = call(&mut s, ZENOH_ENDPOINT, body);
+        assert_eq!(r, Err(HandlerError::InvalidRequest), "{body:?}");
+        assert!(h.notes.is_empty() && !h.stop);
+    }
+    assert_eq!(s.store_mut().flash().raw().log.len(), before);
+    assert_eq!(s.zenoh_endpoint(), Some(Endpoint::parse(EP).unwrap()));
+}
+
+#[test]
+fn fl7_a_save_cut_at_any_flash_op_keeps_the_previous_endpoint() {
+    let mut base = flash();
+    {
+        let (mut s, _) = open(&mut base);
+        ok(&mut s, ZENOH_ENDPOINT, EP.as_bytes());
+    }
+    let old = Endpoint::parse(EP).unwrap();
+    let new = "tcp/10.1.2.3:9000";
+    for cut in 0..4 {
+        let mut f = base.clone();
+        let (mut s, _) = open(&mut f);
+        s.store_mut().flash().raw().cut_at(cut);
+        let (r, h) = call(&mut s, ZENOH_ENDPOINT, new.as_bytes());
+        s.store_mut().flash().raw().restore();
+        let done = r.is_ok();
+        assert_eq!(done, cut >= 3, "cut {cut}: an erase and two programs");
+        if !done {
+            assert_eq!(r, Err(HandlerError::Internal));
+            assert_eq!(h.notes.as_slice(), [Note::Storage(StoreError::Flash)]);
+            assert_eq!(s.zenoh_endpoint(), Some(old), "RAM keeps the old one");
+        }
+        drop(s);
+        let (mut s, boot) = open(&mut f);
+        let want = if done {
+            Endpoint::parse(new).unwrap()
+        } else {
+            old
+        };
+        assert_eq!(boot.zenoh, Ok(Some(want)), "cut {cut}");
+        // The next set after a cut works.
+        ok(&mut s, ZENOH_ENDPOINT, b"tcp/10.9.9.9:1");
+        drop(s);
+        let (s, _) = open(&mut f);
+        assert_eq!(s.zenoh_endpoint().map(|e| e.addr), Some([10, 9, 9, 9]));
+    }
+}
+
+#[test]
+fn fl7_an_unreadable_configuration_is_unavailable_and_never_overwritten() {
+    let mut f = flash();
+    {
+        let (mut s, _) = open(&mut f);
+        ok(&mut s, ZENOH_ENDPOINT, EP.as_bytes());
+    }
+    let erases = f.erases;
+    let (mut s, boot) =
+        Service::open(Unreadable(&mut f, MAP.config), &MAP, FACTS, FACTORY).unwrap();
+    assert!(matches!(boot.zenoh, Err(IoError::Flash(_))));
+    assert_eq!(s.zenoh_endpoint(), None);
+    for body in [&[][..], b"tcp/10.0.0.1:1"] {
+        let (r, h) = call(&mut s, ZENOH_ENDPOINT, body);
+        assert_eq!(r, Err(HandlerError::Unavailable));
+        assert!(h.notes.is_empty());
+    }
+    // The rest of the service works.
+    assert!(call(&mut s, keys::INFO, &[]).0.is_ok());
+    drop(s);
+    assert_eq!(f.erases, erases, "nothing was erased");
+    let (s, _) = open(&mut f);
+    assert_eq!(s.zenoh_endpoint(), Some(Endpoint::parse(EP).unwrap()));
+}
+
+#[test]
+fn fl7_the_endpoint_note_reads_as_a_log_line() {
+    use std::string::ToString;
+    let n = Note::ZenohEndpoint(Endpoint::parse(EP).unwrap());
+    assert_eq!(n.to_string(), "zenoh: endpoint tcp/192.168.1.10:7447 saved");
+}

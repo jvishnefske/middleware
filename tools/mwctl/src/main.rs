@@ -306,6 +306,13 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
+        Cmd::Request { key, body } => {
+            let key = middleware::Key::new(&key).map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("'{key}' is not a valid key"))))?;
+            dev.request(key, body.as_bytes()).map(|reply| match std::str::from_utf8(&reply) {
+                Ok(t) if !t.chars().any(char::is_control) => println!("{t}"),
+                _ => println!("{}", reply.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")),
+            })
+        }
         Cmd::Start { key, counter } => {
             match control_auth(ControlOp::Start, target, key.as_deref(), counter)
                 .and_then(|auth| dev.start_signed(auth))
@@ -400,6 +407,11 @@ fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>) -> Result<(),
         Some(s) => eprintln!("monitoring for {s} s"),
         None => eprintln!("monitoring until Ctrl-C"),
     }
+    // One request first: a USB CDC device that found no reader drops its
+    // publications until a frame from the host arrives (the RP and RT base
+    // firmwares' host-presence rule), so the monitor says it is here. The
+    // reply (or its absence) does not matter.
+    let _ = dev.info();
     // Bounded by `end` when given; otherwise runs until interrupted.
     loop {
         let slice = Instant::now() + Duration::from_millis(500);

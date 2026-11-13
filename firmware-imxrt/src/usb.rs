@@ -21,6 +21,7 @@
 //!   `DEVICEADDR`, `ENDPTLISTADDR`, `PORTSC1` speed, `ENDPTCTRLn` and the
 //!   per-endpoint bits of `ENDPTPRIME`, `ENDPTFLUSH`, `ENDPTSTAT`,
 //!   `ENDPTCOMPLETE` and `ENDPTSETUPSTAT`.
+//! * [`phy`] — the clock gate, the USB PLL and USBPHY1 bring-up values.
 //! * [`control`] — the setup packet, the setup tripwire (`SUTW`) protocol
 //!   for copying it out of the queue head, and the bus reset plan.
 //!
@@ -42,6 +43,7 @@
 
 pub mod control;
 pub mod dma;
+pub mod phy;
 pub mod regs;
 
 /// Endpoints the RT1050's controller implements (`DCCPARAMS.DEN`): 0 to 7.
@@ -59,6 +61,46 @@ pub const EP0_MAX_PACKET: u16 = 64;
 /// dependency of this one.
 pub const fn needs_zlp(last_packet: usize, max_packet: u16) -> bool {
     last_packet == max_packet as usize
+}
+
+/// USB vendor id: NXP's.
+pub const VID: u16 = 0x1FC9;
+/// USB product id: the one NXP's SDK CDC virtual COM example
+/// (`usb_device_cdc_vcom`) uses, as the RP base uses the Pico SDK's CDC
+/// ids, so host rules written for NXP's CDC example match.
+pub const PID: u16 = 0x0094;
+/// Manufacturer string.
+pub const MANUFACTURER: &str = "middleware";
+/// Product string.
+pub const PRODUCT: &str = "imxrt-base";
+
+/// Picks the endpoint number for a new endpoint of one direction:
+/// `requested` if it is free, otherwise the lowest free number from 1;
+/// numbers at or past `limit` (at most [`ENDPOINTS`]) are never given.
+/// `used` has bit `n` set for each number this direction already uses
+/// (endpoint 0 is always used: it is the control endpoint).
+pub const fn pick_number(used: u8, requested: Option<u8>, limit: u8) -> Option<u8> {
+    let limit = if limit < ENDPOINTS { limit } else { ENDPOINTS };
+    let used = used | 1;
+    match requested {
+        Some(n) => {
+            if n < limit && used & (1 << n) == 0 {
+                Some(n)
+            } else {
+                None
+            }
+        }
+        None => {
+            let mut n = 1;
+            while n < limit {
+                if used & (1 << n) == 0 {
+                    return Some(n);
+                }
+                n += 1;
+            }
+            None
+        }
+    }
 }
 
 /// Why a USB structure or value was refused.
@@ -206,9 +248,49 @@ impl Iterator for EpIter {
     }
 }
 
+/// Whether the host is reading a serial port (CDC), as the link last saw
+/// it: firmware-rp's rule (`rp_base::usb::Host`), so publications are
+/// dropped instead of each waiting out the send timeout while no program
+/// has the port open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    /// Sends complete (the state at boot).
+    Present,
+    /// A send timed out and no frame has arrived since.
+    Away,
+}
+
+impl Host {
+    /// The state after a send that completed (`true`) or timed out.
+    pub const fn after_send(self, completed: bool) -> Host {
+        if completed { Host::Present } else { Host::Away }
+    }
+
+    /// The state after a frame arrived from the host.
+    pub const fn after_receive(self) -> Host {
+        Host::Present
+    }
+
+    /// Whether a publication is sent (`false`: dropped).
+    pub const fn sends_publications(self) -> bool {
+        matches!(self, Host::Present)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fl6_publications_are_dropped_while_the_host_is_away() {
+        let h = Host::Present;
+        assert!(h.sends_publications());
+        let h = h.after_send(false);
+        assert_eq!(h, Host::Away);
+        assert!(!h.sends_publications());
+        assert_eq!(h.after_send(true), Host::Present);
+        assert_eq!(h.after_receive(), Host::Present);
+    }
 
     #[test]
     fn fl2_a_frame_ending_on_a_full_packet_gets_a_zero_length_packet() {
@@ -260,5 +342,18 @@ mod tests {
         assert_eq!(EpMask::ALL.iter().count(), 16);
         assert!(EpMask(1 << 16).contains(Ep::EP0_IN));
         assert!(!EpMask(1 << 16).contains(Ep::EP0_OUT));
+    }
+
+    #[test]
+    fn fl2_endpoint_numbers_are_the_requested_one_or_the_lowest_free() {
+        assert_eq!(pick_number(0, None, 4), Some(1));
+        assert_eq!(pick_number(0b0110, None, 4), Some(3));
+        assert_eq!(pick_number(0b1110, None, 4), None, "all of 1-3 taken");
+        assert_eq!(pick_number(0, Some(2), 4), Some(2));
+        assert_eq!(pick_number(0b0100, Some(2), 4), None, "taken");
+        assert_eq!(pick_number(0, Some(0), 4), None, "endpoint 0 is the control endpoint");
+        assert_eq!(pick_number(0, Some(4), 4), None, "past the limit");
+        assert_eq!(pick_number(0, Some(7), 200), Some(7));
+        assert_eq!(pick_number(0xFE, None, 200), None, "never past endpoint 7");
     }
 }

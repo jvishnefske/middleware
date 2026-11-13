@@ -27,6 +27,7 @@
 
 pub mod audio;
 pub mod fxos8700;
+pub mod imu_route;
 pub mod sai;
 pub mod wm8960;
 

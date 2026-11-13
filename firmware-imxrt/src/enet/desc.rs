@@ -47,6 +47,16 @@ pub const RX_BUFFER_BYTES: usize = 1536;
 /// 1518 − 4.
 pub const MAX_TX_FRAME: usize = 1514;
 
+/// The shortest frame put on the wire without the CRC (64 − 4); shorter
+/// frames are zero padded to it by [`padded_len`].
+pub const MIN_TX_FRAME: usize = 60;
+
+/// The length to send a frame of `len` bytes as: at least
+/// [`MIN_TX_FRAME`] (the bytes after `len` being zero).
+pub const fn padded_len(len: usize) -> usize {
+    if len < MIN_TX_FRAME { MIN_TX_FRAME } else { len }
+}
+
 /// Receive: owned by the DMA (empty).
 pub const RX_E: u32 = 1 << 31;
 /// Wrap: the last descriptor of the ring (receive and transmit).
@@ -621,5 +631,13 @@ mod tests {
         assert!(ring_base_ok(0x2004_1E00));
         assert!(!ring_base_ok(0x2004_1E08));
         assert!(!ring_base_ok(0));
+    }
+
+    #[test]
+    fn fl3_short_frames_padded_to_60() {
+        assert_eq!(padded_len(42), 60);
+        assert_eq!(padded_len(0), 60);
+        assert_eq!(padded_len(60), 60);
+        assert_eq!(padded_len(1514), 1514);
     }
 }

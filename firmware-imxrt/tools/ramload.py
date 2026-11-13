@@ -117,6 +117,9 @@ def active_exceptions(g):
 CCR, ICIALLU = 0xE000ED14, 0xE000EF50
 CCGR5 = 0x400FC07C
 DMA0_ERQ, DMAMUX_CHCFG0 = 0x400E800C, 0x400EC000
+CCGR1, CCGR6 = 0x400FC06C, 0x400FC080
+USB1_USBCMD = 0x402E0140   # RST is bit 1
+ENET_ECR = 0x402D8024      # RESET is bit 0
 
 
 def quiesce(g):
@@ -124,12 +127,22 @@ def quiesce(g):
     caches off (the firmware enables them; SDRAM contents need not survive)
     and, if eDMA is clocked (CCGR5 CG3; never touch a gated block), every
     channel's request disabled and DMAMUX channel 0 (the firmware's LPUART1
-    receive ring, which writes into DTCM) off."""
+    receive ring, which writes into DTCM) off; the USB controller and the
+    ENET MAC reset (they too DMA into DTCM: a USB queue head overwrote a
+    freshly loaded flasher, 2026-11-13)."""
     g.set_word(CCR, g.word(CCR) & ~((1 << 16) | (1 << 17)))
     g.set_word(ICIALLU, 0)
     if (g.word(CCGR5) >> 6) & 3:
         g.set_word(DMA0_ERQ, 0)
         g.set_word(DMAMUX_CHCFG0, 0)
+    # Bus masters that keep writing into DTCM while the core is halted
+    # (the firmware's USB queue heads and ENET rings live there): reset the
+    # USB controller (USBCMD.RST) and the ENET MAC (ECR.RESET), each only
+    # if its clock gate is on (CCGR6 CG0, CCGR1 CG5).
+    if g.word(CCGR6) & 3:
+        g.set_word(USB1_USBCMD, 1 << 1)
+    if (g.word(CCGR1) >> 10) & 3:
+        g.set_word(ENET_ECR, 1)
 
 
 def load(elf, listen_seconds=0.0, quiet=False, release=True, session=None):

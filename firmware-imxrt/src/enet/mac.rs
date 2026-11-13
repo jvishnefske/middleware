@@ -99,6 +99,16 @@ pub const fn station_address(mac: [u8; 6]) -> (u32, u32) {
     (palr, paur)
 }
 
+/// The station address of the chip with unique id `uid`
+/// ([`crate::node::unique_id`]): a locally administered unicast address,
+/// `0x02` then the unique id's last five bytes (the ones that differ most
+/// between chips of a lot). Deterministic, so the board keeps its address
+/// (and its DHCP lease) across boots, and the Zenoh management gate can
+/// name the board by it.
+pub const fn mac_from_uid(uid: [u8; 8]) -> [u8; 6] {
+    [0x02, uid[3], uid[4], uid[5], uid[6], uid[7]]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +152,18 @@ mod tests {
     fn fl3_station_address_matches_probe() {
         let mac = [0x02, 0x4D, 0x57, 0x52, 0x54, 0x01];
         assert_eq!(station_address(mac), (0x024D_5752, 0x5401_8808));
+    }
+
+    #[test]
+    fn fl3_mac_from_uid_is_local_unicast() {
+        let uid = [0xE6, 0x61, 0x38, 0x52, 0x83, 0x12, 0x1F, 0x2A];
+        let mac = mac_from_uid(uid);
+        assert_eq!(mac, [0x02, 0x52, 0x83, 0x12, 0x1F, 0x2A]);
+        // Locally administered (bit 1), unicast (bit 0 clear), any uid.
+        for uid in [[0u8; 8], [0xFF; 8], uid] {
+            let m = mac_from_uid(uid);
+            assert_eq!(m[0] & 0b11, 0b10);
+        }
+        assert_ne!(mac_from_uid([0, 0, 0, 0, 0, 0, 0, 1]), mac_from_uid([0, 0, 0, 0, 0, 0, 0, 2]));
     }
 }

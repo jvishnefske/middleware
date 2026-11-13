@@ -1,31 +1,42 @@
-//! Message plumbing between the LPUART link task and the controller.
+//! Message plumbing between the link tasks and the controller (FL1).
 //!
-//! * `inbound` — the link task's requests and publications, copied out of
-//!   its frame buffer, for the controller.
-//! * `reply` — the controller's answer to the link's one request in flight
-//!   (a signal: the latest value wins, and the link waits for its id).
-//! * `outbound` — device publications (log lines, payload status, payload
-//!   publishes) for the link. Publishing never blocks: when the host is
-//!   not reading, the oldest messages are dropped rather than stalling the
-//!   controller.
+//! The board has up to [`MAX_LINKS`] links ([`LinkId`]): LPUART1 and USB
+//! CDC (the serial protocol) and the Zenoh session on Ethernet.
 //!
-//! * `sent` — the link's word that the last reply has left (written and
+//! * `inbound` — every link's requests and publications, copied out of its
+//!   frame buffer and tagged with the link, for the controller (one queue:
+//!   the controller serves them in arrival order).
+//! * `replies` — per link, the controller's answer to the one request in
+//!   flight on it (a signal: the latest value wins, and the link waits for
+//!   its id). A reply goes back on the link the request came from only.
+//! * outbound publications — the routing core [`Links`]
+//!   (`imxrt_base::links`) behind a mutex: [`Bus::publish`] puts a copy on
+//!   the queue of exactly the links whose filter selects the key, a full
+//!   queue drops that link's copy (counted) and never waits, and each link
+//!   task pops its own queue ([`Bus::next_outbound`]) when its `ready`
+//!   signal fires. A serial link's filter is set by its host with
+//!   `sys/link/sub` / `sys/link/unsub` ([`Bus::link_request`]). The Zenoh
+//!   link takes every non-`sys` publication: in client mode the router
+//!   does not declare its subscribers to the board, so it is the router
+//!   that drops what no peer wants.
+//! * `sent` — per link, the word that the last reply has left (written and
 //!   flushed), which the controller waits for before a reset.
 //!
-//! This is firmware-rp's bus (`firmware-rp/src/shell/bus.rs`, itself
-//! esp-base's cut down to one port) with the reply-sent signal in place of
-//! the USB state. The bus is created once at boot and shared as
-//! `&'static Bus` with the tasks, as embassy tasks require.
+//! The bus is created once at boot and shared as `&'static Bus` with the
+//! tasks, as embassy tasks require.
 
+use core::cell::RefCell;
 use core::fmt::{self, Write as _};
+
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embassy_sync::signal::Signal;
 use heapless::{String, Vec};
+use imxrt_base::links::{LinkId, LinkKind, Links, MAX_LINKS, Publication};
 use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
-use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
+use middleware::loader::{CHUNK_MAX, PayloadStatus, is_system_key, keys};
 #[cfg(feature = "wasm")]
 use middleware::transport::RequestMeta;
 use middleware::transport::{HandlerError, SenderId};
@@ -35,20 +46,27 @@ use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
 
 /// Largest reply body: a payload's reply to a request on a key it serves
-/// (`esp_base::serve::REPLY_CAPACITY`, 512); `sys/info` is at most 85
-/// bytes, `sys/trust/info` 41.
+/// (`esp_base::serve::REPLY_CAPACITY`, 512).
 pub const MAX_REPLY: usize = esp_base::serve::REPLY_CAPACITY;
 
-/// Outbound messages buffered before the oldest is dropped.
+/// Publications queued per link before that link's copies are dropped.
 const OUTBOUND_DEPTH: usize = 8;
+
+/// Key expressions a serial host may hold (`sys/link/sub`).
+const LINK_EXPRS: usize = 8;
 
 /// Inbound messages buffered for the controller.
 const INBOUND_DEPTH: usize = 2;
 
-/// Subscribers of outbound publications: the LPUART link.
-const SUBSCRIBERS: usize = 1;
-
 type Mutex = CriticalSectionRawMutex;
+
+/// The routing core with this firmware's capacities (replies are not
+/// queued in it: each link has one request in flight, answered through
+/// its reply signal).
+type Routing = Links<OUTBOUND_DEPTH, 1, LINK_EXPRS, MAX_MESSAGE>;
+
+/// An outbound publication, owned.
+pub type Outbound = Publication<MAX_MESSAGE>;
 
 /// What an inbound message is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,8 +80,10 @@ pub enum Kind {
     Publish,
 }
 
-/// A request or publication from the host, owned.
+/// A request or publication from a host, owned.
 pub struct Inbound {
+    /// The link it came on (the reply goes back on it).
+    pub link: LinkId,
     /// Request or publication.
     pub kind: Kind,
     /// Key (already validated by frame decoding).
@@ -71,18 +91,18 @@ pub struct Inbound {
     /// Body.
     pub body: Vec<u8, MAX_BODY>,
     /// The link's peer, if it was told one: the sender a payload sees in a
-    /// request's meta. The serial frames carry no deadline.
+    /// request's meta.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub peer: Option<SenderId>,
 }
 
 impl Inbound {
     /// Copies a frame's key and body; `None` if the body is too large.
-    pub fn new(kind: Kind, key: Key<'_>, body: &[u8], peer: Option<SenderId>) -> Option<Self> {
+    pub fn new(link: LinkId, kind: Kind, key: Key<'_>, body: &[u8], peer: Option<SenderId>) -> Option<Self> {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
-        Some(Inbound { kind, key: k, body, peer })
+        Some(Inbound { link, kind, key: k, body, peer })
     }
 
     /// What a payload may know of the request: the link's peer as sender.
@@ -97,19 +117,12 @@ impl Inbound {
 
 /// The controller's answer to a request.
 pub struct Reply {
+    /// The link the request came on.
+    pub link: LinkId,
     /// Correlation id of the request.
     pub id: u8,
     /// Body or error.
     pub result: Result<Vec<u8, MAX_REPLY>, HandlerError>,
-}
-
-/// A device publication, owned.
-#[derive(Clone)]
-pub struct Outbound {
-    /// Key.
-    pub key: String<MAX_KEY_LEN>,
-    /// Payload.
-    pub payload: Vec<u8, MAX_MESSAGE>,
 }
 
 /// Why a publication was not queued.
@@ -119,33 +132,29 @@ pub struct TooLarge;
 /// Shared channels.
 pub struct Bus {
     inbound: Channel<Mutex, Inbound, INBOUND_DEPTH>,
-    reply: Signal<Mutex, Reply>,
-    outbound: PubSubChannel<Mutex, Outbound, OUTBOUND_DEPTH, SUBSCRIBERS, 0>,
-    sent: Signal<Mutex, u8>,
+    replies: [Signal<Mutex, Reply>; MAX_LINKS],
+    sent: [Signal<Mutex, u8>; MAX_LINKS],
+    ready: [Signal<Mutex, ()>; MAX_LINKS],
+    routing: BlockingMutex<Mutex, RefCell<Routing>>,
 }
 
-/// The link's view of outbound publications.
-pub type OutboundSubscriber = Subscriber<'static, Mutex, Outbound, OUTBOUND_DEPTH, SUBSCRIBERS, 0>;
+/// The slot of `link` in a per-link array (every [`LinkId`] is below
+/// [`MAX_LINKS`]).
+fn slot<T>(a: &[T; MAX_LINKS], link: LinkId) -> &T {
+    let [first, ..] = a;
+    a.get(link.index()).unwrap_or(first)
+}
 
 impl Bus {
-    /// Empty channels.
+    /// Empty channels; the EVKB's links (UART and USB serial, Zenoh).
     pub const fn new() -> Self {
         Bus {
             inbound: Channel::new(),
-            reply: Signal::new(),
-            outbound: PubSubChannel::new(),
-            sent: Signal::new(),
+            replies: [const { Signal::new() }; MAX_LINKS],
+            sent: [const { Signal::new() }; MAX_LINKS],
+            ready: [const { Signal::new() }; MAX_LINKS],
+            routing: BlockingMutex::new(RefCell::new(Links::evkb())),
         }
-    }
-
-    /// The link has sent (and flushed) the response to request `id`.
-    pub fn reply_sent(&self, id: u8) {
-        self.sent.signal(id);
-    }
-
-    /// Waits until the response to request `id` has been sent.
-    pub async fn wait_sent(&self, id: u8) {
-        while self.sent.wait().await != id {}
     }
 
     /// Queues a message for the controller, waiting while it is busy.
@@ -158,34 +167,69 @@ impl Bus {
         self.inbound.receive().await
     }
 
-    /// Delivers a reply to the link.
+    /// Delivers a reply to the link it is addressed to.
     pub fn reply(&self, reply: Reply) {
-        self.reply.signal(reply);
+        slot(&self.replies, reply.link).signal(reply);
     }
 
-    /// Waits for the reply to the request with `id`; replies to other ids
-    /// (none are expected) are discarded.
-    pub async fn wait_reply(&self, id: u8) -> Reply {
+    /// Waits for the reply to the request with `id` on `link`; replies to
+    /// other ids (none are expected) are discarded.
+    pub async fn wait_reply(&self, link: LinkId, id: u8) -> Reply {
         loop {
-            let reply = self.reply.wait().await;
+            let reply = slot(&self.replies, link).wait().await;
             if reply.id == id {
                 return reply;
             }
         }
     }
 
-    /// A subscriber for the link's outbound publications.
-    pub fn subscribe(&'static self) -> Option<OutboundSubscriber> {
-        self.outbound.subscriber().ok()
+    /// The link has sent (and flushed) the response to request `id`.
+    pub fn reply_sent(&self, link: LinkId, id: u8) {
+        slot(&self.sent, link).signal(id);
     }
 
-    /// Publishes without blocking.
+    /// Waits until the response to request `id` on `link` has been sent.
+    pub async fn wait_sent(&self, link: LinkId, id: u8) {
+        while slot(&self.sent, link).wait().await != id {}
+    }
+
+    /// Publishes without blocking, to every link whose filter selects
+    /// `key` (`sys/...` keys never go to the Zenoh link: the board's system
+    /// keys are served there as queryables, `crate::zenoh_mgmt`).
     pub fn publish(&self, key: Key<'_>, data: &[u8]) -> Result<(), TooLarge> {
-        let mut k = String::new();
-        k.push_str(key.as_str()).map_err(|_| TooLarge)?;
-        let payload = Vec::from_slice(data).map_err(|_| TooLarge)?;
-        self.outbound.immediate_publisher().publish_immediate(Outbound { key: k, payload });
+        let fanout = self.routing.lock(|r| {
+            r.borrow_mut()
+                .publish(key, data, |_, k| !is_system_key(k))
+                .map_err(|_| TooLarge)
+        })?;
+        for (id, ready) in LinkId::ALL.into_iter().zip(self.ready.iter()) {
+            if fanout.queued.contains(id) {
+                ready.signal(());
+            }
+        }
         Ok(())
+    }
+
+    /// Waits for the next publication queued for `link`.
+    pub async fn next_outbound(&self, link: LinkId) -> Outbound {
+        loop {
+            if let Some(p) = self.routing.lock(|r| r.borrow_mut().pop(link)) {
+                return p;
+            }
+            slot(&self.ready, link).wait().await;
+        }
+    }
+
+    /// `sys/link/sub` and `sys/link/unsub` on `link`; `None` for any other
+    /// key (the request goes to the service).
+    pub fn link_request(&self, link: LinkId, key: Key<'_>, body: &[u8]) -> Option<Result<(), HandlerError>> {
+        self.routing.lock(|r| r.borrow_mut().link_request(link, key, body))
+    }
+
+    /// Whether `link` is a link of this board.
+    #[allow(dead_code)]
+    pub fn has(&self, link: LinkId) -> bool {
+        self.routing.lock(|r| r.borrow().kind(link)) != LinkKind::Absent
     }
 
     /// Publishes a log line on `sys/log`, truncated to `MAX_LOG` bytes.

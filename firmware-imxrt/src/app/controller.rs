@@ -26,6 +26,7 @@
 
 use embassy_time::{Duration, with_timeout};
 use heapless::Vec;
+use imxrt_base::links::LinkId;
 use imxrt_base::service::{Handled, Reply as Answer, Service};
 use imxrt_base::shell::flexspi::HyperFlash;
 use middleware::Key;
@@ -65,6 +66,10 @@ pub type Svc = Service<HyperFlash>;
 pub struct Controller {
     svc: Svc,
     bus: &'static Bus,
+    /// The board's Ethernet MAC: the 6-byte address signed control
+    /// requests over Zenoh name.
+    #[cfg_attr(not(feature = "eth"), allow(dead_code))]
+    mac: [u8; 6],
 }
 
 #[cfg(feature = "wasm")]
@@ -91,9 +96,11 @@ impl core::fmt::Display for StartError {
 
 impl Controller {
     /// A controller over `svc`.
-    pub fn new(svc: Svc, bus: &'static Bus) -> Self {
-        Controller { svc, bus }
+    pub fn new(svc: Svc, bus: &'static Bus, mac: [u8; 6]) -> Self {
+        Controller { svc, bus, mac }
     }
+
+
 
     /// Runs forever: starts a stored payload (with `wasm`), then serves
     /// requests.
@@ -114,7 +121,7 @@ impl Controller {
             // Never reached without the runtime (start is NotFound), but
             // answer rather than leave the link waiting.
             #[cfg(not(feature = "wasm"))]
-            self.bus.reply(Reply { id, result: Err(HandlerError::NotFound) });
+            self.bus.reply(Reply { link: id.0, id: id.1, result: Err(HandlerError::NotFound) });
         }
     }
 
@@ -128,14 +135,48 @@ impl Controller {
         #[cfg(feature = "wasm")] payload: Option<&mut Payload<RtDevice>>,
     ) -> (Option<Reply>, bool, bool) {
         self.svc.set_link_ready(true);
+        let link = msg.link;
         let Ok(key) = Key::new(&msg.key) else {
-            return (Some(Reply { id, result: Err(HandlerError::InvalidRequest) }), false, false);
+            return (Some(Reply { link, id, result: Err(HandlerError::InvalidRequest) }), false, false);
         };
+        // Over Zenoh, the management gate decides first (unclaimed: only
+        // `sys/info` and `sys/trust/info`; claimed: read-only keys, and a
+        // start/stop signed by the pinned key, whose counter is persisted
+        // before it acts). A refused request changes nothing.
+        #[cfg(feature = "eth")]
+        let mut gated_body: Option<&[u8]> = None;
+        #[cfg(feature = "eth")]
+        if link == LinkId::ZENOH {
+            use imxrt_base::zenoh_mgmt::{self, Admission};
+            let facts = zenoh_mgmt::facts(self.svc.state(), self.mac);
+            match zenoh_mgmt::admit(&facts, key, &msg.body) {
+                Err(refusal) => {
+                    self.bus.log(format_args!("zenoh: {} refused ({})", key.as_str(), refusal.reason()));
+                    return (Some(Reply { link, id, result: Err(refusal.error()) }), false, false);
+                }
+                Ok(Admission::Dispatch) => {}
+                Ok(Admission::Control { counter }) => {
+                    if self.svc.accept_control(counter).is_err() {
+                        return (Some(Reply { link, id, result: Err(HandlerError::Internal) }), false, false);
+                    }
+                    gated_body = Some(&[]);
+                }
+            }
+        }
+        #[cfg(feature = "eth")]
+        let body: &[u8] = gated_body.unwrap_or(&msg.body);
+        #[cfg(not(feature = "eth"))]
+        let body: &[u8] = &msg.body;
+        // `sys/link/sub` / `unsub`: the asking link's filter, before the
+        // service.
+        if let Some(r) = self.bus.link_request(link, key, body) {
+            return (Some(Reply { link, id, result: r.map(|()| Vec::new()) }), false, false);
+        }
         let before = self.svc.status();
         let mut out = [0u8; MAX_REPLY];
         #[cfg(feature = "wasm")]
         let handled = {
-            let answer = imxrt_base::requests::handle(&mut self.svc, payload, key, &msg.body, &msg.meta(), &mut out);
+            let answer = imxrt_base::requests::handle(&mut self.svc, payload, key, body, &msg.meta(), &mut out);
             if let Some(trap) = &answer.trapped {
                 self.bus.log(format_args!("payload trapped on request {}: {trap}", key.as_str()));
             }
@@ -150,9 +191,13 @@ impl Controller {
                 reset: None,
                 release_watchdog: false,
             },
-            Route::System | Route::Payload => self.svc.handle(key, &msg.body, &mut out),
+            Route::System | Route::Payload => self.svc.handle(key, body, &mut out),
         };
         let Handled { reply, stop, notes, reset: reset_after, release_watchdog } = handled;
+        #[cfg(feature = "eth")]
+        if key == imxrt_base::config::ZENOH_ENDPOINT {
+            super::zenoh::set_endpoint(self.svc.zenoh_endpoint());
+        }
         for note in &notes {
             self.bus.log(format_args!("{note}"));
         }
@@ -165,6 +210,7 @@ impl Controller {
         let reply = match reply {
             Answer::Start => None,
             Answer::Now(r) => Some(Reply {
+                link,
                 id,
                 result: r.and_then(|n| {
                     out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall)
@@ -176,16 +222,17 @@ impl Controller {
 
     /// Sends `reply`, then, if asked, waits for it to leave and resets.
     async fn answer(&self, reply: Reply, then_reset: bool) {
-        let id = reply.id;
+        let (link, id) = (reply.link, reply.id);
         self.bus.reply(reply);
         if then_reset {
-            let _ = with_timeout(RESET_GRACE, self.bus.wait_sent(id)).await;
+            let _ = with_timeout(RESET_GRACE, self.bus.wait_sent(link, id)).await;
             reset::reset();
         }
     }
 
-    /// Serves requests until a payload start is requested; returns its id.
-    async fn idle(&mut self) -> u8 {
+    /// Serves requests until a payload start is requested; returns where
+    /// to answer it.
+    async fn idle(&mut self) -> (LinkId, u8) {
         loop {
             let msg: Inbound = self.bus.receive_inbound().await;
             if let Kind::Request { id } = msg.kind {
@@ -195,7 +242,7 @@ impl Controller {
                 let (reply, _, then_reset) = self.handle(id, &msg);
                 match reply {
                     Some(reply) => self.answer(reply, then_reset).await,
-                    None => return id,
+                    None => return (msg.link, id),
                 }
             }
         }
@@ -247,10 +294,10 @@ impl Controller {
     /// Loads and runs the payload until it traps or must stop. `pending`
     /// is the start request to answer once the load succeeded or failed.
     #[cfg(feature = "wasm")]
-    async fn running(&mut self, pending: Option<u8>) {
+    async fn running(&mut self, pending: Option<(LinkId, u8)>) {
         let answer = |bus: &Bus, result: Result<(), HandlerError>| {
-            if let Some(id) = pending {
-                bus.reply(Reply { id, result: result.map(|()| Vec::new()) });
+            if let Some((link, id)) = pending {
+                bus.reply(Reply { link, id, result: result.map(|()| Vec::new()) });
             }
         };
         let before = self.svc.status();
@@ -329,7 +376,7 @@ impl Controller {
                     Kind::Request { id } => {
                         let (reply, stop, then_reset) = self.handle(id, &msg, Some(&mut *payload));
                         // A start while running is answered by dispatch.
-                        let reply = reply.unwrap_or(Reply { id, result: Ok(Vec::new()) });
+                        let reply = reply.unwrap_or(Reply { link: msg.link, id, result: Ok(Vec::new()) });
                         self.answer(reply, then_reset).await;
                         if stop {
                             self.bus.log(format_args!("payload stopped"));

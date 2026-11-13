@@ -21,10 +21,30 @@
 //! The rest of the API mirrors firmware-rp's for the payload runner
 //! ([`Service::started`], [`Service::trapped`], [`Service::start_failed`],
 //! [`Service::run_ended`], [`Service::route_idle`],
-//! [`Service::store_mut`]) and the self-test ([`Service::set_link_ready`]).
+//! [`Service::store_mut`]) and the self-test ([`Service::set_link_ready`]),
+//! and adds the Zenoh client's two needs: [`Service::zenoh_endpoint`], the
+//! configured endpoint, and [`Service::accept_control`], which persists the
+//! counter of a signed control request the Zenoh gate admitted
+//! (`crate::zenoh_mgmt::Admission::Control`) before it is dispatched.
 //!
 //! # Dispatch
 //!
+//! 0. `sys/zenoh/endpoint` ([`crate::config::ZENOH_ENDPOINT`]) is the
+//!    board configuration's ([`crate::config`]): an empty body reads the
+//!    endpoint (its string, `tcp/<ipv4>:<port>`; `NotFound` when none is
+//!    configured); a body sets it: `InvalidRequest` unless it is a valid
+//!    endpoint ([`crate::config::Endpoint::parse`]: the body is malformed,
+//!    the transport's code for that, as for any other undecodable request
+//!    body), else it is persisted and the reply is `Ok` and empty (the
+//!    same endpoint again writes nothing), `Internal` if the flash failed
+//!    (the previous endpoint stays, on flash and here). When the
+//!    configuration region could not be read at boot both are
+//!    `Unavailable`, so an unreadable record is never overwritten blind.
+//!    It needs no trust: the serial links carry the authority of someone
+//!    holding the board, as for `sys/trust/claim`; over Zenoh it is refused
+//!    before the service sees it (`crate::zenoh_mgmt`). The shell reads the
+//!    endpoint with [`Service::zenoh_endpoint`] (a set is also a
+//!    [`Note::ZenohEndpoint`]).
 //! 1. `sys/fw/*` goes to the A/B updater only ([`fw::Updater`]:
 //!    `middleware::fw_ota`'s `FwService::<RtImage>` over
 //!    [`crate::ab::RtPlatform`] on the raw flash), never to the payload
@@ -64,7 +84,9 @@
 //!   per payload slot ([`crate::layout::BlockErase`]), images capped at
 //!   [`crate::layout::PAYLOAD_CAPACITY`] and [`Facts::max_image`];
 //! * the A/B updater: the raw flash ([`flash::RtFlash::raw`]) for the
-//!   update record and the inactive firmware slot.
+//!   update record and the inactive firmware slot;
+//! * the board configuration: the raw flash at the configuration region
+//!   ([`crate::config::load`], [`crate::config::save`]).
 //!
 //! Every erase is whole blocks of its own region.
 //!
@@ -105,9 +127,13 @@ use middleware::loader::{Caps, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
+use middleware::loader::trust::ControlCounter;
+
 use crate::ab::Handoff;
+use crate::ab::io::IoError;
 use crate::ab::platform::ResetRequest;
-use crate::layout::{FlashMap, LayoutError, PAYLOAD_CAPACITY, SECTOR};
+use crate::config::{self, Config, Endpoint, ZENOH_ENDPOINT};
+use crate::layout::{FlashMap, LayoutError, PAYLOAD_CAPACITY, Region, SECTOR};
 use flash::RtFlash;
 use fw::{FwBootError, FwContext, SelfTest, Updater};
 
@@ -155,6 +181,10 @@ pub struct Boot<E> {
     /// This boot as the A/B updater saw it, or why it did not start
     /// (`sys/fw/*` is then `Unavailable`).
     pub fw: Result<BootInfo, FwBootError<E>>,
+    /// The Zenoh endpoint from the configuration record (`None`: not
+    /// configured), or why the record could not be read
+    /// (`sys/zenoh/endpoint` is then `Unavailable`).
+    pub zenoh: Result<Option<Endpoint>, IoError<E>>,
 }
 
 /// Why [`Service::open`] refused.
@@ -209,6 +239,8 @@ pub enum Note {
     Reset(ResetRequest),
     /// The trial firmware was confirmed.
     Confirmed,
+    /// A new Zenoh endpoint was saved (`sys/zenoh/endpoint`).
+    ZenohEndpoint(Endpoint),
 }
 
 impl fmt::Display for Note {
@@ -237,6 +269,7 @@ impl fmt::Display for Note {
             }
             Note::Reset(ResetRequest::Normal) => f.write_str("firmware: resetting"),
             Note::Confirmed => f.write_str("firmware: trial confirmed"),
+            Note::ZenohEndpoint(e) => write!(f, "zenoh: endpoint {e} saved"),
         }
     }
 }
@@ -294,6 +327,11 @@ pub struct Service<F> {
     link_ready: bool,
     /// The served keys of the payload run that ended.
     served: ServedKeys,
+    /// The configuration region.
+    config_region: Region,
+    /// The configuration record on flash; `None` when it could not be read
+    /// at boot.
+    config: Option<config::Stored>,
 }
 
 impl<F: NorFlash> Service<F> {
@@ -323,6 +361,10 @@ impl<F: NorFlash> Service<F> {
             None => (None, None),
         };
         let (fw, fw_boot) = Updater::boot(flash.raw(), map.ab(), handoff);
+        let (config, zenoh) = match config::load(flash.raw(), map.config) {
+            Ok(c) => (Some(c), Ok(c.endpoint())),
+            Err(e) => (None, Err(e)),
+        };
         let limit = facts.max_image.min(PAYLOAD_CAPACITY);
         let mut store = PayloadStore::new(flash, map.payload.offset, map.payload.size, limit)
             .map_err(OpenError::Store)?;
@@ -355,6 +397,8 @@ impl<F: NorFlash> Service<F> {
             fw,
             link_ready: false,
             served: ServedKeys::new(),
+            config_region: map.config,
+            config,
         };
         Ok((
             svc,
@@ -362,6 +406,7 @@ impl<F: NorFlash> Service<F> {
                 installed,
                 trust: persisted,
                 fw: fw_boot,
+                zenoh,
             },
         ))
     }
@@ -415,6 +460,44 @@ impl<F: NorFlash> Service<F> {
         &self.fw
     }
 
+    /// The configured Zenoh endpoint (`sys/zenoh/endpoint`), the one the
+    /// Zenoh client connects to; `None` when none is configured or the
+    /// configuration record could not be read.
+    pub fn zenoh_endpoint(&self) -> Option<Endpoint> {
+        self.config.and_then(|c| c.endpoint())
+    }
+
+    /// Persists `counter`, the counter of a signed control request the
+    /// Zenoh gate admitted (`crate::zenoh_mgmt::Admission::Control`), with
+    /// the trust record (the trust state unchanged), then adopts it, so a
+    /// replay of the same request is refused from now on, across reboots.
+    /// Call it before dispatching the request; on an error do not dispatch
+    /// it (reply `Internal`).
+    ///
+    /// `Rollback` for a counter not above the last accepted one (nothing
+    /// is written); `Flash` when the trust record is unavailable or its
+    /// save failed (the state then keeps the record on flash).
+    pub fn accept_control(&mut self, counter: ControlCounter) -> Result<(), StoreError> {
+        if counter <= self.state.control() {
+            return Err(StoreError::Rollback);
+        }
+        let ts = self.trust.as_mut().ok_or(StoreError::Flash)?;
+        let next = Persisted {
+            trust: self.state.trust(),
+            control: counter,
+        };
+        match ts.save(self.store.flash(), &next) {
+            Ok(()) => {
+                self.state = self.state.with_control(counter);
+                Ok(())
+            }
+            Err(e) => {
+                self.state = self.adopt_persisted(self.state);
+                Err(e)
+            }
+        }
+    }
+
     /// Records whether the protocol link is up (an input of the
     /// [`SelfTest`]).
     pub fn set_link_ready(&mut self, ready: bool) {
@@ -449,6 +532,9 @@ impl<F: NorFlash> Service<F> {
 
     /// Handles one request; a reply body is written into `out`.
     pub fn handle(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
+        if key == ZENOH_ENDPOINT {
+            return self.handle_zenoh_endpoint(body, out);
+        }
         if fw::is_fw_key(key) {
             return self.handle_fw(key, body, out);
         }
@@ -486,6 +572,41 @@ impl<F: NorFlash> Service<F> {
             reset: None,
             release_watchdog: false,
         }
+    }
+
+    /// A `sys/zenoh/endpoint` request: read (empty body) or set the
+    /// endpoint. See the module docs.
+    fn handle_zenoh_endpoint(&mut self, body: &[u8], out: &mut [u8]) -> Handled {
+        let Some(current) = self.config else {
+            return Handled::now(Err(HandlerError::Unavailable));
+        };
+        if body.is_empty() {
+            let reply = match current.endpoint() {
+                Some(e) => e.write_to(out).ok_or(HandlerError::BufferTooSmall),
+                None => Err(HandlerError::NotFound),
+            };
+            return Handled::now(reply);
+        }
+        let endpoint = match Endpoint::parse_bytes(body) {
+            Ok(e) => e,
+            Err(_) => return Handled::now(Err(HandlerError::InvalidRequest)),
+        };
+        if current.endpoint() == Some(endpoint) {
+            return Handled::now(Ok(0));
+        }
+        let next = Config { endpoint };
+        let mut h = Handled::now(Ok(0));
+        match config::save(self.store.flash().raw(), self.config_region, &current, next) {
+            Ok(saved) => {
+                self.config = Some(saved);
+                let _ = h.notes.push(Note::ZenohEndpoint(endpoint));
+            }
+            Err(_) => {
+                h.reply = Reply::Now(Err(HandlerError::Internal));
+                let _ = h.notes.push(Note::Storage(StoreError::Flash));
+            }
+        }
+        h
     }
 
     /// A `sys/fw/*` request, to the A/B updater only.

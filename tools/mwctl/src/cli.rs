@@ -68,6 +68,9 @@ COMMANDS:
         --key <KEYFILE>            sign the commit (a claimed device requires it)
         --version <MAJOR.MINOR>    expected image version (checked against its IMAGE_DEF)
         --no-reboot                stop after the commit (then fw reboot, fw confirm)
+    request <KEY> [TEXT]       Send one request (body TEXT, UTF-8, or empty) and print the
+                               reply as text, or hex if it is not text (e.g.
+                               sys/link/sub app/**, sys/zenoh/endpoint tcp/192.168.1.10:7447)
     fw reboot                  RP2350: reboot into the committed image on trial
     fw confirm                 RP2350: keep the image on trial (explicit buy)
     fw abort                   RP2350: abandon a transfer or a committed update, or
@@ -181,6 +184,14 @@ pub enum Cmd {
     },
     /// `fw reboot`.
     FwReboot,
+    /// `request <KEY> [TEXT]`: one request with a UTF-8 body (empty if
+    /// none); the reply is printed as text, or hex if it is not text.
+    Request {
+        /// The key.
+        key: String,
+        /// The body.
+        body: String,
+    },
     /// `fw confirm`.
     FwConfirm,
     /// `fw abort`.
@@ -375,6 +386,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             reboot: !no_reboot,
         },
         "fw reboot" => Cmd::FwReboot,
+        "request" => Cmd::Request {
+            key: pos.next().ok_or("request needs a key")?,
+            body: pos.next().unwrap_or_default(),
+        },
         "fw confirm" => Cmd::FwConfirm,
         "fw abort" => Cmd::FwAbort,
         other => return Err(format!("unknown command '{other}'")),
@@ -410,6 +425,19 @@ mod tests {
             Ok(Parsed::Run(c)) => c,
             other => panic!("{s}: {other:?}"),
         }
+    }
+
+    #[test]
+    fn request_takes_a_key_and_an_optional_text_body() {
+        assert_eq!(
+            run("--port p request sys/zenoh/endpoint tcp/192.168.1.10:7447").cmd,
+            Cmd::Request { key: "sys/zenoh/endpoint".into(), body: "tcp/192.168.1.10:7447".into() }
+        );
+        assert_eq!(
+            run("--port p request sys/info").cmd,
+            Cmd::Request { key: "sys/info".into(), body: String::new() }
+        );
+        assert!(p("--port p request").is_err());
     }
 
     #[test]

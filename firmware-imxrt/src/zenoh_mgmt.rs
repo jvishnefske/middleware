@@ -169,6 +169,7 @@ mod tests {
     use crate::layout::{FlashMap, RT1050_EVKB};
     use crate::service::{Facts as SvcFacts, Reply, Service};
     use ed25519_dalek::{Signer, SigningKey};
+    use esp_base::store::StoreError;
     use middleware::crc::Crc32;
     use middleware::fw_ota::Slot;
     use middleware::loader::PayloadStatus;
@@ -254,15 +255,25 @@ mod tests {
         }
     }
 
-    /// A request over Zenoh: the gate first, the service only if admitted
-    /// (a verified control request is dispatched with an empty body, as
-    /// the shell does after persisting its counter).
+    /// A request over Zenoh, as the shell handles it: the gate first, the
+    /// service only if admitted (a verified control request has its
+    /// counter persisted by `Service::accept_control`, then is dispatched
+    /// with an empty body; `Internal` if the counter could not be saved).
     fn zenoh(s: &mut Svc, key: Key<'_>, body: &[u8]) -> Result<StdVec<u8>, HandlerError> {
         match admit(&facts(s.state(), MAC), key, body) {
             Err(r) => Err(r.error()),
             Ok(Admission::Dispatch) => serial(s, key, body),
-            Ok(Admission::Control { .. }) => serial(s, key, &[]),
+            Ok(Admission::Control { counter }) => match s.accept_control(counter) {
+                Ok(()) => serial(s, key, &[]),
+                Err(_) => Err(HandlerError::Internal),
+            },
         }
+    }
+
+    /// The service reopened on a copy of its flash (a reboot).
+    fn reboot(s: &mut Svc) -> Svc {
+        let flash = s.store_mut().flash().raw().clone();
+        Service::open(flash, &MAP, FACTS, FACTORY).unwrap().0
     }
 
     /// What a refused request must not change: the dispatcher state, the
@@ -514,5 +525,111 @@ mod tests {
                 let _ = admit(&facts(State::boot(false), MAC), key, body);
             }
         }
+    }
+
+    #[test]
+    fn zn4_the_zenoh_endpoint_is_never_read_or_set_over_zenoh() {
+        use crate::config::{Endpoint, ZENOH_ENDPOINT};
+        let set = b"tcp/10.0.0.9:7447";
+        // Unclaimed: refused like every key but the identity queries.
+        let s = open();
+        for body in [&[][..], set] {
+            assert_eq!(
+                admit(&facts(s.state(), MAC), ZENOH_ENDPOINT, body),
+                Err(Refusal::Unclaimed)
+            );
+        }
+        // Claimed: never over Zenoh, signed or not.
+        let mut s = claimed_running();
+        assert_eq!(
+            serial(&mut s, ZENOH_ENDPOINT, b"tcp/10.0.0.1:7447"),
+            Ok(StdVec::new())
+        );
+        let before = snapshot(&mut s);
+        let signed = control(1, ControlOp::Stop, &MAC, 1);
+        for body in [&[][..], set, &signed] {
+            assert_eq!(
+                admit(&facts(s.state(), MAC), ZENOH_ENDPOINT, body),
+                Err(Refusal::NotOverZenoh)
+            );
+            assert_eq!(
+                zenoh(&mut s, ZENOH_ENDPOINT, body),
+                Err(HandlerError::Denied)
+            );
+            assert_eq!(snapshot(&mut s), before);
+        }
+        let mine = Endpoint::parse("tcp/10.0.0.1:7447").ok();
+        assert_eq!(s.zenoh_endpoint(), mine);
+        assert_eq!(reboot(&mut s).zenoh_endpoint(), mine);
+        // Its per-node key is a management key like any other: the gate,
+        // not the key filter, is what refuses it.
+        let expr = node_key_buf(NODE, ZENOH_ENDPOINT).unwrap();
+        assert_eq!(management_key(&expr, NODE), Some(ZENOH_ENDPOINT));
+    }
+
+    #[test]
+    fn zn4_an_accepted_control_counter_refuses_its_replay_across_reboots() {
+        let mut s = claimed_running();
+        let trust = s.state().trust();
+        let stop = control(1, ControlOp::Stop, &MAC, 7);
+        let counter = match admit(&facts(s.state(), MAC), keys::STOP, &stop) {
+            Ok(Admission::Control { counter }) => counter,
+            other => panic!("not admitted: {other:?}"),
+        };
+        assert_eq!(counter, ControlCounter(7));
+        assert_eq!(s.accept_control(counter), Ok(()));
+        assert_eq!(s.state().control(), ControlCounter(7));
+        assert_eq!(s.state().trust(), trust, "the trust state is unchanged");
+        assert_eq!(serial(&mut s, keys::STOP, &[]), Ok(StdVec::new()));
+        assert_eq!(s.status(), PayloadStatus::Stopped);
+        // The same request again is a replay, at the gate and at the
+        // service (a counter not above the last writes nothing).
+        assert_eq!(
+            admit(&facts(s.state(), MAC), keys::STOP, &stop),
+            Err(Refusal::ControlRefused)
+        );
+        let ops = s.store_mut().flash().raw().log.len();
+        for c in [7, 6, 0] {
+            assert_eq!(
+                s.accept_control(ControlCounter(c)),
+                Err(StoreError::Rollback),
+                "{c}"
+            );
+        }
+        assert_eq!(s.store_mut().flash().raw().log.len(), ops);
+        // After a reboot the counter is still 7: the replay stays refused,
+        // the pinned key and min_version are kept.
+        let mut s = reboot(&mut s);
+        assert_eq!(s.state().control(), ControlCounter(7));
+        assert_eq!(s.state().trust(), trust);
+        assert_eq!(zenoh(&mut s, keys::STOP, &stop), Err(HandlerError::Denied));
+        // The next counter goes through the shell's path and persists.
+        let start = control(1, ControlOp::Start, &MAC, 8);
+        assert_eq!(zenoh(&mut s, keys::START, &start), Ok(StdVec::new()));
+        assert_eq!(s.state().control(), ControlCounter(8));
+        assert_eq!(
+            zenoh(&mut s, keys::START, &start),
+            Err(HandlerError::Denied)
+        );
+        let s = reboot(&mut s);
+        assert_eq!(s.state().control(), ControlCounter(8));
+    }
+
+    #[test]
+    fn zn4_accept_control_keeps_the_old_counter_when_its_save_is_cut() {
+        // A cut while saving the counter: Flash, and the state keeps the
+        // record on flash (the old counter), before and after a reboot.
+        let mut s = claimed_running();
+        s.store_mut().flash().raw().cut_at(0);
+        assert_eq!(s.accept_control(ControlCounter(3)), Err(StoreError::Flash));
+        s.store_mut().flash().raw().restore();
+        assert_eq!(s.state().control(), ControlCounter(0));
+        let mut s = reboot(&mut s);
+        assert_eq!(s.state().control(), ControlCounter(0));
+        // The request whose counter could not be saved was not dispatched
+        // by the shell, so it can be sent again.
+        let stop = control(1, ControlOp::Stop, &MAC, 3);
+        assert_eq!(zenoh(&mut s, keys::STOP, &stop), Ok(StdVec::new()));
+        assert_eq!(s.state().control(), ControlCounter(3));
     }
 }

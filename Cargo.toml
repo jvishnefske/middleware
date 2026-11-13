@@ -100,6 +100,10 @@ zenoh-buffers = "=1.10.1"
 # loopback), then called with request_with and Gather over Zenoh and the
 # gRPC mesh client. `test = true`: `cargo test --all-features` runs it (K16).
 [[example]]
+name = "zenoh_board"
+required-features = ["zenoh"]
+
+[[example]]
 name = "discover_and_call"
 required-features = ["zenoh", "grpc", "istio", "dns-sd", "mdns"]
 test = true

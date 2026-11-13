@@ -1,6 +1,6 @@
 //! The HyperFlash map of the MIMXRT1050-EVKB: where the bootloader, the
-//! update record, the two firmware slots, the trust record and the payload
-//! store live, in whole 256 KiB erase blocks.
+//! update record, the two firmware slots, the trust record, the payload
+//! store and the board configuration live, in whole 256 KiB erase blocks.
 //!
 //! Offsets are from the start of the HyperFlash (FlexSPI AHB address
 //! `0x6000_0000`), the `embedded-storage` offsets of the HyperFlash driver.
@@ -15,7 +15,8 @@
 //! | `0x040000`  | 512 KiB | 2      | update record: two blocks written alternately (`crate::ab::record`) |
 //! | `0x0C0000`  | 512 KiB | 2      | trust record (`esp_base::trust_store`, through [`SectorPerBlock`]) |
 //! | `0x140000`  | 512 KiB | 2      | payload store (`esp_base::store`, through [`BlockErase`]; 124 KiB images) |
-//! | `0x1C0000`  | 2304 KiB| 9      | unused |
+//! | `0x1C0000`  | 512 KiB | 2      | board configuration: two blocks written alternately (`crate::config`) |
+//! | `0x240000`  | 1792 KiB| 7      | unused |
 //! | `0x400000`  | 4 MiB   | 16     | firmware slot A: slot image header, then the SDRAM image |
 //! | `0x800000`  | 4 MiB   | 16     | firmware slot B |
 //! | `0xC00000`  | 52 MiB  | 208    | unused |
@@ -170,6 +171,9 @@ pub struct FlashMap {
     pub trust: Region,
     /// The payload store (two blocks, one per payload slot).
     pub payload: Region,
+    /// The board configuration record (two blocks, written alternately:
+    /// [`crate::config`]).
+    pub config: Region,
 }
 
 /// Why a flash map is invalid.
@@ -183,7 +187,8 @@ pub enum LayoutError {
     Overlap,
     /// The boot region is not exactly block 0.
     BootNotBlockZero,
-    /// The update record or the trust record is not two blocks.
+    /// The update record, the trust record or the configuration record is
+    /// not two blocks.
     RecordSize,
     /// The slots differ in size, or are smaller than the image region they
     /// must fill or larger than the updater accepts.
@@ -194,12 +199,13 @@ pub enum LayoutError {
 
 impl FlashMap {
     /// Every region, in flash order for the shipped map.
-    pub const fn regions(&self) -> [Region; 6] {
+    pub const fn regions(&self) -> [Region; 7] {
         [
             self.boot,
             self.record,
             self.trust,
             self.payload,
+            self.config,
             self.slot_a,
             self.slot_b,
         ]
@@ -225,12 +231,12 @@ impl FlashMap {
 
     /// Checks the map: every region whole blocks, inside the flash and
     /// free of overlaps; block 0 for the boot header and bootloader; the
-    /// update and trust records two blocks each; the payload store two
+    /// update, trust and configuration records two blocks each; the payload store two
     /// blocks; two equal slots no larger than
     /// `middleware::fw_ota::MAX_IMAGE`.
     pub fn check(&self) -> Result<(), LayoutError> {
         let all = self.regions();
-        // Six regions: every pair is compared once.
+        // Seven regions: every pair is compared once.
         for (i, a) in all.iter().enumerate() {
             if !a.is_aligned() {
                 return Err(LayoutError::Unaligned);
@@ -245,7 +251,10 @@ impl FlashMap {
         if self.boot != Region::blocks(0, 1) {
             return Err(LayoutError::BootNotBlockZero);
         }
-        if self.record.block_count() != 2 || self.trust.block_count() != 2 {
+        if self.record.block_count() != 2
+            || self.trust.block_count() != 2
+            || self.config.block_count() != 2
+        {
             return Err(LayoutError::RecordSize);
         }
         if self.slot_a.size != self.slot_b.size || self.slot_a.size > middleware::fw_ota::MAX_IMAGE
@@ -267,6 +276,7 @@ pub const RT1050_EVKB: FlashMap = FlashMap {
     record: Region::blocks(1, 2),
     trust: Region::blocks(3, 2),
     payload: Region::blocks(5, 2),
+    config: Region::blocks(7, 2),
     slot_a: Region::blocks(16, 16),
     slot_b: Region::blocks(32, 16),
 };
@@ -289,11 +299,13 @@ mod tests {
         assert_eq!(m.record, Region::new(0x4_0000, 2 * BLOCK));
         assert_eq!(m.trust, Region::new(0xC_0000, 2 * BLOCK));
         assert_eq!(m.payload, Region::new(0x14_0000, 2 * BLOCK));
+        assert_eq!(m.config, Region::new(0x1C_0000, 2 * BLOCK));
+        assert_eq!(m.config.block_count(), 2, "written alternately");
         assert_eq!(m.slot_a, Region::new(0x40_0000, 0x40_0000));
         assert_eq!(m.slot_b, Region::new(0x80_0000, 0x40_0000));
         assert_eq!(m.ab().slot_size(), 4 * 1024 * 1024);
         assert_eq!(m.ab().slot_size(), middleware::fw_ota::MAX_IMAGE);
-        assert_eq!(m.unused(), (256 - 39) * BLOCK);
+        assert_eq!(m.unused(), (256 - 41) * BLOCK);
     }
 
     #[test]
@@ -352,7 +364,7 @@ mod tests {
         };
         assert_eq!(into_boot.check(), Err(LayoutError::Overlap));
         let late_boot = FlashMap {
-            boot: Region::blocks(7, 1),
+            boot: Region::blocks(10, 1),
             ..m
         };
         assert_eq!(late_boot.check(), Err(LayoutError::BootNotBlockZero));
@@ -367,6 +379,16 @@ mod tests {
             ..m
         };
         assert_eq!(trust.check(), Err(LayoutError::RecordSize));
+        let config = FlashMap {
+            config: Region::blocks(7, 1),
+            ..m
+        };
+        assert_eq!(config.check(), Err(LayoutError::RecordSize));
+        let config_over_payload = FlashMap {
+            config: Region::blocks(6, 2),
+            ..m
+        };
+        assert_eq!(config_over_payload.check(), Err(LayoutError::Overlap));
         let unequal = FlashMap {
             slot_b: Region::blocks(32, 8),
             ..m

@@ -29,6 +29,7 @@ mod bus;
 mod controller;
 #[cfg(feature = "wasm")]
 mod device;
+#[cfg(feature = "eth")] pub mod enet;
 #[cfg(feature = "wasm")]
 mod heap;
 #[cfg(feature = "wasm")]
@@ -36,6 +37,7 @@ mod i2c;
 mod link;
 mod reset;
 mod uart;
+#[cfg(feature = "usb")] pub mod usb;
 
 use core::fmt::Write as _;
 
@@ -69,11 +71,71 @@ pub const FIRMWARE: &str = env!("CARGO_PKG_VERSION");
 #[cfg(not(feature = "wasm"))]
 pub const FIRMWARE: &str = concat!(env!("CARGO_PKG_VERSION"), "+no-wasm");
 
-static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
+/// The bus, in SDRAM (`memory-app.x`: statics named `*_SDRAM`).
+static BUS_SDRAM: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
+
+#[cfg(feature = "eth")]
+mod zenoh;
+
+#[cfg(feature = "eth")]
+static NET: static_cell::StaticCell<embassy_net::StackResources<4>> = static_cell::StaticCell::new();
+
+#[cfg(feature = "eth")]
+#[embassy_executor::task]
+async fn net_task(mut runner: embassy_net::Runner<'static, enet::EnetDriver>) -> ! {
+    runner.run().await
+}
+
+#[cfg(feature = "eth")]
+#[embassy_executor::task]
+async fn enet_poll_task(poller: enet::EnetPoller) -> ! {
+    enet::poll_task(poller).await
+}
+
+#[cfg(feature = "eth")]
+#[embassy_executor::task]
+async fn zenoh_task(stack: embassy_net::Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
+    zenoh::run(stack, bus, uid).await
+}
+
+/// Brings up Ethernet (the KSZ8081 reset takes about 110 ms), the
+/// embassy-net stack with DHCP and the Zenoh session task.
+#[cfg(feature = "eth")]
+async fn start_eth(spawner: Spawner, bus: &'static Bus, uid: [u8; 8]) {
+    let mac = imxrt_base::enet::mac_from_uid(uid);
+    match enet::new(mac).await {
+        Ok((driver, poller)) => {
+            let seed = u64::from_be_bytes(uid) ^ embassy_time::Instant::now().as_ticks();
+            let (stack, runner) = embassy_net::new(
+                driver,
+                embassy_net::Config::dhcpv4(Default::default()),
+                NET.init(embassy_net::StackResources::new()),
+                seed,
+            );
+            spawner.spawn(net_task(runner).unwrap());
+            spawner.spawn(enet_poll_task(poller).unwrap());
+            spawner.spawn(zenoh_task(stack, bus, uid).unwrap());
+            bus.log(format_args!(
+                "eth: up, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+            ));
+        }
+        Err(e) => bus.log(format_args!("eth: not started ({e:?})")),
+    }
+}
+
+#[cfg(feature = "usb")]
+static USB_SERIAL: static_cell::StaticCell<Serial> = static_cell::StaticCell::new();
+
+#[cfg(feature = "usb")]
+#[embassy_executor::task]
+async fn usb_link_task(link: usb::UsbLink, bus: &'static Bus) {
+    link::serve(link, imxrt_base::links::LinkId::USB, bus).await
+}
 
 #[embassy_executor::task]
-async fn link_task(link: link::UartLink, bus: &'static Bus) {
-    link::serve(link, bus).await;
+async fn uart_task(link: link::UartLink, bus: &'static Bus) {
+    link::serve(link, imxrt_base::links::LinkId::UART, bus).await
 }
 
 /// The chip's unique id from OCOTP CFG0/CFG1 (OCOTP's clock gate, CCGR2
@@ -184,7 +246,7 @@ pub async fn run(spawner: Spawner) -> ! {
         cp.SCB.enable_icache();
         cp.SCB.enable_dcache(&mut cp.CPUID);
     }
-    let bus: &'static Bus = BUS.take();
+    let bus: &'static Bus = BUS_SDRAM.take();
     let uid = read_unique_id();
 
     let flash = match HyperFlash::new(p.FLEXSPI1) {
@@ -204,7 +266,17 @@ pub async fn run(spawner: Spawner) -> ! {
     };
 
     let (rx, tx) = uart::split(p.LPUART1);
-    spawner.spawn(link_task(link::new(rx, tx), bus).unwrap());
+    spawner.spawn(uart_task(link::new(rx, tx), bus).unwrap());
+    #[cfg(feature = "eth")]
+    {
+        zenoh::set_endpoint(svc.zenoh_endpoint());
+        start_eth(spawner, bus, uid).await;
+    }
+    #[cfg(feature = "usb")]
+    match usb::start(spawner, USB_SERIAL.init(Serial::new(uid)).as_str()) {
+        Ok(link) => spawner.spawn(usb_link_task(link, bus).unwrap()),
+        Err(e) => bus.log(format_args!("usb: not started ({e:?})")),
+    }
     log_boot(bus, uid, &boot, svc.capacity(), handoff);
     #[cfg(feature = "wasm")]
     {
@@ -224,5 +296,5 @@ pub async fn run(spawner: Spawner) -> ! {
         install_payload_hw(bus, pins);
         bus.log(format_args!("heap: {} B free after boot", heap::free()));
     }
-    Controller::new(svc, bus).run().await
+    Controller::new(svc, bus, imxrt_base::enet::mac_from_uid(uid)).run().await
 }

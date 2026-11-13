@@ -62,3 +62,5 @@ pub mod desc;
 pub mod ksz8081;
 pub mod mac;
 pub mod mdio;
+
+pub use mac::mac_from_uid;

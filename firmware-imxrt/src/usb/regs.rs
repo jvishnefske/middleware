@@ -171,6 +171,19 @@ impl PortSpeed {
             PortSpeed::Full | PortSpeed::Low => super::FS_BULK_MAX_PACKET,
         }
     }
+
+    /// The packet size a data endpoint described with `described` bytes
+    /// runs at this speed: as described at high speed, at most 64 below
+    /// (a host enumerating a high-speed configuration at full speed clamps
+    /// bulk endpoints to 64, as Linux does).
+    pub const fn data_max_packet(self, described: u16) -> u16 {
+        match self {
+            PortSpeed::High => described,
+            PortSpeed::Full | PortSpeed::Low => {
+                if described < super::FS_BULK_MAX_PACKET { described } else { super::FS_BULK_MAX_PACKET }
+            }
+        }
+    }
 }
 
 /// An endpoint's transfer type, as `ENDPTCTRLn`'s `RXT`/`TXT` encode it.
@@ -330,6 +343,9 @@ mod tests {
         assert_eq!(PortSpeed::from_portsc1(3 << 26), None);
         assert_eq!(PortSpeed::High.bulk_max_packet(), 512);
         assert_eq!(PortSpeed::Full.bulk_max_packet(), 64);
+        assert_eq!(PortSpeed::High.data_max_packet(512), 512);
+        assert_eq!(PortSpeed::Full.data_max_packet(512), 64);
+        assert_eq!(PortSpeed::Full.data_max_packet(16), 16);
     }
 
     #[test]

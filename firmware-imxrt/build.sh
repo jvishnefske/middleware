@@ -33,7 +33,7 @@ build_boot() {
 }
 
 build_app() {
-  cargo build --release -j 2 --target "$target" --features "${APP_FEATURES:-wasm}" --bin imxrt-base
+  cargo build --release -j 2 --target "$target" --features "${APP_FEATURES:-wasm,usb,eth}" --bin imxrt-base
   "$objcopy" -O binary "$out/imxrt-base" "$out/imxrt-base.bin"
   cargo run --quiet --release --features image-tool --bin imxrt-image -- \
     "$out/imxrt-base.bin" "$version" "$out/imxrt-base-$version.slot"
