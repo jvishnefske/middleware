@@ -6,8 +6,15 @@
 //! comes first, a frame from the host or an outbound publication, as
 //! esp-base's link does: requests and publications are copied into an
 //! [`Inbound`] for the controller, a request's reply comes back on the bus
-//! and goes out as the matching response, and publications go out as
-//! publish frames while the host is reading ([`rp_base::usb::Host`]).
+//! and goes out as the matching response, and publications (log lines,
+//! status, payload publishes and the discovery beacons) go out through the
+//! link's middleware `Publisher` as publish frames while the host is
+//! reading ([`rp_base::usb::Host`]).
+//!
+//! The task reads with `next_frame` rather than the link's `Subscriber` or
+//! `Responder`: requests and publications share the stream, and those
+//! traits each wait for one frame kind and drop the other when the link
+//! has no inbox (none here, to save its `.bss`, as esp-base's E23).
 //! Responses from the host are ignored (the device sends no requests).
 //!
 //! Sends are bounded by [`SEND_TIMEOUT`]: a CDC write blocks while no host
@@ -25,7 +32,7 @@ use embassy_usb::driver::EndpointError;
 use embedded_io_async::{ErrorKind, ErrorType, Write};
 use middleware::serial::frame::{Frame, MAX_RAW_FRAME};
 use middleware::serial::link::{Duplex, LinkError, SerialLink};
-use middleware::transport::HandlerError;
+use middleware::transport::{HandlerError, Publisher};
 use rp_base::usb::{Host, MAX_PACKET, needs_zlp};
 
 use super::bus::{Bus, Inbound, Kind};
@@ -115,6 +122,13 @@ async fn send(link: &mut UsbLink, frame: &Frame<'_>) -> bool {
     matches!(with_timeout(SEND_TIMEOUT, link.send(frame)).await, Ok(Ok(())))
 }
 
+/// Publishes through the link's `Publisher`; `false` when it timed out or
+/// failed. A cancelled publish leaves the rest of its frame for the next
+/// send, so the host never sees a torn frame.
+async fn publish(link: &mut UsbLink, key: middleware::Key<'_>, payload: &[u8]) -> bool {
+    matches!(with_timeout(SEND_TIMEOUT, Publisher::publish(link, key, payload)).await, Ok(Ok(())))
+}
+
 /// Runs the protocol on the CDC port forever.
 pub async fn serve(mut link: UsbLink, bus: &'static Bus) {
     let Some(mut outbound) = bus.subscribe() else {
@@ -151,7 +165,7 @@ pub async fn serve(mut link: UsbLink, bus: &'static Bus) {
                 if host.sends_publications()
                     && let Ok(key) = middleware::Key::new(&msg.key)
                 {
-                    let sent = send(&mut link, &Frame::Publish { key, payload: &msg.payload }).await;
+                    let sent = publish(&mut link, key, &msg.payload).await;
                     host = host.after_send(sent);
                 }
             }

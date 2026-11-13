@@ -351,3 +351,49 @@ fn m7_without_the_runtime_sys_info_reports_no_capability() {
     let info = DeviceInfo::decode(&out[..n]).unwrap();
     assert_eq!((info.node, info.caps), (Some(NODE), Caps::NONE));
 }
+
+/// V22 with the real interpreter: the pico-led phase server's key is
+/// announced (beside the node record) while it runs, from the live table
+/// `Payload::serves`, and withdrawn with a goodbye when it stops; a
+/// restart announces it again, an upload (which ends the run) withdraws it.
+#[test]
+fn v22_the_pico_led_phase_key_is_announced_while_it_runs_and_withdrawn_when_the_run_ends() {
+    use crate::beacons::tests::{Gateway, goodbye, up};
+    use crate::beacons::{Announcer, Identity, wanted};
+    use embassy_futures::block_on;
+
+    let mut f = flash();
+    let mut h = host(&mut f);
+    let (cmd, _) = phase_keys(NODE);
+    let id = Identity::new(&FACTS);
+    let (link, mut gw) = Gateway::link(NODE);
+    let mut a = Announcer::new(link);
+    // What the controller does after each step: the records for the
+    // running payload's served keys, or none.
+    let sync = |h: &Host<'_>, a: &mut Announcer<_>| {
+        let served = h.payload.as_ref().into_iter().flat_map(|p| p.serves());
+        block_on(a.sync(&wanted(&id, served))).expect("sent")
+    };
+
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [up("mw/node")]);
+    h.upload(&fixture("pico-led"));
+    assert_eq!(h.request(keys::START.as_str(), &[]).0, Ok(Vec::new()));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [up(&cmd)]);
+    assert_eq!(gw.kinds(), ["mw/node", cmd.as_str()]);
+
+    assert_eq!(h.request(keys::STOP.as_str(), &[]).0, Ok(Vec::new()));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [goodbye(&cmd)]);
+    assert_eq!(gw.kinds(), ["mw/node"]);
+
+    assert_eq!(h.request(keys::START.as_str(), &[]).0, Ok(Vec::new()));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [up(&cmd)]);
+    // An upload's begin stops the payload (the controller drops it).
+    h.payload = None;
+    h.upload(&fixture("pico-led"));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [goodbye(&cmd)]);
+}

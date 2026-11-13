@@ -13,6 +13,12 @@
 //!   (set by the USB stack's handler; an input of the firmware's
 //!   self-test).
 //!
+//! [`Uplink`] is the controller's handle on `outbound` as a middleware
+//! [`Publisher`]: the discovery announcer (`rp_base::beacons::Announcer`,
+//! `PubSubDiscovery` underneath) publishes its `disc/<kind>` beacons
+//! through it, and the link task writes them with the `SerialLink`'s own
+//! `Publisher`, like every other publication.
+//!
 //! This is esp-base's bus (`firmware/src/shell/bus.rs`) cut down to one
 //! port and no radio. The bus is created once at boot and shared as
 //! `&'static Bus` with the tasks, as embassy tasks require.
@@ -30,7 +36,7 @@ use middleware::key::MAX_KEY_LEN;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
 #[cfg(feature = "wasm")]
 use middleware::transport::RequestMeta;
-use middleware::transport::{HandlerError, SenderId};
+use middleware::transport::{HandlerError, Limits, Publisher, SenderId};
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
@@ -201,6 +207,24 @@ impl Bus {
     /// Publishes the payload status on `sys/payload/status`.
     pub fn status(&self, status: PayloadStatus) {
         let _ = self.publish(keys::STATUS, &[status as u8]);
+    }
+}
+
+/// The bus's outbound channel as a [`Publisher`]. Publishing never waits
+/// (the oldest queued message is dropped when the link is behind, as for
+/// every publication); a key or payload over the bus's bounds is
+/// [`TooLarge`].
+#[derive(Clone, Copy)]
+pub struct Uplink(pub &'static Bus);
+
+impl Publisher for Uplink {
+    type Error = TooLarge;
+
+    /// Any key, payloads up to `MAX_MESSAGE` bytes.
+    const LIMITS: Limits = Limits::new(MAX_KEY_LEN, MAX_MESSAGE);
+
+    async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), Self::Error> {
+        self.0.publish(key, payload)
     }
 }
 
