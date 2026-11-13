@@ -1268,7 +1268,7 @@ later phases implement the runner (MS6–MS10, with MS20–MS23), the manifests
   `tests::body_selects_gather_node_or_any`,
   `spec_declares_the_dependency_and_callers` *(mw-service examples)*.
 
-### Containers and the robot VM (nix, MS40–MS56)
+### Containers and the robot VM (nix, MS40–MS58)
 
 The top-level `flake.nix` builds every service binary listed in
 `nix/binaries.nix` as a static musl executable (crane, a pinned
@@ -1371,13 +1371,14 @@ the kernel and Envoy substituted from the native aarch64 cache).
   `checks.robot-pi-eval`, `checks.robot-pi-boots` (subtests "gateway
   waits for the board", "udev rule installed and valid"). *The board
   appearing and the gateway starting on it is a hardware step (MS56).*
-- [ ] MS52 `mw-pi-node` runs as the system user `mw-pi-node` with its own
+- [x] MS52 `mw-pi-node` runs as the system user `mw-pi-node` with its own
   state directory, `MW_ZENOH_ROUTER` on the robot Envoy, `MW_PORT` 50053
   (the gateway has 50052), hardening without `MemoryDenyWriteExecute` (a
   wasm runtime may compile code) and no device access unless
-  `supplementaryGroups` names a group. *Open: the module evaluates, but
-  the service joins the image and `checks.robot-pi-eval` only once
-  `pi-node/` is a workspace member; then the checks above cover it.*
+  `supplementaryGroups` names a group — `checks.robot-pi-eval`,
+  `checks.robot-pi-image` (the unit in the cross image) and
+  `checks.robot-pi-boots` (the node starts, reports its node id and state
+  directory, and retries the router).
 - [x] MS53 `packages.x86_64-linux.sd-image-robot-pi` (cross) and
   `packages.aarch64-linux.sd-image-robot-pi` (native) are one
   `mw-robot-pi.img.zst`, at most 600 MiB compressed and 2.5 GiB unpacked (475 MiB and 2097 MiB
@@ -1415,6 +1416,23 @@ the kernel and Envoy substituted from the native aarch64 cache).
   joins Wi-Fi from a dropped `wpa_supplicant.conf`, and plugging in a
   Pico with the RP base firmware creates `/dev/mw-pico` and starts
   `mw-gateway`. *Hardware procedure; not yet run.*
+- [x] MS57 The static musl service binaries get past their Zenoh
+  configuration at start: on the main thread of a static musl binary
+  `stacker` cannot measure the stack and the configuration parse failed
+  with "stack limit reached", so `mw-gateway` and `mw-pi-node` drive their
+  runtime on one spawned thread with an 8 MiB stack
+  (`mw_service::block_on_thread`, `MAIN_STACK_BYTES`) —
+  `stack::tests::ms57_the_future_runs_on_a_spawned_thread_and_returns_its_output`,
+  `ms57_the_zenoh_configuration_parses_on_that_thread`,
+  `ms57_a_panic_on_the_thread_reaches_the_caller` *(mw-service)*;
+  `checks.static-startup` (the x86_64 static `mw-gateway` and `mw-pi-node`
+  started against a loopback router report no configuration error).
+- [x] MS58 The Pi image does not wait for `network-online.target`
+  (`systemd.network.wait-online.enable = false`): an unprovisioned Pi
+  never comes online, and the wait failed a unit on every boot; Envoy
+  retries its upstream connections itself — `checks.robot-pi-eval`,
+  `checks.robot-pi-boots` (subtest "services up without a Pico, nothing
+  failed").
 
 ### Robots and MCU gateway (RG…)
 

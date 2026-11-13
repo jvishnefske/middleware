@@ -431,8 +431,16 @@ async fn rg25_an_updater_uploads_a_signed_payload_and_others_are_denied() {
         .iter()
         .position(|k| *k == "sys/loader/begin")
         .expect("begin");
+    // The gateway's own read-only polls (its 30 s recheck of the bound
+    // device) may land anywhere in the run; every other key must be the
+    // upload's, in order.
+    let mutating: Vec<&str> = keys[i..]
+        .iter()
+        .copied()
+        .filter(|k| !matches!(*k, "sys/info" | "sys/trust/info"))
+        .collect();
     assert_eq!(
-        &keys[i..],
+        mutating,
         [
             "sys/loader/begin",
             "sys/loader/chunk",

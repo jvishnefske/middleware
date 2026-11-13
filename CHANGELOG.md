@@ -25,6 +25,11 @@
 - mw-pi-node starts its gateway half as `mw-gateway` does since the update gate (RG20–RG27): `mw_gateway::start_with_store` with `GatewayConfig::bridge_with_floor` and the persisted control counter floor; `MW_GATEWAY_STATE` defaults to `<MW_PI_NODE_STATE>/gateway`. `mw_pi_node::start` takes `DeviceParts` and `GatewayParts`; new `control_floor`, `wall_clock_ms`, `config::gateway_state_dir`. Updates through the cluster need an updater principal and signed commits and start/stop; the node is claimed over its local link.
 - README: "Linux payload host (Raspberry Pi)". design.md: "Linux payload host (`pi-node/`, PN…)", PN1–PN10 checked, PN11 (hardware run), PN12 (Linux peripherals) and PN13 (cluster requests on served keys through the gateway) open.
 
+### 0.6: static binaries start (MS57, MS58)
+- `mw-gateway` and `mw-pi-node` exited at start as static musl binaries: the Zenoh configuration parse (pest, through json5) refused to run on the main thread, whose stack `stacker` cannot measure there ("stack limit reached"). New `mw_service::block_on_thread` runs a binary's top-level future on one spawned thread with an 8 MiB stack; both mains use it. `checks.static-startup` starts the static binaries against a loopback router. `mw-robot` was unaffected (its session opens on a runtime worker thread).
+- The Pi image no longer waits for `network-online.target`; an unprovisioned Pi never gets there and the wait failed on every boot.
+- The flake's build source keeps esp-base's library (`firmware/Cargo.toml`, `build.rs`, `src`), which `mw-pi-node` depends on by path; without it every workspace binary failed to build in nix.
+
 ### 0.6: Raspberry Pi robot image (MS49–MS56)
 - `nix/rust.nix` takes a `target`: every `nix/binaries.nix` entry also builds as a static `aarch64-unknown-linux-musl` executable, cross compiled from x86_64 (`packages.x86_64-linux.<name>-aarch64`) or native (`packages.aarch64-linux.<name>`). The x86_64 derivations are unchanged.
 - `nix/binaries.nix` lists `mw-robot`, `mw-gateway` and `mw-pi-node`; the flake skips entries whose directory does not exist yet (`pi-node/`). With `mw-robot` listed, the robot VM and `checks.robot-boots` run the real robot app instead of `hello`, and `packages.image-mw-robot` and `image-mw-gateway` appear.
