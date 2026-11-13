@@ -4,7 +4,7 @@
 //!
 //! | ABI call | RP base |
 //! |----------|---------|
-//! | `log`, `publish` | `sys/log` and publications on the bus (`sys/...` keys refused) |
+//! | `log`, `publish` | `sys/log` and publications on the bus (`sys/...` and `disc/...` keys refused, [`rp_base::beacons::payload_may_publish`]) |
 //! | `now_ms`, `now_us` | embassy-time (1 MHz timer) |
 //! | `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | `Flex` pins, [`rp_base::pins`] rules; `Busy` on a pin a bus holds |
 //! | `timer_start`, `timer_stop` | four software timers (`esp_base::periph::timers`) fired by the controller loop as `Timer` events |
@@ -38,11 +38,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 use esp_base::periph::timers::Timers;
 use esp_base::periph::{dma_done_event, timer_event};
-use middleware::loader::is_system_key;
 use middleware::{Key, SenderId};
 use middleware::wasm_abi::events::{DmaChannel, Event, EventKind, EventQueue, MAX_EVENTS};
 use middleware::wasm_abi::periph::{I2cConfig, SpiConfig, TimerSpec};
 use middleware::wasm_abi::{AbiError, Pull};
+use rp_base::beacons::payload_may_publish;
 use rp_base::chip::Profile;
 use rp_base::periph::claims::{Claims, Owner, pins};
 use rp_base::periph::func::SpiRoute;
@@ -239,7 +239,7 @@ impl wasm_host::Device for RpDevice {
     }
 
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
-        if is_system_key(key) {
+        if !payload_may_publish(key) {
             return Err(AbiError::InvalidKey);
         }
         self.bus.publish(key, data).map_err(|_| AbiError::Transport)

@@ -28,8 +28,9 @@
 //!    reset until a payload opens them. The SPI and I2C register drivers
 //!    ([`pads`], [`spi`], [`i2c`]) are built on the RP2040 too, which runs
 //!    no payloads, so their register code is checked for both chips.
-//! 6. The [`controller`] runs on the main task and starts the stored
-//!    payload if one is valid (and the runtime is built in).
+//! 6. The [`controller`] runs on the main task, announces the device on
+//!    the link (`disc/mw/node`, [`rp_base::beacons`]) and starts the
+//!    stored payload if one is valid (and the runtime is built in).
 //!
 //! Ownership is a tree: the main task owns the controller (service, flash,
 //! payload); the link task owns the CDC class; they meet only through the
@@ -63,6 +64,7 @@ use embassy_usb::{Builder, Handler, UsbDevice};
 use esp_base::trust_store::Persisted;
 use middleware::loader::trust::TrustState;
 use middleware::serial::link::{Duplex, SerialLink};
+use rp_base::beacons::Identity;
 use rp_base::node::{Serial, node_id};
 use rp_base::service::{Facts, Service};
 use rp_base::usb::{MANUFACTURER, MAX_PACKET, PRODUCT, VID, pid};
@@ -293,5 +295,6 @@ pub async fn run(spawner: Spawner) -> ! {
         bus.log(format_args!("heap: {} B free after boot", heap::free()));
     }
 
-    Controller::new(svc, bus).run().await
+    let mut controller = Controller::new(svc, bus, Identity::new(&facts));
+    controller.run().await
 }
