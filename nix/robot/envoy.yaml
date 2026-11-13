@@ -12,6 +12,10 @@
 # Client identity: the robot's X509-SVID, written by spiffe-helper and copied
 # into @certDir@ by mw-envoy-certs.service (file-based SDS, reloaded when a
 # file is moved into @certDir@).
+# node: Envoy 1.37 (the Pi's envoy-bin) refuses file-based SDS without a
+# node id and cluster; 1.36 ignores them for a static config.
+node: { id: mw-robot, cluster: mw-robot }
+
 admin:
   address:
     socket_address: { address: 127.0.0.1, port_value: @adminPort@ }
@@ -57,6 +61,8 @@ static_resources:
   clusters:
     - name: gateway
       type: STRICT_DNS
+      # The lab and its gateway are IPv4; Envoy 1.37 prefers AAAA records.
+      dns_lookup_family: V4_PREFERRED
       connect_timeout: 5s
       load_assignment:
         cluster_name: gateway
@@ -91,6 +97,7 @@ static_resources:
 
     - name: zenoh
       type: STRICT_DNS
+      dns_lookup_family: V4_PREFERRED
       connect_timeout: 5s
       load_assignment:
         cluster_name: zenoh

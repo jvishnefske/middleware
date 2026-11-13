@@ -17,10 +17,16 @@
   outputs = { self, nixpkgs, crane, rust-overlay }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
+      armSystem = "aarch64-linux";
+      pkgsFor = s: import nixpkgs {
+        system = s;
         overlays = [ rust-overlay.overlays.default ];
       };
+      pkgs = pkgsFor system;
+      # The native aarch64 package set: built natively on aarch64 (CI), and
+      # on x86_64 only a source of cache.nixos.org substitutes (the Pi
+      # kernel and Envoy, nix/robot-pi-sd.nix).
+      pkgsArm = pkgsFor armSystem;
       inherit (pkgs) lib;
 
       # The cargo workspace without the parts that are not in it (the
@@ -46,9 +52,29 @@
         ]);
       };
 
+      # nix/binaries.nix entries whose crate directory exists (mw-pi-node
+      # joins once pi-node/ lands).
+      binaryList = lib.filterAttrs
+        (_: b: builtins.pathExists (./. + "/${b.dir}/Cargo.toml"))
+        (import ./nix/binaries.nix);
+
       rust = import ./nix/rust.nix {
         inherit pkgs lib crane src;
-        binaries = import ./nix/binaries.nix;
+        binaries = binaryList;
+      };
+      # The same binaries for aarch64 (design.md MS49): cross compiled on
+      # x86_64, native on aarch64.
+      armTarget = "aarch64-unknown-linux-musl";
+      rustArmCross = import ./nix/rust.nix {
+        inherit pkgs lib crane src;
+        binaries = binaryList;
+        target = armTarget;
+      };
+      rustArmNative = import ./nix/rust.nix {
+        pkgs = pkgsArm;
+        inherit lib crane src;
+        binaries = binaryList;
+        target = armTarget;
       };
 
       # Image tag and labels: the commit for a clean tree, `dev` otherwise.
@@ -63,9 +89,8 @@
       imagePackages = lib.mapAttrs' (name: exe:
         lib.nameValuePair "image-${name}" (images.mkImage name exe)) bins;
 
-      # The robot app: agent E's mw-robot once nix/binaries.nix lists it,
-      # the `hello` placeholder until then.
-      robotPackage = rust.binaries.mw-robot or rust.binaries.hello;
+      # The robot app (nix/binaries.nix lists mw-robot).
+      robotPackage = rust.binaries.mw-robot;
       labMac = "52:54:00:66:00:21";
       labAddress = "192.168.66.21/24";
 
@@ -74,6 +99,31 @@
         modules = [ (import ./nix/robot-vm.nix { inherit robotPackage labMac labAddress; }) ];
       };
       vm = robotVm.config.virtualisation.vmVariant.system.build.vm;
+
+      # The Pi robot (nix/robot-pi.nix on nix/robot-pi-sd.nix): `native`
+      # evaluates for an aarch64 build machine, `cross` for x86_64.
+      piPackages = bs: {
+        robotPackage = bs.mw-robot;
+        gatewayPackage = bs.mw-gateway;
+        piNodePackage = bs.mw-pi-node or null;
+      };
+      robotPi = { native }: nixpkgs.lib.nixosSystem {
+        modules = [
+          (import ./nix/robot-pi.nix
+            (piPackages (if native then rustArmNative.binaries else rustArmCross.binaries)))
+          (import ./nix/robot-pi-sd.nix (if native then { } else {
+            buildPlatform = system;
+            nativePkgs = pkgsArm;
+          }))
+        ];
+      };
+      robotPiNative = robotPi { native = true; };
+      robotPiCross = robotPi { native = false; };
+      sdImageOf = c: c.config.system.build.sdImage;
+
+      # The services the Pi must have (checks.robot-pi-eval, robot-pi-image).
+      piServices = [ "mw-robot" "mw-envoy" "spire-agent" "spiffe-helper" "mw-gateway" "mw-provision" "mw-net-config" "mw-wifi" "sshd" ]
+        ++ lib.optional (binaryList ? mw-pi-node) "mw-pi-node";
 
       launcher = pkgs.replaceVarsWith {
         name = "robot-vm";
@@ -107,14 +157,23 @@
       # Every image is a static, non-root, shell-less docker archive.
       imageChecks = lib.mapAttrs' (name: image:
         lib.nameValuePair "${name}-contents"
-          (pkgs.callPackage ./nix/tests/image-contents.nix { inherit image name; }))
+          (pkgs.callPackage ./nix/tests/image-contents.nix {
+            inherit image;
+            name = lib.removePrefix "image-" name;
+          }))
         imagePackages;
     in
     {
-      packages.${system} = bins // imagePackages // {
+      packages.${system} = bins // imagePackages
+        // lib.mapAttrs' (n: p: lib.nameValuePair "${n}-aarch64" p) rustArmCross.binaries
+        // {
         robot-vm = launcher;
         inherit e2e;
         default = rust.binaries.hello;
+        sd-image-robot-pi = sdImageOf robotPiCross;
+      };
+      packages.${armSystem} = rustArmNative.binaries // {
+        sd-image-robot-pi = sdImageOf robotPiNative;
       };
 
       apps.${system} = {
@@ -123,12 +182,40 @@
       };
 
       nixosModules.robot = ./nix/robot.nix;
+      nixosModules.robot-pi-gateway = ./nix/gateway.nix;
+      nixosModules.robot-pi-node = ./nix/pi-node.nix;
       nixosConfigurations.robot-vm = robotVm;
+      nixosConfigurations.robot-pi = robotPiNative;
+      nixosConfigurations.robot-pi-cross = robotPiCross;
 
       checks.${system} = imageChecks // {
         clippy = rust.clippy;
         robot-boots = import ./nix/tests/robot-boots.nix { inherit pkgs robotPackage; };
         robot-vm = vm;
+
+        # The Pi system evaluates for both build machines with every
+        # service, the udev rule and no baked-in runtime file (MS50-MS54).
+        robot-pi-eval = import ./nix/tests/robot-pi-eval.nix {
+          inherit pkgs lib piServices;
+          configs = { native = robotPiNative; cross = robotPiCross; };
+        };
+        # The cross-built image: size, boot files, device trees, closure,
+        # no secrets (MS53, MS54).
+        robot-pi-image = pkgs.callPackage ./nix/tests/robot-pi-image.nix {
+          inherit piServices;
+          image = sdImageOf robotPiCross;
+          toplevel = robotPiCross.config.system.build.toplevel;
+        };
+        # nix/robot-pi.nix in an x86_64 VM with no Pico attached (MS51, MS52).
+        robot-pi-boots = import ./nix/tests/robot-pi-boots.nix {
+          inherit pkgs;
+          piModule = import ./nix/robot-pi.nix (piPackages rust.binaries);
+        };
+        # The aarch64 binaries are static aarch64 executables (MS49).
+        aarch64-static = import ./nix/tests/aarch64-static.nix {
+          inherit pkgs lib;
+          binaries = rustArmCross.binaries;
+        };
 
         # The launcher maps --tap/--bridge/--state onto QEMU and the share.
         robot-vm-launcher = pkgs.runCommand "robot-vm-launcher" { } ''
@@ -154,6 +241,15 @@
           echo "$plan" | grep -qF "would: mw load"
           touch $out
         '';
+      };
+
+      # Built on an aarch64 machine (the release workflow's arm runner).
+      checks.${armSystem} = {
+        robot-pi-image = pkgsArm.callPackage ./nix/tests/robot-pi-image.nix {
+          inherit piServices;
+          image = sdImageOf robotPiNative;
+          toplevel = robotPiNative.config.system.build.toplevel;
+        };
       };
 
       formatter.${system} = pkgs.nixpkgs-fmt;

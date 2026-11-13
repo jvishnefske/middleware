@@ -132,7 +132,15 @@ in
       adminPort = lib.mkOption { type = lib.types.port; default = 15000; description = "Envoy admin, loopback."; };
       httpPort = lib.mkOption { type = lib.types.port; default = 15001; description = "h2c listener, loopback."; };
       zenohPort = lib.mkOption { type = lib.types.port; default = 17447; description = "Zenoh TCP listener, loopback."; };
-      package = lib.mkPackageOption pkgs "envoy" { };
+      # envoy-bin, Envoy's release binary: nixpkgs' Bazel source build is
+      # not in the binary cache and its dependency tarball no longer
+      # matches its hash (nixos-26.05, envoy 1.36.10).
+      package = lib.mkPackageOption pkgs "envoy-bin" { };
+      concurrency = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        description = "Envoy's --concurrency (worker threads); null: one per CPU, Envoy's default. The Pi image sets 1 to save memory.";
+      };
     };
   };
 
@@ -222,7 +230,8 @@ in
         RuntimeDirectory = "mw-envoy";
         RuntimeDirectoryMode = "0750";
         ExecStartPre = envoyPrepare;
-        ExecStart = "${cfg.envoy.package}/bin/envoy --log-level info -c /run/mw-envoy/envoy.yaml";
+        ExecStart = "${cfg.envoy.package}/bin/envoy --log-level info -c /run/mw-envoy/envoy.yaml"
+          + lib.optionalString (cfg.envoy.concurrency != null) " --concurrency ${toString cfg.envoy.concurrency}";
         # Pick up an SVID issued before Envoy started.
         ExecStartPost = "+${pkgs.bash}/bin/sh -c '[ -s ${spiffeDir}/bundle.pem ] && ${copyCerts} || true'";
         Restart = "always";

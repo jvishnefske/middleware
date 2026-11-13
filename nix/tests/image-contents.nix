@@ -17,8 +17,9 @@ runCommand "image-${name}-contents" { nativeBuildInputs = [ jq binutils gnutar ]
   fail() { echo "image ${name}: $*" >&2; exit 1; }
 
   [ "$(jq -r '.config.User' "$config")" = "65532:65532" ] || fail "not uid/gid 65532"
-  [ "$(jq -r '.created' "$config")" = "1970-01-01T00:00:01Z" ] \
-    || [ "$(jq -r '.created' "$config")" = "1970-01-01T00:00:00Z" ] || fail "creation time not the epoch"
+  # dockerTools writes `Z` or (nixos-26.05) `+00:00`.
+  jq -r '.created' "$config" | grep -Eq '^1970-01-01T00:00:0[01](Z|\+00:00)$' \
+    || fail "creation time not the epoch"
   for l in source revision version; do
     v=$(jq -r ".config.Labels[\"org.opencontainers.image.$l\"] // empty" "$config")
     [ -n "$v" ] || fail "label org.opencontainers.image.$l missing"
