@@ -240,6 +240,49 @@ firmware change outside this crate. Until then the gateway shows the
 device's `sys/log` lines through `gw/sys`, including the `disc: up ...`
 lines of beacons the device hears on the radio.
 
+## Linux payload host (Raspberry Pi)
+
+`mw-pi-node` (`pi-node/`) runs WASM payloads on a Linux host, a Pi Zero 2
+W or Pi 3 in the first place, with the base firmware's own loader, trust
+rules and two-slot store (esp-base's pure core, as the RP firmware uses
+it), and joins the cluster through an MCU gateway inside the same
+process. To the cluster it is a USB-attached board: its payloads'
+`app/...` publications reach Zenoh, the gateway binds its node id and
+serves `gw/sys`, and `sys/info` reports chip `linux-aarch64`, the node id
+and `Caps::SERVE`. Payloads get log, publish, subscribe, ticks, the
+clocks, four timers, `serve` and `node_id`; GPIO, SPI, I2C, ADC, UART,
+PWM and routes answer `Unsupported` for now (design.md, "Linux payload
+host", PN12).
+
+State lives in `MW_PI_NODE_STATE` (default `/var/lib/mw-pi-node`): one
+file per 4 KiB flash sector under `flash/`, each replaced atomically and
+synced, so a power cut leaves the old or the new payload and trust
+record. The directory is locked while the node runs. The node id comes
+from `MW_PI_NODE_NODE_ID` (16 hex digits) or, by default, a hash of
+`/etc/machine-id` (`MW_PI_NODE_MACHINE_ID` names another file). Other
+settings: `MW_PI_NODE_MEMORY_BYTES` (a payload's memory cap, default
+1 MiB), `MW_PI_NODE_LOCAL_SERIAL` (a serial port served beside the
+gateway, such as a USB gadget's `/dev/ttyGS0`, for `mwctl`), the
+gateway's `MW_GATEWAY_*` (`MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` are
+unused) and `MW_ZENOH_ROUTER` (required).
+
+By default `gw/sys` passes only `sys/info` and `sys/log`. To install
+payloads through the cluster, list the loader keys in
+`MW_GATEWAY_SYS_ALLOW` (for example
+`sys/info,sys/log,sys/trust/info,sys/loader/begin,sys/loader/chunk,sys/loader/commit,sys/payload/start,sys/payload/stop`)
+after claiming the node with your key over the local port; once claimed,
+every commit must be signed with it, so the cluster can deliver updates
+but not forge them. Leave `sys/trust/claim` out unless the first caller
+may own the node. A payload's served `app/...` keys are not reachable
+through `gw/sys`; requests on them go over the local port.
+
+For a local try without a Pi, run the node on any Linux machine with a
+PTY pair as the local port (`socat -d -d pty,raw,echo=0 pty,raw,echo=0`
+prints two paths; give one to `MW_PI_NODE_LOCAL_SERIAL` and the other to
+`mwctl --port`), a writable `MW_PI_NODE_STATE` and a zenohd to connect
+to. This mode is documented, not covered by the tests, which run the
+node, the gateway and Zenoh in one process on loopback.
+
 ## Device platform
 
 | path                 | what                                                         |

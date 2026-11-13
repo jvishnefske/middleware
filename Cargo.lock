@@ -687,12 +687,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
-name = "embedded-hal"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
-
-[[package]]
 name = "embedded-io"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -708,6 +702,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-storage"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c815b3ed4213d85d6cfd274b871f430c0681084e28dfd4a537877f47f844ec83"
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,6 +721,16 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "esp-base"
+version = "0.1.0"
+dependencies = [
+ "board-pins",
+ "embedded-storage",
+ "heapless",
+ "middleware",
 ]
 
 [[package]]
@@ -1744,16 +1754,22 @@ dependencies = [
 [[package]]
 name = "mw-jpeg"
 version = "0.1.0"
-dependencies = [
- "mw-payload",
-]
 
 [[package]]
-name = "mw-payload"
-version = "0.1.0"
+name = "mw-pi-node"
+version = "0.6.0"
 dependencies = [
- "embedded-hal",
+ "embedded-storage",
+ "esp-base",
  "middleware",
+ "mw-gateway",
+ "mw-service",
+ "mwctl",
+ "sha2",
+ "tokio",
+ "tracing",
+ "wasm-host",
+ "wat",
 ]
 
 [[package]]
