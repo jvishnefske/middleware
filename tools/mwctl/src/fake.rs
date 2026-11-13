@@ -30,6 +30,14 @@
 //! boots a fresh updater; [`FakeDevice::fw_reset`] resets it at any time
 //! (the trial watchdog, a reset button).
 //!
+//! With [`FakeDevice::with_fw_rt`] it is an i.MX RT1050 as far as the
+//! updater's image checks go: the service runs with the RT slot image
+//! format (`fw_ota::rt_image::RtSlotImage`), so an update must send an
+//! `MWRT` slot image (header first). The slots, record and reboots are
+//! still the RP2350 bootrom model's, so the images ([`rt_image`]) are RT
+//! slot images whose bytes also hold an IMAGE_DEF block loop the model's
+//! bootrom can boot (test images only; a real RT image has none).
+//!
 //! A [`Script`] injects faults by request ordinal (1-based, counting every
 //! request frame received): drop the request, drop its reply, or hold the
 //! reply back until the next reply is sent. A read with nothing queued
@@ -43,6 +51,8 @@ use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_messag
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
+use middleware::fw_ota::picobin::{EXE_TBYB, RP2350_ARM_S_EXE, image_def_block_bytes, sentinel_block_bytes};
+use middleware::fw_ota::rt_image::{RtHeader, RtSlotImage};
 use middleware::fw_ota::service::{Context, FwService};
 use middleware::fw_ota::sim::Rp2350Sim;
 use middleware::wasm_abi::ABI_VERSION;
@@ -92,24 +102,70 @@ pub struct FakeDevice {
 /// The firmware updater on the bootrom model.
 struct Fw {
     sim: Rp2350Sim,
-    svc: FwService,
+    svc: Svc,
     self_test_ok: bool,
 }
 
+/// The updater, by image format.
+enum Svc {
+    /// The RP2350's (picobin).
+    Rp(FwService),
+    /// The i.MX RT1050's slot image.
+    Rt(FwService<RtSlotImage>),
+}
+
 impl Fw {
-    fn boot(mut sim: Rp2350Sim, self_test_ok: bool) -> Fw {
+    fn boot(mut sim: Rp2350Sim, self_test_ok: bool, rt: bool) -> Fw {
         if sim.booted().is_none() {
             sim.power_on().expect("a bootable image");
         }
-        let svc = FwService::boot(&mut sim).expect("updater boots");
+        let svc = if rt {
+            Svc::Rt(FwService::boot_for(&mut sim).expect("updater boots"))
+        } else {
+            Svc::Rp(FwService::boot(&mut sim).expect("updater boots"))
+        };
         Fw { sim, svc, self_test_ok }
     }
 
     fn reset(self) -> Fw {
+        let rt = matches!(self.svc, Svc::Rt(_));
         let mut sim = self.sim;
         sim.reset().expect("a bootable image");
-        Fw::boot(sim, self.self_test_ok)
+        Fw::boot(sim, self.self_test_ok, rt)
     }
+
+    fn handle(&mut self, ctx: &Context, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Option<Result<usize, HandlerError>> {
+        match &mut self.svc {
+            Svc::Rp(svc) => svc.handle(&mut self.sim, ctx, key, body, out),
+            Svc::Rt(svc) => svc.handle(&mut self.sim, ctx, key, body, out),
+        }
+    }
+}
+
+/// Slot offset of [`rt_image`]'s IMAGE_DEF block (after the RT header).
+const RT_IMAGE_DEF_AT: usize = 0x140;
+/// Slot offset of [`rt_image`]'s sentinel block (the first sector's last
+/// page, as the model's bootrom requires).
+const RT_SENTINEL_AT: usize = 0xF40;
+
+/// An RT slot image (header and a `len`-byte image, `len` at least
+/// 4 KiB) of version `version` (`major << 16 | minor`) for
+/// [`FakeDevice::with_fw_rt`]. Its bytes also hold an IMAGE_DEF block loop
+/// of the same version, flagged TBYB when `tbyb`, so the bootrom model
+/// boots it; the other image bytes are a function of `seed`.
+pub fn rt_image(len: usize, version: u32, tbyb: bool, seed: u8) -> Vec<u8> {
+    let at = |slot_offset: usize| slot_offset - middleware::fw_ota::rt_image::HEADER_LEN;
+    let mut image: Vec<u8> = (0..len).map(|i| (i as u32).wrapping_mul(2_654_435_761).wrapping_add(u32::from(seed)) as u8).collect();
+    let flags = RP2350_ARM_S_EXE | if tbyb { EXE_TBYB } else { 0 };
+    let link = (RT_SENTINEL_AT - RT_IMAGE_DEF_AT) as i32;
+    let def = image_def_block_bytes(flags, (version >> 16) as u16, version as u16, link);
+    image[at(RT_IMAGE_DEF_AT)..at(RT_IMAGE_DEF_AT) + def.len()].copy_from_slice(&def);
+    let sentinel = sentinel_block_bytes(-link);
+    image[at(RT_SENTINEL_AT)..at(RT_SENTINEL_AT) + sentinel.len()].copy_from_slice(&sentinel);
+    let header = RtHeader::for_image(Version(version), &image).expect("a small image");
+    let mut slot = header.encode().to_vec();
+    slot.extend_from_slice(&image);
+    slot
 }
 
 impl FakeDevice {
@@ -156,7 +212,16 @@ impl FakeDevice {
     /// it is not).
     pub fn with_fw(self, sim: Rp2350Sim) -> Self {
         FakeDevice {
-            fw: Some(Fw::boot(sim, true)),
+            fw: Some(Fw::boot(sim, true, false)),
+            ..self
+        }
+    }
+
+    /// An i.MX RT1050's updater (the RT slot image format) on `sim`, whose
+    /// slots hold [`rt_image`]s (see the module docs).
+    pub fn with_fw_rt(self, sim: Rp2350Sim) -> Self {
+        FakeDevice {
+            fw: Some(Fw::boot(sim, true, true)),
             ..self
         }
     }
@@ -165,6 +230,12 @@ impl FakeDevice {
     /// fresh updater.
     pub fn fw_reset(&mut self) {
         self.fw = self.fw.take().map(Fw::reset);
+    }
+
+    /// The bootrom model, with [`FakeDevice::with_fw`] or
+    /// [`FakeDevice::with_fw_rt`].
+    pub fn fw_sim(&self) -> Option<&Rp2350Sim> {
+        self.fw.as_ref().map(|fw| &fw.sim)
     }
 
     /// Sets whether the firmware's self-test passed.
@@ -278,7 +349,7 @@ impl FakeDevice {
                 trust: self.trust,
                 self_test_ok: fw.self_test_ok,
             };
-            if let Some(r) = fw.svc.handle(&mut fw.sim, &ctx, key, body, out) {
+            if let Some(r) = fw.handle(&ctx, key, body, out) {
                 return r;
             }
         }

@@ -1,4 +1,6 @@
-//! The hardware seam: what the RP2350 integration implements.
+//! The hardware seam: what the RP2350 integration implements (and the
+//! i.MX RT base firmware's, over its bootloader's update record; the
+//! RP2350 terms below are the contract each maps onto its own boot).
 //!
 //! [`FwPlatform`] is **blocking**. On the RP2350 every flash program or
 //! erase runs with XIP disabled (embassy-rp's `Flash::blocking_erase` /

@@ -131,7 +131,7 @@ pub mod link;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use middleware::wasm_abi::{self, MAX_MESSAGE};
+use middleware::wasm_abi::{self, MAX_MESSAGE, route};
 use wasmi::{
     CompilationMode, Config, Engine, ExternType, FuncType, Instance, Module, Store,
     StoreLimitsBuilder, TrapCode, ValType,
@@ -144,7 +144,8 @@ pub use middleware::wasm_abi::periph::{
     Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
 pub use middleware::wasm_abi::route::{
-    CameraPins, Preamble, RouteStat, Segment, SinkConfig, Source, SourceConfig, SourceKind,
+    AudioMode, CameraPins, I2cDevice, ImuConfig, MicConfig, Preamble, RouteStat, SampleSource,
+    Segment, SinkConfig, Source, SourceConfig, SourceKind,
 };
 pub use middleware::wasm_abi::{AbiError, Pull};
 pub use middleware::{HandlerError, RequestMeta, SenderId};
@@ -310,6 +311,34 @@ pub trait Device {
     ) -> Result<u8, AbiError> {
         let _ = (source, key, cfg);
         Err(AbiError::Unsupported)
+    }
+    /// Starts a sampled source route (`route_source` with
+    /// [`SourceKind::Imu`] or [`SourceKind::Microphone`]): every
+    /// `source.period_us()` the device publishes one
+    /// [`middleware::stream::samples`] batch of `source.samples()` units on
+    /// `key`, `first_index` counting from 0 when the route starts. Returns
+    /// the route handle, as [`Device::route_source`]; the route counts
+    /// against `MAX_ROUTES` and stops with the payload. A board without the
+    /// source answers `InvalidArgument` (the default), and lists the ones
+    /// it has in `sys/info` ([`middleware::loader::Caps::source`]).
+    fn route_samples(
+        &mut self,
+        source: SampleSource,
+        key: middleware::Key<'_>,
+    ) -> Result<u8, AbiError> {
+        let _ = (source, key);
+        Err(AbiError::InvalidArgument)
+    }
+    /// The I2C device a route from `source` streams from, if it sits on a
+    /// bus the payload can use (on the RT1050-EVKB the FXOS8700CQ at 0x1F
+    /// and the WM8960 at 0x1A on bus 0). While such a route runs the
+    /// runtime answers the payload's `i2c_transfer` to that address
+    /// `Busy` without calling [`Device::i2c_transfer`], and refuses a second
+    /// route on the same device (`Busy`). `None` (the default) for a source
+    /// that owns no payload-visible device.
+    fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
+        let _ = source;
+        None
     }
     /// Starts a sink route (ABI 4): messages on `key` are consumed by the
     /// route (not passed to [`Payload::deliver`]) and run through a
@@ -690,6 +719,7 @@ impl<D: Device + 'static> Payload<D> {
                 .build(),
             scratch,
             init_log: None,
+            i2c_owners: route::I2cOwners::new(),
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -938,6 +968,14 @@ impl<D: Device + 'static> Payload<D> {
     pub fn dispatch(&mut self, event: Event) -> Result<bool, Trap> {
         if self.poisoned {
             return Err(Trap::Poisoned);
+        }
+        // A route the device stopped by itself gives its I2C device back,
+        // whether or not the payload hears of it.
+        if event.kind == EventKind::RouteStopped {
+            let st = self.store.data_mut();
+            if let Ok(handle) = route::route_handle(event.source) {
+                st.i2c_owners = st.i2c_owners.release(handle);
+            }
         }
         if !self.handles_irq() {
             return Ok(false);

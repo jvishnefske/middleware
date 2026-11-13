@@ -7,20 +7,28 @@
 //! [`FwUpdate::verified`] and reconciles a boot through [`FwUpdate::boot`].
 //!
 //! The universal rule: **a refused request leaves the state unchanged**,
-//! except a commit whose image fails verification (wrong hash, missing or
-//! wrong IMAGE_DEF), which abandons the transfer because the bytes on flash
+//! except a commit whose image fails verification (wrong hash, or an image
+//! its format refuses, such as a missing or wrong IMAGE_DEF), which abandons the transfer because the bytes on flash
 //! are known to be wrong.
+//!
+//! The image format is a parameter: [`Facts`] carries whatever the
+//! board's [`super::format::ImageFormat`] found in the image, and
+//! [`FwUpdate::verified`] asks it ([`ImageInfo::acceptable`]) whether the
+//! image may be installed. The RP2350's IMAGE_DEF ([`ImageDef`], checked by
+//! [`acceptable`]) is the default.
 //!
 //! Chunks are tracked in a [`ChunkSet`] (one bit per [`CHUNK_LEN`] chunk;
 //! a resent chunk is acknowledged without being written again). Flash is
 //! erased in [`SECTOR`] units just before the first chunk of each sector is
 //! written ([`Effect::Write::erase`]), computed from the set alone. Sector 0
-//! (which holds the image's first metadata block) is erased at `begin` and
+//! (which holds the image's first metadata block on the RP2350, or another
+//! format's header) is erased at `begin` and
 //! its chunks are only *stashed* ([`Effect::Stash`]); it is written to flash
 //! by [`Effect::Install`] after the whole image is verified and the commit
 //! authorized, so the inactive slot never holds a bootable image that was
 //! not authorized.
 
+use super::format::ImageInfo;
 use super::picobin::{ImageDef, SENTINEL_FROM};
 use super::record::{FwRecord, Pending};
 use super::wire::{Command, StateCode, signed_message};
@@ -229,13 +237,16 @@ impl Env {
 }
 
 /// What the shell found when it read the transferred image back
-/// ([`Effect::Verify`]).
+/// ([`Effect::Verify`]). `I` is the image format's inspection result
+/// ([`super::format::ImageFormat::Info`]); the RP2350's IMAGE_DEF by
+/// default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Facts {
+pub struct Facts<I = ImageDef> {
     /// SHA-256 of the image (sector 0 from the stash, the rest from flash).
     pub sha256: [u8; 32],
-    /// Its IMAGE_DEF, if it has one.
-    pub image: Option<ImageDef>,
+    /// What the format found in the image (the RP2350's IMAGE_DEF), if it
+    /// is an image of that format at all.
+    pub image: Option<I>,
 }
 
 /// What the shell must do after a transition. Each variant names the slot
@@ -275,7 +286,8 @@ pub enum Effect<'a> {
         erase: Option<u32>,
     },
     /// Hash the `len`-byte image (sector 0 from the stash, the rest from
-    /// `slot`), read its IMAGE_DEF, and pass the [`Facts`] to
+    /// `slot`), inspect it (the RP2350: read its IMAGE_DEF), and pass the
+    /// [`Facts`] to
     /// [`FwUpdate::verified`].
     Verify {
         /// Target slot.
@@ -632,14 +644,15 @@ impl FwUpdate {
 
     /// The result of [`Effect::Verify`]: the transfer becomes
     /// [`FwUpdate::Verified`] with an [`Effect::Install`] when the hash
-    /// matches the declared one and the IMAGE_DEF is [`acceptable`];
-    /// otherwise it is abandoned (`Idle`, `InvalidRequest`). Any other
-    /// state is unchanged (`InvalidRequest`).
-    pub fn verified<'a>(self, facts: &Facts) -> Step<'a> {
+    /// matches the declared one and the format accepts the image as the
+    /// declared version ([`ImageInfo::acceptable`]; for the RP2350's
+    /// IMAGE_DEF, [`acceptable`]); otherwise it is abandoned (`Idle`,
+    /// `InvalidRequest`). Any other state is unchanged (`InvalidRequest`).
+    pub fn verified<'a, I: ImageInfo>(self, facts: &Facts<I>) -> Step<'a> {
         let FwUpdate::Receiving(t) = self else {
             return (self, Err(HandlerError::InvalidRequest));
         };
-        let ok = facts.sha256 == t.sha256 && facts.image.is_some_and(|d| acceptable(&d, t.version));
+        let ok = facts.sha256 == t.sha256 && facts.image.is_some_and(|d| d.acceptable(t.version));
         if !ok {
             return (FwUpdate::Idle, Err(HandlerError::InvalidRequest));
         }

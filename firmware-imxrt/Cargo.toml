@@ -1,0 +1,124 @@
+[package]
+name = "imxrt-base"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "i.MX RT base firmware (MIMXRT1050-EVKB): A/B bootloader and the middleware serial protocol over LPUART1, with WASM payloads"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone workspace: cross-compiled for thumbv7em-none-eabihf
+# (Cortex-M7), so it stays out of the parent (host) workspace, like
+# `firmware-rp/`.
+[workspace]
+
+[lib]
+# The pure core (`imxrt_base`): flash map, boot header (FCB, IVT, boot
+# data), HyperFlash command sequences, the A/B image format and boot
+# decision, the board profile. No i.MX RT dependencies; unit tested on the
+# host with `cargo test --lib`.
+path = "src/lib.rs"
+
+[[bin]]
+# The A/B bootloader (HyperFlash block 0, booted by the boot ROM):
+# `./build.sh` links it with imxrt-rt (code in ITCM) and the boot header.
+name = "imxrt-boot"
+path = "src/bin/imxrt-boot.rs"
+test = false
+bench = false
+required-features = ["boot"]
+
+[[bin]]
+# The firmware: linked to run from SDRAM, copied there and checked by the
+# bootloader. One build serves both slots.
+name = "imxrt-base"
+path = "src/main.rs"
+test = false
+bench = false
+required-features = ["app"]
+
+[[bin]]
+# Host tool: prepends the slot image header (version, length, SHA-256) to
+# the firmware's binary. `cargo run --features image-tool --bin imxrt-image`.
+name = "imxrt-image"
+path = "src/bin/imxrt-image.rs"
+test = false
+bench = false
+required-features = ["image-tool"]
+
+[features]
+default = []
+# The bootloader binary.
+boot = ["shell"]
+# The firmware binary.
+app = ["shell", "dep:embassy-executor", "dep:embassy-sync", "dep:embassy-futures", "dep:embedded-io-async", "dep:static_cell", "cortex-m-rt/set-vtor"]
+# The payload runtime in the firmware (wasm-host, the heap in SDRAM).
+wasm = ["app", "dep:wasm-host", "dep:linked_list_allocator"]
+# Host only: the `imxrt-image` tool.
+image-tool = ["std"]
+# Host builds of the library with `std` (the image tool).
+std = []
+# Internal: the imperative shell (`imxrt_base::shell`: FlexSPI HyperFlash
+# driver, LPUART1 console) and its i.MX RT dependencies.
+shell = ["dep:embassy-nxp", "dep:embassy-time", "dep:cortex-m", "dep:cortex-m-rt"]
+
+[dependencies]
+esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
+board-pins = { path = "../board-pins" }
+middleware = { path = "..", features = ["serial", "trust"] }
+heapless = { version = "0.9", default-features = false }
+embedded-storage = "0.3.2"
+# The payload runtime (feature `wasm`).
+wasm-host = { path = "../wasm-host", optional = true }
+linked_list_allocator = { version = "0.10.6", optional = true }
+
+# The shell. embassy-nxp is not on crates.io: pinned to a git revision
+# (its `mimxrt1062` support; the RT1052's blocks used are a subset). It
+# gives a safe `init`, the PIT time driver and, with `unstable-pac`, the
+# chiptool PAC every register access goes through without `unsafe`.
+embassy-nxp = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc", features = ["mimxrt1062", "unstable-pac", "time-driver-pit"], optional = true }
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"], optional = true }
+embassy-time = { version = "0.5.1", optional = true }
+embassy-sync = { version = "0.8.0", optional = true }
+embassy-futures = { version = "0.1.2", optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+static_cell = { version = "2.1.1", optional = true }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"], optional = true }
+cortex-m-rt = { version = "0.7.5", optional = true }
+
+[dev-dependencies]
+ed25519-dalek = { version = "2.2", default-features = false }
+# mwctl runs unchanged against the request service over an in-process link
+# (`service::wire`).
+mwctl = { path = "../tools/mwctl" }
+# The request routing with the real interpreter (`requests::tests`).
+wasm-host = { path = "../wasm-host" }
+recipe-core = { path = "../recipe-core" }
+wat = "1"
+
+[build-dependencies]
+# The bootloader's layout (FlexSPI boot, code in ITCM).
+imxrt-rt = { version = "0.1.8", features = ["device"] }
+# The boot header object (.fcb, .dcd) for the bootloader.
+object = { version = "0.36", default-features = false, features = ["write"] }
+heapless = { version = "0.9", default-features = false }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+# embassy-nxp's revision pins the embassy crates it uses; take them all from
+# that revision so there is one version of each in the graph.
+[patch.crates-io]
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-time-queue-utils = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-hal-internal = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }

@@ -79,6 +79,9 @@ pub struct State<D> {
     /// While `init` runs, a bounded copy of its log lines (see [`InitLog`]);
     /// `None` at all other times.
     pub init_log: Option<InitLog>,
+    /// The I2C devices sampled routes own (SC3): the payload's
+    /// `i2c_transfer` to one of them is `Busy` until its route stops.
+    pub i2c_owners: route::I2cOwners,
 }
 
 /// The first `n` bytes of the scratch buffer (`n <= MAX_DMA`), zeroed.
@@ -229,6 +232,8 @@ pub fn i2c_transfer_call<D: Device>(
     args: (i32, i32, i32, i32, i32, i32),
 ) -> Result<(), AbiError> {
     let plan = abi::i2c_transfer(args, mem.len())?;
+    st.i2c_owners
+        .check_transfer(plan.transfer.bus, plan.transfer.addr)?;
     let (mut tx_buf, mut rx_buf) = ([0u8; MAX_I2C], [0u8; MAX_I2C]);
     let src = mem.get(plan.tx.clone()).ok_or(AbiError::OutOfBounds)?;
     let tx = tx_buf
@@ -253,9 +258,27 @@ pub fn route_source_call<D: Device>(
     st: &mut State<D>,
     args: (i32, i32, i32, i32, i32),
 ) -> Result<i32, AbiError> {
-    let plan = abi::route_source(args, mem)?;
-    let handle = st.device.route_source(plan.source, plan.key, plan.cfg)?;
-    abi::route_handle_code(handle)
+    match abi::route_source_any(args, mem)? {
+        abi::RoutePlan::Frames(plan) => {
+            let handle = st.device.route_source(plan.source, plan.key, plan.cfg)?;
+            let code = abi::route_handle_code(handle)?;
+            st.i2c_owners = st.i2c_owners.release(handle);
+            Ok(code)
+        }
+        abi::RoutePlan::Samples(plan) => {
+            let dev = st.device.sample_device(&plan.source);
+            if let Some(dev) = dev {
+                st.i2c_owners.check_free(dev)?;
+            }
+            let handle = st.device.route_samples(plan.source, plan.key)?;
+            let code = abi::route_handle_code(handle)?;
+            st.i2c_owners = match dev {
+                Some(dev) => st.i2c_owners.claim(handle, dev)?,
+                None => st.i2c_owners.release(handle),
+            };
+            Ok(code)
+        }
+    }
 }
 
 /// `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)` (ABI 4): returns
@@ -272,7 +295,10 @@ pub fn route_sink_call<D: Device>(
 
 /// `route_stop(handle)` (ABI 4).
 pub fn route_stop_call<D: Device>(st: &mut State<D>, handle: i32) -> Result<(), AbiError> {
-    st.device.route_stop(route::route_handle(handle)?)
+    let handle = route::route_handle(handle)?;
+    st.device.route_stop(handle)?;
+    st.i2c_owners = st.i2c_owners.release(handle);
+    Ok(())
 }
 
 /// `route_stat(handle, stat)` (ABI 4): the counter, saturated to
@@ -678,6 +704,13 @@ mod tests {
         node: Option<middleware::SenderId>,
     }
 
+    /// A board with an IMU at 0x1f on I2C bus 0 and no microphone.
+    #[derive(Default)]
+    struct Sensors {
+        i2c: Vec<u8>,
+        routes: [bool; route::MAX_ROUTES],
+    }
+
     impl Device for Rec {
         fn log(&mut self, line: &str) {
             self.logs.push(line.to_string());
@@ -714,9 +747,96 @@ mod tests {
         }
     }
 
+    impl Device for Sensors {
+        fn log(&mut self, _: &str) {}
+        fn publish(&mut self, _: Key<'_>, _: &[u8]) -> Result<(), AbiError> {
+            Ok(())
+        }
+        fn now_ms(&mut self) -> u32 {
+            0
+        }
+        fn gpio_output(&mut self, _: u8) -> Result<(), AbiError> {
+            Ok(())
+        }
+        fn gpio_input(&mut self, _: u8, _: Pull) -> Result<(), AbiError> {
+            Ok(())
+        }
+        fn gpio_write(&mut self, _: u8, _: bool) -> Result<(), AbiError> {
+            Ok(())
+        }
+        fn gpio_read(&mut self, _: u8) -> Result<bool, AbiError> {
+            Ok(false)
+        }
+        fn i2c_transfer(&mut self, _: u8, addr: u8, _: &[u8], _: &mut [u8]) -> Result<(), AbiError> {
+            self.i2c.push(addr);
+            Ok(())
+        }
+        fn route_samples(&mut self, source: route::SampleSource, _: Key<'_>) -> Result<u8, AbiError> {
+            if source.kind() == route::SourceKind::Microphone {
+                return Err(AbiError::InvalidArgument);
+            }
+            let free = self.routes.iter().position(|r| !r).ok_or(AbiError::NoResources)?;
+            self.routes[free] = true;
+            u8::try_from(free).map_err(|_| AbiError::NoResources)
+        }
+        fn sample_device(&self, source: &route::SampleSource) -> Option<route::I2cDevice> {
+            matches!(source, route::SampleSource::Imu(_))
+                .then_some(route::I2cDevice { bus: 0, addr: 0x1f })
+        }
+        fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+            let slot = self.routes.get_mut(usize::from(handle)).ok_or(AbiError::Busy)?;
+            if !*slot {
+                return Err(AbiError::Busy);
+            }
+            *slot = false;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn sc3_a_sampled_route_makes_i2c_to_its_device_busy_until_it_stops() {
+        let mut mem = vec![0u8; 64];
+        mem[..7].copy_from_slice(b"app/imu");
+        let imu = route::ImuConfig::new(100, 2, false, 10).expect("valid");
+        mem[16..24].copy_from_slice(&imu.encode());
+        mem[32] = 0x0d; // WHO_AM_I register
+        let mut st = state_on(Sensors::default(), Exports::default());
+        // Bus 0, 0x1f, write one byte at 32, read one byte at 40.
+        let to = |addr: i32| (0, addr, 32, 1, 40, 1);
+        assert_eq!(i2c_transfer_call(&mut mem, &mut st, to(0x1f)), Ok(()));
+        assert_eq!(route_source_call(&mem, &mut st, (2, 0, 7, 16, 8)), Ok(0));
+        assert_eq!(
+            i2c_transfer_call(&mut mem, &mut st, to(0x1f)),
+            Err(AbiError::Busy),
+            "the route owns the IMU"
+        );
+        assert_eq!(i2c_transfer_call(&mut mem, &mut st, to(0x1a)), Ok(()), "other devices stay free");
+        assert_eq!(st.device.i2c, vec![0x1f, 0x1a], "a Busy transfer never reaches the bus");
+        assert_eq!(
+            route_source_call(&mem, &mut st, (2, 0, 7, 16, 8)),
+            Err(AbiError::Busy),
+            "one route per device"
+        );
+        assert_eq!(st.device.routes, [true, false, false, false]);
+        // A board without the source answers InvalidArgument.
+        let mic = route::MicConfig::new(16_000, 0, route::AudioMode::Pcm, 160, 0).expect("valid");
+        mem[16..24].copy_from_slice(&mic.encode());
+        assert_eq!(
+            route_source_call(&mem, &mut st, (3, 0, 7, 16, 8)),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(route_stop_call(&mut st, 0), Ok(()));
+        assert_eq!(i2c_transfer_call(&mut mem, &mut st, to(0x1f)), Ok(()), "stopped: free again");
+        assert_eq!(route_stop_call(&mut st, 0), Err(AbiError::Busy));
+    }
+
     fn state(exports: Exports) -> State<Rec> {
+        state_on(Rec::default(), exports)
+    }
+
+    fn state_on<D>(device: D, exports: Exports) -> State<D> {
         State {
-            device: Rec::default(),
+            device,
             subscriptions: Vec::new(),
             serves: Vec::new(),
             schedule: None,
@@ -724,6 +844,7 @@ mod tests {
             limits: wasmi::StoreLimitsBuilder::new().build(),
             scratch: Vec::new(),
             init_log: None,
+            i2c_owners: route::I2cOwners::new(),
         }
     }
 

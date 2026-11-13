@@ -13,12 +13,21 @@
 //! skips it and the previous image runs again. (The Pico 1's RP2040 bootrom
 //! has none of this; it is out of scope by design.)
 //!
+//! The i.MX RT base firmware (`firmware-imxrt`) uses the same protocol,
+//! machine and service with its own image format and platform: its
+//! bootloader and update record stand in for the RP2350 boot ROM's A/B,
+//! TBYB and buy (design.md "i.MX RT base firmware").
+//!
 //! This module is the hardware-independent part, always built, `no_std`
 //! and allocation free:
 //!
 //! * [`wire`] — `sys/fw/*` request and response bodies and the signed
 //!   message;
 //! * [`machine`] — the pure state machine [`FwUpdate`];
+//! * [`format`](mod@format) — the [`ImageFormat`] seam: how an image is
+//!   inspected and accepted, so another board (the i.MX RT base
+//!   firmware's slot image header) plugs in its own format;
+//!   [`format::Picobin`], the RP2350's, is the default;
 //! * [`picobin`] — finds an image's IMAGE_DEF and version in its metadata
 //!   blocks (host and device);
 //! * [`record`] — the persisted anti-rollback floor and update in flight;
@@ -63,10 +72,12 @@
 //!   so a signature is good for one image, one version, one slot of one
 //!   device. An unclaimed device accepts any commit, signed or not (trust
 //!   on first use, as for payloads). The device then hashes what it
-//!   received and reads the image's IMAGE_DEF: the hash must match, and
-//!   the image must be an RP2350 executable flagged TBYB, without a
-//!   rollback version, whose version equals the declared one and whose
-//!   block loop has a block in the first sector's last page
+//!   received and inspects the image through its format
+//!   ([`format`](mod@format); the RP2350's checks follow, another board's
+//!   are its own): the hash must match, and the image must be an RP2350
+//!   executable flagged TBYB, without a rollback version, whose version
+//!   equals the declared one and whose block loop has a block in the
+//!   first sector's last page
 //!   ([`picobin::SENTINEL_FROM`], so a power cut during the bootrom's buy
 //!   cannot leave a torn image bootable) (`InvalidRequest`, the transfer
 //!   is abandoned). It persists
@@ -127,16 +138,19 @@
 //! update does not complete: the next attempt needs a higher version, so a
 //! captured signed commit can never be replayed.
 
+pub mod format;
 pub mod machine;
 pub mod picobin;
 pub mod platform;
 pub mod record;
+pub mod rt_image;
 #[cfg(feature = "trust")]
 pub mod service;
 #[cfg(feature = "fw-sim")]
 pub mod sim;
 pub mod wire;
 
+pub use format::{ImageFormat, ImageInfo};
 pub use machine::{Effect, Env, Facts, FwUpdate};
 pub use platform::{BootInfo, FwPlatform};
 pub use record::FwRecord;

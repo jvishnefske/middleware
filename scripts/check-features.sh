@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11):
-#   * the always-built pure core, including `discovery`, `dns::wire` and
-#     `fw_ota`, builds for thumbv6m-none-eabi with no features, and so do
+# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11, FL4):
+#   * the always-built pure core, including `discovery`, `dns::wire`,
+#     `zenoh_wire` and `fw_ota`, builds for thumbv6m-none-eabi with no
+#     features, and so do
 #     the `recipe-core` and `state-table` crates (Q11);
 #   * the RP2350 set builds for thumbv8m.main-none-eabihf (Cortex-M33, the
 #     Pico 2): the pure core, `fw_ota::service` (`trust`) and the serial
 #     link, with no cloud dependency and no host feature;
 #   * `fw-sim` (the bootrom model, host only) builds on the host;
+#   * the board Zenoh client `zenoh-lite` builds for the i.MX RT target
+#     thumbv7em-none-eabihf (and thumbv6m) without std, alloc or a cloud
+#     dependency;
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
 #     in no cloud dependency and enable no host feature;
 #   * cloud feature sets (including `dns-sd` and `memory`) never enable an
@@ -18,8 +22,9 @@ cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
+IMXRT_TARGET=thumbv7em-none-eabihf
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2) '
-EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures'
+EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -51,13 +56,14 @@ ungated() { # file, declaration
     grep -qx "$2" "$1"
 }
 for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.rs:pub mod wire;" \
+            "src/lib.rs:pub mod zenoh_wire;" \
             "src/lib.rs:pub mod fw_ota;" "src/fw_ota.rs:pub mod machine;" "src/fw_ota.rs:pub mod wire;" \
             "src/fw_ota.rs:pub mod picobin;" "src/fw_ota.rs:pub mod platform;" "src/fw_ota.rs:pub mod record;" \
             "src/discovery.rs:pub mod record;" "src/discovery.rs:pub mod directory;" "src/discovery.rs:pub mod beacon;"; do
     ungated "${decl%%:*}" "${decl#*:}" || fail "${decl#*:} in ${decl%%:*} is missing or cfg-gated"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then
@@ -76,6 +82,20 @@ for set in "" "trust" "trust,serial" "trust,serial,postcard"; do
     fi
     if features_of_self --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"} | grep -Eqx "$HOST_FEATURES"; then
         fail "[$set] on $RP2350_TARGET enables std or a host feature ($HOST_FEATURES)"
+    fi
+done
+
+# The i.MX RT base firmware's set: the Zenoh client with the serial link
+# and signed updates, no heap (FL4, ZN1-ZN3: the codec and session are
+# pure and `alloc` is never linked).
+for set in "zenoh-lite" "zenoh-lite,serial,trust,postcard"; do
+    echo "== FL4: [$set] on $IMXRT_TARGET"
+    cargo build --quiet --target "$IMXRT_TARGET" --no-default-features --features "$set"
+    if deps --target "$IMXRT_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then
+        fail "[$set] on $IMXRT_TARGET pulls in a cloud dependency"
+    fi
+    if features_of_self --target "$IMXRT_TARGET" --no-default-features --features "$set" | grep -Eqx "$HOST_FEATURES"; then
+        fail "[$set] on $IMXRT_TARGET enables std or a host feature ($HOST_FEATURES)"
     fi
 done
 

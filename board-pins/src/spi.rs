@@ -6,7 +6,11 @@
 //! GPIO carrying that signal in the F1 table ([`crate::rp::spi_function`]),
 //! all on the block SCK selects; CS is driven as a plain output, so any
 //! output pin may be CS. On the ESP chips ([`SpiRouting::Matrix`]) the GPIO
-//! matrix reaches any pin, so the direction check is all.
+//! matrix reaches any pin, so the direction check is all. On a board with
+//! one controller on fixed pins ([`SpiRouting::Fixed`], the RT1050-EVKB's
+//! LPSPI1) SCK, MOSI and MISO must each be that role's pin
+//! ([`SpiProblem::NoSignal`] otherwise) and CS is any output pin; there is
+//! no block to choose, so [`route`] returns `None`.
 //!
 //! The pins are checked in a fixed order (SCK, MOSI, MISO, CS; for each,
 //! the board policy first, then the function table) and the first problem
@@ -14,7 +18,7 @@
 //! depends on anything but the request.
 
 use crate::rp::{SpiBlock, SpiSignal, spi_function};
-use crate::{Direction, PinError, PinMap, SpiRouting};
+use crate::{Direction, FixedSpi, PinError, PinMap, SpiRouting};
 
 /// The pins of one SPI bus: SCK and any of MOSI, MISO and CS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +72,8 @@ impl SpiRole {
 pub enum SpiProblem {
     /// The board policy refuses the pin in the role's direction.
     Pin(PinError),
-    /// The pin does not carry the role's signal (RP function table).
+    /// The pin does not carry the role's signal (RP function table, or not
+    /// the role's fixed pin).
     NoSignal,
     /// The pin carries the signal on the other block than SCK's.
     OtherBlock {
@@ -91,7 +96,7 @@ pub struct SpiError {
 }
 
 /// Checks `pins` on `map` (see the module docs). On the RP chips returns
-/// the block the bus uses; through the ESP matrix, `None`.
+/// the block the bus uses; through the ESP matrix or on fixed pins, `None`.
 pub fn route(map: &PinMap, pins: &SpiPins) -> Result<Option<SpiBlock>, SpiError> {
     let sck_block = check_role(map, SpiRole::Sck, pins.sck, None)?;
     if let Some(p) = pins.mosi {
@@ -118,6 +123,12 @@ pub fn check_role(
     let fail = |problem| SpiError { role, pin, problem };
     map.check(pin, role.direction())
         .map_err(|e| fail(SpiProblem::Pin(e)))?;
+    if let SpiRouting::Fixed(fixed) = map.spi_routing() {
+        return match fixed_pin(&fixed, role) {
+            Some(want) if want != pin => Err(fail(SpiProblem::NoSignal)),
+            _ => Ok(block),
+        };
+    }
     let (SpiRouting::RpFunctionTable, Some(signal)) = (map.spi_routing(), role.signal()) else {
         return Ok(block);
     };
@@ -130,10 +141,21 @@ pub fn check_role(
     }
 }
 
+/// The pin `role` must use on a fixed-pin controller (`None` for CS, which
+/// is any output pin).
+pub const fn fixed_pin(fixed: &FixedSpi, role: SpiRole) -> Option<u8> {
+    match role {
+        SpiRole::Sck => Some(fixed.sck),
+        SpiRole::Mosi => Some(fixed.mosi),
+        SpiRole::Miso => Some(fixed.miso),
+        SpiRole::Cs => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boards::{ESP32, ESP32S3, PICO};
+    use crate::boards::{ESP32, ESP32S3, PICO, RT1050_EVKB};
 
     fn p(sck: u8, mosi: Option<u8>, miso: Option<u8>, cs: Option<u8>) -> SpiPins {
         SpiPins {
@@ -237,6 +259,47 @@ mod tests {
         assert_eq!(
             route(&ESP32, &p(14, Some(7), None, None)),
             err(SpiRole::Mosi, 7, SpiProblem::Pin(PinError::Reserved))
+        );
+    }
+
+    #[test]
+    fn rt10_lpspi1_is_fixed_to_arduino_d13_d11_d12() {
+        // SCK D13, MOSI D11, MISO D12, CS D10 (LPSPI1_PCS0's pin).
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, Some(11), Some(12), Some(10))),
+            Ok(None)
+        );
+        assert_eq!(route(&RT1050_EVKB, &p(13, Some(11), None, None)), Ok(None));
+        // CS is a plain output: any output pin.
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, None, Some(12), Some(7))),
+            Ok(None)
+        );
+        // Each data role must be its fixed pin.
+        assert_eq!(
+            route(&RT1050_EVKB, &p(12, Some(11), None, None)),
+            err(SpiRole::Sck, 12, SpiProblem::NoSignal)
+        );
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, Some(12), None, None)),
+            err(SpiRole::Mosi, 12, SpiProblem::NoSignal)
+        );
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, Some(11), Some(10), None)),
+            err(SpiRole::Miso, 10, SpiProblem::NoSignal)
+        );
+        // The board policy applies first.
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, Some(11), Some(12), Some(23))),
+            err(SpiRole::Cs, 23, SpiProblem::Pin(PinError::Reserved))
+        );
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, Some(11), Some(12), Some(22))),
+            err(SpiRole::Cs, 22, SpiProblem::Pin(PinError::InputOnly))
+        );
+        assert_eq!(
+            route(&RT1050_EVKB, &p(13, Some(11), Some(12), Some(40))),
+            err(SpiRole::Cs, 40, SpiProblem::Pin(PinError::NoSuchPin))
         );
     }
 }

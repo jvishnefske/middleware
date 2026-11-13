@@ -538,7 +538,7 @@ fn whole(v: &JsValue) -> Option<i64> {
 }
 
 /// The board's pins for the pin table: `{chip, spiRouting: "matrix" |
-/// "rp-function-table", gpios: [{pin, reserved?: why, inputOnly, adc?:
+/// "rp-function-table" | "fixed", gpios: [{pin, reserved?: why, inputOnly, adc?:
 /// channel, pwm?: {timer, channel}, i2c?: {bus, line: "sda"|"scl"}, spi?:
 /// [{block, signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm:
 /// [{timer, channel, pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
@@ -554,6 +554,13 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
     let routing = match map.spi_routing() {
         SpiRouting::Matrix => "matrix",
         SpiRouting::RpFunctionTable => "rp-function-table",
+        SpiRouting::Fixed(_) => "fixed",
+    };
+    // On a fixed-pin board (the RT1050-EVKB's LPSPI1) the SCK, MOSI and
+    // MISO pins are block 0's.
+    let fixed = match map.spi_routing() {
+        SpiRouting::Fixed(f) => Some(f),
+        _ => None,
     };
     set(&o, "spiRouting", routing);
     let wired: Vec<(u8, u8, u8)> = (0..2u8)
@@ -582,6 +589,18 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
                 set(&i, "bus", bus);
                 set(&i, "line", if sda == p { "sda" } else { "scl" });
                 set(&g, "i2c", i);
+            }
+            if let Some(f) = fixed {
+                let name = [(f.sck, "sck"), (f.mosi, "mosi"), (f.miso, "miso")]
+                    .into_iter()
+                    .find(|(q, _)| *q == p)
+                    .map(|(_, n)| n);
+                if let Some(name) = name {
+                    let s = Object::new();
+                    set(&s, "block", 0);
+                    set(&s, "signal", name);
+                    set(&g, "spi", s);
+                }
             }
             if routing == "rp-function-table"
                 && let Some((block, signal)) = spi_function(p)

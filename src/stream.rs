@@ -27,6 +27,10 @@
 //!   JPEG camera; its baked frames are `frames::fixtures`, feature
 //!   `cam-fixtures`), behind one [`FrameSource`] that sizes, chunks and
 //!   fills any frame.
+//! * [`samples`] — the sample batch wire format of the IMU and microphone
+//!   source routes: self-contained messages with a `first_index` that
+//!   makes every gap measurable, and the simulators' fake sensors
+//!   ([`samples::fake`]).
 //! * [`RouteStats`] — the per-route counters behind the `route_stat` import.
 //!
 //! # Budget per ESP-NOW message
@@ -41,6 +45,7 @@
 pub mod chunk;
 pub mod frames;
 pub mod pattern;
+pub mod samples;
 pub mod sink;
 pub mod source;
 

@@ -7,6 +7,7 @@
 //! | [`ESP32S3`]| ESP32-S3 boards           | 19, 20 USB, 26–37 flash / PSRAM, 43, 44 UART0 console  | —          | ADC1: 1–10             | 5, 6 / —                 | 11–18 (timers 0–3)          | matrix  |
 //! | [`ESP32C3`]| ESP32-C3 boards           | 12–17 flash, 18, 19 USB, 20, 21 UART0 console          | —          | —                      | — / —                    | —                           | matrix  |
 //! | [`ESP8266`]| ESP8266 modules           | 1, 3 UART0 console, 6–11 flash                         | —          | —                      | — / —                    | —                           | matrix  |
+//! | [`RT1050_EVKB`] | NXP MIMXRT1050-EVKB  | 23, 24 LPUART1 console                                 | 2, 3, 5, 22 | ADC1: 16–21 (A0–A5)   | 20, 21 (LPI2C1) / —      | —                           | fixed LPSPI1 (13, 11, 12) |
 //!
 //! The RP2040 and the RP2350A share the Pico pinout, so both chips use
 //! [`PICO`]. The ESP32 build is the ESP32-CAM's: its I2C bus 0 is the
@@ -18,8 +19,13 @@
 //! ESP base firmware's (`esp_base::chip`, X9).
 //! The ESP32-C3 and ESP8266 builds run no payloads, so they wire no
 //! peripherals; their maps still say which pins exist and are reserved.
+//!
+//! On the RT1050-EVKB the pin numbers are logical board pins, not GPIO
+//! lines: D`n` is pin `n`, A`n` is pin `16 + n`, the USER button SW8 is 22
+//! and the LPUART1 console pins are 23 and 24 ([`crate::imxrt::evkb`] maps
+//! each to its pad, with the table and its sources).
 
-use crate::{PinMap, Reason, SpiRouting, bit, span};
+use crate::{FixedSpi, PinMap, Reason, SpiRouting, bit, span};
 
 const PICO_REASONS: &[Reason] = &[
     Reason {
@@ -153,8 +159,68 @@ pub const ESP8266: PinMap = PinMap {
     ],
 };
 
+/// NXP MIMXRT1050-EVKB (i.MX RT1052): logical board pins 0–24
+/// ([`crate::imxrt::evkb`] has the pin → pad table and its SDK sources).
+///
+/// | pins  | what                    | payload access |
+/// |-------|-------------------------|----------------|
+/// | 0–15  | Arduino D0–D15          | GPIO; D2, D3 input only (driven by the FXOS8700CQ INT2 and the audio jack detect); D4, D5 reserved (the Ethernet PHY's reset, which also drives the USER LED D18, and its interrupt) |
+/// | 16–21 | Arduino A0–A5           | GPIO and ADC1 (ADC channel `n` is A`n`) |
+/// | 20, 21| A4, A5                  | I2C bus 0 SDA, SCL (LPI2C1; the board's FXOS8700CQ at 0x1F and WM8960 codec at 0x1A share it) |
+/// | 13, 11, 12 | D13, D11, D12      | SPI bus 0 SCK, MOSI, MISO (LPSPI1, fixed); CS any output pin |
+/// | 22    | USER button SW8         | input only |
+/// | 23, 24| LPUART1 TXD, RXD        | reserved (the console and protocol link) |
+///
+/// The firmware brings up Ethernet (KSZ8081RNB PHY), so its reset and
+/// interrupt lines D4 and D5 are reserved; the USER LED, wired to the PHY
+/// reset, is therefore not a payload pin.
+///
+/// The SDRAM, HyperFlash, boot, SWD and Ethernet (RMII, MDIO) pads and the
+/// SAI1 pads to the WM8960 codec (none on the Arduino header) have no
+/// logical number at all ([`crate::imxrt::evkb::RESERVED_PADS`]). No PWM
+/// outputs are wired.
+pub const RT1050_EVKB: PinMap = PinMap {
+    gpio: span(0, 24),
+    reserved: bit(4) | bit(5) | bit(23) | bit(24),
+    input_only: bit(2) | bit(3) | bit(22),
+    adc: &[16, 17, 18, 19, 20, 21],
+    i2c: [Some((20, 21)), None],
+    pwm: &[],
+    spi: SpiRouting::Fixed(FixedSpi {
+        sck: 13,
+        mosi: 11,
+        miso: 12,
+    }),
+    reasons: &[
+        Reason {
+            pins: bit(23) | bit(24),
+            why: "LPUART1, the console and protocol link (OpenSDA VCOM)",
+        },
+        Reason {
+            pins: bit(4),
+            why: "the Ethernet PHY reset (also the USER LED D18; driving it low resets the PHY)",
+        },
+        Reason {
+            pins: bit(5),
+            why: "the Ethernet PHY interrupt",
+        },
+        Reason {
+            pins: bit(2),
+            why: "driven by the FXOS8700CQ's INT2 output (input only)",
+        },
+        Reason {
+            pins: bit(3),
+            why: "the audio jack detect, AUD_INT (input only)",
+        },
+        Reason {
+            pins: bit(22),
+            why: "the USER button SW8 (input only)",
+        },
+    ],
+};
+
 /// The map for a chip name as `sys/info` reports it (`esp32`, `esp32s3`,
-/// `esp32c3`, `esp8266`, `rp2040`, `rp2350`).
+/// `esp32c3`, `esp8266`, `rp2040`, `rp2350`, `rt1050`).
 pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
     match chip {
         "esp32" => Some(&ESP32),
@@ -162,6 +228,7 @@ pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
         "esp32c3" => Some(&ESP32C3),
         "esp8266" => Some(&ESP8266),
         "rp2040" | "rp2350" => Some(&PICO),
+        "rt1050" => Some(&RT1050_EVKB),
         _ => None,
     }
 }
@@ -188,5 +255,68 @@ mod tests {
         assert_eq!(ESP32.gpios().count(), 34);
         assert_eq!(ESP32.payload_pins().count(), 34 - 10);
         assert_eq!(ESP32S3.payload_pins().count(), 22 + 23 - 16);
+    }
+
+    #[test]
+    fn rt10_rt1050_evkb_map() {
+        use crate::{AdcError, Direction, PinError};
+        assert_eq!(by_chip("rt1050"), Some(&RT1050_EVKB));
+        let m = &RT1050_EVKB;
+        assert_eq!(
+            m.gpios().count(),
+            usize::from(crate::imxrt::evkb::PIN_COUNT)
+        );
+        assert_eq!(m.payload_pins().count(), 21);
+        // Every logical pin has a pad; none past them exists.
+        assert!(m.gpios().all(|p| crate::imxrt::evkb::pin(p).is_some()));
+        assert_eq!(m.check(25, Direction::Input), Err(PinError::NoSuchPin));
+        // Reserved and input-only pins, each with its reason.
+        for p in [4, 5, 23, 24] {
+            assert_eq!(m.check(p, Direction::Input), Err(PinError::Reserved));
+        }
+        assert_eq!(
+            m.reason(4),
+            Some("the Ethernet PHY reset (also the USER LED D18; driving it low resets the PHY)")
+        );
+        assert_eq!(m.reason(5), Some("the Ethernet PHY interrupt"));
+        for p in [2, 3, 22] {
+            assert_eq!(m.check(p, Direction::Input), Ok(()));
+            assert_eq!(m.check(p, Direction::Output), Err(PinError::InputOnly));
+        }
+        for p in m.gpios() {
+            let held = m.is_reserved(p) || m.is_input_only(p);
+            assert_eq!(m.reason(p).is_some(), held, "pin {p}");
+        }
+        // The SPI and I2C pins are outputs.
+        for p in [0, 1, 6, 10, 11, 12, 13, 14, 15, 16, 21] {
+            assert_eq!(m.check(p, Direction::Output), Ok(()), "pin {p}");
+        }
+        // ADC channel n is An, on ADC1.
+        for n in 0..6u8 {
+            let p = 16 + n;
+            assert_eq!(m.adc_channel(p), Ok(n));
+            let pad = crate::imxrt::evkb::pin(p).unwrap();
+            assert!(pad.adc1.is_some(), "A{n}");
+        }
+        assert_eq!(m.adc_channel(13), Err(AdcError::NotAnalog));
+        assert_eq!(m.adc_channel(30), Err(AdcError::NoSuchPin));
+        // I2C bus 0 is LPI2C1 on A4 (SDA) / A5 (SCL).
+        use crate::imxrt::Signal;
+        assert_eq!(m.i2c_pins(0), Some((20, 21)));
+        assert_eq!(m.i2c_pins(1), None);
+        let (sda, scl) = m.i2c_pins(0).unwrap();
+        let pin = |p| crate::imxrt::evkb::pin(p).unwrap();
+        assert!(pin(sda).function(Signal::Lpi2c1Sda).is_some());
+        assert!(pin(scl).function(Signal::Lpi2c1Scl).is_some());
+        assert_eq!(m.check(sda, Direction::Output), Ok(()));
+        assert_eq!(m.check(scl, Direction::Output), Ok(()));
+        // SPI bus 0 is LPSPI1 on D13 / D11 / D12.
+        let SpiRouting::Fixed(spi) = m.spi_routing() else {
+            panic!("fixed LPSPI1 routing");
+        };
+        assert!(pin(spi.sck).function(Signal::Lpspi1Sck).is_some());
+        assert!(pin(spi.mosi).function(Signal::Lpspi1Sdo).is_some());
+        assert!(pin(spi.miso).function(Signal::Lpspi1Sdi).is_some());
+        assert_eq!(m.pwm_pins().count(), 0);
     }
 }
