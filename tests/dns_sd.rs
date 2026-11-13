@@ -524,7 +524,10 @@ async fn l_announce_then_withdraw() {
 
 #[tokio::test]
 async fn l_goodbye_removes_record_at_once() {
-    discovery::goodbye_removes_record_at_once(&mut DnsSd::new().await).await;
+    // Boxed: the case's future (with the unicast resolver's buffers) is
+    // larger than the 2 MiB test-thread stack in debug builds.
+    let mut dns = DnsSd::new().await;
+    Box::pin(discovery::goodbye_removes_record_at_once(&mut dns)).await;
 }
 
 #[test]
