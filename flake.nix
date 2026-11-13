@@ -33,11 +33,17 @@
       # firmware and payload workspaces, the web app) or that do not affect
       # the build (nix files, prose), so editing them rebuilds nothing.
       # payloads/jpeg and payloads/sdk stay: tools/payload-sim depends on
-      # them by path.
+      # them by path. esp-base's library (firmware/Cargo.toml, build.rs and
+      # src) stays: pi-node depends on it by path; its build script only
+      # adds linker arguments for ESP targets.
       src = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.difference ./. (lib.fileset.unions [
-          ./firmware
+          (lib.fileset.difference ./firmware (lib.fileset.unions [
+            ./firmware/Cargo.toml
+            ./firmware/build.rs
+            ./firmware/src
+          ]))
           ./firmware-esp8266
           (lib.fileset.difference ./payloads (lib.fileset.unions [ ./payloads/jpeg ./payloads/sdk ]))
           ./nix
