@@ -3,18 +3,31 @@ name = "mw-gateway"
 version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
-description = "MCU gateway: bridges a serial-attached middleware device's app/** pub/sub, disc/* beacons and allowlisted sys/* requests to the cluster's Zenoh fabric"
+description = "MCU gateway: bridges a serial-attached middleware device's app/** pub/sub, disc/* beacons, allowlisted sys/* requests and signed updates from allowlisted updaters to the cluster's Zenoh fabric"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "mw-gateway"
 path = "src/main.rs"
 
+# The remote update client (signed payloads, RP2350 firmware) through
+# gw/sys; see `remote`.
+[[bin]]
+name = "mw-update"
+path = "src/bin/mw-update.rs"
+
 [dependencies]
 # Host backends only (Zenoh for the fabric, the serial link codec); never
 # an embedded feature set (scripts/check-features.sh, RG19).
-middleware = { path = "..", features = ["zenoh", "serial"] }
+# `grpc` and `istio` (host) for `shell::serve_sys` and its sidecar
+# principal; the update gate uses the always-built trust wire types and
+# verifies control signatures with ed25519-dalek itself, so no `trust`.
+middleware = { path = "..", features = ["zenoh", "serial", "grpc", "istio"] }
 mw-service = { path = "../service" }
+# mwctl's pure protocol operations (upload, fw update, signing) for
+# mw-update; mwctl itself stays free of cloud dependencies.
+mwctl = { path = "../tools/mwctl" }
+ed25519-dalek = "2.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 # The trait SerialLink reads and writes through.
 embedded-io-async = "0.7"
@@ -24,3 +37,10 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+# The fake device in tests runs the real FwService on the in-memory
+# RP2350 bootrom model and checks signed commits (tests only).
+middleware = { path = "..", features = ["zenoh", "serial", "grpc", "istio", "fw-sim"] }
+# The tests' stand-in sidecar sets x-forwarded-client-cert.
+tonic = "0.14"
+http = "1"
+tokio-stream = { version = "0.1", features = ["net"] }

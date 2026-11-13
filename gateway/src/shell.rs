@@ -1,5 +1,5 @@
 //! The gateway's imperative shell: the tasks that perform what
-//! [`Bridge`](crate::bridge::Bridge) decides.
+//! [`Bridge`] decides.
 //!
 //! # Tasks and queues
 //!
@@ -24,8 +24,28 @@
 //! * One **downlink task** per downlink filter forwards matching samples
 //!   to the link task, which maps them ([`Bridge::downlink`]).
 //! * [`SysForward`], the `gw/sys` [`ServiceHandler`], hands each request
-//!   to the link task, which applies the allowlist ([`Bridge::sys_route`])
-//!   and forwards or answers it, and waits at most its timeout.
+//!   with its caller (principal and `x-request-id`) to the link task, which
+//!   applies the allowlist ([`Bridge::sys_route`]) or, for update keys, the
+//!   update gate ([`Bridge::sys_update`], [`crate::update`]) and forwards
+//!   or answers it; the handler waits at most its timeout and the caller's
+//!   deadline.
+//! * [`serve_sys`] answers `gw/sys` gRPC calls from a
+//!   [`GrpcResponder`](middleware::grpc::GrpcResponder) with a
+//!   `SysForward`, for a process that serves the kind itself rather than
+//!   through the `mw-service` runner.
+//!
+//! # Update requests and timing
+//!
+//! A forwarded update request waits at the device up to the update
+//! timeout ([`UPDATE_TIMEOUT`], `MW_GATEWAY_UPDATE_TIMEOUT_MS`), longer
+//! than a plain request ([`SYS_TIMEOUT`]): a `begin` erases flash and a
+//! firmware `commit` hashes the image. The caller may give up sooner (its
+//! deadline); the device's late answer is still recorded by the update
+//! gate, so the caller's resend with the same request id is answered from
+//! it instead of acting twice. An answer that never comes within the
+//! update timeout is abandoned ([`Bridge::update_abandoned`]). After
+//! binding, and with every recheck, the link task also asks
+//! `sys/trust/info`, which tells the gate whether the device is claimed.
 //!
 //! Every queue is a bounded tokio channel written with `try_send`: when it
 //! is full the **newest** item is dropped and counted ([`Drops`]); nothing
@@ -37,7 +57,7 @@ use middleware::key::{AsKey, Key, KeyBuf};
 use middleware::loader::keys;
 use middleware::serial::frame::Frame;
 use middleware::serial::link::{LinkError, RECV_BUF_LEN, SerialLink};
-use middleware::transport::{HandlerError, Publisher, Request, Subscribe, Subscriber};
+use middleware::transport::{HandlerError, Publisher, Request, RequestMeta, Subscribe, Subscriber};
 use middleware::zenoh::{ZenohDiscovery, ZenohError, ZenohSubscriber, ZenohTransport};
 use mw_service::{Ctx, ServiceHandler};
 use std::time::Duration;
@@ -47,6 +67,7 @@ use tokio::time::Instant;
 
 use crate::bridge::{Bound, Bridge, Counters, OwnedKey, Pending, SysRoute, Uplink};
 use crate::io::ChannelIo;
+use crate::update::{Admission, Caller, SysClass, Ticket, UpdateCounters, classify};
 
 /// The link task's timer period.
 pub const TICK: Duration = Duration::from_millis(250);
@@ -54,6 +75,10 @@ pub const TICK: Duration = Duration::from_millis(250);
 pub const SEND_TIMEOUT: Duration = Duration::from_millis(200);
 /// How long a `gw/sys` request waits for the device by default.
 pub const SYS_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long an update request waits for the device by default.
+pub const UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Largest `gw/sys` answer [`serve_sys`] returns: one serial frame.
+pub const SYS_ANSWER_MAX: usize = RECV_BUF_LEN;
 /// How often `sys/info` is sent while the device is unbound.
 pub const BIND_RETRY: Duration = Duration::from_secs(2);
 /// How often `sys/info` is sent again once bound (a swapped device).
@@ -74,12 +99,29 @@ type Reply = oneshot::Sender<Result<Vec<u8>, HandlerError>>;
 enum Command {
     /// Relay a cluster sample (cluster key) to the device, if it maps.
     Downlink { key: OwnedKey, payload: Vec<u8> },
-    /// A `gw/sys` request already allowed by the handler.
+    /// A `gw/sys` request, decided by the link task.
     Sys {
         key: OwnedKey,
         body: Vec<u8>,
+        caller: OwnedCaller,
         reply: Reply,
     },
+}
+
+/// A [`Caller`] that can wait in a queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OwnedCaller {
+    principal: Option<String>,
+    request_id: Option<String>,
+}
+
+impl OwnedCaller {
+    fn as_caller(&self) -> Caller<'_> {
+        Caller {
+            principal: self.principal.as_deref(),
+            request_id: self.request_id.as_deref(),
+        }
+    }
 }
 
 /// What the link task asks of the zenoh task.
@@ -95,8 +137,13 @@ enum ToCluster {
 enum Waiter {
     /// The gateway's own `sys/info`.
     Bind,
+    /// The gateway's own `sys/trust/info`.
+    Trust,
     /// A `gw/sys` caller.
     Caller(Reply),
+    /// A `gw/sys` update request the gate admitted; the caller may have
+    /// stopped waiting, the answer is recorded either way.
+    Update { reply: Reply, ticket: Ticket },
 }
 
 /// Items dropped by the shell (saturating), by queue.
@@ -127,6 +174,27 @@ pub struct Report {
     pub drops: Drops,
     /// The node the device was bound to.
     pub device: Option<middleware::SenderId>,
+    /// The update gate's decisions.
+    pub updates: UpdateCounters,
+}
+
+/// The shell's timeouts ([`start_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellOptions {
+    /// How long a plain `gw/sys` request (and the gateway's own
+    /// `sys/info`) waits for the device.
+    pub sys_timeout: Duration,
+    /// How long an update request waits for the device.
+    pub update_timeout: Duration,
+}
+
+impl Default for ShellOptions {
+    fn default() -> Self {
+        ShellOptions {
+            sys_timeout: SYS_TIMEOUT,
+            update_timeout: UPDATE_TIMEOUT,
+        }
+    }
 }
 
 fn bump(n: &mut u32) {
@@ -138,6 +206,22 @@ fn bump(n: &mut u32) {
 pub struct SysForward {
     commands: mpsc::Sender<Command>,
     timeout: Duration,
+    update_timeout: Duration,
+}
+
+/// How long the handler waits: its timeout for the key's class, cut to the
+/// caller's deadline. Pure.
+pub fn sys_wait(
+    key: Key<'_>,
+    timeout: Duration,
+    update_timeout: Duration,
+    deadline_ms: Option<u32>,
+) -> Duration {
+    let own = match classify(key) {
+        SysClass::Update(_) => update_timeout,
+        SysClass::Never | SysClass::Plain => timeout,
+    };
+    deadline_ms.map_or(own, |d| own.min(Duration::from_millis(u64::from(d))))
 }
 
 impl SysForward {
@@ -149,6 +233,7 @@ impl SysForward {
         SysForward {
             commands,
             timeout: SYS_TIMEOUT,
+            update_timeout: UPDATE_TIMEOUT,
         }
     }
 
@@ -157,23 +242,51 @@ impl SysForward {
         SysForward { timeout, ..self }
     }
 
+    /// The same handler waiting at most `timeout` for an update request.
+    pub fn with_update_timeout(self, timeout: Duration) -> Self {
+        SysForward {
+            update_timeout: timeout,
+            ..self
+        }
+    }
+
     /// Answers one `gw/sys` request body (`[key_len][key][body]`) into
-    /// `out`. The link task decides with the allowlist
-    /// ([`Bridge::sys_route`], counted); a denied request never reaches
-    /// the device. A full queue is [`HandlerError::Unavailable`], no
-    /// answer within the timeout [`HandlerError::DeadlineExceeded`].
+    /// `out`, for an anonymous caller (no principal: update requests are
+    /// `Denied`). See [`SysForward::forward_as`].
     pub async fn forward(&mut self, body: &[u8], out: &mut [u8]) -> Result<usize, HandlerError> {
+        self.forward_as(&RequestMeta::NONE, body, out).await
+    }
+
+    /// Answers one `gw/sys` request body (`[key_len][key][body]`) into
+    /// `out` for the caller `meta` describes (its principal, request id
+    /// and deadline). The link task decides with the allowlist
+    /// ([`Bridge::sys_route`]) or the update gate ([`Bridge::sys_update`]),
+    /// both counted; a refused request never reaches the device. A full
+    /// queue is [`HandlerError::Unavailable`], no answer within
+    /// [`sys_wait`] [`HandlerError::DeadlineExceeded`].
+    pub async fn forward_as(
+        &mut self,
+        meta: &RequestMeta<'_>,
+        body: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, HandlerError> {
         let (key, inner) = crate::bridge::parse_sys_request(body)?;
+        let wait = sys_wait(key, self.timeout, self.update_timeout, meta.deadline_ms);
         let key = KeyBuf::from_key(key).map_err(|_| HandlerError::InvalidRequest)?;
         let (reply, answer) = oneshot::channel();
+        let caller = OwnedCaller {
+            principal: meta.principal.map(str::to_owned),
+            request_id: meta.request_id.map(|r| r.as_str().to_owned()),
+        };
         self.commands
             .try_send(Command::Sys {
                 key,
                 body: inner.to_vec(),
+                caller,
                 reply,
             })
             .map_err(|_| HandlerError::Unavailable)?;
-        let bytes = tokio::time::timeout(self.timeout, answer)
+        let bytes = tokio::time::timeout(wait, answer)
             .await
             .map_err(|_| HandlerError::DeadlineExceeded)?
             .map_err(|_| HandlerError::Unavailable)??;
@@ -188,11 +301,44 @@ impl SysForward {
 impl ServiceHandler for SysForward {
     async fn handle(
         &mut self,
-        _ctx: &mut Ctx<'_>,
+        ctx: &mut Ctx<'_>,
         req: &Request<'_>,
         out: &mut [u8],
     ) -> Result<usize, HandlerError> {
-        self.forward(req.body, out).await
+        let mut meta = *ctx.meta();
+        if let Some(at) = ctx.deadline() {
+            let left = mw_service::ctx::remaining(at, std::time::Instant::now());
+            meta.deadline_ms = Some(u32::try_from(left.as_millis()).unwrap_or(u32::MAX));
+        }
+        self.forward_as(&meta, req.body, out).await
+    }
+}
+
+/// Answers `gw/sys` calls taken from `responder` with `sys`, one at a
+/// time, until the responder's service is gone. Each call's principal
+/// comes from the responder's [`PrincipalSource`](middleware::grpc::PrincipalSource)
+/// (`SidecarXfcc` behind an Istio or Envoy sidecar; with `None` every
+/// caller is anonymous and update requests are `Denied`); any key other
+/// than [`SYS_KIND`] is `NotFound`. For a process that serves `gw/sys`
+/// itself (an embedding, a test) instead of through the `mw-service`
+/// runner.
+pub async fn serve_sys(responder: middleware::grpc::GrpcResponder, sys: SysForward) {
+    let mut responder = responder;
+    let mut sys = sys;
+    let mut out = vec![0u8; SYS_ANSWER_MAX];
+    while let Ok(call) = responder.next_call().await {
+        let result = match call.key() {
+            Some(k) if k.as_str() == SYS_KIND => {
+                let meta = call.meta();
+                sys.forward_as(&meta, call.body(), &mut out).await
+            }
+            Some(_) => Err(HandlerError::NotFound),
+            None => Err(HandlerError::InvalidRequest),
+        };
+        match result {
+            Ok(n) => call.respond(Ok(out.get(..n).unwrap_or_default())),
+            Err(e) => call.respond(Err(e)),
+        }
     }
 }
 
@@ -212,11 +358,23 @@ pub const SYS_KIND: &str = "gw/sys";
 /// Starts the gateway on the device stream `io` and the Zenoh session
 /// `session`, deciding with `bridge`. Declares one Zenoh subscriber per
 /// downlink filter first (so a failure is reported here), then spawns the
-/// tasks. Returns the running gateway and its `gw/sys` handler.
+/// tasks. Returns the running gateway and its `gw/sys` handler. The
+/// default timeouts ([`ShellOptions::default`]); see [`start_with`].
 pub async fn start(
     io: ChannelIo,
     session: ZenohTransport,
     bridge: Bridge,
+) -> Result<(Gateway, SysForward), ZenohError> {
+    start_with(io, session, bridge, ShellOptions::default()).await
+}
+
+/// [`start`] with the timeouts `options` (the returned handler waits as
+/// long as the link task does).
+pub async fn start_with(
+    io: ChannelIo,
+    session: ZenohTransport,
+    bridge: Bridge,
+    options: ShellOptions,
 ) -> Result<(Gateway, SysForward), ZenohError> {
     let mut session = session;
     let mut subscribers = Vec::new();
@@ -230,7 +388,8 @@ pub async fn start(
     let (control, control_rx) = mpsc::channel(CONTROL_QUEUE);
     let sys = SysForward {
         commands: commands.clone(),
-        timeout: SYS_TIMEOUT,
+        timeout: options.sys_timeout,
+        update_timeout: options.update_timeout,
     };
     let downlinks = subscribers
         .into_iter()
@@ -249,7 +408,9 @@ pub async fn start(
             control,
             started: Instant::now(),
             next_bind_ms: 0,
-            sys_timeout: SYS_TIMEOUT,
+            sys_timeout: options.sys_timeout,
+            update_timeout: options.update_timeout,
+            trust_due: false,
         }
         .run(link, command_rx, stopped.clone()),
     );
@@ -311,6 +472,7 @@ impl Gateway {
             counters: bridge.counters(),
             drops,
             device: bridge.device(),
+            updates: bridge.updates().counters(),
         }
     }
 }
@@ -326,6 +488,9 @@ struct LinkTask {
     started: Instant,
     next_bind_ms: u64,
     sys_timeout: Duration,
+    update_timeout: Duration,
+    /// Ask `sys/trust/info` on the next tick (after a bind).
+    trust_due: bool,
 }
 
 fn ms(d: Duration) -> u64 {
@@ -366,8 +531,15 @@ impl LinkTask {
         // Fail every waiter now rather than at its deadline.
         let (_, waiters) = task.pending.expire(u64::MAX);
         for w in waiters {
-            if let Waiter::Caller(r) = w {
-                let _ = r.send(Err(HandlerError::Unavailable));
+            match w {
+                Waiter::Caller(r) => {
+                    let _ = r.send(Err(HandlerError::Unavailable));
+                }
+                Waiter::Update { reply, ticket } => {
+                    task.bridge = task.bridge.update_abandoned(&ticket);
+                    let _ = reply.send(Err(HandlerError::Unavailable));
+                }
+                Waiter::Bind | Waiter::Trust => {}
             }
         }
         (task.bridge, task.drops)
@@ -424,6 +596,15 @@ impl LinkTask {
                         let _ = reply.send(result.map(<[u8]>::to_vec));
                         self
                     }
+                    (Some(Waiter::Update { reply, ticket }), result) => {
+                        self.bridge = self.bridge.update_done(&ticket, result, now);
+                        let _ = reply.send(result.map(<[u8]>::to_vec));
+                        self
+                    }
+                    (Some(Waiter::Trust), result) => {
+                        self.bridge = self.bridge.observe_trust(result);
+                        self
+                    }
                     (Some(Waiter::Bind), Ok(info)) => self.on_info(info),
                     _ => self,
                 }
@@ -439,6 +620,7 @@ impl LinkTask {
         match bound {
             Bound::Node { node, withdraw } => {
                 tracing::info!(node = ?node.0, "device bound");
+                self.trust_due = true;
                 self.withdraw(withdraw)
             }
             Bound::NoNode => {
@@ -478,8 +660,34 @@ impl LinkTask {
         let (pending, late) = task.pending.expire(now);
         task.pending = pending;
         for w in late {
-            if let Waiter::Caller(r) = w {
-                let _ = r.send(Err(HandlerError::DeadlineExceeded));
+            match w {
+                Waiter::Caller(r) => {
+                    let _ = r.send(Err(HandlerError::DeadlineExceeded));
+                }
+                Waiter::Update { reply, ticket } => {
+                    task.bridge = task.bridge.update_abandoned(&ticket);
+                    let _ = reply.send(Err(HandlerError::DeadlineExceeded));
+                }
+                Waiter::Bind | Waiter::Trust => {}
+            }
+        }
+        if task.trust_due && !task.pending.any(|w| matches!(w, Waiter::Trust)) {
+            task.trust_due = false;
+            let deadline = now.saturating_add(ms(task.sys_timeout));
+            match task.pending.insert(Waiter::Trust, deadline) {
+                Err((pending, _)) => {
+                    task.pending = pending;
+                    task.trust_due = true;
+                }
+                Ok((pending, id)) => {
+                    task.pending = pending;
+                    let frame = Frame::Request {
+                        id,
+                        key: keys::TRUST_INFO,
+                        payload: &[],
+                    };
+                    task = task.send(link, &frame).await.0;
+                }
             }
         }
         let binding = task.pending.any(|w| matches!(w, Waiter::Bind));
@@ -529,7 +737,41 @@ impl LinkTask {
                 }
                 task
             }
-            Command::Sys { key, body, reply } => {
+            Command::Sys {
+                key,
+                body,
+                caller,
+                reply,
+            } => {
+                if let SysClass::Update(op) = classify(key.as_key()) {
+                    let now = self.now_ms();
+                    let (bridge, decision) =
+                        self.bridge
+                            .sys_update(caller.as_caller(), op, key.as_key(), &body, now);
+                    self.bridge = bridge;
+                    return match decision {
+                        Err(e) => {
+                            tracing::debug!(key = key.as_str(), ?e, "update refused");
+                            let _ = reply.send(Err(e));
+                            self
+                        }
+                        Ok(Admission::Replay(r)) => {
+                            let _ = reply.send(r);
+                            self
+                        }
+                        Ok(Admission::Forward { body, ticket }) => {
+                            let deadline = now.saturating_add(ms(self.update_timeout));
+                            self.request_device(
+                                link,
+                                key.as_key(),
+                                &body,
+                                Waiter::Update { reply, ticket },
+                                deadline,
+                            )
+                            .await
+                        }
+                    };
+                }
                 let (bridge, route) = self.bridge.sys_route(key.as_key());
                 self.bridge = bridge;
                 match route {
@@ -553,7 +795,7 @@ impl LinkTask {
     }
 
     async fn sys_to_device<IO>(
-        mut self,
+        self,
         link: &mut SerialLink<IO, 0>,
         key: Key<'_>,
         body: &[u8],
@@ -563,14 +805,42 @@ impl LinkTask {
         IO: embedded_io_async::Read + embedded_io_async::Write,
     {
         let deadline = self.now_ms().saturating_add(ms(self.sys_timeout));
-        match self.pending.insert(Waiter::Caller(reply), deadline) {
+        self.request_device(link, key, body, Waiter::Caller(reply), deadline)
+            .await
+    }
+
+    /// Fails `waiter` with `Unavailable` (an update one is abandoned).
+    fn fail(mut self, waiter: Waiter) -> Self {
+        match waiter {
+            Waiter::Caller(r) => {
+                let _ = r.send(Err(HandlerError::Unavailable));
+            }
+            Waiter::Update { reply, ticket } => {
+                self.bridge = self.bridge.update_abandoned(&ticket);
+                let _ = reply.send(Err(HandlerError::Unavailable));
+            }
+            Waiter::Bind | Waiter::Trust => {}
+        }
+        self
+    }
+
+    /// Sends a request for `waiter`, answered by `deadline_ms`.
+    async fn request_device<IO>(
+        mut self,
+        link: &mut SerialLink<IO, 0>,
+        key: Key<'_>,
+        body: &[u8],
+        waiter: Waiter,
+        deadline_ms: u64,
+    ) -> Self
+    where
+        IO: embedded_io_async::Read + embedded_io_async::Write,
+    {
+        match self.pending.insert(waiter, deadline_ms) {
             Err((pending, waiter)) => {
                 self.pending = pending;
                 bump(&mut self.drops.sys);
-                if let Waiter::Caller(r) = waiter {
-                    let _ = r.send(Err(HandlerError::Unavailable));
-                }
-                self
+                self.fail(waiter)
             }
             Ok((pending, id)) => {
                 self.pending = pending;
@@ -584,8 +854,8 @@ impl LinkTask {
                     bump(&mut task.drops.sys);
                     let (pending, waiter) = task.pending.take(id);
                     task.pending = pending;
-                    if let Some(Waiter::Caller(r)) = waiter {
-                        let _ = r.send(Err(HandlerError::Unavailable));
+                    if let Some(w) = waiter {
+                        task = task.fail(w);
                     }
                 }
                 task
@@ -694,6 +964,8 @@ mod tests {
             started: Instant::now(),
             next_bind_ms: 0,
             sys_timeout: SYS_TIMEOUT,
+            update_timeout: UPDATE_TIMEOUT,
+            trust_due: false,
         }
     }
 
@@ -737,7 +1009,26 @@ mod tests {
         let mut body = [0u8; 16];
         let n = crate::bridge::encode_sys_request(keys::INFO, b"", &mut body).expect("body");
         let mut out = [0u8; 16];
-        assert_eq!(sys.forward(&body[..n], &mut out).await, Err(HandlerError::Unavailable));
-        assert_eq!(sys.forward(b"", &mut out).await, Err(HandlerError::InvalidRequest));
+        assert_eq!(
+            sys.forward(&body[..n], &mut out).await,
+            Err(HandlerError::Unavailable)
+        );
+        assert_eq!(
+            sys.forward(b"", &mut out).await,
+            Err(HandlerError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn rg21_the_wait_follows_the_key_and_the_callers_deadline() {
+        let (t, u) = (Duration::from_secs(2), Duration::from_secs(20));
+        assert_eq!(sys_wait(keys::INFO, t, u, None), t);
+        assert_eq!(sys_wait(keys::BEGIN, t, u, None), u);
+        assert_eq!(
+            sys_wait(keys::BEGIN, t, u, Some(5_000)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(sys_wait(keys::INFO, t, u, Some(60_000)), t);
+        assert_eq!(sys_wait(keys::COMMIT, t, u, Some(0)), Duration::ZERO);
     }
 }

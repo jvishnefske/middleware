@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use middleware::zenoh::{SessionConfig, ZenohTransport};
-use mw_gateway::{GatewayConfig, SysForward, io, service, start};
+use mw_gateway::{GatewayConfig, SysForward, io, service, start_with};
 use mw_service::run::{USAGE, terminate_signal};
 use mw_service::{Command, Config};
 
@@ -77,9 +77,18 @@ async fn run(config: GatewayConfig) -> Result<(), String> {
         .map_err(|e| format!("zenoh: {e}"))?;
     let stream =
         io::open_serial(&config.serial, config.baud).map_err(|e| format!("serial: {e}"))?;
-    let (mut gateway, sys) = start(stream, session, config.bridge())
-        .await
-        .map_err(|e| format!("zenoh: {e}"))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let (mut gateway, sys) = start_with(
+        stream,
+        session,
+        config.bridge_at(now_ms),
+        config.shell_options(),
+    )
+    .await
+    .map_err(|e| format!("zenoh: {e}"))?;
     let svc = service(&config, sys).map_err(|e| e.to_string())?;
     let (stop_runner, runner_stopped) = tokio::sync::oneshot::channel::<()>();
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {
