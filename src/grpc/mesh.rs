@@ -25,6 +25,16 @@
 //! `MeshBrowse::<UnicastDnsSd, 32>::new(dns, MeshDialer::via_sidecar("127.0.0.1:15001"))`,
 //! its events observed into a `Directory`, handed to
 //! [`MeshClient::with_directory`].
+//!
+//! # Node ids
+//!
+//! Unicast DNS-SD knows no node ids. Each endpoint's health service may
+//! send its node's [`SenderId`] in the `mw-node` reply header
+//! ([`health::NODE_HEADER`](super::health::NODE_HEADER)); [`MeshBrowse`]
+//! reports it as the endpoint's `Service::node` whenever the wrapped
+//! browser gave none, so a directory fed from it lets
+//! [`Target::Node`] select a DNS-discovered endpoint. A node the browser
+//! did report wins over the header.
 
 use super::GrpcError;
 use super::client::{GrpcTransport, method_path};
@@ -395,6 +405,8 @@ struct Entry {
     watch: WatchState,
     /// The last status the watch reported (`None` before the first).
     status: Option<ServingStatus>,
+    /// The node id the endpoint's health service sent with its watch.
+    node: Option<SenderId>,
     /// `Up` was reported and no `Down` since.
     announced: bool,
     /// The record changed since `Up` was reported.
@@ -479,11 +491,23 @@ fn observe(entries: &mut Vec<Entry>, event: &Event<'_>, cap: usize) {
             authority,
             watch: WatchState::Due,
             status: None,
+            node: None,
             announced: false,
             dirty: false,
             gone: false,
         }),
         None => {}
+    }
+}
+
+/// `service` with `node` when it names none itself. Pure.
+fn with_node(
+    service: crate::discovery::Service<'_>,
+    node: Option<SenderId>,
+) -> crate::discovery::Service<'_> {
+    crate::discovery::Service {
+        node: service.node.or(node),
+        ..service
     }
 }
 
@@ -578,7 +602,7 @@ impl<B: Browse, const N: usize> MeshBrowse<B, N> {
         let Some(e) = self.entries.get_mut(i) else {
             return Err(MeshBrowseError::Record(RecordError::BufferTooSmall));
         };
-        let service = e.record.service();
+        let service = with_node(e.record.service(), e.node);
         let event = if up {
             Event::Up(service)
         } else {
@@ -619,6 +643,12 @@ impl<B: Browse, const N: usize> MeshBrowse<B, N> {
                 Err(_) => None,
             };
             e.status = None;
+            let learned = opened.as_ref().and_then(|w| w.node());
+            if learned.is_some() && learned != e.node {
+                // Reported again with the new node if it was up.
+                e.dirty |= e.announced;
+                e.node = learned;
+            }
             e.watch = opened.map_or(WatchState::Ended, |w| WatchState::Open(Box::new(w)));
         }
     }
@@ -815,6 +845,7 @@ mod tests {
             authority: "127.0.0.1:1".to_owned(),
             watch: WatchState::Due,
             status: None,
+            node: None,
             announced: false,
             dirty: false,
             gone: false,

@@ -23,9 +23,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["grpc-tonic", "trace"] }
-tracing-opentelemetry = { version = "0.34", default-features = false }
+# The runner's Zenoh client configuration (`zenoh::Config`); the same
+# zenoh as `middleware`'s `zenoh` feature, nothing new in the tree.
+zenoh = "1.10"
 
 [dev-dependencies]
 middleware = { path = "..", features = ["grpc", "istio", "dns-sd", "zenoh", "postcard"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "test-util"] }
 serde = { version = "1", features = ["derive"] }
+# The in-process OTLP collector stub of tests/runner.rs (a tonic
+# TraceService server); same tonic and OpenTelemetry as above.
+tonic = "0.14"
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic", "trace"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+bytes = "1"
+http = "1"
