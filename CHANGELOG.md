@@ -22,6 +22,7 @@
 - esp-base: `rust-version` 1.95 -> 1.91, what its library needs, so the root workspace's toolchain builds it as a dependency (the chip builds still need 1.95 through esp-hal).
 - Root `Cargo.toml`: `"."` is no longer listed in `members` (the root package is a member regardless); the entry made every path under the root an explicit member, so `exclude = ["firmware", ...]` did not apply to `pi-node`'s path dependency on `firmware/`.
 - `scripts/check-features.sh`: block "PN9" (`mw-pi-node` is host only and enables only `serial`, `trust` and `espnow` of `middleware`'s embedded features, beside `zenoh`); `mw-pi-node` joins `CLOUD_CRATES`.
+- mw-pi-node starts its gateway half as `mw-gateway` does since the update gate (RG20–RG27): `mw_gateway::start_with_store` with `GatewayConfig::bridge_with_floor` and the persisted control counter floor; `MW_GATEWAY_STATE` defaults to `<MW_PI_NODE_STATE>/gateway`. `mw_pi_node::start` takes `DeviceParts` and `GatewayParts`; new `control_floor`, `wall_clock_ms`, `config::gateway_state_dir`. Updates through the cluster need an updater principal and signed commits and start/stop; the node is claimed over its local link.
 - README: "Linux payload host (Raspberry Pi)". design.md: "Linux payload host (`pi-node/`, PN…)", PN1–PN10 checked, PN11 (hardware run), PN12 (Linux peripherals) and PN13 (cluster requests on served keys through the gateway) open.
 
 ### 0.6: robots and the MCU gateway (RG1–RG19)

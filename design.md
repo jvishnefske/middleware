@@ -2687,15 +2687,24 @@ optionally a local one (`MW_PI_NODE_LOCAL_SERIAL`: a USB gadget's
 `/dev/ttyGS0` or one end of a PTY pair, opened with the gateway's
 `io::open_serial`, for `mwctl`). Requests are answered on the link they
 came from; publications, log lines and status changes go to all. The
-gateway (`mw_gateway::start`, its public API as of this change) binds to
-the node id from `sys/info`, relays `app/**` to Zenoh and serves `gw/sys`;
-the binary runs `mw_gateway::service` under the runner until SIGTERM or
-SIGINT, then stops the payload, syncs the flash and withdraws what the
-gateway announced. `gw/sys` passes only allowlisted `sys/...` keys, so
-uploads through the cluster need `MW_GATEWAY_SYS_ALLOW` to name the
-loader and trust keys (safe for installs once the node is claimed, as
-every commit must then be signed; allowing `sys/trust/claim` hands the
-first caller the node), and the cluster cannot reach a payload's served
+gateway (`mw_gateway::start_with_store`, as `mw-gateway`'s own binary
+starts it) binds to the node id from `sys/info`, relays `app/**` to Zenoh
+and serves `gw/sys`; the binary runs `mw_gateway::service` (named
+`mw/gateway`, the gateway's fixed service name) under the runner until
+SIGTERM or SIGINT, then stops the payload, syncs the flash and withdraws
+what the gateway announced. Updates through the cluster go through the
+gateway's update gate (RG20–RG27), never through `MW_GATEWAY_SYS_ALLOW`:
+the caller must be an updater (`MW_GATEWAY_UPDATERS`), the node claimed,
+commits signed, start and stop signed control requests over the node id's
+first six bytes with a counter above the gateway's floor, and every
+mutating request must carry an `x-request-id`; `sys/trust/claim` never
+passes, so a node is claimed over its local link (physical access, like
+a board's USB cable). The floor is computed and persisted as in
+`mw-gateway` (`state::floor_at_start`, `ControlStore`); when
+`MW_GATEWAY_STATE` is unset the store lives in `<MW_PI_NODE_STATE>/gateway`,
+so one directory holds all of the node's state. `mw-update` drives the
+node as it drives any board behind a gateway. The cluster cannot reach a
+payload's served
 `app/...` keys through the gateway at all; the local link can. Tests
 marked *(mw-pi-node)* run under `cargo test -p mw-pi-node` and
 `cargo test --workspace`; none opens a serial port or a GPIO chip, and
@@ -2778,18 +2787,24 @@ network tests use 127.0.0.1 only.
   `pn7_an_installed_payload_starts_at_boot_and_bad_images_fail_to_start`
   *(mw-pi-node)*.
 - [x] PN8 End to end in one process, the device thread on a real state
-  directory, the gateway on the other end of a `ChannelIo` pair and Zenoh
-  on loopback: through `gw/sys` as the runner calls it, `sys/info` reports
-  the node; a claim with the golden vector's test key pins it; an unsigned
-  upload of the WAT fixture is `Denied` and a signed one installs; start
-  runs it, its tick publications arrive on the cluster session, a cluster
-  sample on the downlink filter comes back republished, its ABI 5 served
-  key answers over the local link with the node id, `sys/log` holds its
-  lines and an unlisted key is `Denied`; stopping syncs the flash; after a
-  restart on the same directory the payload starts by itself and a
-  replayed commit and a second claim are `Denied` —
+  directory, the gateway on the other end of a `ChannelIo` pair (started
+  with its control counter store and floor, the store under the node's
+  state) and Zenoh on loopback: through `gw/sys` as the runner calls it,
+  `sys/info` reports the node; a claim through `gw/sys` is `Denied` even
+  for the updater, and the claim with the golden vector's test key goes
+  over the local link; a caller that is not an updater, or anonymous, is
+  `Denied`; the updater's unsigned upload of the WAT fixture is `Denied`
+  and a signed one installs; an unsigned start is `Denied`, a signed one
+  runs the payload and its replay is `Denied`; its tick publications
+  arrive on the cluster session, a cluster sample on the downlink filter
+  comes back republished, its ABI 5 served key answers over the local link
+  with the node id, `sys/log` holds its lines and an unsigned stop is
+  `Denied`; stopping syncs the flash and the accepted counter is in the
+  gateway's store; after a restart on the same directory the payload
+  starts by itself and a replayed commit and a second claim are `Denied` —
   `pi-node/tests/node.rs`:
-  `pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves`
+  `pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves`;
+  `config::tests::pn1_the_gateway_state_defaults_under_the_node_state`
   *(mw-pi-node)*.
 - [x] PN9 The crate is host only: no embedded feature set depends on it,
   and of `middleware`'s embedded features it enables only `serial`,

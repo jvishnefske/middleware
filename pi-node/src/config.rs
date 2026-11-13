@@ -12,13 +12,17 @@
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
 //! (`mw_gateway::GatewayConfig`; `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD`
 //! are not used, the device is in the process) and the runner its `MW_*`
-//! variables (`mw_service::Config`; `MW_ZENOH_ROUTER` is required).
+//! variables (`mw_service::Config`; `MW_ZENOH_ROUTER` is required). One
+//! default differs: when `MW_GATEWAY_STATE` is unset the gateway keeps its
+//! control counter in `<MW_PI_NODE_STATE>/gateway`
+//! ([`gateway_state_dir`]), so one directory holds all of the node's
+//! state.
 //!
 //! Unset or empty is the default; a malformed value is a
 //! [`PiNodeConfigError`] naming the variable.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `MW_PI_NODE_STATE`.
 pub const ENV_STATE: &str = "MW_PI_NODE_STATE";
@@ -137,6 +141,19 @@ impl PiNodeConfig {
     }
 }
 
+/// The subdirectory of the node's state the gateway's state defaults to.
+pub const GATEWAY_STATE_SUBDIR: &str = "gateway";
+
+/// Where the in-process gateway keeps its state: `MW_GATEWAY_STATE` when
+/// set (`configured`, the raw variable; the gateway checks it is
+/// absolute), else `<node state>/gateway`. Pure.
+pub fn gateway_state_dir(configured: Option<&str>, node_state: &Path) -> PathBuf {
+    match configured.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => PathBuf::from(v),
+        None => node_state.join(GATEWAY_STATE_SUBDIR),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +198,14 @@ mod tests {
         .expect("config");
         assert_eq!(c.node_id, NodeIdSource::Configured(SenderId([0, 0, 0, 0, 0, 0, 0, 0xff])));
         assert_eq!(c.memory_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pn1_the_gateway_state_defaults_under_the_node_state() {
+        let node = Path::new("/var/lib/mw-pi-node");
+        assert_eq!(gateway_state_dir(None, node), PathBuf::from("/var/lib/mw-pi-node/gateway"));
+        assert_eq!(gateway_state_dir(Some(" "), node), PathBuf::from("/var/lib/mw-pi-node/gateway"));
+        assert_eq!(gateway_state_dir(Some("/srv/gw"), node), PathBuf::from("/srv/gw"));
     }
 
     #[test]

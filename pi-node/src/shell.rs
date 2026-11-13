@@ -23,8 +23,9 @@
 //!   the thread; a local link closing only drops that link. On stop the
 //!   payload is stopped and the flash synced.
 //! * [`start`] makes a `ChannelIo` pair (RG14), starts the gateway on one
-//!   end (`mw_gateway::start`, its public API) and the device thread on the
-//!   other, so the node's payloads publish to Zenoh and the cluster reaches
+//!   end (`mw_gateway::start_with_store`, as `mw-gateway`'s binary does:
+//!   the update gate of RG20–RG27 with its persisted control counter
+//!   floor) and the device thread on the other, so the node's payloads publish to Zenoh and the cluster reaches
 //!   it through `gw/sys` exactly as a USB-attached board through
 //!   `mw-gateway`.
 //!
@@ -45,6 +46,8 @@ use middleware::transport::RequestMeta;
 use middleware::zenoh::{ZenohError, ZenohTransport};
 use mw_gateway::bridge::Bridge;
 use mw_gateway::io::{ChannelIo, pair};
+use mw_gateway::shell::ShellOptions;
+use mw_gateway::state::ControlStore;
 use mw_gateway::{Gateway, SysForward};
 use tokio::sync::{oneshot, watch};
 use wasm_host::Limits;
@@ -350,19 +353,49 @@ pub struct Report {
     pub gateway: mw_gateway::Report,
 }
 
-/// Starts the node (module docs): the gateway on `session` deciding with
-/// `bridge`, the device on `flash`, and `local` as a second link. Returns
-/// the node and the gateway's `gw/sys` handler for the service runner.
+/// The device half of a node.
+#[derive(Debug)]
+pub struct DeviceParts<F> {
+    /// The flash (`crate::open_state_flash`).
+    pub flash: F,
+    /// What `sys/info` reports.
+    pub facts: Facts,
+    /// The limits payloads run under.
+    pub limits: Limits,
+    /// A second link beside the gateway's (`MW_PI_NODE_LOCAL_SERIAL`).
+    pub local: Option<ChannelIo>,
+}
+
+/// The gateway half of a node, as `mw-gateway`'s own binary builds it:
+/// the bridge with the control counter floor
+/// (`GatewayConfig::bridge_with_floor` and `state::floor_at_start`, see
+/// [`crate::control_floor`]), the shell's timeouts and the store the
+/// accepted start/stop counters are persisted in. With no floor, or
+/// without updaters, signed start/stop through `gw/sys` are refused.
+#[derive(Debug)]
+pub struct GatewayParts {
+    /// The bridge.
+    pub bridge: Bridge,
+    /// The shell's timeouts.
+    pub options: ShellOptions,
+    /// The control counter store.
+    pub store: ControlStore,
+}
+
+/// Starts the node (module docs): the gateway on `session`
+/// (`mw_gateway::start_with_store`) and the device thread. Returns the
+/// node and the gateway's `gw/sys` handler for the service runner.
 pub async fn start<F: NorFlash + Durable + Send + 'static>(
-    flash: F,
-    facts: Facts,
-    limits: Limits,
-    bridge: Bridge,
+    device: DeviceParts<F>,
+    gateway: GatewayParts,
     session: ZenohTransport,
-    local: Option<ChannelIo>,
 ) -> Result<(PiNode, SysForward), StartError> {
+    let DeviceParts { flash, facts, limits, local } = device;
+    let GatewayParts { bridge, options, store } = gateway;
     let (device_io, gateway_io) = pair();
-    let (gateway, sys) = mw_gateway::start(gateway_io, session, bridge).await.map_err(StartError::Zenoh)?;
+    let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
+        .await
+        .map_err(StartError::Zenoh)?;
     let device = spawn_device(flash, facts, limits, device_io, local).map_err(StartError::Thread)?;
     Ok((PiNode { device, gateway }, sys))
 }

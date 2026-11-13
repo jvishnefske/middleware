@@ -53,7 +53,7 @@ use flash::SectorFlash;
 use flash::dir::DirSectors;
 
 pub use config::PiNodeConfig;
-pub use shell::{PiNode, Report, start};
+pub use shell::{DeviceParts, GatewayParts, PiNode, Report, start};
 
 /// The node's flash in the state directory `state` (created if missing,
 /// locked while the returned flash lives).
@@ -64,6 +64,26 @@ pub fn open_state_flash(state: &Path) -> io::Result<SectorFlash<DirSectors>> {
 /// What `sys/info` reports for node `node`.
 pub fn facts(node: SenderId) -> service::Facts {
     service::Facts { chip: service::CHIP, firmware: env!("CARGO_PKG_VERSION"), node }
+}
+
+/// The gateway's control counter floor at start, as `mw-gateway`'s
+/// binary computes it (`mw_gateway::state::floor_at_start`): the larger of
+/// the counter persisted in `store` and the wall clock `clock_ms` (counted
+/// only once it is past 2026-01-01); `None` with neither, and then signed
+/// start/stop through `gw/sys` are refused until a floor exists.
+pub fn control_floor(
+    store: &mw_gateway::state::ControlStore,
+    clock_ms: Option<u64>,
+) -> Option<middleware::loader::trust::ControlCounter> {
+    mw_gateway::state::floor_at_start(store.load(), clock_ms)
+}
+
+/// The wall clock in Unix milliseconds, if readable.
+pub fn wall_clock_ms() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
 }
 
 /// The limits payloads run under: `memory_bytes` of linear memory, the

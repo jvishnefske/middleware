@@ -266,15 +266,17 @@ gateway, such as a USB gadget's `/dev/ttyGS0`, for `mwctl`), the
 gateway's `MW_GATEWAY_*` (`MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` are
 unused) and `MW_ZENOH_ROUTER` (required).
 
-By default `gw/sys` passes only `sys/info` and `sys/log`. To install
-payloads through the cluster, list the loader keys in
-`MW_GATEWAY_SYS_ALLOW` (for example
-`sys/info,sys/log,sys/trust/info,sys/loader/begin,sys/loader/chunk,sys/loader/commit,sys/payload/start,sys/payload/stop`)
-after claiming the node with your key over the local port; once claimed,
-every commit must be signed with it, so the cluster can deliver updates
-but not forge them. Leave `sys/trust/claim` out unless the first caller
-may own the node. A payload's served `app/...` keys are not reachable
-through `gw/sys`; requests on them go over the local port.
+Payload updates through the cluster go through the gateway's update
+gate, as for any board behind `mw-gateway`: list the updaters' SPIFFE
+IDs in `MW_GATEWAY_UPDATERS` and use `mw-update`. Claim the node with
+your key over the local port first (`mwctl --port <local port> trust
+claim --key ...`); a claim never passes `gw/sys`. After that the gateway
+forwards only signed commits and signed start/stop requests (each with
+an `x-request-id`), so the cluster can deliver updates but not forge
+them. The gateway keeps its control counter floor in `MW_GATEWAY_STATE`,
+by default `<MW_PI_NODE_STATE>/gateway`. A payload's served `app/...`
+keys are not reachable through `gw/sys`; requests on them go over the
+local port.
 
 For a local try without a Pi, run the node on any Linux machine with a
 PTY pair as the local port (`socat -d -d pty,raw,echo=0 pty,raw,echo=0`
