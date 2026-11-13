@@ -232,7 +232,12 @@ expires. Any `ZenohDiscovery` browser on `cam/jpeg` sees it, including a
 `Directory` fed from one. Camera chunks published on `app/cam/jpeg` arrive
 on Zenoh unchanged.
 
-One gap is known before the first run. Today's firmware sends its camera
+The RP base firmware (Pico, Pico 2) already announces itself on its USB
+serial link (design.md V21–V24): `disc/mw/node` with its chip unique id and
+one record per key its payload serves, so a Pico behind the gateway shows
+up in Zenoh discovery without further setup.
+
+One gap is known for the ESP32-CAM before its first run. Its firmware sends its camera
 beacon only over ESP-NOW (`firmware/src/shell/radio.rs`), and its serial
 port carries `sys/log` and payload publications. So the `Up` appears only
 once the firmware also publishes the beacon on its serial link, a

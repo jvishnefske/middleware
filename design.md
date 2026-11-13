@@ -1466,10 +1466,11 @@ a serial port, and network tests use 127.0.0.1 only.
   announced while the device's own beacons are —
   `gateway/tests/gateway.rs`:
   `rg16_device_beacon_is_announced_on_zenoh_with_the_device_node`,
-  `rg16_spoofed_beacon_is_refused` *(mw-gateway)*. With the ESP32-CAM on
-  `/dev/ttyUSB0` still to be seen: today's firmware sends its beacon on
-  ESP-NOW only, so the hardware run needs the beacon on the serial port
-  too (README, "MCU gateway").
+  `rg16_spoofed_beacon_is_refused` *(mw-gateway)*. On hardware: the RP
+  base firmware announces itself and its served keys on the serial link
+  (V21–V24; the run behind the gateway is V25, open); the ESP32-CAM's
+  firmware still sends its beacon on ESP-NOW only, so its hardware run
+  needs the beacon on the serial port too (README, "MCU gateway").
 - [x] RG17 A camera frame cut into `middleware::stream` chunks (166 data
   bytes, as the camera route) crosses the gateway byte for byte and in
   order on `app/cam/jpeg`, and reassembles to the frame —
