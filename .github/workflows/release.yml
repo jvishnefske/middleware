@@ -9,9 +9,15 @@
 # over HTTPS as Web Serial requires. The release assets are for manual
 # flashing and `mwctl`.
 #
+# The Raspberry Pi robot SD image (nix, `.#packages.aarch64-linux.
+# sd-image-robot-pi`) is built natively on an arm runner and attached to
+# the same release, as `mw-robot-pi-<tag>.img.zst` with its `.sha256`, by a
+# job of its own, so a slow or broken image build never holds back the
+# firmware release.
+#
 # Push a `v*` tag to release and deploy. A manual run (workflow_dispatch)
-# builds everything and keeps the images and site as workflow artifacts
-# without publishing either.
+# builds everything, the SD image included, and keeps the images and site
+# as workflow artifacts without publishing any of them.
 #
 # Pages must be set to "GitHub Actions" as its source (repository
 # Settings > Pages) before the first deployment.
@@ -115,6 +121,32 @@ jobs:
         with:
           path: web/dist
 
+  sd-image:
+    name: Raspberry Pi SD image (aarch64, nix)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build the image and check its contents
+        run: |
+          nix build -L --out-link sd \
+            .#packages.aarch64-linux.sd-image-robot-pi
+          nix build -L --no-link .#checks.aarch64-linux.robot-pi-image
+      - name: Name and checksum
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          name="mw-robot-pi-${REF_NAME//\//-}.img.zst"
+          mkdir out
+          cp sd/sd-image/*.img.zst "out/$name"
+          (cd out && sha256sum "$name" | tee "$name.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sd-image
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -135,6 +167,25 @@ jobs:
         run: |
           gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" \
             firmware/manifest.json firmware/SHA256SUMS firmware/*.bin firmware/*.uf2
+
+  release-sd-image:
+    name: Attach the SD image to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release, sd-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sd-image
+          path: sd-image
+      - name: Upload the image and its checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" sd-image/*.img.zst sd-image/*.img.zst.sha256
 
   pages:
     name: Deploy the web app to GitHub Pages

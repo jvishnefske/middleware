@@ -1268,7 +1268,7 @@ later phases implement the runner (MS6–MS10, with MS20–MS23), the manifests
   `tests::body_selects_gather_node_or_any`,
   `spec_declares_the_dependency_and_callers` *(mw-service examples)*.
 
-### Containers and the robot VM (nix, MS40–MS49)
+### Containers and the robot VM (nix, MS40–MS56)
 
 The top-level `flake.nix` builds every service binary listed in
 `nix/binaries.nix` as a static musl executable (crane, a pinned
@@ -1326,6 +1326,95 @@ SPIRE (1.11) is too far behind the lab's SPIRE server (1.15). Checks named
 - [x] MS48 `nix run .#e2e` builds every image and prints the end-to-end
   plan without touching the lab (Phase 3 fills in the steps) —
   `checks.e2e-plan`.
+
+The Raspberry Pi robot (MS49–MS56) is the same robot module on a
+Raspberry Pi Zero 2 W or Pi 3 (both BCM2710, aarch64), which is also the
+MCU gateway for one USB-attached board running the RP base firmware and
+the host of the Linux payload runner `mw-pi-node`. `nix/robot-pi.nix` is
+that role without Pi hardware, `nix/robot-pi-sd.nix` puts it on nixpkgs'
+`sd-image-aarch64`, `nix/gateway.nix` and `nix/pi-node.nix` are the two
+service modules. `nixosConfigurations.robot-pi` evaluates for an aarch64
+build machine, `robot-pi-cross` for an x86_64 one (cross compiled, with
+the kernel and Envoy substituted from the native aarch64 cache).
+
+- [x] MS49 Every entry of `nix/binaries.nix` also builds as a static
+  `aarch64-unknown-linux-musl` executable: `packages.x86_64-linux.<name>-aarch64`
+  cross compiles it (the `pkgsCross.aarch64-multiplatform.pkgsStatic` C
+  compiler for `ring`), `packages.aarch64-linux.<name>` builds it natively;
+  the x86_64 builds are unchanged (same derivations) —
+  `checks.aarch64-static` (readelf: AArch64, no interpreter, no
+  `NEEDED`). Entries whose directory does not exist yet (`mw-pi-node`
+  until `pi-node/` lands) are skipped by the flake. *Verified cross
+  compiled; the native aarch64 build is exercised by the release job
+  (MS55).*
+- [x] MS50 The Pi role runs the robot module with Envoy at one worker, Go
+  memory limits on spire-agent and spiffe-helper, a `MemoryMax` on every
+  service of ours, zstd zram swap of half the RAM and a 48 MiB journal; in
+  a 512 MiB VM it boots with Envoy and the robot app up, spire-agent and
+  sshd held back by their path conditions and no failed unit. Root has no
+  password; sshd reads keys only from `/var/lib/mw-robot/authorized_keys`,
+  starts only once that file exists and never takes a password —
+  `checks.robot-pi-eval`, `checks.robot-pi-boots` (subtests "services up
+  without a Pico", "memory", "sshd with a key file").
+- [x] MS51 `mw-gateway` runs as the system user `mw-gateway`, the only
+  service user in `dialout`, with `MW_GATEWAY_SERIAL=/dev/mw-pico` fixed
+  on its command line (robot.env cannot move it) and systemd hardening
+  (no capabilities, `DevicePolicy=closed` plus `char-ttyACM`, strict file
+  system protection). `70-mw-pico.rules` gives a ttyACM whose USB device
+  is vendor 2e8a, product 000a (RP2040) or 0009 (RP2350), manufacturer
+  `middleware`, product `rp-base` (`firmware-rp/src/usb.rs`) the symlink
+  `/dev/mw-pico` and `SYSTEMD_WANTS=mw-gateway.service`; the unit is
+  bound to that device unit, so with no board it stays inactive (not
+  failed), and it restarts with delays growing from 2 s to 1 min and no
+  start limit. New `MW_GATEWAY_*` variables go into
+  `services.mw-gateway.environment` or robot.env —
+  `checks.robot-pi-eval`, `checks.robot-pi-boots` (subtests "gateway
+  waits for the board", "udev rule installed and valid"). *The board
+  appearing and the gateway starting on it is a hardware step (MS56).*
+- [ ] MS52 `mw-pi-node` runs as the system user `mw-pi-node` with its own
+  state directory, `MW_ZENOH_ROUTER` on the robot Envoy, `MW_PORT` 50053
+  (the gateway has 50052), hardening without `MemoryDenyWriteExecute` (a
+  wasm runtime may compile code) and no device access unless
+  `supplementaryGroups` names a group. *Open: the module evaluates, but
+  the service joins the image and `checks.robot-pi-eval` only once
+  `pi-node/` is a workspace member; then the checks above cover it.*
+- [x] MS53 `packages.x86_64-linux.sd-image-robot-pi` (cross) and
+  `packages.aarch64-linux.sd-image-robot-pi` (native) are one
+  `mw-robot-pi.img.zst`, at most 600 MiB compressed and 2.5 GiB unpacked (475 MiB and 2097 MiB
+  cross built at the time of writing),
+  with the Pi firmware, `config.txt` (a `[pi02]` section),
+  `u-boot-rpi3.bin` and the firmware's Zero 2 W and Pi 3 device trees on
+  the FAT partition, the kernel's `bcm2837-rpi-zero-2-w.dtb` and
+  `bcm2837-rpi-3-b*.dtb` for U-Boot, a unit for every service and the
+  udev rule in the system, static AArch64 `mw-gateway` and `mw-robot`,
+  and the root file system holding only `boot/` and `nix/` —
+  `checks.robot-pi-image` (x86_64, on the cross image). *The native
+  image and `checks.aarch64-linux.robot-pi-image` run only in the release
+  job (MS55).*
+- [x] MS54 No secret or site setting is in the image: no network,
+  token, bundle, robot.env, Wi-Fi file, authorized key or SSH host key in
+  `/etc` or any store path of the closure. At boot `mw-provision` moves
+  `join-token`, `bundle.spiffe`, `robot.env`, `wpa_supplicant.conf` and
+  `authorized_keys` from the FAT partition's `mw-robot/` into
+  `/var/lib/mw-robot` (0600 root, the bundle 0644) and deletes them there;
+  `mw-wifi` runs wpa_supplicant on wlan0 only when `wpa_supplicant.conf`
+  exists; eth0 and wlan0 use DHCP unless robot.env sets `MW_NET_ADDRESS`
+  (with `MW_NET_INTERFACE`, `MW_NET_GATEWAY`, `MW_NET_DNS`), which
+  `mw-net-config` writes as a networkd file before networkd starts, a
+  malformed value leaving DHCP in place — `checks.robot-pi-eval`,
+  `checks.robot-pi-image`, `checks.robot-pi-boots` (subtests "provision
+  from the boot partition", "static address from robot.env").
+- [ ] MS55 The release workflow's `sd-image` job (ubuntu-24.04-arm,
+  `cachix/install-nix-action@v31`) builds the native image and its check
+  and keeps `mw-robot-pi-<ref>.img.zst` with its `.sha256` as an artifact;
+  on a `v*` tag `release-sd-image` attaches both to the firmware's
+  release, after it exists. Untrusted values reach `run:` only through
+  `env` — `actionlint` passes. *Open until a tag or manual run shows the
+  job working.*
+- [ ] MS56 On a Raspberry Pi Zero 2 W: the image boots from the card,
+  joins Wi-Fi from a dropped `wpa_supplicant.conf`, and plugging in a
+  Pico with the RP base firmware creates `/dev/mw-pico` and starts
+  `mw-gateway`. *Hardware procedure; not yet run.*
 
 ### Robots and MCU gateway (RG…)
 

@@ -1,12 +1,20 @@
-# Static musl builds of the workspace's service binaries with crane.
+# Static musl builds of the workspace's service binaries with crane, for
+# one target triple per import.
 #
-# The toolchain comes from rust-overlay (prebuilt, with the musl standard
-# library); C code in the dependency graph (ring, through zenoh's QUIC
-# link) is compiled and linked by nixpkgs' static musl cross compiler, so
-# every binary is a static-pie executable with no interpreter.
-{ pkgs, lib, crane, src, binaries }:
+# The toolchain comes from rust-overlay (prebuilt, running on the build
+# machine, with the target's musl standard library); C code in the
+# dependency graph (ring, through zenoh's QUIC link) is compiled and linked
+# by nixpkgs' static musl C compiler for that target, so every binary is a
+# static-pie executable with no interpreter.
+#
+#   target  `x86_64-unknown-linux-musl` (the default, design.md MS40) or
+#           `aarch64-unknown-linux-musl` (MS49). When the target's CPU is
+#           the build machine's, the compiler is `pkgsStatic`'s (a native
+#           build); otherwise it is the `pkgsCross` set's static compiler
+#           (a cross build from x86_64, or to x86_64 from aarch64). Both
+#           give the same kind of executable.
+{ pkgs, lib, crane, src, binaries, target ? "x86_64-unknown-linux-musl" }:
 let
-  target = "x86_64-unknown-linux-musl";
   # Pinned, not `latest`, so the binaries are reproducible from flake.lock.
   toolchain = pkgs.rust-bin.stable."1.95.0".minimal.override {
     targets = [ target ];
@@ -14,8 +22,21 @@ let
   };
   craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
-  muslCC = pkgs.pkgsStatic.stdenv.cc;
+  # The pkgsCross set whose static variant targets each triple.
+  crossSets = {
+    "x86_64-unknown-linux-musl" = "gnu64";
+    "aarch64-unknown-linux-musl" = "aarch64-multiplatform";
+  };
+  targetCpu = lib.head (lib.splitString "-" target);
+  native = targetCpu == pkgs.stdenv.buildPlatform.parsed.cpu.name;
+  muslCC =
+    if native then pkgs.pkgsStatic.stdenv.cc
+    else pkgs.pkgsCross.${crossSets.${target} or (throw "nix/rust.nix: no cross set for ${target}")}.pkgsStatic.stdenv.cc;
   prefix = "${muslCC}/bin/${muslCC.targetPrefix}";
+
+  # Cargo's and the cc crate's per-target variable names.
+  targetUpper = lib.toUpper (lib.replaceStrings [ "-" ] [ "_" ] target);
+  targetLower = lib.replaceStrings [ "-" ] [ "_" ] target;
 
   # Everything every build of this workspace shares.
   common = {
@@ -26,11 +47,12 @@ let
     doCheck = false;
     CARGO_BUILD_TARGET = target;
     CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${prefix}cc";
-    CC_x86_64_unknown_linux_musl = "${prefix}cc";
-    AR_x86_64_unknown_linux_musl = "${prefix}ar";
-    # Build scripts run on the host and use the ordinary stdenv compiler;
-    # the musl compiler above is reached through the variables alone.
+    "CARGO_TARGET_${targetUpper}_LINKER" = "${prefix}cc";
+    "CC_${targetLower}" = "${prefix}cc";
+    "AR_${targetLower}" = "${prefix}ar";
+    # Build scripts run on the build machine and use the ordinary stdenv
+    # compiler; the musl compiler above is reached through the variables
+    # alone.
   };
 
   # Dependencies only, built once and shared by every binary and check.
@@ -64,7 +86,7 @@ let
       [ -x "$exe" ] || exe=$dir/examples/${outName b}
       install -Dm0555 "$exe" $out/bin/${name}
     '';
-    passthru = { exe = name; version = version b; };
+    passthru = { exe = name; version = version b; inherit target; };
     meta.mainProgram = name;
   });
 in

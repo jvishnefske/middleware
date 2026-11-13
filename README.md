@@ -99,8 +99,8 @@ package and its directory, and either `example` or `bin`, optionally with
 `nix/robot.nix` is a NixOS module for a Linux robot: a SPIRE agent with
 the join-token attestor, spiffe-helper keeping the robot's SVID in
 `/run/spiffe`, a local Envoy that carries the robot's traffic over mTLS to
-the cluster's ingress gateway, and the robot app (`mw-robot`, or the
-`hello` placeholder until it lands) running as uid 1000. The app speaks
+the cluster's ingress gateway, and the robot app (`mw-robot`) running as
+uid 1000. The app speaks
 plain h2c to `127.0.0.1:15001` and Zenoh TCP to `127.0.0.1:17447`; Envoy's
 admin is on `127.0.0.1:15000`. The h2c listener keeps the request's
 `:authority`, which must match the robot VirtualService's host. The Zenoh
@@ -137,6 +137,78 @@ on `mw-service`, builds the VM, and runs `checks.robot-boots`. That is a
 NixOS test which boots the robot next to a SPIRE server and an
 mTLS-checking stand-in gateway inside the nix sandbox. It follows the
 robot from attestation through to an accepted request.
+
+### Raspberry Pi image
+
+The same robot runs on a Raspberry Pi Zero 2 W or a Pi 3, which is also
+the gateway for one Pico running the RP base firmware on its USB port and
+the host of `mw-pi-node`, the Linux payload runner (design.md MS49–MS56).
+Each release carries `mw-robot-pi-<tag>.img.zst` and its `.sha256`, built
+natively on an arm runner. To build it yourself, `nix build
+.#sd-image-robot-pi` on an x86_64 machine cross compiles it (the first
+build compiles the base system for aarch64 and takes a long time; the
+kernel and Envoy come prebuilt from the NixOS cache), and the same
+attribute on an aarch64 machine builds it natively. The image is in
+`result/sd-image/`.
+
+To flash it, check the download against its `.sha256` with `sha256sum
+-c`, then either open Raspberry Pi Imager, choose "Use custom" and pick
+the `.img.zst` file (Imager decompresses it, and its own "OS
+customisation" settings do not apply to this image, so leave them off),
+or decompress it with `zstd -d` and write the `.img` with `dd` to the
+whole card device (for example `/dev/sdX`, not a partition), with
+`bs=4M conv=fsync status=progress`. Check the device name twice with
+`lsblk` first: `dd` overwrites whatever it is given. The root partition
+grows to fill the card on first boot.
+
+The image holds no network, name, key or token. After flashing, the
+card's small FAT partition (labelled FIRMWARE) is readable from any
+computer: make a folder `mw-robot` on it and put in any of these files.
+On every boot the Pi moves them into `/var/lib/mw-robot`, readable by
+root only, and deletes them from the FAT partition.
+
+- `wpa_supplicant.conf`, the Wi-Fi networks in wpa_supplicant's own
+  format (a `network` block with `ssid` and `psk` per network, and a
+  `country=` line for your regulatory domain). Without it Wi-Fi stays
+  off; a Pi 3 can use its Ethernet port instead.
+- `authorized_keys`, OpenSSH public keys allowed to log in as root.
+  Without it SSH does not run; it never accepts passwords, and root has
+  none.
+- `join-token` and `bundle.spiffe`, the robot's SPIRE join token and the
+  trust bundle, exactly as for the robot VM above.
+- `robot.env`, `KEY=value` lines. Besides the robot VM's settings it
+  takes `MW_ROBOT_NAME`, the gateway's `MW_GATEWAY_*` variables (except
+  the port, which is fixed) and a static address: `MW_NET_ADDRESS` in
+  CIDR form (for example 192.168.66.30/24), with optional
+  `MW_NET_INTERFACE` (default wlan0), `MW_NET_GATEWAY` and `MW_NET_DNS`
+  (space separated). Without `MW_NET_ADDRESS` both eth0 and wlan0 use
+  DHCP.
+
+Files already on the Pi can be replaced the same way, or over SSH in
+`/var/lib/mw-robot`, followed by a reboot.
+
+Plug the Pico in at any time. Udev recognises the RP base firmware by its
+USB identity (vendor 2e8a, product 000a on an RP2040 or 0009 on an
+RP2350, manufacturer "middleware", product "rp-base"), names its port
+`/dev/mw-pico` and starts `mw-gateway` on exactly that port; unplugging
+it stops the gateway. Other Pico SDK boards share those ids but not the
+strings, so they are left alone. Connect one such board per Pi. The
+gateway, the robot app and `mw-pi-node` each run as their own
+unprivileged user; only the gateway's is in the `dialout` group.
+
+The Zero 2 W has 512 MiB of RAM, so the image runs Envoy with one worker
+thread, caps each service's memory, limits the Go heaps of spire-agent and
+spiffe-helper, and keeps half the RAM as compressed swap (zram). The Pi
+has no clock battery: certificates are only valid once the network time
+has been set, so the robot gets its identity a little after the network
+comes up.
+
+`nix flake check` covers the Pi without hardware: `robot-pi-eval`
+evaluates both system variants and checks their configuration,
+`robot-pi-boots` boots the same role in an x86_64 VM with 512 MiB and no
+Pico, provisioning it from a FAT disk, `robot-pi-image` takes the cross
+built image apart (and so builds it), and `aarch64-static` checks the
+cross compiled binaries.
 
 ## Robots and the MCU gateway
 
