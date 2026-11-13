@@ -2008,6 +2008,40 @@ the CDC halves joined as a `Duplex`), and the controller on the main task,
 which owns the service (dispatcher state, payload store, trust record) and
 the running payload. They meet only through the `'static` bus.
 
+Middleware's transport traits on the device side of the link. Every
+publication the device makes (log lines, payload status, payload
+publishes, discovery beacons) leaves through the `SerialLink`'s
+`Publisher`; the beacons are announced through middleware's `Announce`
+trait (`discovery::beacon::PubSubDiscovery`) over the bus's `Uplink`, a
+`Publisher` onto the link task's outbound queue. The link task reads with
+`next_frame` rather than the link's `Subscriber` or `Responder`, because
+requests and publications share the stream and each of those traits
+waits for one frame kind and drops the other on a link without an inbox
+(none here, to save its `.bss`, as esp-base's E23); requests on served
+keys keep going through `rp_base::requests::handle` (V20), whose answer
+also carries a stop, the service's notes and a start, which a
+`transport::Handler` result cannot express. The wire protocol is
+unchanged.
+
+Discovery on the serial link (`rp_base::beacons`), so a Pico behind the
+MCU gateway (RG8, RG9) is announced in the cluster: the device publishes
+`disc/<kind>` beacons (format version 1) for at most 4 records, the
+gateway's per-device cap. Its own record has kind `mw/node`, instance
+`rp-` and the node id in lower-case hex, node the chip unique id (V1),
+endpoint local and TXT `chip=` and `fw=`; while a payload runs, each key
+it serves (ABI 5) is a record of that kind (a request to the kind
+reaches the payload), same node and instance, no TXT, in slot order,
+three at most beside the node record (the rest are logged once per run).
+Every record has TTL 30 s and is sent again every 15 s; when a run ends
+(stop, trap, `begin`, an activated commit) its keys get one goodbye each,
+withdrawals going out before new announcements so the gateway's cap is
+never exceeded; the node record is never withdrawn (an unplugged board
+expires). The gateway refuses beacons until it has bound the device on a
+`sys/info` reply, so answering `sys/info` sends every record again, at
+most every 5 s, behind the response. A payload cannot publish on
+`disc/...` (nor `sys/...`), as on esp-base (E18), since the gateway
+announces every beacon on the link as the device's.
+
 Flash maps (offsets from the start of flash; every region whole 4 KiB
 sectors, checked by `layout::FlashMap::check`):
 
@@ -2037,11 +2071,14 @@ in the table above is physical for reads, erases and writes alike. On a
 board without a partition table nothing is translated and the window is
 the identity, so the same build works there (without the updater).
 
-RAM: the RP2040 build has no heap (no runtime) and 26 KB of static RAM,
-leaving about 238 KiB of stack. The RP2350 build holds a 384 KiB heap arena
-in `.bss` (static RAM 440 KB in all, the firmware updater's 5 KiB sector
+RAM: the RP2040 build has no heap (no runtime) and 27 KB of static RAM
+(the beacon announcer's 2.6 KiB included, V21), leaving about 237 KiB of
+stack. The RP2350 build holds a 384 KiB heap arena
+in `.bss` (static RAM 436 KB in all, the firmware updater's 5 KiB sector
 stash, the 4 KiB SPI transfer buffer, the 512-byte reply a served request
-may need (V20) and the main task's larger future included), leaving about 90 KiB
+may need (V20), the beacon announcer and the main task's larger future
+included; the controller is no longer stored twice in that future),
+leaving about 94 KiB
 for the main stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
 128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
 bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
@@ -2057,7 +2094,7 @@ Payload ABI on the RP2350 (the RP2040 runs no payloads):
 
 | ABI call | RP base |
 |---|---|
-| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes |
+| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes; `publish` on `sys/...` or `disc/...` is `InvalidKey` (V24) |
 | `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | yes: GPIO 0–22 and 25 (LED); 24 (VBUS sense) input only; 23 and 29 reserved; `Busy` on a pin an SPI or I2C bus holds |
 | `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller loop, delivered to `on_irq` |
 | `adc_read` | yes: GPIO 26–28 (ADC0–ADC2), 12-bit; those pins are analog only |
@@ -2095,7 +2132,9 @@ Known gaps: neither board has a presence button wired, so there is no
 re-key window (a claimed device is re-keyed by erasing the trust region,
 for example `picotool erase` of its two sectors); the RP2040 stores
 payloads but cannot run them until wasmi supports targets without CAS
-atomics; nothing has run on silicon yet.
+atomics; the device announces but does not browse (beacons from the host
+reach a subscribed payload like any publication); nothing has run on
+silicon yet, so neither has a Pico behind the gateway (V25).
 
 - [x] V1 `sys/info` reports the chip (`rp2040`, `rp2350`), the firmware
   version (`+no-wasm` on the RP2040), the store capacity and, as node id,
@@ -2262,6 +2301,51 @@ atomics; nothing has run on silicon yet.
   `m7_without_the_runtime_sys_info_reports_no_capability`; clippy rp2350
   and rp2040, `firmware-rp/build.sh rp2350`. The controller's use of it
   (`shell/controller.rs`) is untested on hardware.
+- [x] V21 The device's discovery records: its own, kind `mw/node`,
+  instance `rp-<node id in hex>`, node the chip unique id, endpoint local,
+  TTL 30 s, TXT `chip=` and `fw=` (an entry that does not fit is left
+  out), a version 1 beacon on `disc/mw/node` under 70 bytes; then one per
+  key the running payload serves, of that kind, in slot order, at most 4
+  records in all (the gateway's `MAX_DEVICE_SERVICES`); repeats, `disc/`
+  keys, keys over `MAX_KIND_LEN` and keys beyond the cap are left out and
+  counted, at most `MAX_SERVES` keys looked at; the device never browses —
+  `beacons::tests::v21_the_node_record_names_the_chip_unique_id_chip_and_firmware`,
+  `v21_served_keys_are_announced_as_kinds_beside_the_node_record_up_to_the_cap`,
+  `v21_the_device_never_browses`.
+- [x] V22 The announcer (`PubSubDiscovery` over a `Publisher`) keeps the
+  records in step: an unchanged record is not sent again, a new or changed
+  one is announced, one no longer wanted is withdrawn with a goodbye
+  before anything new is announced; each record is sent again every half
+  TTL (15 s); when a run ends the served keys get their goodbyes and the
+  node record stays. Over a real `SerialLink` whose bytes are decoded as
+  publish frames on `disc/<kind>` and folded into a directory under the
+  gateway's E21 rules, every record names the device's node (goodbyes
+  none), the device never holds more than 4 and none is refused, even when
+  a payload serving three keys is swapped for one serving three others;
+  with the real interpreter, the `pico-led` phase server's key is
+  announced while it runs and withdrawn after `stop` and after an upload,
+  and announced again on restart —
+  `beacons::tests::v22_plan_withdraws_what_is_not_wanted_and_leaves_unchanged_records_alone`,
+  `v22_the_announcer_on_the_serial_link_refreshes_and_says_goodbye_when_the_run_ends`;
+  `requests::tests::v22_the_pico_led_phase_key_is_announced_while_it_runs_and_withdrawn_when_the_run_ends`.
+  The controller's use of it (`shell/controller.rs`: each session pass,
+  the refresh wake-up) is untested on hardware.
+- [x] V23 Answering `sys/info` (the gateway's bind, RG9) sends every
+  wanted record again, behind the response, at most once per 5 s; within
+  that only what changed is sent, and a resend restarts the record's
+  refresh interval —
+  `beacons::tests::v23_answering_sys_info_resends_every_record_at_most_every_five_seconds`.
+- [x] V24 A payload cannot publish on `disc/...` or `sys/...` (E18 on the
+  serial link: the gateway announces every beacon on the link as the
+  device's), and a served `disc/` key is never announced; other keys, such
+  as `discovery/x`, are unaffected —
+  `beacons::tests::v24_a_payload_cannot_publish_beacons_or_system_keys`.
+  The device shell's use of it (`RpDevice::publish`) is in
+  `shell/device.rs`.
+- [ ] V25 A Pico 2 running `pico-led`, attached to `mw-gateway`, shows up in
+  a cluster session's `ZenohDiscovery` browse as `mw/node` and as its
+  phase key with node = its chip unique id, and the phase key goes `Down`
+  after `mwctl stop`. Not yet run on hardware.
 - [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
   with its factory UF2), the CDC port enumerates, `mwctl info` reports the
   chip and node id, an upload survives a power cycle, and on the Pico 2
