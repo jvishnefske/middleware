@@ -16,6 +16,14 @@
 //!   sends the reply. Handler errors become gRPC statuses through
 //!   [`status::to_status`](super::status::to_status).
 //!
+//! A handler that must await (an async mesh handler, a gateway forwarding
+//! to a device) takes calls one at a time with
+//! [`GrpcResponder::next_call`] instead: an [`IncomingCall`] exposes the
+//! key, body and [`RequestMeta`] and is answered with
+//! [`IncomingCall::respond`], so the caller's task can await between the
+//! two without holding a borrowed scratch buffer. Dropping it unanswered
+//! fails the call with `INTERNAL`.
+//!
 //! Which keys exist is the handler's decision: every non-bus path reaches
 //! it, and it answers `HandlerError::NotFound` (sent as `UNIMPLEMENTED`) for
 //! keys it does not serve.
@@ -319,6 +327,60 @@ impl Responder for GrpcResponder {
     }
 }
 
+/// One call taken by [`GrpcResponder::next_call`], owned so the caller can
+/// await before answering it with [`IncomingCall::respond`].
+#[derive(Debug)]
+pub struct IncomingCall {
+    call: Call,
+}
+
+impl IncomingCall {
+    /// The call's key (`Service/Method`); `None` if the path did not make a
+    /// valid key (answer it `InvalidRequest`).
+    pub fn key(&self) -> Option<Key<'_>> {
+        Key::new(&self.call.key).ok()
+    }
+
+    /// The request body.
+    pub fn body(&self) -> &[u8] {
+        &self.call.request
+    }
+
+    /// The caller's metadata as the module docs describe, with
+    /// `deadline_ms` measured at `now`.
+    pub fn meta_at(&self, now: Instant) -> RequestMeta<'_> {
+        RequestMeta {
+            sender: self.call.sender,
+            principal: self.call.principal.as_deref(),
+            deadline_ms: self.call.deadline.map(|d| remaining_ms(d, now)),
+            trace: self.call.trace,
+            request_id: self.call.request_id.as_deref().and_then(RequestId::new),
+        }
+    }
+
+    /// [`IncomingCall::meta_at`] now.
+    pub fn meta(&self) -> RequestMeta<'_> {
+        self.meta_at(Instant::now())
+    }
+
+    /// Answers the call: the response body, or the handler's error sent as
+    /// its gRPC status. A client that went away is ignored.
+    pub fn respond(self, result: Result<&[u8], HandlerError>) {
+        let reply = result.map(Bytes::copy_from_slice).map_err(to_status);
+        let _ = self.call.reply.send(reply);
+    }
+}
+
+impl GrpcResponder {
+    /// Takes the next queued call for a handler that must await before it
+    /// answers (module docs). Cancel safe; [`GrpcError::Closed`] once the
+    /// tonic half is gone.
+    pub async fn next_call(&mut self) -> Result<IncomingCall, GrpcError> {
+        let call = self.rx.recv().await.ok_or(GrpcError::Closed)?;
+        Ok(IncomingCall { call })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +465,44 @@ mod tests {
         m.insert("x-request-id", "two words".parse().unwrap());
         let meta = call_meta(&m, PrincipalSource::None);
         assert_eq!((meta.trace, meta.request_id), (None, None));
+    }
+
+    #[tokio::test]
+    async fn rg22_next_call_lets_an_async_handler_answer() {
+        let (svc, mut resp) = responder(2);
+        let (reply, answer) = oneshot::channel();
+        let mut method = UnaryMethod {
+            key: "gw/sys".into(),
+            tx: svc.tx.clone(),
+            principals: PrincipalSource::None,
+        };
+        let mut req = Request::new(Bytes::from_static(b"ping"));
+        req.metadata_mut()
+            .insert("x-request-id", "upd-1".parse().unwrap());
+        req.metadata_mut()
+            .insert(GRPC_TIMEOUT_HEADER, "5S".parse().unwrap());
+        let fut = method.call(req);
+        tokio::spawn(async move {
+            let _ = reply.send(fut.await.map(Response::into_inner));
+        });
+        let call = resp.next_call().await.unwrap();
+        assert_eq!(call.key().map(|k| k.as_str()), Some("gw/sys"));
+        assert_eq!(call.body(), b"ping");
+        let meta = call.meta();
+        assert_eq!(meta.request_id.map(|r| r.as_str()), Some("upd-1"));
+        assert!(meta.deadline_ms.is_some_and(|d| d > 4_000 && d <= 5_000));
+        assert_eq!(meta.principal, None);
+        tokio::task::yield_now().await;
+        call.respond(Ok(b"pong"));
+        assert_eq!(answer.await.unwrap().unwrap(), Bytes::from_static(b"pong"));
+        // An error answers with its status; a closed queue ends the loop.
+        let fut = method.call(Request::new(Bytes::new()));
+        let call = resp.next_call().await.unwrap();
+        call.respond(Err(HandlerError::Denied));
+        let status = fut.await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        drop((svc, method));
+        assert!(matches!(resp.next_call().await, Err(GrpcError::Closed)));
     }
 
     #[test]

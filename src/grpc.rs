@@ -52,7 +52,9 @@
 //! * [`responder::GrpcResponder`] — implements [`Responder`](crate::Responder):
 //!   its tonic half ([`responder::ResponderService`]) forwards each unary call
 //!   over a bounded channel, and [`Responder::serve_one`](crate::Responder::serve_one)
-//!   runs the caller's pure [`Handler`](crate::Handler) on it.
+//!   runs the caller's pure [`Handler`](crate::Handler) on it;
+//!   [`GrpcResponder::next_call`] hands an owned [`IncomingCall`] to a
+//!   handler that must await before answering.
 //!   The handler sees the caller's `mw-client` id, its `grpc-timeout` as the
 //!   remaining deadline, its `traceparent` and `x-request-id` ([`trace`])
 //!   and, when configured for a sidecar
@@ -100,7 +102,7 @@ pub use bus::BusService;
 pub use client::{GrpcSubscriber, GrpcTransport};
 pub use codec::RawCodec;
 pub use health::{GrpcAnnouncer, HealthClient, HealthService, ServingStatus, health};
-pub use responder::{GrpcResponder, PrincipalSource, ResponderService, responder};
+pub use responder::{GrpcResponder, IncomingCall, PrincipalSource, ResponderService, responder};
 pub use server::GrpcServer;
 
 use crate::transport::HandlerError;
