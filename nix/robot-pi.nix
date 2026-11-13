@@ -209,6 +209,11 @@ in
   networking.wireless.enable = false;
   systemd.network = {
     enable = true;
+    # No waiting for "online" (MS58): an unprovisioned Pi (no
+    # wpa_supplicant.conf, no cable on a Zero 2 W) never gets there, and
+    # the wait would fail on every boot. Envoy, the only unit that wants
+    # network-online.target, retries its upstream connections itself.
+    wait-online.enable = false;
     networks."50-mw-dhcp" = {
       matchConfig.Name = "eth0 wlan0";
       networkConfig.DHCP = "yes";

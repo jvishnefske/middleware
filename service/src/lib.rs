@@ -77,6 +77,7 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod run;
 pub mod spec;
+pub mod stack;
 
 pub use builder::{SampleHook, Served, Service, ServiceBuilder};
 pub use config::{Config, ConfigError};
@@ -90,3 +91,4 @@ pub use lifecycle::{Action, Event, Lifecycle, Monotonic, Outcome};
 pub use manifest::ManifestOptions;
 pub use run::{ArgsError, Command, RunOptions};
 pub use spec::{Mebibytes, MilliCpu, Resources, ServiceSpec, SpecError};
+pub use stack::block_on_thread;

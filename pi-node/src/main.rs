@@ -63,7 +63,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(gateway, node)) {
+    // Off the main thread: a static musl binary cannot measure the main
+    // thread's stack, and the Zenoh configuration parse refuses to run
+    // there (mw_service::stack, MS57).
+    let result = mw_service::block_on_thread(&runtime, run(gateway, node))
+        .unwrap_or_else(|e| Err(format!("main thread: {e}")));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mw-pi-node: {e}");

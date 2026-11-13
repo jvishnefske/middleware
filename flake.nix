@@ -218,6 +218,11 @@
           piModule = import ./nix/robot-pi.nix (piPackages rust.binaries);
         };
         # The aarch64 binaries are static aarch64 executables (MS49).
+        static-startup = import ./nix/tests/static-startup.nix {
+          inherit pkgs;
+          inherit (rust) binaries;
+        };
+
         aarch64-static = import ./nix/tests/aarch64-static.nix {
           inherit pkgs lib;
           binaries = rustArmCross.binaries;
