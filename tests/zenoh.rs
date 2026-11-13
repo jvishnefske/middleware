@@ -965,11 +965,16 @@ async fn z17_target_node_drops_replies_not_naming_the_node() {
     let real = victim.responder(K).await.expect("responder");
     queryable_visible(&client, K.as_str()).await;
     let serving = serve_forever(real, named(b"real"));
-    let got = client
-        .request_with(K, b"?", &mut out, &opts)
-        .await
-        .expect("request");
-    assert_eq!(got, b"real");
+    // The squatters already made the key visible, so the victim's queryable
+    // may reach the client a little later: retry until it answers.
+    let mut got = client.request_with(K, b"?", &mut out, &opts).await;
+    for _ in 0..20 {
+        if !matches!(got, Err(ZenohError::NoReply)) {
+            break;
+        }
+        got = client.request_with(K, b"?", &mut out, &opts).await;
+    }
+    assert_eq!(got.expect("request"), b"real");
     serving.abort();
 }
 
