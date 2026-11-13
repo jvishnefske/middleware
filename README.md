@@ -65,7 +65,14 @@ Zenoh and the gRPC mesh client
 (`cargo run --example discover_and_call --features zenoh,grpc,istio,dns-sd,mdns`).
 
 Requirements and the tests that cover them are listed in `design.md`.
-Feature isolation is checked by `scripts/check-features.sh`.
+Feature isolation is checked by `scripts/check-features.sh`. CI
+(`.github/workflows/ci.yml`) runs it, the workspace tests, the RP base
+firmware build and the web check on every pull request; the ESP firmwares
+need the espup toolchain and are built locally. Pushing a `v*` tag runs
+`.github/workflows/release.yml`: it builds every chip's image with
+`firmware/build-images.sh`, attaches them, the manifest and `SHA256SUMS` to a
+GitHub release, and deploys the web app with those images bundled to GitHub
+Pages, where the flasher reads them from its own origin.
 
 ## Containers and the robot VM (nix)
 
@@ -191,15 +198,21 @@ lines of beacons the device hears on the radio.
 |----------------------|--------------------------------------------------------------|
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
-| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info` |
+| `firmware-rp/`       | RP base firmware over USB CDC-ACM: Raspberry Pi Pico (RP2040, stores payloads only) and Pico 2 (RP2350, runs them): `./build.sh rp2040` or `./build.sh rp2350` (ELF and UF2) |
+| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
+| `tools/espnow-bridge/` | ESP8266 USB↔ESP-NOW bridge sketch for `mwctl --espnow` (`check.sh`: codec test and build; upload with `arduino-cli upload --fqbn esp8266:esp8266:generic -p <port>`) |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
 | `tools/jpeg-fixtures/` | regenerate (or `--check`) the fake camera's baked JPEG frames in `fixtures/cam/` (8 frames at 240×240 and 120×120, baseline 4:2:0): `cargo run -p jpeg-fixtures` |
 | `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |
-| `web/`               | flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
+| `web/`               | Start guide (try Blink in the simulator, per-board setup), flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
 
 Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
 then load payloads over the same USB port, whether it is a CP2102/CH340
-bridge or the chip's native USB-Serial-JTAG. The ESP32-C3 and ESP8266 builds
-have no WASM runtime (the C3 lacks the atomics wasmi needs; the ESP8266 lacks
-the RAM), so they store payloads but cannot run them.
+bridge or the chip's native USB-Serial-JTAG. A Pico or Pico 2 takes the UF2
+from `firmware-rp/build.sh` in BOOTSEL mode (the web page's Start tab offers
+it as a checked download when the site was built after
+`firmware/build-images.sh`, which builds the ESP images and the Pico UF2s),
+then speaks the same protocol on its USB CDC port. The ESP32-C3, ESP8266 and RP2040 builds have no WASM
+runtime (the C3 and the RP2040 lack the atomics wasmi needs; the ESP8266
+lacks the RAM), so they store payloads but cannot run them.

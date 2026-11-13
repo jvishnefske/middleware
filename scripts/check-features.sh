@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
-# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15):
-#   * the always-built pure core, including `discovery` and `dns::wire`,
-#     builds for thumbv6m-none-eabi with no features;
+# Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11):
+#   * the always-built pure core, including `discovery`, `dns::wire` and
+#     `fw_ota`, builds for thumbv6m-none-eabi with no features, and so do
+#     the `recipe-core` and `state-table` crates (Q11);
+#   * the RP2350 set builds for thumbv8m.main-none-eabihf (Cortex-M33, the
+#     Pico 2): the pure core, `fw_ota::service` (`trust`) and the serial
+#     link, with no cloud dependency and no host feature;
+#   * `fw-sim` (the bootrom model, host only) builds on the host;
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
 #     in no cloud dependency and enable no host feature;
 #   * cloud feature sets (including `dns-sd` and `memory`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
 #     middleware feature beyond `default` and no cloud dependency;
-#   * the mesh service runner `mw-service` (design.md M5) enables exactly
+#   * the mesh service runner `mw-service` (design.md MS5) enables exactly
 #     the host features grpc, istio, dns-sd and zenoh of middleware, none
 #     embedded, and its runner dependencies (tracing, OpenTelemetry, YAML)
 #     appear in no embedded set;
 #   * the MCU gateway `mw-gateway` and the robot app `mw-robot` (design.md
-#     V19) are host only: no embedded set depends on them, the robot enables
+#     RG19) are host only: no embedded set depends on them, the robot enables
 #     no embedded feature, and the gateway enables only the serial link
 #     codec (`serial`, the wire it speaks) beside its host features.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
+RP2350_TARGET=thumbv8m.main-none-eabihf
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures'
-HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory'
+HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -41,6 +47,11 @@ features_of_self() {
 echo "== C1: no features, $EMBEDDED_TARGET"
 cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features
 
+# The S88 batch-control core (design.md Q11) and the state tables it shares
+# identifiers with are no_std, no-heap crates for the same target.
+echo "== Q11: recipe-core and state-table, $EMBEDDED_TARGET"
+cargo build --quiet --target "$EMBEDDED_TARGET" -p recipe-core -p state-table
+
 # The discovery core and the DNS codec are part of that build: their module
 # declarations carry no cfg gate (K13, L11).
 ungated() { # file, declaration
@@ -48,6 +59,8 @@ ungated() { # file, declaration
     grep -qx "$2" "$1"
 }
 for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.rs:pub mod wire;" \
+            "src/lib.rs:pub mod fw_ota;" "src/fw_ota.rs:pub mod machine;" "src/fw_ota.rs:pub mod wire;" \
+            "src/fw_ota.rs:pub mod picobin;" "src/fw_ota.rs:pub mod platform;" "src/fw_ota.rs:pub mod record;" \
             "src/discovery.rs:pub mod record;" "src/discovery.rs:pub mod directory;" "src/discovery.rs:pub mod beacon;"; do
     ungated "${decl%%:*}" "${decl#*:}" || fail "${decl#*:} in ${decl%%:*} is missing or cfg-gated"
 done
@@ -62,6 +75,20 @@ for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espno
         fail "[$set] enables std or a host feature ($HOST_FEATURES)"
     fi
 done
+
+for set in "" "trust" "trust,serial" "trust,serial,postcard"; do
+    echo "== Y11: [${set:-no features}] on $RP2350_TARGET"
+    cargo build --quiet --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"}
+    if deps --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"} | grep -Eq "$CLOUD_CRATES"; then
+        fail "[$set] on $RP2350_TARGET pulls in a cloud dependency"
+    fi
+    if features_of_self --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"} | grep -Eqx "$HOST_FEATURES"; then
+        fail "[$set] on $RP2350_TARGET enables std or a host feature ($HOST_FEATURES)"
+    fi
+done
+
+echo "== Y11: [fw-sim] on host"
+cargo build --quiet --no-default-features --features fw-sim
 
 for set in "zenoh" "grpc" "grpc,istio" "mdns" "dns-sd" "memory" "mdns,dns-sd" "zenoh,grpc,istio,prost,mdns,dns-sd"; do
     echo "== F2: [$set] on host"
@@ -81,7 +108,7 @@ if [ -n "$extra" ]; then
     fail "mwctl enables middleware features: $extra"
 fi
 
-echo "== M5: mw-service enables host features only"
+echo "== MS5: mw-service enables host features only"
 cargo build --quiet -p mw-service
 svc_features="$(features_of_self -p mw-service | sort -u)"
 for want in grpc istio dns-sd zenoh; do
@@ -95,7 +122,7 @@ if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target
     fail "the embedded core depends on mw-service"
 fi
 
-echo "== V19: mw-gateway and mw-robot are host only"
+echo "== RG19: mw-gateway and mw-robot are host only"
 cargo build --quiet -p mw-gateway -p mw-robot
 gw_features="$(features_of_self -p mw-gateway | sort -u)"
 for want in zenoh serial; do

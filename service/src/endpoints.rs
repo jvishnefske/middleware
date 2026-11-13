@@ -33,7 +33,7 @@
 //! ([`Config::static_endpoint`](crate::Config::static_endpoint)); a kind
 //! with a static endpoint needs no `MW_SERVICE_MAP` entry.
 //!
-//! Added in 0.6 phase 2 (agent E, design.md V5) for `mw-robot`.
+//! Added in 0.6 phase 2 (agent E, design.md RG5) for `mw-robot`.
 
 use middleware::discovery::directory::MAX_HOST_LEN;
 use middleware::discovery::{Directory, Endpoint, Event, Service, ServiceKind};
@@ -208,7 +208,7 @@ mod tests {
     const ECHO: &str = "demo/echo=http://127.0.0.1:15001@demo-echo.apps.svc.cluster.local:50051";
 
     #[test]
-    fn v5_static_endpoints_parse_dial_and_authority() {
+    fn rg5_static_endpoints_parse_dial_and_authority() {
         let s = StaticEndpoints::parse(&format!(" {ECHO} , ,cam/jpeg=localhost:9@cam.robots:80"))
             .unwrap();
         let echo = s.get("demo/echo").unwrap();
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_static_endpoint_errors_name_the_entry() {
+    fn rg5_static_endpoint_errors_name_the_entry() {
         for (value, reason) in [
             ("demo/echo", "not kind=dial@authority"),
             ("demo/echo=127.0.0.1:1", "not kind=dial@authority"),
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_static_client_routes_the_kind_to_the_authority() {
+    fn rg5_static_client_routes_the_kind_to_the_authority() {
         let s = StaticEndpoints::parse(ECHO).unwrap();
         let echo = s.get("demo/echo").unwrap();
         let dir = echo.directory();

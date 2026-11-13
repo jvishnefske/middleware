@@ -1,0 +1,224 @@
+//! The RP2350 image's boot metadata: where its IMAGE_DEF and sentinel
+//! blocks sit in the image's first sector, and their words.
+//!
+//! The RP2350 boot ROM finds an image by a block loop that starts in its
+//! first 4 KiB (`middleware::fw_ota::picobin` has the format). The RP base
+//! firmware's first sector is laid out by the linker script `build.rs`
+//! generates from this module ([`write_linker_script`], included by
+//! `memory-rp2350.x`):
+//!
+//! | image offset | content                                             |
+//! |--------------|-----------------------------------------------------|
+//! | `0x000`      | Cortex-M vector table (cortex-m-rt `.vector_table`) |
+//! | [`START_BLOCK_OFFSET`] `0x200` | IMAGE_DEF block: IMAGE_TYPE [`UPDATE_FLAGS`] `0x9021` (RP2350 Arm secure executable, try before you buy), VERSION `major.minor`, linked to the sentinel |
+//! | [`SENTINEL_OFFSET`] `0xF00` | sentinel block (one ignored item), linked back: the loop closes only when the first sector's last page is intact |
+//! | [`TEXT_OFFSET`] `0x1000` | `.text` and everything else             |
+//!
+//! Nothing executable lies in the first sector, so the explicit buy, which
+//! erases and reprograms that sector of the running image to clear the
+//! TBYB bit, never erases code the CPU may fetch while it runs
+//! ([`crate::ota::platform`]). The gaps are not part of the ELF; the UF2
+//! and binary tools fill them with `0xFF`.
+//!
+//! The words equal `picobin::image_def_block` and `picobin::sentinel_block`
+//! (unit tested); they are spelled out here, with no crate dependency,
+//! because `build.rs` compiles this file on its own (`#[path]`) to write
+//! them into the linker script. The version is `RP_BASE_FW_VERSION`
+//! (`MAJOR.MINOR`) at build time, else the crate's `major.minor`
+//! ([`parse_version`]).
+
+use core::fmt;
+
+/// Image offset of the IMAGE_DEF block (after the vector table).
+pub const START_BLOCK_OFFSET: u32 = 0x200;
+/// Image offset of the sentinel block: the first sector's last page
+/// (`picobin::SENTINEL_FROM`).
+pub const SENTINEL_OFFSET: u32 = 0xF00;
+/// Image offset where `.text` starts: the second sector.
+pub const TEXT_OFFSET: u32 = 0x1000;
+/// The byte offset from the IMAGE_DEF block to the sentinel (the loop link).
+pub const LINK: i32 = (SENTINEL_OFFSET - START_BLOCK_OFFSET) as i32;
+
+/// IMAGE_TYPE flags of an update image: executable, Arm secure, RP2350,
+/// try before you buy (`0x9021`).
+pub const UPDATE_FLAGS: u16 = 0x0001 | 0x0020 | 0x1000 | 0x8000;
+/// The TBYB bit of the IMAGE_TYPE flags (cleared by the buy).
+pub const TBYB: u16 = 0x8000;
+/// IMAGE_TYPE flags of the factory image (bought): [`UPDATE_FLAGS`]
+/// without [`TBYB`] (`0x1021`).
+pub const FACTORY_FLAGS: u16 = UPDATE_FLAGS & !TBYB;
+
+const BLOCK_START: u32 = 0xffff_ded3;
+const BLOCK_END: u32 = 0xab12_3579;
+
+/// A firmware version, `major.minor`; the protocol's `major << 16 | minor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FwVersion {
+    /// Major.
+    pub major: u16,
+    /// Minor.
+    pub minor: u16,
+}
+
+impl FwVersion {
+    /// `major << 16 | minor`.
+    pub const fn as_u32(self) -> u32 {
+        (self.major as u32) << 16 | self.minor as u32
+    }
+}
+
+impl fmt::Display for FwVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+/// Parses `MAJOR.MINOR` (decimal, each 0..=65535, nothing else).
+pub fn parse_version(s: &str) -> Option<FwVersion> {
+    let (major, minor) = s.split_once('.')?;
+    let num = |t: &str| -> Option<u16> {
+        if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        t.parse().ok()
+    };
+    Some(FwVersion { major: num(major)?, minor: num(minor)? })
+}
+
+/// Words of [`start_block`].
+pub const START_BLOCK_WORDS: usize = 7;
+/// Words of [`sentinel_block`].
+pub const SENTINEL_WORDS: usize = 5;
+
+/// The IMAGE_DEF block with `flags` and `version`, linked to the sentinel:
+/// `START, IMAGE_TYPE(flags), VERSION, major<<16|minor, LAST(3), LINK, END`.
+pub const fn start_block(flags: u16, version: FwVersion) -> [u32; START_BLOCK_WORDS] {
+    [
+        BLOCK_START,
+        0x42 | 1 << 8 | (flags as u32) << 16,
+        0x48 | 2 << 8,
+        version.as_u32(),
+        0xff | 3 << 8,
+        LINK as u32,
+        BLOCK_END,
+    ]
+}
+
+/// The sentinel block, linked back to the IMAGE_DEF:
+/// `START, IGNORED(1), LAST(1), -LINK, END`.
+pub const fn sentinel_block() -> [u32; SENTINEL_WORDS] {
+    [BLOCK_START, 0xfe | 1 << 8, 0xff | 1 << 8, (-LINK) as u32, BLOCK_END]
+}
+
+/// Writes the linker script fragment for an update image of `version`:
+/// the two blocks as `LONG`s at their offsets of `FLASH`, `_stext` at
+/// [`TEXT_OFFSET`], and assertions that the vector table ends before the
+/// IMAGE_DEF.
+pub fn write_linker_script(version: FwVersion, out: &mut impl fmt::Write) -> fmt::Result {
+    writeln!(out, "/* Generated by build.rs from src/ota/image.rs: do not edit. */")?;
+    writeln!(
+        out,
+        "/* IMAGE_DEF flags {UPDATE_FLAGS:#06x}, version {version}, sentinel at {SENTINEL_OFFSET:#x}. */"
+    )?;
+    writeln!(out, "SECTIONS {{")?;
+    writeln!(out, "    .start_block ORIGIN(FLASH) + {START_BLOCK_OFFSET:#x} : {{")?;
+    writeln!(out, "        __start_block_addr = .;")?;
+    for w in start_block(UPDATE_FLAGS, version) {
+        writeln!(out, "        LONG({w:#010x});")?;
+    }
+    writeln!(out, "    }} > FLASH")?;
+    writeln!(out, "    .sentinel_block ORIGIN(FLASH) + {SENTINEL_OFFSET:#x} : {{")?;
+    writeln!(out, "        __sentinel_block_addr = .;")?;
+    for w in sentinel_block() {
+        writeln!(out, "        LONG({w:#010x});")?;
+    }
+    writeln!(out, "    }} > FLASH")?;
+    writeln!(out, "}} INSERT AFTER .vector_table;")?;
+    writeln!(out, "_stext = ORIGIN(FLASH) + {TEXT_OFFSET:#x};")?;
+    writeln!(
+        out,
+        "ASSERT(ADDR(.vector_table) + SIZEOF(.vector_table) <= ORIGIN(FLASH) + {START_BLOCK_OFFSET:#x}, \"vector table overlaps the IMAGE_DEF block\");"
+    )?;
+    writeln!(
+        out,
+        "ASSERT(__start_block_addr == ORIGIN(FLASH) + {START_BLOCK_OFFSET:#x}, \"IMAGE_DEF block misplaced\");"
+    )?;
+    writeln!(
+        out,
+        "ASSERT(__sentinel_block_addr == ORIGIN(FLASH) + {SENTINEL_OFFSET:#x}, \"sentinel block misplaced\");"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use middleware::fw_ota::picobin::{self, EXE_TBYB, RP2350_ARM_S_EXE, SENTINEL_FROM, find_image_def_in};
+    use std::string::String;
+    use std::vec::Vec;
+
+    const V: FwVersion = FwVersion { major: 1, minor: 2 };
+
+    #[test]
+    fn y13_blocks_are_the_picobin_blocks_with_tbyb_and_the_sentinel_in_the_last_page() {
+        assert_eq!(UPDATE_FLAGS, 0x9021);
+        assert_eq!(UPDATE_FLAGS, RP2350_ARM_S_EXE | EXE_TBYB);
+        assert_eq!(FACTORY_FLAGS, 0x1021);
+        assert_eq!(start_block(UPDATE_FLAGS, V), picobin::image_def_block(UPDATE_FLAGS, 1, 2, LINK));
+        assert_eq!(sentinel_block(), picobin::sentinel_block(-LINK));
+        assert_eq!((START_BLOCK_WORDS, SENTINEL_WORDS), (picobin::IMAGE_DEF_BLOCK_WORDS, picobin::SENTINEL_BLOCK_WORDS));
+        assert_eq!(SENTINEL_OFFSET, SENTINEL_FROM);
+        assert!(SENTINEL_OFFSET as usize + 4 * SENTINEL_WORDS <= TEXT_OFFSET as usize);
+        assert!(START_BLOCK_OFFSET as usize + 4 * START_BLOCK_WORDS <= SENTINEL_OFFSET as usize);
+        // The RP2350's vector table (16 + 52 IRQ entries) fits before the block.
+        const { assert!((16 + 52) * 4 <= START_BLOCK_OFFSET) };
+        // A first sector laid out as the linker script does parses as an
+        // updatable image of V with its loop's tail in the last page.
+        let mut sector = [0xffu8; 4096];
+        put(&mut sector, START_BLOCK_OFFSET, &start_block(UPDATE_FLAGS, V));
+        put(&mut sector, SENTINEL_OFFSET, &sentinel_block());
+        let def = find_image_def_in(&sector).unwrap();
+        assert!(def.is_exe() && def.is_rp2350() && def.is_tbyb());
+        assert_eq!((def.version_u32(), def.type_offset, def.window_tail), (V.as_u32(), 0x204, 0xF00));
+    }
+
+    pub(crate) fn put(buf: &mut [u8], at: u32, words: &[u32]) {
+        for (i, w) in words.iter().enumerate() {
+            let o = at as usize + 4 * i;
+            buf[o..o + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn y13_versions_parse_as_major_minor_only() {
+        assert_eq!(parse_version("1.0"), Some(FwVersion { major: 1, minor: 0 }));
+        assert_eq!(parse_version("65535.7"), Some(FwVersion { major: 65535, minor: 7 }));
+        for bad in ["", "1", "1.", ".1", "1.2.3", "65536.0", "+1.0", "1.-0", "a.b", " 1.0", "1.0 "] {
+            assert_eq!(parse_version(bad), None, "{bad:?}");
+        }
+        assert_eq!(std::format!("{}", FwVersion { major: 3, minor: 14 }), "3.14");
+        assert_eq!(FwVersion { major: 1, minor: 1 }.as_u32(), 0x0001_0001);
+    }
+
+    #[test]
+    fn y13_linker_script_carries_exactly_the_block_words() {
+        let mut s = String::new();
+        write_linker_script(V, &mut s).unwrap();
+        let longs: Vec<u32> = s
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("LONG(0x"))
+            .map(|h| u32::from_str_radix(h.trim_end_matches(");"), 16).unwrap())
+            .collect();
+        let mut want = start_block(UPDATE_FLAGS, V).to_vec();
+        want.extend_from_slice(&sentinel_block());
+        assert_eq!(longs, want);
+        assert!(s.contains(".start_block ORIGIN(FLASH) + 0x200 :"));
+        assert!(s.contains(".sentinel_block ORIGIN(FLASH) + 0xf00 :"));
+        assert!(s.contains("_stext = ORIGIN(FLASH) + 0x1000;"));
+        assert!(s.contains("INSERT AFTER .vector_table;"));
+        assert!(s.contains("version 1.2"));
+        // The script memory-rp2350.x includes is the generated one.
+        assert!(include_str!("../../memory-rp2350.x").contains("INCLUDE rp2350-image.x"));
+    }
+}

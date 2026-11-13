@@ -14,14 +14,32 @@
 //!   (SHA-256, signed message, signed commit body, `sys/trust/info`
 //!   names), and a device-side loader with a simulated root of trust for
 //!   fakes.
+//! * [`pins`] — the pin table's checks: rows and bus settings against a
+//!   board's pin map from `board-pins` (the firmwares' own rules) and the
+//!   ABI's `i2c_open` / `spi_open` argument rules, with plain-language
+//!   messages and one-click fixes.
+//! * [`machines`] — the state-machine tables' checks: the page's machines
+//!   converted to `state-table` views, checked against the pin table, and
+//!   each issue rendered in plain language with its one-click fix.
+//! * [`flows`] — the flow graphs' checks: the page's flows converted to
+//!   `state-table` flow views, checked against the machines and the pin
+//!   table, each issue in plain language with its fix.
+//! * [`recipes`] — S88 master recipes over `recipe-core`: checks with
+//!   plain-language messages, allocation of steps to units' equipment
+//!   phases (with per-unit reasons when it fails), a simulated run against
+//!   simulated units, a control recipe run (`recipes::run`) whose
+//!   commands are keyed request bodies for payloads the page drives, and
+//!   the phase state model for the page.
 //! * [`simulator`] (`simulator` feature, default) — runs a payload in
 //!   `wasm-host` against a virtual device: GPIO with edge interrupts, ABI 2
 //!   hardware timers on a JS-supplied clock, an SPI device (loopback or a
-//!   pattern), a UART terminal and the bounded interrupt event queue that
-//!   feeds `on_irq`.
+//!   pattern), a UART terminal, the bounded interrupt event queue that
+//!   feeds `on_irq`, analog levels, and ABI 5: a node id, served keys and
+//!   requests handed to `on_request`.
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
-//!   `abi()`, ...). It only converts values.
+//!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, `checkRecipe`,
+//!   `allocateRecipe`, `simulateRecipe`, `RecipeRun`, `phaseModel`, ...). It only converts values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
@@ -31,6 +49,10 @@
 pub mod bindings;
 pub mod decoder;
 pub mod encode;
+pub mod flows;
 pub mod loader;
+pub mod machines;
+pub mod pins;
+pub mod recipes;
 #[cfg(feature = "simulator")]
 pub mod simulator;

@@ -18,15 +18,18 @@
 //!    CRC verified and the pinned signing key, if any, read
 //!    ([`esp_base::trust_store`]). The [`presence`] task starts watching the
 //!    BOOT button for the re-key window.
-//! 4. With `wasm`, the payload peripherals come up: the GPIO interrupt
-//!    handler, the timer alarm on TIMG1, SPI2 with DMA ([`spi`]) and UART1
-//!    ([`uart1`]), and on the ESP32 LEDC ([`pwm`]), I2C0 ([`i2c`]) and the
-//!    I2S0 camera receiver ([`camera`]), all without pins until a payload
-//!    opens them.
+//! 4. With `wasm` (ESP32, ESP32-S3), the payload peripherals come up: the
+//!    GPIO interrupt handler, the timer alarm on TIMG1, SPI2 with DMA
+//!    ([`spi`]), UART1 ([`uart1`]) and I2C0 ([`i2c`]), and on the ESP32
+//!    LEDC ([`pwm`]) and the I2S0 camera receiver ([`camera`]), all without
+//!    pins until a payload opens them.
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
 //!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
-//!    publishes go out over ESP-NOW, `app/...` samples come in, and source
-//!    routes stream from it. A radio that fails to start is logged and the
+//!    publishes go out over ESP-NOW, `app/...` samples come in, source
+//!    routes stream from it, and requests addressed to this station
+//!    (`middleware::rpc`) reach the controller as `bus::Port::Radio`
+//!    requests, admitted by `esp_base::ota` (signed updates on a claimed
+//!    device only). A radio that fails to start is logged and the
 //!    firmware runs without it.
 //! 6. The [`controller`] runs on the main task and starts the stored payload
 //!    if one is valid (and the `wasm` runtime is built in).
@@ -37,7 +40,8 @@
 //! the controller share the re-key window through [`presence::WINDOW`]. With `wasm`, the payload's
 //! peripherals rest in statics shared with their ISRs or between runs: the
 //! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
-//! timer alarm ([`timer`]) and the SPI/UART drivers ([`device::HW`]).
+//! timer alarm ([`timer`]) and the SPI/UART/I2C (and on the ESP32 PWM)
+//! drivers ([`device::HW`]).
 
 mod board;
 mod bus;
@@ -48,7 +52,7 @@ mod controller;
 mod device;
 #[cfg(feature = "wasm")]
 mod gpio;
-#[cfg(all(feature = "esp32", feature = "wasm"))]
+#[cfg(feature = "wasm")]
 mod i2c;
 #[cfg(feature = "wasm")]
 mod irq;
@@ -69,14 +73,15 @@ use embassy_executor::Spawner;
 use esp_base::chip::FlashSettings;
 use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
-use esp_base::trust_store::TrustStore;
+use esp_base::trust_store::{Persisted, TrustStore};
+use middleware::loader::trust::TrustState;
+use middleware::loader::Caps;
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::Uart;
 use esp_storage::FlashStorage;
-use middleware::loader::trust::TrustState;
 use static_cell::ConstStaticCell;
 
 use bus::{Bus, Port};
@@ -136,8 +141,9 @@ struct Storage {
     store: Option<Store>,
     /// The trust partition, when present and readable.
     trust: Option<TrustStore>,
-    /// The persisted root of trust (Unclaimed without a trust partition).
-    state: TrustState,
+    /// The persisted root of trust and control counter (Unclaimed without
+    /// a trust partition).
+    state: Persisted,
 }
 
 /// Opens the payload partition named [`PAYLOAD_PARTITION`] and the trust
@@ -145,11 +151,7 @@ struct Storage {
 /// flash moves into the payload store, which then lends it back for trust
 /// saves ([`PayloadStore::flash`]).
 fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
-    let none = Storage {
-        store: None,
-        trust: None,
-        state: TrustState::Unclaimed,
-    };
+    let none = Storage { store: None, trust: None, state: Persisted::default() };
     let mut table = [0u8; PARTITION_TABLE_MAX_LEN];
     let (payload, trust) = {
         let Ok(parts) = read_partition_table(&mut flash, &mut table) else {
@@ -165,7 +167,7 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
     };
     let (trust, state) = match trust.map(|(at, len)| TrustStore::open(&mut flash, at, len)) {
         Some(Ok((t, s))) => (Some(t), s),
-        _ => (None, TrustState::Unclaimed),
+        _ => (None, Persisted::default()),
     };
     let store = payload.and_then(|(at, len)| PayloadStore::new(flash, at, len, limit).ok());
     Storage {
@@ -173,6 +175,20 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
         trust,
         state,
     }
+}
+
+/// This device's ESP-NOW station MAC (the eFuse base MAC), which signed
+/// control requests name.
+#[cfg(feature = "espnow")]
+fn own_mac() -> esp_base::ota::Mac {
+    radio::own_mac()
+}
+
+/// Without `espnow` nothing arrives over the air, so no request names a
+/// MAC.
+#[cfg(not(feature = "espnow"))]
+fn own_mac() -> esp_base::ota::Mac {
+    [0; 6]
 }
 
 /// Brings up the board and runs the firmware forever.
@@ -197,25 +213,24 @@ pub async fn run(spawner: Spawner) -> ! {
     // The bootloader's image header: the flash mode and clock code runs
     // from (read before the flash moves into the payload store).
     let mut header = [0u8; 4];
-    let flash_settings = flash
-        .read(0, &mut header)
-        .ok()
-        .and_then(|()| FlashSettings::from_header(header));
-    let Storage {
-        mut store,
-        trust,
-        state: trust_state,
-    } = open_storage(flash, profile.max_image);
+    let flash_settings = flash.read(0, &mut header).ok().and_then(|()| FlashSettings::from_header(header));
+    let Storage { mut store, trust, state: persisted } = open_storage(flash, profile.max_image);
+    let trust_state = persisted.trust;
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
-    let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state);
+    let state =
+        State::boot(matches!(installed, Some(Ok(_)))).with_trust(trust_state).with_control(persisted.control);
     let ctx = Context {
         chip: profile.name,
         firmware: FIRMWARE,
         capacity,
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
+        staging: false,
         node: Some(node_id()),
+        // With the runtime the controller routes requests on served keys
+        // to the payload (`esp_base::serve`); `node_id` answers this node.
+        caps: if cfg!(feature = "wasm") { Caps::SERVE } else { Caps::NONE },
     };
 
     bus.log(format_args!(
@@ -248,8 +263,8 @@ pub async fn run(spawner: Spawner) -> ! {
             "trust: unclaimed; any payload accepted until sys/trust/claim"
         )),
         (Some(_), TrustState::Claimed { key, min_version }) => bus.log(format_args!(
-            "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
-            key.0[0], key.0[1], key.0[2], key.0[3], min_version.0
+            "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}, control counter {}",
+            key.0[0], key.0[1], key.0[2], key.0[3], min_version.0, persisted.control.0
         )),
     }
     spawner.spawn(presence::watch(board.boot, bus).unwrap());
@@ -261,27 +276,29 @@ pub async fn run(spawner: Spawner) -> ! {
         timer::init(TimerGroup::new(board.payload.timg1).timer0);
         let spi = board.payload.spi.and_then(spi::SpiParts::new);
         let uart = board.payload.uart1.and_then(uart1::Uart1Parts::new);
-        if spi.is_none() || uart.is_none() {
+        let i2c = board.payload.i2c0.map(i2c::Bus0::new);
+        if spi.is_none() || uart.is_none() || i2c.is_none() {
+            let ok = |up: bool| if up { "ok" } else { "failed" };
             bus.log(format_args!(
-                "payload peripherals: spi {}, uart1 {}",
-                if spi.is_some() { "ok" } else { "failed" },
-                if uart.is_some() { "ok" } else { "failed" },
+                "payload peripherals: spi {}, uart1 {}, i2c0 {}",
+                ok(spi.is_some()),
+                ok(uart.is_some()),
+                ok(i2c.is_some()),
             ));
         }
         #[cfg(feature = "esp32")]
-        let (pwm, i2c) = {
+        let pwm = {
             let cam = board.payload.cam;
             if !camera::install(cam.i2s0, cam.dma_i2s0) {
                 bus.log(format_args!("camera: I2S0 camera receiver failed to start"));
             }
-            (Some(pwm::Pwm::new(cam.ledc)), cam.i2c0.map(i2c::Bus0::new))
+            Some(pwm::Pwm::new(cam.ledc))
         };
         device::HW.put(device::Hw {
             spi,
             uart,
             #[cfg(feature = "esp32")]
             pwm,
-            #[cfg(feature = "esp32")]
             i2c,
         });
         #[cfg(feature = "espnow")]
@@ -289,13 +306,10 @@ pub async fn run(spawner: Spawner) -> ! {
             Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),
             Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
         }
-        bus.log(format_args!(
-            "heap: {} B free after boot",
-            esp_alloc::HEAP.free()
-        ));
-        Controller::new(state, ctx, store, trust, bus, profile)
+        bus.log(format_args!("heap: {} B free after boot", esp_alloc::HEAP.free()));
+        Controller::new(state, ctx, store, trust, own_mac(), bus, profile)
     };
     #[cfg(not(feature = "wasm"))]
-    let controller = Controller::new(state, ctx, store, trust, bus);
+    let controller = Controller::new(state, ctx, store, trust, own_mac(), bus);
     controller.run().await
 }

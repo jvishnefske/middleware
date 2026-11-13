@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v13_full_queues_drop_the_newest_and_count() {
+    async fn rg13_full_queues_drop_the_newest_and_count() {
         let (up, mut up_rx) = mpsc::channel(2);
         let (ctl, mut ctl_rx) = mpsc::channel(1);
         let t = task(up, ctl)
@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v13_detached_sys_forward_is_unavailable() {
+    async fn rg13_detached_sys_forward_is_unavailable() {
         let mut sys = SysForward::detached().with_timeout(Duration::from_millis(10));
         let mut body = [0u8; 16];
         let n = crate::bridge::encode_sys_request(keys::INFO, b"", &mut body).expect("body");

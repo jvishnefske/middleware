@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_robot_config_parses_and_requires_a_name() {
+    fn rg2_robot_config_parses_and_requires_a_name() {
         let c = RobotConfig::from_env(&env(&[("MW_ROBOT_NAME", "r1")])).unwrap();
         assert_eq!(
             c,
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_runner_defaults_point_at_the_local_envoy() {
+    fn rg3_runner_defaults_point_at_the_local_envoy() {
         let r = RobotConfig::from_env(&env(&[("MW_ROBOT_NAME", "r1")])).unwrap();
         let c = r.runner_config(Config::default());
         assert_eq!(c.zenoh_router.as_deref(), Some("tcp/127.0.0.1:17447"));

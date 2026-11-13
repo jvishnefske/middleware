@@ -42,6 +42,51 @@ pub trait Transport {
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
 }
 
+/// A request/response path to one device: the serial [`Link`], or
+/// [`crate::air::AirLink`] over ESP-NOW through a bridge. [`crate::device::Device`]
+/// runs the protocol operations over either.
+pub trait Endpoint {
+    /// Sends a request and returns the response body.
+    fn request(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Error>;
+
+    /// Publications and noise received since the last call.
+    fn take_events(&mut self) -> Vec<Event>;
+
+    /// Waits until `deadline` for the next publication or noise run.
+    fn next_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error>;
+
+    /// Largest `sys/loader/chunk` data this path carries in one request.
+    fn chunk_size(&self) -> usize;
+
+    /// Sends a loader/system command.
+    fn command(&mut self, cmd: &Command<'_>) -> Result<Vec<u8>, Error> {
+        let mut body = [0u8; 8 + middleware::loader::CHUNK_MAX];
+        let n = cmd
+            .encode_body(&mut body)
+            .ok_or(Error::Frame(FrameError::TooLarge))?;
+        let body = body.get(..n).ok_or(Error::Frame(FrameError::TooLarge))?;
+        self.request(cmd.key(), body)
+    }
+}
+
+impl<T: Transport> Endpoint for Link<T> {
+    fn request(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
+        Link::request(self, key, body)
+    }
+
+    fn take_events(&mut self) -> Vec<Event> {
+        Link::take_events(self)
+    }
+
+    fn next_event(&mut self, deadline: Instant) -> Result<Option<Event>, Error> {
+        Link::next_event(self, deadline)
+    }
+
+    fn chunk_size(&self) -> usize {
+        middleware::loader::CHUNK_MAX
+    }
+}
+
 /// Something the device sent that is not the response being waited for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -116,7 +161,10 @@ pub fn decode_run(run: &[u8]) -> Option<(usize, Incoming)> {
 pub struct Timeouts {
     /// Per-attempt response timeout.
     pub request: Duration,
-    /// Floor for `sys/loader/begin`, which erases flash before answering.
+    /// Floor for requests that erase or program flash before answering:
+    /// `sys/loader/begin`, `sys/fw/begin` and `sys/fw/confirm` (the
+    /// bootrom's buy rewrites a sector); `sys/fw/commit`, which hashes the
+    /// whole image and writes its first sector, waits three times as long.
     pub begin: Duration,
     /// Additional attempts after a timeout.
     pub retries: u32,
@@ -135,7 +183,10 @@ impl Default for Timeouts {
 impl Timeouts {
     /// The per-attempt timeout for a request on `key`.
     pub fn for_key(&self, key: Key<'_>) -> Duration {
-        if key == middleware::loader::keys::BEGIN {
+        use middleware::fw_ota::keys as fw;
+        if key == fw::COMMIT {
+            self.request.max(self.begin * 3)
+        } else if key == middleware::loader::keys::BEGIN || key == fw::BEGIN || key == fw::CONFIRM {
             self.request.max(self.begin)
         } else {
             self.request
@@ -181,6 +232,11 @@ impl<T: Transport> Link<T> {
     /// The transport.
     pub fn transport(&self) -> &T {
         &self.io
+    }
+
+    /// The transport, mutably.
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.io
     }
 
     /// The timing in use.
@@ -293,16 +349,6 @@ impl<T: Transport> Link<T> {
         })
     }
 
-    /// Sends a loader/system command.
-    pub fn command(&mut self, cmd: &Command<'_>) -> Result<Vec<u8>, Error> {
-        let mut body = [0u8; 8 + middleware::loader::CHUNK_MAX];
-        let n = cmd
-            .encode_body(&mut body)
-            .ok_or(Error::Frame(FrameError::TooLarge))?;
-        let body = body.get(..n).ok_or(Error::Frame(FrameError::TooLarge))?;
-        self.request(cmd.key(), body)
-    }
-
     /// Waits until `deadline` for the next [`Event`] (publication or noise).
     /// Responses are discarded: nothing is outstanding outside
     /// [`Link::request`].
@@ -392,5 +438,10 @@ mod tests {
             ..t
         };
         assert_eq!(slow.for_key(keys::BEGIN), Duration::from_secs(9));
+        use middleware::fw_ota::keys as fw;
+        assert_eq!(t.for_key(fw::BEGIN), Duration::from_millis(5000));
+        assert_eq!(t.for_key(fw::CONFIRM), Duration::from_millis(5000));
+        assert_eq!(t.for_key(fw::COMMIT), Duration::from_millis(15000));
+        assert_eq!(t.for_key(fw::CHUNK), Duration::from_millis(1000));
     }
 }

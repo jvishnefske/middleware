@@ -23,6 +23,12 @@
     --warn-bg: #3a3020;
   }
 }
+html {
+  /* Phones must not inflate some text blocks (it put the generated-code
+   * line numbers out of step with the code). */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -77,6 +83,12 @@ input[type="text"] {
   border-radius: 4px;
   background: var(--panel);
   color: var(--fg);
+}
+/* A select is as wide as its longest option; never wider than its row. */
+select {
+  max-width: 100%;
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 button.primary {
   background: var(--accent);
@@ -279,4 +291,868 @@ input[type="password"] {
   color: var(--fg);
   width: 100%;
   box-sizing: border-box;
+}
+.start .hero {
+  margin: 24px 0 8px;
+  max-width: 760px;
+}
+.start .hero h2 {
+  font-size: 1.7rem;
+  margin: 0 0 8px;
+  line-height: 1.2;
+}
+.start .lead {
+  font-size: 1.1rem;
+  margin: 0 0 16px;
+}
+button.big {
+  padding: 10px 18px;
+  font-size: 1.05rem;
+}
+.start .how,
+.start .steps {
+  max-width: 760px;
+  padding-left: 22px;
+}
+.start .how li,
+.start .steps li {
+  margin: 0 0 10px;
+}
+.start .steps p {
+  margin: 4px 0 6px;
+}
+.boards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 16px;
+}
+.boards button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
+  min-width: 150px;
+  cursor: pointer;
+}
+.boards button .muted {
+  font-size: 0.8rem;
+}
+.boards button[aria-pressed="true"] {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  font-weight: 600;
+}
+.start .substeps {
+  padding-left: 22px;
+  margin: 4px 0 6px;
+}
+.start .substeps li {
+  margin: 0 0 4px;
+}
+.start .download p {
+  overflow-wrap: anywhere;
+}
+.start .download .sha {
+  margin: 0 0 6px;
+  font-size: 0.8rem;
+}
+.start .steps li.muted {
+  list-style: none;
+  margin-left: -22px;
+}
+.workspace-head {
+  margin: 1.2em 0 0.4em;
+}
+.workspace-head h3 {
+  margin: 0;
+}
+.toolbox-toggle {
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 0.8rem;
+}
+@media (max-width: 600px) {
+  .blockly-area {
+    height: min(560px, 70vh);
+  }
+  /* A slimmer toolbox leaves the narrow workspace room for blocks. */
+  .blockly-area .blocklyToolboxCategoryLabel {
+    font-size: 12px;
+  }
+  .blockly-area .blocklyToolboxCategory {
+    padding-right: 4px;
+  }
+}
+/* Blocks tab: the Blocks / Pins view switch (a tablist inside the tab). */
+.subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 1em 0 0;
+  border-bottom: 1px solid var(--line);
+}
+.subtabs [role="tab"] {
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: none;
+  padding: 6px 14px;
+  margin-bottom: -1px;
+}
+.subtabs [role="tab"][aria-selected="true"] {
+  border-color: var(--line);
+  background: var(--panel);
+  font-weight: 600;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.small {
+  font-size: 0.85rem;
+}
+/* The pin table scrolls inside its box; the page never scrolls sideways. */
+.pin-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.pin-table {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 0.9rem;
+}
+.pin-table th,
+.pin-table td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.pin-table th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.pin-table input[type="text"] {
+  width: 8.5em;
+}
+.pin-table td:nth-child(7) input {
+  width: 12em;
+}
+.pin-table select {
+  max-width: 15em;
+}
+.pin-table .sticky {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+.pin-table [aria-invalid="true"] {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px #c0392b;
+}
+.pin-table tr.has-issue td {
+  border-bottom: none;
+}
+.pin-table .pin-issue-row td {
+  white-space: normal;
+  padding-top: 0;
+}
+/* Keep a row's message in view when the table is scrolled sideways. */
+.pin-table .pin-issue-row ul {
+  position: sticky;
+  left: 0;
+  max-width: min(36rem, calc(100vw - 64px));
+  margin: 0 0 4px;
+}
+.pin-table button.icon {
+  padding: 0 8px;
+}
+button.fix {
+  font-size: 0.8rem;
+  padding: 0 6px;
+  margin-left: 4px;
+}
+.pin-summary.bad {
+  color: #c0392b;
+}
+.pin-summary.good {
+  color: var(--accent);
+}
+.pin-buses input[type="number"] {
+  width: 8em;
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+}
+@media (prefers-color-scheme: dark) {
+  .pin-table [aria-invalid="true"] {
+    border-color: #ff7a6b;
+    box-shadow: 0 0 0 1px #ff7a6b;
+  }
+  .pin-summary.bad,
+  .issues .error {
+    color: #ff7a6b;
+  }
+}
+/* States view: the state-machine grids (statesTable.ts). They scroll
+ * inside .pin-scroll boxes like the pin table, so a phone never scrolls
+ * the page sideways. */
+.states-view h4 {
+  font-size: 0.85rem;
+  margin: 1em 0 0.3em;
+}
+.sm-table {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 0.9rem;
+}
+.sm-table th,
+.sm-table td {
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.sm-table thead th {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.sm-table input[type="text"] {
+  width: 8.5em;
+}
+.sm-table input.sm-text {
+  width: 10em;
+}
+.sm-table input.sm-num {
+  width: 5em;
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+}
+.sm-table select {
+  max-width: 12em;
+}
+.sm-table .sticky {
+  position: sticky;
+  left: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+.sm-table .sm-num-col {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.8rem;
+  padding-top: 9px;
+}
+.sm-table button.icon {
+  padding: 0 8px;
+}
+/* A cell's editor: one line per guard term or action, then its add button. */
+.sm-editor {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.sm-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+button.sm-add {
+  font-size: 0.8rem;
+  padding: 1px 8px;
+}
+.sm-tag {
+  font-size: 0.7rem;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.sm-tag.now {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.sm-table tr.has-issue td,
+.sm-table tr.has-issue th {
+  border-bottom: none;
+}
+.sm-table .grid-issue-row td {
+  white-space: normal;
+  padding-top: 0;
+}
+.sm-table .grid-issue-row ul {
+  position: sticky;
+  left: 0;
+  max-width: min(36rem, calc(100vw - 64px));
+  margin: 0 0 4px;
+}
+/* Errors block compiling (red, aria-invalid); warnings do not (amber,
+ * dashed). The words "Error" / "Warning" lead each message, so colour is
+ * never the only sign. */
+.sm-table [aria-invalid="true"],
+.sm-meta [aria-invalid="true"] {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px #c0392b;
+}
+.has-warning {
+  border-color: #b7791f;
+  border-style: dashed;
+}
+.states-view .issues .sev {
+  font-weight: 600;
+}
+.states-view .issues .warning {
+  color: #8a5a00;
+}
+/* The simulator's current state: its States row, its matrix row header
+ * and the transitions leaving it. */
+.sm-table tr.current td,
+.sm-table tr.current td.sticky,
+.sm-table tr.from-current td,
+.sm-table tr.from-current th,
+.sm-matrix th.current {
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+.sm-table tr.current td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.sm-rows-head h4 {
+  margin: 0;
+}
+.sm-rows-head {
+  margin: 1em 0 0.3em;
+}
+#sm-matrix-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+/* The matrix overview: read-only, one button per (state, event) cell. */
+.sm-matrix-scroll {
+  margin-bottom: 8px;
+}
+.sm-matrix {
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.sm-matrix th,
+.sm-matrix td {
+  border: 1px solid var(--line);
+  padding: 2px;
+  white-space: nowrap;
+  text-align: center;
+}
+.sm-matrix th {
+  padding: 4px 8px;
+  font-weight: 600;
+}
+.sm-matrix tbody th {
+  text-align: left;
+}
+.sm-matrix button {
+  width: 100%;
+  min-width: 4.5em;
+  border: none;
+  background: none;
+  padding: 4px 6px;
+}
+.sm-matrix button.hole {
+  color: var(--muted);
+}
+.sm-matrix button:hover,
+.sm-matrix button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+}
+.sim-states {
+  font-weight: 600;
+  margin: 4px 0;
+}
+.sim-states:empty {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  .sm-table [aria-invalid="true"],
+  .sm-meta [aria-invalid="true"] {
+    border-color: #ff7a6b;
+    box-shadow: 0 0 0 1px #ff7a6b;
+  }
+  .has-warning {
+    border-color: #e0a84a;
+  }
+  .states-view .issues .warning {
+    color: #e0a84a;
+  }
+  .sm-tag.now {
+    color: #111;
+  }
+  .sm-table tr.current td,
+  .sm-table tr.current td.sticky,
+  .sm-table tr.from-current td,
+  .sm-table tr.from-current th,
+  .sm-matrix th.current {
+    background: color-mix(in srgb, var(--accent) 22%, var(--panel));
+  }
+}
+/* Flows view (flowsView.ts): an SVG canvas that scrolls and pans inside
+ * its own box (never the page), an outline list, and a properties grid. */
+.flows-view .flow-bar {
+  gap: 6px 10px;
+  margin: 6px 0;
+}
+.flows-view .seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.flows-view .seg button[aria-pressed="true"] {
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.flows-view .palette button {
+  font-size: 0.85rem;
+}
+.flow-canvas {
+  overflow: auto;
+  max-width: 100%;
+  height: 460px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--line) 80%, transparent) 1px, transparent 1px) 0 0 / 24px 24px,
+    var(--panel);
+  overscroll-behavior: contain;
+}
+.flow-svg {
+  display: block;
+  touch-action: none;
+  user-select: none;
+  font-family: inherit;
+}
+.flow-svg .fnode {
+  cursor: grab;
+}
+.flow-svg .fnode rect {
+  fill: var(--panel);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+.flow-svg .fnode.k-entry rect {
+  fill: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  stroke: var(--accent);
+}
+.flow-svg .fnode.k-branch rect,
+.flow-svg .fnode.k-repeat rect,
+.flow-svg .fnode.k-sequence rect {
+  stroke-dasharray: 0;
+  fill: color-mix(in srgb, var(--fg) 4%, var(--panel));
+}
+.flow-svg .fnode:focus {
+  outline: none;
+}
+.flow-svg .fnode:focus-visible rect,
+.flow-svg .fnode.sel rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.flow-svg .fnode.error rect {
+  stroke: #c0392b;
+  stroke-width: 2.5;
+}
+.flow-svg .fnode.warning rect {
+  stroke: #b7791f;
+  stroke-dasharray: 5 3;
+}
+.flow-svg .fnode.live rect {
+  fill: color-mix(in srgb, var(--accent) 22%, var(--panel));
+}
+.flow-svg .fnode.current rect {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+.flow-svg text {
+  fill: var(--fg);
+  font-size: 13px;
+  pointer-events: none;
+}
+.flow-svg .fkind {
+  font-size: 11px;
+  fill: var(--muted);
+  font-weight: 600;
+}
+.flow-svg .fport {
+  font-size: 10px;
+  fill: var(--muted);
+}
+.flow-svg .port {
+  fill: var(--panel);
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+.flow-svg .port.out {
+  cursor: crosshair;
+}
+.flow-svg .port.out.wired,
+.flow-svg .port.out:hover {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+.flow-svg .fwire {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+.flow-svg .fwire.live {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.flow-svg .fwire.sel {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+.flow-svg .fwire.error {
+  stroke: #c0392b;
+  stroke-dasharray: 6 4;
+}
+.flow-svg .fwire.warning {
+  stroke: #b7791f;
+  stroke-dasharray: 6 4;
+}
+.flow-svg .fwire.temp {
+  stroke: var(--accent);
+  stroke-dasharray: 4 4;
+  pointer-events: none;
+}
+.flow-svg .fwire-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  cursor: pointer;
+}
+/* The outline: one row per node in run order, indented by depth. */
+.flow-outline {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+.flow-outline .orow {
+  margin: 0 0 6px calc(var(--depth, 0) * 1.25rem);
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+.flow-outline .orow.error {
+  border-left-color: #c0392b;
+}
+.flow-outline .orow.warning {
+  border-left-color: #b7791f;
+  border-left-style: dashed;
+}
+.flow-outline .orow.live {
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+}
+.flow-outline .orow.current {
+  border-left-color: var(--accent);
+  border-left-width: 6px;
+}
+.flow-outline .onode {
+  border: none;
+  background: none;
+  padding: 2px 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.flow-outline .onode[aria-pressed="true"] {
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+.flow-outline .fkind {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.flow-outline .oports {
+  gap: 4px 12px;
+  margin-top: 4px;
+}
+.flow-outline .oport select {
+  max-width: 14em;
+}
+.flow-props-box {
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.flow-props {
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.flow-props caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 4px 0;
+}
+.flow-props th,
+.flow-props td {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+}
+.flow-props th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.flow-props [aria-invalid="true"],
+.flow-outline [aria-invalid="true"] {
+  border-color: #c0392b;
+  box-shadow: 0 0 0 1px #c0392b;
+}
+.flows-view .issues .sev {
+  font-weight: 600;
+}
+.flows-view .issues .warning,
+.flow-outline .onode .warning {
+  color: #8a5a00;
+}
+.flows-view .empty {
+  max-width: 40rem;
+}
+@media (max-width: 700px) {
+  .flow-canvas {
+    height: 340px;
+  }
+  .flow-outline .orow {
+    margin-left: calc(min(var(--depth, 0), 4) * 0.75rem);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .flow-svg .fnode.error rect,
+  .flow-svg .fwire.error {
+    stroke: #ff7a6b;
+  }
+  .flow-svg .fnode.warning rect,
+  .flow-svg .fwire.warning {
+    stroke: #e0a84a;
+  }
+  .flow-outline .orow.error {
+    border-left-color: #ff7a6b;
+  }
+  .flow-outline .orow.warning {
+    border-left-color: #e0a84a;
+  }
+  .flows-view .issues .warning,
+  .flow-outline .onode .warning {
+    color: #e0a84a;
+  }
+  .flow-props [aria-invalid="true"],
+  .flow-outline [aria-invalid="true"] {
+    border-color: #ff7a6b;
+    box-shadow: 0 0 0 1px #ff7a6b;
+  }
+}
+
+/* Units and Phases views (plantViews.ts): the pin table's look. */
+.plant-table input[type="number"] {
+  width: 6em;
+}
+.plant-table fieldset.cms {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  white-space: normal;
+  max-width: 22em;
+}
+.plant-table .ranges {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.plant-table .row.tight {
+  gap: 4px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.phase-matrix caption {
+  text-align: left;
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 4px 0;
+}
+.phase-matrix td,
+.phase-matrix th {
+  text-align: center;
+}
+.plant-view h4 {
+  margin: 1rem 0 0.25rem;
+}
+
+/* Six view tabs: tighter on a phone so they wrap onto two lines at most. */
+@media (max-width: 700px) {
+  .subtabs [role="tab"] {
+    padding: 6px 9px;
+  }
+}
+/* Recipe view (recipeView.ts): lanes per unit procedure, steps, bars,
+ * and the live run's step status and procedure state. Reuses the Flows
+ * canvas and outline styles. */
+.recipe-svg .lane-bg {
+  fill: color-mix(in srgb, var(--fg) 3%, transparent);
+  stroke: var(--line);
+  stroke-dasharray: 4 4;
+}
+.recipe-svg .lane-head {
+  fill: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  stroke: var(--line);
+  cursor: pointer;
+}
+.recipe-svg .rlane:focus {
+  outline: none;
+}
+.recipe-svg .rlane:focus-visible .lane-head,
+.recipe-svg .rlane.sel .lane-head {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.recipe-svg .rlane.error .lane-head {
+  stroke: #c0392b;
+  stroke-width: 2.5;
+}
+.recipe-svg .rlane.warning .lane-head {
+  stroke: #b7791f;
+  stroke-dasharray: 5 3;
+}
+.recipe-svg .rbar {
+  cursor: pointer;
+}
+.recipe-svg .rbar:focus {
+  outline: none;
+}
+.recipe-svg .rbar-hit {
+  fill: transparent;
+}
+.recipe-svg .rbar-line {
+  fill: var(--fg);
+}
+.recipe-svg .rbar.sel .rbar-line,
+.recipe-svg .rbar:focus-visible .rbar-line {
+  fill: var(--accent);
+}
+.recipe-svg .rbar.error .rbar-line {
+  fill: #c0392b;
+}
+.recipe-svg .rbar.warning .rbar-line {
+  fill: #b7791f;
+}
+.recipe-svg .rbar.live .fwire {
+  stroke: var(--accent);
+}
+.recipe-svg .rdouble {
+  stroke: var(--fg);
+  stroke-width: 1.5;
+}
+.recipe-svg .fnode.st-active rect,
+.recipe-outline .orow.st-active {
+  fill: color-mix(in srgb, #b7791f 16%, var(--panel));
+  background: color-mix(in srgb, #b7791f 16%, var(--panel));
+}
+.recipe-svg .fnode.st-started rect,
+.recipe-outline .orow.st-started {
+  fill: color-mix(in srgb, var(--accent) 26%, var(--panel));
+  background: color-mix(in srgb, var(--accent) 26%, var(--panel));
+}
+.recipe-svg .fnode.st-started rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.recipe-svg .fnode.st-done rect,
+.recipe-outline .orow.st-done {
+  fill: color-mix(in srgb, var(--fg) 8%, var(--panel));
+  background: color-mix(in srgb, var(--fg) 8%, var(--panel));
+}
+.recipe-outline .rstatus {
+  font-weight: 600;
+}
+.recipe-view .recipe-props,
+.recipe-view .recipe-alloc,
+.recipe-view .recipe-run {
+  margin-top: 10px;
+}
+.recipe-view .grid.props th {
+  text-align: left;
+  font-weight: 500;
+  padding-right: 8px;
+}
+.recipe-view .grid.alloc {
+  width: 100%;
+}
+.recipe-view .grid.alloc tr.error td {
+  color: #c0392b;
+}
+.recipe-view .operator button:not(:disabled) {
+  border-color: var(--accent);
+}
+.recipe-view .rstate {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 8%, var(--panel));
+}
+.recipe-view .rstate.st-running,
+.recipe-view .rstate.st-complete {
+  background: color-mix(in srgb, var(--accent) 22%, var(--panel));
+}
+.recipe-view .rstate.st-held,
+.recipe-view .rstate.st-holding {
+  background: color-mix(in srgb, #b7791f 22%, var(--panel));
+}
+.recipe-view .rstate.st-aborted,
+.recipe-view .rstate.st-aborting,
+.recipe-view .rstate.st-stopped {
+  background: color-mix(in srgb, #c0392b 18%, var(--panel));
+}
+.recipe-view .recipe-trace {
+  max-height: 240px;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  padding-left: 1.5rem;
+}
+.recipe-view .recipe-trace li.failed,
+.recipe-view .recipe-trace li.refused {
+  color: #c0392b;
+}
+.recipe-view button.small {
+  font-size: 0.8rem;
+  padding: 1px 6px;
+}
+@media (max-width: 700px) {
+  .recipe-view .grid.alloc th:nth-child(3),
+  .recipe-view .grid.alloc td:nth-child(3) {
+    display: none;
+  }
 }

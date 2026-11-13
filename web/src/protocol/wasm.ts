@@ -5,6 +5,12 @@
 // here re-implements the protocol. The raw wasm-bindgen exports return plain
 // objects typed `object`/`any`; this file gives them TypeScript shapes.
 
+import type { Flow, FlowIssue, PhaseDecl } from "../model/flows";
+import type { Machine, MachineIssue } from "../model/machines";
+import type { BusSetting, PinFunc, PinIssue, PinRow } from "../model/pins";
+import type { PhaseClass, RecipeIssue } from "../model/procedural";
+import type { Allocation, MasterRecipe, ScriptEvent, SimulatedRun } from "../model/recipe";
+import type { AllocUnit } from "../model/plant";
 import init, * as pkg from "../pkg/protocol_wasm.js";
 
 /** A frame decoded from the serial line. */
@@ -50,6 +56,10 @@ export interface DeviceInfo {
   firmware: string;
   /** Node id as 16 hex digits (middleware 0.5 firmware), if reported. */
   node?: string;
+  /** Capability bits after the node id (middleware 0.6 firmware); 0 when absent. */
+  caps: number;
+  /** Bit 0: requests on the payload's served keys reach the payload (S88 phases can run on it). */
+  serves: boolean;
 }
 
 export interface LoaderStepResult {
@@ -94,7 +104,7 @@ export interface AbiInfo {
   minTickMs: number;
   /** Every import of every ABI revision (ABI 2 included). */
   imports: AbiImport[];
-  exports: { memory: string; init: string; tick: string; alloc: string; onMessage: string; onIrq: string };
+  exports: { memory: string; init: string; tick: string; alloc: string; onMessage: string; onIrq: string; onRequest?: string };
   errors: Record<string, number>;
   /** `on_irq` `kind` codes. */
   eventKinds: { Gpio: number; Timer: number; DmaDone: number; UartRx: number };
@@ -142,7 +152,12 @@ export type SimEvent =
   | { kind: "write"; pin: number; high: boolean }
   | { kind: "spi"; tx: Uint8Array; rx: Uint8Array }
   | { kind: "uart"; data: Uint8Array }
+  | { kind: "serve"; key: string }
   | IrqEvent;
+
+/** What a served request came back with (ABI 5): the reply, or the
+ * `HandlerError` name a device answers instead. */
+export type RequestResult = { ok: true; reply: Uint8Array } | { ok: false; error: string };
 
 export interface PinState {
   mode: "unused" | "output" | "input";
@@ -173,7 +188,84 @@ export interface Simulator {
   pin(pin: number): PinState | undefined;
   readonly pinCount: number;
   readonly trapped: boolean;
+  /** Hands a request to the payload serving `key` (ABI 5); throws on a
+   * trap (the payload stops) or a malformed key. */
+  request(key: string, body: Uint8Array, deadlineMs?: number | null, sender?: string | null): RequestResult;
+  /** Keys the payload serves, in slot order. */
+  serves(): string[];
+  readonly handlesRequests: boolean;
+  /** The device's node id (16 hex digits). */
+  readonly nodeId: string;
+  /** What `adc_read(pin)` returns (12-bit, clamped). */
+  setAdc(pin: number, level: number): boolean;
   free(): void;
+}
+
+/** A unit as a recipe run reads it: allocation's view plus its node id. */
+export type RunUnit = AllocUnit & { node: string };
+
+/** An input to a `RecipeRun`. */
+export type RunInput =
+  | { kind: "operator"; command: string }
+  | ({ kind: "reply"; id: number } & RequestResult)
+  | { kind: "report"; key: string; data: Uint8Array }
+  | { kind: "lost" | "found"; unit: string }
+  | { kind: "tick" };
+
+/** What a `RecipeRun` asks for or says. */
+export type RunEffect =
+  | { kind: "send"; id: number; unit: string; key: string; body: Uint8Array; timeoutMs: number; command: string; step: string }
+  | { kind: "trace"; t: number; type: string; text: string };
+
+export type StepStatus = "inactive" | "active" | "started" | "done";
+
+/** recipe-core's engine over keyed requests (protocol-wasm `RecipeRun`). */
+export interface RecipeRunHandle {
+  on(nowMs: number, input: RunInput): RunEffect[];
+  readonly state: string;
+  steps(): { id: string; status: StepStatus }[];
+  phases(): { unit: string; em: string; phase: string; state: string | null; values: number[] }[];
+  bindings(): { step: string; unit: string; em: string; phase: string }[];
+  nextDeadline(): number | undefined;
+  free(): void;
+}
+
+export interface RunConfig {
+  ackTimeoutMs?: number;
+  settleTimeoutMs?: number;
+  maxCommands?: number;
+}
+
+/** One GPIO of a board, from protocol-wasm `boardPins` (board-pins). */
+export interface GpioInfo {
+  pin: number;
+  /** Why the board keeps it from payloads, when it does. */
+  reserved?: string;
+  inputOnly: boolean;
+  /** ADC channel. */
+  adc?: number;
+  /** PWM timer 0 channel. */
+  pwm?: number;
+  /** The board-wired I2C line. */
+  i2c?: { bus: number; line: "sda" | "scl" };
+  /** RP2040/RP2350 F1 SPI signal. */
+  spi?: { block: number; signal: "sck" | "mosi" | "miso" };
+}
+
+/** A board's pin map: what the pin table offers and checks against. */
+export interface BoardPins {
+  chip: string;
+  spiRouting: "matrix" | "rp-function-table";
+  gpios: GpioInfo[];
+  i2c: { bus: number; sda: number; scl: number }[];
+  pwm: { channel: number; pin: number }[];
+  adc: number[];
+  i2cBuses: number;
+  spiBuses: number;
+  i2cHz: [number, number];
+  maxSpiKhz: number;
+  maxLabel: number;
+  funcs: string[];
 }
 
 /** A streaming decoder for the serial line. */
@@ -196,14 +288,39 @@ export interface Protocol {
   crc32(data: Uint8Array): number;
   uploadPlan(image: Uint8Array, chunk?: number): UploadStep[];
   decodeDeviceInfo(data: Uint8Array): DeviceInfo | undefined;
-  encodeDeviceInfo(info: Omit<DeviceInfo, "statusName">): Uint8Array;
+  encodeDeviceInfo(info: Omit<DeviceInfo, "statusName" | "caps" | "serves"> & { caps?: number }): Uint8Array;
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
   readonly constants: ProtocolConstants;
   readonly abi: AbiInfo;
   readonly hasSimulator: boolean;
-  /** Loads a payload into the simulator; throws on rejection or init trap. */
-  newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void): Simulator;
+  /** The pin map of a `sys/info` chip name; throws for an unknown one. */
+  boardPins(chip: string): BoardPins;
+  /** Checks a pin table on a chip (board-pins rules + the ABI's bus
+   * argument rules); throws for an unknown chip. */
+  checkPins(chip: string, rows: readonly PinRow[], buses: readonly BusSetting[]): PinIssue[];
+  /** Checks state machines against the pin table's labels and functions
+   * (the `state-table` crate's rules); a `MachineChecker`. */
+  checkMachines(machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[]): MachineIssue[];
+  /** Checks flows against the machines and the pin table (the
+   * `state-table` crate's `flow` rules); a `FlowChecker`. */
+  checkFlows(flows: readonly Flow[], machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[], phases?: readonly PhaseDecl[]): FlowIssue[];
+  /** Checks phase classes and a master recipe (recipe-core's rules). */
+  checkRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[]): RecipeIssue[];
+  /** Binds a recipe's steps to units' equipment phases (plant.ts
+   * `allocationUnits`), or says per unit why not. */
+  allocateRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly AllocUnit[]): Allocation;
+  /** Allocates and runs a recipe against simulated units until `untilMs`. */
+  simulateRecipe(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly AllocUnit[], script: readonly ScriptEvent[], untilMs: number): SimulatedRun;
+  /** The S88 phase state model: states, commands, and next[state][command..., Done]. */
+  phaseModel(): { states: string[]; commands: string[]; next: (string | null)[][] };
+  /** Loads a payload into the simulator on a device with node id `node`
+   * (16 hex digits; default 0000000000000001); throws on rejection or
+   * init trap. */
+  newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void, node?: string): Simulator;
+  /** Compiles, allocates and builds a control recipe run; throws with the
+   * allocation failure's message. */
+  newRecipeRun(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly RunUnit[], config?: RunConfig): RecipeRunHandle;
 }
 
 function wrap(): Protocol {
@@ -222,7 +339,8 @@ function wrap(): Protocol {
     crc32: pkg.crc32,
     uploadPlan: (image, chunk) => pkg.uploadPlan(image, chunk ?? constants.chunkMax) as UploadStep[],
     decodeDeviceInfo: (data) => pkg.decodeDeviceInfo(data) as DeviceInfo | undefined,
-    encodeDeviceInfo: (i) => pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware),
+    encodeDeviceInfo: (i) =>
+      pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware, i.node, i.caps),
     payloadStatusName: pkg.payloadStatusName,
     newDeviceLoader: (capacity) => {
       const l = new pkg.DeviceLoader(capacity);
@@ -236,14 +354,24 @@ function wrap(): Protocol {
     constants,
     abi,
     hasSimulator,
-    newSimulator: (wasm, onEvent) => {
+    boardPins: (chip) => pkg.boardPins(chip) as BoardPins,
+    checkPins: (chip, rows, buses) => pkg.checkPins(chip, [...rows], [...buses]) as PinIssue[],
+    checkMachines: (machines, pins) => pkg.checkMachines([...machines], [...pins]) as MachineIssue[],
+    checkFlows: (flows, machines, pins, phases) => pkg.checkFlows([...flows], [...machines], [...pins], phases ? [...phases] : undefined) as FlowIssue[],
+    checkRecipe: (recipe, classes) => pkg.checkRecipe(recipe, [...classes]) as RecipeIssue[],
+    allocateRecipe: (recipe, classes, units) => pkg.allocateRecipe(recipe, [...classes], [...units]) as Allocation,
+    simulateRecipe: (recipe, classes, units, script, untilMs) => pkg.simulateRecipe(recipe, [...classes], [...units], [...script], untilMs) as SimulatedRun,
+    phaseModel: () => pkg.phaseModel() as { states: string[]; commands: string[]; next: (string | null)[][] },
+    newSimulator: (wasm, onEvent, node) => {
       // `Simulator` exists only when protocol-wasm was built with the
       // `simulator` feature (the default).
-      const Ctor = (pkg as unknown as { Simulator?: new (w: Uint8Array, f: (e: unknown) => void) => Simulator })
+      const Ctor = (pkg as unknown as { Simulator?: new (w: Uint8Array, f: (e: unknown) => void, node?: string) => Simulator })
         .Simulator;
       if (!hasSimulator || !Ctor) throw new Error("protocol-wasm was built without the simulator feature");
-      return new Ctor(wasm, (e) => onEvent(e as SimEvent));
+      return new Ctor(wasm, (e) => onEvent(e as SimEvent), node);
     },
+    newRecipeRun: (recipe, classes, units, config) =>
+      new pkg.RecipeRun(recipe, [...classes], [...units], config ?? {}) as unknown as RecipeRunHandle,
   };
 }
 

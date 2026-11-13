@@ -1,15 +1,19 @@
-// Entry point: loads protocol-wasm, builds the four tabs and the shared
-// serial-port bar.
+// Entry point: loads protocol-wasm, builds the five tabs (Start, Flash,
+// Device, Editor, Blocks) and the shared serial-port bar, and opens the
+// last-shown tab, or Start on a first visit.
 
 import "./style.css";
+import { FIRMWARE_BASE, fetchManifest } from "./flash/manifest";
+import type { BoardId } from "./onboarding/boards";
 import { loadProtocol } from "./protocol/wasm";
 import { PortManager, describePort, webSerialProblem } from "./serial/ports";
-import type { App, PayloadHandoff, TabId } from "./ui/app";
+import { type App, type PayloadHandoff, type TabId, initialTab } from "./ui/app";
 import { blocksPage } from "./ui/blocksPage";
 import { devicePage } from "./ui/devicePage";
 import { errorText, h } from "./ui/dom";
 import { editorPage } from "./ui/editorPage";
 import { flashPage } from "./ui/flashPage";
+import { startPage } from "./ui/startPage";
 
 async function main() {
   const root = document.getElementById("app");
@@ -25,6 +29,12 @@ async function main() {
   const serialProblem = webSerialProblem(window);
   const ports = new PortManager(() => navigator.serial.requestPort());
   const offerListeners: ((p: PayloadHandoff) => void)[] = [];
+  const tryListeners: ((id: string) => void)[] = [];
+  const boardListeners: ((id: BoardId) => void)[] = [];
+  const infoListeners: ((i: import("./protocol/wasm").DeviceInfo | null) => void)[] = [];
+  const connectedListeners: ((b: import("./ui/app").ConnectedBoard | null) => void)[] = [];
+  const plantListeners: ((p: import("./model/plant").PlantModel) => void)[] = [];
+  let lastPlant: import("./model/plant").PlantModel | null = null;
   const tabs: Record<TabId, HTMLButtonElement> = {} as Record<TabId, HTMLButtonElement>;
   const pages: Record<TabId, HTMLElement> = {} as Record<TabId, HTMLElement>;
 
@@ -45,21 +55,47 @@ async function main() {
     },
     offerPayload: (p) => offerListeners.forEach((f) => f(p)),
     onPayloadOffered: (f) => offerListeners.push(f),
+    tryExample(id) {
+      app.showTab("blocks");
+      tryListeners.forEach((f) => f(id));
+    },
+    onTryExample: (f) => tryListeners.push(f),
+    chooseBoard: (id) => boardListeners.forEach((f) => f(id)),
+    onBoardChosen: (f) => boardListeners.push(f),
+    reportDeviceInfo: (i) => infoListeners.forEach((f) => f(i)),
+    onDeviceInfo: (f) => infoListeners.push(f),
+    reportBoard: (b) => connectedListeners.forEach((f) => f(b)),
+    onBoard: (f) => connectedListeners.push(f),
+    reportPlant(p) {
+      lastPlant = p;
+      plantListeners.forEach((f) => f(p));
+    },
+    onPlant(f) {
+      plantListeners.push(f);
+      if (lastPlant) f(lastPlant);
+    },
   };
 
-  pages.flash = flashPage(app);
+  // One fetch of firmware/manifest.json for the Start (Pico UF2s) and Flash (ESP images) tabs.
+  const manifest = fetchManifest(FIRMWARE_BASE);
+  pages.start = startPage(app, manifest);
+  pages.flash = flashPage(app, manifest);
   pages.device = devicePage(app);
   pages.editor = editorPage(app);
   pages.blocks = blocksPage(app);
 
   const nav = h("nav", { role: "tablist" });
   for (const [id, label] of [
+    ["start", "Start"],
     ["flash", "Flash"],
     ["device", "Device"],
     ["editor", "Editor"],
     ["blocks", "Blocks"],
   ] as [TabId, string][]) {
-    tabs[id] = h("button", { role: "tab", onclick: () => app.showTab(id) }, label);
+    tabs[id] = h("button", { role: "tab", id: `tab-${id}`, "aria-controls": `page-${id}`, onclick: () => app.showTab(id) }, label);
+    pages[id].id = `page-${id}`;
+    pages[id].setAttribute("role", "tabpanel");
+    pages[id].setAttribute("aria-labelledby", `tab-${id}`);
     nav.append(tabs[id]);
   }
 
@@ -77,25 +113,25 @@ async function main() {
     h(
       "header",
       {},
-      h("h1", {}, "Middleware device tools"),
+      h("h1", {}, "Middleware"),
       nav,
       h("div", { class: "portbar" }, "Serial port: ", portLabel, " ", chooseBtn),
     ),
     serialProblem ? h("p", { class: "note warn" }, serialProblem, " Flashing and the device console are disabled; the editors and simulator still work.") : "",
+    pages.start,
     pages.flash,
     pages.device,
     pages.editor,
     pages.blocks,
   );
 
-  let initial: TabId = "flash";
+  let saved: string | null = null;
   try {
-    const saved = localStorage.getItem("tab");
-    if (saved === "flash" || saved === "device" || saved === "editor" || saved === "blocks") initial = saved;
+    saved = localStorage.getItem("tab");
   } catch {
     /* storage unavailable */
   }
-  app.showTab(initial);
+  app.showTab(initialTab(saved));
 }
 
 void main();

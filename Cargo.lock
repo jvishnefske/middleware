@@ -234,6 +234,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-pins"
+version = "0.1.0"
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1677,6 +1681,7 @@ dependencies = [
  "middleware",
  "postcard",
  "prost",
+ "recipe-core",
  "serde",
  "sha2",
  "socket2 0.6.5",
@@ -2027,6 +2032,7 @@ dependencies = [
  "middleware",
  "mw-jpeg",
  "peak_alloc",
+ "recipe-core",
  "wasm-host",
  "wat",
 ]
@@ -2343,8 +2349,11 @@ dependencies = [
 name = "protocol-wasm"
 version = "0.1.0"
 dependencies = [
+ "board-pins",
  "js-sys",
  "middleware",
+ "recipe-core",
+ "state-table",
  "wasm-bindgen",
  "wasm-host",
  "wat",
@@ -2535,6 +2544,13 @@ dependencies = [
  "time",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "recipe-core"
+version = "0.1.0"
+dependencies = [
+ "state-table",
 ]
 
 [[package]]
@@ -3213,6 +3229,10 @@ dependencies = [
  "psm",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "state-table"
+version = "0.1.0"
 
 [[package]]
 name = "static_assertions"

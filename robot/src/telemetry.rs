@@ -94,7 +94,7 @@ mod tests {
     const TP: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
     #[test]
-    fn v1_state_counts_ticks_and_outcomes() {
+    fn rg1_state_counts_ticks_and_outcomes() {
         let s = RobotState::default()
             .after(EchoOutcome::Ok(Duration::from_micros(800)), 1000)
             .after(EchoOutcome::Failed, 2000);
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_telemetry_is_one_json_object_with_the_trace() {
+    fn rg1_telemetry_is_one_json_object_with_the_trace() {
         let s = RobotState::default().after(EchoOutcome::Ok(Duration::from_micros(812)), 3000);
         assert_eq!(
             s.to_json("r1", TraceParent::parse(TP)),

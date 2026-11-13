@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_builder_records_every_declaration_in_order() {
+    fn ms1_builder_records_every_declaration_in_order() {
         let resources = Resources {
             cpu_request: MilliCpu(100),
             cpu_limit: MilliCpu(1000),
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_build_validates_the_whole_spec() {
+    fn ms1_build_validates_the_whole_spec() {
         let e = Service::builder("demo/echo")
             .serve("demo/echo", echo())
             .allow_callers(["not-a-spiffe-id"])
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_serve_typed_wraps_typed_handler() {
+    fn ms1_serve_typed_wraps_typed_handler() {
         use middleware::codec::Raw;
         use middleware::transport::{Request, RequestMeta};
         let svc = Service::builder("demo/echo")

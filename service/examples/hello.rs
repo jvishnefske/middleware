@@ -1,7 +1,7 @@
 //! `hello`: the smallest `mw-service` binary, serving kind `demo/hello`.
 //!
 //! It exists to prove the container pipeline (`nix build .#hello`,
-//! `nix build .#image-hello`, design.md M40-M42): a musl static binary
+//! `nix build .#image-hello`, design.md MS40-MS42): a musl static binary
 //! whose `main` is [`Service::main`], so the same executable serves
 //! (`hello`), prints its spec (`hello --print-spec`) and renders its
 //! manifests (`hello --print-manifests`).

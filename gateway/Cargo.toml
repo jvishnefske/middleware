@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Host backends only (Zenoh for the fabric, the serial link codec); never
-# an embedded feature set (scripts/check-features.sh, V19).
+# an embedded feature set (scripts/check-features.sh, RG19).
 middleware = { path = "..", features = ["zenoh", "serial"] }
 mw-service = { path = "../service" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn v15_defaults() {
+    fn rg15_defaults() {
         let c = GatewayConfig::from_env(&env(&[])).unwrap();
         assert_eq!(c, GatewayConfig::default());
         assert_eq!((c.serial.as_str(), c.baud), ("/dev/ttyUSB0", 115_200));
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn v15_parses_every_variable() {
+    fn rg15_parses_every_variable() {
         let c = GatewayConfig::from_env(&env(&[
             ("MW_GATEWAY_SERIAL", "/dev/ttyACM0"),
             ("MW_GATEWAY_BAUD", "921600"),
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn v15_malformed_values_name_the_variable() {
+    fn rg15_malformed_values_name_the_variable() {
         for (var, value) in [
             ("MW_GATEWAY_BAUD", "0"),
             ("MW_GATEWAY_BAUD", "fast"),

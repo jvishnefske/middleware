@@ -3,7 +3,13 @@
 // and the toolbox for a board profile.
 //
 // Custom blocks are prefixed `mw_` (any board) or `badge_` (conagotchi
-// badge). The Blockly built-ins offered are the ones the AssemblyScript
+// badge). The `mw_pin_*` blocks and `mw_on_pin` name a pin by its label in
+// the Pins table (`field_pin_label`, a custom field the Blocks page
+// registers); the `mw_gpio_*` blocks take a pin number and keep working.
+// The `mw_sm_*` blocks refer to the payload's state machines by
+// `<machine id>.<state or event>` (`field_machine_state`,
+// `field_machine_event`: custom fields the Blocks page registers, plain
+// data here) and work on every profile. The Blockly built-ins offered are the ones the AssemblyScript
 // generator implements; every value is an `i32`, so there is no floating
 // point, and the only loops are `repeat N` and `for` with constant bounds.
 
@@ -14,6 +20,7 @@ const ACTION = 210;
 const GPIO = 160;
 const TIMER = 290;
 const BADGE = 330;
+const STATES = 20;
 
 const pin = (name = "PIN") => ({ type: "field_number", name, value: 8, min: 0, max: 48, precision: 1 });
 const pull = {
@@ -25,6 +32,9 @@ const pull = {
     ["pull-down", "2"],
   ],
 };
+/** A pin named by its pin-table label (`field_pin_label`: a dropdown of
+ * the table's labels, registered by the Blocks page; plain data here). */
+const label = { type: "field_pin_label", name: "LABEL" };
 const timerId = { type: "field_number", name: "ID", value: 0, min: 0, max: 3, precision: 1 };
 const doInput = { message1: "%1", args1: [{ type: "input_statement", name: "DO" }] };
 
@@ -136,6 +146,71 @@ export const BLOCK_DEFS: readonly Record<string, unknown>[] = [
     tooltip: "Configures the pin as an input with an interrupt (gpio_irq) and runs on each edge (on_irq).",
   },
   { type: "mw_pin_level", message0: "pin level", output: null, colour: GPIO, tooltip: "The level after the edge (inside on pin edge)." },
+  // ---- pins by label (the Pins table sets them up in init)
+  {
+    type: "mw_pin_write",
+    message0: "write %1 %2",
+    args0: [label, { type: "input_value", name: "LEVEL" }],
+    previousStatement: null,
+    nextStatement: null,
+    colour: GPIO,
+    tooltip: "Drives the GPIO output with this label (Pins table) low (0) or high (anything else).",
+  },
+  {
+    type: "mw_pin_toggle",
+    message0: "toggle %1",
+    args0: [label],
+    previousStatement: null,
+    nextStatement: null,
+    colour: GPIO,
+    tooltip: "Inverts the GPIO output with this label (Pins table).",
+  },
+  { type: "mw_pin_read", message0: "read %1", args0: [label], output: null, colour: GPIO, tooltip: "0 or 1: the GPIO with this label (Pins table)." },
+  {
+    type: "mw_on_pin",
+    message0: "on %1 %2 edge",
+    args0: [
+      label,
+      {
+        type: "field_dropdown",
+        name: "EDGE",
+        options: [
+          ["falling", "2"],
+          ["rising", "1"],
+          ["any", "3"],
+        ],
+      },
+    ],
+    ...doInput,
+    colour: GPIO,
+    tooltip: "Runs on each edge of the GPIO input with this label (Pins table sets its pull).",
+  },
+  // ---- state machines (the States tables)
+  {
+    type: "mw_sm_raise",
+    message0: "raise %1",
+    args0: [{ type: "field_machine_event", name: "EVENT" }],
+    previousStatement: null,
+    nextStatement: null,
+    colour: STATES,
+    tooltip: "Raises an event of a state machine (States). Raised while a machine is stepping, it is queued (one per machine) and runs after the step.",
+  },
+  {
+    type: "mw_sm_in_state",
+    message0: "%1 is current?",
+    args0: [{ type: "field_machine_state", name: "STATE" }],
+    output: null,
+    colour: STATES,
+    tooltip: "1 if the state machine is in this state, else 0.",
+  },
+  {
+    type: "mw_sm_on_enter",
+    message0: "when %1 is entered",
+    args0: [{ type: "field_machine_state", name: "STATE" }],
+    ...doInput,
+    colour: STATES,
+    tooltip: "Runs each time the state machine enters this state (after the state's entry actions), and in init for the initial state.",
+  },
   // ---- timers
   {
     type: "mw_timer_start",
@@ -300,8 +375,9 @@ export const BUILTIN_BLOCKS: readonly string[] = [
 export function featureOf(type: string): Feature | null {
   if (BUILTIN_BLOCKS.includes(type)) return "core";
   if (type.startsWith("badge_")) return "badge";
-  if (type.startsWith("mw_gpio_") || type === "mw_on_pin_edge" || type === "mw_pin_level") return "gpio";
+  if (type.startsWith("mw_gpio_") || type.startsWith("mw_pin_") || type === "mw_on_pin_edge" || type === "mw_on_pin") return "gpio";
   if (type.startsWith("mw_timer_") || type === "mw_on_timer") return "timers";
+  if (type.startsWith("mw_sm_")) return "core";
   if (BLOCK_DEFS.some((d) => d.type === type)) return "core";
   return null;
 }
@@ -313,7 +389,19 @@ export function blockSupported(type: string, profile: ProfileId): boolean {
 }
 
 /** Hat blocks: the event handlers whose stacks become exported code. */
-export const EVENT_BLOCKS: readonly string[] = ["mw_on_init", "mw_every", "mw_on_message", "mw_on_pin_edge", "mw_on_timer", "badge_on_button"];
+export const EVENT_BLOCKS: readonly string[] = [
+  "mw_on_init",
+  "mw_every",
+  "mw_on_message",
+  "mw_on_pin_edge",
+  "mw_on_pin",
+  "mw_on_timer",
+  "badge_on_button",
+  "mw_sm_on_enter",
+];
+
+/** Blocks that name a pin by its pin-table label (field `LABEL`). */
+export const PIN_LABEL_BLOCKS: readonly string[] = ["mw_pin_write", "mw_pin_toggle", "mw_pin_read", "mw_on_pin"];
 
 type ToolboxItem = Record<string, unknown>;
 
@@ -328,7 +416,7 @@ function blk(type: string, extra: Record<string, unknown> = {}): ToolboxItem {
  * support are shown disabled. */
 export function toolbox(profile: ProfileId): ToolboxItem {
   const mark = (item: ToolboxItem): ToolboxItem =>
-    blockSupported(String(item.type), profile) ? item : { ...item, disabled: true };
+    item.kind !== "block" || blockSupported(String(item.type), profile) ? item : { ...item, disabled: true };
   const category = (name: string, colour: number | string, contents: ToolboxItem[], extra: Record<string, unknown> = {}) => ({
     kind: "category",
     name,
@@ -352,6 +440,12 @@ export function toolbox(profile: ProfileId): ToolboxItem {
         blk("mw_now_ms"),
       ]),
       category("GPIO", GPIO, [
+        { kind: "label", text: "Pins by label (see Pins)" },
+        blk("mw_pin_write", { inputs: { LEVEL: num(1) } }),
+        blk("mw_pin_toggle"),
+        blk("mw_pin_read"),
+        blk("mw_on_pin"),
+        { kind: "label", text: "Pins by number" },
         blk("mw_gpio_output"),
         blk("mw_gpio_input"),
         blk("mw_gpio_write", { inputs: { LEVEL: num(1) } }),
@@ -361,6 +455,7 @@ export function toolbox(profile: ProfileId): ToolboxItem {
         blk("mw_pin_level"),
       ]),
       category("Timers", TIMER, [blk("mw_timer_start"), blk("mw_timer_stop"), blk("mw_on_timer")]),
+      category("States", STATES, [blk("mw_sm_raise"), blk("mw_sm_in_state"), blk("mw_sm_on_enter")]),
       category("Badge", BADGE, [
         blk("badge_led", { inputs: { INDEX: num(0), R: num(255), G: num(0), B: num(0) } }),
         blk("badge_leds_fill", { inputs: { R: num(0), G: num(0), B: num(0) } }),

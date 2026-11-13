@@ -60,6 +60,22 @@
 //! | `route_stop`   | `handle`                                 | 0 or error        |
 //! | `route_stat`   | `handle, stat` ([`route::RouteStat`])     | count ≥ 0 (saturating) or error |
 //!
+//! Added in ABI 5 (payloads that serve requests; layouts and rules in
+//! [`serve`]):
+//!
+//! | name           | params                                   | result            |
+//! |----------------|------------------------------------------|-------------------|
+//! | `serve`        | `key_ptr, key_len`                        | slot ≥ 0 or error |
+//! | `node_id`      | `ptr` (writes [`serve::NODE_ID_LEN`] bytes) | 0 or error      |
+//!
+//! `serve` registers a request key (not under `sys/`, at most
+//! [`serve::MAX_SERVES`]; serving a key again returns its slot) and needs
+//! the `mw_alloc` and `on_request` exports (otherwise `Unsupported`), as
+//! does a device that cannot route requests to a payload. `node_id` writes
+//! the device's [`SenderId`](crate::SenderId) (`Unsupported` when the
+//! device has none). On an ABI 4 host a payload importing either fails to
+//! load with an unknown-import error, so it never runs half-wired.
+//!
 //! A route moves frames without copying them through guest memory: a
 //! source route publishes host-captured frames on a key as chunks, a sink
 //! route DMAs a key's chunks to an SPI bus with a per-frame preamble.
@@ -104,11 +120,16 @@
 //! | `mw_alloc`   | `(len: i32) -> i32`         | if subscribing | before each delivery |
 //! | `on_message` | `(slot, ptr, len) -> ()`    | if subscribing | per received sample  |
 //! | `on_irq`     | `(kind, source, value, time_us) -> ()` | if using interrupts or DMA | per queued event |
+//! | `on_request` | `(slot, req_ptr, req_len, meta_ptr, reply_ptr, reply_cap) -> i32` | if serving (ABI 5) | per request, after `mw_alloc` |
 //!
 //! Every call into the payload is metered with [`FUEL_PER_CALL`] units of
 //! fuel (the runtime's default; firmware may grant a different budget per
 //! call); running out traps the payload instead of hanging the device.
-//! Payloads may not publish or subscribe on `sys/...` keys.
+//! Payloads may not publish, subscribe or serve on `sys/...` keys.
+//!
+//! `on_request` returns the reply length or a negated `HandlerError` code
+//! ([`serve::reply_result`]); the request buffer it reads is laid out by
+//! [`serve::layout`] (meta block, request, reply space).
 //!
 //! # Memory
 //!
@@ -123,14 +144,16 @@
 pub mod events;
 pub mod periph;
 pub mod route;
+pub mod serve;
 
 /// ABI revision. Each revision is a superset of the previous one, so a
 /// payload built for revision `n` loads on firmware implementing `>= n`:
 /// the runtime checks each import by name and signature against
 /// [`IMPORTS`], and an older payload simply imports a subset. Revision 2
 /// added interrupts, timers, SPI and UART DMA; revision 3 added PWM, ADC
-/// and I2C; revision 4 added DMA routes.
-pub const ABI_VERSION: u16 = 4;
+/// and I2C; revision 4 added DMA routes; revision 5 added serving requests
+/// (`serve`, `node_id`, the `on_request` export).
+pub const ABI_VERSION: u16 = 5;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -145,7 +168,7 @@ pub const MAX_MESSAGE: usize = 512;
 pub const MAX_LOG: usize = 256;
 
 /// Default fuel granted to each call into the payload (`init`, `tick`,
-/// `mw_alloc`, `on_message`, `on_irq`), roughly one unit per executed
+/// `mw_alloc`, `on_message`, `on_irq`, `on_request`), roughly one unit per executed
 /// instruction.
 pub const FUEL_PER_CALL: u64 = 1_000_000;
 
@@ -318,6 +341,17 @@ pub const IMPORTS: &[Import] = &[
         params: 2,
         returns: true,
     },
+    // ABI 5
+    Import {
+        name: "serve",
+        params: 2,
+        returns: true,
+    },
+    Import {
+        name: "node_id",
+        params: 1,
+        returns: true,
+    },
 ];
 
 /// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
@@ -329,6 +363,33 @@ pub const ABI2_IMPORTS: usize = 20;
 /// Number of imports in ABI 3 (the prefix of [`IMPORTS`] up to
 /// `i2c_transfer`).
 pub const ABI3_IMPORTS: usize = 26;
+
+/// Number of imports in ABI 4 (the prefix of [`IMPORTS`] up to
+/// `route_stat`). A host implementing ABI 4 knows exactly these; see
+/// [`import_in`].
+pub const ABI4_IMPORTS: usize = 30;
+
+/// The number of imports a host implementing ABI `version` provides (the
+/// prefix of [`IMPORTS`]); `None` for a revision that does not exist.
+pub const fn imports_in(version: u16) -> Option<usize> {
+    match version {
+        1 => Some(ABI1_IMPORTS),
+        2 => Some(ABI2_IMPORTS),
+        3 => Some(ABI3_IMPORTS),
+        4 => Some(ABI4_IMPORTS),
+        5 => Some(IMPORTS.len()),
+        _ => None,
+    }
+}
+
+/// Looks up an import by name among those of ABI `version` (what a host of
+/// that revision would accept).
+pub fn import_in(version: u16, name: &str) -> Option<&'static Import> {
+    IMPORTS
+        .get(..imports_in(version)?)?
+        .iter()
+        .find(|i| i.name == name)
+}
 
 /// Looks up an import by name.
 pub fn import(name: &str) -> Option<&'static Import> {
@@ -349,6 +410,8 @@ pub mod exports {
     pub const ON_MESSAGE: &str = "on_message";
     /// Interrupt / DMA event callback (ABI 2).
     pub const ON_IRQ: &str = "on_irq";
+    /// Request callback (ABI 5).
+    pub const ON_REQUEST: &str = "on_request";
 }
 
 /// Error codes returned (negated) by host imports.
@@ -471,13 +534,34 @@ mod tests {
             ("route_stat", 2),
         ];
         assert!(
-            IMPORTS[ABI3_IMPORTS..]
+            IMPORTS[ABI3_IMPORTS..ABI4_IMPORTS]
                 .iter()
                 .map(|i| (i.name, i.params))
                 .eq(abi4)
         );
+        let abi5 = [("serve", 2), ("node_id", 1)];
+        assert!(
+            IMPORTS[ABI4_IMPORTS..]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq(abi5)
+        );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI_VERSION, 4);
+        assert_eq!(ABI_VERSION, 5);
+    }
+
+    #[test]
+    fn an_abi4_host_does_not_know_the_abi5_imports() {
+        assert_eq!(imports_in(ABI_VERSION), Some(IMPORTS.len()));
+        assert_eq!(imports_in(0), None);
+        assert_eq!(imports_in(6), None);
+        for name in ["serve", "node_id"] {
+            assert_eq!(import_in(4, name), None, "{name}");
+            assert_eq!(import_in(5, name), import(name));
+        }
+        assert_eq!(import_in(4, "route_stat"), import("route_stat"));
+        assert_eq!(import_in(1, "gpio_irq"), None);
+        assert_eq!(import_in(9, "log"), None);
     }
 
     #[test]

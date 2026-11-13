@@ -1,4 +1,4 @@
-//! `Ctx` and `ServiceHandler` from outside the crate (M4): a downstream
+//! `Ctx` and `ServiceHandler` from outside the crate (MS4): a downstream
 //! crate implements `ServiceHandler` for its own type next to the blanket
 //! implementation for plain handlers, and a call through `Ctx::client`
 //! continues the inbound trace over a real gRPC hop on 127.0.0.1.
@@ -77,7 +77,7 @@ impl ServiceHandler for Forward {
 }
 
 #[tokio::test]
-async fn m4_ctx_client_continues_trace_request_id_and_deadline_downstream() {
+async fn ms4_ctx_client_continues_trace_request_id_and_deadline_downstream() {
     let (addr, _stop) = reporting_server().await;
     let directory = Directory::<{ mw_service::ctx::DIRECTORY_SLOTS }>::new()
         .observe(
@@ -129,7 +129,7 @@ async fn m4_ctx_client_continues_trace_request_id_and_deadline_downstream() {
 }
 
 #[test]
-fn m4_builder_takes_plain_and_async_handlers() {
+fn ms4_builder_takes_plain_and_async_handlers() {
     let svc = Service::builder("demo/front")
         .serve("demo/front", Forward)
         .serve("demo/ping", handler_fn(|_r, _out| Ok(0)))

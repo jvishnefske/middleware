@@ -1,4 +1,4 @@
-# NixOS module: a Linux robot on the mesh (design.md M43-M45).
+# NixOS module: a Linux robot on the mesh (design.md MS43-MS45).
 #
 #   spire-agent      join_token node attestation against the cluster's SPIRE
 #                    server; the token, the trust bundle and the addresses

@@ -34,10 +34,19 @@
 //!   payloads on a device over any transport; [`loader::trust`] holds the
 //!   signed-payload wire types and rules (its crypto needs `trust`).
 //! * [`wasm_abi`] — the import/export contract between payloads and firmware.
+//! * [`fw_ota`] — A/B firmware update for the RP2350 (always built, pure):
+//!   the `sys/fw/*` wire format, the update state machine, the IMAGE_DEF
+//!   parser, the persisted record and the `FwPlatform` hardware seam; its
+//!   shell `fw_ota::service` needs `trust`, its bootrom model
+//!   `fw_ota::sim` needs `fw-sim` (host only).
 //! * [`stream`] — chunked frame streams over keys (always built, pure): the
 //!   chunk wire format, the source chunker, the sink state machine, a test
 //!   pattern and looped stored frames (the fake JPEG camera), behind the
 //!   ABI 4 DMA routes.
+//! * [`rpc`] — request/response over a datagram radio (always built, pure):
+//!   the ESP-NOW request and response frames, the requester's retry rule
+//!   and the responder's duplicate suppression; `espnow::rpc` runs them
+//!   over an ESP-NOW radio.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
 //!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
@@ -49,7 +58,8 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
-//! | `trust`    | `loader::sha256`, `loader::trust` checks | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `trust`    | `loader::sha256`, `loader::trust` checks, `fw_ota::service` | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
@@ -79,9 +89,11 @@ pub mod dedup;
 pub mod discovery;
 pub mod crc;
 pub mod dns;
+pub mod fw_ota;
 pub mod key;
 pub mod loader;
 pub mod mdns;
+pub mod rpc;
 pub mod serial;
 pub mod stream;
 pub mod transport;

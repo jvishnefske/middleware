@@ -356,14 +356,14 @@ mod tests {
     }
 
     #[test]
-    fn m2_nothing_set_is_the_default() {
+    fn ms2_nothing_set_is_the_default() {
         assert_eq!(Config::from_env(&env(&[])), Ok(Config::default()));
         let empty: Vec<(&str, &str)> = ENV_VARS.iter().map(|v| (*v, "")).collect();
         assert_eq!(Config::from_env(&env(&empty)), Ok(Config::default()));
     }
 
     #[test]
-    fn m2_parses_every_variable() {
+    fn ms2_parses_every_variable() {
         let c = Config::from_env(&env(&[
             ("MW_PORT", "8080"),
             ("POD_NAMESPACE", "apps"),
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn m2_malformed_values_name_the_variable() {
+    fn ms2_malformed_values_name_the_variable() {
         for (var, value) in [
             ("MW_PORT", "65536"),
             ("MW_PORT", "http"),
@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn m2_service_map_entries_are_validated() {
+    fn ms2_service_map_entries_are_validated() {
         for bad in [
             "demo/echo",
             "demo/echo=demo-echo:grpc",
@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn m2_overrides_and_unmapped_calls() {
+    fn ms2_overrides_and_unmapped_calls() {
         let mut spec = ServiceSpec::new("demo/caller");
         spec.calls = vec!["demo/echo".into(), "cam/jpeg".into()];
         let c =
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_static_endpoints_map_calls_off_cluster() {
+    fn rg5_static_endpoints_map_calls_off_cluster() {
         let mut spec = ServiceSpec::new("robot/r1");
         spec.calls = vec!["demo/echo".into(), "cam/jpeg".into()];
         let c = Config::from_env(&env(&[(

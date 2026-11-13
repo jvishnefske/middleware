@@ -1,4 +1,4 @@
-# checks.image-<name>-contents (design.md M41, M42): unpacks one image
+# checks.image-<name>-contents (design.md MS41, MS42): unpacks one image
 # tarball and fails unless
 #   * the config runs as 65532:65532 with the binary as the entrypoint,
 #     carries the three org.opencontainers.image labels and the epoch as

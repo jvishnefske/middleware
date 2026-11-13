@@ -1049,7 +1049,7 @@ encoder; `MdnsSocket` implements `Browse`.
   replies from another port, one attempt),
   `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
 
-### Mesh service runner (`mw-service`, M…)
+### Mesh service runner (`mw-service`, MS…)
 
 The workspace crate `service/` (package `mw-service`, std) turns handlers
 into a deployable mesh service: `Service::builder(name)` declares what the
@@ -1064,13 +1064,13 @@ handler often awaits a downstream call, which a synchronous `Handler`
 cannot do without stalling its serve loop. Tests marked *(mw-service)* run
 under `cargo test -p mw-service` and `cargo test --workspace`.
 
-0.6 is built in phases: phase 1 defines the API and implements M1–M5;
-later phases implement the runner (M6–M10), the manifests (M11–M15), the
-ops CLI (M16) and the end-to-end run on the lab cluster (M17), each
+0.6 is built in phases: phase 1 defines the API and implements MS1–MS5;
+later phases implement the runner (MS6–MS10), the manifests (MS11–MS15), the
+ops CLI (MS16) and the end-to-end run on the lab cluster (MS17), each
 checking its items here. Until then `Service::run_with` and
 `manifest::render` return `ServiceError::Unimplemented`, never panic.
 
-- [x] M1 `Service::builder(name)` records `serve`, `serve_typed` (through
+- [x] MS1 `Service::builder(name)` records `serve`, `serve_typed` (through
   `typed::TypedHandler`), `calls`, `allow_callers`, `publishes`,
   `subscribes`, `replicas`, `resources`, `drain_grace` and `port`, in
   declaration order, into a `ServiceSpec`; `build` validates the whole
@@ -1081,18 +1081,18 @@ checking its items here. Until then `Service::run_with` and
   port ≠ 0); the spec serializes deterministically to YAML and back; the
   command line selects run, `--print-spec` or `--print-manifests
   [--namespace NS] [--image REF]` and refuses anything else —
-  `builder::tests::m1_builder_records_every_declaration_in_order`,
-  `m1_build_validates_the_whole_spec`, `m1_serve_typed_wraps_typed_handler`,
-  `spec::tests::m1_names_map_to_k8s_labels`,
-  `m1_filters_parse_exact_and_prefix`,
-  `m1_validate_accepts_a_full_spec_and_reports_each_rule`,
-  `m1_resources_render_as_kubernetes_quantities`,
-  `m1_yaml_is_deterministic_and_round_trips`,
-  `run::tests::m1_command_line_parses_each_command`,
-  `m1_command_line_errors`, `m1_print_spec_writes_the_yaml`,
-  `m1_run_with_checks_the_service_map_then_reports_unimplemented`
+  `builder::tests::ms1_builder_records_every_declaration_in_order`,
+  `ms1_build_validates_the_whole_spec`, `ms1_serve_typed_wraps_typed_handler`,
+  `spec::tests::ms1_names_map_to_k8s_labels`,
+  `ms1_filters_parse_exact_and_prefix`,
+  `ms1_validate_accepts_a_full_spec_and_reports_each_rule`,
+  `ms1_resources_render_as_kubernetes_quantities`,
+  `ms1_yaml_is_deterministic_and_round_trips`,
+  `run::tests::ms1_command_line_parses_each_command`,
+  `ms1_command_line_errors`, `ms1_print_spec_writes_the_yaml`,
+  `ms1_run_with_checks_the_service_map_then_reports_unimplemented`
   *(mw-service)*.
-- [x] M2 `Config::from_env` parses `MW_PORT`, `POD_NAMESPACE`, `POD_NAME`,
+- [x] MS2 `Config::from_env` parses `MW_PORT`, `POD_NAMESPACE`, `POD_NAME`,
   `OTEL_EXPORTER_OTLP_ENDPOINT`, `MW_ZENOH_ROUTER`, `MW_ZENOH_CREDENTIALS`,
   `MW_SERVICE_MAP` (`kind=service.namespace:port_name,...` into a
   `dns::unicast::ServiceMap`) and `MW_DRAIN_GRACE_MS` through a lookup
@@ -1100,22 +1100,22 @@ checking its items here. Until then `Service::run_with` and
   error naming the variable, a kind mapped twice is an error; the
   overrides apply over the spec and `unmapped_calls` lists called kinds
   without a route —
-  `config::tests::m2_nothing_set_is_the_default`,
-  `m2_parses_every_variable`, `m2_malformed_values_name_the_variable`,
-  `m2_service_map_entries_are_validated`,
-  `m2_overrides_and_unmapped_calls` *(mw-service)*.
-- [x] M3 `Lifecycle::on(self, event, now)` is a pure state machine
+  `config::tests::ms2_nothing_set_is_the_default`,
+  `ms2_parses_every_variable`, `ms2_malformed_values_name_the_variable`,
+  `ms2_service_map_entries_are_validated`,
+  `ms2_overrides_and_unmapped_calls` *(mw-service)*.
+- [x] MS3 `Lifecycle::on(self, event, now)` is a pure state machine
   `Starting → Serving → Draining { since, drain_grace } → Stopped`: ready
   sets health `SERVING`; SIGTERM while serving sets `NOT_SERVING` and keeps
   answering; a tick once the drain grace has passed stops accepting and
   exits cleanly; a second termination, or termination before serving, stops
   at once; a failure stops from any live state with `NOT_SERVING` and a
   failed outcome; `Stopped` is final —
-  `lifecycle::tests::m3_sigterm_reports_not_serving_then_drains_for_the_grace_then_stops`,
-  `m3_second_terminate_or_terminate_before_serving_stops_at_once`,
-  `m3_failure_stops_from_every_live_state`,
-  `m3_monotonic_arithmetic_saturates` *(mw-service)*.
-- [x] M4 Handlers get a `Ctx`: the caller's `RequestMeta`, this handler's
+  `lifecycle::tests::ms3_sigterm_reports_not_serving_then_drains_for_the_grace_then_stops`,
+  `ms3_second_terminate_or_terminate_before_serving_stops_at_once`,
+  `ms3_failure_stops_from_every_live_state`,
+  `ms3_monotonic_arithmetic_saturates` *(mw-service)*.
+- [x] MS4 Handlers get a `Ctx`: the caller's `RequestMeta`, this handler's
   span (`server_trace`: a child of the caller's trace, or a new sampled
   root), the caller's request id and deadline, `client(kind)` for declared
   dependencies only (a `Downstream`, `Requester` + `Gather`, filling unset
@@ -1125,65 +1125,65 @@ checking its items here. Until then `Service::run_with` and
   implement it for its own types. A call through `Ctx::client` over gRPC
   on loopback arrives with the same trace id, this span as parent, the
   request id and a deadline within the caller's —
-  `ctx::tests::m4_server_trace_continues_or_starts_a_trace`,
-  `m4_downstream_fills_unset_options_from_the_request`,
-  `m4_ctx_exposes_meta_trace_and_declared_clients_only`,
-  `m4_plain_handlers_and_async_handlers_box_alike`,
+  `ctx::tests::ms4_server_trace_continues_or_starts_a_trace`,
+  `ms4_downstream_fills_unset_options_from_the_request`,
+  `ms4_ctx_exposes_meta_trace_and_declared_clients_only`,
+  `ms4_plain_handlers_and_async_handlers_box_alike`,
   `service/tests/ctx.rs`:
-  `m4_ctx_client_continues_trace_request_id_and_deadline_downstream`,
-  `m4_builder_takes_plain_and_async_handlers` *(mw-service)*.
-- [x] M5 `mw-service` enables exactly `middleware`'s host features `grpc`,
+  `ms4_ctx_client_continues_trace_request_id_and_deadline_downstream`,
+  `ms4_builder_takes_plain_and_async_handlers` *(mw-service)*.
+- [x] MS5 `mw-service` enables exactly `middleware`'s host features `grpc`,
   `istio`, `dns-sd` and `zenoh`; no embedded feature set pulls in
   `mw-service`, tracing, OpenTelemetry or the YAML crate, and the embedded
   core does not depend on it; OpenTelemetry's OTLP exporter uses the same
-  tonic 0.14 as `middleware` — `scripts/check-features.sh` (block "M5",
+  tonic 0.14 as `middleware` — `scripts/check-features.sh` (block "MS5",
   and those crates in `CLOUD_CRATES` for every F1 set).
-- [ ] M6 `Service::run_with` serves: binds h2c on `0.0.0.0:<port>`, runs a
+- [ ] MS6 `Service::run_with` serves: binds h2c on `0.0.0.0:<port>`, runs a
   `GrpcServer` with health and a responder taking the principal from the
   sidecar (`PrincipalSource::SidecarXfcc`), one serve loop per served kind
   calling its handler with a `Ctx`, reports `SERVING` once every loop is
   up, enforces `allow_callers` in process as well, and drives `Lifecycle`
   from SIGTERM/SIGINT or the shutdown future through drain to exit.
   *Owner: phase 2A (runner internals).*
-- [ ] M7 Structured JSON logs on stdout; with
+- [ ] MS7 Structured JSON logs on stdout; with
   `OTEL_EXPORTER_OTLP_ENDPOINT`, OTLP/gRPC trace export with resource
   `service.name`, `k8s.namespace.name`, `k8s.pod.name`; one server span per
   request whose parent is `RequestMeta::trace` and whose id is
   `Ctx::trace`. *Owner: phase 2A.*
-- [ ] M8 Each `calls` kind gets `MeshBrowse<UnicastDnsSd>` over its
+- [ ] MS8 Each `calls` kind gets `MeshBrowse<UnicastDnsSd>` over its
   `MW_SERVICE_MAP` route feeding a `Directory` and a `MeshClient` through
   the sidecar, lent to handlers in `Links`. *Owner: phase 2A.*
-- [ ] M9 Each pod reports its `SenderId` in an `mw-node` response header on
+- [ ] MS9 Each pod reports its `SenderId` in an `mw-node` response header on
   health `Check`, recorded by `MeshBrowse`, so `Target::Node` works for
   DNS-discovered endpoints. *Owner: phase 2A.*
-- [ ] M10 A service that publishes or subscribes opens a Zenoh client
+- [ ] MS10 A service that publishes or subscribes opens a Zenoh client
   session to `MW_ZENOH_ROUTER` with the credentials in
   `MW_ZENOH_CREDENTIALS`; subscriptions follow `subscribes`.
   *Owners: phase 2A (session), phase 2D (router and ACLs, Z19–Z21).*
-- [ ] M11 `--print-manifests` renders ServiceAccount, Deployment (sidecar
+- [ ] MS11 `--print-manifests` renders ServiceAccount, Deployment (sidecar
   injection, SPIRE template, `grpc` readiness and liveness probes on the
   service port, termination grace above the drain grace, the `Config`
   environment, seccomp `RuntimeDefault`, non-root, read-only root),
   Service (port `grpc`, `appProtocol: grpc`) and a headless Service.
   *Owner: phase 2B (manifests).*
-- [ ] M12 The manifests include an AuthorizationPolicy from
+- [ ] MS12 The manifests include an AuthorizationPolicy from
   `allow_callers` (kubelet probes implicit, an empty list admits no
   caller), a DestinationRule `ISTIO_MUTUAL` and a PodDisruptionBudget.
   *Owner: phase 2B.*
-- [ ] M13 Snapshot tests pin the rendered manifests. *Owner: phase 2B.*
-- [ ] M14 The manifests validate offline with kubeconform against vendored
+- [ ] MS13 Snapshot tests pin the rendered manifests. *Owner: phase 2B.*
+- [ ] MS14 The manifests validate offline with kubeconform against vendored
   Kubernetes, Istio and SPIRE schemas. *Owner: phase 2B.*
-- [ ] M15 Every `calls` kind has a `MW_SERVICE_MAP` entry in the rendered
+- [ ] MS15 Every `calls` kind has a `MW_SERVICE_MAP` entry in the rendered
   environment and every `allow_callers` entry is a SPIFFE ID.
   *Owner: phase 2B.*
-- [ ] M16 The ops CLI `mw` (`tools/mw`) builds, loads, applies, inspects
+- [ ] MS16 The ops CLI `mw` (`tools/mw`) builds, loads, applies, inspects
   and traces services from a pure, unit-tested command plan.
   *Owner: phase 2F (CLI).*
-- [ ] M17 The end-to-end run on the lab cluster asserts identity, gather,
+- [ ] MS17 The end-to-end run on the lab cluster asserts identity, gather,
   deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
   logs. *Owners: phase 3 (e2e), on images from phase 2C (nix).*
 
-### Containers and the robot VM (nix, M40–M49)
+### Containers and the robot VM (nix, MS40–MS49)
 
 The top-level `flake.nix` builds every service binary listed in
 `nix/binaries.nix` as a static musl executable (crane, a pinned
@@ -1194,29 +1194,29 @@ the lab repo's nixos-24.11, because 24.11 has no spiffe-helper and its
 SPIRE (1.11) is too far behind the lab's SPIRE server (1.15). Checks named
 `checks.<name>` run under `nix flake check`.
 
-- [x] M40 Every entry of `nix/binaries.nix` (cargo package plus `--example`
+- [x] MS40 Every entry of `nix/binaries.nix` (cargo package plus `--example`
   or `--bin`) builds as `packages.<name>`, a `x86_64-unknown-linux-musl`
   executable with no ELF interpreter and no shared-library dependencies;
   `hello` (`service/examples/hello.rs`, kind `demo/hello`, `main` is
   `Service::main`) proves the pipeline — `checks.image-hello-contents`
   (readelf on the entrypoint).
-- [x] M41 `packages.image-<name>` is an uncompressed docker-archive tarball
+- [x] MS41 `packages.image-<name>` is an uncompressed docker-archive tarball
   of image `localhost/mw/<name>:<git short rev, or dev>` holding only the
   binary, CA certificates and zoneinfo: no shell and no `/bin`, `/sbin` or
   `/usr`; it runs as uid/gid 65532 with the binary as entrypoint and
   carries the labels `org.opencontainers.image.source`, `.revision` and
   `.version` — `checks.image-hello-contents`,
   `checks.image-zenohd-contents`.
-- [x] M42 Images are reproducible: layers and config are dated at the epoch
+- [x] MS42 Images are reproducible: layers and config are dated at the epoch
   and the tarball is uncompressed, so a rebuild yields the same bytes —
   `checks.image-hello-contents` (creation date) and
   `nix build --rebuild .#image-hello` (bit-identical rebuild).
-- [x] M43 `packages.image-zenohd` runs zenohd built from the same zenoh
+- [x] MS43 `packages.image-zenohd` runs zenohd built from the same zenoh
   release as `Cargo.lock`'s `zenoh` crate (1.10.1, wire compatible with
   the services); evaluation fails if the lock moves to another release
   without the pin following — `checks.image-zenohd-contents` and the
   assertion in `nix/rust.nix`.
-- [x] M44 The robot module runs spire-agent (join_token attestor, server
+- [x] MS44 The robot module runs spire-agent (join_token attestor, server
   address, token and SPIFFE-format trust bundle read at run time from
   `/var/lib/mw-robot`, so the image holds no secret), spiffe-helper as uid
   1000 writing the SVID, key and bundle to `/run/spiffe`, Envoy (admin
@@ -1224,25 +1224,25 @@ SPIRE (1.11) is too far behind the lab's SPIRE server (1.15). Checks named
   robot app as uid 1000. An unprovisioned robot boots with Envoy and the
   app up and spire-agent held back by its path condition —
   `checks.robot-boots` (subtest "unprovisioned robot boots").
-- [x] M45 Provisioned through `/var/lib/mw-robot` against a SPIRE server in
+- [x] MS45 Provisioned through `/var/lib/mw-robot` against a SPIRE server in
   the sandbox, the robot attests, receives `spiffe://infra.local/robot/test`
   for selector `unix:uid:1000`, Envoy loads that SVID without a restart
   (file-based SDS, reloaded on rename), and an h2c request on 15001 and a
   TCP stream on 17447 reach a gateway that requires a client certificate
   from the same trust domain, the request with its `:authority` intact —
   `checks.robot-boots`.
-- [x] M46 `nixosConfigurations.robot-vm` builds as a QEMU VM whose launcher
+- [x] MS46 `nixosConfigurations.robot-vm` builds as a QEMU VM whose launcher
   (`nix run .#robot-vm -- --tap TAP | --bridge BR [--state DIR]`) attaches
   a second NIC with the lab MAC (static address 192.168.66.21/24) and
   shares the state directory as `/var/lib/mw-robot`; it needs no
   privileges itself — `checks.robot-vm`, `checks.robot-vm-launcher`.
-- [x] M47 `mw-service` and its examples pass clippy with `-D warnings` in
+- [x] MS47 `mw-service` and its examples pass clippy with `-D warnings` in
   the static musl build — `checks.clippy`.
-- [x] M48 `nix run .#e2e` builds every image and prints the end-to-end
+- [x] MS48 `nix run .#e2e` builds every image and prints the end-to-end
   plan without touching the lab (Phase 3 fills in the steps) —
   `checks.e2e-plan`.
 
-### Robots and MCU gateway (V…)
+### Robots and MCU gateway (RG…)
 
 Two binaries bring devices outside the cluster into the same identity and
 pub/sub fabric. `mw-robot` (crate `robot/`) is the Linux robot
@@ -1265,26 +1265,26 @@ cluster's `app/<ns>/<rest>`. Tests marked *(mw-robot)* or *(mw-gateway)*
 run under `cargo test -p <crate>` and `cargo test --workspace`; none opens
 a serial port, and network tests use 127.0.0.1 only.
 
-- [x] V1 The robot's state counts ticks, answered and failed calls and
+- [x] RG1 The robot's state counts ticks, answered and failed calls and
   the last round trip; its telemetry on `app/robot/<name>/state` is one
   JSON object naming the tick's trace (`traceparent` form) —
-  `telemetry::tests::v1_state_counts_ticks_and_outcomes`,
-  `v1_telemetry_is_one_json_object_with_the_trace` *(mw-robot)*.
-- [x] V2 `RobotConfig::from_env` requires `MW_ROBOT_NAME` (an RFC 1123
+  `telemetry::tests::rg1_state_counts_ticks_and_outcomes`,
+  `rg1_telemetry_is_one_json_object_with_the_trace` *(mw-robot)*.
+- [x] RG2 `RobotConfig::from_env` requires `MW_ROBOT_NAME` (an RFC 1123
   label) and parses `MW_ROBOT_PERIOD_MS` (10 ms to 1 h, default 1 s) and
   `MW_ROBOT_CALL` (a `Service/Method` kind, default `demo/echo`); the
   service is `robot/<name>`, calling that kind and publishing
   `app/robot/<name>/**` —
-  `config::tests::v2_robot_config_parses_and_requires_a_name`
+  `config::tests::rg2_robot_config_parses_and_requires_a_name`
   *(mw-robot)*.
-- [x] V3 Off cluster the runner configuration defaults to the local
+- [x] RG3 Off cluster the runner configuration defaults to the local
   Envoy: `MW_ZENOH_ROUTER` `tcp/127.0.0.1:17447`, and a called kind that
   neither `MW_STATIC_ENDPOINTS` nor `MW_SERVICE_MAP` maps gets
   `<kind>=127.0.0.1:15001@<kind with - for />.apps.svc.cluster.local:50051`;
   configured values win —
-  `config::tests::v3_runner_defaults_point_at_the_local_envoy`
+  `config::tests::rg3_runner_defaults_point_at_the_local_envoy`
   *(mw-robot)*.
-- [x] V4 Each tick the robot starts a sampled root span with request id
+- [x] RG4 Each tick the robot starts a sampled root span with request id
   `<name>-<seq>`, calls the kind through `Ctx::client` over its static
   endpoint with a deadline of one period, and publishes its state through
   `Ctx::publisher`; in process (the "Envoy" a direct loopback hop to a
@@ -1293,9 +1293,9 @@ a serial port, and network tests use 127.0.0.1 only.
   published state names the same trace, and a robot whose called kind has
   no static endpoint fails at start with `ServiceError::Unmapped` —
   `robot/tests/robot.rs`:
-  `v4_robot_calls_through_its_envoy_with_trace_and_publishes_state`,
-  `v4_robot_without_a_static_endpoint_fails_at_start` *(mw-robot)*.
-- [x] V5 `mw-service` gains static endpoints (an additive API change):
+  `rg4_robot_calls_through_its_envoy_with_trace_and_publishes_state`,
+  `rg4_robot_without_a_static_endpoint_fails_at_start` *(mw-robot)*.
+- [x] RG5 `mw-service` gains static endpoints (an additive API change):
   `MW_STATIC_ENDPOINTS=<kind>=[http://]<dial host:port>@<authority host:port>,...`
   parses into `Config::static_endpoints` (`endpoints::StaticEndpoints`;
   malformed entries and repeated kinds are `ConfigError::StaticEndpoint`
@@ -1303,110 +1303,118 @@ a serial port, and network tests use 127.0.0.1 only.
   through the address with the authority as `:authority` and a
   one-record, never-expiring directory; `Config::static_endpoint` looks a
   kind up and `unmapped_calls` counts statically mapped kinds as mapped —
-  `endpoints::tests::v5_static_endpoints_parse_dial_and_authority`,
-  `v5_static_endpoint_errors_name_the_entry`,
-  `v5_static_client_routes_the_kind_to_the_authority`,
-  `config::tests::v5_static_endpoints_map_calls_off_cluster`
-  *(mw-service)*. *The runner's own use of it (M8) is phase 2A's.*
-- [x] V6 `KeyMap` maps `app` and the keys below it between device and
+  `endpoints::tests::rg5_static_endpoints_parse_dial_and_authority`,
+  `rg5_static_endpoint_errors_name_the_entry`,
+  `rg5_static_client_routes_the_kind_to_the_authority`,
+  `config::tests::rg5_static_endpoints_map_calls_off_cluster`
+  *(mw-service)*. *The runner's own use of it (MS8) is phase 2A's.*
+- [x] RG6 `KeyMap` maps `app` and the keys below it between device and
   cluster, identically or under one namespace segment, segment-wise (so
   `app/benchmark` is not under `app/bench`), refusing keys that would
-  exceed the key length — `bridge::tests::v6_key_map_identity_and_namespace`
+  exceed the key length — `bridge::tests::rg6_key_map_identity_and_namespace`
   *(mw-gateway)*.
-- [x] V7 A device's `app/**` publication is relayed on the mapped key
+- [x] RG7 A device's `app/**` publication is relayed on the mapped key
   with its payload unchanged; `sys/log` is kept in the log tail and never
   published; any other key (`sys/payload/status`, ...) stays on the
-  device — `bridge::tests::v7_app_publications_map_and_others_stay`
+  device — `bridge::tests::rg7_app_publications_map_and_others_stay`
   *(mw-gateway)*.
-- [x] V8 A beacon from the bound device is announced with node = the
+- [x] RG8 A beacon from the bound device is announced with node = the
   device (filled in when the beacon names none); a refresh announces
   nothing, a changed record is re-announced, a goodbye withdraws, a
   goodbye for an unknown record does nothing —
-  `bridge::tests::v8_beacons_announce_with_the_device_node` *(mw-gateway)*.
-- [x] V9 E21 on the serial link: the gateway learns the device's node id
+  `bridge::tests::rg8_beacons_announce_with_the_device_node` *(mw-gateway)*.
+- [x] RG9 E21 on the serial link: the gateway learns the device's node id
   from its `sys/info` reply (retried every 2 s, rechecked every 30 s) and
   refuses every beacon until then; a device without a node id never
   binds; with `MW_GATEWAY_DEVICE_MAC` only that device binds; a beacon
   declaring another node is refused; the device holds at most 4 records
   and a new one beyond is refused, never evicting; a different device on
   the port withdraws the previous one's records. Refusals are counted —
-  `bridge::tests::v9_beacons_are_bound_to_the_device`,
-  `v9_device_cap_and_rebinding` *(mw-gateway)*.
-- [x] V10 Records whose TTL runs out are withdrawn —
-  `bridge::tests::v10_expiry_withdraws` *(mw-gateway)*.
-- [x] V11 Cluster samples reach the device only on the configured
+  `bridge::tests::rg9_beacons_are_bound_to_the_device`,
+  `rg9_device_cap_and_rebinding` *(mw-gateway)*.
+- [x] RG10 Records whose TTL runs out are withdrawn —
+  `bridge::tests::rg10_expiry_withdraws` *(mw-gateway)*.
+- [x] RG11 Cluster samples reach the device only on the configured
   downlink filters (at most 8, under the cluster prefix), mapped back to
-  the device's keys — `bridge::tests::v11_downlink_only_for_declared_filters`;
+  the device's keys — `bridge::tests::rg11_downlink_only_for_declared_filters`;
   `gateway/tests/gateway.rs`:
-  `v11_cluster_samples_reach_the_device_on_declared_filters_only`
+  `rg11_cluster_samples_reach_the_device_on_declared_filters_only`
   *(mw-gateway)*.
-- [x] V12 `gw/sys` takes `[key_len][key][body]`; only exact allowlisted
+- [x] RG12 `gw/sys` takes `[key_len][key][body]`; only exact allowlisted
   `sys/...` keys pass (default `sys/info`, forwarded to the device, and
   `sys/log`, answered from the log tail); everything else, the loader and
   trust keys included, is `Denied` and counted —
-  `bridge::tests::v12_sys_allowlist`, `v12_sys_request_body_round_trips`
+  `bridge::tests::rg12_sys_allowlist`, `rg12_sys_request_body_round_trips`
   *(mw-gateway)*.
-- [x] V13 Bounds: the log tail keeps the newest 2 KiB; at most 4 device
+- [x] RG13 Bounds: the log tail keeps the newest 2 KiB; at most 4 device
   requests are outstanding, each failing with `DeadlineExceeded` at its
   deadline; the shell's queues (uplink 32, discovery 16, commands 16) drop
   the newest item when full and count it, never displacing a queued one;
   a handler with no gateway answers `Unavailable` —
-  `bridge::tests::v13_log_tail_keeps_the_newest_bytes`,
-  `v13_pending_is_bounded_and_expires`,
-  `shell::tests::v13_full_queues_drop_the_newest_and_count`,
-  `v13_detached_sys_forward_is_unavailable` *(mw-gateway)*.
-- [x] V14 `io::ChannelIo` is an `embedded-io-async` byte stream over two
+  `bridge::tests::rg13_log_tail_keeps_the_newest_bytes`,
+  `rg13_pending_is_bounded_and_expires`,
+  `shell::tests::rg13_full_queues_drop_the_newest_and_count`,
+  `rg13_detached_sys_forward_is_unavailable` *(mw-gateway)*.
+- [x] RG14 `io::ChannelIo` is an `embedded-io-async` byte stream over two
   bounded channels (the serial port's two threads in the binary, an
   in-memory cable in tests) that keeps the unread part of a chunk and
-  reports a closed peer — `io::tests::v14_pair_carries_bytes_both_ways_and_keeps_partial_chunks`
+  reports a closed peer — `io::tests::rg14_pair_carries_bytes_both_ways_and_keeps_partial_chunks`
   *(mw-gateway)*.
-- [x] V15 `GatewayConfig::from_env` parses `MW_GATEWAY_SERIAL` (default
+- [x] RG15 `GatewayConfig::from_env` parses `MW_GATEWAY_SERIAL` (default
   `/dev/ttyUSB0`), `MW_GATEWAY_BAUD` (115200), `MW_GATEWAY_NAMESPACE`,
   `MW_GATEWAY_DOWNLINK`, `MW_GATEWAY_SYS_ALLOW`, `MW_GATEWAY_DEVICE_MAC`,
   `MW_GATEWAY_SYS_TIMEOUT_MS` (2000) and `MW_GATEWAY_ALLOW_CALLERS`; a
   malformed value names its variable —
-  `config::tests::v15_defaults`, `v15_parses_every_variable`,
-  `v15_malformed_values_name_the_variable` *(mw-gateway)*.
-- [x] V16 End to end over an in-memory serial cable and Zenoh on
+  `config::tests::rg15_defaults`, `rg15_parses_every_variable`,
+  `rg15_malformed_values_name_the_variable` *(mw-gateway)*.
+- [x] RG16 End to end over an in-memory serial cable and Zenoh on
   loopback: a fake device's `disc/cam/jpeg` beacon shows up in a cluster
   session's `ZenohDiscovery` browse as `Up` with node = the device's MAC,
   and its goodbye as `Down`; a beacon naming another node is never
   announced while the device's own beacons are —
   `gateway/tests/gateway.rs`:
-  `v16_device_beacon_is_announced_on_zenoh_with_the_device_node`,
-  `v16_spoofed_beacon_is_refused` *(mw-gateway)*. With the ESP32-CAM on
+  `rg16_device_beacon_is_announced_on_zenoh_with_the_device_node`,
+  `rg16_spoofed_beacon_is_refused` *(mw-gateway)*. With the ESP32-CAM on
   `/dev/ttyUSB0` still to be seen: today's firmware sends its beacon on
   ESP-NOW only, so the hardware run needs the beacon on the serial port
   too (README, "MCU gateway").
-- [x] V17 A camera frame cut into `middleware::stream` chunks (166 data
+- [x] RG17 A camera frame cut into `middleware::stream` chunks (166 data
   bytes, as the camera route) crosses the gateway byte for byte and in
   order on `app/cam/jpeg`, and reassembles to the frame —
-  `gateway/tests/gateway.rs`: `v17_camera_chunks_cross_the_gateway_intact`
+  `gateway/tests/gateway.rs`: `rg17_camera_chunks_cross_the_gateway_intact`
   *(mw-gateway)*.
-- [x] V18 Through the served kind `gw/sys` (the `mw-service`
+- [x] RG18 Through the served kind `gw/sys` (the `mw-service`
   `ServiceHandler` the runner calls): `sys/info` reaches the device and
   returns its `DeviceInfo`; `sys/loader/begin`, `chunk`, `commit`,
   `sys/trust/claim` and `sys/payload/start` are `Denied` and never reach
   the device; `sys/log` returns the device's log lines —
   `gateway/tests/gateway.rs`:
-  `v18_sys_info_is_forwarded_and_the_loader_is_refused` *(mw-gateway)*.
-- [x] V19 Both crates are host only: no embedded feature set depends on
+  `rg18_sys_info_is_forwarded_and_the_loader_is_refused` *(mw-gateway)*.
+- [x] RG19 Both crates are host only: no embedded feature set depends on
   them, `mw-robot` enables no embedded feature of `middleware`, and
   `mw-gateway` enables only `serial` (the link codec) beside `zenoh` —
-  `scripts/check-features.sh` (block "V19", and both crates in
+  `scripts/check-features.sh` (block "RG19", and both crates in
   `CLOUD_CRATES` for every F1 set).
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
-from the browser. Afterwards, application logic ships as WASM payloads loaded over the
-same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI) or
-the chip's native USB-Serial-JTAG. Payloads talk to the world through the
-middleware ABI in `wasm_abi`.
+from the browser, or onto a Raspberry Pi Pico (RP2040) or Pico 2 (RP2350)
+as a UF2 file. Afterwards, application logic ships as WASM payloads loaded over the
+same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI),
+the chip's native USB-Serial-JTAG, or the RP chips' USB CDC-ACM port.
+Payloads talk to the world through the middleware ABI in `wasm_abi`.
 
-Heap policy: the no-heap rule applies to the `middleware` crate and to RP2040
-firmware. On ESP the base firmware may use a global allocator (`esp-alloc`),
-because WASM linear memory and the wasmi interpreter require one.
+Heap policy: the no-heap rule applies to the `middleware` crate. A base
+firmware may use a global allocator for the payload interpreter only,
+because WASM linear memory and the wasmi interpreter (`wasm-host`, `no_std`
+with `alloc`) require one: on ESP `esp-alloc`; on the RP2350
+(`firmware-rp/`) a fixed 384 KiB `.bss` arena behind
+`linked_list_allocator`, which nothing but the interpreter allocates from,
+and a payload starts only when its bound (`Limits::heap_needed`) plus
+margin is free, the same check as on ESP. The RP2040 build has no payload
+runtime (wasmi needs CAS atomics and `alloc::sync::Arc`, which the
+Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
 
 ### Serial protocol and loader (`serial`, `loader`, `wasm_abi`)
 
@@ -1458,7 +1466,7 @@ because WASM linear memory and the wasmi interpreter require one.
   `None` — `serial::link::tests::s9_peer_is_the_sender_of_samples_and_requests`,
   `s9_without_a_peer_meta_is_empty`.
 - [x] S10 `sys/info` may end with the device's 8-byte node id
-  (`DeviceInfo::node`, a `SenderId`; `MAX_INFO_LEN` 81). Every decoder
+  (`DeviceInfo::node`, a `SenderId`; 81 bytes at most before S12). Every decoder
   reads the fields it knows and ignores trailing bytes, so 0.4 hosts read
   0.5 devices and 0.5 hosts read 0.4 devices (`node: None`). Checked:
   `DeviceInfo::decode` (used by `mwctl`, `protocol-wasm` and so the web
@@ -1474,6 +1482,32 @@ because WASM linear memory and the wasmi interpreter require one.
   `timeout_is_honoured` runs with the caller-side `Bounded` wrapper the
   link's docs prescribe (the link has no clock); `Gather` is not
   implemented (one peer) — `tests/serial.rs`: `k15_serial_*` *(serial)*.
+- [x] S12 `sys/info` may continue after the node id with a capability
+  bitset (`DeviceInfo::caps`, `loader::Caps`, `u32` little-endian;
+  `MAX_INFO_LEN` 85): bit 0 `Caps::SERVE` says requests on keys the
+  payload serves reach its `on_request` (M7), the other bits are reserved,
+  sent as 0 and kept by decoders. The ABI version says what the runtime
+  links; the bit says what the shell does with it (an ABI 5 firmware
+  without routing links `serve` but answers its keys `NotFound`). An
+  empty set is not sent, so a 0.5 device's response is unchanged; a
+  missing or cut bitset decodes as none; capabilities are only sent after
+  a node id (`encode` refuses them without one). Decoders checked: the
+  middleware's own (`DeviceInfo::decode`, used by `mwctl`, which prints
+  "requests: routed to the payload (serve)", by `protocol-wasm`, which
+  gives the page `caps` and `serves`, and by the ESP8266 tests, whose
+  firmware sends none); conagotchi's `badge-mw` constructs `DeviceInfo`
+  and needs `caps: Caps::NONE` when it next moves to this middleware
+  (it builds from tag v2026.10.31 today) —
+  `loader::tests::m7_device_info_carries_trailing_capabilities_after_the_node_id`,
+  `s10_device_info_carries_a_trailing_node_id`; `protocol-wasm`
+  `loader::tests::info_round_trips_and_names_statuses`; `mwctl`
+  `device::tests::info_decodes_a_protocol_only_esp8266`,
+  `report::tests::info_notes_protocol_only_firmware`;
+  `web/test/protocol.test.ts`: "round-trips sys/info"; esp-base
+  `dispatch::tests::e17_info_ends_with_the_node_id_and_old_decoders_ignore_it`,
+  `info_reports_device`; rp-base
+  `requests::tests::m7_without_the_runtime_sys_info_reports_no_capability`;
+  `firmware-esp8266/test.sh`.
 
 ### WASM runtime (`wasm-host`)
 
@@ -1613,9 +1647,13 @@ because WASM linear memory and the wasmi interpreter require one.
   `abi-check` test `p5_forbid_unsafe_code_examples_export_the_abi` (run by `check-all.sh` after the release build).
 - [x] P6 The byte-page payload build is reproducible: `build-byte-pages.sh`
   remaps the home directory, the cargo registry and the repository with
-  `--remap-path-prefix`, and builds from two different directories are
-  byte-identical —
-  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view, cam_jpeg_view and bench, run by `check-all.sh`).
+  `--remap-path-prefix`, gives the wasm32 crates a `-C metadata` derived
+  from their path-normalized rustc command lines
+  (`scripts/rustc-stable-metadata.sh`: cargo hashes the absolute path of
+  the out-of-workspace `middleware` dependency into the crate hashes,
+  which order generic instantiations), and builds from two different
+  directories are byte-identical —
+  `payloads/scripts/check-reproducible.sh` (blink, echo, cam_view, periph_demo, cam_jpeg_view, bench and cam_ov2640_stream, run by `check-all.sh`).
 - [x] P7 The SDK cannot panic on its own paths: `LogLine` (append, decimal
   numbers dropped whole when they do not fit, `log` without re-validating
   UTF-8) and the `on_message` delivery copy use checked access only, so a
@@ -1665,7 +1703,7 @@ because WASM linear memory and the wasmi interpreter require one.
   the chip, refusing pins used by flash, USB or the console UART —
   `chip::tests::console_uart_pins_are_reserved`, `flash_psram_and_usb_pins_are_refused`, `missing_pins_are_invalid`, `esp32_input_only_pins_refuse_output`, `general_purpose_pins_are_allowed`; `dispatch::tests::publications_route_only_to_running_subscribed_payloads`. Runs payloads on ESP32 and ESP32-S3 only; the C3 has no runtime.
 - [x] E6 Produces merged flash images per chip for the web flasher —
-  `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`.
+  `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`. It also builds the Pico UF2s for U19 (`rp2040`, `rp2350`), which are, like the `.bin` images, build output and not committed.
 - [ ] E14 A busy payload or an ESP-NOW flood cannot starve the serial
   links: the controller yields to the executor once per iteration of its
   running loop, and the radio task once per received frame. Before, an
@@ -1698,8 +1736,10 @@ because WASM linear memory and the wasmi interpreter require one.
   cache at that speed —
   `chip::tests::flash_settings_decode_the_image_header`.
 - [x] E17 Requests reach `dispatch::handle_request` as a middleware
-  `Request` with its `RequestMeta` (empty from a serial port; no `sys/*`
-  decision depends on it, the sender being unauthenticated), and
+  `Request` with its `RequestMeta` (empty from a serial port; from ESP-NOW
+  (O8) the sender's MAC as `SenderId`; no `sys/*` decision depends on it,
+  the sender being unauthenticated — the over-the-air policy is
+  `esp_base::ota`, O6), and
   `sys/info` ends with the node id from the chip's base MAC
   (`Context::node`; the ESP8266 build sends none) —
   `dispatch::tests::e17_info_ends_with_the_node_id_and_old_decoders_ignore_it`,
@@ -1710,8 +1750,14 @@ because WASM linear memory and the wasmi interpreter require one.
   checked again in the radio shell's `send`) and its source routes
   (`carries_routes`) refuse `disc/...`, which is reserved for the radio
   task's own beacon, so a payload cannot forge discovery beacons.
-  Received beacons go to the directory, not to the payload —
+  Received beacons go to the directory, not to the payload. The only way
+  `sys/...` crosses the radio is the separate request path of the
+  over-the-air update (`MR` frames, built only by the radio task, admitted
+  by `esp_base::ota`, O6/O16); a payload's publish is always an `MW`
+  sample, even one whose payload is a whole `MR` frame, so it reaches
+  neither discovery nor the request path —
   `radio::tests::e18_beacons_are_received_but_payloads_cannot_send_them`,
+  `e18_o6_a_payload_reaches_neither_discovery_nor_the_request_path`,
   `r11_r12_only_app_keys_go_over_the_air`.
 - [x] E19 While a camera source route runs, the radio task broadcasts a
   `disc/cam/jpeg` beacon (instance `cam-` + the MAC's last three bytes in
@@ -1752,10 +1798,50 @@ because WASM linear memory and the wasmi interpreter require one.
   to 40 920 B, under its 40 KiB check; with none it is 45 032 B —
   conagotchi `scripts/check.sh` "firmware main stack" step (2026-10-29),
   `firmware/build.sh esp32s3`.
+- [x] E24 I2C bus 0 for payloads on the ESP32-S3 (ABI 3), the ESP32's
+  driver and claims: SDA GPIO 5, SCL GPIO 6 (`chip::ESP32S3`'s `i2c0`, a
+  board constant: no strapping, flash/PSRAM, USB or UART0 pin, free on the
+  ESP32-S3-DevKitC-1 and on the conagotchi badge), clocks up to 400 kHz
+  (bus 1 and faster clocks `Unsupported`); the pins are exclusive to the
+  bus while open and released on stop. On both chips each byte has a
+  software timeout of two byte times plus 100 µs (esp-hal's defaults left
+  a stuck bus on the S3 unbounded), so a 64 + 64-byte transfer returns
+  within about 37 ms at 100 kHz and 255 ms at 10 kHz. The ESP32-C3 and
+  ESP8266 run no payloads, so they have no I2C or SPI —
+  `chip::tests::e24_esp32s3_maps_i2c_bus_0_to_gpio_5_and_6`;
+  `periph::claims::tests::e24_esp32s3_i2c_bus_0_holds_gpio_5_and_6_exclusively`;
+  `periph::i2c::tests::e24_byte_timeout_is_two_byte_times_plus_slack`,
+  `e24_a_full_transfer_is_bounded`, `e24_open_plan_accepts_bus_0_up_to_fast_mode`;
+  `firmware/build.sh esp32s3`. Transfers on S3 hardware untested.
 - [x] E22 The `disc:` log lines print radio-supplied kinds and instances
   with every byte outside printable ASCII, and `\`, as `\xNN`, so a
   beacon cannot inject terminal escapes or line breaks into `sys/log` —
   `radio::disc::tests::e22_log_lines_escape_radio_supplied_text`.
+- [x] E25 Requests on keys the payload serves (ABI 5, M7) are routed by
+  `esp_base::serve`, the pure core rp-base shares: `sys/...` always to the
+  dispatcher and never servable (`Device::serve` refuses them
+  `InvalidKey`), a key the running payload serves to `Payload::request`
+  with a 512-byte reply (the serial bus's `MAX_REPLY`) and the request's
+  meta (serial: no sender, no deadline), a trap answered `Internal` and
+  the session ended, a stopped or trapped payload's keys `Unavailable`
+  (the controller keeps the last run's keys, cleared when an upload
+  changes the image), and other application keys `NotFound` as before;
+  `node_id` is the base MAC zero-padded, the node `sys/info` reports, and
+  `sys/info` sends `Caps::SERVE` on the builds with the runtime (ESP32,
+  ESP32-S3; not the ESP32-C3 or ESP8266). Requests over ESP-NOW are not
+  routed: over the air only the update keys are admitted (O6), and
+  answering a payload's keys for unauthenticated radio peers would widen
+  that policy, so they stay `NotOverAir` refusals. The conagotchi badge
+  compiles this shell and gets the routing when it moves to this
+  middleware —
+  `serve::tests::m7_sys_keys_always_go_to_the_dispatcher_and_can_never_be_served`,
+  `m7_served_keys_reach_a_running_payload_and_others_are_not_found`,
+  `m7_a_stopped_trapped_or_loading_payload_is_unavailable_on_its_keys`,
+  `m7_a_trap_answers_internal_and_stops_the_payload`,
+  `m7_the_table_is_bounded_deduplicated_and_cleared_when_the_image_changes`;
+  `dispatch::tests::info_reports_device`; chip clippy and
+  `firmware/build.sh esp32`, `esp32s3`. The shell's routing
+  (`shell/controller.rs`) is untested on hardware.
 
 #### Interpreter speed on the badge
 
@@ -1889,11 +1975,306 @@ handlers); the unsafe asm stays in that vendored dependency.
   and survived `mwctl reset`, and a repeated corrupt upload again left
   status Stopped.
 
+### RP base firmware (`firmware-rp/`)
+
+The base firmware for the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350A,
+Arm cores), one source tree with a cargo feature per chip, on embassy-rp.
+It speaks the protocol of the ESP base firmware, unchanged, over the
+chip's USB port as one CDC-ACM interface: COBS frames, the `sys/info`,
+`sys/loader/*`, `sys/payload/*`, `sys/trust/*` and `sys/log` keys, signed
+payloads, so `mwctl --port /dev/ttyACM0` and the web console work against
+it as they do against esp-base.
+
+Shared with esp-base rather than copied: the request decisions and storage
+come from the `esp-base` library crate with its default features off and
+`trust` on, the way the ESP8266 firmware uses it: `esp_base::dispatch`
+(request table, loader state machine, payload lifecycle, trust rules),
+`esp_base::store` and `esp_base::image` (the two-slot payload store),
+`esp_base::trust_store` (the pinned key), `esp_base::start` (the heap
+check) and `esp_base::periph::timers` (the payload timer table). None of
+them changed, so esp-base's own gates are untouched. What esp-base keeps in
+its private shell (U1's finding: the shell is not exported) is ESP-specific
+and is written again for embassy-rp, kept thin: a one-port message bus, the
+CDC link task and the controller loop (`firmware-rp/src/shell/`). The RP
+pure core (`rp_base`, host tested) adds the flash maps, the chip profiles
+and pin policy, the request service that performs the storage effects over
+any NOR flash, the `sys/fw/*` seam and, on the RP2350, the A/B firmware
+updater that serves it (`rp_base::ota`, see "A/B firmware OTA (RP2350)"),
+the one-sector erase adapter and the untranslated-read window, the USB
+framing rules and the heap budget.
+
+Tasks: the USB device task, the link task (middleware's `SerialLink` over
+the CDC halves joined as a `Duplex`), and the controller on the main task,
+which owns the service (dispatcher state, payload store, trust record) and
+the running payload. They meet only through the `'static` bus.
+
+Flash maps (offsets from the start of flash; every region whole 4 KiB
+sectors, checked by `layout::FlashMap::check`):
+
+| board | partition table | firmware | firmware slot B | update record | payload store | trust | unused |
+|---|---|---|---|---|---|---|---|
+| Pico, RP2040, 2 MiB | — | 0x000000, 1.5 MiB (boot2, then the image) | — | — | 0x180000, 256 KiB | 0x1C0000, 8 KiB | 248 KiB |
+| Pico 2, RP2350, 4 MiB | 0x000000, 8 KiB | 0x002000, 1528 KiB (slot A, partition 0) | 0x180000, 1528 KiB (partition 1, linked to A) | 0x2FE000, 8 KiB | 0x300000, 256 KiB | 0x340000, 8 KiB | 760 KiB |
+
+The payload store is the ESP partition's size, so both report the same
+124 KiB slot capacity (capped by the chip's `max_image`). The RP2350's
+payload store and trust record kept their offsets when the A/B layout
+came, so a board flashed before keeps its payload and its pinned key. The
+RP2350 image is linked at 0x10000000 for one slot (`memory-rp2350.x`
+`FLASH` = 1528 KiB); the boot ROM maps the slot it boots there through
+the QMI's address translation (window 0), so the same image runs from
+either slot.
+
+Under that translation 0x10000000 is the running slot, and anything past
+its end faults, while the boot ROM's erase and program functions (which
+embassy-rp's flash driver calls) take physical offsets. So the shell maps
+the whole flash, untranslated, at XIP window 1 (0x10400000, QMI
+`ATRANS1` base 0, 4 MiB; a safe PAC register write) and every flash access
+of the store, the trust record and the updater goes through
+`rp_base::flash::Window`, which reads at 4 MiB + offset (the driver is
+declared 8 MiB for that) and erases and writes at the offset: every offset
+in the table above is physical for reads, erases and writes alike. On a
+board without a partition table nothing is translated and the window is
+the identity, so the same build works there (without the updater).
+
+RAM: the RP2040 build has no heap (no runtime) and 26 KB of static RAM,
+leaving about 238 KiB of stack. The RP2350 build holds a 384 KiB heap arena
+in `.bss` (static RAM 440 KB in all, the firmware updater's 5 KiB sector
+stash, the 4 KiB SPI transfer buffer, the 512-byte reply a served request
+may need (V20) and the main task's larger future included), leaving about 90 KiB
+for the main stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
+128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
+bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
+compiling), so every image the store accepts is admitted. The byte-page
+builds of `blink` (1 992 B) and `echo` (2 700 B, 16 KiB memory,
+`payloads/scripts/build-byte-pages.sh`) are bounded at 63 and 65 KB (67
+and 69 KB with the margin); their 64 KiB-page builds, charged at the
+128 KiB cap, at 178 and 180 KB. The byte-page builds would also fit the
+RP2040's RAM; what keeps payloads off it is the missing atomics, not
+memory.
+
+Payload ABI on the RP2350 (the RP2040 runs no payloads):
+
+| ABI call | RP base |
+|---|---|
+| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes |
+| `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | yes: GPIO 0–22 and 25 (LED); 24 (VBUS sense) input only; 23 and 29 reserved; `Busy` on a pin an SPI or I2C bus holds |
+| `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller loop, delivered to `on_irq` |
+| `adc_read` | yes: GPIO 26–28 (ADC0–ADC2), 12-bit; those pins are analog only |
+| `spi_open`, `spi_transfer`, `dma_read` (`Spi0`) | yes: bus 0 on SPI0 or SPI1, whichever the payload's pins select (pins checked against the GPIO function table); 1.93 kHz (RP2040) / 2.31 kHz (RP2350) to 40 MHz, never faster than asked; modes 0–3; CS any output pin, low for the whole transfer; up to 4092 bytes pumped through the FIFOs by the controller loop (no DMA), completion as `DmaDone` |
+| `i2c_open`, `i2c_transfer` | yes: bus 0 SDA GPIO 4 / SCL GPIO 5, bus 1 SDA GPIO 6 / SCL GPIO 7 (internal pull-ups on), 10 kHz–1 MHz; blocking, each transfer time bounded; NACK, arbitration loss and timeout are `Transport`; address-only probes `Unsupported` |
+| `gpio_irq` | `Unsupported` |
+| `uart_open`, `uart_write`, `uart_read`, `dma_read` (`Uart1Tx`) | `Unsupported` |
+| `pwm_open`, `pwm_set`, `pwm_stop` | `Unsupported` (no pins bound to PWM on this board map) |
+| `route_source`, `route_sink`, `route_stop`, `route_stat` | `Unsupported` |
+| `serve`, `node_id` (ABI 5) | yes: any non-`sys` key; serial requests on served keys reach `on_request` (`rp_base::requests`, V20); `node_id` is the chip unique id `sys/info` reports |
+
+SPI and I2C on the RP base. Both chips route each peripheral signal to
+fixed GPIOs (functions F1 and F3 of the datasheets' GPIO function tables,
+identical for GPIO 0–29 on the RP2040 and RP2350): SPI0 has SCK on 2, 6,
+18, 22, TX (MOSI) on 3, 7, 19, 23 and RX (MISO) on 0, 4, 16, 20; SPI1 SCK
+on 10, 14, 26, TX on 11, 15, 27, RX on 8, 12, 24, 28; I2C0 SDA on every
+pin `n` with `n % 4 == 0`, I2C1 SDA on `n % 4 == 2`, SCL one above. The
+ABI has one SPI bus, so bus 0 lands on whichever controller its pins name;
+the board maps I2C bus 0 and 1 to the Pico pinout's defaults (GP4/GP5,
+GP6/GP7). The controllers are driven through embassy-rp's PAC, not its
+drivers: those take pins by type, which the pin bank (one `Flex` per
+payload pin for the firmware's life) cannot give, and their blocking loops
+are unbounded on a stuck bus. A bus takes a pin by switching its function
+select and gives it back as an input without pull. Pins are exclusive both
+ways (`rp_base::periph::claims`): a bus cannot take a pin another bus holds
+or one the payload configured as GPIO, and `gpio_*` on a bus pin is
+`Busy`; reserved and ADC pins are `Unsupported` for every bus. (esp-base
+answers a pin held by another peripheral with `InvalidArgument` and lets a
+peripheral take a GPIO pin.) An I2C transfer gives up after twice its bus
+time plus 2 ms (at most 237 ms) and an SPI transfer after twice its bus
+time plus 100 ms; a fault resets the controller. A stop, trap or upload
+holds every controller in reset and frees every pin.
+
+Known gaps: neither board has a presence button wired, so there is no
+re-key window (a claimed device is re-keyed by erasing the trust region,
+for example `picotool erase` of its two sectors); the RP2040 stores
+payloads but cannot run them until wasmi supports targets without CAS
+atomics; nothing has run on silicon yet.
+
+- [x] V1 `sys/info` reports the chip (`rp2040`, `rp2350`), the firmware
+  version (`+no-wasm` on the RP2040), the store capacity and, as node id,
+  the chip's 64-bit unique id (the flash unique id on the RP2040, the OTP
+  chip id on the RP2350), which is also the USB serial number in hex —
+  `service::tests::v1_info_reports_the_rp_chip_capacity_and_node_id`,
+  `node::tests::v1_node_id_and_usb_serial_come_from_the_unique_id`.
+- [x] V2 The flash maps above are sector aligned, inside the flash, free of
+  overlaps, start at offset 0 (the firmware, or on the RP2350 the
+  partition table), hold the 8 KiB trust record and a 256 KiB payload store
+  (124 KiB slots); the RP2350 has two equal firmware slots, the partition
+  table and the two-sector update record outside both slots, and only all
+  three together; the `FLASH` length of `memory-rp2040.x` and
+  `memory-rp2350.x` equals the map's linked firmware size —
+  `layout::tests::v2_both_maps_are_valid_and_keep_the_esp_payload_capacity`,
+  `y13_rp2350_has_a_table_two_equal_slots_and_the_record_outside_them`,
+  `v2_memory_x_flash_lengths_match_the_maps`, `v2_check_refuses_broken_maps`.
+- [x] V3 Payloads go into the two-slot store with esp-base's semantics: an
+  upload survives a reboot and starts; a serial `begin` stops a running
+  payload; a commit with a wrong CRC, or a transfer cut by power loss,
+  keeps the previous image; an image larger than a slot is refused —
+  `service::tests::v3_an_upload_survives_a_reboot_and_runs_on_start`,
+  `v3_a_cut_or_spoiled_transfer_keeps_the_previous_image`,
+  `v3_an_image_larger_than_a_slot_is_refused` (RAM flash model with
+  power-loss injection).
+- [x] V4 Signed payloads: an unclaimed device accepts any commit; a claim
+  pins the key and survives reboots; once claimed, unsigned, foreign-key
+  and replayed commits are denied with the previous image kept; a signed
+  commit raises `min_version`, which reaches flash before the new slot
+  header (a power cut in between keeps the old image with the raised
+  `min_version`, and RAM adopts it); a second claim is denied —
+  `service::tests::v4_a_pinned_key_and_its_min_version_survive_reboots`,
+  `v4_min_version_reaches_flash_before_the_new_header`.
+- [x] V5 Flash erases are issued one 4 KiB sector per driver call, so
+  interrupts (USB) are serviced between sectors; on the RP2350 reads go
+  through the untranslated window and every access is bounded by the
+  physical flash — `flash::tests::v5_erases_one_sector_per_driver_call`,
+  `y12_window_reads_through_the_untranslated_alias_and_writes_physically`.
+- [x] V6 `sys/fw/*` belongs to the firmware-update backend, a generic
+  `FwUpdate<F>` parameter of the service that gets the flash (lent by the
+  payload store), the node id, the root of trust and the self-test with
+  each request: the RP2350 build's backend is the A/B updater (Y12); the
+  `Unsupported` stub answers `Unavailable`; without `fw-update` (RP2040)
+  the keys are `NotFound`; none touches the payload loader, store or
+  status — `fw_update::tests::v6_the_reserved_keys_are_under_the_prefix`,
+  `service::tests::v6_sys_fw_keys_go_to_the_update_backend_only`,
+  `ota::tests::y12_requests_reach_the_updater_and_unknown_fw_keys_are_not_found`.
+- [x] V7 Heap plan: the RP2040 has no heap; the RP2350's 384 KiB arena
+  holds linear memory, the largest image and the interpreter reserve and
+  leaves at least 128 KiB of SRAM for statics and stack; its heap check
+  admits images up to the 64 KiB cap at either 16 KiB (byte pages) or
+  128 KiB of memory (on the 64-bit host bound, which is larger, at least
+  40 KiB), and a smaller heap admits less —
+  `chip::tests::v7_heap_plans_fit_and_images_fit_a_slot`,
+  `budget::tests::v7_the_rp2350_heap_admits_images_up_to_its_cap`,
+  `v7_a_smaller_heap_admits_less`.
+- [x] V8 Pins follow the Pico board map: pins the chip lacks are
+  `InvalidArgument`, 23 and 26–29 `Unsupported` as GPIO, 24 input only;
+  `adc_read` maps GPIO 26–28 to ADC0–ADC2; GPIO modes follow esp-base's
+  rules (write needs an output, read of an unconfigured pin is
+  `InvalidArgument`) and every configured pin is listed for release —
+  `chip::tests::v8_pins_follow_the_pico_board_map`,
+  `v8_adc_reads_gpio_26_to_28`, `pins::tests::v8_gpio_modes_follow_the_esp_base_rules`.
+- [x] V9 `mwctl`, unchanged, drives the service over a byte stream:
+  `info`, `upload --start`, `stop`, `trust claim`, signed and refused
+  uploads, with the image on flash after a reboot —
+  `service::wire::v9_mwctl_info_upload_and_start_work_unchanged`,
+  `v9_mwctl_signed_upload_and_trust_work_unchanged` (mwctl's `Device` over
+  an in-process transport into the real service).
+- [x] V10 USB CDC framing: a flushed write whose last packet was a full 64
+  bytes is ended with a zero-length packet; after a send times out
+  (nobody reading the port) publications are dropped until a frame
+  arrives — `usb::tests::v10_a_frame_ending_on_a_full_packet_gets_a_zero_length_packet`,
+  `v10_publications_are_dropped_while_the_host_is_away`.
+- [x] V11 The RP2040 build stores payloads but refuses `sys/payload/start`
+  (`NotFound`), and `mwctl` sees it as a `+no-wasm` device —
+  `service::tests::v11_without_the_runtime_payloads_are_stored_but_not_started`,
+  `service::wire::v11_mwctl_sees_a_no_wasm_rp2040`.
+- [x] V13 The service fails closed when the trust record cannot be read
+  at boot (either sector unreadable, or the region unusable): payload
+  `begin`, `chunk`, `commit` (signed or not) and `sys/trust/claim` answer
+  `Unavailable` and change nothing, instead of being decided as on an
+  unclaimed device (esp-base's `TrustStore::open` reads an unreadable
+  sector as holding no record, so the service probes both sectors first);
+  `sys/info`, `sys/trust/info`, start and stop still answer; the self-test
+  fails —
+  `service::tests::v13_an_unreadable_trust_record_refuses_payload_installs_and_claims`;
+  `ota::tests::y16_an_unreadable_trust_record_refuses_firmware_installs`
+  (loader part).
+- [x] V14 The `periph_demo` payload (one SPI loopback transfer and one
+  register read from a configured I2C address, no address scanning) runs
+  in `payload-sim` against its SPI loopback and I2C register device, and
+  its byte-page build (16 KiB memory) fits the Pico 2 heap —
+  `tools/payload-sim/tests/periph_demo.rs`
+  (`v14_periph_demo_runs_spi_loopback_and_i2c_read_in_the_simulator`,
+  `v14_periph_demo_logs_a_mismatch_when_miso_disagrees`; 4 922-byte image);
+  `budget::tests::v7_the_rp2350_heap_admits_images_up_to_its_cap`
+  (byte-page images up to the 64 KiB cap at 16 KiB memory).
+- [x] V15 SPI pins follow the chips' GPIO function tables: SCK, MOSI and
+  MISO must carry their signal and sit on one controller (SPI0 or SPI1);
+  CS may be any output pin; a pin without the signal or signals on two
+  controllers are `Unsupported`, the board policy applying first, for the
+  RP2040 and the RP2350 alike —
+  `periph::func::tests::v15_function_tables_match_the_datasheets`,
+  `v15_spi_pins_resolve_onto_one_block_on_both_chips`.
+- [x] V16 I2C buses 0 and 1 use GPIO 4/5 and 6/7, which carry I2C0 and
+  I2C1 in the function table; every ABI clock (10 kHz–1 MHz) has a timing
+  within 1 % at 125 and 150 MHz `clk_peri`, others are refused; a transfer
+  is the writes, a repeated start and the reads with one stop at the end;
+  address-only probes are `Unsupported`; every transfer has a time bound
+  (at most 237 ms); NACK, arbitration loss, other aborts and the timeout
+  are `Transport` —
+  `chip::tests::v16_i2c_buses_map_to_the_pico_default_pins`;
+  `periph::i2c::tests::v16_every_abi_clock_has_a_timing_on_both_chips`,
+  `v16_clocks_outside_the_abi_or_the_divider_are_refused`,
+  `v16_transfers_are_writes_then_reads_after_a_repeated_start`,
+  `v16_every_transfer_is_bounded_in_time`, `v16_every_fault_is_transport`.
+- [x] V17 The SPI divider gives the fastest clock not above the request
+  (requests below the slowest divider are `Unsupported`), modes map to
+  polarity and phase, the FIFO pump moves every byte in bounded steps
+  with never more than 8 bytes in flight and receives in place, and every
+  transfer has a time bound —
+  `periph::spi::tests::v17_the_divider_never_exceeds_the_request_and_is_the_closest`,
+  `v17_clocks_below_the_slowest_divider_are_unsupported`,
+  `v17_modes_map_to_polarity_and_phase`,
+  `v17_the_pump_moves_every_byte_in_bounded_steps`,
+  `v17_every_transfer_is_bounded_in_time`.
+- [x] V18 Bus pins are exclusive: the SPI bus and each I2C bus hold their
+  pins, `gpio_*` on them is `Busy`, a bus cannot take another bus's pin or
+  a payload GPIO pin (`Busy`), reserved and ADC pins never become bus pins,
+  re-opening SPI replaces its pins and release frees one owner —
+  `periph::claims::tests::v18_buses_hold_their_pins_and_gpio_is_busy_on_them`,
+  `v18_pins_are_exclusive_between_buses_and_gpio`,
+  `v18_reopening_spi_replaces_its_pins_and_release_frees_one_owner`,
+  `v18_analog_and_reserved_pins_never_become_bus_pins`. The shell's
+  release on stop (controllers in reset, pins back to inputs) is in
+  `shell/device.rs` and untested on hardware.
+- [ ] V19 On a Pico 2, `periph_demo` with GP19 jumpered to GP16 logs
+  `spi loopback ok` every period, and with an I2C target on GP4/GP5 at the
+  configured address logs the register's value; a missing target logs
+  `Transport`; after `mwctl stop` GP4/5 and GP16–19 are GPIO inputs again.
+  Not yet run on hardware.
+- [x] V20 Requests on served keys (ABI 5, M7) go through
+  `rp_base::requests::handle` over any `wasm_host::Device`, the routing of
+  `esp_base::serve` (E25): `sys/...` and unserved keys to the service, a
+  served key of the running payload to `Payload::request` with a 512-byte
+  reply (the bus's `MAX_REPLY`, up from 128) and the link's meta (its peer
+  as sender, if it has one; serial frames carry no deadline), a trap
+  answered `Internal` with the payload marked trapped and stopped, the
+  keys of a stopped or trapped payload `Unavailable` until the next run or
+  an upload, and `sys/info` with `Caps::SERVE` on the RP2350 (none on the
+  RP2040, which runs no payloads); `RpDevice::node_id` is the chip unique
+  id. The round 8 `pico-led` phase server
+  (`tools/payload-sim/tests/fixtures/phase/`), installed through the
+  loader and started, runs over serial frames (requests in as
+  `Frame::Request`, replies out as `Frame::Response`, its reports out as
+  `[pub]` frames decoded with `recipe_core::wire`): Start(250 ms, 3) is
+  accepted Running, a second Start rejected Running, an out-of-range one
+  `InvalidRequest`, three toggles later Complete, Reset to Idle with the
+  LED off; after `stop` the key is `Unavailable`, after a new upload
+  `NotFound` —
+  `requests::tests::m7_the_pico_led_phase_server_runs_blink_to_complete_through_the_request_service`,
+  `m7_a_trap_answers_internal_stops_the_payload_and_its_key_is_then_unavailable`,
+  `m7_without_the_runtime_sys_info_reports_no_capability`; clippy rp2350
+  and rp2040, `firmware-rp/build.sh rp2350`. The controller's use of it
+  (`shell/controller.rs`) is untested on hardware.
+- [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
+  with its factory UF2), the CDC port enumerates, `mwctl info` reports the
+  chip and node id, an upload survives a power cycle, and on the Pico 2
+  `blink` toggles GPIO 8 and publishes `app/blink/state`. Not yet run on
+  hardware.
+
 ### Host tool (`tools/mwctl`)
 
 `mwctl --port <PATH> info|upload|start|stop|monitor|reset` drives a device
 over one named serial port, synchronously, with the same pure frame and
-loader code as the firmware. It never enumerates ports. It opens the port
+loader code as the firmware. With `--espnow <MAC>` the port is the
+USB↔ESP-NOW bridge and the request reaches that device over the air (see
+"Over-the-air payload update"). It never enumerates ports. It opens the port
 without resetting the board (verified on the CH340 board: no boot output on
 open).
 
@@ -1939,7 +2320,7 @@ open).
   `protocol-wasm` `simulator::tests::simulator_runs_payload_with_virtual_gpio_and_messages`, `simulator_reports_rejection_and_traps`; `web/test/editor.test.ts` runs the blink/echo templates (WAT and AssemblyScript) in wasm-host compiled to WASM.
 - [x] U7 Automated tests cover the protocol bindings and the upload flow
   against a mocked serial port —
-  `npm test` in `web/` (115 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
+  `npm test` in `web/` (123 tests; `web/check.sh` runs it and the build) and `cargo test -p protocol-wasm` (17 tests).
 - [x] U8 The manifest carries each image's `wasm` flag (absent means `true`)
   and the UI marks protocol-only images; the device page disables "start
   after upload" and Start for `+no-wasm` firmware —
@@ -1988,6 +2369,248 @@ open).
   and refused before sending anything when the device pins another key;
   claim is offered when unclaimed or in the re-key window —
   `web/test/trustUpload.test.ts` against a fake device modelling the trust contract in TypeScript in front of the Rust loader: "uploads unsigned to an unclaimed device after asking", "sends nothing when the unsigned upload is declined", "uploads unsigned to firmware without sys/trust and says why", "claims an unclaimed device and denies a second claim", "signs the commit for a device that pins this key, and the device accepts it", "a commit signed by another key is Denied and the old image stays active", "a replayed version is Denied; a clock behind the device bumps past min_version", "re-keys only while the window opened by holding BOOT is open".
+- [x] U16 First run: a Start tab, opened when no tab is saved, says what the
+  site does and what a payload is, runs the Blink example in the Blocks
+  simulator in one click (asking before it replaces different blocks), and
+  gives per-board steps: ESP32, ESP32-S3, ESP32-C3 and ESP8266 flash from
+  the Flash tab; Pico and Pico 2 take the rp-base UF2 in BOOTSEL mode;
+  protocol-only boards (ESP32-C3, ESP8266, Pico) are marked as storing
+  payloads without running them, matching the manifest's `wasm` flags —
+  `web/test/onboarding.test.ts`: "covers every bundled ESP image with the manifest's runtime flag", "installs the Picos from UF2, with only the Pico 2 running payloads", "gives every board install, connect and payload steps that point at real tabs", "sends ESP boards to the Flash tab and Picos to BOOTSEL and the UF2", "says protocol-only boards store payloads without running them", "opens Start without a valid saved tab and the saved tab otherwise", "tries an example that exists", "asks before replacing blocks that differ from the example, not otherwise". The click-to-blink path was checked in headless Chrome (about 1.5 s on localhost); the page itself has no DOM test.
+- [x] U17 Nothing replaces the payload silently: the Examples menu and
+  Import JSON, like the Start tab's "Try it", load at once only when the
+  payload has no blocks and no pins or generates the same code, and
+  otherwise ask first; cancelling keeps everything and returns the menu to
+  its placeholder. A file that is not a payload is reported and changes
+  nothing, and an unrelated JSON object, which parses as an empty
+  workspace, also asks. Examples add the pins they name by label and never
+  change or remove a pin the user chose —
+  `web/test/blocks.replace.test.ts`: "asks before any example replaces a different one, never for itself", "adds the pins an example needs from the board, keeping the user's", "reports a file that is not a payload and loads nothing", "asks before an unrelated JSON object, which parses as an empty workspace, wipes work", "loads straight away over an empty payload", "asks before an import replaces different blocks or pins", "re-importing an export of the same payload does not ask", "a bare workspace keeps the current board and pins; a legacy export brings its profile". The menu's confirm, cancel and replace path was driven in headless Chrome; there is no DOM test.
+- [ ] U18 The site works on a 390 px phone: no tab scrolls sideways, the
+  Examples menu fits its row, the generated-code line numbers stay level
+  with their lines, and the Blockly toolbox is slimmer below 600 px and can
+  be hidden ("Hide categories"); the Blocks build output is announced to
+  screen readers (`aria-live`). Verified by headless Chrome measurements
+  and screenshots only (every tab at 390×844 and 1280×800 has a page
+  `scrollWidth` no wider than the viewport; gutter and line tops match
+  once the editor has been on screen), not by a test, so it stays
+  unchecked.
+- [x] U19 Pico users install rp-base without a toolchain: the firmware
+  manifest may list `uf2.rp2040` and `uf2.rp2350` (file, SHA-256, size,
+  version, UF2 family id, factory flag, `wasm` flag), validated strictly:
+  only those two chips, family `rp2040` for the Pico and, for the Pico 2,
+  only the factory image (partition table plus slot A, family `absolute`;
+  the `rp2350-arm-s` update image is for `mwctl fw update` and is
+  refused), lower-case 64-digit SHA-256, a size in whole 512-byte blocks.
+  `firmware/build-images.sh rp2040 rp2350` builds the UF2s with
+  `firmware-rp/build.sh`, copies them next to the ESP images and writes
+  those entries; like the ESP images they are build output, not
+  committed, and the committed manifest has none. For a listed chip the
+  Start tab's install step offers "Download UF2" with the file name, size,
+  version and SHA-256, then the BOOTSEL and drag-onto-drive steps (RPI-RP2,
+  RP2350); otherwise it says how to build the file. The Pico 2 step says
+  the factory image writes the A/B partition table, so it is for the first
+  install, and that later updates go over USB with `mwctl fw update`. The
+  page saves a download only after checking its UF2 magic, size, family and
+  SHA-256 against the manifest, and says this catches a corrupted or
+  outdated file and is not a signature —
+  `web/test/manifest.test.ts`: "parses what firmware/build-images.sh rp2040 rp2350 writes" (`web/test/fixtures/manifest-uf2.json`, that script's output), "treats an absent uf2 section as none, as in the committed manifest", "rejects an unknown chip and a non-object section", "rejects a wrong family, including an entry filed under the other chip", "lists only the RP2350 factory image, not the mwctl update image", "rejects a missing or malformed sha256, size, version, wasm flag or file name"; `web/test/uf2.test.ts`: "accepts the file the manifest names, with WebCrypto's SHA-256", "refuses a truncated or padded download", "refuses a file whose SHA-256 differs from the manifest", "refuses something that is not a UF2, such as the index.html a server answers for a missing file", "refuses a UF2 of another family, such as the RP2350 update image", "formats sizes for people"; `web/test/onboarding.test.ts`: "sends ESP boards to the Flash tab and, without a UF2 in the manifest, Picos to the build hint", "offers the manifest's UF2 for each Pico with file name, size and version", "says what the download check proves and what it does not", "follows the download with BOOTSEL onto the board's drive, then drag the file, in order", "tells Pico 2 users the factory image sets up A/B and later updates use mwctl fw update", "falls back to the build hint for a chip the manifest has no UF2 for", "marks commands and file names as code spans".
+- [ ] U20 The Start tab's "Download UF2" saves a file that installs by
+  BOOTSEL drag-and-drop: on a Pico it boots rp-base, and on a Pico 2
+  without a partition table it writes the A/B table and boots slot A
+  (`mwctl fw info`: running A, slot A bought). Only partly verified, so
+  unchecked: the button's fetch-check-save path has no DOM test (in
+  headless Chrome against `vite preview` at 1280×800 and 390×844 both
+  files saved with the manifest's SHA-256, a wrong SHA-256 and a missing
+  file were refused without saving, and the Start tab kept a page
+  `scrollWidth` no wider than the viewport); `picotool info -a` on the
+  factory UF2 shows the partition table; no file was dragged onto real
+  hardware.
+- [x] U21 One payload model (IR) behind every editor view: a versioned
+  JSON document (`web/src/model/payload.ts`, format `middleware-payload`,
+  version 1) holding the board, the pin table (rows: label, pin, function,
+  bus, pull, initial level, note; one setting per bus in use), the logic
+  sources (version 1: exactly one Blockly workspace) and the state
+  machines (empty in version 1). Its shape check is strict: an unknown
+  field, a wrong type, a pin outside 0..63, an unknown board, function or
+  logic kind, non-empty machines or a newer version is an error naming the
+  place. The Blocks tab stores, exports and imports the model; a legacy
+  Blocks export or save and a bare Blockly workspace migrate to it with
+  the same workspace, the board their profile implies and no pins, so the
+  generated code is byte-for-byte unchanged (the legacy save is left in
+  place) — `web/test/model.test.ts`: "round-trips through JSON unchanged", "rejects unknown shapes instead of dropping them", "migrates a legacy Blocks export and a bare workspace losslessly", "maps every target to a profile and a pin-rule chip"; `web/test/blocks.storage.test.ts`: "saves and restores the model with its board and pins", "survives storage that throws, is missing or holds garbage", "migrates every legacy save losslessly: same workspace, same profile, same generated code".
+- [x] U22 The pin rules are the firmwares' own: the `board-pins` crate
+  (no_std, no dependencies) holds the pin maps of the Pico / Pico 2,
+  ESP32 (ESP32-CAM), ESP32-S3, ESP32-C3 and ESP8266 (existing, reserved
+  with a reason, input-only, ADC, board-wired I2C buses, PWM outputs, SPI
+  routing), the RP2040 / RP2350 F1 / F3 function tables and the SPI pin
+  resolution; esp-base and rp-base build their `Profile`s on it with
+  unchanged results, and protocol-wasm exposes it to the page as
+  `boardPins(chip)` and `checkPins(chip, rows, buses)`, which also applies
+  the ABI's `i2c_open` / `spi_open` argument rules. The page restates no
+  pin rule — `board-pins` unit tests (`cargo test -p board-pins`): "check_follows_exists_reserved_input_only", "every_held_pin_has_a_reason", "adc_pwm_and_i2c_maps", "board_wired_pins_are_payload_pins", "rp_pins_resolve_onto_one_block", "esp_pins_need_only_the_direction", "function_tables_match_the_datasheets"; the unchanged firmware tests (`firmware-rp` "v8_pins_follow_the_pico_board_map", "v8_adc_reads_gpio_26_to_28", "v16_i2c_buses_map_to_the_pico_default_pins", "v15_spi_pins_resolve_onto_one_block_on_both_chips", new "gpio_count_matches_the_pin_map"; `firmware` chip tests); `web/test/pins.test.ts`: "a complete Pico 2 table is clean; the board map comes from Rust".
+- [x] U23 The pin table is checked live, per row and per table, in plain
+  language with one-click fixes where obvious: missing, malformed or
+  duplicate labels (case ignored), duplicate pins, a pin the chip lacks, a
+  reserved pin (with what the board uses it for), an output on an
+  input-only pin, an ADC or PWM row off the board's analog or PWM pins, an
+  I2C row off its bus's board-wired pin or on an unwired bus, an SPI pin
+  without the signal or on the other controller than SCK, an incomplete
+  I2C pair or SPI bus, and bus clocks or modes outside the ABI's ranges;
+  any problem stops Compile before code is built —
+  `web/protocol-wasm/src/pins.rs` tests (`cargo test -p protocol-wasm pins`): "a_valid_pico_table_has_no_issues", "labels_must_be_present_valid_and_unique", "duplicate_pins_flag_both_rows", "reserved_input_only_and_missing_pins_say_why", "adc_and_pwm_follow_the_board_map", "i2c_pins_are_fixed_by_the_board_and_come_in_pairs", "spi_pins_must_have_the_signal_and_share_a_controller", "spi_bus_must_be_complete_and_configured", "unknown_functions_are_reported"; `web/test/pins.test.ts`: "reports duplicate pins and labels, reserved and incapable pins in plain language", "checks SPI controllers and incomplete buses, with fixes", "checks the bus settings against the ABI ranges"; `web/test/blocks.pins.test.ts`: "a table with problems stops the build before compiling".
+- [x] U24 Boards seed and re-check the table: each board's default table
+  (LED: GPIO 25 on the Picos, the flash LED GPIO 4 on the ESP32-CAM, a
+  named free header pin elsewhere) passes its own pin rules; picking a
+  board on the Start tab or in Blocks replaces a table that is empty or
+  still the old board's defaults and otherwise keeps it and re-checks it
+  against the new board, with fixes — `web/test/onboarding.test.ts`: "names the Blink pin per board, and every board's default pin passes its pin rules (Rust checkPins)"; `web/test/pins.test.ts`: "switching boards re-checks the same table, with the board's fixes", "seeds a board's defaults only over an empty or untouched table", "keeps one setting per bus in use", "renames labels in pin blocks and lists the labels used".
+- [x] U25 The pin table generates code and blocks name pins by label: one
+  `const PIN_<label>: i32` per row with a pin and, in `init`, `gpio_output`
+  plus the initial level, `gpio_input` with its pull (left to an edge
+  handler that configures the pin), `i2c_open(bus, hz)` per complete I2C
+  bus and `spi_open(0, sck, mosi, miso, cs, khz, mode)`; `write`, `toggle`,
+  `read` and `on ... edge` blocks name a label and require a row of the
+  right function; the numeric-pin blocks still work and an empty table
+  changes nothing; the table plus the Blink example compiles with asc and
+  blinks the label's pin in the simulator — `web/test/blocks.pins.test.ts`: "emits the pin constants and the init setup from the table", "label blocks use the constants and check the row's function", "an empty table changes nothing (numeric pin blocks keep working)", "blinks the LED label on GPIO 25 (pico2)", "blinks the LED label on GPIO 4 (esp32)"; `web/test/blocks.generator.test.ts`: "blink (esp-base) matches test/fixtures/blocks/blink.as and compiles"; `web/test/blocks.build.test.ts`: `example "blink" compiles and passes checkAbi (esp-base)`.
+- [ ] U26 The Pins view is a keyboard-editable table that fits a phone:
+  a `<table>` with column headers and a labelled control in every cell,
+  Tab across, Ctrl+arrow keys between cells, Up / Down between rows in
+  text cells, focus and caret kept while typing, problems shown under
+  their row and linked with `aria-describedby`, invalid controls marked
+  `aria-invalid`, and the table scrolling inside its container so no page
+  scrolls sideways at 390 px. Verified in headless Chrome only (at
+  1280×900 and 390×844: page `scrollWidth` equal to the viewport with the
+  table scrolling 356 of 1014 px on the phone; Ctrl+Right, Ctrl+Down and
+  Down moved focus as described; every control labelled; typing kept the
+  caret), not by a DOM test, so it stays unchecked.
+- [x] U27 State machines are part of the payload model: version 2 adds
+  `machines` (at most 4), each with an identifier, a free-text name, an
+  initial state, states (name, note, up to 4 entry actions), events (name,
+  note) and transition rows (state, event, an optional guard, next state,
+  up to 4 actions). Guards are a closed i32 grammar of depth at most 4
+  (digital pin read by label, constant, comparison, and / or / not) and
+  actions a closed set (write or toggle a pin by label, publish constant
+  text, log, raise an event of the same machine). The shape check is
+  strict like version 1's, and a version-1 file parses to the same model
+  as version 2 with no machines and byte-for-byte the same generated
+  code — `web/test/model.test.ts`: "round-trips state machines and copies them", "migrates a version-1 model to version 2 losslessly (no machines, same code)", "rejects unknown shapes instead of dropping them"; `web/test/machines.model.test.ts`: "renaming a state or event renames every reference", "removing a state or event drops what depends on it", "the simple form round-trips through Expr within the depth limit", "lists and renames state and event references".
+- [x] U28 State machine tables are checked in Rust by a no_std, no-heap
+  crate (`state-table`, also built for `thumbv6m-none-eabi`) through
+  protocol-wasm `checkMachines`, in plain language with one-click fixes:
+  identifiers and case-insensitive uniqueness of machine ids, state and
+  event names; the initial state, every row's state, event and next state
+  existing; at most one unguarded row per state and event (an always-true
+  guard counts as one); guards in one cell that can both be true, with a
+  pin assignment that shows it (decided exactly by trying every 0/1
+  combination of up to 12 pins); guard pins that exist and are digital;
+  write and toggle on GPIO outputs; publish keys by the middleware key
+  rule and not under `sys/`; raise naming an event of the machine; at most
+  16 states, 16 events, 64 rows and 4 actions. Unreachable states, events
+  no row handles and never-true guards are warnings and do not stop
+  Compile; errors do (stage "states") — `cargo test -p state-table`: "a_valid_machine_has_no_issues", "machine_ids_must_be_identifiers_unique_ignoring_case", "state_and_event_names_must_be_identifiers_unique_ignoring_case", "initial_must_name_a_state_with_a_fix_to_the_first", "rows_must_name_known_states_and_events_with_add_fixes", "a_cell_has_at_most_one_unguarded_row", "an_always_true_guard_counts_as_the_unguarded_row", "overlapping_guards_report_a_witness_assignment", "exclusive_guards_in_one_cell_do_not_overlap", "overlap_above_twelve_pins_is_a_warning_not_checked", "guard_pins_must_exist_and_be_digital", "guards_deeper_than_four_or_malformed_are_errors", "write_and_toggle_need_an_output_pin", "publish_keys_follow_the_key_rule_and_avoid_sys", "raise_must_name_an_event_of_the_same_machine", "oversized_machines_report_the_size_and_skip_the_rest", "unreachable_states_are_warnings", "events_no_row_handles_are_dead_warnings", "a_guard_that_is_never_true_is_a_warning"; `cargo test -p protocol-wasm machines`: "cell_messages_name_the_earlier_row", "unknown_state_and_event_messages_offer_to_add_them", "flatten_cuts_deep_expressions_at_one_past_the_limit"; `web/test/machines.check.test.ts`: "a valid machine has no issues", "overlapping guards name the earlier row and a witness assignment", "warns about never-true guards, unreachable states and dead events", "a machine with 17 states reports its size and nothing else"; `web/test/blocks.machines.test.ts`: "stops the build at stage states on a machine error and never on a warning".
+- [x] U29 Machines generate bounded i32 code: per machine `SM<k>_<state>`
+  and `EV<k>_<event>` constants and a state global; per event one
+  function with a single `switch` over the states that handle it, guarded
+  rows as `if` / `else if` in table order and the unguarded row as the
+  last `else`; on a change of state the new state is set, logged
+  (`sm <id>: <from> -> <to> on <event>`) and entered (entry actions, then
+  "when <state> is entered" blocks); a self-transition runs only its
+  actions; `init` logs and enters each initial state after the pin setup.
+  No loops and no allocation; a machine no block names still compiles;
+  "raise", "is current?" and "when ... is entered" blocks name
+  `<machine>.<event or state>` and an unknown one is an error on the
+  block — `web/test/blocks.machines.test.ts`: "emits SM/EV constants per machine, its state and pending globals, and one shared smBusy", "dispatches each event with one switch over the states that have rows for it", "turns guarded rows into if / else if in table order with the unguarded row as the final else, and compiles", "on a change of state sets the state, logs the move and enters the next state (entry actions, then on-enter blocks); a self-transition only runs its actions", "init runs the machines after the pin setup, subscriptions and tick, and before the on-init stacks", "generates byte-identical code without machines", "compiles a machine that no block references (dead but valid)", "reports raise, is-current and on-enter blocks naming an unknown machine, state or event on the block", "reports an invalid table as errors naming the machine and row, leaves the bad parts out and still emits valid code"; `cargo test -p state-table step`: "step_fires_the_first_true_guarded_row_before_the_default", "step_uses_the_first_unguarded_row_and_skips_rows_naming_nothing".
+- [x] U30 Raised events are bounded: a raise while any machine is
+  stepping (from a table, a block or a flow) is queued, at most one per machine (a second is dropped and
+  logged), the queue is drained once in machine order after the outermost
+  step, and a raise during the drain is dropped and logged, so one
+  external raise runs at most 1 + (number of machines) steps —
+  `cargo test -p state-table step`: "raise_queue_holds_one_pending_event_per_machine", "dispatch_while_stepping_queues_instead_of_running", "dispatch_drains_pending_raises_once_in_machine_order", "dispatch_runs_at_most_one_plus_machines_steps"; `web/test/blocks.machines.test.ts`: "raises through the bounded queue: dropped while draining, one slot while stepping, drained once in machine order", "drops a second raise in one step and a raise chained from the drain, logs each, and stays bounded without a trap".
+- [x] U31 The "Button toggles LED mode" example (Off / On / Blink on a
+  BUTTON press, TICK every 250 ms toggling the LED in Blink) loads from
+  the Examples menu with the replace-confirm, sets its machine and adds
+  LED and BUTTON from the board's suggestions (BUTTON: a pulled-up input
+  on the board's BOOT button or, on the Picos, GPIO 15), and runs in the
+  simulator — `web/test/blocks.machines.test.ts`: "runs the mode example on pico2 (LED GPIO 25, BUTTON GPIO 15): PRESS steps Off -> On -> Blink -> Off and TICK toggles the LED in Blink", "runs the mode example on esp32 (LED GPIO 4, BUTTON GPIO 0): PRESS steps Off -> On -> Blink -> Off and TICK toggles the LED in Blink", "needs LED (output) and BUTTON (input) and raises both of its events"; `web/test/blocks.replace.test.ts`: "loading the mode example sets its machines and adds LED and BUTTON from the board's suggestions", "treats machines as work: a payload with machines but no blocks or pins asks before being replaced", "compares the generated code including the machines"; `web/test/onboarding.test.ts`: "suggests a BUTTON pin per board (input, pull-up) that passes its pin rules with the LED (Rust checkPins), outside the default table"; `web/test/blocks.build.test.ts`: `example "mode" compiles and passes checkAbi (esp-base)`.
+- [ ] U32 The States view (a sub-view beside Blocks and Pins) edits
+  machines with the Pins view's keyboard grid (shared `ui/grid.ts`): a
+  transition list by default (state, event, structured guard of up to
+  three "pin op value" terms joined by all / any, next state, up to four
+  structured actions) and an optional read-only state × event matrix
+  whose cells jump to their row or add one; problems under their row with
+  `aria-describedby`, errors and warnings styled apart, fixes as buttons;
+  renaming a state, event or machine renames the blocks that name it;
+  while simulating, the current state is highlighted in the tables and
+  named in a live line in the simulator panel. The view's decisions are
+  tested (`web/test/states.view.test.ts`: "renames the state, its rows, the initial state and the blocks when the name is valid and free", "does not merge references when the typed name collides with another state", "lists each cell's rows with next state and guard marker, and labels holes", "counts only errors on the tab, since warnings do not block compiling", "says the state and the transition that led to it"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the mode example loaded after the confirm, a duplicate unguarded row blocked Compile at stage states and switched to the view, and two BUTTON presses in the simulator showed "State: Mode = Blink (from On on PRESS)" with the Blink row highlighted), not by a DOM test, so it stays unchecked.
+
+- [x] U33 Flows are part of the payload model: version 3 makes `logic`
+  the Blocks workspace followed by at most 8 flows, each an identifier, a
+  free-text name, nodes (id, kind, canvas position 0..4000, properties)
+  and wires (output port to input port). Node kinds are a closed set
+  reusing the machines' types: entry (on start, every N ms, on a message,
+  on a pin edge by label, when `<machine>.<state>` is entered), action
+  (exactly an `ActionRef`), branch (an `Expr`), repeat (a count) and
+  sequence (2 to 4 steps). Version 3 also lets an `ActionRef` raise name
+  its machine and adds a state-test leaf to `Expr`. The shape check is
+  strict, and version-1 and version-2 files parse to version 3 with no
+  flows and byte-for-byte the same generated code — `web/test/model.test.ts`: "rejects unknown shapes instead of dropping them", "round-trips flows, keeps them across workspace edits and copies them", "migrates a version-2 model to version 3 losslessly (no flows, same code)", "migrates a version-1 model to version 3 losslessly (no machines, same code)"; `web/test/flows.model.test.ts`: "names each kind's ports in run order; a sequence has 2 to 4 steps", "connect keeps one wire per port and per input, and refuses self, entry and loop wires", "removing a node drops its wires; changing its kind drops wires from ports it lost; moves clamp", "renames pins, machines, states and events in every reference".
+- [x] U34 Flows are checked in Rust by the no_std `state-table` crate's
+  `flow` module (no heap, no recursion, built for `thumbv6m-none-eabi`)
+  through protocol-wasm `checkFlows`, with the tables' issue and fix
+  shape: at most 8 flows, 64 nodes and 128 wires; flow ids unique
+  identifiers and node ids unique identifiers; exactly one entry; every
+  period, key, pin, machine and state an entry names valid and of the
+  right pin function (an edge needs a GPIO input; fix: add it); actions
+  and branch conditions by the tables' own rules, a raise naming an
+  existing machine and event (fix: add the event to that machine);
+  repeat 1..10000, sequence 2..4; wires naming existing nodes, real
+  output ports and a non-entry input, each output port and each input
+  wired at most once; no cycles (a repeat's body loops by itself), an
+  error on each wire of one; nodes the entry does not reach, empty
+  repeats and empty branches are warnings and do not stop Compile; errors
+  do (stage "flows") — `cargo test -p state-table flow`: "the_mode_example_as_flows_has_no_issues", "every_node_kind_and_port_wired_into_a_tree_is_clean", "a_flow_has_exactly_one_entry", "flow_and_node_ids_are_identifiers_and_unique", "sizes_are_bounded_and_an_oversized_flow_is_not_checked_further", "wires_need_known_nodes_real_ports_and_no_entry_target", "each_output_port_and_each_input_is_wired_at_most_once", "a_cycle_is_an_error_on_each_of_its_wires_even_through_a_repeat_body", "nodes_the_entry_does_not_lead_to_and_empty_repeats_and_branches_are_warnings", "entries_check_their_period_key_pin_and_state", "actions_and_conditions_follow_the_table_rules_and_raises_name_their_machine", "repeat_counts_and_sequence_steps_are_bounded"; `cargo test -p protocol-wasm flows`: "the_mode_example_flows_are_clean", "graph_messages_name_the_other_wire_and_say_what_to_do", "entry_and_action_messages_use_the_tables_wording_with_fixes", "a_flow_without_an_entry_and_a_loop_are_errors"; `web/test/flows.model.test.ts`: "finds no issue in the mode example's flows", "reports a missing entry, a merge, an unknown event with an add fix and an unreachable node, by index", "checks branch conditions' state tests and pins like table guards"; `web/test/flows.gen.test.ts`: "stops the build at stage flows on a flow error and never on a warning".
+- [x] U35 Machine tables accept the version-3 additions: a guard's state
+  test ("machine M is in state S") and a raise naming another machine's
+  event, through the same bounded queue (one external raise from any
+  source still runs at most 1 + machines steps). Overlap stays exact: a
+  state test is a 0/1 leaf and assignments with one machine in two states
+  are skipped — `cargo test -p state-table`: "state_tests_of_one_machine_exclude_each_other_in_the_overlap_check", "guard_state_tests_must_name_a_machine_and_its_state", "a_raise_naming_another_machine_needs_that_machine_and_event", "state_leaves_read_through_the_reader_and_exclude_each_other"; the U30 bound tests unchanged.
+- [x] U36 One statement IR behind every logic source: Blocks, table rows
+  and entries, and flows all build `web/src/blocks/stmt.ts` statements
+  (lines, if / else if / else on i32 conditions, constant-count for) and
+  print them with one iterative printer, sharing the lowering of the
+  model's `Expr` and `ActionRef`; the Blocks output is byte-for-byte what
+  it was (verified for this change on every workspace the test suite
+  generates, and kept by the fixture tests) — `web/test/flows.gen.test.ts`: "prints nested if / else if / else and for loops with two spaces per level, iteratively", "lowers the model's expressions and actions, state tests and raises through the host", "generates byte-identical Blocks code when there are no flows"; `web/test/blocks.generator.test.ts` fixture tests ("blink (esp-base) matches test/fixtures/blocks/blink.as and compiles" and the other fixtures); `web/test/blocks.machines.test.ts`: "generates byte-identical code without machines".
+- [x] U37 Flows generate bounded code: the tree under the entry lowers to
+  straight-line statements (a branch to `if`, a repeat to a constant
+  `for`, a sequence to its steps in order) placed where the matching hat
+  block's body goes (init, the shared tick, the message handler, the pin's
+  interrupt, the state's enter function); each node outside a repeat body
+  logs `flow <id>: <node>`; a bad flow is reported and left out and the
+  output still compiles — `web/test/flows.gen.test.ts`: "lowers branch, repeat and sequence onto the shared if / for, logging each node outside repeat bodies", "places each entry's body where its hat block's would go", "reports bad flows, leaves the bad parts out and still emits valid code"; `web/test/blocks.build.test.ts`: `example "mode-flows" compiles and passes checkAbi (esp-base)`; `web/test/blocks.generator.test.ts`: "mode-flows (esp-base) matches test/fixtures/blocks/mode-flows.as and compiles".
+- [x] U38 The "Button toggles LED mode" example drawn as flows (a BUTTON
+  edge raising Mode.PRESS, every 250 ms raising Mode.TICK, entering
+  Mode.Blink logging) produces the same simulator trace as the Blocks
+  version: every log line, publish, pin setup, pin write and interrupt,
+  and the LED level after each step, apart from the flows' own `flow`
+  lines — `web/test/flows.gen.test.ts`: "produces the same simulator trace as the Blocks version on pico2", "produces the same simulator trace as the Blocks version on esp32".
+- [ ] U39 The Flows view (a sub-view beside Blocks, Pins and States)
+  edits flows on a hand-written SVG canvas (drag nodes, drag a wire from
+  an output port onto a node, select and delete nodes and wires, pan by
+  dragging the background, zoom buttons, arrow keys move the focused
+  node) and in an outline of the same flow in run order (each port a menu
+  of nodes it may lead to or a new node, Earlier / Later, Delete), with a
+  palette, Undo for the last 50 changes and a properties grid (grid.ts)
+  for the selected node; problems mark their node or wire and list with
+  fixes; while simulating, each flow's latest run is highlighted and named
+  in a line in the simulator panel; on a phone the outline is the default
+  and the canvas scrolls inside its box. The view's decisions are tested
+  (`web/test/flows.view.test.ts`: "places the input on top and outputs along the bottom in run order", "says what each node does", "makes new entries, actions and conditions from the pins and machines, keeping what applies", "offers as targets only nodes that keep the flow a tree, and reorders a chain", "keeps at most fifty undo steps", "maps issues to nodes, counts errors on the tab, and turns fixes into changes", "names the node each flow last ran in the simulator line"; `web/test/flows.model.test.ts`: "lists the outline in run order with each port's chain under its node, then nodes nothing leads to", "parses flow log lines and keeps each flow's latest run"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the canvas box 356 px wide scrolling 576 px on the phone, a real mouse drag moved a node and rewired a port, a duplicate flow name, a 5 ms period and an unreachable node were reported and blocked Compile at stage flows, two Undos restored them, and two BUTTON presses highlighted the Press flow's nodes), not by a DOM test, so it stays unchecked.
+
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and
@@ -2051,6 +2674,17 @@ name fixed pins, and an ADC read names a board pin. I2C transfers are
 synchronous and bounded (`periph::MAX_I2C` = 64 bytes each way), so the
 payload SDK can offer the blocking `embedded-hal` traits; PWM and ADC calls
 complete immediately. None of these raise events.
+
+SPI (ABI 2) and I2C (ABI 3) per base firmware:
+
+| board | SPI | I2C |
+|---|---|---|
+| ESP32 (ESP32-CAM, `firmware/`) | bus 0: SPI2 with DMA, payload-chosen pins | bus 0: SDA 26 / SCL 27 (the camera's SCCB), up to 400 kHz |
+| ESP32-S3 (`firmware/`) | bus 0: SPI2 with GDMA, payload-chosen pins | bus 0: SDA 5 / SCL 6 (a `Profile` constant), up to 400 kHz (E24) |
+| ESP32-C3 (`firmware/`) | no payloads run (no `wasm` runtime: wasmi needs CAS atomics) | same |
+| ESP8266 (`firmware-esp8266/`) | no payloads run (too little DRAM for wasmi) | same |
+| Pico 2, RP2350 (`firmware-rp/`) | bus 0 on SPI0 or SPI1, pins checked against the function table, FIFO pumped (V15, V17) | buses 0 (GP4/GP5) and 1 (GP6/GP7), up to 1 MHz (V16) |
+| Pico, RP2040 (`firmware-rp/`) | no payloads run (no CAS atomics); the bus drivers are built and the pure core host tested | same |
 
 - [x] X1 ABI 3 is a superset of ABI 2 (six imports appended to
   `wasm_abi::IMPORTS`, `ABI_VERSION` 3), and ABI 1 and ABI 2 payloads still
@@ -2206,6 +2840,16 @@ first claimant pins the key — claim a device before exposing it.
   `saves_alternate_sectors_and_survive_reopen`,
   `power_loss_at_any_operation_keeps_old_or_new_record`,
   `newest_valid_record_wins_and_a_corrupt_one_falls_back`.
+  Trust record format 2 (`firmware/src/trust_store.rs`, 60 bytes): magic
+  `MWTR`, format `2`, state (0 Unclaimed, 1 Claimed), two zero bytes,
+  sequence u32, `min_version` u32, public key 32, last accepted control
+  counter u64 (O17), CRC-32 of bytes 0..56. Format 1 (52 bytes: the same
+  without the counter, CRC-32 of bytes 0..48) still loads, with counter 0;
+  the next save writes format 2 into the other sector, so the migration
+  has the power-loss safety of any save and is never undone —
+  `trust_store::tests::format_1_records_load_with_counter_zero_and_migrate_on_the_next_save`,
+  `unknown_formats_and_an_unclaimed_record_with_a_counter_are_refused`,
+  `saves_never_lower_the_control_counter_for_the_same_key`.
 - [x] T9 A raised `min_version` reaches flash after the new image's CRC
   check and before its slot header, so the new image never boots with the
   old `min_version`; a failed save writes no header —
@@ -2236,6 +2880,746 @@ first claimant pins the key — claim a device before exposing it.
   running, the trust record surviving reboot, and BOOT-held re-keying.
   Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`); not yet run on
   a board.
+
+### Over-the-air payload update (O…)
+
+A claimed ESP base firmware device (ESP32, ESP32-S3: feature `espnow`)
+accepts signed payload updates over ESP-NOW. The host reaches it through a
+USB↔ESP-NOW bridge (`tools/espnow-bridge/esp8266`, an ESP8266 running a
+dumb-radio Arduino sketch) with `mwctl --port <bridge> --espnow <MAC>`.
+Every decision is Rust: the request/response rules in `middleware::rpc`
+(always built, `no_std`, no heap), the over-the-air policy in
+`esp_base::ota`, and the host client in `mwctl::air`.
+
+**Request/response frames.** A request or response is one ESP-NOW frame,
+magic `MR` (not the publications' `MW`, so publication receivers skip it as
+foreign), version 1: `MR | 1 | kind (1 request, 2 response) | id u16 LE |
+to MAC 6 | key length u8 + key + body` (requests) or `| status u8 + body`
+(responses; status 0 or a `HandlerError` code). Key and body share 237
+bytes, so a `sys/loader/chunk` over the air carries 217 image bytes. The
+requester resends on timeout with the **same** id; the responder replays a
+cached response to a repeat instead of running the handler again, so a
+resent `commit` or `start` never acts twice. Responses go unicast to the
+requester.
+
+**Policy** (`esp_base::ota::admit`, before dispatch, over the air only;
+from 2026-10-30, after a security review found that anyone in radio range
+could stop, restart or abort the running payload — ESP-NOW is
+unauthenticated and its source MAC spoofable — and that a non-owner's
+unsigned commit aborted the owner's transfer):
+
+| request over the air        | unclaimed | claimed |
+|-----------------------------|-----------|---------|
+| `sys/info`, `sys/trust/info` | `Denied` | allowed (read only) |
+| `sys/loader/begin`          | `Denied`  | allowed: *stages* into the inactive slot; the active image and the running payload are untouched; takes the transfer over |
+| `sys/loader/chunk`          | `Denied`  | the transfer's owner only (else `InvalidRequest`) |
+| `sys/loader/commit`         | `Denied`  | owner checked first (a non-owner gets `InvalidRequest`, loader untouched); then signed only, `TrustState::accept_commit` (pinned key, version above the last); the owner's unsigned commit is `Denied` and ends its transfer; an accepted commit activates the staged image and stops the old payload |
+| `sys/payload/start`, `stop` | `Denied`  | signed control request only (below), else `Denied` |
+| `sys/trust/claim`, anything else | `Denied` | `Denied` |
+
+**Publications and requests** (with middleware 0.5, E18): two frame
+formats cross the radio and they never mix. Publications (`MW`) are
+`app/...` from a payload and `disc/...` from the radio task's own beacon
+only, received on `app/...` and `disc/...` only; `sys/...` is never a
+publication over the radio. Requests (`MR`) are the only way `sys/...`
+crosses it, they are built only by the radio task (responses) or the host
+(requests), and the table above admits them. A payload cannot send an
+`MR` frame: whatever it publishes is wrapped in an `MW` sample.
+
+Serial is unchanged (physical access is the authority there): a serial
+`begin` stops the payload and shows `Loading`, `start`/`stop` take empty
+bodies, unsigned commits follow the trust rules. `sys/info` stays refused
+over the air on an unclaimed device: an unclaimed device has no key to
+check anything against and does not advertise itself to the air.
+
+**Staging.** The running payload never reads flash after its start (the
+image buffer is only needed to compile it) and a transfer only writes the
+inactive slot, so a `begin` over the air (`Context::staging`) erases and
+fills the inactive slot while the payload keeps running; the status stays
+what it was during the transfer and when it fails. Only a commit that the
+trust rules accept writes the slot header, which activates the new image,
+and stops the old payload (`Action::Activate` stops it; status
+`Stopped`). A storage failure stops the payload only after a serial
+`begin` (`dispatch::after_storage_failure`). The worst a radio attacker
+without the key can do is a denial of service of the *update*: take the
+transfer over with a `begin`, or spoof the owner's MAC and send chunks
+that spoil the staged image, whose commit then fails its CRC or signature
+check. It can never stop, start, replace or roll back the running
+payload.
+
+**Signed control requests** (`middleware::loader::trust`): over the air
+`sys/payload/start` and `stop` carry `[counter u64 LE][signature 64]` (72
+bytes), an Ed25519 signature by the pinned key over the 29-byte message
+`b"mw-control-v1\0" || op u8 (1 start, 2 stop) || target MAC 6 ||
+counter u64 LE`, the target being the device's own station MAC.
+`TrustState::accept_control` accepts it only when the signature verifies
+(`verify_strict`) and the counter is strictly above the last accepted one;
+the controller saves the new counter with the trust record *before*
+acting (failure: `Internal`, nothing done) and then dispatches the key
+with an empty body. A captured request can therefore not be replayed
+(counter used), sent to another device (MAC signed), turned into the
+other command (op signed) or used as a payload signature (different
+tag). A claim of a new key resets the counter to 0. `mwctl` uses the Unix
+time in milliseconds as the counter (`--counter` overrides), so no read
+is needed and `sys/trust/info` is unchanged; a host whose clock lags the
+last accepted counter is refused with an explanation. `stop` stays
+available over the air (signed), because stopping a payload remotely is
+the point of the feature and the signature makes it as safe as `start`;
+`upload --start` over the air sends the commit and then a signed start.
+
+**One loader.** Serial and radio share the dispatcher's loader. The
+requester whose `begin` started the transfer owns it; a `begin` from anyone
+takes it over, and a `chunk` or `commit` from a non-owner is
+`InvalidRequest` without touching the loader — checked before the
+signature rule, so a non-owner's unsigned commit cannot end the owner's
+transfer. Both serial ports count as one requester; radio requesters are
+told apart by MAC.
+
+**Bridge framing** (`mwctl::bridge`, 460800 baud): COBS + CRC-16 frames,
+`Send {dst, data}` host → bridge, `Recv {src, data}`, `Hello {mac,
+channel, version}`, `Stats` (six counters) and `Sent {ok, dst}` (the
+driver's send callback: MAC-level acknowledgement) bridge → host, `Query`
+host → bridge.
+
+- [x] O1 Request and response frames have the layout above, round trip,
+  fill exactly one 250-byte frame at the limits (64-byte key with 173 body
+  bytes; 217-byte chunk; 237-byte response body), refuse larger messages
+  before sending, and reject malformed frames —
+  `rpc::tests::o1_frames_round_trip_and_layout`,
+  `o1_largest_messages_fill_one_frame_and_larger_ones_are_refused`,
+  `o1_malformed_frames_are_rejected`.
+- [x] O2 A requester accepts only the response with its call's id, from the
+  peer it asked, addressed to itself, and its attempts are bounded —
+  `rpc::tests::o2_a_call_accepts_only_its_own_response_and_bounds_attempts`.
+- [x] O3 A responder runs each request once: repeats are replayed from a
+  bounded least-recently-used cache, repeats (and other requests) while one
+  runs are dropped, an abandoned or 10 s old request frees it, and bodies
+  over the cache size are not cached —
+  `rpc::tests::o3_a_request_runs_once_and_repeats_replay_its_response`,
+  `o3_the_cache_is_bounded_least_recently_used_and_skips_large_bodies`,
+  `o3_an_abandoned_or_stale_request_frees_the_responder`.
+- [x] O4 `espnow::rpc::RpcRequester` (`Requester`) and `RpcResponder`
+  (`Responder`) work end to end over an in-memory air that loses,
+  duplicates and reorders frames: a lost request is resent with the same
+  id, a lost response is replayed without running the handler again, a
+  duplicated or delayed request runs once, a delayed response never
+  answers a later call, attempts are bounded, and frames for or from other
+  stations are ignored —
+  `espnow::rpc::tests::o4_request_and_response_end_to_end`,
+  `o4_a_lost_request_is_resent_with_the_same_id`,
+  `o4_a_lost_response_is_replayed_without_running_the_handler_again`,
+  `o4_a_duplicated_request_runs_once`, `o4_reordered_frames_never_mix_answers`,
+  `o4_attempts_are_bounded_and_other_stations_are_ignored`,
+  `o4_oversized_requests_and_small_buffers_are_errors`. On the 0.5
+  contract `RpcRequester::request_with` bounds a call with
+  `options.timeout` (`Retry::within`: shorter and fewer attempts, at least
+  one; `None` keeps `attempts` × `timeout_ms`), refuses a `Target::Node`
+  other than its peer (`WrongTarget`) before sending, and the responder's
+  handler sees the requester's MAC as `RequestMeta::sender` —
+  `o4_request_options_bound_the_call_and_target_only_the_peer`; `espnow` builds for
+  `thumbv6m-none-eabi` (`scripts/check-features.sh`).
+- [x] O5 The bridge framing round trips, rejects bad CRC, COBS, types and
+  lengths, and is found behind the ESP8266's delimiter-less boot banner;
+  the C++ codec of the sketch reproduces the Rust golden frames byte for
+  byte (also checked by an independent Python COBS/CRC script) —
+  mwctl `bridge::tests::o5_messages_round_trip_through_the_wire`,
+  `o5_golden_frames_match_the_bridge_firmware`, `o5_bad_frames_are_rejected`,
+  `o5_frames_split_out_of_a_noisy_stream`, `o5_macs_parse_and_format`;
+  `tools/espnow-bridge/check.sh` (`test_bridge_frame.cpp`, then the sketch
+  compiles for `esp8266:esp8266:generic`).
+- [x] O6 Over the air an unclaimed device refuses everything; a claimed one
+  allows only the update keys, never `sys/trust/claim`, and only signed
+  commits, while serial keeps its rules —
+  `ota::tests::o6_an_unclaimed_device_refuses_the_air_entirely`,
+  `o6_a_claimed_device_allows_only_the_update_keys_over_the_air` (also
+  `app/...` and `disc/...` keys: they are publications, never requests),
+  `o6_a_commit_over_the_air_must_be_signed`.
+- [x] O7 The begin's requester owns the transfer; a begin from the other
+  side takes it over and the abandoned side's chunks and commit are
+  refused without disturbing it; the owner's unsigned commit over the air
+  ends the transfer; a signed replay is `Denied` with the image kept
+  (through the real dispatcher) —
+  `ota::tests::o7_only_the_owner_continues_a_transfer`,
+  `o7_begin_takes_the_transfer_and_its_end_frees_it`,
+  `ota::tests::session::o7_a_serial_begin_aborts_an_air_transfer`,
+  `o7_an_air_begin_aborts_a_serial_transfer_and_completes_signed`.
+- [x] O8 The radio task keeps at most four requesters registered as
+  unicast peers (least recently used replaced), and its request counters
+  saturate and are logged on change at most every 5 s —
+  `radio::tests::o8_unicast_peers_are_bounded_and_rpc_counters_saturate`.
+  The shell (`src/shell/radio.rs`) taps `MR` frames off the radio before
+  the transport, hands new requests to the controller as `Port::Radio`
+  requests tagged with the sender's MAC, and answers repeats from the
+  cache.
+- [x] O9 `mwctl --espnow <MAC>` runs `info`, `trust info|claim`, `upload`
+  (217-byte chunks, signed commit) and `start`/`stop` through the bridge
+  with the same `Device` code as serial; it learns the bridge's MAC from
+  `Hello`, retransmits with the same id (300 ms per attempt, 5 s for
+  begin/commit/start, 10 attempts, a 30 ms wait after an unacknowledged
+  send), and never runs a step twice on a lossy link; `monitor` and
+  `reset` are refused with `--espnow` —
+  mwctl `air::tests::o9_info_over_the_air_learns_the_bridge_first`,
+  `o9_upload_over_the_air_survives_loss_and_never_runs_a_step_twice`,
+  `o9_refusals_are_device_errors_and_attempts_are_bounded`;
+  `plan::tests::o9_air_plans_use_chunks_that_fit_one_espnow_frame`;
+  `cli::tests::o9_espnow_selects_the_bridge_and_refuses_local_commands`.
+- [x] O10 On hardware (2026-10-30; ESP32-S3 `e4:b0:63:81:d3:24` on
+  `/dev/ttyACM0`, bridge ESP8266EX `5c:cf:7f:72:f6:54` on `/dev/ttyUSB0`):
+  after `trust claim` over serial, `info` and `trust info` over the air
+  answered; a signed `upload echo.wasm --start` (version 1000) installed
+  and started, and the S3's own serial showed `ota: sys/loader/begin from
+  5c:cf:7f:72:f6:54`, `trust: signed payload accepted, min_version 1000`,
+  `echo: started`, status running; `mwctl --port /dev/ttyACM0 info` said
+  running.
+- [x] O11 On the same hardware, over the air: with the device unclaimed,
+  `info`, `trust info`, `upload` and `stop` were `Denied` (`ota: ...
+  refused: device unclaimed`); claimed, an unsigned upload was `Denied` at
+  commit (`commit over the air must be signed`, transfer ended, status
+  stopped), a stale (1000) and an older (999) signed version were `Denied`
+  (`needs a valid signature and version > 1000`), and `trust claim` was
+  `Denied` (`not allowed over the air`).
+- [x] O12 On the same hardware: a serial upload begun 0.6 s into an
+  over-the-air upload took over (the air side failed at step 35/109 with
+  `InvalidRequest`, the device logged `chunk from 5c:cf:... refused:
+  another requester owns the transfer`) and installed; an over-the-air
+  upload begun 0.25 s into a serial upload took over the same way (serial
+  failed at step 23/48) and installed and started.
+- [x] O13 Throughput on the same hardware: `bench.wasm` (23072 bytes, 109
+  requests) installed signed in 1.62 s, 1.62 s and 1.69 s (about 14 KB/s),
+  `echo.wasm` (2686 bytes) with start in 0.32 s; no retransmission and no
+  unacknowledged send in any hardware run (the retransmission path is
+  covered by O4 and O9 on the host).
+- [x] O14 A transfer begun over the air stages into the inactive slot:
+  `begin` is `Erase { stop: false }`, the status (`Running` included) is
+  unchanged by begin, chunks, failures, a spoiled image or a refused
+  commit, and only an accepted commit activates the image and stops the
+  old payload; the active image stays loadable throughout; a storage
+  failure stops the payload only after a serial `begin`; a serial `begin`
+  still stops it and shows `Loading` —
+  firmware `dispatch::tests::o14_a_staged_transfer_leaves_the_running_payload_alone_until_commit`,
+  `o14_a_failed_or_spoiled_staged_transfer_keeps_the_payload_running`,
+  `o14_storage_failures_stop_the_payload_only_after_a_serial_begin`;
+  `store::tests::o14_staging_keeps_the_active_image_loadable_and_a_spoiled_one_never_activates`;
+  `ota::tests::session::o14_an_air_transfer_never_disturbs_the_running_payload_before_a_signed_commit`.
+- [x] O15 Ownership is checked before the signature rule: a non-owner's
+  unsigned commit is `InvalidRequest` (`NotOwner`) and leaves the owner's
+  transfer to complete; only the owner's unsigned commit ends it —
+  `ota::tests::o15_ownership_is_checked_before_the_signature_rule`,
+  `ota::tests::session::o15_a_non_owners_unsigned_commit_leaves_the_owners_transfer_to_complete`.
+- [x] O16 Over the air `start`/`stop` need a signed control request: empty
+  or malformed bodies are `Denied` (`UnsignedControl`), a signature by
+  another key, for another device or the other command, or with a counter
+  not above the last is `Denied` (`ControlRefused`); an accepted one acts
+  once and its replay is `Denied`; serial needs no signature —
+  `ota::tests::o16_start_and_stop_over_the_air_need_a_signed_body`,
+  `o16_a_signed_control_names_this_device_this_command_and_a_new_counter`,
+  `ota::tests::session::o16_signed_start_and_stop_act_once_and_replays_are_denied`;
+  middleware `loader::trust::tests::control_message_and_bodies_have_the_documented_layout`,
+  `crypto::control_golden_vector_verifies`,
+  `crypto::control_requests_need_the_pinned_key_this_device_this_op_and_a_new_counter`;
+  firmware `dispatch::tests::trust::reclaim_needs_the_rekey_window` (a
+  claim resets the counter, a commit keeps it).
+- [x] O17 The last accepted control counter is persisted with the trust
+  record (format 2, migrated from format 1, see T8) before the request
+  acts, and is never lowered for the same key —
+  `trust_store::tests::saves_never_lower_the_control_counter_for_the_same_key`,
+  `format_1_records_load_with_counter_zero_and_migrate_on_the_next_save`,
+  `power_loss_at_any_operation_keeps_old_or_new_record`.
+- [x] O18 `mwctl --espnow` signs `start`, `stop` and `upload --start` with
+  `--key` for the target MAC (counter `--counter` or Unix milliseconds),
+  refuses `upload`/`start`/`stop` over the air without `--key` and
+  `start`/`stop --key` over serial with a usage error, and explains a
+  `Denied` start/stop; the control signature reproduces the middleware
+  golden vector —
+  mwctl `sign::tests::golden_control_vector_is_reproduced`,
+  `default_counter_is_unix_milliseconds`;
+  `cli::tests::o9_espnow_selects_the_bridge_and_refuses_local_commands`,
+  `rejects_bad_trust_and_key_usage`; `air::tests::o9_upload_over_the_air_survives_loss_and_never_runs_a_step_twice`,
+  `o9_refusals_are_device_errors_and_attempts_are_bounded`;
+  `error::tests` (`sys/payload/stop` explanation).
+- [x] O19 On hardware (2026-10-30, same boards; firmware flashed over the
+  format-1 trust record claimed at `min_version` 3000 with `echo`
+  running, which loaded as claimed/3000/counter 0): over the air, unsigned
+  `stop` and `start`, a 72-byte zero "signature", and `trust claim` were
+  `Denied` (`refused: start/stop over the air must be signed by the pinned
+  key`, `control signature invalid ...`, `not allowed over the air`);
+  `begin` and 20 chunks of `bench.wasm` without a commit left `echo`
+  running (`ota: staging into the inactive slot; the payload keeps
+  running`); a signed `stop` stopped it, the identical replay, a signed
+  `start` with the same counter and one with an older counter were
+  `Denied`, a signed `start` started it. A signed `upload blink.wasm
+  --start` (3001) logged `new image active; stopping the payload that ran
+  the old one`, then the signed start ran blink; a signed upload of
+  `bench.wasm` (3002, 23 077 bytes, 1.85 s) staged while blink kept
+  publishing `app/blink/state` until the commit. With a serial upload in
+  progress, eight unsigned air commits got `InvalidRequest` (`another
+  requester owns the transfer`) and the serial upload installed; with an
+  air upload in progress, 49 serial unsigned commits were refused the same
+  way and the air upload installed. A signed upload with a corrupted chunk
+  failed its commit (`InvalidRequest`) with `bench` still running and
+  `min_version` unchanged. The trust partition read back as two format-2
+  records (seq 17 and 18, `min_version` 3005, counters 1793329532721 and
+  1793329644857); after a reset the replay of counter 1793329644857 was
+  `Denied`. Serial `stop`/`start` worked unsigned. After the full gate
+  the gated build was flashed again and the refusals, staging, signed
+  stop/start, replay and a signed `upload echo.wasm --start` (3006)
+  repeated with the same results.
+
+### A/B firmware OTA (RP2350)
+
+The RP base firmware on a Raspberry Pi Pico 2 (RP2350) replaces its own
+firmware over the same USB CDC serial port and framing that carries
+payloads, driven by `mwctl fw`. The RP2350 bootrom does the dangerous part:
+two partitions of the partition table are linked as an A/B pair, the
+bootrom boots the valid image with the higher version, and an image
+flagged try-before-you-buy (TBYB) is booted only by a flash-update reboot,
+on trial, until the firmware calls the bootrom's explicit buy within the
+watchdog window; otherwise the next boot skips it and the previous image
+runs. The references are the RP2350 datasheet's bootrom chapter (§5.1
+"Bootrom concepts", §5.4 "Bootrom APIs", §5.9 "Metadata block details");
+the PDF was not available while this was written, so every encoding was
+taken from the pico-sdk headers that the datasheet tabulates
+(`boot/picobin.h`, `boot/bootrom_constants.h`, `pico/bootrom.h`,
+`embedded_start_block.inc.S`), and the behaviours that could not be
+checked are listed below as assumptions to verify on hardware.
+
+The Pico 1 (RP2040) bootrom has no partitions, versions or TBYB, so it is
+out of scope by design: `mwctl` refuses an RP2040 UF2 and the RP2040
+firmware does not answer `sys/fw/*`.
+
+Everything decidable on the host lives in `middleware::fw_ota` (always
+built, `no_std`, no heap): the `sys/fw/*` wire format (`wire`), the pure
+state machine `FwUpdate` (`machine`), the IMAGE_DEF parser (`picobin`), the
+persisted record (`record`) and the hardware seam `FwPlatform`
+(`platform`). The shell `FwService` (`service`, feature `trust`) runs a
+request against a platform. `fw_ota::sim` (feature `fw-sim`, host only) is
+an in-memory model of the RP2350 bootrom and flash that implements
+`FwPlatform`, so the whole lifecycle, power cuts included, is tested on
+the host; mwctl's fake device runs the real `FwService` on it.
+
+**Protocol.** Seven keys, all integers little-endian (the byte layouts are
+in the `fw_ota` module docs and `wire::FwInfo`):
+
+| key              | request body                         | response |
+|------------------|--------------------------------------|----------|
+| `sys/fw/info`    | empty                                | state, running slot, each slot's version and TBYB flag, the anti-rollback floor, node id, the update in progress (36 bytes) |
+| `sys/fw/begin`   | image length, version, SHA-256 (40 bytes) | the target slot (1 byte), always the inactive one |
+| `sys/fw/chunk`   | offset, 1 to 512 bytes               | empty |
+| `sys/fw/commit`  | empty, or an Ed25519 signature (64 bytes) | empty |
+| `sys/fw/reboot`  | empty                                | empty; flash-update reboot about 100 ms later |
+| `sys/fw/confirm` | empty                                | empty; explicit buy |
+| `sys/fw/abort`   | empty                                | empty |
+
+The version is the image's IMAGE_DEF `major << 16 | minor`; it must exceed
+both the persisted `min_version` and the running image's version, and the
+device installs an image only as the version its own IMAGE_DEF declares,
+so the bootrom's A/B choice and the anti-rollback floor always agree.
+Chunks are 512 bytes at multiples of 512 (the last one shorter), in any
+order; a chunk already received is acknowledged and not written again; a
+misaligned, overlapping or out-of-range chunk is refused. The commit
+signature uses the payload signing key pinned by `sys/trust/claim` and
+covers the 64-byte message `"mw-firmware-v1\0"`, length, version, target
+slot, the device's 8-byte node id and the image's SHA-256, so a signature
+is good for one image, one version, one slot of one device and never for a
+payload or a control request (different tags). An unclaimed device
+accepts any commit (trust on first use, as for payloads). Every request is
+idempotent on resend, and a refused request leaves the state unchanged,
+except a commit whose image fails verification, which abandons the
+transfer.
+
+**State machine.** Idle goes to Receiving on `begin` (a repeated
+identical `begin` resumes, any other restarts). When every chunk has
+arrived, `commit` checks the version and the signature, then the device
+hashes what it holds and reads the IMAGE_DEF: the hash must match and the
+image must be an RP2350 executable flagged TBYB, without an OTP rollback
+version, of the declared version, with a block of its metadata loop in
+the first sector's last page (the sentinel, below). The state is then
+Verified; the device persists `min_version` and the pending update, writes
+the image's first sector, and is Committed. `reboot` (only when Committed)
+asks the bootrom for a flash-update reboot into the new slot. That boot is
+a Trial (the bootrom reports a buy pending); `confirm` (only on trial, and
+`Unavailable` until the firmware's own self-test passed) buys the image
+and the state is Confirmed. A trial that ends without a buy (watchdog,
+reset, power cut, or `abort`, which reboots normally) comes back in the
+old slot as RolledBack. `abort` also abandons a transfer or a committed
+update (erasing the new slot's first sector). Verified is transient: it
+is where a commit stays when installing failed, and another commit
+retries.
+
+**Where the image goes.** Flash is erased in 4 KiB sectors, each just
+before its first chunk is written (computed from the received-chunk
+bitmap alone). The first sector, which holds the image's first metadata
+block, is erased at `begin` and its chunks are kept in RAM until a commit
+has passed every check and the record is saved; only then is it written.
+So the inactive slot never holds a bootable image that was not verified
+and authorized, and the running slot is never erased or written (the
+shell refuses any effect on it before touching flash).
+
+**Sentinel block.** The bootrom's explicit buy erases the image's first
+sector and programs it again with the TBYB bit clear, page by page. A
+power cut part way would leave the first pages (an IMAGE_DEF that is no
+longer TBYB) and an erased tail: with the whole block loop in those first
+pages the bootrom would boot a torn image. The power-loss test found this.
+An updatable image therefore carries a second, empty block in the last
+256-byte page of its first sector (from offset 0xF00), linked into the
+loop, so the loop closes only when the sector is complete again and a
+torn buy leaves the slot without a valid image. `picobin::image_def_block`
+and `picobin::sentinel_block` build both blocks; the device and `mwctl`
+refuse images without the sentinel.
+
+**Power loss.** Every state is recovered from flash and the bootrom at
+boot (`FwUpdate::boot`): with nothing pending the state is Idle; with an
+update pending and the bootrom reporting a buy pending it is Trial; if the
+pending slot is the one running (bought, record not yet settled) it is
+Confirmed and the record is settled; if the reboot had been requested and
+the old slot runs, it is RolledBack and the record is settled; if the
+reboot had not been requested it is Committed when the slot still hashes
+to the committed image, else Idle with the slot's first sector erased. A
+commit's version is used up once its record is saved, even when the update
+does not complete, so a captured signed commit can never be replayed.
+
+**Host.** `mwctl --port <PATH> fw info | fw update <IMAGE> [--key <KEYFILE>]
+[--version MAJOR.MINOR] [--no-reboot] | fw reboot | fw confirm | fw abort`.
+The image is a UF2 (RP2350 families, reassembled from the flash base; an
+RP2040 UF2 is refused) or a raw binary; an ELF is refused with the
+`picotool` and `objcopy` commands that convert it. The version comes from
+the image's IMAGE_DEF; `--version` is only a cross-check. `fw update`
+refuses locally an image the device would refuse, sends every chunk with
+progress (a lost reply is resent and deduplicated), signs the commit for
+the slot and node id the device reported, reboots, reopens the same port
+path for up to 12 s (it never scans), waits for the trial and confirms it,
+retrying while the self-test is still running. It waits up to 15 s for
+`sys/fw/commit` (the device hashes the whole image) and 5 s for
+`sys/fw/begin` and `sys/fw/confirm` (sector erases).
+
+- [x] Y1 The `sys/fw/*` requests and the `sys/fw/info` response encode and
+  parse symmetrically; every other body length is `InvalidRequest`, an
+  unknown `sys/fw/` key `NotFound`, any other key is not the updater's;
+  a 512-byte chunk request fits one serial frame —
+  `fw_ota::wire::tests::y1_commands_round_trip_through_parse`,
+  `y1_parse_refuses_bad_bodies_without_panicking`, `y1_info_round_trips`;
+  `fw_ota::tests::y1_slots_and_sizes`.
+- [x] Y2 The IMAGE_DEF parser follows a block loop from the first 4 KiB
+  (bounded blocks, bounded loop length), returns the last IMAGE_DEF with
+  its flags, version (and rollback version) and the loop's highest block
+  in the first sector, and treats any malformed metadata as no image,
+  never panicking —
+  `fw_ota::picobin::tests::y2_block_built_here_parses_with_version_and_tbyb`,
+  `y2_two_block_loop_like_the_pico_sdk`, `y2_rollback_version_is_read`,
+  `y2_malformed_metadata_is_no_image`, `y2_random_metadata_never_panics`,
+  `y2_sentinel_block_closes_the_loop`, `y2_read_errors_propagate`.
+- [x] Y3 The transfer targets the inactive slot, refuses an image larger
+  than the slot or not newer than the floor, accepts aligned chunks in any
+  order once each, refuses misaligned, overlapping, out-of-range and
+  wrong-length chunks without changing state, erases each sector once on
+  its first chunk and stashes the first sector, resumes on an identical
+  `begin`, and abandons the transfer when verification fails (hash,
+  missing or wrong IMAGE_DEF, not TBYB, rollback version, version
+  mismatch) — `fw_ota::machine::tests::y3_happy_path_reaches_committed_with_sector_erases_computed`,
+  `y3_chunks_are_idempotent_and_bounded`,
+  `y3_begin_targets_the_inactive_slot_and_checks_size_and_version`,
+  `y3_verification_failures_abandon_the_transfer`,
+  `y3_chunk_set_counts_and_sectors`.
+- [x] Y4 The signed message is the 64-byte layout above with its own tag;
+  a claimed device accepts a commit only with a signature by the pinned
+  key over exactly this length, version, slot, node and hash (strict
+  verification), an unclaimed one accepts any commit, and a build without
+  `trust` refuses every commit of a claimed device —
+  `fw_ota::wire::tests::y4_signed_message_layout`,
+  `fw_ota::machine::tests::y4_claimed_devices_need_a_signature_binding_slot_node_and_version`
+  *(trust)*, `y4_without_crypto_a_claimed_device_refuses_every_commit`
+  *(no features)*.
+- [x] Y5 `reboot` is accepted only when committed, `confirm` only on trial
+  (`Unavailable` before the self-test passed, idempotent once confirmed),
+  and `abort` abandons a transfer or committed update, reverts a trial
+  and is a no-op otherwise —
+  `fw_ota::machine::tests::y5_reboot_confirm_and_abort_follow_the_state`.
+- [x] Y6 The boot reconciliation maps every combination of record and
+  bootrom state to the table under "Power loss" —
+  `fw_ota::machine::tests::y6_boot_reconciles_every_record_with_the_bootrom_state`.
+- [x] Y7 On the bootrom model, through `FwService` and the wire format: an
+  update installs into B, boots on trial, is confirmed (TBYB cleared) and
+  then boots normally, and the next update goes into A; a trial without a
+  confirm rolls back and its version cannot be replayed; `abort` reverts a
+  trial and discards a committed update; refused requests (early reboot
+  or confirm, old version, oversize, unsigned or wrongly bound
+  signatures) never touch the running slot and leave no image in the
+  other; a bad image or corrupted flash fails the commit with nothing
+  persisted; resent requests are idempotent —
+  `fw_ota::sim::tests::y7_full_lifecycle_updates_both_slots_in_turn`,
+  `y7_trial_without_confirm_rolls_back_and_its_version_is_used_up`,
+  `y7_abort_rejects_a_trial_and_abandons_transfers`,
+  `y7_refusals_leave_the_running_image_alone`,
+  `y7_corrupted_flash_or_a_bad_image_fails_the_commit`,
+  `y7_resent_requests_are_idempotent` *(fw-sim)*.
+- [x] Y8 A power cut at every mutating operation of a complete update
+  (sector erases and writes, the record saves, the reboot request, the
+  bootrom's buy and the boot-time settling) leaves a device that boots,
+  boots only the factory image or a bought new one, starts the updater,
+  and completes the update when the host retries —
+  `fw_ota::sim::tests::y8_power_loss_at_every_operation_is_recoverable`,
+  `y8_power_loss_while_settling_at_boot` *(fw-sim)*.
+- [x] Y9 `mwctl fw` loads UF2 and raw images and refuses ELF, RP2040,
+  non-TBYB, sentinel-less and mismatched images with an explanation;
+  parses its commands; updates, reboots and confirms a fake Pico 2
+  running the real updater on the bootrom model, with progress, signed
+  commits, lost replies resent, refusals explained, confirm retried while
+  the self-test runs, and abort on trial rolling back; prints `fw info`;
+  waits longer for the slow requests —
+  `mwctl` `fw::tests::y9_images_load_from_bin_and_uf2_and_are_checked_like_the_device`,
+  `y9_versions_parse_as_major_minor`,
+  `y9_update_reboot_and_confirm_against_the_bootrom_model`,
+  `y9_refusals_are_explained`,
+  `y9_lost_replies_are_resent_and_the_device_deduplicates`,
+  `y9_abort_on_trial_rolls_back`; `cli::tests::y9_parses_fw_commands`;
+  `report::tests::y9_fw_info_names_slots_versions_and_progress`;
+  `link::tests::timeouts_extend_begin_only`.
+- [x] Y10 The persisted record (60 bytes: magic, format, flags, slot,
+  sequence number, `min_version`, the pending update's version, length and
+  hash, CRC-32) round trips, every single-bit error and an erased sector
+  read as no record, the newer of two copies wins, and a save that would
+  lower `min_version` is detected —
+  `fw_ota::record::tests::y10_records_round_trip_and_reject_damage`,
+  `y10_newest_takes_the_higher_sequence_and_floors_never_drop`.
+- [x] Y11 `fw_ota` is always built (its declarations carry no cfg gate);
+  the RP2350 sets (no features, `trust`, `trust,serial`,
+  `trust,serial,postcard`) build for `thumbv8m.main-none-eabihf` with no
+  cloud dependency and no host feature; `fw-sim` builds on the host and
+  is a host feature that no embedded set enables; mwctl's shipped build
+  uses no middleware feature (the model is a dev-dependency) —
+  `scripts/check-features.sh` (Y11 lines).
+
+**RP2350 integration** (`firmware-rp/`, `rp_base::ota`, feature
+`fw-update`, on in the `rp2350` build). The RP base firmware serves
+`sys/fw/*` with `FwService` on `rp_base::ota::platform::RpPlatform`, an
+`FwPlatform` over any NOR flash and a boot ROM seam (`rp_base::ota::rom::Rom`),
+built for each request from borrows: the flash is the payload store's, lent
+by the request service, and the ROM seam is owned by the backend
+(`rp_base::ota::AbUpdate`). `AbUpdate::boot` runs `FwService::boot` once
+at startup, before the request service opens the store; if it fails (most
+often because the board has no partition table, so the boot ROM booted no
+slot) every `sys/fw/*` request is answered `Unavailable` and the boot log
+says why. The request service hands every `sys/fw/*` key to it before the
+payload dispatcher, with the node id `sys/info` reports, the trust store's
+root of trust and the self-test.
+
+No `unsafe` is written and the only boot ROM function called is `reboot`.
+embassy-rp 0.10 exposes `get_sys_info` and `explicit_buy` only as
+`unsafe fn` (raw buffer pointers); rp235x-hal 0.4 has a safe `boot_info`
+wrapper but cannot be linked beside embassy-rp (it forces its PAC's `rt`
+feature, and both PACs then define the interrupt vector table
+`__INTERRUPTS`). So the integration gets the same facts safely:
+
+- the booted slot is read from the QMI's `ATRANS0` register (the boot ROM
+  maps the booted partition at 0x10000000; the register's base is that
+  partition's first sector), a safe register read through embassy-rp's PAC
+  (feature `unstable-pac`);
+- "buy pending" is the running image's own TBYB flag in its IMAGE_DEF in
+  flash. The boot ROM launches a TBYB image only on a flash-update boot of
+  its partition (otherwise it is an image condition failure), and the buy
+  clears the flag, so a running image still flagged TBYB is exactly a trial;
+- the explicit buy is done by the firmware: it reads the running image's
+  first sector into a 4 KiB stack buffer, clears the TBYB bit of the
+  IMAGE_TYPE item, and erases and programs that sector with embassy-rp's
+  safe blocking flash inside `cortex_m::interrupt::free`, checks it read
+  back, then stops the watchdog (embassy-rp's `Watchdog::stop`). That is
+  the only effect of the ROM's `explicit_buy` that applies here: its
+  downgrade erase of the other slot never applies (versions only grow) and
+  neither does the OTP rollback version (images carry none, and the chip
+  is not in secure boot). The image's first sector holds the vector table
+  and the two metadata blocks but no code (`.text` starts at 0x1000), so
+  nothing the CPU fetches is erased while interrupts are masked, and a
+  power cut part way leaves the sentinel's loop open, so the other slot
+  boots;
+- `reboot_flash_update` is `rom_data::reboot(REBOOT_TYPE_FLASH_UPDATE, 100,
+  0x10000000 + partition offset, 0)` (an XIP address, as picotool passes
+  after a load) and `reboot_normal` is `REBOOT_TYPE_NORMAL` with the same
+  delay; both return, so the reply leaves first.
+
+The platform addresses slots by partition offset through the untranslated
+window (see "RP base firmware"), bounds every access by the slot size,
+refuses an erase or write of the running slot before touching flash
+(defence in depth: the pure core never asks), erases one 4 KiB sector per
+call so USB is serviced between sectors, pads a short final write with
+`0xFF` and bounces unaligned reads. The record lives in two sectors of
+unpartitioned space after slot B (0x2FE000): a save erases the sector not
+holding the newest valid record and writes the new one there with the next
+sequence number, fields first and magic last. Nothing in the firmware
+feeds or starts the watchdog, so a hung trial image is reverted by the
+boot ROM's trial watchdog if it arms one, and by any reset otherwise.
+
+The self-test that gates `sys/fw/confirm` is `fw_update::SelfTest`: the
+host has configured USB (embassy-usb's `Handler::configured`), the payload
+store opened (its flash is readable and lends the flash to the updater)
+and the trust record opened (the key that authorizes the next update is
+readable). Until it passes, `confirm` is `Unavailable` and `mwctl`
+retries.
+
+**Image and partition table.** `build.rs` writes the image's first-sector
+metadata into the linker script (`rp2350-image.x`, included by
+`memory-rp2350.x`) from `rp_base::ota::image`: the vector table at 0x000,
+the IMAGE_DEF block at 0x200 (IMAGE_TYPE flags 0x9021, an RP2350 Arm secure
+executable with TBYB; VERSION `major.minor`), the sentinel block at 0xF00
+linked into its loop, `.text` from 0x1000; embassy-rp's own IMAGE_DEF is
+off (`imagedef-none`). The version is `build.sh rp2350 --version
+MAJOR.MINOR` (environment variable `RP_BASE_FW_VERSION`), else the crate's
+`major.minor`, and is also what `sys/info` reports. The partition table is
+built in Rust from the flash map (`rp_base::ota::table`, rather than a
+picotool JSON file, so the table, the linker script and the updater share
+one map): one block at flash offset 0 with partition 0 "A" (sectors
+0x002 to 0x17F) and partition 1 "B" (0x180 to 0x2FD, link type "A
+partition", value 0), both accepting the `rp2350-arm-s` UF2 family, all
+permissions everywhere (they only govern the ROM's own flash APIs and
+picotool), and unpartitioned space accepting the `absolute` family. The
+host tool `rp-image` (`firmware-rp/src/bin/rp-image.rs`, run by
+`build.sh rp2350` after picotool has converted the ELF to a UF2) checks the
+image as `mwctl fw update` and the device do and writes
+`rp-base-rp2350-V-update.bin` and `-update.uf2` (the TBYB image for `mwctl
+fw update`) and `rp-base-rp2350-V-factory.uf2` and `-factory.bin`: the
+partition table at offset 0, the same image with only its TBYB bit cleared
+(bought) in slot A, and erased pages at the start of slot B and of both
+record sectors, in the `absolute` family, leaving the payload store and the
+trust record as they are. `picotool info -a` on these files shows the
+partition table (A at 0x2000 to 0x180000, B at 0x180000 to 0x2FE000, "B w/
+0") and the image's two metadata blocks at 0x10000200 (image def, version,
+"not bought" on the update image) and 0x10000F00 (ignored).
+
+**Factory flashing** of a Pico 2, for version 1.0 (any version works; the
+first update must be higher). First build with `firmware-rp/build.sh
+rp2350 --version 1.0`, which leaves `rp-base-rp2350-1.0-factory.uf2` in
+`firmware-rp/target/thumbv8m.main-none-eabihf/release/`. Then put the board
+in BOOTSEL mode: hold the BOOTSEL button while plugging in USB (or, from
+the previous rp-base, any way that reaches the boot ROM's USB mode); the
+RP2350 drive and picotool see it. Optionally run `picotool partition info`
+to see what table the board holds now (a board running the pre-A/B rp-base
+has none). Load the factory UF2 with `picotool load --ignore-partitions -v
+rp-base-rp2350-1.0-factory.uf2`, which writes every block at its absolute
+address whatever table the board holds and verifies it, and start it with
+`picotool reboot`; on a board without a partition table, dragging the
+file onto the RP2350 drive does the same. `picotool partition info` (in
+BOOTSEL again) then lists partitions A and B. On the first boot the
+firmware logs `fw: booted slot A, state idle, min_version 0.0` on
+`sys/log`, and `mwctl --port <PATH> fw info` reports state idle, running
+A, slot A 1.0 (bought), slot B empty, `min_version` 0.0. The payload store
+and the pinned key, if any, are unchanged, so a claimed board still needs
+`--key` for signed commits. To start from a clean board instead,
+`picotool erase` before the load wipes everything, including the trust
+record.
+
+- [x] Y12 `FwPlatform` on the RP2350 as above: the booted slot from the
+  translated base (no slot without a partition table, and the updater is
+  then `Unavailable` while the payload side works); the trial flag from
+  the running image's TBYB flag; slots bounded and the running one never
+  erased or written; reads, erases and writes at physical offsets through
+  the untranslated window; short writes padded and odd reads bounced; the
+  record alternating between its two sectors with every power cut during
+  a save leaving the previous record; the buy clearing only the TBYB bit
+  in place with interrupts masked, then stopping the watchdog, idempotent,
+  and a torn buy leaving the slot unbootable so the other one boots;
+  flash-update reboots at the partition's XIP address; the self-test
+  (USB configured, store and trust record open) gating confirm; and the
+  whole lifecycle through `mwctl` and the request service on a model of
+  the boot ROM's A/B choice: factory 1.0 in A, a signed update to 1.1 into
+  B, trial, confirm, reboot into B, an update to 1.2 into A left
+  unconfirmed and reset (rolled back to B, 1.2 used up), then 1.3 into A —
+  `ota::tests::y12_slots_are_bounded_and_the_running_one_is_never_written`,
+  `y12_the_record_alternates_sectors_and_survives_power_cuts`,
+  `y12_explicit_buy_clears_tbyb_in_place_masked_and_stops_the_watchdog`,
+  `y12_a_torn_buy_leaves_slot_b_unbootable_and_a_boots`,
+  `y12_without_the_partition_table_the_updater_is_unavailable`,
+  `y12_mwctl_updates_confirms_and_rolls_back_a_pico_2`,
+  `y12_confirm_waits_for_the_self_test`,
+  `y12_requests_reach_the_updater_and_unknown_fw_keys_are_not_found`;
+  `ota::rom::tests::y12_the_translated_base_names_the_running_slot`;
+  `flash::tests::y12_window_reads_through_the_untranslated_alias_and_writes_physically`;
+  `fw_update::tests::y12_the_self_test_needs_usb_the_store_and_the_trust_record`
+  (firmware-rp `cargo test --lib`).
+- [x] Y13 The image and flash layout: the partition table makes the two
+  equal slots an A/B pair (B linked to A, `rp2350-arm-s` accepted), with
+  the record sectors outside both; every build's IMAGE_DEF is the 0x9021
+  block with the build's `major.minor` at 0x200, linked to the sentinel at
+  0xF00, with no code in the first sector; the linker script carries
+  exactly those words; versions parse as `MAJOR.MINOR` only; the factory
+  flash is the table plus the update image bought (one bit) in slot A and
+  boots A; images `mwctl` refuses are refused here too; the UF2s
+  reassemble to the images and the factory one erases slot B and the
+  record but not the payload store or the trust record; and the image
+  `build.sh rp2350` produced installs through `mwctl fw update
+  --no-reboot` on the board model, reboots on trial, is confirmed and is
+  then byte for byte the factory image of itself —
+  `layout::tests::y13_rp2350_has_a_table_two_equal_slots_and_the_record_outside_them`,
+  `v2_memory_x_flash_lengths_match_the_maps`;
+  `ota::table::tests::y13_partition_table_makes_slots_a_and_b_an_ab_pair`;
+  `ota::image::tests::y13_blocks_are_the_picobin_blocks_with_tbyb_and_the_sentinel_in_the_last_page`,
+  `y13_linker_script_carries_exactly_the_block_words`,
+  `y13_versions_parse_as_major_minor_only`;
+  `ota::tests::y13_factory_flash_is_the_table_and_the_update_image_bought_in_slot_a`,
+  `y13_images_mwctl_refuses_are_refused_here_too`,
+  `y13_uf2s_reassemble_to_the_images_and_the_factory_one_erases_b_and_the_record`,
+  `y13_the_built_update_image_installs_through_mwctl` (with
+  `RP_BASE_UPDATE_IMAGE` naming the built `-update.bin` or `-update.uf2`;
+  skipped without it). `picotool info -a` on the built files shows the
+  table and the blocks as described above.
+
+**Unreadable trust record.** The root of trust decides whether a commit
+must be signed, so when the trust record cannot be read the firmware does
+not treat the device as unclaimed: the request service hands the backend
+no root of trust (`FwContext::trust` is `None`) and the backend refuses
+`begin`, `chunk` and `commit` with `Unavailable` before the updater sees
+them. `info` is read only. `abort` only abandons a transfer (erasing the
+inactive slot's first sector) or reverts a trial to the image that booted
+before, so it can only move the device back to firmware it already ran.
+`reboot` only boots an image already committed, which was authorized
+while the record was readable. `confirm` passes this rule for the same
+reason, but the self-test requires the trust record open, so a trial that
+boots with the record unreadable is never bought and reverts at the next
+reset: the firmware that cannot read its root of trust never becomes
+permanent.
+
+- [x] Y16 With the trust record unreadable, firmware `begin`, `chunk` and
+  `commit` (signed or not) are `Unavailable` and leave the inactive slot
+  untouched, `info` and `abort` work, and a trial booted with the record
+  unreadable cannot be confirmed (self-test) and rolls back on reset —
+  `ota::tests::y16_an_unreadable_trust_record_refuses_firmware_installs`,
+  `y16_a_trial_booted_with_the_trust_record_unreadable_is_never_bought`.
+
+**Boot ROM questions.** Settled from the pico-sdk and picotool sources:
+the flash-update reboot's `p0` is the XIP address of the partition start
+(picotool's load passes `0x10000000 + start`); the A/B partition booted is
+the partition the ROM maps at 0x10000000 (`ATRANS0`), which stands in for
+`boot_info.partition`; a TBYB image is launched only on a flash-update boot
+of its own partition (rp235x-hal's documentation of the boot diagnostic
+`IMAGE_CONDITION_FAILURE`), which makes the TBYB flag the "buy pending"
+bit; the explicit buy's downgrade erase and OTP rollback never apply to
+these images. Open, for the hardware run (Y14): whether the ROM arms a
+watchdog for a trial and with which period (16.7 s is from memory), and
+whether embassy-rp's clock setup, which reprograms the watchdog's tick
+generator to 1 µs from `clk_ref`, changes that period (nothing in the
+firmware feeds or starts the watchdog); that the ROM uses the last
+IMAGE_DEF of a block loop (these images have one); that the ROM compares
+`major.minor` between A and B and boots the higher bought one; what the
+ROM does with a flash-update reboot aimed at a slot holding no valid image
+(the firmware never asks for one: `reboot` needs a committed, verified
+image); whether `ATRANS0`'s size is exactly the partition's (only its base
+is used); and that a power cut during the firmware's own buy leaves B
+unbootable on silicon as in the model.
+
+- [ ] Y14 The bootrom behaves as the model assumes, to verify on a Pico 2:
+  a normal boot skips an unbought TBYB image; a flash-update reboot boots
+  it (and maps its partition at 0x10000000); without a buy the watchdog
+  reboot (if the ROM arms one; about 16 s, from memory of the datasheet)
+  or any reset boots the other slot; the bootrom picks the higher
+  `major.minor` between A and B when neither is TBYB; the firmware's buy
+  (rewriting the image's first sector with the TBYB bit clear) makes the
+  image boot normally afterwards; the last IMAGE_DEF of a block loop is
+  the one used; and a power cut during the buy's rewrite leaves the slot
+  unbootable thanks to the sentinel.
+- [ ] Y15 End to end on a Pico 2 over USB CDC: `mwctl fw update` with a
+  signed image installs into the inactive slot, the port comes back after
+  the reboot within the reconnect window, the trial is confirmed, a later
+  reset boots the new image, a trial left unconfirmed reverts, and power
+  cuts during the transfer, after the commit and during the trial leave a
+  device that boots and finishes the update on a retry.
 
 ### DMA routes (ABI 4)
 
@@ -2617,7 +4001,8 @@ payload): each frame is one JPEG of varying length (R14).
     `pwm::tests::open_validates_before_the_host`.
   - [x] Board pin map and claims (ESP32 = ESP32-CAM): PWM timer 0
     channels 0..3 on GPIO 0, 4, 13, 14, I2C bus 0 on SDA 26 / SCL 27, a
-    camera port; other chips none (`Unsupported`); PWM, I2C and camera
+    camera port; other chips none (`Unsupported`; since E24 the ESP32-S3
+    maps I2C bus 0 to SDA 5 / SCL 6); PWM, I2C and camera
     pins are owned exclusively, checked in their direction (camera inputs
     may be input-only), refused to `gpio_*`, and released per owner; the
     LEDC plan gives each frequency the most duty bits its divider allows
@@ -2712,6 +4097,86 @@ payload): each frame is one JPEG of varying length (R14).
     (DMA 4–12 KB per capture), streams them at 2 frames/s; the badge
     decodes and draws them in about 2.0 s each; a mirrored frame decodes
     with PIL to a 240×240 image. Open: re-verify after the final flash.
+
+### Serving requests (ABI 5, M…)
+
+Payloads answer requests, not only publish and subscribe, so a unit's
+payload can implement a request contract such as the S88 phase commands
+(`unit/<node>/phase/<em>.<phase>`). A payload registers a key with
+`serve`, learns its device's node id with `node_id`, and answers in its
+`on_request` export; the device routes requests on served keys to
+`wasm_host::Payload::request` and answers the caller with the reply or
+the payload's `HandlerError`. Nothing is allocated per request: the
+payload's `mw_alloc` provides one buffer holding a 16-byte meta block
+(sender and deadline; never a principal), the body and the reply space.
+The contract is `wasm_abi::serve`, pure and heap-free.
+
+- [x] M1 ABI 5 is a superset of ABI 4: `serve` (2 params) and `node_id`
+  (1) are appended to `wasm_abi::IMPORTS`, `on_request` is an optional
+  export of six `i32` parameters and an `i32` result, `ABI_VERSION` is 5,
+  ABI 1–4 modules load unchanged, and an ABI 4 host (the ABI 4 prefix)
+  does not know the new imports, so such a payload fails to load with an
+  unknown import instead of running half wired —
+  `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`,
+  `an_abi4_host_does_not_know_the_abi5_imports`;
+  `wasm-host/tests/abi4.rs` `r1_every_import_links_and_older_revisions_still_load`;
+  `wasm-host/tests/abi5.rs` `s10_abi5_imports_are_unknown_to_an_abi4_host`.
+- [x] M2 The request rules are pure and tested without an interpreter:
+  the buffer layout (meta, body, reply), the meta block encoding (flags,
+  deadline, sender; unknown flags and short blocks refused), the result
+  code (a length within the offered capacity, a negated `HandlerError`
+  code, anything else `Internal`), the served-key table and the
+  `node_id` target range — `wasm_abi::serve::tests::*`;
+  `wasm-host` `abi::tests::abi5_serve_slots_node_id_and_request_ranges`,
+  `link::tests::serve_needs_request_exports_and_the_device`,
+  `node_id_checks_the_range_and_the_device`.
+- [x] M3 `wasm-host` serves a request end to end: the body and meta reach
+  the slot, the reply comes back; an unserved key is `NotFound` and an
+  oversized body `InvalidRequest` without calling the payload; a declined
+  or out-of-memory buffer is `Unavailable`; a reply longer than offered or
+  an unknown code is `Internal` and copies nothing; running out of fuel in
+  `on_request` traps and poisons; `serve` checks keys, bounds, the eight
+  slots, the exports and the device; a board without the ABI 5 methods
+  answers `Unsupported` — `wasm-host/tests/abi5.rs` `s1`–`s9`.
+- [x] M4 `payload-sim` takes `!req <key> [<hex>]`, hands it to the board
+  serving the key and prints the reply or the error; `--node` sets the
+  node id — `payload-sim` `sim::tests::abi5_req_commands_node_option_and_reply_lines`;
+  `tools/payload-sim/tests/abi5.rs` `s11_req_reaches_the_serving_payload_and_prints_the_reply`,
+  `s11_the_default_node_is_one`.
+- [x] M5 The Rust SDK serves safely: `serve::serve`, `serve::node_id`
+  (the one new `unsafe` call site, writing exactly an owned 8-byte
+  array), `Payload::on_request` with a `Request` (body, meta) and a reply
+  slice, and `payload!(App, serve)` whose `on_request` only accepts
+  regions inside its receive buffer; `payload!(App)` modules are unchanged
+  — `mw-payload` `rt::tests::on_request_answers_from_the_receive_buffer`,
+  `request_parts_bounds_every_region`, `alloc_follows_the_buffer_size`,
+  `serve::tests::slots_hex_and_host_stubs`; example `serve_echo`
+  (`tests::answers_node_then_body_or_buffer_too_small`); `abi-check`
+  `tests::abi5_serve_needs_on_request_and_mw_alloc`, `tests/payloads.rs`
+  `rust_serve_echo_example`.
+- [x] M6 AssemblyScript authors have the same contract: `templates/serve.ts`
+  and the template README's ABI 5 section, compiled and validated by
+  `payloads/scripts/check-all.sh` — `abi-check` `tests/payloads.rs`
+  `as_serve_template`.
+- [x] M7 Firmware routes requests on served keys to the payload (esp-base,
+  rp-base; conagotchi runs esp-base's shell and gets it when it moves to
+  this middleware): `Device::serve` accepts any non-`sys` key
+  (`esp_base::serve::servable`; wasm-host keeps the live table of eight),
+  `node_id` returns the `sys/info` node id, and the shell answers with
+  `Payload::request`'s reply through the shared pure routing
+  `esp_base::serve` (sys keys first, a trap as `Internal` and the payload
+  stopped, a stopped payload's keys `Unavailable`), and says so in
+  `sys/info` (`Caps::SERVE`, S12). Serial requests only: ESP-NOW admits
+  update keys alone (E25). On hardware: Q24-Q27 —
+  esp-base `serve::tests::m7_*` (E25); rp-base `requests::tests::m7_*`
+  (V20); `loader::tests::m7_device_info_carries_trailing_capabilities_after_the_node_id` (S12).
+- [x] M8 The browser simulator serves requests like a board: each device
+  has a node id (default `0000000000000001`, a `SimBus` gives every unit
+  the next), `serve` is accepted, `adc_read` reads a level set from the
+  page, and `request(key, body, meta)` answers through
+  `Payload::request`; a `SimBus` routes requests by the key's node id,
+  delivers publications between units and to listeners after the
+  publishing call returns, and takes units off the network — `cargo test -p protocol-wasm simulator`: "q19_a_phase_unit_serves_its_phase_under_its_node_id", "adc_levels_are_set_from_js_and_clamped"; `web/test/recipe.run.test.ts`: "gives each unit a distinct node and routes requests by the key's node", "publishes each unit's state reports on the bus and delivers to other units' subscriptions".
 
 ### JPEG decode in WASM (J…)
 
@@ -2831,6 +4296,473 @@ wasmi's per-call fuel budget into RGB565 strips for the GC9A01.
   interop and fuzz tests, clippy (wasm32 and host) and rustdoc with
   warnings denied, and the `fuel_probe` payload validated by `abi-check` —
   `payloads/scripts/check-all.sh`.
+
+### S88 recipe model (Q…)
+
+The payload editor began with one model per payload: a board, its pin
+table and its logic. That suits one board doing one job. It does not
+describe a procedure that spans several boards ("blink the status light,
+then take a reading on the sensor board"), and it ties the procedure to
+pins. The plant is now described the way ISA-88 (S88, IEC 61512-1) batch
+control describes a plant: three models plus the procedural control
+model. The rules live in the `recipe-core` crate (no_std, no heap, no
+recursion, built for `thumbv6m-none-eabi` and for the browser through
+protocol-wasm); the shapes live in the web model (`web/src/model/plant.ts`,
+`procedural.ts`, `recipe.ts`).
+
+From the top: the master recipe (process model, `recipe.ts`) names phase
+classes; allocation rules (`recipe-core` `alloc`) instantiate it as a
+control recipe (runtime binding, executed by the `recipe-core` engine over
+the wire contract), which maps abstract phases to unit-specific phases;
+those belong to the physical model of units, equipment modules and
+control modules (`plant.ts`).
+
+#### The models
+
+- **Physical model.** A *unit* is one board: an id, a name, a *unit
+  class* (an identifier recipes may constrain to), the node id
+  `sys/info` reports once the unit is bound to a board (16 hex digits, or
+  unbound), its board target, and its payload (Blocks workspace, flows,
+  state machines). Its *control modules* are the rows of its pin table,
+  checked by the firmwares' own pin rules as before. An *equipment
+  module* is a named group of control modules on the unit (a control
+  module belongs to at most one).
+- **Procedural control model.** A *phase class* is the
+  equipment-independent interface recipes ask for: an identifier and up
+  to four whole-number parameters, each with a range (for example
+  Blink(period_ms 10..10000, times 1..100), Measure(samples 1..16)). An
+  *equipment phase* is a unit's implementation of a class on one of its
+  equipment modules: a name, the range it accepts for every class
+  parameter (inside the class's), and for each acting state of the phase
+  state model optionally a flow of that unit's logic as the state's body.
+  Every equipment phase runs the phase state model below on the unit.
+- **Master recipe (process model).** A procedure of *unit procedures*
+  (each optionally constrained to a unit class) and *steps*. A step runs
+  one phase class with a value for every parameter inside one unit
+  procedure; an *operation* label groups steps for the reader. Steps are
+  joined by *transitions* into a sequential function chart. A step never
+  names a board, a pin or a unit.
+- **Control recipe.** A master recipe bound by allocation: each unit
+  procedure to one unit, each step to one equipment phase of that unit.
+  The engine executes it by commanding the bound phases.
+
+Deviation from the coordinator's mapping: equipment phases live in the
+procedural section of the document, keyed by unit and equipment module,
+rather than inside each equipment module. Phase classes are shared by
+recipes and units, so they cannot live in either; keeping the phases next
+to them makes the procedural model one list the phase editor (round 8)
+reads, and the references (unit, module, class, body flow) are checked
+like any other.
+
+#### Phase state model
+
+The states and commands follow the example procedural-element state model
+of ISA-88.00.01 §5.2 (IEC 61512-1, the figure of states and commands for
+procedural elements). Pausing and Paused are left out: a phase here has no
+breakpoints, and Hold covers stop-and-resume. Resetting is taken from the
+PackML state model (ISA-TR88.00.02): ISA-88 resets straight to Idle, which
+leaves the phase no state in which to put its equipment back. Every state
+is *acting* (its logic runs and ends by reporting Done: Running, Holding,
+Restarting, Stopping, Aborting, Resetting) or *quiescent* (Idle, Held,
+Complete, Stopped, Aborted). Complete, Stopped and Aborted are *final*.
+The recipe procedure follows the same model.
+
+| state      | Start   | Hold    | Restart    | Stop     | Abort    | Reset     | Done     |
+|------------|---------|---------|------------|----------|----------|-----------|----------|
+| Idle       | Running |         |            |          |          |           |          |
+| Running    |         | Holding |            | Stopping | Aborting |           | Complete |
+| Complete   |         |         |            |          |          | Resetting |          |
+| Holding    |         |         |            | Stopping | Aborting |           | Held     |
+| Held       |         |         | Restarting | Stopping | Aborting |           |          |
+| Restarting |         | Holding |            | Stopping | Aborting |           | Running  |
+| Stopping   |         |         |            |          | Aborting |           | Stopped  |
+| Stopped    |         |         |            |          |          | Resetting |          |
+| Aborting   |         |         |            |          |          |           | Aborted  |
+| Aborted    |         |         |            |          |          | Resetting |          |
+| Resetting  |         |         |            | Stopping | Aborting |           | Idle     |
+
+An empty cell rejects the input and leaves the state unchanged. States
+have wire codes 0..10 in the order listed; commands 1..6 in column order.
+
+#### Master recipe rules
+
+The chart has no selection (alternative) divergence: a transition's only
+condition is that its `from` steps' phases are Complete, a step ends at
+most one transition and is started by at most one, and the chart is
+acyclic. Parallel divergence (one transition starting several steps) and
+convergence (one waiting for several) are allowed. The *initial* steps are
+those no transition starts. These rules make the chart a marked graph in
+which, by induction in topological order, every step runs exactly once
+when every phase completes, which is the engine's termination argument.
+Identifiers are unique ignoring case; arguments must name class
+parameters, each once, every parameter given and in the class's range;
+limits are 16 phase classes, 4 parameters, 4 unit procedures, 16 steps and
+16 transitions. A unit procedure no step uses is a warning.
+
+#### Allocation rules
+
+A unit can host a unit procedure when it is online in discovery, is of
+the unit class the procedure asks for (if any), and has, for every step of
+the procedure, an equipment phase of the step's class whose ranges hold the
+step's arguments. Among several such phases the smallest (equipment
+module, phase name) by byte order wins; two steps that may be active at
+the same time never share a phase, so the later one takes the next
+suitable phase. Each unit hosts at most one unit procedure of a recipe (an
+S88 unit runs one unit procedure at a time). Units are tried in byte order
+of their ids and the first assignment in that order wins, so the result
+depends only on ids and capabilities, never on listing order; the search is
+an iterative depth-first search with a fixed move bound. A failure names
+the first unit procedure no unit can host and, per unit, the first reason
+(offline, wrong unit class, no phase of the class, an argument outside the
+phase's range, every suitable phase taken by a concurrent step), or reports
+contention when every procedure has candidates but there are too few
+distinct units. Allocation assumes the bound phases are Idle.
+
+#### Control-recipe engine
+
+The engine is a pure state machine. Each input (an operator command, a
+command's acknowledgement, a phase's state report, a unit leaving or
+rejoining the discovery directory, or the passage of time) is applied at
+the current time and yields the next engine and a bounded list of effects
+(send a command to a phase, the procedure or a step changed, a command was
+refused, a failure, an input ignored).
+
+- **Steps.** Start activates the initial steps. An active step's phase is
+  sent Start, with the step's arguments in class parameter order, once
+  the phase is Idle; the step is *started* when that command is
+  acknowledged and *done* when its phase reports Complete. A done step's
+  phase is sent Reset to release it. A transition fires once, when all
+  its `from` steps are done. The procedure is Complete when every step is
+  done and every bound phase is back to Idle or unreachable.
+- **Commands are level-triggered.** After every input the engine compares
+  each bound phase's last known state with what the procedure's state asks
+  for and sends at most one command per phase, only when none is
+  outstanding, the unit is online, the state is known and the phase state
+  model allows it. Holding or Held asks running phases to Hold; Restarting
+  asks held phases to Restart; Stopping asks phases doing something to
+  Stop; Aborting asks them to Abort; Resetting asks final phases to Reset.
+  Hold, Restart, Stop and Abort go only to the phases of *involved* steps
+  (active and started, or with a Start outstanding). The procedure moves
+  on (Holding to Held, Stopping to Stopped, Aborting to Aborted, Restarting
+  to Running, Resetting to Idle) when its involved phases have caught up.
+- **Acknowledgement.** A command is acknowledged by its reply (accepted
+  with the new state, or rejected with the current state) or by a state
+  report naming its id, so a unit that can only publish still completes
+  the handshake. Command ids increase; a report naming an id older than
+  the last applied command is ignored as stale.
+- **Failure policy.** A failure is *resumable* when the phase can still be
+  held and restarted (no acknowledgement before the deadline, a transient
+  state that does not settle in time, a reply of Unavailable,
+  DeadlineExceeded or a transport error, a phase that holds itself, a
+  unit with unfinished steps leaving the directory), and *unresumable*
+  otherwise (NotFound, InvalidRequest, a started phase found Stopped,
+  Aborted, Resetting or Idle without being told to, a phase exceeding its
+  command budget). A resumable failure while Running or Restarting holds
+  the procedure; an unresumable one while Running, Restarting, Holding or
+  Held aborts it; otherwise a failure is only reported. A rejected command
+  only updates the known state.
+- **Timeouts.** Every command carries the acknowledgement timeout, which
+  is also the request's timeout and so reaches the unit as its deadline.
+  A transient state (Holding, Restarting, Stopping, Aborting, Resetting)
+  has a settle timeout. A phase whose deadline passes becomes
+  *unreachable*: its state is unknown, it no longer blocks Holding,
+  Stopping or Aborting from finishing, and it blocks Restart until a
+  report makes it known again. Running has no timeout.
+- **Unit loss.** When the directory loses a unit (goodbye or TTL expiry),
+  its phases become unreachable and nothing more is sent to it. If any of
+  its steps is unfinished the procedure holds; Restart is refused while
+  the unit is offline, and after it rejoins until its heartbeat reports
+  its phases. A rejoined unit whose phase is still running is told to
+  Hold, and Restart then resumes the batch. Abort ends a held batch
+  Aborted; a lost phase's state is reported unknown. A unit whose steps
+  are all done is only reported.
+- **Bounds.** One input runs a fixed number of settle passes, each
+  transition fires at most once per run, each phase gets at most a fixed
+  number of commands per run, and every wait ends by a report, an
+  acknowledgement, a deadline or the operator. So after Abort and the two
+  timeouts every run is in a final state.
+
+#### Wire contract
+
+A unit serves each equipment phase on the request key
+`unit/<node>/phase/<em>.<phase>` and publishes the phase's state on
+`unit/<node>/phase/<em>.<phase>/state`, where `<node>` is the 8-byte node
+id (the middleware `SenderId`) in lowercase hex. The engine's shell sends
+each command with `Requester::request_with`, a timeout of the
+acknowledgement deadline (which transports carry to the unit as
+`RequestMeta::deadline_ms`) and `Target::Node` of the unit's node, so a
+backend that can address nodes asks no one else; the key names the node
+too, so key-routed backends reach the same unit. A unit's `HandlerError`
+maps to the engine's acknowledgement errors (NotFound, InvalidRequest,
+Unavailable, DeadlineExceeded; anything else is a transport error). Units
+announce themselves in discovery as service kind `s88/unit` with the unit
+id as instance and the unit class in TXT, which feeds the directory events
+the engine sees as unit loss and return (not yet: Q28; the page binds units
+to boards by their `sys/info` node id instead, and a board's port closing
+is its loss).
+
+Bodies are fixed binary, version 1, integers little-endian: a command is
+the version, the command code, a 32-bit id, a count and that many 32-bit
+arguments (only Start carries arguments); an acknowledgement is the
+version, accepted or rejected, the phase state code and the id; a state
+report is the version, the state code, the id of the last applied command,
+a count and that many 32-bit result values (a Measure phase's reading).
+A unit publishes a report on every state change and as a heartbeat. The
+unit side of a command is a pure function: decode, check Start's arguments
+against the phase's ranges (InvalidRequest otherwise), step the phase
+state model and answer. Payloads serve the request keys through ABI 5
+(`serve`, `on_request`, `node_id`; section "Serving requests"), and a
+report naming a command's id still acknowledges it, for a unit that can
+only publish.
+
+#### Phase flows and the generated phase server
+
+A unit's phase logic is written as flows. A flow whose entry is `phase
+<em>.<phase> <state>` (an acting state, optionally `every N ms`) is that
+phase state's body: it runs when the phase enters the state and, with a
+period, again every period while the phase stays there. The action
+`phase done` finishes the acting state, at once or after the body has run
+a given number of times (a constant or a Start parameter); `phase report`
+stores up to four result values (constants, pin readings, Start
+parameters, the run count) for the phase's state reports. The flow check
+(`state-table` `flow::check_flows_in`, with the unit's phases) requires a
+phase of the unit, an acting state, one body flow per phase state, known
+parameters, run counts only in the phase's own body and report pins that
+are not outputs; the plant check requires each phase's `bodies` to name
+flows whose entry is exactly that phase state.
+
+For a unit with equipment phases the generator emits a phase server
+(`web/src/blocks/phaseGen.ts`): at init it reads `node_id`, writes the
+node's hex digits into each phase's keys, serves each request key and
+publishes Idle; a request is decoded exactly as `wire::decode_command`,
+Start's arguments are checked against the phase's ranges, and a bounded
+switch generated from the phase state table answers accepted with the new
+state or rejected with the current one, then enters the new state
+(clearing the run count, logging it, publishing the report and running
+its body; an acting state without a body is done at once). Done is a
+pending flag that a bounded settle pass at the end of every export
+applies through the same table, so bodies never call back into the state
+machine. Reports go out on every state change, on `phase report` and
+every second.
+
+#### IR version 4 and migration
+
+The saved document becomes a *plant*: `physical` (units, each with its
+control modules, equipment modules and payload logic), `procedural`
+(phase classes and equipment phases) and `recipes` (master recipes). A
+unit's payload is exactly the version-3 model restricted to that unit, and
+that is what the generator compiles. A version 1-3 payload migrates to a
+plant of one unbound unit of class "Unit" with no equipment modules, no
+phases and no recipes; its logic is kept as the unit's basic control, and
+the unit's payload is the original model, so its generated code is
+unchanged byte for byte. It is deliberately not wrapped in an "app" phase:
+a phase runs only when started, so wrapping would change what an existing
+payload does. The version-4 reader accepts every older file.
+
+#### Requirements
+
+- [x] Q1 The phase state model is a pure transition function over 11
+  states, 6 commands and Done, exactly the table above (empty cells reject
+  and keep the state); Abort is accepted wherever something is still
+  happening; final states reset to Idle through Resetting; every state is
+  reachable from Idle and returns to it; Done alone ends any acting state
+  within three steps — `cargo test -p recipe-core phase`: "every_cell_of_the_command_matrix_matches_the_table", "acting_states_and_only_they_accept_done", "abort_is_accepted_wherever_something_is_still_happening", "final_states_reset_to_idle_through_resetting", "every_state_is_reachable_from_idle_and_every_state_reaches_idle", "done_alone_from_any_acting_state_ends_in_a_quiescent_state_within_three_steps".
+- [x] Q2 States and commands have stable wire codes (0..10, 1..6) and
+  names, mirrored by the web model and exposed to the page as the phase
+  model — `cargo test -p recipe-core phase`: "codes_round_trip_and_unknown_codes_are_none"; `cargo test -p protocol-wasm recipes`: "the_phase_model_lists_states_commands_and_the_matrix"; `web/test/plant.test.ts`: "mirrors the Rust phase model's names"; `web/test/recipe.check.test.ts`: "exposes the phase state model matching the page's names".
+- [x] Q3 Master recipes are checked by the rules above (identifiers unique
+  ignoring case; known unit procedures and classes; every parameter given
+  once and in range; known steps, non-empty sides, no repeats; a step in at
+  most one transition per side; no cycle; limits; unused unit procedures
+  warn) and compile to a bounded chart with initial steps, transition
+  masks and a "done before" relation for concurrency — `cargo test -p recipe-core recipe`: "the_worked_example_has_no_issues_and_compiles_to_a_two_step_chain", "ids_must_be_identifiers_unique_ignoring_case", "class_rules_cover_names_parameter_count_and_ranges", "a_step_needs_a_known_unit_procedure_and_class", "arguments_name_class_parameters_once_cover_all_and_lie_in_range", "transitions_need_both_sides_known_steps_and_no_repeats", "a_step_ends_at_most_one_transition_and_starts_from_at_most_one", "cycles_are_errors_on_each_of_their_transitions", "a_convergence_waiting_on_its_own_successor_is_a_cycle", "parallel_divergence_and_convergence_compile_with_concurrency", "a_recipe_needs_steps_and_respects_its_limits", "an_unused_unit_procedure_is_only_a_warning", "compile_refuses_a_recipe_with_errors".
+- [x] Q4 Allocation follows the rules above: candidates by presence, unit
+  class, phase class and ranges; exclusive units found by a bounded
+  backtracking search; ties by unit id, then module and phase name;
+  concurrent steps never share a phase; failures name the procedure and
+  each unit's reason, or contention — `cargo test -p recipe-core alloc`: "the_worked_example_binds_blink_to_the_led_unit_and_measure_to_the_sensor", "the_result_does_not_depend_on_the_order_units_are_listed_in", "an_offline_or_wrong_class_unit_is_rejected_with_its_reason", "a_unit_without_the_class_or_with_a_narrower_range_is_rejected", "two_procedures_cannot_share_one_unit", "the_search_backtracks_to_find_an_exclusive_assignment", "ties_go_to_the_smallest_unit_id_and_the_smallest_module_and_phase", "concurrent_steps_take_different_phases_and_sequential_ones_may_share", "too_many_units_is_refused".
+- [x] Q5 The engine runs steps and transitions as above with
+  level-triggered commands (at most one outstanding per phase), releases
+  done phases with Reset, completes only when every phase is back to Idle,
+  accepts a report naming a command's id as its acknowledgement, ignores
+  stale reports, and moves the procedure by the phase state model
+  (operator commands outside it are refused) — `cargo test -p recipe-core engine`: "the_worked_example_runs_blink_then_measure_and_releases_both_phases", "a_report_naming_the_command_acknowledges_it", "reports_older_than_the_last_applied_command_are_ignored", "operator_commands_follow_the_phase_table", "hold_holds_the_running_phase_and_restart_resumes_it", "stop_and_abort_end_the_run_in_stopped_and_aborted", "a_rejected_command_updates_the_known_state_and_is_retried".
+- [x] Q6 Failures follow the policy above: resumable ones hold, unresumable
+  ones abort, rejections only update the state, and a phase over its
+  command budget aborts — `cargo test -p recipe-core engine`: "a_missing_acknowledgement_holds_the_recipe_and_makes_the_phase_unknown", "not_found_and_invalid_request_abort_while_unavailable_holds", "a_phase_that_holds_itself_holds_the_recipe_and_one_that_aborts_aborts_it", "a_rejected_command_updates_the_known_state_and_is_retried", "a_phase_that_keeps_rejecting_exhausts_its_budget_and_aborts".
+- [x] Q7 Losing a unit with unfinished steps holds the batch, nothing is
+  sent to it, Restart is refused while it is offline and until its
+  heartbeat makes its phases known, a rejoined unit's running phase is
+  held and Restart then completes the batch, Abort ends it Aborted; losing
+  a unit whose steps are done is only reported — `cargo test -p recipe-core engine`: "losing_a_unit_with_unfinished_steps_holds_and_restart_waits_for_it", "losing_a_unit_whose_steps_are_done_is_only_reported"; `cargo test -p recipe-core sim`: "losing_the_led_unit_holds_the_batch_and_abort_ends_it_aborted", "a_lost_unit_that_comes_back_is_held_and_the_batch_restarts_to_complete".
+- [x] Q8 Timeouts are deadlines: every command carries the acknowledgement
+  timeout, which reaches the unit as `RequestMeta::deadline_ms`; a missed
+  acknowledgement or an unsettled transient state makes the phase
+  unreachable and holds the batch — `cargo test -p recipe-core engine`: "a_missing_acknowledgement_holds_the_recipe_and_makes_the_phase_unknown", "a_transient_state_that_never_settles_times_out"; `cargo test -p recipe-core sim`: "a_phase_stuck_holding_times_out_and_the_batch_is_held_with_it_unknown"; `cargo test --test recipe_wire`: "the_worked_example_runs_to_complete_over_request_with_and_pub_sub".
+- [x] Q9 Termination: for 3000 random interleavings of operator commands,
+  unit losses and returns and stuck phases on the worked example, followed
+  by Abort, every run is Complete, Stopped, Aborted (or Idle, never
+  started or reset) within the acknowledgement plus settle timeouts, no
+  input overflows its effects, no command goes to a unit the engine was
+  told is offline, and every ending and the hold path occur; without
+  failures every ordering of unit speeds completes — `cargo test -p recipe-core sim`: "every_run_ends_complete_stopped_or_aborted_after_abort_and_two_timeouts", "without_failures_every_ordering_of_unit_speeds_completes".
+- [x] Q10 The wire contract is as above: keys with the node in hex that
+  parse back, version-1 command, acknowledgement and report bodies that
+  round-trip and refuse malformed input, and a pure unit side that checks
+  Start's arguments against the phase's ranges; over the middleware 0.5
+  traits (memory backend) the engine's commands go out with
+  `request_with`, a timeout and `Target::Node`, units answer through a
+  `Handler`, reports come back over pub/sub, the worked example
+  completes, a command addressed to another node fails and holds, and an
+  out-of-range Start is InvalidRequest — `cargo test -p recipe-core wire`: "keys_name_the_node_in_hex_and_parse_back", "malformed_keys_and_identifiers_are_refused", "command_ack_and_report_bodies_round_trip", "malformed_bodies_are_refused", "serve_applies_the_table_and_checks_start_arguments_against_ranges"; `cargo test --test recipe_wire`: "the_worked_example_runs_to_complete_over_request_with_and_pub_sub", "a_command_addressed_to_another_node_fails_and_holds_the_batch", "a_start_outside_the_phase_range_is_an_invalid_request_that_aborts".
+- [x] Q11 `recipe-core` is no_std with no heap, no `unsafe` and no
+  recursion, and builds for `thumbv6m-none-eabi` — `scripts/check-features.sh` (the Q11 build of `recipe-core` and `state-table` for `thumbv6m-none-eabi`).
+- [x] Q12 The plant document (IR version 4) splits the model into
+  physical, procedural and recipes as above, with a strict shape and
+  reference check naming the place (units, node ids, control and
+  equipment modules, classes, phase ranges for every class parameter
+  inside the class's, body flows of the same unit used once, recipes) and
+  a JSON round trip that copies — `web/test/plant.test.ts`: "the worked example is a valid plant and round-trips through JSON as a copy", "rejects bad shapes and dangling references, naming the place", "each unit's payload is its own board, control modules, logic and machines", "lists allocation units with ranges in class parameter order", "a payload with no logic beyond its own still makes a plant of one unit".
+- [x] Q13 Version 1-3 payloads and legacy Blocks exports migrate to a
+  one-unit plant whose unit payload equals the original model and
+  generates the same code byte for byte, also after saving and reading
+  the plant — `web/test/plant.test.ts`: "migrates version-3 payloads to one unit whose payload generates the same code byte for byte", "migrates version-1 and -2 files and legacy Blocks exports through the version-3 reader".
+- [x] Q14 The page reaches the rules through protocol-wasm: `checkRecipe`
+  (plain-language messages by place), `allocateRecipe` (bindings, or per
+  unit reasons), `simulateRecipe` (a timed trace against simulated units
+  following a script of operator commands and unit losses) and
+  `phaseModel` — `cargo test -p protocol-wasm recipes`: "the_worked_example_checks_clean_and_binds_each_step", "check_messages_name_the_step_and_the_rule", "allocation_failures_say_per_unit_why", "a_simulated_run_completes_and_a_hold_and_a_unit_loss_show_in_the_trace"; `web/test/recipe.check.test.ts`: "the worked example checks clean and allocates Blink to the LED unit, Measure to the sensor unit", "reports recipe errors in plain language, by place", "an allocation failure says, per unit, why it cannot host the procedure", "an unknown script kind throws".
+- [x] Q15 The worked example "Blink then Measure" (classes Blink and
+  Measure; a Pico 2 unit with an LED module and a second Pico 2 unit with an ADC
+  module) allocates Blink to the LED unit and Measure to the sensor unit
+  and runs to Complete with Measure started when Blink completes; a Hold
+  mid-run is Held after the settle time, starts nothing new, and Restart
+  completes the batch; losing the LED unit holds the batch, Restart is
+  refused, and Abort ends it Aborted — `cargo test -p recipe-core sim`: "the_worked_example_runs_to_complete", "a_hold_mid_run_holds_blink_and_a_restart_finishes_the_batch", "losing_the_led_unit_holds_the_batch_and_abort_ends_it_aborted"; `web/test/recipe.check.test.ts`: "runs to Complete against simulated units: Blink first, Measure when Blink completes", "a Hold mid-run holds the batch until Restart, and losing a unit holds it until Abort ends it Aborted".
+- [x] Q16 Physical and procedural editors: a Units view (unit list, unit
+  class, node binding from `sys/info`), the Pins table as each unit's
+  control-module table, equipment modules as a table grouping its rows,
+  and a phase table per module (class, ranges, a body flow per acting
+  state) with the phase state matrix shown read-only; the editor saves
+  version 4. Checked here for the model under the views: saving version
+  4 and loading version 1-3 saves, edits that keep units, modules,
+  classes, parameters, phases, bodies and recipe steps consistent, a new
+  body flow that checks clean, plain-language issues that agree with the
+  plant check, binding to the reported node id, and switching units
+  leaving every unit's code byte for byte as it was — `web/test/plantEdit.test.ts`: "saves version 4 and loads it back; version 1-3 saves load as a one-unit plant", "switching units keeps each unit's code byte for byte", "unit edits: add, rename (phases follow), bind, remove (with phases)", "module and phase edits carry names into phases and body flows", "class and parameter edits keep phases and recipe steps in step", "phases: add, ranges, bodies and a new body flow that checks clean", "issues name the place in plain words and agree with the plant check", "binds to the node id sys/info reports"; `web/test/phase.gen.test.ts`: "switches on the phase model's table" (the matrix the view shows). The views themselves are Q21.
+- [x] Q17 Unit payload code generation exposes the phase API: a flow entry
+  "phase <em>.<phase> enters <state>" and a "phase done" action, generated
+  phase tables answering the wire contract (an ABI request export for
+  payloads, or subscribe-and-report until it exists), heartbeat reports,
+  and argument range checks, all checked against the phase state model —
+  `cargo test -p state-table flow`: "a_blink_body_with_done_after_a_parameter_and_a_report_is_clean", "phase_entries_name_a_phase_of_the_unit_and_an_acting_state", "a_phase_state_has_one_body_flow", "phase_actions_name_a_phase_and_its_parameters_and_count_only_in_its_body", "a_report_carries_at_most_four_values"; `cargo test -p recipe-core phase`: "the_flow_checks_acting_states_are_these_acting_states_in_lower_case"; `cargo test -p protocol-wasm flows`: "a_phase_body_is_clean_and_phase_problems_read_plainly"; `web/test/phase.gen.test.ts`: "switches on the phase model's table", "leaves a unit without phases exactly as before", "generates a bounded command switch, serve per phase, reports and the heartbeat", "reports phase actions on unknown phases, parameters and run counts outside the body", "the worked example's units check clean against their phases", "compiles the payload-sim fixtures: the 77-cell matrix unit and the worked example's two units"; `web/test/plant.test.ts`: "rejects bad shapes and dangling references, naming the place"; `cargo test -p payload-sim --test phase`: "p1_every_cell_of_the_phase_model_matches_recipe_core" (all 77 cells, acknowledgements and reports byte-equal to `recipe_core::wire`), "p2_start_arguments_and_malformed_bodies_are_invalid_requests", "p3_blink_then_measure_runs_to_complete_on_the_generated_units", "p4_a_hold_mid_blink_holds_the_batch_and_restart_finishes_it", "p5_losing_the_led_unit_holds_restart_is_refused_and_abort_ends_aborted".
+- [x] Q18 The master recipe is edited on the Flow canvas: steps as nodes
+  naming a phase class and arguments, transitions as bars joining steps
+  (parallel divergence and convergence), unit procedures as lanes, with
+  `checkRecipe` issues on their nodes. The Recipe view (web
+  `ui/recipeView.ts`, built from the Flows canvas and outline pieces) has
+  an outline editor in run order for keyboards and phones, argument fields
+  carrying the class's range, and one-click fixes from the check; its pure
+  edits keep round 7's chart rules by construction (connecting extends a
+  step's transition into a divergence or convergence and refuses a loop
+  or a second transition on one side; no choice, Q20) —
+  `web/test/recipe.edit.test.ts`: "adds a step at the class minimums below its lane, and it checks clean", "connect makes a transition, a parallel divergence and a convergence; never a loop or a choice", "detach and remove keep transitions non-empty", "renames carry to transitions; class changes keep arguments in range", "unit procedures: add, rename (steps follow), remove only when unused", "applies the check's fixes until the recipe is clean", "plant recipes: add, set, remove"; `web/test/recipe.view.test.ts` (jsdom): "draws a lane per unit procedure, a step per step and a bar per transition", "selects a step from the keyboard; arguments carry the class range and the check's issues, with a fix", "+ Step after a selected step makes a parallel divergence drawn with a double line", "the outline lists steps in run order and its menu connects, refusing a loop"; `cargo test -p protocol-wasm recipes`: "q18_issues_carry_one_click_fixes". The chart's look on a desktop and a phone is Q22.
+- [x] Q19 Allocation and execution in the browser against simulated units:
+  an allocation panel (per unit online in the simulator, whether its
+  bound node is the board the Device tab sees, and what it runs or why it
+  cannot), and recipe-core's engine (protocol-wasm `RecipeRun`) running
+  the control recipe on the units' generated phase servers in the browser
+  simulator (one session per unit on a `SimBus`, requests routed by the
+  key's node id, `/state` reports fed back), with operator buttons (Start,
+  Hold, Restart, Stop, Abort, Reset) enabled exactly where the phase model
+  accepts them in the procedure's state, lose / find unit, live step and
+  phase states, and the trace. The browser path reproduces payload-sim's
+  p3-p5 — `web/test/recipe.run.test.ts`: "p3: Blink then Measure runs to Complete", "p4: a Hold mid-Blink holds the batch and Restart finishes it", "p5: losing the LED unit holds, Restart is refused, Abort ends Aborted", "are enabled exactly where the phase model accepts the command"; `web/test/recipe.view.test.ts` (jsdom): "lists per unit what it runs, or why it cannot", "runs the recipe on the simulated units to Complete, buttons following the phase model"; `cargo test -p protocol-wasm recipes::run`: "q19_start_sends_the_step_arguments_to_the_bound_phase_key", "foreign_reports_errors_and_unknown_units_are_ignored_lines", "nodes_must_match_units". Real boards as units are Q23.
+- [ ] Q20 Selection (alternative) divergence: transitions with conditions
+  on phase result values, keeping the termination argument.
+- [x] Q21 The Units and Phases views (web `ui/plantViews.ts`) follow the
+  grid rules of the Pins and States views: real tables of labelled
+  controls, Ctrl + arrow keys between cells and Up / Down between rows in
+  text cells, focus kept across re-renders, each row's problems under it
+  (aria-describedby, aria-invalid), tables scrolling inside their own
+  container; the unit picker drives the other views —
+  `web/test/plant.view.test.ts` (jsdom): "is a table of labelled controls in its own scroller", "moves between cells with Ctrl + arrows and between rows with Up / Down in text cells", "keeps focus across a re-render and puts a row's problems under it", "the unit picker and Bind drive the plant", "tables of labelled controls per model, problems under their row, focus kept".
+- [ ] Q22 Page layout and wiring of the plant views (Units, Phases,
+  Recipe): no horizontal page scroll at 390 px, the canvas scrolling
+  inside its own box, the Units / Phases / Recipe tabs counting their
+  problems, Compile switching to Phases while there are any, and the
+  Recipe chart, allocation panel and run panel readable on a desktop and
+  a phone. Screenshot-checked only (round 8 `round8/steps8.mjs`, round 9
+  `round9/steps9.mjs`: desktop 1280 px and phone 390 px, page width equal
+  to the viewport in every step); jsdom has no layout.
+- [x] Q23 Real boards as units: a unit bound to the board the Device tab
+  is connected to (its `sys/info` node id, Q16) runs on that board when
+  the board serves phases (`sys/info` capability bit, S12; otherwise the
+  allocation row says in plain words that its firmware cannot serve
+  phases and the unit runs in the simulator); the Device tab lists the
+  plant's units bound to the board and uploads each one's compiled phase
+  server through the signed upload, then starts it; the engine's commands
+  go over Web Serial through a requester with SimBus's request shape
+  (`device/requester.ts`: the device's `HandlerError` by name, no answer
+  within the acknowledgement deadline `DeadlineExceeded`, lost once the
+  port closes) and the board's `/state` publications feed the run after
+  the reply that preceded them; `RecipeRunner` drives a `PlantNet`
+  (`sim/net.ts`) mixing simulated and real units, a board's port closing
+  is the unit's loss and its reopening (same node) its return. Checked
+  against the fake serial device extended to run what it is sent and route
+  served keys as M7 does: a mixed plant (pico-led on the "board",
+  pico-sense simulated) reproduces payload-sim p3-p5 — `web/test/recipe.serial.test.ts`: "installs a unit's payload through the Device tab's upload; sys/info says the board serves phases", "answers like SimBus: the payload's reply or error by name, DeadlineExceeded, NotFound, Unavailable, lost once closed", "a board without the capability bit cannot serve phases, in plain words", "p3: Blink then Measure runs to Complete", "p4: a Hold mid-Blink holds the batch and Restart finishes it", "p5: pulling the board's cable holds, Restart is refused, Abort ends Aborted", "reopened on the same node tells the run it is found; another node is refused"; `web/test/recipe.view.test.ts` (jsdom): "runs a bound unit on a board that serves, and says why not on one that cannot"; `web/test/recipe.run.test.ts` (the simulated path through the same runner): "p3: Blink then Measure runs to Complete", "p4: a Hold mid-Blink holds the batch and Restart finishes it", "p5: losing the LED unit holds, Restart is refused, Abort ends Aborted". The page has one serial port, so at most one unit runs on a board at a time; two boards at once is Q28's discovery or a second port. On hardware: Q24-Q27.
+- [ ] Q24 On hardware, flash and bind (one Pico 2 as the LED unit, the
+  sensor unit simulated). (1) Build: `firmware-rp/build.sh rp2350
+  --version <V>` with V above the board's current version (`mwctl --port
+  /dev/serial/by-id/usb-middleware_rp-base_<ID>-if00 fw info`). (2) Flash:
+  on a Pico 2 running A/B rp-base, `mwctl --port <that path> fw update
+  firmware-rp/target/thumbv8m.main-none-eabihf/release/rp-base-rp2350-<V>-update.uf2
+  [--key <KEYFILE>]` (it reboots, reopens the same path and confirms);
+  on a blank one, hold BOOTSEL while plugging in and `picotool load
+  --ignore-partitions -v rp-base-rp2350-<V>-factory.uf2`, then replug.
+  (3) `mwctl --port <path> info` shows `node: <16 hex>` and `requests:
+  routed to the payload (serve)`. (4) In the page (`web`, `npm run dev`,
+  Chrome): Device tab, Connect, pick the Pico 2's port; Device info shows
+  "Serves phases: yes". (5) Blocks tab, Examples, "Plant: Blink then
+  Measure"; Units view, pico-led's row, "Bind to <node>": the node is the
+  one `mwctl info` printed (Disconnect in the Device tab before using
+  `mwctl` on the same port, and back). (6) Device tab, "Plant units on this
+  board" lists pico-led; Upload pico-led's payload (unsigned on an
+  unclaimed board after the confirmation, signed on a claimed one): it
+  says "Installed and started pico-led" and the payload status is
+  running; Recent publications show `unit/<node>/phase/LED.Blink/state`
+  (the Idle report, then a heartbeat every second).
+  (7) Bind pico-sense to the Pico 1 (RP2040) or any board without the
+  bit instead, for the negative case: Recipe view, the allocation row says
+  it "cannot serve phases" in plain words and the run keeps it simulated.
+- [ ] Q25 On hardware, after Q24, run Blink then Measure to Complete: Blocks
+  tab, Recipe view; the allocation row of pico-led reads "bound to <node>:
+  the board on the Device tab (runs on the board)" and the run panel
+  "Run (pico-led on the board)". Press Run, then Start: the Pico 2's LED
+  (GPIO 25) toggles three times at 250 ms, the procedure goes Running ->
+  Complete within about 2 s, Measure starts only after Blink completes
+  (trace), the phases list ends "pico-led/LED.Blink: Idle" and
+  "pico-sense/ADC.Measure: Idle — reported 2048, 4", and the Device tab's
+  console shows `[log] phase LED.Blink: Running`, `Complete`,
+  `Resetting`, `Idle`.
+- [ ] Q26 On hardware, Hold and Restart: Run, Start, and press Hold during
+  the first second (while the LED blinks): the procedure goes Holding ->
+  Held, the LED stops toggling, nothing is sent to pico-sense; Restart:
+  Restarting -> Running, the blinks finish, then Measure, then Complete
+  (trace: Start, Hold, Restart, Reset to pico-led).
+- [ ] Q27 On hardware, unplug mid-run: Run, Start, and pull the Pico 2's
+  USB cable while the LED blinks: the Device tab shows disconnected,
+  the trace says "unit pico-led left the network (resumable: hold)", the
+  procedure goes Held; Restart is refused ("Restart refused: unit
+  pico-led is offline"); Abort ends it Aborted; nothing more is sent to
+  pico-led. Replug, Connect again: the requester reopens on the same node.
+- [ ] Q28 Units announce themselves in discovery (`s88/unit`, unit id as
+  instance, unit class in TXT) so allocation sees online units without a
+  binding, and the page can drive several boards at once (a port per
+  board). Firmware has no `s88/unit` announcement yet (rp-base has no
+  discovery at all; esp-base's beacons would need the payload to name its
+  unit).
 
 ## Known limitations (0.3)
 

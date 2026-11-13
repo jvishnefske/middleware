@@ -10,9 +10,20 @@
 //!
 //! Signing is deterministic (Ed25519), so the golden vector shared with the
 //! browser (`web/test/fixtures/trust-vector.json`) is reproduced exactly.
+//!
+//! [`sign_control`] signs a control request for `start`/`stop` over
+//! ESP-NOW: the 29-byte [`control_message`]
+//! (`b"mw-control-v1\0" || op || target MAC || counter u64`) for one
+//! device, returned as the [`SignedControl`] that becomes the 72-byte
+//! request body. The default counter is the current Unix time in
+//! milliseconds ([`counter_at`]); the device accepts only a counter above
+//! the last one it accepted, so a request is never accepted twice.
 
 use ed25519_dalek::{Signer, SigningKey};
-use middleware::loader::trust::{PublicKey, Signature, SignedCommit, Version, signed_message};
+use middleware::loader::trust::{
+    ControlCounter, ControlOp, PublicKey, Signature, SignedCommit, SignedControl, TARGET_LEN,
+    Version, control_message, signed_message,
+};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -108,6 +119,30 @@ pub fn version_at(now: SystemTime) -> Result<Version, KeyError> {
         .map_err(|_| KeyError::Clock)
 }
 
+/// Signs control request `op` for the device with MAC `target` as
+/// `counter`.
+pub fn sign_control(
+    seed: &Seed,
+    op: ControlOp,
+    target: &[u8; TARGET_LEN],
+    counter: ControlCounter,
+) -> SignedControl {
+    let message = control_message(op, target, counter);
+    let signature = Signature(seed.signer().sign(&message).to_bytes());
+    SignedControl { counter, signature }
+}
+
+/// The default control counter at `now`: Unix time in milliseconds.
+pub fn counter_at(now: SystemTime) -> Result<ControlCounter, KeyError> {
+    let ms = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| KeyError::Clock)?
+        .as_millis();
+    u64::try_from(ms)
+        .map(ControlCounter)
+        .map_err(|_| KeyError::Clock)
+}
+
 /// Lower-case hex.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -160,6 +195,44 @@ pub(crate) mod tests {
             assert!(json.contains(c), "{c} not in {path}");
         }
         assert!(json.contains(&VERSION.to_string()));
+    }
+
+    /// The control-request vector of `middleware::loader::trust` (same
+    /// test seed, op Stop, target e4:b0:63:81:d3:24).
+    pub const CONTROL_COUNTER: u64 = 1_761_500_000_123;
+    pub const CONTROL_SIGNATURE: &str = "aeffa9bd89e94d48b5577de27cb123b6cdd6450b3e0cf2f6c13eb07827d4938a345233eb01f44746c8c56c056c6b0cbd62544876010bc75352efaab0636b2b01";
+    pub const CONTROL_TARGET: [u8; 6] = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24];
+
+    #[test]
+    fn golden_control_vector_is_reproduced() {
+        let c = sign_control(
+            &vector_seed(),
+            ControlOp::Stop,
+            &CONTROL_TARGET,
+            ControlCounter(CONTROL_COUNTER),
+        );
+        assert_eq!(hex(&c.signature.0), CONTROL_SIGNATURE);
+        let body = c.encode();
+        assert_eq!(&body[..8], &CONTROL_COUNTER.to_le_bytes());
+        assert_eq!(hex(&body[8..]), CONTROL_SIGNATURE);
+        // Bound to the op and the device.
+        let start = sign_control(
+            &vector_seed(),
+            ControlOp::Start,
+            &CONTROL_TARGET,
+            ControlCounter(CONTROL_COUNTER),
+        );
+        assert_ne!(start.signature, c.signature);
+    }
+
+    #[test]
+    fn default_counter_is_unix_milliseconds() {
+        let t = UNIX_EPOCH + Duration::from_millis(1_761_500_000_123);
+        assert_eq!(counter_at(t), Ok(ControlCounter(1_761_500_000_123)));
+        assert_eq!(
+            counter_at(UNIX_EPOCH - Duration::from_secs(1)),
+            Err(KeyError::Clock)
+        );
     }
 
     #[test]

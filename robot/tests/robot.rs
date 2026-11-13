@@ -68,7 +68,7 @@ fn field<'a>(json: &'a str, name: &str) -> Option<&'a str> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v4_robot_calls_through_its_envoy_with_trace_and_publishes_state() {
+async fn rg4_robot_calls_through_its_envoy_with_trace_and_publishes_state() {
     let (echo_addr, seen, _stop_echo) = echo_service().await;
     let port = TcpListener::bind("127.0.0.1:0")
         .await
@@ -167,7 +167,7 @@ async fn v4_robot_calls_through_its_envoy_with_trace_and_publishes_state() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v4_robot_without_a_static_endpoint_fails_at_start() {
+async fn rg4_robot_without_a_static_endpoint_fails_at_start() {
     let robot = Robot::new(
         RobotConfig::from_env(&|k| (k == "MW_ROBOT_NAME").then(|| "r2".to_owned()))
             .expect("config"),

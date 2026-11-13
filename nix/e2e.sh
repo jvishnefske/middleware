@@ -1,5 +1,5 @@
 #!@bash@/bin/bash
-# `nix run .#e2e`: the 0.6 end-to-end run against the lab (design.md M17).
+# `nix run .#e2e`: the 0.6 end-to-end run against the lab (design.md MS17).
 # Phase 2 skeleton: the flake fills @images@ (one "name path" line per built
 # image tarball) and @robotVm@; this script prints the plan and touches
 # nothing. Phase 3 replaces each `plan` line with the real step (the `mw`

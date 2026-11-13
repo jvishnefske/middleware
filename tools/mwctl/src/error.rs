@@ -47,6 +47,12 @@ pub enum Error {
     Plan(PlanError),
     /// A signing key file or version could not be used.
     Key(KeyError),
+    /// The USB↔ESP-NOW bridge did not answer or misbehaved.
+    Bridge(String),
+    /// A firmware image file cannot be installed.
+    Image(crate::fw::ImageError),
+    /// A firmware update cannot proceed (checked before sending).
+    Fw(String),
     /// One step of an upload failed.
     Upload {
         /// Zero-based step index.
@@ -69,6 +75,12 @@ impl From<std::io::Error> for Error {
 impl From<PlanError> for Error {
     fn from(e: PlanError) -> Self {
         Error::Plan(e)
+    }
+}
+
+impl From<crate::fw::ImageError> for Error {
+    fn from(e: crate::fw::ImageError) -> Self {
+        Error::Image(e)
     }
 }
 
@@ -108,7 +120,37 @@ pub const fn status_name(status: HandlerError) -> &'static str {
 pub fn explain(key: &str, status: HandlerError) -> &'static str {
     use HandlerError::*;
     let is = |k: middleware::Key<'static>| key == k.as_str();
+    use middleware::fw_ota::keys as fw;
     match status {
+        Denied if is(fw::BEGIN) => {
+            "the image's version does not exceed the running firmware's or the last committed one \
+             (a committed version is used up even if its update did not complete)"
+        }
+        Denied if is(fw::COMMIT) => {
+            "the device has a pinned key: the firmware commit must be signed by it for this device and \
+             slot (use --key), with a version above the last committed; nothing was installed"
+        }
+        InvalidRequest if is(fw::BEGIN) => {
+            "an update is committed or on trial: run `fw confirm` or `fw abort` first"
+        }
+        BufferTooSmall if is(fw::BEGIN) => "the image is larger than the device's firmware partition",
+        InvalidRequest if is(fw::CHUNK) => "chunk out of range or no firmware transfer in progress",
+        InvalidRequest if is(fw::COMMIT) => {
+            "the device rejected the image: transfer incomplete, SHA-256 mismatch after writing, or its \
+             IMAGE_DEF is not an RP2350 TBYB executable of the declared version (the transfer was \
+             abandoned; the running firmware is unchanged)"
+        }
+        InvalidRequest if is(fw::REBOOT) => "nothing is committed: send the image (fw update) first",
+        InvalidRequest if is(fw::CONFIRM) => {
+            "the device is not running a new image on trial (nothing to confirm)"
+        }
+        Unavailable if is(fw::CONFIRM) => {
+            "the new firmware's self-test has not passed yet; if it never does, the bootrom's \
+             watchdog reverts to the previous image"
+        }
+        NotFound if key.starts_with("sys/fw/") => {
+            "this firmware has no A/B firmware updater (sys/fw/*): an RP2350 base firmware is needed"
+        }
         NotFound if is(keys::START) => {
             "this firmware has no WASM runtime (a `+no-wasm` build such as ESP32-C3 or ESP8266): \
              payloads are stored but cannot be started"
@@ -131,9 +173,17 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
              greater than the last installed (use --key, check --version); \
              the previously installed payload is kept"
         }
+        Denied if is(keys::START) || is(keys::STOP) => {
+            "over ESP-NOW a claimed device starts or stops its payload only on a control \
+             request signed by its pinned key for this device, with a counter above the last \
+             one it accepted (use --key; the default counter is this host's clock in \
+             milliseconds, so check the clock or pass a larger --counter); the payload is \
+             unchanged"
+        }
         Denied if is(keys::TRUST_CLAIM) => {
-            "the device is already claimed; hold BOOT for 3 s after boot to open the 60 s \
-             re-key window, then claim"
+            "the device is already claimed (or the claim came over ESP-NOW, where it is never \
+             accepted); hold BOOT for 3 s after boot to open the 60 s re-key window, then \
+             claim over the serial port"
         }
         NotFound if is(keys::TRUST_INFO) || is(keys::TRUST_CLAIM) => {
             "this firmware does not support signed payloads (built without `trust`)"
@@ -143,7 +193,11 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
         InvalidRequest => "the device rejected the request body",
         BufferTooSmall => "the response did not fit the device's buffer",
         Internal => "the device failed internally (for example a flash error)",
-        Denied => "the device refused the request by policy",
+        Denied => {
+            "the device refused the request by policy (over ESP-NOW a device accepts only \
+             sys/info, sys/trust/info, sys/loader/*, signed sys/payload/start|stop, and only \
+             once it is claimed)"
+        }
         Unavailable => "the device cannot serve this now; try again later",
         DeadlineExceeded => "the device did not answer within the request's deadline",
         _ => "the device answered with a status this mwctl does not know",
@@ -169,6 +223,9 @@ impl fmt::Display for Error {
             Error::Malformed { key } => write!(f, "{key}: malformed response body"),
             Error::Frame(e) => write!(f, "could not encode request frame: {e:?}"),
             Error::Plan(e) => write!(f, "{e}"),
+            Error::Bridge(e) => write!(f, "ESP-NOW bridge: {e}"),
+            Error::Image(e) => write!(f, "{e}"),
+            Error::Fw(e) => write!(f, "firmware update: {e}"),
             Error::Key(e) => write!(f, "{e}"),
             Error::Upload {
                 step,
@@ -232,6 +289,8 @@ mod tests {
         assert_eq!(status_name(HandlerError::DeadlineExceeded), "DeadlineExceeded");
         assert!(explain("sys/loader/commit", HandlerError::Denied).contains("--key"));
         assert!(explain("sys/trust/claim", HandlerError::Denied).contains("BOOT"));
+        assert!(explain("sys/payload/stop", HandlerError::Denied).contains("--counter"));
+        assert!(explain("sys/payload/start", HandlerError::Denied).contains("--key"));
         assert!(explain("sys/trust/info", HandlerError::NotFound).contains("trust"));
         assert!(explain("sys/loader/begin", HandlerError::BufferTooSmall).contains("capacity"));
     }

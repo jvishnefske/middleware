@@ -20,6 +20,10 @@ name = "esp-base"
 path = "src/main.rs"
 test = false
 bench = false
+# The binary needs a chip feature (each enables `shell`); without one, host
+# commands such as `cargo clippy --lib --all-targets` skip it instead of
+# failing on the missing ESP crates.
+required-features = ["shell"]
 
 [features]
 # `trust` is on by default so `cargo test --lib` covers signed payloads; the
@@ -107,6 +111,9 @@ shell = [
 # `espnow`: the frame format and transport (pure, no heap) for the radio
 # shell and the host-tested route core (`esp_base::route`).
 middleware = { path = "..", features = ["serial", "espnow"] }
+# The board pin rules (pin maps, PWM / I2C board maps), shared with
+# rp-base and the web editor. no_std, no dependencies.
+board-pins = { path = "../board-pins" }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 

@@ -1,7 +1,7 @@
 //! Kubernetes manifests rendered from a [`ServiceSpec`] (`--print-manifests`).
 //!
 //! The entry point is [`render`]: the spec plus [`ManifestOptions`] in, a
-//! multi-document YAML stream out. Planned objects (design.md M11–M15):
+//! multi-document YAML stream out. Planned objects (design.md MS11–MS15):
 //! ServiceAccount, Deployment (sidecar injection, SPIRE template, `grpc`
 //! probes on the service port, drain-derived termination grace, the
 //! [`Config`](crate::Config) environment, restricted security context),
@@ -30,7 +30,7 @@ pub struct ManifestOptions {
 /// implemented yet: always [`ServiceError::Unimplemented`].
 pub fn render(spec: &ServiceSpec, options: &ManifestOptions) -> Result<String, ServiceError> {
     let _ = (spec, options);
-    Err(ServiceError::Unimplemented("manifest rendering (M11)"))
+    Err(ServiceError::Unimplemented("manifest rendering (MS11)"))
 }
 
 #[cfg(test)]

@@ -184,7 +184,7 @@ impl Service {
                 return Err(ServiceError::Unmapped((*kind).to_owned()));
             }
             drop(shutdown);
-            Err(ServiceError::Unimplemented("serving (runner, M6)"))
+            Err(ServiceError::Unimplemented("serving (runner, MS6)"))
         }
     }
 
@@ -270,7 +270,7 @@ mod tests {
     use crate::Service;
 
     #[test]
-    fn m1_command_line_parses_each_command() {
+    fn ms1_command_line_parses_each_command() {
         assert_eq!(Command::parse::<[&str; 0], &str>([]), Ok(Command::Run));
         assert_eq!(Command::parse(["--print-spec"]), Ok(Command::PrintSpec));
         assert_eq!(
@@ -303,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_command_line_errors() {
+    fn ms1_command_line_errors() {
         assert_eq!(
             Command::parse(["--serve"]),
             Err(ArgsError::Unknown("--serve".into()))
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_print_spec_writes_the_yaml() {
+    fn ms1_print_spec_writes_the_yaml() {
         let mut out = Vec::new();
         service().execute(&Command::PrintSpec, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn m1_run_with_checks_the_service_map_then_reports_unimplemented() {
+    async fn ms1_run_with_checks_the_service_map_then_reports_unimplemented() {
         let e = service().run_with(Config::default(), async {}).await;
         assert!(
             matches!(e, Err(ServiceError::Unmapped(ref k)) if k == "demo/echo"),

@@ -8,19 +8,44 @@
 //!   returned on drop, because `wasm_host::Payload` needs a `'static`
 //!   device and drops it inside a failed load (esp-hal's async drivers are
 //!   not `Send`, so only the blocking parts can rest in a static);
-//! * the pure [`Claims`] table that decides which pins SPI, UART and GPIO
-//!   interrupts may hold.
+//! * I2C bus 0 ([`Bus0`], ABI 3, ESP32 and ESP32-S3) and on the ESP32 the
+//!   LEDC PWM timer ([`Pwm`]), which stay blocking and move between [`HW`]
+//!   and the device the same way;
+//! * the pure [`Claims`] table that decides which pins SPI, UART, I2C, PWM,
+//!   the camera and GPIO interrupts may hold.
+//!
+//! # I2C (ABI 3)
+//!
+//! `i2c_open(0, freq)` takes the profile's mapped pins
+//! ([`Profile::i2c_pins`]: SDA 26 / SCL 27 on the ESP32, SDA 5 / SCL 6 on
+//! the ESP32-S3), refuses them with `Busy` while a sink route owns either,
+//! claims them (`InvalidArgument` if SPI, UART, PWM, the camera or an
+//! interrupt holds one), applies the clock and routes both lines open
+//! drain. Re-opening reconfigures the clock. `i2c_transfer` runs one
+//! bounded blocking transfer (see `super::i2c`); `Busy` before `i2c_open`.
+//! Bus 1, and I2C on a profile without a map, is `Unsupported`. The pins
+//! stay claimed until the payload stops.
+//!
+//! # Serving requests (ABI 5)
+//!
+//! `serve` accepts any key a payload may serve
+//! ([`esp_base::serve::servable`]: not `sys/...`); wasm-host keeps the live
+//! table and the controller routes serial requests on it to
+//! `Payload::request`. `node_id` answers the node `sys/info` reports (the
+//! base MAC, zero-padded).
 //!
 //! The four payload timers ([`super::timer`]) and the event queue
 //! ([`super::irq`]) are firmware-wide statics shared with their ISRs.
 //!
 //! Dropping the device (payload stop, trap, reload, failed load) stops all
-//! timers, cancels SPI DMA and UART transmit, closes both peripherals,
-//! releases every pin (interrupts off, signals detached) and clears the
-//! event queue. Both peripherals go back to [`HW`] whatever state they were
-//! in: SPI through [`SpiBus::close`] (idle, payload transfer or sink-route
-//! write in flight; see `esp_base::periph::dma_hw`), UART by value, so the
-//! next payload can open them again.
+//! timers, cancels SPI DMA and UART transmit, drives PWM outputs low,
+//! closes every peripheral, releases every pin (interrupts off, signals
+//! detached) and clears the event queue. The peripherals go back to [`HW`]
+//! whatever state they were in: SPI through [`SpiBus::close`] (idle,
+//! payload transfer or sink-route write in flight; see
+//! `esp_base::periph::dma_hw`), UART, PWM and I2C by value (I2C forgets
+//! the payload's open, [`Bus0::close`]), so the next payload can open them
+//! again.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.
@@ -67,20 +92,21 @@ use esp_base::periph::claims::{Claims, pins};
 use esp_base::route::sink::{SinkRoute, transfers};
 use esp_base::route::table::{Kind, Routes};
 use esp_base::route::stopped_event;
-use middleware::Key;
+use middleware::{Key, SenderId};
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Pull, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig,
     TimerSpec, UartConfig,
 };
+use super::i2c::{self, Bus0};
+use wasm_host::I2cConfig;
 #[cfg(feature = "esp32")]
 use {
     super::camera,
-    super::i2c::{self, Bus0},
     super::pwm::{self, Pwm},
     esp_base::periph::claims::Owner,
-    wasm_host::{CameraPins, I2cConfig, PwmSpec},
+    wasm_host::{CameraPins, PwmSpec},
 };
 
 use super::bus::Bus;
@@ -98,8 +124,7 @@ pub struct Hw {
     /// LEDC PWM timer 0 (ESP32).
     #[cfg(feature = "esp32")]
     pub pwm: Option<Pwm>,
-    /// I2C bus 0 (ESP32).
-    #[cfg(feature = "esp32")]
+    /// I2C bus 0 (ESP32, ESP32-S3), if its driver came up at boot.
     pub i2c: Option<Bus0>,
 }
 
@@ -109,7 +134,6 @@ struct Live {
     uart: Option<Uart1Port>,
     #[cfg(feature = "esp32")]
     pwm: Option<Pwm>,
-    #[cfg(feature = "esp32")]
     i2c: Option<Bus0>,
 }
 
@@ -150,12 +174,14 @@ pub struct EspDevice {
     camera: Option<u8>,
     profile: &'static Profile,
     bus: &'static Bus,
+    /// What `node_id` answers.
+    node: SenderId,
 }
 
 impl EspDevice {
     /// A device for one payload run; `None` while another device holds the
-    /// pins.
-    pub fn new(profile: &'static Profile, bus: &'static Bus) -> Option<Self> {
+    /// pins. `node` is the node id `sys/info` reports.
+    pub fn new(profile: &'static Profile, bus: &'static Bus, node: SenderId) -> Option<Self> {
         let pins = PINS.lease()?;
         irq::clear();
         let hw = HW.take().map(|h| Live {
@@ -163,7 +189,6 @@ impl EspDevice {
             uart: h.uart.map(Uart1Port::new),
             #[cfg(feature = "esp32")]
             pwm: h.pwm,
-            #[cfg(feature = "esp32")]
             i2c: h.i2c,
         });
         #[cfg(feature = "espnow")]
@@ -177,6 +202,7 @@ impl EspDevice {
             camera: None,
             profile,
             bus,
+            node,
         })
     }
 
@@ -185,7 +211,6 @@ impl EspDevice {
         self.hw.as_mut().and_then(|h| h.pwm.as_mut()).ok_or(AbiError::Unsupported)
     }
 
-    #[cfg(feature = "esp32")]
     fn i2c(&mut self) -> Result<&mut Bus0, AbiError> {
         self.hw.as_mut().and_then(|h| h.i2c.as_mut()).ok_or(AbiError::Unsupported)
     }
@@ -364,7 +389,6 @@ impl Drop for EspDevice {
                 uart: live.uart.map(Uart1Port::close),
                 #[cfg(feature = "esp32")]
                 pwm,
-                #[cfg(feature = "esp32")]
                 i2c: live.i2c.map(Bus0::close),
             });
         }
@@ -571,7 +595,6 @@ impl Device for EspDevice {
         })
     }
 
-    #[cfg(feature = "esp32")]
     fn i2c_open(&mut self, cfg: I2cConfig) -> Result<(), AbiError> {
         let (sda, scl) = self.profile.i2c_pins(cfg.bus)?;
         if [sda, scl].into_iter().any(|p| self.routes.owns_pin(p)) {
@@ -587,7 +610,6 @@ impl Device for EspDevice {
         Ok(())
     }
 
-    #[cfg(feature = "esp32")]
     fn i2c_transfer(&mut self, bus: u8, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), AbiError> {
         self.profile.i2c_pins(bus)?;
         self.i2c()?.transfer(addr, tx, rx)
@@ -656,5 +678,13 @@ impl Device for EspDevice {
             Kind::Source => return Err(AbiError::Busy),
         };
         Ok(stat.of(&stats))
+    }
+
+    fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
+        esp_base::serve::servable(key)
+    }
+
+    fn node_id(&mut self) -> Result<SenderId, AbiError> {
+        Ok(self.node)
     }
 }

@@ -16,11 +16,20 @@
 //!   such as a 74880-baud ROM banner that has no delimiter before the next
 //!   frame), matches responses by correlation id, and retries timed-out
 //!   attempts with a fresh id.
+//! * [`bridge`] — the serial framing to the USB↔ESP-NOW bridge (an
+//!   ESP8266, `tools/espnow-bridge`): COBS + CRC-16 frames carrying raw
+//!   ESP-NOW frames with their MACs, `Hello`, `Stats` and send results.
+//! * [`air`] — [`air::AirLink`], an [`link::Endpoint`] that reaches a device
+//!   over ESP-NOW through the bridge with `middleware::rpc` requests:
+//!   unicast, retransmitted with the same id, small chunks.
 //! * [`device`] — the protocol operations (`info`, `upload` signed or not,
 //!   `trust info`, `trust claim`, `start`, `stop`, monitor events) over any
 //!   transport.
-//! * [`report`] — human-readable formatting of device info and
-//!   publications.
+//! * [`fw`] — RP2350 A/B firmware updates (`fw info|update|confirm|abort|reboot`):
+//!   the image file (UF2 or raw binary, checked as the device checks it),
+//!   firmware commit signatures, and the `sys/fw/*` requests.
+//! * [`report`] — human-readable formatting of device info, firmware
+//!   update state and publications.
 //! * [`error`] — [`error::Error`], with context-specific explanations of
 //!   device status codes.
 //!
@@ -31,9 +40,12 @@
 //! and the device's trust rules.
 #![forbid(unsafe_code)]
 
+pub mod air;
+pub mod bridge;
 pub mod cli;
 pub mod device;
 pub mod error;
+pub mod fw;
 pub mod link;
 pub mod plan;
 pub mod report;

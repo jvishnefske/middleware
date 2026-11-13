@@ -56,6 +56,7 @@ fn fake_device(
             chip: "esp32",
             firmware: "fake-0.6",
             node: Some(DEVICE),
+            caps: middleware::loader::Caps::NONE,
         }
         .encode(&mut info)
         .expect("info");
@@ -185,7 +186,7 @@ async fn beacon_until_event<B: Browse>(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v16_device_beacon_is_announced_on_zenoh_with_the_device_node() {
+async fn rg16_device_beacon_is_announced_on_zenoh_with_the_device_node() {
     let mut r = rig(GatewayConfig::default()).await;
     let mut browser = r.cluster.discovery();
     browser
@@ -225,7 +226,7 @@ async fn v16_device_beacon_is_announced_on_zenoh_with_the_device_node() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v16_spoofed_beacon_is_refused() {
+async fn rg16_spoofed_beacon_is_refused() {
     let r = rig(GatewayConfig::default()).await;
     let mut browser = r.cluster.discovery();
     browser
@@ -273,7 +274,7 @@ async fn v16_spoofed_beacon_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v17_camera_chunks_cross_the_gateway_intact() {
+async fn rg17_camera_chunks_cross_the_gateway_intact() {
     let mut r = rig(GatewayConfig::default()).await;
     let mut sub = r
         .cluster
@@ -338,7 +339,7 @@ async fn v17_camera_chunks_cross_the_gateway_intact() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v18_sys_info_is_forwarded_and_the_loader_is_refused() {
+async fn rg18_sys_info_is_forwarded_and_the_loader_is_refused() {
     let config = GatewayConfig::default();
     let mut r = rig(config.clone()).await;
     // Through the served kind, as the runner calls it.
@@ -418,7 +419,7 @@ async fn v18_sys_info_is_forwarded_and_the_loader_is_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn v11_cluster_samples_reach_the_device_on_declared_filters_only() {
+async fn rg11_cluster_samples_reach_the_device_on_declared_filters_only() {
     let config = GatewayConfig::from_env(&|k| match k {
         "MW_GATEWAY_NAMESPACE" => Some("bench".into()),
         "MW_GATEWAY_DOWNLINK" => Some("app/bench/robot/cmd/**".into()),

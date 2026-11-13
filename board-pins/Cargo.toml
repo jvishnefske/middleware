@@ -1,0 +1,13 @@
+[package]
+name = "board-pins"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Board pin rules shared by esp-base, rp-base and the web editor: which GPIOs exist, which are reserved or input only, the ADC, I2C and PWM board maps, and the RP2040/RP2350 SPI and I2C function tables"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# no_std, no dependencies: built for the ESP and RP firmware targets and for
+# wasm32 (web/protocol-wasm). A member of the root workspace, so
+# `cargo test --workspace` runs its tests on the host.
+[dependencies]

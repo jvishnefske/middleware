@@ -11,7 +11,7 @@ name = "mw-robot"
 path = "src/main.rs"
 
 [dependencies]
-# Host backends only; never an embedded feature set (V19).
+# Host backends only; never an embedded feature set (RG19).
 middleware = { path = "..", features = ["grpc", "istio", "zenoh"] }
 mw-service = { path = "../service" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

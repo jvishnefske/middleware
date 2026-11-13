@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn m3_sigterm_reports_not_serving_then_drains_for_the_grace_then_stops() {
+    fn ms3_sigterm_reports_not_serving_then_drains_for_the_grace_then_stops() {
         let s = Lifecycle::default();
         assert_eq!(s.health(), ServingStatus::NotServing);
         let (s, a) = s.on(Event::Ready, at(10));
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn m3_second_terminate_or_terminate_before_serving_stops_at_once() {
+    fn ms3_second_terminate_or_terminate_before_serving_stops_at_once() {
         let (draining, _) = Lifecycle::Serving.on(Event::Terminate { drain_grace: GRACE }, at(0));
         assert_eq!(
             draining.on(Event::Terminate { drain_grace: GRACE }, at(1)),
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn m3_failure_stops_from_every_live_state() {
+    fn ms3_failure_stops_from_every_live_state() {
         let failed = vec![
             SetHealth(ServingStatus::NotServing),
             StopAccepting,
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn m3_monotonic_arithmetic_saturates() {
+    fn ms3_monotonic_arithmetic_saturates() {
         assert_eq!(at(5).since(at(9)), Duration::ZERO);
         assert_eq!(at(9).since(at(5)), Duration::from_millis(4));
         assert_eq!(

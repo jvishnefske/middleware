@@ -174,7 +174,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn v14_pair_carries_bytes_both_ways_and_keeps_partial_chunks() {
+    async fn rg14_pair_carries_bytes_both_ways_and_keeps_partial_chunks() {
         let (mut a, mut b) = pair();
         a.write_all(b"hello").await.unwrap();
         let mut two = [0u8; 2];

@@ -1,4 +1,4 @@
-# checks.robot-boots (design.md M44, M45): the robot module boots in the nix
+# checks.robot-boots (design.md MS44, MS45): the robot module boots in the nix
 # sandbox, with no host network, against a stand-in for the lab.
 #
 #   gateway  spire-server (join_token attestor, trust domain infra.local) and

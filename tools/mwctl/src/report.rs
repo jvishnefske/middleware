@@ -7,13 +7,16 @@
 //! * [`format_event`] — one line per publication: `sys/log` as text,
 //!   `sys/payload/status` by name, anything else as UTF-8 or hex; noise runs
 //!   as their length and printable characters.
+//! * [`format_fw_info`] — `sys/fw/info`: update state, running slot, each
+//!   slot's version and TBYB flag, the anti-rollback floor and the update
+//!   in progress.
 //! * [`status_name`] — the payload status names used by the web page.
 
 use crate::device::Info;
 use crate::link::Event;
 use middleware::SenderId;
 use middleware::loader::trust::{TrustCode, TrustInfo, TrustState};
-use middleware::loader::{PayloadStatus, keys};
+use middleware::loader::{Caps, PayloadStatus, keys};
 use middleware::wasm_abi::ABI_VERSION;
 use std::fmt::Write as _;
 
@@ -47,12 +50,52 @@ pub fn format_info(i: &Info) -> String {
         ),
         None => String::new(),
     };
+    let serves = if i.caps.contains(Caps::SERVE) {
+        "requests:         routed to the payload (serve)\n"
+    } else {
+        ""
+    };
     format!(
-        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\nABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
+        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\n{serves}ABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
         i.chip,
         i.firmware,
         i.capacity,
         status_name(i.status)
+    )
+}
+
+/// `sys/fw/info` for printing.
+pub fn format_fw_info(i: &middleware::fw_ota::FwInfo) -> String {
+    use crate::fw::format_version;
+    use middleware::fw_ota::Slot;
+    let slot = |s: Slot| {
+        let info = i.slots[s as usize];
+        let what = match info.version {
+            None => "empty".to_owned(),
+            Some(v) if info.tbyb => format!("{} (TBYB, not bought)", format_version(v)),
+            Some(v) => format_version(v),
+        };
+        let running = if i.running == s { " <- running" } else { "" };
+        format!("slot {}:           {what}{running}\n", s.name())
+    };
+    let target = match i.target {
+        Some(t) => format!(
+            "update:           {} {} into slot {}{}\n",
+            i.state.name(),
+            format_version(i.version),
+            t.name(),
+            if i.len > 0 { format!(", {}/{} bytes", i.received, i.len) } else { String::new() }
+        ),
+        None => format!("update:           {}\n", i.state.name()),
+    };
+    let b = i.node.0;
+    format!(
+        "{}{}{target}min version:      {} (a new image must be newer)\nself-test:        {}\nnode:             {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+        slot(Slot::A),
+        slot(Slot::B),
+        format_version(i.min_version),
+        if i.self_test_ok { "passed" } else { "not passed" },
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
     )
 }
 
@@ -144,8 +187,10 @@ mod tests {
             chip: "esp8266".into(),
             firmware: "0.1.0+no-wasm".into(),
             node: None,
+            caps: Caps::NONE,
         };
         let s = format_info(&i);
+        assert!(!s.contains("requests:"), "{s}");
         assert!(!s.contains("node:"), "{s}");
         assert!(s.contains("chip:             esp8266\n"), "{s}");
         assert!(s.contains("protocol only"), "{s}");
@@ -160,12 +205,14 @@ mod tests {
         assert!(s.contains("mwctl expects"), "{s}");
         let s = format_info(&Info {
             node: Some(SenderId::from_mac([0x24, 0x6f, 0x28, 0xaa, 0xbb, 0xcc])),
-            ..i
+            ..i.clone()
         });
         assert!(
             s.contains("firmware:         0.1.0+no-wasm\nnode:             246f28aabbcc0000\n"),
             "{s}"
         );
+        let s = format_info(&Info { caps: Caps::SERVE, ..i });
+        assert!(s.contains("runtime:          none: protocol only, payloads are stored but not run\nrequests:         routed to the payload (serve)\n"), "{s}");
     }
 
     #[test]
@@ -182,6 +229,42 @@ mod tests {
         assert!(s.contains("last version:     42"), "{s}");
         assert!(s.contains(&"ab".repeat(32)), "{s}");
         assert!(format_trust(&claimed.info(true)).contains("re-key window open"));
+    }
+
+    #[test]
+    fn y9_fw_info_names_slots_versions_and_progress() {
+        use middleware::fw_ota::wire::{FwInfo, SlotInfo, StateCode};
+        use middleware::fw_ota::Slot;
+        use middleware::loader::trust::Version;
+        let i = FwInfo {
+            state: StateCode::Receiving,
+            running: Slot::A,
+            slots: [SlotInfo { version: Some(Version(0x0001_0000)), tbyb: false }, SlotInfo::default()],
+            min_version: Version(0x0001_0000),
+            node: SenderId([1, 2, 3, 4, 5, 6, 7, 8]),
+            target: Some(Slot::B),
+            version: Version(0x0001_0001),
+            len: 2048,
+            received: 512,
+            self_test_ok: true,
+        };
+        let s = format_fw_info(&i);
+        assert!(s.contains("slot A:           1.0 <- running\n"), "{s}");
+        assert!(s.contains("slot B:           empty\n"), "{s}");
+        assert!(s.contains("update:           receiving 1.1 into slot B, 512/2048 bytes\n"), "{s}");
+        assert!(s.contains("node:             0102030405060708"), "{s}");
+        let t = FwInfo {
+            state: StateCode::Trial,
+            running: Slot::B,
+            slots: [i.slots[0], SlotInfo { version: Some(Version(0x0001_0001)), tbyb: true }],
+            len: 0,
+            target: None,
+            self_test_ok: false,
+            ..i
+        };
+        let s = format_fw_info(&t);
+        assert!(s.contains("slot B:           1.1 (TBYB, not bought) <- running"), "{s}");
+        assert!(s.contains("update:           trial\n") && s.contains("not passed"), "{s}");
     }
 
     #[test]

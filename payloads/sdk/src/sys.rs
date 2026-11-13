@@ -1,6 +1,6 @@
-//! The crate's only `unsafe` code: host import declarations, the three safe
+//! The crate's only `unsafe` code: host import declarations, the four safe
 //! wrappers around the imports that write into guest memory (`dma_read`,
-//! `uart_read`, `i2c_transfer`), the single-threaded `Sync` impl for [`GuestCell`], and the
+//! `uart_read`, `i2c_transfer`, `node_id`), the single-threaded `Sync` impl for [`GuestCell`], and the
 //! [`payload!`] export macro.
 //!
 //! Everything here is a thin, logic-free shim. The rest of the crate is
@@ -27,10 +27,11 @@ mod imports {
     // memory during these calls (`spi_transfer` and `uart_write` copy into
     // firmware-owned DMA buffers before returning; the ABI 4 route imports
     // copy the key and config out and never touch guest memory again, since
-    // frame data stays in host memory), and reports problems as
-    // negative codes. `dma_read` and `uart_read` *write* `len` bytes at `ptr`,
-    // and `i2c_transfer` writes `rx_len` bytes at `rx_ptr`, so they stay
-    // `unsafe` and are only called through the wrappers below.
+    // frame data stays in host memory; `serve` copies the key), and reports
+    // problems as negative codes. `dma_read` and `uart_read` *write* `len`
+    // bytes at `ptr`, `i2c_transfer` writes `rx_len` bytes at `rx_ptr` and
+    // `node_id` writes 8 bytes at `ptr`, so they stay `unsafe` and are only
+    // called through the wrappers below.
     #[link(wasm_import_module = "mw")]
     unsafe extern "C" {
         pub safe fn log(ptr: i32, len: i32);
@@ -93,6 +94,9 @@ mod imports {
         ) -> i32;
         pub safe fn route_stop(handle: i32) -> i32;
         pub safe fn route_stat(handle: i32, stat: i32) -> i32;
+        // ABI 5: `serve` reads the key only; `node_id` writes 8 bytes.
+        pub safe fn serve(key_ptr: i32, key_len: i32) -> i32;
+        pub fn node_id(ptr: i32) -> i32;
     }
 }
 
@@ -190,14 +194,32 @@ mod imports {
     pub fn route_stat(_h: i32, _s: i32) -> i32 {
         UNSUPPORTED
     }
+    pub fn serve(_kp: i32, _kl: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub unsafe fn node_id(_p: i32) -> i32 {
+        UNSUPPORTED
+    }
 }
 
 pub(crate) use imports::{
     adc_read, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
     log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, route_sink, route_source,
-    route_stat, route_stop, set_tick, spi_open, spi_transfer, subscribe, timer_start, timer_stop,
-    uart_open, uart_write,
+    route_stat, route_stop, serve, set_tick, spi_open, spi_transfer, subscribe, timer_start,
+    timer_stop, uart_open, uart_write,
 };
+
+/// Writes the device's node id into `out` (`node_id`, ABI 5); returns the
+/// import's result.
+pub(crate) fn node_id(out: &mut [u8; 8]) -> i32 {
+    let Some((ptr, _)) = out_buffer(out) else {
+        return crate::AbiError::OutOfBounds.code();
+    };
+    // SAFETY: `ptr` is the address of `out`, exclusively borrowed for the
+    // whole call and exactly the 8 bytes the host writes; the host checks
+    // the range against linear memory and retains no pointer.
+    unsafe { imports::node_id(ptr) }
+}
 
 /// `(ptr, len)` of an exclusively borrowed guest buffer, or `None` if the
 /// length does not fit the ABI's `i32` (never for buffers in one 64 KiB page).
@@ -287,19 +309,28 @@ impl<T> GuestCell<T> {
 unsafe impl<T> Sync for GuestCell<T> {}
 
 /// Generates the ABI exports (`init`, `tick`, `mw_alloc`, `on_message`,
-/// `on_irq`) for a type implementing [`Payload`](crate::Payload).
+/// `on_irq`, and with `serve` also `on_request`) for a type implementing
+/// [`Payload`](crate::Payload).
 ///
 /// Use it exactly once, at the top level of a `cdylib` crate:
 ///
 /// ```ignore
 /// mw_payload::payload!(MyApp);
+/// // or, for a payload that serves requests (ABI 5):
+/// mw_payload::payload!(MyApp, serve);
 /// ```
 ///
 /// The expansion holds the state in a `static GuestCell<Option<MyApp>>` and
-/// the receive buffer in a `static GuestCell<[u8; MAX_MESSAGE]>`, and forwards
-/// each export to the safe functions in [`rt`](crate::rt). The five function
+/// the receive buffer in a `static GuestCell<[u8; N]>`, where `N` is
+/// `MAX_MESSAGE`, or with `serve`
+/// [`serve::MAX_REQUEST_BUFFER`](crate::serve::MAX_REQUEST_BUFFER) so one
+/// buffer holds a request's meta block, body and reply. The plain form
+/// expands exactly as before ABI 5, so existing payloads build to the same
+/// module. It forwards
+/// each export to the safe functions in [`rt`](crate::rt). The function
 /// exports carry `#[unsafe(no_mangle)]` so the linker emits the fixed ABI
-/// names.
+/// names. Without `serve` the module has no `on_request` export and loads
+/// on ABI 1-4 firmware exactly as before.
 ///
 /// # `#![forbid(unsafe_code)]` in the payload crate
 ///
@@ -317,7 +348,7 @@ unsafe impl<T> Sync for GuestCell<T> {}
 /// no safe way for an upstream crate to call into a downstream one except
 /// through a symbol the downstream crate defines (itself a `no_mangle`
 /// item) or generics, which cannot be exported. The macro therefore keeps
-/// the five exports as one-line forwarders into the generic, safe
+/// the exports as one-line forwarders into the generic, safe
 /// [`rt`](crate::rt) functions, and everything else lives in this crate.
 #[macro_export]
 macro_rules! payload {
@@ -351,6 +382,55 @@ macro_rules! payload {
             #[unsafe(no_mangle)]
             pub extern "C" fn on_irq(kind: i32, source: i32, value: i32, time_us: i32) {
                 $crate::rt::on_irq::<$ty>(&STATE, kind, source, value, time_us);
+            }
+        };
+    };
+    ($ty:ty, serve) => {
+        const _: () = {
+            static STATE: $crate::GuestCell<::core::option::Option<$ty>> =
+                $crate::GuestCell::new(::core::option::Option::None);
+            static RX: $crate::rt::ServeBuffer =
+                $crate::GuestCell::new([0; $crate::serve::MAX_REQUEST_BUFFER]);
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn init() {
+                $crate::rt::init::<$ty>(&STATE);
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn tick(now_ms: i32) {
+                $crate::rt::tick::<$ty>(&STATE, now_ms);
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn mw_alloc(len: i32) -> i32 {
+                $crate::rt::serve_alloc(&RX, len)
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn on_message(slot: i32, ptr: i32, len: i32) {
+                $crate::rt::serve_on_message::<$ty>(&STATE, &RX, slot, ptr, len);
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn on_irq(kind: i32, source: i32, value: i32, time_us: i32) {
+                $crate::rt::on_irq::<$ty>(&STATE, kind, source, value, time_us);
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn on_request(
+                slot: i32,
+                req_ptr: i32,
+                req_len: i32,
+                meta_ptr: i32,
+                reply_ptr: i32,
+                reply_cap: i32,
+            ) -> i32 {
+                $crate::rt::on_request::<$ty>(
+                    &STATE,
+                    &RX,
+                    [slot, req_ptr, req_len, meta_ptr, reply_ptr, reply_cap],
+                )
             }
         };
     };

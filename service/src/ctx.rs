@@ -453,7 +453,7 @@ mod tests {
     fn assert_send<T: Send>(_: &T) {}
 
     #[test]
-    fn m4_server_trace_continues_or_starts_a_trace() {
+    fn ms4_server_trace_continues_or_starts_a_trace() {
         let inbound = TraceParent::parse(TP).unwrap();
         let t = server_trace(Some(inbound), [7; 8], [9; 16]).unwrap();
         assert_eq!(
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn m4_downstream_fills_unset_options_from_the_request() {
+    fn ms4_downstream_fills_unset_options_from_the_request() {
         let span = TraceParent::parse(TP).unwrap().child([7; 8]).unwrap();
         let caller_id = RequestId::new("req-1").unwrap();
         let now = Instant::now();
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn m4_ctx_exposes_meta_trace_and_declared_clients_only() {
+    fn ms4_ctx_exposes_meta_trace_and_declared_clients_only() {
         let meta = RequestMeta::NONE
             .with_trace(TraceParent::parse(TP).unwrap())
             .with_request_id_str("req-2");
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn m4_plain_handlers_and_async_handlers_box_alike() {
+    async fn ms4_plain_handlers_and_async_handlers_box_alike() {
         let mut links = Links::new();
         let mut echo = BoxedHandler::new(handler_fn(|r, out| {
             let dst = out

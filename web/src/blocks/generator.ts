@@ -7,9 +7,36 @@
 // * `@external("mw", ...)` declarations for only the host functions the
 //   blocks use, in ABI order;
 // * `memory`, which asc exports by itself;
-// * `init` (subscriptions, pin interrupts and `set_tick` first, then the
-//   `on init` stacks), and `tick`, `mw_alloc` + `on_message` and `on_irq`
-//   only when an event block needs them.
+// * one `const PIN_<label>: i32` per pin-table row with a pin;
+// * `init` (the pin table's setup first: `gpio_output` plus the initial
+//   level, `gpio_input` with its pull, `i2c_open(bus, hz)` per I2C bus,
+//   `spi_open(...)` for the SPI bus; then subscriptions, pin interrupts and
+//   `set_tick`, then the state machines' initial states, then the `on
+//   init` stacks), and `tick`, `mw_alloc` + `on_message` and `on_irq` only
+//   when an event block needs them;
+// * for each state-machine table (model/machines.ts), its constants,
+//   globals and fixed `switch` dispatch (machineGen.ts documents the
+//   code). `raise <machine>.<event>` calls the machine's bounded raise
+//   from any handler, `<machine>.<state> is current?` compares its state,
+//   and "when <machine>.<state> is entered" blocks run after the state's
+//   entry actions; a reference to a machine, state or event the payload
+//   does not have is an error on the block;
+// * each flow (model/flows.ts, lowered by flowGen.ts) adds its body where
+//   the matching hat block's would go: `init`, the shared tick, the
+//   message handler, `on_irq` for a pin edge (sharing the pin's
+//   interrupt), or the state's enter function, after the blocks' own.
+//
+// Every source builds the shared statement IR (stmt.ts: lines, if / else
+// if / else, constant-count for) and prints it with one printer: blocks
+// here, table rows and entries in machineGen.ts, flows in flowGen.ts. Loop
+// variables are numbered across all of them (`repeat`).
+//
+// Pin blocks either take a pin number (`mw_gpio_*`, `mw_on_pin_edge`) or
+// name a pin-table label (`mw_pin_*`, `mw_on_pin`), which must be a row of
+// the right function (an output for write and toggle, an input for an
+// edge handler). Whether the table's pins suit the board is protocol-wasm
+// `checkPins`' question (pipeline.ts asks it before compiling); the
+// generator only turns the table into code.
 //
 // Nothing allocates at run time. Constant text is UTF-8 in data segments
 // (`memory.data<u8>([...])`), and messages land in a fixed 512-byte
@@ -25,10 +52,28 @@
 // interrupt (the union of their edges) and filter on the pin level.
 //
 // Problems are reported per block (`GenIssue.blockId`) so the UI can point
-// at the block. Disabled blocks are skipped; a block the profile does not
+// at the block; problems in a state-machine table have no block and name
+// the machine and its row or state instead. Disabled blocks are skipped; a block the profile does not
 // support is an error rather than being dropped silently.
 
 import { EVENT_BLOCKS, blockSupported } from "./defs";
+import { type Stmt, line, printStmts, toggleStmt, writeStmt } from "./stmt";
+import { type FlowHost, lowerFlows } from "./flowGen";
+import {
+  type MachineHost,
+  type PlannedMachine,
+  emitMachines,
+  inStateExpr,
+  planInState,
+  planMachines,
+  planRaise,
+  plannedById,
+  raiseCall,
+} from "./machineGen";
+import { EDGE_CODE, type Flow } from "../model/flows";
+import { type PhaseBody, type PhaseCode, type PhaseHost, type PhasePlan, type PhaseSpec, REQUEST_BUFFER, emitPhases, lowerPhaseAction, planPhases } from "./phaseGen";
+import { type Machine, parseMachineRef } from "../model/machines";
+import { EMPTY_PINS, PULL_CODES, type PinFunc, type PinTable } from "../model/pins";
 import { PROFILES, type ProfileId } from "./profiles";
 import {
   type BlockJson,
@@ -83,6 +128,11 @@ const IMPORTS: readonly [string, string][] = [
   ["gpio_irq", "(pin: i32, edge: i32): i32"],
   ["timer_start", "(id: i32, periodUs: i32, periodic: i32): i32"],
   ["timer_stop", "(id: i32): i32"],
+  ["spi_open", "(bus: i32, sck: i32, mosi: i32, miso: i32, cs: i32, freqKhz: i32, mode: i32): i32"],
+  ["adc_read", "(pin: i32): i32"],
+  ["i2c_open", "(bus: i32, freqHz: i32): i32"],
+  ["serve", "(keyPtr: usize, keyLen: i32): i32"],
+  ["node_id", "(ptr: usize): i32"],
 ];
 
 /** Run-time helpers, emitted when used. Order is emission order. */
@@ -245,6 +295,7 @@ const HELPER_NEEDS: Record<string, { helpers?: string[]; buffers?: string[]; imp
 
 const BUFFERS: readonly [string, string][] = [
   ["RX", `// Receive buffer handed to the host by mw_alloc.\nconst RX: usize = memory.data(${MAX_MESSAGE});`],
+  ["RQ", `// Receive buffer handed to the host by mw_alloc: a request's meta block,\n// body and reply space (ABI 5), or a message.\nconst RQ: usize = memory.data(${REQUEST_BUFFER});`],
   ["TX", `// Text being built for publish, log and show text.\nconst TX_CAP: i32 = ${MAX_MESSAGE};\nconst TX: usize = memory.data(${MAX_MESSAGE});\nlet txLen: i32 = 0;`],
   ["DIGITS", "const DIGITS: usize = memory.data(11);"],
   ["PINS", `// Last level written to each pin, for toggle.\nconst PINS: usize = memory.data(${MAX_PIN + 1});`],
@@ -259,7 +310,7 @@ const BADGE_BUTTONS = "badge/buttons";
 type Ty = "number" | "text";
 
 /** What the current handler provides to value blocks. */
-type EventCtx = "init" | "tick" | "message" | "button" | "pin" | "timer";
+type EventCtx = "init" | "tick" | "message" | "button" | "pin" | "timer" | "enter";
 
 interface Ctx {
   event: EventCtx;
@@ -295,6 +346,14 @@ export function keyProblem(key: string): string | null {
   return null;
 }
 
+/** Labels that can name a constant (checkPins enforces the same rule). */
+const PIN_IDENT = /^[A-Za-z][A-Za-z0-9_]{0,23}$/;
+
+/** The constant a pin-table label becomes. */
+export function pinIdent(label: string): string {
+  return `PIN_${label}`;
+}
+
 class Gen {
   readonly errors: GenIssue[] = [];
   readonly warnings: GenIssue[] = [];
@@ -307,11 +366,104 @@ class Gen {
   /** Subscription keys -> slot global. */
   private readonly slots = new Map<string, string>();
   private loopVars = 0;
+  /** The machines that get code (machineGen.ts). */
+  private readonly plan: PlannedMachine[];
+  /** Bodies of "when <state> is entered" blocks by `k.state`. */
+  private readonly hats = new Map<string, string[]>();
+  /** `k.event` pairs that raise blocks name. */
+  private readonly blockRaised = new Set<string>();
+  private readonly host: MachineHost;
+  /** The phases that get a phase server (phaseGen.ts), or null. */
+  private readonly phasePlan: PhasePlan | null;
+  private readonly phaseHost: PhaseHost;
 
   constructor(
     private readonly ws: WorkspaceJson,
     private readonly profile: ProfileId,
-  ) {}
+    private readonly pins: PinTable,
+    private readonly machines: readonly Machine[],
+    private readonly flows: readonly Flow[] = [],
+    phases: readonly PhaseSpec[] = [],
+  ) {
+    this.host = {
+      str: (t) => this.str(t),
+      use: (n) => this.use(n),
+      helper: (n) => this.helper(n),
+      pin: (label, funcs, what) => {
+        const r = this.labelPin(label, funcs, what);
+        return typeof r === "string" ? { problem: r } : { ident: r.ident };
+      },
+      error: (m) => this.error(undefined, m),
+      warn: (m) => this.warn(undefined, m),
+      keyProblem,
+      comment: commentText,
+    };
+    this.plan = planMachines(machines, this.host);
+    this.phaseHost = {
+      ...this.host,
+      inState: (m, st) => planInState(this.plan, m, st),
+      raise: (m, ev) => planRaise(this.plan, m, ev),
+      pinRead: (label) => {
+        const r = this.labelPin(label, ["gpio-in", "gpio-out", "adc"], "a GPIO or analog input");
+        if (typeof r === "string") return { problem: r };
+        const row = this.pins.rows.find((x) => x.label === label);
+        if (row?.func === "adc") {
+          this.use("adc_read");
+          return { code: `mw_adc_read(${r.ident})` };
+        }
+        this.use("gpio_read");
+        return { code: `mw_gpio_read(${r.ident})` };
+      },
+    };
+    this.phasePlan = phases.length > 0 ? planPhases(phases, this.phaseHost) : null;
+  }
+
+  /** The constant naming a labelled pin when `label` names a table row
+   * whose function is one of `funcs`; the problem otherwise. */
+  private labelPin(label: string, funcs: readonly PinFunc[], what: string): { ident: string; pin: number } | string {
+    const r = this.pins.rows.find((x) => x.label === label);
+    if (!r) return `no pin is labelled "${label}" in the Pins table; add it there`;
+    if (!funcs.includes(r.func)) return `${label} is not ${what} in the Pins table`;
+    if (r.pin === null || !PIN_IDENT.test(label) || r.pin > MAX_PIN) return `${label} has no usable pin in the Pins table`;
+    return { ident: pinIdent(label), pin: r.pin };
+  }
+
+  /** The constant naming a labelled pin, after checking the block's label
+   * names a table row whose function is one of `funcs`; null (with an
+   * error on the block) otherwise. */
+  pinLabel(b: BlockJson, funcs: readonly PinFunc[], what: string): { ident: string; pin: number } | null {
+    const r = this.labelPin(fieldText(b, "LABEL"), funcs, what);
+    if (typeof r === "string") {
+      this.error(b, r);
+      return null;
+    }
+    return r;
+  }
+
+  /** The machine and state or event a machine block's `field` names
+   * (`<machine id>.<name>`); null, with an error on the block, when it
+   * names nothing in the payload's machines. `planned` is null when the
+   * machine exists but gets no code (its own errors say why). */
+  machineRef(b: BlockJson, field: "STATE" | "EVENT"): { planned: PlannedMachine | null; name: string } | null {
+    const what = field === "STATE" ? "state" : "event";
+    const v = fieldText(b, field);
+    const ref = parseMachineRef(v);
+    if (!ref) {
+      this.error(b, v === "" ? `pick a state machine ${what}` : `"${v}" does not name a state machine ${what} (machine.${what})`);
+      return null;
+    }
+    const m = this.machines.find((x) => x.id === ref.id);
+    if (!m) {
+      this.error(b, `no state machine is named "${ref.id}"; add it under States`);
+      return null;
+    }
+    const names = field === "STATE" ? m.states.map((s) => s.name) : m.events.map((e) => e.name);
+    if (!names.includes(ref.name)) {
+      this.error(b, `${ref.id} has no ${what} "${ref.name}"`);
+      return null;
+    }
+    return { planned: plannedById(this.plan, ref.id) ?? null, name: ref.name };
+  }
 
   error(b: BlockJson | undefined, message: string): void {
     this.errors.push({ blockId: b?.id, message });
@@ -535,6 +687,16 @@ class Gen {
         this.use("gpio_read");
         return `mw_gpio_read(${p})`;
       }
+      case "mw_pin_read": {
+        const p = this.pinLabel(b, ["gpio-in", "gpio-out"], "a GPIO input or output");
+        if (!p) return "0";
+        this.use("gpio_read");
+        return `mw_gpio_read(${p.ident})`;
+      }
+      case "mw_sm_in_state": {
+        const r = this.machineRef(b, "STATE");
+        return r?.planned ? inStateExpr(r.planned.k, r.name) : "0";
+      }
       case "mw_pin_level":
         if (ctx.event !== "pin") {
           this.error(b, "pin level is only available inside on pin edge");
@@ -560,12 +722,12 @@ class Gen {
   }
 
   /** Statements appending a value to TX (numbers as decimal). */
-  text(b: BlockJson | undefined, ctx: Ctx, pad: string, out: string[]): void {
+  text(b: BlockJson | undefined, ctx: Ctx, out: Stmt[]): void {
     if (!b || isDisabled(b)) return;
     if (!this.supported(b)) return;
     if (this.typeOf(b) === "number") {
       this.helper("txNum");
-      out.push(`${pad}txNum(${this.num(b, ctx)});`);
+      out.push(line(`txNum(${this.num(b, ctx)});`));
       return;
     }
     switch (b.type) {
@@ -574,12 +736,12 @@ class Gen {
         if (s === "") return;
         const id = this.str(s);
         this.helper("txBytes");
-        out.push(`${pad}txBytes(${id}, ${id}_LEN);`);
+        out.push(line(`txBytes(${id}, ${id}_LEN);`));
         return;
       }
       case "text_join": {
         const count = Number((b.extraState as { itemCount?: unknown } | undefined)?.itemCount ?? 2);
-        for (let i = 0; i < Math.min(count, 64); i++) this.text(input(b, `ADD${i}`), ctx, pad, out);
+        for (let i = 0; i < Math.min(count, 64); i++) this.text(input(b, `ADD${i}`), ctx, out);
         return;
       }
       case "mw_message_text":
@@ -588,7 +750,7 @@ class Gen {
           return;
         }
         this.helper("txBytes");
-        out.push(`${pad}txBytes(msgPtr, msgLen);`);
+        out.push(line(`txBytes(msgPtr, msgLen);`));
         return;
       default:
         this.error(b, `block "${b.type}" is not supported by the generator`);
@@ -596,10 +758,10 @@ class Gen {
   }
 
   /** Builds a value into TX: resets it, then appends. */
-  buildText(b: BlockJson | undefined, ctx: Ctx, pad: string, out: string[]): void {
+  buildText(b: BlockJson | undefined, ctx: Ctx, out: Stmt[]): void {
     this.buffer("TX");
-    out.push(`${pad}txLen = 0;`);
-    this.text(b, ctx, pad, out);
+    out.push(line(`txLen = 0;`));
+    this.text(b, ctx, out);
   }
 
   publishConst(key: string, b: BlockJson): string {
@@ -611,29 +773,36 @@ class Gen {
 
   // ---- statements
 
-  stmts(first: BlockJson | undefined, ctx: Ctx, pad: string, out: string[]): void {
+  /** A bounded loop: a fresh loop variable, then the body built with it
+   * (allocated before the body, so nested loops number outside-in). */
+  repeat(count: number, body: (v: string) => Stmt[]): Stmt {
+    const v = `i${this.loopVars++}`;
+    return { kind: "for", v, count, body: body(v) };
+  }
+
+  /** A block stack as statements. */
+  stmts(first: BlockJson | undefined, ctx: Ctx): Stmt[] {
+    const out: Stmt[] = [];
     for (let b = first; b; b = nextBlock(b)) {
       if (isDisabled(b)) continue;
       if (!this.supported(b)) continue;
-      this.stmt(b, ctx, pad, out);
+      this.stmt(b, ctx, out);
     }
+    return out;
   }
 
-  private stmt(b: BlockJson, ctx: Ctx, pad: string, out: string[]): void {
-    const inner = `${pad}  `;
+  private stmt(b: BlockJson, ctx: Ctx, out: Stmt[]): void {
     switch (b.type) {
       case "controls_if": {
         const st = (b.extraState ?? {}) as { elseIfCount?: number; hasElse?: boolean };
         const branches = 1 + Math.min(Number(st.elseIfCount ?? 0), 64);
+        const arms: { cond: string; body: Stmt[] }[] = [];
         for (let i = 0; i < branches; i++) {
-          out.push(`${pad}${i === 0 ? "if" : "} else if"} (${this.num(input(b, `IF${i}`), ctx)} != 0) {`);
-          this.stmts(input(b, `DO${i}`), ctx, inner, out);
+          const cond = this.num(input(b, `IF${i}`), ctx);
+          arms.push({ cond, body: this.stmts(input(b, `DO${i}`), ctx) });
         }
-        if (st.hasElse || b.inputs?.ELSE) {
-          out.push(`${pad}} else {`);
-          this.stmts(input(b, "ELSE"), ctx, inner, out);
-        }
-        out.push(`${pad}}`);
+        const otherwise = st.hasElse || b.inputs?.ELSE ? this.stmts(input(b, "ELSE"), ctx) : null;
+        out.push({ kind: "if", arms, else: otherwise });
         return;
       }
       case "controls_repeat":
@@ -644,10 +813,7 @@ class Gen {
           return;
         }
         if (n > MAX_LOOP) this.error(b, `repeat at most ${MAX_LOOP} times`);
-        const i = `i${this.loopVars++}`;
-        out.push(`${pad}for (let ${i}: i32 = 0; ${i} < ${Math.max(0, Math.min(n, MAX_LOOP))}; ${i}++) {`);
-        this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 }, inner, out);
-        out.push(`${pad}}`);
+        out.push(this.repeat(Math.max(0, Math.min(n, MAX_LOOP)), () => this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 })));
         return;
       }
       case "controls_for": {
@@ -668,11 +834,12 @@ class Gen {
           return;
         }
         const signed = from <= to ? step : -step;
-        const i = `i${this.loopVars++}`;
-        out.push(`${pad}for (let ${i}: i32 = 0; ${i} < ${count}; ${i}++) {`);
-        out.push(`${inner}${v} = ${from < 0 ? `(${from})` : from} + ${i} * ${signed < 0 ? `(${signed})` : signed};`);
-        this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 }, inner, out);
-        out.push(`${pad}}`);
+        out.push(
+          this.repeat(count, (i) => [
+            line(`${v} = ${from < 0 ? `(${from})` : from} + ${i} * ${signed < 0 ? `(${signed})` : signed};`),
+            ...this.stmts(input(b, "DO"), { ...ctx, loops: ctx.loops + 1 }),
+          ]),
+        );
         return;
       }
       case "controls_flow_statements":
@@ -680,7 +847,7 @@ class Gen {
           this.error(b, "break and continue must be inside a loop");
           return;
         }
-        out.push(`${pad}${fieldText(b, "FLOW") === "CONTINUE" ? "continue" : "break"};`);
+        out.push(line(`${fieldText(b, "FLOW") === "CONTINUE" ? "continue" : "break"};`));
         return;
       case "variables_set": {
         const v = this.variable(b);
@@ -688,19 +855,19 @@ class Gen {
           this.error(b, "variables hold numbers; text can only be published, logged or shown");
           return;
         }
-        if (v) out.push(`${pad}${v} = ${this.num(input(b, "VALUE"), ctx)};`);
+        if (v) out.push(line(`${v} = ${this.num(input(b, "VALUE"), ctx)};`));
         return;
       }
       case "math_change": {
         const v = this.variable(b);
-        if (v) out.push(`${pad}${v} += ${this.num(input(b, "DELTA"), ctx)};`);
+        if (v) out.push(line(`${v} += ${this.num(input(b, "DELTA"), ctx)};`));
         return;
       }
       case "text_print":
       case "mw_log":
-        this.buildText(input(b, "TEXT"), ctx, pad, out);
+        this.buildText(input(b, "TEXT"), ctx, out);
         this.use("log");
-        out.push(`${pad}mw_log(TX, txLen);`);
+        out.push(line(`mw_log(TX, txLen);`));
         return;
       case "mw_publish": {
         const key = fieldText(b, "KEY");
@@ -708,33 +875,54 @@ class Gen {
         if (this.profile === "badge" && key.startsWith("badge/")) {
           this.warn(b, `use the badge blocks for ${key}; a malformed payload there is refused`);
         }
-        this.buildText(input(b, "DATA"), ctx, pad, out);
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, TX, txLen);`);
+        this.buildText(input(b, "DATA"), ctx, out);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, TX, txLen);`));
         return;
       }
       case "mw_gpio_output": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         this.use("gpio_output");
-        out.push(`${pad}mw_gpio_output(${p});`);
+        out.push(line(`mw_gpio_output(${p});`));
         return;
       }
       case "mw_gpio_input": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         const pl = this.intField(b, "PULL", 0, 2, "pull");
         this.use("gpio_input");
-        out.push(`${pad}mw_gpio_input(${p}, ${pl});`);
+        out.push(line(`mw_gpio_input(${p}, ${pl});`));
         return;
       }
       case "mw_gpio_write": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         this.helper("pinWrite");
-        out.push(`${pad}pinWrite(${p}, ${this.num(input(b, "LEVEL"), ctx)});`);
+        out.push(writeStmt(String(p), this.num(input(b, "LEVEL"), ctx)));
         return;
       }
       case "mw_gpio_toggle": {
         const p = this.intField(b, "PIN", 0, MAX_PIN, "pin");
         this.helper("pinToggle");
-        out.push(`${pad}pinToggle(${p});`);
+        out.push(toggleStmt(String(p)));
+        return;
+      }
+      case "mw_pin_write": {
+        const p = this.pinLabel(b, ["gpio-out"], "a GPIO output");
+        if (!p) return;
+        this.helper("pinWrite");
+        out.push(writeStmt(p.ident, this.num(input(b, "LEVEL"), ctx)));
+        return;
+      }
+      case "mw_pin_toggle": {
+        const p = this.pinLabel(b, ["gpio-out"], "a GPIO output");
+        if (!p) return;
+        this.helper("pinToggle");
+        out.push(toggleStmt(p.ident));
+        return;
+      }
+      case "mw_sm_raise": {
+        const r = this.machineRef(b, "EVENT");
+        if (!r?.planned) return;
+        this.blockRaised.add(`${r.planned.k}.${r.name}`);
+        out.push(line(raiseCall(r.planned.k, r.name)));
         return;
       }
       case "mw_timer_start": {
@@ -742,43 +930,43 @@ class Gen {
         const ms = this.intField(b, "MS", 1, 2_000_000, "period");
         const periodic = this.intField(b, "MODE", 0, 1, "mode");
         this.use("timer_start");
-        out.push(`${pad}mw_timer_start(${id}, ${ms * 1000}, ${periodic});`);
+        out.push(line(`mw_timer_start(${id}, ${ms * 1000}, ${periodic});`));
         return;
       }
       case "mw_timer_stop": {
         const id = this.intField(b, "ID", 0, 3, "timer");
         this.use("timer_stop");
-        out.push(`${pad}mw_timer_stop(${id});`);
+        out.push(line(`mw_timer_stop(${id});`));
         return;
       }
       case "badge_led":
         this.helper("ledSet");
         out.push(
-          `${pad}ledSet(${this.num(input(b, "INDEX"), ctx)}, ${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`,
+          line(`ledSet(${this.num(input(b, "INDEX"), ctx)}, ${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`),
         );
         return;
       case "badge_leds_fill":
         this.helper("ledFill");
-        out.push(`${pad}ledFill(${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`);
+        out.push(line(`ledFill(${this.num(input(b, "R"), ctx)}, ${this.num(input(b, "G"), ctx)}, ${this.num(input(b, "B"), ctx)});`));
         return;
       case "badge_set_leds": {
         const k = this.publishConst(BADGE_LEDS, b);
         this.buffer("LEDS");
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, LEDS, 24);`);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, LEDS, 24);`));
         return;
       }
       case "badge_show_text": {
         const k = this.publishConst(BADGE_TEXT, b);
-        this.buildText(input(b, "TEXT"), ctx, pad, out);
+        this.buildText(input(b, "TEXT"), ctx, out);
         this.helper("textCap");
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, TX, textCap(${MAX_BADGE_TEXT}));`);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, TX, textCap(${MAX_BADGE_TEXT}));`));
         return;
       }
       case "badge_pet_mode": {
         const mode = this.intField(b, "MODE", 0, 5, "pet mode");
         const k = this.publishConst(BADGE_PET, b);
         const m = this.str(String.fromCharCode(mode));
-        out.push(`${pad}mw_publish(${k}, ${k}_LEN, ${m}, 1);`);
+        out.push(line(`mw_publish(${k}, ${k}_LEN, ${m}, 1);`));
         return;
       }
       default:
@@ -789,14 +977,53 @@ class Gen {
 
   // ---- module
 
+  /** The pin table's constants (returned) and its init setup (appended to
+   * `setup`). Rows without a pin or with a label that cannot name a
+   * constant are skipped (checkPins reports them); GPIO inputs that an
+   * edge handler configures are left to it. */
+  private tableSetup(setup: string[], irqPins: ReadonlyMap<number, unknown>): string[] {
+    const consts: string[] = [];
+    const usable = this.pins.rows.filter((r) => r.pin !== null && r.pin <= MAX_PIN && PIN_IDENT.test(r.label));
+    for (const r of usable) consts.push(`const ${pinIdent(r.label)}: i32 = ${r.pin}; // ${FUNC_COMMENT[r.func]}`);
+    for (const r of usable) {
+      const id = pinIdent(r.label);
+      if (r.func === "gpio-out") {
+        this.use("gpio_output");
+        this.helper("pinWrite");
+        setup.push(`  mw_gpio_output(${id});`, `  pinWrite(${id}, ${r.initial});`);
+      } else if (r.func === "gpio-in" && r.pin !== null && !irqPins.has(r.pin)) {
+        this.use("gpio_input");
+        setup.push(`  mw_gpio_input(${id}, ${PULL_CODES[r.pull]});`);
+      }
+    }
+    for (const bus of this.pins.buses) {
+      const on = (f: PinFunc) => usable.find((r) => r.func === f && r.bus === bus.bus);
+      if (bus.kind === "i2c") {
+        if (!on("i2c-sda") || !on("i2c-scl")) continue;
+        this.use("i2c_open");
+        setup.push(`  mw_i2c_open(${bus.bus}, ${bus.hz});`);
+      } else {
+        const sck = on("spi-sck");
+        if (!sck) continue;
+        const arg = (f: PinFunc) => {
+          const r = on(f);
+          return r ? pinIdent(r.label) : "-1";
+        };
+        this.use("spi_open");
+        setup.push(`  mw_spi_open(${bus.bus}, ${pinIdent(sck.label)}, ${arg("spi-mosi")}, ${arg("spi-miso")}, ${arg("spi-cs")}, ${bus.khz}, ${bus.mode});`);
+      }
+    }
+    return consts;
+  }
+
   run(): GenResult {
     const tops = topBlocks(this.ws).filter((b) => !isDisabled(b));
     const initBody: string[] = [];
     const setup: string[] = [];
-    const every: { b: BlockJson; ms: number; body: string[] }[] = [];
+    const every: { b?: BlockJson; ms: number; body: string[] }[] = [];
     const messages: { key: string; body: string[] }[] = [];
     const buttons: { button: number; action: number; body: string[] }[] = [];
-    const pins = new Map<number, { pull: number; edges: number; b: BlockJson }>();
+    const pins = new Map<number, { pull: number; edges: number; b?: BlockJson }>();
     const pinBodies: { pin: number; edge: number; body: string[] }[] = [];
     const timers: { id: number; body: string[] }[] = [];
 
@@ -810,12 +1037,12 @@ class Gen {
       const ctx = (event: EventCtx): Ctx => ({ event, loops: 0 });
       switch (b.type) {
         case "mw_on_init":
-          this.stmts(input(b, "DO"), ctx("init"), "  ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("init")), "  ", body);
           initBody.push(...body);
           break;
         case "mw_every": {
           const ms = this.intField(b, "MS", MIN_TICK_MS, 2_147_483_647, "period");
-          this.stmts(input(b, "DO"), ctx("tick"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("tick")), "    ", body);
           every.push({ b, ms, body });
           break;
         }
@@ -824,13 +1051,13 @@ class Gen {
           const p = keyProblem(key);
           if (p) this.error(b, p);
           this.slot(key);
-          this.stmts(input(b, "DO"), ctx("message"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("message")), "    ", body);
           messages.push({ key, body });
           break;
         }
         case "badge_on_button":
           this.slot(BADGE_BUTTONS);
-          this.stmts(input(b, "DO"), ctx("button"), "      ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("button")), "      ", body);
           buttons.push({
             button: this.intField(b, "BUTTON", 0, 5, "button"),
             action: this.intField(b, "ACTION", 0, 2, "action"),
@@ -844,18 +1071,123 @@ class Gen {
           const prev = pins.get(pin);
           if (prev && prev.pull !== pull) this.error(b, `pin ${pin} already has a handler with a different pull`);
           pins.set(pin, { pull, edges: (prev?.edges ?? 0) | edge, b });
-          this.stmts(input(b, "DO"), ctx("pin"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("pin")), "    ", body);
           pinBodies.push({ pin, edge, body });
           break;
         }
+        case "mw_on_pin": {
+          const p = this.pinLabel(b, ["gpio-in"], "a GPIO input");
+          const edge = this.intField(b, "EDGE", 1, 3, "edge");
+          printStmts(this.stmts(input(b, "DO"), ctx("pin")), "    ", body);
+          if (!p) break;
+          const r = this.pins.rows.find((x) => x.label === fieldText(b, "LABEL"));
+          const pull = PULL_CODES[r?.pull ?? "none"];
+          const prev = pins.get(p.pin);
+          if (prev && prev.pull !== pull) this.error(b, `pin ${p.pin} already has a handler with a different pull`);
+          pins.set(p.pin, { pull, edges: (prev?.edges ?? 0) | edge, b });
+          pinBodies.push({ pin: p.pin, edge, body });
+          break;
+        }
         case "mw_on_timer":
-          this.stmts(input(b, "DO"), ctx("timer"), "    ", body);
+          printStmts(this.stmts(input(b, "DO"), ctx("timer")), "    ", body);
           timers.push({ id: this.intField(b, "ID", 0, 3, "timer"), body });
           break;
+        case "mw_sm_on_enter": {
+          const r = this.machineRef(b, "STATE");
+          printStmts(this.stmts(input(b, "DO"), ctx("enter")), "  ", body);
+          if (!r?.planned) break;
+          const key = `${r.planned.k}.${r.name}`;
+          this.hats.set(key, [...(this.hats.get(key) ?? []), ...body]);
+          break;
+        }
       }
     }
 
-    // init: subscriptions, pin interrupts, tick, then the on-init stacks.
+    // Flows (flowGen.ts): each body goes where its entry's hat block's
+    // would, after the blocks' own.
+    const flowHost: FlowHost = {
+      ...this.host,
+      inState: (m, st) => planInState(this.plan, m, st),
+      raise: (m, ev) => {
+        const r = planRaise(this.plan, m, ev);
+        if ("raised" in r) this.blockRaised.add(r.raised);
+        return r;
+      },
+      repeat: (count, body) => this.repeat(count, body),
+      ...(this.phasePlan
+        ? { phaseAction: (a, own, fail) => lowerPhaseAction(a, this.phasePlan as PhasePlan, own, this.phaseHost, fail) }
+        : {}),
+    } satisfies FlowHost;
+    const phaseBodies: PhaseBody[] = [];
+    for (const { flow, entry, body } of lowerFlows(this.flows, flowHost)) {
+      const fail = (msg: string) => this.error(undefined, `flow ${flow.id}: ${msg}`);
+      const lines = (pad: string) => {
+        const out: string[] = [];
+        printStmts(body, pad, out);
+        return out;
+      };
+      switch (entry.on) {
+        case "init":
+          initBody.push(...lines("  "));
+          break;
+        case "every":
+          if (!Number.isInteger(entry.ms) || entry.ms < MIN_TICK_MS || entry.ms > 2_147_483_647) {
+            fail(`the period must be a whole number from ${MIN_TICK_MS} to 2147483647 ms`);
+            break;
+          }
+          every.push({ ms: entry.ms, body: lines("    ") });
+          break;
+        case "message": {
+          const p = keyProblem(entry.key);
+          if (p) {
+            fail(p);
+            break;
+          }
+          this.slot(entry.key);
+          messages.push({ key: entry.key, body: lines("    ") });
+          break;
+        }
+        case "pin-edge": {
+          const p = this.labelPin(entry.label, ["gpio-in"], "a GPIO input");
+          if (typeof p === "string") {
+            fail(p);
+            break;
+          }
+          const edge = EDGE_CODE[entry.edge] ?? 3;
+          const r = this.pins.rows.find((x) => x.label === entry.label);
+          const pull = PULL_CODES[r?.pull ?? "none"];
+          const prev = pins.get(p.pin);
+          if (prev && prev.pull !== pull) fail(`pin ${p.pin} already has a handler with a different pull`);
+          pins.set(p.pin, { pull, edges: (prev?.edges ?? 0) | edge, b: prev?.b });
+          pinBodies.push({ pin: p.pin, edge, body: lines("    ") });
+          break;
+        }
+        case "entered": {
+          const ref = parseMachineRef(entry.state);
+          const planned = ref ? plannedById(this.plan, ref.id) : undefined;
+          if (!ref || !planned || !planned.states.has(ref.name)) {
+            fail(`"${entry.state}" is not a state of a state machine that gets code`);
+            break;
+          }
+          const key = `${planned.k}.${ref.name}`;
+          this.hats.set(key, [...(this.hats.get(key) ?? []), ...lines("  ")]);
+          break;
+        }
+        case "phase":
+          if (!this.phasePlan) {
+            fail(`"${entry.phase}" is not a phase of this unit`);
+            break;
+          }
+          phaseBodies.push({ phase: entry.phase, state: entry.state, every: entry.every, body, fail });
+          break;
+      }
+    }
+    const ph: PhaseCode | null = this.phasePlan ? emitPhases(this.phasePlan, phaseBodies, this.phaseHost) : null;
+    const settle = ph ? ["  phSettle();"] : [];
+
+    // init: the pin table, subscriptions, pin interrupts, tick, the state
+    // machines' initial states, then the on-init stacks.
+    const pinConsts = this.tableSetup(setup, pins);
     for (const [key, slot] of this.slots) {
       const k = this.str(key);
       this.use("subscribe");
@@ -866,8 +1198,8 @@ class Gen {
       this.use("gpio_irq");
       setup.push(`  mw_gpio_input(${pin}, ${p.pull});`, `  mw_gpio_irq(${pin}, ${p.edges});`);
     }
-    const tickMs = every.reduce((g, e) => gcd(g, e.ms), 0);
-    if (every.length > 0) {
+    const tickMs = [...every.map((e) => e.ms), ...(ph?.periods ?? [])].reduce((g, ms) => gcd(g, ms), 0);
+    if (every.length > 0 || ph) {
       if (tickMs < MIN_TICK_MS) {
         this.error(every[0]?.b, `the every periods share a ${tickMs} ms tick; periods must have a common divisor of at least ${MIN_TICK_MS} ms`);
       }
@@ -875,16 +1207,20 @@ class Gen {
       setup.push(`  mw_set_tick(${tickMs});`);
     }
 
-    const globals: string[] = [];
+    const sm = emitMachines(this.plan, this.hats, this.blockRaised, this.host);
+    setup.push(...sm.init);
+    if (ph) setup.push(...ph.init);
+
+    const globals: string[] = [...sm.globals];
     const fns: string[] = [];
     const exportsOut: string[] = [];
 
     if (setup.length + initBody.length > 0) {
-      fns.push(["export function init(): void {", ...setup, ...initBody, "}"].join("\n"));
+      fns.push(["export function init(): void {", ...setup, ...initBody, ...settle, "}"].join("\n"));
       exportsOut.push("init");
     }
 
-    if (every.length > 0) {
+    if (every.length > 0 || ph) {
       const lines = ["export function tick(nowMs: i32): void {"];
       every.forEach((e, i) => {
         if (e.ms === tickMs) {
@@ -894,23 +1230,38 @@ class Gen {
           lines.push(`  every${i} += ${tickMs};`, `  if (every${i} >= ${e.ms}) {`, `    every${i} = 0;`, ...e.body, "  }");
         }
       });
+      if (ph) lines.push(...ph.tick(tickMs), ...settle);
       lines.push("}");
       fns.push(lines.join("\n"));
       exportsOut.push("tick");
     }
 
-    if (this.slots.size > 0) {
-      this.buffer("RX");
-      for (const slot of this.slots.values()) globals.push(`let ${slot}: i32 = -1;`);
-      globals.push("// The message being handled.", "let msgPtr: usize = 0;", "let msgLen: i32 = 0;");
+    if (ph) {
+      this.buffer("RQ");
       fns.push(
         [
-          "// Returns the receive buffer, or 0 to decline a message that does not fit.",
+          "// Returns the receive buffer, or 0 to decline what does not fit.",
           "export function mw_alloc(len: i32): usize {",
-          `  return len < 0 || len > ${MAX_MESSAGE} ? 0 : RX;`,
+          `  return len < 0 || len > ${REQUEST_BUFFER} ? 0 : RQ;`,
           "}",
         ].join("\n"),
       );
+      exportsOut.push("mw_alloc");
+    }
+    if (this.slots.size > 0) {
+      for (const slot of this.slots.values()) globals.push(`let ${slot}: i32 = -1;`);
+      globals.push("// The message being handled.", "let msgPtr: usize = 0;", "let msgLen: i32 = 0;");
+      if (!ph) {
+        this.buffer("RX");
+        fns.push(
+          [
+            "// Returns the receive buffer, or 0 to decline a message that does not fit.",
+            "export function mw_alloc(len: i32): usize {",
+            `  return len < 0 || len > ${MAX_MESSAGE} ? 0 : RX;`,
+            "}",
+          ].join("\n"),
+        );
+      }
       const lines = ["export function on_message(slot: i32, ptr: usize, len: i32): void {", "  msgPtr = ptr;", "  msgLen = len;"];
       for (const m of messages) {
         lines.push(`  if (slot == ${this.slot(m.key)}) {`, ...m.body, "  }");
@@ -924,9 +1275,9 @@ class Gen {
         }
         lines.push("  }");
       }
-      lines.push("}");
+      lines.push(...settle, "}");
       fns.push(lines.join("\n"));
-      exportsOut.push("mw_alloc", "on_message");
+      exportsOut.push(...(ph ? [] : ["mw_alloc"]), "on_message");
     }
 
     const needsIrq = pinBodies.length > 0 || timers.length > 0 || this.imports.has("timer_start") || this.imports.has("gpio_irq");
@@ -941,12 +1292,17 @@ class Gen {
         lines.push(`  if (kind == 1 && source == ${p.pin}${level}) {`, ...p.body, "  }");
       }
       for (const t of timers) lines.push(`  if (kind == 2 && source == ${t.id}) {`, ...t.body, "  }");
-      lines.push("}");
+      lines.push(...settle, "}");
       fns.push(lines.join("\n"));
       exportsOut.push("on_irq");
       if (timers.length > 0 && !this.imports.has("timer_start")) {
         this.warn(undefined, "an on timer block has no start timer block, so it never runs");
       }
+    }
+
+    if (ph) {
+      fns.push(ph.onRequest);
+      exportsOut.push("on_request");
     }
 
     for (const id of this.variables.values()) globals.push(`let ${id}: i32 = 0;`);
@@ -977,9 +1333,12 @@ class Gen {
           .join("\n"),
       );
     }
+    if (pinConsts.length > 0) parts.push(["// Pins (from the Pins table).", ...pinConsts].join("\n"));
+    if (sm.consts.length > 0) parts.push(sm.consts.join("\n"));
+    if (ph) parts.push(ph.consts.join("\n"));
     if (globals.length > 0) parts.push(globals.join("\n"));
     const helpers = HELPERS.filter(([n]) => this.helpers.has(n)).map(([, src]) => src);
-    parts.push(...helpers, ...fns);
+    parts.push(...helpers, ...sm.fns, ...(ph?.fns ?? []), ...fns);
 
     return {
       source: `${parts.join("\n\n")}\n`,
@@ -991,7 +1350,32 @@ class Gen {
   }
 }
 
-/** Generates the AssemblyScript module for a workspace. */
-export function generate(ws: WorkspaceJson, profile: ProfileId): GenResult {
-  return new Gen(ws, profile).run();
+/** What each function's constant comment says. */
+const FUNC_COMMENT: Readonly<Record<PinFunc, string>> = {
+  "gpio-out": "GPIO output",
+  "gpio-in": "GPIO input",
+  adc: "analog input (adc_read)",
+  pwm: "PWM output",
+  "i2c-sda": "I2C SDA",
+  "i2c-scl": "I2C SCL",
+  "spi-sck": "SPI SCK",
+  "spi-mosi": "SPI MOSI",
+  "spi-miso": "SPI MISO",
+  "spi-cs": "SPI CS",
+};
+
+/** Generates the AssemblyScript module for a workspace, its pin table,
+ * its state machines, its flows and its unit's equipment phases (none by
+ * default: a workspace from before the table, the machines, the flows or
+ * the phases generates exactly what it did). With phases the module is
+ * an S88 phase server (phaseGen.ts) and needs ABI 5. */
+export function generate(
+  ws: WorkspaceJson,
+  profile: ProfileId,
+  pins: PinTable = EMPTY_PINS,
+  machines: readonly Machine[] = [],
+  flows: readonly Flow[] = [],
+  phases: readonly PhaseSpec[] = [],
+): GenResult {
+  return new Gen(ws, profile, pins, machines, flows, phases).run();
 }

@@ -716,6 +716,7 @@ mod tests {
             chip: "esp32",
             firmware: "0.6",
             node,
+            caps: middleware::loader::Caps::NONE,
         }
         .encode(&mut out)
         .unwrap();
@@ -755,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn v6_key_map_identity_and_namespace() {
+    fn rg6_key_map_identity_and_namespace() {
         let id = KeyMap::identity();
         assert_eq!(
             id.to_cluster(k("app/cam/jpeg")).unwrap().as_str(),
@@ -790,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn v7_app_publications_map_and_others_stay() {
+    fn rg7_app_publications_map_and_others_stay() {
         let (b, u) = bridge().uplink(k("app/cam/jpeg"), b"chunk", 0);
         assert_eq!(u, Uplink::Publish(OwnedKey::new("app/cam/jpeg").unwrap()));
         let (b, u) = b.uplink(k("sys/payload/status"), b"\x01", 0);
@@ -805,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn v8_beacons_announce_with_the_device_node() {
+    fn rg8_beacons_announce_with_the_device_node() {
         let b = bound();
         assert_eq!(b.device(), Some(DEVICE));
         // No node in the beacon: the device's.
@@ -845,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn v9_beacons_are_bound_to_the_device() {
+    fn rg9_beacons_are_bound_to_the_device() {
         // Before sys/info: refused.
         let (b, u) = bridge().uplink(disc().as_key(), &beacon("cam-1", None, 30), 0);
         assert_eq!(u, Uplink::Refuse(Refusal::Unbound));
@@ -873,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn v9_device_cap_and_rebinding() {
+    fn rg9_device_cap_and_rebinding() {
         let mut b = bound();
         for i in 0..MAX_DEVICE_SERVICES {
             let (n, u) = b.uplink(disc().as_key(), &beacon(&format!("cam-{i}"), None, 30), 0);
@@ -901,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn v10_expiry_withdraws() {
+    fn rg10_expiry_withdraws() {
         let (b, _) = bound().uplink(disc().as_key(), &beacon("cam-1", None, 30), 1000);
         assert_eq!(b.next_expiry(1000), Some(31_000));
         let (b, gone) = b.clone().expire(30_999);
@@ -916,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn v11_downlink_only_for_declared_filters() {
+    fn rg11_downlink_only_for_declared_filters() {
         let f = |s: &str| mw_service::spec::parse_filter(s).unwrap().to_buf().unwrap();
         let b = Bridge::new(
             KeyMap::namespaced("bench").unwrap(),
@@ -934,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn v12_sys_allowlist() {
+    fn rg12_sys_allowlist() {
         let b = bridge();
         let (b, r) = b.sys_route(keys::INFO);
         assert_eq!(r, Ok(SysRoute::Device));
@@ -955,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn v12_sys_request_body_round_trips() {
+    fn rg12_sys_request_body_round_trips() {
         let mut out = [0u8; 32];
         let n = encode_sys_request(keys::INFO, b"", &mut out).unwrap();
         assert_eq!(parse_sys_request(&out[..n]), Ok((keys::INFO, &b""[..])));
@@ -975,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn v13_log_tail_keeps_the_newest_bytes() {
+    fn rg13_log_tail_keeps_the_newest_bytes() {
         let mut t = LogTail::default();
         assert!(t.is_empty());
         for _ in 0..LOG_TAIL_BYTES {
@@ -991,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn v13_pending_is_bounded_and_expires() {
+    fn rg13_pending_is_bounded_and_expires() {
         let mut p = Pending::new();
         let mut ids = Vec::new();
         for i in 0..MAX_PENDING {

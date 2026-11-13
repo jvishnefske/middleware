@@ -6,8 +6,10 @@ defined in `src/wasm_abi.rs` of the `middleware` crate: host functions
 imported from module `mw` (log, publish, subscribe, time, tick period, GPIO,
 since ABI 2 GPIO interrupts, hardware timers, SPI and UART DMA, since
 ABI 3 PWM, ADC and I2C, and since ABI 4 DMA routes that stream frames
-between a key and a camera or SPI display, `mw_payload::route`) and the
-exports `memory`, `init`, `tick`, `mw_alloc`, `on_message` and `on_irq`.
+between a key and a camera or SPI display, `mw_payload::route`, and since
+ABI 5 serving request keys and the device's node id, `mw_payload::serve`)
+and the exports `memory`, `init`, `tick`, `mw_alloc`, `on_message`,
+`on_irq` and (ABI 5) `on_request`.
 
 This directory is a Cargo workspace of its own, excluded from the parent
 workspace, because its crates build for `wasm32-unknown-unknown` (set as the
@@ -41,6 +43,19 @@ default target in `.cargo/config.toml`). It contains:
   `app/dimmer/adc`, and reads the temperature register of an LM75-style
   sensor at I2C address 0x48 through `embedded-hal`'s `I2c`, publishing it
   on `app/dimmer/temp`. The board decides which pins those are.
+- `examples/periph_demo` (ABI 3, Raspberry Pi Pico 2 on `rp-base`) — at
+  start and then every second, runs one 8-byte SPI DMA loopback transfer on
+  SPI0 (SCK GP18, MOSI GP19, MISO GP16, CS GP17; jumper GP19 to GP16) and
+  one I2C register read on bus 0 (SDA GP4, SCL GP5 on `rp-base`): a
+  write-read of register 0x00 at address 0x50, the simulator's register
+  device and a 24Cxx EEPROM's address. Set `I2C_ADDR` and `I2C_REG` to a
+  device actually wired on the bus; the payload addresses only that one
+  device and writes only the register pointer, never scanning. Each result
+  is logged (`periph_demo: spi loopback ok (8 bytes)`, `periph_demo: i2c
+  0x50 reg 0x00 = 0x5a`); `ok` or `err` is published on
+  `app/periph_demo/spi` and the register byte, after a successful read
+  only, on `app/periph_demo/i2c`. On `esp-base` change the SPI pins, for
+  example to the ESP32-S3's 12 / 11 / 13 / 10.
 - `examples/cam_stream` (ABI 4, ESP32-CAM) — starts a source route that
   publishes 120×120 RGB565 frames on `app/cam/frame` every 200 ms as
   166-byte chunks, one ESP-NOW message each (174 per frame, 870 messages a
@@ -92,6 +107,11 @@ default target in `.cargo/config.toml`). It contains:
   heap check charges 16 KiB less than the standard build (one 64 KiB
   page, 16 KiB stack, 36 KiB of buffers in `.bss`). Its mw-jpeg is built
   without `Scale::Half` (`default-features = false`).
+- `examples/serve_echo` (ABI 5) — serves `app/serve_echo` and answers each
+  request with the device's node id followed by the request body
+  (`BufferTooSmall` when that does not fit), built with
+  `payload!(ServeEcho, serve)`. Try it with `payload-sim ... --virtual`
+  and a `!req app/serve_echo 6869` line.
 - `examples/bench` — measures a host's interpreter speed in fuel per
   second: one-shot timer steps 1 ms apart alternate integer mixing over a
   4 KiB table (196 564 fuel a step) and `mw-jpeg` decoding the fake
@@ -152,10 +172,18 @@ cam_jpeg_view and bench both ways.
 
 The byte-page build is reproducible: it passes `--remap-path-prefix` for
 the home directory, the cargo registry and the repository, so no absolute
-build path ends up in the module. `scripts/check-reproducible.sh [package...]`
+build path ends up in the module, and runs rustc through
+`scripts/rustc-stable-metadata.sh`, which gives the wasm32 crates a
+`-C metadata` derived from their path-normalized command lines: cargo
+hashes the absolute path of `middleware` (a path dependency outside this
+workspace, rust-lang/cargo#7645) into the crate hashes of it and of
+everything above it, and rustc orders generic instantiations by those
+hashes, so periph_demo's code and data order changed with the checkout
+path. `scripts/check-reproducible.sh [package...]`
 builds here and in a copy of the sources at another path and fails unless
 the two `.wasm` files are byte-identical; `check-all.sh` runs it for blink,
-echo and cam_view, and for cam_jpeg_view and bench with their own sizes.
+echo, cam_view and periph_demo, and for cam_jpeg_view, bench and
+cam_ov2640_stream with their own sizes.
 
 The target must be installed once with
 `rustup target add wasm32-unknown-unknown`.
@@ -207,8 +235,15 @@ second of `spi_loopback` instantly and deterministically.
 For ABI 3, `!adc <pin> <0..4095>` sets the value an analog pin reads, PWM
 duty changes are printed, and every I2C bus carries a 256-byte register
 device at address 0x50 (write a register number followed by data to store
-it; a read returns registers from the last register number written). Other
-I2C addresses do not acknowledge.
+it; a read returns registers from the last register number written). A
+stdin line `!i2c <bus> <reg> <value>` presets what a register of that
+device holds, each number in hex (`0x5a`) or decimal, without moving its
+register pointer; as stdin is read after `init`, a read made in `init`
+still sees the initial 0. Other I2C addresses do not acknowledge. For
+example, `printf '!i2c 0 0x00 0x5a\n' | cargo run -p payload-sim --
+payloads/target/byte-pages/wasm32-unknown-unknown/release/periph_demo.wasm
+--virtual --memory-bytes 16384 --until-ms 2500` shows `periph_demo`'s read
+returning 0x5a from its first one-second repeat on.
 
 For ABI 4 the simulator runs DMA routes on its clock: a test-pattern source
 route prints one line per frame it publishes, and a sink route draws the
@@ -237,3 +272,26 @@ upload it. The page sends it with the loader protocol, shows progress, and
 starts the payload once the device has verified the CRC. The page also has an
 editor that compiles the WAT and AssemblyScript templates in the browser and
 a simulator that runs them without a device.
+
+From a terminal, `mwctl` does the same over the device's serial port:
+
+    mwctl --port /dev/ttyACM0 upload target/wasm32-unknown-unknown/release/echo.wasm --start
+
+A claimed ESP32 or ESP32-S3 also takes payloads over ESP-NOW, through the
+ESP8266 bridge in `tools/espnow-bridge` plugged into the host. Claim it over
+serial first (an unclaimed device refuses everything over the air), then
+sign every upload with the same key:
+
+    mwctl key new ~/.config/mw/key.bin
+    mwctl --port /dev/ttyACM0 trust claim --key ~/.config/mw/key.bin
+    mwctl --port /dev/ttyUSB0 --espnow e4:b0:63:81:d3:24 upload echo.wasm --key ~/.config/mw/key.bin --start
+
+The MAC is the device's Wi-Fi station MAC (`espflash board-info` prints
+it). Over the air the device accepts only `info`, `trust info`, `upload`
+(signed, version above the last), and `start` and `stop` signed with the
+same key (`mwctl ... --espnow <MAC> stop --key ~/.config/mw/key.bin`; a
+control request names the device and carries the host's clock in
+milliseconds as a counter that must exceed the last one accepted);
+`trust claim` is always refused there. An upload over the air is staged
+beside the running payload, which keeps running until the signed commit
+replaces it. Uploads go in 217-byte chunks at about 12-14 KB/s.

@@ -16,6 +16,9 @@ starting point. The `.wat` files are hand-written WebAssembly text; the
 - `timer.wat` (ABI 2) starts hardware timer 0 with a 500 ms period and, on
   each alarm, toggles GPIO 8 and publishes the total number of periods on
   `app/timer/count`.
+- `serve.ts` (ABI 5) serves `app/serve_echo` and answers each request with
+  the device's node id followed by the request body, like the Rust
+  `serve_echo` example.
 - `spi.ts` (ABI 2) is the SPI loopback test of the Rust `spi_loopback`
   example: with GPIO 11 (MOSI) jumpered to GPIO 13 (MISO), timer 0 starts a
   16-byte DMA transfer every 100 ms, and the completion handler reads the
@@ -82,6 +85,19 @@ ABI 2 adds interrupts, hardware timers and DMA:
   the firmware has buffered (up to 1024) and returns the count, which may
   be 0.
 
+ABI 5 adds serving requests:
+
+- `serve(keyPtr, keyLen)` registers a request key and returns its slot (0
+  to 7) or an error. It needs the `mw_alloc` and `on_request` exports, and
+  returns -4 on firmware that cannot route requests to a payload. Serving
+  a key again returns the same slot.
+- `node_id(ptr)` writes the device's 8-byte node id at `ptr` and returns 0,
+  or -4 when the device has none. Keys that name the device (such as the
+  S88 phase keys `unit/<node>/phase/...`) use it as 16 lowercase hex
+  digits.
+
+Firmware older than ABI 5 refuses to load a module importing either.
+
 A negative result is an error code: -1 invalid argument, -2 a pointer and
 length outside memory, -3 no resources left, -4 unsupported on this device,
 -5 the message could not be sent, -6 a malformed or reserved key, and -7
@@ -117,6 +133,19 @@ is an ordinary `export function`:
   `spi_transfer` or `uart_write`, because their results arrive only through
   it; `abi-check` rejects a module that imports one of them without
   exporting `on_irq`.
+
+- `on_request(slot: i32, reqPtr: usize, reqLen: i32, metaPtr: usize,
+  replyPtr: usize, replyCap: i32): i32` (ABI 5) answers a request on a
+  served key. The host first asks `mw_alloc` for one buffer of 16 + request
+  + reply-capacity bytes (at most 1040), writes a 16-byte meta block and
+  the request into it, and passes the three addresses. The meta block is a
+  flags byte (bit 0 sender present, bit 1 deadline present), three zero
+  bytes, the deadline in milliseconds (u32, little-endian) and the sender's
+  8-byte id. Write the reply at `replyPtr` (at most `replyCap` bytes) and
+  return its length, or a negated error: -1 not found, -2 invalid request,
+  -3 buffer too small, -4 internal, -5 denied, -6 unavailable, -7 deadline
+  exceeded. Any other value is treated as an internal error. `serve.ts`
+  shows the whole pattern.
 
 Each call into the payload runs on a fixed fuel budget, so every export must
 return promptly; an endless loop traps instead of hanging the device.

@@ -4,7 +4,8 @@
 //! same sequence the web page sends (protocol-wasm's `uploadPlan`):
 //! `sys/loader/begin` with `[len][crc32]`, then `sys/loader/chunk` with
 //! `[offset][data]` for each in-order chunk of at most
-//! [`CHUNK_MAX`] bytes, then `sys/loader/commit`: empty (unsigned) or, with
+//! [`CHUNK_MAX`] bytes (fewer over ESP-NOW: [`upload_plan_chunked`] with
+//! [`middleware::rpc::CHUNK_DATA`], so each request fits one frame), then `sys/loader/commit`: empty (unsigned) or, with
 //! a [`SignedCommit`] from [`crate::sign::sign_commit`], the 68-byte
 //! `[version][signature]` body. Bodies are written by
 //! [`Command::encode_body`], so they match what the device parses.
@@ -69,6 +70,12 @@ pub const fn chunk_count(len: usize) -> usize {
     len.div_ceil(CHUNK_MAX)
 }
 
+/// Number of chunks of at most `chunk` bytes (at least 1) an image of
+/// `len` bytes is sent in.
+pub const fn chunk_count_of(len: usize, chunk: usize) -> usize {
+    len.div_ceil(if chunk == 0 { 1 } else { chunk })
+}
+
 fn step(cmd: &Command<'_>, done: u32) -> Step {
     let mut body = vec![0u8; 8 + CHUNK_MAX];
     // `body` holds the largest body (`[offset][CHUNK_MAX bytes]`).
@@ -89,11 +96,23 @@ pub fn upload_plan(
     corrupt: Option<usize>,
     auth: Option<SignedCommit>,
 ) -> Result<Vec<Step>, PlanError> {
+    upload_plan_chunked(image, CHUNK_MAX, corrupt, auth)
+}
+
+/// [`upload_plan`] with chunks of at most `chunk` bytes (clamped to
+/// 1..=[`CHUNK_MAX`]).
+pub fn upload_plan_chunked(
+    image: &[u8],
+    chunk: usize,
+    corrupt: Option<usize>,
+    auth: Option<SignedCommit>,
+) -> Result<Vec<Step>, PlanError> {
+    let chunk = chunk.clamp(1, CHUNK_MAX);
     if image.is_empty() {
         return Err(PlanError::Empty);
     }
     let len = u32::try_from(image.len()).map_err(|_| PlanError::TooLarge(image.len()))?;
-    let chunks = chunk_count(image.len());
+    let chunks = chunk_count_of(image.len(), chunk);
     if let Some(index) = corrupt.filter(|&i| i >= chunks) {
         return Err(PlanError::NoSuchChunk { index, chunks });
     }
@@ -102,7 +121,7 @@ pub fn upload_plan(
     steps.push(step(&Command::Begin { len, crc }, 0));
     let mut offset = 0u32;
     let mut scratch = [0u8; CHUNK_MAX];
-    for (i, data) in image.chunks(CHUNK_MAX).enumerate() {
+    for (i, data) in image.chunks(chunk).enumerate() {
         let data = if corrupt == Some(i) {
             let part = scratch
                 .get_mut(..data.len())
@@ -221,5 +240,31 @@ mod tests {
         assert!(upload_plan(&image(600), Some(1), None).is_ok());
         assert_eq!(chunk_count(512), 1);
         assert_eq!(chunk_count(513), 2);
+    }
+
+    #[test]
+    fn o9_air_plans_use_chunks_that_fit_one_espnow_frame() {
+        let img = image(1000);
+        let steps = upload_plan_chunked(&img, middleware::rpc::CHUNK_DATA, None, None).unwrap();
+        assert_eq!(steps.len(), 2 + chunk_count_of(1000, 217));
+        assert_eq!(chunk_count_of(1000, 217), 5);
+        for s in &steps {
+            assert!(
+                middleware::rpc::LIMITS.fits(s.key.as_str().len(), s.body.len()),
+                "{:?}",
+                s.key
+            );
+        }
+        assert!(matches!(run(&steps), Ok(Effect::Activate { .. })));
+        assert_eq!(
+            upload_plan_chunked(&img, 0, None, None).unwrap().len(),
+            1002,
+            "clamped to 1"
+        );
+        assert_eq!(
+            upload_plan_chunked(&img, 9999, None, None).unwrap().len(),
+            4,
+            "clamped to CHUNK_MAX"
+        );
     }
 }

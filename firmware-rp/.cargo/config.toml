@@ -1,0 +1,12 @@
+# Linker scripts for the two chip targets: cortex-m-rt's `link.x` (which
+# includes the `memory.x` that build.rs copies for the chip feature) and, on
+# the RP2040, embassy-rp's `link-rp.x` for the second-stage bootloader.
+# Host builds (`cargo test --lib`) use none of this.
+[target.thumbv6m-none-eabi]
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x", "-C", "link-arg=-Tlink-rp.x"]
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x"]
+
+[build]
+incremental = false

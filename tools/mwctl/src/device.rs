@@ -1,4 +1,7 @@
-//! Protocol operations over a [`Link`]: the CLI commands minus printing.
+//! Protocol operations over an [`Endpoint`] (the serial
+//! [`Link`](crate::link::Link), or [`AirLink`](crate::air::AirLink) over
+//! ESP-NOW): the CLI commands minus printing. Uploads use the endpoint's
+//! chunk size.
 //!
 //! * [`Device::info`] — `sys/info`, decoded with
 //!   [`middleware::loader::DeviceInfo::decode`] into an owned [`Info`].
@@ -12,16 +15,20 @@
 //!   stale commit with `Denied` and keeps its installed payload.
 //! * [`Device::trust_info`], [`Device::trust_claim`] — `sys/trust/info`
 //!   (decoded with [`TrustInfo::decode`]) and `sys/trust/claim`.
-//! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`.
+//! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`
+//!   with an empty body (serial); [`Device::start_signed`],
+//!   [`Device::stop_signed`] send a [`SignedControl`] body instead, which a
+//!   claimed device requires over ESP-NOW (see [`crate::sign::sign_control`]).
+//!   [`UploadOptions::start_auth`] signs the start after an upload.
 //! * [`Device::next_event`] — the next publication or noise run, for
 //!   `monitor`.
 
 use crate::error::Error;
-use crate::link::{Event, Link, Transport};
-use crate::plan::upload_plan;
-use middleware::SenderId;
-use middleware::loader::trust::{PublicKey, SignedCommit, TrustInfo};
-use middleware::loader::{Command, DeviceInfo, PayloadStatus, keys};
+use crate::link::{Endpoint, Event};
+use crate::plan::upload_plan_chunked;
+use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
+use middleware::{Key, SenderId};
+use middleware::loader::{Caps, Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
 
 /// Suffix of the firmware version of builds without the WASM runtime.
@@ -43,6 +50,9 @@ pub struct Info {
     /// The device's node id (middleware 0.5 firmware; `None` from older
     /// firmware, whose response ends after the firmware name).
     pub node: Option<SenderId>,
+    /// What the firmware can do beyond its ABI ([`Caps`]; none from
+    /// firmware older than middleware 0.6).
+    pub caps: Caps,
 }
 
 impl Info {
@@ -56,6 +66,7 @@ impl Info {
             chip: i.chip.to_owned(),
             firmware: i.firmware.to_owned(),
             node: i.node,
+            caps: i.caps,
         })
     }
 
@@ -76,6 +87,9 @@ pub struct UploadOptions {
     /// Sign the commit with this authorisation; `None` sends an unsigned
     /// commit.
     pub auth: Option<SignedCommit>,
+    /// Sign the start (with `start`) with this control request; `None`
+    /// sends an empty start body.
+    pub start_auth: Option<SignedControl>,
 }
 
 /// Progress after one acknowledged upload step.
@@ -93,20 +107,25 @@ pub struct Progress {
     pub events: Vec<Event>,
 }
 
-/// A device on the other end of a transport.
-pub struct Device<T> {
-    link: Link<T>,
+/// A device on the other end of an endpoint.
+pub struct Device<L> {
+    link: L,
 }
 
-impl<T: Transport> Device<T> {
-    /// Wraps a link.
-    pub fn new(link: Link<T>) -> Self {
+impl<L: Endpoint> Device<L> {
+    /// Wraps an endpoint.
+    pub fn new(link: L) -> Self {
         Device { link }
     }
 
-    /// The underlying link.
-    pub fn link(&self) -> &Link<T> {
+    /// The underlying endpoint.
+    pub fn link(&self) -> &L {
         &self.link
+    }
+
+    /// The underlying endpoint, mutably.
+    pub fn link_mut(&mut self) -> &mut L {
+        &mut self.link
     }
 
     /// Publications and noise received outside [`Device::next_event`].
@@ -137,12 +156,27 @@ impl<T: Transport> Device<T> {
 
     /// `sys/payload/start`.
     pub fn start(&mut self) -> Result<(), Error> {
-        self.link.command(&Command::Start).map(drop)
+        self.start_signed(None)
     }
 
     /// `sys/payload/stop`.
     pub fn stop(&mut self) -> Result<(), Error> {
-        self.link.command(&Command::Stop).map(drop)
+        self.stop_signed(None)
+    }
+
+    /// `sys/payload/start`, with a signed control body when `auth` is given.
+    pub fn start_signed(&mut self, auth: Option<SignedControl>) -> Result<(), Error> {
+        self.control(keys::START, auth)
+    }
+
+    /// `sys/payload/stop`, with a signed control body when `auth` is given.
+    pub fn stop_signed(&mut self, auth: Option<SignedControl>) -> Result<(), Error> {
+        self.control(keys::STOP, auth)
+    }
+
+    fn control(&mut self, key: Key<'static>, auth: Option<SignedControl>) -> Result<(), Error> {
+        let body = auth.map(|a| a.encode().to_vec()).unwrap_or_default();
+        self.link.request(key, &body).map(drop)
     }
 
     /// Installs `image`; calls `progress` after each acknowledged step.
@@ -152,7 +186,8 @@ impl<T: Transport> Device<T> {
         opts: UploadOptions,
         mut progress: impl FnMut(Progress),
     ) -> Result<(), Error> {
-        let plan = upload_plan(image, opts.corrupt_chunk, opts.auth)?;
+        let plan =
+            upload_plan_chunked(image, self.link.chunk_size(), opts.corrupt_chunk, opts.auth)?;
         let total = u32::try_from(image.len()).unwrap_or(u32::MAX);
         let steps = plan.len() + usize::from(opts.start);
         for (i, s) in plan.iter().enumerate() {
@@ -173,12 +208,13 @@ impl<T: Transport> Device<T> {
             });
         }
         if opts.start {
-            self.start().map_err(|e| Error::Upload {
-                step: plan.len(),
-                steps,
-                key: keys::START.as_str().to_owned(),
-                cause: Box::new(e),
-            })?;
+            self.start_signed(opts.start_auth)
+                .map_err(|e| Error::Upload {
+                    step: plan.len(),
+                    steps,
+                    key: keys::START.as_str().to_owned(),
+                    cause: Box::new(e),
+                })?;
         }
         Ok(())
     }
@@ -193,7 +229,7 @@ impl<T: Transport> Device<T> {
 mod tests {
     use super::*;
     use crate::fake::{FakeDevice, Script};
-    use crate::link::Timeouts;
+    use crate::link::{Link, Timeouts};
     use crate::sign::sign_commit;
     use crate::sign::tests::{vector_image, vector_seed};
     use middleware::crc::Crc32;
@@ -205,7 +241,7 @@ mod tests {
         (0..n).map(|i| (i * 31 + 7) as u8).collect()
     }
 
-    fn device(fake: FakeDevice) -> Device<FakeDevice> {
+    fn device(fake: FakeDevice) -> Device<Link<FakeDevice>> {
         // Short timeouts: the fake answers synchronously, and reports a
         // dropped reply as an immediate read timeout anyway.
         let t = Timeouts {
@@ -227,7 +263,11 @@ mod tests {
         assert_eq!(i.abi_version, middleware::wasm_abi::ABI_VERSION);
         assert!(!i.runs_payloads());
         assert_eq!(i.node, Some(crate::fake::NODE));
+        assert_eq!(i.caps, Caps::NONE);
         assert!(Info::decode(&[1, 2, 3]).is_none());
+        // A firmware that routes requests to its payload says so.
+        let mut d = device(FakeDevice::new("rp2350", "0.1.0", 4096, true).with_caps(Caps::SERVE));
+        assert_eq!(d.info().unwrap().caps, Caps::SERVE);
         // The host sent one leading delimiter before the first frame.
         assert_eq!(d.link().transport().raw_rx().first(), Some(&0));
     }

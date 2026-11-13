@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_names_map_to_k8s_labels() {
+    fn ms1_names_map_to_k8s_labels() {
         assert_eq!(k8s_name("demo/echo").as_deref(), Some("demo-echo"));
         assert_eq!(k8s_name("gateway").as_deref(), Some("gateway"));
         for bad in ["", "Demo/echo", "a b", "a_b/c", "-a/b", "demo//echo", "x/"] {
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_filters_parse_exact_and_prefix() {
+    fn ms1_filters_parse_exact_and_prefix() {
         assert_eq!(
             parse_filter("app/x"),
             Some(KeyFilter::Exact(Key::from_static("app/x")))
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_validate_accepts_a_full_spec_and_reports_each_rule() {
+    fn ms1_validate_accepts_a_full_spec_and_reports_each_rule() {
         assert_eq!(valid().validate(), Ok(()));
         let field_err = |f: fn(&mut ServiceSpec), want: SpecError| {
             let mut s = valid();
@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_resources_render_as_kubernetes_quantities() {
+    fn ms1_resources_render_as_kubernetes_quantities() {
         let r = Resources::DEFAULT;
         assert_eq!(
             (
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_yaml_is_deterministic_and_round_trips() {
+    fn ms1_yaml_is_deterministic_and_round_trips() {
         let s = valid();
         let yaml = s.to_yaml().unwrap();
         assert_eq!(yaml, valid().to_yaml().unwrap());

@@ -5,10 +5,13 @@
 import { describe, expect, it } from "vitest";
 import { BLOCK_DEFS, BUILTIN_BLOCKS, EVENT_BLOCKS, blockSupported, featureOf, toolbox } from "../src/blocks/defs";
 import { EXAMPLES } from "../src/blocks/examples";
+import type { Flow } from "../src/model/flows";
 import { commentText, generate, keyProblem } from "../src/blocks/generator";
 import { buildPayload } from "../src/blocks/pipeline";
 import type { BlockJson, WorkspaceJson } from "../src/blocks/workspace";
 import { compileAssemblyScript } from "../src/editor/compile";
+import type { Machine } from "../src/model/machines";
+import { EMPTY_PINS, type PinTable, withNeeds } from "../src/model/pins";
 import { protocol } from "./fakeDevice";
 
 const proto = protocol();
@@ -182,16 +185,25 @@ const IRQ: WorkspaceJson = ws(
   },
 );
 
-const GOLDEN: [string, WorkspaceJson, "esp-base" | "badge"][] = [
-  ...EXAMPLES.map((e): [string, WorkspaceJson, "esp-base" | "badge"] => [e.id, e.workspace, e.profile]),
-  ["logic", LOGIC, "esp-base"],
-  ["irq", IRQ, "esp-base"],
+/** Examples get the pins they need from the Pico 2's suggestions (Blink: LED on GPIO 25), their state machines and their flows. */
+type Golden = [string, WorkspaceJson, "esp-base" | "badge", PinTable, readonly Machine[], readonly Flow[]];
+const GOLDEN: Golden[] = [
+  ...EXAMPLES.map((e): Golden => [
+    e.id,
+    e.workspace,
+    e.profile,
+    withNeeds(EMPTY_PINS, e.profile === "badge" ? "badge" : "pico2", e.needs),
+    e.machines ?? [],
+    e.flows ?? [],
+  ]),
+  ["logic", LOGIC, "esp-base", EMPTY_PINS, [], []],
+  ["irq", IRQ, "esp-base", EMPTY_PINS, [], []],
 ];
 
 describe("AssemblyScript generator golden files", () => {
-  for (const [name, w, profile] of GOLDEN) {
+  for (const [name, w, profile, pins, machines, flows] of GOLDEN) {
     it(`${name} (${profile}) matches test/fixtures/blocks/${name}.as and compiles`, async () => {
-      const g = generate(w, profile);
+      const g = generate(w, profile, pins, machines, flows);
       expect(g.errors).toEqual([]);
       await expect(g.source).toMatchFileSnapshot(`./fixtures/blocks/${name}.as`);
       const r = await compileAssemblyScript(g.source);
@@ -247,8 +259,8 @@ describe("AssemblyScript generator", () => {
   });
 
   it("uses fixed buffers and never allocates", () => {
-    for (const [, w, profile] of GOLDEN) {
-      const src = generate(w, profile).source;
+    for (const [, w, profile, pins, machines] of GOLDEN) {
+      const src = generate(w, profile, pins, machines).source;
       expect(src).not.toMatch(/\bnew\b|String\.UTF8|heap\.|__alloc|memory\.grow|f32|f64|\bwhile\s*\(true/);
     }
     expect(generate(EXAMPLES[1]?.workspace ?? ws(), "esp-base").source).toContain("const RX: usize = memory.data(512);");

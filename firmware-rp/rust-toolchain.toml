@@ -1,0 +1,7 @@
+# Host unit tests and both chip builds use stable (rustc >= 1.95, which the
+# shared `esp-base` core requires). RP2040: thumbv6m-none-eabi (Cortex-M0+);
+# RP2350: thumbv8m.main-none-eabihf (Cortex-M33).
+[toolchain]
+channel = "stable"
+components = ["rust-src", "clippy"]
+targets = ["thumbv6m-none-eabi", "thumbv8m.main-none-eabihf"]

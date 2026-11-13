@@ -19,7 +19,12 @@
 //! borrowed from guest memory and a parsed config; no frame data crosses
 //! this layer.
 //!
-//! The ABI 3 imports
+//! The ABI 5 imports are registered by `link_abi5`: `serve` keeps the key
+//! in [`State::serves`] (reserved at load) after the device accepted it,
+//! and `node_id` writes the device's id into guest memory after checking
+//! the range.
+//!
+//! The ABI 3 import
 //! `i2c_transfer` is synchronous and copies through two stack buffers of
 //! [`periph::MAX_I2C`] bytes: transmit bytes leave guest memory before the
 //! device runs, received bytes enter it only after the device succeeds.
@@ -48,6 +53,8 @@ pub struct Exports {
     pub messages: bool,
     /// `on_irq` is exported (ABI 2).
     pub irq: bool,
+    /// Both `mw_alloc` and `on_request` are exported (ABI 5).
+    pub requests: bool,
 }
 
 /// Everything the host keeps per payload, stored as the wasmi store data.
@@ -56,6 +63,9 @@ pub struct State<D> {
     pub device: D,
     /// Subscribed keys; the index is the slot passed to `on_message`.
     pub subscriptions: Vec<String>,
+    /// Served keys (ABI 5); the index is the slot passed to `on_request`.
+    /// Its capacity of [`wasm_abi::serve::MAX_SERVES`] is reserved at load.
+    pub serves: Vec<String>,
     /// Active `tick` schedule, if any.
     pub schedule: Option<Schedule>,
     /// Optional exports present in the module.
@@ -338,6 +348,47 @@ pub fn subscribe_call<D>(mem: &[u8], st: &mut State<D>, kp: i32, kl: i32) -> Res
     i32::try_from(slot.index()).map_err(|_| AbiError::NoResources)
 }
 
+/// `serve(key_ptr, key_len)` (ABI 5): returns the slot. The key follows
+/// the publish rules (no `sys/`); the module must export `mw_alloc` and
+/// `on_request`, and the device must accept the key ([`Device::serve`]),
+/// before it takes a slot.
+pub fn serve_call<D: Device>(
+    mem: &[u8],
+    st: &mut State<D>,
+    kp: i32,
+    kl: i32,
+) -> Result<i32, AbiError> {
+    let key = mem
+        .get(guest_range(kp, kl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    let key = abi::payload_key(key)?;
+    if !st.exports.requests {
+        return Err(AbiError::Unsupported);
+    }
+    let slot = abi::serve_slot(&st.serves, key.as_str())?;
+    if let Slot::New(_) = slot {
+        st.device.serve(key)?;
+        st.serves.push(key.as_str().to_string());
+    }
+    i32::try_from(slot.index()).map_err(|_| AbiError::NoResources)
+}
+
+/// `node_id(ptr)` (ABI 5): writes the device's 8-byte id at `ptr`. The
+/// range is checked before the device is asked, and memory is left alone
+/// on any error.
+pub fn node_id_call<D: Device>(
+    mem: &mut [u8],
+    st: &mut State<D>,
+    ptr: i32,
+) -> Result<(), AbiError> {
+    let target = abi::node_id_target(ptr, mem.len())?;
+    let id = st.device.node_id()?;
+    mem.get_mut(target)
+        .ok_or(AbiError::OutOfBounds)?
+        .copy_from_slice(&id.0);
+    Ok(())
+}
+
 /// `set_tick(period_ms)`.
 pub fn set_tick_call<D: Device>(st: &mut State<D>, period: i32) -> Result<(), AbiError> {
     let now = st.device.now_ms();
@@ -432,7 +483,20 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     link_abi2(&mut l)?;
     link_abi3(&mut l)?;
     link_abi4(&mut l)?;
+    link_abi5(&mut l)?;
     Ok(l)
+}
+
+/// Registers the ABI 5 imports (serving requests).
+fn link_abi5<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    let m = IMPORT_MODULE;
+    l.func_wrap(m, "serve", |c: Caller<'_, State<D>>, kp: i32, kl: i32| {
+        with_memory(c, |mem, st| serve_call(mem, st, kp, kl))
+    })?;
+    l.func_wrap(m, "node_id", |c: Caller<'_, State<D>>, ptr: i32| {
+        with_memory(c, |mem, st| ok0(node_id_call(mem, st, ptr)))
+    })?;
+    Ok(())
 }
 
 /// Registers the ABI 2 imports (interrupts, timers, SPI and UART DMA).
@@ -610,6 +674,8 @@ mod tests {
     struct Rec {
         logs: Vec<String>,
         published: Vec<(String, Vec<u8>)>,
+        served: Vec<String>,
+        node: Option<middleware::SenderId>,
     }
 
     impl Device for Rec {
@@ -636,12 +702,23 @@ mod tests {
         fn gpio_read(&mut self, _: u8) -> Result<bool, AbiError> {
             Ok(true)
         }
+        fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
+            if key.as_str() == "refused/key" {
+                return Err(AbiError::Unsupported);
+            }
+            self.served.push(key.as_str().to_string());
+            Ok(())
+        }
+        fn node_id(&mut self) -> Result<middleware::SenderId, AbiError> {
+            self.node.ok_or(AbiError::Unsupported)
+        }
     }
 
     fn state(exports: Exports) -> State<Rec> {
         State {
             device: Rec::default(),
             subscriptions: Vec::new(),
+            serves: Vec::new(),
             schedule: None,
             exports,
             limits: wasmi::StoreLimitsBuilder::new().build(),
@@ -691,6 +768,52 @@ mod tests {
         assert_eq!(subscribe_call(&mem, &mut st, 0, 5), Ok(0));
         assert_eq!(subscribe_call(&mem, &mut st, 0, 5), Ok(0));
         assert_eq!(st.subscriptions, vec!["a/key".to_string()]);
+    }
+
+    #[test]
+    fn serve_needs_request_exports_and_the_device() {
+        let mut mem = b"a/key".to_vec();
+        let mut st = state(Exports {
+            messages: true,
+            ..Exports::default()
+        });
+        assert_eq!(serve_call(&mem, &mut st, 0, 5), Err(AbiError::Unsupported));
+        let mut st = state(Exports {
+            requests: true,
+            ..Exports::default()
+        });
+        assert_eq!(serve_call(&mem, &mut st, 0, 5), Ok(0));
+        assert_eq!(serve_call(&mem, &mut st, 0, 5), Ok(0), "again: same slot");
+        assert_eq!(st.serves, vec!["a/key".to_string()]);
+        assert_eq!(st.device.served, vec!["a/key".to_string()], "asked once");
+        assert_eq!(serve_call(&mem, &mut st, 2, 9), Err(AbiError::OutOfBounds));
+        mem[..4].copy_from_slice(b"sys/");
+        assert_eq!(serve_call(&mem, &mut st, 0, 5), Err(AbiError::InvalidKey));
+        let refused = b"refused/key".to_vec();
+        assert_eq!(
+            serve_call(&refused, &mut st, 0, 11),
+            Err(AbiError::Unsupported)
+        );
+        assert_eq!(st.serves.len(), 1, "a refused key takes no slot");
+    }
+
+    #[test]
+    fn node_id_checks_the_range_and_the_device() {
+        let mut mem = vec![0xAAu8; 16];
+        let mut st = state(Exports::default());
+        assert_eq!(
+            node_id_call(&mut mem, &mut st, 0),
+            Err(AbiError::Unsupported)
+        );
+        assert!(mem.iter().all(|&b| b == 0xAA));
+        st.device.node = Some(middleware::SenderId([1, 2, 3, 4, 5, 6, 7, 8]));
+        assert_eq!(
+            node_id_call(&mut mem, &mut st, 9),
+            Err(AbiError::OutOfBounds)
+        );
+        assert!(mem.iter().all(|&b| b == 0xAA));
+        assert_eq!(node_id_call(&mut mem, &mut st, 8), Ok(()));
+        assert_eq!(&mem[8..], &[1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]

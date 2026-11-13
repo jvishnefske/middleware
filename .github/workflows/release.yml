@@ -1,0 +1,152 @@
+# Release: base firmware images for every chip, attached to a GitHub
+# release, and the web app (flasher, console, editor) deployed to GitHub
+# Pages with those images bundled.
+#
+# The web flasher reads `firmware/manifest.json` and the images relative
+# to the page (web/src/flash/manifest.ts). Release asset downloads are
+# served from another origin without CORS headers, so the browser cannot
+# fetch them from the page; the Pages deployment carries its own copy,
+# over HTTPS as Web Serial requires. The release assets are for manual
+# flashing and `mwctl`.
+#
+# Push a `v*` tag to release and deploy. A manual run (workflow_dispatch)
+# builds everything and keeps the images and site as workflow artifacts
+# without publishing either.
+#
+# Pages must be set to "GitHub Actions" as its source (repository
+# Settings > Pages) before the first deployment.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The espup Xtensa toolchain the ESP32, ESP32-S3 and ESP8266 builds use
+  # (`cargo +esp-new`, rustc >= 1.95 for esp-hal 1.2).
+  ESP_TOOLCHAIN_VERSION: 1.97.0.0
+  PICOTOOL_VERSION: 2.3.1
+  PICOTOOL_RELEASE: v2.3.1-0
+  ESP8266_CORE: esp8266:esp8266@3.1.2
+
+jobs:
+  build:
+    name: Firmware images and web app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv32imc-unknown-none-elf,thumbv6m-none-eabi,thumbv8m.main-none-eabihf,wasm32-unknown-unknown
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            firmware -> target
+            firmware-esp8266 -> target
+            firmware-rp -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espup,espflash,wasm-pack
+
+      - name: Xtensa toolchain (esp-new)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          espup install --name esp-new --toolchain-version "$ESP_TOOLCHAIN_VERSION" \
+            --targets esp32,esp32s3 --export-file "$HOME/export-esp.sh"
+
+      - name: ESP8266 linker (Arduino lx106 GCC) and esptool
+        uses: arduino/setup-arduino-cli@v2
+      - run: |
+          arduino-cli core install "$ESP8266_CORE" \
+            --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          pipx install "esptool>=5,<6"
+          echo "ESPTOOL=$(command -v esptool)" >> "$GITHUB_ENV"
+
+      - name: picotool
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libusb-1.0-0
+          dir="$RUNNER_TEMP/picotool"
+          mkdir -p "$dir"
+          curl -fsSL "https://github.com/raspberrypi/pico-sdk-tools/releases/download/$PICOTOOL_RELEASE/picotool-$PICOTOOL_VERSION-x86_64-lin.tar.gz" \
+            | tar -xz -C "$dir"
+          bin="$(dirname "$(find "$dir" -type f -name picotool | head -n1)")"
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Build every chip's image and the manifest
+        run: bash firmware/build-images.sh
+
+      - name: Checksums
+        working-directory: web/public/firmware
+        run: sha256sum manifest.json *.bin *.uf2 | tee SHA256SUMS
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web app with the bundled firmware
+        working-directory: web
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run build
+          test -f dist/firmware/manifest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: web/public/firmware/
+          if-no-files-found: error
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: firmware
+      - name: Create the release with the images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" \
+            firmware/manifest.json firmware/SHA256SUMS firmware/*.bin firmware/*.uf2
+
+  pages:
+    name: Deploy the web app to GitHub Pages
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
