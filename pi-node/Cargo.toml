@@ -1,0 +1,40 @@
+[package]
+name = "mw-pi-node"
+version = "0.6.0"
+edition = "2024"
+# `File::try_lock` (the state directory's lock) is 1.89; esp-base's core
+# declares 1.91.
+rust-version = "1.91"
+description = "Linux payload host (Raspberry Pi): runs WASM payloads with the base firmware's loader and trust rules and joins the cluster through an in-process MCU gateway"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "mw-pi-node"
+path = "src/main.rs"
+
+[dependencies]
+# The base firmware's pure core, shared rather than copied, as rp-base and
+# the ESP8266 firmware use it: request dispatch, loader state machine,
+# payload lifecycle and trust rules (`dispatch`), the two-slot payload
+# store (`store`, `image`), the trust record (`trust_store`), served-key
+# routing (`serve`) and the payload timer table (`periph::timers`).
+# Default features off (no chip, no esp-hal); `trust` for signed payloads.
+esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
+wasm-host = { path = "../wasm-host" }
+# `serial`: the device side of the link (the wire the gateway speaks);
+# `trust`: signed commits; `zenoh`: the session the gateway publishes on.
+middleware = { path = "..", features = ["serial", "trust", "zenoh"] }
+mw-gateway = { path = "../gateway" }
+mw-service = { path = "../service" }
+embedded-storage = "0.3.2"
+# The node id: SHA-256 of /etc/machine-id (already in the tree through
+# middleware's `trust`).
+sha2 = "0.10.9"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# Signs commits and plans uploads in the end-to-end test, as mwctl does.
+mwctl = { path = "../tools/mwctl" }
+wat = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"] }

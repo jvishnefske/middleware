@@ -1403,7 +1403,10 @@ from the browser, or onto a Raspberry Pi Pico (RP2040) or Pico 2 (RP2350)
 as a UF2 file. Afterwards, application logic ships as WASM payloads loaded over the
 same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI),
 the chip's native USB-Serial-JTAG, or the RP chips' USB CDC-ACM port.
-Payloads talk to the world through the middleware ABI in `wasm_abi`.
+A Linux host (a Raspberry Pi) runs the same base firmware core as a
+process, `mw-pi-node`, behind an in-process gateway (see "Linux payload
+host"). Payloads talk to the world through the middleware ABI in
+`wasm_abi`.
 
 Heap policy: the no-heap rule applies to the `middleware` crate. A base
 firmware may use a global allocator for the payload interpreter only,
@@ -2267,6 +2270,217 @@ atomics; nothing has run on silicon yet.
   chip and node id, an upload survives a power cycle, and on the Pico 2
   `blink` toggles GPIO 8 and publishes `app/blink/state`. Not yet run on
   hardware.
+
+### Linux payload host (`pi-node/`, PN…)
+
+`mw-pi-node` (crate `pi-node/`, package and binary `mw-pi-node`) makes a
+Linux host, a Raspberry Pi Zero 2 W or Pi 3 on a 64-bit OS in the first
+place, a base firmware in a process: it runs WASM payloads itself,
+accepts the same signed payload updates as the microcontroller base
+firmwares, and joins the cluster through the same gateway. On the wire it
+is a board: COBS frames, `sys/info`, `sys/loader/*`, `sys/payload/*`,
+`sys/trust/*` and `sys/log` as esp-base and rp-base serve them, so
+`mwctl` and the web console speak to it unchanged.
+
+Shared rather than copied, as rp-base does it: esp-base with its default
+features off and `trust` on gives the request table, the loader state
+machine, the payload lifecycle and the trust rules (`esp_base::dispatch`),
+the two-slot payload store (`esp_base::store`, `esp_base::image`), the
+pinned key (`esp_base::trust_store`), served-key routing
+(`esp_base::serve`) and the payload timer table
+(`esp_base::periph::timers`); payloads run in `wasm-host`. None of them
+changed. Two manifest changes make the sharing possible: esp-base
+declares `rust-version` 1.91, what its library needs (the chip builds
+still need 1.95, which esp-hal 1.2 declares and cargo enforces), so the
+root workspace's default toolchain builds it; and the root manifest no
+longer lists `"."` among its members (the root package is a member
+anyway), because that entry made every path under the root an explicit
+member and defeated `exclude` for the path dependency on `firmware/`.
+
+What the crate adds, each part a pure core or a thin shell:
+
+* the configuration (`config`, `MW_PI_NODE_STATE`, `MW_PI_NODE_NODE_ID`,
+  `MW_PI_NODE_MACHINE_ID`, `MW_PI_NODE_MEMORY_BYTES`,
+  `MW_PI_NODE_LOCAL_SERIAL`; the in-process gateway reads its own
+  `MW_GATEWAY_*`, of which `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` go
+  unused, and the runner its `MW_*`, `MW_ZENOH_ROUTER` required);
+* the node id (`node_id`): `MW_PI_NODE_NODE_ID` when set, otherwise the
+  first 8 bytes of SHA-256 over a domain string and the systemd machine
+  id, which is stable across reboots and stays off the wire; without
+  either the node does not start;
+* the flash (`flash`, `layout`): a NOR flash model with the ESP and RP
+  drivers' rules whose sectors persist as files under
+  `<state>/flash/`, payload store 512 KiB (two 256 KiB slots, 252 KiB
+  images) and trust record 8 KiB;
+* the request service (`service`), rp-base's over that flash with no
+  firmware updater: `sys/fw/*` is `NotFound`, as on the RP2040, and the
+  binary is updated by the host's package manager;
+* the payload device (`device`) and the controller (`controller`), one
+  synchronous state machine for the service and the running payload;
+* the shell (`shell`): the device thread over its serial links and the
+  gateway on the other end of a `gateway::io::ChannelIo` pair, inside the
+  one process.
+
+Payload ABI on the node:
+
+| ABI call | mw-pi-node |
+|---|---|
+| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes: publications and `sys/log` lines to every link, the gateway relaying `app/**` to Zenoh; a monotonic clock from the node's start |
+| `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller, delivered to `on_irq` |
+| `serve`, `node_id` (ABI 5) | yes: any non-`sys` key; requests on served keys reach `on_request` with a 512-byte reply; `node_id` is the node id `sys/info` reports |
+| `gpio_*`, `gpio_irq`, `adc_read`, `spi_*`, `dma_read`, `i2c_*`, `uart_*`, `pwm_*`, `route_*` | `Unsupported` |
+
+Storage and power loss. Each sector is one file, replaced atomically
+(written to a temporary file, `fsync`ed, renamed over the sector's file,
+the directory `fsync`ed); an erased sector is a missing file, so a fresh
+state directory reads as blank flash. Writes go to the memory image and
+mark their sector dirty; the dirty sector is stored before any other
+sector is touched and whenever the service syncs, which it does after
+every storage action but a chunk write. At most one sector is ever ahead
+of the disk, so after a crash the disk holds the image after a prefix of
+the operations, the model esp-base's store and trust record are proven
+against, and no sector is ever torn; a reply confirming an activation or
+a claim is sent only once it is on disk. A failed store poisons the flash
+(every later operation fails, so requests answer `Internal`) until a
+restart re-reads the disk. The state directory is locked while the node
+runs. With no presence button there is no re-key window: a claimed node
+is re-keyed by stopping it and deleting the trust sectors
+(`flash/sector-0128`, `flash/sector-0129`).
+
+The process. The device thread runs a current-thread tokio runtime, so a
+payload call (fuel bounded) never holds up the gateway's tasks, and owns
+the controller and one `SerialLink` per link: the gateway's, and
+optionally a local one (`MW_PI_NODE_LOCAL_SERIAL`: a USB gadget's
+`/dev/ttyGS0` or one end of a PTY pair, opened with the gateway's
+`io::open_serial`, for `mwctl`). Requests are answered on the link they
+came from; publications, log lines and status changes go to all. The
+gateway (`mw_gateway::start`, its public API as of this change) binds to
+the node id from `sys/info`, relays `app/**` to Zenoh and serves `gw/sys`;
+the binary runs `mw_gateway::service` under the runner until SIGTERM or
+SIGINT, then stops the payload, syncs the flash and withdraws what the
+gateway announced. `gw/sys` passes only allowlisted `sys/...` keys, so
+uploads through the cluster need `MW_GATEWAY_SYS_ALLOW` to name the
+loader and trust keys (safe for installs once the node is claimed, as
+every commit must then be signed; allowing `sys/trust/claim` hands the
+first caller the node), and the cluster cannot reach a payload's served
+`app/...` keys through the gateway at all; the local link can. Tests
+marked *(mw-pi-node)* run under `cargo test -p mw-pi-node` and
+`cargo test --workspace`; none opens a serial port or a GPIO chip, and
+network tests use 127.0.0.1 only.
+
+- [x] PN1 `PiNodeConfig::from_env` parses `MW_PI_NODE_STATE` (default
+  `/var/lib/mw-pi-node`), `MW_PI_NODE_NODE_ID` (16 hex digits, not all
+  zeros, winning over the machine id), `MW_PI_NODE_MACHINE_ID` (default
+  `/etc/machine-id`), `MW_PI_NODE_MEMORY_BYTES` (64 KiB to 64 MiB, default
+  1 MiB) and `MW_PI_NODE_LOCAL_SERIAL`; empty is unset and a malformed
+  value names its variable —
+  `config::tests::pn1_defaults`, `pn1_parses_every_variable`,
+  `pn1_malformed_values_name_the_variable` *(mw-pi-node)*.
+- [x] PN2 The node id is the configured one or the first 8 bytes of
+  SHA-256 over `mw-pi-node/node-id/v1\0` and the machine id (32 hex
+  digits, case folded, blanks trimmed): the same machine gives the same
+  id, another machine another, malformed ids and an all-zero id are
+  refused —
+  `node_id::tests::pn2_machine_id_hashes_to_a_stable_node_id`,
+  `pn2_a_configured_node_id_wins_and_is_checked` *(mw-pi-node)*.
+- [x] PN3 The flash model follows the NOR rules (4-byte aligned reads and
+  writes inside the device, writes only clear bits, 4 KiB erases to
+  `0xFF`, a blank device reads erased); one dirty sector is stored before
+  another is written or erased and on sync; a failed store poisons the
+  flash; and power loss at every store of a claim followed by a signed
+  upload leaves, after a restart, the old or the new image and the old or
+  the new trust record, the new image never with the old `min_version`,
+  and nothing a reply confirmed lost —
+  `flash::nor::tests::pn3_spans_are_aligned_and_bounded`,
+  `pn3_writes_only_clear_bits_and_split_by_sector`;
+  `flash::tests::pn3_blank_flash_reads_erased_and_writes_follow_nor_rules`,
+  `pn3_one_dirty_sector_is_stored_before_another_is_touched_and_on_sync`,
+  `pn3_a_failed_store_poisons_the_flash`;
+  `service::tests::pn3_power_loss_at_any_store_leaves_the_old_or_the_new_image_and_record`
+  *(mw-pi-node)*.
+- [x] PN4 Sectors persist under `<state>/flash/` as whole 4096-byte files
+  named `sector-NNNN`; an erased sector is a missing file; a leftover
+  temporary file (a crash before the rename) leaves the old sector and is
+  removed at open; a sector file of another length is refused, naming it;
+  a second process cannot open a locked state directory —
+  `flash::dir::tests::pn4_file_names_are_canonical`,
+  `pn4_sectors_persist_as_whole_files_and_erased_is_missing`,
+  `pn4_one_process_holds_the_state_directory`; `pi-node/tests/node.rs`:
+  `pn4_the_state_directory_is_held_by_one_node` *(mw-pi-node)*.
+- [x] PN5 The service answers like a board: `sys/info` names the chip
+  `linux-<arch>` (`linux-aarch64` on the Pi), the version, the node id,
+  `Caps::SERVE`, ABI 5 and a 252 KiB capacity; every `sys/fw/*` key is
+  `NotFound`; the trust rules are esp-base's (unclaimed accepts unsigned,
+  a claim pins the key, then unsigned, replayed and older commits and a
+  second claim are `Denied` with the installed image kept) and the image,
+  key and `min_version` survive a restart; an unreadable trust record
+  refuses installs and claims `Unavailable`; the regions are whole
+  sectors —
+  `service::tests::pn5_sys_info_names_the_linux_node_and_fw_keys_are_not_found`,
+  `pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart`,
+  `pn5_an_unreadable_trust_record_refuses_installs`;
+  `layout::tests::pn5_regions_are_whole_sectors_and_do_not_overlap`
+  *(mw-pi-node)*.
+- [x] PN6 The payload device publishes into a bounded outbox (64, dropping
+  the newest and counting; `sys/...` keys `InvalidKey`; more than one
+  serial frame `InvalidArgument`), logs on `sys/log` cut to one frame on a
+  character boundary, reads the clock, accepts `serve` for non-`sys` keys,
+  answers `node_id`, runs four software timers as `Timer` events, and
+  answers every peripheral call `Unsupported` —
+  `device::tests::pn6_publish_log_clock_serve_and_node_id`,
+  `pn6_the_outbox_is_bounded_and_drops_the_newest`,
+  `pn6_timers_fire_as_events_and_peripherals_are_unsupported`
+  *(mw-pi-node)*.
+- [x] PN7 The controller, with the real interpreter: a started payload's
+  served key answers through `on_request` with the node id, other keys
+  are `NotFound`, a subscribed publication reaches `on_message`, `tick`
+  and timer 0 run when due and `next_wake_us` says when; a trap in a
+  request answers `Internal` and leaves its keys `Unavailable` until a
+  restart, as after a stop, and an upload clears them (`NotFound`); a
+  `begin` while running stops the payload; an installed payload starts at
+  boot; an image that is not WASM or wants more memory than the cap fails
+  to start with `Internal` —
+  `controller::tests::pn7_a_started_payload_serves_publishes_ticks_and_fires_timers`,
+  `pn7_traps_stop_and_uploads_end_the_run_and_settle_the_served_keys`,
+  `pn7_an_installed_payload_starts_at_boot_and_bad_images_fail_to_start`
+  *(mw-pi-node)*.
+- [x] PN8 End to end in one process, the device thread on a real state
+  directory, the gateway on the other end of a `ChannelIo` pair and Zenoh
+  on loopback: through `gw/sys` as the runner calls it, `sys/info` reports
+  the node; a claim with the golden vector's test key pins it; an unsigned
+  upload of the WAT fixture is `Denied` and a signed one installs; start
+  runs it, its tick publications arrive on the cluster session, a cluster
+  sample on the downlink filter comes back republished, its ABI 5 served
+  key answers over the local link with the node id, `sys/log` holds its
+  lines and an unlisted key is `Denied`; stopping syncs the flash; after a
+  restart on the same directory the payload starts by itself and a
+  replayed commit and a second claim are `Denied` —
+  `pi-node/tests/node.rs`:
+  `pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves`
+  *(mw-pi-node)*.
+- [x] PN9 The crate is host only: no embedded feature set depends on it,
+  and of `middleware`'s embedded features it enables only `serial`,
+  `trust` and `espnow` (esp-base's core always builds the ESP-NOW frame
+  codec) beside `zenoh` — `scripts/check-features.sh` (block "PN9", and
+  `mw-pi-node` in `CLOUD_CRATES` for every F1 set).
+- [x] PN10 It builds for the Pi's target: `cargo check --target
+  aarch64-unknown-linux-musl -p mw-pi-node` type-checks (the `psm` build
+  script needs a C compiler for the target: `CC_aarch64_unknown_linux_musl`
+  pointing at any aarch64 GCC or clang will do for a check). A linked
+  static binary is the nix package's job (`nix/binaries.nix` entry
+  `mw-pi-node`).
+- [ ] PN11 On a Pi Zero 2 W or Pi 3: the node starts from the SD image,
+  binds in the cluster, takes a signed upload through `gw/sys` and keeps
+  its payload and key across a power cut. Not yet run on hardware.
+- [ ] PN12 Peripherals through the kernel's character devices (GPIO on
+  `/dev/gpiochipN`, SPI on `/dev/spidevB.C`, I2C on `/dev/i2c-N`) with a
+  pin policy for the Pi's header. Not implemented: every peripheral call
+  is `Unsupported` (PN6).
+- [ ] PN13 The cluster reaches a payload's served keys. Not possible
+  through the gateway as of this change: `gw/sys` passes `sys/...` keys
+  only (RG12), so a served `app/...` key answers over the local link
+  alone (PN8). Needs an additive gateway kind that forwards requests on
+  the device's served keys.
 
 ### Host tool (`tools/mwctl`)
 

@@ -20,13 +20,18 @@
 #   * the MCU gateway `mw-gateway` and the robot app `mw-robot` (design.md
 #     RG19) are host only: no embedded set depends on them, the robot enables
 #     no embedded feature, and the gateway enables only the serial link
-#     codec (`serial`, the wire it speaks) beside its host features.
+#     codec (`serial`, the wire it speaks) beside its host features;
+#   * the Linux payload host `mw-pi-node` (design.md PN9) is host only: no
+#     embedded set depends on it, and of the embedded features it enables
+#     only what the device side needs (`serial`, the link it serves;
+#     `trust`, signed commits; `espnow`, which esp-base's pure core always
+#     builds) beside `zenoh`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
-CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
+CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-pi-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim'
 
@@ -138,6 +143,20 @@ fi
 if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
         | grep -Eq '^mw-(gateway|robot) '; then
     fail "the embedded core depends on mw-gateway or mw-robot"
+fi
+
+echo "== PN9: mw-pi-node is host only"
+cargo build --quiet -p mw-pi-node
+pn_features="$(features_of_self -p mw-pi-node | sort -u)"
+for want in zenoh serial trust; do
+    grep -qx "$want" <<<"$pn_features" || fail "mw-pi-node does not enable middleware/$want"
+done
+if grep -Eqx 'ble|cam-fixtures' <<<"$pn_features"; then
+    fail "mw-pi-node enables an embedded feature other than serial, trust and espnow"
+fi
+if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
+        | grep -Eq '^mw-pi-node '; then
+    fail "the embedded core depends on mw-pi-node"
 fi
 
 echo "OK: feature isolation holds"
