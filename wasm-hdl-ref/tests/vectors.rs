@@ -54,7 +54,7 @@ fn q(s: &str) -> String {
     o
 }
 
-fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
+fn list<T>(items: impl IntoIterator<Item = T>, f: impl FnMut(T) -> String) -> String {
     let v: Vec<String> = items.into_iter().map(f).collect();
     format!("[{}]", v.join(", "))
 }
@@ -518,5 +518,276 @@ fn cl4_load_error_vectors() {
     golden(
         "loaderr.json",
         &format!("{{\"cases\": [\n{}\n]}}\n", entries.join(",\n")),
+    );
+}
+
+/// The 5A-75B's system-request shell for the upload path (CL6): what the
+/// gateware's `upload.py` must answer, request for request. Transfers
+/// follow [`Loader::step`] with the 16 KiB capacity and the payload status
+/// follows the base firmware's dispatch (`firmware/src/dispatch.rs`):
+/// `begin` stops the payload (Loading), a failed transfer returns to the
+/// resting status, a commit installs (Stopped), `start` runs `init`
+/// (Running, or Trapped when it traps), `stop` stops. Unlike the
+/// microcontrollers, the board compiles the module at commit: a module the
+/// loader refuses is answered `InvalidRequest` and the previous payload
+/// stays installed. Commits are unsigned (the board is unclaimed; a
+/// signature body is parsed and ignored).
+struct Shell {
+    loader: middleware::loader::Loader,
+    status: middleware::loader::PayloadStatus,
+    staging: Vec<u8>,
+    installed: Option<Vec<u8>>,
+}
+
+impl Shell {
+    fn new() -> Self {
+        Shell {
+            loader: middleware::loader::Loader::Idle,
+            status: middleware::loader::PayloadStatus::Empty,
+            staging: Vec::new(),
+            installed: None,
+        }
+    }
+
+    fn resting(&self) -> middleware::loader::PayloadStatus {
+        use middleware::loader::PayloadStatus::*;
+        if self.installed.is_some() { Stopped } else { Empty }
+    }
+
+    fn compiles(wasm: &[u8]) -> bool {
+        Box::new(Colorlight::new()).load(wasm).is_ok()
+    }
+
+    fn init_traps(wasm: &[u8]) -> bool {
+        let mut c = Box::new(Colorlight::new());
+        c.load(wasm).unwrap();
+        let mut rec = Rec::new(Rc::new(Cell::new(0)));
+        c.init(&mut rec).is_err()
+    }
+
+    /// Answers one request: the response status code (0 = Ok).
+    fn handle(&mut self, key: &str, body: &[u8]) -> u8 {
+        use middleware::loader::{Command, Effect, PayloadStatus::*};
+        let cmd = match Command::parse(Key::new(key).unwrap(), body) {
+            Ok(Some(c)) => c,
+            Ok(None) => return HandlerError::NotFound.code(),
+            Err(e) => return e.code(),
+        };
+        match cmd {
+            Command::Begin { .. } | Command::Chunk { .. } | Command::Commit { .. } => {}
+            Command::Start => {
+                return match self.status {
+                    Empty | Loading => HandlerError::InvalidRequest.code(),
+                    Running => 0,
+                    Stopped | Trapped => {
+                        let img = self.installed.as_ref().unwrap();
+                        self.status = if Self::init_traps(img) { Trapped } else { Running };
+                        0
+                    }
+                };
+            }
+            Command::Stop => {
+                if matches!(self.status, Running | Trapped) {
+                    self.status = Stopped;
+                }
+                return 0;
+            }
+            Command::Info | Command::TrustInfo => return 0,
+            Command::Board | Command::TrustClaim { .. } => return HandlerError::NotFound.code(),
+        }
+        let (next, r) = self.loader.step(&cmd, wasm_hdl_ref::COLORLIGHT_MEMORY as u32);
+        self.loader = next;
+        match r {
+            Err(e) => {
+                if self.status == Loading {
+                    self.status = self.resting();
+                }
+                e.code()
+            }
+            Ok(Effect::Erase { len }) => {
+                self.staging = vec![0; len as usize];
+                self.status = Loading;
+                0
+            }
+            Ok(Effect::Write { offset, data }) => {
+                let o = offset as usize;
+                self.staging[o..o + data.len()].copy_from_slice(data);
+                0
+            }
+            Ok(Effect::Activate { .. }) => {
+                if Self::compiles(&self.staging) {
+                    self.installed = Some(std::mem::take(&mut self.staging));
+                    self.status = Stopped;
+                    0
+                } else {
+                    self.status = self.resting();
+                    HandlerError::InvalidRequest.code()
+                }
+            }
+            Ok(Effect::None) => 0,
+        }
+    }
+}
+
+fn begin_body(len: u32, crc: u32) -> Vec<u8> {
+    let mut b = len.to_le_bytes().to_vec();
+    b.extend(crc.to_le_bytes());
+    b
+}
+
+fn chunk_body(offset: u32, data: &[u8]) -> Vec<u8> {
+    let mut b = offset.to_le_bytes().to_vec();
+    b.extend(data);
+    b
+}
+
+/// The upload of `img` in chunks of `size`, as mwctl's plan sends it.
+fn upload_reqs(img: &[u8], size: usize) -> Vec<(&'static str, Vec<u8>)> {
+    let mut v = vec![("sys/loader/begin", begin_body(img.len() as u32, Crc32::checksum(img)))];
+    for (i, c) in img.chunks(size).enumerate() {
+        v.push(("sys/loader/chunk", chunk_body((i * size) as u32, c)));
+    }
+    v.push(("sys/loader/commit", Vec::new()));
+    v
+}
+
+#[test]
+fn cl6_upload_vectors() {
+    use middleware::loader::sha256;
+    let (_, good) = module("bridge");
+    let (_, blink) = module("blink");
+    let traps = wat::parse_str(
+        r#"(module (memory (export "memory") 16 (pagesize 1)) (func (export "init") unreachable))"#,
+    )
+    .unwrap();
+    let refused = wat::parse_str(r#"(module (memory (export "memory") 1))"#).unwrap();
+    let cut = good[..good.len() / 2].to_vec();
+    let n = good.len() as u32;
+    let crc = Crc32::checksum(&good);
+    let s = |k: &'static str, b: Vec<u8>| vec![(k, b)];
+
+    let mut cases: Vec<(&str, Vec<(&'static str, Vec<u8>)>)> = Vec::new();
+    let mut happy = s("sys/info", vec![]);
+    happy.extend(upload_reqs(&good, 512));
+    happy.extend(s("sys/payload/start", vec![]));
+    happy.extend(s("sys/payload/start", vec![]));
+    happy.extend(s("sys/payload/stop", vec![]));
+    happy.extend(s("sys/payload/stop", vec![]));
+    happy.extend(s("sys/payload/start", vec![]));
+    cases.push(("happy path, start and stop", happy));
+    // Small chunks, each sent twice (the response was lost).
+    let mut resend = Vec::new();
+    for r in upload_reqs(&good, 100) {
+        if r.0 == "sys/loader/chunk" {
+            resend.push(r.clone());
+        }
+        resend.push(r);
+    }
+    cases.push(("every chunk resent", resend));
+    let mut ooo = upload_reqs(&good, 128);
+    ooo.swap(1, 2);
+    cases.push(("out of order abandons the transfer", ooo));
+    let mut bad_crc = upload_reqs(&good, 512);
+    bad_crc[0].1 = begin_body(n, crc ^ 1);
+    cases.push(("crc mismatch at commit", bad_crc));
+    let mut short = upload_reqs(&good, 512);
+    short.remove(short.len() - 2);
+    cases.push(("commit before the last chunk", short));
+    cases.push(("oversize begin", s("sys/loader/begin", begin_body(16385, 0))));
+    cases.push(("zero-length begin", s("sys/loader/begin", begin_body(0, 0))));
+    let mut over = s("sys/loader/begin", begin_body(4, Crc32::checksum(b"abcd")));
+    over.extend(s("sys/loader/chunk", chunk_body(0, b"abcde")));
+    cases.push(("chunk past the declared length", over));
+    let mut empty = s("sys/loader/begin", begin_body(4, Crc32::checksum(b"abcd")));
+    empty.extend(s("sys/loader/chunk", chunk_body(0, b"")));
+    empty.extend(s("sys/loader/chunk", vec![0, 0]));
+    empty.extend(s("sys/loader/chunk", chunk_body(0, &[0x55; 513])));
+    empty.extend(s("sys/loader/begin", vec![1, 2, 3]));
+    empty.extend(s("sys/loader/chunk", chunk_body(0, b"abcd")));
+    empty.extend(s("sys/loader/commit", vec![0; 5]));
+    empty.extend(s("sys/loader/commit", vec![0; 68]));
+    cases.push(("malformed bodies leave the transfer alone", empty));
+    cases.push(("chunk and commit while idle", {
+        let mut v = s("sys/loader/chunk", chunk_body(0, b"x"));
+        v.extend(s("sys/loader/commit", vec![]));
+        v.extend(s("sys/payload/start", vec![]));
+        v.extend(s("sys/payload/stop", vec![]));
+        v
+    }));
+    cases.push(("refused module keeps the installed one", {
+        let mut v = upload_reqs(&good, 512);
+        v.extend(s("sys/payload/start", vec![]));
+        v.extend(upload_reqs(&refused, 512));
+        v.extend(upload_reqs(&cut, 512));
+        v.extend(s("sys/payload/start", vec![]));
+        v
+    }));
+    cases.push(("init trap", {
+        let mut v = upload_reqs(&traps, 512);
+        v.extend(s("sys/payload/start", vec![]));
+        v.extend(s("sys/payload/stop", vec![]));
+        v.extend(s("sys/payload/start", vec![]));
+        v
+    }));
+    cases.push(("replace a running payload", {
+        let mut v = upload_reqs(&good, 512);
+        v.extend(s("sys/payload/start", vec![]));
+        v.extend(upload_reqs(&blink, 300));
+        v.extend(s("sys/payload/start", vec![]));
+        v
+    }));
+    cases.push(("other sys keys", {
+        let mut v = s("sys/nope", vec![]);
+        v.extend(s("sys/board", vec![]));
+        v.extend(s("sys/trust/claim", vec![0; 32]));
+        v.extend(s("sys/trust/info", vec![]));
+        v.extend(s("sys/info", vec![1]));
+        v.extend(s("sys/payload/start", vec![1]));
+        v
+    }));
+
+    let mut out = Vec::new();
+    for (name, reqs) in &cases {
+        let mut sh = Shell::new();
+        let steps = list(reqs, |(k, b)| {
+            let code = sh.handle(k, b);
+            format!(
+                r#"{{"key": {}, "body": "{}", "code": {code}, "status": {}}}"#,
+                q(k),
+                hex(b),
+                sh.status as u8
+            )
+        });
+        let inst = sh.installed.as_ref().map_or("null".into(), |i| {
+            format!(
+                r#"{{"len": {}, "crc32": {}, "sha256": "{}"}}"#,
+                i.len(),
+                Crc32::checksum(i),
+                hex(&sha256::ImageHash::digest(i))
+            )
+        });
+        out.push(format!(
+            "    {{\"name\": {}, \"steps\": {steps},\n     \"installed\": {inst}}}",
+            q(name)
+        ));
+    }
+    // Check values for the streaming CRC-32 and SHA-256 cores.
+    let lens = [0usize, 1, 3, 55, 56, 63, 64, 65, 119, 128, 1000];
+    let checks = list(lens, |l| {
+        let d: Vec<u8> = (0..l).map(|i| (i * 37 + 11) as u8).collect();
+        format!(
+            r#"{{"data": "{}", "crc32": {}, "sha256": "{}"}}"#,
+            hex(&d),
+            Crc32::checksum(&d),
+            hex(&sha256::ImageHash::digest(&d))
+        )
+    });
+    golden(
+        "upload.json",
+        &format!(
+            "{{\"capacity\": {}, \"checks\": {checks},\n \"cases\": [\n{}\n]}}\n",
+            wasm_hdl_ref::COLORLIGHT_MEMORY,
+            out.join(",\n")
+        ),
     );
 }

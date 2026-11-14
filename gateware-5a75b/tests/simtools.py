@@ -27,6 +27,8 @@ def run(module, name, tb, ios=None, extra_env=None, timeout_s=None):
     build.mkdir(parents=True, exist_ok=True)
     out = convert(module, ios=ios if ios is not None else ios_of(module), name=name)
     out.write(str(build / f"{name}.v"))
+    for fn, data in out.data_files.items():   # $readmemh files (ROM contents)
+        (build / fn).write_text(data)
     runner = get_runner("verilator")
     runner.build(
         sources=[build / f"{name}.v"],

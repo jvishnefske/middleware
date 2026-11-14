@@ -91,6 +91,7 @@ class BridgeTable(Module):
         self.add_end = Signal()
         # Remove and stat by handle.
         self.rm_stb = Signal()
+        self.clear = Signal()            # remove every rule (payload stopped)
         self.stat_stb = Signal()
         self.stat_dropped = Signal()     # 0: forwarded, 1: dropped
         self.handle = Signal(8)
@@ -249,6 +250,7 @@ class BridgeTable(Module):
                     self.cmd_result.eq(0),
                 ).Else(self.cmd_result.eq(ERR_BUSY)),
             ),
+            If(self.clear, valid.eq(0)),
         ]
 
         # --- counters ------------------------------------------------------

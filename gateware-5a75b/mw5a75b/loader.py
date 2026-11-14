@@ -88,13 +88,16 @@ class Reader(Module):
         self.err = Signal()
         self.val = Signal(64)
         self.byte = Signal(8)
+        # Another reader of the RAM while this one is idle.
+        self.ext_sel = Signal()
+        self.ext_adr = Signal(14)
 
         acc = Signal(64)
         n = Signal(4)
         cmd = Signal(2)
         b = rd.dat_r
         chunk = b[:7]
-        self.comb += rd.adr.eq(self.pos[:14])
+        self.comb += rd.adr.eq(Mux(self.ext_sel, self.ext_adr, self.pos[:14]))
         fsm = FSM(reset_state="IDLE")
         self.submodules += fsm
         maxb = Signal(4)
@@ -190,6 +193,11 @@ class Loader(Module):
         self.img_dat = Signal(8)
         self.img_we = Signal()
         self.img_len = Signal(15)
+        # Image RAM read port for others while the loader is idle
+        # (synchronous: data a cycle after the address).
+        self.img_rd_sel = Signal()
+        self.img_rd_adr = Signal(14)
+        self.img_rd_dat = Signal(8)
         # Control.
         self.start = Signal()
         self.busy = Signal()
@@ -221,6 +229,10 @@ class Loader(Module):
         self.specials += iw, ir
         self.comb += iw.adr.eq(self.img_adr), iw.dat_w.eq(self.img_dat), iw.we.eq(self.img_we)
         self.submodules.rd = rd = Reader(ir)
+        self.comb += [
+            rd.ext_sel.eq(self.img_rd_sel & ~self.busy), rd.ext_adr.eq(self.img_rd_adr),
+            self.img_rd_dat.eq(ir.dat_r),
+        ]
         val = rd.val
         v32 = val[:32]
 

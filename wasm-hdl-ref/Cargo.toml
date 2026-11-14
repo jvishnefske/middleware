@@ -10,6 +10,8 @@ license = "MIT OR Apache-2.0"
 middleware = { path = ".." }
 
 [dev-dependencies]
+# The upload vectors hash images with the loader's SHA-256.
+middleware = { path = "..", features = ["trust"] }
 # Differential tests run every payload through wasmi (wasm-host) too.
 wasm-host = { path = "../wasm-host" }
 wat = "1"
