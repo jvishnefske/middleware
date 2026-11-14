@@ -5,6 +5,7 @@
 //!   the corrupt ones the decoder must drop), for the frame core;
 //! * `bridge.json` — rule-table operations (install, de-duplicate, match,
 //!   count, stop) with the [`BridgeTable`] answers, for the bridge engine;
+//! * `loaderr.json` — modules the loader must refuse, with the error kind;
 //! * `wasm/<name>.json` — a module, the image the loader must build from
 //!   it (code words, function table, table 0, globals, exports, initial
 //!   memory), and an event script with the board calls, results and final
@@ -437,5 +438,85 @@ fn cl4_bridge_vectors() {
     golden(
         "bridge.json",
         &format!("{{\"ops\": [\n  {}\n]}}\n", ops.join(",\n  ")),
+    );
+}
+
+#[test]
+fn cl4_load_error_vectors() {
+    let wat_cases: &[(&str, &str)] = &[
+        ("unknown import", r#"(module (import "mw" "nope" (func)) (memory (export "memory") 1 (pagesize 1)))"#),
+        ("other module", r#"(module (import "env" "log" (func (param i32 i32))) (memory (export "memory") 1 (pagesize 1)))"#),
+        ("bad signature", r#"(module (import "mw" "log" (func (param i32))) (memory (export "memory") 1 (pagesize 1)))"#),
+        ("bad export", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "tick")))"#),
+        ("bad export result", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "mw_alloc") (param i32)))"#),
+        ("missing memory", r#"(module (memory 1 (pagesize 1)))"#),
+        ("no memory", r#"(module (func))"#),
+        ("memory too large", r#"(module (memory (export "memory") 1))"#),
+        ("memory too large bytes", r#"(module (memory (export "memory") 16385 (pagesize 1)))"#),
+        ("float", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (f32.const 1))))"#),
+        ("i64 add", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (i64.add (i64.const 1) (i64.const 2)))))"#),
+        ("i64 local", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (local i64)))"#),
+        ("i64 param", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i64)))"#),
+        ("multi value", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (result i32 i32) (i32.const 1) (i32.const 2)))"#),
+        ("block i64", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (block (result i64) (i64.const 1)))))"#),
+        ("start", r#"(module (memory (export "memory") 1 (pagesize 1)) (func $s) (start $s))"#),
+        ("i64 global", r#"(module (memory (export "memory") 1 (pagesize 1)) (global i64 (i64.const 0)))"#),
+        ("memory.init", r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x") (func (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1))))"#),
+        ("passive data", r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x"))"#),
+        ("data past memory", r#"(module (memory (export "memory") 4 (pagesize 1)) (data (i32.const 2) "xyz"))"#),
+        ("imported memory", r#"(module (import "mw" "memory" (memory 1)))"#),
+        ("two tables", r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (table 1 funcref))"#),
+        ("table too large", r#"(module (memory (export "memory") 1 (pagesize 1)) (table 65 funcref))"#),
+        ("elem past table", r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (func $f) (elem (i32.const 1) $f))"#),
+        ("too many params", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32)))"#),
+        ("too many globals", r#"(module (memory (export "memory") 1 (pagesize 1))
+            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
+            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
+            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
+            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
+            (global i32 (i32.const 0)))"#),
+        ("global from global", r#"(module (memory (export "memory") 1 (pagesize 1)) (global $a i32 (i32.const 0)) (global i32 (global.get $a)))"#),
+        ("exported table", r#"(module (memory (export "memory") 1 (pagesize 1)) (table (export "t") 1 funcref))"#),
+    ];
+    let mut entries: Vec<String> = Vec::new();
+    let mut push = |name: &str, wasm: &[u8]| {
+        let mut c = Box::new(Colorlight::new());
+        let e = match c.load(wasm) {
+            Ok(()) => "Ok".to_string(),
+            Err(wasm_hdl_ref::LoadError::Unsupported(_)) => "Unsupported".to_string(),
+            Err(wasm_hdl_ref::LoadError::TooLarge(_)) => "TooLarge".to_string(),
+            Err(wasm_hdl_ref::LoadError::MemoryTooLarge { .. }) => "MemoryTooLarge".to_string(),
+            Err(e) => format!("{e:?}"),
+        };
+        entries.push(format!(
+            r#"    {{"name": {}, "module": "{}", "error": {}}}"#,
+            q(name),
+            hex(wasm),
+            q(&e)
+        ));
+    };
+    for (name, src) in wat_cases {
+        push(name, &wat::parse_str(src).unwrap());
+    }
+    // Truncations and corruptions of a valid module.
+    let (_, good) = module("bridge");
+    for cut in [0usize, 4, 8, 9, 20, good.len() / 2, good.len() - 1] {
+        push(&format!("bridge cut at {cut}"), &good[..cut]);
+    }
+    let mut bad_magic = good.clone();
+    bad_magic[1] = b'x';
+    push("bad magic", &bad_magic);
+    let mut bad_version = good.clone();
+    bad_version[4] = 2;
+    push("bad version", &bad_version);
+    let mut trailing = good.clone();
+    trailing.extend([0x0B, 0x00]);
+    push("trailing junk", &trailing);
+    let mut unknown_section = good.clone();
+    unknown_section.extend([0x0D, 0x00]);
+    push("unknown section", &unknown_section);
+    golden(
+        "loaderr.json",
+        &format!("{{\"cases\": [\n{}\n]}}\n", entries.join(",\n")),
     );
 }

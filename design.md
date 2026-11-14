@@ -4604,13 +4604,26 @@ Requirements:
   installing, which also finds an identical rule); counters in RAM with
   queued accounting and back-pressure — every `bridge.json` operation
   answers as `BridgeTable` does — `tests/test_bridge.py`.
-- [ ] CL6 Upload and storage: `sys/loader/begin|chunk|commit` with
-  streaming CRC-32 and SHA-256 in gateware, the image in one of two SPI
-  flash slots activated after the CRC check, and the loader FSM building
-  the image (code, function table, table 0, globals, exports, memory)
-  from the active slot at reset — open. The compiler is the largest
-  remaining piece; the model's loader is its specification and the
-  vectors carry the image it must build.
+- [ ] CL6 Upload and storage. The `.wasm` is uploaded to the board and
+  compiled there. Done: the hardware loader (`mw5a75b/loader.py`), the
+  model's loader in gateware — a bounded LEB128 reader, every section
+  with the model's checks in the model's order (import names matched
+  against the 33 ABI names and export names against the 7 the runtime
+  calls, both UTF-8 checked), and the body compiler (a 64-entry control
+  stack in LUT RAM, a 256-entry operand-type stack, resolved branch words,
+  forward branches chained and patched at `end`). From each vector's
+  module bytes alone it builds the model's image word for word (code,
+  function table, table 0, globals, exports, initial memory) and the
+  script then runs as the model says; all 40 refused modules
+  (`loaderr.json`: bad imports, signatures, exports, memory, floats,
+  i64, multi-value, start, passive segments, oversized tables and
+  globals, truncations, bad header) fail with the model's error kind —
+  `tests/test_system.py`. Loader, runtime and bridge table together
+  synthesize to about 12.7k LUT4 + 2.0k carry cells and 36 block RAMs, so
+  the full design is tight on the 25F. Open: `sys/loader/begin|chunk|commit`
+  into the image RAM with streaming CRC-32 and SHA-256, the two SPI
+  flash slots (the image activated after the CRC check, compiled from
+  the active slot at reset), and `sys/payload/start|stop|status`.
 - [x] CL7 The WASM interpreter (`mw5a75b/wasm.py`) and the hardware import
   unit and runtime (`mw5a75b/imports.py`: `log`/`publish` as frames on
   every link with a peer, an 8-slot subscription table with matchers on

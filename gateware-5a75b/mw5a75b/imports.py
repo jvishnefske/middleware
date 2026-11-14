@@ -107,12 +107,14 @@ class Utf8Cut(Module):
         self.stb = Signal()
         self.byte = Signal(8)
         self.upto = Signal(9)
+        self.ok = Signal()        # every byte so far is whole characters
         need = Signal(2)
         lo = Signal(8)
         hi = Signal(8)
         stop = Signal()
         i = Signal(9)
         b = self.byte
+        self.comb += self.ok.eq(~stop & (need == 0))
         self.sync += If(self.start,
             need.eq(0), stop.eq(0), i.eq(0), self.upto.eq(0),
         ).Elif(self.stb & ~stop,

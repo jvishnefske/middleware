@@ -154,6 +154,14 @@ class WasmCore(Module):
         self.ld_glob_we = Signal()
         self.glob_rd_adr = Signal(4)
         self.glob_rd_dat = Signal(32)
+        # Reads of code, funcs and table while idle (the loader patches
+        # branches through it; tests read the image back). Synchronous.
+        self.dbg_code_adr = Signal(12)
+        self.dbg_code_dat = Signal(32)
+        self.dbg_func_adr = Signal(7)
+        self.dbg_func_dat = Signal(56)
+        self.dbg_table_adr = Signal(6)
+        self.dbg_table_dat = Signal(16)
         self.code_len = Signal(13)
         self.nfuncs = Signal(8)
         self.table_len = Signal(7)
@@ -300,6 +308,11 @@ class WasmCore(Module):
         fsm = FSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += self.busy.eq(~fsm.ongoing("IDLE"))
+        self.comb += [
+            self.dbg_code_dat.eq(code_rd.dat_r),
+            self.dbg_func_dat.eq(func_rd.dat_r),
+            self.dbg_table_dat.eq(table_rd.dat_r),
+        ]
 
         # The call's function and arguments are latched at call_start.
         c_func = Signal(8)
@@ -310,6 +323,9 @@ class WasmCore(Module):
             *[c_args[i].eq(self.call_args[i]) for i in range(6)],
         )
         fsm.act("IDLE",
+            code_rd.adr.eq(self.dbg_code_adr),
+            func_rd.adr.eq(self.dbg_func_adr),
+            table_rd.adr.eq(self.dbg_table_adr),
             If(self.call_start,
                 NextValue(sp, 0),
                 NextValue(fp, 0),
