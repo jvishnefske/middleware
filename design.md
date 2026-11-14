@@ -2222,13 +2222,15 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   (32 and 48 kHz take a 12.288 MHz MCLK: the codec's ADC dividers cannot
   make them from 6.144 MHz). The codec list follows `fsl_wm8960.c` as
   recalled, unchecked against the file and the board.
-- [ ] SC6 `payload-sim` and the browser simulator offer a fake IMU (a
+- [x] SC6 `payload-sim` and the browser simulator offer a fake IMU (a
   deterministic tilt pattern) and a fake microphone (a tone and chirp),
-  and a payload streaming either runs in both — Rust side done:
+  and a payload streaming either runs in both —
   `stream::samples::fake::tests::sc6_*`, payload-sim
-  `sc6_a_payload_streams_the_fake_imu_and_microphone` and
-  `tests/sc6.rs`, protocol-wasm `sc6_*`; the vitest case
-  (`web/test/sensors.test.ts`) not yet run (no `node_modules` here).
+  `sc6_a_payload_streams_the_fake_imu_and_microphone` and `tests/sc6.rs`,
+  protocol-wasm `sc6_*`; `web/test/sensors.test.ts` (2 tests, the decoder's
+  refusals and the simulator streaming both sources), with the whole web
+  suite (334 tests) and `tsc --noEmit` passing on 2026-11-14 (vitest 5
+  needs Node >= 20.12).
 - [ ] SC7 On the EVKB, flat on the bench the IMU stream reads about +1 g
   on Z and about −1 g upside down, at the configured rate. The route core
   is tested (SC4); the shell's route runner is not written yet.
