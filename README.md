@@ -14,6 +14,7 @@ request/response behind one set of traits, with pluggable transports.
 | `mdns`     | mDNS browse (`MdnsSocket`) and announce (`MdnsAnnouncer`) | `std` + tokio        |
 | `dns-sd`   | unicast DNS-SD browse against cluster DNS         | `std` + tokio                |
 | `memory`   | in-process backend for tests and examples         | `std` + tokio                |
+| `zenoh-lite` | heap-free Zenoh 1.x client (`zenoh_lite`) for boards: pub/sub, queryables, requests over one byte stream | `no_std`, no heap |
 | `trust`    | signed payload checks (SHA-256, Ed25519 verify)   | `no_std`, no heap            |
 | `postcard` | serde codec                                       | `no_std`                     |
 | `prost`    | protobuf codec                                    | `no_std` + `alloc`           |
@@ -64,6 +65,7 @@ need the espup toolchain and are built locally.
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
 | `firmware-rp/`       | RP base firmware over USB CDC-ACM: Raspberry Pi Pico (RP2040, stores payloads only) and Pico 2 (RP2350, runs them): `./build.sh rp2040` or `./build.sh rp2350` (ELF and UF2) |
+| `firmware-imxrt/`   | i.MX RT1050-EVKB base firmware: A/B bootloader in HyperFlash, the protocol on LPUART1, WASM payloads, `mwctl fw update`: `./build.sh image`, `./build.sh flash boot a` (SWD) |
 | `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
 | `tools/espnow-bridge/` | ESP8266 USB↔ESP-NOW bridge sketch for `mwctl --espnow` (`check.sh`: codec test and build; upload with `arduino-cli upload --fqbn esp8266:esp8266:generic -p <port>`) |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |

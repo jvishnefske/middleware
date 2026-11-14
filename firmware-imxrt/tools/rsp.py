@@ -18,6 +18,12 @@ The probe is $IMXRT_PROBE (default: the EVKB's onboard OpenSDA J-Link).
 """
 import os, re, socket, subprocess, time
 
+# IMXRT_GDB=jlink uses SEGGER's JLinkGDBServerCLExe instead: the EVKB's
+# OpenSDA J-Link drops off USB when probe-rs opens it after the USB
+# firmware has run (2026-11-13); SEGGER's server does not.
+JLINK = os.environ.get("IMXRT_GDB") == "jlink"
+JLINK_SN = os.environ.get("IMXRT_JLINK_SN", "000621000000")
+
 PROBE = ["--probe", os.environ.get("IMXRT_PROBE", "1366:0105:000621000000"),
          "--speed", "1000", "--chip", "MIMXRT1050_hyperflash"]
 
@@ -37,17 +43,26 @@ def _unrle(p: str) -> str:
 
 class Rsp:
     def __init__(self, port=1337):
-        self.proc = subprocess.Popen(
-            ["probe-rs", "gdb", *PROBE, "--gdb-connection-string", f"127.0.0.1:{port}", "--non-interactive"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if JLINK:
+            # SEGGER's server: `-noir` keeps the target's state, the core
+            # is halted on attach as with probe-rs.
+            argv = ["JLinkGDBServerCLExe", "-device", "MIMXRT1052xxx6B", "-if", "SWD", "-speed", "1000",
+                    "-select", f"USB={JLINK_SN}", "-port", str(port), "-nogui", "-singlerun", "-noir",
+                    "-nolocalhostonly" if False else "-localhostonly"]
+        else:
+            argv = ["probe-rs", "gdb", *PROBE, "--gdb-connection-string", f"127.0.0.1:{port}", "--non-interactive"]
+        # SEGGER's server logs every command: to a file, since an unread pipe
+        # fills and blocks it mid-transfer.
+        out = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "jlink-gdb.log"), "wb") if JLINK else subprocess.PIPE
+        self.proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT)
         deadline = time.time() + 30
         while True:
             try:
-                self.s = socket.create_connection(("127.0.0.1", port), timeout=10)
+                self.s = socket.create_connection(("127.0.0.1", port), timeout=30 if JLINK else 10)
                 break
             except OSError:
                 if time.time() > deadline or self.proc.poll() is not None:
-                    out = self.proc.stdout.read().decode(errors="replace") if self.proc.poll() is not None else ""
+                    out = self.proc.stdout.read().decode(errors="replace") if self.proc.stdout and self.proc.poll() is not None else ""
                     raise SystemExit(f"gdb server did not come up:\n{out[-1500:]}")
                 time.sleep(0.3)
         self.buf = b""

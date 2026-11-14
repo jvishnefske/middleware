@@ -3,8 +3,13 @@
 #
 #   ./build.sh boot                      the bootloader ELF and its block-0 binary
 #   ./build.sh app [--version M.m]       the firmware ELF and its slot image (with
-#                                        the payload runtime; APP_FEATURES=app for
-#                                        a protocol-only build)
+#                                        the payload runtime; APP_FEATURES=app
+#                                        for a protocol-only build. `usb` and
+#                                        `eth` are opt-in (APP_FEATURES=wasm,usb
+#                                        ...): with either, the PIT time driver
+#                                        ends in an interrupt storm after a while
+#                                        (design.md FL5-FL7), so the default
+#                                        build leaves them out)
 #   ./build.sh image                     boot + app
 #   ./build.sh flash [boot] [a|b] [--version M.m]
 #                                        builds, then programs and reads back over
@@ -33,7 +38,7 @@ build_boot() {
 }
 
 build_app() {
-  cargo build --release -j 2 --target "$target" --features "${APP_FEATURES:-wasm,usb,eth}" --bin imxrt-base
+  cargo build --release -j 2 --target "$target" --features "${APP_FEATURES:-wasm}" --bin imxrt-base
   "$objcopy" -O binary "$out/imxrt-base" "$out/imxrt-base.bin"
   cargo run --quiet --release --features image-tool --bin imxrt-image -- \
     "$out/imxrt-base.bin" "$version" "$out/imxrt-base-$version.slot"

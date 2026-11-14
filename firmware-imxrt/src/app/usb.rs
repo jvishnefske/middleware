@@ -68,7 +68,7 @@ pub const BUS_POLL_US: u64 = 250;
 pub const CONTROL_POLL_US: u64 = 250;
 /// How often a data endpoint's transfer is polled: one high-speed
 /// microframe.
-pub const DATA_POLL_US: u64 = 125;
+pub const DATA_POLL_US: u64 = 250;
 /// How often a disabled endpoint is polled for being enabled.
 const ENABLE_POLL_US: u64 = 1000;
 
@@ -614,6 +614,11 @@ fn take_setup() -> Option<[u8; 8]> {
     packet.map(|p| p.to_bytes())
 }
 
+/// Setup packets taken since boot, and the last one (two little-endian
+/// words), for reading over SWD when diagnosing enumeration.
+static SETUPS: AtomicU32 = AtomicU32::new(0);
+static LAST_SETUP: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
 /// Endpoint 0.
 pub struct ControlPipe;
 
@@ -622,12 +627,21 @@ impl drv::ControlPipe for ControlPipe {
         usize::from(core_usb::EP0_MAX_PACKET)
     }
 
+    /// Waits one poll interval before every look, so a setup packet the
+    /// controller keeps reporting (seen on the bench after the host closed
+    /// the port: the task looped through setup, a failed data stage and
+    /// setup again without ever sleeping, starving every other task) costs
+    /// at most one setup per interval.
     async fn setup(&mut self) -> [u8; 8] {
         loop {
+            Timer::after_micros(CONTROL_POLL_US).await;
             if let Some(packet) = take_setup() {
+                SETUPS.fetch_add(1, SeqCst);
+                let [a, b, c, d, e, f, g, h] = packet;
+                LAST_SETUP[0].store(u32::from_le_bytes([a, b, c, d]), SeqCst);
+                LAST_SETUP[1].store(u32::from_le_bytes([e, f, g, h]), SeqCst);
                 return packet;
             }
-            Timer::after_micros(CONTROL_POLL_US).await;
         }
     }
 

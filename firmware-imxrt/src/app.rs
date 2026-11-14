@@ -124,6 +124,30 @@ async fn start_eth(spawner: Spawner, bus: &'static Bus, uid: [u8; 8]) {
     }
 }
 
+/// A compile-time decimal (the stress periods); 1000 if it is not one.
+#[cfg(feature = "timerstress")]
+const fn parse_us(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut v = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] < b'0' || b[i] > b'9' {
+            return 1000;
+        }
+        v = v * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    v
+}
+
+#[cfg(feature = "timerstress")]
+#[embassy_executor::task(pool_size = 2)]
+async fn timer_stress_task(period_us: u64) -> ! {
+    loop {
+        embassy_time::Timer::after_micros(period_us).await;
+    }
+}
+
 #[cfg(feature = "usb")]
 static USB_SERIAL: static_cell::StaticCell<Serial> = static_cell::StaticCell::new();
 
@@ -267,6 +291,11 @@ pub async fn run(spawner: Spawner) -> ! {
 
     let (rx, tx) = uart::split(p.LPUART1);
     spawner.spawn(uart_task(link::new(rx, tx), bus).unwrap());
+    #[cfg(feature = "timerstress")]
+    {
+        spawner.spawn(timer_stress_task(option_env!("IMXRT_STRESS_A_US").map_or(125, parse_us)).unwrap());
+        spawner.spawn(timer_stress_task(option_env!("IMXRT_STRESS_B_US").map_or(250, parse_us)).unwrap());
+    }
     #[cfg(feature = "eth")]
     {
         zenoh::set_endpoint(svc.zenoh_endpoint());

@@ -91,6 +91,45 @@ def program(images, flasher, erases=()):
 CCGR3, WDOG1_WCR = 0x400FC074, 0x400B8000
 
 
+def rsp_jlink():
+    import rsp
+    return rsp.JLINK
+
+
+def verify_rsp(images):
+    """`verify` over one GDB session (the J-Link backend: no probe-rs)."""
+    ok = True
+    g = Rsp()
+    try:
+        g.halt()
+        for offset, data in images:
+            back = g.read(FLASH_BASE + offset, len(data))
+            same = back == data
+            ok &= same
+            print(f"{offset:#09x}: SWD read-back of {len(data)} bytes {'matches' if same else 'DIFFERS from'} the file")
+        g.cont()
+    finally:
+        g.close()
+    return ok
+
+
+def reset_board_rsp():
+    """`reset_board` over a GDB session: WDOG1's software reset."""
+    g = Rsp()
+    try:
+        g.halt()
+        if (g.word(CCGR3) >> 16) & 3 == 0:
+            print("WDOG1 clock gate off: not resetting; power-cycle the board")
+            return
+        g.cmd(f"M{WDOG1_WCR:x},2:2000")
+        print("reset (WDOG1)")
+    finally:
+        try:
+            g.close()
+        except Exception:
+            pass
+
+
 def reset_board():
     """Resets the chip into the boot ROM and the bootloader: WDOG1's
     software reset (WCR = 0x0020, SRS low), after checking its clock gate
@@ -151,15 +190,17 @@ def main():
     for spec in args:
         off, _, path = spec.partition(":")
         data = open(path, "rb").read()
-        data += b"\xff" * (-len(data) % 4)
+        # Whole 512-byte packets (0xFF, the erased value): the J-Link GDB
+        # server did not answer a short final memory write.
+        data += b"\xff" * (-len(data) % 512)
         images.append((int(off, 0), data))
     if not images:
         sys.exit(__doc__)
     if not verify_only:
         program(images, flasher, erases)
-    ok = verify(images)
+    ok = verify_rsp(images) if rsp_jlink() else verify(images)
     if not verify_only:
-        reset_board()
+        reset_board_rsp() if rsp_jlink() else reset_board()
     sys.exit(0 if ok else 1)
 
 

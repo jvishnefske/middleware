@@ -58,6 +58,12 @@ wasm = ["app", "dep:wasm-host", "dep:linked_list_allocator"]
 usb = ["app", "dep:embassy-usb", "dep:embassy-usb-driver"]
 # Ethernet (KSZ8081 on ENET) with DHCP and the board's Zenoh session (FL7).
 eth = ["app", "dep:embassy-net", "dep:embassy-net-driver", "middleware/zenoh-lite"]
+# Diagnostic: two tasks re-arming 125 µs and 250 µs timers forever (no
+# drivers), to test the PIT time driver under the polled drivers' timer load.
+timerstress = ["app"]
+# Diagnostic: embassy-time's generic timer queue instead of the executor's
+# integrated one.
+generic-queue = ["embassy-time/generic-queue-32"]
 # Host only: the `imxrt-image` tool.
 image-tool = ["std"]
 # Host builds of the library with `std` (the image tool).

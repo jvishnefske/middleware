@@ -1987,6 +1987,7 @@ exact offsets are `imxrt_base::layout`'s.
 | update record | two blocks, written alternately (a power cut leaves the old or the new record) |
 | slot A, slot B | two equal firmware slots, each a slot image header followed by the SDRAM-linked image |
 | trust record | two blocks (esp-base's trust store) |
+| config | two blocks, written alternately: the board configuration record (the Zenoh endpoint, `sys/zenoh/endpoint`) |
 | payload store | esp-base's two-slot store, the ESP partition's 124 KiB slot capacity |
 
 The FCB is the board's factory one (HyperFlash, DQS sampling, DDR, word
@@ -2126,9 +2127,17 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   `rt11_heap_plan_fits_the_sdram_and_matches_the_rp2350_caps`,
   `rt11_pin_policy_maps_to_abi_errors`, `rt11_adc_reads_a0_to_a5_on_adc1`,
   `rt11_i2c_bus_0_is_lpi2c1_on_a4_a5`, `rt11_spi_pins_resolve_onto_lpspi1`.
-- [ ] RT12 On the EVKB, the firmware serves the serial protocol on
+- [x] RT12 On the EVKB, the firmware serves the serial protocol on
   LPUART1 / the OpenSDA VCOM: `mwctl --port /dev/ttyACM0 info` reports
-  the chip and node id. Not yet run on hardware.
+  the chip and node id — 2026-11-13: `mwctl --port
+  /dev/serial/by-id/usb-SEGGER_J-Link_000621000000-if00 info` three times
+  in a row: chip rt1050, node 310441d265f82484 (OCOTP CFG1:CFG0,
+  `node::tests::rt12_node_id_is_the_fused_unique_id_high_word_first`), ABI
+  v5, capacity 65536; an unsigned upload on the unclaimed board survived a
+  WDOG1 reset; `trust claim` pinned a new key (kept across a reset); then
+  an unsigned commit was `Denied` and a signed 20 014-byte upload (42
+  chunks) installed. Receive is LPUART1's eDMA ring in DTCM, no interrupt
+  (an IRQ handler would need `unsafe`): `app/uart.rs`.
 - [x] RT13 On the EVKB, the HyperFlash driver reads the CFI (sector
   layout as RT3 assumes), erases and programs a scratch block and reads it
   back — 2026-11-12/13: the CFI query (QRY, 64 MiB, 512-byte write buffer,
@@ -2140,158 +2149,111 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   itself and `tools/flash.py` read it back over SWD through the FlexSPI
   window, both equal to the file; the same driver then programmed and
   verified the bootloader and slot A (RT14).
-- [ ] RT14 On the EVKB, the bootloader and a slot A image, programmed
+- [x] RT14 On the EVKB, the bootloader and a slot A image, programmed
   and read back over SWD against the ELFs, boot from HyperFlash (SW7 OFF,
   ON, ON, OFF): the DCD brings up SDRAM, the bootloader copies and checks
   slot A and the firmware serves RT12; with neither slot valid the
-  bootloader boots nothing and prints each slot's reason on LPUART1. The
-  boot chain ran on 2026-11-13: images programmed by `tools/flash.py`
-  (the RAM-loaded `imxrt-flasher` running the firmware's own HyperFlash
-  driver, each chunk read back by it) and read back over SWD through the
-  FlexSPI window, byte-identical to the files (bootloader 26 832 bytes at
-  0x0, slot A 5 636 bytes at 0x400000); after a reset (WDOG1 software
-  reset) the boot ROM ran the DCD and the bootloader, which read the
-  factory record (A confirmed), printed `slot A v0.1, 5380 bytes, SHA-256
-  ok`, entered the SDRAM copy, and the firmware printed `running from
-  slot A` from the handoff word once a second. The protocol service
-  (RT12) and recovery not yet run.
-- [ ] RT15 On the EVKB, `mwctl fw update` installs a slot B image, it
+  bootloader boots nothing and prints each slot's reason on LPUART1 — the
+  boot chain on 2026-11-13 (bootloader 26 832 bytes at 0x0, slot A at
+  0x400000, programmed by `tools/flash.py` and read back byte-identical
+  over SWD; `imxrt-boot: slot A v0.1 ... SHA-256 ok`, the firmware serving
+  RT12). Fallback and recovery the same day: with the confirmed slot B's
+  header erased the bootloader booted A (`slot A v0.4 ... SHA-256 ok`,
+  `fw info`: B empty); with both erased it printed `RECOVERY: no bootable
+  slot: A no image (bad magic), B no image (bad magic)` every 3 s and
+  booted nothing.
+- [x] RT15 On the EVKB, `mwctl fw update` installs a slot B image, it
   boots on trial and `confirm` keeps it; an unconfirmed trial reset rolls
-  back to slot A. Not yet run on hardware.
-- [ ] RT16 On the EVKB, a payload toggles an Arduino header pin (the
+  back to slot A — 2026-11-13: `mwctl fw update imxrt-base-0.2.slot --key`
+  installed slot B in 11.4 s, the bootloader printed `slot B on trial
+  v0.2`, mwctl confirmed it, and 70 s later (past the trial window) the
+  board had not reset (`fw info`: B running, confirmed 0.2). Then v0.4 with
+  `--no-reboot` and `fw reboot`: `slot A on trial v0.4`, not confirmed;
+  within 75 s the RTWDOG reset the board, the bootloader read `pending A,
+  rebooted: true, attempts: 1` and booted `slot B v0.2`, `fw info`: rolled
+  back 0.4. The firmware arms the RTWDOG on a trial (60 s, LPO ÷256: CS
+  0x35A0, TOVAL 7680 read back during the trial) and `sys/fw/confirm`
+  stops it: `ab::watchdog::tests::rt15_*`; mwctl takes MWRT slot images
+  (`fw::tests::rt15_*`, `fw_ota::rt_image::tests::rt15_*`). A signed fw
+  commit raises `min_version` before the trial (shared `fw_ota`
+  behaviour), so a rolled-back version cannot be sent again.
+- [x] RT16 On the EVKB, a payload toggles an Arduino header pin (the
   USER LED shares GPIO_AD_B0_09 with the Ethernet PHY's reset and is
   reserved), reads the USER button, and reads the FXOS8700CQ's WHO_AM_I
-  (0xC7) over I2C bus 0. Not yet run on hardware.
-
-#### Sensor channels and fast links
-
-The EVKB's accelerometer and microphone become middleware channels: a
-payload starts a source route (ABI 4's model, as for the camera) and the
-firmware captures from the hardware and publishes sample batches on the
-key the payload chose, which any node subscribes to. Raw audio is about
-32 KB/s at 16 kHz, three times what LPUART1 at 115200 baud carries, so
-the firmware also serves the protocol over USB (high-speed CDC-ACM on
-OTG1), and on Ethernet (KSZ8081RNB PHY) it is a Zenoh node: its channels
-are Zenoh keys any Zenoh peer on the network subscribes to and queries,
-with no host in between.
-
-Hardware (NXP SDK `evkbimxrt1050` board files): the FXOS8700CQ
-(accelerometer and magnetometer, 0x1F) and the WM8960 audio codec (0x1A)
-are on LPI2C1 (GPIO_AD_B1_00/01, also payload I2C bus 0); the onboard
-microphone reaches the codec's differential inputs, and the codec's
-audio reaches SAI1 (MCLK GPIO_AD_B1_09, RX data AD_B1_12, TX data
-AD_B1_13, bit clock AD_B1_14, frame sync AD_B1_15), 6.144 MHz MCLK from
-the audio PLL. The PHY is on RMII (GPIO_B1_04–11) with MDC/MDIO on
-GPIO_EMC_40/41 at PHY address 2, a 50 MHz reference clock from the
-RT1050, interrupt on GPIO_AD_B0_10 and reset on GPIO_AD_B0_09, which
-also drives the USER LED (so the LED is reserved).
-
-Sample batches (`middleware::stream::samples`, pure, `no_std`): each
-message stands alone (no reassembly), a header (version, sensor kind,
-sample format, channels, sample rate, `first_index` — samples since the
-route started, so a gap says exactly how much was lost — the first
-sample's timestamp in µs, and the count) and little-endian samples. The
-IMU's format is three or six `i16` per sample with the range in the
-header; audio is `s16le`, `µ-law` or levels (RMS and peak per block,
-fixed point).
-
-ABI: `route_source` gains `Imu = 2` and `Microphone = 3`, each with its
-own configuration (rate, range or gain, samples per message, and for
-audio levels, µ-law or PCM). The import table is unchanged, so earlier
-payloads load as before; a `sys/info` capability bit lists the kinds a
-board offers, and a board without them answers `InvalidArgument`. A route
-stops with its payload, counts against `MAX_ROUTES`, and owns its device:
-a payload's I2C transfer to the address of a device a route streams from
-is `Busy`.
-
-Drivers, without `unsafe`: the FXOS8700CQ is polled on the route's timer
-for its data-ready status (bounded I2C transfers in the controller loop);
-the WM8960 is configured over LPI2C1 and SAI1's receive FIFO is drained
-from its interrupt into a ring buffer (no DMA). `imxrt-usbd` and
-`imxrt-enet` exist but need `imxrt-ral` instances, which are only
-reachable through `unsafe`, so the USB device controller (ChipIdea, an
-`embassy_usb_driver::Driver` under embassy-usb's CDC-ACM class, as on the
-RP base) and the ENET MAC (an `embassy_net_driver::Driver` under
-embassy-net) are driven through the safe PAC. The memory their DMA
-engines read and write (USB queue heads and transfer descriptors, ENET
-descriptor rings and frame buffers) is `static [AtomicU32; N]` in DTCM:
-atomics are interior-mutable, so a write by the hardware is like a write
-by another thread, and the TCM is not cached, so no cache maintenance is
-needed. That DMA reaches DTCM on this chip is checked on hardware first
-(FL5).
-
-Links: LPUART1 and USB CDC each run the serial protocol (COBS frames,
-unchanged); Ethernet runs a Zenoh session. A request is answered on the
-link it came from; publications fan out to every link whose filter
-matches, each link with its own bounded queue, so a full queue drops that
-link's publications (counted) and never stalls the controller or the
-other links. A serial link's filter is everything until the host narrows
-it (`sys/link/sub`, `sys/link/unsub` on that link); the Zenoh link's
-filter is the union of the subscriptions the Zenoh network has declared
-to the board, so nothing is sent that no peer wants.
-
-Zenoh on the board. The `zenoh` crates build without `std` but not
-without the heap (`alloc`, `hashbrown`, `Arc`) and need `getrandom`,
-whose only hook on this target is a macro that expands to `unsafe` in
-the caller, so the board runs its own client: `middleware::zenoh_lite`,
-`no_std`, heap-free, fixed buffers, a pure codec and session state
-machine for the subset a client needs, with the I/O (an embassy-net TCP
-socket) in the shell. Protocol: Zenoh 1.x (`zenoh` 1.10, the version the
-host backend uses), client mode over TCP to one router or peer listener
-(the endpoint from `sys/zenoh/endpoint`, persisted; Zenoh UDP scouting
-is not implemented, so the endpoint must be configured); the session handshake (InitSyn/Ack, OpenSyn/Ack
-with the cookie), keep-alives and lease, close, reliable frames with
-sequence numbers, declarations of the board's subscribers and
-queryables and answers to the router's interests, publications (Push and
-Put), queries and replies (Request, Response, ResponseFinal). Messages
-stay below one batch, so no fragmentation. Publications and replies
-carry the middleware's attachments (`mw`, sender id, sequence, stream
-id), so the host's `ZenohTransport` and `SeenTable` treat the board like
-any other middleware node; to share that encoding, `zenoh::wire` moves to
-an always-built module (as `dns::wire` is) and the host backend keeps
-using it. Keys are the payload's keys unchanged (payloads already
-include their node id where keys must be unique, ABI 5), and the board's
-`sys/...` keys are queryable as `@mw/<node>/sys/...`, served only for
-`sys/info` and `sys/trust/info` until the board is claimed; after the
-claim, everything that changes the board needs a request signed by the
-pinned key, as over serial. The device gets its address by DHCP.
-
-- [ ] SC1 The sample batch wire format: header fields, little-endian
+  (0xC7) over I2C bus 0 — 2026-11-13, a 600-byte WAT payload: `i2c_open(0,
+  100 kHz)` 0, `i2c_transfer(0x1F, [0x0D])` 0, WHO_AM_I 0xC7; D8
+  (GPIO1_IO03) toggled every 250 ms, its pad following DR when read with
+  SION set over SWD; SW8 read 1 released and 0 while the user held it.
+  embassy-nxp's `Flex::set_level` writes DR_SET/DR_CLEAR, which the RT1052
+  lacks, so outputs are a read-modify-write of DR (`app/device.rs`). Host
+  tests: `pins::tests::rt16_gpio_modes_follow_the_esp_base_rules`,
+  `periph::{i2c,spi,adc}::tests::rt16_*`, `requests::tests::rt16_*`.
+- [x] SC1 The sample batch wire format: header fields, little-endian
   samples, round trip; truncated, unknown-version, count past the
   message or format/channels mismatches are refused; a gap in
-  `first_index` is reported with its size.
-- [ ] SC2 `route_source` accepts `Imu` and `Microphone` configurations
+  `first_index` is reported with its size — `stream::samples::tests::sc1_*`
+  (header layout, i16/µ-law/levels round trips, each refusal, gaps).
+- [x] SC2 `route_source` accepts `Imu` and `Microphone` configurations
   within their ranges and refuses others (`InvalidArgument`); the import
   table and ABI 1–5 modules are unchanged; `sys/info` carries the
-  capability bit.
-- [ ] SC3 A route that owns an I2C device makes a payload's transfer to
-  that address `Busy` until the route stops.
-- [ ] SC4 FXOS8700CQ core: the register plan for each rate and range,
+  capability bit — `wasm_abi::route::tests::sc2_*`,
+  `loader::tests::sc2_source_capability_bits`, wasm-host
+  `abi::tests::sc2_route_source_plans_imu_and_microphone_routes`, the SDK's
+  `sc2_sampled_sources_validate_before_the_host`; every earlier test
+  unchanged except `source_kinds_and_formats`, which asserted kind 2 was
+  invalid (now kind 4).
+- [x] SC3 A route that owns an I2C device makes a payload's transfer to
+  that address `Busy` until the route stops — `route::I2cOwners`
+  (`sc3_a_route_owns_its_i2c_device_until_it_stops`), wasm-host
+  `link::tests::sc3_*` and `tests/sc3.rs` (busy until stopped, released
+  when the device stops the route).
+- [x] SC4 FXOS8700CQ core: the register plan for each rate and range,
   the conversion of raw 14-bit accelerometer and 16-bit magnetometer
-  data to `i16` with the header's scale, the data-ready decision.
-- [ ] SC5 WM8960 and SAI1 core: the codec register list for recording
+  data to `i16` with the header's scale, the data-ready decision —
+  `sensors::fxos8700::tests::sc4_*` and the route's batching
+  `sensors::imu_route::tests::sc7_*` (whole batches with exact indices,
+  not-ready re-polls, overruns counted, resynchronisation, rates the device
+  lacks refused). Register values from the SDK as recalled, not yet
+  checked against `fsl_fxos.c`.
+- [x] SC5 WM8960 and SAI1 core: the codec register list for recording
   from the onboard microphone at each rate, the SAI clock dividers
   (8, 16, 32, 48 kHz from the audio PLL), fixed-point RMS and peak, and
-  the µ-law encoder against the G.711 table.
+  the µ-law encoder against the G.711 table — `sensors::{wm8960,sai,audio}::tests::sc5_*`
+  (32 and 48 kHz take a 12.288 MHz MCLK: the codec's ADC dividers cannot
+  make them from 6.144 MHz). The codec list follows `fsl_wm8960.c` as
+  recalled, unchecked against the file and the board.
 - [ ] SC6 `payload-sim` and the browser simulator offer a fake IMU (a
   deterministic tilt pattern) and a fake microphone (a tone and chirp),
-  and a payload streaming either runs in both.
+  and a payload streaming either runs in both — Rust side done:
+  `stream::samples::fake::tests::sc6_*`, payload-sim
+  `sc6_a_payload_streams_the_fake_imu_and_microphone` and
+  `tests/sc6.rs`, protocol-wasm `sc6_*`; the vitest case
+  (`web/test/sensors.test.ts`) not yet run (no `node_modules` here).
 - [ ] SC7 On the EVKB, flat on the bench the IMU stream reads about +1 g
-  on Z and about −1 g upside down, at the configured rate. Not yet run on
-  hardware.
+  on Z and about −1 g upside down, at the configured rate. The route core
+  is tested (SC4); the shell's route runner is not written yet.
 - [ ] SC8 On the EVKB, the microphone levels rise for a clap or speech,
   and a 1 kHz tone from a phone is the dominant frequency of a 16 kHz PCM
   capture taken over USB or TCP. Not yet run on hardware.
-- [ ] FL1 Multi-link bus: requests are answered on their link; a
+- [x] FL1 Multi-link bus: requests are answered on their link; a
   publication reaches exactly the links whose filters match; a full link
   queue drops and counts that link's publications without delaying the
-  others; `sys/link/sub` and `unsub` change only the asking link.
-- [ ] FL2 ChipIdea USB core: queue head and transfer descriptor encoding,
+  others; `sys/link/sub` and `unsub` change only the asking link —
+  `links::tests::fl1_*` (9); on the EVKB 2026-11-13, `mwctl request
+  sys/link/sub 'sys/**'` on LPUART1 stopped the payload's `rt16/state`
+  there (0 in 2 s) and `sys/link/sub '**'` brought it back (8 in 2 s). The
+  Zenoh link takes every non-`sys` publication: in client mode the router
+  does not declare its subscribers to the board.
+- [x] FL2 ChipIdea USB core: queue head and transfer descriptor encoding,
   the endpoint and setup state decisions, the CDC zero-length-packet rule
-  (shared with the RP base), all over the `AtomicU32` DMA memory model.
-- [ ] FL3 ENET and KSZ8081 core: descriptor ring encoding and ownership
+  (shared with the RP base), all over the `AtomicU32` DMA memory model —
+  `usb::{dma,regs,control,phy}::tests::fl2_*` (37) and
+  `usb::tests::fl6_publications_are_dropped_while_the_host_is_away`.
+- [x] FL3 ENET and KSZ8081 core: descriptor ring encoding and ownership
   hand-off, the MDIO read and write plans, the PHY reset, auto-negotiation
-  and link-status decisions, the RMII clock settings.
+  and link-status decisions, the RMII clock settings —
+  `enet::{clock,mdio,ksz8081,mac,desc}::tests::fl3_*` (34), each register
+  value the RAM probe used on the board asserted.
 - [x] FL4 `zenoh::wire` builds without `std` and is shared by the host
   backend (every Zenoh test unchanged) and `zenoh_lite` — the pure
   encodings live in the always-built `zenoh_wire` (re-exported as
@@ -2305,9 +2267,21 @@ pinned key, as over serial. The device gets its address by DHCP.
   driver): descriptor rings and frame buffers as `AtomicU32` statics in
   DTCM (ring at 0x20041E00), 43 frames received with no errors, two
   frames sent and their DMA completed, no bus error (EIR.EBERR clear).
-  USB not yet run.
+  USB the same day with the firmware's driver: the board enumerated at
+  high speed (bulk 512) and answered `mwctl info` and two uploads over
+  CDC, so the controller's queue heads, descriptors and buffers in DTCM
+  work. Open: see the stall under FL6.
 - [ ] FL6 On the EVKB, the board enumerates as a high-speed CDC-ACM port
-  and `mwctl --port /dev/ttyACM1 info` answers. Not yet run on hardware.
+  and `mwctl --port /dev/ttyACM1 info` answers — partly, 2026-11-13: it
+  enumerated (1fc9:0094, `usb-middleware_imxrt-base_<node>-if00`, bcdUSB
+  2.10, bulk 512), `mwctl info` answered repeatedly and 20 KB and 600-byte
+  uploads installed over it. Open: with the USB (or Ethernet) driver built
+  in, the firmware stalls after a while (requests unanswered on every
+  link); a build with only two tasks re-arming 125 µs and 250 µs timers
+  stalls the same way during a long transfer, so the cause is the
+  timekeeping under polled-driver timer load (the PIT time driver path
+  dominates the core's samples), not the USB driver. Both features are
+  opt-in (`APP_FEATURES=wasm,usb`, `wasm,eth`) until it is fixed.
 - [ ] FL7 On the EVKB, the board gets a DHCP address, opens a Zenoh
   session to a router on the LAN, and a host `ZenohTransport` subscribes
   to its IMU channel and queries `@mw/<node>/sys/info`. The Ethernet
@@ -2315,8 +2289,12 @@ pinned key, as over serial. The device gets its address by DHCP.
   MDIO at address 2 (ID 0x0022/0x1561), 50 MHz RMII clock mode set (PHY
   control 2 bit 7), link up at 100BASE-TX full duplex after
   auto-negotiation, a DHCP DISCOVER answered by the LAN's server with an
-  OFFER (no lease taken). DHCP lease, Zenoh session and channels not yet
-  run.
+  OFFER (no lease taken). The firmware's driver, embassy-net with DHCP,
+  the `sys/zenoh/endpoint` record (`config::tests::fl7_*`,
+  `service::tests::fl7_*`) and the session task are written and the
+  endpoint persisted on the board; the driver brought Ethernet up but no
+  lease was seen before the timer stall (FL6) intervened. The host side is
+  `cargo run --example zenoh_board --features zenoh`.
 - [x] ZN1 `zenoh_lite` codec: every message of the subset encodes and
   decodes (variable-length integers, extensions skipped when unknown and
   refused when mandatory), byte-identical to the `zenoh` 1.10 codec for
@@ -2349,21 +2327,14 @@ pinned key, as over serial. The device gets its address by DHCP.
   `zn3_lite_receives_host_publications_on_declared_keys`,
   `zn3_lite_requests_reach_a_host_responder`,
   `zn3_keep_alives_hold_a_short_lease_while_idle`.
-- [ ] ZN4 Management over Zenoh: only `sys/info` and `sys/trust/info`
+- [x] ZN4 Management over Zenoh: only `sys/info` and `sys/trust/info`
   answer on an unclaimed board; after the claim, a request that changes
   the board needs a signature by the pinned key; a refused request leaves
-  the board unchanged.
-
-### Host tool (`tools/mwctl`)
-
-`mwctl --port <PATH> info|upload|start|stop|monitor|reset` drives a device
-over one named serial port, synchronously, with the same pure frame and
-loader code as the firmware. With `--espnow <MAC>` the port is the
-USB↔ESP-NOW bridge and the request reaches that device over the air (see
-"Over-the-air payload update"). It never enumerates ports. It opens the port
-without resetting the board (verified on the CH340 board: no boot output on
-open).
-
+  the board unchanged — `zenoh_mgmt::tests::zn4_*` (against the real
+  service on the RAM flash: state, flash log, image and `sys/fw/info`
+  unchanged after every refusal; signed start/stop admitted once, its
+  counter persisted by `Service::accept_control` and refused on replay
+  across reboots; `sys/zenoh/endpoint` never over Zenoh).
 - [x] H1 (was T1 before 0.4, renamed so T* names the trust requirements)
   Protocol logic is tested against an in-memory device running the
   real splitter and loader —

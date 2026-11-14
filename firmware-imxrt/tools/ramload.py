@@ -192,7 +192,10 @@ def load(elf, listen_seconds=0.0, quiet=False, release=True, session=None):
             g.set_word(0xE000E180 + 4 * i, 0xFFFF_FFFF)   # NVIC ICER
             g.set_word(0xE000E280 + 4 * i, 0xFFFF_FFFF)   # NVIC ICPR
         g.set_word(0xE000E010, 0)                         # SysTick CTRL
-        g.set_reg("extra", 0)                             # PRIMASK .. CONTROL
+        if "extra" in g.regs:
+            g.set_reg("extra", 0)                         # PRIMASK .. CONTROL
+        else:
+            g.cmd("qRcmd," + b"reg primask = 0".hex())    # J-Link: not in its register list
         g.set_word(MPU_CTRL, 0)
         g.set_word(VTOR, base)
         active = active_exceptions(g)

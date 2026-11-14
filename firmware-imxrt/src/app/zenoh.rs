@@ -92,7 +92,21 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
             Timer::after_secs(3600).await;
         }
     };
-    stack.wait_config_up().await;
+    // Link and lease, reported every few seconds until both are there.
+    let mut waited = 0u32;
+    while !(stack.is_link_up() && stack.is_config_up()) {
+        if waited.is_multiple_of(5) {
+            let st = super::enet::stats();
+            bus.log(format_args!(
+                "eth: link {}, DHCP {} (rx {} dropped {} tx {} bus errors {})",
+                if stack.is_link_up() { "up" } else { "down" },
+                if stack.is_config_up() { "bound" } else { "pending" },
+                st.rx_frames, st.rx_dropped, st.tx_frames, st.bus_errors
+            ));
+        }
+        waited = waited.wrapping_add(1);
+        Timer::after_secs(1).await;
+    }
     if let Some(c) = stack.config_v4() {
         bus.log(format_args!("eth: DHCP lease {}", c.address));
     }

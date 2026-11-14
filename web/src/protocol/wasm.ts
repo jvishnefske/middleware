@@ -289,7 +289,7 @@ export interface GpioInfo {
 /** A board's pin map: what the pin table offers and checks against. */
 export interface BoardPins {
   chip: string;
-  spiRouting: "matrix" | "rp-function-table";
+  spiRouting: "matrix" | "rp-function-table" | "fixed";
   gpios: GpioInfo[];
   i2c: { bus: number; sda: number; scl: number }[];
   pwm: { timer: number; channel: number; pin: number }[];
