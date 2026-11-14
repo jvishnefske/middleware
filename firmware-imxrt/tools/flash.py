@@ -197,7 +197,16 @@ def main():
     if not images:
         sys.exit(__doc__)
     if not verify_only:
-        program(images, flasher, erases)
+        # The first J-Link session after the board has run often drops
+        # (connection reset); one retry has always been enough.
+        try:
+            program(images, flasher, erases)
+        except (ConnectionResetError, TimeoutError, SystemExit) as e:
+            if not rsp_jlink():
+                raise
+            print(f"first attempt failed ({e!r}); retrying once")
+            time.sleep(3)
+            program(images, flasher, erases)
     ok = verify_rsp(images) if rsp_jlink() else verify(images)
     if not verify_only:
         reset_board_rsp() if rsp_jlink() else reset_board()

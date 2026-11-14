@@ -56,6 +56,28 @@ pub enum FlashError {
     Plan,
 }
 
+/// The last failed operation, for reading over SWD without halting the
+/// core: `[code, detail]`, code 1 Timeout, 2 Command (detail STS1), 3 Failed
+/// (detail the status word), 4 Busy (detail the status word), 5 Lut,
+/// 6 Plan; `[0, 0]` until a failure.
+#[used]
+pub static LAST_ERROR: [core::sync::atomic::AtomicU32; 2] =
+    [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)];
+
+fn record(e: &FlashError, detail: u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let (code, d) = match *e {
+        FlashError::Timeout => (1, detail),
+        FlashError::Command(sts1) => (2, sts1),
+        FlashError::Failed => (3, detail),
+        FlashError::Busy => (4, detail),
+        FlashError::Lut => (5, 0),
+        FlashError::Plan => (6, 0),
+    };
+    LAST_ERROR[0].store(code, Relaxed);
+    LAST_ERROR[1].store(d, Relaxed);
+}
+
 impl NorFlashError for FlashError {
     fn kind(&self) -> NorFlashErrorKind {
         match self {
@@ -195,7 +217,23 @@ impl HyperFlash {
 
     /// Issues one IP command. `data` is the caller's buffer for
     /// `WriteData`; `rx` receives `Read` bytes.
+    ///
+    /// With interrupts masked: the command starts before its data is in
+    /// the TX FIFO (a 512-byte program streams through the 8-byte
+    /// watermark), so an interrupt between two FIFO pushes would starve
+    /// the HyperBus transfer mid-command. On the EVKB, under frequent timer
+    /// interrupts, firmware updates wedged the chip (SWD unreachable)
+    /// part-way through a slot's programming (2026-11-14). One command
+    /// takes microseconds.
     fn issue(&mut self, c: &IpCommand, data: &[u8], rx: &mut [u8]) -> Result<(), FlashError> {
+        let r = cortex_m::interrupt::free(|_| self.issue_masked(c, data, rx));
+        if let Err(e) = &r {
+            record(e, c.address);
+        }
+        r
+    }
+
+    fn issue_masked(&mut self, c: &IpCommand, data: &[u8], rx: &mut [u8]) -> Result<(), FlashError> {
         let f = pac::FLEXSPI;
         wait_idle()?;
         f.iptxfcr().write_value(pac::flex_spi::regs::Iptxfcr(1)); // clear, watermark 8 B
@@ -275,8 +313,14 @@ impl HyperFlash {
                                 block_for(Duration::from_micros(bound.interval_us().into()));
                                 poll += 1;
                             }
-                            WaitOutcome::Failed(_) => return Err(FlashError::Failed),
-                            WaitOutcome::TimedOut => return Err(FlashError::Busy),
+                            WaitOutcome::Failed(_) => {
+                                record(&FlashError::Failed, u32::from(u16::from_be_bytes(b)));
+                                return Err(FlashError::Failed);
+                            }
+                            WaitOutcome::TimedOut => {
+                                record(&FlashError::Busy, u32::from(u16::from_be_bytes(b)));
+                                return Err(FlashError::Busy);
+                            }
                         }
                     }
                 }
@@ -318,6 +362,9 @@ impl NorFlash for HyperFlash {
 
     fn erase(&mut self, from: u32, to: u32) -> Result<(), FlashError> {
         let sectors = plan::erase_sectors(from, (to - from) as usize).map_err(|_| FlashError::Plan)?;
+        // Sticky error bits from an earlier failed or cut operation would
+        // fail this one: reset and clear them first (plan::recover_steps).
+        self.run(&plan::recover_steps(), &[])?;
         for s in sectors {
             self.run(&plan::erase_sector_steps(s), &[])?;
         }
@@ -325,6 +372,7 @@ impl NorFlash for HyperFlash {
     }
 
     fn write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), FlashError> {
+        self.run(&plan::recover_steps(), &[])?;
         for ch in plan::program_chunks(offset, bytes.len()).map_err(|_| FlashError::Plan)? {
             self.run(&ch.steps(), bytes)?;
         }

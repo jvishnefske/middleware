@@ -2262,39 +2262,51 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   `fl4_node_keys_build_and_parse_without_heap`,
   `fl4_attachments_round_trip_in_no_std_module`; `scripts/check-features.sh`
   (ungated module, thumbv6m and thumbv7em builds).
-- [ ] FL5 On the EVKB, USB and ENET DMA reach the DTCM buffers. The ENET
-  half ran on 2026-11-13 from a RAM-loaded probe (not yet the firmware's
-  driver): descriptor rings and frame buffers as `AtomicU32` statics in
-  DTCM (ring at 0x20041E00), 43 frames received with no errors, two
-  frames sent and their DMA completed, no bus error (EIR.EBERR clear).
-  USB the same day with the firmware's driver: the board enumerated at
-  high speed (bulk 512) and answered `mwctl info` and two uploads over
-  CDC, so the controller's queue heads, descriptors and buffers in DTCM
-  work. Open: see the stall under FL6.
-- [ ] FL6 On the EVKB, the board enumerates as a high-speed CDC-ACM port
-  and `mwctl --port /dev/ttyACM1 info` answers — partly, 2026-11-13: it
-  enumerated (1fc9:0094, `usb-middleware_imxrt-base_<node>-if00`, bcdUSB
-  2.10, bulk 512), `mwctl info` answered repeatedly and 20 KB and 600-byte
-  uploads installed over it. Open: with the USB (or Ethernet) driver built
-  in, the firmware stalls after a while (requests unanswered on every
-  link); a build with only two tasks re-arming 125 µs and 250 µs timers
-  stalls the same way during a long transfer, so the cause is the
-  timekeeping under polled-driver timer load (the PIT time driver path
-  dominates the core's samples), not the USB driver. Both features are
-  opt-in (`APP_FEATURES=wasm,usb`, `wasm,eth`) until it is fixed.
-- [ ] FL7 On the EVKB, the board gets a DHCP address, opens a Zenoh
+- [x] FL5 On the EVKB, USB and ENET DMA reach the DTCM buffers — ENET
+  first from a RAM-loaded probe on 2026-11-13 (descriptor rings and frame
+  buffers as `AtomicU32` statics in DTCM, 43 frames received, two sent, no
+  bus error), then on 2026-11-14 with the firmware's own drivers in one
+  build (`APP_FEATURES=wasm,usb,eth`, v0.51): the USB controller's queue
+  heads, transfer descriptors and buffers in DTCM carried the CDC traffic
+  of FL6, and the ENET rings carried DHCP and the Zenoh session of FL7
+  (driver counters: frames received and sent, `bus errors 0`).
+- [x] FL6 On the EVKB, the board enumerates as a high-speed CDC-ACM port
+  and `mwctl --port /dev/ttyACM1 info` answers — 2026-11-14, v0.51: it
+  enumerates as 1fc9:0094 (`usb-middleware_imxrt-base_<node>-if00`, bulk
+  512), `mwctl info` answers over it, and eight rounds of `mwctl monitor`
+  on the CDC port (12 publications per 3 s, the payload's 4 Hz) alternating
+  with `info` on LPUART1 all answered; uploads over CDC installed (20 KB,
+  600 B). With Ethernet up at the same time a 750 KB `fw update` over
+  LPUART1 completed (74 s).
+
+  What had stalled the firmware with USB or Ethernet built in (2026-11-13)
+  was the PIT time driver (found with J-Link's non-halting PC sampling,
+  `DWT_PCSR`, and the reset pin, `r0`/`r1`, since halts and breakpoints had
+  disturbed it): at embassy-nxp's 1 MHz PERCLK one PIT register access took
+  297 core cycles (33 at 24 MHz), so the driver saturated the core under
+  the polled drivers' timers, and its interrupt handler trusted a TFLG read
+  that came back stale, returning without clearing the flag forever.
+  `firmware-imxrt/vendor/embassy-nxp` (VENDORED.md) runs the PIT at 24 MHz
+  with a matching `tick-hz-24_000_000` and re-evaluates the alarm on every
+  PIT interrupt. Also fixed on the way: FlexSPI IP commands run with
+  interrupts masked (an interrupt between TX FIFO pushes starves the
+  HyperBus write), and every erase and program first resets a
+  write-buffer abort and clears the HyperFlash's sticky status bits
+  (`hyperflash::plan::recover_steps`,
+  `rt4_recovery_resets_a_write_buffer_abort_then_clears_the_status`).
+- [x] FL7 On the EVKB, the board gets a DHCP address, opens a Zenoh
   session to a router on the LAN, and a host `ZenohTransport` subscribes
-  to its IMU channel and queries `@mw/<node>/sys/info`. The Ethernet
-  layer below ran on 2026-11-13 (RAM-loaded probe): KSZ8081RNB found over
-  MDIO at address 2 (ID 0x0022/0x1561), 50 MHz RMII clock mode set (PHY
-  control 2 bit 7), link up at 100BASE-TX full duplex after
-  auto-negotiation, a DHCP DISCOVER answered by the LAN's server with an
-  OFFER (no lease taken). The firmware's driver, embassy-net with DHCP,
-  the `sys/zenoh/endpoint` record (`config::tests::fl7_*`,
-  `service::tests::fl7_*`) and the session task are written and the
-  endpoint persisted on the board; the driver brought Ethernet up but no
-  lease was seen before the timer stall (FL6) intervened. The host side is
-  `cargo run --example zenoh_board --features zenoh`.
+  to its IMU channel and queries `@mw/<node>/sys/info` — 2026-11-14, v0.43
+  and v0.51: the board took a DHCP lease, connected to the endpoint set
+  with `mwctl request sys/zenoh/endpoint tcp/192.168.1.190:7447` (persisted,
+  `config::tests::fl7_*`), opened the session, and the host's
+  `cargo run --example zenoh_board --features zenoh` (a zenoh 1.10 peer
+  listening on TCP) received the payload's `rt16/state` publications with
+  the board's sender id and sequences 0..4 without gaps, and its
+  `Target::Node` query of `sys/info` answered chip rt1050, node
+  310441d265f82484 (`sys/board`: NotFound, the board has no esp-base
+  profile). The channel subscribed to is the payload's (`rt16/state`):
+  the IMU channel waits for the route runner (SC7).
 - [x] ZN1 `zenoh_lite` codec: every message of the subset encodes and
   decodes (variable-length integers, extensions skipped when unknown and
   refused when mandatory), byte-identical to the `zenoh` 1.10 codec for

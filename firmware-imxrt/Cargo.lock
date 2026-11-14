@@ -373,7 +373,6 @@ checksum = "524eb3c489760508f71360112bca70f6e53173e6fe48fc5f0efd0f5ab217751d"
 [[package]]
 name = "embassy-nxp"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/embassy?rev=d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc#d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc"
 dependencies = [
  "cfg_aliases",
  "cortex-m",

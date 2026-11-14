@@ -58,6 +58,9 @@ pub const CMD_ERASE_SETUP: u16 = 0x80;
 pub const CMD_SECTOR_ERASE: u16 = 0x30;
 /// ID-CFI entry command.
 pub const CMD_CFI_ENTRY: u16 = 0x98;
+/// Clear Status Register command (to word [`UNLOCK_ADDR_1`]): clears the
+/// sticky program, erase and write-buffer-abort error bits.
+pub const CMD_CLEAR_STATUS: u16 = 0x71;
 /// Reset / address-space (ASO, e.g. CFI) exit command.
 pub const CMD_RESET_ASO_EXIT: u16 = 0xF0;
 

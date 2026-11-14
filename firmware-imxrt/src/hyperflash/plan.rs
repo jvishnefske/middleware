@@ -19,7 +19,7 @@
 //! on the bus; programs and reads must therefore start on an even offset
 //! and programs move whole 16-bit words.
 
-use super::s26ks512s::{CFI_ENTRY_ADDR, CMD_CFI_ENTRY, CMD_RESET_ASO_EXIT};
+use super::s26ks512s::{CFI_ENTRY_ADDR, CMD_CFI_ENTRY, CMD_CLEAR_STATUS, CMD_RESET_ASO_EXIT, UNLOCK_ADDR_1};
 use super::s26ks512s::{ERASE_SECTOR, PROGRAM, READ_DATA, READ_STATUS, UNLOCK, WRITE_DATA};
 use super::status::{ERASE_WAIT, PROGRAM_WAIT, PollBound};
 use super::{FLASH_SIZE, SECTOR_COUNT, SECTOR_SIZE, WRITE_BUFFER_SIZE};
@@ -330,6 +330,29 @@ pub const fn cfi_enter() -> IpCommand {
     }
 }
 
+/// Recovers the flash from a failed or aborted operation, before the next
+/// erase or program: the Write-to-Buffer-Abort Reset (the unlock cycles,
+/// then 0x00F0 to word 0x555; also an ordinary reset to read mode) and the
+/// Clear Status Register command (0x0071 to word 0x555). The status
+/// register's error bits (program, erase, write-buffer abort) are sticky:
+/// without this, one aborted write-buffer program (a reset in the middle of
+/// it) made every later operation read as failed (2026-11-14).
+pub const fn recover_steps() -> [Step; 3] {
+    [
+        unlock(0),
+        Step::Issue(IpCommand {
+            address: UNLOCK_ADDR_1 * 2,
+            sequence: WRITE_DATA,
+            transfer: Transfer::WriteWord(CMD_RESET_ASO_EXIT.to_be_bytes()),
+        }),
+        Step::Issue(IpCommand {
+            address: UNLOCK_ADDR_1 * 2,
+            sequence: WRITE_DATA,
+            transfer: Transfer::WriteWord(CMD_CLEAR_STATUS.to_be_bytes()),
+        }),
+    ]
+}
+
 /// Read the CFI query words 0x10..0x40 (96 bytes, see
 /// [`parse_cfi`](super::cfi::parse_cfi)). Only valid after [`cfi_enter`].
 pub const fn cfi_read() -> IpCommand {
@@ -354,6 +377,22 @@ pub const fn cfi_exit() -> IpCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rt4_recovery_resets_a_write_buffer_abort_then_clears_the_status() {
+        let [u, reset, clear] = recover_steps();
+        assert!(matches!(u, Step::Issue(IpCommand { sequence: UNLOCK, .. })));
+        for (step, cmd) in [(reset, 0x00F0u16), (clear, 0x0071)] {
+            match step {
+                Step::Issue(c) => {
+                    assert_eq!(c.address, 0x555 * 2, "word 0x555");
+                    assert_eq!(c.sequence, WRITE_DATA);
+                    assert_eq!(c.transfer, Transfer::WriteWord(cmd.to_be_bytes()));
+                }
+                Step::WaitReady(_) => panic!("no waits"),
+            }
+        }
+    }
 
     #[test]
     fn rt4_program_chunks_never_cross_the_write_buffer() {

@@ -256,6 +256,21 @@ fn install_payload_hw(
     device::HW.put(device::Hw { pins: bank, adc: adc::Adc::new(), i2c: i2c::I2c::new() });
 }
 
+/// Core cycles for 1000 reads of PIT channel 2's CVAL (diagnostic: the
+/// time driver's cost per register access), with DWT's cycle counter.
+#[cfg(feature = "timerstress")]
+fn pit_read_cycles(dcb: &mut cortex_m::peripheral::DCB, dwt: &mut cortex_m::peripheral::DWT) -> u32 {
+    dcb.enable_trace();
+    dwt.enable_cycle_counter();
+    let t0 = cortex_m::peripheral::DWT::cycle_count();
+    let mut x = 0u32;
+    for _ in 0..1000 {
+        x = x.wrapping_add(pac::PIT.timer(2).cval().read().0);
+    }
+    core::hint::black_box(x);
+    cortex_m::peripheral::DWT::cycle_count().wrapping_sub(t0)
+}
+
 /// Brings up the board and runs the firmware forever.
 pub async fn run(spawner: Spawner) -> ! {
     #[cfg(feature = "wasm")]
@@ -266,9 +281,15 @@ pub async fn run(spawner: Spawner) -> ! {
     if handoff.is_some_and(|h| h.trial) {
         reset::arm_trial();
     }
+    #[cfg(feature = "timerstress")]
+    let mut pit_cycles = 0u32;
     if let Some(mut cp) = cortex_m::Peripherals::take() {
         cp.SCB.enable_icache();
         cp.SCB.enable_dcache(&mut cp.CPUID);
+        #[cfg(feature = "timerstress")]
+        {
+            pit_cycles = pit_read_cycles(&mut cp.DCB, &mut cp.DWT);
+        }
     }
     let bus: &'static Bus = BUS_SDRAM.take();
     let uid = read_unique_id();
@@ -307,6 +328,10 @@ pub async fn run(spawner: Spawner) -> ! {
         Err(e) => bus.log(format_args!("usb: not started ({e:?})")),
     }
     log_boot(bus, uid, &boot, svc.capacity(), handoff);
+    #[cfg(feature = "timerstress")]
+    bus.log(format_args!(
+        "pit: 1000 register reads take {pit_cycles} core cycles"
+    ));
     #[cfg(feature = "wasm")]
     {
         // The logical pins in order (board_pins::imxrt::evkb): D0–D15,
