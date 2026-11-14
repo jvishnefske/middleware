@@ -314,9 +314,13 @@ pub struct Sample {
 }
 
 impl Sample {
-    /// The sample's values in stream order: `channels` (3 or 6) `i16`
-    /// written into `out`; returns how many were written (0 when `out` is
-    /// too short).
+    /// The sample's values in stream order and scale: `channels` (3 or 6)
+    /// `i16` written into `out`; returns how many were written (0 when
+    /// `out` is too short). The accelerometer goes out as counts × 4 (the
+    /// part's left-justified 16-bit value), so ±range g spans the whole
+    /// `i16` as the stream header's
+    /// [`accel_scale_ug`](middleware::stream::samples::accel_scale_ug)
+    /// says (16384 per g at ±2 g); the magnetometer as it is.
     pub fn write_to(&self, magnetometer: bool, out: &mut [i16]) -> usize {
         let n = if magnetometer { 6 } else { 3 };
         let Some(dst) = out.get_mut(..n) else {
@@ -324,7 +328,8 @@ impl Sample {
         };
         for (i, d) in dst.iter_mut().enumerate() {
             *d = if i < 3 {
-                self.accel[i]
+                // 14 bits shifted back up: cannot overflow.
+                self.accel[i].wrapping_shl(2)
             } else {
                 self.mag[i - 3]
             };
@@ -494,7 +499,11 @@ mod tests {
         assert_eq!(s.mag, [100, -200, 300]);
         let mut out = [0i16; 8];
         assert_eq!(s.write_to(true, &mut out), 6);
-        assert_eq!(out[..6], [0, 0, 4096, 100, -200, 300]);
+        assert_eq!(
+            out[..6],
+            [0, 0, 16384, 100, -200, 300],
+            "stream scale: counts x 4, 16384 per g at +-2 g"
+        );
         assert_eq!(s.write_to(true, &mut out[..5]), 0);
 
         let accel_only = Config {

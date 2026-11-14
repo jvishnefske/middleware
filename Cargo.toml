@@ -101,7 +101,7 @@ zenoh-buffers = "=1.10.1"
 # gRPC mesh client. `test = true`: `cargo test --all-features` runs it (K16).
 [[example]]
 name = "zenoh_board"
-required-features = ["zenoh"]
+required-features = ["zenoh", "trust"]
 
 [[example]]
 name = "discover_and_call"

@@ -293,7 +293,8 @@ fn rt16_the_pico_led_phase_server_runs_blink_to_complete_through_the_request_ser
     // sys/info says the board routes requests and names its node.
     let info = h.request(keys::INFO.as_str(), &[]).0.unwrap();
     let info = DeviceInfo::decode(&info).unwrap();
-    assert_eq!((info.node, info.caps), (Some(NODE), Caps::SERVE));
+    assert_eq!((info.node, info.caps), (Some(NODE), crate::service::RUNTIME_CAPS));
+    assert!(info.caps.contains(Caps::SERVE));
 
     // Before any payload: the phase key is nobody's.
     assert_eq!(

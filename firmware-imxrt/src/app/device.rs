@@ -13,7 +13,8 @@
 //! | `i2c_open`, `i2c_transfer` | bus 0 on LPI2C1 (A4 SDA / A5 SCL), 10 kHz–1 MHz, blocking and time bounded ([`super::i2c`]) |
 //! | `serve` (ABI 5) | any non-`sys` key; the controller routes its requests ([`imxrt_base::requests`]) |
 //! | `node_id` (ABI 5) | the chip unique id, the node `sys/info` reports |
-//! | `spi_*`, `gpio_irq`, `uart_*`, `dma_read`, `pwm_*`, `route_*` | `Unsupported` (the trait's defaults) |
+//! | `route_source` (Imu) | one FXOS8700CQ route ([`ImuRoute`], handle 0) on LPI2C1 at 0x1F (opened at 400 kHz if the payload has not), polled by [`RtDevice::poll`] on the route's clock, its batches published on the route key with a `RouteFrames` event each (`RouteDropped` for samples the sensor overwrote); `route_stop` puts the sensor in standby; `route_stat`: `Frames`/`Chunks` = batches published, `FramesDropped` = samples the sensor overwrote, `ChunksDropped` = failed reads and batches the bus refused |
+//! | `spi_*`, `gpio_irq`, `uart_*`, `dma_read`, `pwm_*`, `route_sink`, frame routes | `Unsupported` (the trait's defaults); SPI (LPSPI1) is not wired to payloads |
 //!
 //! The hardware ([`Hw`]) rests in [`HW`] between runs. [`RtDevice::new`]
 //! takes it and `Drop` puts it back with the I2C bus closed and every pin
@@ -28,11 +29,17 @@ use embassy_nxp::pac;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
+use heapless::String;
 use esp_base::periph::timer_event;
 use esp_base::periph::timers::Timers;
 use imxrt_base::chip::Profile;
 use imxrt_base::pins::{GPIOS, Pins, ReadFrom};
+use imxrt_base::sensors::imu_route::ImuRoute;
+use imxrt_base::sensors::{FXOS8700_ADDR, fxos8700};
+use middleware::key::MAX_KEY_LEN;
 use middleware::loader::is_system_key;
+use middleware::stream::samples::MAX_BATCH;
+use middleware::wasm_abi::route::{I2cDevice, RouteStat, SampleSource};
 use middleware::wasm_abi::events::{Event, EventKind, EventQueue, MAX_EVENTS};
 use middleware::wasm_abi::periph::{I2cConfig, TimerSpec};
 use middleware::wasm_abi::{AbiError, Pull};
@@ -96,6 +103,21 @@ pub struct RtDevice {
     bus: &'static Bus,
     profile: &'static Profile,
     node: SenderId,
+    imu: Option<Imu>,
+}
+
+/// The IMU route's handle.
+const IMU_HANDLE: u8 = 0;
+
+/// LPI2C1's clock when a route opens the bus itself.
+const ROUTE_I2C_HZ: u32 = 400_000;
+
+/// A running IMU route.
+struct Imu {
+    route: ImuRoute,
+    key: String<MAX_KEY_LEN>,
+    /// Batches the bus refused (queue full or too large).
+    refused: u32,
 }
 
 impl RtDevice {
@@ -112,22 +134,110 @@ impl RtDevice {
             bus,
             profile,
             node,
+            imu: None,
         })
     }
 
-    /// When the earliest running timer is due, in µs since boot.
+    /// When the earliest running timer or route poll is due, in µs since
+    /// boot.
     pub fn next_alarm_us(&self) -> Option<u64> {
-        self.timers.next_deadline()
+        let imu = self.imu.as_ref().map(|i| i.route.due_us());
+        [self.timers.next_deadline(), imu].into_iter().flatten().min()
     }
 
-    /// Fires the timers due at `now` (µs) into the event queue.
-    pub fn fire_timers(&mut self, now: u64) {
+    /// Fires the timers due at `now` (µs) into the event queue and
+    /// services a route whose poll is due.
+    pub fn poll(&mut self, now: u64) {
         let (next, fired) = self.timers.expire(now);
         self.timers = next;
         for f in fired {
             // A full queue drops and counts the event.
             let _ = self.events.push(timer_event(f.id, f.periods, now as u32));
         }
+        self.poll_imu(now);
+    }
+
+    /// Reads `STATUS` and the samples in one transfer when the IMU route
+    /// is due, and publishes a completed batch.
+    fn poll_imu(&mut self, now: u64) {
+        let Some(imu) = self.imu.as_mut() else { return };
+        if imu.route.due_us() > now {
+            return;
+        }
+        let Some(hw) = self.hw.as_mut() else { return };
+        let mut burst = [0u8; 13];
+        let n = imu.route.burst_len().min(burst.len());
+        let read = hw.i2c.transfer(FXOS8700_ADDR, &[fxos8700::STATUS], &mut burst[..n]);
+        if read.is_err() {
+            imu.route.on_failure(now);
+            return;
+        }
+        let mut out = [0u8; MAX_BATCH];
+        let lost = imu.route.lost();
+        let batch = imu.route.on_burst(now, &burst[..n], &mut out);
+        let newly_lost = imu.route.lost().saturating_sub(lost);
+        let published = batch.map(|len| {
+            Key::new(&imu.key)
+                .ok()
+                .is_some_and(|key| self.bus.publish(key, &out[..len]).is_ok())
+        });
+        if published == Some(false) {
+            imu.refused = imu.refused.saturating_add(1);
+        }
+        // Coalescing events: a payload that ignores them costs nothing.
+        let event = |kind, value: u32| Event {
+            kind,
+            source: i32::from(IMU_HANDLE),
+            value: i32::try_from(value).unwrap_or(i32::MAX),
+            time_us: now as u32,
+        };
+        if published == Some(true) {
+            let _ = self.events.push(event(EventKind::RouteFrames, 1));
+        }
+        if newly_lost > 0 {
+            let _ = self.events.push(event(EventKind::RouteDropped, newly_lost));
+        }
+    }
+
+    /// Opens LPI2C1 for a route if the payload has not; `Busy` when the
+    /// payload holds the bus pins as GPIO.
+    fn open_i2c_for_route(&mut self) -> Result<(), AbiError> {
+        if self.i2c_open {
+            return Ok(());
+        }
+        wasm_host::Device::i2c_open(self, I2cConfig { bus: 0, freq_hz: ROUTE_I2C_HZ })
+    }
+
+    /// Writes the FXOS8700CQ's standby register (best effort).
+    fn imu_standby(&mut self) {
+        let (reg, value) = fxos8700::Config::stop();
+        if self.i2c_open
+            && let Some(hw) = self.hw.as_mut()
+        {
+            let _ = hw.i2c.transfer(FXOS8700_ADDR, &[reg, value], &mut []);
+        }
+    }
+
+    /// Starts the IMU route: checks `WHO_AM_I`, writes the plan.
+    fn start_imu(&mut self, cfg: middleware::wasm_abi::route::ImuConfig, key: Key<'_>) -> Result<u8, AbiError> {
+        if self.imu.is_some() {
+            return Err(AbiError::Busy);
+        }
+        let route = ImuRoute::new(cfg, now_us())?;
+        let key: String<MAX_KEY_LEN> = String::try_from(key.as_str()).map_err(|_| AbiError::InvalidKey)?;
+        self.open_i2c_for_route()?;
+        let hw = self.hw()?;
+        let mut who = [0u8; 1];
+        hw.i2c.transfer(FXOS8700_ADDR, &[fxos8700::WHO_AM_I], &mut who)?;
+        if !fxos8700::is_fxos8700(who[0]) {
+            return Err(AbiError::Unsupported);
+        }
+        for (reg, value) in route.plan() {
+            hw.i2c.transfer(FXOS8700_ADDR, &[reg, value], &mut [])?;
+        }
+        // The first poll is due a period from now.
+        self.imu = Some(Imu { route, key, refused: 0 });
+        Ok(IMU_HANDLE)
     }
 
     /// The next queued event.
@@ -200,6 +310,9 @@ fn i2c_pads_to_gpio() {
 
 impl Drop for RtDevice {
     fn drop(&mut self) {
+        if self.imu.take().is_some() {
+            self.imu_standby();
+        }
         let Some(mut hw) = self.hw.take() else { return };
         if self.i2c_open {
             hw.i2c.close();
@@ -329,5 +442,46 @@ impl wasm_host::Device for RtDevice {
 
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Ok(self.node)
+    }
+
+    /// The IMU (one route); the microphone is not offered yet.
+    fn route_samples(&mut self, source: SampleSource, key: Key<'_>) -> Result<u8, AbiError> {
+        if is_system_key(key) {
+            return Err(AbiError::InvalidKey);
+        }
+        match source {
+            SampleSource::Imu(cfg) => self.start_imu(cfg, key),
+            SampleSource::Microphone(_) => Err(AbiError::InvalidArgument),
+        }
+    }
+
+    fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
+        match source {
+            SampleSource::Imu(_) => Some(I2cDevice { bus: 0, addr: FXOS8700_ADDR }),
+            SampleSource::Microphone(_) => None,
+        }
+    }
+
+    fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        if handle != IMU_HANDLE || self.imu.is_none() {
+            return Err(AbiError::Busy);
+        }
+        self.imu_standby();
+        self.imu = None;
+        for kind in [EventKind::RouteFrames, EventKind::RouteDropped] {
+            self.events.purge(kind, i32::from(handle));
+        }
+        Ok(())
+    }
+
+    fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        let imu = self.imu.as_ref().filter(|_| handle == IMU_HANDLE).ok_or(AbiError::Busy)?;
+        let r = &imu.route;
+        let published = r.batches().saturating_sub(imu.refused);
+        Ok(match stat {
+            RouteStat::Frames | RouteStat::Chunks => published,
+            RouteStat::FramesDropped => r.lost(),
+            RouteStat::ChunksDropped => r.failures().saturating_add(imu.refused),
+        })
     }
 }

@@ -324,7 +324,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 Err(e) => {
                     // The device logs why a start failed right after its reply;
                     // show those lines before reporting the error.
-                    let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS));
+                    let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS), false);
                     Err(e)
                 }
             }
@@ -393,7 +393,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 );
             })
         }
-        Cmd::Monitor { seconds } => monitor(dev, seconds),
+        Cmd::Monitor { seconds, samples } => monitor(dev, seconds, samples),
         // Serial only, handled by `fw_command` (the CLI refuses --espnow).
         Cmd::Reset | Cmd::FwInfo | Cmd::FwUpdate { .. } | Cmd::FwReboot | Cmd::FwConfirm | Cmd::FwAbort => {
             Ok(())
@@ -401,7 +401,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
     }
 }
 
-fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>) -> Result<(), Error> {
+fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>, samples: bool) -> Result<(), Error> {
     let end = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     match seconds {
         Some(s) => eprintln!("monitoring for {s} s"),
@@ -417,7 +417,11 @@ fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>) -> Result<(),
         let slice = Instant::now() + Duration::from_millis(500);
         let deadline = end.map_or(slice, |e| e.min(slice));
         if let Some(e) = dev.next_event(deadline)? {
-            println!("{}", format_event(&e));
+            let line = match samples.then(|| mwctl::report::format_samples(&e)).flatten() {
+                Some(line) => line,
+                None => format_event(&e),
+            };
+            println!("{line}");
             let _ = std::io::stdout().flush();
         }
         if end.is_some_and(|e| Instant::now() >= e) {

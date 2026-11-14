@@ -57,7 +57,7 @@
 //!    serial link, never over the air), no esp-base chip profile
 //!    (`sys/board` is `NotFound`). `sys/info` reports [`Facts::chip`],
 //!    [`Facts::firmware`], the payload capacity, the status, the node id
-//!    and, with the runtime ([`Facts::runtime`]), `Caps::SERVE`.
+//!    and, with the runtime ([`Facts::runtime`]), [`RUNTIME_CAPS`].
 //! 3. The storage action is performed as the RP and ESP controllers do:
 //!    erase and write the inactive payload slot, activate it (a raised
 //!    `min_version` saved inside `PayloadStore::activate_with`, after the
@@ -151,6 +151,11 @@ fn trust_readable<F: NorFlash>(flash: &mut F, base: u32) -> bool {
     let mut buf = [0u8; RECORD_LEN];
     (0..2u32).all(|s| flash.read(base + s * SECTOR, &mut buf).is_ok())
 }
+
+/// The `sys/info` capabilities of a build with the runtime: requests on
+/// payload keys (`SERVE`) and the FXOS8700CQ source route (`SOURCE_IMU`,
+/// SC7).
+pub const RUNTIME_CAPS: Caps = Caps::SERVE.with(Caps::SOURCE_IMU);
 
 /// What `sys/info` reports about this build, besides the store capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,7 +389,7 @@ impl<F: NorFlash> Service<F> {
             staging: false,
             node: Some(facts.node),
             caps: if facts.runtime {
-                Caps::SERVE
+                RUNTIME_CAPS
             } else {
                 Caps::NONE
             },

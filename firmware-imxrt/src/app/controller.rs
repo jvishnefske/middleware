@@ -327,7 +327,7 @@ impl Controller {
         let mut dropped = 0u32;
         loop {
             yield_now().await;
-            payload.device().fire_timers(now_us());
+            payload.device().poll(now_us());
             for _ in 0..MAX_EVENTS {
                 let Some(event) = payload.device().pop_event() else { break };
                 if let Err(trap) = payload.dispatch(event) {

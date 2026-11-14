@@ -2213,8 +2213,8 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   `sensors::fxos8700::tests::sc4_*` and the route's batching
   `sensors::imu_route::tests::sc7_*` (whole batches with exact indices,
   not-ready re-polls, overruns counted, resynchronisation, rates the device
-  lacks refused). Register values from the SDK as recalled, not yet
-  checked against `fsl_fxos.c`.
+  lacks refused). Register values from the SDK as recalled; the plan
+  verified on the board (SC7: WHO_AM_I 0xC7, ±2 g at 50 Hz reads 1 g).
 - [x] SC5 WM8960 and SAI1 core: the codec register list for recording
   from the onboard microphone at each rate, the SAI clock dividers
   (8, 16, 32, 48 kHz from the audio PLL), fixed-point RMS and peak, and
@@ -2231,9 +2231,31 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   refusals and the simulator streaming both sources), with the whole web
   suite (334 tests) and `tsc --noEmit` passing on 2026-11-14 (vitest 5
   needs Node >= 20.12).
-- [ ] SC7 On the EVKB, flat on the bench the IMU stream reads about +1 g
-  on Z and about −1 g upside down, at the configured rate. The route core
-  is tested (SC4); the shell's route runner is not written yet.
+- [x] SC7 On the EVKB, flat on the bench the IMU stream reads about +1 g
+  on Z and about −1 g upside down, at the configured rate — 2026-11-14,
+  v0.53 (`wasm,usb,eth`): `firmware-imxrt/tests/payloads/imu.wat` (50 Hz,
+  ±2 g, 3 channels, 10 samples per batch on `imu/raw`) through
+  `RtDevice::route_samples` (`app/device.rs`: WHO_AM_I check, the route's
+  plan over LPI2C1 at 400 kHz, polled from the controller loop's alarm,
+  one STATUS+XYZ burst per poll), read with `mwctl monitor --samples` over
+  USB CDC: 490 samples in 49 batches with no index gap, 48.98 Hz measured
+  from the batch timestamps (the sensor's own ODR clock; 0 lost, 0 failed
+  reads). Flat: mean X 0.081 g, Y −0.176 g, Z +1.029 g (16866 counts at
+  16384/g), |g| 1.048; upside down (290 settled samples): X 0.076 g,
+  Y −0.081 g, Z −0.924 g (Z offset +0.053 g, sensitivity 0.977). The same
+  batches reached `examples/zenoh_board.rs --key imu/raw` over Ethernet
+  (sequences 0..5, gap 0; `sys/info` caps 3 = SERVE | SOURCE_IMU).
+  `sys/payload/stop` left CTRL_REG1 at 0x24 (ACTIVE 0; the part keeps DR
+  and LNOISE, which change only in standby) as a payload read it back
+  over I2C afterwards, its transfer to 0x1F no longer `Busy`.
+  Found on the way: the stream contract's IMU scale is i16 full scale =
+  ±range (`samples::accel_scale_ug`, 61 µg at ±2 g), while the core
+  published 14-bit counts (4096/g): `fxos8700::Sample::write_to` now
+  emits counts × 4 (the part's left-justified value), checked by
+  `imu_route::tests::sc7_*` (value × header scale ≈ 1 g) and mwctl
+  `report::tests::samples_lines_decode_imu_pcm_mulaw_and_levels_batches`.
+  `sys/info` caps carry SOURCE_IMU with the runtime only
+  (`service::tests::rt12_info_*`).
 - [ ] SC8 On the EVKB, the microphone levels rise for a clap or speech,
   and a 1 kHz tone from a phone is the dominant frequency of a 16 kHz PCM
   capture taken over USB or TCP. Not yet run on hardware.
@@ -2307,8 +2329,7 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   the board's sender id and sequences 0..4 without gaps, and its
   `Target::Node` query of `sys/info` answered chip rt1050, node
   310441d265f82484 (`sys/board`: NotFound, the board has no esp-base
-  profile). The channel subscribed to is the payload's (`rt16/state`):
-  the IMU channel waits for the route runner (SC7).
+  profile). The IMU channel itself (`imu/raw`) followed with SC7.
 - [x] ZN1 `zenoh_lite` codec: every message of the subset encodes and
   decodes (variable-length integers, extensions skipped when unknown and
   refused when mandatory), byte-identical to the `zenoh` 1.10 codec for

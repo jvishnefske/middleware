@@ -139,9 +139,10 @@ fn rt12_info_reports_the_rt1050_chip_firmware_runtime_and_node_id() {
     assert_eq!(i.node, Some(NODE));
     assert_eq!(
         i.caps,
-        Caps::SERVE,
-        "the runtime serves requests on payload keys"
+        Caps::SERVE.with(Caps::SOURCE_IMU),
+        "the runtime serves requests on payload keys and offers the IMU route"
     );
+    assert!(i.caps.contains(Caps::SOURCE_IMU));
     assert!(!h.stop && h.notes.is_empty() && h.reset.is_none() && !h.release_watchdog);
     assert_eq!(s.node(), NODE);
     // The store's own cap: a profile allowing more is held to 124 KiB.
@@ -167,6 +168,7 @@ fn rt12_info_reports_the_rt1050_chip_firmware_runtime_and_node_id() {
     let (body, _) = info(&mut s);
     let i = DeviceInfo::decode(&body).unwrap();
     assert_eq!((i.firmware, i.caps), ("0.1.0+no-wasm", Caps::NONE));
+    assert!(!i.caps.contains(Caps::SOURCE_IMU), "no runtime, no source routes");
     transfer(&mut s, &image(500, 1));
     ok(&mut s, keys::COMMIT, &[]);
     assert_eq!(

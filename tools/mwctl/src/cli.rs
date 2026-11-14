@@ -54,6 +54,8 @@ COMMANDS:
                                    accepted [default: current Unix time in milliseconds]
     monitor [--seconds <N>]    Print sys/log and sys/payload/status publications
                                (and other publications) until N seconds pass or Ctrl-C
+        --samples                  decode sample batches (middleware::stream::samples):
+                                   one line per batch with its header and values
     reset                      Reboot into run mode: RTS asserted for 100 ms with DTR
                                deasserted (EN pulse through the DTR/RTS auto-reset circuit)
     trust info                 Print the root of trust: unclaimed, or the pinned key and
@@ -166,6 +168,8 @@ pub enum Cmd {
     Monitor {
         /// How long to listen.
         seconds: Option<u64>,
+        /// Decode sample batches (`--samples`).
+        samples: bool,
     },
     /// `reset`.
     Reset,
@@ -246,6 +250,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut version: Option<String> = None;
     let mut counter = None;
     let mut no_reboot = false;
+    let mut samples = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -267,6 +272,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--key" => key = Some(PathBuf::from(args.next().ok_or("--key needs a key file")?)),
             "--version" => version = Some(args.next().ok_or("--version needs a value")?),
             "--no-reboot" => no_reboot = true,
+            "--samples" => samples = true,
             "--counter" => counter = Some(number("--counter", args.next())?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             _ => positional.push(a),
@@ -305,6 +311,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only("--start", start, &["upload"])?;
     only("--corrupt-chunk", corrupt_chunk.is_some(), &["upload"])?;
     only("--seconds", seconds.is_some(), &["monitor"])?;
+    only("--samples", samples, &["monitor"])?;
     only(
         "--key",
         key.is_some(),
@@ -376,7 +383,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         },
         "start" => Cmd::Start { key, counter },
         "stop" => Cmd::Stop { key, counter },
-        "monitor" => Cmd::Monitor { seconds },
+        "monitor" => Cmd::Monitor { seconds, samples },
         "reset" => Cmd::Reset,
         "fw info" => Cmd::FwInfo,
         "fw update" => Cmd::FwUpdate {
@@ -522,10 +529,17 @@ mod tests {
             }
         );
         assert_eq!(run("--port p reset").cmd, Cmd::Reset);
-        assert_eq!(run("--port p monitor").cmd, Cmd::Monitor { seconds: None });
+        assert_eq!(
+            run("--port p monitor").cmd,
+            Cmd::Monitor { seconds: None, samples: false }
+        );
+        assert_eq!(
+            run("--port p monitor --samples").cmd,
+            Cmd::Monitor { seconds: None, samples: true }
+        );
         assert_eq!(
             run("--port p monitor --seconds 5").cmd,
-            Cmd::Monitor { seconds: Some(5) }
+            Cmd::Monitor { seconds: Some(5), samples: false }
         );
         assert_eq!(
             run("--port p --timeout 250 info").timeout,
@@ -686,6 +700,7 @@ mod tests {
             ("--port p --baud 0 info", "positive"),
             ("--port p info --start", "only to 'upload'"),
             ("--port p start --seconds 1", "only to 'monitor'"),
+            ("--port p info --samples", "only to 'monitor'"),
             ("--port p info --verbose", "unknown option"),
             ("--port", "needs a path"),
         ] {
