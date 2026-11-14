@@ -36,7 +36,7 @@ use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::udp::UdpLink;
 use middleware::fw_ota::StateCode;
 use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
-use mwctl::report::{format_board, format_event, format_fw_info, format_info, format_trust};
+use mwctl::report::{format_board, format_event, format_fw_info, format_info, format_net, format_trust};
 use mwctl::sign::{SEED_LEN, Seed, counter_at, hex, sign_commit, sign_control, version_at};
 use port::SerialTransport;
 use std::io::Read as _;
@@ -121,6 +121,9 @@ fn key(cmd: KeyCmd) -> Result<(), Error> {
     Ok(())
 }
 
+/// Linear memory of the Colorlight 5A-75B gateware's WASM core.
+const ECP5_MEMORY: u64 = 16 * 1024;
+
 fn run(cli: cli::Cli) -> Result<(), Error> {
     let timeouts = Timeouts {
         request: cli.timeout,
@@ -138,6 +141,19 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         let socket = std::net::UdpSocket::bind(local)?;
         socket.connect(peer).map_err(ctx)?;
         let mut dev = Device::new(UdpLink::new(socket, timeouts));
+        // Over UDP (the Colorlight 5A-75B) a module whose memory cannot fit
+        // is refused here, with the reason, before anything is sent.
+        if let Cmd::Upload { file, .. } = &cli.cmd {
+            let image = std::fs::read(file).map_err(|e| io_context(file, e))?;
+            if mwctl::plan::initial_memory_bytes(&image).is_some_and(|m| m > ECP5_MEMORY) {
+                let info = dev.info()?;
+                if info.chip == "ecp5"
+                    && let Some(why) = mwctl::plan::memory_misfit(&image, ECP5_MEMORY)
+                {
+                    return Err(Error::Payload(format!("{}: {why}", file.display())));
+                }
+            }
+        }
         let result = command(&mut dev, cli.cmd, None);
         print_events(&dev.take_events());
         return result;
@@ -402,6 +418,15 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                     if start { " and started" } else { "" },
                     image.len() as f64 / secs.max(1e-6)
                 );
+            })
+        }
+        Cmd::Net { link, ip, mac, peer } => {
+            let changed = ip.is_some() || mac.is_some() || peer.is_some();
+            dev.net(link, ip, mac, peer).map(|a| {
+                print!("{}", format_net(link, &a));
+                if changed {
+                    println!("(applied after the reply; an IP change takes effect for the next request)");
+                }
             })
         }
         Cmd::Monitor { seconds } => monitor(dev, seconds),

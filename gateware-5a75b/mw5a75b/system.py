@@ -689,8 +689,7 @@ class System(Module):
                 ).Else(NextState("START")),
             ).Elif(r_key == K_STOP,
                 If(r_len != 0, *respond(INVALID_REQUEST)
-                ).Elif((st == RUNNING) | (st == TRAPPED),
-                    bridge_clear.eq(1), *set_status(STOPPED), *respond(OK),
+                ).Elif((st == RUNNING) | (st == TRAPPED), NextState("STOP")
                 ).Else(*respond(OK)),
             ).Else(*respond(NOT_FOUND)),
         )
@@ -716,9 +715,19 @@ class System(Module):
                 ).Else(NextValue(ret, 0), *respond(INVALID_REQUEST)),
             ),
         )
+        # Stopping (stop, or a begin that replaces the payload) waits for an
+        # event in flight: its imports may still install bridge rules, so
+        # the table is cleared only once the runtime is idle and locked.
+        fsm.act("STOP",
+            *release(),
+            lock.eq(1),
+            If(ev_idle, bridge_clear.eq(1), *set_status(STOPPED), *respond(OK)),
+        )
         # begin
         fsm.act("BEGIN",
-            If(prog_pend | prog_busy, *respond(UNAVAILABLE)).Else(
+            lock.eq(1),
+            If(~ev_idle
+            ).Elif(prog_pend | prog_busy, *respond(UNAVAILABLE)).Else(
                 up.begin.eq(1), up.len_in.eq(u32(0)), up.crc_in.eq(u32(4)),
                 If(up.code == OK,
                     If((st == RUNNING) | (st == TRAPPED), bridge_clear.eq(1)),

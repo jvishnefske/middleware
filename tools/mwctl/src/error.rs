@@ -49,6 +49,8 @@ pub enum Error {
     Key(KeyError),
     /// The USB↔ESP-NOW bridge did not answer or misbehaved.
     Bridge(String),
+    /// The payload cannot run on the device (found before uploading).
+    Payload(String),
     /// A firmware image file cannot be installed.
     Image(crate::fw::ImageError),
     /// A firmware update cannot proceed (checked before sending).
@@ -159,9 +161,18 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
             "no payload is installed (or a transfer is in progress)"
         }
         InvalidRequest if is(keys::COMMIT) => {
-            "the device rejected the image: CRC-32 mismatch or incomplete transfer \
-             (the transfer was abandoned; any previously installed payload is kept)"
+            "the device rejected the image: CRC-32 mismatch or incomplete transfer, or (on a \
+             board that compiles at commit, the Colorlight 5A-75B) a module its loader refuses, \
+             logged on sys/log (the transfer was abandoned; any previously installed payload is kept)"
         }
+        Unavailable if is(keys::BEGIN) => {
+            "the device is still storing the previous image in flash; retry in a moment"
+        }
+        NotFound if is(keys::NET_ADDR) => {
+            "this device has no configurable network links (sys/net/addr is answered by the \
+             Colorlight 5A-75B gateware)"
+        }
+        InvalidRequest if is(keys::NET_ADDR) => "no such link (the 5A-75B has links 0 and 1)",
         InvalidRequest if is(keys::CHUNK) => {
             "chunk out of order or no transfer in progress (the transfer was abandoned)"
         }
@@ -224,6 +235,7 @@ impl fmt::Display for Error {
             Error::Frame(e) => write!(f, "could not encode request frame: {e:?}"),
             Error::Plan(e) => write!(f, "{e}"),
             Error::Bridge(e) => write!(f, "ESP-NOW bridge: {e}"),
+            Error::Payload(e) => f.write_str(e),
             Error::Image(e) => write!(f, "{e}"),
             Error::Fw(e) => write!(f, "firmware update: {e}"),
             Error::Key(e) => write!(f, "{e}"),

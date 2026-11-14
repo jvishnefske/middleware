@@ -150,7 +150,9 @@ stdin lines `<key> <text>` are delivered to the payload;\n\
 `!i2c <bus> <reg> <value>` presets a register of the I2C device at 0x50 (hex 0x.. or decimal),\n\
 `!req <key> [<hex>]` sends a request to the payload serving <key>,\n\
 `!link <0|1> <key> [<text>]` is a publication arriving on that link (stdin lines arrive on link 0);\n\
-bridge rules (ABI 6 route_bridge) forward matching arrivals to the other link";
+bridge rules (ABI 6 route_bridge) forward matching arrivals to the other link;\n\
+--memory-bytes 16384 is the Colorlight 5A-75B (ecp5) profile: its gateware core has 16 KiB of\n\
+linear memory, so declare 1-byte pages, e.g. (memory (export \"memory\") 4096 4096 (pagesize 1))";
 
 /// Parses the arguments after the program name.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {

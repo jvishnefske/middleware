@@ -53,6 +53,13 @@ COMMANDS:
                                    device named by --espnow (Ed25519 control request)
         --counter <N>              control counter, must exceed the last one the device
                                    accepted [default: current Unix time in milliseconds]
+    net [--link <N>]           Colorlight 5A-75B: print one link's addresses (sys/net/addr):
+                               IP, MAC and the peer publications go to [default link 0]
+        --ip <A.B.C.D>             set the link's IP address
+        --mac <MAC>                set the link's MAC address
+        --peer <A.B.C.D:PORT>      pin the peer; `--peer learn` returns to learning it
+                                   from the latest unicast sender. Changes apply after
+                                   the reply and are kept across resets
     monitor [--seconds <N>]    Print sys/log and sys/payload/status publications
                                (and other publications) until N seconds pass or Ctrl-C
     reset                      Reboot into run mode: RTS asserted for 100 ms with DTR
@@ -165,6 +172,17 @@ pub enum Cmd {
         /// Control counter; `None` uses the current Unix time in ms.
         counter: Option<u64>,
     },
+    /// `net`: read one link's addresses, then set what is given.
+    Net {
+        /// The link.
+        link: u8,
+        /// New IP address.
+        ip: Option<[u8; 4]>,
+        /// New MAC address.
+        mac: Option<[u8; 6]>,
+        /// New pinned peer (`[0; 4]`, 0 to learn it again).
+        peer: Option<([u8; 4], u16)>,
+    },
     /// `monitor`; `None` runs until interrupted.
     Monitor {
         /// How long to listen.
@@ -245,6 +263,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut version: Option<String> = None;
     let mut counter = None;
     let mut no_reboot = false;
+    let mut link: Option<u8> = None;
+    let mut net_ip = None;
+    let mut net_mac = None;
+    let mut net_peer = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -271,6 +293,23 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--version" => version = Some(args.next().ok_or("--version needs a value")?),
             "--no-reboot" => no_reboot = true,
             "--counter" => counter = Some(number("--counter", args.next())?),
+            "--link" => link = Some(number("--link", args.next())?),
+            "--ip" => {
+                let v = args.next().ok_or("--ip needs an address such as 192.168.1.50")?;
+                net_ip = Some(parse_ipv4(&v).ok_or_else(|| format!("--ip: '{v}' is not an IPv4 address"))?);
+            }
+            "--mac" => {
+                let v = args.next().ok_or("--mac needs a MAC such as 02:5a:75:b0:00:00")?;
+                net_mac = Some(
+                    crate::bridge::parse_mac(&v).ok_or_else(|| format!("--mac: '{v}' is not a MAC"))?,
+                );
+            }
+            "--peer" => {
+                let v = args.next().ok_or("--peer needs A.B.C.D:PORT or 'learn'")?;
+                net_peer = Some(parse_peer(&v).ok_or_else(|| {
+                    format!("--peer: '{v}' is not A.B.C.D:PORT (port 1..65535) or 'learn'")
+                })?);
+            }
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             _ => positional.push(a),
         }
@@ -332,6 +371,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         ));
     }
     only("--counter", counter.is_some(), &["start", "stop"])?;
+    only("--link", link.is_some(), &["net"])?;
+    only("--ip", net_ip.is_some(), &["net"])?;
+    only("--mac", net_mac.is_some(), &["net"])?;
+    only("--peer", net_peer.is_some(), &["net"])?;
     if version.is_some() && key.is_none() {
         return Err("--version needs --key (only signed commits carry a version)".into());
     }
@@ -380,6 +423,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         },
         "start" => Cmd::Start { key, counter },
         "stop" => Cmd::Stop { key, counter },
+        "net" => Cmd::Net {
+            link: link.unwrap_or(0),
+            ip: net_ip,
+            mac: net_mac,
+            peer: net_peer,
+        },
         "monitor" => Cmd::Monitor { seconds },
         "reset" => Cmd::Reset,
         "fw info" => Cmd::FwInfo,
@@ -431,9 +480,53 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     }))
 }
 
+/// `A.B.C.D`.
+pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let a: std::net::Ipv4Addr = s.parse().ok()?;
+    Some(a.octets())
+}
+
+/// `A.B.C.D:PORT` (port 1..=65535), or `learn` for 0.0.0.0:0.
+pub fn parse_peer(s: &str) -> Option<([u8; 4], u16)> {
+    if s == "learn" {
+        return Some(([0; 4], 0));
+    }
+    let a: std::net::SocketAddrV4 = s.parse().ok()?;
+    if a.port() == 0 || a.ip().is_unspecified() {
+        return None;
+    }
+    Some((a.ip().octets(), a.port()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cl8_net_reads_or_sets_a_link() {
+        assert_eq!(
+            run("--udp 192.168.1.50 net").cmd,
+            Cmd::Net { link: 0, ip: None, mac: None, peer: None }
+        );
+        assert_eq!(
+            run("--udp 192.168.1.50 net --link 1 --ip 192.168.2.51 --mac 02:5a:75:b0:00:11 --peer 10.0.1.9:7000").cmd,
+            Cmd::Net {
+                link: 1,
+                ip: Some([192, 168, 2, 51]),
+                mac: Some([0x02, 0x5a, 0x75, 0xb0, 0x00, 0x11]),
+                peer: Some(([10, 0, 1, 9], 7000)),
+            }
+        );
+        assert_eq!(
+            run("--udp h net --peer learn").cmd,
+            Cmd::Net { link: 0, ip: None, mac: None, peer: Some(([0; 4], 0)) }
+        );
+        assert!(p("--udp h net --peer 10.0.0.1").unwrap_err().contains("--peer"));
+        assert!(p("--udp h net --peer 0.0.0.0:5").unwrap_err().contains("--peer"));
+        assert!(p("--udp h net --ip 300.1.1.1").unwrap_err().contains("--ip"));
+        assert!(p("--udp h info --link 1").unwrap_err().contains("applies only to 'net'"));
+        assert!(p("--udp h net --link x").unwrap_err().contains("--link"));
+    }
 
     fn p(s: &str) -> Result<Parsed, String> {
         parse(s.split_whitespace().map(String::from))

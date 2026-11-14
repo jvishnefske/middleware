@@ -40,7 +40,7 @@ use crate::sign::image_sha256;
 use ed25519_dalek::{Signature, VerifyingKey};
 use middleware::Key;
 use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
-use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
+use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, NetAddr, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
 use middleware::fw_ota::service::{Context, FwService};
@@ -87,6 +87,7 @@ pub struct FakeDevice {
     rekey_open: bool,
     board: Option<Vec<u8>>,
     fw: Option<Fw>,
+    net: Vec<NetAddr>,
 }
 
 /// The firmware updater on the bootrom model.
@@ -135,6 +136,7 @@ impl FakeDevice {
             rekey_open: false,
             board: None,
             fw: None,
+            net: Vec::new(),
         }
     }
 
@@ -148,6 +150,23 @@ impl FakeDevice {
     }
 
     /// The same device reporting `caps` in `sys/info` (none by default).
+    /// A two-link board answering `sys/net/addr` (the Colorlight
+    /// 5A-75B's defaults), as its gateware does.
+    pub fn with_links(self) -> Self {
+        let link = |n: u8| NetAddr {
+            ip: [192, 168, 1 + n, 50],
+            mac: [0x02, 0x5A, 0x75, 0xB0, 0, n],
+            peer_ip: [0; 4],
+            peer_port: 0,
+        };
+        FakeDevice { net: vec![link(0), link(1)], ..self }
+    }
+
+    /// Link `n`'s current addresses.
+    pub fn net(&self, n: usize) -> NetAddr {
+        self.net[n]
+    }
+
     pub fn with_caps(self, caps: Caps) -> Self {
         FakeDevice { caps, ..self }
     }
@@ -281,6 +300,22 @@ impl FakeDevice {
             if let Some(r) = fw.svc.handle(&mut fw.sim, &ctx, key, body, out) {
                 return r;
             }
+        }
+        if key == keys::NET_ADDR && !self.net.is_empty() {
+            let link = *body.first().ok_or(HandlerError::InvalidRequest)?;
+            let slot = self.net.get_mut(usize::from(link)).ok_or(HandlerError::InvalidRequest)?;
+            return match body.len() {
+                1 => {
+                    let r = slot.set_body(link);
+                    out.get_mut(..r.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(&r);
+                    Ok(r.len())
+                }
+                n if n == 1 + NetAddr::LEN => {
+                    *slot = NetAddr::decode(&body[1..]).ok_or(HandlerError::InvalidRequest)?;
+                    Ok(0)
+                }
+                _ => Err(HandlerError::InvalidRequest),
+            };
         }
         let cmd = Command::parse(key, body)?.ok_or(HandlerError::NotFound)?;
         match cmd {

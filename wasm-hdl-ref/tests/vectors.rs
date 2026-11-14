@@ -555,7 +555,8 @@ impl Shell {
     }
 
     fn compiles(wasm: &[u8]) -> bool {
-        Box::new(Colorlight::new()).load(wasm).is_ok()
+        let mut c = Box::new(Colorlight::new());
+        c.load(wasm).is_ok()
     }
 
     fn init_traps(wasm: &[u8]) -> bool {
@@ -641,8 +642,11 @@ fn chunk_body(offset: u32, data: &[u8]) -> Vec<u8> {
     b
 }
 
+/// Request keys and bodies.
+type Reqs = Vec<(&'static str, Vec<u8>)>;
+
 /// The upload of `img` in chunks of `size`, as mwctl's plan sends it.
-fn upload_reqs(img: &[u8], size: usize) -> Vec<(&'static str, Vec<u8>)> {
+fn upload_reqs(img: &[u8], size: usize) -> Reqs {
     let mut v = vec![("sys/loader/begin", begin_body(img.len() as u32, Crc32::checksum(img)))];
     for (i, c) in img.chunks(size).enumerate() {
         v.push(("sys/loader/chunk", chunk_body((i * size) as u32, c)));
@@ -666,7 +670,7 @@ fn cl6_upload_vectors() {
     let crc = Crc32::checksum(&good);
     let s = |k: &'static str, b: Vec<u8>| vec![(k, b)];
 
-    let mut cases: Vec<(&str, Vec<(&'static str, Vec<u8>)>)> = Vec::new();
+    let mut cases: Vec<(&str, Reqs)> = Vec::new();
     let mut happy = s("sys/info", vec![]);
     happy.extend(upload_reqs(&good, 512));
     happy.extend(s("sys/payload/start", vec![]));

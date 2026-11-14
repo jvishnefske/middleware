@@ -73,6 +73,22 @@ pub fn format_info(i: &Info) -> String {
     )
 }
 
+/// `sys/net/addr` for printing.
+pub fn format_net(link: u8, a: &middleware::loader::NetAddr) -> String {
+    let ip = |o: [u8; 4]| std::net::Ipv4Addr::from(o).to_string();
+    let m = a.mac;
+    let peer = if a.pinned() {
+        format!("{}:{} (pinned)", ip(a.peer_ip), a.peer_port)
+    } else {
+        "learned (the latest unicast sender)".to_string()
+    };
+    format!(
+        "link:             {link}\nip:               {}\nmac:              {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\npeer:             {peer}\n",
+        ip(a.ip),
+        m[0], m[1], m[2], m[3], m[4], m[5]
+    )
+}
+
 fn pin_list(mask: u64) -> String {
     let pins: Vec<String> = (0..64).filter(|n| mask >> n & 1 == 1).map(|n: u32| n.to_string()).collect();
     if pins.is_empty() { "-".into() } else { pins.join(" ") }
