@@ -3773,6 +3773,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-hdl-ref"
+version = "0.1.0"
+dependencies = [
+ "middleware",
+ "wasm-host",
+ "wat",
+]
+
+[[package]]
 name = "wasm-host"
 version = "0.1.0"
 dependencies = [

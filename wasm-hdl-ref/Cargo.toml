@@ -1,0 +1,15 @@
+[package]
+name = "wasm-hdl-ref"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Hardware-shaped reference model of the Colorlight 5A-75B gateware WASM core (no_std, no heap): load-time compiler, interpreter, ABI import unit"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+middleware = { path = ".." }
+
+[dev-dependencies]
+# Differential tests run every payload through wasmi (wasm-host) too.
+wasm-host = { path = "../wasm-host" }
+wat = "1"

@@ -31,6 +31,7 @@ mwctl - talk to the middleware ESP base firmware over one serial port
 USAGE:
     mwctl --port <PATH> [--baud <N>] [--timeout <MS>] <COMMAND>
     mwctl --port <BRIDGE> --espnow <MAC> <COMMAND>    (over the air, see below)
+    mwctl --udp <HOST[:PORT]> [--timeout <MS>] <COMMAND>   (over UDP, see below)
     mwctl key new <KEYFILE> | key pub <KEYFILE>
 
 COMMANDS:
@@ -91,6 +92,11 @@ OPTIONS:
                        stages beside the running payload, which keeps running until
                        the signed commit. trust claim is always refused over the air.
                        Not for monitor or reset.
+    --udp <HOST[:PORT]>
+                       Talk to a node over UDP instead of a serial port: one raw frame
+                       (no COBS) per datagram, port 7448 by default (the Colorlight
+                       5A-75B gateware). Not with --port, --baud or --espnow; not for
+                       reset or fw.
     -h, --help         Print this help
 
 The port is opened with DTR and RTS deasserted so opening it neither resets
@@ -190,8 +196,11 @@ pub enum Cmd {
 /// Parsed arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cli {
-    /// Serial port path.
+    /// Serial port path; empty with [`Cli::udp`].
     pub port: String,
+    /// Over UDP to this `host:port` (the default port filled in) instead
+    /// of a serial port.
+    pub udp: Option<String>,
     /// Baud rate.
     pub baud: u32,
     /// Per-attempt timeout.
@@ -226,6 +235,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut port = None;
     let mut baud = None;
     let mut espnow = None;
+    let mut udp = None;
     let mut timeout = DEFAULT_TIMEOUT;
     let mut positional: Vec<String> = Vec::new();
     let mut start = false;
@@ -239,6 +249,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "--port" => port = Some(args.next().ok_or("--port needs a path")?),
+            "--udp" => {
+                let v = args.next().ok_or("--udp needs HOST[:PORT]")?;
+                udp = Some(crate::udp::with_default_port(&v)?);
+            }
             "--baud" => baud = Some(number("--baud", args.next())?),
             "--espnow" => {
                 let v = args
@@ -261,6 +275,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             _ => positional.push(a),
         }
     }
+    let baud_given = baud.is_some();
     let baud = baud.unwrap_or(if espnow.is_some() {
         crate::bridge::BAUD
     } else {
@@ -387,9 +402,28 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "'{name}' does not go over the air; drop --espnow and use the device's own port"
         ));
     }
-    let port = port.ok_or("--port <PATH> is required (mwctl never scans for ports)")?;
+    if udp.is_some() {
+        if port.is_some() || baud_given || espnow.is_some() {
+            return Err("--udp replaces --port, --baud and --espnow; give only one link".into());
+        }
+        if matches!(cmd, Cmd::Reset) || name.starts_with("fw ") {
+            return Err(format!(
+                "'{name}' needs the board's serial port; drop --udp and use --port"
+            ));
+        }
+        return Ok(Parsed::Run(Cli {
+            port: String::new(),
+            udp,
+            baud,
+            timeout,
+            espnow,
+            cmd,
+        }));
+    }
+    let port = port.ok_or("--port <PATH> (or --udp <HOST>) is required (mwctl never scans for ports)")?;
     Ok(Parsed::Run(Cli {
         port,
+        udp,
         baud,
         timeout,
         espnow,
@@ -460,6 +494,7 @@ mod tests {
                 baud: 115_200,
                 timeout: DEFAULT_TIMEOUT,
                 espnow: None,
+                udp: None,
                 cmd: Cmd::Info
             }
         );
@@ -470,6 +505,7 @@ mod tests {
                 baud: 921_600,
                 timeout: DEFAULT_TIMEOUT,
                 espnow: None,
+                udp: None,
                 cmd: Cmd::Upload {
                     file: "a.wasm".into(),
                     start: true,
@@ -665,6 +701,25 @@ mod tests {
                 Err(e) => assert!(e.contains(why), "{args}: {e}"),
                 Ok(v) => panic!("{args}: accepted as {v:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn cl1_udp_replaces_the_port() {
+        let c = run("--udp 192.168.1.50 info");
+        assert_eq!(c.udp.as_deref(), Some("192.168.1.50:7448"));
+        assert!(c.port.is_empty());
+        assert_eq!(run("upload a.wasm --start --udp b:9").udp.as_deref(), Some("b:9"));
+        for bad in [
+            "--udp h --port p info",
+            "--udp h --baud 9600 info",
+            "--udp h --espnow e4:b0:63:81:d3:24 info",
+            "--udp h reset",
+            "--udp h fw info",
+            "--udp h:99999 info",
+            "--udp",
+        ] {
+            assert!(p(bad).is_err(), "{bad}");
         }
     }
 }

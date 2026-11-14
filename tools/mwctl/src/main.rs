@@ -1,7 +1,8 @@
 //! `mwctl` binary: the imperative shell around the `mwctl` library.
 //!
 //! Parses arguments, opens the one serial port named by `--port`
-//! ([`port::SerialTransport`]), runs the command through
+//! ([`port::SerialTransport`]) or the UDP socket named by `--udp`
+//! ([`UdpLink`]), runs the command through
 //! [`mwctl::device::Device`] over the serial [`Link`] or, with `--espnow`,
 //! over [`AirLink`] through the USB↔ESP-NOW bridge on that port (printing
 //! the bridge's MAC first and the request counters and upload rate last),
@@ -32,6 +33,7 @@ use mwctl::cli::{self, Cmd, KeyCmd, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
+use mwctl::udp::UdpLink;
 use middleware::fw_ota::StateCode;
 use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::report::{format_board, format_event, format_fw_info, format_info, format_trust};
@@ -120,6 +122,26 @@ fn key(cmd: KeyCmd) -> Result<(), Error> {
 }
 
 fn run(cli: cli::Cli) -> Result<(), Error> {
+    let timeouts = Timeouts {
+        request: cli.timeout,
+        ..Timeouts::default()
+    };
+    if let Some(addr) = &cli.udp {
+        use std::net::ToSocketAddrs;
+        let ctx = |e: std::io::Error| std::io::Error::new(e.kind(), format!("{addr}: {e}"));
+        let peer = addr
+            .to_socket_addrs()
+            .map_err(ctx)?
+            .next()
+            .ok_or_else(|| ctx(std::io::ErrorKind::NotFound.into()))?;
+        let local = if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let socket = std::net::UdpSocket::bind(local)?;
+        socket.connect(peer).map_err(ctx)?;
+        let mut dev = Device::new(UdpLink::new(socket, timeouts));
+        let result = command(&mut dev, cli.cmd, None);
+        print_events(&dev.take_events());
+        return result;
+    }
     let mut transport = SerialTransport::open(&cli.port, cli.baud)?;
     if cli.cmd == Cmd::Reset {
         transport.reset()?;
@@ -131,10 +153,6 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         return Ok(());
     }
     let Some(target) = cli.espnow else {
-        let timeouts = Timeouts {
-            request: cli.timeout,
-            ..Timeouts::default()
-        };
         if is_fw(&cli.cmd) {
             return fw_command(transport, &cli, timeouts);
         }

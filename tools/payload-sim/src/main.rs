@@ -289,6 +289,11 @@ impl Bench {
         };
         match sim::parse_command(line) {
             Ok(Some(sim::Command::Req { key, body })) => self.request(&key, &body),
+            Ok(Some(sim::Command::Link { link, key, data })) => {
+                let r = arrive(&mut n.payload, link, &key, &data);
+                n.fault(r)?;
+                self.exchange()
+            }
             Ok(Some(command)) => {
                 if let Err(e) = n.device().apply(command) {
                     eprintln!("{e}");
@@ -374,17 +379,40 @@ impl Bench {
     }
 }
 
-/// Delivers one stdin message line.
+/// A publication arriving on `link` (ABI 6): the bridge rules forward it,
+/// then the board's routes and subscriptions are offered it. Printed as
+/// `drop <key>` when nothing took it.
+fn arrive(p: &mut Sim, link: u8, key: &str, data: &[u8]) -> Result<(), Trap> {
+    let Ok(key) = Key::new(key) else {
+        return Ok(());
+    };
+    let forwarded = p.device().link_receive(link, key, data);
+    let r = match offer(p, key, data) {
+        Ok(false) if forwarded == 0 => {
+            p.device().note(format!("drop {key}"));
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(t) => Err(t),
+    };
+    flush(p);
+    r
+}
+
+/// Delivers one stdin message line (it arrives on link 0).
 fn deliver(p: &mut Sim, line: &str) -> Result<(), Trap> {
     let result = match sim::parse_line(line) {
-        Ok(Some((key, data))) => match offer(p, key, data) {
-            Ok(true) => Ok(()),
-            Ok(false) => {
-                p.device().note(format!("drop {key}"));
-                Ok(())
+        Ok(Some((key, data))) => {
+            let forwarded = p.device().link_receive(0, key, data);
+            match offer(p, key, data) {
+                Ok(false) if forwarded == 0 => {
+                    p.device().note(format!("drop {key}"));
+                    Ok(())
+                }
+                Ok(_) => Ok(()),
+                Err(t) => Err(t),
             }
-            Err(t) => Err(t),
-        },
+        }
         Ok(None) => Ok(()),
         Err(e) => {
             eprintln!("{e}");
