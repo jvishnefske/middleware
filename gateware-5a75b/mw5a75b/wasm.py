@@ -130,7 +130,8 @@ class WasmCore(Module):
         # Host imports.
         self.host_req = Signal()
         self.host_idx = Signal(8)
-        self.host_args = Array(Signal(32, name=f"host_arg{i}") for i in range(8))
+        # host_args (the import's arguments, first parameter at 0) are the
+        # operand registers; see below.
         self.host_ack = Signal()
         self.host_result = Signal(32)
         # Linear memory for the import unit (and tests).
@@ -186,7 +187,24 @@ class WasmCore(Module):
         mem_b = mem.get_port(write_capable=True)
         self.specials += (code_rd, code_wr, func_rd, func_wr, table_rd, table_wr,
                           st_rd, st_wr, fr_rd, fr_wr, mem_a, mem_b)
-        globals_ = Array(Signal(32, name=f"global{i}") for i in range(MAX_GLOBALS))
+        glob = Memory(32, MAX_GLOBALS)
+        glob_dbg = Memory(32, MAX_GLOBALS)
+        self.specials += glob, glob_dbg
+        g_rd = glob.get_port(async_read=True)
+        g_wr = glob.get_port(write_capable=True)
+        gd_rd = glob_dbg.get_port(async_read=True)
+        gd_wr = glob_dbg.get_port(write_capable=True)
+        self.specials += g_rd, g_wr, gd_rd, gd_wr
+        g_we = Signal()
+        g_adr = Signal(4)
+        g_dat = Signal(32)
+        self.comb += [
+            g_wr.adr.eq(Mux(self.ld_glob_we, self.ld_glob_adr, g_adr)),
+            g_wr.dat_w.eq(Mux(self.ld_glob_we, self.ld_glob_dat, g_dat)),
+            g_wr.we.eq(self.ld_glob_we | g_we),
+            gd_wr.adr.eq(g_wr.adr), gd_wr.dat_w.eq(g_wr.dat_w), gd_wr.we.eq(g_wr.we),
+            gd_rd.adr.eq(self.glob_rd_adr),
+        ]
 
         self.comb += [
             code_wr.adr.eq(self.ld_code_adr), code_wr.dat_w.eq(self.ld_code_dat),
@@ -197,12 +215,17 @@ class WasmCore(Module):
             table_wr.we.eq(self.ld_table_we),
             mem_b.adr.eq(self.ext_mem_adr), mem_b.dat_w.eq(self.ext_mem_dat_w),
             mem_b.we.eq(self.ext_mem_we), self.ext_mem_dat_r.eq(mem_b.dat_r),
-            self.glob_rd_dat.eq(globals_[self.glob_rd_adr]),
+            self.glob_rd_dat.eq(gd_rd.dat_r),
         ]
 
         shapes = import_shapes()
         imp_params = Array(p for p, _ in shapes)
         imp_returns = Array(r for _, r in shapes)
+
+        # 64 KiB pages (page_log2 16) or 1-byte pages (0).
+        big = Signal()
+        self.comb += big.eq(self.page_log2 != 0)
+        pages64 = self.mem_len[16:] if len(self.mem_len) > 16 else Constant(0, 1)
 
         # Machine state.
         pc = Signal(16)
@@ -214,9 +237,12 @@ class WasmCore(Module):
         a = Signal(24)
         imm = Signal(32)          # the extra word (literal or offset)
         v = Signal(32)            # value to push
-        opnd = Array(Signal(32, name=f"opnd{i}") for i in range(8))
+        opnd = Array(Signal(32, name=f"host_arg{i}") for i in range(8))
+        self.host_args = opnd
         npop = Signal(4)          # operands still to pop
         pidx = Signal(4)          # where the next popped one goes
+        pidx_m1 = Signal(3)
+        self.comb += pidx_m1.eq(pidx - 1)
         cnt = Signal(32)          # loop counter (locals, bytes)
         ea = Signal(33)
         src_a = Signal(33)
@@ -250,9 +276,8 @@ class WasmCore(Module):
         x = opnd[0]
         y = opnd[1]
         z = opnd[2]
-        sx = Signal((32, True))
-        sy = Signal((32, True))
-        self.comb += sx.eq(x), sy.eq(y)
+
+        self.comb += g_rd.adr.eq(a[:4])
 
         # The memory port of the core: one access per cycle.
         self.comb += mem_a.adr.eq(ea[:aw])
@@ -382,10 +407,10 @@ class WasmCore(Module):
             ).Elif(op == LGET,
                 st_rd.adr.eq(fp + a), NextState("LGET2")
             ).Elif((op == LSET) | (op == LTEE) | (op == GSET), *pop_then(1, 1)
-            ).Elif(op == GGET, NextValue(v, globals_[a[:4]]), NextState("PUSH")
+            ).Elif(op == GGET, NextValue(v, g_rd.dat_r), NextState("PUSH")
             ).Elif(op == LOAD, *pop_then(1, 1)
             ).Elif(op == STORE, If(a == 3, *pop_then(3, 3)).Else(*pop_then(2, 2))
-            ).Elif(op == MSIZE, NextValue(v, self.mem_len >> self.page_log2), NextState("PUSH")
+            ).Elif(op == MSIZE, NextValue(v, Mux(big, pages64, self.mem_len)), NextState("PUSH")
             ).Elif(op == MGROW, *pop_then(1, 1)
             ).Elif((op == MCOPY) | (op == MFILL), *pop_then(3, 3)
             ).Elif(op == UN, *pop_then(1, 1)
@@ -413,7 +438,7 @@ class WasmCore(Module):
             ),
         )
         fsm.act("POP2",
-            NextValue(opnd[pidx - 1], st_rd.dat_r),
+            NextValue(opnd[pidx_m1], st_rd.dat_r),
             NextValue(pidx, pidx - 1),
             NextValue(npop, npop - 1),
             NextState("POP"),
@@ -451,22 +476,52 @@ class WasmCore(Module):
             ).Elif(a[:3] == 4, un_r.eq(sext(x, 8))
             ).Else(un_r.eq(sext(x, 16))),
         ]
+        # One 64-bit right shifter serves every shift and rotate:
+        #   shr_u {0, x} >> sh      shr_s {sign, x} >> sh   rotr {x, x} >> sh
+        #   shl   {x, 0} >> 32-sh   rotl  {x, x} >> 32-sh
         sh = Signal(5)
         self.comb += sh.eq(y[:5])
+        bop = Signal(5)
+        self.comb += bop.eq(a[:5])
+        sh_in = Signal(64)
+        sh_amt = Signal(6)
+        sh_out = Signal(64)
+        self.comb += [
+            If(bop == 20, sh_in.eq(Cat(Constant(0, 32), x))
+            ).Elif(bop == 21, sh_in.eq(Cat(x, Replicate(x[31], 32)))
+            ).Elif(bop == 22, sh_in.eq(Cat(x, Constant(0, 32)))
+            ).Else(sh_in.eq(Cat(x, x))),
+            sh_amt.eq(Mux((bop == 20) | (bop == 23), 32 - sh, sh)),
+            sh_out.eq(sh_in >> sh_amt),
+        ]
+        # Comparisons from one subtraction.
+        diff = Signal(33)
+        self.comb += diff.eq(Cat(x, Constant(0, 1)) - Cat(y, Constant(0, 1)))
+        eq = Signal()
+        ltu = Signal()
+        lts = Signal()
+        self.comb += [
+            eq.eq(x == y),
+            ltu.eq(diff[32]),
+            lts.eq(Mux(x[31] != y[31], x[31], diff[32])),
+        ]
+        # Each flag is its own 1-bit signal: in Verilog `~flag` assigned to
+        # 32 bits would invert after widening.
+        flags = [Signal(name=f"cmp{i}") for i in range(10)]
+        self.comb += [
+            flags[0].eq(eq), flags[1].eq(~eq),
+            flags[2].eq(lts), flags[3].eq(ltu),
+            flags[4].eq(~lts & ~eq), flags[5].eq(~ltu & ~eq),
+            flags[6].eq(lts | eq), flags[7].eq(ltu | eq),
+            flags[8].eq(~lts), flags[9].eq(~ltu),
+        ]
         bin_r = Signal(32)
         cases = {
-            0: bin_r.eq(x == y), 1: bin_r.eq(x != y),
-            2: bin_r.eq(sx < sy), 3: bin_r.eq(x < y),
-            4: bin_r.eq(sx > sy), 5: bin_r.eq(x > y),
-            6: bin_r.eq(sx <= sy), 7: bin_r.eq(x <= y),
-            8: bin_r.eq(sx >= sy), 9: bin_r.eq(x >= y),
-            10: bin_r.eq(x + y), 11: bin_r.eq(x - y),
+            **{i: bin_r.eq(flags[i]) for i in range(10)},
+            10: bin_r.eq(x + y), 11: bin_r.eq(diff[:32]),
             17: bin_r.eq(x & y), 18: bin_r.eq(x | y), 19: bin_r.eq(x ^ y),
-            20: bin_r.eq(x << sh),
-            21: bin_r.eq((Cat(x, Replicate(x[31], 32)) >> sh)[:32]),
-            22: bin_r.eq(x >> sh),
-            23: bin_r.eq((Cat(x, x) << sh)[32:64]),
-            24: bin_r.eq((Cat(x, x) >> sh)[0:32]),
+            20: bin_r.eq(sh_out[:32]), 21: bin_r.eq(sh_out[:32]), 22: bin_r.eq(sh_out[:32]),
+            23: bin_r.eq(sh_out[:32]), 24: bin_r.eq(sh_out[:32]),
         }
         self.comb += Case(a[:5], {**cases, "default": bin_r.eq(0)})
 
@@ -484,7 +539,7 @@ class WasmCore(Module):
             ).Elif(op == LTEE,
                 st_wr.adr.eq(fp + a), st_wr.dat_w.eq(x), st_wr.we.eq(1),
                 NextValue(v, x), NextState("PUSH")
-            ).Elif(op == GSET, NextValue(globals_[a[:4]], x), NextState("FETCH")
+            ).Elif(op == GSET, g_adr.eq(a[:4]), g_dat.eq(x), g_we.eq(1), NextState("FETCH")
             ).Elif(op == LOAD,
                 NextValue(ea, x + imm),
                 NextValue(size, Mux(a == 0, 4, Mux((a == 1) | (a == 2), 1, 2))),
@@ -528,7 +583,9 @@ class WasmCore(Module):
             NextState("LD_LATCH"),
         )
         fsm.act("LD_LATCH",
-            NextValue(acc, acc | (mem_a.dat_r << Cat(Constant(0, 3), cnt[:2]))),
+            Case(cnt[:2], {i: NextValue(acc, Cat(*[mem_a.dat_r if j == i else acc[8 * j:8 * j + 8]
+                                                   for j in range(4)]))
+                           for i in range(4)}),
             NextValue(ea, ea + 1),
             NextValue(cnt, cnt + 1),
             If(cnt + 1 == size, NextState("LD_DONE")).Else(NextState("LD_BYTE")),
@@ -539,14 +596,15 @@ class WasmCore(Module):
             ).Else(NextValue(v, acc)),
             NextState("PUSH"),
         )
-        st_val = Signal(64)
-        self.comb += st_val.eq(Mux(a == 3, Cat(y, z), y))
+        st_byte = Signal(8)
+        self.comb += Case(cnt[:3], {i: st_byte.eq((y if i < 4 else z)[8 * (i % 4):8 * (i % 4) + 8])
+                                    for i in range(8)})
         fsm.act("ST_CHECK",
             If(ea + size > self.mem_len, *trap(T_MEM)).Else(
                 NextValue(cnt, 0), NextState("ST_BYTE")),
         )
         fsm.act("ST_BYTE",
-            mem_a.dat_w.eq((st_val >> Cat(Constant(0, 3), cnt[:3]))[:8]), mem_a.we.eq(1),
+            mem_a.dat_w.eq(st_byte), mem_a.we.eq(1),
             NextValue(ea, ea + 1),
             NextValue(cnt, cnt + 1),
             If(cnt + 1 == size, NextState("FETCH")),
@@ -554,10 +612,10 @@ class WasmCore(Module):
 
         # memory.grow: pages of 2**page_log2 bytes.
         add_bytes = Signal(48)
-        self.comb += add_bytes.eq(x << self.page_log2)
+        self.comb += add_bytes.eq(Mux(big, Cat(Constant(0, 16), x), x))
         fsm.act("GROW",
             If(self.mem_len + add_bytes <= self.mem_max,
-                NextValue(v, self.mem_len >> self.page_log2),
+                NextValue(v, Mux(big, pages64, self.mem_len)),
                 NextValue(self.mem_len, self.mem_len + add_bytes),
             ).Else(
                 NextValue(v, 0xFFFF_FFFF),
@@ -716,7 +774,7 @@ class WasmCore(Module):
             ),
         )
         fsm.act("HOST_POP2",
-            NextValue(self.host_args[pidx - 1], st_rd.dat_r),
+            NextValue(opnd[pidx_m1], st_rd.dat_r),
             NextValue(pidx, pidx - 1),
             NextValue(npop, npop - 1),
             NextState("HOST_POP1"),
@@ -756,5 +814,4 @@ class WasmCore(Module):
             NextState("IDLE"),
         )
 
-        self.sync += If(self.ld_glob_we, globals_[self.ld_glob_adr].eq(self.ld_glob_dat))
         self.sync += If(self.ld_mem_len_we, self.mem_len.eq(self.ld_mem_len))

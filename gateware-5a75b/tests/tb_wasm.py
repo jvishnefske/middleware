@@ -346,10 +346,6 @@ class Runner:
                     self.poisoned = True
                     return ("trap", TRAPS[trap])
                 return ("ok", res)
-            if os.environ.get("WASM_DEBUG"):
-                dut._log.info("pc=%s op=%s a=%s sp=%s fp=%s st=%s", int(dut.pc.value),
-                              int(dut.op.value), int(dut.a.value), int(dut.sp.value),
-                              int(dut.fp.value), int(dut.state.value))
             if int(dut.host_req.value):
                 idx = int(dut.host_idx.value)
                 args = [int(getattr(dut, f"host_arg{i}").value) for i in range(8)]
@@ -402,6 +398,8 @@ class Runner:
         if alloc is None or onm is None:
             return "false"
         kind, ptr = await self.invoke(alloc, [len(data)])
+        if os.environ.get("WASM_DEBUG"):
+            self.dut._log.info("mw_alloc(%d) -> %s %s", len(data), kind, ptr)
         if kind != "ok":
             return f"trap {ptr}"
         if ptr == 0 or self.unit.rng(ptr, len(data)) is None:

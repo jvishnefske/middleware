@@ -25,10 +25,14 @@ its counters restart at zero.
 
 Handles are `BRIDGE_BASE + slot` (16..31). Counters: per rule, forwarded
 and dropped (saturating 32 bit), counted by `acct_*` after a forward
-(`BridgeTable::account`).
+(`BridgeTable::account`). They live in a 32 x 32 RAM (forwarded at
+`slot`, dropped at `16 + slot`) served by one sequencer: accounting
+requests wait in a small FIFO and each matched rule costs a read and a
+write; a stat is a read; installing a rule zeroes both of its counters.
 """
 
-from migen import Array, Cat, If, Memory, Module, Mux, Signal
+from migen import Array, Cat, FSM, If, Memory, Module, Mux, NextState, NextValue, Signal
+from migen.genlib.fifo import SyncFIFO
 
 N_RULES = 16
 MAX_KEY = 128
@@ -111,8 +115,6 @@ class BridgeTable(Module):
         dst = Array(Signal(3, name=f"dst{r}") for r in range(N_RULES))
         prefix = Signal(N_RULES)
         lens = Array(Signal(8, name=f"len{r}") for r in range(N_RULES))
-        fwd = Array(Signal(32, name=f"fwd{r}") for r in range(N_RULES))
-        drp = Array(Signal(32, name=f"drp{r}") for r in range(N_RULES))
         self.valid = valid
 
         keys = Memory(8 * N_RULES, MAX_KEY)
@@ -232,8 +234,6 @@ class BridgeTable(Module):
                     Array(dst)[free[:4]].eq(a_dst),
                     _set_bit(prefix, free[:4], a_prefix),
                     Array(lens)[free[:4]].eq(a_len),
-                    fwd[free[:4]].eq(0),
-                    drp[free[:4]].eq(0),
                 ).Else(
                     self.cmd_result.eq(ERR_NO_RESOURCES),
                 ),
@@ -245,23 +245,108 @@ class BridgeTable(Module):
                     self.cmd_result.eq(0),
                 ).Else(self.cmd_result.eq(ERR_BUSY)),
             ),
+        ]
+
+        # --- counters ------------------------------------------------------
+        counters = Memory(32, 2 * N_RULES)
+        self.specials += counters
+        cp = counters.get_port(write_capable=True)
+        self.specials += cp
+        fifo = SyncFIFO(N_RULES + 8, 8)
+        self.submodules += fifo
+        self.comb += [
+            fifo.din.eq(Cat(self.acct_rules, self.acct_sent)),
+            fifo.we.eq(self.acct_stb),
+        ]
+        zero_req = Signal()
+        zero_slot = Signal(4)
+        stat_req = Signal()
+        stat_adr = Signal(5)
+        self.sync += [
+            If(add_eval & (dup == N_RULES) & (free < N_RULES),
+                zero_req.eq(1), zero_slot.eq(free[:4])),
             If(self.stat_stb,
-                self.cmd_done.eq(1),
                 If(in_range & (valid >> sl)[0],
-                    self.cmd_result.eq(_sat31(Mux(self.stat_dropped, drp[sl], fwd[sl]))),
-                ).Else(self.cmd_result.eq(ERR_BUSY)),
+                    stat_req.eq(1),
+                    stat_adr.eq(Cat(sl, self.stat_dropped)),
+                ).Else(
+                    self.cmd_done.eq(1),
+                    self.cmd_result.eq(ERR_BUSY),
+                ),
             ),
         ]
-        for r in range(N_RULES):
-            ok = Signal(name=f"acct_ok{r}")
-            self.comb += ok.eq((self.acct_sent >> dst[r])[0])
-            self.sync += If(self.acct_stb & self.acct_rules[r] & valid[r],
-                If(ok,
-                    If(fwd[r] != 0xFFFF_FFFF, fwd[r].eq(fwd[r] + 1)),
-                ).Else(
-                    If(drp[r] != 0xFFFF_FFFF, drp[r].eq(drp[r] + 1)),
-                ),
-            )
+        cur_rules = Signal(N_RULES)
+        cur_sent = Signal(8)
+        r_i = Signal(5)
+        c_adr = Signal(5)
+        dsts = Array(dst)
+        fsm = FSM(reset_state="IDLE")
+        self.submodules += fsm
+        self.comb += cp.adr.eq(c_adr)
+        fsm.act("IDLE",
+            If(zero_req,
+                NextValue(c_adr, zero_slot),
+                NextState("ZERO_FWD"),
+            ).Elif(fifo.readable,
+                # Accounting queued before a stat is counted first, as
+                # BridgeTable::account runs before a later route_stat.
+                fifo.re.eq(1),
+                NextValue(cur_rules, fifo.dout[:N_RULES]),
+                NextValue(cur_sent, fifo.dout[N_RULES:]),
+                NextValue(r_i, 0),
+                NextState("ACCT_SCAN"),
+            ).Elif(stat_req,
+                NextValue(c_adr, stat_adr),
+                NextState("STAT_READ"),
+            ),
+        )
+        fsm.act("ZERO_FWD",
+            cp.dat_w.eq(0), cp.we.eq(1),
+            NextValue(c_adr, Cat(zero_slot, 1)),
+            NextState("ZERO_DRP"),
+        )
+        fsm.act("ZERO_DRP",
+            cp.dat_w.eq(0), cp.we.eq(1),
+            NextState("IDLE"),
+        )
+        self.sync += If(fsm.ongoing("ZERO_DRP"), zero_req.eq(0))
+        fsm.act("STAT_READ",
+            NextState("STAT_DONE"),
+        )
+        fsm.act("STAT_DONE",
+            NextState("IDLE"),
+        )
+        self.sync += If(fsm.ongoing("STAT_DONE"),
+            stat_req.eq(0),
+            self.cmd_done.eq(1),
+            self.cmd_result.eq(_sat31(cp.dat_r)),
+        )
+        # Accounting: for each matched rule, count forwarded or dropped.
+        # The lowest matched rule still to count, one per three cycles.
+        todo = Signal(N_RULES)
+        self.comb += todo.eq(cur_rules & valid)
+        low = Signal(4)
+        for r in reversed(range(N_RULES)):
+            self.comb += If(todo[r], low.eq(r))
+        sent_ok = Signal()
+        self.comb += sent_ok.eq((cur_sent >> dsts[low])[0])
+        fsm.act("ACCT_SCAN",
+            If(todo == 0,
+                NextState("IDLE"),
+            ).Else(
+                NextValue(c_adr, Cat(low, ~sent_ok)),
+                NextValue(r_i, low),
+                _set_bit_next(cur_rules, low),
+                NextState("ACCT_READ"),
+            ),
+        )
+        fsm.act("ACCT_READ",
+            NextState("ACCT_WRITE"),
+        )
+        fsm.act("ACCT_WRITE",
+            cp.dat_w.eq(Mux(cp.dat_r == 0xFFFF_FFFF, cp.dat_r, cp.dat_r + 1)), cp.we.eq(1),
+            NextState("ACCT_SCAN"),
+        )
 
 
 def _or_reduce(xs):
@@ -274,6 +359,11 @@ def _or_reduce(xs):
 def _set_bit(sig, idx, value):
     """`sig[idx] = value` for a run-time index."""
     return sig.eq(Mux(value, sig | (1 << idx), sig & ~(1 << idx)))
+
+
+def _set_bit_next(sig, idx):
+    """Clears bit `idx` of `sig` at the next FSM transition."""
+    return NextValue(sig, sig & ~(1 << idx))
 
 
 def _sat31(v):

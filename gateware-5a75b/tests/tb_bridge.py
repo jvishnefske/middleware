@@ -19,7 +19,7 @@ async def clk(dut):
 
 
 async def wait_done(dut):
-    for _ in range(10):
+    for _ in range(200):
         await ReadOnly()
         if int(dut.cmd_done.value):
             r = dut.cmd_result.value.to_signed()
