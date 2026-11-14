@@ -117,6 +117,13 @@ async def cl8_two_links(dut):
     assert all(l == len(d) for _, _, l, d in tx[0].frames)
     assert tx[1].frames == []
 
+    # A broadcast or multicast sender never becomes a peer.
+    await send(dut, 1, request(2, b"sys/info"), "255.255.255.255", 6000)
+    await send(dut, 1, request(3, b"sys/info"), "239.1.2.3", 6000)
+    await settle(dut)
+    assert int(dut.peer1_ip.value) == 0
+    tx[1].frames.clear()
+
     # A rule demo/** link 0 -> 1. No peer on link 1 yet: dropped.
     h = await add(dut, 0, "demo/**", 1)
     assert h == 16

@@ -4,9 +4,12 @@ table (CL4, CL5, CL8).
 Per link:
 
 * **RX**: datagrams (from LiteEth's UDP port in the SoC, from the
-  testbench here) go into a `FrameDecoder`. The sender of every valid
-  frame becomes the link's *peer*: responses go back to the request's
-  sender; publications (forwarded or the device's own) go to the peer.
+  testbench here) go into a `FrameDecoder`. The unicast sender of every
+  valid frame becomes the link's *peer*: responses go back to the
+  request's sender; publications (forwarded or the device's own) go to
+  the peer. The peer is not authenticated (the board is unclaimed and
+  takes unsigned uploads anyway); a configured peer is `sys/net/addr`'s
+  job (CL8, open).
 * **Dispatch**, once the decoder is done:
   * a request is classified by its key (`KeyClassifier`, constant keys
     matched while the key streams in) and answered by the `Responder`
@@ -220,9 +223,14 @@ class Node(Module):
 
             fsm = FSM(reset_state="WAIT")
             self.submodules += fsm
+            # A peer must be a unicast sender: not 0.0.0.0, not the
+            # broadcast address, not multicast (224/4), and port != 0.
+            unicast = Signal(name=f"rx{n}_unicast")
+            self.comb += unicast.eq((rx_ip != 0) & (rx_ip != 0xFFFF_FFFF)
+                                    & (rx_ip[28:32] != 0xE) & (rx_port != 0))
             fsm.act("WAIT",
                 If(dec.done,
-                    If(dec.ok,
+                    If(dec.ok & unicast,
                         NextValue(peers[n][0], rx_ip), NextValue(peers[n][1], rx_port),
                     ),
                     If(dec.ok & (dec.kind == KIND_REQUEST),

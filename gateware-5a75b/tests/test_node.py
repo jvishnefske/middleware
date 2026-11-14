@@ -16,4 +16,5 @@ def test_cl8_node():
                  "cmd_done", "cmd_result"]:
         ios.add(getattr(b, name))
     ios.add(n.status)
+    ios |= {n.peers[0][0], n.peers[1][0]}
     run(n, "node", "tb_node", ios=ios)

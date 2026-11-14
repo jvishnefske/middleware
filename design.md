@@ -4491,6 +4491,159 @@ payload does. The version-4 reader accepts every older file.
   discovery at all; esp-base's beacons would need the payload to name its
   unit).
 
+### Colorlight 5A-75B (`gateware-5a75b/`, CL…)
+
+A Colorlight 5A-75B v7.0 LED receiver card (Lattice LFE5U-25F, 24 288
+LUT4, 56 block RAMs; two Broadcom B50612D Gigabit PHYs over RGMII; 4 MB
+SDRAM; W25Q32 SPI flash) is a middleware node with **two independent
+links**, one per Ethernet port, each its own IPv4 address. There is **no
+soft CPU**: LiteEth's hardware MAC/ARP/ICMP/IP/UDP stack runs on each
+PHY, and the middleware is gateware — a frame core, a system request
+responder, a bridge engine, and a WebAssembly core (loader, interpreter,
+import unit) whose exact semantics are a Rust reference model.
+
+Payloads configure **channel bridging**: `route_bridge` (ABI 6) fills a
+hardware rule table and the board forwards matching publications from
+one link to the other by itself; low-rate messages may still reach the
+payload's `on_message` and `tick` (the slow path).
+
+**Trust is unsigned**: uploads are checked with CRC-32 and SHA-256 in
+hardware and the board reports itself unclaimed (`sys/trust/info`);
+Ed25519 does not fit the 25F next to two Ethernet stacks.
+
+Toolchain: `nix develop ./gateware-5a75b` (flake: yosys, nextpnr-ecp5,
+Project Trellis, openFPGALoader, Verilator, Python with Migen, LiteX,
+LiteEth, liteiclink and litex-boards 2026.08, cocotb, pytest).
+`pytest gateware-5a75b/tests` runs every cocotb + Verilator test;
+`python soc.py` builds the bitstream; `python blinky.py` builds the JTAG
+bring-up design.
+
+Facts that shape the design:
+
+- One raw serial frame per UDP datagram (`middleware::udp`), port 7448:
+  `[kind][id][key_len|status][key][payload][crc16 LE]`, CRC-16/CCITT-FALSE
+  kept (the gateware checks it while the datagram streams in), at most
+  1024 bytes and keys of at most 128.
+- The two PHYs share one MDIO bus (P3/T2) and one reset (P5); the
+  platform (`mw5a75b/platform.py`) gives each `eth` resource its data
+  pins and adds a single `eth_mdio`. Autonegotiation needs no MDIO, so
+  the bus is idle and the reset is not driven.
+- LiteEth's system-side IPv4 checksum and ICMP FIFO close timing at about
+  60 MHz on the -6 part (litex-boards' Colorlight targets run there too),
+  so the system clock is **50 MHz**; the node handles one byte per cycle,
+  so a link forwards up to **400 Mbit/s**, not Gigabit line rate. The
+  RGMII domains run at 125 MHz; the second port's transmit path was
+  routing-bound on every placement seed, so its output gets one more
+  register stage (`mw5a75b/rgmii.py`).
+- Linear memory is **16 KiB** (block RAM). The WAT templates declare one
+  64 KiB page and so load only with 1-byte pages (as `bridge.wat` and the
+  golden vectors do); the Rust SDK examples place their data above
+  16 KiB and need a byte-pages build with a smaller stack
+  (`payloads/scripts/build-byte-pages.sh`).
+
+Requirements:
+
+- [x] CL1 UDP transport: a datagram is exactly `frame::encode_raw`'s
+  bytes, decoded with `frame::decode`; `UdpTransport` (feature `udp`)
+  implements `Requester` (fresh id per attempt, resend every 300 ms until
+  the timeout, 2 s by default; stale answers discarded; remote errors not
+  retried), `Publisher` and `Subscriber` (publications read during a
+  request are queued, 64 at most, newest dropped); `Target::Node` other
+  than the peer is refused; `mwctl --udp HOST[:PORT]` (default port 7448,
+  bracketed IPv6) runs every device command but `reset` and `fw` over a
+  `UdpLink`, retrying like the serial link — `udp::tests::cl1_*`,
+  `udp::link::tests::cl1_*`; mwctl `udp::tests::cl1_*` (info, upload,
+  start against the fake device over loopback UDP, a lost datagram
+  resent, noise), `cli::tests::cl1_udp_replaces_the_port`;
+  `scripts/check-features.sh` (`udp` is a host feature).
+- [x] CL2 ABI 6 `route_bridge(src_link, key_ptr, key_len, dst_link) ->
+  handle`, appended so ABI 1–5 are prefixes: links `0..8`, distinct
+  (`InvalidArgument`), checked before the pointer pair (`OutOfBounds`)
+  and the key (exact, or a segment prefix written `prefix/**`; malformed
+  or under `sys` is `InvalidKey`); handles `16..32` shared with
+  `route_stop`/`route_stat` (forwarded / dropped counts); identical rules
+  de-duplicated, a full table of 16 `NoResources`; bridging never
+  consumes (a subscription still sees the message); `publish` goes out on
+  every link. wasm-host `Device::route_bridge` defaults to `Unsupported`
+  (single-link boards); payload-sim is a fake two-port board (`!link`,
+  `bridge…`/`link… tx` lines); `payloads/templates/bridge.wat`;
+  board-pins `COLORLIGHT_5A75B` (`ecp5`: GPIO 0 LED, GPIO 1 button, no
+  SPI); `sys/info` `Caps::BRIDGE` (bit 1), printed by mwctl —
+  `wasm_abi::bridge::tests::cl2_*`, `wasm_abi::tests::*`;
+  `wasm-host/tests/abi6.rs` `cl2_*`; `tools/payload-sim/tests/bridge.rs`;
+  board-pins `boards::tests::cl2_the_5a75b_offers_its_led_and_button_only`;
+  `loader::tests` (caps), mwctl `report::tests`.
+- [x] CL3 `wasm-hdl-ref` (no_std, no heap) is the WASM core as Rust: a
+  one-pass loader (type, import, function, table, memory, global,
+  export, element, code, data sections) compiling every body into a
+  32-bit internal code with resolved branch targets, keep and drop counts
+  (`isa.rs`: the side table precomputed, no LEB decoding at run time), an
+  interpreter with fuel, a 1024-slot value stack and 32 nested calls, and
+  an import unit with `wasm-host`'s checks in `wasm-host`'s order. The
+  subset is i32, `i64.const` into `i64.store`, `memory.copy`/`fill`,
+  `call_indirect`; anything else is `Unsupported` at load. Every WAT
+  template, the three generated phase payloads, the Rust SDK builds
+  (echo, dimmer, blink, button) and an every-op module run through it
+  and through wasmi with the same board calls, results and final memory;
+  traps match by class; load errors by kind — `wasm-hdl-ref/tests/diff.rs`
+  `cl3_*`, unit tests `cl3_*`; `scripts/check-features.sh` (builds for
+  thumbv6m).
+- [x] CL4 Golden vectors from the model (`wasm-hdl-ref/tests/vectors.rs`,
+  checked in under `gateware-5a75b/tests/vectors/`, stale files fail the
+  test): frames with their decoding, bridge-table operations, and per
+  module the compiled image plus an event script with the expected
+  calls, results, globals, memory CRC and instruction count. The frame
+  core (`mw5a75b/frame.py`: CRC-16 through a two-byte delay line, kind,
+  id, key checked while streaming, body into a block-RAM buffer held
+  until consumed; a CRC appender) decodes every frame vector and
+  re-encodes every valid one byte for byte, with and without idle cycles
+  and under back-pressure — `tests/test_frame.py`.
+- [x] CL5 The bridge engine (`mw5a75b/bridge.py`): 16 rules, key bytes in
+  one byte lane each of a 128 × 128-bit memory, matched against all rules
+  in one pass while a key streams in (one matcher per link, one for
+  installing, which also finds an identical rule); counters in RAM with
+  queued accounting and back-pressure — every `bridge.json` operation
+  answers as `BridgeTable` does — `tests/test_bridge.py`.
+- [ ] CL6 Upload and storage: `sys/loader/begin|chunk|commit` with
+  streaming CRC-32 and SHA-256 in gateware, the image in one of two SPI
+  flash slots activated after the CRC check, and the loader FSM building
+  the image (code, function table, table 0, globals, exports, memory)
+  from the active slot at reset — open. The compiler is the largest
+  remaining piece; the model's loader is its specification and the
+  vectors carry the image it must build.
+- [x] CL7 The WASM interpreter (`mw5a75b/wasm.py`) and the hardware import
+  unit and runtime (`mw5a75b/imports.py`: `log`/`publish` as frames on
+  every link with a peer, an 8-slot subscription table with matchers on
+  the incoming keys, `set_tick`, LED and button, `node_id`, the bridge
+  imports, `Unsupported` otherwise; `init`, `tick`, deliveries) reproduce
+  every wasm vector: board-visible calls, results, globals, final memory
+  CRC and executed instruction count — `tests/test_wasm.py` (interpreter
+  with the import rules in the testbench), `tests/test_runtime.py`
+  (interpreter, import unit and bridge table in gateware).
+- [ ] CL8 The node and the SoC: each link answers `sys/info` (chip
+  `ecp5`, firmware `0.1.0`, ABI 6, capacity 16 KiB, node id from the
+  link-0 MAC, `Caps::BRIDGE`), `sys/trust/info` (unclaimed) and
+  `NotFound` to the request's sender, learns its peer from every valid
+  frame, and forwards a bridged publication to the other link's peer
+  (dropped and counted while that link has no peer). The peer is the last
+  unicast sender of a valid frame and is not authenticated: anyone on a
+  link's network can become its peer and receive what is forwarded
+  there, which matches an unclaimed board that accepts unsigned uploads;
+  a configured, persisted peer belongs to `sys/net/addr` — simulated,
+  `tests/test_node.py`. `soc.py` builds both LiteEth stacks around the
+  node for `LFE5U-25F-6BG256C` (about a third of the LUTs, 50 MHz system
+  clock met). Open: the runtime and the loader in the SoC, `sys/net/addr`
+  (addresses persisted in flash; build-time defaults 192.168.1.50 and
+  192.168.2.50 now), `sys/log`, `sys/payload/*`, 125 MHz RGMII timing on
+  the second port, and on the board (FT4232H, `openFPGALoader -c
+  ft4232`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
+  both answering ARP, ping and `mwctl --udp <ip> info`, tx_delay tuned
+  per port, the bitstream booting from flash.
+- [ ] CL9 Bridging on the board: `bridge.wat` uploaded over port 0
+  survives a power cycle; a publication on a bridged prefix sent to
+  port 0 arrives on port 1 and an unbridged one does not, with the rule
+  counters agreeing — open (needs CL6, CL8).
+
 ## Known limitations (0.3)
 
 - **Publish and receive share one `&mut self`.** A transport that owns both directions of one radio cannot publish while a receive is pending. Callers serialise them or keep per-direction tasks behind channels. Split halves are deferred.
