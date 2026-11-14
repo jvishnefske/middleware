@@ -47,22 +47,45 @@ ERROR_NAMES = {OK: "Ok", TOO_LARGE: "TooLarge", MALFORMED: "Malformed",
                CRC: "Crc", KIND: "UnknownKind", KEY: "InvalidKey"}
 
 
+def _crc16_step_py(crc, byte):
+    crc ^= byte << 8
+    for _ in range(8):
+        crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def _crc16_taps():
+    """For each output bit, the crc bits and byte bits it is the XOR of.
+    The byte step is linear over GF(2), so the unit vectors give it."""
+    taps = []
+    for out in range(16):
+        c = [i for i in range(16) if _crc16_step_py(1 << i, 0) >> out & 1]
+        d = [i for i in range(8) if _crc16_step_py(0, 1 << i) >> out & 1]
+        taps.append((c, d))
+    return taps
+
+
+_TAPS = _crc16_taps()
+
+
 def crc16_byte(crc, byte):
     """One byte of CRC-16/CCITT-FALSE (poly 0x1021, MSB first) as an
-    expression of a 16-bit `crc` and an 8-bit `byte`."""
-    c = crc ^ Cat(Constant(0, 8), byte)
-    for _ in range(8):
-        shifted = Cat(Constant(0, 1), c[:15])
-        c = Mux(c[15], shifted ^ 0x1021, shifted)
-    return c
+    expression of a 16-bit `crc` and an 8-bit `byte`: one XOR per output
+    bit (an unrolled shift loop would nest exponentially)."""
+    bits = []
+    for c, d in _TAPS:
+        terms = [crc[i] for i in c] + [byte[i] for i in d]
+        e = terms[0]
+        for t in terms[1:]:
+            e = e ^ t
+        bits.append(e)
+    return Cat(*bits)
 
 
 def crc16_py(data):
     crc = 0xFFFF
     for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+        crc = _crc16_step_py(crc, b)
     return crc
 
 

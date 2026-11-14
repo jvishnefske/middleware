@@ -3,3 +3,4 @@ sim_build/
 __pycache__/
 *.pyc
 results.xml
+build-soc.log

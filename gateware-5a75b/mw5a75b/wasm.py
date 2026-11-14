@@ -301,6 +301,14 @@ class WasmCore(Module):
         self.submodules += fsm
         self.comb += self.busy.eq(~fsm.ongoing("IDLE"))
 
+        # The call's function and arguments are latched at call_start.
+        c_func = Signal(8)
+        c_nargs = Signal(3)
+        c_args = Array(Signal(32, name=f"c_arg{i}") for i in range(6))
+        self.sync += If(self.call_start & fsm.ongoing("IDLE"),
+            c_func.eq(self.call_func), c_nargs.eq(self.call_nargs),
+            *[c_args[i].eq(self.call_args[i]) for i in range(6)],
+        )
         fsm.act("IDLE",
             If(self.call_start,
                 NextValue(sp, 0),
@@ -315,12 +323,12 @@ class WasmCore(Module):
         )
         # Push the call's arguments, then enter the function.
         fsm.act("ARGS",
-            If(cnt < self.call_nargs,
-                st_wr.adr.eq(sp), st_wr.dat_w.eq(self.call_args[cnt[:3]]), st_wr.we.eq(1),
+            If(cnt < c_nargs,
+                st_wr.adr.eq(sp), st_wr.dat_w.eq(c_args[cnt[:3]]), st_wr.we.eq(1),
                 NextValue(sp, sp + 1),
                 NextValue(cnt, cnt + 1),
             ).Else(
-                func_rd.adr.eq(self.call_func),
+                func_rd.adr.eq(c_func),
                 NextValue(ret_pc, NONE),
                 NextState("ENTER_READ"),
             ),

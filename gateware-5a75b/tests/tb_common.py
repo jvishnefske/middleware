@@ -14,7 +14,13 @@ def vectors(rel):
 
 
 async def start(dut, sigs_zero=()):
+    """Starts the clock (once per cocotb test) and resets."""
     cocotb.start_soon(Clock(dut.sys_clk, 8, unit="ns").start())
+    await reset(dut, sigs_zero)
+
+
+async def reset(dut, sigs_zero=()):
+    """Resets without starting another clock."""
     for s in sigs_zero:
         getattr(dut, s).value = 0
     dut.sys_rst.value = 1

@@ -16,7 +16,7 @@ import cocotb
 from cocotb.triggers import ReadOnly, RisingEdge
 
 from mw5a75b.wasm import TRAPS
-from tb_common import start, vectors
+from tb_common import reset, start, vectors
 
 NAMES = [
     "log", "publish", "subscribe", "now_ms", "set_tick", "gpio_output", "gpio_input",
@@ -485,10 +485,15 @@ ZERO = ["call_start", "call_func", "call_nargs", "host_ack", "host_result",
 async def cl7_wasm_vectors(dut):
     names = vectors("wasm/index.json")
     only = os.environ.get("WASM_VECTOR")
+    first = True
     for name in names:
         if only and name != only:
             continue
-        await start(dut, ZERO)
+        if first:
+            await start(dut, ZERO)
+            first = False
+        else:
+            await reset(dut, ZERO)
         dut.executed.value = 0
         await run_vector(dut, name)
         dut._log.info("vector %s ok", name)
