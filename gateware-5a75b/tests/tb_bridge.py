@@ -91,6 +91,12 @@ async def cl5_bridge_vectors(dut):
             assert (links, rules) == (op["links"], op["rules"]), f"{op}: {links} {rules}"
             dut.acct_rules.value = rules
             dut.acct_sent.value = op["sent"]
+            while True:
+                await ReadOnly()
+                if int(dut.acct_ready.value):
+                    break
+                await clk(dut)
+            await clk(dut)
             dut.acct_stb.value = 1
             await clk(dut)
             dut.acct_stb.value = 0

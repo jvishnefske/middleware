@@ -448,6 +448,9 @@ impl Caps {
     /// to the payload's `on_request`, and `node_id` answers the node id this
     /// response carries.
     pub const SERVE: Caps = Caps(1);
+    /// Bit 1: the device bridges publications between its links (ABI 6
+    /// `route_bridge` installs rules; the Colorlight 5A-75B gateware).
+    pub const BRIDGE: Caps = Caps(2);
 
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Caps) -> bool {
@@ -1103,6 +1106,9 @@ mod tests {
         assert!(back.caps.contains(Caps::SERVE));
         assert!(!Caps::NONE.contains(Caps::SERVE));
         assert_eq!(Caps::NONE.with(Caps::SERVE), Caps::SERVE);
+        let both = Caps::SERVE.with(Caps::BRIDGE);
+        assert_eq!(both, Caps(3));
+        assert!(both.contains(Caps::BRIDGE) && !Caps::SERVE.contains(Caps::BRIDGE));
         // Capabilities need the node id they follow.
         let orphan = DeviceInfo { node: None, ..v06 };
         assert_eq!(orphan.encode(&mut b), None);

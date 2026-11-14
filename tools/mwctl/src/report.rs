@@ -59,8 +59,13 @@ pub fn format_info(i: &Info) -> String {
     } else {
         ""
     };
+    let bridges = if i.caps.contains(Caps::BRIDGE) {
+        "links:            bridged by rules (route_bridge)\n"
+    } else {
+        ""
+    };
     format!(
-        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\n{serves}ABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
+        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\n{serves}{bridges}ABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
         i.chip,
         i.firmware,
         i.capacity,
@@ -250,7 +255,10 @@ mod tests {
             s.contains("firmware:         0.1.0+no-wasm\nnode:             246f28aabbcc0000\n"),
             "{s}"
         );
-        let s = format_info(&Info { caps: Caps::SERVE, ..i });
+        let s = format_info(&Info { caps: Caps::SERVE, ..i.clone() });
+        assert!(!s.contains("bridged"));
+        let b = format_info(&Info { caps: Caps::BRIDGE, ..i });
+        assert!(b.contains("links:            bridged by rules (route_bridge)\n"), "{b}");
         assert!(s.contains("runtime:          none: protocol only, payloads are stored but not run\nrequests:         routed to the payload (serve)\n"), "{s}");
     }
 

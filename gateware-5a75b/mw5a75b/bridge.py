@@ -27,8 +27,11 @@ Handles are `BRIDGE_BASE + slot` (16..31). Counters: per rule, forwarded
 and dropped (saturating 32 bit), counted by `acct_*` after a forward
 (`BridgeTable::account`). They live in a 32 x 32 RAM (forwarded at
 `slot`, dropped at `16 + slot`) served by one sequencer: accounting
-requests wait in a small FIFO and each matched rule costs a read and a
-write; a stat is a read; installing a rule zeroes both of its counters.
+requests wait in an 8-entry FIFO (`acct_ready` low when full: the
+forwarder waits rather than lose a count) and each matched rule costs a
+read and a write; a stat is a read; installing a rule zeroes both of its
+counters, after any accounting already queued (which belongs to the
+rule the slot held before).
 """
 
 from migen import Array, Cat, FSM, If, Memory, Module, Mux, NextState, NextValue, Signal
@@ -97,6 +100,7 @@ class BridgeTable(Module):
         self.acct_stb = Signal()
         self.acct_rules = Signal(N_RULES)
         self.acct_sent = Signal(8)
+        self.acct_ready = Signal()       # acct_stb is taken only when high
         # Match ports, one per link.
         self.m_start = [Signal(name=f"m{l}_start") for l in range(n_links)]
         self.m_stb = [Signal(name=f"m{l}_stb") for l in range(n_links)]
@@ -256,15 +260,16 @@ class BridgeTable(Module):
         self.submodules += fifo
         self.comb += [
             fifo.din.eq(Cat(self.acct_rules, self.acct_sent)),
-            fifo.we.eq(self.acct_stb),
+            fifo.we.eq(self.acct_stb & fifo.writable),
+            self.acct_ready.eq(fifo.writable),
         ]
-        zero_req = Signal()
+        # Slots whose counters must be zeroed (installed since), one bit
+        # each so back-to-back installs are all served.
+        zero_pend = Signal(N_RULES)
         zero_slot = Signal(4)
         stat_req = Signal()
         stat_adr = Signal(5)
         self.sync += [
-            If(add_eval & (dup == N_RULES) & (free < N_RULES),
-                zero_req.eq(1), zero_slot.eq(free[:4])),
             If(self.stat_stb,
                 If(in_range & (valid >> sl)[0],
                     stat_req.eq(1),
@@ -283,11 +288,13 @@ class BridgeTable(Module):
         fsm = FSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += cp.adr.eq(c_adr)
+        zero_low = Signal(4)
+        for r in reversed(range(N_RULES)):
+            self.comb += If(zero_pend[r], zero_low.eq(r))
+        # Accounting queued before an install is counted first (on the old
+        # rule), then the new rule's counters are zeroed.
         fsm.act("IDLE",
-            If(zero_req,
-                NextValue(c_adr, zero_slot),
-                NextState("ZERO_FWD"),
-            ).Elif(fifo.readable,
+            If(fifo.readable,
                 # Accounting queued before a stat is counted first, as
                 # BridgeTable::account runs before a later route_stat.
                 fifo.re.eq(1),
@@ -295,6 +302,10 @@ class BridgeTable(Module):
                 NextValue(cur_sent, fifo.dout[N_RULES:]),
                 NextValue(r_i, 0),
                 NextState("ACCT_SCAN"),
+            ).Elif(zero_pend != 0,
+                NextValue(zero_slot, zero_low),
+                NextValue(c_adr, zero_low),
+                NextState("ZERO_FWD"),
             ).Elif(stat_req,
                 NextValue(c_adr, stat_adr),
                 NextState("STAT_READ"),
@@ -309,7 +320,17 @@ class BridgeTable(Module):
             cp.dat_w.eq(0), cp.we.eq(1),
             NextState("IDLE"),
         )
-        self.sync += If(fsm.ongoing("ZERO_DRP"), zero_req.eq(0))
+        # Clear the served bit before a new install may set another (the
+        # later statement wins on the same bit, which cannot be the one
+        # just zeroed: that slot is valid now).
+        self.sync += If(fsm.ongoing("ZERO_DRP"),
+            zero_pend.eq(zero_pend & ~(1 << zero_slot)))
+        self.sync += If(add_eval & (dup == N_RULES) & (free < N_RULES)
+                        & ~fsm.ongoing("ZERO_DRP"),
+            zero_pend.eq(zero_pend | (1 << free[:4])))
+        self.sync += If(add_eval & (dup == N_RULES) & (free < N_RULES)
+                        & fsm.ongoing("ZERO_DRP"),
+            zero_pend.eq((zero_pend & ~(1 << zero_slot)) | (1 << free[:4])))
         fsm.act("STAT_READ",
             NextState("STAT_DONE"),
         )
