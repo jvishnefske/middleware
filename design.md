@@ -4635,8 +4635,9 @@ Requirements:
   clock met). Open: the runtime and the loader in the SoC, `sys/net/addr`
   (addresses persisted in flash; build-time defaults 192.168.1.50 and
   192.168.2.50 now), `sys/log`, `sys/payload/*`, 125 MHz RGMII timing on
-  the second port, and on the board (FT4232H, `openFPGALoader -c
-  ft4232`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
+  the second port, and on the board (the FT4232H-56Q MiniModule, serial FT4YW8B7, never
+  the KD240 carrier's FT4232H: `openFPGALoader -c ft4232 --ftdi-serial
+  FT4YW8B7`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
   both answering ARP, ping and `mwctl --udp <ip> info`, tx_delay tuned
   per port, the bitstream booting from flash.
 - [ ] CL9 Bridging on the board: `bridge.wat` uploaded over port 0

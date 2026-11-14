@@ -13,8 +13,8 @@ nix develop                      # yosys, nextpnr-ecp5, trellis, openFPGALoader,
 pytest tests                     # every cocotb + Verilator test (golden vectors)
 python blinky.py                 # JTAG bring-up: build/blinky/blinky.bit
 python soc.py                    # the design: build/mw5a75b/mw5a75b.bit
-openFPGALoader -c ft4232 --detect          # expect IDCODE 0x41111043
-openFPGALoader -c ft4232 -m build/mw5a75b/mw5a75b.bit   # load to SRAM
+openFPGALoader -c ft4232 --ftdi-serial FT4YW8B7 --detect          # expect IDCODE 0x41111043
+openFPGALoader -c ft4232 --ftdi-serial FT4YW8B7 -m build/mw5a75b/mw5a75b.bit   # load to SRAM
 ```
 
 | file | what |
@@ -28,6 +28,12 @@ openFPGALoader -c ft4232 -m build/mw5a75b/mw5a75b.bit   # load to SRAM
 | `mw5a75b/rgmii.py` | LiteEth's RGMII transmitter with one more register stage |
 | `soc.py` | PLL, two LiteEth stacks, the node |
 | `tests/vectors/` | golden vectors written by `wasm-hdl-ref/tests/vectors.rs` |
+
+Two FT4232Hs are on this host: the FT4232H-56Q MiniModule wired to the
+5A-75B (serial `FT4YW8B7`) and the KD240's carrier card (`XFL1HM3KDKK1`),
+which must never be driven from here. Every `openFPGALoader` command names
+the MiniModule with `--ftdi-serial FT4YW8B7` (`openFPGALoader --scan-usb`
+lists both).
 
 Bring-up goes one port at a time (`python soc.py --only-port 0`), with
 `--tx-delay0` / `--tx-delay1` (0 to 2 ns) to tune RGMII per port, then both:

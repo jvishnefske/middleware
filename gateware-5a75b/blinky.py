@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """JTAG bring-up design: blinks the user LED at about 1.5 Hz from the 25 MHz
 clock. Build with `python blinky.py`, load to SRAM with
-`openFPGALoader -c ft4232 -m build/blinky/blinky.bit`."""
+`openFPGALoader -c ft4232 --ftdi-serial FT4YW8B7 -m build/blinky/blinky.bit`."""
 
 import argparse
 

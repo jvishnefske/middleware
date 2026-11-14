@@ -7,7 +7,7 @@ node (frame core, system requests, bridge engine). No CPU.
     python soc.py --ip0 192.168.1.50 --ip1 192.168.2.50
     python soc.py --only-port 0      # one PHY, for per-port bring-up
 
-Load to SRAM with `openFPGALoader -c ft4232 -m build/mw5a75b/mw5a75b.bit`.
+Load to SRAM with `openFPGALoader -c ft4232 --ftdi-serial FT4YW8B7 -m build/mw5a75b/mw5a75b.bit`.
 
 Clocking: a PLL makes the 50 MHz system clock from the 25 MHz input
 (LiteEth's system-side IPv4 checksum and ICMP FIFO close timing at about
