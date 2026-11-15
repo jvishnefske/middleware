@@ -992,6 +992,88 @@ encoder; `MdnsSocket` implements `Browse`.
   replies from another port, one attempt),
   `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
 
+### Key-value persistence (KV…)
+
+The `kv` module: a key-value store behind the async `KvStore` trait and the
+blocking `KvStoreSync`, with `Blocking` adapting one to the other.
+`tests/kv_conformance.rs` holds the contract cases; `tests/kv.rs` runs them
+as `table::*` (`Blocking<KvTable>`), `remote::*` and `remote_small_pages::*`
+(`RemoteKv` over the memory bus to a `KvHandler`), and `tests/kv_file.rs`
+*(kv-file)* runs them as `file_sync::*` and `file_batched::*`. A case named
+below without a prefix runs under every one of those modules that applies.
+
+- [x] KV1 Every write is stamped with a revision from one counter per store:
+  from 1, strictly increasing, consecutive while the store stays open, and
+  never reused. A delete returns the removed entry's revision and consumes
+  a new one —
+  `revisions_start_at_one_and_increase`,
+  `kv::table::tests::put_overwrite_keeps_one_entry_and_restamps`,
+  `kv::table::tests::exhausted_revisions_fail_without_writing`.
+- [x] KV2 `Expect::{Any, Absent, Exact}` makes a put or delete
+  compare-and-swap; a mismatch is `Conflict` carrying the current revision
+  (`None` if absent) —
+  `expect_semantics_and_conflict_revision`,
+  `kv::tests::expect_holds_truth_table`.
+- [x] KV3 No error changes the store or consumes a revision. Deleting an
+  absent key under `Any` or `Absent` returns `Ok(None)` and writes nothing —
+  `errors_leave_the_store_unchanged`, `delete_of_absent_key_writes_nothing`,
+  `kv::table::tests::delete_semantics`.
+- [x] KV4 Reads copy into the caller's buffer; a value that does not fit is
+  `BufferTooSmall { needed }` and the entry is intact. A key or value over
+  `LIMITS` is `TooLarge`; a store with no room for a new key is `Full` —
+  `buffer_too_small_reports_needed_size`,
+  `scan_buffer_too_small_reports_needed_size`, `too_large_is_refused`,
+  `full_at_capacity`,
+  `kv::table::tests::full_rejects_new_keys_but_not_updates`,
+  `kv::table::tests::limits_follow_the_const_parameters`.
+- [x] KV5 Scans visit matching entries in key byte order, strictly after
+  the `after` cursor, stop on `Flow::Stop`, and resuming from the last key
+  seen visits every entry exactly once —
+  `scan_visits_keys_in_byte_order`, `scan_prefix_filter_is_segment_wise`,
+  `scan_after_is_exclusive`, `scan_stops_on_flow_stop`,
+  `scan_paging_visits_every_entry_once`.
+- [x] KV6 `KvTable` is heap-free and builds for `thumbv6m-none-eabi`; with
+  no features the crate stays `no_std` —
+  `scripts/check-features.sh`, `cargo build --no-default-features`,
+  `kv::table::tests::entries_stay_sorted_by_key_bytes`.
+- [x] KV7 The `kv::wire` format round-trips every request and response,
+  matches its documented layout, and rejects truncated, garbled,
+  out-of-order or trailing input with an error, never a panic —
+  `kv::wire::tests::requests_round_trip`, `responses_round_trip`,
+  `layout_is_as_documented`, `sizes_cover_the_worst_case`,
+  `every_truncation_of_a_valid_message_is_an_error`,
+  `garbled_input_never_panics_and_valid_decodes_reencode`,
+  `pages_out_of_order_or_with_trailing_bytes_are_rejected`.
+- [x] KV8 `RemoteKv` over any `Requester` and `KvHandler` over any
+  `Responder` pass the whole contract, including multi-page scans. Store
+  errors arrive unchanged; transport, malformed and unexpected replies are
+  `Backend` —
+  `tests/kv.rs`: `remote::*`, `remote_small_pages::*`,
+  `remote_transport_error_is_backend`;
+  `kv::remote::tests::store_errors_are_preserved`,
+  `backend_codes_and_transport_errors_map_to_backend`,
+  `malformed_and_unexpected_replies_are_errors`,
+  `scans_page_through_small_replies`.
+- [x] KV9 *(kv-file)* `FileKv` persists across reopen and keeps its revision
+  counter across reopen and compaction, even after deleting the
+  highest-revision key. In `Batched` mode, revisions of lost writes are never
+  reissued —
+  `tests/kv_file.rs`: `file_sync::revisions_survive_reopen`;
+  `kv::file::tests::entries_persist_across_reopen`,
+  `revision_counter_survives_compaction_after_deleting_the_highest_key`,
+  `compaction_shrinks_the_log_and_preserves_entries_and_revisions`,
+  `batched_mode_reserves_revisions_so_lost_writes_are_not_reissued`,
+  `batched_mode_flushes_and_persists`.
+- [x] KV10 *(kv-file)* A torn final record (any truncation) is dropped on
+  open and the prior state returns; damage before an intact record is
+  `Corrupt { offset }` and leaves the file untouched —
+  `kv::file::tests::every_truncation_of_the_last_record_reopens_to_the_prior_state`,
+  `crc_corruption_in_the_middle_is_an_error`;
+  `kv::file::log::tests::every_truncation_of_the_last_frame_is_a_torn_tail`,
+  `damage_before_an_intact_frame_is_corruption`.
+- [ ] KV11 *(kv-file)* A failed append or sync rolls back or poisons the
+  store as documented. Not yet tested: needs fault injection.
+
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
