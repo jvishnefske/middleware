@@ -10,6 +10,11 @@
 //! # Layers
 //!
 //! * [`key`] — validated, transport-neutral addresses (`sensor/temperature`).
+//! * [`kv`] — persistence: the [`kv::KvStore`] key-value trait (revisions,
+//!   compare-and-swap, ordered paged scans) and its blocking twin
+//!   [`kv::KvStoreSync`]; the heap-free [`kv::table::KvTable`], the remote
+//!   store over any transport ([`kv::remote`], [`kv::wire`]) (always built,
+//!   `no_std`), and the durable `kv::file::FileKv` log (`kv-file`).
 //! * [`transport`] — byte-level traits (the 0.5 contract: request metadata
 //!   and options, gather, declared delivery, gaps, split). Every call takes
 //!   caller-owned buffers, so implementations need no heap. The in-process
@@ -66,6 +71,7 @@
 //! | `mdns`     | `mdns::socket`, `mdns::announce`, `mdns::origin` | `std` | tokio, socket2 |
 //! | `dns-sd`   | `dns::unicast` | `std`          | tokio, getrandom          |
 //! | `memory`   | `transport::memory` | `std`     | tokio (timers); for tests and examples |
+//! | `kv-file`  | `kv::file`  | `std`             | the filesystem; no extra crates |
 //! | `postcard` | `codec::postcard` | `no_std`    | serde                     |
 //! | `prost`    | `codec::prost`    | `no_std` + `alloc` | prost              |
 //!
@@ -90,6 +96,7 @@ pub mod crc;
 pub mod dns;
 pub mod fw_ota;
 pub mod key;
+pub mod kv;
 pub mod loader;
 pub mod mdns;
 pub mod rpc;

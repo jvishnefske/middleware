@@ -14,6 +14,7 @@ request/response behind one set of traits, with pluggable transports.
 | `mdns`     | mDNS browse (`MdnsSocket`) and announce (`MdnsAnnouncer`) | `std` + tokio        |
 | `dns-sd`   | unicast DNS-SD browse against cluster DNS         | `std` + tokio                |
 | `memory`   | in-process backend for tests and examples         | `std` + tokio                |
+| `kv-file`  | durable key-value store (`kv::file::FileKv`), an append-only log | `std`          |
 | `trust`    | signed payload checks (SHA-256, Ed25519 verify)   | `no_std`, no heap            |
 | `postcard` | serde codec                                       | `no_std`                     |
 | `prost`    | protobuf codec                                    | `no_std` + `alloc`           |
@@ -56,6 +57,24 @@ Feature isolation is checked by `scripts/check-features.sh`. CI
 (`.github/workflows/ci.yml`) runs it, the workspace tests, the RP base
 firmware build and the web check on every pull request; the ESP firmwares
 need the espup toolchain and are built locally.
+
+## Persistence
+
+`kv` puts a key-value store behind one trait, `KvStore`. It has a blocking
+twin, `KvStoreSync`, because request handlers are synchronous; `Blocking`
+adapts one to the other. Keys are ordinary middleware keys. Every write is
+stamped with a revision, and a put or delete can be made conditional with
+`Expect` (compare-and-swap). Scans return keys in order, in pages.
+
+| store | where | durability | builds on |
+|---|---|---|---|
+| `kv::table::KvTable` | RAM, fixed capacity | none | `no_std`, no heap |
+| `kv::file::FileKv` | append-only log file, CRC per record | every acknowledged write survives power loss (`Durability::Sync`), or after `flush()` (`Batched`) | `kv-file` |
+| `kv::remote::RemoteKv` | any store, served by `kv::remote::KvHandler` over any `Requester` / `Responder` | the served store's | `no_std`, no heap |
+
+`tests/kv_conformance.rs` is the contract as tests. `tests/kv.rs` runs it
+against the table and against the remote store over the in-process bus, and
+`tests/kv_file.rs` runs it against the file store in both durability modes.
 
 ## Device platform
 

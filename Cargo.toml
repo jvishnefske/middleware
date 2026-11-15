@@ -19,6 +19,10 @@ default = []
 # Host-only conveniences. Never enabled by the microcontroller features.
 std = []
 
+# Durable key-value store on the local filesystem (`kv::file::FileKv`):
+# an append-only log with CRC-checked records. Host only.
+kv-file = ["std"]
+
 # Codecs
 postcard = ["dep:postcard", "dep:serde"]
 prost = ["dep:prost"]
