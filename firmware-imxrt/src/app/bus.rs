@@ -21,6 +21,11 @@
 //!   that drops what no peer wants.
 //! * `sent` — per link, the word that the last reply has left (written and
 //!   flushed), which the controller waits for before a reset.
+//! * `subscriptions` — the running payload's subscription keys
+//!   ([`Bus::set_subscriptions`], kept current by the controller; empty
+//!   while none runs) and a signal when they change, so the Zenoh link
+//!   declares a subscriber for each: the router forwards a publication to
+//!   the board only for a key it declared.
 //!
 //! The bus is created once at boot and shared as `&'static Bus` with the
 //! tasks, as embassy tasks require.
@@ -34,6 +39,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use heapless::{String, Vec};
 use imxrt_base::links::{LinkId, LinkKind, Links, MAX_LINKS, Publication};
+use imxrt_base::zenoh_mgmt::{SubSet, subscription_set};
 use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, is_system_key, keys};
@@ -139,6 +145,8 @@ pub struct Bus {
     sent: [Signal<Mutex, u8>; MAX_LINKS],
     ready: [Signal<Mutex, ()>; MAX_LINKS],
     routing: BlockingMutex<Mutex, RefCell<Routing>>,
+    subscriptions: BlockingMutex<Mutex, RefCell<SubSet>>,
+    subscriptions_changed: Signal<Mutex, ()>,
 }
 
 /// The slot of `link` in a per-link array (every [`LinkId`] is below
@@ -157,7 +165,37 @@ impl Bus {
             sent: [const { Signal::new() }; MAX_LINKS],
             ready: [const { Signal::new() }; MAX_LINKS],
             routing: BlockingMutex::new(RefCell::new(Links::evkb())),
+            subscriptions: BlockingMutex::new(RefCell::new(SubSet::new())),
+            subscriptions_changed: Signal::new(),
         }
+    }
+
+    /// Records the running payload's subscription keys (none when it has
+    /// stopped); signals the Zenoh link when they changed.
+    pub fn set_subscriptions<'a>(&self, keys: impl Iterator<Item = &'a str>) {
+        let next = subscription_set(keys);
+        let changed = self.subscriptions.lock(|s| {
+            let mut s = s.borrow_mut();
+            let changed = *s != next;
+            if changed {
+                *s = next;
+            }
+            changed
+        });
+        if changed {
+            self.subscriptions_changed.signal(());
+        }
+    }
+
+    /// The payload's subscription keys.
+    pub fn subscriptions(&self) -> SubSet {
+        self.subscriptions.lock(|s| s.borrow().clone())
+    }
+
+    /// Waits until the subscription keys change (cancel-safe: a change
+    /// while nobody waits is kept).
+    pub async fn subscriptions_changed(&self) {
+        self.subscriptions_changed.wait().await;
     }
 
     /// Queues a message for the controller, waiting while it is busy.

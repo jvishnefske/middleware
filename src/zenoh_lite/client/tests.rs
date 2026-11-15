@@ -320,3 +320,46 @@ fn zn2_client_refuses_to_send_before_open_and_oversized_messages() {
         lite.restart();
     });
 }
+
+#[test]
+fn zn2_client_undeclares_a_subscriber_and_then_drops_its_samples() {
+    let mut lite = client();
+    futures::executor::block_on(async {
+        let k = Filter::Prefix(Key::from_static("k"));
+        // Undeclaring what was never declared: nothing happens.
+        lite.undeclare_subscriber(Filter::Exact(Key::from_static("none")))
+            .await
+            .expect("table");
+        lite.declare_subscriber(k).await.expect("table");
+        lite.open().await.expect("open");
+        let before = lite.stream_mut().out.len();
+        lite.undeclare_subscriber(k).await.expect("undeclare");
+        let out = lite.stream_mut().out[before..].to_vec();
+        let items = written(&out);
+        let undeclared: Vec<u32> = items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Network(NetworkMessage::Declare(Declare {
+                    body:
+                        DeclareBody::UndeclareSubscriber {
+                            id,
+                            wire_expr: None,
+                        },
+                    ..
+                })) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(undeclared.len(), 1, "{items:?}");
+        // The router's push for k/a is no longer ours: dropped, and the
+        // session ends with the lease.
+        let mut buf = [0u8; 64];
+        let end = lite.next_event(&mut buf).await;
+        assert_eq!(end, Err(LiteError::Down(DownReason::LeaseExpired)));
+        // Again: already gone, nothing sent.
+        let n = lite.stream_mut().out.len();
+        lite.undeclare_subscriber(k).await.expect("table");
+        assert_eq!(lite.stream_mut().out.len(), n);
+    });
+    assert_eq!(lite.stats().dropped_samples, 2, "'other' and k/a");
+}

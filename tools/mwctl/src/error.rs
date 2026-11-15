@@ -91,6 +91,16 @@ impl From<KeyError> for Error {
 }
 
 impl Error {
+    /// Whether this is the serial port itself going away: a USB CDC device
+    /// that resets drops off the bus, and the open port then fails with a
+    /// broken pipe (EPIPE), EIO, ENXIO or ENODEV. After a reboot request
+    /// that means the reboot happened.
+    pub fn is_port_lost(&self) -> bool {
+        let Error::Io(e) = self else { return false };
+        matches!(e.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected)
+            || matches!(e.raw_os_error(), Some(5 | 6 | 19 | 32))
+    }
+
     /// The device status behind this error, looking through upload context.
     pub fn status(&self) -> Option<HandlerError> {
         match self {

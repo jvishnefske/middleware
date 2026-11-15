@@ -94,8 +94,8 @@ use crate::transport::{
 use crate::zenoh_wire as wire;
 
 use super::codec::network::{
-    NetExts, NetworkMessage, Push, PushBody, Put, QOS_BLOCK, QOS_DEFAULT, Query, QueryTarget,
-    Reply, ReplyErr, Request, Response, ResponseBody, ResponseFinal, Value,
+    Declare, DeclareBody, NetExts, NetworkMessage, Push, PushBody, Put, QOS_BLOCK, QOS_DEFAULT,
+    Query, QueryTarget, Reply, ReplyErr, Request, Response, ResponseBody, ResponseFinal, Value,
 };
 use super::codec::transport::{
     Batch, Close, Cursor, DEFAULT_BATCH, LEN_PREFIX, TransportMessage, write_batch,
@@ -691,6 +691,30 @@ where
             Some(i) => self.declare_from(i).await,
             None => Ok(()),
         }
+    }
+
+    /// Undeclares the subscriber for `filter` (now if open; it is not
+    /// declared again after an open), so samples for it are no longer
+    /// delivered. Undeclaring a filter never declared does nothing.
+    pub async fn undeclare_subscriber(&mut self, filter: KeyFilter<'_>) -> Res<(), S> {
+        let (decls, id) = self
+            .decls
+            .remove_subscriber(filter)
+            .map_err(LiteError::Table)?;
+        self.decls = decls;
+        let Some(id) = id else { return Ok(()) };
+        if !self.session.is_open() {
+            return Ok(());
+        }
+        self.send_network(&[NetworkMessage::Declare(Declare {
+            interest_id: None,
+            exts: NetExts::DEFAULT,
+            body: DeclareBody::UndeclareSubscriber {
+                id,
+                wire_expr: None,
+            },
+        })])
+        .await
     }
 
     /// Declares a queryable on `key` and on its per-node key (now if open,

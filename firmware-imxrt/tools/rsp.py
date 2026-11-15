@@ -55,6 +55,15 @@ class Rsp:
         # fills and blocks it mid-transfer.
         out = open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "jlink-gdb.log"), "wb") if JLINK else subprocess.PIPE
         self.proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT)
+        try:
+            self._connect(port)
+        except BaseException:
+            # A server left running would hold the port for the next try.
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+            raise
+
+    def _connect(self, port):
         deadline = time.time() + 30
         while True:
             try:

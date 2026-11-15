@@ -318,6 +318,7 @@ impl Controller {
         self.set_status_after(before);
         answer(self.bus, Ok(()));
         self.session(&mut payload).await;
+        self.bus.set_subscriptions(core::iter::empty());
         imxrt_base::requests::ended(&mut self.svc, &payload);
     }
 
@@ -327,6 +328,8 @@ impl Controller {
         let mut dropped = 0u32;
         loop {
             yield_now().await;
+            // Init or any handler may subscribe: the Zenoh link follows.
+            self.bus.set_subscriptions(payload.subscriptions());
             payload.device().poll(now_us());
             for _ in 0..MAX_EVENTS {
                 let Some(event) = payload.device().pop_event() else { break };

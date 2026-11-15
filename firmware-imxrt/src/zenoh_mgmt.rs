@@ -157,6 +157,40 @@ pub fn admit(facts: &Facts, key: Key<'_>, body: &[u8]) -> Result<Admission, Refu
     }
 }
 
+/// A payload subscription key, as the Zenoh link declares it.
+pub type SubKey = heapless::String<{ middleware::key::MAX_KEY_LEN }>;
+/// The payload's subscriptions (at most `MAX_SUBSCRIPTIONS`).
+pub type SubSet = heapless::Vec<SubKey, { middleware::wasm_abi::MAX_SUBSCRIPTIONS }>;
+
+/// The set the Zenoh link declares subscribers for, from the payload's
+/// subscription keys: valid non-`sys` keys, each once, in order (a `sys/`
+/// publication from the network never reaches a payload, so declaring it
+/// would only draw traffic).
+pub fn subscription_set<'a>(keys: impl Iterator<Item = &'a str>) -> SubSet {
+    let mut set = SubSet::new();
+    for k in keys {
+        let Ok(key) = Key::new(k) else { continue };
+        if is_system_key(key) || set.iter().any(|s| s.as_str() == k) {
+            continue;
+        }
+        let Ok(s) = SubKey::try_from(k) else { continue };
+        let _ = set.push(s);
+    }
+    set
+}
+
+/// What changes when the declared set `old` becomes `new`: the keys to
+/// undeclare (in `old` only) and to declare (in `new` only).
+pub fn subscription_diff(old: &SubSet, new: &SubSet) -> (SubSet, SubSet) {
+    let missing = |from: &SubSet, other: &SubSet| {
+        from.iter()
+            .filter(|k| !other.contains(k))
+            .cloned()
+            .collect::<SubSet>()
+    };
+    (missing(old, new), missing(new, old))
+}
+
 #[cfg(test)]
 mod tests {
     //! ZN4 against the real request service on the RAM HyperFlash model.
@@ -631,5 +665,23 @@ mod tests {
         let stop = control(1, ControlOp::Stop, &MAC, 3);
         assert_eq!(zenoh(&mut s, keys::STOP, &stop), Ok(StdVec::new()));
         assert_eq!(s.state().control(), ControlCounter(3));
+    }
+
+    #[test]
+    fn gap_payload_subscriptions_become_zenoh_declarations() {
+        let set = subscription_set(["app/cmd", "sys/info", "app/cmd", "bad//key", "app/led"].into_iter());
+        let keys: std::vec::Vec<&str> = set.iter().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["app/cmd", "app/led"], "valid non-sys keys, once");
+        let next = subscription_set(["app/led", "app/new"].into_iter());
+        let (undeclare, declare) = subscription_diff(&set, &next);
+        assert_eq!(undeclare.iter().map(|k| k.as_str()).collect::<std::vec::Vec<_>>(), ["app/cmd"]);
+        assert_eq!(declare.iter().map(|k| k.as_str()).collect::<std::vec::Vec<_>>(), ["app/new"]);
+        // A stopped payload: everything goes.
+        let (undeclare, declare) = subscription_diff(&next, &SubSet::new());
+        assert_eq!((undeclare.len(), declare.len()), (2, 0));
+        // A reconnect: everything is declared again.
+        let (undeclare, declare) = subscription_diff(&SubSet::new(), &next);
+        assert_eq!((undeclare.len(), declare.len()), (0, 2));
+        assert_eq!(subscription_diff(&next, &next), (SubSet::new(), SubSet::new()));
     }
 }

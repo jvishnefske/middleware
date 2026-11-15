@@ -74,6 +74,11 @@ pub struct Script {
     pub late_reply: Vec<usize>,
     /// Bytes emitted before the first reply (boot garbage).
     pub preamble: Vec<u8>,
+    /// A USB CDC port that disappears when the device resets: the reply
+    /// to the request that triggered the reset is lost and the port then
+    /// fails every read and write with a broken pipe until
+    /// [`FakeDevice::reappear`] (the host reopening the path).
+    pub vanish_on_reset: bool,
 }
 
 pub struct FakeDevice {
@@ -97,6 +102,7 @@ pub struct FakeDevice {
     rekey_open: bool,
     board: Option<Vec<u8>>,
     fw: Option<Fw>,
+    gone: bool,
 }
 
 /// The firmware updater on the bootrom model.
@@ -191,6 +197,7 @@ impl FakeDevice {
             rekey_open: false,
             board: None,
             fw: None,
+            gone: false,
         }
     }
 
@@ -224,6 +231,12 @@ impl FakeDevice {
             fw: Some(Fw::boot(sim, true, true)),
             ..self
         }
+    }
+
+    /// The port is back after a [`Script::vanish_on_reset`] reset (the
+    /// host reopened it).
+    pub fn reappear(&mut self) {
+        self.gone = false;
     }
 
     /// Resets the bootrom model now (watchdog or reset button) and boots a
@@ -479,12 +492,19 @@ impl FakeDevice {
         // lost).
         if self.fw.as_ref().is_some_and(|fw| fw.sim.scheduled().is_some()) {
             self.fw_reset();
+            if self.script.vanish_on_reset {
+                self.tx.clear();
+                self.gone = true;
+            }
         }
     }
 }
 
 impl Transport for FakeDevice {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.gone {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         self.raw_rx.extend_from_slice(bytes);
         for &b in bytes {
             if let Split::Frame(_) = self.splitter.push(b) {
@@ -496,6 +516,9 @@ impl Transport for FakeDevice {
     }
 
     fn read(&mut self, buf: &mut [u8], _timeout: Duration) -> io::Result<usize> {
+        if self.gone {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         let n = buf.len().min(self.tx.len());
         for (dst, src) in buf.iter_mut().zip(self.tx.drain(..n)) {
             *dst = src;

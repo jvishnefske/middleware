@@ -13,7 +13,10 @@
 //!   `sys/info` and `sys/trust/info` on an unclaimed board, signed
 //!   start/stop once claimed) and answers on this link; the answer goes
 //!   back as the query's reply;
-//! * a sample on a declared subscription: an inbound publication;
+//! * a sample on a declared subscription: an inbound publication (the
+//!   session declares a subscriber for each of the running payload's
+//!   subscription keys, [`Bus::subscriptions`], and follows their changes;
+//!   a new session declares them again);
 //! * a publication the bus queued for this link: a Zenoh Put with the
 //!   middleware attachment (`Publisher::publish`).
 //!
@@ -28,7 +31,7 @@
 
 use core::cell::Cell;
 
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
@@ -38,6 +41,8 @@ use imxrt_base::config::Endpoint;
 use imxrt_base::links::LinkId;
 use middleware::loader::keys;
 use middleware::transport::Publisher;
+use imxrt_base::zenoh_mgmt::{SubSet, subscription_diff};
+use middleware::key::Filter;
 use middleware::zenoh_lite::{Clock, Config, Event, ZenohLite, Zid};
 
 use super::bus::{Bus, Inbound, Kind};
@@ -151,10 +156,26 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
             client.sender_id().0[3],
             if declared { "declared" } else { "partly declared" }
         ));
+        let mut declared = SubSet::new();
+        if follow_subscriptions(&mut client, bus, &mut declared).await.is_err() {
+            Timer::after(RETRY).await;
+            continue;
+        }
         let mut buf = [0u8; 1024];
         loop {
-            match select(client.next_event(&mut buf), bus.next_outbound(LinkId::ZENOH)).await {
-                Either::First(Ok(Event::Query(q))) => {
+            match select3(
+                client.next_event(&mut buf),
+                bus.next_outbound(LinkId::ZENOH),
+                bus.subscriptions_changed(),
+            )
+            .await
+            {
+                Either3::Third(()) => {
+                    if follow_subscriptions(&mut client, bus, &mut declared).await.is_err() {
+                        break;
+                    }
+                }
+                Either3::First(Ok(Event::Query(q))) => {
                     next_id = next_id.wrapping_add(1);
                     let id = next_id;
                     let result = match Inbound::new(LinkId::ZENOH, Kind::Request { id }, q.key, q.body, q.meta.sender) {
@@ -171,16 +192,16 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
                         break;
                     }
                 }
-                Either::First(Ok(Event::Sample(s))) => {
+                Either3::First(Ok(Event::Sample(s))) => {
                     if let Some(msg) = Inbound::new(LinkId::ZENOH, Kind::Publish, s.key, s.payload, s.meta.sender) {
                         bus.send_inbound(msg).await;
                     }
                 }
-                Either::First(Err(e)) => {
+                Either3::First(Err(e)) => {
                     bus.log(format_args!("zenoh: session lost: {e:?}"));
                     break;
                 }
-                Either::Second(p) => {
+                Either3::Second(p) => {
                     if client.publish(p.key(), &p.payload).await.is_err() {
                         break;
                     }
@@ -189,4 +210,33 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
         }
         Timer::after(RETRY).await;
     }
+}
+
+/// Declares a subscriber for each of the payload's subscription keys not
+/// yet `declared` and undeclares those it dropped; `declared` follows.
+/// An error is a lost session.
+async fn follow_subscriptions<S, C>(
+    client: &mut ZenohLite<S, C>,
+    bus: &Bus,
+    declared: &mut SubSet,
+) -> Result<(), ()>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+    C: Clock,
+{
+    let want = bus.subscriptions();
+    let (gone, new) = subscription_diff(declared, &want);
+    for k in &gone {
+        let Ok(key) = middleware::Key::new(k) else { continue };
+        client.undeclare_subscriber(Filter::Exact(key)).await.map_err(|_| ())?;
+    }
+    for k in &new {
+        let Ok(key) = middleware::Key::new(k) else { continue };
+        client.declare_subscriber(Filter::Exact(key)).await.map_err(|_| ())?;
+    }
+    if !gone.is_empty() || !new.is_empty() {
+        bus.log(format_args!("zenoh: payload subscriptions: {} declared, {} undeclared", new.len(), gone.len()));
+    }
+    *declared = want;
+    Ok(())
 }

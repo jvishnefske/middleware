@@ -63,8 +63,8 @@ COMMANDS:
     trust claim --key <KEYFILE>
                                Pin KEYFILE's public key (sys/trust/claim). Accepted when
                                unclaimed, or within 60 s after BOOT was held for 3 s
-    fw info                    RP2350: firmware update state, running slot, slot versions
-    fw update <IMAGE>          RP2350: install a firmware image (UF2 or raw .bin) in the
+    fw info                    RP2350, RT1050: firmware update state, running slot, slot versions
+    fw update <IMAGE>          RP2350, RT1050: install a firmware image (UF2, .bin, .slot) in the
                                inactive A/B slot, reboot into it on trial, reconnect to the
                                same --port and confirm it once its self-test passes
         --key <KEYFILE>            sign the commit (a claimed device requires it)

@@ -192,6 +192,26 @@ impl<const D: usize> Declarations<D> {
         Ok((t, Some(index)))
     }
 
+    /// The table without the subscriber for `filter`, and its entity id;
+    /// `None` (and an unchanged table) if there is none.
+    pub fn remove_subscriber(
+        &self,
+        filter: KeyFilter<'_>,
+    ) -> Result<(Self, Option<u32>), TableError> {
+        let expr = filter_expr(filter)?;
+        let Some(pos) = self
+            .entries
+            .iter()
+            .position(|d| matches!(d.kind, DeclKind::Subscriber { .. }) && d.expr == expr)
+        else {
+            return Ok((self.clone(), None));
+        };
+        let mut next = self.clone();
+        let id = next.entries.get(pos).map(|d| d.id);
+        next.entries.remove(pos);
+        Ok((next, id))
+    }
+
     /// The table with the two queryables of `key` added (the key and its
     /// per-node key for `sender`), and the index of the first; `None` if
     /// they exist. `self` is unchanged on error.

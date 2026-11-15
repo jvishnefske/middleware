@@ -561,8 +561,10 @@ impl<L: Endpoint> Device<L> {
             step += 1;
             match self.fw(&Command::Reboot) {
                 Ok(_) => {}
-                // The reply can lose the race with the reset.
+                // The reply can lose the race with the reset, and a USB
+                // CDC port goes away with the device.
                 Err(Error::Timeout { .. }) => done.reboot_unanswered = true,
+                Err(e) if e.is_port_lost() => done.reboot_unanswered = true,
                 Err(e) => return Err(wrap(step, keys::REBOOT, e)),
             }
             done.rebooted = true;
@@ -571,9 +573,13 @@ impl<L: Endpoint> Device<L> {
         Ok(done)
     }
 
-    /// `sys/fw/reboot`.
+    /// `sys/fw/reboot`; a port that goes away with the reset counts as
+    /// done.
     pub fn fw_reboot(&mut self) -> Result<(), Error> {
-        self.fw(&Command::Reboot).map(drop)
+        match self.fw(&Command::Reboot) {
+            Err(e) if e.is_port_lost() => Ok(()),
+            r => r.map(drop),
+        }
     }
 
     /// `sys/fw/confirm`, retried while the device answers `Unavailable`
@@ -1012,6 +1018,58 @@ mod tests {
         // The installed slot is the file, header first.
         let sim = d.link().transport().fw_sim().unwrap();
         assert_eq!(sim.slot(Slot::B)[..HEADER_LEN], file[..HEADER_LEN]);
+    }
+
+    #[test]
+    fn rt15_a_usb_port_that_vanishes_with_the_reboot_is_a_reboot() {
+        let fake =
+            rt1050()
+                .with_claim(vector_seed().public_key())
+                .with_script(crate::fake::Script {
+                    vanish_on_reset: true,
+                    ..Default::default()
+                });
+        let mut d = device(fake);
+        let img = load_image(&rt_image(20_000, V1_1, true, 2), None).unwrap();
+        let seed = vector_seed();
+        let done = d
+            .fw_update(
+                &img,
+                UpdateOptions {
+                    key: Some(&seed),
+                    reboot: true,
+                },
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(
+            (done.slot, done.rebooted, done.reboot_unanswered),
+            (Slot::B, true, true),
+            "the broken pipe after the reboot request is the reset"
+        );
+        // The port is gone until the host reopens it.
+        let lost = d.fw_info().unwrap_err();
+        assert!(lost.is_port_lost(), "{lost:?}");
+        d.link_mut().transport_mut().reappear();
+        assert_eq!(d.fw_info().unwrap().state, StateCode::Trial);
+        d.fw_confirm(3, || {}).unwrap();
+        assert_eq!(d.fw_info().unwrap().state, StateCode::Confirmed);
+        // `fw reboot` on its own: the same rule.
+        assert!(
+            !Error::Timeout {
+                key: "k".into(),
+                attempts: 1
+            }
+            .is_port_lost()
+        );
+        assert!(
+            Error::Io(std::io::Error::from_raw_os_error(6)).is_port_lost(),
+            "ENXIO"
+        );
+        assert!(
+            !Error::Io(std::io::Error::from_raw_os_error(13)).is_port_lost(),
+            "EACCES is not"
+        );
     }
 
     #[test]

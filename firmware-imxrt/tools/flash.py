@@ -12,11 +12,19 @@ with the file.
 
 usage: python3 -I flash.py [--flasher ELF] [--erase OFFSET:LEN ...] OFFSET:FILE [...]
        python3 -I flash.py --verify-only OFFSET:FILE [...]
+       python3 -I flash.py --reset
 `--erase` erases whole 256 KiB sectors (e.g. the record, trust and payload
 regions before a first flashing) before the images are programmed.
 Offsets are flash offsets (0x0 for the bootloader, 0x400000 slot A, ...).
 The board may be in the boot ROM's serial downloader mode or running
 anything; the flasher is loaded over it.
+
+After programming (or with `--reset` alone) the board is reset with
+WDOG1's software reset. With the J-Link backend the reset is then checked:
+after BOOT_SECONDS VTOR must point into SDRAM, where the bootloader starts
+the firmware; still in HyperFlash or the boot ROM means the board stayed in
+the bootloader (seen after some resets), and a second WDOG1 reset is
+issued (at most RESETS in all).
 """
 import os, re, subprocess, sys, time
 
@@ -89,6 +97,53 @@ def program(images, flasher, erases=()):
 
 
 CCGR3, WDOG1_WCR = 0x400FC074, 0x400B8000
+VTOR = 0xE000ED08
+SDRAM = range(0x8000_0000, 0x8000_0000 + 32 * 1024 * 1024)
+BOOT_SECONDS = 6.0   # the bootloader copies and hashes the slot (about 1 s for 800 KB)
+RESETS = 3
+
+
+def open_rsp(attempts=3):
+    """A GDB session, retried: the first J-Link session after the board
+    has run often drops or does not answer."""
+    for n in range(attempts):
+        try:
+            return Rsp()
+        except (ConnectionResetError, TimeoutError, OSError) as e:
+            if n + 1 == attempts:
+                raise
+            print(f"GDB session failed ({e!r}); retrying")
+            time.sleep(3)
+
+
+def booted(vtor):
+    """Whether VTOR says the firmware runs: its vector table is in SDRAM."""
+    return vtor in SDRAM
+
+
+def reset_and_check_rsp():
+    """WDOG1 resets until the firmware runs (VTOR in SDRAM), at most
+    RESETS; returns whether it does."""
+    for n in range(1, RESETS + 1):
+        reset_board_rsp()
+        time.sleep(BOOT_SECONDS)
+        g = open_rsp()
+        try:
+            g.halt()
+            vtor = g.word(VTOR)
+            pc = g.get_reg("pc")
+            g.cont()
+        finally:
+            try:
+                g.close()
+            except Exception:
+                pass
+        if booted(vtor):
+            print(f"firmware running (VTOR {vtor:#010x}, PC {pc:#010x}) after {n} reset(s)")
+            return True
+        print(f"still in the bootloader or the ROM (VTOR {vtor:#010x}, PC {pc:#010x}); resetting again")
+    print(f"the firmware did not start after {RESETS} resets: power-cycle the board")
+    return False
 
 
 def rsp_jlink():
@@ -115,7 +170,7 @@ def verify_rsp(images):
 
 def reset_board_rsp():
     """`reset_board` over a GDB session: WDOG1's software reset."""
-    g = Rsp()
+    g = open_rsp()
     try:
         g.halt()
         if (g.word(CCGR3) >> 16) & 3 == 0:
@@ -185,7 +240,13 @@ def main():
         erases.append((int(off, 0), int(length, 0)))
         del args[i : i + 2]
     verify_only = "--verify-only" in args
-    args = [a for a in args if a != "--verify-only"]
+    reset_only = "--reset" in args
+    args = [a for a in args if a not in ("--verify-only", "--reset")]
+    if reset_only:
+        if rsp_jlink():
+            sys.exit(0 if reset_and_check_rsp() else 1)
+        reset_board()
+        sys.exit(0)
     images = []
     for spec in args:
         off, _, path = spec.partition(":")
@@ -209,7 +270,10 @@ def main():
             program(images, flasher, erases)
     ok = verify_rsp(images) if rsp_jlink() else verify(images)
     if not verify_only:
-        reset_board_rsp() if rsp_jlink() else reset_board()
+        if rsp_jlink():
+            ok &= reset_and_check_rsp()
+        else:
+            reset_board()
     sys.exit(0 if ok else 1)
 
 
