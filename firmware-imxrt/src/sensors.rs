@@ -19,15 +19,20 @@
 //!   receiver register values for each [`AudioRate`] (SC5).
 //! * [`audio`] — fixed-point RMS and peak over a block, and the G.711
 //!   µ-law encoder and decoder (SC5).
+//! * [`imu_route`] and [`mic_route`] — the source routes' cores: samples
+//!   to `middleware::stream::samples` batches with exact indices and loss
+//!   accounting (SC7, SC8).
 //!
 //! The shell's order for the microphone: [`sai::clock_plan`] (audio PLL,
 //! SAI1 root, MCLK out) so the codec has MCLK; [`wm8960::record_plan`]
-//! over LPI2C1; then [`sai::sai_plan`] and enable the receiver, draining
-//! its FIFO from the interrupt with [`sai::sample_from_fifo`].
+//! over LPI2C1; then [`sai::sai_plan`] and enable the receiver, its FIFO
+//! drained by eDMA into a ring that the shell reads with
+//! [`sai::sample_from_fifo`] into a [`mic_route::MicRoute`].
 
 pub mod audio;
 pub mod fxos8700;
 pub mod imu_route;
+pub mod mic_route;
 pub mod sai;
 pub mod wm8960;
 

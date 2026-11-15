@@ -29,6 +29,7 @@ mod bus;
 mod controller;
 #[cfg(feature = "wasm")]
 mod device;
+mod edma;
 #[cfg(feature = "eth")] pub mod enet;
 #[cfg(feature = "wasm")]
 mod heap;
@@ -36,6 +37,8 @@ mod heap;
 mod i2c;
 mod link;
 mod reset;
+#[cfg(feature = "wasm")]
+mod sai;
 mod uart;
 #[cfg(feature = "usb")] pub mod usb;
 

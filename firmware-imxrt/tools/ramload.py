@@ -126,15 +126,17 @@ def quiesce(g):
     """Leaves nothing of the halted image running under the new one: the
     caches off (the firmware enables them; SDRAM contents need not survive)
     and, if eDMA is clocked (CCGR5 CG3; never touch a gated block), every
-    channel's request disabled and DMAMUX channel 0 (the firmware's LPUART1
-    receive ring, which writes into DTCM) off; the USB controller and the
+    channel's request disabled (ERQ = 0) and DMAMUX channels 0 and 1 (the
+    firmware's LPUART1 and SAI1 receive rings, which write into DTCM) off;
+    the USB controller and the
     ENET MAC reset (they too DMA into DTCM: a USB queue head overwrote a
     freshly loaded flasher, 2026-11-13)."""
     g.set_word(CCR, g.word(CCR) & ~((1 << 16) | (1 << 17)))
     g.set_word(ICIALLU, 0)
     if (g.word(CCGR5) >> 6) & 3:
         g.set_word(DMA0_ERQ, 0)
-        g.set_word(DMAMUX_CHCFG0, 0)
+        for ch in range(2):
+            g.set_word(DMAMUX_CHCFG0 + 4 * ch, 0)
     # Bus masters that keep writing into DTCM while the core is halted
     # (the firmware's USB queue heads and ENET rings live there): reset the
     # USB controller (USBCMD.RST) and the ENET MAC (ECR.RESET), each only

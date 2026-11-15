@@ -4,14 +4,12 @@
 //! An interrupt handler would need an `unsafe fn` in this crate (the HAL's
 //! `Handler::on_interrupt`), which `#![forbid(unsafe_code)]` refuses, so:
 //!
-//! * **receive**: eDMA channel [`RX_CHANNEL`], requested by LPUART1's
+//! * **receive**: eDMA channel 0 ([`super::edma`]), requested by LPUART1's
 //!   receiver through DMAMUX (source [`DMAMUX_LPUART1_RX`]), copies every
 //!   received byte into [`RX_RING`], a ring of [`RX_RING_LEN`] atomics in
 //!   DTCM (the TCM is not cached, so no cache maintenance; a write by the
-//!   DMA engine is like a write by another thread). The major loop is the
-//!   ring: after its last byte the destination steps back by the ring's
-//!   length (`DLAST_SGA`) and, with `DREQ` clear, the channel stays
-//!   enabled, so reception never stops and no byte is lost while the
+//!   DMA engine is like a write by another thread). The ring never stops
+//!   ([`super::edma::Ring`]), so no byte is lost while the
 //!   firmware is busy (a 256 KiB erase blocks for a second; the ring holds
 //!   about 350 ms of input at 115200 baud, and the host sends nothing while
 //!   its request is in flight). [`UartRx`] reads the DMA's write position
@@ -30,6 +28,8 @@ use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::{ErrorKind, ErrorType, Read, Write};
 use imxrt_base::shell::console::Console;
 
+use super::edma;
+
 /// Bytes of the receive ring (a power of two, below eDMA's 15-bit loop
 /// count).
 pub const RX_RING_LEN: usize = 4096;
@@ -38,7 +38,7 @@ pub const RX_RING_LEN: usize = 4096;
 static RX_RING: [AtomicU8; RX_RING_LEN] = [const { AtomicU8::new(0) }; RX_RING_LEN];
 
 /// The eDMA channel of the receiver.
-pub const RX_CHANNEL: usize = 0;
+pub const RX_CHANNEL: edma::Channel = edma::Channel::Ch0;
 
 /// DMAMUX request source of LPUART1's receiver (RT1050 RM, DMAMUX table:
 /// LPUART1 TX 2, RX 3).
@@ -81,7 +81,7 @@ impl embedded_io_async::Error for Never {
 pub struct UartRx {
     /// Ring index of the next byte to read.
     tail: usize,
-    base: u32,
+    ring: edma::Ring,
 }
 
 /// The transmitting half.
@@ -110,46 +110,28 @@ pub fn split(uart: embassy_nxp::Peri<'static, embassy_nxp::peripherals::LPUART1>
         w.set_txwater(TX_WATER);
     });
 
-    // eDMA and DMAMUX share one clock gate (CCGR5 CG3).
-    pac::CCM.ccgr5().modify(|w| w.set_cg3(0b11));
-    let base = RX_RING.as_ptr() as u32;
-    let src = u.data().as_ptr() as u32;
-    let d = pac::DMA0;
-    d.cerq().write(|w| w.set_cerq(RX_CHANNEL as u8));
-    d.tcd0_saddr().write(|w| w.set_saddr(src));
-    d.tcd0_soff().write(|w| w.set_soff(0));
-    d.tcd0_attr().write(|w| {
-        w.set_ssize(pac::dma::vals::TcdAttrSsize::Eight);
-        w.set_dsize(0);
-    });
-    d.tcd0_nbytes_mlno().write(|w| w.set_nbytes(1));
-    d.tcd0_slast().write(|w| w.set_slast(0));
-    d.tcd0_daddr().write(|w| w.set_daddr(base));
-    d.tcd0_doff().write(|w| w.set_doff(1));
-    let n = RX_RING_LEN as u16;
-    d.tcd0_citer_elinkno().write(|w| w.set_citer(n));
-    d.tcd0_biter_elinkno().write(|w| w.set_biter(n));
-    d.tcd0_dlastsga().write(|w| w.set_dlastsga((RX_RING_LEN as u32).wrapping_neg()));
-    d.tcd0_csr().write(|w| w.set_dreq(false));
-    pac::DMAMUX.chcfg(RX_CHANNEL).write(|w| {
-        w.set_source(DMAMUX_LPUART1_RX);
-        w.set_enbl(pac::dmamux::vals::Enbl::Enbl1);
-    });
-    d.serq().write(|w| w.set_serq(RX_CHANNEL as u8));
+    let ring = edma::Ring {
+        channel: RX_CHANNEL,
+        source: DMAMUX_LPUART1_RX,
+        src: u.data().as_ptr() as u32,
+        base: RX_RING.as_ptr() as u32,
+        len: RX_RING_LEN as u16,
+        width: edma::Width::U8,
+    };
+    edma::start_ring(&ring);
 
     u.baud().modify(|w| w.set_rdmae(true));
     u.ctrl().modify(|w| {
         w.set_te(true);
         w.set_re(true);
     });
-    (UartRx { tail: 0, base }, UartTx { _uart: console })
+    (UartRx { tail: 0, ring }, UartTx { _uart: console })
 }
 
 impl UartRx {
     /// The ring index the DMA writes next.
     fn head(&self) -> usize {
-        let daddr = pac::DMA0.tcd0_daddr().read().daddr();
-        (daddr.wrapping_sub(self.base) as usize) % RX_RING_LEN
+        edma::write_index(&self.ring)
     }
 
     /// Clears a receiver overrun (which stops reception until cleared);

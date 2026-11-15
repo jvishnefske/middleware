@@ -3,7 +3,8 @@
 //! for each [`AudioRate`].
 //!
 //! Clocks ([`clock_plan`]). The audio PLL (PLL4) runs at 786.432 MHz =
-//! 24 MHz × (32 + 768/1000), post divider 1 (`MISC2.AUDIO_DIV` 1 too).
+//! 24 MHz × (32 + 768/1000), post divider 1 (`POST_DIV_SELECT` = 2 and
+//! `MISC2.AUDIO_DIV` = 0, the SDK's `CLOCK_InitAudioPll` table).
 //! SAI1's root clock takes PLL4 (`CSCMR1.SAI1_CLK_SEL` = 2) through
 //! `CS1CDR.SAI1_CLK_PRED` and `SAI1_CLK_PODF`: ÷128 for 6.144 MHz, ÷64 for
 //! 12.288 MHz ([`AudioRate::mclk_hz`]). The root clock leaves on
@@ -27,14 +28,27 @@
 //! | 32 kHz | 12.288 MHz | 1.024 MHz | 5 |
 //! | 48 kHz | 12.288 MHz | 1.536 MHz | 3 |
 //!
-//! The receiver masks the right word (`RMR` = 0b10), so each FIFO entry
-//! is one microphone sample ([`sample_from_fifo`]) and the FIFO request
-//! interrupt fires at [`RX_WATERMARK`] samples.
+//! The EVKB's microphone is on the codec's *right* input (MicroPython's
+//! WM8960 notes for the MIMXRT boards; the SDK's EVKB configuration puts
+//! the differential MIC2 input there), so the receiver masks the left word
+//! (`RMR` = 0b01, [`MIC_WORD`]): each FIFO entry is one microphone sample
+//! ([`sample_from_fifo`]), and with the watermark at [`RX_WATERMARK`] each
+//! entry raises a DMA request (`RCSR.FRDE`), drained by eDMA into a ring.
+//! The transmitter has channel 0 enabled (as the SDK and MicroPython
+//! configure it for a synchronous receiver) but its pad is not muxed: its
+//! FIFO underruns harmlessly while it generates the clocks.
+//!
+//! Pads (all ALT3, input daisy 1, from the RT1052 `fsl_iomuxc.h` and
+//! Zephyr's EVK pinctrl): SAI1_MCLK GPIO_AD_B1_09, RX_DATA00 GPIO_AD_B1_12,
+//! TX_BCLK GPIO_AD_B1_14, TX_SYNC GPIO_AD_B1_15; the receive request is
+//! DMAMUX source [`DMAMUX_SAI1_RX`]. The register bit positions are those
+//! of the SDK's `PERI_I2S.h`; the clock path that of `fsl_clock.c`.
 //!
 //! The shell's order: the clocks; `TCSR`/`RCSR` software and FIFO reset
 //! ([`CSR_RESET`]), then 0; the `TCR*`/`RCR*`/`RMR` values; then
-//! [`RCSR_ENABLE`] and [`TCSR_ENABLE`] (the transmitter must run for the
-//! synchronous receiver's clocks; it has no data channel enabled).
+//! [`TCSR_ENABLE`] then [`RCSR_ENABLE`] (the transmitter must run for the
+//! synchronous receiver's clocks; the SDK's `SAI_RxEnable` sets `TE`
+//! itself for a synchronous receiver).
 
 use super::AudioRate;
 
@@ -94,16 +108,62 @@ pub const fn clock_plan(rate: AudioRate) -> ClockPlan {
     }
 }
 
-/// Words a FIFO request waits for (`RCR1.RFW` + 1; the FIFO holds 32).
-pub const RX_WATERMARK: u32 = 16;
+/// Words a FIFO request waits for (`RCR1.RFW` + 1; the FIFO holds 32):
+/// one, so the DMA takes each sample as it arrives.
+pub const RX_WATERMARK: u32 = 1;
+
+/// The frame word the microphone is in: 1, the right channel.
+pub const MIC_WORD: u32 = 1;
+
+/// DMAMUX request source of SAI1's receiver (`kDmaRequestMuxSai1Rx`).
+pub const DMAMUX_SAI1_RX: u8 = 19;
+
+/// The SAI1 pads' mux mode.
+pub const PAD_ALT: u32 = 3;
+
+/// The SAI1 pads' input daisy (`SAI1_*_SELECT_INPUT`) value.
+pub const PAD_DAISY: u32 = 1;
+
+/// `IOMUXC_GPR1.SAI1_MCLK_DIR` (bit 19): SAI1_MCLK is an output; with
+/// `SAI1_MCLK1_SEL` (bits 2..0) 0, MCLK1 is the SAI1 root clock.
+pub const GPR1_SAI1_MCLK_DIR: u32 = 1 << 19;
+
+/// `PLL_AUDIO.LOCK` (bit 31).
+pub const PLL_LOCK: u32 = 1 << 31;
+/// `PLL_AUDIO.BYPASS` (bit 16).
+pub const PLL_BYPASS: u32 = 1 << 16;
+/// `PLL_AUDIO.ENABLE` (bit 13).
+pub const PLL_ENABLE: u32 = 1 << 13;
+/// `PLL_AUDIO.POWERDOWN` (bit 12).
+pub const PLL_POWERDOWN: u32 = 1 << 12;
+/// `MISC2.AUDIO_DIV_MSB` (bit 23) and `AUDIO_DIV_LSB` (bit 15).
+pub const MISC2_AUDIO_DIV: u32 = (1 << 23) | (1 << 15);
+
+impl ClockPlan {
+    /// `PLL_AUDIO` with the PLL running: enabled, powered, the loop and
+    /// post dividers, 24 MHz reference, not bypassed.
+    pub const fn pll_audio(&self) -> u32 {
+        PLL_ENABLE | ((self.pll_post_div_field as u32 & 0b11) << 19) | (self.pll_div_select as u32 & 0x7F)
+    }
+
+    /// `CSCMR1` with SAI1's clock select replaced in `cscmr1`.
+    pub const fn cscmr1(&self, cscmr1: u32) -> u32 {
+        (cscmr1 & !(0b11 << 10)) | ((self.sai1_clk_sel as u32 & 0b11) << 10)
+    }
+
+    /// `CS1CDR` with SAI1's dividers replaced in `cs1cdr`.
+    pub const fn cs1cdr(&self, cs1cdr: u32) -> u32 {
+        (cs1cdr & !0x1FF) | ((self.sai1_clk_pred as u32 & 0b111) << 6) | (self.sai1_clk_podf as u32 & 0x3F)
+    }
+}
 
 /// `xCSR` software reset (`SR`) and FIFO reset (`FR`).
 pub const CSR_RESET: u32 = (1 << 24) | (1 << 25);
 /// `TCSR`: transmitter enable (`TE`) and bit clock enable (`BCE`).
 pub const TCSR_ENABLE: u32 = (1 << 31) | (1 << 28);
-/// `RCSR`: receiver enable (`RE`), bit clock enable (`BCE`), FIFO
-/// request (`FRIE`) and FIFO error (`FEIE`) interrupts.
-pub const RCSR_ENABLE: u32 = (1 << 31) | (1 << 28) | (1 << 10) | (1 << 8);
+/// `RCSR`: receiver enable (`RE`), bit clock enable (`BCE`) and FIFO
+/// request DMA enable (`FRDE`); no interrupts.
+pub const RCSR_ENABLE: u32 = (1 << 31) | (1 << 28) | 1;
 /// `xCSR.FEF`: FIFO error (receiver overflow); write 1 to clear.
 pub const CSR_FEF: u32 = 1 << 18;
 
@@ -112,7 +172,7 @@ pub const CSR_FEF: u32 = 1 << 18;
 pub struct SaiPlan {
     /// `TCR2`: asynchronous, bit clock polarity, MCLK1, master, `DIV`.
     pub tcr2: u32,
-    /// `TCR3`: no transmit data channel.
+    /// `TCR3`: transmit data channel 0 (its pad unmuxed).
     pub tcr3: u32,
     /// `TCR4`: frame shape (also generates the frame sync).
     pub tcr4: u32,
@@ -128,7 +188,7 @@ pub struct SaiPlan {
     pub rcr4: u32,
     /// `RCR5`: word widths, as `TCR5`.
     pub rcr5: u32,
-    /// `RMR`: the right word masked.
+    /// `RMR`: every word but [`MIC_WORD`] masked.
     pub rmr: u32,
 }
 
@@ -158,7 +218,7 @@ pub const fn sai_plan(rate: AudioRate) -> SaiPlan {
     let div = bclk_div(rate);
     SaiPlan {
         tcr2: CR2_MASTER | div,
-        tcr3: 0,
+        tcr3: 1 << 16,
         tcr4: CR4_I2S,
         tcr5: CR5_16BIT,
         rcr1: RX_WATERMARK - 1,
@@ -166,7 +226,7 @@ pub const fn sai_plan(rate: AudioRate) -> SaiPlan {
         rcr3: 1 << 16,
         rcr4: CR4_I2S,
         rcr5: CR5_16BIT,
-        rmr: 0b10,
+        rmr: 0b11 & !(1 << MIC_WORD),
     }
 }
 
@@ -221,11 +281,28 @@ mod tests {
         assert_eq!((p.rcr4 >> 8) & 0x1F, 15, "SYWD: 16 bit clocks");
         assert_eq!(p.rcr5, 0x0F0F_0F00);
         assert_eq!(p.rcr3, 0x0001_0000);
-        assert_eq!(p.tcr3, 0);
-        assert_eq!(p.rcr1, 15);
-        assert_eq!(p.rmr, 0b10);
-        assert_eq!(RCSR_ENABLE, 0x9000_0500);
+        assert_eq!(p.tcr3, 0x0001_0000, "TX channel 0, as the SDK configures it");
+        assert_eq!(p.rcr1, 0, "a DMA request per word");
+        assert_eq!(p.rmr, 0b01, "the left word masked: the mic is on the right input");
+        assert_eq!(RCSR_ENABLE, 0x9000_0001);
         assert_eq!(TCSR_ENABLE, 0x9000_0000);
+    }
+
+    #[test]
+    fn sc8_clock_register_values_follow_the_sdk_clock_driver() {
+        let c = clock_plan(AudioRate::Hz16000);
+        // DIV_SELECT 32, POST_DIV_SELECT 2 (÷1), ENABLE, no POWERDOWN/BYPASS.
+        assert_eq!(c.pll_audio(), 0x0010_2020);
+        assert_eq!(c.pll_audio() & (PLL_POWERDOWN | PLL_BYPASS), 0);
+        // CSCMR1.SAI1_CLK_SEL (bits 11:10) = 2, other bits kept.
+        assert_eq!(c.cscmr1(0xFFFF_FFFF), 0xFFFF_FBFF);
+        assert_eq!(c.cscmr1(0), 0x0000_0800);
+        // CS1CDR: PRED (8:6) = 1, PODF (5:0) = 63, other bits kept.
+        assert_eq!(c.cs1cdr(0), 0x0000_007F);
+        assert_eq!(c.cs1cdr(0xFFFF_FE00), 0xFFFF_FE7F);
+        assert_eq!(clock_plan(AudioRate::Hz48000).cs1cdr(0), 0x3F);
+        assert_eq!(GPR1_SAI1_MCLK_DIR, 0x0008_0000);
+        assert_eq!((DMAMUX_SAI1_RX, PAD_ALT, PAD_DAISY), (19, 3, 1));
     }
 
     #[test]

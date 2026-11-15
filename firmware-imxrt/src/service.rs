@@ -153,9 +153,9 @@ fn trust_readable<F: NorFlash>(flash: &mut F, base: u32) -> bool {
 }
 
 /// The `sys/info` capabilities of a build with the runtime: requests on
-/// payload keys (`SERVE`) and the FXOS8700CQ source route (`SOURCE_IMU`,
-/// SC7).
-pub const RUNTIME_CAPS: Caps = Caps::SERVE.with(Caps::SOURCE_IMU);
+/// payload keys (`SERVE`), the FXOS8700CQ source route (`SOURCE_IMU`,
+/// SC7) and the microphone route (`SOURCE_MICROPHONE`, SC8).
+pub const RUNTIME_CAPS: Caps = Caps::SERVE.with(Caps::SOURCE_IMU).with(Caps::SOURCE_MICROPHONE);
 
 /// What `sys/info` reports about this build, besides the store capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

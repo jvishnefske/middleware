@@ -32,11 +32,20 @@
 //! | 16 | `RINVOL` (0x01) | 0x100 \| PGA | right PGA likewise |
 //! | 17 | `CLOCK1` (0x04) | per rate | ADC and DAC dividers from MCLK ([`clock1`]) |
 //!
-//! The microphone is taken from the left channel (SAI1 masks the right
-//! word, [`super::sai`]); both channels are powered, as the SDK does, so
-//! moving the capture to the right channel changes only the mask. The
-//! ADC's high-pass filter stays on (the default), removing the
-//! microphone's DC offset.
+//! The EVKB's microphone is on the right input (RINPUT1 − / RINPUT2 +,
+//! the SDK's `kWM8960_InputDifferentialMicInput2` for the right channel;
+//! MicroPython's WM8960 notes: "a MIMXRT Dev board mic, which is connected
+//! to the right input"), so SAI1 keeps the right word
+//! ([`super::sai::MIC_WORD`]); both channels are powered, as the SDK does,
+//! so moving the capture changes only the mask. The ADC's high-pass filter
+//! stays on (the default), removing the microphone's DC offset. The
+//! register fields were checked against the WM8960 register map: R0/R1
+//! `IPVU`|`LINVOL`, R25 `VMIDSEL`=01 `VREF` `AINL/R` `ADCL/R` `MICB`, R47
+//! `LMIC`/`RMIC`, R9 `ALRCGPIO`, R32/R33 `xMN1` `xMP3`/`xMP2` boost +29 dB
+//! `xMIC2B`, R7 I2S 16-bit slave, R4 `ADCDIV`/`DACDIV`.
+//!
+//! The route's gain ([`pga_for_gain_db`]) is the input PGA's, above the
+//! fixed +29 dB boost: 0 dB is code 0x17, 0.75 dB a step.
 
 use super::AudioRate;
 
@@ -144,6 +153,16 @@ const fn adc_div_halves(code: u16) -> u32 {
     }
 }
 
+/// The input PGA code for a route gain of `db` dB (0..=30; more is
+/// clamped): 0x17 + db × 4/3 rounded to the nearest 0.75 dB step, 0x3F at
+/// +30 dB.
+pub const fn pga_for_gain_db(db: u8) -> u8 {
+    let db = if db > 30 { 30 } else { db } as u16;
+    let steps = (db * 4 + 1) / 3;
+    let code = PGA_0DB as u16 + steps;
+    if code > PGA_MAX as u16 { PGA_MAX } else { code as u8 }
+}
+
 /// Number of writes in [`record_plan`].
 pub const RECORD_PLAN_LEN: usize = 17;
 
@@ -221,6 +240,21 @@ mod tests {
         assert_eq!(loud[14], w(LINVOL, 0x13F));
         assert_eq!(record_plan(AudioRate::Hz8000, 0)[15], w(RINVOL, 0x100));
         assert!(stop_plan().iter().all(|x| x.value == 0));
+    }
+
+    #[test]
+    fn sc8_route_gain_maps_onto_the_pga_steps() {
+        assert_eq!(pga_for_gain_db(0), PGA_0DB);
+        assert_eq!(pga_for_gain_db(30), PGA_MAX, "+30 dB = 0x17 + 40 steps");
+        assert_eq!(pga_for_gain_db(255), PGA_MAX);
+        assert_eq!(pga_for_gain_db(3), PGA_0DB + 4);
+        assert_eq!(pga_for_gain_db(1), PGA_0DB + 1, "1.33 steps rounds to 1");
+        assert_eq!(pga_for_gain_db(2), PGA_0DB + 3, "2.67 steps rounds to 3");
+        for db in 0..=30u8 {
+            let code = pga_for_gain_db(db);
+            let back = (f64::from(code) - f64::from(PGA_0DB)) * 0.75;
+            assert!((back - f64::from(db)).abs() <= 0.375 + 1e-9, "{db} dB -> {code:#x}");
+        }
     }
 
     #[test]

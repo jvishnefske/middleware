@@ -49,8 +49,11 @@ pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } els
 /// (`esp_base::serve::REPLY_CAPACITY`, 512).
 pub const MAX_REPLY: usize = esp_base::serve::REPLY_CAPACITY;
 
-/// Publications queued per link before that link's copies are dropped.
-const OUTBOUND_DEPTH: usize = 8;
+/// Publications queued per link before that link's copies are dropped:
+/// 320 ms of a microphone PCM route (100 batches a second, SC8), so a
+/// link that stalls briefly (a TCP retransmission to a Wi-Fi host) loses
+/// nothing. In SDRAM with the bus (`BUS_SDRAM`), about 17 KiB per link.
+const OUTBOUND_DEPTH: usize = 32;
 
 /// Key expressions a serial host may hold (`sys/link/sub`).
 const LINK_EXPRS: usize = 8;

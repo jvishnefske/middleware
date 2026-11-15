@@ -110,8 +110,11 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
     if let Some(c) = stack.config_v4() {
         bus.log(format_args!("eth: DHCP lease {}", c.address));
     }
+    // The send buffer covers about 0.9 s of a 16 kHz PCM route's batches
+    // (SC8) beyond the bus queue, for a peer whose ACKs stall (a Wi-Fi
+    // host); the task's future, and with it both buffers, is in SDRAM.
     let mut rx = [0u8; 2048];
-    let mut tx = [0u8; 2048];
+    let mut tx = [0u8; 32 * 1024];
     let mut next_id: u8 = 0;
     loop {
         let Some(ep) = endpoint() else {

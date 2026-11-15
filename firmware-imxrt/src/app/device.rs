@@ -14,6 +14,7 @@
 //! | `serve` (ABI 5) | any non-`sys` key; the controller routes its requests ([`imxrt_base::requests`]) |
 //! | `node_id` (ABI 5) | the chip unique id, the node `sys/info` reports |
 //! | `route_source` (Imu) | one FXOS8700CQ route ([`ImuRoute`], handle 0) on LPI2C1 at 0x1F (opened at 400 kHz if the payload has not), polled by [`RtDevice::poll`] on the route's clock, its batches published on the route key with a `RouteFrames` event each (`RouteDropped` for samples the sensor overwrote); `route_stop` puts the sensor in standby; `route_stat`: `Frames`/`Chunks` = batches published, `FramesDropped` = samples the sensor overwrote, `ChunksDropped` = failed reads and batches the bus refused |
+//! | `route_source` (Microphone) | one microphone route ([`MicRoute`], handle 1): the WM8960 at 0x1A configured over LPI2C1 ([`wm8960::record_plan`] at the route's gain), SAI1 receiving its right word into a DMA ring ([`super::sai`]), drained every [`mic_route::POLL_US`] into batches of the route's mode; `route_stop` powers the codec down and stops SAI1, its DMA and the audio PLL; `route_stat` as for the IMU (`FramesDropped`: samples not published) |
 //! | `spi_*`, `gpio_irq`, `uart_*`, `dma_read`, `pwm_*`, `route_sink`, frame routes | `Unsupported` (the trait's defaults); SPI (LPSPI1) is not wired to payloads |
 //!
 //! The hardware ([`Hw`]) rests in [`HW`] between runs. [`RtDevice::new`]
@@ -35,7 +36,8 @@ use esp_base::periph::timers::Timers;
 use imxrt_base::chip::Profile;
 use imxrt_base::pins::{GPIOS, Pins, ReadFrom};
 use imxrt_base::sensors::imu_route::ImuRoute;
-use imxrt_base::sensors::{FXOS8700_ADDR, fxos8700};
+use imxrt_base::sensors::mic_route::{self, MicRoute};
+use imxrt_base::sensors::{FXOS8700_ADDR, WM8960_ADDR, fxos8700, wm8960};
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::is_system_key;
 use middleware::stream::samples::MAX_BATCH;
@@ -48,6 +50,7 @@ use middleware::{Key, SenderId};
 use super::adc::Adc;
 use super::bus::Bus;
 use super::i2c::I2c;
+use super::sai::{self, SaiRx};
 
 /// Microseconds since boot.
 pub fn now_us() -> u64 {
@@ -104,13 +107,28 @@ pub struct RtDevice {
     profile: &'static Profile,
     node: SenderId,
     imu: Option<Imu>,
+    mic: Option<Mic>,
 }
 
 /// The IMU route's handle.
 const IMU_HANDLE: u8 = 0;
 
+/// The microphone route's handle.
+const MIC_HANDLE: u8 = 1;
+
 /// LPI2C1's clock when a route opens the bus itself.
 const ROUTE_I2C_HZ: u32 = 400_000;
+
+/// A running microphone route.
+struct Mic {
+    route: MicRoute,
+    rx: SaiRx,
+    key: String<MAX_KEY_LEN>,
+    /// Batches the bus refused.
+    refused: u32,
+    /// When the ring is drained next, in µs.
+    next_us: u64,
+}
 
 /// A running IMU route.
 struct Imu {
@@ -135,6 +153,7 @@ impl RtDevice {
             profile,
             node,
             imu: None,
+            mic: None,
         })
     }
 
@@ -142,7 +161,8 @@ impl RtDevice {
     /// boot.
     pub fn next_alarm_us(&self) -> Option<u64> {
         let imu = self.imu.as_ref().map(|i| i.route.due_us());
-        [self.timers.next_deadline(), imu].into_iter().flatten().min()
+        let mic = self.mic.as_ref().map(|m| m.next_us);
+        [self.timers.next_deadline(), imu, mic].into_iter().flatten().min()
     }
 
     /// Fires the timers due at `now` (µs) into the event queue and
@@ -155,6 +175,86 @@ impl RtDevice {
             let _ = self.events.push(timer_event(f.id, f.periods, now as u32));
         }
         self.poll_imu(now);
+        self.poll_mic(now);
+    }
+
+    /// Drains the microphone's ring into its route when due, publishing
+    /// the batches it completes.
+    fn poll_mic(&mut self, now: u64) {
+        let Some(mic) = self.mic.as_mut() else { return };
+        if mic.next_us > now {
+            return;
+        }
+        mic.next_us = now.saturating_add(mic_route::POLL_US);
+        let mut buf = [0i16; 256];
+        let mut out = [0u8; MAX_BATCH];
+        let lost_before = mic.route.lost();
+        let mut published = 0u32;
+        loop {
+            let d = mic.rx.drain(now, &mut buf);
+            mic.route.gap(d.lost);
+            if d.samples == 0 {
+                break;
+            }
+            let mut rest = buf.get(..d.samples).unwrap_or_default();
+            while !rest.is_empty() {
+                let fed = mic.route.feed(now, rest, &mut out);
+                rest = rest.get(fed.consumed..).unwrap_or_default();
+                let Some(len) = fed.batch else { continue };
+                let ok = Key::new(&mic.key)
+                    .ok()
+                    .is_some_and(|key| self.bus.publish(key, out.get(..len).unwrap_or_default()).is_ok());
+                if ok {
+                    published += 1;
+                } else {
+                    mic.refused = mic.refused.saturating_add(1);
+                }
+            }
+        }
+        let newly_lost = mic.route.lost().saturating_sub(lost_before);
+        route_events(&mut self.events, MIC_HANDLE, now, published, newly_lost);
+    }
+
+    /// Starts the microphone route: MCLK, the codec over I2C, then SAI1
+    /// and its DMA.
+    fn start_mic(&mut self, cfg: middleware::wasm_abi::route::MicConfig, key: Key<'_>) -> Result<u8, AbiError> {
+        if self.mic.is_some() {
+            return Err(AbiError::Busy);
+        }
+        let route = MicRoute::new(cfg, now_us())?;
+        let key: String<MAX_KEY_LEN> = String::try_from(key.as_str()).map_err(|_| AbiError::InvalidKey)?;
+        self.open_i2c_for_route()?;
+        sai::start_clocks(route.rate())?;
+        let pga = wm8960::pga_for_gain_db(route.gain_db());
+        let hw = self.hw()?;
+        for w in wm8960::record_plan(route.rate(), pga) {
+            if let Err(e) = hw.i2c.transfer(WM8960_ADDR, &w.bytes(), &mut []) {
+                sai::stop();
+                return Err(e);
+            }
+        }
+        let now = now_us();
+        let rx = sai::start(route.rate(), now);
+        self.mic = Some(Mic {
+            route,
+            rx,
+            key,
+            refused: 0,
+            next_us: now.saturating_add(mic_route::POLL_US),
+        });
+        Ok(MIC_HANDLE)
+    }
+
+    /// Stops the microphone: the codec powered down, SAI1 and its DMA off.
+    fn mic_stop(&mut self) {
+        sai::stop();
+        if self.i2c_open
+            && let Some(hw) = self.hw.as_mut()
+        {
+            for w in wm8960::stop_plan() {
+                let _ = hw.i2c.transfer(WM8960_ADDR, &w.bytes(), &mut []);
+            }
+        }
     }
 
     /// Reads `STATUS` and the samples in one transfer when the IMU route
@@ -184,19 +284,8 @@ impl RtDevice {
         if published == Some(false) {
             imu.refused = imu.refused.saturating_add(1);
         }
-        // Coalescing events: a payload that ignores them costs nothing.
-        let event = |kind, value: u32| Event {
-            kind,
-            source: i32::from(IMU_HANDLE),
-            value: i32::try_from(value).unwrap_or(i32::MAX),
-            time_us: now as u32,
-        };
-        if published == Some(true) {
-            let _ = self.events.push(event(EventKind::RouteFrames, 1));
-        }
-        if newly_lost > 0 {
-            let _ = self.events.push(event(EventKind::RouteDropped, newly_lost));
-        }
+        let n = u32::from(published == Some(true));
+        route_events(&mut self.events, IMU_HANDLE, now, n, newly_lost);
     }
 
     /// Opens LPI2C1 for a route if the payload has not; `Busy` when the
@@ -271,6 +360,24 @@ impl RtDevice {
     }
 }
 
+/// Queues a route's `RouteFrames` (batches published) and `RouteDropped`
+/// (units lost) events. They coalesce in the queue, so a payload that
+/// ignores them costs nothing.
+fn route_events(events: &mut EventQueue<MAX_EVENTS>, handle: u8, now: u64, published: u32, lost: u32) {
+    let event = |kind, value: u32| Event {
+        kind,
+        source: i32::from(handle),
+        value: i32::try_from(value).unwrap_or(i32::MAX),
+        time_us: now as u32,
+    };
+    if published > 0 {
+        let _ = events.push(event(EventKind::RouteFrames, published));
+    }
+    if lost > 0 {
+        let _ = events.push(event(EventKind::RouteDropped, lost));
+    }
+}
+
 /// Drives `pin`'s output latch: a read-modify-write of its bank's `DR`
 /// in a critical section. embassy-nxp's `Flex::set_level` writes the
 /// `DR_SET` / `DR_CLEAR` registers, which the RT1062 has and the RT1052's
@@ -312,6 +419,9 @@ impl Drop for RtDevice {
     fn drop(&mut self) {
         if self.imu.take().is_some() {
             self.imu_standby();
+        }
+        if self.mic.take().is_some() {
+            self.mic_stop();
         }
         let Some(mut hw) = self.hw.take() else { return };
         if self.i2c_open {
@@ -444,30 +554,36 @@ impl wasm_host::Device for RtDevice {
         Ok(self.node)
     }
 
-    /// The IMU (one route); the microphone is not offered yet.
+    /// One IMU route and one microphone route.
     fn route_samples(&mut self, source: SampleSource, key: Key<'_>) -> Result<u8, AbiError> {
         if is_system_key(key) {
             return Err(AbiError::InvalidKey);
         }
         match source {
             SampleSource::Imu(cfg) => self.start_imu(cfg, key),
-            SampleSource::Microphone(_) => Err(AbiError::InvalidArgument),
+            SampleSource::Microphone(cfg) => self.start_mic(cfg, key),
         }
     }
 
     fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
-        match source {
-            SampleSource::Imu(_) => Some(I2cDevice { bus: 0, addr: FXOS8700_ADDR }),
-            SampleSource::Microphone(_) => None,
-        }
+        Some(match source {
+            SampleSource::Imu(_) => I2cDevice { bus: 0, addr: FXOS8700_ADDR },
+            SampleSource::Microphone(_) => I2cDevice { bus: 0, addr: WM8960_ADDR },
+        })
     }
 
     fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
-        if handle != IMU_HANDLE || self.imu.is_none() {
-            return Err(AbiError::Busy);
+        match handle {
+            IMU_HANDLE if self.imu.is_some() => {
+                self.imu_standby();
+                self.imu = None;
+            }
+            MIC_HANDLE if self.mic.is_some() => {
+                self.mic_stop();
+                self.mic = None;
+            }
+            _ => return Err(AbiError::Busy),
         }
-        self.imu_standby();
-        self.imu = None;
         for kind in [EventKind::RouteFrames, EventKind::RouteDropped] {
             self.events.purge(kind, i32::from(handle));
         }
@@ -475,13 +591,22 @@ impl wasm_host::Device for RtDevice {
     }
 
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
-        let imu = self.imu.as_ref().filter(|_| handle == IMU_HANDLE).ok_or(AbiError::Busy)?;
-        let r = &imu.route;
-        let published = r.batches().saturating_sub(imu.refused);
+        // (batches, lost, failed reads, refused)
+        let (batches, lost, failures, refused) = match handle {
+            IMU_HANDLE => {
+                let i = self.imu.as_ref().ok_or(AbiError::Busy)?;
+                (i.route.batches(), i.route.lost(), i.route.failures(), i.refused)
+            }
+            MIC_HANDLE => {
+                let m = self.mic.as_ref().ok_or(AbiError::Busy)?;
+                (m.route.batches(), m.route.lost(), 0, m.refused)
+            }
+            _ => return Err(AbiError::Busy),
+        };
         Ok(match stat {
-            RouteStat::Frames | RouteStat::Chunks => published,
-            RouteStat::FramesDropped => r.lost(),
-            RouteStat::ChunksDropped => r.failures().saturating_add(imu.refused),
+            RouteStat::Frames | RouteStat::Chunks => batches.saturating_sub(refused),
+            RouteStat::FramesDropped => lost,
+            RouteStat::ChunksDropped => failures.saturating_add(refused),
         })
     }
 }

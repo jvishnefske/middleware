@@ -7,8 +7,13 @@
 //!                      board's sys/zenoh/endpoint points at this machine
 //!   --key KEY          key to subscribe to [rt16/state]
 //!   --count N          samples to print before the queries [5]
-//!   --put KEY TEXT     after the samples, publish TEXT on KEY (a payload's
-//!                      subscription), then print N more samples of --key
+//!   --samples-lines    print each sample batch whole, in the line format
+//!                      of `mwctl monitor --samples` (what
+//!                      firmware-imxrt/tools/mic_capture.py reads)
+//!   --put KEY TEXT     once subscribed (and a second later, for the board to
+//!                      have connected), publish TEXT on KEY, e.g. a payload's
+//!                      subscription whose answer is --key; repeated every
+//!                      second until the first sample arrives
 //!   --stop KEYFILE MAC finally send a signed sys/payload/stop (Ed25519 seed
 //!                      file, the board's Ethernet MAC aa:bb:cc:dd:ee:ff as
 //!                      the control target; counter = Unix time in ms), then
@@ -39,6 +44,7 @@ struct Args {
     count: usize,
     put: Option<(String, String)>,
     stop: Option<(String, [u8; 6])>,
+    lines: bool,
 }
 
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
@@ -56,6 +62,7 @@ fn args() -> Args {
         count: 5,
         put: None,
         stop: None,
+        lines: false,
     };
     let mut it = std::env::args().skip(1);
     let need = |v: Option<String>, what: &str| v.unwrap_or_else(|| panic!("{what} needs a value"));
@@ -63,6 +70,7 @@ fn args() -> Args {
         match arg.as_str() {
             "--listen" => a.listen = need(it.next(), "--listen"),
             "--key" => a.key = need(it.next(), "--key"),
+            "--samples-lines" => a.lines = true,
             "--count" => a.count = need(it.next(), "--count").parse().expect("--count N"),
             "--put" => a.put = Some((need(it.next(), "--put KEY"), need(it.next(), "--put TEXT"))),
             "--stop" => {
@@ -74,6 +82,38 @@ fn args() -> Args {
         }
     }
     a
+}
+
+/// A sample batch as `mwctl monitor --samples` prints it (keep the two
+/// the same: `[samples] KEY KIND FORMAT ch= rate= first= t= n= range=
+/// scale=: units`).
+fn samples_line(key: &str, payload: &[u8]) -> Option<String> {
+    let b = samples::decode(payload).ok()?;
+    let h = b.header;
+    let kind = match h.kind {
+        samples::SensorKind::Imu => "imu",
+        samples::SensorKind::Microphone => "mic",
+    };
+    let (format, values): (&str, Vec<String>) = match h.format {
+        samples::SampleFormat::I16 => ("i16", b.i16_values().map(|v| v.to_string()).collect()),
+        samples::SampleFormat::MuLaw => (
+            "mulaw",
+            b.data.iter().map(|c| samples::mulaw_decode(*c).to_string()).collect(),
+        ),
+        samples::SampleFormat::Levels => ("levels", b.levels().map(|(r, p)| format!("{r}/{p}")).collect()),
+    };
+    let units: Vec<String> = values.chunks(usize::from(h.channels).max(1)).map(|u| u.join(",")).collect();
+    Some(format!(
+        "[samples] {key} {kind} {format} ch={} rate={} first={} t={} n={} range={} scale={}: {}",
+        h.channels,
+        h.rate_hz,
+        h.first_index,
+        h.timestamp_us,
+        h.count,
+        h.range,
+        h.scale,
+        units.join(" ")
+    ))
 }
 
 /// One line for a received payload: decoded when it is a sample batch.
@@ -110,11 +150,17 @@ fn describe(payload: &[u8]) -> String {
 async fn print_samples(
     sub: &mut middleware::zenoh::ZenohSubscriber,
     n: usize,
+    lines: bool,
 ) -> Option<middleware::SenderId> {
     let mut buf = vec![0u8; 4096];
     let mut node = None;
     for _ in 0..n {
         let s = sub.recv(&mut buf).await.expect("sample");
+        node = s.meta.sender.or(node);
+        if lines && let Some(line) = samples_line(s.key.as_str(), s.payload) {
+            println!("{line}");
+            continue;
+        }
         println!(
             "[sample] {} {} sender {:?} seq {:?} gap {:?}",
             s.key.as_str(),
@@ -123,7 +169,6 @@ async fn print_samples(
             s.meta.seq,
             s.meta.gap
         );
-        node = s.meta.sender.or(node);
     }
     node
 }
@@ -139,16 +184,25 @@ async fn main() {
         .with_timeout(Duration::from_secs(5));
     println!("listening on {}; waiting for {} ...", a.listen, key.as_str());
     let mut sub = host.subscriber(key).await.expect("subscriber");
-    let Some(node) = print_samples(&mut sub, a.count).await else {
+    let mut echoed = None;
+    if let Some((put_key, text)) = &a.put {
+        let k = Key::new(put_key).expect("a middleware key");
+        let mut buf = vec![0u8; 4096];
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            host.publish(k, text.as_bytes()).await.expect("publish");
+            println!("[put] {put_key}: {text}");
+            if let Ok(Some(s)) = sub.try_recv(&mut buf) {
+                println!("[sample] {} {} sender {:?}", s.key.as_str(), describe(s.payload), s.meta.sender);
+                echoed = s.meta.sender;
+                break;
+            }
+        }
+    }
+    let Some(node) = print_samples(&mut sub, a.count, a.lines).await.or(echoed) else {
         eprintln!("the samples carried no sender id");
         std::process::exit(1);
     };
-    if let Some((put_key, text)) = &a.put {
-        let k = Key::new(put_key).expect("a middleware key");
-        host.publish(k, text.as_bytes()).await.expect("publish");
-        println!("[put] {put_key}: {text}");
-        print_samples(&mut sub, a.count).await;
-    }
     let opts = RequestOptions::DEFAULT.with_target(Target::Node(node));
     let mut out = [0u8; 512];
     match host.request_with(keys::INFO, &[], &mut out, &opts).await {

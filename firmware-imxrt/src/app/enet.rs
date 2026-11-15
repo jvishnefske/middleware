@@ -31,10 +31,12 @@ use imxrt_base::enet::desc::{self, RxRing, TxRing};
 use imxrt_base::enet::ksz8081::{self, Duplex, Link, PhyError, ResetStep, Speed};
 use imxrt_base::enet::{clock, mac, mdio};
 
-/// Receive descriptors (and buffers).
-const NRX: usize = 4;
+/// Receive descriptors (and buffers): eight, so a burst of frames
+/// between two polls of [`poll_task`] fits (with four, a Zenoh PCM stream
+/// to a Wi-Fi host lost 0.7 s bursts, SC8).
+const NRX: usize = 8;
 /// Transmit descriptors (and buffers).
-const NTX: usize = 2;
+const NTX: usize = 4;
 /// Words per frame buffer (MRBR bytes).
 const BUF_WORDS: usize = desc::RX_BUFFER_BYTES / 4;
 /// Bytes per frame buffer.
