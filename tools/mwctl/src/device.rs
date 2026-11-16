@@ -13,6 +13,8 @@
 //!   With [`UploadOptions::auth`] the commit is signed (see
 //!   [`crate::sign`]); a device with a pinned key refuses an unsigned or
 //!   stale commit with `Denied` and keeps its installed payload.
+//! * [`Device::board`] — `sys/board` as an owned [`Board`], decoded with
+//!   [`BoardInfo::decode`].
 //! * [`Device::trust_info`], [`Device::trust_claim`] — `sys/trust/info`
 //!   (decoded with [`TrustInfo::decode`]) and `sys/trust/claim`.
 //! * [`Device::start`], [`Device::stop`] — `sys/payload/start` / `stop`
@@ -28,7 +30,7 @@ use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
 use middleware::{Key, SenderId};
-use middleware::loader::{Caps, Command, DeviceInfo, PayloadStatus, keys};
+use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, PayloadStatus, keys};
 use std::time::Instant;
 
 /// Suffix of the firmware version of builds without the WASM runtime.
@@ -73,6 +75,23 @@ impl Info {
     /// Whether the firmware includes the WASM runtime (can start payloads).
     pub fn runs_payloads(&self) -> bool {
         !self.firmware.ends_with(NO_WASM_SUFFIX)
+    }
+}
+
+/// Owned `sys/board` response (a validated body).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Board(Vec<u8>);
+
+impl Board {
+    /// Validates a `sys/board` response body.
+    pub fn decode(body: Vec<u8>) -> Option<Self> {
+        BoardInfo::decode(&body)?;
+        Some(Board(body))
+    }
+
+    /// The decoded description.
+    pub fn info(&self) -> BoardInfo<'_> {
+        BoardInfo::decode(&self.0).expect("validated in Board::decode")
     }
 }
 
@@ -138,6 +157,14 @@ impl<L: Endpoint> Device<L> {
         let body = self.link.command(&Command::Info)?;
         Info::decode(&body).ok_or_else(|| Error::Malformed {
             key: keys::INFO.as_str().to_owned(),
+        })
+    }
+
+    /// `sys/board`. Firmware older than 0.6 answers `NotFound`.
+    pub fn board(&mut self) -> Result<Board, Error> {
+        let body = self.link.command(&Command::Board)?;
+        Board::decode(body).ok_or_else(|| Error::Malformed {
+            key: keys::BOARD.as_str().to_owned(),
         })
     }
 
@@ -472,6 +499,32 @@ mod tests {
             auth,
             ..UploadOptions::default()
         }
+    }
+
+    #[test]
+    fn board_is_decoded_or_not_found_on_older_firmware() {
+        use middleware::loader::BOARD_RUNTIME;
+        let info = BoardInfo {
+            abi_version: 3,
+            max_image: 32 * 1024,
+            max_memory: 128 * 1024,
+            gpio: 0xFF_0EEF_FFFF,
+            reserved: 0x3_0FCA,
+            input_only: 0xFC_0000_0000,
+            strapping: 0x9025,
+            adc: 0xFF_0000_0000,
+            pwm_max_bits: 16,
+            flags: BOARD_RUNTIME,
+            uart_tx: 1,
+            uart_rx: 3,
+            pwm_pins: &[4, 13, 18, 19, 23, 25, 26, 27],
+        };
+        let mut body = [0u8; 128];
+        let n = info.encode(&mut body).unwrap();
+        let fake = FakeDevice::new("esp32", "0.6.0", 4096, true).with_board(body[..n].to_vec());
+        assert_eq!(device(fake).board().unwrap().info(), info);
+        let err = device(FakeDevice::new("esp32", "0.5.0", 4096, true)).board().unwrap_err();
+        assert!(err.to_string().contains("not"), "{err}");
     }
 
     #[test]

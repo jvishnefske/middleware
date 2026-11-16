@@ -8,11 +8,16 @@
 //!   returned on drop, because `wasm_host::Payload` needs a `'static`
 //!   device and drops it inside a failed load (esp-hal's async drivers are
 //!   not `Send`, so only the blocking parts can rest in a static);
-//! * I2C bus 0 ([`Bus0`], ABI 3, ESP32 and ESP32-S3) and on the ESP32 the
-//!   LEDC PWM timer ([`Pwm`]), which stay blocking and move between [`HW`]
-//!   and the device the same way;
-//! * the pure [`Claims`] table that decides which pins SPI, UART, I2C, PWM,
-//!   the camera and GPIO interrupts may hold.
+//! * the LEDC ([`LedcHw`]) and ADC1 ([`AdcUnit`]) behind the ABI 3 PWM and
+//!   ADC imports, and I2C bus 0 ([`Bus0`], ABI 3, ESP32 and ESP32-S3), which
+//!   rest in [`HW`] the same way;
+//! * the pure [`Claims`] table that decides which pins SPI, UART, I2C, the
+//!   camera, GPIO interrupts, PWM outputs and ADC inputs may hold, and the
+//!   pure [`PwmTable`] of open PWM timers.
+//!
+//! Every peripheral import follows the same order: the pure transition
+//! first (claims, PWM table), then the hardware, then the new pure values
+//! are committed, so a refused call changes nothing.
 //!
 //! # I2C (ABI 3)
 //!
@@ -38,14 +43,14 @@
 //! ([`super::irq`]) are firmware-wide statics shared with their ISRs.
 //!
 //! Dropping the device (payload stop, trap, reload, failed load) stops all
-//! timers, cancels SPI DMA and UART transmit, drives PWM outputs low,
-//! closes every peripheral, releases every pin (interrupts off, signals
-//! detached) and clears the event queue. The peripherals go back to [`HW`]
-//! whatever state they were in: SPI through [`SpiBus::close`] (idle,
-//! payload transfer or sink-route write in flight; see
-//! `esp_base::periph::dma_hw`), UART, PWM and I2C by value (I2C forgets
-//! the payload's open, [`Bus0::close`]), so the next payload can open them
-//! again.
+//! timers, cancels SPI DMA and UART transmit, closes every peripheral,
+//! zeroes every PWM channel, releases every pin (interrupts off, signals
+//! detached, analog pins back on the digital mux) and clears the event
+//! queue. The peripherals go back to [`HW`] whatever state they were in:
+//! SPI through [`SpiBus::close`] (idle, payload transfer or sink-route
+//! write in flight; see `esp_base::periph::dma_hw`), UART, the LEDC, ADC1
+//! and I2C by value (I2C forgets the payload's open, [`Bus0::close`]), so
+//! the next payload can open them again.
 //!
 //! The controller awaits [`EspDevice::io`] alongside messages and ticks; it
 //! completes SPI and UART work and pushes `DmaDone` / `UartRx` events.
@@ -89,6 +94,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
 use esp_base::chip::{Direction, Profile};
 use esp_base::periph::claims::{Claims, pins};
+use esp_base::periph::pwm::PwmTable;
 use esp_base::route::sink::{SinkRoute, transfers};
 use esp_base::route::table::{Kind, Routes};
 use esp_base::route::stopped_event;
@@ -96,7 +102,7 @@ use middleware::{Key, SenderId};
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Pull, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig,
+    AbiError, Device, DmaChannel, Edge, Pull, PwmSpec, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig,
     TimerSpec, UartConfig,
 };
 use super::i2c::{self, Bus0};
@@ -104,13 +110,14 @@ use wasm_host::I2cConfig;
 #[cfg(feature = "esp32")]
 use {
     super::camera,
-    super::pwm::{self, Pwm},
     esp_base::periph::claims::Owner,
-    wasm_host::{CameraPins, PwmSpec},
+    wasm_host::CameraPins,
 };
 
+use super::adc::AdcUnit;
 use super::bus::Bus;
 use super::gpio::{PINS, PinBank, PinLease};
+use super::pwm::{self, LedcHw};
 use super::spi::{self, SpiBus, SpiParts};
 use super::uart1::{self, Uart1Parts, Uart1Port};
 use super::{irq, timer};
@@ -121,9 +128,10 @@ pub struct Hw {
     pub spi: Option<SpiParts>,
     /// UART 1, if its driver came up at boot.
     pub uart: Option<Uart1Parts>,
-    /// LEDC PWM timer 0 (ESP32).
-    #[cfg(feature = "esp32")]
-    pub pwm: Option<Pwm>,
+    /// The LED controller (PWM).
+    pub ledc: Option<LedcHw>,
+    /// ADC1.
+    pub adc: Option<AdcUnit>,
     /// I2C bus 0 (ESP32, ESP32-S3), if its driver came up at boot.
     pub i2c: Option<Bus0>,
 }
@@ -132,8 +140,8 @@ pub struct Hw {
 struct Live {
     spi: Option<SpiBus>,
     uart: Option<Uart1Port>,
-    #[cfg(feature = "esp32")]
-    pwm: Option<Pwm>,
+    ledc: Option<LedcHw>,
+    adc: Option<AdcUnit>,
     i2c: Option<Bus0>,
 }
 
@@ -168,6 +176,7 @@ pub struct EspDevice {
     pins: PinLease,
     hw: Option<Live>,
     claims: Claims,
+    pwm: PwmTable,
     routes: Routes,
     /// The camera source route's handle, while one runs.
     #[cfg(feature = "esp32")]
@@ -187,8 +196,8 @@ impl EspDevice {
         let hw = HW.take().map(|h| Live {
             spi: h.spi.map(SpiBus::new),
             uart: h.uart.map(Uart1Port::new),
-            #[cfg(feature = "esp32")]
-            pwm: h.pwm,
+            ledc: h.ledc,
+            adc: h.adc,
             i2c: h.i2c,
         });
         #[cfg(feature = "espnow")]
@@ -197,6 +206,7 @@ impl EspDevice {
             pins,
             hw,
             claims: Claims::new(),
+            pwm: PwmTable::new(),
             routes: Routes::new(),
             #[cfg(feature = "esp32")]
             camera: None,
@@ -204,11 +214,6 @@ impl EspDevice {
             bus,
             node,
         })
-    }
-
-    #[cfg(feature = "esp32")]
-    fn pwm(&mut self) -> Result<&mut Pwm, AbiError> {
-        self.hw.as_mut().and_then(|h| h.pwm.as_mut()).ok_or(AbiError::Unsupported)
     }
 
     fn i2c(&mut self) -> Result<&mut Bus0, AbiError> {
@@ -271,6 +276,10 @@ impl EspDevice {
 
     fn uart(&mut self) -> Result<&mut Uart1Port, AbiError> {
         self.hw.as_mut().and_then(|h| h.uart.as_mut()).ok_or(AbiError::Unsupported)
+    }
+
+    fn ledc(&mut self) -> Result<&mut LedcHw, AbiError> {
+        self.hw.as_mut().and_then(|h| h.ledc.as_mut()).ok_or(AbiError::Unsupported)
     }
 
     /// `Busy` while a sink route drives `pin` as its D/C pin.
@@ -377,18 +386,15 @@ impl Drop for EspDevice {
         timer::stop_all();
         #[cfg(feature = "espnow")]
         super::radio::with_sources(|t| t.clear());
-        if let Some(live) = self.hw.take() {
-            #[cfg(feature = "esp32")]
-            let pwm = live.pwm.map(|mut p| {
-                // Outputs low; the pins themselves are released below.
-                p.stop(0).ok();
-                p
-            });
+        if let Some(mut live) = self.hw.take() {
+            if let Some(ledc) = live.ledc.as_mut() {
+                ledc.zero_all();
+            }
             HW.put(Hw {
                 spi: live.spi.and_then(SpiBus::close),
                 uart: live.uart.map(Uart1Port::close),
-                #[cfg(feature = "esp32")]
-                pwm,
+                ledc: live.ledc,
+                adc: live.adc,
                 i2c: live.i2c.map(Bus0::close),
             });
         }
@@ -560,39 +566,55 @@ impl Device for EspDevice {
         self.uart()?.read(port, out)
     }
 
-    #[cfg(feature = "esp32")]
     fn pwm_open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
-        self.pwm()?.open(spec)
+        let (next, step) = self.pwm.open(self.profile, spec)?;
+        self.ledc()?.open(&step)?;
+        self.pwm = next;
+        Ok(())
     }
 
-    /// Claims and routes the channel's mapped pin on first use.
-    #[cfg(feature = "esp32")]
     fn pwm_set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
-        let pin = self.profile.pwm_pin(timer, channel)?;
-        if !self.pwm()?.is_open() {
-            return Err(AbiError::Busy);
+        let (next, step) = self.pwm.set(self.profile, timer, channel, duty)?;
+        let claims = match step.route {
+            Some(pin) => {
+                self.check_route_pin(pin)?;
+                self.claims.claim_pwm(self.profile, pin)?
+            }
+            None => self.claims,
+        };
+        self.ledc()?.set(step.channel, step.raw);
+        if let Some(pin) = step.route {
+            self.pins.with(|b| b.route_out(pin, pwm::signal(step.channel)))?;
         }
-        if self.claims.owner(pin) != Some(Owner::Pwm) {
-            self.check_route_pin(pin)?;
-            let next = self.claims.claim_pwm(self.profile, pin)?;
-            let signal = pwm::signal(channel)?;
-            self.pins.with(|b| b.route_out(pin, signal))?;
-            self.claims = next;
-        }
-        self.pwm()?.set(timer, channel, duty)
+        self.pwm = next;
+        self.claims = claims;
+        Ok(())
     }
 
-    #[cfg(feature = "esp32")]
     fn pwm_stop(&mut self, timer: u8) -> Result<(), AbiError> {
-        self.pwm()?.stop(timer)?;
-        let old = self.claims.pins_of(Owner::Pwm);
-        self.claims = self.claims.release(Owner::Pwm);
-        self.pins.with(|b| {
-            for p in pins(old) {
-                b.unroute(p);
-            }
-            Ok(())
-        })
+        let (next, step) = self.pwm.stop(self.profile, timer)?;
+        let Some(step) = step else { return Ok(()) };
+        let ledc = self.ledc()?;
+        for ch in step.channels {
+            ledc.set(ch, 0);
+        }
+        let mut claims = self.claims;
+        for pin in step.pins.into_iter().flatten() {
+            self.pins.with(|b| b.drive_low(pin))?;
+            claims = claims.release_pwm(pin);
+        }
+        self.pwm = next;
+        self.claims = claims;
+        Ok(())
+    }
+
+    fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
+        self.check_route_pin(pin)?;
+        let next = self.claims.claim_adc(self.profile, pin)?;
+        let adc = self.hw.as_mut().and_then(|h| h.adc.as_mut()).ok_or(AbiError::Unsupported)?;
+        let raw = self.pins.with(|b| b.analog(pin, || adc.read(pin)))?;
+        self.claims = next;
+        Ok(raw)
     }
 
     fn i2c_open(&mut self, cfg: I2cConfig) -> Result<(), AbiError> {

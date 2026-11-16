@@ -6,7 +6,7 @@
 //! * [`chip`] — per-chip profiles: name, heap plan, WASM memory limit,
 //!   largest payload image, and the GPIO tables that decide which pins a
 //!   payload may touch (flash/PSRAM, USB D+/D-, and console UART pins are
-//!   refused).
+//!   refused), plus the fixed PWM and ADC1 pins.
 //! * [`camera`] — the R15 camera capture decisions: the ESP32 I2S
 //!   camera-mode sample layout ([`camera::extract`]) and the JPEG frame
 //!   assembler that finds `FF D8` … `FF D9` across DMA buffers.
@@ -31,9 +31,9 @@
 //! * [`perf`] — the payload loop's time accounting: wall time and fuel per
 //!   payload operation, waits, yields and the radio task's time, folded into
 //!   a reporting window and logged as two `sys/log` lines.
-//! * [`periph`] — the ABI 2 peripheral decisions: pin claims, the timer
-//!   deadline table, the DMA channel state machine, the UART receive ring,
-//!   and the events ISRs and completions push.
+//! * [`periph`] — the ABI 2 and ABI 3 peripheral decisions: pin claims,
+//!   the timer deadline table, the DMA channel state machine, the UART
+//!   receive ring, the PWM table, and the events ISRs and completions push.
 //! * [`radio`] — the ESP-NOW policy: the fixed channel, the `app` key
 //!   filter for what goes over the air, queue depths and drop counters,
 //!   the request responder's cache size and the unicast peer table.

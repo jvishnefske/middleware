@@ -1,6 +1,7 @@
 //! Virtual ABI 2 peripherals behind [`super::SimDevice`]: the interrupt
 //! event queue, GPIO edge detection, hardware timers, an SPI device and a
-//! secondary UART.
+//! secondary UART; and the ABI 3 PWM outputs ([`Pwm`]) and analog inputs
+//! ([`Adc`]).
 //!
 //! [`Peripherals`] is a plain value driven by explicit time arguments
 //! (microseconds since load, as a non-wrapping `u64`), so it can be tested
@@ -34,17 +35,29 @@
 //!   buffered up to [`UART_RX_BUFFER`] (excess dropped) and raise a
 //!   coalescing [`EventKind::UartRx`] carrying the buffered count.
 //!
+//! * **PWM (X15).** Timers `0..MAX_PWM_TIMERS`, each with
+//!   `PWM_CHANNELS` outputs: [`Pwm`] records each open timer's frequency and
+//!   the last ABI duty of each channel. Opening starts every channel at duty
+//!   0; reopening an open timer changes its frequency and keeps its duties;
+//!   `pwm_set` on a closed timer is [`AbiError::Busy`]; stopping closes the
+//!   timer. Unlike the ESP32 boards (which back timers 0–3, channels 0–1,
+//!   with fixed pins) every ABI id is accepted, as on the desktop simulator.
+//! * **ADC (X15).** [`Adc`] holds one value per virtual pin (0 until set
+//!   from the UI, at most `ADC_MAX`); `adc_read` returns it.
+//!
 //! Using SPI or UART before opening it, or starting a second transfer while
 //! one is in flight, is [`AbiError::Busy`]; `uart_write` on a port opened
 //! without a TX pin is [`AbiError::Unsupported`]. These semantics match the
-//! desktop simulator (`tools/payload-sim`).
+//! desktop simulator (`tools/payload-sim`), whose [`Pwm`] and [`Adc`] models
+//! these are copies of.
 
 use std::collections::VecDeque;
 
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::events::{DmaChannel, Event, EventKind, EventQueue, MAX_EVENTS, Pushed};
 use middleware::wasm_abi::periph::{
-    Edge, MAX_TIMERS, SpiConfig, TimerSpec, UART_RX_BUFFER, UartConfig,
+    ADC_MAX, Edge, MAX_PWM_TIMERS, MAX_TIMERS, PWM_CHANNELS, PwmSpec, SpiConfig, TimerSpec,
+    UART_RX_BUFFER, UartConfig,
 };
 
 use super::PIN_COUNT;
@@ -474,6 +487,133 @@ impl Peripherals {
     }
 }
 
+/// One open PWM timer: its frequency and each channel's duty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PwmTimer {
+    freq_hz: u32,
+    duty: [u16; PWM_CHANNELS],
+}
+
+/// One open PWM timer, for the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PwmInfo {
+    /// Timer id.
+    pub timer: u8,
+    /// Frequency in Hz.
+    pub freq_hz: u32,
+    /// Each channel's last duty (a fraction of 65535).
+    pub duty: [u16; PWM_CHANNELS],
+}
+
+/// The payload's PWM timers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pwm {
+    timers: [Option<PwmTimer>; MAX_PWM_TIMERS],
+}
+
+impl Pwm {
+    /// Opens (or retunes) a timer; a fresh timer starts at duty 0, a
+    /// retuned one keeps its duties.
+    pub fn open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
+        let slot = self
+            .timers
+            .get_mut(usize::from(spec.timer))
+            .ok_or(AbiError::InvalidArgument)?;
+        let duty = slot.map_or([0; PWM_CHANNELS], |t| t.duty);
+        *slot = Some(PwmTimer {
+            freq_hz: spec.freq_hz,
+            duty,
+        });
+        Ok(())
+    }
+
+    /// Records a channel's duty; `Busy` if the timer is not open.
+    pub fn set(&mut self, timer: u8, channel: u8, duty: u16) -> Result<(), AbiError> {
+        let t = self
+            .timers
+            .get_mut(usize::from(timer))
+            .ok_or(AbiError::InvalidArgument)?
+            .as_mut()
+            .ok_or(AbiError::Busy)?;
+        *t.duty
+            .get_mut(usize::from(channel))
+            .ok_or(AbiError::InvalidArgument)? = duty;
+        Ok(())
+    }
+
+    /// Stops a timer (a no-op if it is not open).
+    pub fn stop(&mut self, timer: u8) -> Result<(), AbiError> {
+        *self
+            .timers
+            .get_mut(usize::from(timer))
+            .ok_or(AbiError::InvalidArgument)? = None;
+        Ok(())
+    }
+
+    /// The frequency of an open timer.
+    pub fn freq_hz(&self, timer: u8) -> Option<u32> {
+        self.timers.get(usize::from(timer))?.map(|t| t.freq_hz)
+    }
+
+    /// The last duty set on a channel of an open timer.
+    pub fn duty(&self, timer: u8, channel: u8) -> Option<u16> {
+        let t = (*self.timers.get(usize::from(timer))?)?;
+        t.duty.get(usize::from(channel)).copied()
+    }
+
+    /// Every open timer, by id.
+    pub fn timers(&self) -> Vec<PwmInfo> {
+        self.timers
+            .iter()
+            .enumerate()
+            .filter_map(|(id, t)| {
+                t.map(|t| PwmInfo {
+                    timer: id as u8,
+                    freq_hz: t.freq_hz,
+                    duty: t.duty,
+                })
+            })
+            .collect()
+    }
+}
+
+/// The analog inputs: one settable value per pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adc {
+    values: [u16; PIN_COUNT],
+}
+
+impl Default for Adc {
+    fn default() -> Self {
+        Adc {
+            values: [0; PIN_COUNT],
+        }
+    }
+}
+
+impl Adc {
+    /// Sets the value `pin` reads (`0..=ADC_MAX`).
+    pub fn set(&mut self, pin: u8, value: u16) -> Result<(), String> {
+        if value > ADC_MAX {
+            return Err(format!("adc value {value} above {ADC_MAX}"));
+        }
+        let slot = self
+            .values
+            .get_mut(usize::from(pin))
+            .ok_or_else(|| format!("no pin {pin}"))?;
+        *slot = value;
+        Ok(())
+    }
+
+    /// The value `pin` reads; `Unsupported` beyond the simulated pins.
+    pub fn read(&self, pin: u8) -> Result<u16, AbiError> {
+        self.values
+            .get(usize::from(pin))
+            .copied()
+            .ok_or(AbiError::Unsupported)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +802,43 @@ mod tests {
             Err(AbiError::Unsupported),
             "no TX pin"
         );
+    }
+
+    #[test]
+    fn x15_pwm_records_duty_per_channel_and_reopen_keeps_it() {
+        let mut p = Pwm::default();
+        assert_eq!(p.set(0, 0, 1), Err(AbiError::Busy), "not open");
+        p.open(PwmSpec::parse(2, 1000).unwrap()).unwrap();
+        p.set(2, 3, 40_000).unwrap();
+        assert_eq!((p.duty(2, 3), p.duty(2, 0)), (Some(40_000), Some(0)));
+        p.open(PwmSpec::parse(2, 50).unwrap()).unwrap();
+        assert_eq!((p.freq_hz(2), p.duty(2, 3)), (Some(50), Some(40_000)));
+        assert_eq!(
+            p.timers(),
+            [PwmInfo {
+                timer: 2,
+                freq_hz: 50,
+                duty: [0, 0, 0, 40_000]
+            }]
+        );
+        assert_eq!(p.set(2, 4, 1), Err(AbiError::InvalidArgument));
+        p.stop(2).unwrap();
+        assert_eq!((p.freq_hz(2), p.duty(2, 3)), (None, None));
+        assert!(p.timers().is_empty());
+        assert!(p.stop(2).is_ok(), "idempotent");
+        assert_eq!(p.stop(6), Err(AbiError::InvalidArgument));
+    }
+
+    #[test]
+    fn x15_adc_values_are_settable_and_bounded() {
+        let mut a = Adc::default();
+        assert_eq!(a.read(3), Ok(0));
+        a.set(3, 1234).unwrap();
+        assert_eq!(a.read(3), Ok(1234));
+        a.set(3, ADC_MAX).unwrap();
+        assert!(a.set(3, ADC_MAX + 1).is_err());
+        assert!(a.set(PIN_COUNT as u8, 1).is_err());
+        assert_eq!(a.read(PIN_COUNT as u8), Err(AbiError::Unsupported));
     }
 
     #[test]

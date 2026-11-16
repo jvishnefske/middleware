@@ -34,10 +34,21 @@
 //! GPIO matrix by reference (`OutputSignal::connect_to(&flex)`), so the
 //! drivers never consume the pin. [`PinBank::unroute`] reconnects the pin
 //! to plain GPIO (alternate function and output select), which also undoes
-//! a direct IO MUX function the routing may have chosen.
-//! [`PinBank::route_open_drain`] connects both directions of an I2C line
-//! (open drain, pull-up), and an input may feed several peripheral inputs
-//! (on the ESP32 the camera's data lines feed two I2S data inputs each).
+//! a direct IO MUX function the routing may have chosen. PWM outputs (X11)
+//! are routed the same way, to an LEDC low-speed signal;
+//! [`PinBank::drive_low`] turns one back into a plain GPIO output driven
+//! low on `pwm_stop`. [`PinBank::route_open_drain`] connects both
+//! directions of an I2C line (open drain, pull-up), and an input may feed
+//! several peripheral inputs (on the ESP32 the camera's data lines feed two
+//! I2S data inputs each).
+//!
+//! # Analog inputs (X12)
+//!
+//! [`PinBank::analog`] puts a slot in `Mode::Analog` (digital input and
+//! output off) and runs an ADC conversion on it; the ADC module switches
+//! the pad to the analog (RTC) mux with a stolen handle and hands that
+//! handle back. The slot keeps it, and [`PinBank::release_all`] rebuilds the
+//! slot's `Flex` from it, which puts the pad back on the digital IO MUX.
 
 use core::cell::RefCell;
 
@@ -46,7 +57,8 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use esp_base::chip::{Direction, Profile};
 use esp_base::periph::gpio_event;
 use esp_hal::gpio::{
-    Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal, Pull as HalPull,
+    AnyPin, Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal,
+    Pull as HalPull,
 };
 use esp_hal::gpio::DriveMode;
 use esp_hal::handler;
@@ -63,8 +75,10 @@ enum Mode {
     Idle,
     Input,
     Output,
-    /// Routed to SPI or UART.
+    /// Routed to SPI, UART or PWM.
     Peripheral,
+    /// On the analog mux for ADC1 reads.
+    Analog,
 }
 
 struct Slot {
@@ -75,6 +89,9 @@ struct Slot {
     /// The payload configured this input with the pull-up (the only
     /// configuration in which a low level means the button is pressed).
     pull_up: bool,
+    /// The handle an ADC read handed back (`Mode::Analog` only), kept to
+    /// rebuild `pin` on release.
+    analog: Option<AnyPin<'static>>,
 }
 
 impl Slot {
@@ -106,7 +123,7 @@ impl PinBank {
             && !self.profile.is_reserved(n)
             && let Some(slot) = self.slots.get_mut(usize::from(n))
         {
-            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off, pull_up: false });
+            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off, pull_up: false, analog: None });
         }
     }
 
@@ -116,12 +133,17 @@ impl PinBank {
     }
 
     /// Returns every pin to high impedance (input and output disabled, no
-    /// pull, interrupt off, plain GPIO function), as after reset. Input-only
-    /// pins ([`Profile::can_output`]) have no output side to reset.
+    /// pull, interrupt off, plain GPIO function, digital mux), as after
+    /// reset. Input-only pins ([`Profile::can_output`]) have no output side
+    /// to reset.
     fn release_all(&mut self) {
         let profile = self.profile;
         for (n, slot) in self.slots.iter_mut().enumerate() {
             let Some(slot) = slot else { continue };
+            if let Some(pin) = slot.analog.take() {
+                // A fresh `Flex` resets the pad to the digital IO MUX.
+                slot.pin = Flex::new(pin);
+            }
             slot.pin.unlisten();
             slot.pin.clear_interrupt();
             slot.edge = Edge::Off;
@@ -156,7 +178,7 @@ impl PinBank {
                 Some(low)
             }
             Mode::Input if slot.pull_up => Some(slot.pin.is_low()),
-            Mode::Input | Mode::Output | Mode::Peripheral => None,
+            Mode::Input | Mode::Output | Mode::Peripheral | Mode::Analog => None,
         }
     }
 
@@ -205,7 +227,7 @@ impl PinBank {
         match slot.mode {
             Mode::Input => Ok(slot.pin.is_high()),
             Mode::Output => Ok(slot.pin.is_set_high()),
-            Mode::Idle | Mode::Peripheral => Err(AbiError::InvalidArgument),
+            Mode::Idle | Mode::Peripheral | Mode::Analog => Err(AbiError::InvalidArgument),
         }
     }
 
@@ -266,6 +288,38 @@ impl PinBank {
         signal.connect_to(&slot.pin);
         slot.mode = Mode::Peripheral;
         Ok(())
+    }
+
+    /// Returns PWM pin `n` to plain GPIO as an output driven low
+    /// (`pwm_stop`).
+    pub fn drive_low(&mut self, n: u8) -> Result<(), AbiError> {
+        self.unroute(n);
+        self.output(n)
+    }
+
+    /// Puts pin `n` on the analog mux and runs `read` (an ADC conversion
+    /// that hands back the pin's handle, also when it fails, so a failed
+    /// first read is still undone on release); see the module docs.
+    pub fn analog<R>(
+        &mut self,
+        n: u8,
+        read: impl FnOnce() -> (Result<R, AbiError>, Option<AnyPin<'static>>),
+    ) -> Result<R, AbiError> {
+        let slot = self.slot(n, Direction::Input)?;
+        if slot.mode != Mode::Analog {
+            slot.drop_irq(n);
+            OutputSignal::GPIO.connect_to(&slot.pin);
+            slot.pin.set_output_enable(false);
+            slot.pin.set_input_enable(false);
+            slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
+            slot.mode = Mode::Analog;
+            slot.pull_up = false;
+        }
+        let (value, pin) = read();
+        if slot.analog.is_none() {
+            slot.analog = pin;
+        }
+        value
     }
 
     /// Connects pin `n` to peripheral input `signal` and output `output` as

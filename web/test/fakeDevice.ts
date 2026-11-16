@@ -141,6 +141,9 @@ export interface FakeDeviceScript {
   /** Trust support; without it the device predates `sys/trust` and
    * answers those keys NotFound. */
   trust?: FakeTrust;
+  /** `sys/board` body (e.g. `bsp_export --wire`); without it the device
+   * predates 0.6 and answers NotFound. */
+  board?: Uint8Array;
   /** Runs uploaded payloads and routes served keys to them (see above). */
   runs?: FakeRuntime;
 }
@@ -302,6 +305,12 @@ export class FakeDevice {
             firmware: "0.1.0-fake",
             ...(this.script.runs ? { node: this.script.runs.node, caps: this.script.runs.caps ?? 1 } : {}),
           });
+          break;
+        case "board":
+          if (!this.script.board) {
+            return silent ? undefined : this.send(this.proto.encodeResponse(req.id, NOT_FOUND, new Uint8Array()));
+          }
+          body = this.script.board;
           break;
         case "erase":
           this.stopSession();

@@ -1,13 +1,13 @@
 //! Pure decision logic behind the ABI 2 peripherals (interrupts, timers,
-//! SPI and UART DMA) and the ABI 3 ones (PWM, I2C).
+//! SPI and UART DMA) and the ABI 3 ones (PWM outputs, ADC inputs, I2C).
 //!
 //! The imperative shell (`src/shell/irq.rs`, `timer.rs`, `spi.rs`,
-//! `uart1.rs`, `i2c.rs`, `device.rs`) owns the esp-hal drivers and ISRs; every
+//! `uart1.rs`, `pwm.rs`, `adc.rs`, `i2c.rs`, `device.rs`) owns the esp-hal drivers and ISRs; every
 //! decision it makes comes from here, so it is unit tested on the host:
 //!
-//! * [`claims`] — which pins the SPI bus, the secondary UART and GPIO
-//!   interrupts hold, so they never collide with each other or with the
-//!   chip's reserved pins (D5, D6, D7).
+//! * [`claims`] — which pins the SPI bus, the secondary UART, GPIO
+//!   interrupts, PWM outputs and ADC inputs hold, so they never collide with
+//!   each other or with the chip's reserved pins (D5, D6, D7, X12, X13).
 //! * [`timers`] — the deadline table that multiplexes the four payload
 //!   timers onto one hardware alarm: next deadline, periodic re-arm, missed
 //!   periods (D8).
@@ -22,6 +22,9 @@
 //!   ABI duty's mapping onto them (ABI 3 PWM, R15 camera clock).
 //! * [`ring`] — the fixed UART receive ring that drops and counts bytes
 //!   beyond its capacity (D7).
+//! * [`pwm`] — the ABI 3 PWM mapping onto LEDC low-speed timers and
+//!   channels, the duty resolution per frequency, duty scaling and the
+//!   open/set/stop lifecycle (X9, X10, X11).
 //!
 //! The helpers in this module turn ISR observations into queue events
 //! ([`gpio_event`], [`timer_event`], [`dma_done_event`]) and decide when an

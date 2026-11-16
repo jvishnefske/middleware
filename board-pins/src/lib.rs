@@ -4,7 +4,10 @@
 //! has, which the board reserves (flash, PSRAM, USB, the console UART, the
 //! Pico's power and sense pins), which have no output driver, which GPIOs
 //! the ADC channels own, the board-wired I2C buses and PWM outputs, and
-//! how SPI pins are routed. The ESP base firmware (`firmware/src/chip.rs`)
+//! how SPI pins are routed. The PWM outputs are the ESP base firmware's
+//! ABI 3 table (main 0.5): ABI timer `t` (0–3) channel `c` (0–1) is entry
+//! `2·t + c` of [`PinMap::pwm_table`], an LEDC low-speed channel; a pair
+//! past the table is not wired. The ESP base firmware (`firmware/src/chip.rs`)
 //! and the RP base firmware (`firmware-rp/src/chip.rs`) build their
 //! `Profile`s on these maps, and `web/protocol-wasm` exposes them to the
 //! browser, so the web pin table checks pins with the rules the device
@@ -91,10 +94,16 @@ pub struct PinMap {
     input_only: u64,
     adc: &'static [u8],
     i2c: [Option<(u8, u8)>; 2],
-    pwm0: [Option<u8>; 4],
+    pwm: &'static [u8],
     spi: SpiRouting,
     reasons: &'static [Reason],
 }
+
+/// ABI PWM timers a board can wire (`0..PWM_TIMERS`).
+pub const PWM_TIMERS: u8 = 4;
+
+/// Outputs per ABI PWM timer a board can wire (`0..PWM_OUTPUTS`).
+pub const PWM_OUTPUTS: u8 = 2;
 
 /// Bit `pin` set, or 0 for a pin past 63.
 pub const fn bit(pin: u8) -> u64 {
@@ -122,6 +131,32 @@ pub fn pins_of(mask: u64) -> impl Iterator<Item = u8> {
 }
 
 impl PinMap {
+    /// The pins that exist (bit `n` for GPIO `n`).
+    pub const fn gpio_mask(&self) -> u64 {
+        self.gpio
+    }
+
+    /// The pins the board keeps from payloads.
+    pub const fn reserved_mask(&self) -> u64 {
+        self.reserved
+    }
+
+    /// The pins without an output driver.
+    pub const fn input_only_mask(&self) -> u64 {
+        self.input_only
+    }
+
+    /// The pins an ADC channel samples.
+    pub const fn adc_mask(&self) -> u64 {
+        let mut m = 0u64;
+        let mut i = 0;
+        while i < self.adc.len() {
+            m |= bit(self.adc[i]);
+            i += 1;
+        }
+        m
+    }
+
     /// Whether the chip has GPIO `pin`.
     pub const fn exists(&self, pin: u8) -> bool {
         has(self.gpio, pin)
@@ -190,18 +225,24 @@ impl PinMap {
         self.i2c.get(usize::from(bus)).copied().flatten()
     }
 
-    /// The pin PWM `timer`'s `channel` drives, if the board wires it (only
-    /// timer 0 is wired on any board).
+    /// The pin PWM `timer`'s `channel` drives, if the board wires it
+    /// (entry `2·timer + channel` of [`PinMap::pwm_table`]).
     pub fn pwm_pin(&self, timer: u8, channel: u8) -> Option<u8> {
-        match timer {
-            0 => self.pwm0.get(usize::from(channel)).copied().flatten(),
-            _ => None,
+        if timer >= PWM_TIMERS || channel >= PWM_OUTPUTS {
+            return None;
         }
+        self.pwm.get(usize::from(timer * PWM_OUTPUTS + channel)).copied()
     }
 
-    /// The (channel, pin) pairs of PWM timer 0, ascending by channel.
-    pub fn pwm_pins(&self) -> impl Iterator<Item = (u8, u8)> + '_ {
-        (0u8..4).filter_map(|c| self.pwm_pin(0, c).map(|p| (c, p)))
+    /// The PWM output pins, indexed by `2·timer + channel` (empty when the
+    /// board wires none).
+    pub const fn pwm_table(&self) -> &'static [u8] {
+        self.pwm
+    }
+
+    /// The ((timer, channel), pin) PWM outputs, in table order.
+    pub fn pwm_pins(&self) -> impl Iterator<Item = ((u8, u8), u8)> + '_ {
+        self.pwm.iter().zip(0u8..).map(|(&p, i)| ((i / PWM_OUTPUTS, i % PWM_OUTPUTS), p))
     }
 
     /// How SPI pins are routed.
@@ -267,7 +308,12 @@ mod tests {
         assert_eq!(PICO.adc_channel(28), Ok(2));
         assert_eq!(PICO.adc_channel(29), Err(AdcError::NotAnalog));
         assert_eq!(PICO.adc_channel(40), Err(AdcError::NoSuchPin));
-        assert_eq!(ESP32.adc_channel(32), Err(AdcError::NotAnalog));
+        assert_eq!(ESP32.adc_channel(36), Ok(0), "ADC1_CH0");
+        assert_eq!(ESP32.adc_channel(32), Ok(4), "ADC1_CH4");
+        assert_eq!(ESP32.adc_channel(25), Err(AdcError::NotAnalog), "ADC2 is never offered");
+        assert_eq!(ESP32S3.adc_channel(1), Ok(0));
+        assert_eq!(ESP32S3.adc_mask(), span(1, 10));
+        assert_eq!(ESP32.adc_mask(), span(32, 39));
         assert_eq!(PICO.i2c_pins(0), Some((4, 5)));
         assert_eq!(PICO.i2c_pins(1), Some((6, 7)));
         assert_eq!(PICO.i2c_pins(2), None);
@@ -277,7 +323,11 @@ mod tests {
         assert_eq!(ESP32C3.i2c_pins(0), None);
         assert_eq!(ESP32.pwm_pins().count(), 4);
         assert_eq!(ESP32.pwm_pin(0, 1), Some(4));
-        assert_eq!(ESP32.pwm_pin(1, 0), None);
+        assert_eq!(ESP32.pwm_pin(1, 0), Some(13));
+        assert_eq!(ESP32.pwm_pin(2, 0), None, "the ESP32-CAM wires timers 0-1");
+        assert_eq!(ESP32.pwm_pin(0, 2), None, "two outputs per timer");
+        assert_eq!(ESP32.pwm_pins().nth(3), Some(((1, 1), 14)));
+        assert_eq!(ESP32S3.pwm_pin(3, 1), Some(18));
         assert_eq!(PICO.pwm_pins().count(), 0);
     }
 

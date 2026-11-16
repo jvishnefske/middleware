@@ -34,7 +34,7 @@ use mwctl::error::Error;
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use middleware::fw_ota::StateCode;
 use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
-use mwctl::report::{format_event, format_fw_info, format_info, format_trust};
+use mwctl::report::{format_board, format_event, format_fw_info, format_info, format_trust};
 use mwctl::sign::{SEED_LEN, Seed, counter_at, hex, sign_commit, sign_control, version_at};
 use port::SerialTransport;
 use std::io::Read as _;
@@ -305,6 +305,7 @@ fn control_auth(
 fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> Result<(), Error> {
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
+        Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
         Cmd::Start { key, counter } => {
             match control_auth(ControlOp::Start, target, key.as_deref(), counter)
                 .and_then(|auth| dev.start_signed(auth))

@@ -88,11 +88,11 @@ describe("pin table checks (Rust)", () => {
 
   it("switching boards re-checks the same table, with the board's fixes", () => {
     // The Pico table on the ESP32-S3: I2C bus 0 is wired to 5 / 6 there, and
-    // it has no ADC for payloads.
+    // its analog inputs are ADC1's, GPIO 1-10.
     const s3 = check("esp32s3", full);
     const text = s3.map((i) => i.message);
     expect(text).toContain("I2C bus 0 SDA is fixed at GPIO 5 on this board.");
-    expect(text).toContain("This board's firmware gives payloads no analog inputs.");
+    expect(text).toContain("GPIO 26 has no analog input; the analog inputs are GPIO 1, 2, 3, 4, 5, 6, 7, 8, 9 and 10.");
     expect(s3.find((i) => i.message.startsWith("I2C bus 0 SDA"))?.fix).toEqual({ kind: "pin", pin: 5 });
     // On the ESP32 (ESP32-CAM) GPIO 16 is the PSRAM.
     expect(check("esp32", full).map((i) => i.message)).toContain("GPIO 16 is reserved on this board (the PSRAM); choose another pin.");

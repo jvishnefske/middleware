@@ -20,8 +20,10 @@
 //!    BOOT button for the re-key window.
 //! 4. With `wasm` (ESP32, ESP32-S3), the payload peripherals come up: the
 //!    GPIO interrupt handler, the timer alarm on TIMG1, SPI2 with DMA
-//!    ([`spi`]), UART1 ([`uart1`]) and I2C0 ([`i2c`]), and on the ESP32
-//!    LEDC ([`pwm`]) and the I2S0 camera receiver ([`camera`]), all without
+//!    ([`spi`]), UART1 ([`uart1`]), I2C0 ([`i2c`]), the LEDC for PWM
+//!    ([`pwm`]) and ADC1 ([`adc`], built while the board is split, before
+//!    the pin bank), and on the ESP32 the I2S0 camera receiver ([`camera`]),
+//!    all without
 //!    pins until a payload opens them.
 //! 5. With `espnow` (ESP32, ESP32-S3), Wi-Fi comes up in station mode on
 //!    the fixed ESP-NOW channel and the [`radio`] task starts: `app/...`
@@ -40,9 +42,11 @@
 //! the controller share the re-key window through [`presence::WINDOW`]. With `wasm`, the payload's
 //! peripherals rest in statics shared with their ISRs or between runs: the
 //! pin bank ([`gpio::PINS`]), the interrupt event queue ([`irq`]), the
-//! timer alarm ([`timer`]) and the SPI/UART/I2C (and on the ESP32 PWM)
-//! drivers ([`device::HW`]).
+//! timer alarm ([`timer`]) and the SPI/UART/I2C/LEDC/ADC drivers
+//! ([`device::HW`]).
 
+#[cfg(feature = "wasm")]
+mod adc;
 mod board;
 mod bus;
 #[cfg(all(feature = "esp32", feature = "wasm"))]
@@ -58,10 +62,10 @@ mod i2c;
 mod irq;
 mod link;
 mod presence;
-#[cfg(all(feature = "esp32", feature = "wasm"))]
-mod pwm;
 #[cfg(feature = "espnow")]
 mod radio;
+#[cfg(feature = "wasm")]
+mod pwm;
 #[cfg(feature = "wasm")]
 mod spi;
 #[cfg(feature = "wasm")]
@@ -224,6 +228,7 @@ pub async fn run(spawner: Spawner) -> ! {
         chip: profile.name,
         firmware: FIRMWARE,
         capacity,
+        profile: Some(profile),
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
         staging: false,
@@ -287,18 +292,17 @@ pub async fn run(spawner: Spawner) -> ! {
             ));
         }
         #[cfg(feature = "esp32")]
-        let pwm = {
+        {
             let cam = board.payload.cam;
             if !camera::install(cam.i2s0, cam.dma_i2s0) {
                 bus.log(format_args!("camera: I2S0 camera receiver failed to start"));
             }
-            Some(pwm::Pwm::new(cam.ledc))
-        };
+        }
         device::HW.put(device::Hw {
             spi,
             uart,
-            #[cfg(feature = "esp32")]
-            pwm,
+            ledc: Some(pwm::LedcHw::new(board.payload.ledc)),
+            adc: Some(board.payload.adc),
             i2c,
         });
         #[cfg(feature = "espnow")]

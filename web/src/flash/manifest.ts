@@ -1,7 +1,17 @@
-// Firmware manifest written by the firmware build into public/firmware/:
+// Firmware manifest written by the firmware build into public/firmware/ (U16).
+// Since 0.6 it is an ESP Web Tools manifest with two extra build fields:
+//
+//   {"name": "esp-base", "version": "0.6.0", "new_install_prompt_erase": false,
+//    "builds": [{"chipFamily": "ESP32-C3", "parts": [{"path": "esp32c3.bin", "offset": 0}],
+//                "wasm": false, "bsp": "esp32c3.bsp.json"}, ...]}
+//
+// Older builds wrote
 //
 //   {"version": "0.1.0",
 //    "images": {"esp32c3": {"file": "esp32c3.bin", "offset": 0, "wasm": false}, ...}}
+//
+// and both parse to the same `Manifest`. A build must have exactly one part
+// (the merged image); `bsp` names the chip's mw-bsp/1 descriptor (E15).
 //
 // Keys are chip names in lower case without dashes, matching what
 // `chipKey` derives from esptool-js's CHIP_NAME ("ESP32-C3" -> "esp32c3",
@@ -38,6 +48,8 @@ export interface FirmwareImage {
   offset: number;
   /** The image includes the WASM payload runtime (absent in JSON: `true`). */
   wasm: boolean;
+  /** The board support package descriptor next to the image, if listed. */
+  bsp?: string;
 }
 
 /** The chips the manifest may list UF2s for. */
@@ -81,7 +93,14 @@ export interface Manifest {
 }
 
 function isRelativeFile(file: unknown): file is string {
-  return typeof file === "string" && file.length > 0 && !file.includes("..") && !file.startsWith("/") && !file.includes("\\");
+  return (
+    typeof file === "string" &&
+    file.length > 0 &&
+    !file.includes("..") &&
+    !file.startsWith("/") &&
+    !file.includes("\\") &&
+    !file.includes("://")
+  );
 }
 
 function parseUf2(chip: string, v: unknown): Uf2Image {
@@ -110,15 +129,37 @@ function parseUf2(chip: string, v: unknown): Uf2Image {
   return { file, sha256, size, version, familyId, factory: isFactory, wasm };
 }
 
-/** Validates a parsed manifest; throws with a reason when malformed. */
+/** An ESP Web Tools manifest as the old `images` map. */
+function fromBuilds(builds: unknown): Record<string, unknown> {
+  if (!Array.isArray(builds)) throw new Error("manifest.builds must be an array");
+  const images: Record<string, unknown> = {};
+  builds.forEach((b, i) => {
+    const { chipFamily, parts, wasm, bsp } = (b ?? {}) as Record<string, unknown>;
+    if (typeof chipFamily !== "string") throw new Error(`manifest.builds[${i}].chipFamily must be a string`);
+    if (!Array.isArray(parts) || parts.length !== 1) {
+      throw new Error(`manifest.builds[${i}].parts must hold exactly one merged image`);
+    }
+    if (bsp !== undefined && !isRelativeFile(bsp)) {
+      throw new Error(`manifest.builds[${i}].bsp must be a relative file name`);
+    }
+    const { path, offset } = (parts[0] ?? {}) as Record<string, unknown>;
+    images[chipKey(chipFamily)] = { file: path, offset, wasm, bsp };
+  });
+  return images;
+}
+
+/** Validates a parsed manifest, in either format; throws with a reason when
+ * malformed. */
 export function parseManifest(json: unknown): Manifest {
   if (typeof json !== "object" || json === null) throw new Error("manifest is not an object");
-  const { version, images, uf2 } = json as Record<string, unknown>;
+  const { version, builds, uf2 } = json as Record<string, unknown>;
+  let { images } = json as Record<string, unknown>;
   if (typeof version !== "string") throw new Error("manifest.version must be a string");
+  if (builds !== undefined) images = fromBuilds(builds);
   if (typeof images !== "object" || images === null) throw new Error("manifest.images must be an object");
   const out: Record<string, FirmwareImage> = {};
   for (const [chip, v] of Object.entries(images as Record<string, unknown>)) {
-    const { file, offset, wasm } = (v ?? {}) as Record<string, unknown>;
+    const { file, offset, wasm, bsp } = (v ?? {}) as Record<string, unknown>;
     if (!isRelativeFile(file)) {
       throw new Error(`manifest.images.${chip}.file must be a relative file name`);
     }
@@ -130,7 +171,7 @@ export function parseManifest(json: unknown): Manifest {
     if (typeof runtime !== "boolean") {
       throw new Error(`manifest.images.${chip}.wasm must be a boolean`);
     }
-    out[chip] = { file, offset: off, wasm: runtime };
+    out[chip] = { file, offset: off, wasm: runtime, ...(typeof bsp === "string" ? { bsp } : {}) };
   }
   const uf2Out: Partial<Record<Uf2Chip, Uf2Image>> = {};
   if (uf2 !== undefined) {

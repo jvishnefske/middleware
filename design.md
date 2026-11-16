@@ -953,9 +953,9 @@ encoder; `MdnsSocket` implements `Browse`.
 - [x] L13 `typed::TypedBrowser` decodes a service's description from its
   TXT entry `m=<bytes>` with a codec (`typed::encode_txt` writes it) —
   `typed::tests::typed_browser_decodes_txt_descriptions`.
-- [x] L14 An mDNS announcer and a unicast DNS-SD resolver (`dns::unicast`,
-  feature `dns-sd`) pass the discovery conformance cases on loopback — the
-  mDNS half below, the unicast half in L16.
+- [ ] L14 *(phase 2)* An mDNS announcer (`Announce` on `MdnsSocket`) and
+  a unicast DNS-SD resolver (`dns::unicast`, feature `dns-sd`) pass the
+  discovery conformance cases on loopback.
   - [x] mDNS half: `MdnsAnnouncer` (the `Announce` side, a type of its own
     rather than `MdnsSocket`) announcing to an `MdnsSocket` browser over
     loopback passes every discovery case — `tests/mdns.rs`
@@ -1405,13 +1405,14 @@ the kernel and Envoy substituted from the native aarch64 cache).
   malformed value leaving DHCP in place — `checks.robot-pi-eval`,
   `checks.robot-pi-image`, `checks.robot-pi-boots` (subtests "provision
   from the boot partition", "static address from robot.env").
-- [ ] MS55 The release workflow's `sd-image` job (ubuntu-24.04-arm,
-  `cachix/install-nix-action@v31`) builds the native image and its check
-  and keeps `mw-robot-pi-<ref>.img.zst` with its `.sha256` as an artifact;
-  on a `v*` tag `release-sd-image` attaches both to the firmware's
-  release, after it exists. Untrusted values reach `run:` only through
-  `env` — `actionlint` passes. *Open until a tag or manual run shows the
-  job working.*
+- [ ] MS55 `.github/workflows/release-robot-pi.yml`, apart from the
+  esp-base release: on a tag `robot-pi-v<version>` its `sd-image` job
+  (ubuntu-24.04-arm, `cachix/install-nix-action@v31`) builds the native
+  image and its check, and `release` attaches `mw-robot-pi-<tag>.img.zst`
+  and its `.sha256` to that tag's release (created if missing); a manual
+  run keeps both as an artifact and publishes nothing. Untrusted values
+  reach `run:` only through `env`. *Open until a tag or manual run shows
+  the job working.*
 - [ ] MS56 On a Raspberry Pi Zero 2 W: the image boots from the card,
   joins Wi-Fi from a dropped `wpa_supplicant.conf`, and plugging in a
   Pico with the RP base firmware creates `/dev/mw-pico` and starts
@@ -1753,6 +1754,88 @@ runs `mwctl`'s own `upload` and `fw_update` over a `gw/sys` endpoint.
   `rg27_an_accepted_start_is_persisted_before_it_reaches_the_device`
   *(mw-gateway)*.
 
+### Key-value persistence (KV…)
+
+The `kv` module: a key-value store behind the async `KvStore` trait and the
+blocking `KvStoreSync`, with `Blocking` adapting one to the other.
+`tests/kv_conformance.rs` holds the contract cases; `tests/kv.rs` runs them
+as `table::*` (`Blocking<KvTable>`), `remote::*` and `remote_small_pages::*`
+(`RemoteKv` over the memory bus to a `KvHandler`), and `tests/kv_file.rs`
+*(kv-file)* runs them as `file_sync::*` and `file_batched::*`. A case named
+below without a prefix runs under every one of those modules that applies.
+
+- [x] KV1 Every write is stamped with a revision from one counter per store:
+  from 1, strictly increasing, consecutive while the store stays open, and
+  never reused. A delete returns the removed entry's revision and consumes
+  a new one —
+  `revisions_start_at_one_and_increase`,
+  `kv::table::tests::put_overwrite_keeps_one_entry_and_restamps`,
+  `kv::table::tests::exhausted_revisions_fail_without_writing`.
+- [x] KV2 `Expect::{Any, Absent, Exact}` makes a put or delete
+  compare-and-swap; a mismatch is `Conflict` carrying the current revision
+  (`None` if absent) —
+  `expect_semantics_and_conflict_revision`,
+  `kv::tests::expect_holds_truth_table`.
+- [x] KV3 No error changes the store or consumes a revision. Deleting an
+  absent key under `Any` or `Absent` returns `Ok(None)` and writes nothing —
+  `errors_leave_the_store_unchanged`, `delete_of_absent_key_writes_nothing`,
+  `kv::table::tests::delete_semantics`.
+- [x] KV4 Reads copy into the caller's buffer; a value that does not fit is
+  `BufferTooSmall { needed }` and the entry is intact. A key or value over
+  `LIMITS` is `TooLarge`; a store with no room for a new key is `Full` —
+  `buffer_too_small_reports_needed_size`,
+  `scan_buffer_too_small_reports_needed_size`, `too_large_is_refused`,
+  `full_at_capacity`,
+  `kv::table::tests::full_rejects_new_keys_but_not_updates`,
+  `kv::table::tests::limits_follow_the_const_parameters`.
+- [x] KV5 Scans visit matching entries in key byte order, strictly after
+  the `after` cursor, stop on `Flow::Stop`, and resuming from the last key
+  seen visits every entry exactly once —
+  `scan_visits_keys_in_byte_order`, `scan_prefix_filter_is_segment_wise`,
+  `scan_after_is_exclusive`, `scan_stops_on_flow_stop`,
+  `scan_paging_visits_every_entry_once`.
+- [x] KV6 `KvTable` is heap-free and builds for `thumbv6m-none-eabi`; with
+  no features the crate stays `no_std` —
+  `scripts/check-features.sh`, `cargo build --no-default-features`,
+  `kv::table::tests::entries_stay_sorted_by_key_bytes`.
+- [x] KV7 The `kv::wire` format round-trips every request and response,
+  matches its documented layout, and rejects truncated, garbled,
+  out-of-order or trailing input with an error, never a panic —
+  `kv::wire::tests::requests_round_trip`, `responses_round_trip`,
+  `layout_is_as_documented`, `sizes_cover_the_worst_case`,
+  `every_truncation_of_a_valid_message_is_an_error`,
+  `garbled_input_never_panics_and_valid_decodes_reencode`,
+  `pages_out_of_order_or_with_trailing_bytes_are_rejected`.
+- [x] KV8 `RemoteKv` over any `Requester` and `KvHandler` over any
+  `Responder` pass the whole contract, including multi-page scans. Store
+  errors arrive unchanged; transport, malformed and unexpected replies are
+  `Backend` —
+  `tests/kv.rs`: `remote::*`, `remote_small_pages::*`,
+  `remote_transport_error_is_backend`;
+  `kv::remote::tests::store_errors_are_preserved`,
+  `backend_codes_and_transport_errors_map_to_backend`,
+  `malformed_and_unexpected_replies_are_errors`,
+  `scans_page_through_small_replies`.
+- [x] KV9 *(kv-file)* `FileKv` persists across reopen and keeps its revision
+  counter across reopen and compaction, even after deleting the
+  highest-revision key. In `Batched` mode, revisions of lost writes are never
+  reissued —
+  `tests/kv_file.rs`: `file_sync::revisions_survive_reopen`;
+  `kv::file::tests::entries_persist_across_reopen`,
+  `revision_counter_survives_compaction_after_deleting_the_highest_key`,
+  `compaction_shrinks_the_log_and_preserves_entries_and_revisions`,
+  `batched_mode_reserves_revisions_so_lost_writes_are_not_reissued`,
+  `batched_mode_flushes_and_persists`.
+- [x] KV10 *(kv-file)* A torn final record (any truncation) is dropped on
+  open and the prior state returns; damage before an intact record is
+  `Corrupt { offset }` and leaves the file untouched —
+  `kv::file::tests::every_truncation_of_the_last_record_reopens_to_the_prior_state`,
+  `crc_corruption_in_the_middle_is_an_error`;
+  `kv::file::log::tests::every_truncation_of_the_last_frame_is_a_torn_tail`,
+  `damage_before_an_intact_frame_is_corruption`.
+- [ ] KV11 *(kv-file)* A failed append or sync rolls back or poisons the
+  store as documented. Not yet tested: needs fault injection.
+
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
@@ -1800,6 +1883,16 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   `parse_rejects_bad_bodies_and_passes_app_keys`, `device_info_round_trips`.
 - [x] S7 The payload ABI (imports, exports, error codes, bounds checks) is
   defined once in `wasm_abi` — `wasm_abi::tests::*`.
+- [x] S8 (0.6) `sys/board` (empty request) answers the board the firmware
+  was built for, as `loader::BoardInfo`: `[ver u8=1][abi u16][max_image
+  u32][max_memory u32][gpio u64][reserved u64][input_only u64][strapping
+  u64][adc u64][pwm_max_bits u8][flags u8: runtime|usb_jtag|pwm_ref_tick]
+  [uart_tx u8][uart_rx u8][n_pwm u8][pwm_pins…]`, little-endian, bit `n` of
+  a mask for GPIO `n`, `pwm_pins[2·timer + channel]`; at most 96 bytes
+  (40 PWM pins), so it fits the firmware's 128-byte reply. A host checks
+  its pin assignment against it before sending a payload; firmware before
+  0.6 answers `NotFound` —
+  `loader::tests::board_info_round_trips`, `board_info_golden_bytes`, `commands_round_trip_through_parse`, `parse_rejects_bad_bodies_and_passes_app_keys`; `firmware` `dispatch::tests::s8_board_reports_profile`, `chip::tests::s8_board_info_matches_profile`; `protocol-wasm` `decodeBoardInfo` (`web/test/protocol.test.ts`: "decodes the bsp_export --wire fixture (ESP32-S3)"); `mwctl board` (`device::tests::board_is_decoded_or_not_found_on_older_firmware`, `report::tests::board_lists_pin_classes_and_pwm_table`).
 - [x] S8 Publications that arrive while `request_with` or `serve_one`
   waits are kept, in order, in the link's inbox of `I` bytes (const
   generic, default `INBOX_BYTES` = one maximal raw frame + 2; each entry
@@ -2062,8 +2155,33 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
 - [x] E5 Bridges payload publish/subscribe to the serial link and GPIO to
   the chip, refusing pins used by flash, USB or the console UART —
   `chip::tests::console_uart_pins_are_reserved`, `flash_psram_and_usb_pins_are_refused`, `missing_pins_are_invalid`, `esp32_input_only_pins_refuse_output`, `general_purpose_pins_are_allowed`; `dispatch::tests::publications_route_only_to_running_subscribed_payloads`. Runs payloads on ESP32 and ESP32-S3 only; the C3 has no runtime.
+  From 0.5 the same two chips also bridge the ABI 3 PWM and ADC imports,
+  on fixed pins that are never flash, USB or console pins (X9, X12); a pin
+  held by PWM or the ADC is refused to plain `gpio_*` like an SPI or UART
+  pin (X13).
 - [x] E6 Produces merged flash images per chip for the web flasher —
   `firmware/build-images.sh` writes `web/public/firmware/{esp32,esp32s3,esp32c3}.bin` and `manifest.json`. It also builds the Pico UF2s for U19 (`rp2040`, `rp2350`), which are, like the `.bin` images, build output and not committed.
+- [x] E14 (0.6) Each chip profile has a strapping-pin mask (ESP32 GPIO
+  0/2/5/12/15, ESP32-S3 0/3/45/46, ESP32-C3 2/8/9, ESP8266 0/2/15). Strapping
+  pins stay usable by payloads (`check_pin` allows them); hosts warn, as
+  ESPHome does with `ignore_strapping_warning`. The PWM pins avoid them —
+  `chip::tests::e14_strapping_pins_per_chip_are_allowed`; `periph::pwm::tests::x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c` (uses the mask instead of a hand list).
+- [ ] E15 (0.6) Board support packages: `cargo run --example bsp_export --
+  <chip>` prints the chip's `mw-bsp/1` JSON (`format, chip, firmware, abi,
+  runtime, maxImage, maxMemory, console {usbJtag, uartTx, uartRx}, pins
+  {gpio, reserved, inputOnly, strapping, adc1}, pwm {maxBits, refTick, table
+  [{timer, channel, gpio}]}`) from the same `Profile` that `sys/board`
+  serves, and `--wire` the `sys/board` body as hex (the golden fixture
+  `web/test/fixtures/esp32s3.board.hex`, also used by Skygraph). A BSP is
+  identified as `<chip>@<firmware>`. `build-images.sh` writes
+  `<chip>.bsp.json` next to each image and an ESP Web Tools manifest whose
+  builds carry `wasm` and `bsp`. `.github/workflows/release.yml` builds the
+  images on a tag `esp-base-v<version>`, attaches `.bin`, `.bsp.json` and
+  `manifest.json` to the release, and mirrors every release to GitHub
+  Pages (`firmware/<version>/`, `firmware/latest/`), because release assets
+  are not readable cross-origin from a browser. Partial: the exporter and
+  the manifest writer are checked locally; the workflow is linted
+  (actionlint) but has not run yet.
 - [ ] E14 A busy payload or an ESP-NOW flood cannot starve the serial
   links: the controller yields to the executor once per iteration of its
   running loop, and the radio task once per received frame. Before, an
@@ -3039,6 +3157,11 @@ open).
   and refused before sending anything when the device pins another key;
   claim is offered when unclaimed or in the re-key window —
   `web/test/trustUpload.test.ts` against a fake device modelling the trust contract in TypeScript in front of the Rust loader: "uploads unsigned to an unclaimed device after asking", "sends nothing when the unsigned upload is declined", "uploads unsigned to firmware without sys/trust and says why", "claims an unclaimed device and denies a second claim", "signs the commit for a device that pins this key, and the device accepts it", "a commit signed by another key is Denied and the old image stays active", "a replayed version is Denied; a clock behind the device bumps past min_version", "re-keys only while the window opened by holding BOOT is open".
+- [x] U16 (0.6) The flasher reads both manifest formats: the ESP Web Tools
+  shape (`builds[].chipFamily`, exactly one `parts` entry, plus `wasm` and
+  `bsp`) and the older `{version, images}` map, to the same images —
+  `web/test/manifest.test.ts`: "U16: parses the ESP Web Tools manifest to the same images, with the BSP", "parses the wasm runtime flag, defaulting to true when absent".
+
 - [x] U16 First run: a Start tab, opened when no tab is saved, says what the
   site does and what a payload is, runs the Blink example in the Blocks
   simulator in one click (asking before it replaces different blocks), and
@@ -3407,6 +3530,97 @@ SPI (ABI 2) and I2C (ABI 3) per base firmware:
 - [x] X8 `wasm-host` still builds for `thumbv7em-none-eabihf` (the STM32F407
   target that implements ABI 3 on hardware) —
   `cargo build -p wasm-host --target thumbv7em-none-eabihf`.
+
+#### PWM and ADC on the ESP base firmware (0.5)
+
+The ESP32 and ESP32-S3 base firmware implement `pwm_open`, `pwm_set`,
+`pwm_stop` and `adc_read` with esp-hal 1.2's `ledc` and `analog::adc`
+drivers (both behind esp-hal's `unstable` feature). The ESP32-C3 (no
+runtime) and the ESP8266 are unchanged. The decisions are pure and host
+tested in `esp_base` (`chip`, `periph::pwm`, `periph::claims`); the
+hardware code is `firmware/src/shell/pwm.rs` and `adc.rs`. The pin tables
+below are a contract with payload generators (Skygraph), served by
+`sys/board`. The ESP32 row changed once, when the ESP32 build became the
+AI-Thinker ESP32-CAM's (R15): 0.5 had GPIO 4, 13, 18, 19, 23, 25, 26, 27,
+which on that board are camera data, sync and SCCB lines; (0,0) is now the
+camera's XCLK (GPIO 0, a strapping pin) and timers 2–3 are `Unsupported`.
+
+| ABI (t,c) | (0,0) | (0,1) | (1,0) | (1,1) | (2,0) | (2,1) | (3,0) | (3,1) |
+|---|---|---|---|---|---|---|---|---|
+| ESP32 (ESP32-CAM) GPIO | 0 | 4 | 13 | 14 | — | — | — | — |
+| ESP32-S3 GPIO | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
+
+| chip | `adc_read` pins (ADC1, 11 dB, raw 12-bit) |
+|---|---|
+| ESP32 | GPIO32–39 |
+| ESP32-S3 | GPIO1–10 |
+
+- [x] X9 ABI PWM timers 0–3 are LEDC low-speed timers 0–3 and channel `c`
+  of timer `t` is LEDC low-speed channel `2·t + c`, on the fixed pin in the
+  table above; timers 4–5, channels 2–3 and a timer the board maps no pin
+  to (ESP32 timers 2–3) are `Unsupported`. The pins avoid strapping (except
+  the ESP32-CAM's XCLK, GPIO 0), flash/PSRAM, USB, UART0, ADC1 and the
+  default I2C pins —
+  `firmware` `periph::pwm::tests::x9_abi_timers_and_channels_map_to_ledc_low_speed_channels`,
+  `x9_pwm_pins_avoid_strapping_flash_usb_console_adc1_and_i2c`;
+  `chip::tests::profiles_match_chips` (`Profile::pwm_pins`, `pwm_pin`).
+- [x] X10 A timer gets the widest duty resolution its 80 MHz APB divider
+  allows (`div = (clk << 8) / f / 2^bits ∈ 256..=0x3FFFF`, 8.8 fixed point),
+  capped at 16 bits on ESP32 and 14 on ESP32-S3; ESP32 falls back to the
+  1 MHz REF_TICK when the APB divider overflows (as esp-hal does), and
+  ESP32-S3 refuses 1–4 Hz with `Unsupported`. Duty is scaled as
+  `raw = (d·2^bits + 32767) / 65535`, so 0 is always low and 65535 always
+  high — `periph::pwm::tests::x10_resolution_is_the_widest_the_apb_divider_allows`,
+  `x10_low_frequencies_use_ref_tick_on_esp32_and_are_refused_on_esp32s3`,
+  `x10_duty_scales_with_rounding_to_the_full_range`.
+- [x] X11 `pwm_open` configures the timer and binds both its channels at
+  duty 0; reopening retunes the timer and rescales the duties it keeps.
+  `pwm_set` on a closed timer is `Busy`; a channel's first `pwm_set` claims
+  and routes its pin (`PinBank::route_out(pin, LEDC_LS_SIGn)`, the esp-hal
+  channel built with `NoPin` from short-lived handles over the stored
+  `LEDC`). `pwm_stop` zeroes both channels, drives their routed pins low as
+  GPIO outputs and frees them; stopping a closed timer is a no-op. Payload
+  stop (`EspDevice` drop) zeroes all eight channels before the pins are
+  released — `periph::pwm::tests::x11_open_binds_both_channels_at_zero_and_reopen_rescales_kept_duties`,
+  `x11_set_needs_an_open_timer_and_unmapped_ids_are_unsupported`,
+  `x11_stop_returns_routed_pins_and_closes_the_timer`; `shell/device.rs`
+  (esp32/esp32s3 builds).
+- [x] X12 `adc_read` is an ADC1 one-shot conversion at 11 dB attenuation
+  returning the raw, uncalibrated 12-bit value, on ESP32 GPIO32–39 and
+  ESP32-S3 GPIO1–10; ADC2 is never used (it conflicts with Wi-Fi). A pin that
+  does not exist is `InvalidArgument`, a pin without an ADC1 channel
+  `Unsupported`, and a conversion that does not finish within 1 ms
+  `Transport`. ADC1 is built at boot with every channel enabled, before the
+  pin bank; a read steals the pin's `GPIOn` only inside `adc_read`, with the
+  bank slot in `Mode::Analog`, and payload stop rebuilds the slot's `Flex`,
+  which takes the pad back from the analog (RTC) mux —
+  `chip::tests::x12_adc1_pins_per_chip`;
+  `claims::tests::x12_adc_claims_only_adc1_pins`; `shell/adc.rs`,
+  `shell/gpio.rs` (esp32/esp32s3 builds).
+- [x] X13 PWM and ADC pins are exclusive claims (`Owner::Pwm`,
+  `Owner::Adc`): neither can be taken by SPI, UART, a GPIO interrupt or the
+  other, a pin held elsewhere is `InvalidArgument`, and plain `gpio_*` calls
+  on them are refused until `pwm_stop` (PWM) or payload stop (ADC) —
+  `claims::tests::x13_pwm_and_adc_claims_are_exclusive`.
+- [ ] X14 On hardware (ESP32 and ESP32-S3): each of the eight PWM pins
+  shows the requested frequency and duty on a scope (including 1 Hz on
+  ESP32 via REF_TICK, 1 MHz at 6 bits, duty 0 and 65535), reopening retunes
+  without a stuck output, `pwm_stop` and payload stop leave the pins low;
+  `adc_read` reads about 0 at GND and 4095 near 3.3 V on every ADC1 pin, and
+  an ADC pin works as plain GPIO again after the payload stops. Builds
+  (`firmware/build.sh esp32`, `esp32s3`; `esp32c3` unchanged); not yet run
+  on a board.
+- [x] X15 The browser simulator implements the ABI 3 PWM and ADC imports
+  like the desktop simulator (X7): PWM records each open timer's frequency
+  and channel duties (reopen keeps them, set on a closed timer is `Busy`)
+  and reports `pwmOpen`/`pwmSet`/`pwmStop` events; `adc_read` returns the
+  value set with `setAdc(pin, value)` (0–4095, 0 until set); `pwm()` lists
+  the open timers. It accepts every ABI timer, channel and pin, not just the
+  ESP32 tables — protocol-wasm `simulator::periph::tests::x15_pwm_records_duty_per_channel_and_reopen_keeps_it`,
+  `x15_adc_values_are_settable_and_bounded`,
+  `simulator::tests::x15_device_records_pwm_events_and_reads_set_adc_values`,
+  `x15_payload_reads_adc_drives_pwm_and_stop_makes_set_busy` (fixture
+  `web/test/fixtures/pwm_adc.wat`); `web/test/abi3.test.ts`.
 
 ### Signed payloads (trust)
 

@@ -1,9 +1,11 @@
 {
-  "version": "0.1.0",
-  "images": {
-    "esp32": { "file": "esp32.bin", "offset": 0, "wasm": true },
-    "esp32s3": { "file": "esp32s3.bin", "offset": 0, "wasm": true },
-    "esp32c3": { "file": "esp32c3.bin", "offset": 0, "wasm": false },
-    "esp8266": { "file": "esp8266.bin", "offset": 0, "wasm": false }
-  }
+  "name": "esp-base",
+  "version": "0.6.0",
+  "new_install_prompt_erase": false,
+  "builds": [
+    { "chipFamily": "ESP32", "parts": [{ "path": "esp32.bin", "offset": 0 }], "wasm": true, "bsp": "esp32.bsp.json" },
+    { "chipFamily": "ESP32-S3", "parts": [{ "path": "esp32s3.bin", "offset": 0 }], "wasm": true, "bsp": "esp32s3.bsp.json" },
+    { "chipFamily": "ESP32-C3", "parts": [{ "path": "esp32c3.bin", "offset": 0 }], "wasm": false, "bsp": "esp32c3.bsp.json" },
+    { "chipFamily": "ESP8266", "parts": [{ "path": "esp8266.bin", "offset": 0 }], "wasm": false, "bsp": "esp8266.bsp.json" }
+  ]
 }

@@ -35,6 +35,8 @@ USAGE:
 
 COMMANDS:
     info                       Print chip, firmware, ABI, capacity and payload status
+    board                      Print the board description (sys/board): pin classes,
+                               PWM pins, limits; firmware 0.6 or later
     upload <FILE.wasm>         Install a payload (sys/loader begin/chunk/commit)
         --key <KEYFILE>            sign the commit (Ed25519); without it the commit is
                                    unsigned, which only an unclaimed device accepts
@@ -121,6 +123,8 @@ pub enum KeyCmd {
 pub enum Cmd {
     /// `info`.
     Info,
+    /// `board`.
+    Board,
     /// `upload`.
     Upload {
         /// Payload image.
@@ -347,6 +351,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     }
     let cmd = match name.as_str() {
         "info" => Cmd::Info,
+        "board" => Cmd::Board,
         "upload" => Cmd::Upload {
             file: PathBuf::from(pos.next().ok_or("upload needs a .wasm file")?),
             start,
@@ -504,6 +509,7 @@ mod tests {
     #[test]
     fn parses_trust_key_and_signed_upload_commands() {
         assert_eq!(run("--port p trust info").cmd, Cmd::TrustInfo);
+        assert_eq!(run("--port p board").cmd, Cmd::Board);
         assert_eq!(
             run("trust claim --key k.key --port p").cmd,
             Cmd::TrustClaim {

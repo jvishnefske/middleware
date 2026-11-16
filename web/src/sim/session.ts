@@ -215,9 +215,15 @@ export class SimSession {
     return r;
   }
 
-  /** Sets what the payload's `adc_read(pin)` returns (12-bit). */
+  /** Sets what the payload's `adc_read(pin)` returns, clamped to 12
+   * bits; false for a pin the board does not have. */
   setAdc(pin: number, level: number): boolean {
-    return this.sim.setAdc(pin, level);
+    try {
+      this.sim.setAdc(pin, Math.max(0, Math.min(4095, Math.round(level))));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Drives an input; a matching armed edge queues a GPIO event for the

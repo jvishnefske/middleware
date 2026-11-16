@@ -62,10 +62,30 @@ export interface DeviceInfo {
   serves: boolean;
 }
 
+/** A decoded `sys/board` body: pin classes as ascending GPIO numbers,
+ * `pwmPins[2·timer + channel]`. */
+export interface BoardInfo {
+  abiVersion: number;
+  maxImage: number;
+  maxMemory: number;
+  gpio: number[];
+  reserved: number[];
+  inputOnly: number[];
+  strapping: number[];
+  adc: number[];
+  pwmMaxBits: number;
+  runtime: boolean;
+  usbJtag: boolean;
+  pwmRefTick: boolean;
+  uartTx: number;
+  uartRx: number;
+  pwmPins: number[];
+}
+
 export interface LoaderStepResult {
   statusCode: number;
   status: string;
-  action?: "app" | "info" | "start" | "stop" | "erase" | "write" | "activate";
+  action?: "app" | "info" | "board" | "start" | "stop" | "erase" | "write" | "activate";
   offset?: number;
   data?: Uint8Array;
   len?: number;
@@ -78,6 +98,7 @@ export interface ProtocolConstants {
   maxWireFrame: number;
   keys: {
     info: string;
+    board: string;
     begin: string;
     chunk: string;
     commit: string;
@@ -144,6 +165,14 @@ export interface TimerState {
   fires: number;
 }
 
+/** An open PWM timer (ABI 3): its frequency and each channel's last duty. */
+export interface PwmState {
+  timer: number;
+  freqHz: number;
+  /** Channels 0–3, as fractions of 65535. */
+  duty: number[];
+}
+
 export type SimEvent =
   | { kind: "log"; line: string }
   | { kind: "publish"; key: string; data: Uint8Array }
@@ -152,6 +181,9 @@ export type SimEvent =
   | { kind: "write"; pin: number; high: boolean }
   | { kind: "spi"; tx: Uint8Array; rx: Uint8Array }
   | { kind: "uart"; data: Uint8Array }
+  | { kind: "pwmOpen"; timer: number; freqHz: number }
+  | { kind: "pwmSet"; timer: number; channel: number; duty: number }
+  | { kind: "pwmStop"; timer: number }
   | { kind: "serve"; key: string }
   | IrqEvent;
 
@@ -176,6 +208,10 @@ export interface Simulator {
   /** Empty selects loopback; otherwise the pattern repeats. */
   setSpiPattern(pattern: Uint8Array): void;
   timers(): TimerState[];
+  /** Sets what `adc_read(pin)` returns (0–4095, 0 until set); throws when out of range. */
+  setAdc(pin: number, value: number): void;
+  /** Open PWM timers. */
+  pwm(): PwmState[];
   /** Events dropped from the full queue since load. */
   readonly dropped: number;
   readonly pending: number;
@@ -196,8 +232,6 @@ export interface Simulator {
   readonly handlesRequests: boolean;
   /** The device's node id (16 hex digits). */
   readonly nodeId: string;
-  /** What `adc_read(pin)` returns (12-bit, clamped). */
-  setAdc(pin: number, level: number): boolean;
   free(): void;
 }
 
@@ -244,8 +278,8 @@ export interface GpioInfo {
   inputOnly: boolean;
   /** ADC channel. */
   adc?: number;
-  /** PWM timer 0 channel. */
-  pwm?: number;
+  /** The PWM output (ABI timer and channel) that drives the pin. */
+  pwm?: { timer: number; channel: number };
   /** The board-wired I2C line. */
   i2c?: { bus: number; line: "sda" | "scl" };
   /** RP2040/RP2350 F1 SPI signal. */
@@ -258,7 +292,7 @@ export interface BoardPins {
   spiRouting: "matrix" | "rp-function-table";
   gpios: GpioInfo[];
   i2c: { bus: number; sda: number; scl: number }[];
-  pwm: { channel: number; pin: number }[];
+  pwm: { timer: number; channel: number; pin: number }[];
   adc: number[];
   i2cBuses: number;
   spiBuses: number;
@@ -289,6 +323,7 @@ export interface Protocol {
   uploadPlan(image: Uint8Array, chunk?: number): UploadStep[];
   decodeDeviceInfo(data: Uint8Array): DeviceInfo | undefined;
   encodeDeviceInfo(info: Omit<DeviceInfo, "statusName" | "caps" | "serves"> & { caps?: number }): Uint8Array;
+  decodeBoardInfo(data: Uint8Array): BoardInfo | undefined;
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
   readonly constants: ProtocolConstants;
@@ -339,6 +374,7 @@ function wrap(): Protocol {
     crc32: pkg.crc32,
     uploadPlan: (image, chunk) => pkg.uploadPlan(image, chunk ?? constants.chunkMax) as UploadStep[],
     decodeDeviceInfo: (data) => pkg.decodeDeviceInfo(data) as DeviceInfo | undefined,
+    decodeBoardInfo: (data) => pkg.decodeBoardInfo(data) as BoardInfo | undefined,
     encodeDeviceInfo: (i) =>
       pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware, i.node, i.caps),
     payloadStatusName: pkg.payloadStatusName,

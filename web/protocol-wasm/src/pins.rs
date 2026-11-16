@@ -950,6 +950,7 @@ mod tests {
             pico[1].message,
             "This board's firmware wires no PWM outputs for payloads."
         );
+        // The ESP32's analog inputs are ADC1's (GPIO 32-39).
         let esp = check(
             &ESP32,
             &[
@@ -958,15 +959,14 @@ mod tests {
             ],
             &[],
         );
+        assert_eq!(esp.len(), 1, "{esp:?}");
         assert_eq!(
             esp[0].message,
-            "This board's firmware gives payloads no analog inputs."
-        );
-        assert_eq!(
-            esp[1].message,
             "GPIO 2 is not a PWM output on this board; the PWM outputs are GPIO 0, 4, 13 and 14."
         );
-        assert_eq!(esp[1].fix, Some(Fix::Pin(0)));
+        assert_eq!(esp[0].fix, Some(Fix::Pin(0)));
+        let esp = check(&ESP32, &[row("POT", Some(25), Func::Adc, 0)], &[]);
+        assert_eq!(esp[0].fix, Some(Fix::Pin(36)), "ADC1 channel 0 first");
         assert!(check(&ESP32, &[row("FLASH", Some(4), Func::Pwm, 0)], &[]).is_empty());
     }
 

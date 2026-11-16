@@ -10,6 +10,7 @@
 //! | request              | condition            | action     | status after |
 //! |----------------------|----------------------|------------|--------------|
 //! | `sys/info`           | —                    | none       | unchanged (ends with [`Context::node`] and [`Context::caps`]) |
+//! | `sys/board`          | —                    | none (reply [`Profile::board_info`]) | unchanged |
 //! | `sys/loader/begin`   | fits                 | `Erase { stop: true }` | `Loading` |
 //! | `sys/loader/begin`   | fits, [`Context::staging`] | `Erase { stop: false }` | unchanged |
 //! | `sys/loader/chunk`   | in order, fits       | `Write`    | unchanged    |
@@ -86,6 +87,8 @@ use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatu
 use middleware::transport::{HandlerError, Request, SenderId};
 use middleware::wasm_abi::ABI_VERSION;
 
+use crate::chip::Profile;
+
 /// Facts for dispatch: what `sys/info` reports, plus whether the re-key
 /// window is open at the time of the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +99,10 @@ pub struct Context<'a> {
     pub firmware: &'a str,
     /// Largest payload image in bytes.
     pub capacity: u32,
+    /// The chip profile `sys/board` describes; `None` on a firmware whose
+    /// chip has no esp-base profile (rp-base), which answers `sys/board`
+    /// with `NotFound` like firmware before 0.6.
+    pub profile: Option<&'static Profile>,
     /// Whether the firmware includes the WASM runtime. Without it the loader
     /// and storage work but `sys/payload/start` is refused with `NotFound`.
     pub runtime: bool,
@@ -321,7 +328,8 @@ impl<'a> Outcome<'a> {
 }
 
 /// Dispatches one request. The response body (for `sys/info`, which ends
-/// with [`Context::node`] when set) is written into `out`.
+/// with [`Context::node`] when set, `sys/board` and `sys/trust/info`) is
+/// written into `out`.
 ///
 /// The request's [`RequestMeta`](middleware::RequestMeta) is what the
 /// shell knows about the caller: over the serial ports nothing (no sender,
@@ -353,6 +361,13 @@ pub fn handle_request<'a>(
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
+        Command::Board => match ctx.profile {
+            Some(profile) => {
+                let board = profile.board_info(ABI_VERSION);
+                Outcome::reply(state, board.encode(out).ok_or(HandlerError::BufferTooSmall))
+            }
+            None => Outcome::reply(state, Err(HandlerError::NotFound)),
+        },
         Command::Start if !ctx.runtime => Outcome::reply(state, Err(HandlerError::NotFound)),
         Command::Start => match state.status {
             PayloadStatus::Empty | PayloadStatus::Loading => {
@@ -476,6 +491,7 @@ mod tests {
         chip: "esp32c3",
         firmware: "0.1.0",
         capacity: 1024,
+        profile: Some(&crate::chip::ESP32C3),
         runtime: true,
         rekey_window: false,
         staging: false,
@@ -570,6 +586,31 @@ mod tests {
             &mut tiny,
         );
         assert_eq!(o.reply, Err(HandlerError::BufferTooSmall));
+    }
+
+    #[test]
+    fn s8_board_reports_profile() {
+        use middleware::loader::BoardInfo;
+        let mut out = [0u8; 128];
+        let s = State::boot(true);
+        let ctx = Context { profile: Some(&crate::chip::ESP32S3), ..CTX };
+        let o = handle_request(s, &ctx, &Request::new(keys::BOARD, &[]), &mut out);
+        assert_eq!((o.state, o.action), (s, Action::None));
+        let board = BoardInfo::decode(&out[..o.reply.unwrap()]).unwrap();
+        assert_eq!(board, crate::chip::ESP32S3.board_info(ABI_VERSION));
+        assert_eq!(board.pwm_pins, [11, 12, 13, 14, 15, 16, 17, 18]);
+        assert_eq!(req(s, keys::BOARD, b"x").reply, Err(HandlerError::InvalidRequest));
+        let mut tiny = [0u8; 16];
+        assert_eq!(
+            handle_request(s, &CTX, &Request::new(keys::BOARD, &[]), &mut tiny).reply,
+            Err(HandlerError::BufferTooSmall)
+        );
+        // Without a profile (rp-base) the key is absent, as before 0.6.
+        let none = Context { profile: None, ..CTX };
+        assert_eq!(
+            handle_request(s, &none, &Request::new(keys::BOARD, &[]), &mut out).reply,
+            Err(HandlerError::NotFound)
+        );
     }
 
     #[test]

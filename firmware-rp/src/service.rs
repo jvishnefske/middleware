@@ -244,6 +244,8 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             chip: facts.chip,
             firmware: facts.firmware,
             capacity: store.as_ref().map_or(0, PayloadStore::capacity),
+            // No esp-base chip profile: `sys/board` is `NotFound`.
+            profile: None,
             runtime: facts.runtime,
             rekey_window: false,
             staging: false,

@@ -14,6 +14,7 @@ request/response behind one set of traits, with pluggable transports.
 | `mdns`     | mDNS browse (`MdnsSocket`) and announce (`MdnsAnnouncer`) | `std` + tokio        |
 | `dns-sd`   | unicast DNS-SD browse against cluster DNS         | `std` + tokio                |
 | `memory`   | in-process backend for tests and examples         | `std` + tokio                |
+| `kv-file`  | durable key-value store (`kv::file::FileKv`), an append-only log | `std`          |
 | `trust`    | signed payload checks (SHA-256, Ed25519 verify)   | `no_std`, no heap            |
 | `postcard` | serde codec                                       | `no_std`                     |
 | `prost`    | protobuf codec                                    | `no_std` + `alloc`           |
@@ -68,11 +69,25 @@ Requirements and the tests that cover them are listed in `design.md`.
 Feature isolation is checked by `scripts/check-features.sh`. CI
 (`.github/workflows/ci.yml`) runs it, the workspace tests, the RP base
 firmware build and the web check on every pull request; the ESP firmwares
-need the espup toolchain and are built locally. Pushing a `v*` tag runs
-`.github/workflows/release.yml`: it builds every chip's image with
-`firmware/build-images.sh`, attaches them, the manifest and `SHA256SUMS` to a
-GitHub release, and deploys the web app with those images bundled to GitHub
-Pages, where the flasher reads them from its own origin.
+need the espup toolchain and are built locally.
+
+## Persistence
+
+`kv` puts a key-value store behind one trait, `KvStore`. It has a blocking
+twin, `KvStoreSync`, because request handlers are synchronous; `Blocking`
+adapts one to the other. Keys are ordinary middleware keys. Every write is
+stamped with a revision, and a put or delete can be made conditional with
+`Expect` (compare-and-swap). Scans return keys in order, in pages.
+
+| store | where | durability | builds on |
+|---|---|---|---|
+| `kv::table::KvTable` | RAM, fixed capacity | none | `no_std`, no heap |
+| `kv::file::FileKv` | append-only log file, CRC per record | every acknowledged write survives power loss (`Durability::Sync`), or after `flush()` (`Batched`) | `kv-file` |
+| `kv::remote::RemoteKv` | any store, served by `kv::remote::KvHandler` over any `Requester` / `Responder` | the served store's | `no_std`, no heap |
+
+`tests/kv_conformance.rs` is the contract as tests. `tests/kv.rs` runs it
+against the table and against the remote store over the in-process bus, and
+`tests/kv_file.rs` runs it against the file store in both durability modes.
 
 ## Containers and the robot VM (nix)
 
@@ -143,8 +158,9 @@ robot from attestation through to an accepted request.
 The same robot runs on a Raspberry Pi Zero 2 W or a Pi 3, which is also
 the gateway for one Pico running the RP base firmware on its USB port and
 the host of `mw-pi-node`, the Linux payload runner (design.md MS49–MS56).
-Each release carries `mw-robot-pi-<tag>.img.zst` and its `.sha256`, built
-natively on an arm runner. To build it yourself, `nix build
+Each `robot-pi-v<version>` release carries `mw-robot-pi-<tag>.img.zst` and
+its `.sha256`, built natively on an arm runner by
+`.github/workflows/release-robot-pi.yml`. To build it yourself, `nix build
 .#sd-image-robot-pi` on an x86_64 machine cross compiles it (the first
 build compiles the base system for aarch64 and takes a long time; the
 kernel and Envoy come prebuilt from the NixOS cache), and the same
@@ -386,3 +402,11 @@ it as a checked download when the site was built after
 then speaks the same protocol on its USB CDC port. The ESP32-C3, ESP8266 and RP2040 builds have no WASM
 runtime (the C3 and the RP2040 lack the atomics wasmi needs; the ESP8266
 lacks the RAM), so they store payloads but cannot run them.
+
+Board support packages: each ESP firmware describes its pins on `sys/board`
+(`mwctl board`; the RP firmware answers `NotFound`), and `cargo run --example bsp_export -- <chip>` (in
+`firmware/`) prints the same description as `mw-bsp/1` JSON. A tag
+`esp-base-v<version>` makes `.github/workflows/release.yml` attach the images,
+BSPs and an ESP Web Tools `manifest.json` to a release and mirror them to
+GitHub Pages under `firmware/<version>/` and `firmware/latest/`, where
+browsers (the web flasher, Skygraph) can fetch them.

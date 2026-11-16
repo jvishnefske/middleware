@@ -219,6 +219,38 @@ pub fn encode_device_info(
     .ok_or_else(|| js_err("invalid device info"))
 }
 
+fn pins(mask: u64) -> Array {
+    (0u32..64).filter(|n| mask >> n & 1 == 1).map(JsValue::from).collect()
+}
+
+/// Decodes a `sys/board` body into `{abiVersion, maxImage, maxMemory, gpio,
+/// reserved, inputOnly, strapping, adc, pwmMaxBits, runtime, usbJtag,
+/// pwmRefTick, uartTx, uartRx, pwmPins}` (the pin classes as ascending GPIO
+/// number arrays, `pwmPins[2·timer + channel]`), or `undefined` when
+/// malformed.
+#[wasm_bindgen(js_name = decodeBoardInfo)]
+pub fn decode_board_info(data: &[u8]) -> Option<Object> {
+    use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
+    let b = BoardInfo::decode(data)?;
+    let o = Object::new();
+    set(&o, "abiVersion", b.abi_version);
+    set(&o, "maxImage", b.max_image);
+    set(&o, "maxMemory", b.max_memory);
+    set(&o, "gpio", pins(b.gpio));
+    set(&o, "reserved", pins(b.reserved));
+    set(&o, "inputOnly", pins(b.input_only));
+    set(&o, "strapping", pins(b.strapping));
+    set(&o, "adc", pins(b.adc));
+    set(&o, "pwmMaxBits", b.pwm_max_bits);
+    set(&o, "runtime", b.flags & BOARD_RUNTIME != 0);
+    set(&o, "usbJtag", b.flags & BOARD_USB_JTAG != 0);
+    set(&o, "pwmRefTick", b.flags & BOARD_PWM_REF_TICK != 0);
+    set(&o, "uartTx", b.uart_tx);
+    set(&o, "uartRx", b.uart_rx);
+    set(&o, "pwmPins", b.pwm_pins.iter().map(|&p| JsValue::from(p)).collect::<Array>());
+    Some(o)
+}
+
 /// SHA-256 of `data` (32 bytes), computed by the device loader's hasher.
 #[wasm_bindgen]
 pub fn sha256(data: &[u8]) -> Vec<u8> {
@@ -337,6 +369,7 @@ impl JsDeviceLoader {
             let name = match action {
                 Action::App => "app",
                 Action::Info => "info",
+                Action::Board => "board",
                 Action::Start => "start",
                 Action::Stop => "stop",
                 Action::Erase(len) => {
@@ -367,7 +400,7 @@ impl JsDeviceLoader {
 
 /// Protocol constants and system keys:
 /// `{chunkMax, maxRawFrame, maxWireFrame, signedCommitLen, rekeyWindowMs,
-/// presenceHoldMs, keys: {info, begin, chunk, commit, start, stop, log,
+/// presenceHoldMs, keys: {info, board, begin, chunk, commit, start, stop, log,
 /// status, trustInfo, trustClaim}}`.
 #[wasm_bindgen]
 pub fn protocol() -> Object {
@@ -381,6 +414,7 @@ pub fn protocol() -> Object {
     let k = Object::new();
     for (name, key) in [
         ("info", keys::INFO),
+        ("board", keys::BOARD),
         ("begin", keys::BEGIN),
         ("chunk", keys::CHUNK),
         ("commit", keys::COMMIT),
@@ -505,9 +539,9 @@ fn whole(v: &JsValue) -> Option<i64> {
 
 /// The board's pins for the pin table: `{chip, spiRouting: "matrix" |
 /// "rp-function-table", gpios: [{pin, reserved?: why, inputOnly, adc?:
-/// channel, pwm?: channel, i2c?: {bus, line: "sda"|"scl"}, spi?: [{block,
-/// signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm: [{channel,
-/// pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
+/// channel, pwm?: {timer, channel}, i2c?: {bus, line: "sda"|"scl"}, spi?:
+/// [{block, signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm:
+/// [{timer, channel, pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
 /// maxLabel, funcs: [name]}`. `chip` is a `sys/info` chip name; an unknown
 /// one throws.
 #[wasm_bindgen(js_name = boardPins)]
@@ -537,8 +571,11 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
             if let Ok(ch) = map.adc_channel(p) {
                 set(&g, "adc", ch);
             }
-            if let Some((ch, _)) = map.pwm_pins().find(|(_, q)| *q == p) {
-                set(&g, "pwm", ch);
+            if let Some(((timer, channel), _)) = map.pwm_pins().find(|(_, q)| *q == p) {
+                let w = Object::new();
+                set(&w, "timer", timer);
+                set(&w, "channel", channel);
+                set(&g, "pwm", w);
             }
             if let Some(&(bus, sda, _)) = wired.iter().find(|(_, d, c)| *d == p || *c == p) {
                 let i = Object::new();
@@ -580,8 +617,9 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
     set(&o, "i2c", i2c);
     let pwm: Array = map
         .pwm_pins()
-        .map(|(channel, pin)| {
+        .map(|((timer, channel), pin)| {
             let b = Object::new();
+            set(&b, "timer", timer);
             set(&b, "channel", channel);
             set(&b, "pin", pin);
             JsValue::from(b)
@@ -1726,6 +1764,25 @@ mod sim {
                 set(&o, "kind", "uart");
                 set(&o, "data", bytes(data));
             }
+            SimEvent::PwmOpen { timer, freq_hz } => {
+                set(&o, "kind", "pwmOpen");
+                set(&o, "timer", *timer);
+                set(&o, "freqHz", *freq_hz);
+            }
+            SimEvent::PwmSet {
+                timer,
+                channel,
+                duty,
+            } => {
+                set(&o, "kind", "pwmSet");
+                set(&o, "timer", *timer);
+                set(&o, "channel", *channel);
+                set(&o, "duty", *duty);
+            }
+            SimEvent::PwmStop(timer) => {
+                set(&o, "kind", "pwmStop");
+                set(&o, "timer", *timer);
+            }
             SimEvent::Serve(key) => {
                 set(&o, "kind", "serve");
                 set(&o, "key", key.as_str());
@@ -1756,10 +1813,12 @@ mod sim {
     /// virtual device. Events — `{kind: "log", line}`, `{kind: "publish",
     /// key, data}`, `{kind: "output", pin}`, `{kind: "input", pin, pull}`,
     /// `{kind: "write", pin, high}`, `{kind: "spi", tx, rx}`, `{kind:
-    /// "uart", data}` (UART 1 transmit), `{kind: "serve", key}` (ABI 5)
-    /// and `{kind: "irq", irq, code, source, value, timeUs, handled}` (an
-    /// event popped for `on_irq`) — are passed to `onEvent` after each
-    /// call. The device's node id is `node` (16 hex digits) or
+    /// "uart", data}` (UART 1 transmit), `{kind: "pwmOpen", timer,
+    /// freqHz}`, `{kind: "pwmSet", timer, channel, duty}`, `{kind:
+    /// "pwmStop", timer}` (ABI 3, successful calls only), `{kind: "serve",
+    /// key}` (ABI 5) and `{kind: "irq", irq, code, source, value, timeUs,
+    /// handled}` (an event popped for `on_irq`) — are passed to `onEvent`
+    /// after each call. The device's node id is `node` (16 hex digits) or
     /// `0000000000000001`.
     #[wasm_bindgen(js_name = Simulator)]
     pub struct JsSimulator {
@@ -1839,6 +1898,30 @@ mod sim {
         pub fn set_spi_pattern(&mut self, pattern: &[u8]) {
             self.sim
                 .set_spi_responder(SpiResponder::from_pattern(pattern));
+        }
+
+        /// Sets the value `adc_read(pin)` returns (`0..=4095`; 0 until set).
+        /// Throws for a larger value or a pin beyond `pinCount`.
+        #[wasm_bindgen(js_name = setAdc)]
+        pub fn set_adc(&mut self, pin: u8, value: u16) -> Result<(), JsError> {
+            self.sim.set_adc(pin, value).map_err(|e| JsError::new(&e))
+        }
+
+        /// Open PWM timers: `[{timer, freqHz, duty: [d0, d1, d2, d3]}]`,
+        /// duties as fractions of 65535.
+        pub fn pwm(&mut self) -> Array {
+            self.sim
+                .pwm()
+                .iter()
+                .map(|t| {
+                    let o = Object::new();
+                    set(&o, "timer", t.timer);
+                    set(&o, "freqHz", t.freq_hz);
+                    let duty: Array = t.duty.iter().map(|&d| JsValue::from(d)).collect();
+                    set(&o, "duty", duty);
+                    o
+                })
+                .collect()
         }
 
         /// Started timers: `[{id, periodUs, periodic, active, fires}]`.
@@ -1926,13 +2009,6 @@ mod sim {
         #[wasm_bindgen(getter, js_name = nodeId)]
         pub fn node_id(&mut self) -> String {
             node_hex(self.sim.node())
-        }
-
-        /// Sets what `adc_read(pin)` returns (12-bit, clamped); false for
-        /// a pin out of range.
-        #[wasm_bindgen(js_name = setAdc)]
-        pub fn set_adc(&mut self, pin: u8, level: u16) -> bool {
-            self.sim.set_adc(pin, level)
         }
 
         /// Sets the time reported by `now_ms` without ticking.

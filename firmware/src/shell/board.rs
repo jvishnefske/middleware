@@ -19,11 +19,14 @@
 //! With `wasm` (ESP32, ESP32-S3), [`PayloadPeripherals`] adds the payload
 //! hardware: IO_MUX (GPIO interrupt handler), TIMG1 (payload timer alarm),
 //! SPI2 with its DMA channel (`DMA_SPI2` on ESP32, GDMA `DMA_CH0` on
-//! ESP32-S3), UART1 and I2C0 (ABI 3 I2C bus 0, built without pins; its
-//! pins are the profile's `i2c_pins(0)`: 26/27 on the ESP32, 5/6 on the
-//! ESP32-S3); on the ESP32 (the ESP32-CAM) also [`CamPeripherals`]: LEDC
-//! for ABI 3 PWM and I2S0 with `DMA_I2S0` for the camera (R15), whose
-//! sensor's SCCB is the same I2C0 bus 0 the payload drives.
+//! ESP32-S3), UART1, I2C0 (ABI 3 I2C bus 0, built without pins; its pins
+//! are the profile's `i2c_pins(0)`: 26/27 on the ESP32, 5/6 on the
+//! ESP32-S3), the LEDC (PWM) and ADC1 with every ADC1 pin enabled at 11 dB
+//! (ESP32 GPIO32–39, ESP32-S3 GPIO1–10). ADC1 is built before the pin bank,
+//! because building a `Flex` takes a pin back from the analog mux that
+//! enabling it for the ADC selected (see `adc.rs`). On the ESP32 (the
+//! ESP32-CAM) also [`CamPeripherals`]: I2S0 with `DMA_I2S0` for the camera
+//! (R15), whose sensor's SCCB is the same I2C0 bus 0 the payload drives.
 //! With `espnow` (ESP32, ESP32-S3) the board also hands over `WIFI`.
 //!
 //! The heap ([`init_heap`]) is one allocator over the two regions of the
@@ -39,9 +42,11 @@ use super::presence::BootButton;
 
 #[cfg(feature = "wasm")]
 use {
+    super::adc::{ATTENUATION, AdcUnit},
     super::gpio::PinBank,
+    esp_hal::analog::adc::{Adc, AdcConfig},
     esp_hal::gpio::Flex,
-    esp_hal::peripherals::{IO_MUX, TIMG1},
+    esp_hal::peripherals::{IO_MUX, LEDC, TIMG1},
     esp_hal::Blocking,
     esp_hal::i2c::master::I2c,
     esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDma},
@@ -102,8 +107,8 @@ pub struct Board {
     pub wifi: esp_hal::peripherals::WIFI<'static>,
 }
 
-/// Peripherals behind the ABI 2 imports (interrupts, timers, SPI, UART)
-/// and ABI 3 I2C.
+/// Peripherals behind the ABI 2 imports (interrupts, timers, SPI, UART) and
+/// the ABI 3 PWM, ADC and I2C imports.
 #[cfg(feature = "wasm")]
 pub struct PayloadPeripherals {
     /// IO MUX, for the GPIO interrupt handler.
@@ -117,6 +122,11 @@ pub struct PayloadPeripherals {
     /// UART1 without pins, blocking until a payload runs; `None` if
     /// configuration failed.
     pub uart1: Option<Uart<'static, Blocking>>,
+    /// The LED controller (PWM outputs; on the ESP32-CAM also the sensor
+    /// clock).
+    pub ledc: LEDC<'static>,
+    /// ADC1 with every payload ADC1 pin enabled.
+    pub adc: AdcUnit,
     /// I2C0 without pins (ABI 3 I2C bus 0; on the ESP32-CAM also the
     /// camera sensor's SCCB), blocking; `None` if configuration failed.
     pub i2c0: Option<I2c<'static, Blocking>>,
@@ -125,33 +135,43 @@ pub struct PayloadPeripherals {
     pub cam: CamPeripherals,
 }
 
-/// ESP32: LEDC (PWM, the sensor clock) and I2S0 with its DMA channel (the
-/// camera port). The sensor's SCCB is I2C bus 0
-/// ([`PayloadPeripherals::i2c0`]).
+/// ESP32: I2S0 with its DMA channel (the camera port). The sensor's SCCB is
+/// I2C bus 0 ([`PayloadPeripherals::i2c0`]).
 #[cfg(feature = "esp32")]
 pub struct CamPeripherals {
-    /// LED PWM controller.
-    pub ledc: esp_hal::peripherals::LEDC<'static>,
     /// I2S0.
     pub i2s0: esp_hal::peripherals::I2S0<'static>,
     /// I2S0's DMA channel.
     pub dma_i2s0: esp_hal::peripherals::DMA_I2S0<'static>,
 }
 
-/// Builds the payload peripherals from SPI2, its DMA channel, UART1 and
-/// I2C0.
+/// Builds the payload peripherals from SPI2, its DMA channel, UART1, I2C0,
+/// the LEDC and the ADC1 unit built by [`adc1!`].
 #[cfg(feature = "wasm")]
 macro_rules! payload_peripherals {
-    ($p:ident, $dma:ident $(, $field:ident: $value:expr)?) => {
+    ($p:ident, $dma:ident, $adc:ident $(, $field:ident: $value:expr)?) => {
         PayloadPeripherals {
             io_mux: $p.IO_MUX,
             timg1: $p.TIMG1,
             spi: Spi::new($p.SPI2, SpiConfig::default()).ok().map(|s| s.with_dma($p.$dma)),
             uart1: Uart::new($p.UART1, UartConfig::default()).ok(),
+            ledc: $p.LEDC,
+            adc: $adc,
             i2c0: I2c::new($p.I2C0, Default::default()).ok(),
             $($field: $value,)?
         }
     };
+}
+
+/// Builds ADC1 with `GPIOn` fields of `p` enabled at [`ATTENUATION`]. The
+/// pins are only reborrowed: the pin bank takes them next.
+#[cfg(feature = "wasm")]
+macro_rules! adc1 {
+    ($p:ident; $($field:ident),* $(,)?) => {{
+        let mut config = AdcConfig::new();
+        $( let _ = config.enable_pin($p.$field.reborrow(), ATTENUATION); )*
+        AdcUnit::new(Adc::new($p.ADC1, config))
+    }};
 }
 
 fn uart(
@@ -175,7 +195,17 @@ macro_rules! pin_bank {
 
 /// Splits the peripherals.
 #[cfg(feature = "esp32")]
-pub fn split(p: Peripherals) -> Board {
+pub fn split(mut p: Peripherals) -> Board {
+    #[cfg(feature = "wasm")]
+    let adc = adc1!(p; GPIO32, GPIO33, GPIO34, GPIO35, GPIO36, GPIO37, GPIO38, GPIO39);
+    #[cfg(feature = "wasm")]
+    let pins = pin_bank!(p;
+        0 => GPIO0, 2 => GPIO2, 4 => GPIO4, 5 => GPIO5,
+        12 => GPIO12, 13 => GPIO13, 14 => GPIO14, 15 => GPIO15,
+        18 => GPIO18, 19 => GPIO19, 21 => GPIO21, 22 => GPIO22, 23 => GPIO23,
+        25 => GPIO25, 26 => GPIO26, 27 => GPIO27, 32 => GPIO32, 33 => GPIO33,
+        34 => GPIO34, 35 => GPIO35, 36 => GPIO36, 37 => GPIO37, 38 => GPIO38, 39 => GPIO39,
+    );
     Board {
         timg0: p.TIMG0,
         sw_int: p.FROM_CPU_INTR0,
@@ -183,16 +213,9 @@ pub fn split(p: Peripherals) -> Board {
         flash: p.FLASH,
         boot: BootButton::in_bank(0),
         #[cfg(feature = "wasm")]
-        pins: pin_bank!(p;
-            0 => GPIO0, 2 => GPIO2, 4 => GPIO4, 5 => GPIO5,
-            12 => GPIO12, 13 => GPIO13, 14 => GPIO14, 15 => GPIO15,
-            18 => GPIO18, 19 => GPIO19, 21 => GPIO21, 22 => GPIO22, 23 => GPIO23,
-            25 => GPIO25, 26 => GPIO26, 27 => GPIO27, 32 => GPIO32, 33 => GPIO33,
-            34 => GPIO34, 35 => GPIO35, 36 => GPIO36, 37 => GPIO37, 38 => GPIO38, 39 => GPIO39,
-        ),
+        pins,
         #[cfg(feature = "wasm")]
-        payload: payload_peripherals!(p, DMA_SPI2, cam: CamPeripherals {
-            ledc: p.LEDC,
+        payload: payload_peripherals!(p, DMA_SPI2, adc, cam: CamPeripherals {
             i2s0: p.I2S0,
             dma_i2s0: p.DMA_I2S0,
         }),
@@ -203,7 +226,18 @@ pub fn split(p: Peripherals) -> Board {
 
 /// Splits the peripherals.
 #[cfg(feature = "esp32s3")]
-pub fn split(p: Peripherals) -> Board {
+pub fn split(mut p: Peripherals) -> Board {
+    #[cfg(feature = "wasm")]
+    let adc = adc1!(p; GPIO1, GPIO2, GPIO3, GPIO4, GPIO5, GPIO6, GPIO7, GPIO8, GPIO9, GPIO10);
+    #[cfg(feature = "wasm")]
+    let pins = pin_bank!(p;
+        0 => GPIO0, 1 => GPIO1, 2 => GPIO2, 3 => GPIO3, 4 => GPIO4, 5 => GPIO5,
+        6 => GPIO6, 7 => GPIO7, 8 => GPIO8, 9 => GPIO9, 10 => GPIO10, 11 => GPIO11,
+        12 => GPIO12, 13 => GPIO13, 14 => GPIO14, 15 => GPIO15, 16 => GPIO16,
+        17 => GPIO17, 18 => GPIO18, 21 => GPIO21, 38 => GPIO38, 39 => GPIO39,
+        40 => GPIO40, 41 => GPIO41, 42 => GPIO42, 45 => GPIO45, 46 => GPIO46,
+        47 => GPIO47, 48 => GPIO48,
+    );
     Board {
         timg0: p.TIMG0,
         sw_int: p.FROM_CPU_INTR0,
@@ -212,16 +246,9 @@ pub fn split(p: Peripherals) -> Board {
         flash: p.FLASH,
         boot: BootButton::in_bank(0),
         #[cfg(feature = "wasm")]
-        pins: pin_bank!(p;
-            0 => GPIO0, 1 => GPIO1, 2 => GPIO2, 3 => GPIO3, 4 => GPIO4, 5 => GPIO5,
-            6 => GPIO6, 7 => GPIO7, 8 => GPIO8, 9 => GPIO9, 10 => GPIO10, 11 => GPIO11,
-            12 => GPIO12, 13 => GPIO13, 14 => GPIO14, 15 => GPIO15, 16 => GPIO16,
-            17 => GPIO17, 18 => GPIO18, 21 => GPIO21, 38 => GPIO38, 39 => GPIO39,
-            40 => GPIO40, 41 => GPIO41, 42 => GPIO42, 45 => GPIO45, 46 => GPIO46,
-            47 => GPIO47, 48 => GPIO48,
-        ),
+        pins,
         #[cfg(feature = "wasm")]
-        payload: payload_peripherals!(p, DMA_CH0),
+        payload: payload_peripherals!(p, DMA_CH0, adc),
         #[cfg(feature = "espnow")]
         wifi: p.WIFI,
     }

@@ -1,19 +1,21 @@
 //! The boards' pin maps.
 //!
-//! | map        | board                     | reserved (why)                                        | input only | ADC      | I2C bus 0 / 1 (SDA, SCL) | PWM timer 0 ch 0–3 | SPI     |
-//! |------------|---------------------------|-------------------------------------------------------|------------|----------|--------------------------|--------------------|---------|
-//! | [`PICO`]   | Raspberry Pi Pico, Pico 2 | 23 power save, 26–28 ADC, 29 VSYS / 3                  | 24 (VBUS)  | 26 27 28 | 4, 5 / 6, 7              | —                  | F1 table |
-//! | [`ESP32`]  | AI-Thinker ESP32-CAM      | 1, 3 UART0 console, 6–11 flash, 16, 17 PSRAM           | 34–39      | —        | 26, 27 (SCCB) / —        | 0, 4, 13, 14       | matrix  |
-//! | [`ESP32S3`]| ESP32-S3 boards           | 19, 20 USB, 26–37 flash / PSRAM, 43, 44 UART0 console  | —          | —        | 5, 6 / —                 | —                  | matrix  |
-//! | [`ESP32C3`]| ESP32-C3 boards           | 12–17 flash, 18, 19 USB, 20, 21 UART0 console          | —          | —        | — / —                    | —                  | matrix  |
-//! | [`ESP8266`]| ESP8266 modules           | 1, 3 UART0 console, 6–11 flash                         | —          | —        | — / —                    | —                  | matrix  |
+//! | map        | board                     | reserved (why)                                        | input only | ADC (channel order)    | I2C bus 0 / 1 (SDA, SCL) | PWM (t,c) = 2·t+c           | SPI     |
+//! |------------|---------------------------|-------------------------------------------------------|------------|------------------------|--------------------------|-----------------------------|---------|
+//! | [`PICO`]   | Raspberry Pi Pico, Pico 2 | 23 power save, 26–28 ADC, 29 VSYS / 3                  | 24 (VBUS)  | 26 27 28               | 4, 5 / 6, 7              | —                           | F1 table |
+//! | [`ESP32`]  | AI-Thinker ESP32-CAM      | 1, 3 UART0 console, 6–11 flash, 16, 17 PSRAM           | 34–39      | ADC1: 36–39, 32–35     | 26, 27 (SCCB) / —        | 0, 4, 13, 14 (timers 0–1)   | matrix  |
+//! | [`ESP32S3`]| ESP32-S3 boards           | 19, 20 USB, 26–37 flash / PSRAM, 43, 44 UART0 console  | —          | ADC1: 1–10             | 5, 6 / —                 | 11–18 (timers 0–3)          | matrix  |
+//! | [`ESP32C3`]| ESP32-C3 boards           | 12–17 flash, 18, 19 USB, 20, 21 UART0 console          | —          | —                      | — / —                    | —                           | matrix  |
+//! | [`ESP8266`]| ESP8266 modules           | 1, 3 UART0 console, 6–11 flash                         | —          | —                      | — / —                    | —                           | matrix  |
 //!
 //! The RP2040 and the RP2350A share the Pico pinout, so both chips use
 //! [`PICO`]. The ESP32 build is the ESP32-CAM's: its I2C bus 0 is the
 //! camera's SCCB and its PWM outputs include the camera clock (GPIO 0) and
 //! the flash LED (GPIO 4). The ESP32-S3's bus 0 pins are free headers on
 //! the boards that build runs on (not strapping, flash, PSRAM, USB or
-//! console pins). ADC inputs are offered to payloads on the Picos only.
+//! console pins). On the ESP chips the ADC inputs are ADC1's (ADC2 shares
+//! its controller with Wi-Fi and is never offered) and the PWM table is the
+//! ESP base firmware's (`esp_base::chip`, X9).
 //! The ESP32-C3 and ESP8266 builds run no payloads, so they wire no
 //! peripherals; their maps still say which pins exist and are reserved.
 
@@ -46,7 +48,7 @@ pub const PICO: PinMap = PinMap {
     input_only: bit(24),
     adc: &[26, 27, 28],
     i2c: [Some((4, 5)), Some((6, 7))],
-    pwm0: [None; 4],
+    pwm: &[],
     spi: SpiRouting::RpFunctionTable,
     reasons: PICO_REASONS,
 };
@@ -56,9 +58,9 @@ pub const ESP32: PinMap = PinMap {
     gpio: span(0, 19) | span(21, 23) | span(25, 27) | span(32, 39),
     reserved: bit(1) | bit(3) | span(6, 11) | bit(16) | bit(17),
     input_only: span(34, 39),
-    adc: &[],
+    adc: &[36, 37, 38, 39, 32, 33, 34, 35],
     i2c: [Some((26, 27)), None],
-    pwm0: [Some(0), Some(4), Some(13), Some(14)],
+    pwm: &[0, 4, 13, 14],
     spi: SpiRouting::Matrix,
     reasons: &[
         Reason {
@@ -85,9 +87,9 @@ pub const ESP32S3: PinMap = PinMap {
     gpio: span(0, 21) | span(26, 48),
     reserved: bit(19) | bit(20) | span(26, 37) | bit(43) | bit(44),
     input_only: 0,
-    adc: &[],
+    adc: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     i2c: [Some((5, 6)), None],
-    pwm0: [None; 4],
+    pwm: &[11, 12, 13, 14, 15, 16, 17, 18],
     spi: SpiRouting::Matrix,
     reasons: &[
         Reason {
@@ -112,7 +114,7 @@ pub const ESP32C3: PinMap = PinMap {
     input_only: 0,
     adc: &[],
     i2c: [None, None],
-    pwm0: [None; 4],
+    pwm: &[],
     spi: SpiRouting::Matrix,
     reasons: &[
         Reason {
@@ -137,7 +139,7 @@ pub const ESP8266: PinMap = PinMap {
     input_only: 0,
     adc: &[],
     i2c: [None, None],
-    pwm0: [None; 4],
+    pwm: &[],
     spi: SpiRouting::Matrix,
     reasons: &[
         Reason {

@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "esp-base"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "board-pins",
  "critical-section",
@@ -762,6 +762,7 @@ dependencies = [
  "esp-storage",
  "heapless 0.9.3",
  "middleware",
+ "nb 1.1.0",
  "static_cell",
  "wasm-host",
 ]

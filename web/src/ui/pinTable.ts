@@ -59,7 +59,7 @@ function pinText(g: GpioInfo): string {
   if (g.adc !== undefined) tags.push(`ADC${g.adc}`);
   if (g.i2c) tags.push(`I2C${g.i2c.bus} ${g.i2c.line.toUpperCase()}`);
   if (g.spi) tags.push(`SPI${g.spi.block} ${g.spi.signal.toUpperCase()}`);
-  if (g.pwm !== undefined) tags.push(`PWM ch ${g.pwm}`);
+  if (g.pwm !== undefined) tags.push(`PWM ${g.pwm.timer}.${g.pwm.channel}`);
   return `GPIO ${g.pin}${tags.length ? ` (${tags.join(", ")})` : ""}`;
 }
 

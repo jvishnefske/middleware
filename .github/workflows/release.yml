@@ -1,203 +1,152 @@
-# Release: base firmware images for every chip, attached to a GitHub
-# release, and the web app (flasher, console, editor) deployed to GitHub
-# Pages with those images bundled.
+name: Release esp-base
+
+# E15: on a tag `esp-base-v<version>`, builds the base firmware for ESP32,
+# ESP32-S3 and ESP32-C3 (and ESP8266, best effort), and attaches to the
+# GitHub release, per chip:
 #
-# The web flasher reads `firmware/manifest.json` and the images relative
-# to the page (web/src/flash/manifest.ts). Release asset downloads are
-# served from another origin without CORS headers, so the browser cannot
-# fetch them from the page; the Pages deployment carries its own copy,
-# over HTTPS as Web Serial requires. The release assets are for manual
-# flashing and `mwctl`.
+#   <chip>.bin        merged flash image, written at 0x0
+#   <chip>.bsp.json   mw-bsp/1 board support package (bsp_export)
+#   manifest.json     ESP Web Tools manifest listing both
 #
-# The Raspberry Pi robot SD image (nix, `.#packages.aarch64-linux.
-# sd-image-robot-pi`) is built natively on an arm runner and attached to
-# the same release, as `mw-robot-pi-<tag>.img.zst` with its `.sha256`, by a
-# job of its own, so a slow or broken image build never holds back the
-# firmware release.
+# Browsers cannot fetch release assets cross-origin (the asset host sends no
+# Access-Control-Allow-Origin), so the `pages` job mirrors every release to
+# GitHub Pages, which does:
 #
-# Push a `v*` tag to release and deploy. A manual run (workflow_dispatch)
-# builds everything, the SD image included, and keeps the images and site
-# as workflow artifacts without publishing any of them.
+#   https://<owner>.github.io/<repo>/firmware/<version>/manifest.json
+#   https://<owner>.github.io/<repo>/firmware/latest/manifest.json
 #
-# Pages must be set to "GitHub Actions" as its source (repository
-# Settings > Pages) before the first deployment.
-name: Release
+# and also copies the latest release to firmware/ next to the web flasher
+# (web/src/ui/flashPage.ts reads firmware/manifest.json). Enable Pages once
+# under Settings → Pages → Source: GitHub Actions. `workflow_dispatch` only
+# rebuilds the Pages mirror from the existing releases.
 
 on:
   push:
-    tags: ["v*"]
+    tags: [ "esp-base-v*" ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  # The espup Xtensa toolchain the ESP32, ESP32-S3 and ESP8266 builds use
-  # (`cargo +esp-new`, rustc >= 1.95 for esp-hal 1.2).
-  ESP_TOOLCHAIN_VERSION: 1.97.0.0
-  PICOTOOL_VERSION: 2.3.1
-  PICOTOOL_RELEASE: v2.3.1-0
-  ESP8266_CORE: esp8266:esp8266@3.1.2
-
 jobs:
-  build:
-    name: Firmware images and web app
+  esp32:
+    if: startsWith(github.ref, 'refs/tags/esp-base-v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - name: Check the tag matches firmware/Cargo.toml
+      run: |
+        want="${GITHUB_REF_NAME#esp-base-v}"
+        have="$(sed -n 's/^version *= *"\(.*\)"/\1/p' firmware/Cargo.toml | head -n1)"
+        [[ "$want" == "$have" ]] || { echo "tag $want != firmware/Cargo.toml $have" >&2; exit 1; }
+    - name: Install the ESP Rust toolchain
+      run: |
+        cargo install espup --locked
+        cargo install espflash --locked
+        # build.sh selects `+esp-new` by default.
+        espup install --name esp-new --targets esp32,esp32s3 --export-file "$HOME/export-esp.sh"
+    - name: Host tests
+      run: |
+        cargo test --workspace
+        (cd firmware && cargo test --lib)
+    - name: Build images
+      run: OUT="$PWD/dist" firmware/build-images.sh esp32 esp32s3 esp32c3
+    - uses: actions/upload-artifact@v4
+      with:
+        name: esp32-family
+        path: dist/
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: riscv32imc-unknown-none-elf,thumbv6m-none-eabi,thumbv8m.main-none-eabihf,wasm32-unknown-unknown
-          components: rust-src
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            firmware -> target
-            firmware-esp8266 -> target
-            firmware-rp -> target
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: espup,espflash,wasm-pack
-
-      - name: Xtensa toolchain (esp-new)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          espup install --name esp-new --toolchain-version "$ESP_TOOLCHAIN_VERSION" \
-            --targets esp32,esp32s3 --export-file "$HOME/export-esp.sh"
-
-      - name: ESP8266 linker (Arduino lx106 GCC) and esptool
-        uses: arduino/setup-arduino-cli@v2
-      - run: |
-          arduino-cli core install "$ESP8266_CORE" \
-            --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-          pipx install "esptool>=5,<6"
-          echo "ESPTOOL=$(command -v esptool)" >> "$GITHUB_ENV"
-
-      - name: picotool
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq libusb-1.0-0
-          dir="$RUNNER_TEMP/picotool"
-          mkdir -p "$dir"
-          curl -fsSL "https://github.com/raspberrypi/pico-sdk-tools/releases/download/$PICOTOOL_RELEASE/picotool-$PICOTOOL_VERSION-x86_64-lin.tar.gz" \
-            | tar -xz -C "$dir"
-          bin="$(dirname "$(find "$dir" -type f -name picotool | head -n1)")"
-          echo "$bin" >> "$GITHUB_PATH"
-
-      - name: Build every chip's image and the manifest
-        run: bash firmware/build-images.sh
-
-      - name: Checksums
-        working-directory: web/public/firmware
-        run: sha256sum manifest.json *.bin *.uf2 | tee SHA256SUMS
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Web app with the bundled firmware
-        working-directory: web
-        run: |
-          npm ci
-          npm run build:wasm
-          npm run build
-          test -f dist/firmware/manifest.json
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: firmware
-          path: web/public/firmware/
-          if-no-files-found: error
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: web/dist
-
-  sd-image:
-    name: Raspberry Pi SD image (aarch64, nix)
-    runs-on: ubuntu-24.04-arm
+  esp8266:
+    if: startsWith(github.ref, 'refs/tags/esp-base-v')
+    runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-      - name: Build the image and check its contents
-        run: |
-          nix build -L --out-link sd \
-            .#packages.aarch64-linux.sd-image-robot-pi
-          nix build -L --no-link .#checks.aarch64-linux.robot-pi-image
-      - name: Name and checksum
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          name="mw-robot-pi-${REF_NAME//\//-}.img.zst"
-          mkdir out
-          cp sd/sd-image/*.img.zst "out/$name"
-          (cd out && sha256sum "$name" | tee "$name.sha256")
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sd-image
-          path: out/
-          if-no-files-found: error
-          compression-level: 0
+    - uses: actions/checkout@v4
+    - name: Install the toolchain (espup, lx106 gcc, esptool)
+      run: |
+        cargo install espup --locked
+        espup install --name esp-new --targets esp32 --export-file "$HOME/export-esp.sh"
+        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="$HOME/.local/bin" sh
+        "$HOME/.local/bin/arduino-cli" core install esp8266:esp8266@3.1.2 \
+          --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+        pipx install esptool
+    - name: Build image
+      run: OUT="$PWD/dist" ESPTOOL=esptool firmware/build-images.sh esp8266
+    - uses: actions/upload-artifact@v4
+      with:
+        name: esp8266
+        path: dist/
 
   release:
-    name: GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [ esp32, esp8266 ]
+    if: ${{ !cancelled() && needs.esp32.result == 'success' }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: firmware
-          path: firmware
-      - name: Create the release with the images
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          gh release create "$TAG" --verify-tag --generate-notes --title "$TAG" \
-            firmware/manifest.json firmware/SHA256SUMS firmware/*.bin firmware/*.uf2
-
-  release-sd-image:
-    name: Attach the SD image to the release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release, sd-image]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: sd-image
-          path: sd-image
-      - name: Upload the image and its checksum
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" sd-image/*.img.zst sd-image/*.img.zst.sha256
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+      with:
+        path: parts/
+    - name: Merge the per-job manifests
+      run: |
+        mkdir dist
+        cp parts/*/*.bin parts/*/*.bsp.json dist/
+        jq -s '.[0] + { builds: (map(.builds) | add) }' parts/*/manifest.json > dist/manifest.json
+        cat dist/manifest.json
+    - name: Create or update the release
+      run: |
+        gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+          gh release create "$GITHUB_REF_NAME" --title "esp-base ${GITHUB_REF_NAME#esp-base-v}" \
+            --notes "See CHANGELOG.md. Flash from https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/ or load the BSP in Skygraph."
+        gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
   pages:
-    name: Deploy the web app to GitHub Pages
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [ release ]
+    if: ${{ !cancelled() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22.x
+    - name: Build the web page
+      run: |
+        cargo install wasm-pack --locked
+        cd web && npm ci && npm run build:wasm && npm run build
+    - name: Mirror release assets
+      run: |
+        fw=web/dist/firmware
+        rm -rf "$fw" && mkdir -p "$fw"
+        # Newest first.
+        tags="$(gh release list --limit 100 --json tagName,createdAt \
+          --jq '[.[] | select(.tagName | startswith("esp-base-v"))] | sort_by(.createdAt) | reverse | .[].tagName')"
+        latest=""
+        for tag in $tags; do
+          version="${tag#esp-base-v}"
+          gh release download "$tag" --dir "$fw/$version" --pattern '*.bin' --pattern '*.json'
+          [[ -f "$fw/$version/manifest.json" ]] || { rm -rf "${fw:?}/$version"; continue; }
+          [[ -n "$latest" ]] || latest="$version"
+        done
+        if [[ -n "$latest" ]]; then
+          cp -r "$fw/$latest" "$fw/latest"
+          cp "$fw/$latest"/* "$fw/"
+        fi
+        find "$fw" -type f | sort
+    - uses: actions/configure-pages@v5
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: web/dist
+    - id: deployment
+      uses: actions/deploy-pages@v4

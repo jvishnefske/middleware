@@ -1,5 +1,5 @@
 //! Pin claims: which pins the SPI bus, the secondary UART, GPIO
-//! interrupts, PWM outputs, the I2C bus and the camera hold.
+//! interrupts, PWM outputs, ADC inputs, the I2C bus and the camera hold.
 //!
 //! A [`Claims`] value is one pin bitmask per [`Owner`]. Every
 //! transition is a function from a claims value to a new one, applied only
@@ -14,15 +14,21 @@
 //!   land on them.
 //! * [`Claims::set_irq`] adds or removes a GPIO interrupt pin; a pin held by
 //!   SPI or UART cannot take an interrupt.
-//! * [`Claims::claim_pwm`], [`Claims::claim_i2c`] and
-//!   [`Claims::claim_camera`] (ABI 3 PWM and I2C, R15 camera) take the
-//!   board-mapped PWM output pin, the I2C bus's SDA and SCL (both driven
-//!   open drain and read back) and the camera's eleven input pins; each is
-//!   checked against the profile in its direction and refused when another
-//!   owner holds it. [`Claims::release`] drops one owner's pins.
+//! * [`Claims::claim_pwm`] takes the fixed pin of one PWM output (on its
+//!   first `pwm_set`) and [`Claims::release_pwm`] frees it (`pwm_stop`)
+//!   (X13).
+//! * [`Claims::claim_adc`] takes an ADC1 pin on its first `adc_read`; it
+//!   stays analog until the payload stops. A pin without an ADC1 channel is
+//!   `Unsupported` (X12, X13).
+//! * [`Claims::claim_i2c`] and [`Claims::claim_camera`] (ABI 3 I2C, R15
+//!   camera) take the I2C bus's SDA and SCL (both driven open drain and
+//!   read back) and the camera's eleven input pins; each is checked against
+//!   the profile in its direction and refused when another owner holds it.
+//!   [`Claims::release`] drops one owner's pins.
 //! * [`Claims::check_gpio`] guards plain `gpio_*` calls: pins routed to a
-//!   peripheral (SPI, UART, PWM, I2C, camera) are off limits until the
-//!   payload stops or the peripheral lets them go.
+//!   peripheral (SPI, UART, PWM, I2C, camera), and analog ADC pins, are off
+//!   limits until the payload stops or the peripheral lets them go (for
+//!   PWM, `pwm_stop`).
 //!
 //! Errors follow the ABI: a pin that does not exist is
 //! [`AbiError::InvalidArgument`], a reserved pin (or an output on an
@@ -44,8 +50,10 @@ pub enum Owner {
     Spi,
     /// Secondary UART 1.
     Uart,
-    /// A PWM output (ABI 3).
+    /// A PWM output (LEDC channel).
     Pwm,
+    /// An ADC1 input.
+    Adc,
     /// I2C bus 0's SDA and SCL (ABI 3).
     I2c,
     /// The camera's parallel port (R15).
@@ -59,6 +67,7 @@ pub struct Claims {
     spi: u64,
     uart: u64,
     pwm: u64,
+    adc: u64,
     i2c: u64,
     camera: u64,
 }
@@ -75,7 +84,7 @@ pub fn pins(mask: u64) -> impl Iterator<Item = u8> {
 impl Claims {
     /// Nothing claimed.
     pub const fn new() -> Self {
-        Claims { irq: 0, spi: 0, uart: 0, pwm: 0, i2c: 0, camera: 0 }
+        Claims { irq: 0, spi: 0, uart: 0, pwm: 0, adc: 0, i2c: 0, camera: 0 }
     }
 
     /// Who holds `pin`, if anyone.
@@ -91,6 +100,8 @@ impl Claims {
             Some(Owner::Uart)
         } else if self.pwm & b != 0 {
             Some(Owner::Pwm)
+        } else if self.adc & b != 0 {
+            Some(Owner::Adc)
         } else if self.i2c & b != 0 {
             Some(Owner::I2c)
         } else if self.camera & b != 0 {
@@ -107,6 +118,7 @@ impl Claims {
             Owner::Spi => self.spi,
             Owner::Uart => self.uart,
             Owner::Pwm => self.pwm,
+            Owner::Adc => self.adc,
             Owner::I2c => self.i2c,
             Owner::Camera => self.camera,
         }
@@ -119,6 +131,7 @@ impl Claims {
             Owner::Spi => Claims { spi: 0, ..self },
             Owner::Uart => Claims { uart: 0, ..self },
             Owner::Pwm => Claims { pwm: 0, ..self },
+            Owner::Adc => Claims { adc: 0, ..self },
             Owner::I2c => Claims { i2c: 0, ..self },
             Owner::Camera => Claims { camera: 0, ..self },
         }
@@ -137,6 +150,16 @@ impl Claims {
     /// Pins routed to UART 1.
     pub const fn uart_pins(&self) -> u64 {
         self.uart
+    }
+
+    /// Pins routed to PWM outputs.
+    pub const fn pwm_pins(&self) -> u64 {
+        self.pwm
+    }
+
+    /// Pins in use as ADC inputs.
+    pub const fn adc_pins(&self) -> u64 {
+        self.adc
     }
 
     /// Checks `wanted` (pin, direction) pairs for `owner`, ignoring pins the
@@ -186,13 +209,6 @@ impl Claims {
         Ok(Claims { uart, ..self })
     }
 
-    /// Adds PWM output `pin` (a timer channel's board-mapped pin; it is
-    /// driven). Other PWM pins stay claimed.
-    pub fn claim_pwm(self, profile: &Profile, pin: u8) -> Result<Self, AbiError> {
-        let add = self.check(profile, Owner::Pwm, &[(Some(pin), Direction::Output)])?;
-        Ok(Claims { pwm: self.pwm | add, ..self })
-    }
-
     /// Claims I2C bus 0's `sda` and `scl`, replacing its previous pins.
     /// Both are driven (open drain) and read back, so both must be able to
     /// drive.
@@ -229,12 +245,35 @@ impl Claims {
         Ok(Claims { irq: self.irq | irq, ..self })
     }
 
+    /// Claims the pin of a PWM output (an output pin, adding to the PWM
+    /// pins already held).
+    pub fn claim_pwm(self, profile: &Profile, pin: u8) -> Result<Self, AbiError> {
+        let pwm = self.check(profile, Owner::Pwm, &[(Some(pin), Direction::Output)])?;
+        Ok(Claims { pwm: self.pwm | pwm, ..self })
+    }
+
+    /// Frees the pin of a stopped PWM output.
+    pub const fn release_pwm(self, pin: u8) -> Self {
+        Claims { pwm: self.pwm & !bit(pin), ..self }
+    }
+
+    /// Claims `pin` as an ADC1 input: `InvalidArgument` for a pin that does
+    /// not exist or that another owner holds, `Unsupported` for a pin
+    /// without an ADC1 channel.
+    pub fn claim_adc(self, profile: &Profile, pin: u8) -> Result<Self, AbiError> {
+        let adc = self.check(profile, Owner::Adc, &[(Some(pin), Direction::Input)])?;
+        if !profile.has_adc(pin) {
+            return Err(AbiError::Unsupported);
+        }
+        Ok(Claims { adc: self.adc | adc, ..self })
+    }
+
     /// Whether a plain `gpio_*` call may touch `pin` (pins routed to a
     /// peripheral are refused; interrupt pins are allowed, the shell drops
     /// the interrupt when the pin is reconfigured).
     pub const fn check_gpio(&self, pin: u8) -> Result<(), AbiError> {
         match self.owner(pin) {
-            Some(Owner::Spi | Owner::Uart | Owner::Pwm | Owner::I2c | Owner::Camera) => {
+            Some(Owner::Spi | Owner::Uart | Owner::Pwm | Owner::Adc | Owner::I2c | Owner::Camera) => {
                 Err(AbiError::InvalidArgument)
             }
             Some(Owner::Irq) | None => Ok(()),
@@ -330,6 +369,58 @@ mod tests {
         assert_eq!(off.owner(5), None);
         assert_eq!(pins(off.irq_pins()).count(), 0);
         assert_eq!(Claims::new().owner(200), None);
+    }
+
+    #[test]
+    fn x12_adc_claims_only_adc1_pins() {
+        let c = Claims::new().claim_adc(&ESP32S3, 1).unwrap();
+        assert_eq!(c.owner(1), Some(Owner::Adc));
+        let c = c.claim_adc(&ESP32S3, 1).unwrap();
+        assert_eq!(pins(c.adc_pins()).collect::<heapless::Vec<u8, 2>>(), [1], "re-reading keeps one claim");
+        for pin in (1..=10).chain(32..=32) {
+            let ok = Claims::new().claim_adc(&ESP32S3, pin);
+            assert_eq!(ok.is_ok(), pin <= 10, "esp32s3 {pin}");
+        }
+        for pin in 32..=39 {
+            assert!(Claims::new().claim_adc(&ESP32, pin).is_ok(), "esp32 {pin}");
+        }
+        // ADC2 (Wi-Fi) and plain pins are Unsupported; missing pins invalid.
+        for pin in [0, 2, 4, 12, 13, 14, 15, 25, 26, 27] {
+            assert_eq!(Claims::new().claim_adc(&ESP32, pin), Err(AbiError::Unsupported), "esp32 ADC2 {pin}");
+        }
+        assert_eq!(Claims::new().claim_adc(&ESP32S3, 11), Err(AbiError::Unsupported), "ADC2_CH0");
+        assert_eq!(Claims::new().claim_adc(&ESP32S3, 43), Err(AbiError::Unsupported), "console");
+        assert_eq!(Claims::new().claim_adc(&ESP32, 31), Err(AbiError::InvalidArgument), "missing");
+        assert_eq!(Claims::new().claim_adc(&ESP32S3, 22), Err(AbiError::InvalidArgument), "missing");
+        assert_eq!(Claims::new().claim_adc(&ESP32C3, 1), Err(AbiError::Unsupported), "no ADC offered");
+    }
+
+    #[test]
+    fn x13_pwm_and_adc_claims_are_exclusive() {
+        let c = Claims::new().claim_pwm(&ESP32, 4).unwrap().claim_adc(&ESP32, 34).unwrap();
+        assert_eq!((c.owner(4), c.owner(34)), (Some(Owner::Pwm), Some(Owner::Adc)));
+        // Neither may be used as plain GPIO, an interrupt, SPI or UART.
+        for pin in [4, 34] {
+            assert_eq!(c.check_gpio(pin), Err(AbiError::InvalidArgument), "{pin}");
+            assert_eq!(c.set_irq(&ESP32, pin, true), Err(AbiError::InvalidArgument), "{pin}");
+        }
+        assert_eq!(c.claim_spi(&ESP32, &spi(4, 13, -1, -1)), Err(AbiError::InvalidArgument));
+        assert_eq!(c.claim_uart(&ESP32, &uart(-1, 34)), Err(AbiError::InvalidArgument));
+        // And PWM/ADC cannot take pins others hold.
+        let c = c.claim_uart(&ESP32, &uart(13, 35)).unwrap().set_irq(&ESP32, 32, true).unwrap();
+        assert_eq!(c.claim_pwm(&ESP32, 13), Err(AbiError::InvalidArgument), "UART TX");
+        assert_eq!(c.claim_adc(&ESP32, 35), Err(AbiError::InvalidArgument), "UART RX");
+        assert_eq!(c.claim_adc(&ESP32, 32), Err(AbiError::InvalidArgument), "interrupt");
+        assert_eq!(c.claim_adc(&ESP32, 4), Err(AbiError::InvalidArgument), "PWM before ADC1 check");
+        assert_eq!(c.claim_pwm(&ESP32, 34), Err(AbiError::Unsupported), "input only");
+        let s3 = Claims::new().claim_adc(&ESP32S3, 5).unwrap();
+        assert_eq!(s3.claim_pwm(&ESP32S3, 5), Err(AbiError::InvalidArgument), "ADC pin");
+        assert_eq!(Claims::new().claim_pwm(&ESP32, 36), Err(AbiError::Unsupported), "input only");
+        // Stopping PWM frees its pin for GPIO again; ADC stays claimed.
+        let c = c.release_pwm(4);
+        assert_eq!((c.owner(4), c.check_gpio(4)), (None, Ok(())));
+        assert_eq!(c.owner(34), Some(Owner::Adc));
+        assert_eq!(pins(c.pwm_pins()).count(), 0);
     }
 
     #[test]
