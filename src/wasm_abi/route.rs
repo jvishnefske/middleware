@@ -667,11 +667,13 @@ impl RouteStat {
     }
 }
 
-/// Parses a route handle argument (`0..MAX_ROUTES`).
+/// Parses a route handle argument: a DMA route (`0..MAX_ROUTES`) or,
+/// since ABI 6, a bridge
+/// ([`bridge::BRIDGE_BASE`](super::bridge::BRIDGE_BASE)`..+MAX_BRIDGES`).
 pub fn route_handle(v: i32) -> Result<u8, AbiError> {
     u8::try_from(v)
         .ok()
-        .filter(|&h| usize::from(h) < MAX_ROUTES)
+        .filter(|&h| usize::from(h) < MAX_ROUTES || super::bridge::handle_index(h).is_some())
         .ok_or(AbiError::InvalidArgument)
 }
 
@@ -935,5 +937,9 @@ mod tests {
             Err(AbiError::InvalidArgument)
         );
         assert_eq!(route_handle(-1), Err(AbiError::InvalidArgument));
+        assert_eq!(route_handle(16), Ok(16), "a bridge handle (ABI 6)");
+        assert_eq!(route_handle(31), Ok(31));
+        assert_eq!(route_handle(32), Err(AbiError::InvalidArgument));
+        assert_eq!(route_handle(15), Err(AbiError::InvalidArgument));
     }
 }

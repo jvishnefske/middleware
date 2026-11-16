@@ -73,12 +73,13 @@
 //! | `dns-sd`   | `dns::unicast` | `std`          | tokio, getrandom          |
 //! | `memory`   | `transport::memory` | `std`     | tokio (timers); for tests and examples |
 //! | `kv-file`  | `kv::file`  | `std`             | the filesystem; no extra crates |
+//! | `udp`      | `udp::UdpTransport` | `std`     | tokio (net, timers); one raw frame per datagram |
 //! | `postcard` | `codec::postcard` | `no_std`    | serde                     |
 //! | `prost`    | `codec::prost`    | `no_std` + `alloc` | prost              |
 //!
 //! With no features the crate is `#![no_std]`, allocation free and builds for
-//! `thumbv6m-none-eabi`. Enabling `zenoh`, `grpc`, `mdns`, `dns-sd` or
-//! `memory` turns on `std`; the
+//! `thumbv6m-none-eabi`. Enabling `zenoh`, `grpc`, `mdns`, `dns-sd`,
+//! `memory` or `udp` turns on `std`; the
 //! embedded features never do, so firmware never links cloud dependencies and
 //! cloud builds never compile the BLE stack unless asked.
 //!
@@ -105,6 +106,7 @@ pub mod serial;
 pub mod stream;
 pub mod transport;
 pub mod typed;
+pub mod udp;
 pub mod wasm_abi;
 
 #[cfg(feature = "ble")]

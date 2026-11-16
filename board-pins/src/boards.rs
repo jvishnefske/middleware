@@ -7,6 +7,7 @@
 //! | [`ESP32S3`]| ESP32-S3 boards           | 19, 20 USB, 26–37 flash / PSRAM, 43, 44 UART0 console  | —          | ADC1: 1–10             | 5, 6 / —                 | 11–18 (timers 0–3)          | matrix  |
 //! | [`ESP32C3`]| ESP32-C3 boards           | 12–17 flash, 18, 19 USB, 20, 21 UART0 console          | —          | —                      | — / —                    | —                           | matrix  |
 //! | [`ESP8266`]| ESP8266 modules           | 1, 3 UART0 console, 6–11 flash                         | —          | —                      | — / —                    | —                           | matrix  |
+//! | [`COLORLIGHT_5A75B`] | Colorlight 5A-75B v7.0 (ECP5) | —                                    | 1 (button) | —                      | — / —                    | —                           | none    |
 //!
 //! The RP2040 and the RP2350A share the Pico pinout, so both chips use
 //! [`PICO`]. The ESP32 build is the ESP32-CAM's: its I2C bus 0 is the
@@ -153,8 +154,31 @@ pub const ESP8266: PinMap = PinMap {
     ],
 };
 
+/// Colorlight 5A-75B v7.0 (Lattice ECP5 LFE5U-25F, gateware, no CPU):
+/// the payload-visible pins are virtual GPIO numbers the gateware maps to
+/// FPGA balls. GPIO 0 is the user LED (ball P11, active low; the gateware
+/// inverts it, so `gpio_write(0, 1)` lights it), GPIO 1 the user button
+/// (ball M13, input only, active low with the board's pull-up; reads 1
+/// when pressed). Everything else on the board (the two RGMII PHYs, the
+/// SDRAM, the SPI flash, the HUB75 connectors) belongs to the gateware.
+/// The chip profile is in `gateware-5a75b/` and `wasm-hdl-ref`: 16 KiB of
+/// linear memory, 16 KiB images.
+pub const COLORLIGHT_5A75B: PinMap = PinMap {
+    gpio: span(0, 1),
+    reserved: 0,
+    input_only: bit(1),
+    adc: &[],
+    i2c: [None, None],
+    pwm: &[],
+    spi: SpiRouting::None,
+    reasons: &[Reason {
+        pins: bit(1),
+        why: "the user button (input only)",
+    }],
+};
+
 /// The map for a chip name as `sys/info` reports it (`esp32`, `esp32s3`,
-/// `esp32c3`, `esp8266`, `rp2040`, `rp2350`).
+/// `esp32c3`, `esp8266`, `rp2040`, `rp2350`, `ecp5`).
 pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
     match chip {
         "esp32" => Some(&ESP32),
@@ -162,6 +186,7 @@ pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
         "esp32c3" => Some(&ESP32C3),
         "esp8266" => Some(&ESP8266),
         "rp2040" | "rp2350" => Some(&PICO),
+        "ecp5" => Some(&COLORLIGHT_5A75B),
         _ => None,
     }
 }
@@ -178,6 +203,7 @@ mod tests {
         assert_eq!(by_chip("esp32s3"), Some(&ESP32S3));
         assert_eq!(by_chip("esp32c3"), Some(&ESP32C3));
         assert_eq!(by_chip("esp8266"), Some(&ESP8266));
+        assert_eq!(by_chip("ecp5"), Some(&COLORLIGHT_5A75B));
         assert_eq!(by_chip("badge"), None);
     }
 
@@ -188,5 +214,23 @@ mod tests {
         assert_eq!(ESP32.gpios().count(), 34);
         assert_eq!(ESP32.payload_pins().count(), 34 - 10);
         assert_eq!(ESP32S3.payload_pins().count(), 22 + 23 - 16);
+    }
+
+    #[test]
+    fn cl2_the_5a75b_offers_its_led_and_button_only() {
+        use crate::Direction;
+        let m = &COLORLIGHT_5A75B;
+        assert_eq!(m.gpios().count(), 2);
+        assert!(m.check(0, Direction::Output).is_ok());
+        assert!(m.check(1, Direction::Input).is_ok());
+        assert!(m.check(1, Direction::Output).is_err());
+        assert!(m.check(2, Direction::Input).is_err());
+        let pins = crate::spi::SpiPins {
+            sck: 0,
+            mosi: None,
+            miso: None,
+            cs: None,
+        };
+        assert!(crate::spi::route(m, &pins).is_err());
     }
 }

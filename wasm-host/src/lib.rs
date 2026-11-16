@@ -356,6 +356,19 @@ pub trait Device {
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Err(AbiError::Unsupported)
     }
+
+    /// Installs a bridge rule (ABI 6, [`wasm_abi::bridge`]): publications
+    /// arriving on link `bridge.src` whose key matches `bridge.filter` are
+    /// re-emitted on link `bridge.dst`. The links are distinct and the key
+    /// is already validated (not under `sys`). Returns the rule's handle
+    /// (`BRIDGE_BASE..BRIDGE_BASE + MAX_BRIDGES`; any other value reaches
+    /// the payload as `NoResources`), the same handle for an identical
+    /// rule; `route_stop` and `route_stat` then take it. `Unsupported` for a
+    /// link the device lacks, and by default (a single-link device).
+    fn route_bridge(&mut self, bridge: &wasm_abi::bridge::Bridge<'_>) -> Result<u8, AbiError> {
+        let _ = bridge;
+        Err(AbiError::Unsupported)
+    }
 }
 
 /// Default [`Limits::max_stack_bytes`]: 4 KiB of wasmi value stack.
@@ -953,6 +966,15 @@ impl<D: Device + 'static> Payload<D> {
     /// Whether an earlier call trapped (see [`Trap::Poisoned`]).
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
+    }
+
+    /// The payload's linear memory, e.g. for differential tests against
+    /// another runtime (`wasm-hdl-ref`).
+    pub fn memory(&self) -> &[u8] {
+        self.instance
+            .get_memory(&self.store, wasm_abi::exports::MEMORY)
+            .map(|m| m.data(&self.store))
+            .unwrap_or_default()
     }
 
     /// The device, e.g. to inspect a simulator's state.

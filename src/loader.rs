@@ -15,6 +15,7 @@
 //! | `sys/payload/stop`  | empty                           | empty              |
 //! | `sys/trust/info`    | empty                           | [`trust::TrustInfo`] |
 //! | `sys/trust/claim`   | `[public key 32]`               | empty              |
+//! | `sys/net/addr`      | `[link u8]`, or `[link u8]` + [`NetAddr`] | `[link u8]` + [`NetAddr`], or empty |
 //!
 //! [`Command::parse`] takes `sys/payload/start` and `stop` with empty
 //! bodies only. Over a radio a claimed ESP base firmware device instead
@@ -79,6 +80,8 @@ pub mod keys {
     pub const TRUST_INFO: Key<'static> = Key::from_static("sys/trust/info");
     /// Pins a payload signing key.
     pub const TRUST_CLAIM: Key<'static> = Key::from_static("sys/trust/claim");
+    /// Reads or sets one link's network addresses ([`super::NetAddr`]).
+    pub const NET_ADDR: Key<'static> = Key::from_static("sys/net/addr");
 }
 
 /// A parsed system request.
@@ -448,6 +451,9 @@ impl Caps {
     /// to the payload's `on_request`, and `node_id` answers the node id this
     /// response carries.
     pub const SERVE: Caps = Caps(1);
+    /// Bit 1: the device bridges publications between its links (ABI 6
+    /// `route_bridge` installs rules; the Colorlight 5A-75B gateware).
+    pub const BRIDGE: Caps = Caps(2);
 
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Caps) -> bool {
@@ -558,6 +564,77 @@ impl<'a> DeviceInfo<'a> {
             node,
             caps,
         })
+    }
+}
+
+/// One link's network addresses on a multi-link board (the Colorlight
+/// 5A-75B's two Ethernet ports), for `sys/net/addr`.
+///
+/// Wire form, 16 bytes: `[ip 4][mac 6][peer_ip 4][peer_port u16 LE]`, the
+/// addresses in network (dotted, transmission) order. A request body
+/// `[link]` reads link `link`; `[link]` + record sets it, and the
+/// response is empty. The response to a read is `[link]` + record. A
+/// set takes effect after its response (which still leaves from the old
+/// address) and is kept across resets. `peer_ip` 0.0.0.0 means the
+/// peer is learned (the unicast sender of the latest valid frame); any
+/// other value pins the peer that publications go to.
+///
+/// [`Command::parse`] does not take this key: only boards with
+/// configurable links answer it, others answer `NotFound`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetAddr {
+    /// The link's IPv4 address.
+    pub ip: [u8; 4],
+    /// The link's MAC address.
+    pub mac: [u8; 6],
+    /// The pinned peer's IPv4 address, or 0.0.0.0 to learn it.
+    pub peer_ip: [u8; 4],
+    /// The pinned peer's UDP port.
+    pub peer_port: u16,
+}
+
+impl NetAddr {
+    /// Encoded length of the record.
+    pub const LEN: usize = 16;
+
+    /// The record's 16 bytes.
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[..4].copy_from_slice(&self.ip);
+        out[4..10].copy_from_slice(&self.mac);
+        out[10..14].copy_from_slice(&self.peer_ip);
+        out[14..].copy_from_slice(&self.peer_port.to_le_bytes());
+        out
+    }
+
+    /// Parses exactly [`NetAddr::LEN`] bytes.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let b: &[u8; Self::LEN] = bytes.try_into().ok()?;
+        let mut r = NetAddr { ip: [0; 4], mac: [0; 6], peer_ip: [0; 4], peer_port: 0 };
+        r.ip.copy_from_slice(&b[..4]);
+        r.mac.copy_from_slice(&b[4..10]);
+        r.peer_ip.copy_from_slice(&b[10..14]);
+        r.peer_port = u16::from_le_bytes([b[14], b[15]]);
+        Some(r)
+    }
+
+    /// Whether the peer is pinned (not learned).
+    pub const fn pinned(&self) -> bool {
+        u32::from_be_bytes(self.peer_ip) != 0
+    }
+
+    /// The set request body `[link]` + record.
+    pub fn set_body(&self, link: u8) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 1 + Self::LEN];
+        out[0] = link;
+        out[1..].copy_from_slice(&self.encode());
+        out
+    }
+
+    /// Parses a read response `[link]` + record.
+    pub fn decode_reply(bytes: &[u8]) -> Option<(u8, Self)> {
+        let (&link, rest) = bytes.split_first()?;
+        Some((link, Self::decode(rest)?))
     }
 }
 
@@ -683,6 +760,31 @@ pub fn is_system_key(key: Key<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_addr_round_trips_and_matches_the_gateware_layout() {
+        let a = NetAddr {
+            ip: [192, 168, 2, 51],
+            mac: [0x02, 0x5A, 0x75, 0xB0, 0x00, 0x11],
+            peer_ip: [10, 0, 1, 9],
+            peer_port: 7000,
+        };
+        let wire = a.encode();
+        // gateware-5a75b/tests/tb_node_full.py `net_record`.
+        assert_eq!(
+            wire,
+            [192, 168, 2, 51, 0x02, 0x5A, 0x75, 0xB0, 0x00, 0x11, 10, 0, 1, 9, 0x58, 0x1B]
+        );
+        assert_eq!(NetAddr::decode(&wire), Some(a));
+        assert_eq!(NetAddr::decode(&wire[..15]), None);
+        assert_eq!(NetAddr::decode_reply(&a.set_body(1)), Some((1, a)));
+        assert_eq!(NetAddr::decode_reply(&[]), None);
+        assert!(a.pinned());
+        assert!(!NetAddr { peer_ip: [0; 4], ..a }.pinned());
+        // Not a loader command: boards without links answer NotFound.
+        assert_eq!(Command::parse(keys::NET_ADDR, &[1]), Err(HandlerError::NotFound));
+        assert!(is_system_key(keys::NET_ADDR));
+    }
 
     fn run_transfer(image: &[u8], chunk: usize) -> Result<Effect<'static>, HandlerError> {
         let crc = Crc32::checksum(image);
@@ -1103,6 +1205,9 @@ mod tests {
         assert!(back.caps.contains(Caps::SERVE));
         assert!(!Caps::NONE.contains(Caps::SERVE));
         assert_eq!(Caps::NONE.with(Caps::SERVE), Caps::SERVE);
+        let both = Caps::SERVE.with(Caps::BRIDGE);
+        assert_eq!(both, Caps(3));
+        assert!(both.contains(Caps::BRIDGE) && !Caps::SERVE.contains(Caps::BRIDGE));
         // Capabilities need the node id they follow.
         let orphan = DeviceInfo { node: None, ..v06 };
         assert_eq!(orphan.encode(&mut b), None);

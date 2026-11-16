@@ -16,6 +16,9 @@
 //!   such as a 74880-baud ROM banner that has no delimiter before the next
 //!   frame), matches responses by correlation id, and retries timed-out
 //!   attempts with a fresh id.
+//! * [`udp`] — [`udp::UdpLink`], an [`link::Endpoint`] over UDP with one
+//!   raw serial frame per datagram (`--udp HOST[:PORT]`, the Colorlight
+//!   5A-75B gateware), retrying like the serial link.
 //! * [`bridge`] — the serial framing to the USB↔ESP-NOW bridge (an
 //!   ESP8266, `tools/espnow-bridge`): COBS + CRC-16 frames carrying raw
 //!   ESP-NOW frames with their MACs, `Hello`, `Stats` and send results.
@@ -50,6 +53,7 @@ pub mod link;
 pub mod plan;
 pub mod report;
 pub mod sign;
+pub mod udp;
 
 #[cfg(test)]
 mod fake;

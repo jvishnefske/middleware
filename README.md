@@ -385,7 +385,9 @@ node, the gateway and Zenoh in one process on loopback.
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
 | `firmware-rp/`       | RP base firmware over USB CDC-ACM: Raspberry Pi Pico (RP2040, stores payloads only) and Pico 2 (RP2350, runs them): `./build.sh rp2040` or `./build.sh rp2350` (ELF and UF2) |
-| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
+| `gateware-5a75b/`    | Colorlight 5A-75B v7.0 (ECP5) gateware, no CPU: two Ethernet links, frame core, bridge engine, WASM core (`nix develop ./gateware-5a75b`, `pytest tests`, `python soc.py`); work in progress, see design.md CL… |
+| `wasm-hdl-ref/`      | the gateware WASM core as a no_std Rust model, tested against wasmi; writes the gateware's golden vectors |
+| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`, or one UDP node with `--udp <host>[:port]`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
 | `tools/espnow-bridge/` | ESP8266 USB↔ESP-NOW bridge sketch for `mwctl --espnow` (`check.sh`: codec test and build; upload with `arduino-cli upload --fqbn esp8266:esp8266:generic -p <port>`) |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |

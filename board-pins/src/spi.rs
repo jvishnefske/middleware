@@ -118,6 +118,9 @@ pub fn check_role(
     let fail = |problem| SpiError { role, pin, problem };
     map.check(pin, role.direction())
         .map_err(|e| fail(SpiProblem::Pin(e)))?;
+    if map.spi_routing() == SpiRouting::None {
+        return Err(fail(SpiProblem::NoSignal));
+    }
     let (SpiRouting::RpFunctionTable, Some(signal)) = (map.spi_routing(), role.signal()) else {
         return Ok(block);
     };

@@ -554,6 +554,7 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
     let routing = match map.spi_routing() {
         SpiRouting::Matrix => "matrix",
         SpiRouting::RpFunctionTable => "rp-function-table",
+        SpiRouting::None => "none",
     };
     set(&o, "spiRouting", routing);
     let wired: Vec<(u8, u8, u8)> = (0..2u8)

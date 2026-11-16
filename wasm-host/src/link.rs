@@ -35,6 +35,7 @@ use alloc::vec::Vec;
 use middleware::wasm_abi::periph::{
     self, I2cConfig, MAX_I2C, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
+use middleware::wasm_abi::bridge;
 use middleware::wasm_abi::route::{self, RouteStat};
 use middleware::wasm_abi::{self, AbiError, IMPORT_MODULE, MAX_MESSAGE, guest_range};
 use wasmi::{Caller, Engine, Extern, Linker, StoreLimits};
@@ -270,6 +271,25 @@ pub fn route_sink_call<D: Device>(
     abi::route_handle_code(handle)
 }
 
+/// `route_bridge(src_link, key_ptr, key_len, dst_link)` (ABI 6): links
+/// first, then the pointer pair, then the key; returns the bridge handle.
+pub fn route_bridge_call<D: Device>(
+    mem: &[u8],
+    st: &mut State<D>,
+    (src, kp, kl, dst): (i32, i32, i32, i32),
+) -> Result<i32, AbiError> {
+    let _ = bridge::links(src, dst)?;
+    let key = mem
+        .get(guest_range(kp, kl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    let b = bridge::parse(src, key, dst)?;
+    let handle = st.device.route_bridge(&b)?;
+    if bridge::handle_index(handle).is_none() {
+        return Err(AbiError::NoResources);
+    }
+    Ok(i32::from(handle))
+}
+
 /// `route_stop(handle)` (ABI 4).
 pub fn route_stop_call<D: Device>(st: &mut State<D>, handle: i32) -> Result<(), AbiError> {
     st.device.route_stop(route::route_handle(handle)?)
@@ -484,7 +504,20 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     link_abi3(&mut l)?;
     link_abi4(&mut l)?;
     link_abi5(&mut l)?;
+    link_abi6(&mut l)?;
     Ok(l)
+}
+
+/// Registers the ABI 6 import (bridging between links).
+fn link_abi6<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    l.func_wrap(
+        IMPORT_MODULE,
+        "route_bridge",
+        |c: Caller<'_, State<D>>, src: i32, kp: i32, kl: i32, dst: i32| {
+            with_memory(c, |mem, st| route_bridge_call(mem, st, (src, kp, kl, dst)))
+        },
+    )?;
+    Ok(())
 }
 
 /// Registers the ABI 5 imports (serving requests).

@@ -75,6 +75,9 @@ pub enum SpiRouting {
     /// SCK, MOSI and MISO on GPIOs with that signal, all on one block; CS
     /// is driven as a plain output, so any output pin.
     RpFunctionTable,
+    /// No SPI bus for payloads (the Colorlight 5A-75B gateware): every pin
+    /// fails with [`spi::SpiProblem::NoSignal`].
+    None,
 }
 
 /// A plain-language reason the board holds some pins.

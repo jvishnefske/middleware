@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "esp-base"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "board-pins",
  "embedded-storage",
@@ -3996,6 +3996,15 @@ checksum = "4495a6f85dd94c411c749303efcbc5defade0b0cbdbc0541495241ab917a9b5a"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.262.0",
+]
+
+[[package]]
+name = "wasm-hdl-ref"
+version = "0.1.0"
+dependencies = [
+ "middleware",
+ "wasm-host",
+ "wat",
 ]
 
 [[package]]

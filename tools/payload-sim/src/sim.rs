@@ -45,6 +45,14 @@
 //! (`Payload::request`, a [`REQ_REPLY_CAP`]-byte reply buffer and a
 //! [`REQ_DEADLINE_MS`] deadline); [`render_reply`] prints the outcome as
 //! `reply <key> <hex>` or `reply <key> error <HandlerError>`.
+//!
+//! ABI 6: the board is a fake two-port device (links 0 and 1, like the
+//! Colorlight 5A-75B) with a real [`BridgeTable`]. `route_bridge` prints
+//! `bridge<handle> link<src> <key> -> link<dst>`; stdin message lines
+//! arrive on link 0, and `!link <n> <key> [<text>]` ([`Command::Link`])
+//! delivers one on link `n`. Each arrival is matched against the rules
+//! first ([`SimDevice::link_receive`], printing `link<dst> tx <key>
+//! <payload>` per forwarded copy), then offered to the payload as usual.
 
 pub mod bus;
 pub mod panel;
@@ -54,6 +62,7 @@ pub mod route;
 use std::fmt::Write as _;
 
 use middleware::stream::{Action, FrameSource, Sink};
+use middleware::wasm_abi::bridge::{self, Bridge, BridgeTable};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use middleware::{HandlerError, Key, SenderId};
 use wasm_host::{
@@ -139,7 +148,11 @@ stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input,\n\
 `!i2c <bus> <reg> <value>` presets a register of the I2C device at 0x50 (hex 0x.. or decimal),\n\
-`!req <key> [<hex>]` sends a request to the payload serving <key>";
+`!req <key> [<hex>]` sends a request to the payload serving <key>,\n\
+`!link <0|1> <key> [<text>]` is a publication arriving on that link (stdin lines arrive on link 0);\n\
+bridge rules (ABI 6 route_bridge) forward matching arrivals to the other link;\n\
+--memory-bytes 16384 is the Colorlight 5A-75B (ecp5) profile: its gateware core has 16 KiB of\n\
+linear memory, so declare 1-byte pages, e.g. (memory (export \"memory\") 4096 4096 (pagesize 1))";
 
 /// Parses the arguments after the program name.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
@@ -271,6 +284,16 @@ pub enum Command {
         /// The request body (empty when no hex is given).
         body: Vec<u8>,
     },
+    /// `!link <n> <key> [<text>]`: a publication arriving on link `n` (ABI
+    /// 6), matched against the bridge rules, then offered to the payload.
+    Link {
+        /// The link it arrived on (0 or 1).
+        link: u8,
+        /// The key.
+        key: String,
+        /// The payload (the text after the key, may be empty).
+        data: Vec<u8>,
+    },
 }
 
 /// Parses a command line; `Ok(None)` when the line is not a command.
@@ -339,6 +362,22 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, String> {
             Ok(Some(Command::Req {
                 key: key.to_string(),
                 body,
+            }))
+        }
+        "link" => {
+            let usage = "!link needs <0|1> <key> [<text>]";
+            let (n, rest) = args.split_once(' ').ok_or(usage)?;
+            let link = match n {
+                "0" => 0,
+                "1" => 1,
+                _ => return Err(usage.to_string()),
+            };
+            let (key, data) = rest.split_once(' ').unwrap_or((rest, ""));
+            Key::new(key).map_err(|e| format!("bad key {key:?}: {e:?}"))?;
+            Ok(Some(Command::Link {
+                link,
+                key: key.to_string(),
+                data: data.as_bytes().to_vec(),
             }))
         }
         "uart" if !args.is_empty() => Ok(Some(Command::Uart(args.as_bytes().to_vec()))),
@@ -437,6 +476,8 @@ pub struct SimDevice {
     i2c: I2c,
     /// What `node_id` returns.
     node: SenderId,
+    /// ABI 6 forwarding rules between links 0 and 1.
+    bridges: BridgeTable,
 }
 
 impl Default for SimDevice {
@@ -468,6 +509,7 @@ impl SimDevice {
             adc: Adc::default(),
             i2c: I2c::default(),
             node: DEFAULT_NODE,
+            bridges: BridgeTable::new(),
         }
     }
 
@@ -634,6 +676,21 @@ impl SimDevice {
         true
     }
 
+    /// A publication arriving on `link` (ABI 6): forwards it on every
+    /// destination link a bridge rule names, printing `link<n> tx <key>
+    /// <payload>` for each, and counts it on the matching rules. Returns
+    /// the destination link mask.
+    pub fn link_receive(&mut self, link: u8, key: Key<'_>, data: &[u8]) -> u8 {
+        let f = self.bridges.route(link, key);
+        for dst in 0..8u8 {
+            if f.links & (1 << dst) != 0 {
+                self.event(format!("link{dst} tx {key} {}", render(data)));
+            }
+        }
+        self.bridges.account(f, f.links);
+        f.links
+    }
+
     fn route_event(&mut self, kind: EventKind, handle: u8, value: i32) {
         self.queue.push(Event {
             kind,
@@ -704,6 +761,7 @@ impl SimDevice {
                 Ok(())
             }
             Command::Req { key, .. } => Err(format!("!req {key}: requests go to the payload")),
+            Command::Link { key, .. } => Err(format!("!link {key}: arrivals go through the shell")),
             Command::I2c { bus, reg, value } => {
                 self.i2c.preset(bus, reg, value)?;
                 self.event(format!(
@@ -1024,6 +1082,11 @@ impl Device for SimDevice {
     }
 
     fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        if bridge::handle_index(handle).is_some() {
+            self.bridges.remove(handle)?;
+            self.event(format!("bridge{handle} stop"));
+            return Ok(());
+        }
         self.routes.stop(handle)?;
         for kind in [
             EventKind::RouteFrames,
@@ -1037,7 +1100,27 @@ impl Device for SimDevice {
     }
 
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        if bridge::handle_index(handle).is_some() {
+            let s = self.bridges.get(handle).ok_or(AbiError::Busy)?.stats;
+            return Ok(match stat {
+                RouteStat::Frames | RouteStat::Chunks => s.forwarded,
+                RouteStat::FramesDropped | RouteStat::ChunksDropped => s.dropped,
+            });
+        }
         Ok(stat.of(&self.routes.stats(handle)?))
+    }
+
+    fn route_bridge(&mut self, b: &Bridge<'_>) -> Result<u8, AbiError> {
+        if b.src > 1 || b.dst > 1 {
+            return Err(AbiError::Unsupported);
+        }
+        let handle = self.bridges.add(b)?;
+        let key = match b.filter {
+            middleware::Filter::Exact(k) => k.as_str().to_string(),
+            middleware::Filter::Prefix(k) => format!("{k}/**"),
+        };
+        self.event(format!("bridge{handle} link{} {key} -> link{}", b.src, b.dst));
+        Ok(handle)
     }
 
     fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
