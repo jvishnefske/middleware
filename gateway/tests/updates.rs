@@ -114,6 +114,8 @@ impl FakeDevice {
                 .encode(out)
                 .ok_or(HandlerError::BufferTooSmall),
             Command::TrustClaim { .. } => Err(HandlerError::Denied),
+            // A board without an esp-base chip profile (rp-base).
+            Command::Board => Err(HandlerError::NotFound),
             // Serial start/stop: empty bodies, no signature (the gateway
             // checked it).
             Command::Start => match self.installed {
