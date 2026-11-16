@@ -41,9 +41,11 @@ use crate::irq::Event;
 use crate::spi::Spi;
 use crate::{AbiError, check, len_i32, ptr_i32, sys};
 pub use middleware::stream::{ESPNOW_CHUNK_DATA, MAX_CHUNK_DATA, MAX_FRAME_BYTES};
+pub use middleware::stream::samples;
 pub use middleware::wasm_abi::route::{
-    CAMERA_CFG_LEN, CAMERA_PINS_LEN, CameraPins, MAX_DIM, MAX_PREAMBLE, MAX_ROUTES, MAX_SEGMENTS,
-    MAX_SINK_CFG_LEN, MIN_PERIOD_MS, PixelFormat, Preamble, RouteStat, Segment, SinkConfig, Source,
+    AudioMode, CAMERA_CFG_LEN, CAMERA_PINS_LEN, CameraPins, IMU_CFG_LEN, ImuConfig, MAX_DIM,
+    MAX_PREAMBLE, MAX_ROUTES, MAX_SEGMENTS, MAX_SINK_CFG_LEN, MIC_CFG_LEN, MIN_PERIOD_MS,
+    MicConfig, PixelFormat, Preamble, RouteStat, SampleSource, Segment, SinkConfig, Source,
     SourceConfig, SourceKind, route_handle,
 };
 
@@ -78,13 +80,40 @@ impl Route {
     /// reserved or malformed key, `Unsupported` for a source the board
     /// lacks, `NoResources` when [`MAX_ROUTES`] are running.
     /// [`SourceKind::Camera`] needs its pins, so it is `InvalidArgument`
-    /// here; start a camera with [`Route::camera`].
+    /// here; start a camera with [`Route::camera`]. The sampled sources
+    /// take their own configs: start them with [`Route::samples`].
     pub fn source(source: SourceKind, key: &str, cfg: &SourceConfig) -> Result<Self, AbiError> {
         match source {
             SourceKind::TestPattern => Self::start(Source::TestPattern, key, cfg),
             // The camera needs its pins: use `Route::camera`.
             SourceKind::Camera => Err(AbiError::InvalidArgument),
+            // Sample batches, not frames: use `Route::samples`.
+            SourceKind::Imu | SourceKind::Microphone => Err(AbiError::InvalidArgument),
         }
+    }
+
+    /// Starts a sampled source route (the IMU or the microphone) publishing
+    /// one [`samples`] batch of `source.samples()` units per message on
+    /// `key`. While it runs the route owns the sensor's I2C device: the
+    /// payload's transfers to that address are `Busy`.
+    ///
+    /// `InvalidArgument` (before calling the host) for a config outside its
+    /// table, and from the host for a board without the sensor (its
+    /// `sys/info` capability bits list the ones it has), plus the errors
+    /// of [`Route::source`].
+    pub fn samples(source: SampleSource, key: &str) -> Result<Self, AbiError> {
+        let source = match source {
+            SampleSource::Imu(c) => SampleSource::Imu(c.validated()?),
+            SampleSource::Microphone(c) => SampleSource::Microphone(c.validated()?),
+        };
+        let bytes = source.encode();
+        Self::started(sys::route_source(
+            source.kind() as i32,
+            ptr_i32(key.as_bytes()),
+            len_i32(key.len())?,
+            ptr_i32(&bytes),
+            len_i32(bytes.len())?,
+        ))
     }
 
     /// Starts a source route publishing the frames of the camera wired to
@@ -196,6 +225,22 @@ mod tests {
             Err(AbiError::Unsupported),
             "host stub"
         );
+    }
+
+    #[test]
+    fn sc2_sampled_sources_validate_before_the_host() {
+        let ok = ImuConfig::new(100, 2, false, 10).expect("valid");
+        assert_eq!(Route::samples(SampleSource::Imu(ok), "app/imu"), Err(AbiError::Unsupported), "host stub");
+        let bad = ImuConfig { range_g: 3, ..ok };
+        assert_eq!(Route::samples(SampleSource::Imu(bad), "app/imu"), Err(AbiError::InvalidArgument));
+        let mic = MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 0).expect("valid");
+        let bad = MicConfig { block: 3, ..mic };
+        assert_eq!(
+            Route::samples(SampleSource::Microphone(bad), "app/mic"),
+            Err(AbiError::InvalidArgument)
+        );
+        let frames = SourceConfig::new(120, 120, 100).expect("valid");
+        assert_eq!(Route::source(SourceKind::Imu, "app/imu", &frames), Err(AbiError::InvalidArgument));
     }
 
     #[test]

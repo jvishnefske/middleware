@@ -1699,6 +1699,9 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "zenoh",
+ "zenoh-buffers",
+ "zenoh-codec",
+ "zenoh-protocol",
 ]
 
 [[package]]

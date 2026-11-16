@@ -49,6 +49,7 @@ pub mod trust;
 use crate::crc::Crc32;
 use crate::key::Key;
 use crate::transport::{HandlerError, SenderId};
+use crate::wasm_abi::route::SourceKind;
 use trust::{PublicKey, SignedCommit};
 
 /// Largest chunk body accepted by `sys/loader/chunk`.
@@ -454,6 +455,35 @@ impl Caps {
     /// Bit 1: the device bridges publications between its links (ABI 6
     /// `route_bridge` installs rules; the Colorlight 5A-75B gateware).
     pub const BRIDGE: Caps = Caps(2);
+    /// Bit 2: `route_source` offers [`SourceKind::Imu`] (sample batches
+    /// from the accelerometer). Bit 1 was this bit's first number on the
+    /// RT1050-EVKB line; it moved here when that line merged with the
+    /// Colorlight line, which had already given bit 1 to [`Caps::BRIDGE`].
+    pub const SOURCE_IMU: Caps = Caps(1 << 2);
+    /// Bit 3: `route_source` offers [`SourceKind::Microphone`] (sample
+    /// batches from the microphone).
+    pub const SOURCE_MICROPHONE: Caps = Caps(1 << 3);
+
+    /// Every named bit with its name, lowest bit first, for tools that
+    /// list what a device reports (`mwctl info`, protocol-wasm
+    /// `decodeDeviceInfo`'s `capNames`).
+    pub const NAMED: [(Caps, &'static str); 4] = [
+        (Caps::SERVE, "serve"),
+        (Caps::BRIDGE, "bridge"),
+        (Caps::SOURCE_IMU, "source_imu"),
+        (Caps::SOURCE_MICROPHONE, "source_microphone"),
+    ];
+
+    /// The bit that says `route_source` offers `kind`; `None` for the
+    /// frame sources, which have no bit (a board without them answers
+    /// `Unsupported`).
+    pub const fn source(kind: SourceKind) -> Option<Caps> {
+        match kind {
+            SourceKind::Imu => Some(Caps::SOURCE_IMU),
+            SourceKind::Microphone => Some(Caps::SOURCE_MICROPHONE),
+            SourceKind::TestPattern | SourceKind::Camera => None,
+        }
+    }
 
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Caps) -> bool {
@@ -1211,5 +1241,37 @@ mod tests {
         // Capabilities need the node id they follow.
         let orphan = DeviceInfo { node: None, ..v06 };
         assert_eq!(orphan.encode(&mut b), None);
+    }
+
+    #[test]
+    fn sc2_source_capability_bits() {
+        assert_eq!(Caps::SERVE.0, 1, "existing bits keep their numbers");
+        assert_eq!(Caps::BRIDGE.0, 2, "the Colorlight gateware hard-codes bit 1");
+        assert_eq!((Caps::SOURCE_IMU.0, Caps::SOURCE_MICROPHONE.0), (4, 8));
+        assert_eq!(Caps::source(SourceKind::Imu), Some(Caps::SOURCE_IMU));
+        assert_eq!(Caps::source(SourceKind::Microphone), Some(Caps::SOURCE_MICROPHONE));
+        assert_eq!(Caps::source(SourceKind::Camera), None);
+        assert_eq!(Caps::source(SourceKind::TestPattern), None);
+        let caps = Caps::SERVE.with(Caps::SOURCE_IMU);
+        let info = DeviceInfo {
+            abi_version: 5,
+            capacity: 1,
+            status: PayloadStatus::Empty,
+            chip: "imxrt1052",
+            firmware: "0.1.0",
+            node: Some(SenderId([1; 8])),
+            caps,
+        };
+        let mut out = [0u8; MAX_INFO_LEN];
+        let n = info.encode(&mut out).unwrap();
+        let back = DeviceInfo::decode(&out[..n]).unwrap();
+        assert!(back.caps.contains(Caps::SOURCE_IMU) && back.caps.contains(Caps::SERVE));
+        assert!(!back.caps.contains(Caps::SOURCE_MICROPHONE));
+        assert!(!back.caps.contains(Caps::BRIDGE));
+        assert_eq!(back.caps, Caps(5), "an EVKB with the IMU reports caps 5");
+        // The named bits are distinct single bits, in ascending order.
+        for (n, (bit, _)) in Caps::NAMED.iter().enumerate() {
+            assert_eq!(bit.0, 1 << n);
+        }
     }
 }

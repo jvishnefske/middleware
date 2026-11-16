@@ -35,6 +35,10 @@ prost = ["dep:prost"]
 ble = []
 serial = ["dep:embedded-io-async"]
 espnow = []
+# The board's Zenoh 1.x client (`zenoh_lite`): a pure codec and session
+# state machine and an async adapter over one `embedded-io-async` TCP
+# stream. no_std, no heap; the `zenoh` crates need alloc and getrandom.
+zenoh-lite = ["dep:embedded-io-async"]
 # Signed payload updates (no_std, no heap): SHA-256 of the image while it
 # streams in, Ed25519 verification of signed commits, and the pure trust
 # state transitions. The wire types are always built; this adds the crypto.
@@ -97,11 +101,20 @@ middleware = { path = ".", features = ["memory"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 # The S88 phase command contract on these traits (`tests/recipe_wire.rs`).
 recipe-core = { path = "recipe-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+# `zenoh_lite`'s codec is checked byte for byte against Zenoh's own
+# (ZN1), pinned to the `zenoh` version in Cargo.lock. Host tests only.
+zenoh-codec = "=1.10.1"
+zenoh-protocol = "=1.10.1"
+zenoh-buffers = "=1.10.1"
 
 # One service kind discovered over Zenoh, mDNS and cluster DNS (stub on
 # loopback), then called with request_with and Gather over Zenoh and the
 # gRPC mesh client. `test = true`: `cargo test --all-features` runs it (K16).
+[[example]]
+name = "zenoh_board"
+required-features = ["zenoh", "trust"]
+
 [[example]]
 name = "discover_and_call"
 required-features = ["zenoh", "grpc", "istio", "dns-sd", "mdns"]

@@ -23,6 +23,13 @@
 //! runs; [`SimDevice::sensor_summary`] reports what it wrote. There is no
 //! image sensor model: the camera source route is `Unsupported`.
 //!
+//! The sampled sources (SC6): `route_source` with `SourceKind::Imu` or
+//! `SourceKind::Microphone` runs the deterministic fake IMU (a tilt about
+//! X) or fake microphone (a tone and a chirp) of
+//! `middleware::stream::samples::fake`, one sample batch per message;
+//! the fake IMU owns [`FAKE_IMU_ADDR`] and the microphone
+//! [`FAKE_CODEC_ADDR`] on I2C bus 0 while they stream.
+//!
 //! The ABI 4 DMA routes (requirement R10) run in [`route`]: a test-pattern
 //! source route publishes each due frame as chunks (one printed summary
 //! line per frame), and a sink route consumes the messages on its key,
@@ -67,12 +74,13 @@ use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use middleware::{HandlerError, Key, SenderId};
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
-    RouteStat, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec, UartConfig,
+    I2cDevice, RouteStat, SampleSource, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec,
+    UartConfig,
 };
 
 use panel::Panel;
 use periph::{Adc, I2c, Pwm, Spi, Timers, Uart};
-use route::{Route, Routes, SinkRoute, SourceRoute};
+use route::{Route, Routes, SampleRoute, SinkRoute, SourceRoute};
 
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +124,13 @@ pub const REQ_REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
 
 /// Deadline `!req` requests carry, in milliseconds.
 pub const REQ_DEADLINE_MS: u32 = 1000;
+
+/// I2C address (bus 0) of the fake IMU, the FXOS8700CQ's: a route from it
+/// makes a payload's transfer there `Busy` (SC3).
+pub const FAKE_IMU_ADDR: u8 = 0x1f;
+
+/// I2C address (bus 0) of the fake microphone's codec, the WM8960's.
+pub const FAKE_CODEC_ADDR: u8 = 0x1a;
 
 /// The peer board's node: `node` with its last byte plus one (wrapping).
 pub fn peer_node(node: SenderId) -> SenderId {
@@ -576,6 +591,26 @@ impl SimDevice {
                 self.route_event(EventKind::RouteDropped, frame.handle, n);
             }
         }
+        for batch in self.routes.due_batches(self.now_us) {
+            let skipped = if batch.skipped > 0 {
+                format!(", {} skipped", batch.skipped)
+            } else {
+                String::new()
+            };
+            self.event(format!(
+                "route{} batch {} -> {} ({} B{skipped})",
+                batch.handle,
+                batch.number,
+                batch.key,
+                batch.data.len()
+            ));
+            self.outbox.push((batch.key, batch.data));
+            self.route_event(EventKind::RouteFrames, batch.handle, 1);
+            if batch.skipped > 0 {
+                let n = i32::try_from(batch.skipped).unwrap_or(i32::MAX);
+                self.route_event(EventKind::RouteDropped, batch.handle, n);
+            }
+        }
     }
 
     /// When the next timer is due, in microseconds.
@@ -631,6 +666,7 @@ impl SimDevice {
             .map(|(h, r)| {
                 let (kind, key) = match r {
                     Route::Source(s) => ("source", &s.key),
+                    Route::Samples(s) => ("samples", &s.key),
                     Route::Sink(s) => ("sink", &s.key),
                 };
                 let s = self.routes.stats(h).unwrap_or_default();
@@ -1056,6 +1092,35 @@ impl Device for SimDevice {
         Ok(handle)
     }
 
+    /// The fake IMU and microphone (SC6) of
+    /// [`middleware::stream::samples::fake`], every config the ABI allows;
+    /// the first batch is due when its last unit has been taken.
+    fn route_samples(&mut self, source: SampleSource, key: Key<'_>) -> Result<u8, AbiError> {
+        let handle = self.routes.add(Route::Samples(SampleRoute {
+            key: key.as_str().to_string(),
+            fake: middleware::stream::samples::fake::FakeRoute::new(source, self.now_us),
+            stats: Default::default(),
+        }))?;
+        self.event(format!(
+            "route{handle} source {:?} {} per batch every {} us on {key}",
+            source.kind(),
+            source.samples(),
+            source.period_us()
+        ));
+        Ok(handle)
+    }
+
+    /// The fake IMU sits at the FXOS8700CQ's address and the fake
+    /// microphone's codec at the WM8960's, both on bus 0, as on the
+    /// RT1050-EVKB: a payload's transfer to them is `Busy` while their
+    /// route runs.
+    fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
+        Some(match source {
+            SampleSource::Imu(_) => I2cDevice { bus: 0, addr: FAKE_IMU_ADDR },
+            SampleSource::Microphone(_) => I2cDevice { bus: 0, addr: FAKE_CODEC_ADDR },
+        })
+    }
+
     /// `Busy` unless `bus` is open and no other sink owns it; `Unsupported`
     /// for a D/C pin past [`PINS`]. The D/C pin becomes an output.
     fn route_sink(&mut self, key: Key<'_>, bus: u8, cfg: &SinkConfig) -> Result<u8, AbiError> {
@@ -1137,6 +1202,57 @@ impl Device for SimDevice {
 mod tests {
     use super::*;
     use wasm_host::CameraPins;
+
+    /// The SC6 fixture shared with the browser simulator's tests.
+    const SENSOR_STREAM: &str = include_str!("../../../web/test/fixtures/sensor_stream.wat");
+
+    fn i32_at(data: &[u8]) -> Vec<i32> {
+        data.chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+
+    #[test]
+    fn sc6_a_payload_streams_the_fake_imu_and_microphone() {
+        use middleware::stream::samples::{self, Gap, SensorKind, fake};
+        let wasm = wat::parse_str(SENSOR_STREAM).unwrap();
+        let mut p = wasm_host::Payload::load(&wasm, SimDevice::new(None), Limits::default()).unwrap();
+        let mut published = p.device().take_outbox();
+        for ms in (10..=1000).step_by(10) {
+            p.device().advance_to(ms * 1000);
+            while let Some(e) = p.device().pop_event() {
+                p.dispatch(e).unwrap();
+            }
+            published.extend(p.device().take_outbox());
+        }
+        let on = |key: &str| -> Vec<Vec<u8>> {
+            published.iter().filter(|(k, _)| k == key).map(|(_, d)| d.clone()).collect()
+        };
+        assert_eq!(on("app/started").iter().map(|d| i32_at(d)).collect::<Vec<_>>(), [vec![0, 1]]);
+        // Both routes publish every 100 ms; the sixth RouteFrames (at 300
+        // ms, three per route) stops the IMU.
+        assert_eq!(on("app/stopped").iter().map(|d| i32_at(d)).collect::<Vec<_>>(), [vec![0]]);
+        let imu: Vec<_> = on("app/imu").iter().map(|d| samples::decode(d).unwrap().header).collect();
+        assert_eq!(imu.len(), 3, "stopped after three batches");
+        for (n, h) in imu.iter().enumerate() {
+            assert_eq!((h.kind, h.channels, h.count, h.rate_hz), (SensorKind::Imu, 3, 5, 50));
+            assert_eq!((h.first_index, h.timestamp_us), (5 * n as u64, 100_000 * n as u64));
+        }
+        assert_eq!(samples::gap(&imu[0], &imu[1]), Gap::None);
+        let first = on("app/imu")[0].clone();
+        let b = samples::decode(&first).unwrap();
+        assert!(b.i16_values().take(3).eq(fake::imu_sample(0, 50, 2).into_iter().take(3)));
+        let mic = on("app/mic");
+        assert_eq!(mic.len(), 10, "the microphone keeps streaming");
+        let last = samples::decode(mic.last().unwrap()).unwrap();
+        assert_eq!((last.header.kind, last.header.first_index), (SensorKind::Microphone, 18));
+        assert!(last.levels().all(|(rms, peak)| rms > 10_000 && peak > 16_000));
+        // The fake IMU sits where the EVKB's FXOS8700CQ does.
+        assert_eq!(
+            p.device().sample_device(&SampleSource::Imu(wasm_host::ImuConfig::new(50, 2, false, 5).unwrap())),
+            Some(I2cDevice { bus: 0, addr: FAKE_IMU_ADDR })
+        );
+    }
 
     #[test]
     fn abi5_req_commands_node_option_and_reply_lines() {

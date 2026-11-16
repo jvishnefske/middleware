@@ -155,9 +155,11 @@ pub fn upload_plan_signed(
 }
 
 /// Decodes a `sys/info` body into
-/// `{abiVersion, capacity, status, statusName, chip, firmware, caps, serves}`
+/// `{abiVersion, capacity, status, statusName, chip, firmware, caps, capNames, serves}`
 /// (`caps` the capability bits, 0 from firmware before middleware 0.6;
-/// `serves` whether bit 0, requests routed to the payload, is set), plus
+/// `capNames` the names of the set bits that have one, lowest first:
+/// "serve", "bridge", "source_imu", "source_microphone"; `serves` whether
+/// bit 0, requests routed to the payload, is set), plus
 /// `node` (16 hex digits) when the device reports its node id, or
 /// `undefined` when malformed.
 #[wasm_bindgen(js_name = decodeDeviceInfo)]
@@ -179,6 +181,12 @@ pub fn decode_device_info(data: &[u8]) -> Option<Object> {
         set(&o, "node", hex);
     }
     set(&o, "caps", info.caps);
+    let names: Array = middleware::loader::Caps::NAMED
+        .iter()
+        .filter(|(bit, _)| middleware::loader::Caps(info.caps).contains(*bit))
+        .map(|(_, name)| JsValue::from_str(name))
+        .collect();
+    set(&o, "capNames", names);
     set(
         &o,
         "serves",
@@ -538,7 +546,7 @@ fn whole(v: &JsValue) -> Option<i64> {
 }
 
 /// The board's pins for the pin table: `{chip, spiRouting: "matrix" |
-/// "rp-function-table", gpios: [{pin, reserved?: why, inputOnly, adc?:
+/// "rp-function-table" | "fixed" | "none", gpios: [{pin, reserved?: why, inputOnly, adc?:
 /// channel, pwm?: {timer, channel}, i2c?: {bus, line: "sda"|"scl"}, spi?:
 /// [{block, signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm:
 /// [{timer, channel, pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
@@ -555,6 +563,13 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
         SpiRouting::Matrix => "matrix",
         SpiRouting::RpFunctionTable => "rp-function-table",
         SpiRouting::None => "none",
+        SpiRouting::Fixed(_) => "fixed",
+    };
+    // On a fixed-pin board (the RT1050-EVKB's LPSPI1) the SCK, MOSI and
+    // MISO pins are block 0's.
+    let fixed = match map.spi_routing() {
+        SpiRouting::Fixed(f) => Some(f),
+        _ => None,
     };
     set(&o, "spiRouting", routing);
     let wired: Vec<(u8, u8, u8)> = (0..2u8)
@@ -583,6 +598,18 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
                 set(&i, "bus", bus);
                 set(&i, "line", if sda == p { "sda" } else { "scl" });
                 set(&g, "i2c", i);
+            }
+            if let Some(f) = fixed {
+                let name = [(f.sck, "sck"), (f.mosi, "mosi"), (f.miso, "miso")]
+                    .into_iter()
+                    .find(|(q, _)| *q == p)
+                    .map(|(_, n)| n);
+                if let Some(name) = name {
+                    let s = Object::new();
+                    set(&s, "block", 0);
+                    set(&s, "signal", name);
+                    set(&g, "spi", s);
+                }
             }
             if routing == "rp-function-table"
                 && let Some((block, signal)) = spi_function(p)

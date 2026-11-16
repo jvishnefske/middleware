@@ -489,7 +489,7 @@ impl ZenohTransport {
             Target::Node(id) => wire::node_key(id, key),
         };
         let attachment =
-            wire::encode_query(self.sender, deadline_ms, options.trace, options.request_id);
+            wire::encode_query(self.sender, deadline_ms, options.trace, options.request_id).to_vec();
         let replies = self
             .session
             .get(selector)

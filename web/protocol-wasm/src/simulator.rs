@@ -35,8 +35,18 @@
 //!   reply buffer) and returns the reply or the `HandlerError` a device
 //!   would answer.
 //!
+//! * Sensors (SC6): `route_source` with `SourceKind::Imu` or
+//!   `SourceKind::Microphone` runs the deterministic fake IMU (a tilt
+//!   about X) or fake microphone (a tone and a chirp) of
+//!   `middleware::stream::samples::fake`, the same bytes payload-sim
+//!   publishes; each due batch is a [`SimEvent::Publish`] on the route's
+//!   key and raises `RouteFrames` (and `RouteDropped` for batches a clock
+//!   jump skipped). `route_stop` and `route_stat` work on them; the frame
+//!   sources and sink routes stay `Unsupported`.
+//!
 //! [`Simulator::step`] is the main loop: it completes DMA transfers started
-//! before the step (raising `DmaDone`), raises due timer alarms, runs `tick`
+//! before the step (raising `DmaDone`), raises due timer alarms, publishes
+//! due sensor batches, runs `tick`
 //! if due, then pops at most [`MAX_DISPATCH_PER_STEP`] queued events into
 //! [`Payload::dispatch`] (`on_irq`). Without an `on_irq` export, events are
 //! discarded.
@@ -49,11 +59,15 @@
 
 pub mod periph;
 
-use middleware::wasm_abi::events::MAX_EVENTS;
+use middleware::stream::RouteStats;
+use middleware::stream::samples::MAX_BATCH;
+use middleware::stream::samples::fake::FakeRoute;
+use middleware::wasm_abi::events::{EventKind, MAX_EVENTS};
+use middleware::wasm_abi::route::MAX_ROUTES;
 use middleware::{HandlerError, Key, RequestMeta, SenderId};
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, Limits, Payload, Pull, PwmSpec, SpiConfig,
-    TimerSpec, UartConfig,
+    AbiError, Device, DmaChannel, Edge, Event, Limits, Payload, Pull, PwmSpec, RouteStat,
+    SampleSource, SpiConfig, TimerSpec, UartConfig,
 };
 
 use periph::{Adc, Peripherals, Pwm, PwmInfo, SpiResponder, SpiTransfer, TimerInfo};
@@ -146,6 +160,14 @@ pub enum SimEvent {
     },
 }
 
+/// A running fake sensor route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SensorRoute {
+    key: String,
+    fake: FakeRoute,
+    stats: RouteStats,
+}
+
 /// The virtual device behind the simulator.
 #[derive(Debug, Clone)]
 pub struct SimDevice {
@@ -156,6 +178,7 @@ pub struct SimDevice {
     adc: Adc,
     events: Vec<SimEvent>,
     node: SenderId,
+    sensors: [Option<SensorRoute>; MAX_ROUTES],
 }
 
 impl Default for SimDevice {
@@ -176,6 +199,7 @@ impl SimDevice {
             adc: Adc::default(),
             events: Vec::new(),
             node: DEFAULT_NODE,
+            sensors: Default::default(),
         }
     }
 
@@ -244,6 +268,57 @@ impl SimDevice {
     /// Sets the value `adc_read(pin)` returns (`0..=ADC_MAX`).
     pub fn set_adc(&mut self, pin: u8, value: u16) -> Result<(), String> {
         self.adc.set(pin, value)
+    }
+
+    /// Publishes the sensor batches due at `now_us` (at most one per
+    /// route; a clock jump skips to the latest) and queues their
+    /// `RouteFrames` / `RouteDropped` events.
+    pub fn advance_sensors(&mut self, now_us: u64) {
+        let mut buf = [0u8; MAX_BATCH];
+        for (handle, slot) in self.sensors.iter_mut().enumerate() {
+            let Some(route) = slot else {
+                continue;
+            };
+            let Some(Ok(p)) = route.fake.poll(now_us, &mut buf) else {
+                continue;
+            };
+            let skipped = u32::try_from(p.skipped).unwrap_or(u32::MAX);
+            route.stats = RouteStats {
+                frames_dropped: route.stats.frames_dropped.saturating_add(skipped),
+                chunks_dropped: route.stats.chunks_dropped.saturating_add(skipped),
+                ..route.stats
+            }
+            .sent(1);
+            self.events.push(SimEvent::Publish {
+                key: route.key.clone(),
+                data: buf.get(..p.len).unwrap_or_default().to_vec(),
+            });
+            let source = handle as i32;
+            let time_us = now_us as u32;
+            self.periph.push(Event {
+                kind: EventKind::RouteFrames,
+                source,
+                value: 1,
+                time_us,
+            });
+            if skipped > 0 {
+                self.periph.push(Event {
+                    kind: EventKind::RouteDropped,
+                    source,
+                    value: i32::try_from(skipped).unwrap_or(i32::MAX),
+                    time_us,
+                });
+            }
+        }
+    }
+
+    /// When the next sensor batch is due, if a sensor route runs.
+    pub fn next_sensor_us(&self) -> Option<u64> {
+        self.sensors
+            .iter()
+            .flatten()
+            .map(|r| r.fake.next_due_us())
+            .min()
     }
 
     fn slot(&mut self, pin: u8) -> Result<&mut PinMode, AbiError> {
@@ -391,6 +466,41 @@ impl Device for SimDevice {
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Ok(self.node)
     }
+
+    /// The fake IMU and microphone (SC6), every config the ABI allows.
+    fn route_samples(&mut self, source: SampleSource, key: Key<'_>) -> Result<u8, AbiError> {
+        let (handle, slot) = self
+            .sensors
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.is_none())
+            .ok_or(AbiError::NoResources)?;
+        *slot = Some(SensorRoute {
+            key: key.as_str().to_owned(),
+            fake: FakeRoute::new(source, self.now_us),
+            stats: RouteStats::default(),
+        });
+        u8::try_from(handle).map_err(|_| AbiError::NoResources)
+    }
+
+    fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        self.sensors
+            .get_mut(usize::from(handle))
+            .and_then(Option::take)
+            .ok_or(AbiError::Busy)?;
+        for kind in [EventKind::RouteFrames, EventKind::RouteDropped, EventKind::RouteStopped] {
+            self.periph.purge(kind, i32::from(handle));
+        }
+        Ok(())
+    }
+
+    fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        self.sensors
+            .get(usize::from(handle))
+            .and_then(Option::as_ref)
+            .map(|r| stat.of(&r.stats))
+            .ok_or(AbiError::Busy)
+    }
 }
 
 /// Why a simulator call failed.
@@ -487,6 +597,7 @@ impl Simulator {
         dev.set_time_us(now_us);
         dev.periph().complete_dma(now_us);
         dev.periph().advance(now_us);
+        dev.advance_sensors(now_us);
         let r = self.payload.tick((now_us / 1000) as u32);
         self.trap(r)?;
         let mut popped = 0;
@@ -785,6 +896,46 @@ mod tests {
     const UART: &str = include_str!("../../test/fixtures/uart_echo.wat");
     const OVERFLOW: &str = include_str!("../../test/fixtures/overflow.wat");
     const PWM_ADC: &str = include_str!("../../test/fixtures/pwm_adc.wat");
+    const SENSOR_STREAM: &str = include_str!("../../test/fixtures/sensor_stream.wat");
+
+    #[test]
+    fn sc6_a_payload_streams_the_fake_imu_and_microphone() {
+        use middleware::stream::samples::{self, Gap, SensorKind};
+        use wasm_host::{AudioMode, ImuConfig, MicConfig};
+        let mut sim = fixture(SENSOR_STREAM);
+        let mut events = sim.drain();
+        for ms in (10..=1000).step_by(10) {
+            sim.step(ms * 1000).unwrap();
+            events.extend(sim.drain());
+        }
+        assert_eq!(publishes(&events, "app/started"), [[0, 0, 0, 0, 1, 0, 0, 0]]);
+        assert_eq!(last_i32(&events, "app/stopped"), Some(0), "route_stop(0) succeeded");
+        let imu = publishes(&events, "app/imu");
+        assert_eq!(imu.len(), 3, "the sixth RouteFrames (300 ms) stopped the IMU");
+        // Byte for byte what payload-sim publishes: the shared fake.
+        let src = SampleSource::Imu(ImuConfig::new(50, 2, false, 5).unwrap());
+        let mut want = [0u8; MAX_BATCH];
+        for (n, data) in imu.iter().enumerate() {
+            let len = src
+                .fake_batch(5 * n as u64, 100_000 * n as u64, 5, &mut want)
+                .unwrap();
+            assert_eq!(data.as_slice(), &want[..len], "batch {n}");
+        }
+        let a = samples::decode(&imu[0]).unwrap().header;
+        let b = samples::decode(&imu[1]).unwrap().header;
+        assert_eq!((a.kind, samples::gap(&a, &b)), (SensorKind::Imu, Gap::None));
+        let mic = publishes(&events, "app/mic");
+        assert_eq!(mic.len(), 10);
+        let src = SampleSource::Microphone(MicConfig::new(8_000, 0, AudioMode::Levels, 2, 400).unwrap());
+        let len = src.fake_batch(18, 900_000, 2, &mut want).unwrap();
+        assert_eq!(mic.last().map(Vec::as_slice), Some(&want[..len]));
+        let irqs = events
+            .iter()
+            .filter(|e| matches!(e, SimEvent::Irq { event, handled: true } if event.kind == EventKind::RouteFrames))
+            .count();
+        assert_eq!(irqs, 13, "3 IMU + 10 microphone batches");
+        assert_eq!(sim.payload.device().next_sensor_us(), Some(1_100_000));
+    }
 
     #[test]
     fn d10_periodic_timer_ticks_are_counted_in_virtual_time() {

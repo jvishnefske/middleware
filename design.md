@@ -857,7 +857,9 @@ carry none.
     (both names are in `PROPAGATED_HEADERS`), and the mesh client on a
     request and on every call of a gather, `tests/grpc.rs`:
     `mesh::k18_mesh_client_injects_trace_on_request_and_gather` *(istio)*;
-  - Zenoh: `zenoh::wire::tests::k18_query_trace_extension_round_trips`,
+  - Zenoh: `zenoh_wire::tests::k18_query_trace_extension_round_trips`
+    (the always-built, no_std encodings; the extension is built in a
+    fixed buffer, so the board client `zenoh_lite` sends it too),
     `zenoh::responder::tests::k18_request_meta_carries_trace_and_request_id`
     *(zenoh)*.
 - [x] K19 Trace context never breaks what does not carry it: invalid
@@ -867,10 +869,14 @@ carry none.
   malformed extension loses only the trace fields (a 0.5 responder's
   exact-length rule ignores the extended form entirely, so mixed fleets see
   full metadata at 0.5 responders only for untraced queries); the serial
-  link delivers `None` —
+  link delivers `None`; `zenoh_lite` reads both query forms and hands its
+  handlers the trace but no request id (it would borrow the receive
+  buffer) —
   `grpc::trace::tests::k19_invalid_header_values_are_dropped` *(grpc)*,
-  `zenoh::wire::tests::k19_query_extension_is_compatible_both_ways`,
-  `k19_malformed_extensions_keep_sender_and_deadline` *(zenoh)*,
+  `zenoh_wire::tests::k19_query_extension_is_compatible_both_ways`,
+  `k19_malformed_extensions_keep_sender_and_deadline`,
+  `zenoh_lite::client::tests::k19_lite_request_meta_reads_both_query_forms`
+  *(zenoh-lite)*,
   `tests/serial.rs`: `k19_serial_trace_is_not_carried` (the
   `trace_is_propagated` case with `PROPAGATES_TRACE = false`) *(serial)*.
   BLE GATT and ESP-NOW build their `RequestMeta` from `RequestMeta::NONE`,
@@ -3056,6 +3062,486 @@ network tests use 127.0.0.1 only.
   alone (PN8). Needs an additive gateway kind that forwards requests on
   the device's served keys.
 
+### i.MX RT base firmware (`firmware-imxrt/`)
+
+The base firmware for the NXP MIMXRT1050-EVKB (i.MX RT1052, Cortex-M7,
+512 KiB FlexRAM, 64 MiB HyperFlash S26KS512S on FlexSPI, 32 MiB SDRAM).
+It speaks the protocol of the ESP and RP base firmwares, unchanged, over
+LPUART1 at 115200 baud, which the board's OpenSDA debugger exposes as a
+USB virtual COM port, so `mwctl --port /dev/ttyACM0` works against it as
+it does against esp-base. The request decisions come from `esp-base`'s
+library (`dispatch`, `store`, `image`, `trust_store`, `start`) as on the
+RP base firmware; this crate adds the RT1050's flash map, boot header,
+HyperFlash driver, A/B bootloader and board profile.
+
+The HAL is embassy-nxp (`mimxrt1062` feature, pinned git revision: the
+crate is not on crates.io). It gives a safe `init` (peripheral
+singletons), the embassy executor, a PIT time driver (24 MHz oscillator /
+24 = 1 MHz, independent of the boot clocks) and, with `unstable-pac`, the
+chiptool PAC through which every register is read and written without
+`unsafe`. `imxrt-ral` and `imxrt-iomuxc` were not used: their peripheral
+instances and pads are only reachable through `unsafe` constructors. The
+RT1062 register map is a superset of the RT1052's for the blocks used
+(CCM, IOMUXC, GPIO1–5, LPUART, LPI2C, LPSPI, ADC, PIT, FlexSPI); blocks
+the RT1052 lacks (GPIO6–9, OCRAM2, FlexSPI2) are never touched, and on
+i.MX RT an access to a block whose clock gate is off stalls the bus until
+a power cycle, so nothing reads a peripheral before enabling its clock.
+The firmware (with the WASM runtime, about 630 KB like the RP2350's) is
+larger than the 512 KiB FlexRAM, and the HyperFlash cannot be read while
+it erases or programs, so the firmware never executes from HyperFlash: it
+is linked to run from the board's SDRAM (MT48LC16M16A2, 32 MiB at
+0x80000000), with its stack and hot statics in DTCM and the payload heap
+in SDRAM, I and D caches on. The bootloader is linked by `imxrt-rt`
+(`Family::Imxrt1050`), copied to ITCM by its startup.
+
+#### Boot, A/B slots and the bootloader
+
+The RT1050 boot ROM boots one image at a fixed place (FCB at 0, IVT at
+0x1000) and has no A/B support (unlike the RP2350's). A small bootloader
+lives in HyperFlash block 0 with the boot header; the boot ROM boots it,
+and it boots one of two firmware slots:
+
+1. It reads the update record (the persisted `middleware::fw_ota` record:
+   anti-rollback floor, confirmed slot, pending update and its trial
+   attempts).
+2. It checks the candidate slot: the slot image header (magic, header
+   version, image version, length, SHA-256) must be well formed and fit
+   the slot. It copies the image into SDRAM at the firmware's link
+   address and the SHA-256 of that copy must match, so what was checked
+   is what runs. A slot that fails is never booted.
+3. A pending update not yet tried boots once on trial: the attempt is
+   persisted before the jump, with the watchdog armed. A trial that ends
+   in a reset without `sys/fw/confirm` (the watchdog, a panic, a power
+   cut) rolls back: the next boot runs the confirmed slot. A confirmed
+   slot that fails its check boots the other slot if that one passes.
+4. It jumps: VTOR, MSP and the reset vector of the copy's vector table.
+
+The jump is the firmware's one `unsafe` operation (`cortex_m::asm::bootload`),
+an explicit exception to the project's no-`unsafe` rule, agreed for the
+bootloader only: Rust has no safe way to transfer control to another
+image, and without it A/B needs a swap that rewrites the running slot (a
+power cut during that rewrite bricks the board). The bootloader crate is
+`#![deny(unsafe_code)]` with a single `#[allow(unsafe_code)]` on the jump
+function, whose rustdoc states the invariants checked before it is
+called (the copy passed step 2, its vector table's SP is in RAM and its
+reset vector inside the copy). Everything before the jump is pure,
+host-tested decision code (`imxrt_base::ab`). The bootloader is never
+updated over the air; it is written by factory flashing only.
+
+Because the image runs from its SDRAM copy, one build serves both slots
+(the RT1050 cannot remap flash addresses, so slot-linked images would
+need two builds per release). `sys/fw/begin` answers the inactive slot,
+as on the RP2350. The update
+protocol is `middleware::fw_ota`'s unchanged (`sys/fw/*`, signed commit
+by the pinned key, `min_version` floor, trial and confirm); the RP2350's
+picobin checks move behind an image-format trait so the RT1050 plugs in
+its own header, and the RP2350 behaviour and its tests stay as they are.
+
+#### Flash map
+
+HyperFlash, 64 MiB at 0x60000000, erased in 256 KiB blocks (the uniform
+sectors of the S26KS512S; checked against the chip's CFI on hardware,
+RT13). Every region is whole blocks (`layout::FlashMap::check`); the
+exact offsets are `imxrt_base::layout`'s.
+
+| region | contents |
+|---|---|
+| block 0 | FCB (0x0), IVT, boot data and DCD (0x1000), the bootloader (from 0x2000) |
+| update record | two blocks, written alternately (a power cut leaves the old or the new record) |
+| slot A, slot B | two equal firmware slots, each a slot image header followed by the SDRAM-linked image |
+| trust record | two blocks (esp-base's trust store) |
+| config | two blocks, written alternately: the board configuration record (the Zenoh endpoint, `sys/zenoh/endpoint`) |
+| payload store | esp-base's two-slot store, the ESP partition's 124 KiB slot capacity |
+
+The FCB is the board's factory one (HyperFlash, DQS sampling, DDR, word
+addressed, 64 MiB), built from typed fields by `boot_header` and placed
+at link time from an object file `build.rs` writes, so no `unsafe`
+`#[link_section]` static is needed. The DCD (device configuration data,
+which the boot ROM executes before the bootloader) is the SDRAM setup of
+NXP's SDK for this board (`evkbimxrt1050` `dcd.c`, BSD-3-Clause): SEMC
+clock, pads and the SDRAM's mode registers.
+
+#### Board peripherals
+
+Payload pins are the EVKB's logical board pins, mapped to pads by
+`board_pins::boards::RT1050_EVKB` (the table and its sources are in that
+module's rustdoc, taken from NXP's MCUXpresso SDK board files for the
+`evkbimxrt1050`): the Arduino header's digital pins, its analog inputs on
+ADC1, the USER LED (D18) and the USER button (SW8). I2C bus 0 is LPI2C1
+on the Arduino A4/A5 pins (also the FXOS8700CQ accelerometer), SPI bus 0
+is LPSPI1 on the Arduino D10–D13 pins. LPUART1 (the console and protocol
+link) and the HyperFlash, SDRAM and boot pins are reserved.
+
+#### Requirements
+
+- [x] RT1 `boot_header` builds the FCB from typed fields (HyperFlash, DQS
+  read sampling, DDR, word addressable, 64 MiB, the HyperFlash read
+  sequence in the LUT) byte-identical to the board's factory FCB
+  (`firmware-imxrt/fixtures/rt1050-evkb-factory-fcb.bin`, read from the
+  board over SWD) —
+  `boot_header::fcb::tests::rt1_fcb_matches_the_factory_block`,
+  `rt1_fcb_fields_at_the_boot_rom_offsets`, `rt1_fcb_fields_are_independent`.
+- [x] RT2 `boot_header` builds the IVT, boot data and DCD for the
+  bootloader: tag, version, entry (the vector table), DCD and self
+  pointers, boot data (start, length, plugin flag), at the offsets the
+  boot ROM reads; the DCD's commands are the SDK's SDRAM setup, in the
+  boot ROM's DCD encoding (header, write-data and check-data commands,
+  big-endian); a length past the flash or a misaligned entry is refused —
+  `boot_header::evkb_sdram::tests::rt2_dcd_is_the_sdk_sdram_setup` (byte-identical
+  to the SDK `dcd.c`, `fixtures/evkbimxrt1050-dcd.bin`),
+  `rt2_dcd_maps_sdram_at_0x8000_0000`; `boot_header::dcd::tests::*`;
+  `boot_header::ivt::tests::rt2_ivt_fields_at_the_boot_rom_offsets`,
+  `rt2_ivt_refuses_bad_length_or_entry`;
+  `boot_header::tests::rt2_boot_region_places_fcb_ivt_boot_data_and_dcd`,
+  `rt2_boot_region_refuses_bad_images`, `rt2_dcd_fits_before_the_bootloader`.
+- [x] RT3 The flash map is whole 256 KiB blocks, inside the 64 MiB
+  HyperFlash, free of overlaps, with block 0 for the bootloader, a
+  two-block update record, two equal firmware slots, a two-block trust
+  record and the payload store with the ESP payload capacity; the linker
+  layouts of the bootloader and of the firmware (one SDRAM-linked build for
+  both slots) match it —
+  `layout::tests::rt3_the_evkb_map_is_whole_blocks_inside_the_flash_without_overlap`,
+  `rt3_the_link_layouts_match_the_map` (`memory-app.x`, `boot-image.x` and
+  `build.rs`'s bootloader region against the map), and the other `rt3_`
+  tests of `layout` (adapters, refusals).
+- [x] RT4 `hyperflash` encodes the FlexSPI LUT sequences for the
+  S26KS512S (DDR read, register read, CFI entry and exit, word program
+  with its unlock cycles, sector erase, status read) in the LUT
+  instruction format, and plans every program as buffer writes that never
+  cross the flash's write buffer, every erase as one block, every wait
+  for status with a bound —
+  `hyperflash::lut::tests::*`;
+  `hyperflash::s26ks512s::tests::rt4_lut_matches_the_sdk_hyperflash_sequences`,
+  `rt4_read_sequence_is_the_factory_one`, `rt4_no_chip_erase_in_the_lut`;
+  `hyperflash::plan::tests::rt4_program_chunks_never_cross_the_write_buffer`,
+  `rt4_erase_is_one_sector_per_command`, `rt4_program_refuses_odd_or_out_of_range`;
+  `hyperflash::status::tests::rt4_status_wait_is_bounded`;
+  `hyperflash::cfi::tests::*`.
+- [x] RT5 The slot image header: a well-formed header gives the image's
+  version, length and SHA-256; a bad magic or header version, a length
+  past the slot or the SDRAM image region, or a hash that does not match
+  is refused, each with its own reason —
+  `ab::header::tests::rt5_a_well_formed_header_gives_version_length_and_hash_and_the_copy_is_the_image`,
+  `rt5_each_defect_is_refused_with_its_own_reason`,
+  `rt5_an_image_filling_the_slot_exactly_is_accepted`.
+- [x] RT6 The boot decision: the confirmed slot boots when it passes its
+  check; a pending update boots once on trial with the attempt persisted
+  first; a trial that reset without confirm rolls back to the confirmed
+  slot; a slot that fails its check never boots and the other slot boots
+  if it passes; a spent trial is never booted again, so a rollback slot
+  that fails too is recovery (the user's choice over a last-resort
+  retry of the trial); neither passing is recovery with each slot's
+  reason —
+  `ab::boot::tests::rt6_the_confirmed_slot_boots_when_it_passes`,
+  `rt6_a_pending_update_boots_once_on_trial_with_the_attempt_persisted_first`,
+  `rt6_an_unconfirmed_trial_rolls_back`,
+  `rt6_a_failing_slot_never_boots_and_the_other_boots_if_it_passes`,
+  `rt6_neither_slot_passing_is_recovery_with_both_reasons`;
+  `ab::record::tests::rt6_saves_alternate_blocks_and_load_takes_the_newest`.
+- [x] RT7 `fw_ota` checks images through a trait: the RP2350's picobin
+  checks are one implementation (every RP2350 test unchanged and
+  passing), the RT1050 header another; the RT1050 platform answers
+  `begin` with the inactive slot, refuses at commit an image whose header
+  does not match what was received, and on `reboot` and `confirm` writes
+  the record the bootloader reads —
+  `fw_ota::format` (`ImageFormat`, `Picobin` for the RP2350:
+  firmware-rp 71 tests unchanged);
+  `ab::tests::rt7_a_full_update_trial_and_confirm`,
+  `rt7_commit_refuses_an_image_whose_header_does_not_match_what_was_received`,
+  `rt7_each_slot_block_is_erased_once_before_its_first_program_and_the_header_is_written_last`,
+  `rt7_an_unconfirmed_trial_or_an_abort_rolls_back_and_the_record_settles`,
+  `rt7_a_fallback_boot_records_the_running_slot_so_the_next_update_still_boots_on_trial`,
+  `rt7_the_platform_refuses_the_running_slot_and_a_foreign_geometry`.
+- [x] RT8 Power loss: a cut at every flash operation of an update (begin,
+  chunks, commit, reboot, the bootloader's attempt write, confirm) leaves
+  a state the next boot recovers to a bootable, verified slot (RAM flash
+  model with power-cut injection) —
+  `ab::tests::rt8_a_power_cut_at_every_flash_operation_leaves_a_bootable_verified_slot`
+  (a cut at each of about 524 erase and write operations of factory boot,
+  update, trial, confirm and settle, then three boots and a further
+  update), `rt8_a_power_cut_during_the_bootloaders_attempt_write_keeps_the_board_bootable`;
+  `ab::record::tests::rt8_a_cut_save_leaves_the_old_record_or_the_new_one`.
+- [x] RT9 The bootloader fits block 0 after the boot header and its only
+  `unsafe` is the jump (`#![deny(unsafe_code)]`, one allowed function) —
+  the build gate: `build.sh`'s `cargo build --features boot` links it
+  into imxrt-rt's 256 KiB FLASH region (fails to link if larger; 26 832
+  bytes on 2026-11-13, boot header included), checked against the map by
+  `layout::tests::rt3_the_link_layouts_match_the_map`;
+  `src/bin/imxrt-boot.rs` is `#![deny(unsafe_code)]` with one
+  `#[allow(unsafe_code)]` on `jump` (every other crate file, the library,
+  the firmware and the flasher, is `#![forbid(unsafe_code)]`).
+- [x] RT10 `board_pins::boards::RT1050_EVKB`: the logical pins, their
+  pads, reserved and input-only pins, ADC channels, I2C bus 0 (LPI2C1)
+  and the SPI routing (LPSPI1) follow the SDK board files; the map is
+  offered through `by_chip("rt1050")` —
+  board-pins `imxrt::evkb::tests::rt10_arduino_pins_map_to_the_sdk_pads`,
+  `rt10_peripheral_functions_match_the_sdk_iomuxc_macros`,
+  `rt10_analog_inputs_are_adc1`, `rt10_no_logical_pin_reaches_a_board_pad`;
+  `imxrt::tests::rt10_pad_rules_match_the_sdk_iomuxc_macros`;
+  `boards::tests::rt10_rt1050_evkb_map`;
+  `spi::tests::rt10_lpspi1_is_fixed_to_arduino_d13_d11_d12`. The ADC1
+  inputs of A2–A5 follow the RT1050 pad rule; no SDK file confirms them.
+- [x] RT11 The board profile: chip name `rt1050`, the payload heap in
+  SDRAM outside the firmware's run copy and statics, the RP2350's WASM
+  caps (128 KiB memory, 64 KiB images) so a payload accepted for one
+  runtime board loads on the others, the pin policy mapped to `AbiError`
+  as on the other firmwares —
+  `chip::tests::rt11_profile_is_the_rt1050_with_the_runtime`,
+  `rt11_heap_plan_fits_the_sdram_and_matches_the_rp2350_caps`,
+  `rt11_pin_policy_maps_to_abi_errors`, `rt11_adc_reads_a0_to_a5_on_adc1`,
+  `rt11_i2c_bus_0_is_lpi2c1_on_a4_a5`, `rt11_spi_pins_resolve_onto_lpspi1`.
+- [x] RT12 On the EVKB, the firmware serves the serial protocol on
+  LPUART1 / the OpenSDA VCOM: `mwctl --port /dev/ttyACM0 info` reports
+  the chip and node id — 2026-11-13: `mwctl --port
+  /dev/serial/by-id/usb-SEGGER_J-Link_000621000000-if00 info` three times
+  in a row: chip rt1050, node 310441d265f82484 (OCOTP CFG1:CFG0,
+  `node::tests::rt12_node_id_is_the_fused_unique_id_high_word_first`), ABI
+  v5, capacity 65536; an unsigned upload on the unclaimed board survived a
+  WDOG1 reset; `trust claim` pinned a new key (kept across a reset); then
+  an unsigned commit was `Denied` and a signed 20 014-byte upload (42
+  chunks) installed. Receive is LPUART1's eDMA ring in DTCM, no interrupt
+  (an IRQ handler would need `unsafe`): `app/uart.rs`.
+- [x] RT13 On the EVKB, the HyperFlash driver reads the CFI (sector
+  layout as RT3 assumes), erases and programs a scratch block and reads it
+  back — 2026-11-12/13: the CFI query (QRY, 64 MiB, 512-byte write buffer,
+  one region of 256 × 256 KiB sectors, typical sector erase 1 s, 4 s at
+  most) and `imxrt_base::hyperflash`'s plans on sector 255 from a
+  RAM-loaded probe; then the firmware's own driver
+  (`imxrt_base::shell::flexspi::HyperFlash`, in `imxrt-flasher`) erased
+  sector 255 (0x3FC0000), programmed 3 KiB of random data, read it back
+  itself and `tools/flash.py` read it back over SWD through the FlexSPI
+  window, both equal to the file; the same driver then programmed and
+  verified the bootloader and slot A (RT14).
+- [x] RT14 On the EVKB, the bootloader and a slot A image, programmed
+  and read back over SWD against the ELFs, boot from HyperFlash (SW7 OFF,
+  ON, ON, OFF): the DCD brings up SDRAM, the bootloader copies and checks
+  slot A and the firmware serves RT12; with neither slot valid the
+  bootloader boots nothing and prints each slot's reason on LPUART1 — the
+  boot chain on 2026-11-13 (bootloader 26 832 bytes at 0x0, slot A at
+  0x400000, programmed by `tools/flash.py` and read back byte-identical
+  over SWD; `imxrt-boot: slot A v0.1 ... SHA-256 ok`, the firmware serving
+  RT12). Fallback and recovery the same day: with the confirmed slot B's
+  header erased the bootloader booted A (`slot A v0.4 ... SHA-256 ok`,
+  `fw info`: B empty); with both erased it printed `RECOVERY: no bootable
+  slot: A no image (bad magic), B no image (bad magic)` every 3 s and
+  booted nothing.
+- [x] RT15 On the EVKB, `mwctl fw update` installs a slot B image, it
+  boots on trial and `confirm` keeps it; an unconfirmed trial reset rolls
+  back to slot A — 2026-11-13: `mwctl fw update imxrt-base-0.2.slot --key`
+  installed slot B in 11.4 s, the bootloader printed `slot B on trial
+  v0.2`, mwctl confirmed it, and 70 s later (past the trial window) the
+  board had not reset (`fw info`: B running, confirmed 0.2). Then v0.4 with
+  `--no-reboot` and `fw reboot`: `slot A on trial v0.4`, not confirmed;
+  within 75 s the RTWDOG reset the board, the bootloader read `pending A,
+  rebooted: true, attempts: 1` and booted `slot B v0.2`, `fw info`: rolled
+  back 0.4. The firmware arms the RTWDOG on a trial (60 s, LPO ÷256: CS
+  0x35A0, TOVAL 7680 read back during the trial) and `sys/fw/confirm`
+  stops it: `ab::watchdog::tests::rt15_*`; mwctl takes MWRT slot images
+  (`fw::tests::rt15_*`, `fw_ota::rt_image::tests::rt15_*`). A signed fw
+  commit raises `min_version` before the trial (shared `fw_ota`
+  behaviour), so a rolled-back version cannot be sent again.
+- [x] RT16 On the EVKB, a payload toggles an Arduino header pin (the
+  USER LED shares GPIO_AD_B0_09 with the Ethernet PHY's reset and is
+  reserved), reads the USER button, and reads the FXOS8700CQ's WHO_AM_I
+  (0xC7) over I2C bus 0 — 2026-11-13, a 600-byte WAT payload: `i2c_open(0,
+  100 kHz)` 0, `i2c_transfer(0x1F, [0x0D])` 0, WHO_AM_I 0xC7; D8
+  (GPIO1_IO03) toggled every 250 ms, its pad following DR when read with
+  SION set over SWD; SW8 read 1 released and 0 while the user held it.
+  embassy-nxp's `Flex::set_level` writes DR_SET/DR_CLEAR, which the RT1052
+  lacks, so outputs are a read-modify-write of DR (`app/device.rs`). Host
+  tests: `pins::tests::rt16_gpio_modes_follow_the_esp_base_rules`,
+  `periph::{i2c,spi,adc}::tests::rt16_*`, `requests::tests::rt16_*`.
+- [x] SC1 The sample batch wire format: header fields, little-endian
+  samples, round trip; truncated, unknown-version, count past the
+  message or format/channels mismatches are refused; a gap in
+  `first_index` is reported with its size — `stream::samples::tests::sc1_*`
+  (header layout, i16/µ-law/levels round trips, each refusal, gaps).
+- [x] SC2 `route_source` accepts `Imu` and `Microphone` configurations
+  within their ranges and refuses others (`InvalidArgument`); the import
+  table and ABI 1–5 modules are unchanged; `sys/info` carries the
+  capability bit (bit 2 IMU, bit 3 microphone, beside the Colorlight
+  line's bit 1 `BRIDGE`), which `mwctl info` prints as a `sources:` line
+  and protocol-wasm `decodeDeviceInfo` names in `capNames` —
+  `wasm_abi::route::tests::sc2_*`,
+  `loader::tests::sc2_source_capability_bits`, mwctl
+  `report::tests::info_notes_protocol_only_firmware`, web
+  `protocol.test.ts` "round-trips sys/info", wasm-host
+  `abi::tests::sc2_route_source_plans_imu_and_microphone_routes`, the SDK's
+  `sc2_sampled_sources_validate_before_the_host`; every earlier test
+  unchanged except `source_kinds_and_formats`, which asserted kind 2 was
+  invalid (now kind 4).
+- [x] SC3 A route that owns an I2C device makes a payload's transfer to
+  that address `Busy` until the route stops — `route::I2cOwners`
+  (`sc3_a_route_owns_its_i2c_device_until_it_stops`), wasm-host
+  `link::tests::sc3_*` and `tests/sc3.rs` (busy until stopped, released
+  when the device stops the route).
+- [x] SC4 FXOS8700CQ core: the register plan for each rate and range,
+  the conversion of raw 14-bit accelerometer and 16-bit magnetometer
+  data to `i16` with the header's scale, the data-ready decision —
+  `sensors::fxos8700::tests::sc4_*` and the route's batching
+  `sensors::imu_route::tests::sc7_*` (whole batches with exact indices,
+  not-ready re-polls, overruns counted, resynchronisation, rates the device
+  lacks refused). Register values from the SDK as recalled; the plan
+  verified on the board (SC7: WHO_AM_I 0xC7, ±2 g at 50 Hz reads 1 g).
+- [x] SC5 WM8960 and SAI1 core: the codec register list for recording
+  from the onboard microphone at each rate, the SAI clock dividers
+  (8, 16, 32, 48 kHz from the audio PLL), fixed-point RMS and peak, and
+  the µ-law encoder against the G.711 table — `sensors::{wm8960,sai,audio}::tests::sc5_*`
+  (32 and 48 kHz take a 12.288 MHz MCLK: the codec's ADC dividers cannot
+  make them from 6.144 MHz). The codec list follows `fsl_wm8960.c` as
+  recalled, unchecked against the file and the board.
+- [x] SC6 `payload-sim` and the browser simulator offer a fake IMU (a
+  deterministic tilt pattern) and a fake microphone (a tone and chirp),
+  and a payload streaming either runs in both —
+  `stream::samples::fake::tests::sc6_*`, payload-sim
+  `sc6_a_payload_streams_the_fake_imu_and_microphone` and `tests/sc6.rs`,
+  protocol-wasm `sc6_*`; `web/test/sensors.test.ts` (2 tests, the decoder's
+  refusals and the simulator streaming both sources), with the whole web
+  suite (334 tests) and `tsc --noEmit` passing on 2026-11-14 (vitest 5
+  needs Node >= 20.12).
+- [x] SC7 On the EVKB, flat on the bench the IMU stream reads about +1 g
+  on Z and about −1 g upside down, at the configured rate — 2026-11-14,
+  v0.53 (`wasm,usb,eth`): `firmware-imxrt/tests/payloads/imu.wat` (50 Hz,
+  ±2 g, 3 channels, 10 samples per batch on `imu/raw`) through
+  `RtDevice::route_samples` (`app/device.rs`: WHO_AM_I check, the route's
+  plan over LPI2C1 at 400 kHz, polled from the controller loop's alarm,
+  one STATUS+XYZ burst per poll), read with `mwctl monitor --samples` over
+  USB CDC: 490 samples in 49 batches with no index gap, 48.98 Hz measured
+  from the batch timestamps (the sensor's own ODR clock; 0 lost, 0 failed
+  reads). Flat: mean X 0.081 g, Y −0.176 g, Z +1.029 g (16866 counts at
+  16384/g), |g| 1.048; upside down (290 settled samples): X 0.076 g,
+  Y −0.081 g, Z −0.924 g (Z offset +0.053 g, sensitivity 0.977). The same
+  batches reached `examples/zenoh_board.rs --key imu/raw` over Ethernet
+  (sequences 0..5, gap 0; `sys/info` caps 3 = SERVE | SOURCE_IMU, with
+  SOURCE_IMU then bit 1). Since the merge with the Colorlight line, whose
+  `Caps::BRIDGE` holds bit 1, SOURCE_IMU is bit 2 and SOURCE_MICROPHONE
+  bit 3, so the same firmware reports caps 5 (and today's, with the
+  microphone route, 13) — `loader::tests::sc2_source_capability_bits`.
+  `sys/payload/stop` left CTRL_REG1 at 0x24 (ACTIVE 0; the part keeps DR
+  and LNOISE, which change only in standby) as a payload read it back
+  over I2C afterwards, its transfer to 0x1F no longer `Busy`.
+  Found on the way: the stream contract's IMU scale is i16 full scale =
+  ±range (`samples::accel_scale_ug`, 61 µg at ±2 g), while the core
+  published 14-bit counts (4096/g): `fxos8700::Sample::write_to` now
+  emits counts × 4 (the part's left-justified value), checked by
+  `imu_route::tests::sc7_*` (value × header scale ≈ 1 g) and mwctl
+  `report::tests::samples_lines_decode_imu_pcm_mulaw_and_levels_batches`.
+  `sys/info` caps carry SOURCE_IMU with the runtime only
+  (`service::tests::rt12_info_*`).
+- [ ] SC8 On the EVKB, the microphone levels rise for a clap or speech,
+  and a 1 kHz tone from a phone is the dominant frequency of a 16 kHz PCM
+  capture taken over USB or TCP. Not yet run on hardware.
+- [x] FL1 Multi-link bus: requests are answered on their link; a
+  publication reaches exactly the links whose filters match; a full link
+  queue drops and counts that link's publications without delaying the
+  others; `sys/link/sub` and `unsub` change only the asking link —
+  `links::tests::fl1_*` (9); on the EVKB 2026-11-13, `mwctl request
+  sys/link/sub 'sys/**'` on LPUART1 stopped the payload's `rt16/state`
+  there (0 in 2 s) and `sys/link/sub '**'` brought it back (8 in 2 s). The
+  Zenoh link takes every non-`sys` publication: in client mode the router
+  does not declare its subscribers to the board.
+- [x] FL2 ChipIdea USB core: queue head and transfer descriptor encoding,
+  the endpoint and setup state decisions, the CDC zero-length-packet rule
+  (shared with the RP base), all over the `AtomicU32` DMA memory model —
+  `usb::{dma,regs,control,phy}::tests::fl2_*` (37) and
+  `usb::tests::fl6_publications_are_dropped_while_the_host_is_away`.
+- [x] FL3 ENET and KSZ8081 core: descriptor ring encoding and ownership
+  hand-off, the MDIO read and write plans, the PHY reset, auto-negotiation
+  and link-status decisions, the RMII clock settings —
+  `enet::{clock,mdio,ksz8081,mac,desc}::tests::fl3_*` (34), each register
+  value the RAM probe used on the board asserted.
+- [x] FL4 `zenoh::wire` builds without `std` and is shared by the host
+  backend (every Zenoh test unchanged) and `zenoh_lite` — the pure
+  encodings live in the always-built `zenoh_wire` (re-exported as
+  `zenoh::wire`, whose tests are unchanged);
+  `zenoh_wire::tests::fl4_stream_id_is_fnv1a_over_origin_then_key`,
+  `fl4_node_keys_build_and_parse_without_heap`,
+  `fl4_attachments_round_trip_in_no_std_module`; `scripts/check-features.sh`
+  (ungated module, thumbv6m and thumbv7em builds).
+- [x] FL5 On the EVKB, USB and ENET DMA reach the DTCM buffers — ENET
+  first from a RAM-loaded probe on 2026-11-13 (descriptor rings and frame
+  buffers as `AtomicU32` statics in DTCM, 43 frames received, two sent, no
+  bus error), then on 2026-11-14 with the firmware's own drivers in one
+  build (`APP_FEATURES=wasm,usb,eth`, v0.51): the USB controller's queue
+  heads, transfer descriptors and buffers in DTCM carried the CDC traffic
+  of FL6, and the ENET rings carried DHCP and the Zenoh session of FL7
+  (driver counters: frames received and sent, `bus errors 0`).
+- [x] FL6 On the EVKB, the board enumerates as a high-speed CDC-ACM port
+  and `mwctl --port /dev/ttyACM1 info` answers — 2026-11-14, v0.51: it
+  enumerates as 1fc9:0094 (`usb-middleware_imxrt-base_<node>-if00`, bulk
+  512), `mwctl info` answers over it, and eight rounds of `mwctl monitor`
+  on the CDC port (12 publications per 3 s, the payload's 4 Hz) alternating
+  with `info` on LPUART1 all answered; uploads over CDC installed (20 KB,
+  600 B). With Ethernet up at the same time a 750 KB `fw update` over
+  LPUART1 completed (74 s).
+
+  What had stalled the firmware with USB or Ethernet built in (2026-11-13)
+  was the PIT time driver (found with J-Link's non-halting PC sampling,
+  `DWT_PCSR`, and the reset pin, `r0`/`r1`, since halts and breakpoints had
+  disturbed it): at embassy-nxp's 1 MHz PERCLK one PIT register access took
+  297 core cycles (33 at 24 MHz), so the driver saturated the core under
+  the polled drivers' timers, and its interrupt handler trusted a TFLG read
+  that came back stale, returning without clearing the flag forever.
+  `firmware-imxrt/vendor/embassy-nxp` (VENDORED.md) runs the PIT at 24 MHz
+  with a matching `tick-hz-24_000_000` and re-evaluates the alarm on every
+  PIT interrupt. Also fixed on the way: FlexSPI IP commands run with
+  interrupts masked (an interrupt between TX FIFO pushes starves the
+  HyperBus write), and every erase and program first resets a
+  write-buffer abort and clears the HyperFlash's sticky status bits
+  (`hyperflash::plan::recover_steps`,
+  `rt4_recovery_resets_a_write_buffer_abort_then_clears_the_status`).
+- [x] FL7 On the EVKB, the board gets a DHCP address, opens a Zenoh
+  session to a router on the LAN, and a host `ZenohTransport` subscribes
+  to its IMU channel and queries `@mw/<node>/sys/info` — 2026-11-14, v0.43
+  and v0.51: the board took a DHCP lease, connected to the endpoint set
+  with `mwctl request sys/zenoh/endpoint tcp/192.168.1.190:7447` (persisted,
+  `config::tests::fl7_*`), opened the session, and the host's
+  `cargo run --example zenoh_board --features zenoh` (a zenoh 1.10 peer
+  listening on TCP) received the payload's `rt16/state` publications with
+  the board's sender id and sequences 0..4 without gaps, and its
+  `Target::Node` query of `sys/info` answered chip rt1050, node
+  310441d265f82484 (`sys/board`: NotFound, the board has no esp-base
+  profile). The IMU channel itself (`imu/raw`) followed with SC7.
+- [x] ZN1 `zenoh_lite` codec: every message of the subset encodes and
+  decodes (variable-length integers, extensions skipped when unknown and
+  refused when mandatory), byte-identical to the `zenoh` 1.10 codec for
+  the same messages (host test against `zenoh-codec` =1.10.1) —
+  `zenoh_lite::codec::transport::tests::zn1_transport_messages_are_byte_identical_to_zenoh_codec`,
+  `zenoh_lite::codec::network::tests::zn1_network_messages_are_byte_identical_to_zenoh_codec`,
+  `zenoh_lite::codec::tests::zn1_zints_round_trip_at_every_length_boundary`,
+  `zn1_unknown_extensions_skip_and_mandatory_ones_refuse`, and the
+  truncation, batch-limit and OAM tests in `codec::{transport,network}::tests`.
+  Fragmentation, QoS priorities, compression, auth and peer mode are not
+  in the subset (oversized messages are refused, fragments dropped).
+- [x] ZN2 Session state machine: handshake, lease and keep-alive timing,
+  sequence numbers, close and reconnect with bounded backoff, every
+  malformed or out-of-order input refused without panicking —
+  `zenoh_lite::session::tests::*` (handshake with the cookie, keep-alive
+  and lease on the clock, per-channel sequence numbers and wrap,
+  out-of-order frames refused, timeout and backoff bounds, close until
+  restart, `zn2_random_and_mutated_batches_never_panic` over 20 000
+  rounds); `zenoh_lite::tables::tests::*`;
+  `zenoh_lite::client::tests::zn2_client_opens_redeclares_answers_interests_and_resolves_router_ids`
+  (a scripted router: a real zenoh peer never sends a client an Interest
+  or a key-expression declaration).
+- [x] ZN3 Interop on the host: `zenoh_lite` over a TCP socket to a real
+  `zenoh` 1.10 session (router or peer listener): a `ZenohTransport`
+  subscriber receives its publications with their attachments and gaps,
+  its queryable answers `get`s, and it receives a Zenoh publisher's
+  samples on the keys it declared — `tests/zenoh_lite.rs`:
+  `zn3_host_subscriber_receives_lite_publications_with_attachments_and_gaps`,
+  `zn3_lite_queryable_answers_host_gets`,
+  `zn3_lite_receives_host_publications_on_declared_keys`,
+  `zn3_lite_requests_reach_a_host_responder`,
+  `zn3_keep_alives_hold_a_short_lease_while_idle`.
+- [x] ZN4 Management over Zenoh: only `sys/info` and `sys/trust/info`
+  answer on an unclaimed board; after the claim, a request that changes
+  the board needs a signature by the pinned key; a refused request leaves
+  the board unchanged — `zenoh_mgmt::tests::zn4_*` (against the real
+  service on the RAM flash: state, flash log, image and `sys/fw/info`
+  unchanged after every refusal; signed start/stop admitted once, its
+  counter persisted by `Service::accept_control` and refused on replay
+  across reboots; `sys/zenoh/endpoint` never over Zenoh).
 ### Host tool (`tools/mwctl`)
 
 `mwctl --port <PATH> info|upload|start|stop|monitor|reset` drives a device

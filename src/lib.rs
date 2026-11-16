@@ -52,6 +52,10 @@
 //!   the ESP-NOW request and response frames, the requester's retry rule
 //!   and the responder's duplicate suppression; `espnow::rpc` runs them
 //!   over an ESP-NOW radio.
+//! * [`zenoh_wire`] — the middleware's Zenoh attachments, reply-error
+//!   payloads and reserved key expressions (always built, pure, `no_std`):
+//!   shared by the host backend (as `zenoh::wire`) and the board client
+//!   `zenoh_lite`, so both write the same bytes.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
 //!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
@@ -67,6 +71,7 @@
 //! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
+//! | `zenoh-lite` | `zenoh_lite` | `no_std`, no heap | `embedded-io-async`; Zenoh 1.x client over one TCP stream |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio`, `grpc::mesh` | `std` | `grpc`                |
 //! | `mdns`     | `mdns::socket`, `mdns::announce`, `mdns::origin` | `std` | tokio, socket2 |
@@ -108,6 +113,7 @@ pub mod transport;
 pub mod typed;
 pub mod udp;
 pub mod wasm_abi;
+pub mod zenoh_wire;
 
 #[cfg(feature = "ble")]
 pub mod ble;
@@ -117,6 +123,8 @@ pub mod espnow;
 pub mod grpc;
 #[cfg(feature = "zenoh")]
 pub mod zenoh;
+#[cfg(feature = "zenoh-lite")]
+pub mod zenoh_lite;
 
 pub use codec::Codec;
 pub use key::{AsKey, Filter, Key, KeyBuf, KeyError, KeyFilter, KeyFilterBuf};

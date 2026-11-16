@@ -11,15 +11,25 @@
 //! and the RP base firmware (`firmware-rp/src/chip.rs`) build their
 //! `Profile`s on these maps, and `web/protocol-wasm` exposes them to the
 //! browser, so the web pin table checks pins with the rules the device
-//! applies instead of a second copy.
+//! applies instead of a second copy. The i.MX RT base firmware
+//! (`firmware-imxrt/src/chip.rs`) builds its profile on
+//! [`boards::RT1050_EVKB`] the same way.
 //!
 //! * [`boards`] — the maps: [`boards::PICO`] (Raspberry Pi Pico and Pico 2),
 //!   [`boards::ESP32`] (AI-Thinker ESP32-CAM), [`boards::ESP32S3`],
-//!   [`boards::ESP32C3`], [`boards::ESP8266`], and [`boards::by_chip`].
+//!   [`boards::ESP32C3`], [`boards::ESP8266`], [`boards::RT1050_EVKB`]
+//!   (NXP MIMXRT1050-EVKB), and [`boards::by_chip`].
 //! * [`rp`] — the RP2040 / RP2350 GPIO function tables for SPI (F1) and
 //!   I2C (F3).
+//! * [`imxrt`] — i.MX RT1050 pads (IOMUXC registers, GPIO lines, ALT
+//!   functions, ADC1 inputs) and, in [`imxrt::evkb`], the EVKB's logical
+//!   board pins mapped to those pads. On the RT1050 a payload pin number is
+//!   a logical board pin (an Arduino header pin, the USER button), not a
+//!   GPIO line: the chip has five GPIO banks of 32 lines, more than the
+//!   ABI's 64 pin numbers.
 //! * [`spi`] — resolving a payload's SPI pins on a map (one SPI block on
-//!   the RP chips; any capable pin through the ESP GPIO matrix).
+//!   the RP chips; any capable pin through the ESP GPIO matrix; the fixed
+//!   LPSPI1 pins on the RT1050-EVKB).
 //!
 //! [`PinMap::check`] is the board policy behind every `gpio_*` call:
 //! [`PinError::NoSuchPin`] for a pin the chip lacks (the ABI's
@@ -33,6 +43,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boards;
+pub mod imxrt;
 pub mod rp;
 pub mod spi;
 
@@ -78,6 +89,22 @@ pub enum SpiRouting {
     /// No SPI bus for payloads (the Colorlight 5A-75B gateware): every pin
     /// fails with [`spi::SpiProblem::NoSignal`].
     None,
+    /// One SPI controller whose SCK, MOSI and MISO are wired to fixed
+    /// board pins (the RT1050-EVKB's LPSPI1 on Arduino D13, D11, D12): each
+    /// of those roles must use its pin. CS is driven as a plain output, so
+    /// any output pin.
+    Fixed(FixedSpi),
+}
+
+/// The board pins of a [`SpiRouting::Fixed`] controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedSpi {
+    /// The clock pin.
+    pub sck: u8,
+    /// The controller-out pin.
+    pub mosi: u8,
+    /// The controller-in pin.
+    pub miso: u8,
 }
 
 /// A plain-language reason the board holds some pins.

@@ -62,6 +62,8 @@ COMMANDS:
                                    the reply and are kept across resets
     monitor [--seconds <N>]    Print sys/log and sys/payload/status publications
                                (and other publications) until N seconds pass or Ctrl-C
+        --samples                  decode sample batches (middleware::stream::samples):
+                                   one line per batch with its header and values
     reset                      Reboot into run mode: RTS asserted for 100 ms with DTR
                                deasserted (EN pulse through the DTR/RTS auto-reset circuit)
     trust info                 Print the root of trust: unclaimed, or the pinned key and
@@ -69,13 +71,16 @@ COMMANDS:
     trust claim --key <KEYFILE>
                                Pin KEYFILE's public key (sys/trust/claim). Accepted when
                                unclaimed, or within 60 s after BOOT was held for 3 s
-    fw info                    RP2350: firmware update state, running slot, slot versions
-    fw update <IMAGE>          RP2350: install a firmware image (UF2 or raw .bin) in the
+    fw info                    RP2350, RT1050: firmware update state, running slot, slot versions
+    fw update <IMAGE>          RP2350, RT1050: install a firmware image (UF2, .bin, .slot) in the
                                inactive A/B slot, reboot into it on trial, reconnect to the
                                same --port and confirm it once its self-test passes
         --key <KEYFILE>            sign the commit (a claimed device requires it)
         --version <MAJOR.MINOR>    expected image version (checked against its IMAGE_DEF)
         --no-reboot                stop after the commit (then fw reboot, fw confirm)
+    request <KEY> [TEXT]       Send one request (body TEXT, UTF-8, or empty) and print the
+                               reply as text, or hex if it is not text (e.g.
+                               sys/link/sub app/**, sys/zenoh/endpoint tcp/192.168.1.10:7447)
     fw reboot                  RP2350: reboot into the committed image on trial
     fw confirm                 RP2350: keep the image on trial (explicit buy)
     fw abort                   RP2350: abandon a transfer or a committed update, or
@@ -187,6 +192,8 @@ pub enum Cmd {
     Monitor {
         /// How long to listen.
         seconds: Option<u64>,
+        /// Decode sample batches (`--samples`).
+        samples: bool,
     },
     /// `reset`.
     Reset,
@@ -205,6 +212,14 @@ pub enum Cmd {
     },
     /// `fw reboot`.
     FwReboot,
+    /// `request <KEY> [TEXT]`: one request with a UTF-8 body (empty if
+    /// none); the reply is printed as text, or hex if it is not text.
+    Request {
+        /// The key.
+        key: String,
+        /// The body.
+        body: String,
+    },
     /// `fw confirm`.
     FwConfirm,
     /// `fw abort`.
@@ -267,6 +282,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut net_ip = None;
     let mut net_mac = None;
     let mut net_peer = None;
+    let mut samples = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -292,6 +308,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--key" => key = Some(PathBuf::from(args.next().ok_or("--key needs a key file")?)),
             "--version" => version = Some(args.next().ok_or("--version needs a value")?),
             "--no-reboot" => no_reboot = true,
+            "--samples" => samples = true,
             "--counter" => counter = Some(number("--counter", args.next())?),
             "--link" => link = Some(number("--link", args.next())?),
             "--ip" => {
@@ -348,6 +365,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only("--start", start, &["upload"])?;
     only("--corrupt-chunk", corrupt_chunk.is_some(), &["upload"])?;
     only("--seconds", seconds.is_some(), &["monitor"])?;
+    only("--samples", samples, &["monitor"])?;
     only(
         "--key",
         key.is_some(),
@@ -429,7 +447,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             mac: net_mac,
             peer: net_peer,
         },
-        "monitor" => Cmd::Monitor { seconds },
+        "monitor" => Cmd::Monitor { seconds, samples },
         "reset" => Cmd::Reset,
         "fw info" => Cmd::FwInfo,
         "fw update" => Cmd::FwUpdate {
@@ -439,6 +457,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             reboot: !no_reboot,
         },
         "fw reboot" => Cmd::FwReboot,
+        "request" => Cmd::Request {
+            key: pos.next().ok_or("request needs a key")?,
+            body: pos.next().unwrap_or_default(),
+        },
         "fw confirm" => Cmd::FwConfirm,
         "fw abort" => Cmd::FwAbort,
         other => return Err(format!("unknown command '{other}'")),
@@ -540,6 +562,19 @@ mod tests {
     }
 
     #[test]
+    fn request_takes_a_key_and_an_optional_text_body() {
+        assert_eq!(
+            run("--port p request sys/zenoh/endpoint tcp/192.168.1.10:7447").cmd,
+            Cmd::Request { key: "sys/zenoh/endpoint".into(), body: "tcp/192.168.1.10:7447".into() }
+        );
+        assert_eq!(
+            run("--port p request sys/info").cmd,
+            Cmd::Request { key: "sys/info".into(), body: String::new() }
+        );
+        assert!(p("--port p request").is_err());
+    }
+
+    #[test]
     fn o9_espnow_selects_the_bridge_and_refuses_local_commands() {
         let c = run("--port /dev/ttyUSB0 --espnow e4:b0:63:81:d3:24 upload a.wasm --key k --start");
         assert_eq!(c.espnow, Some([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24]));
@@ -623,10 +658,17 @@ mod tests {
             }
         );
         assert_eq!(run("--port p reset").cmd, Cmd::Reset);
-        assert_eq!(run("--port p monitor").cmd, Cmd::Monitor { seconds: None });
+        assert_eq!(
+            run("--port p monitor").cmd,
+            Cmd::Monitor { seconds: None, samples: false }
+        );
+        assert_eq!(
+            run("--port p monitor --samples").cmd,
+            Cmd::Monitor { seconds: None, samples: true }
+        );
         assert_eq!(
             run("--port p monitor --seconds 5").cmd,
-            Cmd::Monitor { seconds: Some(5) }
+            Cmd::Monitor { seconds: Some(5), samples: false }
         );
         assert_eq!(
             run("--port p --timeout 250 info").timeout,
@@ -787,6 +829,7 @@ mod tests {
             ("--port p --baud 0 info", "positive"),
             ("--port p info --start", "only to 'upload'"),
             ("--port p start --seconds 1", "only to 'monitor'"),
+            ("--port p info --samples", "only to 'monitor'"),
             ("--port p info --verbose", "unknown option"),
             ("--port", "needs a path"),
         ] {

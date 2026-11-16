@@ -340,6 +340,13 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
+        Cmd::Request { key, body } => {
+            let key = middleware::Key::new(&key).map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("'{key}' is not a valid key"))))?;
+            dev.request(key, body.as_bytes()).map(|reply| match std::str::from_utf8(&reply) {
+                Ok(t) if !t.chars().any(char::is_control) => println!("{t}"),
+                _ => println!("{}", reply.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")),
+            })
+        }
         Cmd::Start { key, counter } => {
             match control_auth(ControlOp::Start, target, key.as_deref(), counter)
                 .and_then(|auth| dev.start_signed(auth))
@@ -351,7 +358,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 Err(e) => {
                     // The device logs why a start failed right after its reply;
                     // show those lines before reporting the error.
-                    let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS));
+                    let _ = monitor(dev, Some(START_FAILURE_LOG_SECONDS), false);
                     Err(e)
                 }
             }
@@ -429,7 +436,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 }
             })
         }
-        Cmd::Monitor { seconds } => monitor(dev, seconds),
+        Cmd::Monitor { seconds, samples } => monitor(dev, seconds, samples),
         // Serial only, handled by `fw_command` (the CLI refuses --espnow).
         Cmd::Reset | Cmd::FwInfo | Cmd::FwUpdate { .. } | Cmd::FwReboot | Cmd::FwConfirm | Cmd::FwAbort => {
             Ok(())
@@ -437,18 +444,27 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
     }
 }
 
-fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>) -> Result<(), Error> {
+fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>, samples: bool) -> Result<(), Error> {
     let end = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     match seconds {
         Some(s) => eprintln!("monitoring for {s} s"),
         None => eprintln!("monitoring until Ctrl-C"),
     }
+    // One request first: a USB CDC device that found no reader drops its
+    // publications until a frame from the host arrives (the RP and RT base
+    // firmwares' host-presence rule), so the monitor says it is here. The
+    // reply (or its absence) does not matter.
+    let _ = dev.info();
     // Bounded by `end` when given; otherwise runs until interrupted.
     loop {
         let slice = Instant::now() + Duration::from_millis(500);
         let deadline = end.map_or(slice, |e| e.min(slice));
         if let Some(e) = dev.next_event(deadline)? {
-            println!("{}", format_event(&e));
+            let line = match samples.then(|| mwctl::report::format_samples(&e)).flatten() {
+                Some(line) => line,
+                None => format_event(&e),
+            };
+            println!("{line}");
             let _ = std::io::stdout().flush();
         }
         if end.is_some_and(|e| Instant::now() >= e) {

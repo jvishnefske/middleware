@@ -15,6 +15,7 @@ request/response behind one set of traits, with pluggable transports.
 | `dns-sd`   | unicast DNS-SD browse against cluster DNS         | `std` + tokio                |
 | `memory`   | in-process backend for tests and examples         | `std` + tokio                |
 | `kv-file`  | durable key-value store (`kv::file::FileKv`), an append-only log | `std`          |
+| `zenoh-lite` | heap-free Zenoh 1.x client (`zenoh_lite`) for boards: pub/sub, queryables, requests over one byte stream | `no_std`, no heap |
 | `trust`    | signed payload checks (SHA-256, Ed25519 verify)   | `no_std`, no heap            |
 | `postcard` | serde codec                                       | `no_std`                     |
 | `prost`    | protobuf codec                                    | `no_std` + `alloc`           |
@@ -385,6 +386,7 @@ node, the gateway and Zenoh in one process on loopback.
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
 | `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
 | `firmware-rp/`       | RP base firmware over USB CDC-ACM: Raspberry Pi Pico (RP2040, stores payloads only) and Pico 2 (RP2350, runs them): `./build.sh rp2040` or `./build.sh rp2350` (ELF and UF2) |
+| `firmware-imxrt/`   | i.MX RT1050-EVKB base firmware: A/B bootloader in HyperFlash, the protocol on LPUART1, WASM payloads, `mwctl fw update`: `./build.sh image`, `./build.sh flash boot a` (SWD) |
 | `gateware-5a75b/`    | Colorlight 5A-75B v7.0 (ECP5) gateware, no CPU: two Ethernet links, frame core, bridge engine, WASM core (`nix develop ./gateware-5a75b`, `pytest tests`, `python soc.py`); work in progress, see design.md CL… |
 | `wasm-hdl-ref/`      | the gateware WASM core as a no_std Rust model, tested against wasmi; writes the gateware's golden vectors |
 | `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`, or one UDP node with `--udp <host>[:port]`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |

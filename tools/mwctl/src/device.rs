@@ -168,6 +168,11 @@ impl<L: Endpoint> Device<L> {
         })
     }
 
+    /// One request on any key with `body`; the reply body.
+    pub fn request(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
+        self.link.request(key, body)
+    }
+
     /// `sys/trust/info`.
     pub fn trust_info(&mut self) -> Result<TrustInfo, Error> {
         let body = self.link.command(&Command::TrustInfo)?;
