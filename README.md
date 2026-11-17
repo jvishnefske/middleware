@@ -57,9 +57,9 @@ BLE carry neither; their handlers see `None`.
 The workspace crate `mw-service` (in `service/`) is the mesh service
 runner being built for 0.6: a service is declared with
 `Service::builder(name)`, and the same declaration is meant to produce its
-Kubernetes manifests. Its API and pure parts are in place; serving and
-manifest rendering are not implemented yet (see design.md, "Mesh service
-runner").
+Kubernetes manifests (`--print-manifests`). Its API, the runner and the
+manifest rendering are implemented; the CLI and the end-to-end run on the
+lab cluster are not yet (see design.md, "Mesh service runner").
 
 `examples/discover_and_call.rs` puts it together on loopback: one service
 kind announced over Zenoh, mDNS and a stub cluster DNS, every event fed

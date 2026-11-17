@@ -49,7 +49,8 @@
 //!   [`Service::run_with_options`] ([`RunOptions`]): the runner itself
 //!   (serving, drain, discovery of called kinds, node ids, telemetry,
 //!   Zenoh).
-//! * [`manifest`] — `--print-manifests` rendering.
+//! * [`manifest`] — `--print-manifests`: the Kubernetes and Istio objects
+//!   rendered from the spec ([`manifest::render`], [`ManifestOptions`]).
 //! * [`zenoh_router`] — the Zenoh router (zenohd): per-service
 //!   credentials, access-control rules derived from the specs, its config
 //!   and Kubernetes manifests ([`render_router`]).
@@ -57,10 +58,9 @@
 //!
 //! # Status
 //!
-//! 0.6: the API, the pure parts and the runner (serving, drain, OTLP
-//! traces, `calls` discovery, node ids, the Zenoh session) are
-//! implemented. Manifest rendering returns [`ServiceError::Unimplemented`]
-//! (never a panic) until its phase lands; design.md "Mesh service runner
+//! 0.6: the API, the pure parts, the runner (serving, drain, OTLP
+//! traces, `calls` discovery, node ids, the Zenoh session) and
+//! `--print-manifests` are implemented; design.md "Mesh service runner
 //! (`mw-service`)" tracks which requirement each phase closes.
 //!
 //! # Feature isolation
@@ -92,7 +92,7 @@ pub use ctx::{
 pub use endpoints::{StaticEndpoint, StaticEndpoints};
 pub use error::ServiceError;
 pub use lifecycle::{Action, Event, Lifecycle, Monotonic, Outcome};
-pub use manifest::ManifestOptions;
+pub use manifest::{ManifestError, ManifestOptions, PullPolicy, Route};
 pub use run::{ArgsError, Command, RunOptions};
 pub use spec::{Mebibytes, MilliCpu, Resources, ServiceSpec, SpecError};
 pub use stack::block_on_thread;

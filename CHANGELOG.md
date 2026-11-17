@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### 0.6: manifests derived from Rust (MS11–MS15, MS30–MS34)
+- `manifest::render` is implemented. `--print-manifests` emits one deterministic YAML stream rendered from typed serde objects:
+  - ServiceAccount, Service `<name>` and headless Service `<name>-pods`. Callers' DNS-SD SRV name is `_grpc._tcp.<name>-pods.<ns>.svc.cluster.local`.
+  - A Deployment: Istio sidecar injection, gRPC probes, drain-derived termination grace and proxy drain, the `MW_*` environment, a restricted security context.
+  - An `ALLOW` AuthorizationPolicy from `allow_callers`, `ISTIO_MUTUAL` DestinationRules, and a PodDisruptionBudget when `replicas > 1`.
+- New `ManifestOptions` fields: `pull_policy` (`PullPolicy`), `otlp_endpoint`, `zenoh_router`, `app_version`, `routes` (`Route`). There is also `ManifestOptions::new(namespace)` and `Default`. **Breaking for struct literals:** add the fields or use `..ManifestOptions::new(ns)`.
+- New `--print-manifests` flags: `--pull-policy`, `--otlp`, `--zenoh-router`, `--app-version`, `--route KIND=SERVICE[.NS]` (repeatable). New `ArgsError::InvalidValue` and `ServiceError::Manifest(ManifestError)`.
+- Zenoh contract: Secret `zenoh-<name>`, key `credentials`, mounted at `/var/run/mw/zenoh/`, with `MW_ZENOH_CREDENTIALS=/var/run/mw/zenoh/credentials`.
+- New `scripts/check-manifests.sh`: golden snapshots under `service/tests/golden/`, checked offline with `kubeconform -strict` against the schemas vendored in `deploy/schemas/` (Kubernetes 1.31, Istio v1).
+
 ### P-256 keys and telemetry on the 0.6 stack
 - `mw-gateway`'s update gate checks signed `sys/payload/start`/`stop` with the device's own `loader::trust::verify_signature` (Ed25519 or ECDSA P-256, by the pinned key's kind) instead of calling ed25519-dalek itself; the gateway now enables middleware's `trust` feature (RG19, RG20) and keeps ed25519-dalek and p256 as test-only dependencies.
 - `mw-update` signs with any `mwctl::sign::Signer`: `--key <KEYFILE>` (Ed25519) or `--pkcs11 <LABEL>` (a token key, P-256 in the TPM); `remote::job` takes an injected token opener (RG24).

@@ -493,9 +493,11 @@ runs in process (zenoh 1.10, router mode, the rendered config on a
   *(mw-service)*. Not yet verified on the lab: Istio merging the TLS
   server into the HTTPS server's port with SNI precedence (phase 3).
   Not covered by a test either: `scripts/check-zenoh-manifests.sh` runs
-  kubeconform (`-strict`, Kubernetes 1.33) on `deploy/zenoh/zenohd.yaml`,
-  but no schemas are vendored in `deploy/schemas/` yet, so it only runs
-  with `MW_SCHEMAS=online`, by hand.
+  kubeconform (`-strict`) on `deploy/zenoh/zenohd.yaml` by hand. Offline
+  it checks the four kinds with a schema vendored in `deploy/schemas/`
+  (MS14: ServiceAccount, Deployment, Service, AuthorizationPolicy) and
+  skips ConfigMap, Gateway and VirtualService; `MW_SCHEMAS=online`
+  (Kubernetes 1.33 and the datreeio CRD catalog) checks all seven.
 
 ### Zenoh telemetry (`zenoh-otel`, OT…)
 
@@ -1219,10 +1221,9 @@ cannot do without stalling its serve loop. Tests marked *(mw-service)* run
 under `cargo test -p mw-service` and `cargo test --workspace`.
 
 0.6 is built in phases: phase 1 defines the API and implements MS1–MS5;
-later phases implement the runner (MS6–MS10, with MS20–MS23), the manifests
-(MS11–MS15), the ops CLI (MS16) and the end-to-end run on the lab cluster
-(MS17), each checking its items here. Until its phase lands
-`manifest::render` returns `ServiceError::Unimplemented`, never panics.
+later phases implement the runner (MS6–MS10, with MS20–MS23), the
+manifests (MS11–MS15, with MS30–MS34), the ops CLI (MS16) and the
+end-to-end run on the lab cluster (MS17), each checking its items here.
 
 - [x] MS1 `Service::builder(name)` records `serve`, `serve_typed` (through
   `typed::TypedHandler`), `calls`, `allow_callers`, `publishes`,
@@ -1371,22 +1372,97 @@ later phases implement the runner (MS6–MS10, with MS20–MS23), the manifests
   `builder::tests::ms10_on_sample_declares_the_subscription_and_keeps_the_hook`
   *(mw-service)*. Router and ACLs: Z19–Z21.
   *Owners: phase 2A (session), phase 2D (router and ACLs, Z19–Z21).*
-- [ ] MS11 `--print-manifests` renders ServiceAccount, Deployment (sidecar
-  injection, SPIRE template, `grpc` readiness and liveness probes on the
-  service port, termination grace above the drain grace, the `Config`
-  environment, seccomp `RuntimeDefault`, non-root, read-only root),
-  Service (port `grpc`, `appProtocol: grpc`) and a headless Service.
-  *Owner: phase 2B (manifests).*
-- [ ] MS12 The manifests include an AuthorizationPolicy from
-  `allow_callers` (kubelet probes implicit, an empty list admits no
-  caller), a DestinationRule `ISTIO_MUTUAL` and a PodDisruptionBudget.
-  *Owner: phase 2B.*
-- [ ] MS13 Snapshot tests pin the rendered manifests. *Owner: phase 2B.*
-- [ ] MS14 The manifests validate offline with kubeconform against vendored
-  Kubernetes, Istio and SPIRE schemas. *Owner: phase 2B.*
-- [ ] MS15 Every `calls` kind has a `MW_SERVICE_MAP` entry in the rendered
-  environment and every `allow_callers` entry is a SPIFFE ID.
-  *Owner: phase 2B.*
+- [x] MS11 `--print-manifests` renders, from typed serde objects, a
+  ServiceAccount (no token automount), Service `<name>` and headless
+  Service `<name>-pods` (port `grpc`, `appProtocol: grpc`), and a
+  Deployment. The Deployment has the pod label
+  `sidecar.istio.io/inject: "true"` and no SPIRE annotation, because the
+  lab's istiod injects the `spire` template by default. Its `grpc` startup,
+  readiness and liveness probes are on the service port with
+  `service: ""`. Its `terminationGracePeriodSeconds` is the drain grace
+  rounded up plus 10 s. It carries the `Config` environment (`MW_PORT`,
+  `POD_NAMESPACE` / `POD_NAME` from the downward API,
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `MW_SERVICE_MAP`, and with pub/sub
+  `MW_ZENOH_ROUTER` / `MW_ZENOH_CREDENTIALS`). Its security context is
+  uid/gid 65532, non-root, read-only root, no privilege escalation, every
+  capability dropped and seccomp `RuntimeDefault`. Labels are
+  `app.kubernetes.io/{name,instance,version,managed-by}`, `app` and
+  `version`; the selector uses only `app.kubernetes.io/{name,instance}`. —
+  `service/tests/manifest.rs`: `ms11_objects_and_deployment_contract`;
+  `manifest::tests::ms11_pure_helpers` *(mw-service)*.
+- [x] MS12 The manifests include an `ALLOW` AuthorizationPolicy whose
+  `from.source.principals` are `allow_callers` without `spiffe://`. An
+  empty list renders no rules, an `ALLOW` policy matching nothing, which
+  admits no caller. Kubelet probes need no rule: they are rewritten to
+  pilot-agent (port 15020, `sidecar.istio.io/rewriteAppHTTPProbers`),
+  which calls the app over loopback, so they never pass Envoy's inbound
+  authorization. There is a DestinationRule `ISTIO_MUTUAL` for each
+  Service FQDN, and a PodDisruptionBudget `minAvailable: 1` only when
+  `replicas > 1`. —
+  `service/tests/manifest.rs`:
+  `ms12_authorization_policy_destination_rules_and_pdb` *(mw-service)*.
+- [x] MS13 Snapshot tests pin the rendered manifests of three fixtures
+  (`demo-echo`, `demo-caller`, `mw-gateway`) byte for byte against
+  `service/tests/golden/*.yaml`, rendered through `Service::execute`
+  (`MW_UPDATE_GOLDEN=1` rewrites them) —
+  `service/tests/manifest.rs`: `ms13_goldens_match_byte_for_byte`
+  *(mw-service)*.
+- [x] MS14 The manifests validate offline with `kubeconform -strict`
+  against vendored Kubernetes 1.31 (standalone-strict) and Istio
+  `security.istio.io/v1` / `networking.istio.io/v1` schemas in
+  `deploy/schemas/` (sources in its README). No SPIRE object is rendered,
+  so no SPIRE schema is needed. — `scripts/check-manifests.sh`.
+- [x] MS15 Every `calls` kind has a `MW_SERVICE_MAP` entry in the rendered
+  environment. The entry parses with `config::parse_service_map` and
+  targets the callee's own headless Service, namespace and port name, so
+  the SRV name is `_grpc._tcp.<callee>-pods.<ns>.svc.cluster.local`. Every
+  rendered principal is an `allow_callers` SPIFFE ID converted to Istio's
+  form. `render` runs the rendered environment through `Config::from_env`
+  and refuses what the runner would refuse. —
+  `service/tests/manifest.rs`:
+  `ms15_service_map_targets_the_callees_headless_service`,
+  `ms15_every_rendered_principal_is_a_converted_spiffe_id`,
+  `ms33_options_and_names_are_checked` *(mw-service)*.
+- [x] MS30 `--print-manifests` takes `--namespace`, `--image`,
+  `--pull-policy Always|IfNotPresent|Never` (default `IfNotPresent`),
+  `--otlp URL` (default the lab's Alloy),
+  `--zenoh-router LOCATOR` (default `tcp/zenohd.<ns>.svc.cluster.local:7447`),
+  `--app-version V` (default the image tag, else `unversioned`) and the
+  repeatable `--route KIND=SERVICE[.NS]`. Each takes a value and may be
+  given once (except `--route`); a malformed value is
+  `ArgsError::InvalidValue`; any of them without `--print-manifests` is
+  refused. The output is exactly `manifest::render`. —
+  `run::tests::ms30_print_manifests_takes_every_option`,
+  `ms30_print_manifests_writes_the_rendered_stream` *(mw-service)*.
+- [x] MS31 A service that publishes or subscribes mounts the Secret
+  `zenoh-<name>` (key `credentials`, mode 0440, not optional, read-only at
+  `/var/run/mw/zenoh/`) with
+  `MW_ZENOH_CREDENTIALS=/var/run/mw/zenoh/credentials`. `--route`
+  overrides a callee's Service and namespace. The pod annotation
+  `proxy.istio.io/config` holds the application until the proxy starts,
+  and sets the sidecar's `terminationDrainDuration` and
+  `MINIMUM_DRAIN_DURATION` to the drain grace rounded up plus 2 s, with
+  `EXIT_ON_ZERO_ACTIVE_CONNECTIONS`, so Envoy outlives the app's drain
+  inside the termination grace. The liveness threshold covers the whole
+  termination grace, so a draining pod is not killed for `NOT_SERVING`. —
+  `service/tests/manifest.rs`: `ms31_zenoh_secret_mount_routes_and_overrides`;
+  `manifest::tests::ms11_pure_helpers` *(mw-service)*.
+- [x] MS32 Over 400 generated service and callee names, every rendered
+  object name, ServiceAccount and Secret name is an RFC 1123 label, and
+  every label value is a valid Kubernetes label value. A name is refused
+  only when the spec is invalid or a `<name>` exceeds 58 bytes, leaving
+  room for `-pods`. — `service/tests/manifest.rs`:
+  `ms32_generated_names_render_only_valid_names_and_labels` *(mw-service)*.
+- [x] MS33 `render` refuses, with a typed error, an over-long name, a
+  namespace that is not a label, a malformed image or version, a route for
+  an uncalled kind, a duplicate or malformed route, and an environment the
+  runner's `Config` would reject (a bad OTLP URL or Zenoh locator, or more
+  than 16 callees) — `service/tests/manifest.rs`:
+  `ms33_options_and_names_are_checked` *(mw-service)*.
+- [x] MS34 The vendored schemas match their recorded checksums, and
+  kubeconform refuses a misspelt field in the core and in the Istio
+  schemas (strictness is verified, not assumed) —
+  `scripts/check-manifests.sh`.
 - [ ] MS16 The ops CLI `mw` (`tools/mw`) builds, loads, applies, inspects
   and traces services from a pure, unit-tested command plan.
   *Owner: phase 2F (CLI).*
