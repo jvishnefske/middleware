@@ -50,7 +50,9 @@
 //!   ABI 4 DMA routes.
 //! * [`rpc`] — request/response over a datagram radio (always built, pure):
 //!   the ESP-NOW request and response frames, the requester's retry rule
-//!   and the responder's duplicate suppression; `espnow::rpc` runs them
+//!   and the responder's duplicate suppression, bound to a SHA-256 digest
+//!   of each request (`loader::sha256`, always built over `sha2`'s block
+//!   function); `espnow::rpc` runs them
 //!   over an ESP-NOW radio.
 //! * [`zenoh_wire`] — the middleware's Zenoh attachments, reply-error
 //!   payloads and reserved key expressions (always built, pure, `no_std`):
@@ -69,7 +71,7 @@
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
 //! | `smbus`    | `smbus`     | `no_std`, no heap | `embedded-hal(-async)` 1.0 master, an `I2cTarget` adapter, a `Clock` |
-//! | `trust`    | `loader::sha256`, `loader::trust` checks, `fw_ota::service` | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `trust`    | `loader::trust` checks, image hashing, `fw_ota::service` | `no_std`, no heap | ed25519-dalek (verify only), p256 |
 //! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |

@@ -46,7 +46,7 @@ zenoh-lite = ["dep:embedded-io-async"]
 # streams in, Ed25519 and ECDSA P-256 verification of signed commits, and
 # the pure trust state transitions. The wire types are always built; this
 # adds the crypto.
-trust = ["dep:sha2", "dep:ed25519-dalek", "dep:p256"]
+trust = ["dep:ed25519-dalek", "dep:p256"]
 # The in-memory RP2350 bootrom and flash model (`fw_ota::sim`) for host
 # tests of A/B firmware updates (here and in mwctl's fake device). Host only.
 fw-sim = ["std", "trust"]
@@ -88,8 +88,10 @@ embedded-io-async = { version = "0.7", optional = true }
 embedded-hal = { version = "1.0", default-features = false, optional = true }
 embedded-hal-async = { version = "1.0", default-features = false, optional = true }
 # `compress` exposes the SHA-256 block function: the loader keeps its own
-# Copy-able hashing state around it (see loader/sha256.rs).
-sha2 = { version = "0.10.9", default-features = false, features = ["compress"], optional = true }
+# Copy-able hashing state around it (see loader/sha256.rs). Always built
+# (no_std, no heap, pure Rust): the rpc responder cache binds entries to a
+# SHA-256 digest of each request, and the `trust` checks hash images.
+sha2 = { version = "0.10.9", default-features = false, features = ["compress"] }
 # Verification only: no signing, no precomputed tables, no std.
 ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 # ECDSA P-256 / SHA-256 for keys held in hardware tokens (TPM 2.0, PIV):

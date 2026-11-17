@@ -1,4 +1,8 @@
-//! Incremental SHA-256 as a `Copy` value (feature `trust`).
+//! Incremental SHA-256 as a `Copy` value (always built; `no_std`, no heap).
+//!
+//! The loader uses it with the `trust` feature; [`crate::rpc::RequestDigest`]
+//! uses it in every build to bind responder cache entries to the request
+//! content.
 //!
 //! [`ImageHash`] hashes a payload image chunk by chunk as the loader
 //! receives it, so the commit can check a signature over the image digest
