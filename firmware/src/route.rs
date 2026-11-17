@@ -55,7 +55,10 @@ pub struct Report {
 
 impl Report {
     /// Nothing to report.
-    pub const NONE: Report = Report { frames: 0, dropped: 0 };
+    pub const NONE: Report = Report {
+        frames: 0,
+        dropped: 0,
+    };
 
     /// The `RouteFrames` and `RouteDropped` events for route `handle`
     /// (each only when its count is non-zero, values saturated to
@@ -69,13 +72,21 @@ impl Report {
                 time_us,
             })
         };
-        [event(EventKind::RouteFrames, self.frames), event(EventKind::RouteDropped, self.dropped)]
+        [
+            event(EventKind::RouteFrames, self.frames),
+            event(EventKind::RouteDropped, self.dropped),
+        ]
     }
 }
 
 /// The `RouteStopped` event for route `handle` given up after `fault`.
 pub fn stopped_event(handle: u8, fault: AbiError, time_us: u32) -> Event {
-    Event { kind: EventKind::RouteStopped, source: i32::from(handle), value: fault.code(), time_us }
+    Event {
+        kind: EventKind::RouteStopped,
+        source: i32::from(handle),
+        value: fault.code(),
+        time_us,
+    }
 }
 
 #[cfg(test)]
@@ -85,11 +96,29 @@ mod tests {
     #[test]
     fn r11_r12_reports_become_route_events() {
         assert_eq!(Report::NONE.events(1, 5), [None, None]);
-        let [f, d] = Report { frames: 2, dropped: u32::MAX }.events(3, 9);
-        assert_eq!(f.map(|e| e.to_args()), Some([EventKind::RouteFrames as i32, 3, 2, 9]));
-        assert_eq!(d.map(|e| e.to_args()), Some([EventKind::RouteDropped as i32, 3, i32::MAX, 9]));
+        let [f, d] = Report {
+            frames: 2,
+            dropped: u32::MAX,
+        }
+        .events(3, 9);
+        assert_eq!(
+            f.map(|e| e.to_args()),
+            Some([EventKind::RouteFrames as i32, 3, 2, 9])
+        );
+        assert_eq!(
+            d.map(|e| e.to_args()),
+            Some([EventKind::RouteDropped as i32, 3, i32::MAX, 9])
+        );
         let s = stopped_event(2, AbiError::Transport, 1);
-        assert_eq!(s.to_args(), [EventKind::RouteStopped as i32, 2, AbiError::Transport.code(), 1]);
+        assert_eq!(
+            s.to_args(),
+            [
+                EventKind::RouteStopped as i32,
+                2,
+                AbiError::Transport.code(),
+                1
+            ]
+        );
         assert_eq!(AIR_CHUNK_DATA, 167);
     }
 }

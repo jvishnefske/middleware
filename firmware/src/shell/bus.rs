@@ -25,13 +25,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embassy_sync::signal::Signal;
+use esp_base::ota::Origin;
 use heapless::{String, Vec};
+use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
-use middleware::Key;
-use esp_base::ota::Origin;
 
 /// Number of serial ports the protocol can run on (each subscribes to
 /// outbound publications).
@@ -41,7 +41,11 @@ pub const PORTS: usize = 2;
 const REPLY_PORTS: usize = PORTS + 1;
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
-pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
+pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE {
+    4 + CHUNK_MAX
+} else {
+    MAX_MESSAGE
+};
 
 /// Largest reply body: a payload's reply to a request on a key it serves
 /// (`esp_base::serve::REPLY_CAPACITY`, 512); `sys/info` is at most
@@ -112,14 +116,23 @@ impl Inbound {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
-        Some(Inbound { port, origin: Origin::Serial, kind, key: k, body })
+        Some(Inbound {
+            port,
+            origin: Origin::Serial,
+            kind,
+            key: k,
+            body,
+        })
     }
 
     /// Copies a request received over ESP-NOW from `mac`, answered on
     /// [`Port::Radio`] with bus id `id`.
     #[cfg(feature = "espnow")]
     pub fn from_air(mac: [u8; 6], id: u8, key: Key<'_>, body: &[u8]) -> Option<Self> {
-        Inbound::new(Port::Radio, Kind::Request { id }, key, body).map(|m| Inbound { origin: Origin::Air(mac), ..m })
+        Inbound::new(Port::Radio, Kind::Request { id }, key, body).map(|m| Inbound {
+            origin: Origin::Air(mac),
+            ..m
+        })
     }
 }
 
@@ -189,7 +202,9 @@ impl Bus {
     /// The radio port's reply, if one is waiting.
     #[cfg(feature = "espnow")]
     pub fn try_radio_reply(&self) -> Option<Reply> {
-        self.replies.get(Port::Radio.index()).and_then(Signal::try_take)
+        self.replies
+            .get(Port::Radio.index())
+            .and_then(Signal::try_take)
     }
 
     /// Waits for the next inbound message.
@@ -208,7 +223,10 @@ impl Bus {
     /// other ids (none are expected) are discarded.
     pub async fn wait_reply(&self, port: Port, id: u8) -> Reply {
         let Some(signal) = self.replies.get(port.index()) else {
-            return Reply { id, result: Err(HandlerError::Internal) };
+            return Reply {
+                id,
+                result: Err(HandlerError::Internal),
+            };
         };
         loop {
             let reply = signal.wait().await;
@@ -228,7 +246,9 @@ impl Bus {
         let mut k = String::new();
         k.push_str(key.as_str()).map_err(|_| TooLarge)?;
         let payload = Vec::from_slice(data).map_err(|_| TooLarge)?;
-        self.outbound.immediate_publisher().publish_immediate(Outbound { key: k, payload });
+        self.outbound
+            .immediate_publisher()
+            .publish_immediate(Outbound { key: k, payload });
         Ok(())
     }
 

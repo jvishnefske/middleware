@@ -64,8 +64,8 @@ use middleware::stream::{Action, FrameSource, Sink};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use middleware::{HandlerError, Key, SenderId};
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
-    I2cDevice, RouteStat, SampleSource, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec,
+    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, I2cDevice, Limits, Pull,
+    PwmSpec, RouteStat, SampleSource, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec,
     UartConfig,
 };
 
@@ -1029,7 +1029,11 @@ impl Device for SimDevice {
         self.event(format!(
             "route{handle} source {:?} {}x{} {:?} every {} ms on {key} ({} B chunks)",
             source.kind(),
-            cfg.width, cfg.height, cfg.format, cfg.period_ms, cfg.chunk_data
+            cfg.width,
+            cfg.height,
+            cfg.format,
+            cfg.period_ms,
+            cfg.chunk_data
         ));
         Ok(handle)
     }
@@ -1058,8 +1062,14 @@ impl Device for SimDevice {
     /// route runs.
     fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
         Some(match source {
-            SampleSource::Imu(_) => I2cDevice { bus: 0, addr: FAKE_IMU_ADDR },
-            SampleSource::Microphone(_) => I2cDevice { bus: 0, addr: FAKE_CODEC_ADDR },
+            SampleSource::Imu(_) => I2cDevice {
+                bus: 0,
+                addr: FAKE_IMU_ADDR,
+            },
+            SampleSource::Microphone(_) => I2cDevice {
+                bus: 0,
+                addr: FAKE_CODEC_ADDR,
+            },
         })
     }
 
@@ -1133,7 +1143,8 @@ mod tests {
     fn sc6_a_payload_streams_the_fake_imu_and_microphone() {
         use middleware::stream::samples::{self, Gap, SensorKind, fake};
         let wasm = wat::parse_str(SENSOR_STREAM).unwrap();
-        let mut p = wasm_host::Payload::load(&wasm, SimDevice::new(None), Limits::default()).unwrap();
+        let mut p =
+            wasm_host::Payload::load(&wasm, SimDevice::new(None), Limits::default()).unwrap();
         let mut published = p.device().take_outbox();
         for ms in (10..=1000).step_by(10) {
             p.device().advance_to(ms * 1000);
@@ -1143,31 +1154,71 @@ mod tests {
             published.extend(p.device().take_outbox());
         }
         let on = |key: &str| -> Vec<Vec<u8>> {
-            published.iter().filter(|(k, _)| k == key).map(|(_, d)| d.clone()).collect()
+            published
+                .iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, d)| d.clone())
+                .collect()
         };
-        assert_eq!(on("app/started").iter().map(|d| i32_at(d)).collect::<Vec<_>>(), [vec![0, 1]]);
+        assert_eq!(
+            on("app/started")
+                .iter()
+                .map(|d| i32_at(d))
+                .collect::<Vec<_>>(),
+            [vec![0, 1]]
+        );
         // Both routes publish every 100 ms; the sixth RouteFrames (at 300
         // ms, three per route) stops the IMU.
-        assert_eq!(on("app/stopped").iter().map(|d| i32_at(d)).collect::<Vec<_>>(), [vec![0]]);
-        let imu: Vec<_> = on("app/imu").iter().map(|d| samples::decode(d).unwrap().header).collect();
+        assert_eq!(
+            on("app/stopped")
+                .iter()
+                .map(|d| i32_at(d))
+                .collect::<Vec<_>>(),
+            [vec![0]]
+        );
+        let imu: Vec<_> = on("app/imu")
+            .iter()
+            .map(|d| samples::decode(d).unwrap().header)
+            .collect();
         assert_eq!(imu.len(), 3, "stopped after three batches");
         for (n, h) in imu.iter().enumerate() {
-            assert_eq!((h.kind, h.channels, h.count, h.rate_hz), (SensorKind::Imu, 3, 5, 50));
-            assert_eq!((h.first_index, h.timestamp_us), (5 * n as u64, 100_000 * n as u64));
+            assert_eq!(
+                (h.kind, h.channels, h.count, h.rate_hz),
+                (SensorKind::Imu, 3, 5, 50)
+            );
+            assert_eq!(
+                (h.first_index, h.timestamp_us),
+                (5 * n as u64, 100_000 * n as u64)
+            );
         }
         assert_eq!(samples::gap(&imu[0], &imu[1]), Gap::None);
         let first = on("app/imu")[0].clone();
         let b = samples::decode(&first).unwrap();
-        assert!(b.i16_values().take(3).eq(fake::imu_sample(0, 50, 2).into_iter().take(3)));
+        assert!(
+            b.i16_values()
+                .take(3)
+                .eq(fake::imu_sample(0, 50, 2).into_iter().take(3))
+        );
         let mic = on("app/mic");
         assert_eq!(mic.len(), 10, "the microphone keeps streaming");
         let last = samples::decode(mic.last().unwrap()).unwrap();
-        assert_eq!((last.header.kind, last.header.first_index), (SensorKind::Microphone, 18));
-        assert!(last.levels().all(|(rms, peak)| rms > 10_000 && peak > 16_000));
+        assert_eq!(
+            (last.header.kind, last.header.first_index),
+            (SensorKind::Microphone, 18)
+        );
+        assert!(
+            last.levels()
+                .all(|(rms, peak)| rms > 10_000 && peak > 16_000)
+        );
         // The fake IMU sits where the EVKB's FXOS8700CQ does.
         assert_eq!(
-            p.device().sample_device(&SampleSource::Imu(wasm_host::ImuConfig::new(50, 2, false, 5).unwrap())),
-            Some(I2cDevice { bus: 0, addr: FAKE_IMU_ADDR })
+            p.device().sample_device(&SampleSource::Imu(
+                wasm_host::ImuConfig::new(50, 2, false, 5).unwrap()
+            )),
+            Some(I2cDevice {
+                bus: 0,
+                addr: FAKE_IMU_ADDR
+            })
         );
     }
 

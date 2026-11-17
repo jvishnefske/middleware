@@ -213,7 +213,9 @@ impl CameraPins {
     /// Every pin, in wire order (D0..D7, VSYNC, HREF, PCLK).
     pub const fn all(&self) -> [u8; CAMERA_PINS_LEN] {
         let d = self.data;
-        [d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], self.vsync, self.href, self.pclk]
+        [
+            d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], self.vsync, self.href, self.pclk,
+        ]
     }
 
     /// The pin block bytes ([`CameraPins::all`]).
@@ -338,7 +340,9 @@ pub fn parse_route_source(kind: SourceKind, cfg: &[u8]) -> Result<RouteSource, A
             let (source, config) = parse_source(kind, cfg)?;
             Ok(RouteSource::Frames(source, config))
         }
-        SourceKind::Imu => Ok(RouteSource::Samples(SampleSource::Imu(ImuConfig::parse(cfg)?))),
+        SourceKind::Imu => Ok(RouteSource::Samples(SampleSource::Imu(ImuConfig::parse(
+            cfg,
+        )?))),
         SourceKind::Microphone => Ok(RouteSource::Samples(SampleSource::Microphone(
             MicConfig::parse(cfg)?,
         ))),
@@ -433,8 +437,13 @@ impl ImuConfig {
 
     /// Checks every rule of the table.
     pub const fn validated(self) -> Result<Self, AbiError> {
-        let ranges = [IMU_RANGES_G[0] as u16, IMU_RANGES_G[1] as u16, IMU_RANGES_G[2] as u16];
-        if !contains_u16(&IMU_RATES_HZ, self.rate_hz) || !contains_u16(&ranges, self.range_g as u16) {
+        let ranges = [
+            IMU_RANGES_G[0] as u16,
+            IMU_RANGES_G[1] as u16,
+            IMU_RANGES_G[2] as u16,
+        ];
+        if !contains_u16(&IMU_RATES_HZ, self.rate_hz) || !contains_u16(&ranges, self.range_g as u16)
+        {
             return Err(AbiError::InvalidArgument);
         }
         if !batch_fits(self.samples, self.channels() as usize * 2, 1, self.rate_hz) {
@@ -456,7 +465,12 @@ impl ImuConfig {
             6 => true,
             _ => return Err(bad),
         };
-        ImuConfig::new(u16::from_le_bytes([r0, r1]), range_g, mag, u16::from_le_bytes([s0, s1]))
+        ImuConfig::new(
+            u16::from_le_bytes([r0, r1]),
+            range_g,
+            mag,
+            u16::from_le_bytes([s0, s1]),
+        )
     }
 
     /// The `cfg` bytes for `route_source`.
@@ -724,7 +738,9 @@ impl SampleSource {
         use crate::stream::samples::fake;
         match self {
             SampleSource::Imu(c) => fake::imu_batch(c, first_index, timestamp_us, count, out),
-            SampleSource::Microphone(c) => fake::mic_batch(c, first_index, timestamp_us, count, out),
+            SampleSource::Microphone(c) => {
+                fake::mic_batch(c, first_index, timestamp_us, count, out)
+            }
         }
     }
 }
@@ -1315,20 +1331,36 @@ mod tests {
             Ok((Source::TestPattern, cfg))
         );
         let bad = Err(AbiError::InvalidArgument);
-        assert_eq!(parse_source(SourceKind::TestPattern, &bytes), bad, "pins on a pattern");
+        assert_eq!(
+            parse_source(SourceKind::TestPattern, &bytes),
+            bad,
+            "pins on a pattern"
+        );
         assert_eq!(parse_source(SourceKind::Camera, &bytes[..20]), bad, "short");
         assert_eq!(parse_source(SourceKind::Camera, &tp[..n]), bad, "no pins");
         let mut rgb = bytes;
         rgb[4] = 0;
         rgb[0] = 120;
         rgb[2] = 120;
-        assert_eq!(parse_source(SourceKind::Camera, &rgb), bad, "camera must be JPEG");
+        assert_eq!(
+            parse_source(SourceKind::Camera, &rgb),
+            bad,
+            "camera must be JPEG"
+        );
         let mut dup = bytes;
         dup[20] = 5; // PCLK on D0's pin
-        assert_eq!(parse_source(SourceKind::Camera, &dup), bad, "pins must differ");
+        assert_eq!(
+            parse_source(SourceKind::Camera, &dup),
+            bad,
+            "pins must differ"
+        );
         let mut flags = bytes;
         flags[5] = 1;
-        assert_eq!(parse_source(SourceKind::Camera, &flags), bad, "head rules apply");
+        assert_eq!(
+            parse_source(SourceKind::Camera, &flags),
+            bad,
+            "head rules apply"
+        );
         assert_eq!(CameraPins::parse(&[0; 10]), Err(AbiError::InvalidArgument));
         assert_eq!(
             CameraPins::parse(&CameraPins::AI_THINKER.encode()),
@@ -1455,8 +1487,14 @@ mod tests {
         assert_eq!(b, [100, 0, 4, 6, 10, 0, 0, 0]);
         assert_eq!(ImuConfig::parse(&b), Ok(c));
         let src = SampleSource::Imu(c);
-        assert_eq!(parse_route_source(SourceKind::Imu, &b), Ok(RouteSource::Samples(src)));
-        assert_eq!((src.kind(), src.encode(), src.samples()), (SourceKind::Imu, b, 10));
+        assert_eq!(
+            parse_route_source(SourceKind::Imu, &b),
+            Ok(RouteSource::Samples(src))
+        );
+        assert_eq!(
+            (src.kind(), src.encode(), src.samples()),
+            (SourceKind::Imu, b, 10)
+        );
         assert_eq!(c.period_us(), 100_000);
         assert_eq!(c.channels(), 6);
         for rate in IMU_RATES_HZ {
@@ -1469,7 +1507,10 @@ mod tests {
         assert_eq!(ImuConfig::new(100, 2, false, 0), bad, "no samples");
         assert_eq!(ImuConfig::new(800, 2, false, 7), bad, "under MIN_PERIOD_MS");
         assert!(ImuConfig::new(800, 2, false, 8).is_ok());
-        assert!(ImuConfig::new(800, 2, false, 80).is_ok(), "80 x 6 B = 480 B");
+        assert!(
+            ImuConfig::new(800, 2, false, 80).is_ok(),
+            "80 x 6 B = 480 B"
+        );
         assert_eq!(ImuConfig::new(800, 2, false, 81), bad, "past one batch");
         assert!(ImuConfig::new(800, 2, true, 40).is_ok());
         assert_eq!(ImuConfig::new(800, 2, true, 41), bad, "past one batch");
@@ -1509,16 +1550,52 @@ mod tests {
         for rate in MIC_RATES_HZ {
             assert!(MicConfig::new(rate, 0, AudioMode::Levels, 4, MAX_LEVEL_BLOCK).is_ok());
         }
-        assert_eq!(MicConfig::new(44_100, 0, AudioMode::Pcm, 240, 0), bad, "rate");
-        assert_eq!(MicConfig::new(16_000, 31, AudioMode::Pcm, 160, 0), bad, "gain");
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Pcm, 241, 0), bad, "past one batch");
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Pcm, 159, 0), bad, "under 10 ms");
+        assert_eq!(
+            MicConfig::new(44_100, 0, AudioMode::Pcm, 240, 0),
+            bad,
+            "rate"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 31, AudioMode::Pcm, 160, 0),
+            bad,
+            "gain"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Pcm, 241, 0),
+            bad,
+            "past one batch"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Pcm, 159, 0),
+            bad,
+            "under 10 ms"
+        );
         assert_eq!(MicConfig::new(16_000, 0, AudioMode::MuLaw, 481, 0), bad);
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 4), bad, "block on PCM");
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Levels, 1, 0), bad, "no block");
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Levels, 1, 4_097), bad, "block");
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Levels, 1, 100), bad, "6.25 ms");
-        assert_eq!(MicConfig::new(16_000, 0, AudioMode::Levels, 121, 256), bad, "past one batch");
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 4),
+            bad,
+            "block on PCM"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 1, 0),
+            bad,
+            "no block"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 1, 4_097),
+            bad,
+            "block"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 1, 100),
+            bad,
+            "6.25 ms"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 121, 256),
+            bad,
+            "past one batch"
+        );
         let mut m = b;
         m[3] = 3;
         assert_eq!(MicConfig::parse(&m), bad, "mode");
@@ -1551,12 +1628,28 @@ mod tests {
         assert_eq!(owners.check_transfer(0, 0x1f), Ok(()));
         let owners = owners.claim(1, imu).unwrap();
         assert_eq!(owners.check_transfer(0, 0x1f), Err(AbiError::Busy));
-        assert_eq!(owners.check_transfer(0, 0x1a), Ok(()), "other addresses stay free");
-        assert_eq!(owners.check_transfer(1, 0x1f), Ok(()), "other buses stay free");
+        assert_eq!(
+            owners.check_transfer(0, 0x1a),
+            Ok(()),
+            "other addresses stay free"
+        );
+        assert_eq!(
+            owners.check_transfer(1, 0x1f),
+            Ok(()),
+            "other buses stay free"
+        );
         assert_eq!(owners.owner(imu), Some(1));
         assert_eq!(owners.check_free(imu), Err(AbiError::Busy));
-        assert_eq!(owners.claim(2, imu), Err(AbiError::Busy), "one owner per device");
-        assert_eq!(owners.claim(1, imu), Ok(owners), "claiming again is a no-op");
+        assert_eq!(
+            owners.claim(2, imu),
+            Err(AbiError::Busy),
+            "one owner per device"
+        );
+        assert_eq!(
+            owners.claim(1, imu),
+            Ok(owners),
+            "claiming again is a no-op"
+        );
         assert_eq!(
             owners.claim(MAX_ROUTES as u8, codec),
             Err(AbiError::InvalidArgument)
@@ -1564,7 +1657,11 @@ mod tests {
         let owners = owners.claim(2, codec).unwrap();
         assert_eq!(owners.check_transfer(0, 0x1a), Err(AbiError::Busy));
         let owners = owners.release(1);
-        assert_eq!(owners.check_transfer(0, 0x1f), Ok(()), "stopped: the payload's again");
+        assert_eq!(
+            owners.check_transfer(0, 0x1f),
+            Ok(()),
+            "stopped: the payload's again"
+        );
         assert_eq!(owners.check_transfer(0, 0x1a), Err(AbiError::Busy));
         assert_eq!(owners.release(2).release(9), I2cOwners::default());
     }

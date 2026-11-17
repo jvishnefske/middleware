@@ -251,7 +251,10 @@ impl MdnsAnnouncer {
     }
 
     /// Applies a table transition synchronously (never across an await).
-    fn transition<R>(&mut self, f: impl FnOnce(AnnounceTable, &mut [u8]) -> (AnnounceTable, R)) -> R {
+    fn transition<R>(
+        &mut self,
+        f: impl FnOnce(AnnounceTable, &mut [u8]) -> (AnnounceTable, R),
+    ) -> R {
         let table = core::mem::take(&mut self.table);
         let (table, r) = f(table, &mut self.tx);
         self.table = table;
@@ -440,7 +443,9 @@ mod tests {
         assert!(took >= Duration::from_millis(700), "{took:?}");
         assert_eq!(a.instance_label(KIND, "unit-1"), Some("unit-1"));
 
-        within(b.browse(KeyFilter::Exact(KIND.key()))).await.unwrap();
+        within(b.browse(KeyFilter::Exact(KIND.key())))
+            .await
+            .unwrap();
         let mut buf = [0u8; 512];
         // The announcement (after three probes the browser skips).
         let Event::Up(s) = within(b.next(&mut buf)).await.unwrap() else {
@@ -494,12 +499,17 @@ mod tests {
             assert_eq!(a.dropped_replies(), i as u32 + 1, "{from}");
         }
         // The announcer still works: a real browse is answered.
-        within(b.browse(KeyFilter::Exact(KIND.key()))).await.unwrap();
+        within(b.browse(KeyFilter::Exact(KIND.key())))
+            .await
+            .unwrap();
         within(a.step()).await.unwrap();
         let mut buf = [0u8; 512];
         // The announcement first, then the answer to the browse.
         for _ in 0..2 {
-            assert!(matches!(within(b.next(&mut buf)).await.unwrap(), Event::Up(_)));
+            assert!(matches!(
+                within(b.next(&mut buf)).await.unwrap(),
+                Event::Up(_)
+            ));
         }
         assert_eq!(a.dropped_replies(), 4);
     }

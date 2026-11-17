@@ -115,10 +115,21 @@ fn configure(open: &Open) -> Result<(), AbiError> {
 impl SpiBus {
     /// Takes both controllers (held in reset until a payload opens the
     /// bus) and the transfer buffer.
-    pub fn new(spi0: Peri<'static, SPI0>, spi1: Peri<'static, SPI1>, buf: &'static mut Buffer) -> Self {
+    pub fn new(
+        spi0: Peri<'static, SPI0>,
+        spi1: Peri<'static, SPI1>,
+        buf: &'static mut Buffer,
+    ) -> Self {
         hold_reset(SpiBlock::Spi0, true);
         hold_reset(SpiBlock::Spi1, true);
-        SpiBus { _spi0: spi0, _spi1: spi1, buf, open: None, state: DmaState::Idle, xfer: None }
+        SpiBus {
+            _spi0: spi0,
+            _spi1: spi1,
+            buf,
+            open: None,
+            state: DmaState::Idle,
+            xfer: None,
+        }
     }
 
     /// Whether a transfer is running.
@@ -141,7 +152,12 @@ impl SpiBus {
         let clk = embassy_rp::clocks::clk_peri_freq();
         let clock = Clock::new(clk, cfg.freq_khz.saturating_mul(1000))?;
         let mode = mode_bits(cfg.mode)?;
-        let open = Open { route, clock, mode, hz: clock.hz(clk) };
+        let open = Open {
+            route,
+            clock,
+            mode,
+            hz: clock.hz(clk),
+        };
         if let Some(old) = self.open
             && old.route.block != route.block
         {
@@ -167,7 +183,10 @@ impl SpiBus {
         head.copy_from_slice(tx);
         tail.fill(0);
         let budget = Duration::from_micros(timeout_us(open.hz, len));
-        self.xfer = Some(Xfer { pump: Pump::new(len), deadline: Instant::now() + budget });
+        self.xfer = Some(Xfer {
+            pump: Pump::new(len),
+            deadline: Instant::now() + budget,
+        });
         self.state = state;
         Ok(())
     }
@@ -224,7 +243,9 @@ impl SpiBus {
         self.state = state;
         let n = len.min(out.len());
         let src = self.buf.get(..n).ok_or(AbiError::InvalidArgument)?;
-        out.get_mut(..n).ok_or(AbiError::InvalidArgument)?.copy_from_slice(src);
+        out.get_mut(..n)
+            .ok_or(AbiError::InvalidArgument)?
+            .copy_from_slice(src);
         Ok(n)
     }
 

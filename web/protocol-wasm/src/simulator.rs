@@ -488,7 +488,11 @@ impl Device for SimDevice {
             .get_mut(usize::from(handle))
             .and_then(Option::take)
             .ok_or(AbiError::Busy)?;
-        for kind in [EventKind::RouteFrames, EventKind::RouteDropped, EventKind::RouteStopped] {
+        for kind in [
+            EventKind::RouteFrames,
+            EventKind::RouteDropped,
+            EventKind::RouteStopped,
+        ] {
             self.periph.purge(kind, i32::from(handle));
         }
         Ok(())
@@ -906,10 +910,21 @@ mod tests {
             sim.step(ms * 1000).unwrap();
             events.extend(sim.drain());
         }
-        assert_eq!(publishes(&events, "app/started"), [[0, 0, 0, 0, 1, 0, 0, 0]]);
-        assert_eq!(last_i32(&events, "app/stopped"), Some(0), "route_stop(0) succeeded");
+        assert_eq!(
+            publishes(&events, "app/started"),
+            [[0, 0, 0, 0, 1, 0, 0, 0]]
+        );
+        assert_eq!(
+            last_i32(&events, "app/stopped"),
+            Some(0),
+            "route_stop(0) succeeded"
+        );
         let imu = publishes(&events, "app/imu");
-        assert_eq!(imu.len(), 3, "the sixth RouteFrames (300 ms) stopped the IMU");
+        assert_eq!(
+            imu.len(),
+            3,
+            "the sixth RouteFrames (300 ms) stopped the IMU"
+        );
         // Byte for byte what payload-sim publishes: the shared fake.
         let src = SampleSource::Imu(ImuConfig::new(50, 2, false, 5).unwrap());
         let mut want = [0u8; MAX_BATCH];
@@ -924,7 +939,8 @@ mod tests {
         assert_eq!((a.kind, samples::gap(&a, &b)), (SensorKind::Imu, Gap::None));
         let mic = publishes(&events, "app/mic");
         assert_eq!(mic.len(), 10);
-        let src = SampleSource::Microphone(MicConfig::new(8_000, 0, AudioMode::Levels, 2, 400).unwrap());
+        let src =
+            SampleSource::Microphone(MicConfig::new(8_000, 0, AudioMode::Levels, 2, 400).unwrap());
         let len = src.fake_batch(18, 900_000, 2, &mut want).unwrap();
         assert_eq!(mic.last().map(Vec::as_slice), Some(&want[..len]));
         let irqs = events

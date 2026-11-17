@@ -32,12 +32,12 @@
 //! The service's notes are logged on `sys/log`; every status change is
 //! published on `sys/payload/status`.
 
+#[cfg(not(feature = "wasm"))]
+use esp_base::serve::Route;
 use heapless::Vec;
 use middleware::Key;
 use middleware::transport::HandlerError;
 use rp_base::service::{Handled, Reply as Answer, Service};
-#[cfg(not(feature = "wasm"))]
-use esp_base::serve::Route;
 
 use super::board::{Fw, StoreFlash};
 use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Reply};
@@ -116,7 +116,10 @@ impl Controller {
             // Never reached without the runtime (start is NotFound), but
             // answer rather than leave the link waiting.
             #[cfg(not(feature = "wasm"))]
-            self.bus.reply(Reply { id, result: Err(HandlerError::NotFound) });
+            self.bus.reply(Reply {
+                id,
+                result: Err(HandlerError::NotFound),
+            });
         }
     }
 
@@ -130,23 +133,43 @@ impl Controller {
         #[cfg(feature = "wasm")] payload: Option<&mut Payload<RpDevice>>,
     ) -> (Option<Reply>, bool) {
         let Ok(key) = Key::new(&msg.key) else {
-            return (Some(Reply { id, result: Err(HandlerError::InvalidRequest) }), false);
+            return (
+                Some(Reply {
+                    id,
+                    result: Err(HandlerError::InvalidRequest),
+                }),
+                false,
+            );
         };
         let before = self.svc.status();
         let mut out = [0u8; MAX_REPLY];
         self.svc.set_usb_configured(self.bus.usb_configured());
         #[cfg(feature = "wasm")]
         let Handled { reply, stop, notes } = {
-            let answer = rp_base::requests::handle(&mut self.svc, payload, key, &msg.body, &msg.meta(), &mut out);
+            let answer = rp_base::requests::handle(
+                &mut self.svc,
+                payload,
+                key,
+                &msg.body,
+                &msg.meta(),
+                &mut out,
+            );
             if let Some(trap) = &answer.trapped {
-                self.bus.log(format_args!("payload trapped on request {}: {trap}", key.as_str()));
+                self.bus.log(format_args!(
+                    "payload trapped on request {}: {trap}",
+                    key.as_str()
+                ));
             }
             answer.handled
         };
         // Without the runtime nothing is ever served (start is NotFound).
         #[cfg(not(feature = "wasm"))]
         let Handled { reply, stop, notes } = match self.svc.route_idle(key) {
-            Route::Refuse(e) => Handled { reply: Answer::Now(Err(e)), stop: false, notes: Vec::new() },
+            Route::Refuse(e) => Handled {
+                reply: Answer::Now(Err(e)),
+                stop: false,
+                notes: Vec::new(),
+            },
             Route::System | Route::Payload => self.svc.handle(key, &msg.body, &mut out),
         };
         for note in &notes {
@@ -160,7 +183,9 @@ impl Controller {
             Answer::Now(r) => Some(Reply {
                 id,
                 result: r.and_then(|n| {
-                    out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall)
+                    out.get(..n)
+                        .and_then(|b| Vec::from_slice(b).ok())
+                        .ok_or(HandlerError::BufferTooSmall)
                 }),
             }),
         };
@@ -197,19 +222,28 @@ impl Controller {
     #[cfg(feature = "wasm")]
     fn load(&mut self) -> Result<Payload<RpDevice>, StartError> {
         let limits = rp_base::budget::limits(&PROFILE_REF);
-        let store = self.svc.store_mut().ok_or(StartError::Store(StoreError::NoImage))?;
-        let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
+        let store = self
+            .svc
+            .store_mut()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
+        let header = store
+            .header()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
         check_heap(heap::free(), header.len).map_err(StartError::NoHeap)?;
         let len = header.len as usize;
         let mut image = AllocVec::new();
-        image.try_reserve_exact(len).map_err(|_| StartError::NoMemory)?;
+        image
+            .try_reserve_exact(len)
+            .map_err(|_| StartError::NoMemory)?;
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
         let bound = limits.heap_needed(&image);
-        let needed = check_heap_holding(heap::free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
+        let needed = check_heap_holding(heap::free(), image.capacity(), bound)
+            .map_err(StartError::NoHeap)?;
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
-        let device = RpDevice::new(self.bus, &PROFILE_REF, self.svc.node()).ok_or(StartError::NoHardware)?;
+        let device =
+            RpDevice::new(self.bus, &PROFILE_REF, self.svc.node()).ok_or(StartError::NoHardware)?;
         let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
@@ -233,7 +267,10 @@ impl Controller {
     async fn running(&mut self, pending: Option<u8>) {
         let answer = |bus: &Bus, result: Result<(), HandlerError>| {
             if let Some(id) = pending {
-                bus.reply(Reply { id, result: result.map(|()| Vec::new()) });
+                bus.reply(Reply {
+                    id,
+                    result: result.map(|()| Vec::new()),
+                });
             }
         };
         let before = self.svc.status();
@@ -265,7 +302,9 @@ impl Controller {
             yield_now().await;
             payload.device().fire_timers(now_us());
             for _ in 0..MAX_EVENTS {
-                let Some(event) = payload.device().pop_event() else { break };
+                let Some(event) = payload.device().pop_event() else {
+                    break;
+                };
                 if let Err(trap) = payload.dispatch(event) {
                     self.trapped(&trap);
                     return;
@@ -273,7 +312,8 @@ impl Controller {
             }
             let overflow = payload.device().overflow();
             if let Some(n) = overflow_report(dropped, overflow) {
-                self.bus.log(format_args!("event queue full: {n} events dropped"));
+                self.bus
+                    .log(format_args!("event queue full: {n} events dropped"));
             }
             dropped = overflow;
             let tick = payload.next_tick().map(|due| {
@@ -303,7 +343,9 @@ impl Controller {
                 }
                 Either3::First(msg) => match msg.kind {
                     Kind::Publish => {
-                        let Ok(key) = Key::new(&msg.key) else { continue };
+                        let Ok(key) = Key::new(&msg.key) else {
+                            continue;
+                        };
                         if route_publication(&self.svc.state(), key, payload.subscriptions())
                             && let Err(trap) = payload.deliver(key, &msg.body)
                         {
@@ -314,7 +356,10 @@ impl Controller {
                     Kind::Request { id } => {
                         let (reply, stop) = self.handle(id, &msg, Some(&mut *payload));
                         // A start while running is answered by dispatch.
-                        self.bus.reply(reply.unwrap_or(Reply { id, result: Ok(Vec::new()) }));
+                        self.bus.reply(reply.unwrap_or(Reply {
+                            id,
+                            result: Ok(Vec::new()),
+                        }));
                         if stop {
                             self.bus.log(format_args!("payload stopped"));
                             return;

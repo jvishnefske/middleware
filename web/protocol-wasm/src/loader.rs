@@ -595,11 +595,22 @@ mod tests {
         assert_eq!(longer.len(), bytes.len() + 8);
         assert_eq!(Info::decode(&longer), Some(with_node.clone()));
         // A 0.6 response carries the capability bits after the node id.
-        let serving = Info { caps: 1, ..with_node };
+        let serving = Info {
+            caps: 1,
+            ..with_node
+        };
         let longest = serving.encode().unwrap();
         assert_eq!(longest.len(), longer.len() + 4);
         assert_eq!(Info::decode(&longest), Some(serving));
-        assert_eq!(Info { caps: 1, ..info.clone() }.encode(), None, "caps need a node");
+        assert_eq!(
+            Info {
+                caps: 1,
+                ..info.clone()
+            }
+            .encode(),
+            None,
+            "caps need a node"
+        );
         assert_eq!(Info::decode(&bytes[..3]), None);
         assert_eq!(Info { status: 9, ..info }.encode(), None);
         let names: Vec<_> = (0..6).map(status_name).collect();

@@ -68,7 +68,12 @@ pub fn timer_event(id: u8, periods: u32, time_us: u32) -> Event {
 /// The `DmaDone` event for `channel`: `value` is the byte count on success
 /// or the negative [`AbiError`](middleware::wasm_abi::AbiError) code.
 pub fn dma_done_event(channel: DmaChannel, value: i32, time_us: u32) -> Event {
-    Event { kind: EventKind::DmaDone, source: channel as i32, value, time_us }
+    Event {
+        kind: EventKind::DmaDone,
+        source: channel as i32,
+        value,
+        time_us,
+    }
 }
 
 /// The coalesced `UartRx` event for `port` with `buffered` bytes waiting.
@@ -85,7 +90,11 @@ pub fn uart_rx_event(port: u8, buffered: usize, time_us: u32) -> Event {
 /// overflow count already reported, `current` the queue's count now.
 /// Returns the number of newly dropped events, if any.
 pub const fn overflow_report(logged: u32, current: u32) -> Option<u32> {
-    if current > logged { Some(current - logged) } else { None }
+    if current > logged {
+        Some(current - logged)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -98,8 +107,15 @@ mod tests {
     fn d5_gpio_event_respects_edge() {
         let e = gpio_event(4, Edge::Rising, true, 77).unwrap();
         assert_eq!(e.to_args(), [EventKind::Gpio as i32, 4, 1, 77]);
-        assert_eq!(gpio_event(4, Edge::Rising, false, 0), None, "bounce read low");
-        assert_eq!(gpio_event(4, Edge::Falling, false, 5).map(|e| e.value), Some(0));
+        assert_eq!(
+            gpio_event(4, Edge::Rising, false, 0),
+            None,
+            "bounce read low"
+        );
+        assert_eq!(
+            gpio_event(4, Edge::Falling, false, 5).map(|e| e.value),
+            Some(0)
+        );
         assert!(gpio_event(4, Edge::Any, false, 0).is_some());
         assert!(gpio_event(4, Edge::Any, true, 0).is_some());
         assert_eq!(gpio_event(4, Edge::Off, true, 0), None);

@@ -69,6 +69,81 @@ mod tests {
         assert_eq!(decode_pub(&encode_query(ID, 5)), None);
     }
 
+    const TRACE: TraceContext = TraceContext {
+        trace_id: [
+            0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e,
+            0x47, 0x36,
+        ],
+        span_id: [0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7],
+        flags: 1,
+    };
+
+    #[test]
+    fn traced_publications_keep_their_header_and_carry_the_context() {
+        let a = encode_pub_traced(ID, Sequence::new(9), 0xDEAD_BEEF, &TRACE);
+        assert_eq!(a.len(), 41);
+        assert_eq!(&a[..2], b"mw");
+        assert_eq!(a[2], 3);
+        assert_eq!(
+            decode_pub(&a),
+            Some(PubHeader {
+                sender: ID,
+                seq: 9,
+                stream: Some(0xDEAD_BEEF)
+            })
+        );
+        assert_eq!(decode_trace(&a), Some(TRACE));
+        // Untraced attachments have none; a truncated one decodes as nothing.
+        assert_eq!(decode_trace(&encode_pub(ID, Sequence::new(9), 1)), None);
+        assert_eq!(decode_pub(&a[..40]), None);
+        assert_eq!(decode_trace(&a[..40]), None);
+        // An all-zero context is invalid: the header still decodes.
+        let zero = TraceContext {
+            trace_id: [0; 16],
+            span_id: [0; 8],
+            flags: 0,
+        };
+        let z = encode_pub_traced(ID, Sequence::new(1), 1, &zero);
+        assert!(decode_pub(&z).is_some());
+        assert_eq!(decode_trace(&z), None);
+    }
+
+    #[test]
+    fn traced_queries_keep_their_header_and_carry_the_context() {
+        let q = encode_query_traced(ID, 3000, &TRACE);
+        assert_eq!(q.len(), QUERY_TRACED_ATTACHMENT_LEN);
+        assert_eq!(decode_query(&q), Some((ID, 3000)));
+        assert_eq!(decode_trace(&q), Some(TRACE));
+        assert_eq!(decode_trace(&encode_query(ID, 3000)), None);
+        assert_eq!(decode_query(&q[..QUERY_TRACED_ATTACHMENT_LEN - 1]), None);
+        // Neither kind is mistaken for the other.
+        assert_eq!(decode_pub(&q), None);
+        assert_eq!(
+            decode_query(&encode_pub_traced(ID, Sequence::new(1), 1, &TRACE)),
+            None
+        );
+    }
+
+    #[test]
+    fn traceparent_text_round_trips() {
+        // The example from the W3C Trace Context specification.
+        let text = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let ctx = TraceContext::parse_traceparent(text).expect("valid");
+        assert_eq!(ctx, TRACE);
+        assert!(ctx.sampled());
+        assert_eq!(&ctx.to_traceparent()[..], text.as_bytes());
+        for bad in [
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736_00f067aa0ba902b7-01",
+        ] {
+            assert_eq!(TraceContext::parse_traceparent(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn stream_ids_separate_keys_and_origins() {
         let k1 = Key::from_static("a/b");

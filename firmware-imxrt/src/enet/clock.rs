@@ -39,8 +39,7 @@ pub const GPR1_ENET1_TX_CLK_DIR: u32 = 1 << 17;
 /// `current`: powered up, not bypassed, `DIV_SELECT` 50 MHz, output
 /// enabled; every other bit kept.
 pub const fn pll_enet_50mhz(current: u32) -> u32 {
-    let cleared =
-        current & !(PLL_ENET_POWERDOWN | PLL_ENET_BYPASS | PLL_ENET_DIV_SELECT_MASK);
+    let cleared = current & !(PLL_ENET_POWERDOWN | PLL_ENET_BYPASS | PLL_ENET_DIV_SELECT_MASK);
     cleared | PLL_ENET_DIV_50MHZ | PLL_ENET_ENABLE
 }
 

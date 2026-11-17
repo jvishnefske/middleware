@@ -30,9 +30,9 @@ use embassy_nxp::pac;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::Instant;
-use heapless::String;
 use esp_base::periph::timer_event;
 use esp_base::periph::timers::Timers;
+use heapless::String;
 use imxrt_base::chip::Profile;
 use imxrt_base::pins::{GPIOS, Pins, ReadFrom};
 use imxrt_base::sensors::imu_route::ImuRoute;
@@ -41,9 +41,9 @@ use imxrt_base::sensors::{FXOS8700_ADDR, WM8960_ADDR, fxos8700, wm8960};
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::is_system_key;
 use middleware::stream::samples::MAX_BATCH;
-use middleware::wasm_abi::route::{I2cDevice, RouteStat, SampleSource};
 use middleware::wasm_abi::events::{Event, EventKind, EventQueue, MAX_EVENTS};
 use middleware::wasm_abi::periph::{I2cConfig, TimerSpec};
+use middleware::wasm_abi::route::{I2cDevice, RouteStat, SampleSource};
 use middleware::wasm_abi::{AbiError, Pull};
 use middleware::{Key, SenderId};
 
@@ -162,7 +162,10 @@ impl RtDevice {
     pub fn next_alarm_us(&self) -> Option<u64> {
         let imu = self.imu.as_ref().map(|i| i.route.due_us());
         let mic = self.mic.as_ref().map(|m| m.next_us);
-        [self.timers.next_deadline(), imu, mic].into_iter().flatten().min()
+        [self.timers.next_deadline(), imu, mic]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Fires the timers due at `now` (µs) into the event queue and
@@ -201,9 +204,11 @@ impl RtDevice {
                 let fed = mic.route.feed(now, rest, &mut out);
                 rest = rest.get(fed.consumed..).unwrap_or_default();
                 let Some(len) = fed.batch else { continue };
-                let ok = Key::new(&mic.key)
-                    .ok()
-                    .is_some_and(|key| self.bus.publish(key, out.get(..len).unwrap_or_default()).is_ok());
+                let ok = Key::new(&mic.key).ok().is_some_and(|key| {
+                    self.bus
+                        .publish(key, out.get(..len).unwrap_or_default())
+                        .is_ok()
+                });
                 if ok {
                     published += 1;
                 } else {
@@ -217,12 +222,17 @@ impl RtDevice {
 
     /// Starts the microphone route: MCLK, the codec over I2C, then SAI1
     /// and its DMA.
-    fn start_mic(&mut self, cfg: middleware::wasm_abi::route::MicConfig, key: Key<'_>) -> Result<u8, AbiError> {
+    fn start_mic(
+        &mut self,
+        cfg: middleware::wasm_abi::route::MicConfig,
+        key: Key<'_>,
+    ) -> Result<u8, AbiError> {
         if self.mic.is_some() {
             return Err(AbiError::Busy);
         }
         let route = MicRoute::new(cfg, now_us())?;
-        let key: String<MAX_KEY_LEN> = String::try_from(key.as_str()).map_err(|_| AbiError::InvalidKey)?;
+        let key: String<MAX_KEY_LEN> =
+            String::try_from(key.as_str()).map_err(|_| AbiError::InvalidKey)?;
         self.open_i2c_for_route()?;
         sai::start_clocks(route.rate())?;
         let pga = wm8960::pga_for_gain_db(route.gain_db());
@@ -267,7 +277,9 @@ impl RtDevice {
         let Some(hw) = self.hw.as_mut() else { return };
         let mut burst = [0u8; 13];
         let n = imu.route.burst_len().min(burst.len());
-        let read = hw.i2c.transfer(FXOS8700_ADDR, &[fxos8700::STATUS], &mut burst[..n]);
+        let read = hw
+            .i2c
+            .transfer(FXOS8700_ADDR, &[fxos8700::STATUS], &mut burst[..n]);
         if read.is_err() {
             imu.route.on_failure(now);
             return;
@@ -294,7 +306,13 @@ impl RtDevice {
         if self.i2c_open {
             return Ok(());
         }
-        wasm_host::Device::i2c_open(self, I2cConfig { bus: 0, freq_hz: ROUTE_I2C_HZ })
+        wasm_host::Device::i2c_open(
+            self,
+            I2cConfig {
+                bus: 0,
+                freq_hz: ROUTE_I2C_HZ,
+            },
+        )
     }
 
     /// Writes the FXOS8700CQ's standby register (best effort).
@@ -308,16 +326,22 @@ impl RtDevice {
     }
 
     /// Starts the IMU route: checks `WHO_AM_I`, writes the plan.
-    fn start_imu(&mut self, cfg: middleware::wasm_abi::route::ImuConfig, key: Key<'_>) -> Result<u8, AbiError> {
+    fn start_imu(
+        &mut self,
+        cfg: middleware::wasm_abi::route::ImuConfig,
+        key: Key<'_>,
+    ) -> Result<u8, AbiError> {
         if self.imu.is_some() {
             return Err(AbiError::Busy);
         }
         let route = ImuRoute::new(cfg, now_us())?;
-        let key: String<MAX_KEY_LEN> = String::try_from(key.as_str()).map_err(|_| AbiError::InvalidKey)?;
+        let key: String<MAX_KEY_LEN> =
+            String::try_from(key.as_str()).map_err(|_| AbiError::InvalidKey)?;
         self.open_i2c_for_route()?;
         let hw = self.hw()?;
         let mut who = [0u8; 1];
-        hw.i2c.transfer(FXOS8700_ADDR, &[fxos8700::WHO_AM_I], &mut who)?;
+        hw.i2c
+            .transfer(FXOS8700_ADDR, &[fxos8700::WHO_AM_I], &mut who)?;
         if !fxos8700::is_fxos8700(who[0]) {
             return Err(AbiError::Unsupported);
         }
@@ -325,7 +349,11 @@ impl RtDevice {
             hw.i2c.transfer(FXOS8700_ADDR, &[reg, value], &mut [])?;
         }
         // The first poll is due a period from now.
-        self.imu = Some(Imu { route, key, refused: 0 });
+        self.imu = Some(Imu {
+            route,
+            key,
+            refused: 0,
+        });
         Ok(IMU_HANDLE)
     }
 
@@ -363,7 +391,13 @@ impl RtDevice {
 /// Queues a route's `RouteFrames` (batches published) and `RouteDropped`
 /// (units lost) events. They coalesce in the queue, so a payload that
 /// ignores them costs nothing.
-fn route_events(events: &mut EventQueue<MAX_EVENTS>, handle: u8, now: u64, published: u32, lost: u32) {
+fn route_events(
+    events: &mut EventQueue<MAX_EVENTS>,
+    handle: u8,
+    now: u64,
+    published: u32,
+    lost: u32,
+) {
     let event = |kind, value: u32| Event {
         kind,
         source: i32::from(handle),
@@ -395,7 +429,11 @@ fn write_level(profile: &Profile, pin: u8, high: bool) -> Result<(), AbiError> {
     };
     cortex_m::interrupt::free(|_| {
         block.dr().modify(|w| {
-            w.0 = if high { w.0 | line.mask() } else { w.0 & !line.mask() };
+            w.0 = if high {
+                w.0 | line.mask()
+            } else {
+                w.0 & !line.mask()
+            };
         })
     });
     Ok(())
@@ -411,8 +449,12 @@ fn release_pin(hw: &mut Hw, pin: u8) {
 
 /// Muxes A5 (GPIO_AD_B1_00) and A4 (GPIO_AD_B1_01) back to GPIO (ALT5).
 fn i2c_pads_to_gpio() {
-    pac::IOMUXC.sw_mux_ctl_pad_gpio_ad_b1_00().write_value(pac::iomuxc::regs::MuxCtl(0x05));
-    pac::IOMUXC.sw_mux_ctl_pad_gpio_ad_b1_01().write_value(pac::iomuxc::regs::MuxCtl(0x05));
+    pac::IOMUXC
+        .sw_mux_ctl_pad_gpio_ad_b1_00()
+        .write_value(pac::iomuxc::regs::MuxCtl(0x05));
+    pac::IOMUXC
+        .sw_mux_ctl_pad_gpio_ad_b1_01()
+        .write_value(pac::iomuxc::regs::MuxCtl(0x05));
 }
 
 impl Drop for RtDevice {
@@ -537,7 +579,13 @@ impl wasm_host::Device for RtDevice {
         Ok(())
     }
 
-    fn i2c_transfer(&mut self, bus: u8, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), AbiError> {
+    fn i2c_transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
         if bus != 0 || !self.i2c_open {
             return Err(AbiError::InvalidArgument);
         }
@@ -567,8 +615,14 @@ impl wasm_host::Device for RtDevice {
 
     fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
         Some(match source {
-            SampleSource::Imu(_) => I2cDevice { bus: 0, addr: FXOS8700_ADDR },
-            SampleSource::Microphone(_) => I2cDevice { bus: 0, addr: WM8960_ADDR },
+            SampleSource::Imu(_) => I2cDevice {
+                bus: 0,
+                addr: FXOS8700_ADDR,
+            },
+            SampleSource::Microphone(_) => I2cDevice {
+                bus: 0,
+                addr: WM8960_ADDR,
+            },
         })
     }
 
@@ -595,7 +649,12 @@ impl wasm_host::Device for RtDevice {
         let (batches, lost, failures, refused) = match handle {
             IMU_HANDLE => {
                 let i = self.imu.as_ref().ok_or(AbiError::Busy)?;
-                (i.route.batches(), i.route.lost(), i.route.failures(), i.refused)
+                (
+                    i.route.batches(),
+                    i.route.lost(),
+                    i.route.failures(),
+                    i.refused,
+                )
             }
             MIC_HANDLE => {
                 let m = self.mic.as_ref().ok_or(AbiError::Busy)?;

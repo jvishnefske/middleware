@@ -56,11 +56,11 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use esp_base::chip::{Direction, Profile};
 use esp_base::periph::gpio_event;
-use esp_hal::gpio::{
-    AnyPin, Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal,
-    Pull as HalPull,
-};
 use esp_hal::gpio::DriveMode;
+use esp_hal::gpio::{
+    AnyPin, Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig,
+    OutputSignal, Pull as HalPull,
+};
 use esp_hal::handler;
 use esp_hal::peripherals::IO_MUX;
 use wasm_host::{AbiError, Edge, Pull};
@@ -114,7 +114,10 @@ pub struct PinBank {
 impl PinBank {
     /// An empty bank governed by `profile`.
     pub fn new(profile: &'static Profile) -> Self {
-        PinBank { profile, slots: [const { None }; MAX_PINS] }
+        PinBank {
+            profile,
+            slots: [const { None }; MAX_PINS],
+        }
     }
 
     /// Adds GPIO `n`; reserved or non-existent pins are dropped.
@@ -123,13 +126,22 @@ impl PinBank {
             && !self.profile.is_reserved(n)
             && let Some(slot) = self.slots.get_mut(usize::from(n))
         {
-            *slot = Some(Slot { pin, mode: Mode::Idle, edge: Edge::Off, pull_up: false, analog: None });
+            *slot = Some(Slot {
+                pin,
+                mode: Mode::Idle,
+                edge: Edge::Off,
+                pull_up: false,
+                analog: None,
+            });
         }
     }
 
     fn slot(&mut self, n: u8, dir: Direction) -> Result<&mut Slot, AbiError> {
         self.profile.check_pin(n, dir)?;
-        self.slots.get_mut(usize::from(n)).and_then(Option::as_mut).ok_or(AbiError::Unsupported)
+        self.slots
+            .get_mut(usize::from(n))
+            .and_then(Option::as_mut)
+            .ok_or(AbiError::Unsupported)
     }
 
     /// Returns every pin to high impedance (input and output disabled, no
@@ -152,7 +164,8 @@ impl PinBank {
                 slot.pin.set_output_enable(false);
             }
             slot.pin.set_input_enable(false);
-            slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
+            slot.pin
+                .apply_input_config(&InputConfig::default().with_pull(HalPull::None));
             slot.mode = Mode::Idle;
             slot.pull_up = false;
         }
@@ -170,11 +183,13 @@ impl PinBank {
         let slot = self.slots.get_mut(usize::from(n))?.as_mut()?;
         match slot.mode {
             Mode::Idle => {
-                slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::Up));
+                slot.pin
+                    .apply_input_config(&InputConfig::default().with_pull(HalPull::Up));
                 slot.pin.set_input_enable(true);
                 let low = slot.pin.is_low();
                 slot.pin.set_input_enable(false);
-                slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
+                slot.pin
+                    .apply_input_config(&InputConfig::default().with_pull(HalPull::None));
                 Some(low)
             }
             Mode::Input if slot.pull_up => Some(slot.pin.is_low()),
@@ -204,7 +219,8 @@ impl PinBank {
             Pull::Down => HalPull::Down,
         };
         slot.pin.set_output_enable(false);
-        slot.pin.apply_input_config(&InputConfig::default().with_pull(pull));
+        slot.pin
+            .apply_input_config(&InputConfig::default().with_pull(pull));
         slot.pin.set_input_enable(true);
         slot.mode = Mode::Input;
         slot.pull_up = pull == HalPull::Up;
@@ -217,7 +233,8 @@ impl PinBank {
         if slot.mode != Mode::Output {
             return Err(AbiError::InvalidArgument);
         }
-        slot.pin.set_level(if high { Level::High } else { Level::Low });
+        slot.pin
+            .set_level(if high { Level::High } else { Level::Low });
         Ok(())
     }
 
@@ -311,7 +328,8 @@ impl PinBank {
             OutputSignal::GPIO.connect_to(&slot.pin);
             slot.pin.set_output_enable(false);
             slot.pin.set_input_enable(false);
-            slot.pin.apply_input_config(&InputConfig::default().with_pull(HalPull::None));
+            slot.pin
+                .apply_input_config(&InputConfig::default().with_pull(HalPull::None));
             slot.mode = Mode::Analog;
             slot.pull_up = false;
         }
@@ -325,12 +343,19 @@ impl PinBank {
     /// Connects pin `n` to peripheral input `signal` and output `output` as
     /// an open-drain line with the internal pull-up, released high (I2C
     /// SDA and SCL).
-    pub fn route_open_drain(&mut self, n: u8, input: InputSignal, output: OutputSignal) -> Result<(), AbiError> {
+    pub fn route_open_drain(
+        &mut self,
+        n: u8,
+        input: InputSignal,
+        output: OutputSignal,
+    ) -> Result<(), AbiError> {
         let slot = self.slot(n, Direction::Output)?;
         slot.drop_irq(n);
         slot.pin.set_level(Level::High);
         slot.pin.apply_output_config(
-            &OutputConfig::default().with_drive_mode(DriveMode::OpenDrain).with_pull(HalPull::Up),
+            &OutputConfig::default()
+                .with_drive_mode(DriveMode::OpenDrain)
+                .with_pull(HalPull::Up),
         );
         slot.pin.set_output_enable(true);
         slot.pin.set_input_enable(true);
@@ -360,11 +385,15 @@ struct Home {
 pub struct PinHome(Mutex<CriticalSectionRawMutex, RefCell<Home>>);
 
 /// The firmware's pin bank.
-pub static PINS: PinHome = PinHome(Mutex::new(RefCell::new(Home { bank: None, leased: false })));
+pub static PINS: PinHome = PinHome(Mutex::new(RefCell::new(Home {
+    bank: None,
+    leased: false,
+})));
 
 impl PinHome {
     fn with_home<R>(&self, f: impl FnOnce(&mut Home) -> R) -> Option<R> {
-        self.0.lock(|cell| cell.try_borrow_mut().ok().map(|mut h| f(&mut h)))
+        self.0
+            .lock(|cell| cell.try_borrow_mut().ok().map(|mut h| f(&mut h)))
     }
 
     /// Installs the bank at boot.
@@ -375,7 +404,8 @@ impl PinHome {
     /// Samples the BOOT button on pin `n` ([`PinBank::boot_button`]);
     /// `None` before the bank is installed or while it is borrowed.
     pub fn boot_button(&self, n: u8) -> Option<bool> {
-        self.with_home(|h| h.bank.as_mut().and_then(|b| b.boot_button(n))).flatten()
+        self.with_home(|h| h.bank.as_mut().and_then(|b| b.boot_button(n)))
+            .flatten()
     }
 
     /// Takes the lease for a payload, with every pin released; `None` when
@@ -402,8 +432,14 @@ pub struct PinLease {
 
 impl PinLease {
     /// Runs `f` on the bank.
-    pub fn with<R>(&mut self, f: impl FnOnce(&mut PinBank) -> Result<R, AbiError>) -> Result<R, AbiError> {
-        self.home.with_home(|h| h.bank.as_mut().map(f)).flatten().unwrap_or(Err(AbiError::Unsupported))
+    pub fn with<R>(
+        &mut self,
+        f: impl FnOnce(&mut PinBank) -> Result<R, AbiError>,
+    ) -> Result<R, AbiError> {
+        self.home
+            .with_home(|h| h.bank.as_mut().map(f))
+            .flatten()
+            .unwrap_or(Err(AbiError::Unsupported))
     }
 }
 

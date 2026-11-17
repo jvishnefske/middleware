@@ -75,7 +75,8 @@ fn args() -> Args {
             "--put" => a.put = Some((need(it.next(), "--put KEY"), need(it.next(), "--put TEXT"))),
             "--stop" => {
                 let file = need(it.next(), "--stop KEYFILE");
-                let mac = parse_mac(&need(it.next(), "--stop MAC")).expect("--stop MAC aa:bb:cc:dd:ee:ff");
+                let mac = parse_mac(&need(it.next(), "--stop MAC"))
+                    .expect("--stop MAC aa:bb:cc:dd:ee:ff");
                 a.stop = Some((file, mac));
             }
             other => panic!("unknown argument {other}"),
@@ -98,11 +99,20 @@ fn samples_line(key: &str, payload: &[u8]) -> Option<String> {
         samples::SampleFormat::I16 => ("i16", b.i16_values().map(|v| v.to_string()).collect()),
         samples::SampleFormat::MuLaw => (
             "mulaw",
-            b.data.iter().map(|c| samples::mulaw_decode(*c).to_string()).collect(),
+            b.data
+                .iter()
+                .map(|c| samples::mulaw_decode(*c).to_string())
+                .collect(),
         ),
-        samples::SampleFormat::Levels => ("levels", b.levels().map(|(r, p)| format!("{r}/{p}")).collect()),
+        samples::SampleFormat::Levels => (
+            "levels",
+            b.levels().map(|(r, p)| format!("{r}/{p}")).collect(),
+        ),
     };
-    let units: Vec<String> = values.chunks(usize::from(h.channels).max(1)).map(|u| u.join(",")).collect();
+    let units: Vec<String> = values
+        .chunks(usize::from(h.channels).max(1))
+        .map(|u| u.join(","))
+        .collect();
     Some(format!(
         "[samples] {key} {kind} {format} ch={} rate={} first={} t={} n={} range={} scale={}: {}",
         h.channels,
@@ -122,7 +132,9 @@ fn describe(payload: &[u8]) -> String {
         Ok(b) => {
             let h = b.header;
             let units: Vec<String> = match h.format {
-                samples::SampleFormat::Levels => b.levels().map(|(r, p)| format!("{r}/{p}")).collect(),
+                samples::SampleFormat::Levels => {
+                    b.levels().map(|(r, p)| format!("{r}/{p}")).collect()
+                }
                 _ => b
                     .i16_values()
                     .collect::<Vec<_>>()
@@ -177,12 +189,19 @@ async fn print_samples(
 async fn main() {
     let a = args();
     let key = Key::new(&a.key).expect("a middleware key");
-    let config = SessionConfig::new().listen(a.listen.clone()).build().expect("config");
+    let config = SessionConfig::new()
+        .listen(a.listen.clone())
+        .build()
+        .expect("config");
     let mut host = ZenohTransport::open(config)
         .await
         .expect("host session")
         .with_timeout(Duration::from_secs(5));
-    println!("listening on {}; waiting for {} ...", a.listen, key.as_str());
+    println!(
+        "listening on {}; waiting for {} ...",
+        a.listen,
+        key.as_str()
+    );
     let mut sub = host.subscriber(key).await.expect("subscriber");
     let mut echoed = None;
     if let Some((put_key, text)) = &a.put {
@@ -193,7 +212,12 @@ async fn main() {
             host.publish(k, text.as_bytes()).await.expect("publish");
             println!("[put] {put_key}: {text}");
             if let Ok(Some(s)) = sub.try_recv(&mut buf) {
-                println!("[sample] {} {} sender {:?}", s.key.as_str(), describe(s.payload), s.meta.sender);
+                println!(
+                    "[sample] {} {} sender {:?}",
+                    s.key.as_str(),
+                    describe(s.payload),
+                    s.meta.sender
+                );
                 echoed = s.meta.sender;
                 break;
             }
@@ -224,7 +248,10 @@ async fn main() {
             .expect("key file")
             .try_into()
             .expect("a 32-byte Ed25519 seed");
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_millis();
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
         let counter = ControlCounter(u64::try_from(ms).expect("counter"));
         let m = control_message(ControlOp::Stop, mac, counter);
         let signature = Signature(SigningKey::from_bytes(&seed).sign(&m).to_bytes());

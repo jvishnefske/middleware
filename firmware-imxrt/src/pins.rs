@@ -57,19 +57,30 @@ impl Default for Pins {
 impl Pins {
     /// No pin configured.
     pub const fn new() -> Self {
-        Pins { modes: [Mode::Idle; GPIOS] }
+        Pins {
+            modes: [Mode::Idle; GPIOS],
+        }
     }
 
     /// The mode of `pin` (`Idle` for a pin the chip lacks).
     pub fn mode(&self, pin: u8) -> Mode {
-        self.modes.get(usize::from(pin)).copied().unwrap_or(Mode::Idle)
+        self.modes
+            .get(usize::from(pin))
+            .copied()
+            .unwrap_or(Mode::Idle)
     }
 
     fn with(self, profile: &Profile, pin: u8, mode: Mode) -> Result<Self, AbiError> {
-        let dir = if mode == Mode::Output { Direction::Output } else { Direction::Input };
+        let dir = if mode == Mode::Output {
+            Direction::Output
+        } else {
+            Direction::Input
+        };
         profile.check_pin(pin, dir)?;
         let mut modes = self.modes;
-        let slot = modes.get_mut(usize::from(pin)).ok_or(AbiError::InvalidArgument)?;
+        let slot = modes
+            .get_mut(usize::from(pin))
+            .ok_or(AbiError::InvalidArgument)?;
         *slot = mode;
         Ok(Pins { modes })
     }
@@ -105,7 +116,10 @@ impl Pins {
 
     /// Pins the payload configured, ascending.
     pub fn configured(&self) -> impl Iterator<Item = u8> + '_ {
-        (0u8..).zip(self.modes.iter()).filter(|(_, m)| **m != Mode::Idle).map(|(p, _)| p)
+        (0u8..)
+            .zip(self.modes.iter())
+            .filter(|(_, m)| **m != Mode::Idle)
+            .map(|(p, _)| p)
     }
 }
 
@@ -119,7 +133,11 @@ mod tests {
         let p = &RT1050;
         assert_eq!(GPIOS, usize::from(board_pins::imxrt::evkb::PIN_COUNT));
         let pins = Pins::new();
-        assert_eq!(pins.read_from(p, 8), Err(AbiError::InvalidArgument), "never configured");
+        assert_eq!(
+            pins.read_from(p, 8),
+            Err(AbiError::InvalidArgument),
+            "never configured"
+        );
         assert_eq!(pins.check_write(p, 8), Err(AbiError::InvalidArgument));
         let pins = pins.output(p, 8).unwrap();
         assert_eq!(pins.check_write(p, 8), Ok(()));
@@ -127,13 +145,30 @@ mod tests {
         let pins = pins.input(p, 8).unwrap();
         assert_eq!(pins.read_from(p, 8), Ok(ReadFrom::Pad));
         assert_eq!(pins.check_write(p, 8), Err(AbiError::InvalidArgument));
-        assert_eq!(pins.output(p, 4), Err(AbiError::Unsupported), "D4: the PHY reset / USER LED");
-        assert_eq!(pins.output(p, 23), Err(AbiError::Unsupported), "LPUART1 TXD");
-        assert_eq!(pins.output(p, 22), Err(AbiError::Unsupported), "SW8 is input only");
+        assert_eq!(
+            pins.output(p, 4),
+            Err(AbiError::Unsupported),
+            "D4: the PHY reset / USER LED"
+        );
+        assert_eq!(
+            pins.output(p, 23),
+            Err(AbiError::Unsupported),
+            "LPUART1 TXD"
+        );
+        assert_eq!(
+            pins.output(p, 22),
+            Err(AbiError::Unsupported),
+            "SW8 is input only"
+        );
         let pins = pins.input(p, 22).unwrap();
         assert_eq!(pins.output(p, 25), Err(AbiError::InvalidArgument));
         let pins = pins.output(p, 13).unwrap();
-        assert_eq!(pins.configured().collect::<heapless::Vec<u8, 4>>().as_slice(), &[8, 13, 22]);
+        assert_eq!(
+            pins.configured()
+                .collect::<heapless::Vec<u8, 4>>()
+                .as_slice(),
+            &[8, 13, 22]
+        );
         assert_eq!(pins.mode(99), Mode::Idle);
     }
 }

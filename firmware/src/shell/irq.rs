@@ -30,15 +30,19 @@ struct Queue {
     logged: u32,
 }
 
-static QUEUE: Mutex<CriticalSectionRawMutex, RefCell<Queue>> =
-    Mutex::new(RefCell::new(Queue { events: EventQueue::new(), logged: 0 }));
+static QUEUE: Mutex<CriticalSectionRawMutex, RefCell<Queue>> = Mutex::new(RefCell::new(Queue {
+    events: EventQueue::new(),
+    logged: 0,
+}));
 
 /// Signalled on every push; the controller waits on it.
 pub static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Microseconds since boot (esp-hal system time; does not wrap in practice).
 pub fn now_us() -> u64 {
-    esp_hal::time::Instant::now().duration_since_epoch().as_micros()
+    esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_micros()
 }
 
 /// Runs `f` on the queue. The `RefCell` is only borrowed inside the

@@ -29,7 +29,12 @@ impl<const N: usize> Default for RxRing<N> {
 impl<const N: usize> RxRing<N> {
     /// An empty ring.
     pub const fn new() -> Self {
-        RxRing { buf: [0; N], head: 0, len: 0, dropped: 0 }
+        RxRing {
+            buf: [0; N],
+            head: 0,
+            len: 0,
+            dropped: 0,
+        }
     }
 
     /// Bytes buffered.
@@ -52,7 +57,11 @@ impl<const N: usize> RxRing<N> {
         let room = N - self.len;
         let stored = room.min(data.len());
         for &b in data.iter().take(stored) {
-            let tail = if N == 0 { 0 } else { (self.head + self.len) % N };
+            let tail = if N == 0 {
+                0
+            } else {
+                (self.head + self.len) % N
+            };
             if let Some(slot) = self.buf.get_mut(tail) {
                 *slot = b;
                 self.len += 1;

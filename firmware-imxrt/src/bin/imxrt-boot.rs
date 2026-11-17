@@ -76,7 +76,10 @@ impl ImageDest for Sdram {
     fn read(&self, at: usize, buf: &mut [u8]) {
         for (i, b) in buf.iter_mut().enumerate() {
             let p = at + i;
-            *b = self.0.get(p / 4).map_or(0, |w| w.load(Relaxed).to_le_bytes()[p % 4]);
+            *b = self
+                .0
+                .get(p / 4)
+                .map_or(0, |w| w.load(Relaxed).to_le_bytes()[p % 4]);
         }
     }
 }
@@ -169,17 +172,30 @@ fn main() -> ! {
     };
     let _ = writeln!(console, "imxrt-boot: record {:?}\r", stored.record);
     let mut dest = Sdram(&APP_IMAGE);
-    let mut decision = decide(&stored.record, |slot| check_slot(&mut flash, &ab, slot, &mut dest));
-    if let Decision::Boot { persist: Some(next), .. } = decision
+    let mut decision = decide(&stored.record, |slot| {
+        check_slot(&mut flash, &ab, slot, &mut dest)
+    });
+    if let Decision::Boot {
+        persist: Some(next),
+        ..
+    } = decision
         && record::save(&mut flash, ab.record, &stored, next).is_err()
     {
-        let _ = writeln!(console, "imxrt-boot: trial attempt not persisted; rolling back\r");
+        let _ = writeln!(
+            console,
+            "imxrt-boot: trial attempt not persisted; rolling back\r"
+        );
         decision = decide(&stored.record.with_attempt(), |slot| {
             check_slot(&mut flash, &ab, slot, &mut dest)
         });
     }
     match decision {
-        Decision::Boot { slot, trial, header, .. } => {
+        Decision::Boot {
+            slot,
+            trial,
+            header,
+            ..
+        } => {
             let _ = writeln!(
                 console,
                 "imxrt-boot: slot {slot:?}{} v{}.{}, {} bytes, SHA-256 ok\r",
@@ -192,7 +208,10 @@ fn main() -> ! {
                 pac::SRC.gpr8().write_value(h.encode());
             }
             enter(header.len, &mut console);
-            recovery(&mut console, format_args!("slot {slot:?} has an unusable vector table"))
+            recovery(
+                &mut console,
+                format_args!("slot {slot:?} has an unusable vector table"),
+            )
         }
         Decision::Recovery { a, b } => recovery(
             &mut console,

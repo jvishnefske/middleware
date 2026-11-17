@@ -44,7 +44,9 @@ pub struct ImageHash {
 
 impl core::fmt::Debug for ImageHash {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ImageHash").field("bytes", &self.total).finish_non_exhaustive()
+        f.debug_struct("ImageHash")
+            .field("bytes", &self.total)
+            .finish_non_exhaustive()
     }
 }
 
@@ -61,7 +63,12 @@ fn compress(state: &mut [u32; 8], block: [u8; BLOCK]) {
 impl ImageHash {
     /// The hash of no bytes.
     pub const fn new() -> Self {
-        ImageHash { state: H0, block: [0; BLOCK], filled: 0, total: 0 }
+        ImageHash {
+            state: H0,
+            block: [0; BLOCK],
+            filled: 0,
+            total: 0,
+        }
     }
 
     /// Bytes hashed so far.
@@ -158,10 +165,7 @@ mod tests {
     #[test]
     fn known_answers() {
         // FIPS 180-2 examples.
-        assert_eq!(
-            ImageHash::digest(b""),
-            reference(b""),
-        );
+        assert_eq!(ImageHash::digest(b""), reference(b""),);
         let abc = ImageHash::digest(b"abc");
         assert_eq!(abc[..4], [0xba, 0x78, 0x16, 0xbf]);
         assert_eq!(abc[28..], [0xf2, 0x00, 0x15, 0xad]);
@@ -177,7 +181,9 @@ mod tests {
             let expect = reference(whole);
             assert_eq!(ImageHash::digest(whole), expect, "len {len}");
             for split in [1usize, 3, 55, 56, 63, 64, 65, 127, 128] {
-                let h = whole.chunks(split).fold(ImageHash::new(), ImageHash::update);
+                let h = whole
+                    .chunks(split)
+                    .fold(ImageHash::new(), ImageHash::update);
                 assert_eq!(h.len(), len as u64);
                 assert_eq!(h.finish(), expect, "len {len} split {split}");
             }

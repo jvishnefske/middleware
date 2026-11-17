@@ -213,13 +213,25 @@ mod tests {
     #[test]
     fn v8_pins_follow_the_pico_board_map() {
         for p in [RP2040, RP2350] {
-            assert_eq!(p.check_pin(30, Direction::Input), Err(AbiError::InvalidArgument));
-            assert_eq!(p.check_pin(255, Direction::Output), Err(AbiError::InvalidArgument));
+            assert_eq!(
+                p.check_pin(30, Direction::Input),
+                Err(AbiError::InvalidArgument)
+            );
+            assert_eq!(
+                p.check_pin(255, Direction::Output),
+                Err(AbiError::InvalidArgument)
+            );
             for reserved in [23, 26, 27, 28, 29] {
-                assert_eq!(p.check_pin(reserved, Direction::Input), Err(AbiError::Unsupported));
+                assert_eq!(
+                    p.check_pin(reserved, Direction::Input),
+                    Err(AbiError::Unsupported)
+                );
             }
             assert_eq!(p.check_pin(24, Direction::Input), Ok(()));
-            assert_eq!(p.check_pin(24, Direction::Output), Err(AbiError::Unsupported));
+            assert_eq!(
+                p.check_pin(24, Direction::Output),
+                Err(AbiError::Unsupported)
+            );
             for ok in [0, 8, 15, 22, 25] {
                 assert_eq!(p.check_pin(ok, Direction::Output), Ok(()));
             }
@@ -230,7 +242,12 @@ mod tests {
     #[test]
     fn gpio_count_matches_the_pin_map() {
         for p in [RP2040, RP2350] {
-            assert_eq!(usize::from(p.gpio_count), p.pins().gpios().count(), "{}", p.name);
+            assert_eq!(
+                usize::from(p.gpio_count),
+                p.pins().gpios().count(),
+                "{}",
+                p.name
+            );
             assert!(p.pins().gpios().all(|g| g < p.gpio_count), "{}", p.name);
         }
     }
@@ -265,13 +282,20 @@ mod tests {
     fn v7_heap_plans_fit_and_images_fit_a_slot() {
         for p in [RP2040, RP2350] {
             assert!(p.plan_fits(), "{}", p.name);
-            assert!(p.max_image <= Slots::new(p.flash.payload.size).capacity(), "{}", p.name);
+            assert!(
+                p.max_image <= Slots::new(p.flash.payload.size).capacity(),
+                "{}",
+                p.name
+            );
         }
         // The RP2040 runs no payloads and so has no heap.
         assert_eq!((RP2040.runtime, RP2040.heap), (false, 0));
         // The RP2350 keeps at least 128 KiB of SRAM for statics and stack.
         assert!(RP2350.sram_outside_heap() >= 128 * 1024);
-        let broken = Profile { heap: 100 * 1024, ..RP2350 };
+        let broken = Profile {
+            heap: 100 * 1024,
+            ..RP2350
+        };
         assert!(!broken.plan_fits());
         assert!(!Profile { heap: 4, ..RP2040 }.plan_fits());
     }

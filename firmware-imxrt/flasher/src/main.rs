@@ -26,7 +26,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU32, Ordering::Relaxed, fence, Ordering::SeqCst};
+use core::sync::atomic::{AtomicU32, Ordering::Relaxed, Ordering::SeqCst, fence};
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use imxrt_base::shell::console::Console;
@@ -78,7 +78,9 @@ fn program(flash: &mut HyperFlash, offset: u32, len: usize) -> Result<(), u32> {
     let mut at = 0;
     while at < len {
         let n = 512.min(len - at);
-        flash.read(offset + at as u32, &mut chunk[..n]).map_err(code)?;
+        flash
+            .read(offset + at as u32, &mut chunk[..n])
+            .map_err(code)?;
         if let Some(k) = (0..n).find(|&k| chunk[k] != byte(at + k)) {
             return Err(0x8000_0000 | (at + k) as u32);
         }
@@ -122,9 +124,15 @@ fn main() -> ! {
             continue;
         }
         fence(SeqCst);
-        let (cmd, offset, len) = (MAILBOX[1].load(Relaxed), MAILBOX[2].load(Relaxed), MAILBOX[3].load(Relaxed));
+        let (cmd, offset, len) = (
+            MAILBOX[1].load(Relaxed),
+            MAILBOX[2].load(Relaxed),
+            MAILBOX[3].load(Relaxed),
+        );
         let result = match cmd {
-            1 => flash.erase(offset, offset.saturating_add(len)).map_err(code),
+            1 => flash
+                .erase(offset, offset.saturating_add(len))
+                .map_err(code),
             2 => program(&mut flash, offset, len as usize),
             _ => Err(8),
         };
@@ -132,7 +140,11 @@ fn main() -> ! {
             Ok(()) => (1, 0),
             Err(c) => (0x100, c),
         };
-        let _ = writeln!(console, "imxrt-flasher: cmd {cmd} at {offset:#x} len {len:#x}: {}\r", if status == 1 { "ok" } else { "FAILED" });
+        let _ = writeln!(
+            console,
+            "imxrt-flasher: cmd {cmd} at {offset:#x} len {len:#x}: {}\r",
+            if status == 1 { "ok" } else { "FAILED" }
+        );
         // Drop FlexSPI's AHB read buffers, so the host's read-back through
         // the memory-mapped window (0x6000_0000) sees the flash as it now is.
         embassy_nxp::pac::FLEXSPI.ahbcr().modify(|w| w.0 |= 1 << 1);

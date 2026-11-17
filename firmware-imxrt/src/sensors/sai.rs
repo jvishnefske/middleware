@@ -143,7 +143,9 @@ impl ClockPlan {
     /// `PLL_AUDIO` with the PLL running: enabled, powered, the loop and
     /// post dividers, 24 MHz reference, not bypassed.
     pub const fn pll_audio(&self) -> u32 {
-        PLL_ENABLE | ((self.pll_post_div_field as u32 & 0b11) << 19) | (self.pll_div_select as u32 & 0x7F)
+        PLL_ENABLE
+            | ((self.pll_post_div_field as u32 & 0b11) << 19)
+            | (self.pll_div_select as u32 & 0x7F)
     }
 
     /// `CSCMR1` with SAI1's clock select replaced in `cscmr1`.
@@ -153,7 +155,9 @@ impl ClockPlan {
 
     /// `CS1CDR` with SAI1's dividers replaced in `cs1cdr`.
     pub const fn cs1cdr(&self, cs1cdr: u32) -> u32 {
-        (cs1cdr & !0x1FF) | ((self.sai1_clk_pred as u32 & 0b111) << 6) | (self.sai1_clk_podf as u32 & 0x3F)
+        (cs1cdr & !0x1FF)
+            | ((self.sai1_clk_pred as u32 & 0b111) << 6)
+            | (self.sai1_clk_podf as u32 & 0x3F)
     }
 }
 
@@ -281,9 +285,15 @@ mod tests {
         assert_eq!((p.rcr4 >> 8) & 0x1F, 15, "SYWD: 16 bit clocks");
         assert_eq!(p.rcr5, 0x0F0F_0F00);
         assert_eq!(p.rcr3, 0x0001_0000);
-        assert_eq!(p.tcr3, 0x0001_0000, "TX channel 0, as the SDK configures it");
+        assert_eq!(
+            p.tcr3, 0x0001_0000,
+            "TX channel 0, as the SDK configures it"
+        );
         assert_eq!(p.rcr1, 0, "a DMA request per word");
-        assert_eq!(p.rmr, 0b01, "the left word masked: the mic is on the right input");
+        assert_eq!(
+            p.rmr, 0b01,
+            "the left word masked: the mic is on the right input"
+        );
         assert_eq!(RCSR_ENABLE, 0x9000_0001);
         assert_eq!(TCSR_ENABLE, 0x9000_0000);
     }

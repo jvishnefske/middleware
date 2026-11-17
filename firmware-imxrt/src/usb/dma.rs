@@ -111,12 +111,18 @@ const DTD_RESERVED: usize = 7;
 
 /// Reads word `i` of a structure.
 fn load(words: &[AtomicU32], i: usize) -> Result<u32, Error> {
-    words.get(i).map(|w| w.load(Ordering::SeqCst)).ok_or(Error::ShortMemory)
+    words
+        .get(i)
+        .map(|w| w.load(Ordering::SeqCst))
+        .ok_or(Error::ShortMemory)
 }
 
 /// Writes word `i` of a structure.
 fn store(words: &[AtomicU32], i: usize, value: u32) -> Result<(), Error> {
-    words.get(i).map(|w| w.store(value, Ordering::SeqCst)).ok_or(Error::ShortMemory)
+    words
+        .get(i)
+        .map(|w| w.store(value, Ordering::SeqCst))
+        .ok_or(Error::ShortMemory)
 }
 
 /// How a queue head is set up: its capabilities word.
@@ -133,15 +139,25 @@ pub struct QhConfig {
 
 impl QhConfig {
     /// Endpoint 0 OUT: 64-byte packets, interrupt on setup.
-    pub const CONTROL_OUT: QhConfig =
-        QhConfig { max_packet: super::EP0_MAX_PACKET, ios: true, zlt_disabled: true };
+    pub const CONTROL_OUT: QhConfig = QhConfig {
+        max_packet: super::EP0_MAX_PACKET,
+        ios: true,
+        zlt_disabled: true,
+    };
     /// Endpoint 0 IN: 64-byte packets.
-    pub const CONTROL_IN: QhConfig =
-        QhConfig { max_packet: super::EP0_MAX_PACKET, ios: false, zlt_disabled: true };
+    pub const CONTROL_IN: QhConfig = QhConfig {
+        max_packet: super::EP0_MAX_PACKET,
+        ios: false,
+        zlt_disabled: true,
+    };
 
     /// A bulk or interrupt endpoint with this max packet length.
     pub const fn data(max_packet: u16) -> QhConfig {
-        QhConfig { max_packet, ios: false, zlt_disabled: true }
+        QhConfig {
+            max_packet,
+            ios: false,
+            zlt_disabled: true,
+        }
     }
 
     /// The capabilities word (`Mult` 0: not isochronous).
@@ -365,7 +381,9 @@ impl DtdStatus {
         } else if self.active {
             Completion::Pending
         } else {
-            Completion::Done { transferred: len.saturating_sub(self.remaining) }
+            Completion::Done {
+                transferred: len.saturating_sub(self.remaining),
+            }
         }
     }
 }
@@ -437,7 +455,10 @@ mod tests {
         let q = qh(&list, in3).unwrap();
         assert_eq!(q.len(), QH_WORDS);
         assert!(core::ptr::eq(q.as_ptr(), list.get(7 * 16).unwrap()));
-        assert_eq!(qh(list.get(..100).unwrap(), in3).err(), Some(Error::ShortMemory));
+        assert_eq!(
+            qh(list.get(..100).unwrap(), in3).err(),
+            Some(Error::ShortMemory)
+        );
     }
 
     #[test]
@@ -459,16 +480,32 @@ mod tests {
     #[test]
     fn fl2_max_packet_past_1024_and_short_heads_are_refused() {
         assert_eq!(QhConfig::data(1025).capabilities(), Err(Error::TooLong));
-        assert_eq!(QhConfig::data(1024).capabilities(), Ok((1024 << 16) | QH_ZLT));
+        assert_eq!(
+            QhConfig::data(1024).capabilities(),
+            Ok((1024 << 16) | QH_ZLT)
+        );
         let short = mem::<15>();
-        assert_eq!(init_qh(&short, QhConfig::CONTROL_IN), Err(Error::ShortMemory));
-        assert!(short.iter().all(|w| w.load(Ordering::SeqCst) == 0xDEAD_BEEF), "nothing written");
+        assert_eq!(
+            init_qh(&short, QhConfig::CONTROL_IN),
+            Err(Error::ShortMemory)
+        );
+        assert!(
+            short
+                .iter()
+                .all(|w| w.load(Ordering::SeqCst) == 0xDEAD_BEEF),
+            "nothing written"
+        );
     }
 
     #[test]
     fn fl2_a_dtd_carries_its_buffer_pages_length_ioc_and_active() {
         let d = mem::<DTD_WORDS>();
-        let t = Transfer { buffer: 0x2000_1234, len: 512, ioc: true, next: None };
+        let t = Transfer {
+            buffer: 0x2000_1234,
+            len: 512,
+            ioc: true,
+            next: None,
+        };
         encode_dtd(&d, t).unwrap();
         assert_eq!(word(&d, 0), T_TERMINATE);
         assert_eq!(word(&d, 1), (512 << 16) | (1 << 15) | (1 << 7));
@@ -487,10 +524,24 @@ mod tests {
     #[test]
     fn fl2_a_dtd_links_to_its_next_and_a_zero_length_packet_is_a_dtd() {
         let d = mem::<DTD_WORDS>();
-        encode_dtd(&d, Transfer { buffer: 0, len: 0, ioc: false, next: Some(0x2000_0040) }).unwrap();
+        encode_dtd(
+            &d,
+            Transfer {
+                buffer: 0,
+                len: 0,
+                ioc: false,
+                next: Some(0x2000_0040),
+            },
+        )
+        .unwrap();
         assert_eq!(word(&d, 0), 0x2000_0040);
         assert_eq!(word(&d, 1), TOKEN_ACTIVE);
-        let t = Transfer { buffer: 0, len: 0, ioc: false, next: Some(0x2000_0044) };
+        let t = Transfer {
+            buffer: 0,
+            len: 0,
+            ioc: false,
+            next: Some(0x2000_0044),
+        };
         assert_eq!(encode_dtd(&d, t), Err(Error::Misaligned));
     }
 
@@ -500,12 +551,25 @@ mod tests {
         assert_eq!(dtd_capacity(0x2000_0FFF), 16 * 1024 + 1);
         assert!(dtd_capacity(u32::MAX) >= DTD_MAX_BYTES);
         let d = mem::<DTD_WORDS>();
-        let over = Transfer { buffer: 0x2000_0010, len: 20 * 1024 - 15, ioc: true, next: None };
+        let over = Transfer {
+            buffer: 0x2000_0010,
+            len: 20 * 1024 - 15,
+            ioc: true,
+            next: None,
+        };
         assert_eq!(encode_dtd(&d, over), Err(Error::TooLong));
-        let fits = Transfer { len: 20 * 1024 - 16, ..over };
+        let fits = Transfer {
+            len: 20 * 1024 - 16,
+            ..over
+        };
         assert_eq!(encode_dtd(&d, fits), Ok(()));
         // Pages past the top of the address space wrap rather than panic.
-        let top = Transfer { buffer: 0xFFFF_F000, len: 4096, ioc: false, next: None };
+        let top = Transfer {
+            buffer: 0xFFFF_F000,
+            len: 4096,
+            ioc: false,
+            next: None,
+        };
         encode_dtd(&d, top).unwrap();
         assert_eq!(word(&d, 3), 0x0000_0000);
         assert_eq!(encode_dtd(&mem::<7>(), fits), Err(Error::ShortMemory));
@@ -517,9 +581,16 @@ mod tests {
         assert_eq!(done.completion(512), Completion::Done { transferred: 500 });
         // An OUT dTD whose total bytes exceed what was asked still decodes.
         assert_eq!(done.completion(4), Completion::Done { transferred: 0 });
-        for bit in [TOKEN_HALTED, TOKEN_DATA_BUFFER_ERROR, TOKEN_TRANSACTION_ERROR] {
+        for bit in [
+            TOKEN_HALTED,
+            TOKEN_DATA_BUFFER_ERROR,
+            TOKEN_TRANSACTION_ERROR,
+        ] {
             let s = DtdStatus::from_token(bit | TOKEN_ACTIVE | (512 << 16));
-            assert!(matches!(s.completion(512), Completion::Failed(_)), "{bit:#x}");
+            assert!(
+                matches!(s.completion(512), Completion::Failed(_)),
+                "{bit:#x}"
+            );
         }
         let s = DtdStatus::from_token(TOKEN_HALTED | TOKEN_TRANSACTION_ERROR);
         assert!(s.halted && s.transaction_error && !s.data_buffer_error && !s.active);
@@ -532,11 +603,17 @@ mod tests {
         let ep = Ep::new(1, Dir::In).unwrap();
         let q = qh(&list, ep).unwrap();
         init_qh(q, QhConfig::data(512)).unwrap();
-        q.get(3).unwrap().store(TOKEN_ACTIVE | TOKEN_HALTED | TOKEN_IOC | (7 << 16), Ordering::SeqCst);
+        q.get(3).unwrap().store(
+            TOKEN_ACTIVE | TOKEN_HALTED | TOKEN_IOC | (7 << 16),
+            Ordering::SeqCst,
+        );
         assert_eq!(prime(&list, ep, 0x2000_0100), Ok(1 << 17));
         assert_eq!(word(q, 2), 0x2000_0100, "next pointer, T clear");
         assert_eq!(word(q, 3), TOKEN_IOC | (7 << 16));
-        assert_eq!(qh_status(q).unwrap().completion(7), Completion::Done { transferred: 0 });
+        assert_eq!(
+            qh_status(q).unwrap().completion(7),
+            Completion::Done { transferred: 0 }
+        );
         assert_eq!(prime(&list, ep, 0x2000_0108), Err(Error::Misaligned));
         q.get(1).unwrap().store(0x2000_011F, Ordering::SeqCst);
         assert_eq!(qh_current_dtd(q), Ok(0x2000_0100));
@@ -558,7 +635,10 @@ mod tests {
         assert_eq!(dtd_address(0x2000_0410, 0), Err(Error::Misaligned));
         assert_eq!(dtd_address(0xFFFF_FFE0, 1), Err(Error::ShortMemory));
         let pool = mem::<{ 4 * DTD_WORDS }>();
-        assert!(core::ptr::eq(dtd(&pool, 3).unwrap().as_ptr(), pool.get(24).unwrap()));
+        assert!(core::ptr::eq(
+            dtd(&pool, 3).unwrap().as_ptr(),
+            pool.get(24).unwrap()
+        ));
         assert_eq!(dtd(&pool, 4).err(), Some(Error::ShortMemory));
         assert_eq!(dtd(&pool, usize::MAX).err(), Some(Error::ShortMemory));
     }

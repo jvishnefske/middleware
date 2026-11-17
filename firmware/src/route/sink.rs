@@ -45,7 +45,10 @@ pub struct Plan<'m> {
 impl Plan<'_> {
     /// Frames completed and abandoned by this message.
     pub const fn report(&self) -> Report {
-        Report { frames: self.step.completed as u32, dropped: self.step.aborted as u32 }
+        Report {
+            frames: self.step.completed as u32,
+            dropped: self.step.aborted as u32,
+        }
     }
 
     /// Whether the preamble goes out before the data.
@@ -57,7 +60,16 @@ impl Plan<'_> {
 impl SinkRoute {
     /// A sink that has seen nothing.
     pub const fn new(cfg: SinkConfig) -> Self {
-        SinkRoute { cfg, sink: Sink::new(), stats: RouteStats { frames: 0, frames_dropped: 0, chunks: 0, chunks_dropped: 0 } }
+        SinkRoute {
+            cfg,
+            sink: Sink::new(),
+            stats: RouteStats {
+                frames: 0,
+                frames_dropped: 0,
+                chunks: 0,
+                chunks_dropped: 0,
+            },
+        }
     }
 
     /// The route's config.
@@ -74,7 +86,11 @@ impl SinkRoute {
     /// include this message.
     pub fn receive(self, msg: &[u8]) -> (Self, Plan<'_>) {
         let (step, data) = self.sink.receive(self.cfg.frame_len, msg);
-        let next = SinkRoute { sink: step.sink, stats: self.stats.record(&step), ..self };
+        let next = SinkRoute {
+            sink: step.sink,
+            stats: self.stats.record(&step),
+            ..self
+        };
         (next, Plan { step, data })
     }
 }
@@ -82,7 +98,10 @@ impl SinkRoute {
 /// The transfers for `plan`, preamble segments (from `preamble`) first.
 pub fn transfers<'a>(preamble: &'a Preamble, plan: &Plan<'a>) -> impl Iterator<Item = Segment<'a>> {
     let start = plan.starts_frame();
-    let data = plan.step.forwards().then_some(Segment { dc: true, bytes: plan.data });
+    let data = plan.step.forwards().then_some(Segment {
+        dc: true,
+        bytes: plan.data,
+    });
     preamble
         .segments()
         .filter(move |_| start)
@@ -107,12 +126,20 @@ mod tests {
 
     fn msg(seq: u16, offset: u32, data: &[u8]) -> Vec<u8> {
         let mut out = std::vec![0u8; HEADER_LEN + data.len()];
-        ChunkHeader { seq, offset, total: 6 }.write(data, &mut out).expect("valid");
+        ChunkHeader {
+            seq,
+            offset,
+            total: 6,
+        }
+        .write(data, &mut out)
+        .expect("valid");
         out
     }
 
     fn plan_of(cfg: &SinkConfig, plan: &Plan<'_>) -> Vec<(bool, Vec<u8>)> {
-        transfers(&cfg.preamble, plan).map(|s| (s.dc, s.bytes.to_vec())).collect()
+        transfers(&cfg.preamble, plan)
+            .map(|s| (s.dc, s.bytes.to_vec()))
+            .collect()
     }
 
     #[test]
@@ -137,8 +164,21 @@ mod tests {
         let m = msg(1, 3, &[4, 5, 6]);
         let (r, p) = r.receive(&m);
         assert_eq!(plan_of(r.config(), &p), [(true, std::vec![4, 5, 6])]);
-        assert_eq!(p.report(), Report { frames: 1, dropped: 0 });
-        assert_eq!(r.stats(), RouteStats { frames: 1, chunks: 2, ..RouteStats::default() });
+        assert_eq!(
+            p.report(),
+            Report {
+                frames: 1,
+                dropped: 0
+            }
+        );
+        assert_eq!(
+            r.stats(),
+            RouteStats {
+                frames: 1,
+                chunks: 2,
+                ..RouteStats::default()
+            }
+        );
         // The next frame re-sends the preamble.
         let m = msg(2, 0, &[9]);
         let (_, p) = r.receive(&m);
@@ -158,13 +198,27 @@ mod tests {
         let late = msg(1, 4, &[5, 6]);
         let (r, p) = r.receive(&late);
         assert!(plan_of(r.config(), &p).is_empty());
-        assert_eq!(p.report(), Report { frames: 0, dropped: 1 });
+        assert_eq!(
+            p.report(),
+            Report {
+                frames: 0,
+                dropped: 1
+            }
+        );
         // Garbage is malformed and dropped.
         let (r, p) = r.receive(&[1, 2, 3]);
-        assert!(matches!(p.step.action, Action::Drop(DropReason::Malformed(_))));
+        assert!(matches!(
+            p.step.action,
+            Action::Drop(DropReason::Malformed(_))
+        ));
         assert_eq!(
             r.stats(),
-            RouteStats { frames: 0, frames_dropped: 1, chunks: 1, chunks_dropped: 3 }
+            RouteStats {
+                frames: 0,
+                frames_dropped: 1,
+                chunks: 1,
+                chunks_dropped: 3
+            }
         );
     }
 
@@ -174,10 +228,21 @@ mod tests {
         let r = SinkRoute::new(bare);
         let m = msg(1, 0, &[1, 2, 3, 4, 5, 6]);
         let (r, p) = r.receive(&m);
-        assert_eq!(plan_of(r.config(), &p), [(true, std::vec![1, 2, 3, 4, 5, 6])]);
-        assert_eq!(p.report(), Report { frames: 1, dropped: 0 });
+        assert_eq!(
+            plan_of(r.config(), &p),
+            [(true, std::vec![1, 2, 3, 4, 5, 6])]
+        );
+        assert_eq!(
+            p.report(),
+            Report {
+                frames: 1,
+                dropped: 0
+            }
+        );
         // A full preamble of MAX_SEGMENTS segments plus data fits the bound.
-        let full = (0..MAX_SEGMENTS).fold(Preamble::new(), |p, i| p.push(i % 2 == 1, &[i as u8]).expect("fits"));
+        let full = (0..MAX_SEGMENTS).fold(Preamble::new(), |p, i| {
+            p.push(i % 2 == 1, &[i as u8]).expect("fits")
+        });
         let (_, p) = SinkRoute::new(bare.with_preamble(full)).receive(&m);
         assert_eq!(transfers(&full, &p).count(), MAX_TRANSFERS);
     }

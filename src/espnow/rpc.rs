@@ -119,11 +119,26 @@ impl Retry {
     /// waits add up to about `budget_ms`.
     pub const fn within(self, budget_ms: Option<u32>) -> Retry {
         let Some(budget) = budget_ms else { return self };
-        let timeout_ms = if budget < self.timeout_ms { budget } else { self.timeout_ms };
-        let fit = if timeout_ms == 0 { 1 } else { budget / timeout_ms };
+        let timeout_ms = if budget < self.timeout_ms {
+            budget
+        } else {
+            self.timeout_ms
+        };
+        let fit = if timeout_ms == 0 {
+            1
+        } else {
+            budget / timeout_ms
+        };
         let fit = if fit == 0 { 1 } else { fit };
-        let attempts = if (self.attempts as u32) < fit { self.attempts } else { fit as u8 };
-        Retry { timeout_ms, attempts: if attempts == 0 { 1 } else { attempts } }
+        let attempts = if (self.attempts as u32) < fit {
+            self.attempts
+        } else {
+            fit as u8
+        };
+        Retry {
+            timeout_ms,
+            attempts: if attempts == 0 { 1 } else { attempts },
+        }
     }
 }
 
@@ -582,7 +597,11 @@ mod tests {
     }
 
     impl Handler for Device {
-        fn handle(&mut self, req: &Request<'_>, response: &mut [u8]) -> Result<usize, HandlerError> {
+        fn handle(
+            &mut self,
+            req: &Request<'_>,
+            response: &mut [u8],
+        ) -> Result<usize, HandlerError> {
             let (key, request) = (req.key, req.body);
             self.runs.push(key.as_str().into());
             self.senders.push(req.meta.sender);
@@ -866,30 +885,72 @@ mod tests {
         use core::time::Duration;
         // A caller's budget shortens attempts and caps how many are made.
         assert_eq!(RETRY.within(None), RETRY);
-        assert_eq!(RETRY.within(Some(250)), Retry { timeout_ms: 100, attempts: 2 });
-        assert_eq!(RETRY.within(Some(30)), Retry { timeout_ms: 30, attempts: 1 });
-        assert_eq!(RETRY.within(Some(0)), Retry { timeout_ms: 0, attempts: 1 });
+        assert_eq!(
+            RETRY.within(Some(250)),
+            Retry {
+                timeout_ms: 100,
+                attempts: 2
+            }
+        );
+        assert_eq!(
+            RETRY.within(Some(30)),
+            Retry {
+                timeout_ms: 30,
+                attempts: 1
+            }
+        );
+        assert_eq!(
+            RETRY.within(Some(0)),
+            Retry {
+                timeout_ms: 0,
+                attempts: 1
+            }
+        );
         assert_eq!(RETRY.within(Some(u32::MAX)), RETRY);
         let (mut req, mut resp, air) = net(&[Fate::Lose; 4]);
         let mut dev = Device::default();
         let mut out = [0u8; 64];
         let budget = RequestOptions::DEFAULT.with_timeout(Duration::from_millis(250));
         assert_eq!(
-            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &budget),
+            call_with(
+                &mut req,
+                &mut resp,
+                &mut dev,
+                "sys/info",
+                &[],
+                &mut out,
+                &budget
+            ),
             Err(RpcClientError::Timeout)
         );
         assert_eq!(air.borrow().sent, 2, "two 100 ms attempts fit 250 ms");
         // Another node is refused before anything is sent.
         let other = RequestOptions::DEFAULT.with_target(Target::Node(SenderId::from_mac(OTHER)));
         assert_eq!(
-            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &other),
+            call_with(
+                &mut req,
+                &mut resp,
+                &mut dev,
+                "sys/info",
+                &[],
+                &mut out,
+                &other
+            ),
             Err(RpcClientError::WrongTarget)
         );
         assert_eq!(air.borrow().sent, 2);
         // The peer itself is fine, and the handler is told who asked.
         let peer = RequestOptions::DEFAULT.with_target(Target::Node(SenderId::from_mac(DEV)));
         assert_eq!(
-            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &peer),
+            call_with(
+                &mut req,
+                &mut resp,
+                &mut dev,
+                "sys/info",
+                &[],
+                &mut out,
+                &peer
+            ),
             Ok(b"esp32s3".to_vec())
         );
         assert_eq!(dev.senders, [Some(SenderId::from_mac(HOST))]);

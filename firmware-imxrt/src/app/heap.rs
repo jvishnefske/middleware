@@ -22,7 +22,8 @@ pub const SIZE: usize = RT1050.heap;
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::empty();
 
-static HEAP_ARENA: ConstStaticCell<[MaybeUninit<u8>; SIZE]> = ConstStaticCell::new([MaybeUninit::uninit(); SIZE]);
+static HEAP_ARENA: ConstStaticCell<[MaybeUninit<u8>; SIZE]> =
+    ConstStaticCell::new([MaybeUninit::uninit(); SIZE]);
 
 /// Gives the arena to the allocator. Called once, first thing at boot.
 pub fn init() {

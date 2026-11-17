@@ -41,20 +41,20 @@
 
 use core::future::pending;
 
+use embassy_time::{Duration, with_timeout};
 use esp_base::periph::dma::DmaState;
-use esp_base::periph::dma_hw::{self, DmaHw, HwSlot};
 use esp_base::periph::dma_done_event;
-use esp_hal::{Async, Blocking};
+use esp_base::periph::dma_hw::{self, DmaHw, HwSlot};
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf};
 use esp_hal::gpio::{InputSignal, OutputSignal};
 use esp_hal::spi::Mode;
 use esp_hal::spi::master::{Config, SpiDma, SpiDmaTransfer};
 use esp_hal::time::Rate;
+use esp_hal::{Async, Blocking};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{MAX_DMA, SpiConfig};
-use embassy_time::{Duration, with_timeout};
 use static_cell::ConstStaticCell;
 
 use super::irq;
@@ -125,7 +125,11 @@ impl dma_hw::Transfer for Transfer {
 impl Parts {
     /// Loads `n` bytes into the transmit buffer with `fill` and starts a
     /// full-duplex transfer of `n` bytes; on failure the parts come back.
-    fn start(mut self, n: usize, fill: impl FnOnce(&mut [u8])) -> Result<Transfer, (AbiError, Parts)> {
+    fn start(
+        mut self,
+        n: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<Transfer, (AbiError, Parts)> {
         let n = n.min(self.tx.capacity()).min(self.rx.capacity());
         if let Some(room) = self.tx.as_mut_slice().get_mut(..n) {
             fill(room);
@@ -150,8 +154,16 @@ impl SpiParts {
     /// Wraps the boot-time driver and takes the static DMA buffers. Call
     /// once; `None` if the buffers were already taken or are misplaced.
     pub fn new(spi: SpiDma<'static, Blocking>) -> Option<Self> {
-        let rx = DmaRxBuf::new(RX_DESC.try_take()?.get_mut().unsize(), RX_BUF.try_take()?.get_mut().unsize()).ok()?;
-        let tx = DmaTxBuf::new(TX_DESC.try_take()?.get_mut().unsize(), TX_BUF.try_take()?.get_mut().unsize()).ok()?;
+        let rx = DmaRxBuf::new(
+            RX_DESC.try_take()?.get_mut().unsize(),
+            RX_BUF.try_take()?.get_mut().unsize(),
+        )
+        .ok()?;
+        let tx = DmaTxBuf::new(
+            TX_DESC.try_take()?.get_mut().unsize(),
+            TX_BUF.try_take()?.get_mut().unsize(),
+        )
+        .ok()?;
         Some(SpiParts { spi, rx, tx })
     }
 }
@@ -167,7 +179,15 @@ impl SpiBus {
     /// The bus for a payload run (closed until `spi_open`).
     pub fn new(parts: SpiParts) -> Self {
         let SpiParts { spi, rx, tx } = parts;
-        SpiBus { hw: HwSlot::new(Parts { spi: spi.into_async(), rx, tx }), dma: DmaState::Idle, open: false }
+        SpiBus {
+            hw: HwSlot::new(Parts {
+                spi: spi.into_async(),
+                rx,
+                tx,
+            }),
+            dma: DmaState::Idle,
+            open: false,
+        }
     }
 
     /// Whether a transfer is running.
@@ -205,12 +225,20 @@ impl SpiBus {
         }
         let started = self
             .hw
-            .step(|hw| hw.start(|p| p.start(data.len(), |room| room.iter_mut().zip(data).for_each(|(d, s)| *d = *s))))
+            .step(|hw| {
+                hw.start(|p| {
+                    p.start(data.len(), |room| {
+                        room.iter_mut().zip(data).for_each(|(d, s)| *d = *s)
+                    })
+                })
+            })
             .unwrap_or(Err(AbiError::Busy));
         started?;
         let mut result = Ok(());
         if let Some(t) = self.hw.get_mut().and_then(DmaHw::transfer_mut)
-            && with_timeout(ROUTE_TIMEOUT, t.0.wait_for_done()).await.is_err()
+            && with_timeout(ROUTE_TIMEOUT, t.0.wait_for_done())
+                .await
+                .is_err()
         {
             t.0.cancel();
             result = Err(AbiError::Transport);
@@ -221,15 +249,24 @@ impl SpiBus {
 
     /// Applies clock and mode (pins are routed by the caller).
     pub fn open(&mut self, cfg: &SpiConfig) -> Result<(), AbiError> {
-        let parts = self.hw.get_mut().and_then(DmaHw::parts_mut).ok_or(AbiError::Busy)?;
+        let parts = self
+            .hw
+            .get_mut()
+            .and_then(DmaHw::parts_mut)
+            .ok_or(AbiError::Busy)?;
         let mode = match cfg.mode {
             0 => Mode::_0,
             1 => Mode::_1,
             2 => Mode::_2,
             _ => Mode::_3,
         };
-        let config = Config::default().with_frequency(Rate::from_khz(cfg.freq_khz)).with_mode(mode);
-        parts.spi.apply_config(&config).map_err(|_| AbiError::InvalidArgument)?;
+        let config = Config::default()
+            .with_frequency(Rate::from_khz(cfg.freq_khz))
+            .with_mode(mode);
+        parts
+            .spi
+            .apply_config(&config)
+            .map_err(|_| AbiError::InvalidArgument)?;
         self.open = true;
         Ok(())
     }
@@ -246,7 +283,9 @@ impl SpiBus {
                 *b = tx.get(i).copied().unwrap_or(0);
             }
         };
-        self.hw.step(|hw| hw.start(|p| p.start(len, fill))).unwrap_or(Err(AbiError::Busy))?;
+        self.hw
+            .step(|hw| hw.start(|p| p.start(len, fill)))
+            .unwrap_or(Err(AbiError::Busy))?;
         self.dma = started;
         Ok(())
     }
@@ -263,7 +302,11 @@ impl SpiBus {
         let (dma, value) = self.dma.complete(Ok(()));
         self.dma = dma;
         if let Some(value) = value {
-            irq::push(dma_done_event(DmaChannel::Spi0, value, irq::now_us() as u32));
+            irq::push(dma_done_event(
+                DmaChannel::Spi0,
+                value,
+                irq::now_us() as u32,
+            ));
         }
     }
 
@@ -287,6 +330,10 @@ impl SpiBus {
     pub fn close(self) -> Option<SpiParts> {
         let parts = self.hw.close();
         MISO.connect_to(&esp_hal::gpio::Level::Low);
-        parts.map(|Parts { spi, rx, tx }| SpiParts { spi: spi.into_blocking(), rx, tx })
+        parts.map(|Parts { spi, rx, tx }| SpiParts {
+            spi: spi.into_blocking(),
+            rx,
+            tx,
+        })
     }
 }

@@ -11,7 +11,10 @@ from a file or stdin:
         | python3 -I tools/mic_capture.py --expect 1000 --wav tone.wav
 
 Batches must be one channel of i16 at one rate; their `first` indices say
-where each goes, so a missing batch leaves zeros and is reported as a gap.
+where each goes. The capture is split into runs of consecutive batches
+(stale batches a link queued before the capture started, or a burst lost
+in transit, start a new run); the longest run is analysed and written, and
+the others are reported.
 Prints the capture's length, gaps, RMS, the dominant frequency (Hann
 window, parabolic interpolation of the peak bin, ignoring < 50 Hz) and the
 tone's SNR (power within --tol of the peak against everything else from
@@ -56,17 +59,23 @@ def parse(lines, key):
     return rate, batches
 
 
-def assemble(batches):
-    """One signal from the batches placed by index; (signal, gap units)."""
-    batches.sort()
-    start = batches[0][0]
-    end = max(f + len(v) for f, v in batches)
-    signal = np.zeros(end - start, dtype=np.int16)
-    covered = 0
+def runs(batches):
+    """The batches split into runs of consecutive indices, longest first."""
+    batches = sorted(set((f, tuple(v)) for f, v in batches))
+    out, cur = [], []
     for first, values in batches:
-        signal[first - start:first - start + len(values)] = values
-        covered += len(values)
-    return signal, (end - start) - covered
+        if cur and first != cur[-1][0] + len(cur[-1][1]):
+            out.append(cur)
+            cur = []
+        cur.append((first, values))
+    if cur:
+        out.append(cur)
+    return sorted(out, key=lambda r: sum(len(v) for _, v in r), reverse=True)
+
+
+def assemble(run):
+    """One signal from a run of consecutive batches."""
+    return np.array([x for _, v in run for x in v], dtype=np.int16)
 
 
 def analyse(signal, rate, tol):
@@ -103,11 +112,16 @@ def main():
     rate, batches = parse(src, a.key)
     if rate is None or not batches:
         sys.exit(f"no {a.key} batches in the input")
-    signal, gap = assemble(batches)
+    parts = runs(batches)
+    longest = parts[0]
+    signal = assemble(longest)
     seconds = len(signal) / rate
     rms = float(np.sqrt(np.mean(signal.astype(np.float64) ** 2)))
-    print(f"{a.key}: {len(batches)} batches, {len(signal)} samples at {rate} Hz "
-          f"({seconds:.2f} s), {gap} missing, RMS {rms:.0f}, peak {int(np.abs(signal.astype(np.int32)).max())}")
+    others = sum(len(r) for r in parts[1:])
+    print(f"{a.key}: {len(batches)} batches in {len(parts)} run(s); the longest: {len(longest)} batches, "
+          f"{len(signal)} samples at {rate} Hz ({seconds:.2f} s) from index {longest[0][0]}, "
+          f"RMS {rms:.0f}, peak {int(np.abs(signal.astype(np.int32)).max())}"
+          + (f"; {others} batches in other runs" if others else ""))
     if a.wav:
         with wave.open(a.wav, "wb") as wf:
             wf.setnchannels(1)

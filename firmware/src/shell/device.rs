@@ -88,6 +88,7 @@
 
 use core::cell::RefCell;
 
+use super::i2c::{self, Bus0};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -96,23 +97,18 @@ use esp_base::chip::{Direction, Profile};
 use esp_base::periph::claims::{Claims, pins};
 use esp_base::periph::pwm::PwmTable;
 use esp_base::route::sink::{SinkRoute, transfers};
-use esp_base::route::table::{Kind, Routes};
 use esp_base::route::stopped_event;
-use middleware::{Key, SenderId};
+use esp_base::route::table::{Kind, Routes};
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
-use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Pull, PwmSpec, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig,
-    TimerSpec, UartConfig,
-};
-use super::i2c::{self, Bus0};
+use middleware::{Key, SenderId};
 use wasm_host::I2cConfig;
-#[cfg(feature = "esp32")]
-use {
-    super::camera,
-    esp_base::periph::claims::Owner,
-    wasm_host::CameraPins,
+use wasm_host::{
+    AbiError, Device, DmaChannel, Edge, Pull, PwmSpec, RouteStat, SinkConfig, Source, SourceConfig,
+    SpiConfig, TimerSpec, UartConfig,
 };
+#[cfg(feature = "esp32")]
+use {super::camera, esp_base::periph::claims::Owner, wasm_host::CameraPins};
 
 use super::adc::AdcUnit;
 use super::bus::Bus;
@@ -162,7 +158,8 @@ impl HwHome {
     }
 
     fn take(&self) -> Option<Hw> {
-        self.0.lock(|c| c.try_borrow_mut().ok().and_then(|mut s| s.take()))
+        self.0
+            .lock(|c| c.try_borrow_mut().ok().and_then(|mut s| s.take()))
     }
 }
 
@@ -217,12 +214,20 @@ impl EspDevice {
     }
 
     fn i2c(&mut self) -> Result<&mut Bus0, AbiError> {
-        self.hw.as_mut().and_then(|h| h.i2c.as_mut()).ok_or(AbiError::Unsupported)
+        self.hw
+            .as_mut()
+            .and_then(|h| h.i2c.as_mut())
+            .ok_or(AbiError::Unsupported)
     }
 
     /// Starts the camera source route (ESP32-CAM, R15).
     #[cfg(all(feature = "esp32", feature = "espnow"))]
-    fn start_camera(&mut self, pins: CameraPins, key: Key<'_>, cfg: SourceConfig) -> Result<u8, AbiError> {
+    fn start_camera(
+        &mut self,
+        pins: CameraPins,
+        key: Key<'_>,
+        cfg: SourceConfig,
+    ) -> Result<u8, AbiError> {
         if !self.profile.camera() || !camera::present() {
             return Err(AbiError::Unsupported);
         }
@@ -230,7 +235,8 @@ impl EspDevice {
             return Err(AbiError::Busy);
         }
         let route = esp_base::route::SourceRoute::camera(cfg, now_ms())?;
-        let route_key = esp_base::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
+        let route_key =
+            esp_base::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
         if pins.all().into_iter().any(|p| self.routes.owns_pin(p)) {
             return Err(AbiError::Busy);
         }
@@ -260,31 +266,45 @@ impl EspDevice {
             self.camera = None;
             let old = self.claims.pins_of(Owner::Camera);
             self.claims = self.claims.release(Owner::Camera);
-            self.pins.with(|b| {
-                for p in pins(old) {
-                    b.unroute(p);
-                }
-                Ok(())
-            })
-            .ok();
+            self.pins
+                .with(|b| {
+                    for p in pins(old) {
+                        b.unroute(p);
+                    }
+                    Ok(())
+                })
+                .ok();
         }
     }
 
     fn spi(&mut self) -> Result<&mut SpiBus, AbiError> {
-        self.hw.as_mut().and_then(|h| h.spi.as_mut()).ok_or(AbiError::Unsupported)
+        self.hw
+            .as_mut()
+            .and_then(|h| h.spi.as_mut())
+            .ok_or(AbiError::Unsupported)
     }
 
     fn uart(&mut self) -> Result<&mut Uart1Port, AbiError> {
-        self.hw.as_mut().and_then(|h| h.uart.as_mut()).ok_or(AbiError::Unsupported)
+        self.hw
+            .as_mut()
+            .and_then(|h| h.uart.as_mut())
+            .ok_or(AbiError::Unsupported)
     }
 
     fn ledc(&mut self) -> Result<&mut LedcHw, AbiError> {
-        self.hw.as_mut().and_then(|h| h.ledc.as_mut()).ok_or(AbiError::Unsupported)
+        self.hw
+            .as_mut()
+            .and_then(|h| h.ledc.as_mut())
+            .ok_or(AbiError::Unsupported)
     }
 
     /// `Busy` while a sink route drives `pin` as its D/C pin.
     fn check_route_pin(&self, pin: u8) -> Result<(), AbiError> {
-        if self.routes.owns_pin(pin) { Err(AbiError::Busy) } else { Ok(()) }
+        if self.routes.owns_pin(pin) {
+            Err(AbiError::Busy)
+        } else {
+            Ok(())
+        }
     }
 
     /// The sink route consuming messages on `key`, if any: such messages go
@@ -533,7 +553,11 @@ impl Device for EspDevice {
     }
 
     fn uart_open(&mut self, cfg: UartConfig) -> Result<(), AbiError> {
-        if [cfg.tx, cfg.rx].into_iter().flatten().any(|p| self.routes.owns_pin(p)) {
+        if [cfg.tx, cfg.rx]
+            .into_iter()
+            .flatten()
+            .any(|p| self.routes.owns_pin(p))
+        {
             return Err(AbiError::Busy);
         }
         let next = self.claims.claim_uart(self.profile, &cfg)?;
@@ -584,7 +608,8 @@ impl Device for EspDevice {
         };
         self.ledc()?.set(step.channel, step.raw);
         if let Some(pin) = step.route {
-            self.pins.with(|b| b.route_out(pin, pwm::signal(step.channel)))?;
+            self.pins
+                .with(|b| b.route_out(pin, pwm::signal(step.channel)))?;
         }
         self.pwm = next;
         self.claims = claims;
@@ -611,7 +636,11 @@ impl Device for EspDevice {
     fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
         self.check_route_pin(pin)?;
         let next = self.claims.claim_adc(self.profile, pin)?;
-        let adc = self.hw.as_mut().and_then(|h| h.adc.as_mut()).ok_or(AbiError::Unsupported)?;
+        let adc = self
+            .hw
+            .as_mut()
+            .and_then(|h| h.adc.as_mut())
+            .ok_or(AbiError::Unsupported)?;
         let raw = self.pins.with(|b| b.analog(pin, || adc.read(pin)))?;
         self.claims = next;
         Ok(raw)
@@ -632,13 +661,24 @@ impl Device for EspDevice {
         Ok(())
     }
 
-    fn i2c_transfer(&mut self, bus: u8, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), AbiError> {
+    fn i2c_transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
         self.profile.i2c_pins(bus)?;
         self.i2c()?.transfer(addr, tx, rx)
     }
 
     #[cfg(feature = "espnow")]
-    fn route_source(&mut self, source: Source, key: Key<'_>, cfg: SourceConfig) -> Result<u8, AbiError> {
+    fn route_source(
+        &mut self,
+        source: Source,
+        key: Key<'_>,
+        cfg: SourceConfig,
+    ) -> Result<u8, AbiError> {
         if !esp_base::radio::carries_routes(key) {
             return Err(AbiError::Unsupported);
         }
@@ -650,7 +690,8 @@ impl Device for EspDevice {
             Source::Camera(_) => return Err(AbiError::Unsupported),
         }
         let route = esp_base::route::SourceRoute::new(cfg, now_ms())?;
-        let route_key = esp_base::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
+        let route_key =
+            esp_base::route::sources::RouteKey::from_key(key).map_err(|_| AbiError::Unsupported)?;
         let (routes, handle) = self.routes.add(key, Kind::Source)?;
         self.routes = routes;
         super::radio::with_sources(|t| t.start(handle, route_key, route));
@@ -670,7 +711,13 @@ impl Device for EspDevice {
         if !spi.is_open() || spi.busy() {
             return Err(AbiError::Busy);
         }
-        let (routes, handle) = self.routes.add(key, Kind::Sink { bus, route: SinkRoute::new(*cfg) })?;
+        let (routes, handle) = self.routes.add(
+            key,
+            Kind::Sink {
+                bus,
+                route: SinkRoute::new(*cfg),
+            },
+        )?;
         // Take the pin over as an output (it may already be one) at the
         // data level, ready for the first frame's preamble.
         self.pins.with(|b| {
@@ -684,7 +731,11 @@ impl Device for EspDevice {
     fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
         self.release_route(handle)?;
         let source = i32::from(handle);
-        for kind in [EventKind::RouteFrames, EventKind::RouteDropped, EventKind::RouteStopped] {
+        for kind in [
+            EventKind::RouteFrames,
+            EventKind::RouteDropped,
+            EventKind::RouteStopped,
+        ] {
             irq::purge(kind, source);
         }
         Ok(())
@@ -695,7 +746,9 @@ impl Device for EspDevice {
         let stats = match entry.kind {
             Kind::Sink { route, .. } => route.stats(),
             #[cfg(feature = "espnow")]
-            Kind::Source => super::radio::read_sources(|t| t.stats(handle)).ok_or(AbiError::Busy)?,
+            Kind::Source => {
+                super::radio::read_sources(|t| t.stats(handle)).ok_or(AbiError::Busy)?
+            }
             #[cfg(not(feature = "espnow"))]
             Kind::Source => return Err(AbiError::Busy),
         };

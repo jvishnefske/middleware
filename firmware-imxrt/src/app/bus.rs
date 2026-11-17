@@ -49,7 +49,11 @@ use middleware::transport::{HandlerError, SenderId};
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
-pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
+pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE {
+    4 + CHUNK_MAX
+} else {
+    MAX_MESSAGE
+};
 
 /// Largest reply body: a payload's reply to a request on a key it serves
 /// (`esp_base::serve::REPLY_CAPACITY`, 512).
@@ -107,11 +111,23 @@ pub struct Inbound {
 
 impl Inbound {
     /// Copies a frame's key and body; `None` if the body is too large.
-    pub fn new(link: LinkId, kind: Kind, key: Key<'_>, body: &[u8], peer: Option<SenderId>) -> Option<Self> {
+    pub fn new(
+        link: LinkId,
+        kind: Kind,
+        key: Key<'_>,
+        body: &[u8],
+        peer: Option<SenderId>,
+    ) -> Option<Self> {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
-        Some(Inbound { link, kind, key: k, body, peer })
+        Some(Inbound {
+            link,
+            kind,
+            key: k,
+            body,
+            peer,
+        })
     }
 
     /// What a payload may know of the request: the link's peer as sender.
@@ -263,8 +279,14 @@ impl Bus {
 
     /// `sys/link/sub` and `sys/link/unsub` on `link`; `None` for any other
     /// key (the request goes to the service).
-    pub fn link_request(&self, link: LinkId, key: Key<'_>, body: &[u8]) -> Option<Result<(), HandlerError>> {
-        self.routing.lock(|r| r.borrow_mut().link_request(link, key, body))
+    pub fn link_request(
+        &self,
+        link: LinkId,
+        key: Key<'_>,
+        body: &[u8],
+    ) -> Option<Result<(), HandlerError>> {
+        self.routing
+            .lock(|r| r.borrow_mut().link_request(link, key, body))
     }
 
     /// Whether `link` is a link of this board.

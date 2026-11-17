@@ -14,8 +14,10 @@
 //! |------|----|----------------------|
 //! | 1 | publication (0.4) | sender id 8, sequence 1 |
 //! | 2 | publication | sender id 8, sequence 1, stream id 4 |
+//! | 3 | publication with trace context | as kind 2, then [`TraceContext`] 25 |
 //! | `0x10` | query | requester's sender id 8, deadline in ms 4 |
 //! | `0x11` | successful reply | replier's sender id 8 |
+//! | `0x12` | query with trace context | as `0x10`, then [`TraceContext`] 25 |
 //!
 //! A publication's sequence numbers one **stream**: one key published
 //! through one transport value. The stream id ([`stream_id`]) tells streams
@@ -24,6 +26,15 @@
 //! Kind 1 attachments (from 0.4 publishers) still decode, without a stream
 //! and so without gaps. Anything else is ignored: the sample or query then
 //! carries no metadata.
+//!
+//! Kinds 3 and `0x12` add the W3C trace context of the publishing or
+//! requesting span (trace id 16, parent span id 8, flags 1: the binary
+//! form of a `traceparent` header, version 00), so a subscriber or
+//! responder can continue the trace ([`decode_trace`]). A sender writes
+//! them only when told to (`ZenohTransport::with_trace_context`): a
+//! decoder older than these kinds ignores the whole attachment, losing
+//! the sender and sequence, so they are for networks whose nodes all
+//! decode them (middleware 0.6 and later, `zenoh_lite` included).
 //!
 //! # Reply errors
 //!
@@ -56,14 +67,22 @@ use crate::transport::{HandlerError, SampleMeta, SenderId, Target};
 const MAGIC: [u8; 2] = [b'm', b'w'];
 const KIND_PUB_V1: u8 = 1;
 const KIND_PUB: u8 = 2;
+const KIND_PUB_TRACED: u8 = 3;
 const KIND_QUERY: u8 = 0x10;
 const KIND_REPLY: u8 = 0x11;
+const KIND_QUERY_TRACED: u8 = 0x12;
 
 /// Length of a publication attachment.
 pub const PUB_ATTACHMENT_LEN: usize = 3 + 8 + 1 + 4;
 const PUB_V1_ATTACHMENT_LEN: usize = 3 + 8 + 1;
 /// Length of a query attachment.
 pub const QUERY_ATTACHMENT_LEN: usize = 3 + 8 + 4;
+/// Length of a [`TraceContext`] on the wire.
+pub const TRACE_CONTEXT_LEN: usize = 16 + 8 + 1;
+/// Length of a publication attachment with trace context (kind 3).
+pub const PUB_TRACED_ATTACHMENT_LEN: usize = PUB_ATTACHMENT_LEN + TRACE_CONTEXT_LEN;
+/// Length of a query attachment with trace context (kind `0x12`).
+pub const QUERY_TRACED_ATTACHMENT_LEN: usize = QUERY_ATTACHMENT_LEN + TRACE_CONTEXT_LEN;
 /// Length of a reply attachment.
 pub const REPLY_ATTACHMENT_LEN: usize = 3 + 8;
 /// Length of a reply-error payload.
@@ -76,6 +95,93 @@ pub const SERVICE_PREFIX: &str = "@mw/svc/";
 /// Longest per-node key expression: the prefix, 16 hex digits, `/` and the
 /// longest key.
 pub const NODE_KEY_MAX: usize = NODE_PREFIX.len() + 16 + 1 + MAX_KEY_LEN;
+
+/// A W3C trace context (`traceparent`, version 00) in binary: the trace,
+/// the span the receiver's span continues from, and the trace flags (bit
+/// 0: sampled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceContext {
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+    pub flags: u8,
+}
+
+impl TraceContext {
+    /// A valid context: neither id all zero (W3C trace context 3.2.2).
+    pub fn is_valid(&self) -> bool {
+        self.trace_id != [0; 16] && self.span_id != [0; 8]
+    }
+
+    /// The sampled flag.
+    pub const fn sampled(&self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    fn encode(&self) -> [u8; TRACE_CONTEXT_LEN] {
+        let mut out = [0u8; TRACE_CONTEXT_LEN];
+        out[..16].copy_from_slice(&self.trace_id);
+        out[16..24].copy_from_slice(&self.span_id);
+        out[24] = self.flags;
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; TRACE_CONTEXT_LEN] = bytes.try_into().ok()?;
+        let ctx = TraceContext {
+            trace_id: bytes[..16].try_into().ok()?,
+            span_id: bytes[16..24].try_into().ok()?,
+            flags: bytes[24],
+        };
+        ctx.is_valid().then_some(ctx)
+    }
+
+    /// The `traceparent` header value: `00-<trace 32 hex>-<span 16 hex>-<flags 2 hex>`.
+    pub fn to_traceparent(&self) -> [u8; 55] {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = [b'-'; 55];
+        out[0] = b'0';
+        out[1] = b'0';
+        let mut put = |at: usize, bytes: &[u8]| {
+            for (i, b) in bytes.iter().enumerate() {
+                out[at + 2 * i] = HEX[usize::from(b >> 4)];
+                out[at + 2 * i + 1] = HEX[usize::from(b & 0x0f)];
+            }
+        };
+        put(3, &self.trace_id);
+        put(36, &self.span_id);
+        put(53, &[self.flags]);
+        out
+    }
+
+    /// Parses a version-00 `traceparent` value (lowercase hex, as the
+    /// specification requires); `None` if malformed or invalid.
+    pub fn parse_traceparent(s: &str) -> Option<Self> {
+        let b = s.as_bytes();
+        if b.len() != 55 || &b[..3] != b"00-" || b[35] != b'-' || b[52] != b'-' {
+            return None;
+        }
+        fn nibble(c: u8) -> Option<u8> {
+            match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                _ => None,
+            }
+        }
+        fn hex<const N: usize>(s: &[u8]) -> Option<[u8; N]> {
+            let mut out = [0u8; N];
+            for (o, pair) in out.iter_mut().zip(s.chunks_exact(2)) {
+                *o = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+            }
+            Some(out)
+        }
+        let ctx = TraceContext {
+            trace_id: hex::<16>(&b[3..35])?,
+            span_id: hex::<8>(&b[36..52])?,
+            flags: hex::<1>(&b[53..55])?[0],
+        };
+        ctx.is_valid().then_some(ctx)
+    }
+}
 
 /// What a publication attachment says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +236,23 @@ pub fn encode_pub(sender: SenderId, seq: Sequence, stream: u32) -> [u8; PUB_ATTA
     out
 }
 
-/// Reads a publication attachment (kind 2, or kind 1 without a stream).
+/// The attachment of a publication carrying the publishing span's trace
+/// context (kind 3; see the module docs for when to send it).
+pub fn encode_pub_traced(
+    sender: SenderId,
+    seq: Sequence,
+    stream: u32,
+    trace: &TraceContext,
+) -> [u8; PUB_TRACED_ATTACHMENT_LEN] {
+    let mut out = [0u8; PUB_TRACED_ATTACHMENT_LEN];
+    out[..PUB_ATTACHMENT_LEN].copy_from_slice(&encode_pub(sender, seq, stream));
+    out[2] = KIND_PUB_TRACED;
+    out[PUB_ATTACHMENT_LEN..].copy_from_slice(&trace.encode());
+    out
+}
+
+/// Reads a publication attachment (kind 2 or 3, or kind 1 without a
+/// stream). A kind 3 trace context is read by [`decode_trace`].
 pub fn decode_pub(bytes: &[u8]) -> Option<PubHeader> {
     let (kind, rest) = strip_header(bytes)?;
     let (sender, rest) = rest.split_first_chunk::<8>()?;
@@ -138,6 +260,9 @@ pub fn decode_pub(bytes: &[u8]) -> Option<PubHeader> {
     let stream = match (kind, rest.len()) {
         (KIND_PUB_V1, 0) if bytes.len() == PUB_V1_ATTACHMENT_LEN => None,
         (KIND_PUB, 4) => Some(u32::from_le_bytes(rest.try_into().ok()?)),
+        (KIND_PUB_TRACED, n) if n == 4 + TRACE_CONTEXT_LEN => {
+            Some(u32::from_le_bytes(rest[..4].try_into().ok()?))
+        }
         _ => return None,
     };
     Some(PubHeader {
@@ -156,17 +281,47 @@ pub fn encode_query(sender: SenderId, deadline_ms: u32) -> [u8; QUERY_ATTACHMENT
     out
 }
 
-/// Reads a query attachment: requester and deadline in milliseconds.
+/// The attachment of a query carrying the requesting span's trace context
+/// (kind `0x12`; see the module docs for when to send it).
+pub fn encode_query_traced(
+    sender: SenderId,
+    deadline_ms: u32,
+    trace: &TraceContext,
+) -> [u8; QUERY_TRACED_ATTACHMENT_LEN] {
+    let mut out = [0u8; QUERY_TRACED_ATTACHMENT_LEN];
+    out[..QUERY_ATTACHMENT_LEN].copy_from_slice(&encode_query(sender, deadline_ms));
+    out[2] = KIND_QUERY_TRACED;
+    out[QUERY_ATTACHMENT_LEN..].copy_from_slice(&trace.encode());
+    out
+}
+
+/// Reads a query attachment (kind `0x10` or `0x12`): requester and
+/// deadline in milliseconds.
 pub fn decode_query(bytes: &[u8]) -> Option<(SenderId, u32)> {
     let (kind, rest) = strip_header(bytes)?;
-    if kind != KIND_QUERY || rest.len() != 12 {
-        return None;
-    }
-    let (sender, deadline) = rest.split_first_chunk::<8>()?;
+    let fields = match (kind, rest.len()) {
+        (KIND_QUERY, 12) => rest,
+        (KIND_QUERY_TRACED, n) if n == 12 + TRACE_CONTEXT_LEN => &rest[..12],
+        _ => return None,
+    };
+    let (sender, deadline) = fields.split_first_chunk::<8>()?;
     Some((
         SenderId(*sender),
         u32::from_le_bytes(deadline.try_into().ok()?),
     ))
+}
+
+/// The trace context of a kind 3 publication or kind `0x12` query
+/// attachment; `None` for every other attachment, and for an all-zero
+/// (invalid) context.
+pub fn decode_trace(bytes: &[u8]) -> Option<TraceContext> {
+    let (kind, _) = strip_header(bytes)?;
+    let at = match (kind, bytes.len()) {
+        (KIND_PUB_TRACED, PUB_TRACED_ATTACHMENT_LEN) => PUB_ATTACHMENT_LEN,
+        (KIND_QUERY_TRACED, QUERY_TRACED_ATTACHMENT_LEN) => QUERY_ATTACHMENT_LEN,
+        _ => return None,
+    };
+    TraceContext::decode(&bytes[at..])
 }
 
 /// The attachment of a successful reply.

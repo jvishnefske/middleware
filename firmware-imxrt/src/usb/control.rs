@@ -53,13 +53,26 @@ impl SetupPacket {
         let v = self.value.to_le_bytes();
         let i = self.index.to_le_bytes();
         let l = self.length.to_le_bytes();
-        [self.request_type, self.request, v[0], v[1], i[0], i[1], l[0], l[1]]
+        [
+            self.request_type,
+            self.request,
+            v[0],
+            v[1],
+            i[0],
+            i[1],
+            l[0],
+            l[1],
+        ]
     }
 
     /// The data stage's direction (`bmRequestType` bit 7); with no data
     /// stage, the status stage is IN.
     pub const fn data_dir(self) -> Dir {
-        if self.request_type & 0x80 != 0 { Dir::In } else { Dir::Out }
+        if self.request_type & 0x80 != 0 {
+            Dir::In
+        } else {
+            Dir::Out
+        }
     }
 
     /// The address of a standard device `SET_ADDRESS` (write it at once
@@ -233,7 +246,11 @@ pub enum BusReset {
 
 /// Decides [`ResetStep::CheckPortReset`].
 pub const fn bus_reset_outcome(portsc1: u32) -> BusReset {
-    if portsc1 & super::regs::PORTSC1_PR != 0 { BusReset::InProgress } else { BusReset::TooLate }
+    if portsc1 & super::regs::PORTSC1_PR != 0 {
+        BusReset::InProgress
+    } else {
+        BusReset::TooLate
+    }
 }
 
 /// The configuration a queue head is reset to on a bus reset: endpoint
@@ -277,8 +294,14 @@ mod tests {
         assert_eq!(p.data_dir(), Dir::Out);
         let addr = p.set_address().unwrap();
         assert_eq!(regs::deviceaddr(addr, true), Ok((42 << 25) | (1 << 24)));
-        assert_eq!(SetupPacket::from_bytes([0x00, 0x05, 0x80, 0x00, 0, 0, 0, 0]).set_address(), None);
-        assert_eq!(SetupPacket::from_bytes([0x01, 0x05, 0x01, 0x00, 0, 0, 0, 0]).set_address(), None);
+        assert_eq!(
+            SetupPacket::from_bytes([0x00, 0x05, 0x80, 0x00, 0, 0, 0, 0]).set_address(),
+            None
+        );
+        assert_eq!(
+            SetupPacket::from_bytes([0x01, 0x05, 0x01, 0x00, 0, 0, 0, 0]).set_address(),
+            None
+        );
     }
 
     #[test]
@@ -303,9 +326,16 @@ mod tests {
         let stale = dma::qh_setup_bytes(q).unwrap();
         q.get(10).unwrap().store(0x0100_0680, Ordering::SeqCst);
         q.get(11).unwrap().store(0x0040_0000, Ordering::SeqCst);
-        assert_eq!(tw.after_copy(false, stale), Tripwire::Again, "controller cleared SUTW");
+        assert_eq!(
+            tw.after_copy(false, stale),
+            Tripwire::Again,
+            "controller cleared SUTW"
+        );
         let fresh = dma::qh_setup_bytes(q).unwrap();
-        assert_eq!(tw.after_copy(true, fresh), Tripwire::Done(SetupPacket::from_bytes(GET_DESCRIPTOR)));
+        assert_eq!(
+            tw.after_copy(true, fresh),
+            Tripwire::Done(SetupPacket::from_bytes(GET_DESCRIPTOR))
+        );
     }
 
     #[test]
@@ -327,7 +357,11 @@ mod tests {
         assert_eq!(wait_step(1, 0), WaitStep::Again);
         assert_eq!(wait_step(1, POLL_LIMIT - 2), WaitStep::Again);
         assert_eq!(wait_step(1, POLL_LIMIT - 1), WaitStep::TimedOut);
-        assert_eq!(wait_step(0, POLL_LIMIT - 1), WaitStep::Done, "a final zero read counts");
+        assert_eq!(
+            wait_step(0, POLL_LIMIT - 1),
+            WaitStep::Done,
+            "a final zero read counts"
+        );
         assert_eq!(wait_step(1, u32::MAX), WaitStep::TimedOut);
     }
 

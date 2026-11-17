@@ -138,9 +138,15 @@ pub struct Ep {
 
 impl Ep {
     /// Endpoint 0 OUT (receives setup packets).
-    pub const EP0_OUT: Ep = Ep { number: 0, dir: Dir::Out };
+    pub const EP0_OUT: Ep = Ep {
+        number: 0,
+        dir: Dir::Out,
+    };
     /// Endpoint 0 IN.
-    pub const EP0_IN: Ep = Ep { number: 0, dir: Dir::In };
+    pub const EP0_IN: Ep = Ep {
+        number: 0,
+        dir: Dir::In,
+    };
 
     /// Endpoint `number` in direction `dir`, if the controller has it.
     pub const fn new(number: u8, dir: Dir) -> Result<Ep, Error> {
@@ -217,7 +223,10 @@ impl EpMask {
 
     /// The endpoints whose bits are set: OUT 0 to 7, then IN 0 to 7.
     pub const fn iter(self) -> EpIter {
-        EpIter { mask: self.0 & EpMask::ALL.0, next: 0 }
+        EpIter {
+            mask: self.0 & EpMask::ALL.0,
+            next: 0,
+        }
     }
 }
 
@@ -236,9 +245,15 @@ impl Iterator for EpIter {
             let i = self.next;
             self.next += 1;
             let ep = if i < ENDPOINTS {
-                Ep { number: i, dir: Dir::Out }
+                Ep {
+                    number: i,
+                    dir: Dir::Out,
+                }
             } else {
-                Ep { number: i - ENDPOINTS, dir: Dir::In }
+                Ep {
+                    number: i - ENDPOINTS,
+                    dir: Dir::In,
+                }
             };
             if self.mask & ep.bit() != 0 {
                 return Some(ep);
@@ -296,7 +311,10 @@ mod tests {
     fn fl2_a_frame_ending_on_a_full_packet_gets_a_zero_length_packet() {
         assert!(needs_zlp(512, HS_BULK_MAX_PACKET));
         assert!(!needs_zlp(511, HS_BULK_MAX_PACKET));
-        assert!(!needs_zlp(0, HS_BULK_MAX_PACKET), "nothing written since the last flush");
+        assert!(
+            !needs_zlp(0, HS_BULK_MAX_PACKET),
+            "nothing written since the last flush"
+        );
         // The RP base's own cases, at its 64-byte full-speed packet.
         assert!(needs_zlp(64, FS_BULK_MAX_PACKET));
         assert!(!needs_zlp(63, FS_BULK_MAX_PACKET));
@@ -351,7 +369,11 @@ mod tests {
         assert_eq!(pick_number(0b1110, None, 4), None, "all of 1-3 taken");
         assert_eq!(pick_number(0, Some(2), 4), Some(2));
         assert_eq!(pick_number(0b0100, Some(2), 4), None, "taken");
-        assert_eq!(pick_number(0, Some(0), 4), None, "endpoint 0 is the control endpoint");
+        assert_eq!(
+            pick_number(0, Some(0), 4),
+            None,
+            "endpoint 0 is the control endpoint"
+        );
         assert_eq!(pick_number(0, Some(4), 4), None, "past the limit");
         assert_eq!(pick_number(0, Some(7), 200), Some(7));
         assert_eq!(pick_number(0xFE, None, 200), None, "never past endpoint 7");

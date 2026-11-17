@@ -164,7 +164,10 @@ pub struct Link {
 
 impl Link {
     /// 100BASE-TX full duplex, what the EVKB's link came up as on the probe.
-    pub const FAST_FULL: Link = Link { speed: Speed::Mbps100, duplex: Duplex::Full };
+    pub const FAST_FULL: Link = Link {
+        speed: Speed::Mbps100,
+        duplex: Duplex::Full,
+    };
 }
 
 /// The link state from a BMSR read and a PHY control 1 read.
@@ -216,11 +219,17 @@ mod tests {
         // KSZ8091 / another model, and a different OUI.
         assert_eq!(
             identify(0x0022, 0x1571),
-            Err(PhyError::WrongPhy { id1: 0x0022, id2: 0x1571 })
+            Err(PhyError::WrongPhy {
+                id1: 0x0022,
+                id2: 0x1571
+            })
         );
         assert_eq!(
             identify(0x0007, 0xC0F1),
-            Err(PhyError::WrongPhy { id1: 0x0007, id2: 0xC0F1 })
+            Err(PhyError::WrongPhy {
+                id1: 0x0007,
+                id2: 0xC0F1
+            })
         );
     }
 
@@ -235,8 +244,14 @@ mod tests {
         assert_eq!(RESET_COMMAND, 0x8000);
         assert_eq!(reset_step(Some(0x8000), 1), ResetStep::Poll);
         assert_eq!(reset_step(Some(0x3100), 2), ResetStep::Done);
-        assert_eq!(reset_step(Some(0x8000), RESET_POLL_BOUND - 1), ResetStep::Poll);
-        assert_eq!(reset_step(Some(0x8000), RESET_POLL_BOUND), ResetStep::Failed);
+        assert_eq!(
+            reset_step(Some(0x8000), RESET_POLL_BOUND - 1),
+            ResetStep::Poll
+        );
+        assert_eq!(
+            reset_step(Some(0x8000), RESET_POLL_BOUND),
+            ResetStep::Failed
+        );
         assert_eq!(reset_step(Some(0x8000), u32::MAX), ResetStep::Failed);
         assert_eq!(reset_step(Some(0x0000), u32::MAX), ResetStep::Done);
         assert_eq!(reset_step(None, 1), ResetStep::Failed);
@@ -260,20 +275,32 @@ mod tests {
     #[test]
     fn fl3_phy_link_decode() {
         assert_eq!(link_state(0x7809, 0x0006), LinkState::Down);
-        assert_eq!(link_state(0x7809 | BMSR_LINK, 0x0000), LinkState::Negotiating);
+        assert_eq!(
+            link_state(0x7809 | BMSR_LINK, 0x0000),
+            LinkState::Negotiating
+        );
         let up = 0x7829 | BMSR_LINK;
         assert_eq!(link_state(up, 0x0116), LinkState::Up(Link::FAST_FULL));
         assert_eq!(
             link_state(up, 0x0001),
-            LinkState::Up(Link { speed: Speed::Mbps10, duplex: Duplex::Half })
+            LinkState::Up(Link {
+                speed: Speed::Mbps10,
+                duplex: Duplex::Half
+            })
         );
         assert_eq!(
             link_state(up, 0x0002),
-            LinkState::Up(Link { speed: Speed::Mbps100, duplex: Duplex::Half })
+            LinkState::Up(Link {
+                speed: Speed::Mbps100,
+                duplex: Duplex::Half
+            })
         );
         assert_eq!(
             link_state(up, 0x0005),
-            LinkState::Up(Link { speed: Speed::Mbps10, duplex: Duplex::Full })
+            LinkState::Up(Link {
+                speed: Speed::Mbps10,
+                duplex: Duplex::Full
+            })
         );
         for op in [3u16, 4, 7] {
             assert_eq!(link_state(up, op), LinkState::Unknown(op as u8));

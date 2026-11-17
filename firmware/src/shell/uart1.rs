@@ -39,9 +39,9 @@ use embassy_futures::select::{Either, select};
 use esp_base::periph::dma::DmaState;
 use esp_base::periph::ring::RxRing;
 use esp_base::periph::{dma_done_event, uart_rx_event};
-use esp_hal::{Async, Blocking};
 use esp_hal::gpio::{InputSignal, Level, OutputSignal};
 use esp_hal::uart::{Config, Uart};
+use esp_hal::{Async, Blocking};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{MAX_DMA, UART_PORT, UART_RX_BUFFER, UartConfig};
@@ -70,7 +70,11 @@ pub struct Uart1Parts {
 impl Uart1Parts {
     /// Wraps the boot-time driver and takes the static buffers. Call once.
     pub fn new(uart: Uart<'static, Blocking>) -> Option<Self> {
-        Some(Uart1Parts { uart, tx_buf: TX_BUF.try_take()?, rx: RX_RING.try_take()? })
+        Some(Uart1Parts {
+            uart,
+            tx_buf: TX_BUF.try_take()?,
+            rx: RX_RING.try_take()?,
+        })
     }
 }
 
@@ -90,7 +94,15 @@ impl Uart1Port {
     pub fn new(parts: Uart1Parts) -> Self {
         let Uart1Parts { uart, tx_buf, rx } = parts;
         rx.clear();
-        Uart1Port { uart: uart.into_async(), tx_buf, tx_len: 0, tx_sent: 0, dma: DmaState::Idle, rx, open: None }
+        Uart1Port {
+            uart: uart.into_async(),
+            tx_buf,
+            tx_len: 0,
+            tx_sent: 0,
+            dma: DmaState::Idle,
+            rx,
+            open: None,
+        }
     }
 
     /// Whether a transmit is running.
@@ -116,7 +128,9 @@ impl Uart1Port {
     }
 
     fn port(&self, port: u8) -> Result<UartConfig, AbiError> {
-        self.open.filter(|c| c.port == port && port as i32 == UART_PORT).ok_or(AbiError::Busy)
+        self.open
+            .filter(|c| c.port == port && port as i32 == UART_PORT)
+            .ok_or(AbiError::Busy)
     }
 
     /// Starts transmitting `data`.
@@ -147,7 +161,15 @@ impl Uart1Port {
     pub async fn io(&mut self) {
         let receiving = self.open.is_some_and(|c| c.rx.is_some());
         let sending = self.dma.in_flight();
-        let Uart1Port { uart, tx_buf, tx_len, tx_sent, dma, rx, .. } = self;
+        let Uart1Port {
+            uart,
+            tx_buf,
+            tx_len,
+            tx_sent,
+            dma,
+            rx,
+            ..
+        } = self;
         let (uart_rx, uart_tx) = uart.split_mut();
         let tx_step = async {
             if !sending {
@@ -198,6 +220,10 @@ impl Uart1Port {
     pub fn close(self) -> Uart1Parts {
         RXD.connect_to(&Level::High);
         self.rx.clear();
-        Uart1Parts { uart: self.uart.into_blocking(), tx_buf: self.tx_buf, rx: self.rx }
+        Uart1Parts {
+            uart: self.uart.into_blocking(),
+            tx_buf: self.tx_buf,
+            rx: self.rx,
+        }
     }
 }

@@ -52,7 +52,10 @@ pub enum FactoryError {
 /// Checks an update image as the device and `mwctl` do; its IMAGE_DEF.
 pub fn check_update(image: &[u8], slot_size: u32) -> Result<ImageDef, FactoryError> {
     if image.len() > slot_size as usize {
-        return Err(FactoryError::TooLarge { len: image.len(), slot: slot_size });
+        return Err(FactoryError::TooLarge {
+            len: image.len(),
+            slot: slot_size,
+        });
     }
     let def = find_image_def_in(image).ok_or(FactoryError::NoImageDef)?;
     if !def.is_exe() || !def.is_rp2350() {
@@ -105,8 +108,12 @@ pub fn factory_flash(update: &[u8], map: &FlashMap, out: &mut [u8]) -> Result<us
     if table.len() > pt.size as usize {
         return Err(FactoryError::Layout);
     }
-    out.get_mut(..table.len()).ok_or(FactoryError::Layout)?.copy_from_slice(&table);
-    let slot = out.get_mut(ab.a.offset as usize..).ok_or(FactoryError::Layout)?;
+    out.get_mut(..table.len())
+        .ok_or(FactoryError::Layout)?
+        .copy_from_slice(&table);
+    let slot = out
+        .get_mut(ab.a.offset as usize..)
+        .ok_or(FactoryError::Layout)?;
     slot.copy_from_slice(update);
     clear_tbyb(slot, &def)?;
     Ok(len)

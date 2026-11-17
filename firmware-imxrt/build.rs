@@ -60,7 +60,11 @@ fn boot_header_object(out: &Path) -> PathBuf {
     let dcd = boot_header::evkb_sdram::dcd().expect("the SDK's SDRAM DCD encodes");
     let mut obj = Object::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
     // EABI version 5, hard-float, as rustc's objects for thumbv7em-none-eabihf.
-    obj.flags = FileFlags::Elf { os_abi: 0, abi_version: 0, e_flags: 0x0500_0400 };
+    obj.flags = FileFlags::Elf {
+        os_abi: 0,
+        abi_version: 0,
+        e_flags: 0x0500_0400,
+    };
     let s = obj.add_section(Vec::new(), b".fcb".to_vec(), SectionKind::ReadOnlyData);
     obj.append_section_data(s, &fcb, 4);
     let s = obj.add_section(Vec::new(), b".dcd".to_vec(), SectionKind::ReadOnlyData);
@@ -85,7 +89,11 @@ fn splice_app_image(script: &Path) {
     let asserts = part("/* @ASSERT */", None);
     let text = fs::read_to_string(script).expect("imxrt-boot.x");
     let anchor = "  .bss (NOLOAD) : ALIGN(4)";
-    assert_eq!(text.matches(anchor).count(), 1, "imxrt-rt's .bss rule changed; update splice_app_image");
+    assert_eq!(
+        text.matches(anchor).count(),
+        1,
+        "imxrt-rt's .bss rule changed; update splice_app_image"
+    );
     let text = text.replace(anchor, &format!("{section}\n{anchor}"));
     fs::write(script, format!("{memory}\n{text}\n{asserts}")).expect("imxrt-boot.x");
 }
@@ -122,7 +130,8 @@ fn main() {
         println!("cargo:rustc-link-arg-bin=imxrt-boot=-Timxrt-boot.x");
     }
     if app {
-        let memory = fs::read_to_string("memory-app.x").expect("memory-app.x")
+        let memory = fs::read_to_string("memory-app.x")
+            .expect("memory-app.x")
             .replace("@FLEXRAM_CONFIG@", &format!("{config:#010x}"));
         fs::write(out.join("memory.x"), memory).expect("memory.x");
         println!("cargo:rustc-link-arg-bin=imxrt-base=--nmagic");

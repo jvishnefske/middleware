@@ -110,12 +110,32 @@ fn tcd(channel: Channel) -> Tcd {
     let d = pac::DMA0;
     match channel {
         Channel::Ch0 => tcd!(
-            d, tcd0_saddr, tcd0_soff, tcd0_attr, tcd0_nbytes_mlno, tcd0_slast, tcd0_daddr, tcd0_doff,
-            tcd0_citer_elinkno, tcd0_biter_elinkno, tcd0_dlastsga, tcd0_csr
+            d,
+            tcd0_saddr,
+            tcd0_soff,
+            tcd0_attr,
+            tcd0_nbytes_mlno,
+            tcd0_slast,
+            tcd0_daddr,
+            tcd0_doff,
+            tcd0_citer_elinkno,
+            tcd0_biter_elinkno,
+            tcd0_dlastsga,
+            tcd0_csr
         ),
         Channel::Ch1 => tcd!(
-            d, tcd1_saddr, tcd1_soff, tcd1_attr, tcd1_nbytes_mlno, tcd1_slast, tcd1_daddr, tcd1_doff,
-            tcd1_citer_elinkno, tcd1_biter_elinkno, tcd1_dlastsga, tcd1_csr
+            d,
+            tcd1_saddr,
+            tcd1_soff,
+            tcd1_attr,
+            tcd1_nbytes_mlno,
+            tcd1_slast,
+            tcd1_daddr,
+            tcd1_doff,
+            tcd1_citer_elinkno,
+            tcd1_biter_elinkno,
+            tcd1_dlastsga,
+            tcd1_csr
         ),
     }
 }
@@ -142,7 +162,8 @@ pub fn start_ring(ring: &Ring) {
     t.doff.write(|w| w.set_doff(step as u16));
     t.citer.write(|w| w.set_citer(ring.len));
     t.biter.write(|w| w.set_biter(ring.len));
-    t.dlastsga.write(|w| w.set_dlastsga((u32::from(ring.len) * step).wrapping_neg()));
+    t.dlastsga
+        .write(|w| w.set_dlastsga((u32::from(ring.len) * step).wrapping_neg()));
     t.csr.write(|w| w.set_dreq(false));
     pac::DMAMUX.chcfg(ring.channel as usize).write(|w| {
         w.set_source(ring.source);
@@ -161,5 +182,7 @@ pub fn write_index(ring: &Ring) -> usize {
 /// Stops the channel: its request disabled and its DMAMUX slot off.
 pub fn stop(channel: Channel) {
     pac::DMA0.cerq().write(|w| w.set_cerq(channel as u8));
-    pac::DMAMUX.chcfg(channel as usize).write(|w| w.set_enbl(pac::dmamux::vals::Enbl::Enbl0));
+    pac::DMAMUX
+        .chcfg(channel as usize)
+        .write(|w| w.set_enbl(pac::dmamux::vals::Enbl::Enbl0));
 }

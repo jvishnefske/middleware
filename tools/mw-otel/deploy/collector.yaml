@@ -1,0 +1,37 @@
+# An OpenTelemetry Collector between mw-otel-bridge (or any host service
+# built with middleware's `zenoh-otel`) and a Grafana stack. Point the
+# bridge at it with OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318.
+#
+# Replace the three backend URLs. Each speaks OTLP/HTTP natively:
+#   Prometheus  --web.enable-otlp-receiver   <prom>/api/v1/otlp   (on at 10.51.200.16)
+#   Loki 3.x    OTLP ingestion               <loki>:3100/otlp
+#   Tempo       OTLP receiver                <tempo>:4318
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+  # Bounded memory: drop data rather than grow without limit when a
+  # backend is down.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+
+exporters:
+  otlphttp/prometheus:
+    endpoint: http://PROMETHEUS:9090/api/v1/otlp
+  otlphttp/loki:
+    endpoint: http://LOKI:3100/otlp
+  otlphttp/tempo:
+    endpoint: http://TEMPO:4318
+
+service:
+  pipelines:
+    metrics: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/prometheus] }
+    logs:    { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/loki] }
+    traces:  { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/tempo] }

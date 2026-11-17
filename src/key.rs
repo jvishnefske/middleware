@@ -175,7 +175,10 @@ impl<const N: usize> KeyBuf<N> {
             i += 1;
         }
         // Lossless: src.len() <= N <= u8::MAX (CAPACITY_OK).
-        Ok(KeyBuf { len: src.len() as u8, bytes })
+        Ok(KeyBuf {
+            len: src.len() as u8,
+            bytes,
+        })
     }
 
     /// The key text.
@@ -338,7 +341,12 @@ mod tests {
             Err(_) => panic!(),
         };
         assert_eq!(C.as_str(), "a/b");
-        assert_eq!(KeyBuf::<16>::try_from(Key::from_static("x")).unwrap().as_str(), "x");
+        assert_eq!(
+            KeyBuf::<16>::try_from(Key::from_static("x"))
+                .unwrap()
+                .as_str(),
+            "x"
+        );
     }
 
     #[test]
@@ -351,7 +359,9 @@ mod tests {
         }
         assert_eq!(owned.as_filter(), borrowed);
         assert_eq!(owned.key(), Key::from_static("app"));
-        let exact: KeyFilterBuf<8> = KeyFilter::Exact(Key::from_static("app/x")).to_buf().unwrap();
+        let exact: KeyFilterBuf<8> = KeyFilter::Exact(Key::from_static("app/x"))
+            .to_buf()
+            .unwrap();
         assert!(exact.matches(Key::from_static("app/x")));
         assert!(!exact.matches(Key::from_static("app/x/y")));
         assert_eq!(

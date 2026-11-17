@@ -23,9 +23,9 @@ cd "$(dirname "$0")/.."
 EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
-CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2) '
+CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|opentelemetry) '
 EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite'
-HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim'
+HOST_FEATURES='std|zenoh|zenoh-otel|grpc|istio|mdns|dns-sd|memory|fw-sim'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -102,11 +102,18 @@ done
 echo "== Y11: [fw-sim] on host"
 cargo build --quiet --no-default-features --features fw-sim
 
-for set in "zenoh" "grpc" "grpc,istio" "mdns" "dns-sd" "memory" "mdns,dns-sd" "zenoh,grpc,istio,prost,mdns,dns-sd"; do
+for set in "zenoh" "zenoh-otel" "grpc" "grpc,istio" "mdns" "dns-sd" "memory" "mdns,dns-sd" "zenoh,grpc,istio,prost,mdns,dns-sd"; do
     echo "== F2: [$set] on host"
     cargo build --quiet --no-default-features --features "$set"
     if features_of_self --no-default-features --features "$set" | grep -Eqx "$EMBEDDED_FEATURES"; then
         fail "[$set] enables an embedded feature ($EMBEDDED_FEATURES)"
+    fi
+done
+
+echo "== OT5: zenoh-otel is off unless asked for"
+for set in "zenoh" "zenoh,grpc,istio,prost,mdns,dns-sd,memory"; do
+    if deps --no-default-features --features "$set" | grep -q '^opentelemetry'; then
+        fail "[$set] pulls in OpenTelemetry without zenoh-otel"
     fi
 done
 

@@ -39,10 +39,10 @@ use embassy_time::Instant;
 use esp_base::periph::timers::Timers;
 use esp_base::periph::{dma_done_event, timer_event};
 use middleware::loader::is_system_key;
-use middleware::{Key, SenderId};
 use middleware::wasm_abi::events::{DmaChannel, Event, EventKind, EventQueue, MAX_EVENTS};
 use middleware::wasm_abi::periph::{I2cConfig, SpiConfig, TimerSpec};
 use middleware::wasm_abi::{AbiError, Pull};
+use middleware::{Key, SenderId};
 use rp_base::chip::Profile;
 use rp_base::periph::claims::{Claims, Owner, pins};
 use rp_base::periph::func::SpiRoute;
@@ -71,7 +71,10 @@ pub struct Analog {
 
 impl Analog {
     /// The converter and its three pin channels.
-    pub fn new(adc: Adc<'static, embassy_rp::adc::Blocking>, channels: [Channel<'static>; 3]) -> Self {
+    pub fn new(
+        adc: Adc<'static, embassy_rp::adc::Blocking>,
+        channels: [Channel<'static>; 3],
+    ) -> Self {
         Analog { adc, channels }
     }
 }
@@ -192,13 +195,17 @@ impl RpDevice {
     /// nothing (the progress lives in the bus).
     pub async fn io(&mut self) {
         loop {
-            let Some(hw) = self.hw.as_mut() else { return core::future::pending().await };
+            let Some(hw) = self.hw.as_mut() else {
+                return core::future::pending().await;
+            };
             if !hw.spi.busy() {
                 return core::future::pending().await;
             }
             if let Some(value) = hw.spi.step() {
                 self.select(false);
-                let _ = self.events.push(dma_done_event(DmaChannel::Spi0, value, now_us() as u32));
+                let _ = self
+                    .events
+                    .push(dma_done_event(DmaChannel::Spi0, value, now_us() as u32));
                 return;
             }
             yield_now().await;
@@ -280,7 +287,8 @@ impl wasm_host::Device for RpDevice {
     fn gpio_write(&mut self, pin: u8, high: bool) -> Result<(), AbiError> {
         self.claims.check_gpio(pin)?;
         self.modes.check_write(self.profile, pin)?;
-        self.pin(pin)?.set_level(if high { Level::High } else { Level::Low });
+        self.pin(pin)?
+            .set_level(if high { Level::High } else { Level::Low });
         Ok(())
     }
 
@@ -313,8 +321,14 @@ impl wasm_host::Device for RpDevice {
     fn adc_read(&mut self, pin: u8) -> Result<u16, AbiError> {
         let channel = usize::from(self.profile.adc_channel(pin)?);
         let analog = &mut self.hw.as_mut().ok_or(AbiError::Unsupported)?.adc;
-        let ch = analog.channels.get_mut(channel).ok_or(AbiError::Unsupported)?;
-        analog.adc.blocking_read(ch).map_err(|_| AbiError::Transport)
+        let ch = analog
+            .channels
+            .get_mut(channel)
+            .ok_or(AbiError::Unsupported)?;
+        analog
+            .adc
+            .blocking_read(ch)
+            .map_err(|_| AbiError::Transport)
     }
 
     /// Resolves the pins onto SPI0 or SPI1, claims them (pins the bus held
@@ -372,7 +386,13 @@ impl wasm_host::Device for RpDevice {
         Ok(())
     }
 
-    fn i2c_transfer(&mut self, bus: u8, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), AbiError> {
+    fn i2c_transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
         self.hw()?.i2c.transfer(bus, addr, tx, rx)
     }
 
