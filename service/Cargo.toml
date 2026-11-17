@@ -42,3 +42,13 @@ opentelemetry-proto = { version = "0.33", default-features = false, features = [
 tokio-stream = { version = "0.1", features = ["net"] }
 bytes = "1"
 http = "1"
+
+# Examples' unit tests run under `cargo test` (design.md MS23 cites them);
+# without `test = true` cargo only builds examples.
+[[example]]
+name = "demo_echo"
+test = true
+
+[[example]]
+name = "demo_caller"
+test = true
