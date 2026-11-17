@@ -7,7 +7,7 @@
 
 use middleware::wasm_abi::bridge::{BRIDGE_BASE, Bridge, BridgeTable};
 use middleware::wasm_abi::route::RouteStat;
-use middleware::wasm_abi::{ABI5_IMPORTS, IMPORTS, import_in};
+use middleware::wasm_abi::{ABI5_IMPORTS, ABI6_IMPORTS, IMPORTS, import_in};
 use middleware::{Filter, Key};
 use wasm_host::{AbiError, Device, Limits, LoadError, Payload, Pull};
 
@@ -214,7 +214,8 @@ fn cl2_the_bridge_template_loads_and_installs_both_rules() {
 #[test]
 fn cl2_abi5_hosts_do_not_know_route_bridge_and_older_payloads_still_load() {
     assert_eq!(import_in(5, "route_bridge"), None);
-    assert_eq!(IMPORTS.len(), ABI5_IMPORTS + 1);
+    assert_eq!(ABI6_IMPORTS, ABI5_IMPORTS + 1);
+    assert_eq!(IMPORTS[ABI6_IMPORTS - 1].name, "route_bridge");
     // An ABI 1 payload (log/publish/subscribe, 64 KiB page) and an ABI 5
     // one load on this ABI 6 host unchanged.
     for wat in [

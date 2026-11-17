@@ -1,5 +1,6 @@
 //! Pin claims: which pins the SPI bus, the secondary UART, GPIO
-//! interrupts, PWM outputs, ADC inputs, the I2C bus and the camera hold.
+//! interrupts, PWM outputs, ADC inputs, the I2C bus, the camera and LED
+//! strips hold.
 //!
 //! A [`Claims`] value is one pin bitmask per [`Owner`]. Every
 //! transition is a function from a claims value to a new one, applied only
@@ -25,10 +26,13 @@
 //!   read back) and the camera's eleven input pins; each is checked against
 //!   the profile in its direction and refused when another owner holds it.
 //!   [`Claims::release`] drops one owner's pins.
+//! * [`Claims::claim_ledstrip`] (ABI 7) adds an LED strip's data pin (it
+//!   is driven), refused when another owner holds it;
+//!   [`Claims::release_ledstrip`] gives one strip pin back.
 //! * [`Claims::check_gpio`] guards plain `gpio_*` calls: pins routed to a
-//!   peripheral (SPI, UART, PWM, I2C, camera), and analog ADC pins, are off
-//!   limits until the payload stops or the peripheral lets them go (for
-//!   PWM, `pwm_stop`).
+//!   peripheral (SPI, UART, PWM, I2C, camera, LED strip), and analog ADC
+//!   pins, are off limits until the payload stops or the peripheral lets
+//!   them go (for PWM, `pwm_stop`).
 //!
 //! Errors follow the ABI: a pin that does not exist is
 //! [`AbiError::InvalidArgument`], a reserved pin (or an output on an
@@ -58,6 +62,8 @@ pub enum Owner {
     I2c,
     /// The camera's parallel port (R15).
     Camera,
+    /// An LED strip's data pin (ABI 7).
+    LedStrip,
 }
 
 /// Pin ownership for one payload session.
@@ -70,6 +76,7 @@ pub struct Claims {
     adc: u64,
     i2c: u64,
     camera: u64,
+    ledstrip: u64,
 }
 
 const fn bit(pin: u8) -> u64 {
@@ -92,6 +99,7 @@ impl Claims {
             adc: 0,
             i2c: 0,
             camera: 0,
+            ledstrip: 0,
         }
     }
 
@@ -114,6 +122,8 @@ impl Claims {
             Some(Owner::I2c)
         } else if self.camera & b != 0 {
             Some(Owner::Camera)
+        } else if self.ledstrip & b != 0 {
+            Some(Owner::LedStrip)
         } else {
             None
         }
@@ -129,6 +139,7 @@ impl Claims {
             Owner::Adc => self.adc,
             Owner::I2c => self.i2c,
             Owner::Camera => self.camera,
+            Owner::LedStrip => self.ledstrip,
         }
     }
 
@@ -142,6 +153,10 @@ impl Claims {
             Owner::Adc => Claims { adc: 0, ..self },
             Owner::I2c => Claims { i2c: 0, ..self },
             Owner::Camera => Claims { camera: 0, ..self },
+            Owner::LedStrip => Claims {
+                ledstrip: 0,
+                ..self
+            },
         }
     }
 
@@ -247,6 +262,24 @@ impl Claims {
         Ok(Claims { camera, ..self })
     }
 
+    /// Adds LED strip data `pin` (ABI 7; it is driven). Other strip pins
+    /// stay claimed; claiming a pin the strips already hold is a no-op.
+    pub fn claim_ledstrip(self, profile: &Profile, pin: u8) -> Result<Self, AbiError> {
+        let add = self.check(profile, Owner::LedStrip, &[(Some(pin), Direction::Output)])?;
+        Ok(Claims {
+            ledstrip: self.ledstrip | add,
+            ..self
+        })
+    }
+
+    /// Gives LED strip pin `pin` back; other pins are untouched.
+    pub const fn release_ledstrip(self, pin: u8) -> Self {
+        Claims {
+            ledstrip: self.ledstrip & !bit(pin),
+            ..self
+        }
+    }
+
     /// Enables (`on`) or disables the interrupt claim on `pin`.
     pub fn set_irq(self, profile: &Profile, pin: u8, on: bool) -> Result<Self, AbiError> {
         if !on {
@@ -300,7 +333,13 @@ impl Claims {
     pub const fn check_gpio(&self, pin: u8) -> Result<(), AbiError> {
         match self.owner(pin) {
             Some(
-                Owner::Spi | Owner::Uart | Owner::Pwm | Owner::Adc | Owner::I2c | Owner::Camera,
+                Owner::Spi
+                | Owner::Uart
+                | Owner::Pwm
+                | Owner::Adc
+                | Owner::I2c
+                | Owner::Camera
+                | Owner::LedStrip,
             ) => Err(AbiError::InvalidArgument),
             Some(Owner::Irq) | None => Ok(()),
         }
@@ -741,5 +780,95 @@ mod tests {
         );
         // The ESP32-C3 maps no bus.
         assert_eq!(ESP32C3.i2c_pins(0), Err(AbiError::Unsupported));
+    }
+
+    #[test]
+    fn ls4_ledstrip_pins_are_driven_owned_and_exclusive() {
+        let c = Claims::new().claim_ledstrip(&ESP32S3, 45).unwrap();
+        assert_eq!(c.owner(45), Some(Owner::LedStrip));
+        assert_eq!(
+            c.check_gpio(45),
+            Err(AbiError::InvalidArgument),
+            "gpio_* refused"
+        );
+        // Re-claiming the same pin is fine; a second pin adds.
+        assert_eq!(c.claim_ledstrip(&ESP32S3, 45), Ok(c));
+        let two = c.claim_ledstrip(&ESP32S3, 4).unwrap();
+        assert_eq!(
+            pins(two.pins_of(Owner::LedStrip)).collect::<heapless::Vec<u8, 2>>(),
+            [4, 45]
+        );
+        // Pin checks as for gpio_output.
+        assert_eq!(
+            Claims::new().claim_ledstrip(&ESP32S3, 22),
+            Err(AbiError::InvalidArgument),
+            "missing"
+        );
+        assert_eq!(
+            Claims::new().claim_ledstrip(&ESP32S3, 43),
+            Err(AbiError::Unsupported),
+            "console"
+        );
+        assert_eq!(
+            Claims::new().claim_ledstrip(&ESP32, 36),
+            Err(AbiError::Unsupported),
+            "input-only"
+        );
+        assert_eq!(
+            Claims::new().claim_ledstrip(&ESP32C3, 19),
+            Err(AbiError::Unsupported),
+            "USB"
+        );
+        // Nobody takes another owner's pin.
+        assert_eq!(
+            c.claim_spi(&ESP32S3, &spi(45, 11, -1, -1)),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(
+            c.claim_uart(&ESP32S3, &uart(45, -1)),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(
+            c.set_irq(&ESP32S3, 45, true),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(c.claim_pwm(&ESP32S3, 45), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            c.claim_i2c(&ESP32S3, 45, 46),
+            Err(AbiError::InvalidArgument)
+        );
+        let held = Claims::new()
+            .claim_spi(&ESP32S3, &spi(12, 11, -1, -1))
+            .unwrap()
+            .claim_uart(&ESP32S3, &uart(17, -1))
+            .unwrap()
+            .claim_pwm(&ESP32S3, 5)
+            .unwrap()
+            .claim_i2c(&ESP32S3, 8, 9)
+            .unwrap()
+            .set_irq(&ESP32S3, 6, true)
+            .unwrap();
+        for pin in [12, 11, 17, 5, 8, 9, 6] {
+            assert_eq!(
+                held.claim_ledstrip(&ESP32S3, pin),
+                Err(AbiError::InvalidArgument),
+                "pin {pin}"
+            );
+        }
+        let cam = Claims::new()
+            .claim_camera(&ESP32, &CameraPins::AI_THINKER)
+            .unwrap();
+        assert_eq!(
+            cam.claim_ledstrip(&ESP32, 22),
+            Err(AbiError::InvalidArgument),
+            "PCLK"
+        );
+        // Releasing one strip pin keeps the other and other owners' pins.
+        let back = two.claim_pwm(&ESP32S3, 5).unwrap().release_ledstrip(45);
+        assert_eq!(back.owner(45), None);
+        assert_eq!(back.check_gpio(45), Ok(()));
+        assert_eq!(back.owner(4), Some(Owner::LedStrip));
+        assert_eq!(back.owner(5), Some(Owner::Pwm));
+        assert_eq!(back.release(Owner::LedStrip).owner(4), None);
     }
 }

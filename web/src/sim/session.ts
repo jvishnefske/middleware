@@ -1,7 +1,8 @@
 // Simulation session (requirements U6, D10): drives a protocol-wasm
 // Simulator (wasm-host, the device runtime, compiled to WASM) on a clock and
 // keeps what the UI renders: the virtual pin table and the ABI 2 peripheral
-// view (timers, last SPI transfer, UART transmit log, queue overflow).
+// view (timers, last SPI transfer, UART transmit log, queue overflow) and the
+// ABI 7 LED strips (LS6: each strip's LEDs, from `Simulator.ledstrips()`).
 // DOM-free; the clock is injected so tests run in virtual time.
 //
 // Each poll calls `Simulator.step(nowUs)`, which completes DMA started
@@ -14,7 +15,15 @@
 // `request` hands a request to the payload serving its key. Several
 // sessions (one per unit) talk through a `SimBus` (bus.ts).
 
-import type { PinState, Protocol, RequestResult, SimEvent, Simulator, TimerState } from "../protocol/wasm";
+import type { LedStripState, PinState, Protocol, RequestResult, SimEvent, Simulator, TimerState } from "../protocol/wasm";
+
+/** G, R, B wire bytes as `#rrggbb` colours, one per whole LED. */
+export function ledColours(grb: Uint8Array): string[] {
+  const hex = (b: number) => b.toString(16).padStart(2, "0");
+  const out: string[] = [];
+  for (let i = 0; i + 3 <= grb.length; i += 3) out.push(`#${hex(grb[i + 1])}${hex(grb[i])}${hex(grb[i + 2])}`);
+  return out;
+}
 
 /** Per-request metadata a caller may pass (`RequestMeta`). */
 export interface RequestMetaIn {
@@ -101,11 +110,17 @@ export class SimSession {
       case "irq":
         this.irqs++;
         break;
+      case "ledstripOpen":
+        // The pin is the strip's now, not GPIO.
+        this.pinTable.delete(e.pin);
+        break;
       default:
         break;
     }
     this.events.onEvent?.(e);
-    if (e.kind === "output" || e.kind === "input" || e.kind === "write") this.events.onPins?.(this.pinTable);
+    if (e.kind === "output" || e.kind === "input" || e.kind === "write" || e.kind === "ledstripOpen") {
+      this.events.onPins?.(this.pinTable);
+    }
   }
 
   /** Current peripheral state. */
@@ -121,6 +136,11 @@ export class SimSession {
 
   private notifyPeripherals(): void {
     if (this.events.onPeripherals) this.events.onPeripherals(this.peripherals());
+  }
+
+  /** Open LED strips with the colours their LEDs last received. */
+  ledstrips(): LedStripState[] {
+    return this.sim.ledstrips();
   }
 
   /** Whether the payload exports `on_irq`. */

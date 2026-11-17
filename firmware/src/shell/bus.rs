@@ -21,11 +21,11 @@
 
 use core::fmt::{self, Write as _};
 
+use crate::ota::Origin;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embassy_sync::signal::Signal;
-use esp_base::ota::Origin;
 use heapless::{String, Vec};
 use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
@@ -48,9 +48,9 @@ pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE {
 };
 
 /// Largest reply body: a payload's reply to a request on a key it serves
-/// (`esp_base::serve::REPLY_CAPACITY`, 512); `sys/info` is at most
+/// (`crate::serve::REPLY_CAPACITY`, 512); `sys/info` is at most
 /// `MAX_INFO_LEN`, 85 bytes.
-pub const MAX_REPLY: usize = esp_base::serve::REPLY_CAPACITY;
+pub const MAX_REPLY: usize = crate::serve::REPLY_CAPACITY;
 
 /// Outbound messages buffered per port before the oldest is dropped.
 const OUTBOUND_DEPTH: usize = 8;

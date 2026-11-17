@@ -1,7 +1,7 @@
 //! PWM outputs for payloads: LEDC low-speed timers 0–3 and channels 0–7
 //! (X9–X11).
 //!
-//! The pure [`esp_base::periph::pwm`] table decides the mapping, the duty
+//! The pure [`crate::periph::pwm`] table decides the mapping, the duty
 //! resolution, the raw duty values and which pins to route; this module
 //! only writes them to the LEDC.
 //!
@@ -21,10 +21,10 @@
 //!
 //! esp-hal picks the clock itself: it computes the divider on APB and, on
 //! ESP32 only, switches to REF_TICK when that divider overflows, the same
-//! rule [`esp_base::periph::pwm::resolution`] applies, so the pure table's
+//! rule [`crate::periph::pwm::resolution`] applies, so the pure table's
 //! `ref_tick` flag is informational here.
 
-use esp_base::periph::pwm::{LEDC_CHANNELS, OpenStep};
+use crate::periph::pwm::{LEDC_CHANNELS, OpenStep};
 use esp_hal::gpio::{DriveMode, NoPin, OutputSignal};
 use esp_hal::ledc::channel::{self, ChannelHW, ChannelIFace};
 use esp_hal::ledc::timer::{self, TimerIFace};

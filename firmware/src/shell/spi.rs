@@ -41,10 +41,10 @@
 
 use core::future::pending;
 
+use crate::periph::dma::DmaState;
+use crate::periph::dma_done_event;
+use crate::periph::dma_hw::{self, DmaHw, HwSlot};
 use embassy_time::{Duration, with_timeout};
-use esp_base::periph::dma::DmaState;
-use esp_base::periph::dma_done_event;
-use esp_base::periph::dma_hw::{self, DmaHw, HwSlot};
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf};
 use esp_hal::gpio::{InputSignal, OutputSignal};

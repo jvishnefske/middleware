@@ -188,6 +188,10 @@ export type SimEvent =
   | { kind: "pwmSet"; timer: number; channel: number; duty: number }
   | { kind: "pwmStop"; timer: number }
   | { kind: "serve"; key: string }
+  | { kind: "ledstripOpen"; handle: number; pin: number; count: number }
+  /** A frame sent to an LED strip: G, R, B bytes per LED, nearest the pin first. */
+  | { kind: "ledstrip"; handle: number; pin: number; grb: Uint8Array }
+  | { kind: "ledstripClose"; handle: number; pin: number }
   | IrqEvent;
 
 /** What a served request came back with (ABI 5): the reply, or the
@@ -195,9 +199,20 @@ export type SimEvent =
 export type RequestResult = { ok: true; reply: Uint8Array } | { ok: false; error: string };
 
 export interface PinState {
-  mode: "unused" | "output" | "input";
+  mode: "unused" | "output" | "input" | "ledstrip";
   high?: boolean;
   pull?: "none" | "up" | "down";
+  /** The LED strip whose data pin this is (mode "ledstrip"). */
+  handle?: number;
+}
+
+/** An open LED strip (ABI 7) and the colours its LEDs last received. */
+export interface LedStripState {
+  handle: number;
+  pin: number;
+  count: number;
+  /** G, R, B bytes per LED (`count * 3`). */
+  grb: Uint8Array;
 }
 
 /** A payload running in wasm-host against a virtual device. */
@@ -215,6 +230,7 @@ export interface Simulator {
   setAdc(pin: number, value: number): void;
   /** Open PWM timers. */
   pwm(): PwmState[];
+  ledstrips(): LedStripState[];
   /** Events dropped from the full queue since load. */
   readonly dropped: number;
   readonly pending: number;

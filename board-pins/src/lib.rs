@@ -197,6 +197,21 @@ impl PinMap {
         has(self.reserved, pin)
     }
 
+    /// The same map with `pin` reserved or not (a pin past 63 changes
+    /// nothing). A board adapting a chip map (the ESP base firmware's
+    /// `esp_base::board`) keeps extra pins or opens module flash/PSRAM pins
+    /// it lacks this way; every check on the map follows. The reasons are
+    /// unchanged, so [`PinMap::reason`] may still name a released pin's
+    /// former use.
+    pub const fn with_reserved(mut self, pin: u8, reserved: bool) -> PinMap {
+        if reserved {
+            self.reserved |= bit(pin);
+        } else {
+            self.reserved &= !bit(pin);
+        }
+        self
+    }
+
     /// Whether `pin` can only be read.
     pub const fn is_input_only(&self, pin: u8) -> bool {
         has(self.input_only, pin)
@@ -299,6 +314,18 @@ impl PinMap {
 mod tests {
     use super::boards::*;
     use super::*;
+
+    #[test]
+    fn with_reserved_adds_and_removes_one_pin() {
+        let open = ESP32S3.with_reserved(35, false);
+        assert!(ESP32S3.is_reserved(35) && !open.is_reserved(35));
+        assert_eq!(open.check(35, Direction::Output), Ok(()));
+        assert!(open.payload_pins().any(|p| p == 35));
+        let kept = ESP32S3.with_reserved(4, true);
+        assert_eq!(kept.check(4, Direction::Input), Err(PinError::Reserved));
+        assert_eq!(kept.reserved_mask(), ESP32S3.reserved_mask() | bit(4));
+        assert_eq!(ESP32S3.with_reserved(64, true), ESP32S3);
+    }
 
     #[test]
     fn masks_and_spans() {

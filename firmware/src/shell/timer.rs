@@ -16,10 +16,10 @@
 
 use core::cell::RefCell;
 
+use crate::periph::timer_event;
+use crate::periph::timers::Timers;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use esp_base::periph::timer_event;
-use esp_base::periph::timers::Timers;
 use esp_hal::Blocking;
 use esp_hal::handler;
 use esp_hal::time::Duration;

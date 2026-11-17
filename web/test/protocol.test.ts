@@ -202,10 +202,13 @@ describe("ABI constants", () => {
       "serve",
       "node_id",
       "route_bridge",
+      "ledstrip_open",
+      "ledstrip_write",
+      "ledstrip_close",
     ]);
     expect(abi.imports.find((i) => i.name === "publish")).toEqual({ name: "publish", params: 4, returns: true });
     expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq", onRequest: "on_request" });
-    expect(abi.version).toBe(6);
+    expect(abi.version).toBe(7);
     expect(abi.errors.InvalidKey).toBe(-6);
     expect(proto.constants.keys.status).toBe("sys/payload/status");
   });

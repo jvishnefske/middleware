@@ -5,13 +5,16 @@
 //!
 //! * **idle** — no payload runs; requests are dispatched and storage actions
 //!   performed. A `sys/payload/start` ends the session.
-//! * **running** (`wasm` only) — the stored image is read and CRC
-//!   checked; if the free heap covers the payload's bound plus margin
-//!   ([`esp_base::start`], the bound charging linear memory at the
+//! * **running** (`wasm` only) — at boot only if the shell's boot decision
+//!   is [`Autostart::Start`] (a valid image, and the board's safe-mode pin
+//!   not held, [`crate::board::autostart`]), later on `sys/payload/start`.
+//!   The stored image is read and CRC checked; if the free heap covers the payload's bound plus margin
+//!   ([`crate::start`], the bound charging linear memory at the
 //!   module's declared maximum; otherwise the start fails with the free
 //!   and needed bytes on `sys/log` and the image buffer is freed), it is
-//!   compiled, freed and the module instantiated into a [`Payload`]; the
-//!   session then loops:
+//!   compiled, freed and the module instantiated into a [`Payload`] with
+//!   the board's linear-memory cap and fuel per call
+//!   ([`crate::board::Board::fuel_per_call`]); the session then loops:
 //!   1. drain the interrupt event queue ([`irq`]), at most `MAX_EVENTS`
 //!      events per iteration, into `Payload::dispatch` (`on_irq`), and log
 //!      on `sys/log` when the queue's overflow count has risen;
@@ -25,10 +28,10 @@
 //!   yield the serial link tasks, which carry the start reply, and the
 //!   radio task would never run.
 //!
-//!   With [`esp_base::perf::ENABLED`] every payload operation (delivery,
+//!   With [`crate::perf::ENABLED`] every payload operation (delivery,
 //!   `on_irq`, `tick`) is timed with the microsecond clock and its fuel
 //!   read from [`Payload::fuel_stats`], as are the wait and the yield;
-//!   every [`esp_base::perf::REPORT_INTERVAL_US`] the window is logged on
+//!   every [`crate::perf::REPORT_INTERVAL_US`] the window is logged on
 //!   `sys/log` as two `perf:` lines (busy time, fuel per second while busy,
 //!   the split per operation kind, waiting, yielding, the radio task's
 //!   time) and restarted.
@@ -47,17 +50,17 @@
 //!   image.
 //!
 //! Origin: every request carries where it came from
-//! ([`esp_base::ota::Origin`]: a serial port, or an ESP-NOW peer's MAC,
-//! answered by the radio task). Before dispatch [`esp_base::ota::admit`]
+//! ([`crate::ota::Origin`]: a serial port, or an ESP-NOW peer's MAC,
+//! answered by the radio task). Before dispatch [`crate::ota::admit`]
 //! decides whether it may run, from the trust state, the last accepted
-//! control counter and this device's own MAC ([`esp_base::ota::Facts`]):
+//! control counter and this device's own MAC ([`crate::ota::Facts`]):
 //! over the air only the update keys, only on a claimed device; a loader
 //! `chunk` or `commit` only from the requester whose `begin` started the
 //! transfer in progress (the controller keeps that owner,
-//! [`esp_base::ota::owner_after`]), so a `begin` from the other side
+//! [`crate::ota::owner_after`]), so a `begin` from the other side
 //! aborts a transfer cleanly; then, over the air, commits only signed and
 //! `start`/`stop` only with a signed control body. For an accepted
-//! control request ([`esp_base::ota::Admission::Control`]) the controller
+//! control request ([`crate::ota::Admission::Control`]) the controller
 //! first saves the new counter with the trust record (answering
 //! `Internal` and doing nothing if that fails), then dispatches the key
 //! with an empty body. Requests over the air are dispatched with
@@ -67,7 +70,7 @@
 //! refused commit does on serial; over-the-air `begin`, `commit`, `start`
 //! and `stop` are logged with the requester's MAC.
 //!
-//! Each request reaches `esp_base::dispatch::handle_request` as a
+//! Each request reaches `crate::dispatch::handle_request` as a
 //! middleware `Request` with its `RequestMeta`: empty for a serial port
 //! (it names no caller), the sender's MAC as `SenderId` for a request over
 //! the air (unauthenticated; admission is the over-the-air policy's).
@@ -79,14 +82,14 @@
 //! `Activate` that raises `min_version` saves the record inside
 //! [`PayloadStore::activate_with`], after the image CRC check and before
 //! the slot header (the ordering is explained in
-//! `esp_base::trust_store`). A failed storage action leaves the state of
-//! [`esp_base::dispatch::after_storage_failure`] (a running payload keeps
+//! `crate::trust_store`). A failed storage action leaves the state of
+//! [`crate::dispatch::after_storage_failure`] (a running payload keeps
 //! running unless a serial `begin` stopped it) with the trust state and
 //! control counter adopted from flash. Refused claims, commits and
 //! control requests are logged.
 //!
 //! Serving (ABI 5, `wasm`): before admission, a serial request is routed by
-//! [`esp_base::serve::route_request`]. A key the running payload serves
+//! [`crate::serve::route_request`]. A key the running payload serves
 //! goes to `Payload::request` with a 512-byte reply buffer and the
 //! request's meta (serial: no sender, no deadline), and its reply or
 //! `HandlerError` is the answer; a trap answers `Internal` and ends the
@@ -94,22 +97,23 @@
 //! runs is `Unavailable`; `sys/...` and unserved keys go on to admission
 //! and dispatch as before (`NotFound` for an application key). The
 //! controller keeps the last run's keys and clears them when an upload
-//! changes the image ([`esp_base::serve::served_after`]). Requests over
+//! changes the image ([`crate::serve::served_after`]). Requests over
 //! ESP-NOW are not routed to the payload: over the air only the update
-//! keys are admitted ([`esp_base::ota::admit`]), and serving a payload's
+//! keys are admitted ([`crate::ota::admit`]), and serving a payload's
 //! keys to unauthenticated radio peers would widen that policy, so they
 //! stay `NotOverAir` refusals.
 //!
-//! All decisions come from `esp_base::dispatch` and `esp_base::serve`;
+//! All decisions come from `crate::dispatch` and `crate::serve`;
 //! this module performs them.
 //! Status changes are published on `sys/payload/status`, notable events as
 //! `sys/log` lines.
 
-use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
-use esp_base::ota::{self, Admission, Facts, Mac, Origin};
-use esp_base::serve::{Route, ServedKeys, route_request, served_after};
-use esp_base::store::{PayloadStore, StoreError};
-use esp_base::trust_store::{Persisted, TrustStore};
+use crate::board::Autostart;
+use crate::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
+use crate::ota::{self, Admission, Facts, Mac, Origin};
+use crate::serve::{Route, ServedKeys, route_request, served_after};
+use crate::store::{PayloadStore, StoreError};
+use crate::trust_store::{Persisted, TrustStore};
 use esp_storage::FlashStorage;
 use heapless::Vec;
 use middleware::Key;
@@ -124,14 +128,14 @@ use super::presence;
 use {
     super::device::{EspDevice, now_ms},
     super::irq,
+    crate::board::Board,
+    crate::dispatch::{route_publication, tick_delay},
+    crate::perf::{self, CallKind, Cost, RadioTime, Window},
+    crate::start::{HeapShort, check_heap, check_heap_holding},
     alloc::vec::Vec as AllocVec,
     embassy_futures::select::{Either, Either4, select, select4},
     embassy_futures::yield_now,
     embassy_time::Timer,
-    esp_base::chip::Profile,
-    esp_base::dispatch::{route_publication, tick_delay},
-    esp_base::perf::{self, CallKind, Cost, RadioTime, Window},
-    esp_base::start::{HeapShort, check_heap, check_heap_holding},
     middleware::wasm_abi::events::MAX_EVENTS,
     wasm_host::{Compiled, Limits, LoadError, Payload, Trap},
 };
@@ -161,9 +165,10 @@ pub struct Controller {
     /// name it.
     own: Mac,
     bus: &'static Bus,
+    /// The board: pin policy, memory limit and fuel per call.
     #[cfg(feature = "wasm")]
-    profile: &'static Profile,
-    /// The keys the payload run that ended served (`esp_base::serve`).
+    board: &'static Board,
+    /// The keys the payload run that ended served (`crate::serve`).
     served: ServedKeys,
 }
 
@@ -199,7 +204,7 @@ impl Controller {
         trust: Option<TrustStore>,
         own: Mac,
         bus: &'static Bus,
-        #[cfg(feature = "wasm")] profile: &'static Profile,
+        #[cfg(feature = "wasm")] board: &'static Board,
     ) -> Self {
         Controller {
             state,
@@ -210,16 +215,19 @@ impl Controller {
             own,
             bus,
             #[cfg(feature = "wasm")]
-            profile,
+            board,
             served: ServedKeys::new(),
         }
     }
 
-    /// Runs forever: starts a stored payload, then serves requests.
-    pub async fn run(mut self) -> ! {
+    /// Runs forever: starts the stored payload if `autostart` says so (the
+    /// boot decision, [`crate::board::autostart`]), then serves requests.
+    pub async fn run(mut self, autostart: Autostart) -> ! {
         self.bus.status(self.state.status());
         #[cfg(feature = "wasm")]
-        let mut start = self.state.startable().then_some(None);
+        let mut start = (autostart == Autostart::Start).then_some(None);
+        #[cfg(not(feature = "wasm"))]
+        let _ = autostart;
         loop {
             #[cfg(feature = "wasm")]
             if let Some(pending) = start.take() {
@@ -551,7 +559,7 @@ impl Controller {
     /// Loads the stored payload in two steps, compile then instantiate,
     /// freeing the image buffer between them. Refuses, with nothing left
     /// allocated, if the free heap is below the payload's bound plus
-    /// [`esp_base::start::HEAP_MARGIN`]: first if it cannot even hold the
+    /// [`crate::start::HEAP_MARGIN`]: first if it cannot even hold the
     /// image, then, with the image read (the bound charges linear memory at
     /// the module's declared maximum, [`Limits::heap_needed`]), if the heap
     /// free before the read is below the whole bound. Translation is eager,
@@ -559,8 +567,8 @@ impl Controller {
     /// that was free here.
     #[cfg(feature = "wasm")]
     fn load(&mut self) -> Result<Payload<EspDevice>, StartError> {
-        let limits = Limits::bytes(self.profile.max_memory_bytes)
-            .with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
+        let limits = Limits::bytes(self.board.profile().max_memory_bytes)
+            .with_fuel(self.board.fuel_per_call());
         let store = self.store().map_err(StartError::Store)?;
         let header = store
             .header()
@@ -579,7 +587,8 @@ impl Controller {
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
         let node = self.ctx.node.unwrap_or(SenderId([0; 8]));
-        let device = EspDevice::new(self.profile, self.bus, node).ok_or(StartError::NoPins)?;
+        let device =
+            EspDevice::new(self.board.profile(), self.bus, node).ok_or(StartError::NoPins)?;
         let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
@@ -790,7 +799,7 @@ struct Served {
     trap: Option<Trap>,
 }
 
-/// Hands a serial request to the payload (`esp_base::serve::payload_reply`
+/// Hands a serial request to the payload (`crate::serve::payload_reply`
 /// decides the answer); serial requests name no sender and no deadline.
 #[cfg(feature = "wasm")]
 fn request(payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Served {
@@ -803,7 +812,7 @@ fn request(payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Served {
     let mut out = [0u8; MAX_REPLY];
     let result = payload.request(key, body, &RequestMeta::NONE, &mut out);
     let trap = result.as_ref().err().cloned();
-    let answer = esp_base::serve::payload_reply(result);
+    let answer = crate::serve::payload_reply(result);
     let result = answer.reply.and_then(|n| {
         out.get(..n)
             .and_then(|b| Vec::from_slice(b).ok())
@@ -849,8 +858,8 @@ fn radio_time() -> RadioTime {
 /// The next sample received over ESP-NOW, as key and body.
 #[cfg(feature = "espnow")]
 async fn radio_sample() -> (
-    heapless::String<{ esp_base::radio::KEY_CAPACITY }>,
-    Vec<u8, { esp_base::radio::RX_PAYLOAD }>,
+    heapless::String<{ crate::radio::KEY_CAPACITY }>,
+    Vec<u8, { crate::radio::RX_PAYLOAD }>,
 ) {
     let r = super::radio::receive().await;
     (r.key, r.payload)

@@ -23,6 +23,18 @@
 //! [`Profile::check_pin`] does not refuse them — but a host warns about an
 //! assignment that drives one, as ESPHome does (`ignore_strapping_warning`).
 //!
+//! A fifth mask, `releasable` (E28), names the reserved pins that only
+//! some modules wire to flash or PSRAM (ESP32 GPIO16/17, PSRAM on WROVER
+//! modules; ESP32-S3 GPIO33–37, octal flash/PSRAM). A board without that
+//! memory may open them to payloads with
+//! [`crate::board::BoardBuilder::release`]; the chip profiles keep them
+//! reserved.
+//!
+//! The chip profiles are the defaults; a board adapts one (name, pins,
+//! image cap) through [`crate::board::Board`], which is what the shell runs
+//! with and what `sys/board` describes ([`Profile::board_info`] of
+//! [`crate::board::Board::profile`]).
+//!
 //! # Board pin map (ABI 3 PWM and I2C, R15 camera)
 //!
 //! The ESP32 build is the AI-Thinker ESP32-CAM's (the only ESP32 board
@@ -236,6 +248,8 @@ pub struct Profile {
     /// Whether PWM timers can fall back to the 1 MHz REF_TICK.
     pub pwm_ref_tick: bool,
     strapping: u64,
+    /// Reserved pins a board may release (see the module docs).
+    releasable: u64,
     /// The board's pins: which exist, are reserved or input only, the ADC
     /// inputs, and the PWM and I2C maps (see the board pin map).
     pins: PinMap,
@@ -261,6 +275,7 @@ pub const ESP32: Profile = Profile {
     pwm_max_bits: 16,
     pwm_ref_tick: true,
     strapping: bit(0) | bit(2) | bit(5) | bit(12) | bit(15),
+    releasable: bit(16) | bit(17),
     pins: boards::ESP32,
     camera: true,
 };
@@ -284,6 +299,7 @@ pub const ESP32S3: Profile = Profile {
     pwm_max_bits: 14,
     pwm_ref_tick: false,
     strapping: bit(0) | bit(3) | bit(45) | bit(46),
+    releasable: board_pins::span(33, 37),
     pins: boards::ESP32S3,
     camera: false,
 };
@@ -306,6 +322,7 @@ pub const ESP32C3: Profile = Profile {
     pwm_max_bits: 0,
     pwm_ref_tick: false,
     strapping: bit(2) | bit(8) | bit(9),
+    releasable: 0,
     pins: boards::ESP32C3,
     camera: false,
 };
@@ -330,6 +347,7 @@ pub const ESP8266: Profile = Profile {
     pwm_max_bits: 0,
     pwm_ref_tick: false,
     strapping: bit(0) | bit(2) | bit(15),
+    releasable: 0,
     pins: boards::ESP8266,
     camera: false,
 };
@@ -365,6 +383,21 @@ impl Profile {
     /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
     pub const fn is_reserved(&self, pin: u8) -> bool {
         self.pins.is_reserved(pin)
+    }
+
+    /// Whether `pin` is reserved only for module flash or PSRAM that some
+    /// boards lack, so a board may release it
+    /// ([`crate::board::BoardBuilder::release`]).
+    pub const fn is_releasable(&self, pin: u8) -> bool {
+        self.releasable & bit(pin) != 0
+    }
+
+    /// The same profile with `pin` (below 64) reserved or not; the pin map
+    /// and so [`Profile::check_pin`], [`Profile::payload_pins`] and
+    /// [`Profile::board_info`] follow.
+    pub(crate) const fn with_reserved(mut self, pin: u8, reserved: bool) -> Profile {
+        self.pins = self.pins.with_reserved(pin, reserved);
+        self
     }
 
     /// Whether `pin` is a strapping pin (usable, but read at reset).
@@ -647,6 +680,32 @@ mod tests {
         }
         assert_eq!(ESP8266.payload_pins().count(), 9);
         assert!(ESP32S3.payload_pins().all(|p| !ESP32S3.is_reserved(p)));
+    }
+
+    #[test]
+    fn e28_releasable_pins_are_reserved_module_memory_pins() {
+        for p in ALL {
+            for pin in 0..64 {
+                if p.is_releasable(pin) {
+                    assert!(p.is_reserved(pin), "{} {pin}", p.name);
+                }
+            }
+        }
+        assert!((33..=37).all(|pin| ESP32S3.is_releasable(pin)));
+        assert!((26..=32).all(|pin| !ESP32S3.is_releasable(pin)));
+        assert!(ESP32.is_releasable(16) && ESP32.is_releasable(17) && !ESP32.is_releasable(6));
+        assert!((0..64).all(|pin| !ESP32C3.is_releasable(pin) && !ESP8266.is_releasable(pin)));
+        // A released pin is a payload pin, and sys/board follows.
+        let open = ESP32S3.with_reserved(35, false);
+        assert_eq!(open.check_pin(35, Direction::Output), Ok(()));
+        assert!(open.payload_pins().any(|p| p == 35));
+        assert_eq!(open.board_info(7).reserved & bit(35), 0);
+        let kept = ESP32S3.with_reserved(41, true);
+        assert_eq!(
+            kept.check_pin(41, Direction::Output),
+            Err(AbiError::Unsupported)
+        );
+        assert_ne!(kept.board_info(7).reserved & bit(41), 0);
     }
 
     #[test]
