@@ -193,7 +193,11 @@ pub struct Handled {
 
 impl Handled {
     const fn now(reply: Result<usize, HandlerError>) -> Self {
-        Handled { reply: Reply::Now(reply), stop: false, notes: Vec::new() }
+        Handled {
+            reply: Reply::Now(reply),
+            stop: false,
+            notes: Vec::new(),
+        }
     }
 }
 
@@ -236,10 +240,13 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             Some((t, p)) => (Some(t), Some(p)),
             None => (None, None),
         };
-        let mut store = PayloadStore::new(flash, map.payload.offset, map.payload.size, facts.max_image).ok();
+        let mut store =
+            PayloadStore::new(flash, map.payload.offset, map.payload.size, facts.max_image).ok();
         let installed = store.as_mut().map(PayloadStore::verify);
         let p = persisted.unwrap_or_default();
-        let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(p.trust).with_control(p.control);
+        let state = State::boot(matches!(installed, Some(Ok(_))))
+            .with_trust(p.trust)
+            .with_control(p.control);
         let ctx = Context {
             chip: facts.chip,
             firmware: facts.firmware,
@@ -250,10 +257,28 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
-            caps: if facts.runtime { Caps::SERVE } else { Caps::NONE },
+            caps: if facts.runtime {
+                Caps::SERVE
+            } else {
+                Caps::NONE
+            },
         };
-        let svc = Service { state, ctx, store, trust, fw, usb_configured: false, served: ServedKeys::new() };
-        (svc, Boot { installed, trust: persisted })
+        let svc = Service {
+            state,
+            ctx,
+            store,
+            trust,
+            fw,
+            usb_configured: false,
+            served: ServedKeys::new(),
+        };
+        (
+            svc,
+            Boot {
+                installed,
+                trust: persisted,
+            },
+        )
     }
 
     /// The dispatcher state.
@@ -354,7 +379,11 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
         }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
         if outcome.action == Action::Start {
-            return Handled { reply: Reply::Start, stop: false, notes: Vec::new() };
+            return Handled {
+                reply: Reply::Start,
+                stop: false,
+                notes: Vec::new(),
+            };
         }
         let mut notes = Notes::new();
         let mut stop = outcome.action.stops_payload();
@@ -373,7 +402,11 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
                 Err(HandlerError::Internal)
             }
         };
-        Handled { reply: Reply::Now(reply), stop, notes }
+        Handled {
+            reply: Reply::Now(reply),
+            stop,
+            notes,
+        }
     }
 
     /// Performs the outcome's storage action.
@@ -383,12 +416,28 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
         match outcome.action {
             Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
-            Action::Activate { len, crc, trust: None } => self.store()?.activate(len, crc),
-            Action::Activate { len, crc, trust: Some(next) } => {
+            Action::Activate {
+                len,
+                crc,
+                trust: None,
+            } => self.store()?.activate(len, crc),
+            Action::Activate {
+                len,
+                crc,
+                trust: Some(next),
+            } => {
                 let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
                     return Err(StoreError::Flash);
                 };
-                store.activate_with(len, crc, |flash| ts.save(flash, &Persisted { trust: next, control }))
+                store.activate_with(len, crc, |flash| {
+                    ts.save(
+                        flash,
+                        &Persisted {
+                            trust: next,
+                            control,
+                        },
+                    )
+                })
             }
             Action::Claim { trust } => {
                 let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
@@ -425,14 +474,25 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             Action::Activate { len, trust, .. } => {
                 push(Note::Installed { len });
                 if let Some(TrustState::Claimed { min_version, .. }) = trust {
-                    push(Note::SignedAccepted { min_version: min_version.0 });
+                    push(Note::SignedAccepted {
+                        min_version: min_version.0,
+                    });
                 }
                 if self.state.status() == PayloadStatus::Running {
                     push(Note::ReplacesRunning);
                 }
             }
-            Action::Claim { trust: TrustState::Claimed { key, .. } } => {
-                push(Note::Pinned { prefix: [key.0[0], key.0[1], key.0[2], key.0[3]] });
+            Action::Claim {
+                trust: TrustState::Claimed { key, .. },
+            } => {
+                push(Note::Pinned {
+                    prefix: [
+                        key.as_bytes()[0],
+                        key.as_bytes()[1],
+                        key.as_bytes()[2],
+                        key.as_bytes()[3],
+                    ],
+                });
             }
             _ => {}
         }
@@ -465,7 +525,9 @@ pub(crate) mod tests {
     use middleware::crc::Crc32;
     use middleware::loader::DeviceInfo;
     use middleware::loader::sha256::ImageHash;
-    use middleware::loader::trust::{PublicKey, SIGNED_COMMIT_LEN, Signature, SignedCommit, Version, signed_message};
+    use middleware::loader::trust::{
+        PublicKey, SIGNED_COMMIT_LEN, Signature, SignedCommit, Version, signed_message,
+    };
     use std::boxed::Box;
     use std::vec::Vec as StdVec;
 
@@ -500,12 +562,20 @@ pub(crate) mod tests {
         Box::new(Flash::new())
     }
 
-    fn open<'f, U: FwUpdate<&'f mut Flash>>(flash: &'f mut Flash, facts: Facts, fw: U) -> (Svc<'f, U>, Boot) {
+    fn open<'f, U: FwUpdate<&'f mut Flash>>(
+        flash: &'f mut Flash,
+        facts: Facts,
+        fw: U,
+    ) -> (Svc<'f, U>, Boot) {
         Service::open(flash, &MAP, facts, fw)
     }
 
     /// Sends one request; returns the reply with its body copied out.
-    fn call<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>, key: Key<'_>, body: &[u8]) -> (Result<StdVec<u8>, HandlerError>, Handled) {
+    fn call<'f, U: FwUpdate<&'f mut Flash>>(
+        s: &mut Svc<'f, U>,
+        key: Key<'_>,
+        body: &[u8],
+    ) -> (Result<StdVec<u8>, HandlerError>, Handled) {
         let mut out = [0u8; 128];
         let h = s.handle(key, body, &mut out);
         let r = match h.reply {
@@ -530,7 +600,10 @@ pub(crate) mod tests {
 
     /// Begin and chunks of `image` (48-byte chunks); commit not sent.
     fn transfer<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>, image: &[u8]) {
-        assert_eq!(call(s, keys::BEGIN, &begin(image.len(), Crc32::checksum(image))).0, Ok(StdVec::new()));
+        assert_eq!(
+            call(s, keys::BEGIN, &begin(image.len(), Crc32::checksum(image))).0,
+            Ok(StdVec::new())
+        );
         for (i, part) in image.chunks(48).enumerate() {
             let mut c = (i as u32 * 48).to_le_bytes().to_vec();
             c.extend_from_slice(part);
@@ -539,7 +612,9 @@ pub(crate) mod tests {
     }
 
     pub fn image(n: usize, seed: u8) -> StdVec<u8> {
-        (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+        (0..n)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+            .collect()
     }
 
     fn installed<'f, U: FwUpdate<&'f mut Flash>>(s: &mut Svc<'f, U>) -> Option<StdVec<u8>> {
@@ -619,7 +694,11 @@ pub(crate) mod tests {
         // later write; the transfer reports Internal.
         {
             let (mut s, _) = open(&mut f, FACTS, Unsupported);
-            ok(&mut s, keys::BEGIN, &begin(new.len(), Crc32::checksum(&new)));
+            ok(
+                &mut s,
+                keys::BEGIN,
+                &begin(new.len(), Crc32::checksum(&new)),
+            );
             s.store_mut().unwrap().flash().cut_at(3);
             let mut failed = false;
             for (i, part) in new.chunks(48).enumerate() {
@@ -627,7 +706,10 @@ pub(crate) mod tests {
                 c.extend_from_slice(part);
                 let (r, h) = call(&mut s, keys::CHUNK, &c);
                 if r == Err(HandlerError::Internal) {
-                    assert!(matches!(h.notes.as_slice(), [Note::Storage(StoreError::Flash)]));
+                    assert!(matches!(
+                        h.notes.as_slice(),
+                        [Note::Storage(StoreError::Flash)]
+                    ));
                     failed = true;
                     break;
                 }
@@ -655,13 +737,21 @@ pub(crate) mod tests {
     }
 
     fn public(seed: u8) -> PublicKey {
-        PublicKey(signer(seed).verifying_key().to_bytes())
+        PublicKey::Ed25519(signer(seed).verifying_key().to_bytes())
     }
 
     fn signed(seed: u8, image: &[u8], version: u32) -> [u8; SIGNED_COMMIT_LEN] {
-        let m = signed_message(image.len() as u32, Version(version), &ImageHash::digest(image));
+        let m = signed_message(
+            image.len() as u32,
+            Version(version),
+            &ImageHash::digest(image),
+        );
         let signature = Signature(signer(seed).sign(&m).to_bytes());
-        SignedCommit { version: Version(version), signature }.encode()
+        SignedCommit {
+            version: Version(version),
+            signature,
+        }
+        .encode()
     }
 
     #[test]
@@ -673,13 +763,16 @@ pub(crate) mod tests {
             // Trust on first use: unsigned accepted.
             transfer(&mut s, &img);
             assert_eq!(call(&mut s, keys::COMMIT, &[]).0, Ok(StdVec::new()));
-            let (r, h) = call(&mut s, keys::TRUST_CLAIM, &public(1).0);
+            let (r, h) = call(&mut s, keys::TRUST_CLAIM, public(1).as_bytes());
             assert_eq!(r, Ok(StdVec::new()));
             assert!(matches!(h.notes.as_slice(), [Note::Pinned { .. }]));
         }
         {
             let (mut s, boot) = open(&mut f, FACTS, Unsupported);
-            let pinned = TrustState::Claimed { key: public(1), min_version: Version(0) };
+            let pinned = TrustState::Claimed {
+                key: public(1),
+                min_version: Version(0),
+            };
             assert_eq!(boot.trust.map(|p| p.trust), Some(pinned));
             // Unsigned, foreign and rollback commits are denied.
             for body in [StdVec::new(), signed(2, &img, 5).to_vec()] {
@@ -693,18 +786,28 @@ pub(crate) mod tests {
             assert_eq!(r, Ok(StdVec::new()));
             assert_eq!(
                 h.notes.as_slice(),
-                &[Note::Installed { len: 1500 }, Note::SignedAccepted { min_version: 5 }]
+                &[
+                    Note::Installed { len: 1500 },
+                    Note::SignedAccepted { min_version: 5 }
+                ]
             );
             // A second claim is refused: no re-key window on this board.
-            let (r, h) = call(&mut s, keys::TRUST_CLAIM, &public(2).0);
+            let (r, h) = call(&mut s, keys::TRUST_CLAIM, public(2).as_bytes());
             assert_eq!(r, Err(HandlerError::Denied));
             assert_eq!(h.notes.as_slice(), &[Note::ClaimDenied]);
         }
         let (mut s, boot) = open(&mut f, FACTS, Unsupported);
-        let raised = TrustState::Claimed { key: public(1), min_version: Version(5) };
+        let raised = TrustState::Claimed {
+            key: public(1),
+            min_version: Version(5),
+        };
         assert_eq!(boot.trust.map(|p| p.trust), Some(raised));
         transfer(&mut s, &img);
-        assert_eq!(call(&mut s, keys::COMMIT, &signed(1, &img, 5)).0, Err(HandlerError::Denied), "replay");
+        assert_eq!(
+            call(&mut s, keys::COMMIT, &signed(1, &img, 5)).0,
+            Err(HandlerError::Denied),
+            "replay"
+        );
     }
 
     #[test]
@@ -716,7 +819,7 @@ pub(crate) mod tests {
             let (mut s, _) = open(&mut f, FACTS, Unsupported);
             transfer(&mut s, &old);
             ok(&mut s, keys::COMMIT, &[]);
-            ok(&mut s, keys::TRUST_CLAIM, &public(1).0);
+            ok(&mut s, keys::TRUST_CLAIM, public(1).as_bytes());
             transfer(&mut s, &new);
             // The image needs no final word flush (1200 = 300 words); the
             // trust save is ops 0-2 (erase, fields, magic) and the slot
@@ -726,13 +829,23 @@ pub(crate) mod tests {
             assert_eq!(r, Err(HandlerError::Internal));
             assert!(matches!(h.notes.as_slice(), [Note::Storage(_)]));
             // RAM adopts what flash holds: the raised min_version.
-            let raised = TrustState::Claimed { key: public(1), min_version: Version(9) };
+            let raised = TrustState::Claimed {
+                key: public(1),
+                min_version: Version(9),
+            };
             assert_eq!(s.state().trust(), raised);
             s.store_mut().unwrap().flash().restore();
         }
         let (mut s, boot) = open(&mut f, FACTS, Unsupported);
-        assert_eq!(installed(&mut s).as_deref(), Some(&old[..]), "the old image stays active");
-        let raised = TrustState::Claimed { key: public(1), min_version: Version(9) };
+        assert_eq!(
+            installed(&mut s).as_deref(),
+            Some(&old[..]),
+            "the old image stays active"
+        );
+        let raised = TrustState::Claimed {
+            key: public(1),
+            min_version: Version(9),
+        };
         assert_eq!(boot.trust.map(|p| p.trust), Some(raised));
     }
 
@@ -752,13 +865,19 @@ pub(crate) mod tests {
         assert_eq!(call(&mut s, keys::COMMIT, &[]).0, Ok(StdVec::new()));
         let mut g = flash();
         let (mut s, _) = open(&mut g, FACTS, Absent);
-        assert_eq!(call(&mut s, crate::fw_update::keys::INFO, &[]).0, Err(HandlerError::NotFound));
+        assert_eq!(
+            call(&mut s, crate::fw_update::keys::INFO, &[]).0,
+            Err(HandlerError::NotFound)
+        );
     }
 
     #[test]
     fn v13_an_unreadable_trust_record_refuses_payload_installs_and_claims() {
         // The trust region lies outside the flash: it cannot be read.
-        let map = FlashMap { trust: Region::new(MAP.flash_size, 0x2000), ..MAP };
+        let map = FlashMap {
+            trust: Region::new(MAP.flash_size, 0x2000),
+            ..MAP
+        };
         let img = image(600, 14);
         let mut f = flash();
         let (mut s, boot) = Service::open(&mut *f, &map, FACTS, Unsupported);
@@ -766,7 +885,7 @@ pub(crate) mod tests {
         assert!(boot.installed.is_some(), "the store opened");
         let mut chunk = 0u32.to_le_bytes().to_vec();
         chunk.extend_from_slice(&img[..48]);
-        let claim = public(1).0;
+        let claim = public(1).as_bytes().to_vec();
         for (k, body) in [
             (keys::BEGIN, &begin(img.len(), Crc32::checksum(&img))[..]),
             (keys::CHUNK, &chunk[..]),
@@ -792,14 +911,25 @@ pub(crate) mod tests {
 
     #[test]
     fn v11_without_the_runtime_payloads_are_stored_but_not_started() {
-        let facts = Facts { chip: "rp2040", firmware: "0.1.0+no-wasm", runtime: false, ..FACTS };
+        let facts = Facts {
+            chip: "rp2040",
+            firmware: "0.1.0+no-wasm",
+            runtime: false,
+            ..FACTS
+        };
         let img = image(900, 8);
         let mut f = flash();
         let (mut s, _) = open(&mut f, facts, Absent);
         transfer(&mut s, &img);
         assert_eq!(call(&mut s, keys::COMMIT, &[]).0, Ok(StdVec::new()));
         let (r, h) = call(&mut s, keys::START, &[]);
-        assert_eq!((r, h.reply), (Err(HandlerError::NotFound), Reply::Now(Err(HandlerError::NotFound))));
+        assert_eq!(
+            (r, h.reply),
+            (
+                Err(HandlerError::NotFound),
+                Reply::Now(Err(HandlerError::NotFound))
+            )
+        );
         assert_eq!(s.status(), PayloadStatus::Stopped);
         let body = call(&mut s, keys::INFO, &[]).0.unwrap();
         assert_eq!(DeviceInfo::decode(&body).unwrap().firmware, "0.1.0+no-wasm");
@@ -828,9 +958,26 @@ pub(crate) mod tests {
     #[test]
     fn notes_read_as_log_lines() {
         use std::string::ToString;
-        assert_eq!(Note::Installed { len: 12 }.to_string(), "payload installed (12 bytes)");
-        assert_eq!(Note::Pinned { prefix: [0xAB, 1, 2, 3] }.to_string(), "trust: key ab010203... pinned, min_version 0");
-        assert!(Note::CommitDenied { min_version: 4 }.to_string().contains("version > 4"));
-        assert!(Note::Storage(StoreError::Crc).to_string().starts_with("storage: "));
+        assert_eq!(
+            Note::Installed { len: 12 }.to_string(),
+            "payload installed (12 bytes)"
+        );
+        assert_eq!(
+            Note::Pinned {
+                prefix: [0xAB, 1, 2, 3]
+            }
+            .to_string(),
+            "trust: key ab010203... pinned, min_version 0"
+        );
+        assert!(
+            Note::CommitDenied { min_version: 4 }
+                .to_string()
+                .contains("version > 4")
+        );
+        assert!(
+            Note::Storage(StoreError::Crc)
+                .to_string()
+                .starts_with("storage: ")
+        );
     }
 }

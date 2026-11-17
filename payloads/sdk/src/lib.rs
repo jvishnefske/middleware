@@ -91,6 +91,16 @@
 //! * [`serve::node_id`] — the device's 8-byte node id ([`serve::node_hex`]
 //!   formats it for keys).
 //!
+//! Added with ABI 7 (requires firmware implementing [`ABI_VERSION`] 7; ABI
+//! 6, `route_bridge`, has no SDK wrapper):
+//!
+//! * [`ledstrip::LedStrip`] — WS2812-style one-wire RGB LED chains:
+//!   [`ledstrip::LedStrip::open`] names the data pin and the chain length,
+//!   [`ledstrip::LedStrip::write`] sends a frame of [`ledstrip::Rgb`]
+//!   colours (encoded to the wire's G, R, B order in a fixed stack buffer
+//!   by [`ledstrip::encode`]). The host generates the pulse train; strips
+//!   raise no events.
+//!
 //! Received messages are copied by the host into one fixed receive buffer of
 //! [`MAX_MESSAGE`] bytes that `mw_alloc` hands out; there is no heap.
 //!
@@ -108,7 +118,8 @@
 //!    never writes into guest memory during those calls (`spi_transfer` and
 //!    `uart_write` copy into firmware-owned DMA buffers; the ABI 4 route
 //!    imports copy the key and config out and move frames in host memory
-//!    only).
+//!    only; the ABI 7 `ledstrip_write` copies the frame into a host buffer
+//!    before sending it).
 //! 2. Four `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
 //!    `uart_read`, the ABI 3 import `i2c_transfer` and the ABI 5 import
 //!    `node_id`, which *write* into
@@ -146,6 +157,7 @@ pub mod dma;
 pub mod gpio;
 pub mod i2c;
 pub mod irq;
+pub mod ledstrip;
 mod logline;
 #[cfg(all(feature = "panic-handler", target_arch = "wasm32", not(test)))]
 mod panic;

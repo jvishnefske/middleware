@@ -125,7 +125,7 @@ const fn unexpected<E>() -> KvError<RemoteError<E>> {
 pub struct RemoteKv<R, const N: usize> {
     requester: R,
     key: KeyBuf<MAX_KEY_LEN>,
-    options: RequestOptions,
+    options: RequestOptions<'static>,
     scan_limit: usize,
     tx: [u8; N],
     rx: [u8; N],
@@ -154,7 +154,7 @@ impl<R, const N: usize> RemoteKv<R, N> {
 
     /// The same client sending every request with `options` (a timeout, a
     /// target node).
-    pub fn with_options(self, options: RequestOptions) -> Self {
+    pub fn with_options(self, options: RequestOptions<'static>) -> Self {
         RemoteKv { options, ..self }
     }
 
@@ -543,7 +543,7 @@ mod tests {
             key: Key<'_>,
             request: &[u8],
             response: &'b mut [u8],
-            _options: &RequestOptions,
+            _options: &RequestOptions<'_>,
         ) -> Result<&'b [u8], HandlerError> {
             assert_eq!(key, STORE);
             self.requests += 1;
@@ -567,7 +567,7 @@ mod tests {
             _key: Key<'_>,
             _request: &[u8],
             response: &'b mut [u8],
-            _options: &RequestOptions,
+            _options: &RequestOptions<'_>,
         ) -> Result<&'b [u8], ()> {
             let bytes = self.0.clone()?;
             let out = response.get_mut(..bytes.len()).ok_or(())?;

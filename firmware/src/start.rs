@@ -74,34 +74,64 @@ mod tests {
 
     #[test]
     fn w10_starts_only_with_bound_plus_margin_free() {
-        assert_eq!(check_heap(100_000 + HEAP_MARGIN as usize, 100_000), Ok(100_000 + HEAP_MARGIN));
+        assert_eq!(
+            check_heap(100_000 + HEAP_MARGIN as usize, 100_000),
+            Ok(100_000 + HEAP_MARGIN)
+        );
         assert_eq!(
             check_heap(100_000 + HEAP_MARGIN as usize - 1, 100_000),
-            Err(HeapShort { free: 100_000 + HEAP_MARGIN - 1, needed: 100_000 + HEAP_MARGIN })
+            Err(HeapShort {
+                free: 100_000 + HEAP_MARGIN - 1,
+                needed: 100_000 + HEAP_MARGIN
+            })
         );
-        assert_eq!(check_heap(0, 0), Err(HeapShort { free: 0, needed: HEAP_MARGIN }));
+        assert_eq!(
+            check_heap(0, 0),
+            Err(HeapShort {
+                free: 0,
+                needed: HEAP_MARGIN
+            })
+        );
     }
 
     #[test]
     fn w10_saturates() {
         assert_eq!(check_heap(usize::MAX, u32::MAX), Ok(u32::MAX));
-        assert_eq!(check_heap(10, u32::MAX), Err(HeapShort { free: 10, needed: u32::MAX }));
+        assert_eq!(
+            check_heap(10, u32::MAX),
+            Err(HeapShort {
+                free: 10,
+                needed: u32::MAX
+            })
+        );
     }
 
     #[test]
     fn w10_holding_the_image_credits_it_back() {
         // 150 000 free before a 30 000-byte image was read, 120 000 after.
-        assert_eq!(check_heap_holding(120_000, 30_000, 140_000), Ok(140_000 + HEAP_MARGIN));
+        assert_eq!(
+            check_heap_holding(120_000, 30_000, 140_000),
+            Ok(140_000 + HEAP_MARGIN)
+        );
         assert_eq!(
             check_heap_holding(120_000, 30_000, 150_000),
-            Err(HeapShort { free: 150_000, needed: 150_000 + HEAP_MARGIN })
+            Err(HeapShort {
+                free: 150_000,
+                needed: 150_000 + HEAP_MARGIN
+            })
         );
-        assert_eq!(check_heap_holding(usize::MAX, usize::MAX, u32::MAX), Ok(u32::MAX));
+        assert_eq!(
+            check_heap_holding(usize::MAX, usize::MAX, u32::MAX),
+            Ok(u32::MAX)
+        );
     }
 
     #[test]
     fn w10_refusal_reports_free_and_needed() {
-        let short = HeapShort { free: 150_000, needed: 201_000 };
+        let short = HeapShort {
+            free: 150_000,
+            needed: 201_000,
+        };
         assert_eq!(
             short.to_string(),
             "not enough heap: needs 201000 B (196904 B bound + 4096 B margin), 150000 B free"

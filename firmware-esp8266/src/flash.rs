@@ -6,18 +6,22 @@
 //! [`NorFlash`] / [`ReadNorFlash`] traits on top in [`RegionFlash`], so that
 //! `esp_base::store::PayloadStore` can run on the chip unchanged.
 //!
-//! [`RegionFlash`] confines every access to one fixed region:
+//! [`RegionFlash`] confines every access to one fixed window: the payload
+//! region and, right after it, the trust record (requirement E26):
 //!
 //! | constant          | value      | meaning                                  |
 //! |-------------------|------------|------------------------------------------|
-//! | [`REGION_BASE`]   | `0x100000` | absolute flash address of the region     |
+//! | [`REGION_BASE`]   | `0x100000` | absolute flash address of the window     |
 //! | [`REGION_SIZE`]   | `0x40000`  | 256 KiB: two 128 KiB payload slots       |
+//! | [`TRUST_OFFSET`]  | `0x40000`  | the trust record (`esp_base::trust_store`, two 4 KiB sectors) |
+//! | [`WINDOW_SIZE`]   | `0x42000`  | everything the driver may touch          |
 //!
-//! Offsets passed to the `NorFlash` methods are **region relative**
-//! (`0..REGION_SIZE`); the driver adds [`REGION_BASE`]. The store is
-//! therefore opened at base `0` over the whole region, and nothing outside
-//! `0x100000..0x140000` can be touched (the firmware image occupies
-//! `0x0..0x11000`, IROM mapped from `0x10000`).
+//! Offsets passed to the `NorFlash` methods are **window relative**
+//! (`0..WINDOW_SIZE`); the driver adds [`REGION_BASE`]. The store is
+//! opened at base `0` over the payload region, the trust store at
+//! [`TRUST_OFFSET`], and nothing outside `0x100000..0x142000` can be
+//! touched (the firmware image occupies `0x0..0x11000`, IROM mapped from
+//! `0x10000`).
 //!
 //! Geometry and rules:
 //!
@@ -35,8 +39,8 @@
 //!   [`NorFlashErrorKind`] (`OutOfBounds`, `NotAligned`) before any device
 //!   operation; a failing device operation is `Other`.
 //!
-//! Every loop is bounded by the request length: at most `REGION_SIZE /
-//! PAGE` program calls per write and `REGION_SIZE / SECTOR` erase calls per
+//! Every loop is bounded by the request length: at most `WINDOW_SIZE /
+//! PAGE` program calls per write and `WINDOW_SIZE / SECTOR` erase calls per
 //! erase.
 //!
 //! The decision logic here is pure and host tested against a RAM NOR model
@@ -55,6 +59,13 @@ pub const REGION_BASE: u32 = 0x10_0000;
 
 /// Size of the payload region in bytes (256 KiB).
 pub const REGION_SIZE: u32 = 0x4_0000;
+
+/// Window-relative offset of the trust record, right after the payload
+/// region.
+pub const TRUST_OFFSET: u32 = REGION_SIZE;
+
+/// Bytes the driver may touch: the payload region and the trust record.
+pub const WINDOW_SIZE: u32 = TRUST_OFFSET + esp_base::trust_store::PARTITION_LEN;
 
 /// Erase granularity.
 pub const SECTOR: u32 = 4096;
@@ -143,7 +154,7 @@ impl<R: RawFlash> RegionFlash<R> {
 fn in_region(offset: u32, len: usize) -> Result<u32, FlashError> {
     let len = u32::try_from(len).map_err(|_| FlashError::OutOfBounds)?;
     let end = offset.checked_add(len).ok_or(FlashError::OutOfBounds)?;
-    if end > REGION_SIZE {
+    if end > WINDOW_SIZE {
         Err(FlashError::OutOfBounds)
     } else {
         Ok(end)
@@ -171,7 +182,7 @@ impl<R: RawFlash> ReadNorFlash for RegionFlash<R> {
     }
 
     fn capacity(&self) -> usize {
-        REGION_SIZE as usize
+        WINDOW_SIZE as usize
     }
 }
 
@@ -183,10 +194,10 @@ impl<R: RawFlash> NorFlash for RegionFlash<R> {
         if from > to || !from.is_multiple_of(SECTOR) || !to.is_multiple_of(SECTOR) {
             return Err(FlashError::NotAligned);
         }
-        if to > REGION_SIZE {
+        if to > WINDOW_SIZE {
             return Err(FlashError::OutOfBounds);
         }
-        // Bounded: at most REGION_SIZE / SECTOR iterations.
+        // Bounded: at most WINDOW_SIZE / SECTOR iterations.
         for sector in (from..to).step_by(SECTOR as usize) {
             self.raw.erase_sector(REGION_BASE + sector)?;
         }
@@ -263,8 +274,8 @@ mod tests {
     #[test]
     fn whole_region_erases() {
         let mut f = flash();
-        f.erase(0, REGION_SIZE).unwrap();
-        assert_eq!(f.into_inner().ops().len(), (REGION_SIZE / SECTOR) as usize);
+        f.erase(0, WINDOW_SIZE).unwrap();
+        assert_eq!(f.into_inner().ops().len(), (WINDOW_SIZE / SECTOR) as usize);
     }
 
     #[test]
@@ -324,27 +335,27 @@ mod tests {
         let mut f = flash();
         let mut buf = [0u8; 8];
         assert_eq!(
-            f.read(REGION_SIZE - 4, &mut buf),
+            f.read(WINDOW_SIZE - 4, &mut buf),
             Err(FlashError::OutOfBounds)
         );
         assert_eq!(
             f.read(u32::MAX, &mut buf[..1]),
             Err(FlashError::OutOfBounds)
         );
-        assert_eq!(f.write(REGION_SIZE, &[0; 4]), Err(FlashError::OutOfBounds));
+        assert_eq!(f.write(WINDOW_SIZE, &[0; 4]), Err(FlashError::OutOfBounds));
         assert_eq!(f.write(u32::MAX - 3, &[0; 8]), Err(FlashError::OutOfBounds));
         assert_eq!(
-            f.erase(0, REGION_SIZE + SECTOR),
+            f.erase(0, WINDOW_SIZE + SECTOR),
             Err(FlashError::OutOfBounds)
         );
         assert_eq!(
             FlashError::OutOfBounds.kind(),
             NorFlashErrorKind::OutOfBounds
         );
-        assert_eq!(f.capacity(), REGION_SIZE as usize);
+        assert_eq!(f.capacity(), WINDOW_SIZE as usize);
         // The last word and an empty read at the end are in range.
-        f.read(REGION_SIZE - 4, &mut buf[..4]).unwrap();
-        f.read(REGION_SIZE, &mut []).unwrap();
+        f.read(WINDOW_SIZE - 4, &mut buf[..4]).unwrap();
+        f.read(WINDOW_SIZE, &mut []).unwrap();
         assert!(
             f.into_inner()
                 .ops()

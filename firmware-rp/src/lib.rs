@@ -41,6 +41,11 @@
 //!   unserved keys to the service, served keys to `Payload::request` with a
 //!   512-byte reply, `Unavailable` for a stopped or trapped payload's keys,
 //!   a trap answered `Internal` and the payload stopped).
+//! * [`beacons`] — discovery beacons on the serial link: the device's own
+//!   `disc/mw/node` record and one per key its payload serves, with its
+//!   node id, at most four (the gateway's cap), refreshed every 15 s, sent
+//!   again after a `sys/info` reply, withdrawn when the run ends; and the
+//!   rule that a payload publishes neither `sys/...` nor `disc/...`.
 //! * [`usb`] — the CDC-ACM zero-length-packet rule and the USB identity.
 //! * `budget` (with the `wasm` runtime, and in tests) — the limits
 //!   payloads run under and the largest image a heap admits.
@@ -52,6 +57,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod beacons;
 #[cfg(any(test, feature = "wasm"))]
 pub mod budget;
 pub mod chip;

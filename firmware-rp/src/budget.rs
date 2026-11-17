@@ -29,7 +29,10 @@ pub const fn limits(profile: &Profile) -> Limits {
 /// maximum, at most the cap), passes the heap check with `free` bytes free.
 /// 0 if not even an empty image fits.
 pub fn largest_image(profile: &Profile, free: usize, memory: u32) -> u32 {
-    let limits = Limits { max_memory_bytes: memory.min(profile.max_memory_bytes), ..limits(profile) };
+    let limits = Limits {
+        max_memory_bytes: memory.min(profile.max_memory_bytes),
+        ..limits(profile)
+    };
     let fits = |len: u32| check_heap(free, limits.load_heap_needed(len)).is_ok();
     if !fits(0) {
         return 0;
@@ -72,7 +75,10 @@ mod tests {
         }
         // blink and echo (under 4 KiB) leave most of the heap free.
         let small = limits(&RP2350).load_heap_needed(4 * 1024);
-        assert!(check_heap(heap, small).is_ok() && small < 256 * 1024, "{small}");
+        assert!(
+            check_heap(heap, small).is_ok() && small < 256 * 1024,
+            "{small}"
+        );
     }
 
     #[test]

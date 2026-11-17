@@ -273,7 +273,10 @@ mod tests {
         let (s, _) = s.apply(RouteEvent::Frames(5));
         let (s, _) = s.apply(RouteEvent::Dropped(5));
         let (s, _) = s.apply(RouteEvent::Stopped(AbiError::Busy));
-        assert_eq!((s.frames, s.dropped, s.stops), (u32::MAX, u32::MAX, u32::MAX));
+        assert_eq!(
+            (s.frames, s.dropped, s.stops),
+            (u32::MAX, u32::MAX, u32::MAX)
+        );
     }
 
     #[test]
@@ -283,10 +286,7 @@ mod tests {
             dropped: 5,
             stops: 0xFFFF_FFFF,
         };
-        assert_eq!(
-            s.encode(),
-            [4, 3, 2, 1, 5, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]
-        );
+        assert_eq!(s.encode(), [4, 3, 2, 1, 5, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
     }
 
     #[test]

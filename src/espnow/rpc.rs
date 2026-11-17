@@ -27,8 +27,11 @@
 //! peer. [`Responder::serve_one`] waits for the next request (skipping
 //! other frames, at most [`super::MAX_IGNORED_FRAMES`]), and decides with
 //! [`Replies`]: a new request runs the handler and its response is cached;
-//! a repeat (the requester did not hear the response) is answered from the
-//! cache without running the handler again. The handler runs synchronously
+//! a repeat (the requester did not hear the response; same id and the same
+//! key and body, [`RequestDigest`]) is answered from the cache without
+//! running the handler again. A request reusing a cached id with other
+//! content runs as a new one, so a spoofed MAC cannot pre-empt a genuine
+//! request's id and have it suppressed. The handler runs synchronously
 //! between two awaits, so nothing is ever in flight across a cancellation.
 //! It sees the requester's MAC as [`RequestMeta::sender`]
 //! ([`SenderId::from_mac`]), no principal and no deadline; the MAC is not
@@ -40,7 +43,9 @@
 
 use super::{EspNowRadio, MAX_IGNORED_FRAMES, Mac};
 use crate::key::Key;
-use crate::rpc::{Admit, Call, MAX_FRAME, MAX_RESPONSE_BODY, Message, Replies, RpcError, next_id};
+use crate::rpc::{
+    Admit, Call, MAX_FRAME, MAX_RESPONSE_BODY, Message, Replies, RequestDigest, RpcError, next_id,
+};
 use crate::transport::{
     Handler, HandlerError, Request, RequestMeta, RequestOptions, Requester, Responder, SenderId,
     Target,
@@ -119,11 +124,26 @@ impl Retry {
     /// waits add up to about `budget_ms`.
     pub const fn within(self, budget_ms: Option<u32>) -> Retry {
         let Some(budget) = budget_ms else { return self };
-        let timeout_ms = if budget < self.timeout_ms { budget } else { self.timeout_ms };
-        let fit = if timeout_ms == 0 { 1 } else { budget / timeout_ms };
+        let timeout_ms = if budget < self.timeout_ms {
+            budget
+        } else {
+            self.timeout_ms
+        };
+        let fit = if timeout_ms == 0 {
+            1
+        } else {
+            budget / timeout_ms
+        };
         let fit = if fit == 0 { 1 } else { fit };
-        let attempts = if (self.attempts as u32) < fit { self.attempts } else { fit as u8 };
-        Retry { timeout_ms, attempts: if attempts == 0 { 1 } else { attempts } }
+        let attempts = if (self.attempts as u32) < fit {
+            self.attempts
+        } else {
+            fit as u8
+        };
+        Retry {
+            timeout_ms,
+            attempts: if attempts == 0 { 1 } else { attempts },
+        }
     }
 }
 
@@ -241,7 +261,7 @@ impl<R: EspNowUnicast, D: Delay> Requester for RpcRequester<R, D> {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], Self::Error> {
         if let Target::Node(node) = options.target
             && node != SenderId::from_mac(self.peer)
@@ -403,14 +423,17 @@ impl<R: EspNowUnicast, const N: usize, const B: usize> Responder for RpcResponde
             if to != self.own || src == self.own {
                 continue;
             }
-            let (replies, admit) = self.replies.admit(src, id, 0);
+            // Bound to the content: a spoofed request with this id cannot
+            // make the genuine one look like a repeat (`rpc` module docs).
+            let digest = RequestDigest::of(key, body);
+            let (replies, admit) = self.replies.admit(src, id, digest, 0);
             self.replies = replies;
             match admit {
                 Admit::Busy => continue,
                 Admit::Replay => {
                     self.stats.replayed = self.stats.replayed.saturating_add(1);
                     let mut copy = [0u8; MAX_RESPONSE_BODY];
-                    let result = match self.replies.cached(src, id) {
+                    let result = match self.replies.cached(src, id, digest) {
                         Some(Ok(b)) => copy
                             .get_mut(..b.len())
                             .map(|s| {
@@ -434,7 +457,7 @@ impl<R: EspNowUnicast, const N: usize, const B: usize> Responder for RpcResponde
                     let result = handler
                         .handle(&req, out)
                         .and_then(|n| out.get(..n).ok_or(HandlerError::BufferTooSmall));
-                    self.replies = self.replies.complete(src, id, result);
+                    self.replies = self.replies.complete(src, id, digest, result);
                     return self.reply(src, id, result).await;
                 }
             }
@@ -582,7 +605,11 @@ mod tests {
     }
 
     impl Handler for Device {
-        fn handle(&mut self, req: &Request<'_>, response: &mut [u8]) -> Result<usize, HandlerError> {
+        fn handle(
+            &mut self,
+            req: &Request<'_>,
+            response: &mut [u8],
+        ) -> Result<usize, HandlerError> {
             let (key, request) = (req.key, req.body);
             self.runs.push(key.as_str().into());
             self.senders.push(req.meta.sender);
@@ -796,6 +823,47 @@ mod tests {
     }
 
     #[test]
+    fn o20_a_spoofed_request_with_the_next_id_does_not_suppress_the_genuine_one() {
+        // An attacker claiming HOST's MAC sends id 100 (the requester's next
+        // id) to the device before HOST does.
+        let (mut req, mut resp, air) = net(&[]);
+        let mut dev = Device::default();
+        let mut raw = [0u8; MAX_FRAME];
+        let n = Message::Request {
+            id: 100,
+            to: DEV,
+            key: Key::from_static("echo"),
+            body: b"evil",
+        }
+        .encode(&mut raw)
+        .unwrap();
+        air.borrow_mut()
+            .inbox(DEV)
+            .push_back((raw[..n].to_vec(), HOST));
+        let mut scratch = [0u8; 64];
+        let mut cx = Context::from_waker(Waker::noop());
+        let served = pin!(resp.serve_one(&mut dev, &mut scratch)).poll(&mut cx);
+        assert_eq!(served, Poll::Ready(Ok(())));
+        // Its response reached HOST between calls; drop it (responses are
+        // not authenticated either: that is the requester's concern).
+        air.borrow_mut().inbox(HOST).clear();
+        // HOST's genuine request with id 100 runs and gets its own answer.
+        let mut out = [0u8; 64];
+        assert_eq!(
+            call(&mut req, &mut resp, &mut dev, "echo", b"good", &mut out),
+            Ok(b"good".to_vec())
+        );
+        assert_eq!(dev.runs, ["echo", "echo"]);
+        assert_eq!(
+            resp.stats(),
+            ServeStats {
+                executed: 2,
+                replayed: 0
+            }
+        );
+    }
+
+    #[test]
     fn o4_reordered_frames_never_mix_answers() {
         // The first response is delayed past the requester's timeout, so
         // the request is resent and answered again; the delayed response
@@ -866,30 +934,72 @@ mod tests {
         use core::time::Duration;
         // A caller's budget shortens attempts and caps how many are made.
         assert_eq!(RETRY.within(None), RETRY);
-        assert_eq!(RETRY.within(Some(250)), Retry { timeout_ms: 100, attempts: 2 });
-        assert_eq!(RETRY.within(Some(30)), Retry { timeout_ms: 30, attempts: 1 });
-        assert_eq!(RETRY.within(Some(0)), Retry { timeout_ms: 0, attempts: 1 });
+        assert_eq!(
+            RETRY.within(Some(250)),
+            Retry {
+                timeout_ms: 100,
+                attempts: 2
+            }
+        );
+        assert_eq!(
+            RETRY.within(Some(30)),
+            Retry {
+                timeout_ms: 30,
+                attempts: 1
+            }
+        );
+        assert_eq!(
+            RETRY.within(Some(0)),
+            Retry {
+                timeout_ms: 0,
+                attempts: 1
+            }
+        );
         assert_eq!(RETRY.within(Some(u32::MAX)), RETRY);
         let (mut req, mut resp, air) = net(&[Fate::Lose; 4]);
         let mut dev = Device::default();
         let mut out = [0u8; 64];
         let budget = RequestOptions::DEFAULT.with_timeout(Duration::from_millis(250));
         assert_eq!(
-            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &budget),
+            call_with(
+                &mut req,
+                &mut resp,
+                &mut dev,
+                "sys/info",
+                &[],
+                &mut out,
+                &budget
+            ),
             Err(RpcClientError::Timeout)
         );
         assert_eq!(air.borrow().sent, 2, "two 100 ms attempts fit 250 ms");
         // Another node is refused before anything is sent.
         let other = RequestOptions::DEFAULT.with_target(Target::Node(SenderId::from_mac(OTHER)));
         assert_eq!(
-            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &other),
+            call_with(
+                &mut req,
+                &mut resp,
+                &mut dev,
+                "sys/info",
+                &[],
+                &mut out,
+                &other
+            ),
             Err(RpcClientError::WrongTarget)
         );
         assert_eq!(air.borrow().sent, 2);
         // The peer itself is fine, and the handler is told who asked.
         let peer = RequestOptions::DEFAULT.with_target(Target::Node(SenderId::from_mac(DEV)));
         assert_eq!(
-            call_with(&mut req, &mut resp, &mut dev, "sys/info", &[], &mut out, &peer),
+            call_with(
+                &mut req,
+                &mut resp,
+                &mut dev,
+                "sys/info",
+                &[],
+                &mut out,
+                &peer
+            ),
             Ok(b"esp32s3".to_vec())
         );
         assert_eq!(dev.senders, [Some(SenderId::from_mac(HOST))]);

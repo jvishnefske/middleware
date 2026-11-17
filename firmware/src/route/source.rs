@@ -55,11 +55,11 @@
 //! bytes copied from the flash-resident `&'static [u8]` fixture. There is
 //! no frame buffer.
 
+use middleware::Key;
 use middleware::espnow::{Frame, FrameError, MAX_FRAME};
 use middleware::stream::{ChunkError, ChunkPlan, Chunker, FrameSource, HEADER_LEN, RouteStats};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::route::SourceConfig;
-use middleware::Key;
 
 use super::{AIR_CHUNK_DATA, Report};
 use crate::dispatch::tick_delay;
@@ -129,12 +129,18 @@ impl SourceRoute {
 
     /// A route for `cfg` serving `source`, first frame due at `now_ms`.
     /// `Unsupported` when the chunk size does not fit one ESP-NOW message.
-    pub fn with_source(cfg: SourceConfig, source: FrameSource<'static>, now_ms: u32) -> Result<Self, AbiError> {
+    pub fn with_source(
+        cfg: SourceConfig,
+        source: FrameSource<'static>,
+        now_ms: u32,
+    ) -> Result<Self, AbiError> {
         let data = usize::from(cfg.chunk_data);
         if data > AIR_CHUNK_DATA {
             return Err(AbiError::Unsupported);
         }
-        let chunker = source.chunker(0, 0, data).map_err(|_| AbiError::InvalidArgument)?;
+        let chunker = source
+            .chunker(0, 0, data)
+            .map_err(|_| AbiError::InvalidArgument)?;
         Ok(SourceRoute {
             cfg,
             feed: Feed::Stored(source),
@@ -226,7 +232,14 @@ impl SourceRoute {
         if chunk < count {
             return (SourceRoute { chunk, ..self }, Report::NONE);
         }
-        self.finish(now_ms, self.stats.sent(count), Report { frames: 1, dropped: 0 })
+        self.finish(
+            now_ms,
+            self.stats.sent(count),
+            Report {
+                frames: 1,
+                dropped: 0,
+            },
+        )
     }
 
     /// The state after the capture asked for by [`Next::Capture`]: a frame
@@ -238,13 +251,30 @@ impl SourceRoute {
             return (self, Report::NONE);
         }
         let data = usize::from(self.cfg.chunk_data);
-        match result.ok().and_then(|len| Chunker::new(self.chunker.seq(), len, data).ok()) {
-            Some(chunker) => {
-                (SourceRoute { feed: Feed::Camera { len: chunker.total() }, chunker, ..self }, Report::NONE)
-            }
+        match result
+            .ok()
+            .and_then(|len| Chunker::new(self.chunker.seq(), len, data).ok())
+        {
+            Some(chunker) => (
+                SourceRoute {
+                    feed: Feed::Camera {
+                        len: chunker.total(),
+                    },
+                    chunker,
+                    ..self
+                },
+                Report::NONE,
+            ),
             None => {
                 let stats = self.stats.skipped(0, 0);
-                self.finish(now_ms, stats, Report { frames: 0, dropped: 1 })
+                self.finish(
+                    now_ms,
+                    stats,
+                    Report {
+                        frames: 0,
+                        dropped: 1,
+                    },
+                )
             }
         }
     }
@@ -253,7 +283,14 @@ impl SourceRoute {
     /// [`SourceRoute::next`] failed: the rest of the frame is abandoned.
     pub fn failed(self, now_ms: u32) -> (Self, Report) {
         let stats = self.stats.skipped(self.chunk, self.chunker.count());
-        self.finish(now_ms, stats, Report { frames: 0, dropped: 1 })
+        self.finish(
+            now_ms,
+            stats,
+            Report {
+                frames: 0,
+                dropped: 1,
+            },
+        )
     }
 
     /// Schedules the next frame after the current one ended at `now_ms`,
@@ -261,12 +298,18 @@ impl SourceRoute {
     fn finish(self, now_ms: u32, stats: RouteStats, report: Report) -> (Self, Report) {
         let period = u32::from(self.cfg.period_ms).max(1);
         let due = self.due.wrapping_add(period);
-        let late = if tick_delay(now_ms, due) == 0 { now_ms.wrapping_sub(due) } else { 0 };
+        let late = if tick_delay(now_ms, due) == 0 {
+            now_ms.wrapping_sub(due)
+        } else {
+            0
+        };
         let missed = late / period;
         let count = self.chunker.count();
         let stats = RouteStats {
             frames_dropped: stats.frames_dropped.saturating_add(missed),
-            chunks_dropped: stats.chunks_dropped.saturating_add(missed.saturating_mul(count)),
+            chunks_dropped: stats
+                .chunks_dropped
+                .saturating_add(missed.saturating_mul(count)),
             ..stats
         };
         let seq = middleware::stream::source::next_seq(self.chunker.seq());
@@ -277,9 +320,15 @@ impl SourceRoute {
         // match the frame and `write_frame` would refuse its chunks.
         let data = usize::from(self.cfg.chunk_data);
         let (feed, chunker) = match self.feed {
-            Feed::Stored(source) => (self.feed, source.chunker(frame, seq, data).unwrap_or(self.chunker)),
+            Feed::Stored(source) => (
+                self.feed,
+                source.chunker(frame, seq, data).unwrap_or(self.chunker),
+            ),
             // The next frame is captured when due; its chunker comes then.
-            Feed::Camera { .. } => (Feed::Camera { len: 0 }, placeholder(seq, data).unwrap_or(self.chunker)),
+            Feed::Camera { .. } => (
+                Feed::Camera { len: 0 },
+                placeholder(seq, data).unwrap_or(self.chunker),
+            ),
         };
         let next = SourceRoute {
             feed,
@@ -290,7 +339,13 @@ impl SourceRoute {
             stats,
             ..self
         };
-        (next, Report { dropped: report.dropped.saturating_add(missed), ..report })
+        (
+            next,
+            Report {
+                dropped: report.dropped.saturating_add(missed),
+                ..report
+            },
+        )
     }
 }
 
@@ -327,9 +382,17 @@ pub fn write_frame(
     }
     let header = plan.header.encode(len).map_err(WireError::Chunk)?;
     // The radio header and key, with no payload yet: the chunk follows.
-    let at = Frame { seq: radio_seq, key, payload: &[] }.encode(out).map_err(WireError::Frame)?;
+    let at = Frame {
+        seq: radio_seq,
+        key,
+        payload: &[],
+    }
+    .encode(out)
+    .map_err(WireError::Frame)?;
     let end = at + HEADER_LEN + len;
-    let slot = out.get_mut(at..end).ok_or(WireError::Frame(FrameError::PayloadTooLarge))?;
+    let slot = out
+        .get_mut(at..end)
+        .ok_or(WireError::Frame(FrameError::PayloadTooLarge))?;
     let (head, data) = slot.split_at_mut(HEADER_LEN);
     head.copy_from_slice(&header);
     let filled = source.fill(frame, plan.range.start, data);
@@ -350,7 +413,10 @@ mod tests {
     use std::vec::Vec;
 
     const KEY: Key<'static> = Key::from_static("app/cam/frame");
-    const PATTERN: FrameSource<'static> = FrameSource::Pattern { width: 120, height: 120 };
+    const PATTERN: FrameSource<'static> = FrameSource::Pattern {
+        width: 120,
+        height: 120,
+    };
 
     /// Three stored "JPEG" frames of different lengths: 1, 2 and 3 chunks.
     const F0: &[u8] = &[0xA0; 100];
@@ -389,7 +455,8 @@ mod tests {
     }
 
     fn camera(period: u16, now: u32) -> SourceRoute {
-        SourceRoute::camera(SourceConfig::jpeg(240, 240, period).expect("valid"), now).expect("valid")
+        SourceRoute::camera(SourceConfig::jpeg(240, 240, period).expect("valid"), now)
+            .expect("valid")
     }
 
     #[test]
@@ -404,28 +471,56 @@ mod tests {
         assert_eq!(rep, Report::NONE);
         assert_eq!(r.feed(), Feed::Camera { len: 400 });
         assert_eq!(r.chunks_per_frame(), 3);
-        let Next::Send(first) = r.next(1080) else { panic!("send") };
+        let Next::Send(first) = r.next(1080) else {
+            panic!("send")
+        };
         assert_eq!((first.header.total, first.range), (400, 0..166));
         assert_eq!(first.header.seq, 0);
         let (r, rep, sent) = send_frame(r, 1100);
-        assert_eq!((rep, sent), (Report { frames: 1, dropped: 0 }, 3));
+        assert_eq!(
+            (rep, sent),
+            (
+                Report {
+                    frames: 1,
+                    dropped: 0
+                },
+                3
+            )
+        );
         // The next frame is captured a period after the first was due.
         assert_eq!(r.feed(), Feed::Camera { len: 0 });
         assert_eq!(r.next(1100), Next::Wait(400));
         assert_eq!(r.next(1500), Next::Capture);
         let (r, _) = r.captured(1550, Ok(1000));
-        let Next::Send(p) = r.next(1550) else { panic!("send") };
-        assert_eq!((p.header.seq, p.header.total), (1, 1000), "one seq per frame");
+        let Next::Send(p) = r.next(1550) else {
+            panic!("send")
+        };
+        assert_eq!(
+            (p.header.seq, p.header.total),
+            (1, 1000),
+            "one seq per frame"
+        );
         assert_eq!(r.stats().frames, 1);
         assert_eq!(r.stats().chunks, 3);
     }
 
     #[test]
     fn r15_a_failed_capture_drops_the_frame_and_waits_a_period() {
-        for fault in [CaptureFault::Overflow, CaptureFault::Timeout, CaptureFault::Hardware] {
+        for fault in [
+            CaptureFault::Overflow,
+            CaptureFault::Timeout,
+            CaptureFault::Hardware,
+        ] {
             let r = camera(500, 0);
             let (r, rep) = r.captured(300, Err(fault));
-            assert_eq!(rep, Report { frames: 0, dropped: 1 }, "{fault:?}");
+            assert_eq!(
+                rep,
+                Report {
+                    frames: 0,
+                    dropped: 1
+                },
+                "{fault:?}"
+            );
             assert_eq!(r.stats().frames_dropped, 1);
             assert_eq!(r.next(300), Next::Wait(200));
             assert_eq!(r.next(500), Next::Capture);
@@ -433,7 +528,13 @@ mod tests {
         // A capture slower than whole periods skips them; the next frame,
         // already late, is captured at once.
         let (r, rep) = camera(100, 0).captured(350, Err(CaptureFault::Timeout));
-        assert_eq!(rep, Report { frames: 0, dropped: 3 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 0,
+                dropped: 3
+            }
+        );
         assert_eq!(r.next(350), Next::Capture);
         // An empty or oversize "frame" is a failed capture.
         let (_, rep) = camera(100, 0).captured(10, Ok(0));
@@ -447,13 +548,25 @@ mod tests {
 
     #[test]
     fn r15_camera_routes_need_jpeg_and_air_sized_chunks() {
-        assert_eq!(SourceRoute::camera(cfg(), 0), Err(AbiError::InvalidArgument), "RGB565");
-        let big = SourceConfig::jpeg(240, 240, 100).and_then(|c| c.with_chunk_data(200)).expect("valid");
+        assert_eq!(
+            SourceRoute::camera(cfg(), 0),
+            Err(AbiError::InvalidArgument),
+            "RGB565"
+        );
+        let big = SourceConfig::jpeg(240, 240, 100)
+            .and_then(|c| c.with_chunk_data(200))
+            .expect("valid");
         assert_eq!(SourceRoute::camera(big, 0), Err(AbiError::Unsupported));
         // A failed broadcast abandons a captured frame like any other.
         let (r, _) = camera(100, 0).captured(5, Ok(400));
         let (r, rep) = r.failed(6);
-        assert_eq!(rep, Report { frames: 0, dropped: 1 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 0,
+                dropped: 1
+            }
+        );
         assert_eq!(r.feed(), Feed::Camera { len: 0 });
         assert_eq!(r.stats().chunks_dropped, 3);
     }
@@ -464,12 +577,30 @@ mod tests {
         assert_eq!(r.chunks_per_frame(), 174);
         assert!(matches!(r.next(1000), Next::Send(ref p) if p.range == (0..166)));
         let (r, rep, sent) = send_frame(r, 1050);
-        assert_eq!((rep, sent), (Report { frames: 1, dropped: 0 }, 174));
-        assert_eq!(r.stats(), RouteStats { frames: 1, chunks: 174, ..RouteStats::default() });
+        assert_eq!(
+            (rep, sent),
+            (
+                Report {
+                    frames: 1,
+                    dropped: 0
+                },
+                174
+            )
+        );
+        assert_eq!(
+            r.stats(),
+            RouteStats {
+                frames: 1,
+                chunks: 174,
+                ..RouteStats::default()
+            }
+        );
         assert_eq!(r.frame(), 1);
         // Next frame due at 1200: wait 150 ms.
         assert_eq!(r.next(1050), Next::Wait(150));
-        assert!(matches!(r.next(1200), Next::Send(ref p) if p.header.seq == 1 && p.header.offset == 0));
+        assert!(
+            matches!(r.next(1200), Next::Send(ref p) if p.header.seq == 1 && p.header.offset == 0)
+        );
     }
 
     #[test]
@@ -488,17 +619,32 @@ mod tests {
         let r = SourceRoute::new(cfg(), 0).expect("valid");
         // Finishes at 250: frame 1 (due 200) is late but not missed.
         let (r, rep, _) = send_frame(r, 250);
-        assert_eq!(rep, Report { frames: 1, dropped: 0 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 1,
+                dropped: 0
+            }
+        );
         assert!(matches!(r.next(250), Next::Send(_)));
         assert_eq!(r.frame(), 1);
         // Frame 1 finishes at 1000: periods due 400, 600 and 800 have
         // passed; 3 frames are skipped and frame 5 (due 1000) starts.
         let (r, rep, _) = send_frame(r, 1000);
-        assert_eq!(rep, Report { frames: 1, dropped: 3 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 1,
+                dropped: 3
+            }
+        );
         assert_eq!(r.frame(), 5);
         assert_eq!(r.stats().frames_dropped, 3);
         assert_eq!(r.stats().chunks_dropped, 3 * 174);
-        assert!(matches!(r.next(1000), Next::Send(ref p) if p.header.seq == 2), "seq counts attempts");
+        assert!(
+            matches!(r.next(1000), Next::Send(ref p) if p.header.seq == 2),
+            "seq counts attempts"
+        );
         assert_eq!(r.next(999), Next::Wait(1));
     }
 
@@ -507,13 +653,26 @@ mod tests {
         let r = SourceRoute::new(cfg(), 0).expect("valid");
         let r = (0..10).fold(r, |r, _| r.published(0).0);
         let (r, rep) = r.failed(20);
-        assert_eq!(rep, Report { frames: 0, dropped: 1 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 0,
+                dropped: 1
+            }
+        );
         assert_eq!(
             r.stats(),
-            RouteStats { frames: 0, frames_dropped: 1, chunks: 10, chunks_dropped: 164 }
+            RouteStats {
+                frames: 0,
+                frames_dropped: 1,
+                chunks: 10,
+                chunks_dropped: 164
+            }
         );
         assert_eq!(r.next(20), Next::Wait(180));
-        assert!(matches!(r.next(200), Next::Send(ref p) if p.header.offset == 0 && p.header.seq == 1));
+        assert!(
+            matches!(r.next(200), Next::Send(ref p) if p.header.offset == 0 && p.header.seq == 1)
+        );
     }
 
     #[test]
@@ -533,9 +692,12 @@ mod tests {
     fn r11_write_frame_builds_a_radio_frame_with_the_pattern_in_place() {
         let c = cfg();
         let r = SourceRoute::new(c, 0).expect("valid");
-        let Next::Send(plan) = r.next(0) else { panic!("due") };
+        let Next::Send(plan) = r.next(0) else {
+            panic!("due")
+        };
         let mut out = [0u8; MAX_FRAME];
-        let n = write_frame(&mut out, 7, KEY, 3, &r.source().expect("stored"), &plan).expect("fits");
+        let n =
+            write_frame(&mut out, 7, KEY, 3, &r.source().expect("stored"), &plan).expect("fits");
         assert_eq!(n, 7 + KEY.as_str().len() + 12 + ESPNOW_CHUNK_DATA);
         let f = Frame::decode(&out[..n]).expect("radio frame");
         assert_eq!((f.seq, f.key), (7, KEY));
@@ -554,8 +716,18 @@ mod tests {
         let mut sink = Sink::new();
         let mut out = [0u8; MAX_FRAME];
         for i in 0..r.chunks_per_frame() {
-            let Next::Send(plan) = r.next(0) else { panic!("due") };
-            let n = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
+            let Next::Send(plan) = r.next(0) else {
+                panic!("due")
+            };
+            let n = write_frame(
+                &mut out,
+                i as u8,
+                KEY,
+                r.frame(),
+                &r.source().expect("stored"),
+                &plan,
+            )
+            .expect("fits");
             let f = Frame::decode(&out[..n]).expect("radio frame");
             let (step, data) = sink.receive(c.frame_len(), f.payload);
             assert!(step.forwards());
@@ -572,7 +744,11 @@ mod tests {
     fn r11_write_frame_refuses_what_does_not_fit() {
         let c = cfg();
         let plan = ChunkPlan {
-            header: middleware::stream::ChunkHeader { seq: 0, offset: 0, total: c.frame_len() },
+            header: middleware::stream::ChunkHeader {
+                seq: 0,
+                offset: 0,
+                total: c.frame_len(),
+            },
             range: 0..168,
         };
         let mut out = [0u8; MAX_FRAME];
@@ -581,17 +757,34 @@ mod tests {
             Err(WireError::Frame(FrameError::PayloadTooLarge))
         );
         let long = std::string::String::from("app/") + &"k".repeat(MAX_KEY);
-        let plan = ChunkPlan { range: 0..10, ..plan };
+        let plan = ChunkPlan {
+            range: 0..10,
+            ..plan
+        };
         assert_eq!(
-            write_frame(&mut out, 0, Key::new(&long).expect("valid"), 0, &PATTERN, &plan),
+            write_frame(
+                &mut out,
+                0,
+                Key::new(&long).expect("valid"),
+                0,
+                &PATTERN,
+                &plan
+            ),
             Err(WireError::Frame(FrameError::KeyTooLong))
         );
         // A plan past the frame end is a chunk error, not a short frame.
         let past = ChunkPlan {
-            header: middleware::stream::ChunkHeader { seq: 0, offset: 28_790, total: 28_800 },
+            header: middleware::stream::ChunkHeader {
+                seq: 0,
+                offset: 28_790,
+                total: 28_800,
+            },
             range: 28_790..28_810,
         };
-        assert_eq!(write_frame(&mut out, 0, KEY, 0, &PATTERN, &past), Err(WireError::Chunk(ChunkError::Bounds)));
+        assert_eq!(
+            write_frame(&mut out, 0, KEY, 0, &PATTERN, &past),
+            Err(WireError::Chunk(ChunkError::Bounds))
+        );
     }
 
     #[test]
@@ -601,13 +794,29 @@ mod tests {
         for n in 0..6u32 {
             let want = STORED[n as usize % 3];
             assert_eq!(r.frame(), n);
-            assert_eq!(r.chunks_per_frame() as usize, want.len().div_ceil(ESPNOW_CHUNK_DATA));
+            assert_eq!(
+                r.chunks_per_frame() as usize,
+                want.len().div_ceil(ESPNOW_CHUNK_DATA)
+            );
             let mut rebuilt = Vec::new();
             let mut out = [0u8; MAX_FRAME];
             for i in 0..r.chunks_per_frame() {
-                let Next::Send(plan) = r.next(now) else { panic!("due") };
-                assert_eq!((plan.header.total as usize, plan.header.seq), (want.len(), n as u16));
-                let len = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
+                let Next::Send(plan) = r.next(now) else {
+                    panic!("due")
+                };
+                assert_eq!(
+                    (plan.header.total as usize, plan.header.seq),
+                    (want.len(), n as u16)
+                );
+                let len = write_frame(
+                    &mut out,
+                    i as u8,
+                    KEY,
+                    r.frame(),
+                    &r.source().expect("stored"),
+                    &plan,
+                )
+                .expect("fits");
                 let f = Frame::decode(&out[..len]).expect("radio frame");
                 rebuilt.extend_from_slice(chunk::decode(f.payload).expect("chunk").data);
                 r = r.published(now).0;
@@ -615,7 +824,14 @@ mod tests {
             assert_eq!(rebuilt, want);
             now += 200;
         }
-        assert_eq!(r.stats(), RouteStats { frames: 6, chunks: 2 * (1 + 2 + 3), ..RouteStats::default() });
+        assert_eq!(
+            r.stats(),
+            RouteStats {
+                frames: 6,
+                chunks: 2 * (1 + 2 + 3),
+                ..RouteStats::default()
+            }
+        );
     }
 
     #[test]
@@ -625,9 +841,17 @@ mod tests {
         // passed, so frames 1 and 2 are skipped and frame 3 (stored frame
         // 0 again, due 600) starts at once.
         let (r, rep) = r.published(650);
-        assert_eq!(rep, Report { frames: 1, dropped: 2 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 1,
+                dropped: 2
+            }
+        );
         assert_eq!(r.frame(), 3);
-        assert!(matches!(r.next(650), Next::Send(ref p) if p.header.total == 100 && p.header.seq == 1));
+        assert!(
+            matches!(r.next(650), Next::Send(ref p) if p.header.total == 100 && p.header.seq == 1)
+        );
         // The skipped chunks are counted with the next frame's length.
         assert_eq!(r.stats().chunks_dropped, 2);
     }
@@ -635,17 +859,35 @@ mod tests {
     #[test]
     fn r11_jpeg_write_frame_copies_the_stored_bytes() {
         let r = jpeg_route(0).published(0).0;
-        let Next::Send(plan) = r.next(200) else { panic!("due") };
+        let Next::Send(plan) = r.next(200) else {
+            panic!("due")
+        };
         let mut out = [0u8; MAX_FRAME];
-        let n = write_frame(&mut out, 0, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
-        let ch = chunk::decode(Frame::decode(&out[..n]).expect("radio frame").payload).expect("chunk");
+        let n = write_frame(
+            &mut out,
+            0,
+            KEY,
+            r.frame(),
+            &r.source().expect("stored"),
+            &plan,
+        )
+        .expect("fits");
+        let ch =
+            chunk::decode(Frame::decode(&out[..n]).expect("radio frame").payload).expect("chunk");
         assert_eq!(ch.data, &F1[..ESPNOW_CHUNK_DATA]);
         // A plan for a longer frame than the stored one is refused.
         let wrong = ChunkPlan {
-            header: middleware::stream::ChunkHeader { seq: 0, offset: 166, total: 400 },
+            header: middleware::stream::ChunkHeader {
+                seq: 0,
+                offset: 166,
+                total: 400,
+            },
             range: 166..332,
         };
-        assert_eq!(write_frame(&mut out, 0, KEY, 1, &r.source().expect("stored"), &wrong), Err(WireError::Chunk(ChunkError::Bounds)));
+        assert_eq!(
+            write_frame(&mut out, 0, KEY, 1, &r.source().expect("stored"), &wrong),
+            Err(WireError::Chunk(ChunkError::Bounds))
+        );
     }
 
     #[test]
@@ -672,6 +914,9 @@ mod tests {
         }
         let too_big = jpeg.with_chunk_data(168).expect("valid ABI config");
         let set = FrameSet::new(STORED).expect("valid");
-        assert_eq!(SourceRoute::with_source(too_big, FrameSource::Frames(set), 0), Err(AbiError::Unsupported));
+        assert_eq!(
+            SourceRoute::with_source(too_big, FrameSource::Frames(set), 0),
+            Err(AbiError::Unsupported)
+        );
     }
 }

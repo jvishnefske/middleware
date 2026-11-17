@@ -777,7 +777,11 @@ fn w10_call_depth_is_capped_by_limits() {
     // `init` plus 10 nested calls fits in 16 frames.
     assert!(Payload::load(&recursion(10), Fake::default(), limits).is_ok());
     let err = Payload::load(&recursion(100), Fake::default(), limits).err();
-    let Some(LoadError::Init { trap: Trap::Wasm(msg), .. }) = err else {
+    let Some(LoadError::Init {
+        trap: Trap::Wasm(msg),
+        ..
+    }) = err
+    else {
         panic!("expected a trap, got {err:?}");
     };
     assert!(msg.contains("stack exhausted"), "{msg}");
@@ -846,10 +850,16 @@ fn w10_heap_bound_charges_the_declared_maximum_not_the_cap() {
     );
     // No maximum: may grow to the cap, which is charged.
     let open = byte_page_module(12_288, "");
-    assert_eq!(cap.heap_needed(&open), cap.load_heap_needed(open.len() as u32));
+    assert_eq!(
+        cap.heap_needed(&open),
+        cap.load_heap_needed(open.len() as u32)
+    );
     // A maximum above the cap: the cap.
     let big = module(r#"(memory (export "memory") 1 4)"#);
-    assert_eq!(cap.heap_needed(&big), cap.load_heap_needed(big.len() as u32));
+    assert_eq!(
+        cap.heap_needed(&big),
+        cap.load_heap_needed(big.len() as u32)
+    );
     // The declared maximum holds at run time: growing past it fails even
     // though the cap would allow it.
     let grow = module(

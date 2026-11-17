@@ -11,15 +11,25 @@
 //! and the RP base firmware (`firmware-rp/src/chip.rs`) build their
 //! `Profile`s on these maps, and `web/protocol-wasm` exposes them to the
 //! browser, so the web pin table checks pins with the rules the device
-//! applies instead of a second copy.
+//! applies instead of a second copy. The i.MX RT base firmware
+//! (`firmware-imxrt/src/chip.rs`) builds its profile on
+//! [`boards::RT1050_EVKB`] the same way.
 //!
 //! * [`boards`] — the maps: [`boards::PICO`] (Raspberry Pi Pico and Pico 2),
 //!   [`boards::ESP32`] (AI-Thinker ESP32-CAM), [`boards::ESP32S3`],
-//!   [`boards::ESP32C3`], [`boards::ESP8266`], and [`boards::by_chip`].
+//!   [`boards::ESP32C3`], [`boards::ESP8266`], [`boards::RT1050_EVKB`]
+//!   (NXP MIMXRT1050-EVKB), and [`boards::by_chip`].
 //! * [`rp`] — the RP2040 / RP2350 GPIO function tables for SPI (F1) and
 //!   I2C (F3).
+//! * [`imxrt`] — i.MX RT1050 pads (IOMUXC registers, GPIO lines, ALT
+//!   functions, ADC1 inputs) and, in [`imxrt::evkb`], the EVKB's logical
+//!   board pins mapped to those pads. On the RT1050 a payload pin number is
+//!   a logical board pin (an Arduino header pin, the USER button), not a
+//!   GPIO line: the chip has five GPIO banks of 32 lines, more than the
+//!   ABI's 64 pin numbers.
 //! * [`spi`] — resolving a payload's SPI pins on a map (one SPI block on
-//!   the RP chips; any capable pin through the ESP GPIO matrix).
+//!   the RP chips; any capable pin through the ESP GPIO matrix; the fixed
+//!   LPSPI1 pins on the RT1050-EVKB).
 //!
 //! [`PinMap::check`] is the board policy behind every `gpio_*` call:
 //! [`PinError::NoSuchPin`] for a pin the chip lacks (the ABI's
@@ -33,6 +43,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boards;
+pub mod imxrt;
 pub mod rp;
 pub mod spi;
 
@@ -75,6 +86,25 @@ pub enum SpiRouting {
     /// SCK, MOSI and MISO on GPIOs with that signal, all on one block; CS
     /// is driven as a plain output, so any output pin.
     RpFunctionTable,
+    /// No SPI bus for payloads (the Colorlight 5A-75B gateware): every pin
+    /// fails with [`spi::SpiProblem::NoSignal`].
+    None,
+    /// One SPI controller whose SCK, MOSI and MISO are wired to fixed
+    /// board pins (the RT1050-EVKB's LPSPI1 on Arduino D13, D11, D12): each
+    /// of those roles must use its pin. CS is driven as a plain output, so
+    /// any output pin.
+    Fixed(FixedSpi),
+}
+
+/// The board pins of a [`SpiRouting::Fixed`] controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedSpi {
+    /// The clock pin.
+    pub sck: u8,
+    /// The controller-out pin.
+    pub mosi: u8,
+    /// The controller-in pin.
+    pub miso: u8,
 }
 
 /// A plain-language reason the board holds some pins.
@@ -167,6 +197,21 @@ impl PinMap {
         has(self.reserved, pin)
     }
 
+    /// The same map with `pin` reserved or not (a pin past 63 changes
+    /// nothing). A board adapting a chip map (the ESP base firmware's
+    /// `esp_base::board`) keeps extra pins or opens module flash/PSRAM pins
+    /// it lacks this way; every check on the map follows. The reasons are
+    /// unchanged, so [`PinMap::reason`] may still name a released pin's
+    /// former use.
+    pub const fn with_reserved(mut self, pin: u8, reserved: bool) -> PinMap {
+        if reserved {
+            self.reserved |= bit(pin);
+        } else {
+            self.reserved &= !bit(pin);
+        }
+        self
+    }
+
     /// Whether `pin` can only be read.
     pub const fn is_input_only(&self, pin: u8) -> bool {
         has(self.input_only, pin)
@@ -231,7 +276,9 @@ impl PinMap {
         if timer >= PWM_TIMERS || channel >= PWM_OUTPUTS {
             return None;
         }
-        self.pwm.get(usize::from(timer * PWM_OUTPUTS + channel)).copied()
+        self.pwm
+            .get(usize::from(timer * PWM_OUTPUTS + channel))
+            .copied()
     }
 
     /// The PWM output pins, indexed by `2·timer + channel` (empty when the
@@ -242,7 +289,10 @@ impl PinMap {
 
     /// The ((timer, channel), pin) PWM outputs, in table order.
     pub fn pwm_pins(&self) -> impl Iterator<Item = ((u8, u8), u8)> + '_ {
-        self.pwm.iter().zip(0u8..).map(|(&p, i)| ((i / PWM_OUTPUTS, i % PWM_OUTPUTS), p))
+        self.pwm
+            .iter()
+            .zip(0u8..)
+            .map(|(&p, i)| ((i / PWM_OUTPUTS, i % PWM_OUTPUTS), p))
     }
 
     /// How SPI pins are routed.
@@ -264,6 +314,18 @@ impl PinMap {
 mod tests {
     use super::boards::*;
     use super::*;
+
+    #[test]
+    fn with_reserved_adds_and_removes_one_pin() {
+        let open = ESP32S3.with_reserved(35, false);
+        assert!(ESP32S3.is_reserved(35) && !open.is_reserved(35));
+        assert_eq!(open.check(35, Direction::Output), Ok(()));
+        assert!(open.payload_pins().any(|p| p == 35));
+        let kept = ESP32S3.with_reserved(4, true);
+        assert_eq!(kept.check(4, Direction::Input), Err(PinError::Reserved));
+        assert_eq!(kept.reserved_mask(), ESP32S3.reserved_mask() | bit(4));
+        assert_eq!(ESP32S3.with_reserved(64, true), ESP32S3);
+    }
 
     #[test]
     fn masks_and_spans() {
@@ -310,7 +372,11 @@ mod tests {
         assert_eq!(PICO.adc_channel(40), Err(AdcError::NoSuchPin));
         assert_eq!(ESP32.adc_channel(36), Ok(0), "ADC1_CH0");
         assert_eq!(ESP32.adc_channel(32), Ok(4), "ADC1_CH4");
-        assert_eq!(ESP32.adc_channel(25), Err(AdcError::NotAnalog), "ADC2 is never offered");
+        assert_eq!(
+            ESP32.adc_channel(25),
+            Err(AdcError::NotAnalog),
+            "ADC2 is never offered"
+        );
         assert_eq!(ESP32S3.adc_channel(1), Ok(0));
         assert_eq!(ESP32S3.adc_mask(), span(1, 10));
         assert_eq!(ESP32.adc_mask(), span(32, 39));

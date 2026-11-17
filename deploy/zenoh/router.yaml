@@ -1,0 +1,20 @@
+# RouterOptions for the lab deployment (namespace apps, image
+# localhost/mw/zenohd, trust domain infra.local, robot route on the
+# ingress gateway's port 15443 with SNI zenoh.infra.local: the defaults).
+#
+# The MCU gateway re-announces device services (cam/**) and answers their
+# requests; robot r1 publishes under its own prefix and reads demo data.
+extra_grants:
+- user: mw-gateway
+  grants:
+    announces:
+    - cam/**
+    answers:
+    - cam/**
+robots:
+- name: r1
+  grants:
+    publishes:
+    - app/robot/r1/**
+    subscribes:
+    - app/demo/**

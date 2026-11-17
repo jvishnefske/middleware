@@ -7,8 +7,8 @@
 #   scripts/check-reproducible.sh [package...]
 #
 # The copy holds only what the payload build reads: the `middleware` crate
-# (Cargo.toml, src/, and examples/, which the manifest's `[[example]]`
-# table names) and payloads/ without target/. It gets its own target
+# (Cargo.toml, src/, and examples/ and tests/, which the manifest's
+# `[[example]]` and `[[test]]` tables name) and payloads/ without target/. It gets its own target
 # directory, so nothing is shared between the two builds but the cargo
 # registry and the toolchain.
 set -euo pipefail
@@ -20,7 +20,7 @@ OUT=target/byte-pages/wasm32-unknown-unknown/release
 copy="$(mktemp -d "${TMPDIR:-/tmp}/mw-repro.XXXXXX")"
 trap 'rm -rf "$copy"' EXIT
 mkdir -p "$copy/elsewhere/payloads"
-cp -R ../Cargo.toml ../src ../examples "$copy/elsewhere/"
+cp -R ../Cargo.toml ../src ../examples ../tests "$copy/elsewhere/"
 tar -C . --exclude=./target -cf - . | tar -C "$copy/elsewhere/payloads" -xf -
 
 scripts/build-byte-pages.sh "${PACKAGES[@]/#/--package=}"

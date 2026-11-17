@@ -1,0 +1,10 @@
+# File-based SDS: the robot's X509-SVID and key, as copied into @certDir@ by
+# mw-envoy-certs.service. Envoy re-reads both when a file is moved into
+# @certDir@ (watched_directory).
+resources:
+  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+    name: svid
+    tls_certificate:
+      certificate_chain: { filename: "@certDir@/svid.pem" }
+      private_key: { filename: "@certDir@/svid_key.pem" }
+      watched_directory: { path: "@certDir@" }

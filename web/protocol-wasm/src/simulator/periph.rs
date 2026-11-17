@@ -187,6 +187,11 @@ impl Peripherals {
         r
     }
 
+    /// Drops the pending events of `kind` from `source` (a stopped route's).
+    pub fn purge(&mut self, kind: EventKind, source: i32) {
+        self.queue.purge(kind, source);
+    }
+
     /// Removes the oldest pending event.
     pub fn pop(&mut self) -> Option<Event> {
         self.queue.pop()

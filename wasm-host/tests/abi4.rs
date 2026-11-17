@@ -196,7 +196,7 @@ fn importing(imports: &[Import]) -> Vec<u8> {
 fn r1_every_import_links_and_older_revisions_still_load() {
     assert_eq!(ABI4_IMPORTS, ABI3_IMPORTS + 4);
     for (what, imports) in [
-        ("ABI 5", IMPORTS),
+        ("current", IMPORTS),
         ("ABI 4", &IMPORTS[..ABI4_IMPORTS]),
         ("ABI 3", &IMPORTS[..ABI3_IMPORTS]),
         ("ABI 2", &IMPORTS[..ABI2_IMPORTS]),

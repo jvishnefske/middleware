@@ -1,0 +1,40 @@
+[package]
+name = "imxrt-flasher"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "RAM-loaded HyperFlash programmer for the MIMXRT1050-EVKB, fed over SWD (tools/flash.py)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone: a RAM-linked image (DTCM) with its own memory.x, so it cannot
+# share firmware-imxrt's link layouts.
+[workspace]
+
+[[bin]]
+name = "imxrt-flasher"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+imxrt-base = { path = "..", features = ["shell"] }
+embassy-nxp = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc", features = ["mimxrt1062", "unstable-pac", "time-driver-pit"] }
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+embedded-storage = "0.3.2"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+
+[patch.crates-io]
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-time-queue-utils = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-hal-internal = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "d76de55c334d3221f9d05c6a8f7f0d3b7735c3fc" }

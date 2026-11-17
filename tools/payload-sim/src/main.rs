@@ -1,4 +1,4 @@
-//! Desktop payload simulator (requirements W7, D10, X7 and R10).
+//! Desktop payload simulator (requirements W7, D10, X7, R10 and LS6).
 //!
 //! `payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]
 //! [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE] [--seed S]
@@ -43,6 +43,15 @@
 //! (`ov2640 dsp <reg>=<value> ...`, `ov2640 sensor ...`). Other addresses
 //! do not acknowledge. There is no image sensor: a camera source route is
 //! `Unsupported`.
+//!
+//! The ABI 7 LED strips (LS6) print `ledstrip<h> open pin <p> <n> leds`,
+//! one `ledstrip<h> #rrggbb #rrggbb ...` line per `ledstrip_write` (the
+//! LEDs written, nearest the pin first, in RGB order although the payload
+//! sends G, R, B bytes) and `ledstrip<h> close`. A strip's data pin is
+//! not plain GPIO while it is open (`gpio_*` on it is `InvalidArgument`).
+//! When the run ends, each open strip prints the colour every LED last
+//! received as `ledstrip<h> pin <p>: #rrggbb ...` (LEDs never written
+//! show `#000000`).
 //!
 //! Hardware timers run on the simulator clock. `spi_transfer` loops the
 //! transmitted bytes back (or returns `--spi-pattern`, repeated) and
@@ -289,6 +298,11 @@ impl Bench {
         };
         match sim::parse_command(line) {
             Ok(Some(sim::Command::Req { key, body })) => self.request(&key, &body),
+            Ok(Some(sim::Command::Link { link, key, data })) => {
+                let r = arrive(&mut n.payload, link, &key, &data);
+                n.fault(r)?;
+                self.exchange()
+            }
             Ok(Some(command)) => {
                 if let Err(e) = n.device().apply(command) {
                     eprintln!("{e}");
@@ -335,14 +349,17 @@ impl Bench {
         self.pump()
     }
 
-    /// Prints the route counters, fuel use and bus summary, and dumps the
-    /// panel.
+    /// Prints the route counters, sensor and LED-strip state, fuel use and
+    /// bus summary, and dumps the panel.
     fn finish(&mut self, opts: &Options) {
         for n in &mut self.nodes {
             for line in n.device().route_summary() {
                 n.device().note(line);
             }
             for line in n.device().sensor_summary() {
+                n.device().note(line);
+            }
+            for line in n.device().ledstrip_summary() {
                 n.device().note(line);
             }
             let fuel = n.payload.fuel_stats();
@@ -374,17 +391,40 @@ impl Bench {
     }
 }
 
-/// Delivers one stdin message line.
+/// A publication arriving on `link` (ABI 6): the bridge rules forward it,
+/// then the board's routes and subscriptions are offered it. Printed as
+/// `drop <key>` when nothing took it.
+fn arrive(p: &mut Sim, link: u8, key: &str, data: &[u8]) -> Result<(), Trap> {
+    let Ok(key) = Key::new(key) else {
+        return Ok(());
+    };
+    let forwarded = p.device().link_receive(link, key, data);
+    let r = match offer(p, key, data) {
+        Ok(false) if forwarded == 0 => {
+            p.device().note(format!("drop {key}"));
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(t) => Err(t),
+    };
+    flush(p);
+    r
+}
+
+/// Delivers one stdin message line (it arrives on link 0).
 fn deliver(p: &mut Sim, line: &str) -> Result<(), Trap> {
     let result = match sim::parse_line(line) {
-        Ok(Some((key, data))) => match offer(p, key, data) {
-            Ok(true) => Ok(()),
-            Ok(false) => {
-                p.device().note(format!("drop {key}"));
-                Ok(())
+        Ok(Some((key, data))) => {
+            let forwarded = p.device().link_receive(0, key, data);
+            match offer(p, key, data) {
+                Ok(false) if forwarded == 0 => {
+                    p.device().note(format!("drop {key}"));
+                    Ok(())
+                }
+                Ok(_) => Ok(()),
+                Err(t) => Err(t),
             }
-            Err(t) => Err(t),
-        },
+        }
         Ok(None) => Ok(()),
         Err(e) => {
             eprintln!("{e}");

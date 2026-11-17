@@ -43,7 +43,14 @@ pub struct Answer {
 
 impl Answer {
     fn now(reply: Result<usize, HandlerError>) -> Self {
-        Answer { handled: Handled { reply: Reply::Now(reply), stop: false, notes: Default::default() }, trapped: None }
+        Answer {
+            handled: Handled {
+                reply: Reply::Now(reply),
+                stop: false,
+                notes: Default::default(),
+            },
+            trapped: None,
+        }
     }
 }
 
@@ -60,7 +67,10 @@ pub fn handle<F: NorFlash, U: FwUpdate<F>, D: Device>(
 ) -> Answer {
     let running = svc.status() == PayloadStatus::Running;
     let (route, payload) = match payload {
-        Some(p) if running => (route_request(key, PayloadStatus::Running, p.serves()), Some(p)),
+        Some(p) if running => (
+            route_request(key, PayloadStatus::Running, p.serves()),
+            Some(p),
+        ),
         _ => (svc.route_idle(key), None),
     };
     match (route, payload) {
@@ -82,12 +92,18 @@ pub fn handle<F: NorFlash, U: FwUpdate<F>, D: Device>(
         (Route::Refuse(e), _) => Answer::now(Err(e)),
         // `Route::Payload` needs a running payload; without one the
         // service answers (NotFound), as for any key nothing serves.
-        (Route::System | Route::Payload, _) => Answer { handled: svc.handle(key, body, out), trapped: None },
+        (Route::System | Route::Payload, _) => Answer {
+            handled: svc.handle(key, body, out),
+            trapped: None,
+        },
     }
 }
 
 /// A run ended: the service keeps the keys `payload` served.
-pub fn ended<F: NorFlash, U: FwUpdate<F>, D: Device>(svc: &mut Service<F, U>, payload: &Payload<D>) {
+pub fn ended<F: NorFlash, U: FwUpdate<F>, D: Device>(
+    svc: &mut Service<F, U>,
+    payload: &Payload<D>,
+) {
     svc.run_ended(ServedKeys::from_run(payload.serves()));
 }
 

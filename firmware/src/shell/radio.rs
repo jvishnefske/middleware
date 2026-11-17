@@ -7,16 +7,16 @@
 //! [`EspNowTransport`] on top of it ignores our own MAC and repeated
 //! `(sender, key, seq)` frames. Unlike the badge there is no access point,
 //! scan or BLE: [`start`] brings Wi-Fi up in station mode, parks it on
-//! [`CHANNEL`] (`esp_base::radio::CHANNEL`, 1) and spawns [`radio_task`].
+//! [`CHANNEL`] (`crate::radio::CHANNEL`, 1) and spawns [`radio_task`].
 //!
 //! The task owns the transport and waits for whichever comes first:
 //!
 //! * a received sample (the transport's filters are
-//!   `esp_base::radio::FILTERS`, `Prefix("app")` and `Prefix("disc")`): an
+//!   `crate::radio::FILTERS`, `Prefix("app")` and `Prefix("disc")`): an
 //!   `app/...` sample is copied into [`RX`] with `try_send`, so a slow
 //!   controller loses samples (counted) instead of stalling the radio; a
 //!   `disc/...` beacon goes to the directory
-//!   (`esp_base::radio::disc::Neighbours`), which logs `disc: up ...`,
+//!   (`crate::radio::disc::Neighbours`), which logs `disc: up ...`,
 //!   `disc: updated ...` and `disc: down ...` lines on `sys/log` (the
 //!   payload does not see beacons);
 //! * a payload publish from [`TX`] (the controller queues `app/...` keys
@@ -24,7 +24,7 @@
 //!   drops and counts when the queue is full):
 //!   broadcast through the transport;
 //! * a source-route chunk due in [`SOURCES`]: written into the frame buffer
-//!   by `esp_base::route::source::write_frame` (radio header, key, chunk
+//!   by `crate::route::source::write_frame` (radio header, key, chunk
 //!   header, then the pattern bytes generated in place, the JPEG bytes
 //!   copied from the flash-resident fixture, or the camera frame's bytes
 //!   copied from the camera's frame buffer) and broadcast with the radio
@@ -54,7 +54,8 @@
 //! into [`RPC_RX`] (bounded; drops counted) before the transport, which
 //! skips them as foreign. The task decodes each one: a request addressed
 //! to our MAC goes through the responder cache
-//! (`esp_base::radio::RpcReplies`): a repeat is answered from the cache, a
+//! (`crate::radio::RpcReplies`): a repeat (same id, key and body, by
+//! `middleware::rpc::RequestDigest`) is answered from the cache, a
 //! repeat of the request in flight (or any request while one is in flight)
 //! is dropped, and a new one is handed to the controller on the bus as a
 //! [`Port::Radio`] request from that MAC, without waiting (a full inbound
@@ -63,20 +64,20 @@
 //! requester ([`EspNowUnicast::send_to`], which registers the requester as
 //! a peer with the driver, at most `RPC_PEERS` of them, least recently used
 //! replaced). Whether the controller accepts the request at all is decided
-//! there (`esp_base::ota`). While a source route streams, queued requests
+//! there (`crate::ota`). While a source route streams, queued requests
 //! and replies are served between two chunks. The request counters
-//! (`esp_base::radio::RpcCounters`) are logged like the others.
+//! (`crate::radio::RpcCounters`) are logged like the others.
 //!
 //! # Discovery
 //!
-//! Discovery (`esp_base::radio::disc`): while a camera source route runs,
+//! Discovery (`crate::radio::disc`): while a camera source route runs,
 //! the task broadcasts the `disc/cam/jpeg` beacon (instance `cam-xxxxxx`,
 //! TXT `key=<route key>`, TTL 30 s) when the route starts and every 15 s,
 //! and a goodbye when it stops; records in the directory whose TTL ran out
 //! are logged as `disc: down ... (expired)` and dropped. Both are checked
 //! once per loop iteration, and the loop's timer also wakes for them.
 //!
-//! The counters (`esp_base::radio::Counters`) are logged on `sys/log` when
+//! The counters (`crate::radio::Counters`) are logged on `sys/log` when
 //! losses rise, at most every `REPORT_INTERVAL_MS`. The time spent handling
 //! received frames (transport decode and the queue to the controller) is
 //! added up in [`TIME`] for the controller's `perf:` report
@@ -89,6 +90,16 @@
 
 use core::cell::RefCell;
 
+use crate::perf::RadioTime;
+use crate::radio::disc::{BeaconStep, CAM_BEACON_LEN, CamBeacon, Neighbours, cam_beacon};
+use crate::radio::{
+    CHANNEL, Counters, FILTERS, KEY_CAPACITY, PeerChange, Peers, RPC_BODY, RPC_DEPTH, RPC_PEERS,
+    RPC_SEND_TIMEOUT_MS, RX_DEPTH, RX_PAYLOAD, RpcCounters, RpcReplies, SEND_TIMEOUT_MS, TX_DEPTH,
+    TX_PAYLOAD, is_beacon,
+};
+use crate::route::Report;
+use crate::route::source::{Feed, write_frame};
+use crate::route::sources::{Capture, Due, Job, SourceTable};
 use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::Mutex;
@@ -96,27 +107,20 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
-use esp_base::radio::disc::{BeaconStep, CAM_BEACON_LEN, CamBeacon, Neighbours, cam_beacon};
-use esp_base::radio::{
-    CHANNEL, Counters, FILTERS, KEY_CAPACITY, PeerChange, Peers, RPC_BODY, RPC_DEPTH, RPC_PEERS,
-    RPC_SEND_TIMEOUT_MS, RX_DEPTH, RX_PAYLOAD, RpcCounters, RpcReplies, SEND_TIMEOUT_MS, TX_DEPTH,
-    TX_PAYLOAD, is_beacon,
-};
-use esp_base::perf::RadioTime;
-use esp_base::route::source::{Feed, write_frame};
-use esp_base::route::sources::{Capture, Due, Job, SourceTable};
-use esp_base::route::Report;
 use esp_radio::esp_now::{
-    BROADCAST_ADDRESS, EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
+    BROADCAST_ADDRESS, EspNowError, EspNowManager, EspNowReceiver, EspNowSender,
+    EspNowWifiInterface, PeerInfo,
 };
 use esp_radio::wifi::{ControllerConfig, SecondaryChannel, WifiController, WifiError};
 use heapless::{String, Vec};
 use middleware::espnow::rpc::EspNowUnicast;
-use middleware::espnow::{EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, MAX_KEY, Mac};
-use middleware::rpc::{self, Admit, Message};
-use middleware::transport::HandlerError;
+use middleware::espnow::{
+    EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, MAX_KEY, Mac,
+};
+use middleware::rpc::{self, Admit, Message, RequestDigest};
 #[cfg(feature = "esp32")]
 use middleware::stream::{FrameSet, FrameSource};
+use middleware::transport::HandlerError;
 use middleware::{AsKey, Key, Publisher, Sample, Subscriber};
 use static_cell::StaticCell;
 
@@ -163,7 +167,8 @@ fn tap(data: &[u8], src: Mac) {
     if !rpc::is_rpc(data) {
         return;
     }
-    let queued = Vec::from_slice(data).is_ok_and(|data| RPC_RX.try_send(RpcFrame { src, data }).is_ok());
+    let queued =
+        Vec::from_slice(data).is_ok_and(|data| RPC_RX.try_send(RpcFrame { src, data }).is_ok());
     if !queued {
         RPC_DROPPED.lock(|n| {
             let mut n = n.borrow_mut();
@@ -176,7 +181,8 @@ fn tap(data: &[u8], src: Mac) {
 static TX_DROPPED: Mutex<CriticalSectionRawMutex, RefCell<u32>> = Mutex::new(RefCell::new(0));
 
 /// Time spent on received frames since the controller last took it.
-static TIME: Mutex<CriticalSectionRawMutex, RefCell<RadioTime>> = Mutex::new(RefCell::new(RadioTime::ZERO));
+static TIME: Mutex<CriticalSectionRawMutex, RefCell<RadioTime>> =
+    Mutex::new(RefCell::new(RadioTime::ZERO));
 
 /// Adds `frames` frames handled in the time since `start_us`.
 fn add_time(start_us: u64, frames: u32) {
@@ -236,12 +242,15 @@ pub fn read_sources<R>(f: impl FnOnce(&SourceTable) -> R) -> R {
 }
 
 /// Queues a payload publish for broadcast; drops (and counts) it when the
-/// key is not one a payload may send (`esp_base::radio::goes_over_air`:
+/// key is not one a payload may send (`crate::radio::goes_over_air`:
 /// `app/...` only, so never a `disc/...` beacon), the queue is full or it
 /// does not fit one frame.
 pub fn send(key: Key<'_>, data: &[u8]) {
-    let mut msg = Outgoing { key: String::new(), payload: Vec::new() };
-    let fits = esp_base::radio::goes_over_air(key)
+    let mut msg = Outgoing {
+        key: String::new(),
+        payload: Vec::new(),
+    };
+    let fits = crate::radio::goes_over_air(key)
         && msg.key.push_str(key.as_str()).is_ok()
         && msg.payload.extend_from_slice(data).is_ok();
     if !fits || TX.try_send(msg).is_err() {
@@ -306,7 +315,10 @@ impl EspNowUnicast for EspNowLink {
             let _ = self.manager.remove_peer(&old);
         }
         self.add_peer(peer)?;
-        self.sender.send_async(&peer, frame).await.map_err(LinkError::Send)
+        self.sender
+            .send_async(&peer, frame)
+            .await
+            .map_err(LinkError::Send)
     }
 }
 
@@ -314,7 +326,10 @@ impl EspNowRadio for EspNowLink {
     type Error = LinkError;
 
     async fn broadcast(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-        self.sender.send_async(&BROADCAST_ADDRESS, frame).await.map_err(LinkError::Send)
+        self.sender
+            .send_async(&BROADCAST_ADDRESS, frame)
+            .await
+            .map_err(LinkError::Send)
     }
 
     async fn receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<(&'b [u8], Mac), LinkError> {
@@ -329,7 +344,9 @@ impl EspNowRadio for EspNowLink {
     }
 
     fn try_receive<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<(&'b [u8], Mac)>, LinkError> {
-        let Some(rx) = self.receiver.receive() else { return Ok(None) };
+        let Some(rx) = self.receiver.receive() else {
+            return Ok(None);
+        };
         let data = rx.data();
         tap(data, rx.info.src_address);
         let slot = buf.get_mut(..data.len()).ok_or(LinkError::TooLarge)?;
@@ -378,12 +395,21 @@ pub enum StartError {
 pub fn start(wifi: esp_hal::peripherals::WIFI<'static>) -> Result<Transport, StartError> {
     let controller = WifiController::new(wifi, controller_config()).map_err(StartError::Wifi)?;
     let controller = CONTROLLER.try_init(controller).ok_or(StartError::Again)?;
-    controller.set_channel(CHANNEL, SecondaryChannel::None).map_err(StartError::Wifi)?;
+    controller
+        .set_channel(CHANNEL, SecondaryChannel::None)
+        .map_err(StartError::Wifi)?;
     // The only ESP-NOW instance: `esp_now` panics only if one exists.
     let (manager, sender, receiver) = controller.esp_now().split();
-    let link = EspNowLink { manager, sender, receiver, peers: Peers::new() };
+    let link = EspNowLink {
+        manager,
+        sender,
+        receiver,
+        peers: Peers::new(),
+    };
     let transport = EspNowTransport::new(link).with_own_address(own_mac());
-    transport.with_filters(&FILTERS).map_err(|_| StartError::Again)
+    transport
+        .with_filters(&FILTERS)
+        .map_err(|_| StartError::Again)
 }
 
 /// Our station MAC (the eFuse base MAC): requests over the air are
@@ -445,7 +471,10 @@ impl Radio {
                 self.counters.received(true)
             }
             Ok(s) => {
-                let mut msg = Received { key: String::new(), payload: Vec::new() };
+                let mut msg = Received {
+                    key: String::new(),
+                    payload: Vec::new(),
+                };
                 let fits = msg.key.push_str(s.key.as_str()).is_ok()
                     && msg.payload.extend_from_slice(s.payload).is_ok();
                 self.counters.received(fits && RX.try_send(msg).is_ok())
@@ -474,7 +503,11 @@ impl Radio {
     async fn publish(&mut self, msg: Outgoing) {
         let ok = match Key::new(&msg.key) {
             Ok(key) => matches!(
-                with_timeout(Duration::from_millis(SEND_TIMEOUT_MS), self.transport.publish(key, &msg.payload)).await,
+                with_timeout(
+                    Duration::from_millis(SEND_TIMEOUT_MS),
+                    self.transport.publish(key, &msg.payload)
+                )
+                .await,
                 Ok(Ok(()))
             ),
             Err(_) => false,
@@ -505,7 +538,7 @@ impl Radio {
             result
         };
         #[cfg(not(feature = "esp32"))]
-        let result = Err(esp_base::route::source::CaptureFault::Hardware);
+        let result = Err(crate::route::source::CaptureFault::Hardware);
         let now = now_ms();
         let time_us = irq::now_us() as u32;
         update(|table| {
@@ -522,17 +555,21 @@ impl Radio {
     /// paced so the links' outbound queue never overflows.
     #[cfg(feature = "esp32")]
     async fn mirror(&mut self, len: u32) {
-        let Ok(chunker) = middleware::stream::Chunker::new(0, len, middleware::stream::ESPNOW_CHUNK_DATA) else {
+        let Ok(chunker) =
+            middleware::stream::Chunker::new(0, len, middleware::stream::ESPNOW_CHUNK_DATA)
+        else {
             return;
         };
         for plan in chunker.chunks() {
-            let mut msg = [0u8; middleware::stream::HEADER_LEN + middleware::stream::ESPNOW_CHUNK_DATA];
+            let mut msg =
+                [0u8; middleware::stream::HEADER_LEN + middleware::stream::ESPNOW_CHUNK_DATA];
             let n = plan.range.len();
             let filled = super::camera::with_frame(len, |frame| {
                 let (head, data) = msg.split_at_mut(middleware::stream::HEADER_LEN);
                 let header = plan.header.encode(n).ok()?;
                 head.copy_from_slice(&header);
-                data.get_mut(..n)?.copy_from_slice(frame.get(plan.range.clone())?);
+                data.get_mut(..n)?
+                    .copy_from_slice(frame.get(plan.range.clone())?);
                 Some(())
             })
             .flatten();
@@ -552,7 +589,9 @@ impl Radio {
         let seq = self.route_seq;
         self.route_seq = seq.wrapping_add(1);
         let written = match job.feed {
-            Feed::Stored(source) => write_frame(frame, seq, job.key.as_key(), job.frame, &source, &job.plan).ok(),
+            Feed::Stored(source) => {
+                write_frame(frame, seq, job.key.as_key(), job.frame, &source, &job.plan).ok()
+            }
             Feed::Camera { len } => camera_chunk(frame, seq, &job, len),
         };
         let ok = match written {
@@ -575,7 +614,8 @@ impl Radio {
         // The events are pushed under the table lock, so a concurrent
         // `route_stop` (which purges them) cannot be overtaken.
         update(|table| {
-            let (next, report): (SourceTable, Report) = table.finish(job.handle, job.epoch, ok, now);
+            let (next, report): (SourceTable, Report) =
+                table.finish(job.handle, job.epoch, ok, now);
             for event in report.events(job.handle, time_us).into_iter().flatten() {
                 irq::push(event);
             }
@@ -641,14 +681,17 @@ impl Radio {
                 return;
             }
         };
-        let (replies, admit) = self.replies.admit(src, id, now_ms());
+        // Bound to the content: a spoofed request with this id cannot make
+        // the genuine one look like a repeat (`middleware::rpc` docs).
+        let digest = RequestDigest::of(key, body);
+        let (replies, admit) = self.replies.admit(src, id, digest, now_ms());
         self.replies = replies;
         match admit {
             Admit::Busy => self.rpc = self.rpc.busy(),
             Admit::Replay => {
                 self.rpc = self.rpc.replayed();
                 let mut copy = [0u8; RPC_BODY];
-                let result = match self.replies.cached(src, id) {
+                let result = match self.replies.cached(src, id, digest) {
                     Some(Ok(b)) => copy
                         .get_mut(..b.len())
                         .map(|c| {
@@ -676,7 +719,7 @@ impl Radio {
                     }
                     None => {
                         let result = Err(HandlerError::BufferTooSmall);
-                        self.replies = self.replies.complete(src, id, result);
+                        self.replies = self.replies.complete(src, id, digest, result);
                         self.respond(src, id, result).await;
                     }
                 }
@@ -687,20 +730,26 @@ impl Radio {
     /// The controller answered the request handed over with bus id
     /// `reply.id`: caches and sends the response.
     async fn replied(&mut self, reply: Reply) {
-        let Some(f) = self.replies.in_flight() else { return };
+        let Some(f) = self.replies.in_flight() else {
+            return;
+        };
         if self.pending != Some(reply.id) {
             return;
         }
         self.pending = None;
         let result = reply.result.as_ref().map(|v| v.as_slice()).map_err(|e| *e);
-        self.replies = self.replies.complete(f.peer, f.id, result);
+        self.replies = self.replies.complete(f.peer, f.id, f.digest, result);
         self.respond(f.peer, f.id, result).await;
     }
 
     /// Sends a response unicast to `peer`.
     async fn respond(&mut self, peer: Mac, id: u16, result: Result<&[u8], HandlerError>) {
         let mut frame = [0u8; MAX_FRAME];
-        let msg = Message::Response { id, to: peer, result };
+        let msg = Message::Response {
+            id,
+            to: peer,
+            result,
+        };
         let sent = match msg.encode(&mut frame) {
             Ok(n) => match frame.get(..n) {
                 Some(bytes) => matches!(
@@ -727,7 +776,9 @@ impl Radio {
             self.replied(reply).await;
         }
         for _ in 0..RPC_DEPTH {
-            let Ok(frame) = RPC_RX.try_receive() else { break };
+            let Ok(frame) = RPC_RX.try_receive() else {
+                break;
+            };
             self.request(frame).await;
         }
     }
@@ -768,7 +819,15 @@ fn camera_chunk(out: &mut [u8; MAX_FRAME], seq: u8, job: &Job, len: u32) -> Opti
     return super::camera::with_frame(len, |bytes| {
         let frames = [bytes];
         let set = FrameSet::new(&frames).ok()?;
-        write_frame(out, seq, job.key.as_key(), 0, &FrameSource::Frames(set), &job.plan).ok()
+        write_frame(
+            out,
+            seq,
+            job.key.as_key(),
+            0,
+            &FrameSource::Frames(set),
+            &job.plan,
+        )
+        .ok()
     })
     .flatten();
     #[cfg(not(feature = "esp32"))]
@@ -838,7 +897,12 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
         };
         let rpc = select(RPC_RX.receive(), bus.radio_reply());
         let woke = select(
-            select4(radio.transport.recv(&mut sample), TX.receive(), timer, SOURCES_CHANGED.wait()),
+            select4(
+                radio.transport.recv(&mut sample),
+                TX.receive(),
+                timer,
+                SOURCES_CHANGED.wait(),
+            ),
             rpc,
         )
         .await;

@@ -31,16 +31,35 @@
 //!
 //! The service's notes are logged on `sys/log`; every status change is
 //! published on `sys/payload/status`.
+//!
+//! Discovery beacons ([`rp_base::beacons`]): the controller owns the
+//! device's [`Identity`] and an [`Announcer`] over the bus's [`Uplink`]
+//! publisher. Each pass of either session brings the announced records to
+//! [`wanted`]: the node record, plus the running payload's served keys
+//! (none while idle, so the first idle pass after a run, whether it ended
+//! by stop, trap, `begin` or an activated commit, sends their goodbyes),
+//! then sends the refreshes that are due; the next due refresh is one of
+//! the wake-ups both sessions wait for. Served keys left out (over the
+//! four-record cap, or not usable as a kind) are logged once per run.
+//! After answering `sys/info` (the gateway's bind) every record is sent
+//! again, at most every 5 s, behind the response on the link.
 
-use heapless::Vec;
-use middleware::Key;
-use middleware::transport::HandlerError;
-use rp_base::service::{Handled, Reply as Answer, Service};
+use core::task::Poll;
+
+use embassy_futures::poll_once;
+use embassy_futures::select::{Either, select};
+use embassy_time::{Instant, Timer};
 #[cfg(not(feature = "wasm"))]
 use esp_base::serve::Route;
+use heapless::Vec;
+use middleware::Key;
+use middleware::loader::keys;
+use middleware::transport::HandlerError;
+use rp_base::beacons::{Announcer, Identity, wanted};
+use rp_base::service::{Handled, Reply as Answer, Service};
 
 use super::board::{Fw, StoreFlash};
-use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Reply};
+use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Reply, Uplink};
 
 #[cfg(feature = "wasm")]
 use {
@@ -50,7 +69,7 @@ use {
     alloc::vec::Vec as AllocVec,
     embassy_futures::select::{Either3, select3},
     embassy_futures::yield_now,
-    embassy_time::{Duration, Instant, Timer},
+    embassy_time::Duration,
     esp_base::dispatch::{route_publication, tick_delay},
     esp_base::periph::overflow_report,
     esp_base::start::{HeapShort, check_heap, check_heap_holding},
@@ -67,6 +86,41 @@ pub type Svc = Service<StoreFlash, Fw>;
 pub struct Controller {
     svc: Svc,
     bus: &'static Bus,
+    id: Identity,
+    beacons: Announcer<Uplink>,
+}
+
+/// Milliseconds since boot: the announcer's clock.
+fn now_millis() -> u64 {
+    Instant::now().as_millis()
+}
+
+/// Waits until `at` (milliseconds since boot), or forever for `None`.
+async fn until(at: Option<u64>) {
+    match at {
+        Some(ms) => Timer::at(Instant::from_millis(ms)).await,
+        None => core::future::pending::<()>().await,
+    }
+}
+
+/// Logs an announcer call that failed. The calls are polled once
+/// (`poll_once`) rather than awaited: [`Uplink`]'s publish never waits, so
+/// they are ready on the first poll, and their futures (the beacon
+/// encoder's 640 bytes of buffers among them) live on the stack for the
+/// call instead of in the main task's static future. A call that was not
+/// ready (never expected) is dropped, as a cancelled `PubSubDiscovery` call
+/// may be, and logged.
+fn report<E: core::fmt::Debug>(bus: &Bus, what: &str, polled: Poll<Result<usize, E>>) {
+    match polled {
+        Poll::Ready(Ok(_)) => {}
+        Poll::Ready(Err(e)) => bus.log(format_args!("disc: {what} not sent: {e:?}")),
+        Poll::Pending => bus.log(format_args!("disc: {what} not sent: publisher busy")),
+    }
+}
+
+/// Whether `msg` was a `sys/info` request that `reply` answers.
+fn answers_info(msg: &Inbound, reply: &Reply) -> bool {
+    msg.key.as_str() == keys::INFO.as_str() && reply.result.is_ok()
 }
 
 #[cfg(feature = "wasm")]
@@ -92,14 +146,46 @@ impl core::fmt::Display for StartError {
 }
 
 impl Controller {
-    /// A controller over `svc`.
-    pub fn new(svc: Svc, bus: &'static Bus) -> Self {
-        Controller { svc, bus }
+    /// A controller over `svc`, announcing `id`.
+    pub fn new(svc: Svc, bus: &'static Bus, id: Identity) -> Self {
+        Controller {
+            svc,
+            bus,
+            id,
+            beacons: Announcer::new(Uplink(bus)),
+        }
+    }
+
+    /// Brings the announced records to the node record plus `served`,
+    /// then sends the refreshes due; returns how many served keys were
+    /// left out. A failed send is logged (see [`Announcer::sync`] for what
+    /// is sent again).
+    fn announce<'s>(&mut self, served: impl Iterator<Item = &'s str>) -> usize {
+        let wanted = wanted(&self.id, served);
+        report(self.bus, "beacon", poll_once(self.beacons.sync(&wanted)));
+        report(
+            self.bus,
+            "refresh",
+            poll_once(self.beacons.tick(now_millis())),
+        );
+        wanted.omitted
+    }
+
+    /// After a `sys/info` reply: every record again (rate limited).
+    fn after_info<'s>(&mut self, served: impl Iterator<Item = &'s str>) {
+        let wanted = wanted(&self.id, served);
+        report(
+            self.bus,
+            "beacon",
+            poll_once(self.beacons.after_info(&wanted, now_millis())),
+        );
     }
 
     /// Runs forever: starts a stored payload (with `wasm`), then serves
-    /// requests.
-    pub async fn run(mut self) -> ! {
+    /// requests. Takes the controller by reference so the caller's future
+    /// holds its one copy (by value, the controller, announcer included,
+    /// would be stored twice in the main task's static future).
+    pub async fn run(&mut self) -> ! {
         self.bus.status(self.svc.status());
         #[cfg(feature = "wasm")]
         let mut start = self.svc.state().startable().then_some(None);
@@ -116,7 +202,10 @@ impl Controller {
             // Never reached without the runtime (start is NotFound), but
             // answer rather than leave the link waiting.
             #[cfg(not(feature = "wasm"))]
-            self.bus.reply(Reply { id, result: Err(HandlerError::NotFound) });
+            self.bus.reply(Reply {
+                id,
+                result: Err(HandlerError::NotFound),
+            });
         }
     }
 
@@ -130,23 +219,43 @@ impl Controller {
         #[cfg(feature = "wasm")] payload: Option<&mut Payload<RpDevice>>,
     ) -> (Option<Reply>, bool) {
         let Ok(key) = Key::new(&msg.key) else {
-            return (Some(Reply { id, result: Err(HandlerError::InvalidRequest) }), false);
+            return (
+                Some(Reply {
+                    id,
+                    result: Err(HandlerError::InvalidRequest),
+                }),
+                false,
+            );
         };
         let before = self.svc.status();
         let mut out = [0u8; MAX_REPLY];
         self.svc.set_usb_configured(self.bus.usb_configured());
         #[cfg(feature = "wasm")]
         let Handled { reply, stop, notes } = {
-            let answer = rp_base::requests::handle(&mut self.svc, payload, key, &msg.body, &msg.meta(), &mut out);
+            let answer = rp_base::requests::handle(
+                &mut self.svc,
+                payload,
+                key,
+                &msg.body,
+                &msg.meta(),
+                &mut out,
+            );
             if let Some(trap) = &answer.trapped {
-                self.bus.log(format_args!("payload trapped on request {}: {trap}", key.as_str()));
+                self.bus.log(format_args!(
+                    "payload trapped on request {}: {trap}",
+                    key.as_str()
+                ));
             }
             answer.handled
         };
         // Without the runtime nothing is ever served (start is NotFound).
         #[cfg(not(feature = "wasm"))]
         let Handled { reply, stop, notes } = match self.svc.route_idle(key) {
-            Route::Refuse(e) => Handled { reply: Answer::Now(Err(e)), stop: false, notes: Vec::new() },
+            Route::Refuse(e) => Handled {
+                reply: Answer::Now(Err(e)),
+                stop: false,
+                notes: Vec::new(),
+            },
             Route::System | Route::Payload => self.svc.handle(key, &msg.body, &mut out),
         };
         for note in &notes {
@@ -160,7 +269,9 @@ impl Controller {
             Answer::Now(r) => Some(Reply {
                 id,
                 result: r.and_then(|n| {
-                    out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall)
+                    out.get(..n)
+                        .and_then(|b| Vec::from_slice(b).ok())
+                        .ok_or(HandlerError::BufferTooSmall)
                 }),
             }),
         };
@@ -168,16 +279,29 @@ impl Controller {
     }
 
     /// Serves requests until a payload start is requested; returns its id.
+    /// Announces the node record alone (withdrawing a past run's keys)
+    /// and wakes for its refreshes.
     async fn idle(&mut self) -> u8 {
         loop {
-            let msg: Inbound = self.bus.receive_inbound().await;
+            self.announce(core::iter::empty());
+            let due = self.beacons.due(now_millis());
+            let msg: Inbound = match select(self.bus.receive_inbound(), until(due)).await {
+                Either::First(msg) => msg,
+                Either::Second(()) => continue,
+            };
             if let Kind::Request { id } = msg.kind {
                 #[cfg(feature = "wasm")]
                 let handled = self.handle(id, &msg, None);
                 #[cfg(not(feature = "wasm"))]
                 let handled = self.handle(id, &msg);
                 match handled.0 {
-                    Some(reply) => self.bus.reply(reply),
+                    Some(reply) => {
+                        let info = answers_info(&msg, &reply);
+                        self.bus.reply(reply);
+                        if info {
+                            self.after_info(core::iter::empty());
+                        }
+                    }
                     None => return id,
                 }
             }
@@ -197,19 +321,28 @@ impl Controller {
     #[cfg(feature = "wasm")]
     fn load(&mut self) -> Result<Payload<RpDevice>, StartError> {
         let limits = rp_base::budget::limits(&PROFILE_REF);
-        let store = self.svc.store_mut().ok_or(StartError::Store(StoreError::NoImage))?;
-        let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
+        let store = self
+            .svc
+            .store_mut()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
+        let header = store
+            .header()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
         check_heap(heap::free(), header.len).map_err(StartError::NoHeap)?;
         let len = header.len as usize;
         let mut image = AllocVec::new();
-        image.try_reserve_exact(len).map_err(|_| StartError::NoMemory)?;
+        image
+            .try_reserve_exact(len)
+            .map_err(|_| StartError::NoMemory)?;
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
         let bound = limits.heap_needed(&image);
-        let needed = check_heap_holding(heap::free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
+        let needed = check_heap_holding(heap::free(), image.capacity(), bound)
+            .map_err(StartError::NoHeap)?;
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
-        let device = RpDevice::new(self.bus, &PROFILE_REF, self.svc.node()).ok_or(StartError::NoHardware)?;
+        let device =
+            RpDevice::new(self.bus, &PROFILE_REF, self.svc.node()).ok_or(StartError::NoHardware)?;
         let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
@@ -233,7 +366,10 @@ impl Controller {
     async fn running(&mut self, pending: Option<u8>) {
         let answer = |bus: &Bus, result: Result<(), HandlerError>| {
             if let Some(id) = pending {
-                bus.reply(Reply { id, result: result.map(|()| Vec::new()) });
+                bus.reply(Reply {
+                    id,
+                    result: result.map(|()| Vec::new()),
+                });
             }
         };
         let before = self.svc.status();
@@ -261,11 +397,21 @@ impl Controller {
     #[cfg(feature = "wasm")]
     async fn session(&mut self, payload: &mut Payload<RpDevice>) {
         let mut dropped = 0u32;
+        let mut omitted_logged = false;
         loop {
             yield_now().await;
+            let omitted = self.announce(payload.serves());
+            if omitted > 0 && !omitted_logged {
+                self.bus.log(format_args!(
+                    "disc: {omitted} served keys not announced (4 records at most)"
+                ));
+                omitted_logged = true;
+            }
             payload.device().fire_timers(now_us());
             for _ in 0..MAX_EVENTS {
-                let Some(event) = payload.device().pop_event() else { break };
+                let Some(event) = payload.device().pop_event() else {
+                    break;
+                };
                 if let Err(trap) = payload.dispatch(event) {
                     self.trapped(&trap);
                     return;
@@ -273,17 +419,16 @@ impl Controller {
             }
             let overflow = payload.device().overflow();
             if let Some(n) = overflow_report(dropped, overflow) {
-                self.bus.log(format_args!("event queue full: {n} events dropped"));
+                self.bus
+                    .log(format_args!("event queue full: {n} events dropped"));
             }
             dropped = overflow;
             let tick = payload.next_tick().map(|due| {
                 Instant::now() + Duration::from_millis(u64::from(tick_delay(now_ms(), due)))
             });
             let alarm = payload.device().next_alarm_us().map(Instant::from_micros);
-            let wake = match (tick, alarm) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let beacon = self.beacons.due(now_millis()).map(Instant::from_millis);
+            let wake = [tick, alarm, beacon].into_iter().flatten().min();
             let timer = async move {
                 match wake {
                     Some(at) => Timer::at(at).await,
@@ -303,7 +448,9 @@ impl Controller {
                 }
                 Either3::First(msg) => match msg.kind {
                     Kind::Publish => {
-                        let Ok(key) = Key::new(&msg.key) else { continue };
+                        let Ok(key) = Key::new(&msg.key) else {
+                            continue;
+                        };
                         if route_publication(&self.svc.state(), key, payload.subscriptions())
                             && let Err(trap) = payload.deliver(key, &msg.body)
                         {
@@ -314,10 +461,18 @@ impl Controller {
                     Kind::Request { id } => {
                         let (reply, stop) = self.handle(id, &msg, Some(&mut *payload));
                         // A start while running is answered by dispatch.
-                        self.bus.reply(reply.unwrap_or(Reply { id, result: Ok(Vec::new()) }));
+                        let reply = reply.unwrap_or(Reply {
+                            id,
+                            result: Ok(Vec::new()),
+                        });
+                        let info = answers_info(&msg, &reply);
+                        self.bus.reply(reply);
                         if stop {
                             self.bus.log(format_args!("payload stopped"));
                             return;
+                        }
+                        if info {
+                            self.after_info(payload.serves());
                         }
                     }
                 },

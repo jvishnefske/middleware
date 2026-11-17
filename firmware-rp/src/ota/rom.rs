@@ -120,13 +120,19 @@ mod tests {
     #[test]
     fn y12_the_translated_base_names_the_running_slot() {
         let ab = RP2350.ab().unwrap();
-        let at = |base| XipMap { base, size: ab.a.size };
+        let at = |base| XipMap {
+            base,
+            size: ab.a.size,
+        };
         assert_eq!(running_slot(&ab, at(0x2000)), Some(Slot::A));
         assert_eq!(running_slot(&ab, at(0x18_0000)), Some(Slot::B));
         for base in [0, 0x1000, 0x17_F000, 0x2F_E000, 0x30_0000] {
             assert_eq!(running_slot(&ab, at(base)), None, "{base:#x}");
         }
         assert_eq!(Reboot::Normal.args(), (0, 0, 0));
-        assert_eq!(Reboot::FlashUpdate { start: 0x1018_0000 }.args(), (4, 0x1018_0000, 0));
+        assert_eq!(
+            Reboot::FlashUpdate { start: 0x1018_0000 }.args(),
+            (4, 0x1018_0000, 0)
+        );
     }
 }

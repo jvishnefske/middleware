@@ -62,7 +62,6 @@ use crate::transport::{
 };
 use bytes::Bytes;
 use core::sync::atomic::{AtomicU64, Ordering};
-use core::time::Duration;
 use http::uri::PathAndQuery;
 use tokio::sync::{broadcast, oneshot};
 use tonic::Streaming;
@@ -200,20 +199,22 @@ where
         Ok(resp.into_inner())
     }
 
-    /// One unary request call on `path` with this client's id and, with a
-    /// `timeout`, its `grpc-timeout` and local deadline; the reply owned.
-    /// The shared core of [`Requester::request_with`] and the mesh
-    /// gather.
+    /// One unary request call on `path` with this client's id, the
+    /// options' trace context ([`super::trace::inject`]) and, with a
+    /// timeout, its `grpc-timeout` and local deadline; the reply owned.
+    /// `options.target` is not looked at. The shared core of
+    /// [`Requester::request_with`] and the mesh client.
     pub(crate) async fn call(
         &mut self,
         path: PathAndQuery,
         body: Bytes,
-        timeout: Option<Duration>,
+        options: &RequestOptions<'_>,
     ) -> Result<Bytes, GrpcError> {
         let mut call = tonic::Request::new(body);
         call.metadata_mut()
             .insert(CLIENT_HEADER, self.client_value()?);
-        let Some(d) = timeout else {
+        super::trace::inject(call.metadata_mut(), options.trace, options.request_id);
+        let Some(d) = options.timeout else {
             return self.unary(path, call).await;
         };
         let wire = MetadataValue::try_from(GrpcTimeout::from_duration(d).to_string())
@@ -311,7 +312,9 @@ where
     type Error = GrpcError;
 
     /// A unary call on `/Service/Method` carrying this client's id in
-    /// [`CLIENT_HEADER`]. `options.timeout` is sent as the `grpc-timeout`
+    /// [`CLIENT_HEADER`] and `options.trace` / `options.request_id` as the
+    /// `traceparent` / `x-request-id` headers ([`super::trace`]; an
+    /// interceptor setting the same headers wins). `options.timeout` is sent as the `grpc-timeout`
     /// deadline ([`GrpcTimeout`]) and enforced locally: when it elapses
     /// the call is abandoned with status `DEADLINE_EXCEEDED`
     /// ([`HandlerError::DeadlineExceeded`](crate::HandlerError::DeadlineExceeded)
@@ -328,14 +331,14 @@ where
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], GrpcError> {
         if options.target != Target::Any {
             return Err(GrpcError::UnsupportedTarget);
         }
         let path = method_path(key)?;
         let reply = self
-            .call(path, Bytes::copy_from_slice(request), options.timeout)
+            .call(path, Bytes::copy_from_slice(request), options)
             .await?;
         let out = copy_into(response, &reply).ok_or(GrpcError::BufferTooSmall {
             needed: reply.len(),

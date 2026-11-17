@@ -793,7 +793,7 @@ impl<IO: Read + Write, const I: usize> Requester for SerialLink<IO, I> {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        _options: &RequestOptions,
+        _options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], Self::Error> {
         let id = self.take_id();
         self.send(&Frame::Request {

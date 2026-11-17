@@ -502,7 +502,12 @@ pub fn check(r: &RecipeIn, classes: &[ClassIn]) -> Vec<RecipeIssue> {
     let issues: Vec<Found> = with_recipe(r, classes, |view, cls| {
         let mut out = Vec::new();
         let mut push = |i: Issue<'_>| {
-            out.push((i.at, i.severity, message(r, classes, &i), fix(r, classes, &i)))
+            out.push((
+                i.at,
+                i.severity,
+                message(r, classes, &i),
+                fix(r, classes, &i),
+            ))
         };
         recipe::check_classes(cls, &mut push);
         recipe::check(view, cls, &mut push);

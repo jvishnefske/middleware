@@ -1101,7 +1101,12 @@ mod tests {
             .collect();
         let huge_txt = entry.repeat(5);
         let huge = http_response(3, "huge", &huge_txt, 60);
-        for packet in [&bad[..], truncated, &huge, &http_response(4, "good", b"", 60)] {
+        for packet in [
+            &bad[..],
+            truncated,
+            &huge,
+            &http_response(4, "good", b"", 60),
+        ] {
             responder.send_to(packet, from).await.unwrap();
         }
         let mut buf = [0u8; 256];

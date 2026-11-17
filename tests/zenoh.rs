@@ -480,6 +480,7 @@ impl ReqRepFixture for Zenoh {
     type Requester = ZenohTransport;
     type Responder = ZenohResponder<'static>;
     const PROPAGATES_DEADLINE: bool = true;
+    const PROPAGATES_TRACE: bool = true;
 
     async fn connect(&mut self, key: Key<'static>) -> (ZenohTransport, ZenohResponder<'static>) {
         let (server, endpoint) = hub().await;
@@ -594,6 +595,11 @@ async fn k_handler_errors_round_trip() {
 #[tokio::test(flavor = "multi_thread")]
 async fn k_handler_sees_caller_identity() {
     reqrep::handler_sees_caller_identity(&mut Zenoh::default()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn k_trace_is_propagated() {
+    reqrep::trace_is_propagated(&mut Zenoh::default()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

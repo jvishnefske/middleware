@@ -22,7 +22,8 @@
 //!   (the next request after a timeout still works, see
 //!   `s8_request_after_a_timeout_still_works`). Each side's link names its
 //!   peer ([`SerialLink::with_peer`]), so the handler sees the client's id;
-//!   there is no principal and no deadline on the wire.
+//!   there is no principal, no deadline and no trace context on the wire
+//!   (`trace_is_propagated` checks the handler sees `None`, K19).
 //! * Gather: not implemented by the serial link (one peer), not run.
 //! * Pub/sub: both cases over a lossy direction of 4 frames, which is
 //!   where a serial link's `DropNewest` comes from in deployment (a UART
@@ -172,7 +173,7 @@ impl Requester for Bounded {
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], BoundedError> {
         let call = self.0.request_with(key, request, response, options);
         match options.timeout {
@@ -191,6 +192,7 @@ impl ReqRepFixture for Serial {
     type Requester = Bounded;
     type Responder = Link;
     const PROPAGATES_DEADLINE: bool = false;
+    const PROPAGATES_TRACE: bool = false;
 
     async fn connect(&mut self, _key: Key<'static>) -> (Bounded, Link) {
         let (client, device, _) = pair(None, None);
@@ -275,6 +277,12 @@ async fn k15_serial_handler_errors_round_trip() {
 #[tokio::test]
 async fn k15_serial_handler_sees_caller_identity() {
     reqrep::handler_sees_caller_identity(&mut Serial).await;
+}
+
+/// The link carries no trace context (K19): the handler sees `None`.
+#[tokio::test]
+async fn k19_serial_trace_is_not_carried() {
+    reqrep::trace_is_propagated(&mut Serial).await;
 }
 
 #[tokio::test]

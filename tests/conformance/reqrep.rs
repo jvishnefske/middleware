@@ -1,12 +1,13 @@
 //! Request/response cases (design.md K-requirements on `request_with`,
-//! `HandlerError`, `RequestMeta` and `Gather`).
+//! `HandlerError`, `RequestMeta` (including the 0.6 trace context, K18)
+//! and `Gather`).
 
 use std::time::{Duration, Instant};
 
 use middleware::key::Key;
 use middleware::{
-    Flow, Gather, HandlerError, Request, RequestOptions, Requester, Responder, SenderId,
-    transport::handler_fn,
+    Flow, Gather, HandlerError, Request, RequestId, RequestOptions, Requester, Responder, SenderId,
+    TraceParent, transport::handler_fn,
 };
 
 use super::{GatherFixture, ReqRepFixture, prompt};
@@ -125,6 +126,45 @@ pub async fn handler_sees_caller_identity<F: ReqRepFixture>(f: &mut F) {
         (true, Some(ms)) => assert!(ms <= 3000, "deadline {ms} ms over the 3 s timeout"),
         (true, None) => panic!("backend claims to propagate deadlines, handler saw none"),
         (false, d) => assert_eq!(d, None, "backend claims not to propagate deadlines"),
+    }
+}
+
+/// The handler sees the caller's `RequestOptions::trace` and `request_id`
+/// unchanged if the backend propagates trace context
+/// (`PROPAGATES_TRACE`), and `None` for both otherwise.
+pub async fn trace_is_propagated<F: ReqRepFixture>(f: &mut F) {
+    let (mut req, mut resp) = f.connect(KEY).await;
+    let trace = TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        .expect("spec traceparent");
+    let request_id = RequestId::new("conformance-req-1").expect("request id");
+    let mut seen = None;
+    let mut h = handler_fn(|r, out| {
+        seen = Some((
+            r.meta.trace,
+            r.meta.request_id.map(|i| i.as_str().to_owned()),
+        ));
+        echo(r, out)
+    });
+    let (mut out, mut scratch) = ([0u8; 64], [0u8; 256]);
+    let options = RequestOptions::DEFAULT
+        .with_timeout(Duration::from_secs(3))
+        .with_trace(trace)
+        .with_request_id(request_id);
+    let (got, served) = prompt("trace", async {
+        tokio::join!(
+            req.request_with(KEY, b"traced", &mut out, &options),
+            resp.serve_one(&mut h, &mut scratch)
+        )
+    })
+    .await;
+    served.expect("serve_one");
+    assert_eq!(got.expect("request"), b"traced");
+    let (seen_trace, seen_id) = seen.expect("handler ran");
+    if F::PROPAGATES_TRACE {
+        assert_eq!(seen_trace, Some(trace));
+        assert_eq!(seen_id.as_deref(), Some("conformance-req-1"));
+    } else {
+        assert_eq!((seen_trace, seen_id), (None, None));
     }
 }
 

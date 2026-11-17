@@ -13,6 +13,8 @@
 //!   sits on top and the call is wire compatible with a generated server.
 //!   A key with any other segment count is rejected with
 //!   [`GrpcError::NotServiceMethod`] before anything is sent.
+//!   `RequestOptions::trace` and `request_id` are sent as the
+//!   `traceparent` and `x-request-id` headers ([`trace`]).
 //! * [`Publisher`](crate::Publisher) — a unary call to
 //!   `middleware.v1.Bus/Publish` with the key in the [`bus::KEY_HEADER`]
 //!   metadata entry, the client's id in [`bus::CLIENT_HEADER`] and the
@@ -50,9 +52,12 @@
 //! * [`responder::GrpcResponder`] — implements [`Responder`](crate::Responder):
 //!   its tonic half ([`responder::ResponderService`]) forwards each unary call
 //!   over a bounded channel, and [`Responder::serve_one`](crate::Responder::serve_one)
-//!   runs the caller's pure [`Handler`](crate::Handler) on it.
+//!   runs the caller's pure [`Handler`](crate::Handler) on it;
+//!   [`GrpcResponder::next_call`] hands an owned [`responder::PendingCall`] to a
+//!   handler that must await before answering.
 //!   The handler sees the caller's `mw-client` id, its `grpc-timeout` as the
-//!   remaining deadline and, when configured for a sidecar
+//!   remaining deadline, its `traceparent` and `x-request-id` ([`trace`])
+//!   and, when configured for a sidecar
 //!   ([`PrincipalSource`]), its SPIFFE ID (see the [`responder`](mod@responder) module).
 //! * [`health`](mod@health) — the standard `grpc.health.v1.Health` service (`Check`,
 //!   `Watch`) hand-encoded on [`RawCodec`]: [`HealthService`],
@@ -86,6 +91,7 @@ pub mod responder;
 pub mod server;
 pub mod status;
 pub mod timeout;
+pub mod trace;
 
 #[cfg(feature = "istio")]
 pub mod istio;
@@ -95,8 +101,8 @@ pub mod mesh;
 pub use bus::BusService;
 pub use client::{GrpcSubscriber, GrpcTransport};
 pub use codec::RawCodec;
-pub use health::{GrpcAnnouncer, HealthClient, HealthService, ServingStatus, health};
-pub use responder::{GrpcResponder, PrincipalSource, ResponderService, responder};
+pub use health::{GrpcAnnouncer, HealthClient, HealthService, NODE_HEADER, ServingStatus, health};
+pub use responder::{GrpcResponder, PendingCall, PrincipalSource, ResponderService, responder};
 pub use server::GrpcServer;
 
 use crate::transport::HandlerError;

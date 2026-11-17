@@ -126,6 +126,13 @@ impl ZenohSubscriber {
         let attachment = sample.attachment().map(|a| a.to_bytes());
         let (seen, meta) = sample_meta(self.seen, attachment.as_deref());
         self.seen = seen;
+        #[cfg(feature = "zenoh-otel")]
+        super::otel::deliver(
+            sample.key_expr().as_str(),
+            &meta,
+            attachment.as_deref().and_then(wire::decode_trace),
+            sample.payload().len(),
+        );
         into_sample(sample, meta, buf)
     }
 }

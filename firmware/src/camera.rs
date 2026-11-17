@@ -55,7 +55,13 @@ pub fn extract(mode: SampleMode, raw: &[u8], out: &mut [u8]) -> (usize, usize) {
     let per_word = 4 / mode.expansion();
     let words = (raw.len() / 4).min(out.len() / per_word);
     let mut written = 0;
-    for (word, dst) in raw.as_chunks::<4>().0.iter().take(words).zip(out.chunks_exact_mut(per_word)) {
+    for (word, dst) in raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .take(words)
+        .zip(out.chunks_exact_mut(per_word))
+    {
         match (mode, word, dst) {
             (SampleMode::Word, [_, _, s, _], [d]) => *d = *s,
             (SampleMode::HalfWord, [s2, _, s1, _], [d1, d2]) => {
@@ -113,7 +119,12 @@ impl Default for Assembler {
 impl Assembler {
     /// Seeking start-of-image, nothing skipped.
     pub const fn new() -> Self {
-        Assembler { phase: Phase::Seeking, len: 0, after_ff: false, skipped: 0 }
+        Assembler {
+            phase: Phase::Seeking,
+            len: 0,
+            after_ff: false,
+            skipped: 0,
+        }
     }
 
     /// Bytes skipped before start-of-image so far.
@@ -149,15 +160,26 @@ impl Assembler {
                             None => return (Assembler::new(), i + 1, Status::Overflow),
                         }
                         // The FF was counted as skipped; it is the frame's.
-                        st = Assembler { phase: Phase::Frame, len: 2, after_ff: false, skipped: st.skipped.saturating_sub(1) };
+                        st = Assembler {
+                            phase: Phase::Frame,
+                            len: 2,
+                            after_ff: false,
+                            skipped: st.skipped.saturating_sub(1),
+                        };
                     } else {
                         st.after_ff = b == 0xFF;
                         st.skipped = st.skipped.saturating_add(1);
                     }
                 }
                 Phase::Frame => {
-                    let Some(slot) = usize::try_from(st.len).ok().and_then(|at| frame.get_mut(at)) else {
-                        let next = Assembler { skipped: st.skipped, ..Assembler::new() };
+                    let Some(slot) = usize::try_from(st.len)
+                        .ok()
+                        .and_then(|at| frame.get_mut(at))
+                    else {
+                        let next = Assembler {
+                            skipped: st.skipped,
+                            ..Assembler::new()
+                        };
                         return (next, i + 1, Status::Overflow);
                     };
                     *slot = b;
@@ -217,10 +239,17 @@ mod tests {
             let raw = dma(mode, &bytes);
             assert_eq!(raw.len(), bytes.len() * mode.expansion());
             let mut out = [0u8; 64];
-            assert_eq!(extract(mode, &raw, &mut out), (raw.len(), bytes.len()), "{mode:?}");
+            assert_eq!(
+                extract(mode, &raw, &mut out),
+                (raw.len(), bytes.len()),
+                "{mode:?}"
+            );
             assert_eq!(&out[..bytes.len()], &bytes[..]);
             // A partial trailing word waits; a short output stops early.
-            assert_eq!(extract(mode, &raw[..7], &mut out), (4, 4 / mode.expansion()));
+            assert_eq!(
+                extract(mode, &raw[..7], &mut out),
+                (4, 4 / mode.expansion())
+            );
             let mut small = [0u8; 3];
             let (used, n) = extract(mode, &raw, &mut small);
             assert_eq!(n, 3 / (4 / mode.expansion()) * (4 / mode.expansion()));
@@ -240,7 +269,10 @@ mod tests {
         assert_eq!(used, 6 + FRAME.len(), "stops after EOI");
         assert_eq!(st.skipped(), 6);
         // Done is sticky and consumes nothing more.
-        assert_eq!(st.feed(&s[used..], &mut buf), (st, 0, Status::Done(FRAME.len() as u32)));
+        assert_eq!(
+            st.feed(&s[used..], &mut buf),
+            (st, 0, Status::Done(FRAME.len() as u32))
+        );
     }
 
     #[test]

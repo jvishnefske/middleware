@@ -12,6 +12,9 @@
 //! * [`format_fw_info`] — `sys/fw/info`: update state, running slot, each
 //!   slot's version and TBYB flag, the anti-rollback floor and the update
 //!   in progress.
+//! * [`format_samples`] — a publication that is a
+//!   [`middleware::stream::samples`] batch (`monitor --samples`): one line
+//!   with the key, the header and the units.
 //! * [`status_name`] — the payload status names used by the web page.
 
 use crate::device::Info;
@@ -59,8 +62,22 @@ pub fn format_info(i: &Info) -> String {
     } else {
         ""
     };
+    let bridges = if i.caps.contains(Caps::BRIDGE) {
+        "links:            bridged by rules (route_bridge)\n"
+    } else {
+        ""
+    };
+    let sources = match (
+        i.caps.contains(Caps::SOURCE_IMU),
+        i.caps.contains(Caps::SOURCE_MICROPHONE),
+    ) {
+        (true, true) => "sources:          imu, microphone (route_source)\n",
+        (true, false) => "sources:          imu (route_source)\n",
+        (false, true) => "sources:          microphone (route_source)\n",
+        (false, false) => "",
+    };
     format!(
-        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\n{serves}ABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
+        "chip:             {}\nfirmware:         {}\n{node}runtime:          {runtime}\n{serves}{bridges}{sources}ABI:              {abi}\npayload capacity: {} bytes\npayload status:   {}\n",
         i.chip,
         i.firmware,
         i.capacity,
@@ -68,9 +85,37 @@ pub fn format_info(i: &Info) -> String {
     )
 }
 
+/// `sys/net/addr` for printing.
+pub fn format_net(link: u8, a: &middleware::loader::NetAddr) -> String {
+    let ip = |o: [u8; 4]| std::net::Ipv4Addr::from(o).to_string();
+    let m = a.mac;
+    let peer = if a.pinned() {
+        format!("{}:{} (pinned)", ip(a.peer_ip), a.peer_port)
+    } else {
+        "learned (the latest unicast sender)".to_string()
+    };
+    format!(
+        "link:             {link}\nip:               {}\nmac:              {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\npeer:             {peer}\n",
+        ip(a.ip),
+        m[0],
+        m[1],
+        m[2],
+        m[3],
+        m[4],
+        m[5]
+    )
+}
+
 fn pin_list(mask: u64) -> String {
-    let pins: Vec<String> = (0..64).filter(|n| mask >> n & 1 == 1).map(|n: u32| n.to_string()).collect();
-    if pins.is_empty() { "-".into() } else { pins.join(" ") }
+    let pins: Vec<String> = (0..64)
+        .filter(|n| mask >> n & 1 == 1)
+        .map(|n: u32| n.to_string())
+        .collect();
+    if pins.is_empty() {
+        "-".into()
+    } else {
+        pins.join(" ")
+    }
 }
 
 /// `sys/board` for printing.
@@ -95,9 +140,20 @@ pub fn format_board(b: &BoardInfo<'_>) -> String {
     ] {
         let _ = writeln!(s, "{:<18}{}", format!("{name}:"), pin_list(mask));
     }
-    let _ = write!(s, "PWM:              {} bits, REF_TICK {}", b.pwm_max_bits, yes(BOARD_PWM_REF_TICK));
+    let _ = write!(
+        s,
+        "PWM:              {} bits, REF_TICK {}",
+        b.pwm_max_bits,
+        yes(BOARD_PWM_REF_TICK)
+    );
     for (i, pin) in b.pwm_pins.iter().enumerate() {
-        let _ = write!(s, "{}({},{})={pin}", if i == 0 { "; " } else { " " }, i / 2, i % 2);
+        let _ = write!(
+            s,
+            "{}({},{})={pin}",
+            if i == 0 { "; " } else { " " },
+            i / 2,
+            i % 2
+        );
     }
     s.push('\n');
     s
@@ -123,7 +179,11 @@ pub fn format_fw_info(i: &middleware::fw_ota::FwInfo) -> String {
             i.state.name(),
             format_version(i.version),
             t.name(),
-            if i.len > 0 { format!(", {}/{} bytes", i.received, i.len) } else { String::new() }
+            if i.len > 0 {
+                format!(", {}/{} bytes", i.received, i.len)
+            } else {
+                String::new()
+            }
         ),
         None => format!("update:           {}\n", i.state.name()),
     };
@@ -133,8 +193,19 @@ pub fn format_fw_info(i: &middleware::fw_ota::FwInfo) -> String {
         slot(Slot::A),
         slot(Slot::B),
         format_version(i.min_version),
-        if i.self_test_ok { "passed" } else { "not passed" },
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]
+        if i.self_test_ok {
+            "passed"
+        } else {
+            "not passed"
+        },
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7]
     )
 }
 
@@ -148,9 +219,10 @@ pub fn format_trust(t: &TrustInfo) -> String {
     match t.state {
         TrustState::Unclaimed => format!("trust:            {state}\n"),
         TrustState::Claimed { key, min_version } => format!(
-            "trust:            {state}\nlast version:     {}\npinned key:       {}\n",
+            "trust:            {state}\nlast version:     {}\npinned key:       {} ({})\n",
             min_version.0,
-            crate::sign::hex(&key.0)
+            crate::sign::hex(key.as_bytes()),
+            key.kind().name()
         ),
     }
 }
@@ -179,6 +251,60 @@ fn printable(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// One line for a publication that decodes as a sample batch; `None` for
+/// anything else (then [`format_event`] applies):
+///
+/// `[samples] KEY KIND FORMAT ch=C rate=HZ first=I t=US n=N range=R scale=S: U U ...`
+///
+/// where each unit `U` is its channels joined by `,` (`i16` values; µ-law
+/// decoded to `i16`; levels as `rms/peak`). A line `mic_capture.py` and
+/// other scripts parse, so keep its shape.
+pub fn format_samples(e: &Event) -> Option<String> {
+    use middleware::stream::samples::{SampleFormat, SensorKind, decode, mulaw_decode};
+    let Event::Publish { key, payload } = e else {
+        return None;
+    };
+    if key.starts_with("sys/") {
+        return None;
+    }
+    let b = decode(payload).ok()?;
+    let h = b.header;
+    let kind = match h.kind {
+        SensorKind::Imu => "imu",
+        SensorKind::Microphone => "mic",
+    };
+    let channel_values: Vec<String> = match h.format {
+        SampleFormat::I16 => b.i16_values().map(|v| v.to_string()).collect(),
+        SampleFormat::MuLaw => b
+            .data
+            .iter()
+            .map(|c| mulaw_decode(*c).to_string())
+            .collect(),
+        SampleFormat::Levels => b.levels().map(|(r, p)| format!("{r}/{p}")).collect(),
+    };
+    let format = match h.format {
+        SampleFormat::I16 => "i16",
+        SampleFormat::MuLaw => "mulaw",
+        SampleFormat::Levels => "levels",
+    };
+    let per_unit = usize::from(h.channels).max(1);
+    let units: Vec<String> = channel_values
+        .chunks(per_unit)
+        .map(|u| u.join(","))
+        .collect();
+    Some(format!(
+        "[samples] {key} {kind} {format} ch={} rate={} first={} t={} n={} range={} scale={}: {}",
+        h.channels,
+        h.rate_hz,
+        h.first_index,
+        h.timestamp_us,
+        h.count,
+        h.range,
+        h.scale,
+        units.join(" ")
+    ))
+}
+
 /// One line describing `e`.
 pub fn format_event(e: &Event) -> String {
     match e {
@@ -191,7 +317,10 @@ pub fn format_event(e: &Event) -> String {
                 .chars()
                 .flat_map(|c| {
                     let escaped = c.is_control().then(|| c.escape_default());
-                    escaped.into_iter().flatten().chain((!c.is_control()).then_some(c))
+                    escaped
+                        .into_iter()
+                        .flatten()
+                        .chain((!c.is_control()).then_some(c))
                 })
                 .collect();
             format!("[log] {line}")
@@ -216,6 +345,63 @@ pub fn format_event(e: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn samples_lines_decode_imu_pcm_mulaw_and_levels_batches() {
+        use middleware::stream::samples::fake::{imu_batch, mic_batch};
+        use middleware::wasm_abi::route::{AudioMode, ImuConfig, MicConfig};
+        let mut out = [0u8; middleware::stream::samples::MAX_BATCH];
+        let publish = |key: &str, b: &[u8]| Event::Publish {
+            key: key.into(),
+            payload: b.to_vec(),
+        };
+
+        let imu = ImuConfig::new(50, 2, false, 2).unwrap();
+        let n = imu_batch(&imu, 10, 1234, 2, &mut out).unwrap();
+        let line = format_samples(&publish("imu/raw", &out[..n])).unwrap();
+        let batch = middleware::stream::samples::decode(&out[..n]).unwrap();
+        let v: Vec<i16> = batch.i16_values().collect();
+        let want = format!(
+            "[samples] imu/raw imu i16 ch=3 rate=50 first=10 t=1234 n=2 range=2 scale=61: {},{},{} {},{},{}",
+            v[0], v[1], v[2], v[3], v[4], v[5]
+        );
+        assert_eq!(line, want);
+
+        let pcm = MicConfig::new(16000, 0, AudioMode::Pcm, 160, 0).unwrap();
+        let n = mic_batch(&pcm, 0, 0, 160, &mut out).unwrap();
+        let line = format_samples(&publish("mic/pcm", &out[..n])).unwrap();
+        assert!(
+            line.starts_with(
+                "[samples] mic/pcm mic i16 ch=1 rate=16000 first=0 t=0 n=160 range=0 scale=0: "
+            ),
+            "{line}"
+        );
+        assert_eq!(line.split(": ").nth(1).unwrap().split(' ').count(), 160);
+
+        let mu = MicConfig::new(8000, 0, AudioMode::MuLaw, 80, 0).unwrap();
+        let n = mic_batch(&mu, 0, 0, 80, &mut out).unwrap();
+        assert!(
+            format_samples(&publish("mic/mu", &out[..n]))
+                .unwrap()
+                .contains(" mulaw ch=1 ")
+        );
+
+        let lv = MicConfig::new(8000, 0, AudioMode::Levels, 2, 400).unwrap();
+        let n = mic_batch(&lv, 0, 0, 2, &mut out).unwrap();
+        let line = format_samples(&publish("mic/level", &out[..n])).unwrap();
+        assert!(
+            line.contains(" levels ch=1 rate=8000 ") && line.contains("scale=400: "),
+            "{line}"
+        );
+        let units: Vec<&str> = line.split(": ").nth(1).unwrap().split(' ').collect();
+        assert_eq!(units.len(), 2);
+        assert!(units.iter().all(|u| u.split('/').count() == 2));
+
+        // Not a batch, or a system key: left to format_event.
+        assert_eq!(format_samples(&publish("app/x", b"hello")), None);
+        assert_eq!(format_samples(&publish("sys/log", &out[..n])), None);
+        assert_eq!(format_samples(&Event::Noise(vec![1, 2])), None);
+    }
 
     #[test]
     fn info_notes_protocol_only_firmware() {
@@ -250,7 +436,47 @@ mod tests {
             s.contains("firmware:         0.1.0+no-wasm\nnode:             246f28aabbcc0000\n"),
             "{s}"
         );
-        let s = format_info(&Info { caps: Caps::SERVE, ..i });
+        let s = format_info(&Info {
+            caps: Caps::SERVE,
+            ..i.clone()
+        });
+        assert!(!s.contains("bridged"));
+        assert!(!s.contains("sources:"), "{s}");
+        let b = format_info(&Info {
+            caps: Caps::BRIDGE,
+            ..i.clone()
+        });
+        assert!(
+            b.contains("links:            bridged by rules (route_bridge)\n"),
+            "{b}"
+        );
+        assert!(!b.contains("sources:"), "{b}");
+        // An EVKB with both sample sources: caps 13 = SERVE | IMU | MIC.
+        let rt = format_info(&Info {
+            caps: Caps(13),
+            ..i.clone()
+        });
+        assert!(
+            rt.contains("sources:          imu, microphone (route_source)\n"),
+            "{rt}"
+        );
+        assert!(!rt.contains("bridged"), "{rt}");
+        let imu = format_info(&Info {
+            caps: Caps::SERVE.with(Caps::SOURCE_IMU),
+            ..i.clone()
+        });
+        assert!(
+            imu.contains("sources:          imu (route_source)\n"),
+            "{imu}"
+        );
+        let mic = format_info(&Info {
+            caps: Caps::SOURCE_MICROPHONE,
+            ..i
+        });
+        assert!(
+            mic.contains("sources:          microphone (route_source)\n"),
+            "{mic}"
+        );
         assert!(s.contains("runtime:          none: protocol only, payloads are stored but not run\nrequests:         routed to the payload (serve)\n"), "{s}");
     }
 
@@ -285,7 +511,7 @@ mod tests {
         let s = format_trust(&TrustState::Unclaimed.info(false));
         assert!(s.starts_with("trust:            unclaimed"), "{s}");
         let claimed = TrustState::Claimed {
-            key: PublicKey([0xab; 32]),
+            key: PublicKey::Ed25519([0xab; 32]),
             min_version: Version(42),
         };
         let s = format_trust(&claimed.info(false));
@@ -297,13 +523,19 @@ mod tests {
 
     #[test]
     fn y9_fw_info_names_slots_versions_and_progress() {
-        use middleware::fw_ota::wire::{FwInfo, SlotInfo, StateCode};
         use middleware::fw_ota::Slot;
+        use middleware::fw_ota::wire::{FwInfo, SlotInfo, StateCode};
         use middleware::loader::trust::Version;
         let i = FwInfo {
             state: StateCode::Receiving,
             running: Slot::A,
-            slots: [SlotInfo { version: Some(Version(0x0001_0000)), tbyb: false }, SlotInfo::default()],
+            slots: [
+                SlotInfo {
+                    version: Some(Version(0x0001_0000)),
+                    tbyb: false,
+                },
+                SlotInfo::default(),
+            ],
             min_version: Version(0x0001_0000),
             node: SenderId([1, 2, 3, 4, 5, 6, 7, 8]),
             target: Some(Slot::B),
@@ -315,20 +547,35 @@ mod tests {
         let s = format_fw_info(&i);
         assert!(s.contains("slot A:           1.0 <- running\n"), "{s}");
         assert!(s.contains("slot B:           empty\n"), "{s}");
-        assert!(s.contains("update:           receiving 1.1 into slot B, 512/2048 bytes\n"), "{s}");
+        assert!(
+            s.contains("update:           receiving 1.1 into slot B, 512/2048 bytes\n"),
+            "{s}"
+        );
         assert!(s.contains("node:             0102030405060708"), "{s}");
         let t = FwInfo {
             state: StateCode::Trial,
             running: Slot::B,
-            slots: [i.slots[0], SlotInfo { version: Some(Version(0x0001_0001)), tbyb: true }],
+            slots: [
+                i.slots[0],
+                SlotInfo {
+                    version: Some(Version(0x0001_0001)),
+                    tbyb: true,
+                },
+            ],
             len: 0,
             target: None,
             self_test_ok: false,
             ..i
         };
         let s = format_fw_info(&t);
-        assert!(s.contains("slot B:           1.1 (TBYB, not bought) <- running"), "{s}");
-        assert!(s.contains("update:           trial\n") && s.contains("not passed"), "{s}");
+        assert!(
+            s.contains("slot B:           1.1 (TBYB, not bought) <- running"),
+            "{s}"
+        );
+        assert!(
+            s.contains("update:           trial\n") && s.contains("not passed"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -342,7 +589,10 @@ mod tests {
             format_event(&p("sys/log", b"disc: up x\x1b[2Jy\rz\n")),
             "[log] disc: up x\\u{1b}[2Jy\\rz"
         );
-        assert_eq!(format_event(&p("sys/log", "caf\u{e9}".as_bytes())), "[log] caf\u{e9}");
+        assert_eq!(
+            format_event(&p("sys/log", "caf\u{e9}".as_bytes())),
+            "[log] caf\u{e9}"
+        );
         assert_eq!(
             format_event(&p("sys/payload/status", &[2])),
             "[status] running"

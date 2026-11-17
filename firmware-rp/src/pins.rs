@@ -57,19 +57,30 @@ impl Default for Pins {
 impl Pins {
     /// No pin configured.
     pub const fn new() -> Self {
-        Pins { modes: [Mode::Idle; GPIOS] }
+        Pins {
+            modes: [Mode::Idle; GPIOS],
+        }
     }
 
     /// The mode of `pin` (`Idle` for a pin the chip lacks).
     pub fn mode(&self, pin: u8) -> Mode {
-        self.modes.get(usize::from(pin)).copied().unwrap_or(Mode::Idle)
+        self.modes
+            .get(usize::from(pin))
+            .copied()
+            .unwrap_or(Mode::Idle)
     }
 
     fn with(self, profile: &Profile, pin: u8, mode: Mode) -> Result<Self, AbiError> {
-        let dir = if mode == Mode::Output { Direction::Output } else { Direction::Input };
+        let dir = if mode == Mode::Output {
+            Direction::Output
+        } else {
+            Direction::Input
+        };
         profile.check_pin(pin, dir)?;
         let mut modes = self.modes;
-        let slot = modes.get_mut(usize::from(pin)).ok_or(AbiError::InvalidArgument)?;
+        let slot = modes
+            .get_mut(usize::from(pin))
+            .ok_or(AbiError::InvalidArgument)?;
         *slot = mode;
         Ok(Pins { modes })
     }
@@ -105,7 +116,10 @@ impl Pins {
 
     /// Pins the payload configured, ascending.
     pub fn configured(&self) -> impl Iterator<Item = u8> + '_ {
-        (0u8..).zip(self.modes.iter()).filter(|(_, m)| **m != Mode::Idle).map(|(p, _)| p)
+        (0u8..)
+            .zip(self.modes.iter())
+            .filter(|(_, m)| **m != Mode::Idle)
+            .map(|(p, _)| p)
     }
 }
 
@@ -118,7 +132,11 @@ mod tests {
     fn v8_gpio_modes_follow_the_esp_base_rules() {
         let p = &RP2350;
         let pins = Pins::new();
-        assert_eq!(pins.read_from(p, 8), Err(AbiError::InvalidArgument), "never configured");
+        assert_eq!(
+            pins.read_from(p, 8),
+            Err(AbiError::InvalidArgument),
+            "never configured"
+        );
         assert_eq!(pins.check_write(p, 8), Err(AbiError::InvalidArgument));
         let pins = pins.output(p, 8).unwrap();
         assert_eq!(pins.check_write(p, 8), Ok(()));
@@ -133,7 +151,12 @@ mod tests {
         assert_eq!(pins.output(p, 30), Err(AbiError::InvalidArgument));
         assert_eq!(pins.read_from(p, 26), Err(AbiError::Unsupported), "ADC pin");
         let pins = pins.output(p, 25).unwrap();
-        assert_eq!(pins.configured().collect::<heapless::Vec<u8, 4>>().as_slice(), &[8, 24, 25]);
+        assert_eq!(
+            pins.configured()
+                .collect::<heapless::Vec<u8, 4>>()
+                .as_slice(),
+            &[8, 24, 25]
+        );
         assert_eq!(pins.mode(99), Mode::Idle);
     }
 }

@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: thumbv6m-none-eabi,thumbv8m.main-none-eabihf
+          targets: thumbv6m-none-eabi,thumbv7em-none-eabihf,thumbv8m.main-none-eabihf
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/check-features.sh
 

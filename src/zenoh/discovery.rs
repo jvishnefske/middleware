@@ -64,9 +64,13 @@
 //! answering with a different record makes the browser refuse it instead of
 //! taking whichever came first. A peer that answers with the same bytes, or
 //! that declares the token and the only queryable itself, is not detected.
-//! Authenticated discovery needs Zenoh access control and authentication
-//! (router ACLs restricting who may declare tokens and queryables on
-//! `@mw/svc/**`), which this module does not configure.
+//! Authenticated discovery needs Zenoh access control and authentication,
+//! which this module does not configure; `mw-service`'s `zenoh_router`
+//! renders a router that provides them: only a principal that serves a
+//! kind may declare tokens, queryables and replies on `@mw/svc/<kind>/*`,
+//! so a forged record from another principal never reaches a browser
+//! (design.md Z19). Which instance a permitted principal announces stays
+//! its own claim.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

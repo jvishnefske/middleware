@@ -16,7 +16,8 @@
 //!   store over any transport ([`kv::remote`], [`kv::wire`]) (always built,
 //!   `no_std`), and the durable `kv::file::FileKv` log (`kv-file`).
 //! * [`transport`] — byte-level traits (the 0.5 contract: request metadata
-//!   and options, gather, declared delivery, gaps, split). Every call takes
+//!   and options, gather, declared delivery, gaps, split; 0.6 adds W3C
+//!   trace context and request ids to requests). Every call takes
 //!   caller-owned buffers, so implementations need no heap. The in-process
 //!   backend `transport::memory` needs `memory`.
 //! * [`dedup`] — duplicate suppression and gap counting over 8-bit
@@ -49,9 +50,16 @@
 //!   ABI 4 DMA routes.
 //! * [`rpc`] — request/response over a datagram radio (always built, pure):
 //!   the ESP-NOW request and response frames, the requester's retry rule
-//!   and the responder's duplicate suppression; `espnow::rpc` runs them
+//!   and the responder's duplicate suppression, bound to a SHA-256 digest
+//!   of each request (`loader::sha256`, always built over `sha2`'s block
+//!   function); `espnow::rpc` runs them
 //!   over an ESP-NOW radio.
-//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
+//! * [`zenoh_wire`] — the middleware's Zenoh attachments, reply-error
+//!   payloads and reserved key expressions (always built, pure, `no_std`):
+//!   shared by the host backend (as `zenoh::wire`) and the board client
+//!   `zenoh_lite`, so both write the same bytes.
+//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images, CRC-8 for the
+//!   SMBus Packet Error Code.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
 //!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
 //!   announcer (a [`discovery::Announce`]) need `mdns`.
@@ -62,22 +70,25 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
-//! | `trust`    | `loader::sha256`, `loader::trust` checks, `fw_ota::service` | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
+//! | `smbus`    | `smbus`     | `no_std`, no heap | `embedded-hal(-async)` 1.0 master, an `I2cTarget` adapter, a `Clock` |
+//! | `trust`    | `loader::trust` checks, image hashing, `fw_ota::service` | `no_std`, no heap | ed25519-dalek (verify only), p256 |
 //! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
+//! | `zenoh-lite` | `zenoh_lite` | `no_std`, no heap | `embedded-io-async`; Zenoh 1.x client over one TCP stream |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio`, `grpc::mesh` | `std` | `grpc`                |
 //! | `mdns`     | `mdns::socket`, `mdns::announce`, `mdns::origin` | `std` | tokio, socket2 |
 //! | `dns-sd`   | `dns::unicast` | `std`          | tokio, getrandom          |
 //! | `memory`   | `transport::memory` | `std`     | tokio (timers); for tests and examples |
 //! | `kv-file`  | `kv::file`  | `std`             | the filesystem; no extra crates |
+//! | `udp`      | `udp::UdpTransport` | `std`     | tokio (net, timers); one raw frame per datagram |
 //! | `postcard` | `codec::postcard` | `no_std`    | serde                     |
 //! | `prost`    | `codec::prost`    | `no_std` + `alloc` | prost              |
 //!
 //! With no features the crate is `#![no_std]`, allocation free and builds for
-//! `thumbv6m-none-eabi`. Enabling `zenoh`, `grpc`, `mdns`, `dns-sd` or
-//! `memory` turns on `std`; the
+//! `thumbv6m-none-eabi`. Enabling `zenoh`, `grpc`, `mdns`, `dns-sd`,
+//! `memory` or `udp` turns on `std`; the
 //! embedded features never do, so firmware never links cloud dependencies and
 //! cloud builds never compile the BLE stack unless asked.
 //!
@@ -90,9 +101,9 @@
 #![allow(async_fn_in_trait)]
 
 pub mod codec;
+pub mod crc;
 pub mod dedup;
 pub mod discovery;
-pub mod crc;
 pub mod dns;
 pub mod fw_ota;
 pub mod key;
@@ -104,7 +115,9 @@ pub mod serial;
 pub mod stream;
 pub mod transport;
 pub mod typed;
+pub mod udp;
 pub mod wasm_abi;
+pub mod zenoh_wire;
 
 #[cfg(feature = "ble")]
 pub mod ble;
@@ -112,13 +125,17 @@ pub mod ble;
 pub mod espnow;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+#[cfg(feature = "smbus")]
+pub mod smbus;
 #[cfg(feature = "zenoh")]
 pub mod zenoh;
+#[cfg(feature = "zenoh-lite")]
+pub mod zenoh_lite;
 
 pub use codec::Codec;
 pub use key::{AsKey, Filter, Key, KeyBuf, KeyError, KeyFilter, KeyFilterBuf};
 pub use transport::{
     Delivery, Flow, Gather, Handler, HandlerError, Limits, Overflow, Publisher, Reply, Request,
-    RequestMeta, RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId, Split,
-    Subscribe, Subscriber, Target,
+    RequestId, RequestMeta, RequestOptions, Requester, Responder, Sample, SampleMeta, SenderId,
+    Split, Subscribe, Subscriber, Target, TraceParent,
 };

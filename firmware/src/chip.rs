@@ -23,6 +23,18 @@
 //! [`Profile::check_pin`] does not refuse them — but a host warns about an
 //! assignment that drives one, as ESPHome does (`ignore_strapping_warning`).
 //!
+//! A fifth mask, `releasable` (E28), names the reserved pins that only
+//! some modules wire to flash or PSRAM (ESP32 GPIO16/17, PSRAM on WROVER
+//! modules; ESP32-S3 GPIO33–37, octal flash/PSRAM). A board without that
+//! memory may open them to payloads with
+//! [`crate::board::BoardBuilder::release`]; the chip profiles keep them
+//! reserved.
+//!
+//! The chip profiles are the defaults; a board adapts one (name, pins,
+//! image cap) through [`crate::board::Board`], which is what the shell runs
+//! with and what `sys/board` describes ([`Profile::board_info`] of
+//! [`crate::board::Board::profile`]).
+//!
 //! # Board pin map (ABI 3 PWM and I2C, R15 camera)
 //!
 //! The ESP32 build is the AI-Thinker ESP32-CAM's (the only ESP32 board
@@ -236,6 +248,8 @@ pub struct Profile {
     /// Whether PWM timers can fall back to the 1 MHz REF_TICK.
     pub pwm_ref_tick: bool,
     strapping: u64,
+    /// Reserved pins a board may release (see the module docs).
+    releasable: u64,
     /// The board's pins: which exist, are reserved or input only, the ADC
     /// inputs, and the PWM and I2C maps (see the board pin map).
     pins: PinMap,
@@ -261,6 +275,7 @@ pub const ESP32: Profile = Profile {
     pwm_max_bits: 16,
     pwm_ref_tick: true,
     strapping: bit(0) | bit(2) | bit(5) | bit(12) | bit(15),
+    releasable: bit(16) | bit(17),
     pins: boards::ESP32,
     camera: true,
 };
@@ -284,6 +299,7 @@ pub const ESP32S3: Profile = Profile {
     pwm_max_bits: 14,
     pwm_ref_tick: false,
     strapping: bit(0) | bit(3) | bit(45) | bit(46),
+    releasable: board_pins::span(33, 37),
     pins: boards::ESP32S3,
     camera: false,
 };
@@ -306,6 +322,7 @@ pub const ESP32C3: Profile = Profile {
     pwm_max_bits: 0,
     pwm_ref_tick: false,
     strapping: bit(2) | bit(8) | bit(9),
+    releasable: 0,
     pins: boards::ESP32C3,
     camera: false,
 };
@@ -330,6 +347,7 @@ pub const ESP8266: Profile = Profile {
     pwm_max_bits: 0,
     pwm_ref_tick: false,
     strapping: bit(0) | bit(2) | bit(15),
+    releasable: 0,
     pins: boards::ESP8266,
     camera: false,
 };
@@ -365,6 +383,21 @@ impl Profile {
     /// Whether `pin` is reserved for flash, PSRAM, USB or the console UART.
     pub const fn is_reserved(&self, pin: u8) -> bool {
         self.pins.is_reserved(pin)
+    }
+
+    /// Whether `pin` is reserved only for module flash or PSRAM that some
+    /// boards lack, so a board may release it
+    /// ([`crate::board::BoardBuilder::release`]).
+    pub const fn is_releasable(&self, pin: u8) -> bool {
+        self.releasable & bit(pin) != 0
+    }
+
+    /// The same profile with `pin` (below 64) reserved or not; the pin map
+    /// and so [`Profile::check_pin`], [`Profile::payload_pins`] and
+    /// [`Profile::board_info`] follow.
+    pub(crate) const fn with_reserved(mut self, pin: u8, reserved: bool) -> Profile {
+        self.pins = self.pins.with_reserved(pin, reserved);
+        self
     }
 
     /// Whether `pin` is a strapping pin (usable, but read at reset).
@@ -522,42 +555,78 @@ mod tests {
     fn console_uart_pins_are_reserved() {
         for p in ALL {
             assert!(p.exists(p.uart0_tx) && p.exists(p.uart0_rx), "{}", p.name);
-            assert_eq!(p.check_pin(p.uart0_tx, Direction::Output), Err(AbiError::Unsupported));
-            assert_eq!(p.check_pin(p.uart0_rx, Direction::Input), Err(AbiError::Unsupported));
+            assert_eq!(
+                p.check_pin(p.uart0_tx, Direction::Output),
+                Err(AbiError::Unsupported)
+            );
+            assert_eq!(
+                p.check_pin(p.uart0_rx, Direction::Input),
+                Err(AbiError::Unsupported)
+            );
         }
     }
 
     #[test]
     fn flash_psram_and_usb_pins_are_refused() {
         for pin in 6..=11 {
-            assert_eq!(ESP32.check_pin(pin, Direction::Input), Err(AbiError::Unsupported));
+            assert_eq!(
+                ESP32.check_pin(pin, Direction::Input),
+                Err(AbiError::Unsupported)
+            );
         }
-        assert_eq!(ESP32.check_pin(16, Direction::Output), Err(AbiError::Unsupported));
-        assert_eq!(ESP32.check_pin(17, Direction::Output), Err(AbiError::Unsupported));
+        assert_eq!(
+            ESP32.check_pin(16, Direction::Output),
+            Err(AbiError::Unsupported)
+        );
+        assert_eq!(
+            ESP32.check_pin(17, Direction::Output),
+            Err(AbiError::Unsupported)
+        );
         for pin in (26..=37).chain([19, 20]) {
-            assert_eq!(ESP32S3.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+            assert_eq!(
+                ESP32S3.check_pin(pin, Direction::Output),
+                Err(AbiError::Unsupported)
+            );
         }
         for pin in 12..=19 {
-            assert_eq!(ESP32C3.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+            assert_eq!(
+                ESP32C3.check_pin(pin, Direction::Output),
+                Err(AbiError::Unsupported)
+            );
         }
         for pin in 6..=11 {
-            assert_eq!(ESP8266.check_pin(pin, Direction::Input), Err(AbiError::Unsupported));
+            assert_eq!(
+                ESP8266.check_pin(pin, Direction::Input),
+                Err(AbiError::Unsupported)
+            );
         }
     }
 
     #[test]
     fn missing_pins_are_invalid() {
         for pin in [20, 24, 28, 31, 40, 63, 64, 255] {
-            assert_eq!(ESP32.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+            assert_eq!(
+                ESP32.check_pin(pin, Direction::Input),
+                Err(AbiError::InvalidArgument)
+            );
         }
         for pin in [22, 25, 49, 64] {
-            assert_eq!(ESP32S3.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+            assert_eq!(
+                ESP32S3.check_pin(pin, Direction::Input),
+                Err(AbiError::InvalidArgument)
+            );
         }
         for pin in [22, 30, 64] {
-            assert_eq!(ESP32C3.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+            assert_eq!(
+                ESP32C3.check_pin(pin, Direction::Input),
+                Err(AbiError::InvalidArgument)
+            );
         }
         for pin in [17, 20, 64] {
-            assert_eq!(ESP8266.check_pin(pin, Direction::Input), Err(AbiError::InvalidArgument));
+            assert_eq!(
+                ESP8266.check_pin(pin, Direction::Input),
+                Err(AbiError::InvalidArgument)
+            );
         }
     }
 
@@ -565,7 +634,10 @@ mod tests {
     fn esp32_input_only_pins_refuse_output() {
         for pin in 34..=39 {
             assert_eq!(ESP32.check_pin(pin, Direction::Input), Ok(()));
-            assert_eq!(ESP32.check_pin(pin, Direction::Output), Err(AbiError::Unsupported));
+            assert_eq!(
+                ESP32.check_pin(pin, Direction::Output),
+                Err(AbiError::Unsupported)
+            );
             assert!(!ESP32.can_output(pin), "esp32 {pin}");
         }
         assert!(ESP32.can_output(33));
@@ -575,21 +647,65 @@ mod tests {
 
     #[test]
     fn general_purpose_pins_are_allowed() {
-        for pin in [0, 2, 4, 5, 12, 13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33] {
-            assert_eq!(ESP32.check_pin(pin, Direction::Output), Ok(()), "esp32 {pin}");
+        for pin in [
+            0, 2, 4, 5, 12, 13, 14, 15, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33,
+        ] {
+            assert_eq!(
+                ESP32.check_pin(pin, Direction::Output),
+                Ok(()),
+                "esp32 {pin}"
+            );
         }
         for pin in (0..=18).chain([21, 38, 39, 40, 41, 42, 45, 46, 47, 48]) {
-            assert_eq!(ESP32S3.check_pin(pin, Direction::Output), Ok(()), "esp32s3 {pin}");
+            assert_eq!(
+                ESP32S3.check_pin(pin, Direction::Output),
+                Ok(()),
+                "esp32s3 {pin}"
+            );
         }
         for pin in 0..=11 {
-            assert_eq!(ESP32C3.check_pin(pin, Direction::Output), Ok(()), "esp32c3 {pin}");
+            assert_eq!(
+                ESP32C3.check_pin(pin, Direction::Output),
+                Ok(()),
+                "esp32c3 {pin}"
+            );
         }
         assert_eq!(ESP32C3.payload_pins().count(), 12);
         for pin in [0, 2, 4, 5, 12, 13, 14, 15, 16] {
-            assert_eq!(ESP8266.check_pin(pin, Direction::Output), Ok(()), "esp8266 {pin}");
+            assert_eq!(
+                ESP8266.check_pin(pin, Direction::Output),
+                Ok(()),
+                "esp8266 {pin}"
+            );
         }
         assert_eq!(ESP8266.payload_pins().count(), 9);
         assert!(ESP32S3.payload_pins().all(|p| !ESP32S3.is_reserved(p)));
+    }
+
+    #[test]
+    fn e28_releasable_pins_are_reserved_module_memory_pins() {
+        for p in ALL {
+            for pin in 0..64 {
+                if p.is_releasable(pin) {
+                    assert!(p.is_reserved(pin), "{} {pin}", p.name);
+                }
+            }
+        }
+        assert!((33..=37).all(|pin| ESP32S3.is_releasable(pin)));
+        assert!((26..=32).all(|pin| !ESP32S3.is_releasable(pin)));
+        assert!(ESP32.is_releasable(16) && ESP32.is_releasable(17) && !ESP32.is_releasable(6));
+        assert!((0..64).all(|pin| !ESP32C3.is_releasable(pin) && !ESP8266.is_releasable(pin)));
+        // A released pin is a payload pin, and sys/board follows.
+        let open = ESP32S3.with_reserved(35, false);
+        assert_eq!(open.check_pin(35, Direction::Output), Ok(()));
+        assert!(open.payload_pins().any(|p| p == 35));
+        assert_eq!(open.board_info(7).reserved & bit(35), 0);
+        let kept = ESP32S3.with_reserved(41, true);
+        assert_eq!(
+            kept.check_pin(41, Direction::Output),
+            Err(AbiError::Unsupported)
+        );
+        assert_ne!(kept.board_info(7).reserved & bit(41), 0);
     }
 
     #[test]
@@ -621,7 +737,11 @@ mod tests {
         assert_eq!(ESP32.check_pin(scl, Direction::Output), Ok(()));
         // The AI-Thinker camera port is all payload input pins.
         for pin in middleware::wasm_abi::route::CameraPins::AI_THINKER.all() {
-            assert_eq!(ESP32.check_pin(pin, Direction::Input), Ok(()), "camera {pin}");
+            assert_eq!(
+                ESP32.check_pin(pin, Direction::Input),
+                Ok(()),
+                "camera {pin}"
+            );
         }
     }
 
@@ -629,7 +749,11 @@ mod tests {
     fn e24_esp32s3_maps_i2c_bus_0_to_gpio_5_and_6() {
         assert_eq!(ESP32S3.i2c_pins(0), Ok((5, 6)));
         assert_eq!(ESP32S3.i2c_pins(1), Err(AbiError::Unsupported), "bus 1");
-        assert_eq!(ESP32C3.i2c_pins(0), Err(AbiError::Unsupported), "no runtime");
+        assert_eq!(
+            ESP32C3.i2c_pins(0),
+            Err(AbiError::Unsupported),
+            "no runtime"
+        );
         assert_eq!(ESP32C3.i2c_pins(1), Err(AbiError::Unsupported));
         // Both lines are payload pins that can drive (open drain) and
         // read: not reserved, not strapping (0, 3, 45, 46), not the
@@ -656,7 +780,13 @@ mod tests {
                 + p.max_image as usize
                 + INTERPRETER_RESERVE
                 + p.radio_heap;
-            assert!(p.heap_total() >= need, "{}: {} < {}", p.name, p.heap_total(), need);
+            assert!(
+                p.heap_total() >= need,
+                "{}: {} < {}",
+                p.name,
+                p.heap_total(),
+                need
+            );
             assert!(p.max_memory_bytes >= WASM_PAGE, "{}", p.name);
             // Page multiples, so a 64 KiB-page payload can use all of it.
             assert_eq!(p.max_memory_bytes % WASM_PAGE, 0, "{}", p.name);
@@ -680,19 +810,35 @@ mod tests {
         let slot = crate::image::Region::new(0x4_0000).capacity();
         assert_eq!(slot, 124 * 1024);
         for p in ALL {
-            assert!(p.max_image <= slot, "{}: {} > {}", p.name, p.max_image, slot);
+            assert!(
+                p.max_image <= slot,
+                "{}: {} > {}",
+                p.name,
+                p.max_image,
+                slot
+            );
         }
         assert_eq!(ESP8266.max_image, slot, "the ESP8266 accepts a whole slot");
     }
 
     #[test]
     fn x12_adc1_pins_per_chip() {
-        let adc = |p: &Profile| (0u8..64).filter(|&n| p.has_adc(n)).collect::<heapless::Vec<u8, 64>>();
+        let adc = |p: &Profile| {
+            (0u8..64)
+                .filter(|&n| p.has_adc(n))
+                .collect::<heapless::Vec<u8, 64>>()
+        };
         assert_eq!(adc(&ESP32), [32, 33, 34, 35, 36, 37, 38, 39]);
         assert_eq!(adc(&ESP32S3), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert!(adc(&ESP32C3).is_empty() && adc(&ESP8266).is_empty());
         for p in ALL {
-            assert!((0u8..64).filter(|&n| p.has_adc(n)).all(|n| p.check_pin(n, Direction::Input).is_ok()), "{}", p.name);
+            assert!(
+                (0u8..64)
+                    .filter(|&n| p.has_adc(n))
+                    .all(|n| p.check_pin(n, Direction::Input).is_ok()),
+                "{}",
+                p.name
+            );
         }
         assert!(!ESP32.has_adc(64) && !ESP32.has_adc(255));
     }
@@ -709,13 +855,21 @@ mod tests {
         let runtime: [bool; 4] = ALL.map(|p| p.runtime);
         assert_eq!(runtime, [true, true, false, false]);
         // PWM only where payloads run.
-        let pwm: [(usize, u8, bool); 4] = ALL.map(|p| (p.pwm_pins.len(), p.pwm_max_bits, p.pwm_ref_tick));
-        assert_eq!(pwm, [(4, 16, true), (8, 14, false), (0, 0, false), (0, 0, false)]);
+        let pwm: [(usize, u8, bool); 4] =
+            ALL.map(|p| (p.pwm_pins.len(), p.pwm_max_bits, p.pwm_ref_tick));
+        assert_eq!(
+            pwm,
+            [(4, 16, true), (8, 14, false), (0, 0, false), (0, 0, false)]
+        );
     }
 
     #[test]
     fn e14_strapping_pins_per_chip_are_allowed() {
-        let strap = |p: &Profile| (0u8..64).filter(|&n| p.is_strapping(n)).collect::<heapless::Vec<u8, 64>>();
+        let strap = |p: &Profile| {
+            (0u8..64)
+                .filter(|&n| p.is_strapping(n))
+                .collect::<heapless::Vec<u8, 64>>()
+        };
         assert_eq!(strap(&ESP32), [0, 2, 5, 12, 15]);
         assert_eq!(strap(&ESP32S3), [0, 3, 45, 46]);
         assert_eq!(strap(&ESP32C3), [2, 8, 9]);
@@ -736,7 +890,10 @@ mod tests {
             let mut buf = [0u8; BOARD_INFO_MAX];
             let n = b.encode(&mut buf).unwrap();
             assert_eq!(BoardInfo::decode(&buf[..n]), Some(b), "{}", p.name);
-            assert_eq!((b.max_image, b.uart_tx, b.uart_rx), (p.max_image, p.uart0_tx, p.uart0_rx));
+            assert_eq!(
+                (b.max_image, b.uart_tx, b.uart_rx),
+                (p.max_image, p.uart0_tx, p.uart0_rx)
+            );
             assert_eq!(b.pwm_pins, p.pwm_pins);
             assert!((0u8..64).all(|n| (b.gpio >> n & 1 == 1) == p.exists(n)));
         }
@@ -751,15 +908,35 @@ mod tests {
     fn flash_settings_decode_the_image_header() {
         // espflash defaults (DIO, 40 MHz, 8 MB: size nibble 3).
         let dio40 = FlashSettings::from_header([0xE9, 3, 2, 0x30]).expect("valid");
-        assert_eq!(dio40, FlashSettings { mode: FlashMode::Dio, mhz: 40 });
+        assert_eq!(
+            dio40,
+            FlashSettings {
+                mode: FlashMode::Dio,
+                mhz: 40
+            }
+        );
         extern crate std;
         assert_eq!(std::format!("{dio40}"), "DIO 40 MHz");
         let qio80 = FlashSettings::from_header([0xE9, 5, 0, 0x2F]).expect("valid");
         assert_eq!(std::format!("{qio80}"), "QIO 80 MHz");
-        assert_eq!(FlashSettings::from_header([0xE9, 1, 1, 0x01]).map(|s| (s.mode, s.mhz)), Some((FlashMode::Qout, 26)));
-        assert_eq!(FlashSettings::from_header([0xE9, 1, 3, 0x02]).map(|s| (s.mode, s.mhz)), Some((FlashMode::Dout, 20)));
+        assert_eq!(
+            FlashSettings::from_header([0xE9, 1, 1, 0x01]).map(|s| (s.mode, s.mhz)),
+            Some((FlashMode::Qout, 26))
+        );
+        assert_eq!(
+            FlashSettings::from_header([0xE9, 1, 3, 0x02]).map(|s| (s.mode, s.mhz)),
+            Some((FlashMode::Dout, 20))
+        );
         assert_eq!(FlashSettings::from_header([0xFF; 4]), None, "erased flash");
-        assert_eq!(FlashSettings::from_header([0xE9, 1, 4, 0]), None, "unknown mode");
-        assert_eq!(FlashSettings::from_header([0xE9, 1, 2, 0x05]), None, "unknown frequency");
+        assert_eq!(
+            FlashSettings::from_header([0xE9, 1, 4, 0]),
+            None,
+            "unknown mode"
+        );
+        assert_eq!(
+            FlashSettings::from_header([0xE9, 1, 2, 0x05]),
+            None,
+            "unknown frequency"
+        );
     }
 }

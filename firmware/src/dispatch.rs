@@ -185,7 +185,11 @@ impl State {
 
     /// Status when no transfer is in progress and nothing runs.
     const fn resting(installed: bool) -> PayloadStatus {
-        if installed { PayloadStatus::Stopped } else { PayloadStatus::Empty }
+        if installed {
+            PayloadStatus::Stopped
+        } else {
+            PayloadStatus::Empty
+        }
     }
 
     /// Current payload status.
@@ -200,24 +204,36 @@ impl State {
 
     /// Whether the payload may be started (an image is installed).
     pub const fn startable(&self) -> bool {
-        matches!(self.status, PayloadStatus::Stopped | PayloadStatus::Trapped | PayloadStatus::Running)
+        matches!(
+            self.status,
+            PayloadStatus::Stopped | PayloadStatus::Trapped | PayloadStatus::Running
+        )
     }
 
     /// The shell loaded and started the payload.
     pub const fn started(self) -> Self {
-        State { status: PayloadStatus::Running, ..self }
+        State {
+            status: PayloadStatus::Running,
+            ..self
+        }
     }
 
     /// The payload trapped, ran out of fuel, or failed to load.
     pub const fn trapped(self) -> Self {
-        State { status: PayloadStatus::Trapped, ..self }
+        State {
+            status: PayloadStatus::Trapped,
+            ..self
+        }
     }
 
     /// The payload no longer runs: `Running` and `Trapped` become
     /// `Stopped`; other statuses are unchanged.
     pub const fn stopped(self) -> Self {
         match self.status {
-            PayloadStatus::Running | PayloadStatus::Trapped => State { status: PayloadStatus::Stopped, ..self },
+            PayloadStatus::Running | PayloadStatus::Trapped => State {
+                status: PayloadStatus::Stopped,
+                ..self
+            },
             _ => self,
         }
     }
@@ -232,7 +248,11 @@ impl State {
             PayloadStatus::Loading => Self::resting(self.installed),
             other => other,
         };
-        State { loader: Loader::Idle, status, ..self }
+        State {
+            loader: Loader::Idle,
+            status,
+            ..self
+        }
     }
 }
 
@@ -296,7 +316,10 @@ pub enum Action<'a> {
 impl Action<'_> {
     /// Whether the payload must not run after this action succeeds.
     pub const fn stops_payload(&self) -> bool {
-        matches!(self, Action::Erase { stop: true, .. } | Action::Stop | Action::Activate { .. })
+        matches!(
+            self,
+            Action::Erase { stop: true, .. } | Action::Stop | Action::Activate { .. }
+        )
     }
 
     /// Whether the payload stops before the action touches flash, so it
@@ -319,11 +342,19 @@ pub struct Outcome<'a> {
 
 impl<'a> Outcome<'a> {
     const fn reply(state: State, reply: Result<usize, HandlerError>) -> Self {
-        Outcome { state, reply, action: Action::None }
+        Outcome {
+            state,
+            reply,
+            action: Action::None,
+        }
     }
 
     const fn act(state: State, action: Action<'a>) -> Self {
-        Outcome { state, reply: Ok(0), action }
+        Outcome {
+            state,
+            reply: Ok(0),
+            action,
+        }
     }
 }
 
@@ -377,9 +408,13 @@ pub fn handle_request<'a>(
             PayloadStatus::Stopped | PayloadStatus::Trapped => Outcome::act(state, Action::Start),
         },
         Command::Stop => match state.status {
-            PayloadStatus::Running | PayloadStatus::Trapped => {
-                Outcome::act(State { status: PayloadStatus::Stopped, ..state }, Action::Stop)
-            }
+            PayloadStatus::Running | PayloadStatus::Trapped => Outcome::act(
+                State {
+                    status: PayloadStatus::Stopped,
+                    ..state
+                },
+                Action::Stop,
+            ),
             _ => Outcome::reply(state, Ok(0)),
         },
         Command::Begin { .. } | Command::Chunk { .. } | Command::Commit { .. } => {
@@ -392,9 +427,14 @@ pub fn handle_request<'a>(
         }
         #[cfg(feature = "trust")]
         Command::TrustClaim { key } => match state.trust.claim(key, ctx.rekey_window) {
-            Ok(trust) => {
-                Outcome::act(State { trust, control: ControlCounter(0), ..state }, Action::Claim { trust })
-            }
+            Ok(trust) => Outcome::act(
+                State {
+                    trust,
+                    control: ControlCounter(0),
+                    ..state
+                },
+                Action::Claim { trust },
+            ),
             Err(e) => Outcome::reply(state, Err(e)),
         },
         #[cfg(not(feature = "trust"))]
@@ -435,15 +475,24 @@ fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32, staging: bool) -
             PayloadStatus::Loading => State::resting(state.installed),
             other => other,
         };
-        State { loader, status, ..state }
+        State {
+            loader,
+            status,
+            ..state
+        }
     };
     match result {
         Err(e) => Outcome::reply(abandoned(state, loader), Err(e)),
-        Ok(Effect::Erase { len }) if staging => {
-            Outcome::act(State { loader, ..state }, Action::Erase { len, stop: false })
-        }
+        Ok(Effect::Erase { len }) if staging => Outcome::act(
+            State { loader, ..state },
+            Action::Erase { len, stop: false },
+        ),
         Ok(Effect::Erase { len }) => Outcome::act(
-            State { loader, status: PayloadStatus::Loading, ..state },
+            State {
+                loader,
+                status: PayloadStatus::Loading,
+                ..state
+            },
             Action::Erase { len, stop: true },
         ),
         Ok(Effect::Write { offset, data }) => {
@@ -451,10 +500,25 @@ fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32, staging: bool) -
         }
         Ok(Effect::Activate { image, auth }) => match authorize(&state, &image, auth.as_ref()) {
             Ok((_trust, persist)) => {
-                let next = State { loader, status: PayloadStatus::Stopped, installed: true, ..state };
+                let next = State {
+                    loader,
+                    status: PayloadStatus::Stopped,
+                    installed: true,
+                    ..state
+                };
                 #[cfg(feature = "trust")]
-                let next = State { trust: _trust, ..next };
-                Outcome::act(next, Action::Activate { len: image.len, crc: image.crc, trust: persist })
+                let next = State {
+                    trust: _trust,
+                    ..next
+                };
+                Outcome::act(
+                    next,
+                    Action::Activate {
+                        len: image.len,
+                        crc: image.crc,
+                        trust: persist,
+                    },
+                )
             }
             Err(e) => Outcome::reply(abandoned(state, loader), Err(e)),
         },
@@ -532,7 +596,11 @@ mod tests {
         // The node id follows the 0.4 fields, then the capability bits.
         assert_eq!(&out[n - 12..n - 4], &NODE.0);
         assert_eq!(&out[n - 4..n], &[1, 0, 0, 0]);
-        let without = Context { node: None, caps: Caps::NONE, ..CTX };
+        let without = Context {
+            node: None,
+            caps: Caps::NONE,
+            ..CTX
+        };
         let m = handle_request(
             State::boot(false),
             &without,
@@ -575,8 +643,18 @@ mod tests {
         assert_eq!(info.node, Some(NODE));
         assert_eq!(info.caps, Caps::SERVE);
         // A shell that does not route requests reports no capability.
-        let plain = Context { caps: Caps::NONE, ..CTX };
-        let n = handle_request(State::boot(true), &plain, &Request::new(keys::INFO, &[]), &mut out).reply.unwrap();
+        let plain = Context {
+            caps: Caps::NONE,
+            ..CTX
+        };
+        let n = handle_request(
+            State::boot(true),
+            &plain,
+            &Request::new(keys::INFO, &[]),
+            &mut out,
+        )
+        .reply
+        .unwrap();
         assert_eq!(DeviceInfo::decode(&out[..n]).unwrap().caps, Caps::NONE);
         let mut tiny = [0u8; 4];
         let o = handle_request(
@@ -593,20 +671,29 @@ mod tests {
         use middleware::loader::BoardInfo;
         let mut out = [0u8; 128];
         let s = State::boot(true);
-        let ctx = Context { profile: Some(&crate::chip::ESP32S3), ..CTX };
+        let ctx = Context {
+            profile: Some(&crate::chip::ESP32S3),
+            ..CTX
+        };
         let o = handle_request(s, &ctx, &Request::new(keys::BOARD, &[]), &mut out);
         assert_eq!((o.state, o.action), (s, Action::None));
         let board = BoardInfo::decode(&out[..o.reply.unwrap()]).unwrap();
         assert_eq!(board, crate::chip::ESP32S3.board_info(ABI_VERSION));
         assert_eq!(board.pwm_pins, [11, 12, 13, 14, 15, 16, 17, 18]);
-        assert_eq!(req(s, keys::BOARD, b"x").reply, Err(HandlerError::InvalidRequest));
+        assert_eq!(
+            req(s, keys::BOARD, b"x").reply,
+            Err(HandlerError::InvalidRequest)
+        );
         let mut tiny = [0u8; 16];
         assert_eq!(
             handle_request(s, &CTX, &Request::new(keys::BOARD, &[]), &mut tiny).reply,
             Err(HandlerError::BufferTooSmall)
         );
         // Without a profile (rp-base) the key is absent, as before 0.6.
-        let none = Context { profile: None, ..CTX };
+        let none = Context {
+            profile: None,
+            ..CTX
+        };
         assert_eq!(
             handle_request(s, &none, &Request::new(keys::BOARD, &[]), &mut out).reply,
             Err(HandlerError::NotFound)
@@ -620,17 +707,45 @@ mod tests {
         let s = State::boot(false);
         let b = begin(40, crc);
         let o = req(s, keys::BEGIN, &b);
-        assert_eq!((o.action, o.reply), (Action::Erase { len: 40, stop: true }, Ok(0)));
+        assert_eq!(
+            (o.action, o.reply),
+            (
+                Action::Erase {
+                    len: 40,
+                    stop: true
+                },
+                Ok(0)
+            )
+        );
         assert_eq!(o.state.status(), PayloadStatus::Loading);
         assert!(o.action.stops_payload());
         let (c, n) = chunk(0, &image[..30]);
         let o = req(o.state, keys::CHUNK, &c[..n]);
-        assert_eq!(o.action, Action::Write { offset: 0, data: &image[..30] });
+        assert_eq!(
+            o.action,
+            Action::Write {
+                offset: 0,
+                data: &image[..30]
+            }
+        );
         let (c, n) = chunk(30, &image[30..]);
         let o = req(o.state, keys::CHUNK, &c[..n]);
-        assert_eq!(o.action, Action::Write { offset: 30, data: &image[30..] });
+        assert_eq!(
+            o.action,
+            Action::Write {
+                offset: 30,
+                data: &image[30..]
+            }
+        );
         let o = req(o.state, keys::COMMIT, &[]);
-        assert_eq!(o.action, Action::Activate { len: 40, crc, trust: None });
+        assert_eq!(
+            o.action,
+            Action::Activate {
+                len: 40,
+                crc,
+                trust: None
+            }
+        );
         assert_eq!(o.state.status(), PayloadStatus::Stopped);
 
         let o = req(o.state, keys::START, &[]);
@@ -666,13 +781,22 @@ mod tests {
     fn begin_while_running_stops_and_erases() {
         let b = begin(10, 0);
         let o = req(State::boot(true).started(), keys::BEGIN, &b);
-        assert_eq!(o.action, Action::Erase { len: 10, stop: true });
+        assert_eq!(
+            o.action,
+            Action::Erase {
+                len: 10,
+                stop: true
+            }
+        );
         assert_eq!(o.state.status(), PayloadStatus::Loading);
     }
 
     #[test]
     fn abandoned_transfer_keeps_installed_payload() {
-        for (installed, after) in [(true, PayloadStatus::Stopped), (false, PayloadStatus::Empty)] {
+        for (installed, after) in [
+            (true, PayloadStatus::Stopped),
+            (false, PayloadStatus::Empty),
+        ] {
             let b = begin(8, 0);
             let o = req(State::boot(installed).started(), keys::BEGIN, &b);
             let (c, n) = chunk(4, &[1]);
@@ -721,32 +845,69 @@ mod tests {
     #[test]
     fn start_requires_an_installed_image() {
         let o = req(State::boot(false), keys::START, &[]);
-        assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::InvalidRequest)));
+        assert_eq!(
+            (o.action, o.reply),
+            (Action::None, Err(HandlerError::InvalidRequest))
+        );
         let loading = req(State::boot(true), keys::BEGIN, &begin(4, 0)).state;
-        assert_eq!(req(loading, keys::START, &[]).reply, Err(HandlerError::InvalidRequest));
+        assert_eq!(
+            req(loading, keys::START, &[]).reply,
+            Err(HandlerError::InvalidRequest)
+        );
         let trapped = State::boot(true).started().trapped();
         assert_eq!(req(trapped, keys::START, &[]).action, Action::Start);
-        assert_eq!(req(trapped, keys::STOP, &[]).state.status(), PayloadStatus::Stopped);
+        assert_eq!(
+            req(trapped, keys::STOP, &[]).state.status(),
+            PayloadStatus::Stopped
+        );
     }
 
     #[test]
     fn start_without_runtime_is_refused_but_loader_works() {
-        let ctx = Context { runtime: false, ..CTX };
+        let ctx = Context {
+            runtime: false,
+            ..CTX
+        };
         let mut out = [0u8; 128];
-        let o = handle_request(State::boot(true), &ctx, &Request::new(keys::START, &[]), &mut out);
-        assert_eq!((o.action, o.reply), (Action::None, Err(HandlerError::NotFound)));
+        let o = handle_request(
+            State::boot(true),
+            &ctx,
+            &Request::new(keys::START, &[]),
+            &mut out,
+        );
+        assert_eq!(
+            (o.action, o.reply),
+            (Action::None, Err(HandlerError::NotFound))
+        );
         let b = begin(4, 0);
-        let o = handle_request(State::boot(true), &ctx, &Request::new(keys::BEGIN, &b), &mut out);
+        let o = handle_request(
+            State::boot(true),
+            &ctx,
+            &Request::new(keys::BEGIN, &b),
+            &mut out,
+        );
         assert_eq!(o.action, Action::Erase { len: 4, stop: true });
     }
 
     #[test]
     fn unknown_and_application_keys_are_not_found() {
         let s = State::boot(true);
-        assert_eq!(req(s, Key::from_static("sys/nope"), &[]).reply, Err(HandlerError::NotFound));
-        assert_eq!(req(s, Key::from_static("app/ping"), b"x").reply, Err(HandlerError::NotFound));
-        assert_eq!(req(s, keys::INFO, b"x").reply, Err(HandlerError::InvalidRequest));
-        assert_eq!(req(s, keys::CHUNK, &[]).reply, Err(HandlerError::InvalidRequest));
+        assert_eq!(
+            req(s, Key::from_static("sys/nope"), &[]).reply,
+            Err(HandlerError::NotFound)
+        );
+        assert_eq!(
+            req(s, Key::from_static("app/ping"), b"x").reply,
+            Err(HandlerError::NotFound)
+        );
+        assert_eq!(
+            req(s, keys::INFO, b"x").reply,
+            Err(HandlerError::InvalidRequest)
+        );
+        assert_eq!(
+            req(s, keys::CHUNK, &[]).reply,
+            Err(HandlerError::InvalidRequest)
+        );
     }
 
     #[test]
@@ -756,15 +917,24 @@ mod tests {
         // A running payload keeps running: storage touches only the
         // inactive slot.
         let f = s.storage_failed();
-        assert_eq!((f.status(), f.loader()), (PayloadStatus::Running, Loader::Idle));
+        assert_eq!(
+            (f.status(), f.loader()),
+            (PayloadStatus::Running, Loader::Idle)
+        );
         let f = s.stopped().storage_failed();
-        assert_eq!((f.status(), f.loader()), (PayloadStatus::Stopped, Loader::Idle));
+        assert_eq!(
+            (f.status(), f.loader()),
+            (PayloadStatus::Stopped, Loader::Idle)
+        );
         assert!(f.startable());
         assert_eq!(s.trapped().stopped().status(), PayloadStatus::Stopped);
         assert_eq!(State::boot(false).stopped().status(), PayloadStatus::Empty);
         let loading = req(State::boot(false), keys::BEGIN, &begin(4, 0)).state;
         let f = loading.storage_failed();
-        assert_eq!((f.status(), f.loader()), (PayloadStatus::Empty, Loader::Idle));
+        assert_eq!(
+            (f.status(), f.loader()),
+            (PayloadStatus::Empty, Loader::Idle)
+        );
         assert!(!f.startable());
         assert!(State::boot(true).startable());
     }
@@ -775,14 +945,29 @@ mod tests {
         let k = Key::from_static("cmd/led");
         let running = State::boot(true).started();
         assert!(route_publication(&running, k, subs.iter().copied()));
-        assert!(!route_publication(&running, Key::from_static("cmd/other"), subs.iter().copied()));
-        assert!(!route_publication(&running, Key::from_static("cmd"), subs.iter().copied()));
-        assert!(!route_publication(&State::boot(true), k, subs.iter().copied()));
+        assert!(!route_publication(
+            &running,
+            Key::from_static("cmd/other"),
+            subs.iter().copied()
+        ));
+        assert!(!route_publication(
+            &running,
+            Key::from_static("cmd"),
+            subs.iter().copied()
+        ));
+        assert!(!route_publication(
+            &State::boot(true),
+            k,
+            subs.iter().copied()
+        ));
         let sys = ["sys/log"];
         assert!(!route_publication(&running, keys::LOG, sys.iter().copied()));
     }
 
-    const STAGING: Context<'static> = Context { staging: true, ..CTX };
+    const STAGING: Context<'static> = Context {
+        staging: true,
+        ..CTX
+    };
 
     fn staged<'a>(state: State, key: Key<'a>, body: &'a [u8]) -> Outcome<'a> {
         let mut out = [0u8; 128];
@@ -797,20 +982,49 @@ mod tests {
         let bb = begin(40, crc);
 
         let o = staged(running, keys::BEGIN, &bb);
-        assert_eq!((o.action, o.reply), (Action::Erase { len: 40, stop: false }, Ok(0)));
+        assert_eq!(
+            (o.action, o.reply),
+            (
+                Action::Erase {
+                    len: 40,
+                    stop: false
+                },
+                Ok(0)
+            )
+        );
         assert!(!o.action.stops_payload() && !o.action.stops_before_storage());
-        assert_eq!(o.state.status(), PayloadStatus::Running, "begin does not stop it");
+        assert_eq!(
+            o.state.status(),
+            PayloadStatus::Running,
+            "begin does not stop it"
+        );
         assert!(matches!(o.state.loader(), Loader::Receiving { .. }));
         let (c, n) = chunk(0, &image);
         let o = staged(o.state, keys::CHUNK, &c[..n]);
-        assert_eq!(o.action, Action::Write { offset: 0, data: &image[..] });
+        assert_eq!(
+            o.action,
+            Action::Write {
+                offset: 0,
+                data: &image[..]
+            }
+        );
         assert!(!o.action.stops_payload());
         assert_eq!(o.state.status(), PayloadStatus::Running);
         // Start and stop still act on the running (active) payload.
         assert_eq!(staged(o.state, keys::START, &[]).reply, Ok(0));
         let commit = staged(o.state, keys::COMMIT, &[]);
-        assert_eq!(commit.action, Action::Activate { len: 40, crc, trust: None });
-        assert!(commit.action.stops_payload(), "the new image replaces the running one");
+        assert_eq!(
+            commit.action,
+            Action::Activate {
+                len: 40,
+                crc,
+                trust: None
+            }
+        );
+        assert!(
+            commit.action.stops_payload(),
+            "the new image replaces the running one"
+        );
         assert_eq!(commit.state.status(), PayloadStatus::Stopped);
         assert_eq!(commit.state.loader(), Loader::Idle);
     }
@@ -825,7 +1039,10 @@ mod tests {
         let (c, n) = chunk(4, &[1]);
         let o = staged(o.state, keys::CHUNK, &c[..n]);
         assert_eq!(o.reply, Err(HandlerError::InvalidRequest));
-        assert_eq!((o.state.status(), o.state.loader()), (PayloadStatus::Running, Loader::Idle));
+        assert_eq!(
+            (o.state.status(), o.state.loader()),
+            (PayloadStatus::Running, Loader::Idle)
+        );
         // A spoofed chunk spoils the image: the commit fails its CRC and
         // the payload runs on.
         let bb = begin(4, Crc32::checksum(&[1, 2, 3, 4]));
@@ -833,10 +1050,17 @@ mod tests {
         let (c, n) = chunk(0, &[9, 9, 9, 9]);
         let o = staged(o.state, keys::CHUNK, &c[..n]);
         let o = staged(o.state, keys::COMMIT, &[]);
-        assert_eq!((o.reply, o.action), (Err(HandlerError::InvalidRequest), Action::None));
+        assert_eq!(
+            (o.reply, o.action),
+            (Err(HandlerError::InvalidRequest), Action::None)
+        );
         assert_eq!(o.state.status(), PayloadStatus::Running);
         // A stopped or empty device keeps its status while staging too.
-        for s in [State::boot(true), State::boot(false), State::boot(true).started().trapped()] {
+        for s in [
+            State::boot(true),
+            State::boot(false),
+            State::boot(true).started().trapped(),
+        ] {
             let bb = begin(8, 0);
 
             let o = staged(s, keys::BEGIN, &bb);
@@ -846,7 +1070,10 @@ mod tests {
         let bb = begin(8, 0);
 
         let o = req(running, keys::BEGIN, &bb);
-        assert_eq!((o.action, o.state.status()), (Action::Erase { len: 8, stop: true }, PayloadStatus::Loading));
+        assert_eq!(
+            (o.action, o.state.status()),
+            (Action::Erase { len: 8, stop: true }, PayloadStatus::Loading)
+        );
     }
 
     #[test]
@@ -856,23 +1083,52 @@ mod tests {
 
         let serial = req(running, keys::BEGIN, &bb);
         let (s, stop) = after_storage_failure(running, &serial.action);
-        assert_eq!((s.status(), s.loader(), stop), (PayloadStatus::Stopped, Loader::Idle, true));
+        assert_eq!(
+            (s.status(), s.loader(), stop),
+            (PayloadStatus::Stopped, Loader::Idle, true)
+        );
         let bb = begin(8, 0);
 
         let air = staged(running, keys::BEGIN, &bb);
         let (s, stop) = after_storage_failure(running, &air.action);
-        assert_eq!((s.status(), s.loader(), stop), (PayloadStatus::Running, Loader::Idle, false));
+        assert_eq!(
+            (s.status(), s.loader(), stop),
+            (PayloadStatus::Running, Loader::Idle, false)
+        );
         // A failed write or activate (header never written) keeps it too.
         let receiving = air.state;
-        for action in [Action::Write { offset: 0, data: &[1] }, Action::Activate { len: 8, crc: 0, trust: None }] {
+        for action in [
+            Action::Write {
+                offset: 0,
+                data: &[1],
+            },
+            Action::Activate {
+                len: 8,
+                crc: 0,
+                trust: None,
+            },
+        ] {
             let (s, stop) = after_storage_failure(receiving, &action);
-            assert_eq!((s.status(), s.loader(), stop), (PayloadStatus::Running, Loader::Idle, false), "{action:?}");
+            assert_eq!(
+                (s.status(), s.loader(), stop),
+                (PayloadStatus::Running, Loader::Idle, false),
+                "{action:?}"
+            );
         }
         // A serial transfer's Loading returns to resting.
-        let (s, _) = after_storage_failure(serial.state, &Action::Write { offset: 0, data: &[1] });
+        let (s, _) = after_storage_failure(
+            serial.state,
+            &Action::Write {
+                offset: 0,
+                data: &[1],
+            },
+        );
         assert_eq!(s.status(), PayloadStatus::Stopped);
         let empty = req(State::boot(false), keys::BEGIN, &begin(8, 0)).state;
-        assert_eq!(after_storage_failure(empty, &Action::None).0.status(), PayloadStatus::Empty);
+        assert_eq!(
+            after_storage_failure(empty, &Action::None).0.status(),
+            PayloadStatus::Empty
+        );
     }
 
     #[cfg(feature = "trust")]
@@ -890,24 +1146,48 @@ mod tests {
         }
 
         fn key(seed: u8) -> PublicKey {
-            PublicKey(signer(seed).verifying_key().to_bytes())
+            PublicKey::Ed25519(signer(seed).verifying_key().to_bytes())
         }
 
         fn commit_body(seed: u8, image: &[u8], version: u32) -> [u8; SIGNED_COMMIT_LEN] {
-            let m = signed_message(image.len() as u32, Version(version), &ImageHash::digest(image));
+            let m = signed_message(
+                image.len() as u32,
+                Version(version),
+                &ImageHash::digest(image),
+            );
             let signature = Signature(signer(seed).sign(&m).to_bytes());
-            SignedCommit { version: Version(version), signature }.encode()
+            SignedCommit {
+                version: Version(version),
+                signature,
+            }
+            .encode()
         }
 
         fn claimed(seed: u8, min: u32) -> State {
-            State::boot(true).with_trust(TrustState::Claimed { key: key(seed), min_version: Version(min) })
+            State::boot(true).with_trust(TrustState::Claimed {
+                key: key(seed),
+                min_version: Version(min),
+            })
         }
 
-        fn at(state: State, ctx: &Context<'_>, k: Key<'_>, body: &[u8]) -> (Outcome<'static>, [u8; 64]) {
+        fn at(
+            state: State,
+            ctx: &Context<'_>,
+            k: Key<'_>,
+            body: &[u8],
+        ) -> (Outcome<'static>, [u8; 64]) {
             let mut out = [0u8; 64];
             // Bodies here never reach the outcome's action data.
             let o = handle_request(state, ctx, &Request::new(k, body), &mut out);
-            (Outcome { state: o.state, reply: o.reply, action: Action::None }.with(o.action), out)
+            (
+                Outcome {
+                    state: o.state,
+                    reply: o.reply,
+                    action: Action::None,
+                }
+                .with(o.action),
+                out,
+            )
         }
 
         impl Outcome<'_> {
@@ -922,7 +1202,11 @@ mod tests {
                     Action::Start => Action::Start,
                     Action::Stop => Action::Stop,
                 };
-                Outcome { state: self.state, reply: self.reply, action }
+                Outcome {
+                    state: self.state,
+                    reply: self.reply,
+                    action,
+                }
             }
         }
 
@@ -946,7 +1230,14 @@ mod tests {
             let img = image(120, 1);
             let s = transfer_into(State::boot(false), &img[..120]);
             let o = req(s, keys::COMMIT, &[]);
-            assert!(matches!(o.action, Action::Activate { len: 120, trust: None, .. }));
+            assert!(matches!(
+                o.action,
+                Action::Activate {
+                    len: 120,
+                    trust: None,
+                    ..
+                }
+            ));
             assert_eq!(o.state.trust(), TrustState::Unclaimed);
             // A signature on an unclaimed device is ignored, even a bad one.
             let s = transfer_into(o.state, &img[..120]);
@@ -957,39 +1248,66 @@ mod tests {
         #[test]
         fn claim_on_unclaimed_pins_key_and_info_reports_it() {
             let k = key(1);
-            let (o, _) = at(State::boot(false), &CTX, keys::TRUST_CLAIM, &k.0);
-            let pinned = TrustState::Claimed { key: k, min_version: Version(0) };
-            assert_eq!((o.reply, o.action), (Ok(0), Action::Claim { trust: pinned }));
+            let (o, _) = at(State::boot(false), &CTX, keys::TRUST_CLAIM, k.as_bytes());
+            let pinned = TrustState::Claimed {
+                key: k,
+                min_version: Version(0),
+            };
+            assert_eq!(
+                (o.reply, o.action),
+                (Ok(0), Action::Claim { trust: pinned })
+            );
             assert_eq!(o.state.trust(), pinned);
             let (i, out) = at(o.state, &CTX, keys::TRUST_INFO, &[]);
             let info = TrustInfo::decode(&out[..i.reply.unwrap()]).unwrap();
             assert_eq!((info.state, info.code()), (pinned, TrustCode::Claimed));
-            let open = Context { rekey_window: true, ..CTX };
+            let open = Context {
+                rekey_window: true,
+                ..CTX
+            };
             let (i, out) = at(o.state, &open, keys::TRUST_INFO, &[]);
-            assert_eq!(TrustInfo::decode(&out[..i.reply.unwrap()]).unwrap().code(), TrustCode::RekeyOpen);
+            assert_eq!(
+                TrustInfo::decode(&out[..i.reply.unwrap()]).unwrap().code(),
+                TrustCode::RekeyOpen
+            );
             let (i, out) = at(State::boot(false), &CTX, keys::TRUST_INFO, &[]);
             assert_eq!(&out[..i.reply.unwrap()], &[0, 0, 0, 0, 0]);
-            assert_eq!(at(o.state, &CTX, keys::TRUST_INFO, b"x").0.reply, Err(HandlerError::InvalidRequest));
+            assert_eq!(
+                at(o.state, &CTX, keys::TRUST_INFO, b"x").0.reply,
+                Err(HandlerError::InvalidRequest)
+            );
         }
 
         #[test]
         fn reclaim_needs_the_rekey_window() {
             let s = claimed(1, 50);
-            let (o, _) = at(s, &CTX, keys::TRUST_CLAIM, &key(2).0);
-            assert_eq!((o.reply, o.action, o.state), (Err(HandlerError::Denied), Action::None, s));
-            let open = Context { rekey_window: true, ..CTX };
-            let (o, _) = at(s, &open, keys::TRUST_CLAIM, &key(2).0);
-            let rekeyed = TrustState::Claimed { key: key(2), min_version: Version(0) };
+            let (o, _) = at(s, &CTX, keys::TRUST_CLAIM, key(2).as_bytes());
+            assert_eq!(
+                (o.reply, o.action, o.state),
+                (Err(HandlerError::Denied), Action::None, s)
+            );
+            let open = Context {
+                rekey_window: true,
+                ..CTX
+            };
+            let (o, _) = at(s, &open, keys::TRUST_CLAIM, key(2).as_bytes());
+            let rekeyed = TrustState::Claimed {
+                key: key(2),
+                min_version: Version(0),
+            };
             assert_eq!(o.action, Action::Claim { trust: rekeyed });
             // The new key starts its control counter over; a commit keeps it.
             let counted = s.with_control(ControlCounter(77));
-            let (o, _) = at(counted, &open, keys::TRUST_CLAIM, &key(2).0);
+            let (o, _) = at(counted, &open, keys::TRUST_CLAIM, key(2).as_bytes());
             assert_eq!(o.state.control(), ControlCounter(0));
             let img = image(10, 1);
             let body = commit_body(1, &img[..10], 51);
             let o = req(transfer_into(counted, &img[..10]), keys::COMMIT, &body);
             assert_eq!((o.reply, o.state.control()), (Ok(0), ControlCounter(77)));
-            assert_eq!(at(s, &CTX, keys::TRUST_CLAIM, &[0; 31]).0.reply, Err(HandlerError::InvalidRequest));
+            assert_eq!(
+                at(s, &CTX, keys::TRUST_CLAIM, &[0; 31]).0.reply,
+                Err(HandlerError::InvalidRequest)
+            );
         }
 
         #[test]
@@ -998,9 +1316,14 @@ mod tests {
             let s = transfer_into(claimed(1, 5), &img[..150]);
             let body = commit_body(1, &img[..150], 6);
             let o = req(s, keys::COMMIT, &body);
-            let raised = TrustState::Claimed { key: key(1), min_version: Version(6) };
+            let raised = TrustState::Claimed {
+                key: key(1),
+                min_version: Version(6),
+            };
             assert_eq!(o.reply, Ok(0));
-            assert!(matches!(o.action, Action::Activate { len: 150, trust: Some(t), .. } if t == raised));
+            assert!(
+                matches!(o.action, Action::Activate { len: 150, trust: Some(t), .. } if t == raised)
+            );
             assert_eq!(o.state.trust(), raised);
             assert_eq!(o.state.status(), PayloadStatus::Stopped);
         }
@@ -1018,8 +1341,10 @@ mod tests {
                 ("other image", &commit_body(1, &image(150, 4)[..150], 6)[..]),
             ] {
                 for installed in [true, false] {
-                    let base = State::boot(installed)
-                        .with_trust(TrustState::Claimed { key: key(1), min_version: Version(5) });
+                    let base = State::boot(installed).with_trust(TrustState::Claimed {
+                        key: key(1),
+                        min_version: Version(5),
+                    });
                     let o = req(transfer_into(base, img), keys::COMMIT, body);
                     assert_eq!((o.reply, o.action), (denied, Action::None), "{what}");
                     assert_eq!(o.state.trust(), base.trust(), "{what}: trust unchanged");
@@ -1027,7 +1352,11 @@ mod tests {
                     assert_eq!(o.state.startable(), installed, "{what}");
                     assert_eq!(
                         o.state.status(),
-                        if installed { PayloadStatus::Stopped } else { PayloadStatus::Empty }
+                        if installed {
+                            PayloadStatus::Stopped
+                        } else {
+                            PayloadStatus::Empty
+                        }
                     );
                 }
             }

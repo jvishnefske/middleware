@@ -122,7 +122,7 @@ impl<T: Requester, C, const N: usize> Client<T, C, N> {
         &mut self,
         key: Key<'_>,
         request: &Req,
-        options: &RequestOptions,
+        options: &RequestOptions<'_>,
     ) -> Result<Resp, TypedError<T::Error, <C as Codec<Req>>::Error>>
     where
         C: Codec<Req> + Codec<Resp, Error = <C as Codec<Req>>::Error>,
@@ -424,7 +424,7 @@ mod tests {
             _key: Key<'_>,
             request: &[u8],
             response: &'b mut [u8],
-            _options: &RequestOptions,
+            _options: &RequestOptions<'_>,
         ) -> Result<&'b [u8], ()> {
             let out = response.get_mut(..request.len()).ok_or(())?;
             out.copy_from_slice(request);

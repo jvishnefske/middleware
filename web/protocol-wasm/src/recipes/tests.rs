@@ -225,9 +225,10 @@ fn a_simulated_run_completes_and_a_hold_and_a_unit_loss_show_in_the_trace() {
     .unwrap();
     assert_eq!(t.state, "Complete");
     assert_eq!(t.lines[0].text, "recipe Idle -> Running");
-    assert!(t.lines.iter().any(
-        |l| l.t == 300 && l.text == "Start -> pico-sense/ADC.Measure (#3, step \"TakeReading\")"
-    ));
+    assert!(
+        t.lines.iter().any(|l| l.t == 300
+            && l.text == "Start -> pico-sense/ADC.Measure (#3, step \"TakeReading\")")
+    );
 
     let script = vec![
         (0, ScriptEventIn::Operator(Command::Start)),

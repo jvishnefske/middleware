@@ -10,8 +10,12 @@ license = "MIT OR Apache-2.0"
 # `firmware/` (per-chip ESP32 targets), `firmware-esp8266/` (the ESP8266
 # protocol-only firmware) and `payloads/` (wasm32 guests) are separate
 # workspaces because they build for other targets and toolchains.
+#
+# The root package is a member without being listed: listing "." would
+# make every path under the root an explicit member and defeat `exclude`
+# for `pi-node`'s path dependency on `firmware/` (esp-base's pure core).
 [workspace]
-members = [".", "board-pins", "state-table", "recipe-core", "wasm-host", "tools/payload-sim", "tools/mwctl", "tools/jpeg-fixtures", "web/protocol-wasm"]
+members = ["service", "gateway", "robot", "pi-node", "board-pins", "state-table", "recipe-core", "wasm-host", "wasm-hdl-ref", "tools/payload-sim", "tools/mwctl", "tools/mw", "tools/mw-otel", "tools/jpeg-fixtures", "web/protocol-wasm"]
 exclude = ["firmware", "firmware-esp8266", "firmware-rp", "payloads"]
 
 [features]
@@ -30,11 +34,19 @@ prost = ["dep:prost"]
 # Embedded transports (no_std, no heap)
 ble = []
 serial = ["dep:embedded-io-async"]
+# SMBus multi-master message passing over I2C: an embedded-hal-async master
+# plus a target adapter trait of our own (embedded-hal 1.0 has none).
+smbus = ["dep:embedded-hal", "dep:embedded-hal-async"]
 espnow = []
+# The board's Zenoh 1.x client (`zenoh_lite`): a pure codec and session
+# state machine and an async adapter over one `embedded-io-async` TCP
+# stream. no_std, no heap; the `zenoh` crates need alloc and getrandom.
+zenoh-lite = ["dep:embedded-io-async"]
 # Signed payload updates (no_std, no heap): SHA-256 of the image while it
-# streams in, Ed25519 verification of signed commits, and the pure trust
-# state transitions. The wire types are always built; this adds the crypto.
-trust = ["dep:sha2", "dep:ed25519-dalek"]
+# streams in, Ed25519 and ECDSA P-256 verification of signed commits, and
+# the pure trust state transitions. The wire types are always built; this
+# adds the crypto.
+trust = ["dep:ed25519-dalek", "dep:p256"]
 # The in-memory RP2350 bootrom and flash model (`fw_ota::sim`) for host
 # tests of A/B firmware updates (here and in mwctl's fake device). Host only.
 fw-sim = ["std", "trust"]
@@ -45,6 +57,11 @@ cam-fixtures = []
 
 # Cloud / host transports (std, tokio)
 zenoh = ["std", "dep:zenoh", "dep:tokio"]
+# Spans and metrics of the Zenoh backend through the OpenTelemetry API
+# (`zenoh::otel`). OFF by default and never implied by another feature:
+# without it nothing of OpenTelemetry is compiled in. The application
+# installs the exporter (tools/mw-otel).
+zenoh-otel = ["zenoh", "dep:opentelemetry"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
 mdns = ["std", "dep:tokio", "tokio?/net", "dep:socket2"]
@@ -55,6 +72,10 @@ dns-sd = ["std", "dep:tokio", "tokio?/net", "dep:getrandom"]
 # only: std and tokio's timers). Integration tests enable it through the
 # self dev-dependency below.
 memory = ["std", "dep:tokio"]
+# The host UDP transport `udp::UdpTransport` (one raw serial frame per
+# datagram, port 7448): std and tokio's sockets and timers. The framing in
+# `udp` itself is always built (no_std).
+udp = ["std", "dep:tokio", "tokio?/net"]
 
 [dependencies]
 # Bounded owned strings and byte vectors (no heap) for the discovery
@@ -64,13 +85,21 @@ postcard = { version = "1.1", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
 embedded-io-async = { version = "0.7", optional = true }
+embedded-hal = { version = "1.0", default-features = false, optional = true }
+embedded-hal-async = { version = "1.0", default-features = false, optional = true }
 # `compress` exposes the SHA-256 block function: the loader keeps its own
-# Copy-able hashing state around it (see loader/sha256.rs).
-sha2 = { version = "0.10.9", default-features = false, features = ["compress"], optional = true }
+# Copy-able hashing state around it (see loader/sha256.rs). Always built
+# (no_std, no heap, pure Rust): the rpc responder cache binds entries to a
+# SHA-256 digest of each request, and the `trust` checks hash images.
+sha2 = { version = "0.10.9", default-features = false, features = ["compress"] }
 # Verification only: no signing, no precomputed tables, no std.
 ed25519-dalek = { version = "2.2", default-features = false, optional = true }
+# ECDSA P-256 / SHA-256 for keys held in hardware tokens (TPM 2.0, PIV):
+# no std, no alloc; the linker drops the signing half the firmware never calls.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
 
 zenoh = { version = "1.10", optional = true }
+opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics"], optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
 # Query ids for unicast DNS-SD (`dns-sd`), from the OS CSPRNG.
 getrandom = { version = "0.3", optional = true }
@@ -89,7 +118,23 @@ middleware = { path = ".", features = ["memory"] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 # The S88 phase command contract on these traits (`tests/recipe_wire.rs`).
 recipe-core = { path = "recipe-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+# `zenoh_lite`'s codec is checked byte for byte against Zenoh's own
+# (ZN1), pinned to the `zenoh` version in Cargo.lock. Host tests only.
+zenoh-codec = "=1.10.1"
+zenoh-protocol = "=1.10.1"
+zenoh-buffers = "=1.10.1"
+# The in-memory span and metric exporters for tests/zenoh_otel.rs (feature
+# `zenoh-otel`). Test only: the library uses the API crate alone.
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "testing"] }
+
+[[test]]
+name = "zenoh_otel"
+required-features = ["zenoh-otel"]
+
+[[example]]
+name = "zenoh_board"
+required-features = ["zenoh", "trust"]
 
 # One service kind discovered over Zenoh, mDNS and cluster DNS (stub on
 # loopback), then called with request_with and Gather over Zenoh and the
