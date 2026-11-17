@@ -285,9 +285,10 @@ fn write_enrollment(
 ) -> Result<(), Cause> {
     let out = state.join_output.take().ok_or(Cause::NoJoinOutput)?;
     let join = robot::parse_join(&out).map_err(Cause::Join)?;
+    let files = robot::files(name, &join, node_address).map_err(Cause::Join)?;
     std::fs::create_dir_all(dir).map_err(io(dir))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io(dir))?;
-    for f in robot::files(name, &join, node_address) {
+    for f in files {
         write_file(&dir.join(f.name), f.contents.as_bytes(), f.mode)?;
     }
     println!(

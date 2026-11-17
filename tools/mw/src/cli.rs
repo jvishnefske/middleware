@@ -25,6 +25,7 @@ COMMANDS:
         --tag <TAG>                image tag of localhost/mw/<bin> [default: $MW_IMAGE_TAG or latest]
     zenoh apply <svc>...       Generate one Zenoh password per service, store them only
                                in cluster Secrets, render and apply the router manifests
+                               (name every Zenoh service: the dictionary holds only these)
         --namespace <NS>           [default: apps]
     status [svc]               kubectl get the Deployments, Pods and Services mw applied
         --namespace <NS>
@@ -39,7 +40,7 @@ COMMANDS:
                                    [default: guid:x-request-id, Envoy's tag]
         --since <D>                search window for a request id [default: 1h]
     robot enroll <name>        Run the lab's `just helm::robot-join <name> <selector>` and
-                               install the join token, trust bundle and addresses
+                               install join-token, bundle.spiffe and robot.env (replaced)
         --selector <SEL>           SPIRE workload selector [default: unix:uid:1000]
         --robot-dir <DIR>          write into DIR (the robot VM's shared folder)
         --robot-host <HOST>        or copy to HOST:/var/lib/mw-robot/ over ssh

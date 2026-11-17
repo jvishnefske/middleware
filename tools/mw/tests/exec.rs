@@ -4,8 +4,13 @@
 //! Each test puts small `/bin/sh` stand-ins for nix, kubectl, cargo, just
 //! and curl first on the child's `PATH`. They record their argument vector
 //! and standard input under `$FAKE_LOG` and print canned output, so the
-//! real executor runs end to end with nothing contacted.
+//! real executor runs end to end with nothing contacted. ssh, scp and helm
+//! are shadowed by stand-ins that log and fail, so a plan that reached a
+//! remote host could not succeed, and every test checks none ran.
 
+use mw_service::zenoh_router::credentials::{
+    Credentials, DICTIONARY_KEY, DICTIONARY_SECRET, SECRET_KEY, dictionary, secret_name,
+};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -43,6 +48,12 @@ echo "$url" >> "$FAKE_LOG/curl.argv"
 case "$url" in */api/search*) cat "$FIXTURES/tempo-search.json";; *) cat "$FIXTURES/tempo-trace.json";; esac
 "##;
 
+/// ssh, scp, helm: never run by these tests (logged, then exit 99).
+const FORBIDDEN: &str = r##"#!/bin/sh
+echo "$0 $*" >> "$FAKE_LOG/forbidden"
+exit 99
+"##;
+
 struct Lab {
     root: PathBuf,
 }
@@ -60,6 +71,9 @@ impl Lab {
             ("cargo", CARGO),
             ("just", JUST),
             ("curl", CURL),
+            ("ssh", FORBIDDEN),
+            ("scp", FORBIDDEN),
+            ("helm", FORBIDDEN),
         ] {
             let p = root.join("bin").join(prog);
             std::fs::write(&p, text).unwrap();
@@ -91,7 +105,9 @@ impl Lab {
         for (k, v) in env {
             c.env(k, v);
         }
-        c.output().unwrap()
+        let out = c.output().unwrap();
+        assert_eq!(self.log("forbidden"), "", "a remote tool ran");
+        out
     }
 }
 
@@ -164,23 +180,32 @@ fn ms66_zenoh_passwords_reach_only_kubectl() {
     let stdin = lab.log("kubectl.stdin");
     let secrets = stdin.split("---\n").next().unwrap();
     let v: serde_json::Value = serde_json::from_str(secrets).unwrap();
-    let dict = v["items"][0]["stringData"]["credentials.txt"]
+    assert_eq!(v["items"][0]["metadata"]["name"], DICTIONARY_SECRET);
+    let dict = v["items"][0]["stringData"][DICTIONARY_KEY]
         .as_str()
         .unwrap();
     let lines: Vec<&str> = dict.lines().collect();
     assert_eq!(lines.len(), 2);
     let mut passwords = Vec::new();
-    for (i, svc) in ["demo-echo", "demo-caller"].iter().enumerate() {
-        let (user, pw) = lines[i].split_once(':').unwrap();
-        assert_eq!(&user, svc);
+    let mut parsed = Vec::new();
+    // The dictionary is sorted by user; the per-service Secrets follow
+    // the command line's order.
+    for (line, svc) in lines.iter().zip(["demo-caller", "demo-echo"]) {
+        let (user, pw) = line.split_once(':').unwrap();
+        assert_eq!(user, svc);
         assert_eq!(pw.len(), 48);
         assert!(pw.bytes().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(
-            v["items"][i + 1]["stringData"]["credentials"],
-            format!("{svc}\n{pw}\n")
-        );
+        let item = if svc == "demo-echo" { 1 } else { 2 };
+        assert_eq!(v["items"][item]["metadata"]["name"], secret_name(svc));
+        let file = v["items"][item]["stringData"][SECRET_KEY].as_str().unwrap();
+        assert_eq!(file, format!("{svc}:{pw}\n"));
+        // The service's runner and the router read what mw wrote.
+        let c = Credentials::parse(file).unwrap();
+        assert_eq!((c.user(), c.password().expose()), (svc, pw));
+        parsed.push(c);
         passwords.push(pw.to_owned());
     }
+    assert_eq!(dictionary(&parsed).unwrap(), dict);
     assert_ne!(passwords[0], passwords[1]);
     // Nowhere on disk except the fake kubectl's own stdin log.
     for f in files_under(&repo) {
@@ -225,9 +250,9 @@ fn ms66_robot_enrollment_lands_in_the_robot_dir() {
     );
     let bundle = std::fs::read_to_string(vm.join("bundle.spiffe")).unwrap();
     assert!(bundle.contains("\"spiffe_sequence\": 1"));
-    let env = std::fs::read_to_string(vm.join("enrollment.env")).unwrap();
+    let env = std::fs::read_to_string(vm.join("robot.env")).unwrap();
     assert!(
-        env.contains("MW_SPIRE_SERVER_ADDRESS=192.168.66.11\nMW_SPIRE_SERVER_PORT=30081\n"),
+        env.contains("MW_SPIRE_SERVER_ADDRESS=192.168.66.11\nMW_GATEWAY_ADDRESS=192.168.66.11\n"),
         "{env}"
     );
 }

@@ -1464,7 +1464,9 @@ end-to-end run on the lab cluster (MS17), each checking its items here.
   schemas (strictness is verified, not assumed) —
   `scripts/check-manifests.sh`.
 - [ ] MS16 The ops CLI `mw` (`tools/mw`) builds, loads, applies, inspects
-  and traces services from a pure, unit-tested command plan.
+  and traces services from a pure, unit-tested command plan. The plan and
+  the executor against fake programs are covered (MS60–MS66, below); this
+  stays open until the commands have run against the lab cluster (MS17).
   *Owner: phase 2F (CLI).*
 - [ ] MS17 The end-to-end run on the lab cluster asserts identity, gather,
   deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
@@ -1500,20 +1502,28 @@ end-to-end run on the lab cluster (MS17), each checking its items here.
 
 #### Ops CLI `mw` (MS60–MS69)
 
-`tools/mw` (package `mw`, std, no `middleware` dependency) is the cluster
-counterpart of `mwctl`. A command and the environment (`MW_*` variables,
+`tools/mw` (package `mw`, std; it links neither `middleware` nor
+`mw-service`, which is only a dev-dependency for the credential contract
+test) is the cluster counterpart of `mwctl`. It takes a binary's name to
+be its service's Kubernetes name (`app.kubernetes.io/name`, the
+Deployment and the Zenoh user). A command and the environment (`MW_*` variables,
 whether the cached lab kubeconfig exists, the clock) are planned purely
 into typed steps that carry their exact argument vectors; a thin executor
 runs them. Tests marked *(mw)* run under `cargo test -p mw`; none contacts
-a cluster, node or network service.
+a cluster, node or network service (the executor tests shadow ssh, scp
+and helm with stand-ins that fail).
 
 - [x] MS60 Every command (`build`, `load`, `apply`, `zenoh apply`,
   `status`, `logs`, `down`, `trace`, `robot enroll`) has its plan pinned
   by a unit test, and every name that reaches an argument vector is
   validated first (RFC 1123 labels, tags, selectors, hosts that cannot be
-  read as options) — `tools/mw/src/plan.rs`: the `ms60_*` tests, including
+  read as options). `zenoh apply` passes `--namespace` to `mw-service`'s
+  `zenoh_router_manifests` example, which takes it in every mode —
+  `tools/mw/src/plan.rs`: the `ms60_*` tests, including
   `ms60_names_are_validated_before_reaching_argv` and
-  `ms60_a_missing_kubeconfig_is_fetched_first` *(mw)*.
+  `ms60_a_missing_kubeconfig_is_fetched_first` *(mw)*;
+  `service/examples/zenoh_router_manifests.rs`:
+  `tests::ms60_namespace_is_taken_with_every_mode` *(mw-service example)*.
 - [x] MS61 `mw trace` tells a trace id from a request id, builds Tempo's
   `/api/traces/<id>` and `/api/search` (logfmt tag, percent-encoded,
   bounded window) URLs, parses Tempo's OTLP JSON shapes and prints a span
@@ -1525,18 +1535,30 @@ a cluster, node or network service.
   `ms61_other_tempo_shapes_parse`, `ms61_cycles_and_orphans_terminate`
   *(mw)*.
 - [x] MS62 `mw robot enroll` parses the lab's `robot-join` output (token,
-  ports, SPIFFE bundle) while ignoring other lines, and renders the robot's
-  `/var/lib/mw-robot/` files (`join-token` mode 0600, `bundle.spiffe`,
-  `enrollment.env`) — `tools/mw/src/robot.rs`:
+  ports, SPIFFE bundle) while ignoring other lines, and renders the robot
+  module's `/var/lib/mw-robot/` contract (MS44): `join-token` mode 0600,
+  `bundle.spiffe`, and `robot.env` with only keys `nix/robot.nix` reads
+  (`MW_ROBOT_NAME`, `MW_SPIRE_SERVER_ADDRESS`, `MW_GATEWAY_ADDRESS`,
+  `MW_GATEWAY_PORT`, `MW_ZENOH_GATEWAY_PORT`); a SPIRE port other than the
+  module's 30081 is refused, since the image cannot be told it at run
+  time — `tools/mw/src/robot.rs`:
   `ms62_parses_the_lab_output_with_extra_lines`,
   `ms62_tolerates_other_ports_bare_tokens_and_no_header`,
   `ms62_rejects_missing_token_or_bundle`,
   `ms62_files_follow_the_robot_dir_contract` *(mw)*.
-- [x] MS63 `mw zenoh apply` renders the router's `user:password`
-  dictionary Secret and one `zenoh-<svc>` Secret (`user\npassword`) per
-  service from 192-bit hex passwords — `tools/mw/src/zenoh.rs`:
+- [x] MS63 `mw zenoh apply` renders, in `mw-service`'s credential format
+  (MS10, MS31, Z19), the router's dictionary Secret `zenohd-auth` (key
+  `dictionary`, one `user:password` line per service, sorted by user) and
+  one `zenoh-<svc>` Secret (key `credentials`, the line `user:password`)
+  per service, from 192-bit hex passwords. The dictionary holds exactly
+  the services named, so every Zenoh service is named each time; robot
+  users are not provisioned — `tools/mw/src/zenoh.rs`:
   `ms63_passwords_are_hex`,
-  `ms63_secrets_hold_the_dictionary_and_per_service_credentials` *(mw)*.
+  `ms63_secrets_hold_the_sorted_dictionary_and_per_service_credentials`
+  *(mw)*; `tools/mw/tests/exec.rs`:
+  `ms66_zenoh_passwords_reach_only_kubectl` parses each Secret with
+  `zenoh_router::credentials::Credentials::parse` and rebuilds the
+  dictionary with `credentials::dictionary` *(mw)*.
 - [x] MS64 `mw --dry-run` prints every command's plan and runs nothing:
   with an empty `PATH` every command succeeds and writes no file; usage
   and planning errors exit 2 — `tools/mw/tests/dry_run.rs`:
@@ -1546,7 +1568,7 @@ a cluster, node or network service.
   vector (no shell), pipes a source's output to `kubectl apply -f -` only
   after the source succeeded, and stops at the first failing step —
   `tools/mw/tests/exec.rs` (fake nix, kubectl, cargo, just and curl on
-  `PATH`): `ms65_steps_run_as_argv_and_pipe_manifests`,
+  `PATH`, failing ssh, scp and helm): `ms65_steps_run_as_argv_and_pipe_manifests`,
   `ms65_the_first_failure_stops_the_run` *(mw)*.
 - [x] MS66 Generated Zenoh passwords reach only kubectl's standard input
   (never a file under the repository), robot enrollment files land with

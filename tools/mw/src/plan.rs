@@ -719,7 +719,7 @@ impl fmt::Display for Step {
                 write!(
                     f,
                     "<Secrets {} and zenoh-{{{}}} with fresh passwords, never written to disk> | ",
-                    zenoh::ROUTER_SECRET,
+                    zenoh::DICTIONARY_SECRET,
                     names.join(",")
                 )?;
                 line(f)
@@ -1352,7 +1352,7 @@ mod tests {
         );
         let shown = steps[2].to_string();
         assert!(
-            shown.starts_with("<Secrets zenohd-credentials and zenoh-{demo-echo}"),
+            shown.starts_with("<Secrets zenohd-auth and zenoh-{demo-echo}"),
             "{shown}"
         );
         assert_eq!(
@@ -1458,11 +1458,11 @@ mod tests {
             p,
             [
                 "just helm::robot-join r1 unix:uid:1000".to_owned(),
-                "<in process> write join-token, bundle.spiffe, enrollment.env from the robot-join output into /repo/target/mw/robot/r1".to_owned(),
+                "<in process> write join-token, bundle.spiffe, robot.env from the robot-join output into /repo/target/mw/robot/r1".to_owned(),
                 format!("ssh {SSH} root@192.168.66.20 mkdir -p -m 0700 /var/lib/mw-robot"),
                 format!("scp {SSH} /repo/target/mw/robot/r1/join-token root@192.168.66.20:/var/lib/mw-robot/join-token"),
                 format!("scp {SSH} /repo/target/mw/robot/r1/bundle.spiffe root@192.168.66.20:/var/lib/mw-robot/bundle.spiffe"),
-                format!("scp {SSH} /repo/target/mw/robot/r1/enrollment.env root@192.168.66.20:/var/lib/mw-robot/enrollment.env"),
+                format!("scp {SSH} /repo/target/mw/robot/r1/robot.env root@192.168.66.20:/var/lib/mw-robot/robot.env"),
             ]
         );
         let steps = plan(&cmd(&["robot", "enroll", "r1"]), &env()).unwrap();

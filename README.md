@@ -399,10 +399,14 @@ as a tree.
 Two commands provision identity. `mw zenoh apply <svc>…` gives each
 service its own Zenoh user with a password drawn from the operating
 system's random source; the passwords go straight to cluster Secrets (the
-router's dictionary and one per service) and are never written to disk.
+router's dictionary `zenohd-auth` and one `zenoh-<svc>` per service, in
+`mw-service`'s credentials format) and are never written to disk. The
+dictionary and the router's ACL are rendered from the services named, so
+name every Zenoh service of the namespace each time.
 `mw robot enroll <name>` asks the lab's SPIRE server for a single-use join
-token and installs it, the trust bundle and the server and gateway
-addresses where the robot VM reads them: a shared folder (`--robot-dir`),
+token and installs it, the trust bundle and a `robot.env` with the server
+and gateway addresses where the robot VM reads them (`/var/lib/mw-robot`;
+`robot.env` is replaced whole): a shared folder (`--robot-dir`),
 the VM itself over ssh (`--robot-host`), or a staging directory under
 `target/mw/robot/`.
 

@@ -17,10 +17,17 @@
 //! after the bundle header (or anywhere, without one), which must hold a
 //! `keys` array. Other lines are ignored.
 //!
-//! [`files`] renders the enrollment the robot VM reads from
-//! [`ROBOT_DIR`]: `join-token` (mode 0600), `bundle.spiffe` and
-//! `enrollment.env` (`KEY=value` lines: name, SPIFFE ids, trust domain,
-//! SPIRE server and mesh gateway address and port).
+//! [`files`] renders the enrollment in the runtime file contract of the
+//! robot module (`nix/robot.nix`, MS44/MS45), directory [`ROBOT_DIR`]:
+//! `join-token` (mode 0600), `bundle.spiffe` and `robot.env`, the
+//! `KEY=value` overrides spire-agent, mw-envoy and mw-robot read:
+//! `MW_ROBOT_NAME`, `MW_SPIRE_SERVER_ADDRESS`, `MW_GATEWAY_ADDRESS`,
+//! `MW_GATEWAY_PORT` and `MW_ZENOH_GATEWAY_PORT` (the robots' h2c and Zenoh
+//! both go through the mesh gateway port). `robot.env` is written whole,
+//! so it replaces any overrides already there. The SPIRE server port is
+//! the module's `spireServerPort` option (30081), not a runtime setting,
+//! so [`files`] refuses a `robot-join` that names another one
+//! ([`JoinError::SpirePort`]).
 
 use crate::plan::Name;
 use serde_json::Value;
@@ -29,7 +36,7 @@ use std::fmt;
 /// Where the robot VM reads its enrollment.
 pub const ROBOT_DIR: &str = "/var/lib/mw-robot";
 /// The enrollment files, in the order [`files`] returns them.
-pub const FILE_NAMES: [&str; 3] = ["join-token", "bundle.spiffe", "enrollment.env"];
+pub const FILE_NAMES: [&str; 3] = ["join-token", "bundle.spiffe", "robot.env"];
 /// The lab's trust domain.
 pub const TRUST_DOMAIN: &str = "infra.local";
 /// SPIRE server NodePort when the output does not say.
@@ -57,6 +64,9 @@ pub enum JoinError {
     NoToken,
     /// No JSON trust bundle with a `keys` array.
     NoBundle,
+    /// The SPIRE server is on a port the robot image cannot be told at
+    /// run time (module docs).
+    SpirePort(u16),
 }
 
 impl fmt::Display for JoinError {
@@ -66,6 +76,11 @@ impl fmt::Display for JoinError {
             JoinError::NoBundle => {
                 f.write_str("robot-join printed no SPIFFE trust bundle (JSON with \"keys\")")
             }
+            JoinError::SpirePort(p) => write!(
+                f,
+                "the SPIRE server is on port {p}; the robot image connects to \
+                 {DEFAULT_SPIRE_PORT} (services.mw-robot.spireServerPort)"
+            ),
         }
     }
 }
@@ -166,10 +181,12 @@ pub struct File {
 
 /// The enrollment files for robot `name`, whose SPIRE server and mesh
 /// gateway are at `node_address` (module docs).
-pub fn files(name: &Name, join: &Join, node_address: &str) -> [File; 3] {
+pub fn files(name: &Name, join: &Join, node_address: &str) -> Result<[File; 3], JoinError> {
+    if join.spire_port != DEFAULT_SPIRE_PORT {
+        return Err(JoinError::SpirePort(join.spire_port));
+    }
     let [token, bundle, env] = FILE_NAMES;
-    let id = format!("spiffe://{TRUST_DOMAIN}/robot/{name}");
-    [
+    Ok([
         File {
             name: token,
             contents: format!("{}\n", join.token),
@@ -184,18 +201,15 @@ pub fn files(name: &Name, join: &Join, node_address: &str) -> [File; 3] {
             name: env,
             contents: format!(
                 "MW_ROBOT_NAME={name}\n\
-                 MW_ROBOT_SPIFFE_ID={id}\n\
-                 MW_ROBOT_AGENT_ID={id}/agent\n\
-                 MW_TRUST_DOMAIN={TRUST_DOMAIN}\n\
                  MW_SPIRE_SERVER_ADDRESS={node_address}\n\
-                 MW_SPIRE_SERVER_PORT={}\n\
                  MW_GATEWAY_ADDRESS={node_address}\n\
-                 MW_GATEWAY_PORT={}\n",
-                join.spire_port, join.mesh_port
+                 MW_GATEWAY_PORT={port}\n\
+                 MW_ZENOH_GATEWAY_PORT={port}\n",
+                port = join.mesh_port
             ),
             mode: 0o644,
         },
-    ]
+    ])
 }
 
 #[cfg(test)]
@@ -256,7 +270,7 @@ mod tests {
             bundle: "{\"keys\":[]}".into(),
         };
         let name = Name::parse("robot", "r1").unwrap();
-        let [t, b, e] = files(&name, &j, "192.168.66.11");
+        let [t, b, e] = files(&name, &j, "192.168.66.11").unwrap();
         assert_eq!(
             (t.name, t.contents.as_str(), t.mode),
             ("join-token", "tok\n", 0o600)
@@ -266,8 +280,26 @@ mod tests {
             ("bundle.spiffe", "{\"keys\":[]}\n")
         );
         assert_eq!(
-            e.contents,
-            "MW_ROBOT_NAME=r1\nMW_ROBOT_SPIFFE_ID=spiffe://infra.local/robot/r1\nMW_ROBOT_AGENT_ID=spiffe://infra.local/robot/r1/agent\nMW_TRUST_DOMAIN=infra.local\nMW_SPIRE_SERVER_ADDRESS=192.168.66.11\nMW_SPIRE_SERVER_PORT=30081\nMW_GATEWAY_ADDRESS=192.168.66.11\nMW_GATEWAY_PORT=30443\n"
+            (e.name, e.contents.as_str()),
+            (
+                "robot.env",
+                "MW_ROBOT_NAME=r1\nMW_SPIRE_SERVER_ADDRESS=192.168.66.11\nMW_GATEWAY_ADDRESS=192.168.66.11\nMW_GATEWAY_PORT=30443\nMW_ZENOH_GATEWAY_PORT=30443\n"
+            )
+        );
+        // Every key is one nix/robot.nix reads.
+        let module = include_str!("../../../nix/robot.nix");
+        for line in e.contents.lines() {
+            let key = line.split_once('=').unwrap().0;
+            assert!(module.contains(key), "{key} is not in nix/robot.nix");
+        }
+        assert!(module.contains("envFile = \"${stateDir}/robot.env\""));
+        let other = Join {
+            spire_port: 31081,
+            ..j
+        };
+        assert_eq!(
+            files(&name, &other, "192.168.66.11"),
+            Err(JoinError::SpirePort(31081))
         );
     }
 }

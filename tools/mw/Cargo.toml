@@ -11,3 +11,9 @@ license = "MIT OR Apache-2.0"
 serde_json = "1"
 # Zenoh passwords, generated locally and sent only to the cluster.
 getrandom = "0.3"
+
+[dev-dependencies]
+# The Zenoh credential contract (`zenoh_router::credentials`): the exec
+# tests parse what `mw zenoh apply` sends with the runner's and router's
+# own code. Test only; `mw` itself does not link mw-service.
+mw-service = { path = "../../service" }

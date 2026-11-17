@@ -1,13 +1,15 @@
 //! Renders the Zenoh router deployment from service specs.
 //!
 //! ```text
-//! zenoh_router_manifests [--options ROUTER.yaml] [--out DIR] SPEC.yaml...
-//! zenoh_router_manifests [--options ROUTER.yaml] --users SPEC.yaml...
-//! zenoh_router_manifests [--options ROUTER.yaml] --credentials DIR SPEC.yaml...
+//! zenoh_router_manifests [--options ROUTER.yaml] [--namespace NS] [--out DIR] SPEC.yaml...
+//! zenoh_router_manifests [--options ROUTER.yaml] [--namespace NS] --users SPEC.yaml...
+//! zenoh_router_manifests [--options ROUTER.yaml] [--namespace NS] --credentials DIR SPEC.yaml...
 //! ```
 //!
 //! * Each `SPEC.yaml` is a service's `--print-spec` output; `ROUTER.yaml`
-//!   is a `RouterOptions` (every field optional, lab defaults).
+//!   is a `RouterOptions` (every field optional, lab defaults);
+//!   `--namespace NS` overrides its `namespace` (the ops CLI `mw zenoh
+//!   apply` passes it, MS60).
 //! * Default: the router's manifests (config included, no secrets) on
 //!   stdout, ready for `kubectl apply -f -`; with `--out DIR`, written to
 //!   `DIR/config.json5` and `DIR/zenohd.yaml` instead (this is how
@@ -35,18 +37,21 @@ enum Mode {
 
 struct Args {
     options: Option<PathBuf>,
+    namespace: Option<String>,
     mode: Mode,
     specs: Vec<PathBuf>,
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut options = None;
+    let mut namespace = None;
     let mut mode = Mode::Manifests { out: None };
     let mut specs = Vec::new();
     while let Some(a) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
         match a.as_str() {
             "--options" => options = Some(PathBuf::from(value("--options")?)),
+            "--namespace" => namespace = Some(value("--namespace")?),
             "--out" => {
                 mode = Mode::Manifests {
                     out: Some(PathBuf::from(value("--out")?)),
@@ -64,6 +69,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     }
     Ok(Args {
         options,
+        namespace,
         mode,
         specs,
     })
@@ -75,12 +81,15 @@ fn read(path: &PathBuf) -> Result<String, String> {
 
 fn run() -> Result<(), String> {
     let args = parse(std::env::args().skip(1))?;
-    let options: RouterOptions = match &args.options {
+    let mut options: RouterOptions = match &args.options {
         Some(p) => {
             serde_norway::from_str(&read(p)?).map_err(|e| format!("{}: {e}", p.display()))?
         }
         None => RouterOptions::default(),
     };
+    if let Some(ns) = args.namespace {
+        options.namespace = ns;
+    }
     let specs = args
         .specs
         .iter()
@@ -129,5 +138,28 @@ fn main() -> ExitCode {
             eprintln!("zenoh_router_manifests: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Result<Args, String> {
+        parse(a.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn ms60_namespace_is_taken_with_every_mode() {
+        let a = args(&["--namespace", "lab", "a.yaml", "b.yaml"]).unwrap();
+        assert_eq!(a.namespace.as_deref(), Some("lab"));
+        assert!(matches!(a.mode, Mode::Manifests { out: None }));
+        assert_eq!(a.specs, [PathBuf::from("a.yaml"), PathBuf::from("b.yaml")]);
+        let a = args(&["--users", "--namespace", "x", "s.yaml"]).unwrap();
+        assert_eq!(a.namespace.as_deref(), Some("x"));
+        assert!(matches!(a.mode, Mode::Users));
+        assert!(args(&["s.yaml"]).unwrap().namespace.is_none());
+        assert!(args(&["--namespace"]).is_err());
+        assert!(args(&["--bogus"]).is_err());
     }
 }

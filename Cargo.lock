@@ -1959,6 +1959,7 @@ name = "mw"
 version = "0.6.0"
 dependencies = [
  "getrandom 0.3.4",
+ "mw-service",
  "serde_json",
 ]
 

@@ -43,7 +43,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 bytes = "1"
 http = "1"
 
-# Examples' unit tests run under `cargo test` (design.md MS23 cites them);
+# Examples' unit tests run under `cargo test` (design.md MS23 and MS60 cite them);
 # without `test = true` cargo only builds examples.
 [[example]]
 name = "demo_echo"
@@ -51,4 +51,8 @@ test = true
 
 [[example]]
 name = "demo_caller"
+test = true
+
+[[example]]
+name = "zenoh_router_manifests"
 test = true
