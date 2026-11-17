@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11,
-# CL3, FL4, MS5, RG19, PN9):
+# CL3, FL4, MS5, RG19, PN9, SB16):
 #   * the always-built pure core, including `discovery`, `dns::wire`,
 #     `zenoh_wire` and `fw_ota`, builds for thumbv6m-none-eabi with no
 #     features, and so do the `recipe-core` and `state-table` crates (Q11),
@@ -39,7 +39,7 @@ EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-pi-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
-EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite'
+EMBEDDED_FEATURES='ble|espnow|serial|smbus|trust|cam-fixtures|zenoh-lite'
 HOST_FEATURES='std|zenoh|zenoh-otel|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -81,7 +81,7 @@ for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.r
     ungated "${decl%%:*}" "${decl#*:}" || fail "${decl#*:} in ${decl%%:*} is missing or cfg-gated"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "smbus" "smbus,postcard"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then

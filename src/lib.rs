@@ -56,7 +56,8 @@
 //!   payloads and reserved key expressions (always built, pure, `no_std`):
 //!   shared by the host backend (as `zenoh::wire`) and the board client
 //!   `zenoh_lite`, so both write the same bytes.
-//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
+//! * [`crc`] — CRC-16 for frames, CRC-32 for payload images, CRC-8 for the
+//!   SMBus Packet Error Code.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
 //!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
 //!   announcer (a [`discovery::Announce`]) need `mdns`.
@@ -67,6 +68,7 @@
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
+//! | `smbus`    | `smbus`     | `no_std`, no heap | `embedded-hal(-async)` 1.0 master, an `I2cTarget` adapter, a `Clock` |
 //! | `trust`    | `loader::sha256`, `loader::trust` checks, `fw_ota::service` | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
 //! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
@@ -121,6 +123,8 @@ pub mod ble;
 pub mod espnow;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+#[cfg(feature = "smbus")]
+pub mod smbus;
 #[cfg(feature = "zenoh")]
 pub mod zenoh;
 #[cfg(feature = "zenoh-lite")]

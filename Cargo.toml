@@ -34,6 +34,9 @@ prost = ["dep:prost"]
 # Embedded transports (no_std, no heap)
 ble = []
 serial = ["dep:embedded-io-async"]
+# SMBus multi-master message passing over I2C: an embedded-hal-async master
+# plus a target adapter trait of our own (embedded-hal 1.0 has none).
+smbus = ["dep:embedded-hal", "dep:embedded-hal-async"]
 espnow = []
 # The board's Zenoh 1.x client (`zenoh_lite`): a pure codec and session
 # state machine and an async adapter over one `embedded-io-async` TCP
@@ -82,6 +85,8 @@ postcard = { version = "1.1", default-features = false, optional = true }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 prost = { version = "0.14", default-features = false, features = ["derive"], optional = true }
 embedded-io-async = { version = "0.7", optional = true }
+embedded-hal = { version = "1.0", default-features = false, optional = true }
+embedded-hal-async = { version = "1.0", default-features = false, optional = true }
 # `compress` exposes the SHA-256 block function: the loader keeps its own
 # Copy-able hashing state around it (see loader/sha256.rs).
 sha2 = { version = "0.10.9", default-features = false, features = ["compress"], optional = true }
