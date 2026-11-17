@@ -97,7 +97,14 @@ pub trait FwUpdate<F> {
 pub struct Unsupported;
 
 impl<F> FwUpdate<F> for Unsupported {
-    fn handle(&mut self, _: Option<&mut F>, _: &FwContext, _: Key<'_>, _: &[u8], _: &mut [u8]) -> Result<usize, HandlerError> {
+    fn handle(
+        &mut self,
+        _: Option<&mut F>,
+        _: &FwContext,
+        _: Key<'_>,
+        _: &[u8],
+        _: &mut [u8],
+    ) -> Result<usize, HandlerError> {
         Err(HandlerError::Unavailable)
     }
 }
@@ -107,7 +114,14 @@ impl<F> FwUpdate<F> for Unsupported {
 pub struct Absent;
 
 impl<F> FwUpdate<F> for Absent {
-    fn handle(&mut self, _: Option<&mut F>, _: &FwContext, _: Key<'_>, _: &[u8], _: &mut [u8]) -> Result<usize, HandlerError> {
+    fn handle(
+        &mut self,
+        _: Option<&mut F>,
+        _: &FwContext,
+        _: Key<'_>,
+        _: &[u8],
+        _: &mut [u8],
+    ) -> Result<usize, HandlerError> {
         Err(HandlerError::NotFound)
     }
 }
@@ -126,7 +140,11 @@ mod tests {
         assert!(!is_fw_key(Key::from_static("sys/fwx")));
         assert!(!is_fw_key(Key::from_static("app/sys/fw/info")));
         let mut out = [0u8; 4];
-        let ctx = FwContext { node: SenderId([0; 8]), trust: Some(TrustState::Unclaimed), self_test: SelfTest::default() };
+        let ctx = FwContext {
+            node: SenderId([0; 8]),
+            trust: Some(TrustState::Unclaimed),
+            self_test: SelfTest::default(),
+        };
         let r = FwUpdate::<()>::handle(&mut Unsupported, None, &ctx, keys::BEGIN, b"x", &mut out);
         assert_eq!(r, Err(HandlerError::Unavailable));
         let r = FwUpdate::<()>::handle(&mut Absent, None, &ctx, keys::BEGIN, b"x", &mut out);
@@ -135,13 +153,26 @@ mod tests {
 
     #[test]
     fn y12_the_self_test_needs_usb_the_store_and_the_trust_record() {
-        let all = SelfTest { usb_configured: true, store_open: true, trust_open: true };
+        let all = SelfTest {
+            usb_configured: true,
+            store_open: true,
+            trust_open: true,
+        };
         assert!(all.ok());
         assert!(!SelfTest::default().ok());
         for broken in [
-            SelfTest { usb_configured: false, ..all },
-            SelfTest { store_open: false, ..all },
-            SelfTest { trust_open: false, ..all },
+            SelfTest {
+                usb_configured: false,
+                ..all
+            },
+            SelfTest {
+                store_open: false,
+                ..all
+            },
+            SelfTest {
+                trust_open: false,
+                ..all
+            },
         ] {
             assert!(!broken.ok(), "{broken:?}");
         }

@@ -15,6 +15,7 @@
 //! | `sys/payload/stop`  | empty                           | empty              |
 //! | `sys/trust/info`    | empty                           | [`trust::TrustInfo`] |
 //! | `sys/trust/claim`   | `[public key 32]`               | empty              |
+//! | `sys/net/addr`      | `[link u8]`, or `[link u8]` + [`NetAddr`] | `[link u8]` + [`NetAddr`], or empty |
 //!
 //! [`Command::parse`] takes `sys/payload/start` and `stop` with empty
 //! bodies only. Over a radio a claimed ESP base firmware device instead
@@ -40,14 +41,15 @@
 //! shell can decide with [`trust::TrustState::accept_commit`] before it
 //! activates anything. Without `trust` the loader behaves as in 0.3: a
 //! signature in the commit body is parsed and passed on, never checked.
+//! [`sha256`] itself is always built (the rpc responder cache uses it).
 
-#[cfg(feature = "trust")]
 pub mod sha256;
 pub mod trust;
 
 use crate::crc::Crc32;
 use crate::key::Key;
 use crate::transport::{HandlerError, SenderId};
+use crate::wasm_abi::route::SourceKind;
 use trust::{PublicKey, SignedCommit};
 
 /// Largest chunk body accepted by `sys/loader/chunk`.
@@ -79,6 +81,8 @@ pub mod keys {
     pub const TRUST_INFO: Key<'static> = Key::from_static("sys/trust/info");
     /// Pins a payload signing key.
     pub const TRUST_CLAIM: Key<'static> = Key::from_static("sys/trust/claim");
+    /// Reads or sets one link's network addresses ([`super::NetAddr`]).
+    pub const NET_ADDR: Key<'static> = Key::from_static("sys/net/addr");
 }
 
 /// A parsed system request.
@@ -141,9 +145,9 @@ impl<'a> Command<'a> {
         match key.as_str() {
             k if k == keys::INFO.as_str() => empty(Command::Info),
             k if k == keys::BOARD.as_str() => empty(Command::Board),
-            k if k == keys::COMMIT.as_str() => {
-                Ok(Some(Command::Commit { auth: SignedCommit::parse_body(body)? }))
-            }
+            k if k == keys::COMMIT.as_str() => Ok(Some(Command::Commit {
+                auth: SignedCommit::parse_body(body)?,
+            })),
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
             k if k == keys::TRUST_INFO.as_str() => empty(Command::TrustInfo),
@@ -206,8 +210,9 @@ impl<'a> Command<'a> {
                 Some(body.len())
             }
             Command::TrustClaim { key } => {
-                out.get_mut(..key.0.len())?.copy_from_slice(&key.0);
-                Some(key.0.len())
+                let bytes = key.as_bytes();
+                out.get_mut(..bytes.len())?.copy_from_slice(bytes);
+                Some(bytes.len())
             }
             Command::Info
             | Command::Board
@@ -448,6 +453,38 @@ impl Caps {
     /// to the payload's `on_request`, and `node_id` answers the node id this
     /// response carries.
     pub const SERVE: Caps = Caps(1);
+    /// Bit 1: the device bridges publications between its links (ABI 6
+    /// `route_bridge` installs rules; the Colorlight 5A-75B gateware).
+    pub const BRIDGE: Caps = Caps(2);
+    /// Bit 2: `route_source` offers [`SourceKind::Imu`] (sample batches
+    /// from the accelerometer). Bit 1 was this bit's first number on the
+    /// RT1050-EVKB line; it moved here when that line merged with the
+    /// Colorlight line, which had already given bit 1 to [`Caps::BRIDGE`].
+    pub const SOURCE_IMU: Caps = Caps(1 << 2);
+    /// Bit 3: `route_source` offers [`SourceKind::Microphone`] (sample
+    /// batches from the microphone).
+    pub const SOURCE_MICROPHONE: Caps = Caps(1 << 3);
+
+    /// Every named bit with its name, lowest bit first, for tools that
+    /// list what a device reports (`mwctl info`, protocol-wasm
+    /// `decodeDeviceInfo`'s `capNames`).
+    pub const NAMED: [(Caps, &'static str); 4] = [
+        (Caps::SERVE, "serve"),
+        (Caps::BRIDGE, "bridge"),
+        (Caps::SOURCE_IMU, "source_imu"),
+        (Caps::SOURCE_MICROPHONE, "source_microphone"),
+    ];
+
+    /// The bit that says `route_source` offers `kind`; `None` for the
+    /// frame sources, which have no bit (a board without them answers
+    /// `Unsupported`).
+    pub const fn source(kind: SourceKind) -> Option<Caps> {
+        match kind {
+            SourceKind::Imu => Some(Caps::SOURCE_IMU),
+            SourceKind::Microphone => Some(Caps::SOURCE_MICROPHONE),
+            SourceKind::TestPattern | SourceKind::Camera => None,
+        }
+    }
 
     /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Caps) -> bool {
@@ -561,6 +598,82 @@ impl<'a> DeviceInfo<'a> {
     }
 }
 
+/// One link's network addresses on a multi-link board (the Colorlight
+/// 5A-75B's two Ethernet ports), for `sys/net/addr`.
+///
+/// Wire form, 16 bytes: `[ip 4][mac 6][peer_ip 4][peer_port u16 LE]`, the
+/// addresses in network (dotted, transmission) order. A request body
+/// `[link]` reads link `link`; `[link]` + record sets it, and the
+/// response is empty. The response to a read is `[link]` + record. A
+/// set takes effect after its response (which still leaves from the old
+/// address) and is kept across resets. `peer_ip` 0.0.0.0 means the
+/// peer is learned (the unicast sender of the latest valid frame); any
+/// other value pins the peer that publications go to.
+///
+/// [`Command::parse`] does not take this key: only boards with
+/// configurable links answer it, others answer `NotFound`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetAddr {
+    /// The link's IPv4 address.
+    pub ip: [u8; 4],
+    /// The link's MAC address.
+    pub mac: [u8; 6],
+    /// The pinned peer's IPv4 address, or 0.0.0.0 to learn it.
+    pub peer_ip: [u8; 4],
+    /// The pinned peer's UDP port.
+    pub peer_port: u16,
+}
+
+impl NetAddr {
+    /// Encoded length of the record.
+    pub const LEN: usize = 16;
+
+    /// The record's 16 bytes.
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut out = [0u8; Self::LEN];
+        out[..4].copy_from_slice(&self.ip);
+        out[4..10].copy_from_slice(&self.mac);
+        out[10..14].copy_from_slice(&self.peer_ip);
+        out[14..].copy_from_slice(&self.peer_port.to_le_bytes());
+        out
+    }
+
+    /// Parses exactly [`NetAddr::LEN`] bytes.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let b: &[u8; Self::LEN] = bytes.try_into().ok()?;
+        let mut r = NetAddr {
+            ip: [0; 4],
+            mac: [0; 6],
+            peer_ip: [0; 4],
+            peer_port: 0,
+        };
+        r.ip.copy_from_slice(&b[..4]);
+        r.mac.copy_from_slice(&b[4..10]);
+        r.peer_ip.copy_from_slice(&b[10..14]);
+        r.peer_port = u16::from_le_bytes([b[14], b[15]]);
+        Some(r)
+    }
+
+    /// Whether the peer is pinned (not learned).
+    pub const fn pinned(&self) -> bool {
+        u32::from_be_bytes(self.peer_ip) != 0
+    }
+
+    /// The set request body `[link]` + record.
+    pub fn set_body(&self, link: u8) -> [u8; 1 + Self::LEN] {
+        let mut out = [0u8; 1 + Self::LEN];
+        out[0] = link;
+        out[1..].copy_from_slice(&self.encode());
+        out
+    }
+
+    /// Parses a read response `[link]` + record.
+    pub fn decode_reply(bytes: &[u8]) -> Option<(u8, Self)> {
+        let (&link, rest) = bytes.split_first()?;
+        Some((link, Self::decode(rest)?))
+    }
+}
+
 /// [`BoardInfo`] format version.
 pub const BOARD_INFO_VERSION: u8 = 1;
 /// Most PWM pins a [`BoardInfo`] carries.
@@ -632,10 +745,22 @@ impl<'a> BoardInfo<'a> {
         put(&self.abi_version.to_le_bytes())?;
         put(&self.max_image.to_le_bytes())?;
         put(&self.max_memory.to_le_bytes())?;
-        for mask in [self.gpio, self.reserved, self.input_only, self.strapping, self.adc] {
+        for mask in [
+            self.gpio,
+            self.reserved,
+            self.input_only,
+            self.strapping,
+            self.adc,
+        ] {
             put(&mask.to_le_bytes())?;
         }
-        put(&[self.pwm_max_bits, self.flags, self.uart_tx, self.uart_rx, self.pwm_pins.len() as u8])?;
+        put(&[
+            self.pwm_max_bits,
+            self.flags,
+            self.uart_tx,
+            self.uart_rx,
+            self.pwm_pins.len() as u8,
+        ])?;
         put(self.pwm_pins)?;
         Some(at)
     }
@@ -683,6 +808,42 @@ pub fn is_system_key(key: Key<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_addr_round_trips_and_matches_the_gateware_layout() {
+        let a = NetAddr {
+            ip: [192, 168, 2, 51],
+            mac: [0x02, 0x5A, 0x75, 0xB0, 0x00, 0x11],
+            peer_ip: [10, 0, 1, 9],
+            peer_port: 7000,
+        };
+        let wire = a.encode();
+        // gateware-5a75b/tests/tb_node_full.py `net_record`.
+        assert_eq!(
+            wire,
+            [
+                192, 168, 2, 51, 0x02, 0x5A, 0x75, 0xB0, 0x00, 0x11, 10, 0, 1, 9, 0x58, 0x1B
+            ]
+        );
+        assert_eq!(NetAddr::decode(&wire), Some(a));
+        assert_eq!(NetAddr::decode(&wire[..15]), None);
+        assert_eq!(NetAddr::decode_reply(&a.set_body(1)), Some((1, a)));
+        assert_eq!(NetAddr::decode_reply(&[]), None);
+        assert!(a.pinned());
+        assert!(
+            !NetAddr {
+                peer_ip: [0; 4],
+                ..a
+            }
+            .pinned()
+        );
+        // Not a loader command: boards without links answer NotFound.
+        assert_eq!(
+            Command::parse(keys::NET_ADDR, &[1]),
+            Err(HandlerError::NotFound)
+        );
+        assert!(is_system_key(keys::NET_ADDR));
+    }
 
     fn run_transfer(image: &[u8], chunk: usize) -> Result<Effect<'static>, HandlerError> {
         let crc = Crc32::checksum(image);
@@ -895,7 +1056,7 @@ mod tests {
             Command::Stop,
             Command::TrustInfo,
             Command::TrustClaim {
-                key: trust::PublicKey([3; 32]),
+                key: trust::PublicKey::Ed25519([3; 32]),
             },
         ] {
             let mut body = [0u8; 80];
@@ -999,8 +1160,18 @@ mod tests {
         assert_eq!(BoardInfo::decode(&buf[..n]), None);
         assert!(BOARD.encode(&mut [0u8; 63]).is_none());
         let many = [0u8; BOARD_PWM_MAX + 1];
-        assert!(BoardInfo { pwm_pins: &many, ..BOARD }.encode(&mut [0u8; 128]).is_none());
-        let max = BoardInfo { pwm_pins: &many[..BOARD_PWM_MAX], ..BOARD };
+        assert!(
+            BoardInfo {
+                pwm_pins: &many,
+                ..BOARD
+            }
+            .encode(&mut [0u8; 128])
+            .is_none()
+        );
+        let max = BoardInfo {
+            pwm_pins: &many[..BOARD_PWM_MAX],
+            ..BOARD
+        };
         assert_eq!(max.encode(&mut [0u8; 128]), Some(BOARD_INFO_MAX));
     }
 
@@ -1009,14 +1180,29 @@ mod tests {
         let mut buf = [0u8; BOARD_INFO_MAX];
         let n = BOARD.encode(&mut buf).unwrap();
         let hex = concat!(
-            "01", "0300", "00400100", "00000200",
-            "ffff3ffcffff0100", "000018fc3f180000", "0000000000000000",
-            "0900000000600000", "fe07000000000000",
-            "0e", "03", "2b", "2c", "08", "0b0c0d0e0f101112",
+            "01",
+            "0300",
+            "00400100",
+            "00000200",
+            "ffff3ffcffff0100",
+            "000018fc3f180000",
+            "0000000000000000",
+            "0900000000600000",
+            "fe07000000000000",
+            "0e",
+            "03",
+            "2b",
+            "2c",
+            "08",
+            "0b0c0d0e0f101112",
         );
         assert_eq!(hex.len(), 2 * n);
         for (i, b) in buf[..n].iter().enumerate() {
-            assert_eq!(u8::from_str_radix(&hex[2 * i..2 * i + 2], 16), Ok(*b), "byte {i}");
+            assert_eq!(
+                u8::from_str_radix(&hex[2 * i..2 * i + 2], 16),
+                Ok(*b),
+                "byte {i}"
+            );
         }
     }
 
@@ -1077,7 +1263,10 @@ mod tests {
             node: Some(node),
             caps: Caps::NONE,
         };
-        let v06 = DeviceInfo { caps: Caps::SERVE, ..v05 };
+        let v06 = DeviceInfo {
+            caps: Caps::SERVE,
+            ..v05
+        };
         let mut a = [0u8; MAX_INFO_LEN];
         let mut b = [0u8; MAX_INFO_LEN];
         let n05 = v05.encode(&mut a).unwrap();
@@ -1094,7 +1283,10 @@ mod tests {
             assert_eq!(DeviceInfo::decode(&b[..n05 + cut]), Some(v05), "cut {cut}");
         }
         // Reserved bits survive a round trip; later fields are ignored.
-        let future = DeviceInfo { caps: Caps(0x8000_0003), ..v05 };
+        let future = DeviceInfo {
+            caps: Caps(0x8000_0003),
+            ..v05
+        };
         let n = future.encode(&mut b).unwrap();
         let mut longer = [7u8; MAX_INFO_LEN + 5];
         longer[..n].copy_from_slice(&b[..n]);
@@ -1103,8 +1295,50 @@ mod tests {
         assert!(back.caps.contains(Caps::SERVE));
         assert!(!Caps::NONE.contains(Caps::SERVE));
         assert_eq!(Caps::NONE.with(Caps::SERVE), Caps::SERVE);
+        let both = Caps::SERVE.with(Caps::BRIDGE);
+        assert_eq!(both, Caps(3));
+        assert!(both.contains(Caps::BRIDGE) && !Caps::SERVE.contains(Caps::BRIDGE));
         // Capabilities need the node id they follow.
         let orphan = DeviceInfo { node: None, ..v06 };
         assert_eq!(orphan.encode(&mut b), None);
+    }
+
+    #[test]
+    fn sc2_source_capability_bits() {
+        assert_eq!(Caps::SERVE.0, 1, "existing bits keep their numbers");
+        assert_eq!(
+            Caps::BRIDGE.0,
+            2,
+            "the Colorlight gateware hard-codes bit 1"
+        );
+        assert_eq!((Caps::SOURCE_IMU.0, Caps::SOURCE_MICROPHONE.0), (4, 8));
+        assert_eq!(Caps::source(SourceKind::Imu), Some(Caps::SOURCE_IMU));
+        assert_eq!(
+            Caps::source(SourceKind::Microphone),
+            Some(Caps::SOURCE_MICROPHONE)
+        );
+        assert_eq!(Caps::source(SourceKind::Camera), None);
+        assert_eq!(Caps::source(SourceKind::TestPattern), None);
+        let caps = Caps::SERVE.with(Caps::SOURCE_IMU);
+        let info = DeviceInfo {
+            abi_version: 5,
+            capacity: 1,
+            status: PayloadStatus::Empty,
+            chip: "imxrt1052",
+            firmware: "0.1.0",
+            node: Some(SenderId([1; 8])),
+            caps,
+        };
+        let mut out = [0u8; MAX_INFO_LEN];
+        let n = info.encode(&mut out).unwrap();
+        let back = DeviceInfo::decode(&out[..n]).unwrap();
+        assert!(back.caps.contains(Caps::SOURCE_IMU) && back.caps.contains(Caps::SERVE));
+        assert!(!back.caps.contains(Caps::SOURCE_MICROPHONE));
+        assert!(!back.caps.contains(Caps::BRIDGE));
+        assert_eq!(back.caps, Caps(5), "an EVKB with the IMU reports caps 5");
+        // The named bits are distinct single bits, in ascending order.
+        for (n, (bit, _)) in Caps::NAMED.iter().enumerate() {
+            assert_eq!(bit.0, 1 << n);
+        }
     }
 }

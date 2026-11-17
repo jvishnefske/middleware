@@ -681,7 +681,7 @@ impl<L: GattClient, const N: usize, const A: usize> Requester for BleClient<'_, 
         key: Key<'_>,
         request: &[u8],
         response: &'b mut [u8],
-        _options: &RequestOptions,
+        _options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], Self::Error> {
         let id = self.take_id();
         let att = att_payload::<A>(self.link.att_mtu());

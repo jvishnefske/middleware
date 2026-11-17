@@ -155,9 +155,11 @@ pub fn upload_plan_signed(
 }
 
 /// Decodes a `sys/info` body into
-/// `{abiVersion, capacity, status, statusName, chip, firmware, caps, serves}`
+/// `{abiVersion, capacity, status, statusName, chip, firmware, caps, capNames, serves}`
 /// (`caps` the capability bits, 0 from firmware before middleware 0.6;
-/// `serves` whether bit 0, requests routed to the payload, is set), plus
+/// `capNames` the names of the set bits that have one, lowest first:
+/// "serve", "bridge", "source_imu", "source_microphone"; `serves` whether
+/// bit 0, requests routed to the payload, is set), plus
 /// `node` (16 hex digits) when the device reports its node id, or
 /// `undefined` when malformed.
 #[wasm_bindgen(js_name = decodeDeviceInfo)]
@@ -179,6 +181,12 @@ pub fn decode_device_info(data: &[u8]) -> Option<Object> {
         set(&o, "node", hex);
     }
     set(&o, "caps", info.caps);
+    let names: Array = middleware::loader::Caps::NAMED
+        .iter()
+        .filter(|(bit, _)| middleware::loader::Caps(info.caps).contains(*bit))
+        .map(|(_, name)| JsValue::from_str(name))
+        .collect();
+    set(&o, "capNames", names);
     set(
         &o,
         "serves",
@@ -202,7 +210,9 @@ pub fn encode_device_info(
 ) -> Result<Vec<u8>, JsError> {
     let node = match node {
         Some(hex) => Some(
-            parse_node(&hex).map(|n| n.0).ok_or_else(|| js_err("node: 16 hex digits"))?,
+            parse_node(&hex)
+                .map(|n| n.0)
+                .ok_or_else(|| js_err("node: 16 hex digits"))?,
         ),
         None => None,
     };
@@ -220,7 +230,10 @@ pub fn encode_device_info(
 }
 
 fn pins(mask: u64) -> Array {
-    (0u32..64).filter(|n| mask >> n & 1 == 1).map(JsValue::from).collect()
+    (0u32..64)
+        .filter(|n| mask >> n & 1 == 1)
+        .map(JsValue::from)
+        .collect()
 }
 
 /// Decodes a `sys/board` body into `{abiVersion, maxImage, maxMemory, gpio,
@@ -247,7 +260,14 @@ pub fn decode_board_info(data: &[u8]) -> Option<Object> {
     set(&o, "pwmRefTick", b.flags & BOARD_PWM_REF_TICK != 0);
     set(&o, "uartTx", b.uart_tx);
     set(&o, "uartRx", b.uart_rx);
-    set(&o, "pwmPins", b.pwm_pins.iter().map(|&p| JsValue::from(p)).collect::<Array>());
+    set(
+        &o,
+        "pwmPins",
+        b.pwm_pins
+            .iter()
+            .map(|&p| JsValue::from(p))
+            .collect::<Array>(),
+    );
     Some(o)
 }
 
@@ -286,7 +306,7 @@ fn trust_info_object(info: &TrustInfo) -> Object {
         TrustState::Unclaimed => set(&o, "minVersion", 0u32),
         TrustState::Claimed { key, min_version } => {
             set(&o, "minVersion", min_version.0);
-            set(&o, "key", bytes(&key.0));
+            set(&o, "key", bytes(key.as_bytes()));
         }
     }
     o
@@ -538,7 +558,7 @@ fn whole(v: &JsValue) -> Option<i64> {
 }
 
 /// The board's pins for the pin table: `{chip, spiRouting: "matrix" |
-/// "rp-function-table", gpios: [{pin, reserved?: why, inputOnly, adc?:
+/// "rp-function-table" | "fixed" | "none", gpios: [{pin, reserved?: why, inputOnly, adc?:
 /// channel, pwm?: {timer, channel}, i2c?: {bus, line: "sda"|"scl"}, spi?:
 /// [{block, signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm:
 /// [{timer, channel, pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
@@ -554,6 +574,14 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
     let routing = match map.spi_routing() {
         SpiRouting::Matrix => "matrix",
         SpiRouting::RpFunctionTable => "rp-function-table",
+        SpiRouting::None => "none",
+        SpiRouting::Fixed(_) => "fixed",
+    };
+    // On a fixed-pin board (the RT1050-EVKB's LPSPI1) the SCK, MOSI and
+    // MISO pins are block 0's.
+    let fixed = match map.spi_routing() {
+        SpiRouting::Fixed(f) => Some(f),
+        _ => None,
     };
     set(&o, "spiRouting", routing);
     let wired: Vec<(u8, u8, u8)> = (0..2u8)
@@ -582,6 +610,18 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
                 set(&i, "bus", bus);
                 set(&i, "line", if sda == p { "sda" } else { "scl" });
                 set(&g, "i2c", i);
+            }
+            if let Some(f) = fixed {
+                let name = [(f.sck, "sck"), (f.mosi, "mosi"), (f.miso, "miso")]
+                    .into_iter()
+                    .find(|(q, _)| *q == p)
+                    .map(|(_, n)| n);
+                if let Some(name) = name {
+                    let s = Object::new();
+                    set(&s, "block", 0);
+                    set(&s, "signal", name);
+                    set(&g, "spi", s);
+                }
             }
             if routing == "rp-function-table"
                 && let Some((block, signal)) = spi_function(p)
@@ -1787,6 +1827,23 @@ mod sim {
                 set(&o, "kind", "serve");
                 set(&o, "key", key.as_str());
             }
+            SimEvent::LedStripOpen { handle, pin, count } => {
+                set(&o, "kind", "ledstripOpen");
+                set(&o, "handle", *handle);
+                set(&o, "pin", *pin);
+                set(&o, "count", *count as u32);
+            }
+            SimEvent::LedStrip { handle, pin, grb } => {
+                set(&o, "kind", "ledstrip");
+                set(&o, "handle", *handle);
+                set(&o, "pin", *pin);
+                set(&o, "grb", bytes(grb));
+            }
+            SimEvent::LedStripClose { handle, pin } => {
+                set(&o, "kind", "ledstripClose");
+                set(&o, "handle", *handle);
+                set(&o, "pin", *pin);
+            }
             SimEvent::Irq { event, handled } => {
                 set(&o, "kind", "irq");
                 set(&o, "irq", format!("{:?}", event.kind));
@@ -1816,7 +1873,10 @@ mod sim {
     /// "uart", data}` (UART 1 transmit), `{kind: "pwmOpen", timer,
     /// freqHz}`, `{kind: "pwmSet", timer, channel, duty}`, `{kind:
     /// "pwmStop", timer}` (ABI 3, successful calls only), `{kind: "serve",
-    /// key}` (ABI 5) and `{kind: "irq", irq, code, source, value, timeUs,
+    /// key}` (ABI 5), `{kind: "ledstripOpen", handle, pin, count}`,
+    /// `{kind: "ledstrip", handle, pin, grb}` (a frame sent to an LED
+    /// strip, G, R, B bytes per LED), `{kind: "ledstripClose", handle,
+    /// pin}` (ABI 7) and `{kind: "irq", irq, code, source, value, timeUs,
     /// handled}` (an event popped for `on_irq`) — are passed to `onEvent`
     /// after each call. The device's node id is `node` (16 hex digits) or
     /// `0000000000000001`.
@@ -1941,6 +2001,23 @@ mod sim {
                 .collect()
         }
 
+        /// Open LED strips: `[{handle, pin, count, grb}]`, `grb` holding the
+        /// G, R, B bytes each LED last received (`count * 3` bytes).
+        pub fn ledstrips(&mut self) -> Array {
+            self.sim
+                .ledstrips()
+                .iter()
+                .map(|s| {
+                    let o = Object::new();
+                    set(&o, "handle", s.handle);
+                    set(&o, "pin", s.pin);
+                    set(&o, "count", s.count as u32);
+                    set(&o, "grb", bytes(&s.grb));
+                    o
+                })
+                .collect()
+        }
+
         /// Events dropped from the full queue since load (not reset by the
         /// payload's `irq_overflow`).
         #[wasm_bindgen(getter)]
@@ -2038,8 +2115,9 @@ mod sim {
             self.sim.set_input(pin, high)
         }
 
-        /// `{mode: "unused"|"output"|"input", high?, pull?}` for a pin, or
-        /// `undefined` if out of range.
+        /// `{mode: "unused"|"output"|"input"|"ledstrip", high?, pull?,
+        /// handle?}` for a pin (`handle` for the data pin of an open LED
+        /// strip), or `undefined` if out of range.
         pub fn pin(&mut self, pin: u8) -> Option<Object> {
             let o = Object::new();
             match self.sim.pin(pin)? {
@@ -2052,6 +2130,10 @@ mod sim {
                     set(&o, "mode", "input");
                     set(&o, "pull", pull_name(pull));
                     set(&o, "high", level.unwrap_or(pull == Pull::Up));
+                }
+                PinMode::LedStrip(handle) => {
+                    set(&o, "mode", "ledstrip");
+                    set(&o, "handle", handle);
                 }
             }
             Some(o)

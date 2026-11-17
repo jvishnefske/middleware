@@ -35,8 +35,27 @@
 //!   reply buffer) and returns the reply or the `HandlerError` a device
 //!   would answer.
 //!
+//! * Sensors (SC6): `route_source` with `SourceKind::Imu` or
+//!   `SourceKind::Microphone` runs the deterministic fake IMU (a tilt
+//!   about X) or fake microphone (a tone and a chirp) of
+//!   `middleware::stream::samples::fake`, the same bytes payload-sim
+//!   publishes; each due batch is a [`SimEvent::Publish`] on the route's
+//!   key and raises `RouteFrames` (and `RouteDropped` for batches a clock
+//!   jump skipped). `route_stop` and `route_stat` work on them; the frame
+//!   sources and sink routes stay `Unsupported`.
+//! * ABI 7 (LS6): LED strips live in [`ledstrip::LedStrips`], which keeps the
+//!   colour each LED last received ([`Simulator::ledstrips`]). Opening,
+//!   writing and closing a strip are recorded as [`SimEvent::LedStripOpen`],
+//!   [`SimEvent::LedStrip`] (the frame written) and
+//!   [`SimEvent::LedStripClose`]; strips raise no interrupt events. The data
+//!   pin must exist (else [`AbiError::InvalidArgument`]); while the strip is
+//!   open, [`SimDevice::pin`] reports it as [`PinMode::LedStrip`] and every
+//!   `gpio_*` call on it is `InvalidArgument`, as on the firmware. Closing
+//!   the strip returns the pin to [`PinMode::Unused`].
+//!
 //! [`Simulator::step`] is the main loop: it completes DMA transfers started
-//! before the step (raising `DmaDone`), raises due timer alarms, runs `tick`
+//! before the step (raising `DmaDone`), raises due timer alarms, publishes
+//! due sensor batches, runs `tick`
 //! if due, then pops at most [`MAX_DISPATCH_PER_STEP`] queued events into
 //! [`Payload::dispatch`] (`on_irq`). Without an `on_irq` export, events are
 //! discarded.
@@ -47,15 +66,21 @@
 //! disarms its interrupt. After a trap the simulator refuses further calls
 //! until reloaded.
 
+pub mod ledstrip;
 pub mod periph;
 
-use middleware::wasm_abi::events::MAX_EVENTS;
+use middleware::stream::RouteStats;
+use middleware::stream::samples::MAX_BATCH;
+use middleware::stream::samples::fake::FakeRoute;
+use middleware::wasm_abi::events::{EventKind, MAX_EVENTS};
+use middleware::wasm_abi::route::MAX_ROUTES;
 use middleware::{HandlerError, Key, RequestMeta, SenderId};
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, Limits, Payload, Pull, PwmSpec, SpiConfig,
-    TimerSpec, UartConfig,
+    AbiError, Device, DmaChannel, Edge, Event, LedStripSpec, Limits, Payload, Pull, PwmSpec,
+    RouteStat, SampleSource, SpiConfig, TimerSpec, UartConfig,
 };
 
+use ledstrip::{LedStripInfo, LedStrips};
 use periph::{Adc, Peripherals, Pwm, PwmInfo, SpiResponder, SpiTransfer, TimerInfo};
 
 /// Number of virtual GPIO pins.
@@ -81,13 +106,15 @@ pub enum PinMode {
     Output(bool),
     /// Input with a pull; `Some(level)` once JS has driven it.
     Input(Pull, Option<bool>),
+    /// Data line of the open LED strip with this handle (not plain GPIO).
+    LedStrip(u8),
 }
 
 impl PinMode {
     /// The level a read would return, if the pin is configured.
     pub fn level(self) -> Option<bool> {
         match self {
-            PinMode::Unused => None,
+            PinMode::Unused | PinMode::LedStrip(_) => None,
             PinMode::Output(level) | PinMode::Input(_, Some(level)) => Some(level),
             PinMode::Input(pull, None) => Some(pull == Pull::Up),
         }
@@ -136,6 +163,32 @@ pub enum SimEvent {
     PwmStop(u8),
     /// The payload serves this key (ABI 5 `serve`).
     Serve(String),
+    /// An LED strip was opened (or reopened with a new length).
+    LedStripOpen {
+        /// Handle.
+        handle: u8,
+        /// Data pin.
+        pin: u8,
+        /// Number of LEDs.
+        count: usize,
+    },
+    /// A frame was sent to an LED strip: G, R, B bytes for its first
+    /// `grb.len() / 3` LEDs, nearest the pin first.
+    LedStrip {
+        /// Handle.
+        handle: u8,
+        /// Data pin.
+        pin: u8,
+        /// The frame, in wire order.
+        grb: Vec<u8>,
+    },
+    /// An LED strip was closed; its pin is idle again.
+    LedStripClose {
+        /// Handle.
+        handle: u8,
+        /// Data pin.
+        pin: u8,
+    },
     /// An interrupt event was popped from the queue; `handled` is whether
     /// the payload's `on_irq` ran.
     Irq {
@@ -146,6 +199,14 @@ pub enum SimEvent {
     },
 }
 
+/// A running fake sensor route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SensorRoute {
+    key: String,
+    fake: FakeRoute,
+    stats: RouteStats,
+}
+
 /// The virtual device behind the simulator.
 #[derive(Debug, Clone)]
 pub struct SimDevice {
@@ -154,8 +215,10 @@ pub struct SimDevice {
     periph: Peripherals,
     pwm: Pwm,
     adc: Adc,
+    strips: LedStrips,
     events: Vec<SimEvent>,
     node: SenderId,
+    sensors: [Option<SensorRoute>; MAX_ROUTES],
 }
 
 impl Default for SimDevice {
@@ -174,8 +237,10 @@ impl SimDevice {
             periph: Peripherals::new(),
             pwm: Pwm::default(),
             adc: Adc::default(),
+            strips: LedStrips::default(),
             events: Vec::new(),
             node: DEFAULT_NODE,
+            sensors: Default::default(),
         }
     }
 
@@ -194,9 +259,16 @@ impl SimDevice {
         core::mem::take(&mut self.events)
     }
 
-    /// The mode of `pin`, if it exists.
+    /// The mode of `pin`, if it exists: [`PinMode::LedStrip`] while an
+    /// open strip drives it.
     pub fn pin(&self, pin: u8) -> Option<PinMode> {
-        self.pins.get(usize::from(pin)).copied()
+        let mode = self.pins.get(usize::from(pin)).copied()?;
+        Some(self.strips.handle_of(pin).map_or(mode, PinMode::LedStrip))
+    }
+
+    /// The open LED strips with the colours their LEDs last received.
+    pub fn ledstrips(&self) -> Vec<LedStripInfo> {
+        self.strips.list()
     }
 
     /// The clock, in microseconds since load.
@@ -246,7 +318,63 @@ impl SimDevice {
         self.adc.set(pin, value)
     }
 
+    /// Publishes the sensor batches due at `now_us` (at most one per
+    /// route; a clock jump skips to the latest) and queues their
+    /// `RouteFrames` / `RouteDropped` events.
+    pub fn advance_sensors(&mut self, now_us: u64) {
+        let mut buf = [0u8; MAX_BATCH];
+        for (handle, slot) in self.sensors.iter_mut().enumerate() {
+            let Some(route) = slot else {
+                continue;
+            };
+            let Some(Ok(p)) = route.fake.poll(now_us, &mut buf) else {
+                continue;
+            };
+            let skipped = u32::try_from(p.skipped).unwrap_or(u32::MAX);
+            route.stats = RouteStats {
+                frames_dropped: route.stats.frames_dropped.saturating_add(skipped),
+                chunks_dropped: route.stats.chunks_dropped.saturating_add(skipped),
+                ..route.stats
+            }
+            .sent(1);
+            self.events.push(SimEvent::Publish {
+                key: route.key.clone(),
+                data: buf.get(..p.len).unwrap_or_default().to_vec(),
+            });
+            let source = handle as i32;
+            let time_us = now_us as u32;
+            self.periph.push(Event {
+                kind: EventKind::RouteFrames,
+                source,
+                value: 1,
+                time_us,
+            });
+            if skipped > 0 {
+                self.periph.push(Event {
+                    kind: EventKind::RouteDropped,
+                    source,
+                    value: i32::try_from(skipped).unwrap_or(i32::MAX),
+                    time_us,
+                });
+            }
+        }
+    }
+
+    /// When the next sensor batch is due, if a sensor route runs.
+    pub fn next_sensor_us(&self) -> Option<u64> {
+        self.sensors
+            .iter()
+            .flatten()
+            .map(|r| r.fake.next_due_us())
+            .min()
+    }
+
+    /// The GPIO mode of `pin`; `InvalidArgument` if it does not exist or
+    /// an LED strip holds it.
     fn slot(&mut self, pin: u8) -> Result<&mut PinMode, AbiError> {
+        if self.strips.handle_of(pin).is_some() {
+            return Err(AbiError::InvalidArgument);
+        }
         self.pins
             .get_mut(usize::from(pin))
             .ok_or(AbiError::InvalidArgument)
@@ -354,6 +482,34 @@ impl Device for SimDevice {
         self.periph.uart_read(port, out)
     }
 
+    /// The pin must exist; it stops being GPIO (its interrupt is disarmed).
+    /// Reopening a strip's own pin resizes it under the same handle.
+    fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {
+        let slot = self
+            .pins
+            .get_mut(usize::from(spec.pin))
+            .ok_or(AbiError::InvalidArgument)?;
+        let handle = self.strips.open(spec)?;
+        *slot = PinMode::Unused;
+        self.periph.set_edge(spec.pin, Edge::Off)?;
+        self.events.push(SimEvent::LedStripOpen {
+            handle,
+            pin: spec.pin,
+            count: spec.count.get(),
+        });
+        Ok(handle)
+    }
+
+    fn ledstrip_write(&mut self, handle: u8, grb: &[u8]) -> Result<(), AbiError> {
+        let pin = self.strips.write(handle, grb)?;
+        self.events.push(SimEvent::LedStrip {
+            handle,
+            pin,
+            grb: grb.to_vec(),
+        });
+        Ok(())
+    }
+
     fn pwm_open(&mut self, spec: PwmSpec) -> Result<(), AbiError> {
         self.pwm.open(spec)?;
         self.events.push(SimEvent::PwmOpen {
@@ -390,6 +546,51 @@ impl Device for SimDevice {
 
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Ok(self.node)
+    }
+
+    /// The fake IMU and microphone (SC6), every config the ABI allows.
+    fn route_samples(&mut self, source: SampleSource, key: Key<'_>) -> Result<u8, AbiError> {
+        let (handle, slot) = self
+            .sensors
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.is_none())
+            .ok_or(AbiError::NoResources)?;
+        *slot = Some(SensorRoute {
+            key: key.as_str().to_owned(),
+            fake: FakeRoute::new(source, self.now_us),
+            stats: RouteStats::default(),
+        });
+        u8::try_from(handle).map_err(|_| AbiError::NoResources)
+    }
+
+    fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        self.sensors
+            .get_mut(usize::from(handle))
+            .and_then(Option::take)
+            .ok_or(AbiError::Busy)?;
+        for kind in [
+            EventKind::RouteFrames,
+            EventKind::RouteDropped,
+            EventKind::RouteStopped,
+        ] {
+            self.periph.purge(kind, i32::from(handle));
+        }
+        Ok(())
+    }
+
+    fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        self.sensors
+            .get(usize::from(handle))
+            .and_then(Option::as_ref)
+            .map(|r| stat.of(&r.stats))
+            .ok_or(AbiError::Busy)
+    }
+
+    fn ledstrip_close(&mut self, handle: u8) -> Result<(), AbiError> {
+        let pin = self.strips.close(handle)?;
+        self.events.push(SimEvent::LedStripClose { handle, pin });
+        Ok(())
     }
 }
 
@@ -487,6 +688,7 @@ impl Simulator {
         dev.set_time_us(now_us);
         dev.periph().complete_dma(now_us);
         dev.periph().advance(now_us);
+        dev.advance_sensors(now_us);
         let r = self.payload.tick((now_us / 1000) as u32);
         self.trap(r)?;
         let mut popped = 0;
@@ -532,6 +734,8 @@ impl Simulator {
             sender,
             principal: None,
             deadline_ms,
+            trace: None,
+            request_id: None,
         };
         let mut reply = [0u8; REPLY_CAP];
         let r = self.payload.request(key, body, &meta, &mut reply);
@@ -610,6 +814,11 @@ impl Simulator {
     /// Events dropped from the full queue since load.
     pub fn dropped(&mut self) -> u32 {
         self.payload.device().periph().dropped()
+    }
+
+    /// The open LED strips with the colours their LEDs last received.
+    pub fn ledstrips(&mut self) -> Vec<LedStripInfo> {
+        self.payload.device().ledstrips()
     }
 
     /// Events waiting for dispatch.
@@ -783,6 +992,160 @@ mod tests {
     const UART: &str = include_str!("../../test/fixtures/uart_echo.wat");
     const OVERFLOW: &str = include_str!("../../test/fixtures/overflow.wat");
     const PWM_ADC: &str = include_str!("../../test/fixtures/pwm_adc.wat");
+    const SENSOR_STREAM: &str = include_str!("../../test/fixtures/sensor_stream.wat");
+
+    #[test]
+    fn sc6_a_payload_streams_the_fake_imu_and_microphone() {
+        use middleware::stream::samples::{self, Gap, SensorKind};
+        use wasm_host::{AudioMode, ImuConfig, MicConfig};
+        let mut sim = fixture(SENSOR_STREAM);
+        let mut events = sim.drain();
+        for ms in (10..=1000).step_by(10) {
+            sim.step(ms * 1000).unwrap();
+            events.extend(sim.drain());
+        }
+        assert_eq!(
+            publishes(&events, "app/started"),
+            [[0, 0, 0, 0, 1, 0, 0, 0]]
+        );
+        assert_eq!(
+            last_i32(&events, "app/stopped"),
+            Some(0),
+            "route_stop(0) succeeded"
+        );
+        let imu = publishes(&events, "app/imu");
+        assert_eq!(
+            imu.len(),
+            3,
+            "the sixth RouteFrames (300 ms) stopped the IMU"
+        );
+        // Byte for byte what payload-sim publishes: the shared fake.
+        let src = SampleSource::Imu(ImuConfig::new(50, 2, false, 5).unwrap());
+        let mut want = [0u8; MAX_BATCH];
+        for (n, data) in imu.iter().enumerate() {
+            let len = src
+                .fake_batch(5 * n as u64, 100_000 * n as u64, 5, &mut want)
+                .unwrap();
+            assert_eq!(data.as_slice(), &want[..len], "batch {n}");
+        }
+        let a = samples::decode(&imu[0]).unwrap().header;
+        let b = samples::decode(&imu[1]).unwrap().header;
+        assert_eq!((a.kind, samples::gap(&a, &b)), (SensorKind::Imu, Gap::None));
+        let mic = publishes(&events, "app/mic");
+        assert_eq!(mic.len(), 10);
+        let src =
+            SampleSource::Microphone(MicConfig::new(8_000, 0, AudioMode::Levels, 2, 400).unwrap());
+        let len = src.fake_batch(18, 900_000, 2, &mut want).unwrap();
+        assert_eq!(mic.last().map(Vec::as_slice), Some(&want[..len]));
+        let irqs = events
+            .iter()
+            .filter(|e| matches!(e, SimEvent::Irq { event, handled: true } if event.kind == EventKind::RouteFrames))
+            .count();
+        assert_eq!(irqs, 13, "3 IMU + 10 microphone batches");
+        assert_eq!(sim.payload.device().next_sensor_us(), Some(1_100_000));
+    }
+
+    const LEDSTRIP: &str = include_str!("../../test/fixtures/ledstrip.wat");
+
+    fn strip(pin: u8, count: i32) -> LedStripSpec {
+        LedStripSpec::parse(i32::from(pin), count).unwrap()
+    }
+
+    #[test]
+    fn ls6_device_strips_record_frames_and_hold_their_pin() {
+        let mut d = SimDevice::new();
+        d.gpio_input(5, Pull::Up).unwrap();
+        d.gpio_irq(5, Edge::Rising).unwrap();
+        assert_eq!(d.ledstrip_open(strip(5, 2)), Ok(0));
+        assert_eq!(d.periph().edge(5), Edge::Off, "interrupt disarmed");
+        assert_eq!(d.pin(5), Some(PinMode::LedStrip(0)));
+        d.ledstrip_write(0, &[1, 2, 3]).unwrap();
+        assert_eq!(d.ledstrip_write(0, &[0; 9]), Err(AbiError::InvalidArgument));
+        assert_eq!(d.ledstrip_write(1, &[0; 3]), Err(AbiError::Busy));
+        assert_eq!(d.gpio_output(5), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_input(5, Pull::Up), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_write(5, true), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_read(5), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_irq(5, Edge::Rising), Err(AbiError::InvalidArgument));
+        assert!(!d.set_input(5, true));
+        assert_eq!(d.ledstrip_open(strip(5, 3)), Ok(0), "reopen resizes");
+        assert_eq!(d.ledstrip_open(strip(6, 1)), Ok(1));
+        assert_eq!(d.ledstrip_open(strip(7, 1)), Err(AbiError::NoResources));
+        assert_eq!(
+            d.ledstrip_open(strip(PIN_COUNT as u8, 1)),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(
+            d.ledstrips(),
+            [
+                LedStripInfo {
+                    handle: 0,
+                    pin: 5,
+                    count: 3,
+                    grb: vec![1, 2, 3, 0, 0, 0, 0, 0, 0],
+                },
+                LedStripInfo {
+                    handle: 1,
+                    pin: 6,
+                    count: 1,
+                    grb: vec![0, 0, 0],
+                },
+            ]
+        );
+        d.ledstrip_close(0).unwrap();
+        assert_eq!(d.ledstrip_close(0), Err(AbiError::Busy));
+        assert_eq!(d.pin(5), Some(PinMode::Unused));
+        d.gpio_output(5).unwrap();
+        let events = d.drain();
+        assert_eq!(
+            &events[1..4],
+            [
+                SimEvent::LedStripOpen {
+                    handle: 0,
+                    pin: 5,
+                    count: 2
+                },
+                SimEvent::LedStrip {
+                    handle: 0,
+                    pin: 5,
+                    grb: vec![1, 2, 3]
+                },
+                SimEvent::LedStripOpen {
+                    handle: 0,
+                    pin: 5,
+                    count: 3
+                },
+            ]
+        );
+        assert!(events.contains(&SimEvent::LedStripClose { handle: 0, pin: 5 }));
+    }
+
+    #[test]
+    fn ls6_payload_drives_a_strip() {
+        let mut sim = fixture(LEDSTRIP);
+        let events = sim.drain();
+        assert!(events.contains(&SimEvent::LedStrip {
+            handle: 0,
+            pin: 5,
+            grb: vec![0, 0xff, 0, 0xff, 0, 0, 0, 0, 0xff],
+        }));
+        let invalid = Some(AbiError::InvalidArgument.code());
+        assert_eq!(last_i32(&events, "app/gpio"), invalid);
+        assert_eq!(last_i32(&events, "app/long"), invalid);
+        assert_eq!(sim.pin(5), Some(PinMode::LedStrip(0)));
+        assert!(sim.deliver("app/in", &[0x10, 0x20, 0x30]).unwrap());
+        assert_eq!(
+            sim.ledstrips()[0].grb,
+            [0x10, 0x20, 0x30, 0xff, 0, 0, 0, 0, 0xff]
+        );
+        assert!(sim.deliver("app/off", &[]).unwrap());
+        assert!(sim.ledstrips().is_empty());
+        assert_eq!(
+            sim.drain().last(),
+            Some(&SimEvent::LedStripClose { handle: 0, pin: 5 })
+        );
+        assert_eq!(sim.pin(5), Some(PinMode::Unused));
+    }
 
     #[test]
     fn d10_periodic_timer_ticks_are_counted_in_virtual_time() {

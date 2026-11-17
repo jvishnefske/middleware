@@ -55,7 +55,7 @@
 //!
 //! | name           | params                                   | result            |
 //! |----------------|------------------------------------------|-------------------|
-//! | `route_source` | `source, key_ptr, key_len, cfg_ptr, cfg_len` ([`route::SourceKind`], [`route::SourceConfig`], camera pins [`route::CameraPins`]) | handle ≥ 0 or error |
+//! | `route_source` | `source, key_ptr, key_len, cfg_ptr, cfg_len` ([`route::SourceKind`], [`route::SourceConfig`], camera pins [`route::CameraPins`], [`route::ImuConfig`], [`route::MicConfig`]) | handle ≥ 0 or error |
 //! | `route_sink`   | `key_ptr, key_len, bus, cfg_ptr, cfg_len` ([`route::SinkConfig`]) | handle ≥ 0 or error |
 //! | `route_stop`   | `handle`                                 | 0 or error        |
 //! | `route_stat`   | `handle, stat` ([`route::RouteStat`])     | count ≥ 0 (saturating) or error |
@@ -75,6 +75,29 @@
 //! the device's [`SenderId`](crate::SenderId) (`Unsupported` when the
 //! device has none). On an ABI 4 host a payload importing either fails to
 //! load with an unknown-import error, so it never runs half-wired.
+//!
+//! Added in ABI 6 (forwarding publications between a device's links;
+//! rules in [`bridge`]):
+//!
+//! | name           | params                                   | result            |
+//! |----------------|------------------------------------------|-------------------|
+//! | `route_bridge` | `src_link, key_ptr, key_len, dst_link` (key exact, or a prefix ending `/**`) | handle ≥ 0 or error |
+//!
+//! A bridge handle (`bridge::BRIDGE_BASE..`) works with `route_stop` and
+//! `route_stat`. A device with one link answers `Unsupported`.
+//!
+//! Added in ABI 7 (WS2812-style LED strips; arguments, frame layout and
+//! timing in [`ledstrip`]):
+//!
+//! | name             | params                                 | result            |
+//! |------------------|----------------------------------------|-------------------|
+//! | `ledstrip_open`  | `pin, count` (LEDs, `1..=ledstrip::MAX_LEDS`) | handle ≥ 0 or error |
+//! | `ledstrip_write` | `handle, ptr, len` (G, R, B bytes per LED) | 0 (sent) or error |
+//! | `ledstrip_close` | `handle`                               | 0 or error        |
+//!
+//! `ledstrip_write` is synchronous and bounded (about 30 µs per LED plus
+//! the latch gap); the host encodes the pulse train, so the payload never
+//! times a pulse. The data pin passes the same checks as `gpio_output`.
 //!
 //! A route moves frames without copying them through guest memory: a
 //! source route publishes host-captured frames on a key as chunks, a sink
@@ -141,7 +164,9 @@
 //! past it returns `-1`. Pointers and lengths in the imports are byte
 //! offsets either way.
 
+pub mod bridge;
 pub mod events;
+pub mod ledstrip;
 pub mod periph;
 pub mod route;
 pub mod serve;
@@ -152,8 +177,10 @@ pub mod serve;
 /// [`IMPORTS`], and an older payload simply imports a subset. Revision 2
 /// added interrupts, timers, SPI and UART DMA; revision 3 added PWM, ADC
 /// and I2C; revision 4 added DMA routes; revision 5 added serving requests
-/// (`serve`, `node_id`, the `on_request` export).
-pub const ABI_VERSION: u16 = 5;
+/// (`serve`, `node_id`, the `on_request` export); revision 6 added
+/// bridging between links (`route_bridge`); revision 7 added LED strips
+/// (`ledstrip_open`, `ledstrip_write`, `ledstrip_close`).
+pub const ABI_VERSION: u16 = 7;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -352,6 +379,28 @@ pub const IMPORTS: &[Import] = &[
         params: 1,
         returns: true,
     },
+    // ABI 6
+    Import {
+        name: "route_bridge",
+        params: 4,
+        returns: true,
+    },
+    // ABI 7
+    Import {
+        name: "ledstrip_open",
+        params: 2,
+        returns: true,
+    },
+    Import {
+        name: "ledstrip_write",
+        params: 3,
+        returns: true,
+    },
+    Import {
+        name: "ledstrip_close",
+        params: 1,
+        returns: true,
+    },
 ];
 
 /// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
@@ -369,6 +418,14 @@ pub const ABI3_IMPORTS: usize = 26;
 /// [`import_in`].
 pub const ABI4_IMPORTS: usize = 30;
 
+/// Number of imports in ABI 5 (the prefix of [`IMPORTS`] up to
+/// `node_id`).
+pub const ABI5_IMPORTS: usize = 32;
+
+/// Number of imports in ABI 6 (the prefix of [`IMPORTS`] up to
+/// `route_bridge`).
+pub const ABI6_IMPORTS: usize = 33;
+
 /// The number of imports a host implementing ABI `version` provides (the
 /// prefix of [`IMPORTS`]); `None` for a revision that does not exist.
 pub const fn imports_in(version: u16) -> Option<usize> {
@@ -377,7 +434,9 @@ pub const fn imports_in(version: u16) -> Option<usize> {
         2 => Some(ABI2_IMPORTS),
         3 => Some(ABI3_IMPORTS),
         4 => Some(ABI4_IMPORTS),
-        5 => Some(IMPORTS.len()),
+        5 => Some(ABI5_IMPORTS),
+        6 => Some(ABI6_IMPORTS),
+        7 => Some(IMPORTS.len()),
         _ => None,
     }
 }
@@ -541,25 +600,49 @@ mod tests {
         );
         let abi5 = [("serve", 2), ("node_id", 1)];
         assert!(
-            IMPORTS[ABI4_IMPORTS..]
+            IMPORTS[ABI4_IMPORTS..ABI5_IMPORTS]
                 .iter()
                 .map(|i| (i.name, i.params))
                 .eq(abi5)
         );
+        assert!(
+            IMPORTS[ABI5_IMPORTS..ABI6_IMPORTS]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq([("route_bridge", 4)])
+        );
+        let abi7 = [
+            ("ledstrip_open", 2),
+            ("ledstrip_write", 3),
+            ("ledstrip_close", 1),
+        ];
+        assert!(
+            IMPORTS[ABI6_IMPORTS..]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq(abi7)
+        );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI_VERSION, 5);
+        assert_eq!(ABI_VERSION, 7);
     }
 
     #[test]
     fn an_abi4_host_does_not_know_the_abi5_imports() {
         assert_eq!(imports_in(ABI_VERSION), Some(IMPORTS.len()));
         assert_eq!(imports_in(0), None);
-        assert_eq!(imports_in(6), None);
+        assert_eq!(imports_in(8), None);
         for name in ["serve", "node_id"] {
             assert_eq!(import_in(4, name), None, "{name}");
             assert_eq!(import_in(5, name), import(name));
         }
         assert_eq!(import_in(4, "route_stat"), import("route_stat"));
+        assert_eq!(import_in(5, "route_bridge"), None);
+        assert_eq!(import_in(6, "route_bridge"), import("route_bridge"));
+        assert_eq!(import_in(6, "node_id"), import("node_id"));
+        for name in ["ledstrip_open", "ledstrip_write", "ledstrip_close"] {
+            assert_eq!(import_in(6, name), None, "{name}");
+            assert_eq!(import_in(7, name), import(name));
+        }
         assert_eq!(import_in(1, "gpio_irq"), None);
         assert_eq!(import_in(9, "log"), None);
     }

@@ -1,0 +1,263 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mw-gateway
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mw-gateway
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+spec:
+  selector:
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/name: mw-gateway
+  ports:
+  - name: grpc
+    appProtocol: grpc
+    protocol: TCP
+    port: 7000
+    targetPort: grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mw-gateway-pods
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/name: mw-gateway
+  ports:
+  - name: grpc
+    appProtocol: grpc
+    protocol: TCP
+    port: 7000
+    targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mw-gateway
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: mw-gateway
+      app.kubernetes.io/name: mw-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: mw-gateway
+        app.kubernetes.io/instance: mw-gateway
+        app.kubernetes.io/managed-by: mw-service
+        app.kubernetes.io/name: mw-gateway
+        app.kubernetes.io/version: 0.6.0-rc1
+        sidecar.istio.io/inject: 'true'
+        version: 0.6.0-rc1
+      annotations:
+        kubectl.kubernetes.io/default-container: mw-gateway
+        proxy.istio.io/config: |
+          holdApplicationUntilProxyStarts: true
+          terminationDrainDuration: 33s
+          proxyMetadata:
+            EXIT_ON_ZERO_ACTIVE_CONNECTIONS: 'true'
+            MINIMUM_DRAIN_DURATION: 33s
+        sidecar.istio.io/rewriteAppHTTPProbers: 'true'
+    spec:
+      serviceAccountName: mw-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 41
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mw-gateway
+        image: registry.local:5000/mw/gateway@sha256:0123
+        imagePullPolicy: Never
+        ports:
+        - name: grpc
+          containerPort: 7000
+          protocol: TCP
+        env:
+        - name: MW_PORT
+          value: '7000'
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel.observability.svc.cluster.local:4317
+        - name: MW_SERVICE_MAP
+          value: demo/echo=demo-echo-pods.apps:grpc,cam/jpeg=cam-pods.robots:grpc
+        - name: MW_ZENOH_ROUTER
+          value: tcp/zenohd.mesh.svc.cluster.local:7447
+        - name: MW_ZENOH_CREDENTIALS
+          value: /var/run/mw/zenoh/credentials
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        startupProbe:
+          grpc:
+            port: 7000
+            service: ''
+          periodSeconds: 1
+          timeoutSeconds: 1
+          failureThreshold: 60
+        readinessProbe:
+          grpc:
+            port: 7000
+            service: ''
+          periodSeconds: 2
+          timeoutSeconds: 1
+          failureThreshold: 1
+        livenessProbe:
+          grpc:
+            port: 7000
+            service: ''
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+          readOnly: false
+        - name: zenoh-credentials
+          mountPath: /var/run/mw/zenoh
+          readOnly: true
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
+      - name: zenoh-credentials
+        secret:
+          secretName: zenoh-mw-gateway
+          defaultMode: 288
+          optional: false
+          items:
+          - key: credentials
+            path: credentials
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: mw-gateway
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: mw-gateway
+      app.kubernetes.io/name: mw-gateway
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals:
+        - infra.local/ns/ops/sa/mw
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: mw-gateway
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+spec:
+  host: mw-gateway.apps.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: mw-gateway-pods
+  namespace: apps
+  labels:
+    app: mw-gateway
+    app.kubernetes.io/instance: mw-gateway
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: mw-gateway
+    app.kubernetes.io/version: 0.6.0-rc1
+    version: 0.6.0-rc1
+spec:
+  host: mw-gateway-pods.apps.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL

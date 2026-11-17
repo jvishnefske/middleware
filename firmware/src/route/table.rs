@@ -75,12 +75,17 @@ pub struct Routes {
 impl Routes {
     /// No routes.
     pub const fn new() -> Self {
-        Routes { slots: [None; MAX_ROUTES] }
+        Routes {
+            slots: [None; MAX_ROUTES],
+        }
     }
 
     fn entries(&self) -> impl Iterator<Item = (u8, &Entry)> {
         // index < MAX_ROUTES, so it fits u8.
-        self.slots.iter().enumerate().filter_map(|(i, e)| e.as_ref().map(|e| (i as u8, e)))
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|e| (i as u8, e)))
     }
 
     /// The table with a new route; returns it and the route's handle.
@@ -96,7 +101,11 @@ impl Routes {
                 return Err(AbiError::Busy);
             }
         }
-        let index = self.slots.iter().position(Option::is_none).ok_or(AbiError::NoResources)?;
+        let index = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(AbiError::NoResources)?;
         let mut next = self;
         let slot = next.slots.get_mut(index).ok_or(AbiError::NoResources)?;
         *slot = Some(Entry { key, kind });
@@ -107,7 +116,10 @@ impl Routes {
     /// running.
     pub fn remove(self, handle: u8) -> Result<(Self, Entry), AbiError> {
         let mut next = self;
-        let slot = next.slots.get_mut(usize::from(handle)).ok_or(AbiError::Busy)?;
+        let slot = next
+            .slots
+            .get_mut(usize::from(handle))
+            .ok_or(AbiError::Busy)?;
         let entry = slot.take().ok_or(AbiError::Busy)?;
         Ok((next, entry))
     }
@@ -129,8 +141,10 @@ impl Routes {
     /// `handle` is not a sink route).
     pub fn with_sink(self, handle: u8, route: SinkRoute) -> Self {
         let mut next = self;
-        if let Some(Some(Entry { kind: Kind::Sink { route: r, .. }, .. })) =
-            next.slots.get_mut(usize::from(handle))
+        if let Some(Some(Entry {
+            kind: Kind::Sink { route: r, .. },
+            ..
+        })) = next.slots.get_mut(usize::from(handle))
         {
             *r = route;
         }
@@ -163,7 +177,10 @@ mod tests {
     }
 
     fn sink(bus: u8, dc: u8) -> Kind {
-        Kind::Sink { bus, route: SinkRoute::new(SinkConfig::new(dc, 4).expect("valid")) }
+        Kind::Sink {
+            bus,
+            route: SinkRoute::new(SinkConfig::new(dc, 4).expect("valid")),
+        }
     }
 
     #[test]
@@ -186,7 +203,9 @@ mod tests {
 
     #[test]
     fn r12_a_sink_owns_its_bus_pin_and_key() {
-        let (r, h) = Routes::new().add(k("app/cam/frame"), sink(0, 13)).expect("free");
+        let (r, h) = Routes::new()
+            .add(k("app/cam/frame"), sink(0, 13))
+            .expect("free");
         assert!(r.owns_bus(0));
         assert!(!r.owns_bus(1));
         assert!(r.owns_pin(13));
@@ -195,7 +214,11 @@ mod tests {
         assert_eq!(r.sink_for(k("app/cam")), None);
         assert_eq!(r.add(k("app/x"), sink(0, 14)), Err(AbiError::Busy), "bus");
         assert_eq!(r.add(k("app/x"), sink(1, 13)), Err(AbiError::Busy), "pin");
-        assert_eq!(r.add(k("app/cam/frame"), sink(1, 14)), Err(AbiError::Busy), "key");
+        assert_eq!(
+            r.add(k("app/cam/frame"), sink(1, 14)),
+            Err(AbiError::Busy),
+            "key"
+        );
         // A source may publish on a key a sink consumes (loopback).
         assert!(r.add(k("app/cam/frame"), Kind::Source).is_ok());
         let (r, e) = r.remove(h).expect("running");
@@ -210,10 +233,17 @@ mod tests {
         let (_, before) = r.sink_for(k("app/s")).expect("sink");
         let (after, _) = before.receive(&[0xFF]);
         let r = r.with_sink(h, after);
-        assert_eq!(r.sink_for(k("app/s")).map(|(_, s)| s.stats().chunks_dropped), Some(1));
+        assert_eq!(
+            r.sink_for(k("app/s"))
+                .map(|(_, s)| s.stats().chunks_dropped),
+            Some(1)
+        );
         assert_eq!(r.with_sink(3, before), r, "no such sink");
         let long = "app/0123456789012345678901234567890123456789012345678901234567890";
         assert!(long.len() > middleware::espnow::MAX_KEY);
-        assert_eq!(Routes::new().add(k(long), Kind::Source), Err(AbiError::Unsupported));
+        assert_eq!(
+            Routes::new().add(k(long), Kind::Source),
+            Err(AbiError::Unsupported)
+        );
     }
 }

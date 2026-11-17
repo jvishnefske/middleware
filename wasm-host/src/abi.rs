@@ -34,6 +34,9 @@
 //!   bus and the config length, then the key and config pointers, parsing
 //!   with the shared [`wasm_abi::route`] parsers; [`route_handle_code`]
 //!   checks the handle a device hands back.
+//! * ABI 7: [`ledstrip_write`] validates the strip handle and frame length
+//!   with [`wasm_abi::ledstrip`] before the pointer;
+//!   [`ledstrip_handle_code`] checks the handle a device hands back.
 //!
 //! * ABI 5: [`serve_slot`] places a served key in the table of at most
 //!   [`serve::MAX_SERVES`]; [`node_id_target`] bounds `node_id`'s write;
@@ -51,8 +54,11 @@ use core::ops::Range;
 use middleware::Key;
 
 use middleware::wasm_abi::events::DmaChannel;
+use middleware::wasm_abi::ledstrip;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
-use middleware::wasm_abi::route::{self, SinkConfig, Source, SourceConfig, SourceKind};
+use middleware::wasm_abi::route::{
+    self, SampleSource, SinkConfig, Source, SourceConfig, SourceKind,
+};
 use middleware::wasm_abi::serve;
 use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
 
@@ -622,14 +628,46 @@ pub struct SourcePlan<'m> {
     pub cfg: SourceConfig,
 }
 
-/// Plans `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` against
-/// linear memory `mem`: the source kind and config length
-/// ([`route::source_cfg_len`]: 10 bytes, 21 for the camera) first, then
-/// the key and config pointers, then their contents.
+/// A validated `route_source` request for a sampled source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplePlan<'m> {
+    /// The sensor and its config.
+    pub source: SampleSource,
+    /// The publish key (not under `sys/`).
+    pub key: Key<'m>,
+}
+
+/// A validated `route_source` request of any kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutePlan<'m> {
+    /// Chunked frames (test pattern, camera).
+    Frames(SourcePlan<'m>),
+    /// Sample batches (IMU, microphone).
+    Samples(SamplePlan<'m>),
+}
+
+/// Plans `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` for a
+/// frame source ([`route_source_any`]; a sampled source is
+/// `InvalidArgument` here).
 pub fn route_source(
-    (source, kp, kl, cp, cl): (i32, i32, i32, i32, i32),
+    args: (i32, i32, i32, i32, i32),
     mem: &[u8],
 ) -> Result<SourcePlan<'_>, AbiError> {
+    match route_source_any(args, mem)? {
+        RoutePlan::Frames(plan) => Ok(plan),
+        RoutePlan::Samples(_) => Err(AbiError::InvalidArgument),
+    }
+}
+
+/// Plans `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` against
+/// linear memory `mem`: the source kind and config length
+/// ([`route::source_cfg_len`]: 10 bytes, 21 for the camera, 8 for the IMU
+/// and the microphone) first, then the key and config pointers, then
+/// their contents ([`route::parse_route_source`]).
+pub fn route_source_any(
+    (source, kp, kl, cp, cl): (i32, i32, i32, i32, i32),
+    mem: &[u8],
+) -> Result<RoutePlan<'_>, AbiError> {
     let kind = SourceKind::from_i32(source)?;
     if usize::try_from(cl).ok() != Some(route::source_cfg_len(kind)) {
         return Err(AbiError::InvalidArgument);
@@ -641,8 +679,12 @@ pub fn route_source(
         .get(wasm_abi::guest_range(cp, cl, mem.len())?)
         .ok_or(AbiError::OutOfBounds)?;
     let key = payload_key(key)?;
-    let (source, cfg) = route::parse_source(kind, cfg)?;
-    Ok(SourcePlan { source, key, cfg })
+    Ok(match route::parse_route_source(kind, cfg)? {
+        route::RouteSource::Frames(source, cfg) => {
+            RoutePlan::Frames(SourcePlan { source, key, cfg })
+        }
+        route::RouteSource::Samples(source) => RoutePlan::Samples(SamplePlan { source, key }),
+    })
 }
 
 /// A validated `route_sink` request (ABI 4).
@@ -685,6 +727,31 @@ pub fn route_sink(
 /// `NoResources` if the device answered outside `0..MAX_ROUTES`.
 pub fn route_handle_code(handle: u8) -> Result<i32, AbiError> {
     if usize::from(handle) < route::MAX_ROUTES {
+        Ok(i32::from(handle))
+    } else {
+        Err(AbiError::NoResources)
+    }
+}
+
+/// Plans `ledstrip_write(handle, ptr, len)` (ABI 7) against `mem_len`
+/// bytes of linear memory: the handle and frame length first, then the
+/// pointer. Returns the handle and the frame's guest range.
+pub fn ledstrip_write(
+    handle: i32,
+    ptr: i32,
+    len: i32,
+    mem_len: usize,
+) -> Result<(u8, Range<usize>), AbiError> {
+    let handle = ledstrip::ledstrip_handle(handle)?;
+    ledstrip::frame_len(len)?;
+    Ok((handle, wasm_abi::guest_range(ptr, len, mem_len)?))
+}
+
+/// The import result for a strip handle a device returned (ABI 7): the
+/// handle, or `NoResources` if the device answered outside
+/// `0..MAX_LEDSTRIPS`.
+pub fn ledstrip_handle_code(handle: u8) -> Result<i32, AbiError> {
+    if usize::from(handle) < ledstrip::MAX_LEDSTRIPS {
         Ok(i32::from(handle))
     } else {
         Err(AbiError::NoResources)
@@ -1265,6 +1332,50 @@ mod tests {
     }
 
     #[test]
+    fn sc2_route_source_plans_imu_and_microphone_routes() {
+        let mut mem = vec![0u8; 64];
+        mem[..7].copy_from_slice(b"app/imu");
+        let imu = route::ImuConfig::new(100, 2, false, 10).expect("valid");
+        mem[16..24].copy_from_slice(&imu.encode());
+        let plan = route_source_any((2, 0, 7, 16, 8), &mem).expect("valid");
+        let RoutePlan::Samples(p) = plan else {
+            panic!("{plan:?}")
+        };
+        assert_eq!(
+            (p.source, p.key.as_str()),
+            (SampleSource::Imu(imu), "app/imu")
+        );
+        let bad: Result<RoutePlan<'_>, AbiError> = Err(AbiError::InvalidArgument);
+        assert_eq!(
+            route_source((2, 0, 7, 16, 8), &mem),
+            Err(AbiError::InvalidArgument),
+            "frames only"
+        );
+        assert_eq!(
+            route_source_any((2, 0, 7, 16, 10), &mem),
+            bad,
+            "imu takes 8"
+        );
+        assert_eq!(route_source_any((4, 0, 7, 16, 8), &mem), bad, "no kind 4");
+        assert_eq!(
+            route_source_any((2, 0, 7, 500, 9), &mem),
+            bad,
+            "cfg len first"
+        );
+        mem[18] = 3; // a range the IMU lacks
+        assert_eq!(route_source_any((2, 0, 7, 16, 8), &mem), bad, "range");
+        let mic =
+            route::MicConfig::new(16_000, 0, route::AudioMode::Levels, 2, 256).expect("valid");
+        mem[16..24].copy_from_slice(&mic.encode());
+        let plan = route_source_any((3, 0, 7, 16, 8), &mem).expect("valid");
+        assert!(
+            matches!(plan, RoutePlan::Samples(SamplePlan { source: SampleSource::Microphone(m), .. }) if m == mic)
+        );
+        mem[19] = 7; // audio mode
+        assert_eq!(route_source_any((3, 0, 7, 16, 8), &mem), bad, "mode");
+    }
+
+    #[test]
     fn route_sink_checks_arguments_before_pointers() {
         let mut mem = vec![0u8; 128];
         mem[..7].copy_from_slice(b"app/cam");
@@ -1302,6 +1413,23 @@ mod tests {
         );
         assert_eq!(route_handle_code(3), Ok(3));
         assert_eq!(route_handle_code(4), Err(AbiError::NoResources));
+    }
+
+    #[test]
+    fn ls2_ledstrip_write_checks_arguments_before_pointer() {
+        let mem = 1024;
+        assert_eq!(ledstrip_write(0, 16, 24, mem), Ok((0, 16..40)));
+        assert_eq!(ledstrip_write(1, 0, 192, mem), Ok((1, 0..192)));
+        let bad = Err(AbiError::InvalidArgument);
+        assert_eq!(ledstrip_write(2, 5000, 24, mem), bad, "handle first");
+        assert_eq!(ledstrip_write(-1, 0, 24, mem), bad);
+        assert_eq!(ledstrip_write(0, 5000, 25, mem), bad, "length first");
+        assert_eq!(ledstrip_write(0, 0, 0, mem), bad, "empty frame");
+        assert_eq!(ledstrip_write(0, 0, 195, mem), bad, "over MAX_FRAME");
+        assert_eq!(ledstrip_write(0, 1020, 24, mem), Err(AbiError::OutOfBounds));
+        assert_eq!(ledstrip_write(0, -1, 24, mem), Err(AbiError::OutOfBounds));
+        assert_eq!(ledstrip_handle_code(1), Ok(1));
+        assert_eq!(ledstrip_handle_code(2), Err(AbiError::NoResources));
     }
 
     #[test]

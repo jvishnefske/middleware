@@ -65,6 +65,12 @@
 //!   checks its 8-byte target before asking the device. A request writes
 //!   only inside the `mw_alloc` buffer after checking it lies in linear
 //!   memory, and reads back at most the reply capacity.
+//! * `ledstrip_write` (ABI 7) checks the handle and frame length
+//!   ([`wasm_abi::ledstrip::frame_len`]) before the pointer and copies the
+//!   frame through a stack buffer of
+//!   [`ledstrip::MAX_FRAME`](wasm_abi::ledstrip::MAX_FRAME) bytes, so the
+//!   device never sees guest memory. Handles the device returns outside
+//!   `0..MAX_LEDSTRIPS` reach the payload as `NoResources`.
 //! * Every call into the payload (`init`, `tick`, `mw_alloc`, `on_message`,
 //!   `on_irq`, `on_request`) is refuelled to [`Limits::fuel_per_call`] first, so an infinite loop
 //!   ends with [`Trap::OutOfFuel`] instead of hanging the host (W4).
@@ -131,7 +137,7 @@ pub mod link;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use middleware::wasm_abi::{self, MAX_MESSAGE};
+use middleware::wasm_abi::{self, MAX_MESSAGE, route};
 use wasmi::{
     CompilationMode, Config, Engine, ExternType, FuncType, Instance, Module, Store,
     StoreLimitsBuilder, TrapCode, ValType,
@@ -140,11 +146,13 @@ use wasmi::{
 pub use abi::FuelStats;
 pub use error::{INIT_LOG_LINES, InitLog, LoadError, Trap};
 pub use middleware::wasm_abi::events::{DmaChannel, Event, EventKind};
+pub use middleware::wasm_abi::ledstrip::{LedCount, LedStripSpec};
 pub use middleware::wasm_abi::periph::{
     Edge, I2cConfig, I2cTransfer, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
 pub use middleware::wasm_abi::route::{
-    CameraPins, Preamble, RouteStat, Segment, SinkConfig, Source, SourceConfig, SourceKind,
+    AudioMode, CameraPins, I2cDevice, ImuConfig, MicConfig, Preamble, RouteStat, SampleSource,
+    Segment, SinkConfig, Source, SourceConfig, SourceKind,
 };
 pub use middleware::wasm_abi::{AbiError, Pull};
 pub use middleware::{HandlerError, RequestMeta, SenderId};
@@ -163,9 +171,11 @@ use link::{Exports, State};
 /// The ABI 2 methods (from [`Device::now_us`] on), the ABI 3 methods
 /// (from [`Device::pwm_open`] on), the ABI 4 route methods (from
 /// [`Device::route_source`] on) and the ABI 5 methods ([`Device::serve`],
-/// [`Device::node_id`]) have defaults (`Unsupported`, or a derived clock)
-/// so a board without interrupts, DMA, PWM, ADC, I2C, routes or request
-/// routing keeps compiling; see the crate docs.
+/// [`Device::node_id`]), the ABI 6 [`Device::route_bridge`] and the ABI 7
+/// LED-strip methods (from [`Device::ledstrip_open`] on) have defaults
+/// (`Unsupported`, or a derived clock) so a board without interrupts, DMA,
+/// PWM, ADC, I2C, routes, request routing, bridges or LED strips keeps
+/// compiling; see the crate docs.
 pub trait Device {
     /// A payload log line (UTF-8, at most [`wasm_abi::MAX_LOG`] bytes).
     fn log(&mut self, line: &str);
@@ -311,6 +321,34 @@ pub trait Device {
         let _ = (source, key, cfg);
         Err(AbiError::Unsupported)
     }
+    /// Starts a sampled source route (`route_source` with
+    /// [`SourceKind::Imu`] or [`SourceKind::Microphone`]): every
+    /// `source.period_us()` the device publishes one
+    /// [`middleware::stream::samples`] batch of `source.samples()` units on
+    /// `key`, `first_index` counting from 0 when the route starts. Returns
+    /// the route handle, as [`Device::route_source`]; the route counts
+    /// against `MAX_ROUTES` and stops with the payload. A board without the
+    /// source answers `InvalidArgument` (the default), and lists the ones
+    /// it has in `sys/info` ([`middleware::loader::Caps::source`]).
+    fn route_samples(
+        &mut self,
+        source: SampleSource,
+        key: middleware::Key<'_>,
+    ) -> Result<u8, AbiError> {
+        let _ = (source, key);
+        Err(AbiError::InvalidArgument)
+    }
+    /// The I2C device a route from `source` streams from, if it sits on a
+    /// bus the payload can use (on the RT1050-EVKB the FXOS8700CQ at 0x1F
+    /// and the WM8960 at 0x1A on bus 0). While such a route runs the
+    /// runtime answers the payload's `i2c_transfer` to that address
+    /// `Busy` without calling [`Device::i2c_transfer`], and refuses a second
+    /// route on the same device (`Busy`). `None` (the default) for a source
+    /// that owns no payload-visible device.
+    fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
+        let _ = source;
+        None
+    }
     /// Starts a sink route (ABI 4): messages on `key` are consumed by the
     /// route (not passed to [`Payload::deliver`]) and run through a
     /// [`middleware::stream::Sink`] with `cfg.frame_len`; on
@@ -354,6 +392,49 @@ pub trait Device {
     /// The device's node id (ABI 5), the [`SenderId`] its transports
     /// report and `sys/info` names; `Unsupported` by default.
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
+        Err(AbiError::Unsupported)
+    }
+
+    /// Installs a bridge rule (ABI 6, [`wasm_abi::bridge`]): publications
+    /// arriving on link `bridge.src` whose key matches `bridge.filter` are
+    /// re-emitted on link `bridge.dst`. The links are distinct and the key
+    /// is already validated (not under `sys`). Returns the rule's handle
+    /// (`BRIDGE_BASE..BRIDGE_BASE + MAX_BRIDGES`; any other value reaches
+    /// the payload as `NoResources`), the same handle for an identical
+    /// rule; `route_stop` and `route_stat` then take it. `Unsupported` for a
+    /// link the device lacks, and by default (a single-link device).
+    fn route_bridge(&mut self, bridge: &wasm_abi::bridge::Bridge<'_>) -> Result<u8, AbiError> {
+        let _ = bridge;
+        Err(AbiError::Unsupported)
+    }
+
+    /// Opens a WS2812-style LED strip of `spec.count` LEDs on `spec.pin`
+    /// (ABI 7) and returns its handle (`0..MAX_LEDSTRIPS`; any other value
+    /// reaches the payload as `NoResources`). The pin is checked as for
+    /// [`Device::gpio_output`]; a pin another peripheral holds is
+    /// `InvalidArgument`. Opening the pin of an open strip changes its
+    /// length and returns the same handle. `NoResources` when the board
+    /// drives no further strip, `Unsupported` for a chain longer than it
+    /// can send. Sends nothing.
+    fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {
+        let _ = spec;
+        Err(AbiError::Unsupported)
+    }
+    /// Sends one frame (ABI 7): `grb` holds 3 bytes per LED (G, R, B), a
+    /// non-zero multiple of 3 of at most
+    /// [`ledstrip::MAX_FRAME`](wasm_abi::ledstrip::MAX_FRAME) bytes, already
+    /// checked by the runtime. The device refuses a frame longer than the
+    /// strip ([`LedStripSpec::check_frame`], `InvalidArgument`) and returns
+    /// once it is on the wire. `Busy` if the handle is not open,
+    /// `Transport` if transmission failed.
+    fn ledstrip_write(&mut self, handle: u8, grb: &[u8]) -> Result<(), AbiError> {
+        let _ = (handle, grb);
+        Err(AbiError::Unsupported)
+    }
+    /// Closes a strip and returns its pin to idle GPIO (ABI 7); `Busy` if
+    /// the handle is not open.
+    fn ledstrip_close(&mut self, handle: u8) -> Result<(), AbiError> {
+        let _ = handle;
         Err(AbiError::Unsupported)
     }
 }
@@ -690,6 +771,7 @@ impl<D: Device + 'static> Payload<D> {
                 .build(),
             scratch,
             init_log: None,
+            i2c_owners: route::I2cOwners::new(),
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -939,6 +1021,14 @@ impl<D: Device + 'static> Payload<D> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
+        // A route the device stopped by itself gives its I2C device back,
+        // whether or not the payload hears of it.
+        if event.kind == EventKind::RouteStopped {
+            let st = self.store.data_mut();
+            if let Ok(handle) = route::route_handle(event.source) {
+                st.i2c_owners = st.i2c_owners.release(handle);
+            }
+        }
         if !self.handles_irq() {
             return Ok(false);
         }
@@ -953,6 +1043,15 @@ impl<D: Device + 'static> Payload<D> {
     /// Whether an earlier call trapped (see [`Trap::Poisoned`]).
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
+    }
+
+    /// The payload's linear memory, e.g. for differential tests against
+    /// another runtime (`wasm-hdl-ref`).
+    pub fn memory(&self) -> &[u8] {
+        self.instance
+            .get_memory(&self.store, wasm_abi::exports::MEMORY)
+            .map(|m| m.data(&self.store))
+            .unwrap_or_default()
     }
 
     /// The device, e.g. to inspect a simulator's state.

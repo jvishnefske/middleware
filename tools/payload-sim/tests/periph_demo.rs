@@ -94,7 +94,10 @@ fn v14_periph_demo_runs_spi_loopback_and_i2c_read_in_the_simulator() {
         // 0x5a is printable, so the simulator shows the byte as `Z`.
         "publish app/periph_demo/i2c Z",
     ] {
-        assert!(lines.contains(&expected), "missing {expected:?} in {stdout}");
+        assert!(
+            lines.contains(&expected),
+            "missing {expected:?} in {stdout}"
+        );
     }
     // Two rounds (init and the 1 s repeat), each with one good transfer.
     let ok = lines
@@ -135,6 +138,9 @@ fn v14_periph_demo_logs_a_mismatch_when_miso_disagrees() {
         "log periph_demo: i2c 0x50 reg 0x00 = 0x00",
         "publish app/periph_demo/i2c 0x00",
     ] {
-        assert!(lines.contains(&expected), "missing {expected:?} in {stdout}");
+        assert!(
+            lines.contains(&expected),
+            "missing {expected:?} in {stdout}"
+        );
     }
 }

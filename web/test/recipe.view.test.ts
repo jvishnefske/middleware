@@ -174,7 +174,7 @@ describe("allocation and a run in the browser (Q19)", () => {
 
 describe("a unit on the Device tab's board (Q23)", () => {
   const node = "e6613852831f2a0b";
-  const info = (serves: boolean): DeviceInfo => ({ abiVersion: 5, capacity: 65536, status: 2, statusName: "running", chip: "rp2350", firmware: "0.1.0", node, caps: serves ? 1 : 0, serves });
+  const info = (serves: boolean): DeviceInfo => ({ abiVersion: 5, capacity: 65536, status: 2, statusName: "running", chip: "rp2350", firmware: "0.1.0", node, caps: serves ? 1 : 0, capNames: serves ? ["serve"] : [], serves });
   const board = (serves: boolean) => {
     const i = info(serves);
     return { info: i, requester: new SerialRequester({ request: async () => new Uint8Array() }, i) };

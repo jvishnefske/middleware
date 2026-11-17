@@ -17,10 +17,20 @@
 //!   the clock jumped over several periods, only the latest frame is
 //!   produced and the earlier ones count as skipped
 //!   ([`RouteStats::skipped`]), like a camera that overran.
+//! * A [`SampleRoute`] ([`wasm_host::SourceKind::Imu`] or
+//!   [`wasm_host::SourceKind::Microphone`], SC6) runs a
+//!   [`FakeRoute`]: the deterministic fake IMU (a tilt about X) or fake
+//!   microphone (a tone, then a chirp) of
+//!   [`middleware::stream::samples::fake`]. Each due batch is one message
+//!   ([`Routes::due_batches`]); after a clock jump only the latest is
+//!   published and the skipped ones count as dropped (their units show as
+//!   a gap in the next batch's `first_index`).
 //! * A [`SinkRoute`] owns an SPI bus and its D/C pin; every message on its
 //!   key goes through a [`Sink`] ([`SinkRoute::receive`]) and its
 //!   [`RouteStats`] record each step.
 
+use middleware::stream::samples::MAX_BATCH;
+use middleware::stream::samples::fake::FakeRoute;
 use middleware::stream::{FrameSource, HEADER_LEN, MAX_CHUNK_DATA, RouteStats, Sink, Step};
 use middleware::wasm_abi::route::MAX_ROUTES;
 use wasm_host::{AbiError, SinkConfig, SourceConfig};
@@ -68,11 +78,24 @@ impl SinkRoute {
     }
 }
 
+/// A running fake IMU or microphone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleRoute {
+    /// Key the batches are published on.
+    pub key: String,
+    /// The sensor, its config and its schedule.
+    pub fake: FakeRoute,
+    /// Counters for `route_stat` (one "frame" and one "chunk" per batch).
+    pub stats: RouteStats,
+}
+
 /// One route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     /// Publishes frames.
     Source(SourceRoute),
+    /// Publishes sample batches.
+    Samples(SampleRoute),
     /// Draws frames.
     Sink(SinkRoute),
 }
@@ -81,9 +104,25 @@ impl Route {
     fn stats(&self) -> RouteStats {
         match self {
             Route::Source(s) => s.stats,
+            Route::Samples(s) => s.stats,
             Route::Sink(s) => s.stats,
         }
     }
+}
+
+/// One batch a sampled route produced, ready to publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batch {
+    /// Route handle.
+    pub handle: u8,
+    /// Key to publish on.
+    pub key: String,
+    /// Batch number since the route started.
+    pub number: u64,
+    /// Batches skipped before this one because the clock jumped past them.
+    pub skipped: u32,
+    /// The encoded batch.
+    pub data: Vec<u8>,
 }
 
 /// One frame a source produced: its chunk messages, ready to publish.
@@ -198,14 +237,45 @@ impl Routes {
             .any(|(_, r)| matches!(r, Route::Sink(s) if s.cfg.dc_pin == pin))
     }
 
-    /// When the next source frame is due, in microseconds.
+    /// When the next source frame or batch is due, in microseconds.
     pub fn next_due(&self) -> Option<u64> {
         self.iter()
             .filter_map(|(_, r)| match r {
                 Route::Source(s) => Some(s.due_us),
+                Route::Samples(s) => Some(s.fake.next_due_us()),
                 Route::Sink(_) => None,
             })
             .min()
+    }
+
+    /// Produces every sample batch due at `now_us` (at most one per route)
+    /// and advances those routes' schedules and counters.
+    pub fn due_batches(&mut self, now_us: u64) -> Vec<Batch> {
+        let mut batches = Vec::new();
+        let mut buf = [0u8; MAX_BATCH];
+        for (handle, slot) in self.slots.iter_mut().enumerate() {
+            let Some(Route::Samples(r)) = slot else {
+                continue;
+            };
+            let Some(Ok(p)) = r.fake.poll(now_us, &mut buf) else {
+                continue;
+            };
+            let skipped = u32::try_from(p.skipped).unwrap_or(u32::MAX);
+            r.stats = RouteStats {
+                frames_dropped: r.stats.frames_dropped.saturating_add(skipped),
+                chunks_dropped: r.stats.chunks_dropped.saturating_add(skipped),
+                ..r.stats
+            }
+            .sent(1);
+            batches.push(Batch {
+                handle: handle as u8,
+                key: r.key.clone(),
+                number: p.batch,
+                skipped,
+                data: buf.get(..p.len).unwrap_or_default().to_vec(),
+            });
+        }
+        batches
     }
 
     /// Produces every source frame due at `now_us` (at most one per route)
@@ -390,5 +460,36 @@ mod tests {
         assert!(routes.owns_pin(13) && !routes.owns_pin(12));
         assert!(routes.sink_for("cam").is_some() && routes.sink_for("other").is_none());
         assert_eq!(routes.next_due(), None);
+    }
+
+    #[test]
+    fn sc6_sample_routes_publish_fake_batches_on_the_clock() {
+        use middleware::stream::samples::{self, Gap, SensorKind};
+        use wasm_host::{ImuConfig, SampleSource};
+        let imu = SampleSource::Imu(ImuConfig::new(50, 2, true, 5).unwrap());
+        let mut routes = Routes::default();
+        let h = routes
+            .add(Route::Samples(SampleRoute {
+                key: "imu".into(),
+                fake: FakeRoute::new(imu, 0),
+                stats: RouteStats::default(),
+            }))
+            .unwrap();
+        assert_eq!(routes.next_due(), Some(100_000));
+        assert!(routes.due_batches(99_999).is_empty());
+        let b = routes.due_batches(100_000);
+        assert_eq!((b.len(), b[0].handle, b[0].number), (1, h, 0));
+        let first = samples::decode(&b[0].data).unwrap().header;
+        assert_eq!(
+            (first.kind, first.channels, first.count),
+            (SensorKind::Imu, 6, 5)
+        );
+        let b = routes.due_batches(400_000);
+        assert_eq!((b[0].number, b[0].skipped), (3, 2));
+        let next = samples::decode(&b[0].data).unwrap().header;
+        assert_eq!(samples::gap(&first, &next), Gap::Lost(10));
+        let s = routes.stats(h).unwrap();
+        assert_eq!((s.frames, s.frames_dropped), (2, 2));
+        assert!(routes.due_frames(400_000).is_empty(), "not a frame source");
     }
 }

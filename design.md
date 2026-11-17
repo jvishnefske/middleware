@@ -89,7 +89,7 @@ characteristic UUID and a 16-bit advertising id.
 ### Feature isolation
 
 - [x] F1 `ble` and `postcard` build for `thumbv6m-none-eabi` without `std` —
-  `scripts/check-features.sh` (builds `ble`, `ble,postcard`, `postcard`, `serial`, `espnow`, `espnow,postcard` for `thumbv6m-none-eabi`, asserts `std` off).
+  `scripts/check-features.sh` (builds `ble`, `ble,postcard`, `postcard`, `serial`, `espnow`, `espnow,postcard`, `smbus`, `smbus,postcard` for `thumbv6m-none-eabi`, asserts `std` off; see SB16).
 - [x] F2 `zenoh`, `grpc` and `istio` build on the host without pulling in the
   `ble` module —
   `scripts/check-features.sh` (builds `zenoh`, `grpc`, `grpc,istio`, `zenoh,grpc,istio,prost`, asserts `ble` off).
@@ -339,7 +339,8 @@ with scouting off. All run under `--features zenoh`.
   `z11_gather_names_repliers_and_carries_their_errors`,
   `zenoh::wire::tests::query_and_reply_attachments_round_trip`.
 - [x] Z12 Queries carry an attachment with the requester's sender id and
-  its timeout; the handler sees them as `RequestMeta::sender` and
+  its timeout (since 0.6 optionally followed by the trace extension, K18,
+  K19); the handler sees them as `RequestMeta::sender` and
   `deadline_ms` (minus the time queued at the responder); `principal` is
   `None` (Zenoh authenticates no caller name); handler errors, including
   `Unavailable`, `DeadlineExceeded` and `Denied`, round trip —
@@ -403,6 +404,156 @@ with scouting off. All run under `--features zenoh`.
   `z18_records_for_another_service_are_ignored`,
   `zenoh::discovery::tests::differing_records_conflict_and_equal_ones_agree`,
   `zenoh::discovery::tests::records_must_name_the_token_kind_and_instance`.
+
+The 0.6 router (Z19–Z22) lifts Z17/Z18 from "self-asserted" to
+"authenticated connection, authorised key space" for sessions behind one
+zenohd. `mw-service`'s `zenoh_router` renders the router from the
+services' specs: a user/password credential per principal (the service's
+Kubernetes name, `robot-<name>` for robots), `access_control` rules with
+default deny, the router's Kubernetes manifests and a TLS route for robots
+through the ingress gateway. The middleware's Zenoh backend itself still
+configures no authentication. Unit tests are in `zenoh_router::{acl,
+credentials, k8s}::tests` and `zenoh_router::tests`; the router itself
+runs in process (zenoh 1.10, router mode, the rendered config on a
+127.0.0.1 port) in `service/tests/zenoh_router.rs` *(mw-service)*.
+
+- [x] Z19 Each principal's ACL is derived from its spec: it may `put` and
+  `delete` on its `publishes` filters, declare subscribers on and receive
+  publications from its `subscribes` filters, declare queryables and reply
+  on its `serves` kinds (and their per-node keys `@mw/node/*/<kind>`),
+  query its `calls` kinds, announce its `serves` kinds on
+  `@mw/svc/<kind>/*`, and browse `@mw/svc/**`; nothing else (`sys/**`,
+  the admin space `@/**`, other kinds' announcements) under default deny.
+  The model evaluates rules as zenoh does (a rule key expression must
+  include the message's), principals are sorted and unique, grants must be
+  key filters. Against the in-process router: a declared put reaches the
+  subscriber; undeclared puts (`app/other`, `sys/reboot`, a subscriber's
+  forged put) are dropped at ingress; a subscription outside the grant gets
+  nothing (egress); only a caller of `demo/echo` gets replies, and only
+  from its server, never from a squatting queryable; a forged
+  announcement of another principal's kind is refused, so browsers see
+  the genuine record with no `ConflictingRecords` (Z18's forger) —
+  `acl::tests::z19_a_service_publishes_its_declared_keys_only`,
+  `z19_a_service_subscribes_within_its_declared_filters_only`,
+  `z19_nobody_touches_sys_or_the_admin_space`,
+  `z19_every_principal_can_browse_discovery`,
+  `z19_only_the_server_of_a_kind_announces_and_answers_it`,
+  `z19_model_is_sorted_and_refuses_bad_input`,
+  `zenoh_router::tests::z19_principals_are_zenoh_services_and_robots`,
+  `z19_principals_refuse_inconsistent_options`,
+  `z19_config_is_deterministic_json5_zenoh_accepts`,
+  `service/tests/zenoh_router.rs`:
+  `z19_declared_puts_arrive_and_undeclared_puts_are_dropped`,
+  `z19_only_callers_query_and_only_the_server_answers`,
+  `z19_discovery_works_for_all_and_only_the_server_announces`
+  *(mw-service)*.
+- [x] Z20 Credentials: the file `MW_ZENOH_CREDENTIALS` names is one line
+  `<user>:<password>` (the runner's format, MS10; the password 16–256
+  bytes of visible ASCII), parsed strictly, rendered back identically and
+  read by the runner's parser to the same user and password; passwords never appear in
+  `Debug` or errors; the router's `usrpwd` dictionary is one
+  `user:password` line per principal, sorted, without duplicates; one
+  credential per principal is required (missing or unknown users are
+  errors); Secrets are rendered separately from the committable output
+  (`zenohd-auth` key `dictionary`, `zenoh-<user>` key `credentials`,
+  none for robots). The in-process router refuses a wrong password, an
+  unknown user and a client with no credentials, and admits the right
+  ones —
+  `credentials::tests::z20_credentials_file_round_trips_and_is_strict`,
+  `z20_passwords_never_print`, `z20_dictionary_is_sorted_and_refuses_duplicates`,
+  `z20_from_file_reads_and_reports_io`,
+  `zenoh_router::tests::z20_render_router_needs_exactly_one_credential_per_principal`,
+  `k8s::tests::z20_secrets_hold_the_dictionary_and_service_credentials_only`,
+  `service/tests/zenoh_router.rs`:
+  `z20_wrong_unknown_or_missing_credentials_are_refused` (clients use the
+  runner's `run::zenoh::client_config`) *(mw-service)*.
+- [x] Z21 The router's manifests in namespace `apps`: ServiceAccount
+  `zenohd`; ConfigMap `zenohd-config` with the config; Deployment (one
+  replica, `Recreate`, image `localhost/mw/zenohd` with
+  `imagePullPolicy: Never`, `-c /etc/zenoh/config.json5`, the dictionary
+  Secret mounted read-only, non-root, read-only root filesystem, no
+  capabilities, seccomp `RuntimeDefault`, TCP probes on `zenoh`, a config
+  hash annotation that rolls the pod); Service port `zenoh` 7447
+  `appProtocol: tcp`; an ALLOW AuthorizationPolicy on port 7447 admitting
+  exactly the principals of the services that use Zenoh, the ingress
+  gateway (robots) and `infra.local/robot/*` —
+  `k8s::tests::z21_authorization_policy_admits_exactly_the_zenoh_principals`,
+  `z21_deployment_service_and_config_follow_the_contract` *(mw-service)*.
+- [x] Z22 Robots reach the router through the ingress gateway's port
+  15443 (NodePort 30443) on a separate Gateway server `apps/zenohd-robots`
+  (protocol `TLS`, `ISTIO_MUTUAL`, host `zenoh.infra.local`) with a
+  VirtualService `tcp` route to `zenohd.apps.svc.cluster.local:7447`; the
+  lab's `https-robots` server is `HTTPS`, where Istio applies only `http`
+  routes, so the robot selects this server by SNI `zenoh.infra.local`.
+  `deploy/zenoh/` (`config.json5`, `zenohd.yaml`) is the output for
+  `deploy/zenoh/router.yaml` and `deploy/zenoh/specs/`, regenerated with
+  the `zenoh_router_manifests` example or `MW_BLESS=1` —
+  `k8s::tests::z22_robot_route_is_an_sni_tls_server_with_a_tcp_route`,
+  `service/tests/zenoh_router.rs`: `z22_deploy_zenoh_is_the_rendered_output`
+  *(mw-service)*. Not yet verified on the lab: Istio merging the TLS
+  server into the HTTPS server's port with SNI precedence (phase 3).
+  Not covered by a test either: `scripts/check-zenoh-manifests.sh` runs
+  kubeconform (`-strict`) on `deploy/zenoh/zenohd.yaml` by hand. Offline
+  it checks the four kinds with a schema vendored in `deploy/schemas/`
+  (MS14: ServiceAccount, Deployment, Service, AuthorizationPolicy) and
+  skips ConfigMap, Gateway and VirtualService; `MW_SCHEMAS=online`
+  (Kubernetes 1.33 and the datreeio CRD catalog) checks all seven.
+
+### Zenoh telemetry (`zenoh-otel`, OT…)
+
+Debug channel trace, logs and metrics for running middleware, exported to a
+Grafana stack over OTLP. The library records through the OpenTelemetry API
+only (`zenoh::otel`), behind the feature `zenoh-otel`, which is **off by
+default** and implied by no other feature; `tools/mw-otel` installs the
+exporters and runs `mw-otel-bridge`, the Zenoh node that exports what the
+boards (the EVKB over Ethernet, any host service) publish.
+
+- [x] OT1 With `zenoh-otel` a publication, its delivery, a request and its
+  handling are spans (`mw publish|deliver|request|handle <key>`, producer /
+  consumer / client / server) with the key, sender, sequence, stream, gap
+  and size as attributes; with `with_trace_context(true)` the delivery is
+  the publication's child and the handling the request's child across two
+  sessions, and a handler error marks both ends —
+  `tests/zenoh_otel.rs`: `ot1_spans_and_metrics_cross_two_sessions` (OT1-OT4 checks in sequence: the providers are process globals).
+- [x] OT2 The trace context crosses the wire only on request: attachment
+  kind 3 (publication) is the kind 2 attachment followed by the 25-byte
+  binary W3C trace context, written only with `with_trace_context(true)`;
+  a query carries the requesting span in K18's query trace extension (the
+  same 25 bytes; no separate traced query kind), the request span's
+  context with `with_trace_context(true)`, else `RequestOptions::trace` as
+  K18 has it, and a request span without a current span continues
+  `RequestOptions::trace`; every decoder (host and `zenoh_lite`) reads
+  sender, sequence, stream and deadline as before; an all-zero context is
+  ignored; the context type is K17's `TraceParent` (its `traceparent` text
+  round trip is K17's) —
+  `zenoh::wire::tests::traced_publications_keep_their_header_and_carry_the_context`,
+  `zenoh::wire::tests::traced_queries_carry_the_context_in_the_query_extension`,
+  `tests/zenoh_otel.rs`: `ot1_spans_and_metrics_cross_two_sessions` (the
+  untraced publication, and a plain transport's `RequestOptions::trace`
+  parenting the request and handle spans).
+- [x] OT3 Metrics `mw.zenoh.published`, `delivered`, `lost` (sequence gaps),
+  `bytes` (in / out), `request.duration` and `handle.duration`, by key
+  (and sender, outcome) — `ot1_spans_and_metrics_cross_two_sessions`.
+- [x] OT4 `mw-otel-bridge` exports the boards' `sys/log` lines as OTLP log
+  records (scope `mw.device`, sender, key, seq; control characters escaped),
+  `mw.node.up` per node from `sys/info` rounds (chip, firmware, payload
+  status), and the delivery spans and metrics of its subscriptions; by
+  default it does not subscribe to raw sample streams (`mic/pcm`,
+  `imu/raw`), which a board would then send —
+  `mw_otel::tests::*`; run 2026-11-16 against a local OpenTelemetry Collector
+  0.116.1 (file exporter) with `examples/fake_board.rs`: 61 + 12 + 6
+  delivery spans, 7 `sys/info` request spans, the six log lines with their
+  attributes, `mw.node.up` = 1 with the fake chip and firmware.
+- [x] OT5 Without `zenoh-otel` nothing of OpenTelemetry is compiled in and
+  the wire bytes are unchanged (16-byte publication attachment) —
+  `scripts/check-features.sh` (OT5: no `opentelemetry` in `zenoh` or the
+  full host set; `zenoh-otel` builds on the host and enables no embedded
+  feature).
+- [ ] OT6 The bridge's data in the shared Grafana (10.51.200.16): the
+  dashboard `tools/mw-otel/grafana/middleware-debug.json` shows the EVKB's
+  log, node and traffic panels. Open: that Grafana's service-account token
+  is rejected (401), its Prometheus accepts OTLP but its proxy refuses
+  writes from outside the cluster, and no Loki or Tempo was found there.
 
 ### gRPC (`grpc`)
 
@@ -819,6 +970,68 @@ crate's self dev-dependency). Tests marked *(feature)* run under
   `tests::discover_and_call_finds_and_calls_every_responder` (run by
   `cargo test --all-features`; the example declares `test = true`).
 
+#### 0.6 additions: trace context (K17–K19)
+
+Requests carry the caller's W3C trace context and Envoy request id, so a
+trace stays one trace across every hop: `transport::trace` holds the pure
+`TraceParent` and `RequestId` values, `RequestOptions` sends them and
+`RequestMeta` delivers them. gRPC carries them as the `traceparent` and
+`x-request-id` headers, Zenoh as an optional trailing field of the query
+attachment, the memory backend in process; the serial link, BLE and ESP-NOW
+carry none.
+
+- [x] K17 `TraceParent` parses and formats W3C `traceparent` values with no
+  heap: version `00` exactly 55 characters, future versions parsed by the
+  version-00 rules and re-emitted as `00`, version `ff`, all-zero ids,
+  uppercase and malformed values refused; `child` keeps the trace id and
+  flags with a new span, `is_sampled` reads the flag. `RequestId` accepts
+  1 to 64 bytes of visible ASCII only —
+  `transport::trace::tests::k17_parses_and_formats_the_spec_examples`,
+  `k17_rejects_invalid_values`, `k17_tolerates_future_versions`,
+  `k17_new_and_child_refuse_zero_ids`,
+  `k17_format_round_trips_every_byte_value`,
+  `k17_request_ids_are_visible_ascii_up_to_64_bytes`.
+- [x] K18 `RequestOptions::{trace, request_id}` (`with_trace`,
+  `with_request_id`, `propagating`) reach the handler unchanged as
+  `RequestMeta::{trace, request_id}` on every backend that can carry them:
+  - core: `transport::meta::tests::k18_request_meta_builders_set_trace_and_request_id`,
+    `transport::reqrep::tests::k18_request_options_carry_trace_and_request_id`;
+  - conformance: `tests/conformance/reqrep.rs`: `trace_is_propagated`
+    (fixture knob `PROPAGATES_TRACE`), run by `tests/memory.rs`:
+    `k_trace_is_propagated`, `tests/grpc.rs`:
+    `conformance_cases::k18_grpc_trace_is_propagated` *(istio)* and
+    `tests/zenoh.rs`: `k_trace_is_propagated` *(zenoh)*;
+  - gRPC: `grpc::trace::tests::k18_inject_then_extract_round_trips`,
+    `grpc::responder::tests::k18_call_meta_reads_traceparent_and_request_id`,
+    `grpc::istio::tests::k18_trace_context_exposes_the_typed_trace_and_request_id`
+    (both names are in `PROPAGATED_HEADERS`), and the mesh client on a
+    request and on every call of a gather, `tests/grpc.rs`:
+    `mesh::k18_mesh_client_injects_trace_on_request_and_gather` *(istio)*;
+  - Zenoh: `zenoh_wire::tests::k18_query_trace_extension_round_trips`
+    (the always-built, no_std encodings; the extension is built in a
+    fixed buffer, so the board client `zenoh_lite` sends it too),
+    `zenoh::responder::tests::k18_request_meta_carries_trace_and_request_id`
+    *(zenoh)*.
+- [x] K19 Trace context never breaks what does not carry it: invalid
+  header values are dropped, not forwarded; a Zenoh query without trace
+  context sends exactly the 0.5 attachment, a 0.6 responder reads 0.5
+  attachments, reserved flags and trailing bytes are ignored, and a
+  malformed extension loses only the trace fields (a 0.5 responder's
+  exact-length rule ignores the extended form entirely, so mixed fleets see
+  full metadata at 0.5 responders only for untraced queries); the serial
+  link delivers `None`; `zenoh_lite` reads both query forms and hands its
+  handlers the trace but no request id (it would borrow the receive
+  buffer) —
+  `grpc::trace::tests::k19_invalid_header_values_are_dropped` *(grpc)*,
+  `zenoh_wire::tests::k19_query_extension_is_compatible_both_ways`,
+  `k19_malformed_extensions_keep_sender_and_deadline`,
+  `zenoh_lite::client::tests::k19_lite_request_meta_reads_both_query_forms`
+  *(zenoh-lite)*,
+  `tests/serial.rs`: `k19_serial_trace_is_not_carried` (the
+  `trace_is_propagated` case with `PROPAGATES_TRACE = false`) *(serial)*.
+  BLE GATT and ESP-NOW build their `RequestMeta` from `RequestMeta::NONE`,
+  so both fields are `None`; they have no async fake in `tests/` (as K15).
+
 ### Service discovery (L…)
 
 `discovery` (always built, `no_std`, no heap): `Service` records of a
@@ -992,6 +1205,879 @@ encoder; `MdnsSocket` implements `Browse`.
   replies from another port, one attempt),
   `mismatched_ids_and_spoofed_sources_are_ignored` *(dns-sd)*.
 
+### Mesh service runner (`mw-service`, MS…)
+
+The workspace crate `service/` (package `mw-service`, std) turns handlers
+into a deployable mesh service: `Service::builder(name)` declares what the
+service serves, calls, admits, publishes and subscribes to; the same
+declarations become its Kubernetes manifests (`--print-manifests`), so code
+and deployment configuration cannot drift. The pure parts are the
+`ServiceSpec` (serializable, deterministic), the environment parser
+`Config::from_env`, the `Lifecycle` state machine and the per-request
+`Ctx`; the runner is the thin I/O shell around them. Handlers implement the
+async `ServiceHandler` (every plain `Handler` is one), because a mesh
+handler often awaits a downstream call, which a synchronous `Handler`
+cannot do without stalling its serve loop. Tests marked *(mw-service)* run
+under `cargo test -p mw-service` and `cargo test --workspace`.
+
+0.6 is built in phases: phase 1 defines the API and implements MS1–MS5;
+later phases implement the runner (MS6–MS10, with MS20–MS23), the
+manifests (MS11–MS15, with MS30–MS34), the ops CLI (MS16) and the
+end-to-end run on the lab cluster (MS17), each checking its items here.
+
+- [x] MS1 `Service::builder(name)` records `serve`, `serve_typed` (through
+  `typed::TypedHandler`), `calls`, `allow_callers`, `publishes`,
+  `subscribes`, `replicas`, `resources`, `drain_grace` and `port`, in
+  declaration order, into a `ServiceSpec`; `build` validates the whole
+  spec (the name maps to an RFC 1123 Kubernetes name, kinds are
+  `Service/Method` keys, nothing is both served and called, callers are
+  SPIFFE IDs, filters are keys or `key/**`, no duplicates, replicas ≥ 1,
+  resources non-zero with requests within limits, drain grace ≤ 10 min,
+  port ≠ 0); the spec serializes deterministically to YAML and back; the
+  command line selects run, `--print-spec` or `--print-manifests
+  [--namespace NS] [--image REF]` and refuses anything else —
+  `builder::tests::ms1_builder_records_every_declaration_in_order`,
+  `ms1_build_validates_the_whole_spec`, `ms1_serve_typed_wraps_typed_handler`,
+  `spec::tests::ms1_names_map_to_k8s_labels`,
+  `ms1_filters_parse_exact_and_prefix`,
+  `ms1_validate_accepts_a_full_spec_and_reports_each_rule`,
+  `ms1_resources_render_as_kubernetes_quantities`,
+  `ms1_yaml_is_deterministic_and_round_trips`,
+  `run::tests::ms1_command_line_parses_each_command`,
+  `ms1_command_line_errors`, `ms1_print_spec_writes_the_yaml`,
+  `ms1_run_with_checks_the_service_map_first`
+  *(mw-service)*.
+- [x] MS2 `Config::from_env` parses `MW_PORT`, `POD_NAMESPACE`, `POD_NAME`,
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `MW_ZENOH_ROUTER`, `MW_ZENOH_CREDENTIALS`,
+  `MW_SERVICE_MAP` (`kind=service.namespace:port_name,...` into a
+  `dns::unicast::ServiceMap`) and `MW_DRAIN_GRACE_MS` through a lookup
+  function, purely; unset or empty is `None`, a malformed value is a typed
+  error naming the variable, a kind mapped twice is an error; the
+  overrides apply over the spec and `unmapped_calls` lists called kinds
+  without a route —
+  `config::tests::ms2_nothing_set_is_the_default`,
+  `ms2_parses_every_variable`, `ms2_malformed_values_name_the_variable`,
+  `ms2_service_map_entries_are_validated`,
+  `ms2_overrides_and_unmapped_calls` *(mw-service)*.
+- [x] MS3 `Lifecycle::on(self, event, now)` is a pure state machine
+  `Starting → Serving → Draining { since, drain_grace } → Stopped`: ready
+  sets health `SERVING`; SIGTERM while serving sets `NOT_SERVING` and keeps
+  answering; a tick once the drain grace has passed stops accepting and
+  exits cleanly; a second termination, or termination before serving, stops
+  at once; a failure stops from any live state with `NOT_SERVING` and a
+  failed outcome; `Stopped` is final —
+  `lifecycle::tests::ms3_sigterm_reports_not_serving_then_drains_for_the_grace_then_stops`,
+  `ms3_second_terminate_or_terminate_before_serving_stops_at_once`,
+  `ms3_failure_stops_from_every_live_state`,
+  `ms3_monotonic_arithmetic_saturates` *(mw-service)*.
+- [x] MS4 Handlers get a `Ctx`: the caller's `RequestMeta`, this handler's
+  span (`server_trace`: a child of the caller's trace, or a new sampled
+  root), the caller's request id and deadline, `client(kind)` for declared
+  dependencies only (a `Downstream`, `Requester` + `Gather`, filling unset
+  options with that span, the request id and the time left), and
+  `publisher()` refusing undeclared keys. `ServiceHandler` is async with a
+  `Send` future; every plain `Handler` is one, and a downstream crate can
+  implement it for its own types. A call through `Ctx::client` over gRPC
+  on loopback arrives with the same trace id, this span as parent, the
+  request id and a deadline within the caller's —
+  `ctx::tests::ms4_server_trace_continues_or_starts_a_trace`,
+  `ms4_downstream_fills_unset_options_from_the_request`,
+  `ms4_ctx_exposes_meta_trace_and_declared_clients_only`,
+  `ms4_plain_handlers_and_async_handlers_box_alike`,
+  `service/tests/ctx.rs`:
+  `ms4_ctx_client_continues_trace_request_id_and_deadline_downstream`,
+  `ms4_builder_takes_plain_and_async_handlers` *(mw-service)*.
+- [x] MS5 `mw-service` enables exactly `middleware`'s host features `grpc`,
+  `istio`, `dns-sd` and `zenoh`; no embedded feature set pulls in
+  `mw-service`, tracing, OpenTelemetry or the YAML crate, and the embedded
+  core does not depend on it; OpenTelemetry's OTLP exporter uses the same
+  tonic 0.14 as `middleware` — `scripts/check-features.sh` (block "MS5",
+  and those crates in `CLOUD_CRATES` for every F1 set).
+- [x] MS6 `Service::run_with` serves: binds h2c on `0.0.0.0:<port>`, runs a
+  `GrpcServer` with health and a responder taking the principal from the
+  sidecar (`PrincipalSource::SidecarXfcc`), one serve loop per served kind
+  calling its handler with a `Ctx`, reports `SERVING` once every loop is
+  up, enforces `allow_callers` in process as well, and drives `Lifecycle`
+  from SIGTERM/SIGINT or the shutdown future through drain to exit.
+  Health starts `NOT_SERVING`; an unlisted or unidentified caller is
+  `PERMISSION_DENIED` before routing, an unserved key `UNIMPLEMENTED`;
+  kinds run concurrently, each kind one call at a time (its handler is
+  `&mut self`) with a bounded queue (full: `UNAVAILABLE`); the caller's
+  deadline bounds the handler; on shutdown health turns `NOT_SERVING` at
+  once, calls are answered through the drain grace, the call in flight
+  completes, then the server stops accepting, open health watches end
+  and the run returns `Ok` within the stop bound —
+  `service/tests/runner.rs`:
+  `ms6_serves_admitted_callers_and_drains_on_shutdown`;
+  `run::serve::tests::ms6_route_checks_callers_then_kinds`,
+  `ms6_shell_performs_health_stop_and_exit_in_order`,
+  `run::options::tests::ms6_options_default_and_override`,
+  `run::tests::ms1_run_with_checks_the_service_map_first`;
+  `grpc::responder::tests::ms6_next_call_hands_over_an_owned_call_answered_later`
+  *(mw-service; the last in `middleware`)*.
+- [x] MS7 Structured JSON logs on stdout; with
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, OTLP/gRPC trace export with resource
+  `service.name`, `k8s.namespace.name`, `k8s.pod.name`; one server span per
+  request whose parent is `RequestMeta::trace` and whose id is
+  `Ctx::trace`. The span (kind server) carries `rpc.system`,
+  `rpc.service`, `rpc.method`, `mw.kind`, and `mw.principal` /
+  `mw.request_id` when present, ends with status error when the handler
+  fails, and is flushed at shutdown within a bound; without an endpoint
+  handlers still get a span context continuing the inbound trace —
+  `service/tests/runner.rs`: `ms7_server_spans_reach_the_otlp_collector`
+  (an in-process OTLP `TraceService` on 127.0.0.1);
+  `run::telemetry::tests::ms7_resource_and_span_attributes`,
+  `ms7_without_export_spans_still_continue_the_trace` *(mw-service)*.
+- [x] MS8 Each `calls` kind gets `MeshBrowse<UnicastDnsSd>` over its
+  `MW_SERVICE_MAP` route feeding a `Directory` and a `MeshClient` through
+  the sidecar, lent to handlers in `Links`. One background task per kind
+  publishes directory snapshots that each serve loop's own `Links` takes
+  between requests; endpoints are dialled directly (Istio's traffic
+  capture puts the sidecar in the path). Two echo pods behind a stub
+  cluster DNS are gathered, called round robin and, when one drains,
+  dropped from the caller's directory before it stops; a call through
+  `ctx.client` continues the trace (echo's parent is the caller's server
+  span) — `service/tests/runner.rs`:
+  `ms8_m9_calls_discover_pods_by_dns_and_target_them_by_node`;
+  `ctx::tests::ms8_links_take_new_directories_per_kind` *(mw-service)*.
+- [x] MS9 Each pod reports its `SenderId` in an `mw-node` response header on
+  health `Check`, recorded by `MeshBrowse`, so `Target::Node` works for
+  DNS-discovered endpoints. The header is 16 lowercase hex digits, also
+  on `Watch` replies (which `MeshBrowse` opens); the id is the FNV-1a hash
+  of `<POD_NAMESPACE>/<POD_NAME>`, fresh per run without a pod name; a
+  node id the browser itself reports wins —
+  `service/tests/runner.rs`:
+  `ms8_m9_calls_discover_pods_by_dns_and_target_them_by_node`,
+  `ms6_serves_admitted_callers_and_drains_on_shutdown`;
+  `run::node::tests::ms9_node_id_hashes_the_pod_identity` *(mw-service)*;
+  `grpc::health::tests::ms9_node_header_value_is_sixteen_lowercase_hex_digits`,
+  `ms9_check_and_watch_replies_carry_the_node_header`, `tests/grpc.rs`:
+  `mesh::ms9_mesh_browse_records_the_node_header_as_the_endpoint_node`
+  *(middleware, features `grpc`, `istio`)*.
+- [x] MS10 A service that publishes or subscribes opens a Zenoh client
+  session to `MW_ZENOH_ROUTER` with the credentials in
+  `MW_ZENOH_CREDENTIALS`; subscriptions follow `subscribes`.
+  Runner side: client mode, no scouting, a bounded connect; no router
+  configured is an error at start; the credentials file is one
+  `user:password` line (zenohd's `usrpwd` dictionary format), never
+  echoed; wrong credentials fail the start; `ctx.publisher()` publishes
+  only declared keys; `on_sample` hooks receive their filter's samples
+  (a bare `subscribes` only declares) —
+  `service/tests/runner.rs`:
+  `ms10_zenoh_session_authenticates_publishes_and_subscribes` (an
+  in-process Zenoh router with a `usrpwd` dictionary on 127.0.0.1);
+  `run::zenoh::tests::ms10_credentials_file_is_one_user_password_line`,
+  `ms10_router_is_required_only_when_the_spec_uses_zenoh`,
+  `ms10_client_config_sets_mode_router_and_credentials`,
+  `builder::tests::ms10_on_sample_declares_the_subscription_and_keeps_the_hook`
+  *(mw-service)*. Router and ACLs: Z19–Z21.
+  *Owners: phase 2A (session), phase 2D (router and ACLs, Z19–Z21).*
+- [x] MS11 `--print-manifests` renders, from typed serde objects, a
+  ServiceAccount (no token automount), Service `<name>` and headless
+  Service `<name>-pods` (port `grpc`, `appProtocol: grpc`), and a
+  Deployment. The Deployment has the pod label
+  `sidecar.istio.io/inject: "true"` and no SPIRE annotation, because the
+  lab's istiod injects the `spire` template by default. Its `grpc` startup,
+  readiness and liveness probes are on the service port with
+  `service: ""`. Its `terminationGracePeriodSeconds` is the drain grace
+  rounded up plus 10 s. It carries the `Config` environment (`MW_PORT`,
+  `POD_NAMESPACE` / `POD_NAME` from the downward API,
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `MW_SERVICE_MAP`, and with pub/sub
+  `MW_ZENOH_ROUTER` / `MW_ZENOH_CREDENTIALS`). Its security context is
+  uid/gid 65532, non-root, read-only root, no privilege escalation, every
+  capability dropped and seccomp `RuntimeDefault`. Labels are
+  `app.kubernetes.io/{name,instance,version,managed-by}`, `app` and
+  `version`; the selector uses only `app.kubernetes.io/{name,instance}`. —
+  `service/tests/manifest.rs`: `ms11_objects_and_deployment_contract`;
+  `manifest::tests::ms11_pure_helpers` *(mw-service)*.
+- [x] MS12 The manifests include an `ALLOW` AuthorizationPolicy whose
+  `from.source.principals` are `allow_callers` without `spiffe://`. An
+  empty list renders no rules, an `ALLOW` policy matching nothing, which
+  admits no caller. Kubelet probes need no rule: they are rewritten to
+  pilot-agent (port 15020, `sidecar.istio.io/rewriteAppHTTPProbers`),
+  which calls the app over loopback, so they never pass Envoy's inbound
+  authorization. There is a DestinationRule `ISTIO_MUTUAL` for each
+  Service FQDN, and a PodDisruptionBudget `minAvailable: 1` only when
+  `replicas > 1`. —
+  `service/tests/manifest.rs`:
+  `ms12_authorization_policy_destination_rules_and_pdb` *(mw-service)*.
+- [x] MS13 Snapshot tests pin the rendered manifests of three fixtures
+  (`demo-echo`, `demo-caller`, `mw-gateway`) byte for byte against
+  `service/tests/golden/*.yaml`, rendered through `Service::execute`
+  (`MW_UPDATE_GOLDEN=1` rewrites them) —
+  `service/tests/manifest.rs`: `ms13_goldens_match_byte_for_byte`
+  *(mw-service)*.
+- [x] MS14 The manifests validate offline with `kubeconform -strict`
+  against vendored Kubernetes 1.31 (standalone-strict) and Istio
+  `security.istio.io/v1` / `networking.istio.io/v1` schemas in
+  `deploy/schemas/` (sources in its README). No SPIRE object is rendered,
+  so no SPIRE schema is needed. — `scripts/check-manifests.sh`.
+- [x] MS15 Every `calls` kind has a `MW_SERVICE_MAP` entry in the rendered
+  environment. The entry parses with `config::parse_service_map` and
+  targets the callee's own headless Service, namespace and port name, so
+  the SRV name is `_grpc._tcp.<callee>-pods.<ns>.svc.cluster.local`. Every
+  rendered principal is an `allow_callers` SPIFFE ID converted to Istio's
+  form. `render` runs the rendered environment through `Config::from_env`
+  and refuses what the runner would refuse. —
+  `service/tests/manifest.rs`:
+  `ms15_service_map_targets_the_callees_headless_service`,
+  `ms15_every_rendered_principal_is_a_converted_spiffe_id`,
+  `ms33_options_and_names_are_checked` *(mw-service)*.
+- [x] MS30 `--print-manifests` takes `--namespace`, `--image`,
+  `--pull-policy Always|IfNotPresent|Never` (default `IfNotPresent`),
+  `--otlp URL` (default the lab's Alloy),
+  `--zenoh-router LOCATOR` (default `tcp/zenohd.<ns>.svc.cluster.local:7447`),
+  `--app-version V` (default the image tag, else `unversioned`) and the
+  repeatable `--route KIND=SERVICE[.NS]`. Each takes a value and may be
+  given once (except `--route`); a malformed value is
+  `ArgsError::InvalidValue`; any of them without `--print-manifests` is
+  refused. The output is exactly `manifest::render`. —
+  `run::tests::ms30_print_manifests_takes_every_option`,
+  `ms30_print_manifests_writes_the_rendered_stream` *(mw-service)*.
+- [x] MS31 A service that publishes or subscribes mounts the Secret
+  `zenoh-<name>` (key `credentials`, mode 0440, not optional, read-only at
+  `/var/run/mw/zenoh/`) with
+  `MW_ZENOH_CREDENTIALS=/var/run/mw/zenoh/credentials`. `--route`
+  overrides a callee's Service and namespace. The pod annotation
+  `proxy.istio.io/config` holds the application until the proxy starts,
+  and sets the sidecar's `terminationDrainDuration` and
+  `MINIMUM_DRAIN_DURATION` to the drain grace rounded up plus 2 s, with
+  `EXIT_ON_ZERO_ACTIVE_CONNECTIONS`, so Envoy outlives the app's drain
+  inside the termination grace. The liveness threshold covers the whole
+  termination grace, so a draining pod is not killed for `NOT_SERVING`. —
+  `service/tests/manifest.rs`: `ms31_zenoh_secret_mount_routes_and_overrides`;
+  `manifest::tests::ms11_pure_helpers` *(mw-service)*.
+- [x] MS32 Over 400 generated service and callee names, every rendered
+  object name, ServiceAccount and Secret name is an RFC 1123 label, and
+  every label value is a valid Kubernetes label value. A name is refused
+  only when the spec is invalid or a `<name>` exceeds 58 bytes, leaving
+  room for `-pods`. — `service/tests/manifest.rs`:
+  `ms32_generated_names_render_only_valid_names_and_labels` *(mw-service)*.
+- [x] MS33 `render` refuses, with a typed error, an over-long name, a
+  namespace that is not a label, a malformed image or version, a route for
+  an uncalled kind, a duplicate or malformed route, and an environment the
+  runner's `Config` would reject (a bad OTLP URL or Zenoh locator, or more
+  than 16 callees) — `service/tests/manifest.rs`:
+  `ms33_options_and_names_are_checked` *(mw-service)*.
+- [x] MS34 The vendored schemas match their recorded checksums, and
+  kubeconform refuses a misspelt field in the core and in the Istio
+  schemas (strictness is verified, not assumed) —
+  `scripts/check-manifests.sh`.
+- [ ] MS16 The ops CLI `mw` (`tools/mw`) builds, loads, applies, inspects
+  and traces services from a pure, unit-tested command plan. The plan and
+  the executor against fake programs are covered (MS60–MS66, below); this
+  stays open until the commands have run against the lab cluster (MS17).
+  *Owner: phase 2F (CLI).*
+- [ ] MS17 The end-to-end run on the lab cluster asserts identity, gather,
+  deadline, trace, drain, Zenoh ACL and gateway discovery, and collects
+  logs. *Owners: phase 3 (e2e), on images from phase 2C (nix).*
+- [x] MS20 `grpc::GrpcResponder::next_call` hands out each queued unary
+  call as an owned `PendingCall` (key, body, `RequestMeta` measured at a
+  given instant, deadline, whether the client still waits) that another
+  task answers with `reply` (a `HandlerError` becomes its status) or
+  `reply_status`; this is how the runner serves async handlers —
+  `grpc::responder::tests::ms6_next_call_hands_over_an_owned_call_answered_later`
+  *(middleware, feature `grpc`)*.
+- [x] MS21 `Service::run_with_options` takes `RunOptions`: an already bound
+  listener, the discovery nameserver and schedule, the downstream dialer
+  (default: direct, 2 s connect timeout), the stop bound (default 5 s)
+  and `without_sidecar` (no principal, no in-process caller check, for
+  loopback tests) — `run::options::tests::ms6_options_default_and_override`,
+  and every test of `service/tests/runner.rs` *(mw-service)*.
+- [x] MS22 `ServiceBuilder::on_sample(filter, hook)` declares the
+  subscription like `subscribes` and keeps a synchronous hook the runner
+  calls with every sample of the filter, in order —
+  `builder::tests::ms10_on_sample_declares_the_subscription_and_keeps_the_hook`,
+  `service/tests/runner.rs`:
+  `ms10_zenoh_session_authenticates_publishes_and_subscribes`
+  *(mw-service)*.
+- [x] MS23 The reference services `service/examples/demo_echo.rs`
+  (`demo/echo`: pod, authenticated caller, trace id and body; three
+  replicas; admits `demo-caller`) and `service/examples/demo_caller.rs`
+  (`demo/hello`: one echo, a gather across the echo pods with their node
+  ids, or a `Target::Node` call) build and their pure parts are tested —
+  `demo_echo` `tests::answers_pod_caller_trace_and_body`, `demo_caller`
+  `tests::body_selects_gather_node_or_any`,
+  `spec_declares_the_dependency_and_callers` *(mw-service examples)*.
+
+#### Ops CLI `mw` (MS60–MS69)
+
+`tools/mw` (package `mw`, std; it links neither `middleware` nor
+`mw-service`, which is only a dev-dependency for the credential contract
+test) is the cluster counterpart of `mwctl`. It takes a binary's name to
+be its service's Kubernetes name (`app.kubernetes.io/name`, the
+Deployment and the Zenoh user). A command and the environment (`MW_*` variables,
+whether the cached lab kubeconfig exists, the clock) are planned purely
+into typed steps that carry their exact argument vectors; a thin executor
+runs them. Tests marked *(mw)* run under `cargo test -p mw`; none contacts
+a cluster, node or network service (the executor tests shadow ssh, scp
+and helm with stand-ins that fail).
+
+- [x] MS60 Every command (`build`, `load`, `apply`, `zenoh apply`,
+  `status`, `logs`, `down`, `trace`, `robot enroll`) has its plan pinned
+  by a unit test, and every name that reaches an argument vector is
+  validated first (RFC 1123 labels, tags, selectors, hosts that cannot be
+  read as options). `zenoh apply` passes `--namespace` to `mw-service`'s
+  `zenoh_router_manifests` example, which takes it in every mode —
+  `tools/mw/src/plan.rs`: the `ms60_*` tests, including
+  `ms60_names_are_validated_before_reaching_argv` and
+  `ms60_a_missing_kubeconfig_is_fetched_first` *(mw)*;
+  `service/examples/zenoh_router_manifests.rs`:
+  `tests::ms60_namespace_is_taken_with_every_mode` *(mw-service example)*.
+- [x] MS61 `mw trace` tells a trace id from a request id, builds Tempo's
+  `/api/traces/<id>` and `/api/search` (logfmt tag, percent-encoded,
+  bounded window) URLs, parses Tempo's OTLP JSON shapes and prints a span
+  tree whose walk terminates on cycles and orphans —
+  `tools/mw/src/tempo.rs`: `ms61_queries_are_told_apart`, `ms61_urls`,
+  `ms61_search_response_gives_trace_ids`,
+  `ms61_fixture_trace_renders_as_a_tree` (hand-written fixture
+  `tools/mw/tests/fixtures/tempo-trace.json`),
+  `ms61_other_tempo_shapes_parse`, `ms61_cycles_and_orphans_terminate`
+  *(mw)*.
+- [x] MS62 `mw robot enroll` parses the lab's `robot-join` output (token,
+  ports, SPIFFE bundle) while ignoring other lines, and renders the robot
+  module's `/var/lib/mw-robot/` contract (MS44): `join-token` mode 0600,
+  `bundle.spiffe`, and `robot.env` with only keys `nix/robot.nix` reads
+  (`MW_ROBOT_NAME`, `MW_SPIRE_SERVER_ADDRESS`, `MW_GATEWAY_ADDRESS`,
+  `MW_GATEWAY_PORT`, `MW_ZENOH_GATEWAY_PORT`); a SPIRE port other than the
+  module's 30081 is refused, since the image cannot be told it at run
+  time — `tools/mw/src/robot.rs`:
+  `ms62_parses_the_lab_output_with_extra_lines`,
+  `ms62_tolerates_other_ports_bare_tokens_and_no_header`,
+  `ms62_rejects_missing_token_or_bundle`,
+  `ms62_files_follow_the_robot_dir_contract` *(mw)*.
+- [x] MS63 `mw zenoh apply` renders, in `mw-service`'s credential format
+  (MS10, MS31, Z19), the router's dictionary Secret `zenohd-auth` (key
+  `dictionary`, one `user:password` line per service, sorted by user) and
+  one `zenoh-<svc>` Secret (key `credentials`, the line `user:password`)
+  per service, from 192-bit hex passwords. The dictionary holds exactly
+  the services named, so every Zenoh service is named each time; robot
+  users are not provisioned — `tools/mw/src/zenoh.rs`:
+  `ms63_passwords_are_hex`,
+  `ms63_secrets_hold_the_sorted_dictionary_and_per_service_credentials`
+  *(mw)*; `tools/mw/tests/exec.rs`:
+  `ms66_zenoh_passwords_reach_only_kubectl` parses each Secret with
+  `zenoh_router::credentials::Credentials::parse` and rebuilds the
+  dictionary with `credentials::dictionary` *(mw)*.
+- [x] MS64 `mw --dry-run` prints every command's plan and runs nothing:
+  with an empty `PATH` every command succeeds and writes no file; usage
+  and planning errors exit 2 — `tools/mw/tests/dry_run.rs`:
+  `ms64_every_command_dry_runs_without_side_effects`,
+  `ms64_usage_and_plan_errors_exit_2` *(mw)*.
+- [x] MS65 The executor runs each step as a program with an argument
+  vector (no shell), pipes a source's output to `kubectl apply -f -` only
+  after the source succeeded, and stops at the first failing step —
+  `tools/mw/tests/exec.rs` (fake nix, kubectl, cargo, just and curl on
+  `PATH`, failing ssh, scp and helm): `ms65_steps_run_as_argv_and_pipe_manifests`,
+  `ms65_the_first_failure_stops_the_run` *(mw)*.
+- [x] MS66 Generated Zenoh passwords reach only kubectl's standard input
+  (never a file under the repository), robot enrollment files land with
+  their modes, and `mw trace` prints the tree for both id kinds —
+  `tools/mw/tests/exec.rs`: `ms66_zenoh_passwords_reach_only_kubectl`,
+  `ms66_robot_enrollment_lands_in_the_robot_dir`,
+  `ms66_trace_prints_span_trees_from_tempo` *(mw)*.
+
+### Containers and the robot VM (nix, MS40–MS58)
+
+The top-level `flake.nix` builds every service binary listed in
+`nix/binaries.nix` as a static musl executable (crane, a pinned
+rust-overlay toolchain, nixpkgs' static musl C compiler for `ring`), wraps
+each in an OCI image, and builds the emulated robot: a NixOS module
+(`nix/robot.nix`) and a QEMU VM on top of it. nixpkgs is nixos-26.05, not
+the lab repo's nixos-24.11, because 24.11 has no spiffe-helper and its
+SPIRE (1.11) is too far behind the lab's SPIRE server (1.15). Checks named
+`checks.<name>` run under `nix flake check`.
+
+- [x] MS40 Every entry of `nix/binaries.nix` (cargo package plus `--example`
+  or `--bin`) builds as `packages.<name>`, a `x86_64-unknown-linux-musl`
+  executable with no ELF interpreter and no shared-library dependencies;
+  `hello` (`service/examples/hello.rs`, kind `demo/hello`, `main` is
+  `Service::main`) proves the pipeline — `checks.image-hello-contents`
+  (readelf on the entrypoint).
+- [x] MS41 `packages.image-<name>` is an uncompressed docker-archive tarball
+  of image `localhost/mw/<name>:<git short rev, or dev>` holding only the
+  binary, CA certificates and zoneinfo: no shell and no `/bin`, `/sbin` or
+  `/usr`; it runs as uid/gid 65532 with the binary as entrypoint and
+  carries the labels `org.opencontainers.image.source`, `.revision` and
+  `.version` — `checks.image-hello-contents`,
+  `checks.image-zenohd-contents`.
+- [x] MS42 Images are reproducible: layers and config are dated at the epoch
+  and the tarball is uncompressed, so a rebuild yields the same bytes —
+  `checks.image-hello-contents` (creation date) and
+  `nix build --rebuild .#image-hello` (bit-identical rebuild).
+- [x] MS43 `packages.image-zenohd` runs zenohd built from the same zenoh
+  release as `Cargo.lock`'s `zenoh` crate (1.10.1, wire compatible with
+  the services); evaluation fails if the lock moves to another release
+  without the pin following — `checks.image-zenohd-contents` and the
+  assertion in `nix/rust.nix`.
+- [x] MS44 The robot module runs spire-agent (join_token attestor, server
+  address, token and SPIFFE-format trust bundle read at run time from
+  `/var/lib/mw-robot`, so the image holds no secret), spiffe-helper as uid
+  1000 writing the SVID, key and bundle to `/run/spiffe`, Envoy (admin
+  127.0.0.1:15000, h2c 127.0.0.1:15001, Zenoh TCP 127.0.0.1:17447) and the
+  robot app as uid 1000. An unprovisioned robot boots with Envoy and the
+  app up and spire-agent held back by its path condition —
+  `checks.robot-boots` (subtest "unprovisioned robot boots").
+- [x] MS45 Provisioned through `/var/lib/mw-robot` against a SPIRE server in
+  the sandbox, the robot attests, receives `spiffe://infra.local/robot/test`
+  for selector `unix:uid:1000`, Envoy loads that SVID without a restart
+  (file-based SDS, reloaded on rename), and an h2c request on 15001 and a
+  TCP stream on 17447 reach a gateway that requires a client certificate
+  from the same trust domain, the request with its `:authority` intact —
+  `checks.robot-boots`.
+- [x] MS46 `nixosConfigurations.robot-vm` builds as a QEMU VM whose launcher
+  (`nix run .#robot-vm -- --tap TAP | --bridge BR [--state DIR]`) attaches
+  a second NIC with the lab MAC (static address 192.168.66.21/24) and
+  shares the state directory as `/var/lib/mw-robot`; it needs no
+  privileges itself — `checks.robot-vm`, `checks.robot-vm-launcher`.
+- [x] MS47 `mw-service` and its examples pass clippy with `-D warnings` in
+  the static musl build — `checks.clippy`.
+- [x] MS48 `nix run .#e2e` builds every image and prints the end-to-end
+  plan without touching the lab (Phase 3 fills in the steps) —
+  `checks.e2e-plan`.
+
+The Raspberry Pi robot (MS49–MS56) is the same robot module on a
+Raspberry Pi Zero 2 W or Pi 3 (both BCM2710, aarch64), which is also the
+MCU gateway for one USB-attached board running the RP base firmware and
+the host of the Linux payload runner `mw-pi-node`. `nix/robot-pi.nix` is
+that role without Pi hardware, `nix/robot-pi-sd.nix` puts it on nixpkgs'
+`sd-image-aarch64`, `nix/gateway.nix` and `nix/pi-node.nix` are the two
+service modules. `nixosConfigurations.robot-pi` evaluates for an aarch64
+build machine, `robot-pi-cross` for an x86_64 one (cross compiled, with
+the kernel and Envoy substituted from the native aarch64 cache).
+
+- [x] MS49 Every entry of `nix/binaries.nix` also builds as a static
+  `aarch64-unknown-linux-musl` executable: `packages.x86_64-linux.<name>-aarch64`
+  cross compiles it (the `pkgsCross.aarch64-multiplatform.pkgsStatic` C
+  compiler for `ring`), `packages.aarch64-linux.<name>` builds it natively;
+  the x86_64 builds are unchanged (same derivations) —
+  `checks.aarch64-static` (readelf: AArch64, no interpreter, no
+  `NEEDED`). Entries whose directory does not exist yet (`mw-pi-node`
+  until `pi-node/` lands) are skipped by the flake. *Verified cross
+  compiled; the native aarch64 build is exercised by the release job
+  (MS55).*
+- [x] MS50 The Pi role runs the robot module with Envoy at one worker, Go
+  memory limits on spire-agent and spiffe-helper, a `MemoryMax` on every
+  service of ours, zstd zram swap of half the RAM and a 48 MiB journal; in
+  a 512 MiB VM it boots with Envoy and the robot app up, spire-agent and
+  sshd held back by their path conditions and no failed unit. Root has no
+  password; sshd reads keys only from `/var/lib/mw-robot/authorized_keys`,
+  starts only once that file exists and never takes a password —
+  `checks.robot-pi-eval`, `checks.robot-pi-boots` (subtests "services up
+  without a Pico", "memory", "sshd with a key file").
+- [x] MS51 `mw-gateway` runs as the system user `mw-gateway`, the only
+  service user in `dialout`, with `MW_GATEWAY_SERIAL=/dev/mw-pico` fixed
+  on its command line (robot.env cannot move it) and systemd hardening
+  (no capabilities, `DevicePolicy=closed` plus `char-ttyACM`, strict file
+  system protection). `70-mw-pico.rules` gives a ttyACM whose USB device
+  is vendor 2e8a, product 000a (RP2040) or 0009 (RP2350), manufacturer
+  `middleware`, product `rp-base` (`firmware-rp/src/usb.rs`) the symlink
+  `/dev/mw-pico` and `SYSTEMD_WANTS=mw-gateway.service`; the unit is
+  bound to that device unit, so with no board it stays inactive (not
+  failed), and it restarts with delays growing from 2 s to 1 min and no
+  start limit. New `MW_GATEWAY_*` variables go into
+  `services.mw-gateway.environment` or robot.env —
+  `checks.robot-pi-eval`, `checks.robot-pi-boots` (subtests "gateway
+  waits for the board", "udev rule installed and valid"). *The board
+  appearing and the gateway starting on it is a hardware step (MS56).*
+- [x] MS52 `mw-pi-node` runs as the system user `mw-pi-node` with its own
+  state directory, `MW_ZENOH_ROUTER` on the robot Envoy, `MW_PORT` 50053
+  (the gateway has 50052), hardening without `MemoryDenyWriteExecute` (a
+  wasm runtime may compile code) and no device access unless
+  `supplementaryGroups` names a group — `checks.robot-pi-eval`,
+  `checks.robot-pi-image` (the unit in the cross image) and
+  `checks.robot-pi-boots` (the node starts, reports its node id and state
+  directory, and retries the router).
+- [x] MS53 `packages.x86_64-linux.sd-image-robot-pi` (cross) and
+  `packages.aarch64-linux.sd-image-robot-pi` (native) are one
+  `mw-robot-pi.img.zst`, at most 600 MiB compressed and 2.5 GiB unpacked (475 MiB and 2097 MiB
+  cross built at the time of writing),
+  with the Pi firmware, `config.txt` (a `[pi02]` section),
+  `u-boot-rpi3.bin` and the firmware's Zero 2 W and Pi 3 device trees on
+  the FAT partition, the kernel's `bcm2837-rpi-zero-2-w.dtb` and
+  `bcm2837-rpi-3-b*.dtb` for U-Boot, a unit for every service and the
+  udev rule in the system, static AArch64 `mw-gateway` and `mw-robot`,
+  and the root file system holding only `boot/` and `nix/` —
+  `checks.robot-pi-image` (x86_64, on the cross image). *The native
+  image and `checks.aarch64-linux.robot-pi-image` run only in the release
+  job (MS55).*
+- [x] MS54 No secret or site setting is in the image: no network,
+  token, bundle, robot.env, Wi-Fi file, authorized key or SSH host key in
+  `/etc` or any store path of the closure. At boot `mw-provision` moves
+  `join-token`, `bundle.spiffe`, `robot.env`, `wpa_supplicant.conf` and
+  `authorized_keys` from the FAT partition's `mw-robot/` into
+  `/var/lib/mw-robot` (0600 root, the bundle 0644) and deletes them there;
+  `mw-wifi` runs wpa_supplicant on wlan0 only when `wpa_supplicant.conf`
+  exists; eth0 and wlan0 use DHCP unless robot.env sets `MW_NET_ADDRESS`
+  (with `MW_NET_INTERFACE`, `MW_NET_GATEWAY`, `MW_NET_DNS`), which
+  `mw-net-config` writes as a networkd file before networkd starts, a
+  malformed value leaving DHCP in place — `checks.robot-pi-eval`,
+  `checks.robot-pi-image`, `checks.robot-pi-boots` (subtests "provision
+  from the boot partition", "static address from robot.env").
+- [ ] MS55 `.github/workflows/release-robot-pi.yml`, apart from the
+  esp-base release: on a tag `robot-pi-v<version>` its `sd-image` job
+  (ubuntu-24.04-arm, `cachix/install-nix-action@v31`) builds the native
+  image and its check, and `release` attaches `mw-robot-pi-<tag>.img.zst`
+  and its `.sha256` to that tag's release (created if missing); a manual
+  run keeps both as an artifact and publishes nothing. Untrusted values
+  reach `run:` only through `env`. *Open until a tag or manual run shows
+  the job working.*
+- [ ] MS56 On a Raspberry Pi Zero 2 W: the image boots from the card,
+  joins Wi-Fi from a dropped `wpa_supplicant.conf`, and plugging in a
+  Pico with the RP base firmware creates `/dev/mw-pico` and starts
+  `mw-gateway`. *Hardware procedure; not yet run.*
+- [x] MS57 The static musl service binaries get past their Zenoh
+  configuration at start: on the main thread of a static musl binary
+  `stacker` cannot measure the stack and the configuration parse failed
+  with "stack limit reached", so `mw-gateway` and `mw-pi-node` drive their
+  runtime on one spawned thread with an 8 MiB stack
+  (`mw_service::block_on_thread`, `MAIN_STACK_BYTES`) —
+  `stack::tests::ms57_the_future_runs_on_a_spawned_thread_and_returns_its_output`,
+  `ms57_the_zenoh_configuration_parses_on_that_thread`,
+  `ms57_a_panic_on_the_thread_reaches_the_caller` *(mw-service)*;
+  `checks.static-startup` (the x86_64 static `mw-gateway` and `mw-pi-node`
+  started against a loopback router report no configuration error).
+- [x] MS58 The Pi image does not wait for `network-online.target`
+  (`systemd.network.wait-online.enable = false`): an unprovisioned Pi
+  never comes online, and the wait failed a unit on every boot; Envoy
+  retries its upstream connections itself — `checks.robot-pi-eval`,
+  `checks.robot-pi-boots` (subtest "services up without a Pico, nothing
+  failed").
+
+### Robots and MCU gateway (RG…)
+
+Two binaries bring devices outside the cluster into the same identity and
+pub/sub fabric. `mw-robot` (crate `robot/`) is the Linux robot
+application: it runs off cluster behind the robot's local Envoy, which
+holds mTLS with the robot's SVID (`spiffe://infra.local/robot/<name>`,
+issued through spire-agent's join token attestor) to the cluster's
+ingress gateway, so the application itself speaks plaintext to loopback:
+h2c to `127.0.0.1:15001` for calls and TCP to `127.0.0.1:17447` for its
+Zenoh session to zenohd. `mw-gateway` (crate `gateway/`) bridges one
+serial-attached middleware device (the ESP base firmware) to Zenoh: the
+device's `app/**` publications, its `disc/<kind>` beacons (re-announced
+as `ZenohDiscovery` services bound to the device's MAC, under the
+firmware's E21 rules), allowlisted `sys/*` requests through the served
+kind `gw/sys`, and signed updates (payloads, RP2350 firmware) from the
+updaters it allowlists, under the device's own over-the-air rules
+(RG20–RG27). Both are built on `mw-service`; both keep their decisions
+in pure cores (`robot::telemetry`, `gateway::bridge`) behind thin shells.
+The gateway's key mapping: without `MW_GATEWAY_NAMESPACE` device and
+cluster keys are identical (the ESP32-CAM's `app/cam/jpeg` stays
+`app/cam/jpeg`); with namespace `<ns>` the device's `app/<rest>` is the
+cluster's `app/<ns>/<rest>`. Tests marked *(mw-robot)* or *(mw-gateway)*
+run under `cargo test -p <crate>` and `cargo test --workspace`; none opens
+a serial port, and network tests use 127.0.0.1 only.
+
+- [x] RG1 The robot's state counts ticks, answered and failed calls and
+  the last round trip; its telemetry on `app/robot/<name>/state` is one
+  JSON object naming the tick's trace (`traceparent` form) —
+  `telemetry::tests::rg1_state_counts_ticks_and_outcomes`,
+  `rg1_telemetry_is_one_json_object_with_the_trace` *(mw-robot)*.
+- [x] RG2 `RobotConfig::from_env` requires `MW_ROBOT_NAME` (an RFC 1123
+  label) and parses `MW_ROBOT_PERIOD_MS` (10 ms to 1 h, default 1 s) and
+  `MW_ROBOT_CALL` (a `Service/Method` kind, default `demo/echo`); the
+  service is `robot/<name>`, calling that kind and publishing
+  `app/robot/<name>/**` —
+  `config::tests::rg2_robot_config_parses_and_requires_a_name`
+  *(mw-robot)*.
+- [x] RG3 Off cluster the runner configuration defaults to the local
+  Envoy: `MW_ZENOH_ROUTER` `tcp/127.0.0.1:17447`, and a called kind that
+  neither `MW_STATIC_ENDPOINTS` nor `MW_SERVICE_MAP` maps gets
+  `<kind>=127.0.0.1:15001@<kind with - for />.apps.svc.cluster.local:50051`;
+  configured values win —
+  `config::tests::rg3_runner_defaults_point_at_the_local_envoy`
+  *(mw-robot)*.
+- [x] RG4 Each tick the robot starts a sampled root span with request id
+  `<name>-<seq>`, calls the kind through `Ctx::client` over its static
+  endpoint with a deadline of one period, and publishes its state through
+  `Ctx::publisher`; in process (the "Envoy" a direct loopback hop to a
+  gRPC echo service, a Zenoh session on loopback for the router) the echo
+  handler sees the robot's span as `traceparent` and its request id, the
+  published state names the same trace, and a robot whose called kind has
+  no static endpoint fails at start with `ServiceError::Unmapped` —
+  `robot/tests/robot.rs`:
+  `rg4_robot_calls_through_its_envoy_with_trace_and_publishes_state`,
+  `rg4_robot_without_a_static_endpoint_fails_at_start` *(mw-robot)*.
+- [x] RG5 `mw-service` gains static endpoints (an additive API change):
+  `MW_STATIC_ENDPOINTS=<kind>=[http://]<dial host:port>@<authority host:port>,...`
+  parses into `Config::static_endpoints` (`endpoints::StaticEndpoints`;
+  malformed entries and repeated kinds are `ConfigError::StaticEndpoint`
+  naming the entry); `StaticEndpoint::client` is a `MeshClient` dialing
+  through the address with the authority as `:authority` and a
+  one-record, never-expiring directory; `Config::static_endpoint` looks a
+  kind up and `unmapped_calls` counts statically mapped kinds as mapped —
+  `endpoints::tests::rg5_static_endpoints_parse_dial_and_authority`,
+  `rg5_static_endpoint_errors_name_the_entry`,
+  `rg5_static_client_routes_the_kind_to_the_authority`,
+  `config::tests::rg5_static_endpoints_map_calls_off_cluster`
+  *(mw-service)*. *The runner's own use of it (MS8) is phase 2A's.*
+- [x] RG6 `KeyMap` maps `app` and the keys below it between device and
+  cluster, identically or under one namespace segment, segment-wise (so
+  `app/benchmark` is not under `app/bench`), refusing keys that would
+  exceed the key length — `bridge::tests::rg6_key_map_identity_and_namespace`
+  *(mw-gateway)*.
+- [x] RG7 A device's `app/**` publication is relayed on the mapped key
+  with its payload unchanged; `sys/log` is kept in the log tail and never
+  published; any other key (`sys/payload/status`, ...) stays on the
+  device — `bridge::tests::rg7_app_publications_map_and_others_stay`
+  *(mw-gateway)*.
+- [x] RG8 A beacon from the bound device is announced with node = the
+  device (filled in when the beacon names none); a refresh announces
+  nothing, a changed record is re-announced, a goodbye withdraws, a
+  goodbye for an unknown record does nothing —
+  `bridge::tests::rg8_beacons_announce_with_the_device_node` *(mw-gateway)*.
+- [x] RG9 E21 on the serial link: the gateway learns the device's node id
+  from its `sys/info` reply (retried every 2 s, rechecked every 30 s) and
+  refuses every beacon until then; a device without a node id never
+  binds; with `MW_GATEWAY_DEVICE_MAC` only that device binds; a beacon
+  declaring another node is refused; the device holds at most 4 records
+  and a new one beyond is refused, never evicting; a different device on
+  the port withdraws the previous one's records. Refusals are counted —
+  `bridge::tests::rg9_beacons_are_bound_to_the_device`,
+  `rg9_device_cap_and_rebinding` *(mw-gateway)*.
+- [x] RG10 Records whose TTL runs out are withdrawn —
+  `bridge::tests::rg10_expiry_withdraws` *(mw-gateway)*.
+- [x] RG11 Cluster samples reach the device only on the configured
+  downlink filters (at most 8, under the cluster prefix), mapped back to
+  the device's keys — `bridge::tests::rg11_downlink_only_for_declared_filters`;
+  `gateway/tests/gateway.rs`:
+  `rg11_cluster_samples_reach_the_device_on_declared_filters_only`
+  *(mw-gateway)*.
+- [x] RG12 `gw/sys` takes `[key_len][key][body]`. Update keys
+  (`sys/loader/*`, `sys/payload/start|stop|status`, `sys/trust/info`,
+  `sys/fw/*`) are decided by the update gate (RG20) and never by the
+  plain allowlist; `sys/trust/claim` is always `Denied`. Of every other
+  key only exact allowlisted `sys/...` keys pass (default `sys/info`,
+  forwarded to the device, and `sys/log`, answered from the log tail),
+  and listing an update or trust key in `MW_GATEWAY_SYS_ALLOW` does not
+  open it; the rest is `Denied` and counted. Without updaters every
+  update request is `Denied` too —
+  `bridge::tests::rg12_sys_allowlist`, `rg12_sys_request_body_round_trips`
+  *(mw-gateway)*.
+- [x] RG13 Bounds: the log tail keeps the newest 2 KiB; at most 4 device
+  requests are outstanding, each failing with `DeadlineExceeded` at its
+  deadline; the shell's queues (uplink 32, discovery 16, commands 16) drop
+  the newest item when full and count it, never displacing a queued one;
+  a handler with no gateway answers `Unavailable` —
+  `bridge::tests::rg13_log_tail_keeps_the_newest_bytes`,
+  `rg13_pending_is_bounded_and_expires`,
+  `shell::tests::rg13_full_queues_drop_the_newest_and_count`,
+  `rg13_detached_sys_forward_is_unavailable` *(mw-gateway)*.
+- [x] RG14 `io::ChannelIo` is an `embedded-io-async` byte stream over two
+  bounded channels (the serial port's two threads in the binary, an
+  in-memory cable in tests) that keeps the unread part of a chunk and
+  reports a closed peer — `io::tests::rg14_pair_carries_bytes_both_ways_and_keeps_partial_chunks`
+  *(mw-gateway)*.
+- [x] RG15 `GatewayConfig::from_env` parses `MW_GATEWAY_SERIAL` (default
+  `/dev/ttyUSB0`), `MW_GATEWAY_BAUD` (115200), `MW_GATEWAY_NAMESPACE`,
+  `MW_GATEWAY_DOWNLINK`, `MW_GATEWAY_SYS_ALLOW`, `MW_GATEWAY_DEVICE_MAC`,
+  `MW_GATEWAY_SYS_TIMEOUT_MS` (2000) and `MW_GATEWAY_ALLOW_CALLERS`; a
+  malformed value names its variable —
+  `config::tests::rg15_defaults`, `rg15_parses_every_variable`,
+  `rg15_malformed_values_name_the_variable` *(mw-gateway)*.
+- [x] RG16 End to end over an in-memory serial cable and Zenoh on
+  loopback: a fake device's `disc/cam/jpeg` beacon shows up in a cluster
+  session's `ZenohDiscovery` browse as `Up` with node = the device's MAC,
+  and its goodbye as `Down`; a beacon naming another node is never
+  announced while the device's own beacons are —
+  `gateway/tests/gateway.rs`:
+  `rg16_device_beacon_is_announced_on_zenoh_with_the_device_node`,
+  `rg16_spoofed_beacon_is_refused` *(mw-gateway)*. On hardware: the RP
+  base firmware announces itself and its served keys on the serial link
+  (V21–V24; the run behind the gateway is V25, open); the ESP32-CAM's
+  firmware still sends its beacon on ESP-NOW only, so its hardware run
+  needs the beacon on the serial port too (README, "MCU gateway").
+- [x] RG17 A camera frame cut into `middleware::stream` chunks (166 data
+  bytes, as the camera route) crosses the gateway byte for byte and in
+  order on `app/cam/jpeg`, and reassembles to the frame —
+  `gateway/tests/gateway.rs`: `rg17_camera_chunks_cross_the_gateway_intact`
+  *(mw-gateway)*.
+- [x] RG18 Through the served kind `gw/sys` (the `mw-service`
+  `ServiceHandler` the runner calls) of a gateway with no updaters (the
+  default): `sys/info` reaches the device and returns its `DeviceInfo`;
+  `sys/loader/begin`, `chunk`, `commit`, `sys/trust/claim` and
+  `sys/payload/start` are `Denied` and never reach the device; `sys/log`
+  returns the device's log lines. With updaters configured, RG25 and
+  RG26 cover what reaches the device and for whom —
+  `gateway/tests/gateway.rs`:
+  `rg18_sys_info_is_forwarded_and_the_loader_is_refused` *(mw-gateway)*.
+- [x] RG19 Both crates are host only: no embedded feature set depends on
+  them, `mw-robot` enables no embedded feature of `middleware`, and
+  `mw-gateway` enables only `serial` (the link codec) beside its host
+  features (`zenoh`; `grpc` and `istio` for `serve_sys`, RG22) and
+  `trust` (the update gate verifies control signatures with the device's
+  own `loader::trust::verify_signature`, Ed25519 and P-256 alike, RG20;
+  `trust` is no_std crypto and pulls in nothing of the host set) —
+  `scripts/check-features.sh` (block "RG19", and both crates in
+  `CLOUD_CRATES` for every F1 set).
+
+**Updates through the gateway (RG20–RG27).** Over its serial port the
+device grants physical-access authority (a serial `begin` stops the
+payload, `start`/`stop` are unsigned, an unclaimed device accepts any
+commit), and every `gw/sys` request reaches it that way. So the gateway's
+pure update gate (`gateway::update`) applies the device's over-the-air
+policy (`esp_base::ota::admit`, O-section) to mesh callers, with the
+caller's SPIFFE ID (`RequestMeta::principal`, from the sidecar's
+`x-forwarded-client-cert`) in place of the radio peer's MAC, and only for
+principals in `MW_GATEWAY_UPDATERS` (empty by default: updates
+disabled). The device still verifies every signed commit; the gateway
+only refuses more. Unsigned `start`/`stop` are refused for updaters as
+well: the gateway requires and verifies the signed control request the
+device requires over the air, then forwards the serial form (empty
+body).
+
+| `gw/sys` key | not an updater | updater, device not known claimed | updater, claimed device |
+|--------------|----------------|-----------------------------------|-------------------------|
+| `sys/trust/info`, `sys/fw/info`, `sys/payload/status` | `Denied` | forwarded (read only) | forwarded (read only) |
+| `sys/loader/begin`, `sys/fw/begin` | `Denied` | `Denied` | starts a transfer owned by the caller; another caller's live transfer: `InvalidRequest`, that transfer untouched |
+| `sys/loader/chunk`, `sys/fw/chunk` | `Denied` | `Denied` | the owner of a transfer of that kind only, else `InvalidRequest` |
+| `sys/loader/commit`, `sys/fw/commit` | `Denied` | `Denied` | owner first (else `InvalidRequest`, untouched); then signed only (`[version][signature]`, or the 64-byte firmware signature): unsigned is `Denied` and ends the owner's transfer; forwarded, the device checks the signature; the transfer ends with the answer |
+| `sys/fw/reboot`, `confirm`, `abort` | `Denied` | `Denied` | forwarded unless another caller's transfer is live (`InvalidRequest`) |
+| `sys/payload/start`, `stop` | `Denied` | `Denied` | a signed control request only, verified by the gateway with the device's own check for the pinned key's kind (Ed25519 or ECDSA P-256, `loader::trust::verify_signature`; pinned key from `sys/trust/info`, target = the first six bytes of the device's node id, the op, counter strictly above the last accepted, persisted before forwarding, RG27); forwarded with an empty body; else `Denied`; no known floor: `Unavailable` |
+| `sys/trust/claim`, unknown `sys/fw/*`, `sys/trust/*` | `Denied` | `Denied` | `Denied` |
+
+"Claimed" is the device's last `sys/trust/info` answer: the gateway asks
+after binding and on every recheck, and forwarded answers update it; a
+different device on the port forgets it and the transfer. A transfer
+left idle for 60 s is abandoned (the next `begin` takes over). Every
+mutating request needs an `x-request-id`; a resend with the same id from
+the same principal is answered from a bounded replay cache (8 entries,
+120 s): `Unavailable` while the first copy is at the device, its answer
+afterwards, `InvalidRequest` if the id names another request, and the
+device's answer is kept even when it arrives after the caller's
+deadline. A device body that would not fit one serial frame is refused
+before it is sent. The gateway waits `MW_GATEWAY_UPDATE_TIMEOUT_MS`
+(default 20 s) for an update answer; the caller waits at most that and
+its own deadline. The client is `mw-update` (`gateway::remote`), which
+runs `mwctl`'s own `upload` and `fw_update` over a `gw/sys` endpoint.
+
+- [x] RG20 The update gate decides every row of the table above: only
+  updaters pass, a disabled gate denies all; read-only keys need no claim;
+  mutations need a claimed device; one transfer at a time, owned by its
+  caller, others' begin/chunk/commit/reboot/confirm/abort refused without
+  disturbing it, an idle transfer taken over after 60 s; commits signed
+  only (an unsigned one ends the owner's transfer); start/stop only with a
+  verified signed control request (wrong op, device, key or an old
+  counter refused, the counter used up, forwarded with an empty body),
+  verified with the device's own check for the pinned key's kind, so a
+  P-256-claimed device's signed start passes and a forged one (another
+  P-256 key, an Ed25519 key, a flipped bit) is refused exactly where the
+  device's `accept_control` refuses it; a new device forgets trust and
+  transfer; `sys/trust/claim` never passes —
+  `update::tests::rg20_keys_classify_and_claim_never_passes`,
+  `rg20_only_updaters_pass_and_disabled_denies_all`,
+  `rg20_read_only_requests_need_no_claim`,
+  `rg20_one_transfer_owned_by_its_caller`,
+  `rg20_an_idle_transfer_is_taken_over`, `rg20_commits_must_be_signed`,
+  `rg20_start_and_stop_need_a_verified_signed_control`,
+  `rg20_a_p256_pinned_key_is_verified_as_the_device_does`,
+  `rg20_another_device_forgets_trust_and_transfer`; end to end through
+  `gw/sys` to a fake device claimed with a P-256 key, `gateway/tests/updates.rs`:
+  `rg20_a_p256_claimed_devices_signed_start_passes_and_a_forged_one_is_refused`
+  *(mw-gateway)*.
+- [x] RG21 Resends act once: mutating requests need an `x-request-id`; a
+  repeat while in flight is `Unavailable`, an answered one is replayed
+  (refusals included), the same id for another request is
+  `InvalidRequest`, another principal's identical id is a different
+  request, an unanswered request is forgotten so its resend goes out
+  again; the cache is bounded (oldest answered entry dropped, in-flight
+  entries never displaced, large answers not kept) and ages out; a body
+  over one serial frame is refused and a full 512-byte chunk fits; the
+  handler waits the update timeout for update keys, cut to the caller's
+  deadline; the client resends with the same id on `DeadlineExceeded`,
+  `Unavailable` or a transport failure, at most `--attempts` times, and
+  stops at any other answer —
+  `update::tests::rg21_resends_are_answered_once_and_oversized_bodies_refused`,
+  `update::replay::tests::rg21_a_request_runs_once_and_repeats_replay_its_answer`,
+  `rg21_the_cache_is_bounded_and_expires`,
+  `shell::tests::rg21_the_wait_follows_the_key_and_the_callers_deadline`,
+  `remote::tests::rg21_resends_carry_the_same_request_id`,
+  `rg21_final_answers_and_exhausted_attempts` *(mw-gateway)*.
+- [x] RG22 The gateway's `serve_sys` answers `gw/sys` calls taken with
+  `middleware::grpc::GrpcResponder::next_call` (MS20): each owned
+  `PendingCall` gives the key, body and `RequestMeta` with the deadline
+  measured when read, and is answered with its result or the error's gRPC
+  status; any key but `gw/sys` is `NotFound` —
+  `grpc::responder::tests::ms6_next_call_hands_over_an_owned_call_answered_later`;
+  `serve_sys` through RG25 and RG26.
+- [x] RG23 `GatewayConfig::from_env` parses `MW_GATEWAY_UPDATERS` (up to
+  8 SPIFFE IDs, default none), `MW_GATEWAY_UPDATE_TIMEOUT_MS`
+  (1..=120000, default 20000) and `MW_GATEWAY_STATE` (an absolute
+  directory, default `/var/lib/mw-gateway`); updaters are admitted to
+  `gw/sys` beside `MW_GATEWAY_ALLOW_CALLERS`; `bridge_with_floor` sets
+  the control counter floor and `bridge()` has none (fail closed);
+  malformed values name the variable —
+  `config::tests::rg23_updaters_and_update_timeout_parse`,
+  `rg15_defaults` *(mw-gateway)*.
+- [x] RG24 `mw-update`'s command line (`info`, `upload --key [--version]
+  [--start [--counter]]`, `start|stop --key [--counter]`, `fw info|update
+  --key [--version] [--no-reboot]|reboot|confirm|abort`, `--endpoint` or
+  `MW_STATIC_ENDPOINTS`'s `gw/sys` entry, `--timeout`, `--attempts`)
+  parses purely, requires a key for every signed request (`--key
+  <KEYFILE>`, an Ed25519 key file, or `--pkcs11 <LABEL>`, a token key such
+  as the TPM's P-256 `mw-release`; one of them) and refuses misplaced
+  options; jobs load their files through an injected reader, open a token
+  key through an injected opener, and default the version and counter to
+  the clock —
+  `remote::cli::tests::rg24_command_line_parses_each_command`,
+  `rg24_command_line_errors`, `remote::tests::rg24_jobs_load_their_inputs`
+  *(mw-gateway)*.
+- [x] RG25 End to end (in-memory cable, a claimed fake device running the
+  real loader and trust check, `gw/sys` over gRPC on 127.0.0.1 behind
+  stand-in sidecars setting `x-forwarded-client-cert`, `mw-update`'s
+  `MeshSysCall` through a static endpoint): a caller not in
+  `MW_GATEWAY_UPDATERS` is `Denied` and no loader or payload request
+  reaches the device; the updater's signed upload installs (begin, three
+  chunks, the 68-byte signed commit) and its signed start reaches the
+  device with an empty body; an unsigned (wrongly signed) start is
+  `Denied`; a replayed version is refused by the device; a resend with
+  the same request id runs once, a reused id is refused, and a device
+  answer arriving after the caller's deadline is replayed to the resend
+  instead of the request running again — `gateway/tests/updates.rs`:
+  `rg25_an_updater_uploads_a_signed_payload_and_others_are_denied`,
+  `rg25_a_resend_with_the_same_request_id_runs_once`,
+  `rg25_a_late_answer_after_the_callers_deadline_is_replayed_not_rerun`
+  *(mw-gateway)*.
+- [x] RG26 End to end as RG25 with the fake device a Pico 2 running the
+  real `FwService` on the in-memory RP2350 bootrom model: a non-updater's
+  `fw update` is `Denied`; the updater's goes through `sys/fw/info`,
+  `begin`, every 512-byte chunk, the signed `commit`, `reboot` and
+  `confirm`, and `sys/fw/info` then reports Confirmed —
+  `gateway/tests/updates.rs`:
+  `rg26_an_rp2350_firmware_update_reaches_the_device_and_is_confirmed`
+  *(mw-gateway)*. Open: the `mw-gateway` binary serves `gw/sys` only once
+  the runner does (MS6); after a real Pico 2 reboots, its USB device
+  re-enumerates and the gateway exits for its supervisor to restart (not
+  run on hardware).
+- [x] RG27 The signed start/stop counter floor survives restarts on a
+  host without a real-time clock and fails closed. Every accepted
+  counter is written to `<MW_GATEWAY_STATE>/control-counter` (temporary
+  file, fsync, rename, directory fsync; never lowered) before the request
+  is forwarded; a failed write (or no store at all) refuses the request
+  `Unavailable`, rolls the counter back, counts it and forwards nothing.
+  At start the floor is the larger of the persisted counter and the
+  clock, the clock counting only from 2026-01-01T00:00:00Z on; with no
+  state and an unsynced or unreadable clock, or an unreadable state
+  file, there is no floor and every signed start/stop is `Unavailable`,
+  never a floor of 0. Uploads stay available without a floor: the device
+  checks and persists a signed commit's version itself. One floor serves
+  the port, not one per device: a counter accepted for one device only
+  raises the bar for the next, and the signed MAC keeps a captured
+  request from working on another device. The floor does not depend on
+  the pinned key's kind: a P-256 signed start is persisted before it is
+  forwarded like an Ed25519 one —
+  `state::tests::rg27_the_floor_is_the_persisted_counter_or_a_sane_clock`,
+  `rg27_a_saved_counter_survives_a_restart_and_beats_a_backwards_clock`,
+  `rg27_a_write_failure_is_an_error`,
+  `update::tests::rg27_without_a_floor_start_and_stop_fail_closed_and_uploads_stay`,
+  `rg27_an_unpersisted_counter_is_rolled_back_and_nothing_forwarded`;
+  `gateway/tests/updates.rs`:
+  `rg27_a_start_whose_counter_cannot_be_persisted_is_refused_not_forwarded`,
+  `rg27_an_accepted_start_is_persisted_before_it_reaches_the_device`,
+  `rg20_a_p256_claimed_devices_signed_start_passes_and_a_forged_one_is_refused`
+  (its persisted counter) *(mw-gateway)*.
+
 ### Key-value persistence (KV…)
 
 The `kv` module: a key-value store behind the async `KvStore` trait and the
@@ -1074,6 +2160,191 @@ below without a prefix runs under every one of those modules that applies.
 - [ ] KV11 *(kv-file)* A failed append or sync rolls back or poisons the
   store as documented. Not yet tested: needs fault injection.
 
+### SMBus multi-master transport (SB…)
+
+`smbus` (feature `smbus`, `no_std`, no heap): the middleware over one I2C
+bus shared by several microcontrollers, using SMBus conventions. Every node
+is a master when it sends (an `embedded-hal-async` 1.0 `I2c`) and a target
+at its own 7-bit address when it receives (the crate's own `I2cTarget`
+trait, since `embedded-hal` 1.0 has none, implemented by a HAL adapter);
+a `Clock` (milliseconds now, microsecond waits) times retries, timeouts and
+reassembly. Unicast (requests, replies, errors, `Target::Node`) is an SMBus
+Block Write to the destination; publications are Block Writes to a shared
+broadcast address, the I2C general call `0x00` by default. Messages larger
+than a block stream across up to 128 blocks. The pure core is
+`smbus::{address, wire, reassembly, retry}`; `smbus::node::SmbusNode` is the
+shell. Tests marked *(smbus)* run under `--features smbus` or
+`--all-features`.
+
+- [x] SB1 Addresses are validated 7-bit values: a node address refuses the
+  I2C reserved ranges (UM10204 §3.1.12: `0x00..=0x07`, `0x78..=0x7F`) and
+  the SMBus reserved addresses (SMBus 2.0 appendix C: `0x08` host, `0x0C`
+  alert response, `0x28` and `0x37` ACCESS.bus, `0x61` ARP default), 107
+  addresses remain; the broadcast address is the general call or any node
+  address; a node's `SenderId` is `SMB` followed by its address and maps
+  back to it, and foreign ids map to nothing —
+  `smbus::address::tests::sb1_reserved_ranges_are_refused`,
+  `sb1_every_other_seven_bit_address_is_a_node`,
+  `sb1_broadcast_accepts_general_call_and_node_addresses`,
+  `sb1_sender_ids_round_trip_and_reject_foreign_ids`; `tests/smbus.rs`:
+  `sb1_reserved_addresses_build_no_node` *(smbus)*.
+- [x] SB2 Each fragment is one SMBus Block Write with PEC: command `0xC0`
+  plus the kind (publish 1, request 2, reply 3, error 4), count, then data
+  holding the sender's address, the message id, the fragment index with a
+  last flag, and the fragment's body; the block size `B` is a const generic
+  from 4 to 255 (32 by default, SMBus 2.0). Decoding checks length and
+  count, then the PEC, then the command and the sender, and never panics:
+  every single-bit corruption is rejected, the PEC binds the destination
+  address, foreign commands and reserved senders are refused, and 20 000
+  pseudo-random inputs pass through both decoders —
+  `smbus::wire::tests::sb2_block_layout_is_smbus_block_write_with_pec`,
+  `sb2_blocks_round_trip_for_every_kind_and_size`,
+  `sb2_bad_blocks_are_rejected`,
+  `sb2_foreign_commands_and_bad_sources_are_rejected_after_the_pec`,
+  `sb2_encode_refuses_what_does_not_fit`, `sb2_hostile_input_never_panics`
+  *(smbus)*.
+- [x] SB3 The SMBus Packet Error Code is CRC-8/SMBUS (polynomial `0x07`,
+  init 0, no reflection) in `crc`, computed incrementally over the address
+  byte with R/W̄, the command, the count and the data: catalogue check
+  value `0xF4`, single-byte and Block Write vectors cross-checked with an
+  independent implementation, and a transaction followed by its PEC
+  checksums to zero — `crc::tests::reference_check_values`,
+  `crc::tests::sb3_crc8_smbus_vectors`.
+- [x] SB4 Message bodies: a publish is key length, key, payload; a request
+  carries the caller's deadline (32-bit milliseconds, all ones for none)
+  before its key; a reply is the response; an error is one
+  `HandlerError::code`. Bodies are cut into fragments straight from the
+  caller's key and payload (no copy of the whole message); a body needs at
+  most 128 fragments (3 712 bytes at `B` = 32) and every node also bounds it
+  by its `M` (512 by default); malformed bodies are rejected —
+  `smbus::wire::tests::sb4_message_bodies_round_trip_through_fragments`,
+  `sb4_fragment_counts_are_bounded`, `sb4_malformed_bodies_are_rejected`
+  *(smbus)*.
+- [x] SB5 Reassembly keeps up to `R` messages in `M`-byte slots keyed by
+  sender, kind and message id, so interleaved fragments of several masters
+  (and of several messages of one) reassemble independently; in-order
+  fragments are appended, index 0 restarts, a repeated fragment is ignored,
+  a skipped one abandons the message, a message over `M` is discarded, a
+  fragment with no message in progress is an orphan, a partial message
+  older than the reassembly timeout on the caller's clock is expired, and a
+  full table evicts the oldest; every discard is counted and nothing
+  partial is ever returned —
+  `smbus::reassembly::tests::sb5_in_order_fragments_complete_and_free_the_slot`,
+  `sb5_interleaved_masters_reassemble_independently`,
+  `sb5_duplicates_are_ignored_and_gaps_abandon_the_message`,
+  `sb5_index_zero_restarts_a_partial_message`,
+  `sb5_oversized_messages_are_discarded`,
+  `sb5_partial_messages_expire_on_the_callers_clock`,
+  `sb5_a_full_table_evicts_the_oldest_message`,
+  `sb5_hostile_fragment_streams_never_panic_or_return_partials` *(smbus)*.
+- [x] SB6 Failed blocks are retried per block under a bounded policy: lost
+  arbitration up to 8 times, NACKs up to 3 times (counted apart, so a block
+  is written at most 10 times), a broadcast whose address nobody
+  acknowledges is dropped at once as unheard, bus errors propagate at once.
+  The backoff after the k-th failure is a whole number of slots from a
+  window that doubles per failure (up to 32 slots of 1 ms) chosen by an
+  integer hash of the node's address, plus a sub-slot offset unique to the
+  address, so two colliding masters never wait the same time; no RNG, no
+  floating point; the worst case is under 250 ms per block —
+  `smbus::retry::tests::sb6_backoff_stays_within_its_window`,
+  `sb6_backoff_is_deterministic_and_differs_between_addresses`,
+  `sb6_arbitration_loss_is_retried_a_bounded_number_of_times`,
+  `sb6_nacks_and_bus_errors`, `sb6_hal_error_kinds_map_to_faults` *(smbus)*.
+- [x] SB7 A node's configuration refuses a broadcast address equal to its
+  own and a default peer equal to its own or the broadcast address.
+  `Target::Node` must name an SMBus node other than itself (anything else is
+  `UnsupportedTarget`); `Target::Any` goes to the configured default peer
+  and is `NoTarget` without one (the bus has no service routing) —
+  `smbus::node::tests::sb7_config_refuses_self_addressing`,
+  `sb7_targets_resolve_to_node_addresses_only` *(smbus)*.
+- [x] SB8 Completed publications and requests go to an inbox of `Q` entries
+  (4 by default) that every receive drains the adapter into first (up to 64
+  transactions without waiting); a full inbox drops the arriving message
+  and counts it, queued requests expire (see SB18). `DELIVERY` is
+  `DropNewest` with per-sender order. Publications carry the sender's 8-bit
+  sequence, and the gap is exact per sender: messages lost on the bus or
+  dropped by the inbox or by a full adapter show up in the next accepted
+  sample's gap; a repeated sequence is a duplicate and dropped —
+  `smbus::node::tests::sb8_inbox_keeps_arrival_order_per_kind_and_drops_the_newest`,
+  `sb8_queued_requests_expire_on_their_deadline`; `tests/smbus.rs`:
+  `sb9_smbus_overload_matches_declared_delivery`, `sb9_smbus_gap_is_reported`
+  (inbox drops), `sb11_full_and_detached_targets` (adapter drops),
+  `sb12_duplicate_single_block_is_delivered_once` *(smbus)*.
+- [x] SB9 The SMBus node passes every conformance case for the traits it
+  implements, between nodes on a simulated multi-master bus whose target
+  adapters follow the `I2cTarget` contract: round trip, `request_with`
+  timeout honoured on the node's own clock (no caller-side wrapper), handler
+  errors, caller identity (the requester's SMBus sender id, no principal,
+  the deadline propagated), overload matching `DropNewest` on the 4-entry
+  inbox, exact gaps, and discovery as `PubSubDiscovery` over a split node
+  (announce/withdraw, goodbye, expiry); `Gather` is not implemented —
+  `tests/smbus.rs`: `sb9_smbus_*` *(smbus)*.
+- [x] SB10 Two masters streaming 300-byte publications (11 blocks each) at
+  once interleave their blocks on the bus and both arrive intact; with
+  contention modelled, the master that starts while the other's block is on
+  the bus loses arbitration, backs off and retries, and both messages
+  arrive — `tests/smbus.rs`:
+  `sb10_interleaved_masters_stream_large_messages`,
+  `sb10_contending_masters_back_off_and_both_deliver` *(smbus)*.
+- [x] SB11 Over the bus, the retry bounds hold: 7 lost arbitrations still
+  deliver on the 8th write, 8 give up with `ArbitrationLost`; a request to
+  an absent or full node is written 3 times then fails with `NoAcknowledge`;
+  a publication nobody hears takes one write and is counted as unheard;
+  broadcast data NACKs are retried then reported; a bus error propagates —
+  `tests/smbus.rs`: `sb11_arbitration_retries_are_bounded`,
+  `sb11_nacks_and_bus_errors`, `sb11_full_and_detached_targets` *(smbus)*.
+- [x] SB12 A block corrupted on the bus fails its PEC and is dropped and
+  counted, the message it belonged to is never delivered, the next one is
+  and reports the loss as its gap; a block delivered twice is ignored, and a
+  single-block publication delivered twice is delivered once —
+  `tests/smbus.rs`: `sb12_pec_corruption_drops_the_block_and_the_message`,
+  `sb12_duplicate_single_block_is_delivered_once` *(smbus)*.
+- [x] SB13 `Target::Node` reaches exactly that node and the handler sees the
+  requester's address; requests and replies of several blocks (400 and
+  450 bytes) stream both ways; a reply larger than the caller's buffer is
+  `BufferTooSmall`; a request over `M` is refused before anything is
+  written — `tests/smbus.rs`: `sb13_targets`,
+  `sb13_large_requests_and_replies_stream` *(smbus)*.
+- [x] SB14 Publications that arrive while `request_with` waits are queued in
+  order and returned by `recv` afterwards with their sender; a request that
+  reaches a node while it waits for its own reply is queued and answered by
+  its next `serve_one` (every node is requester and responder) —
+  `tests/smbus.rs`:
+  `sb14_publications_during_a_request_are_queued_in_order`,
+  `sb14_requests_arriving_while_waiting_are_served_next` *(smbus)*.
+- [x] SB15 `Split` borrows a node as `SmbusTx` (publisher) and `SmbusRx`
+  (subscriber) sharing the clock and configuration by reference, without
+  `RefCell`: one task publishes while another waits in `recv`; `Subscribe`
+  hands out a filtered view that skips other keys —
+  `tests/smbus.rs`: `sb15_split_publishes_while_subscribed`,
+  `sb15_subscribe_filters_keys` *(smbus)*.
+- [x] SB16 `smbus` and `smbus,postcard` build for `thumbv6m-none-eabi`
+  without `std`, pull in no cloud dependency and enable no host feature, and
+  no host feature set enables `smbus`; clippy is clean for that target —
+  `scripts/check-features.sh` (F1 sets `smbus`, `smbus,postcard`; `smbus`
+  in the embedded feature list),
+  `cargo clippy -p middleware --no-default-features --features smbus --target thumbv6m-none-eabi -- -D warnings`.
+- [ ] SB17 On hardware (not written, not regression-tested): `I2cTarget`
+  adapters for embassy-rp's I2C target driver (RP2040, general call
+  enabled) and for esp-hal's target mode, and a run of two or more boards
+  on one bus with pull-ups, exercising arbitration between real masters.
+  Open.
+- [x] SB18 Request admission is bounded by the node, not by the requester:
+  requests occupy at most `Q - 1` inbox entries (`Q` must be at least 2),
+  so a publication always finds room; a queued request is dropped once it
+  has waited the smaller of its claimed deadline and
+  `Config::with_max_request_queue_ms` (default: the node's default request
+  timeout), so a deadline of days cannot park it; a node configured with
+  `Config::serving(false)` drops every request on arrival, counts it and
+  writes no reply (the requester times out; a refusal reply would make the
+  receive path transmit on any master's behalf), and its `serve_one` fails
+  with `NotServing` —
+  `smbus::node::tests::sb18_requests_leave_an_inbox_entry_for_publications`,
+  `sb18_queue_residency_is_capped_by_the_node`,
+  `sb18_config_admission_defaults`; `tests/smbus.rs`:
+  `sb18_request_flood_cannot_starve_publications`,
+  `sb18_a_node_that_does_not_serve_refuses_requests` *(smbus)*.
+
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
@@ -1081,7 +2352,10 @@ from the browser, or onto a Raspberry Pi Pico (RP2040) or Pico 2 (RP2350)
 as a UF2 file. Afterwards, application logic ships as WASM payloads loaded over the
 same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI),
 the chip's native USB-Serial-JTAG, or the RP chips' USB CDC-ACM port.
-Payloads talk to the world through the middleware ABI in `wasm_abi`.
+A Linux host (a Raspberry Pi) runs the same base firmware core as a
+process, `mw-pi-node`, behind an in-process gateway (see "Linux payload
+host"). Payloads talk to the world through the middleware ABI in
+`wasm_abi`.
 
 Heap policy: the no-heap rule applies to the `middleware` crate. A base
 firmware may use a global allocator for the payload interpreter only,
@@ -1373,14 +2647,16 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
 
 - [x] E1 Builds for `esp32`, `esp32s3` and `esp32c3` from one source tree
   via cargo features —
-  `firmware/build.sh esp32`, `esp32s3`, `esp32c3` release builds; `compile_error!` in `firmware/src/main.rs` unless exactly one chip feature is set.
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3` release builds; `compile_error!` in `firmware/src/lib.rs` unless exactly one chip feature is set when the shell is built.
 - [ ] E2 Serves the protocol on UART0 (bridge chips) on all chips and on
   USB-Serial-JTAG on S3 and C3. Implemented (`firmware/src/shell/board.rs`,
   `link.rs`) and builds. Hardware evidence so far: UART0 behind a CH340 on an
   ESP8266EX (`firmware-esp8266`, 2026-10-25): `mwctl info`, `upload`,
   `reset` + `monitor` and `start` all ran against `/dev/ttyUSB0`, including
-  recovery from the ROM's 74880-baud boot output. ESP32 family and
-  USB-Serial-JTAG still need a hardware test.
+  recovery from the ROM's 74880-baud boot output. USB-Serial-JTAG on an
+  ESP32-S3: the O10/O19 runs claimed and uploaded over `/dev/ttyACM0`
+  (the S3's own USB). Still open: UART0 on an ESP32 and USB-Serial-JTAG
+  on a C3.
 - [x] E3 Answers `sys/info`; installs payloads with the loader into a flash
   region, verifying CRC-32; the payload survives reboot —
   `firmware` core tests `dispatch::tests::info_reports_device`, `full_transfer_installs_then_start_and_stop`, `abandoned_transfer_keeps_installed_payload`, `oversized_begin_from_idle_keeps_installed_payload`, `resent_last_chunk_is_acknowledged_without_rewriting`; `store::tests::installed_image_survives_reopen_and_verifies`, `interrupted_transfer_keeps_previous_image`, `corruption_is_detected`, `limits_and_ordering_are_enforced` (RAM flash model; silicon untested).
@@ -1555,6 +2831,71 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   `dispatch::tests::info_reports_device`; chip clippy and
   `firmware/build.sh esp32`, `esp32s3`. The shell's routing
   (`shell/controller.rs`) is untested on hardware.
+- [x] E27 The imperative shell is part of the `esp_base` library
+  (`esp_base::shell`, feature `shell`, enabled by each chip feature), so
+  a board crate depends on `esp-base` with a chip feature and calls
+  `esp_base::shell::run(spawner, &BOARD)` instead of compiling the
+  shell's sources by path. The `esp-base` binary is that call with the
+  chip default. The firmware version and chip name in `sys/info` and the
+  boot log are the caller's (`Board::firmware`, `Board::profile().name`),
+  not the `CARGO_PKG_VERSION` of whichever crate compiles the shell. A
+  board built from another chip's profile runs the chip default instead,
+  reporting `<esp-base version>+wrong-board` and logging both chips. The
+  binary crate keeps the entry point, the application descriptor and the
+  `-Tlinkall.x` link argument. The pure core still forbids `unsafe`; with
+  `shell` the crate denies it, keeping the one ADC pin `steal` the binary
+  already allowed (`shell/adc.rs`). With 0.6's heap plan unchanged
+  (`heap_main` 152 KiB) the ESP32-S3 `.stack` is 35 752 B (0.6 without
+  the shell library and LED strips: 36 576 B) —
+  `board::tests::e27_board_must_match_the_compiled_chip`;
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3`; a scratch board crate
+  depending on `esp-base` by path with `features = ["esp32s3"]` built
+  with its own board (2026-11-17, with released 33–37, reserved 41 and safe-mode pin 21). On hardware still to be seen.
+- [x] E28 A board profile (`esp_base::board::Board`) is constructible
+  outside the crate with `const fn` builders on a chip profile (the 0.6
+  `chip::Profile` on its board-pins map): the `sys/info` name (at most 32
+  bytes), the firmware version, extra reserved pins, released pins (only
+  those a chip reserves for module flash or PSRAM some boards lack,
+  `Profile::is_releasable`: ESP32-S3 GPIO33–37, ESP32 GPIO16/17; never the
+  console UART, USB D-/D+ or SPI flash pins), the presence button (default
+  BOOT: GPIO0, or GPIO9 on the ESP32-C3), an optional safe-mode pin, the
+  image cap (within one payload slot and, with the runtime, the heap
+  plan) and fuel per call. Reserving and releasing change the pin map
+  (`board_pins::PinMap::with_reserved`), so every pin check and
+  `sys/board` (S8, answered from the board's profile) describe the board.
+  `build` returns the first problem as a `BoardError`, so a bad `static`
+  board is a compile error. `Board::chip_default` reproduces every chip's
+  behaviour before boards existed. The shell builds its pin bank and ADC1
+  from the board and never makes a `Flex` for, or enables the ADC on, a
+  reserved pin —
+  `board::tests::e28_chip_default_reproduces_every_chip_profile`,
+  `e28_board_names_itself_and_reports_the_callers_firmware`,
+  `e28_reserve_keeps_pins_from_payloads`,
+  `e28_sys_board_describes_the_board_not_the_chip`,
+  `e28_release_opens_module_psram_pins_only`,
+  `e28_presence_and_safe_mode_must_be_payload_pins`,
+  `e28_max_image_fits_a_slot_and_the_heap`,
+  `e28_first_error_wins_and_errors_describe_themselves`;
+  `chip::tests::e28_releasable_pins_are_reserved_module_memory_pins`;
+  `board-pins` `tests::with_reserved_adds_and_removes_one_pin`;
+  the `esp_base::board` doctest (a conagotchi-style board as a `static`).
+- [x] E29 Safe mode: a board's optional safe-mode pin is sampled once at
+  boot through the pin bank (pull-up enabled, 1 ms blocking settle,
+  read, returned to high impedance), active low. Held, the stored
+  payload stays installed and `Stopped` but is not autostarted, and
+  `sys/log` says `safe mode: GPIO<n> held at boot; stored payload not
+  started`; `sys/payload/start` still starts it. An unreadable pin is
+  logged and does not block the start. Without `wasm` nothing autostarts,
+  so the pin is not sampled. The decision is the pure
+  `board::autostart` —
+  `board::tests::e29_safe_mode_held_at_boot_skips_autostart_only`,
+  `e29_safe_mode_keeps_the_payload_installed`. On hardware still to be
+  seen.
+- [x] E30 Fuel per call is a board field (`Board::fuel_per_call`,
+  default `wasm_abi::FUEL_PER_CALL`, never zero); the controller meters
+  every call into the payload with it —
+  `board::tests::e30_fuel_per_call_is_a_board_field`,
+  `e28_chip_default_reproduces_every_chip_profile`.
 
 #### Interpreter speed on the badge
 
@@ -1688,6 +3029,22 @@ handlers); the unsafe asm stays in that vendored dependency.
   and survived `mwctl reset`, and a repeated corrupt upload again left
   status Stopped.
 
+- [x] E26 Signed payloads on the ESP8266 (`esp-base` with `trust`): the
+  trust record in the two sectors at `0x140000` (`flash::TRUST_OFFSET`,
+  right after the payload region; the driver's window grows to
+  `0x100000..0x142000`), `sys/trust/info|claim`, signed commits with
+  Ed25519 or P-256 keys, `min_version` saved inside
+  `PayloadStore::activate_with`, fail closed on an unreadable record; no
+  re-key window (erase the two sectors with esptool) —
+  `controller::tests::signed::e26_an_ed25519_claim_requires_signed_commits`,
+  `e26_a_p256_claim_requires_signed_commits` (claim, unsigned / other key /
+  tampered refused, signed installed, replay refused, the key and
+  `min_version` across a reboot),
+  `e26_the_trust_record_lives_after_the_payload_region`,
+  `e26_an_unreadable_trust_record_refuses_installs_and_claims`; the release
+  build (`build.sh`) and `test.sh` (clippy `-D warnings`). Not yet on the
+  board.
+
 ### RP base firmware (`firmware-rp/`)
 
 The base firmware for the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350A,
@@ -1721,6 +3078,40 @@ the CDC halves joined as a `Duplex`), and the controller on the main task,
 which owns the service (dispatcher state, payload store, trust record) and
 the running payload. They meet only through the `'static` bus.
 
+Middleware's transport traits on the device side of the link. Every
+publication the device makes (log lines, payload status, payload
+publishes, discovery beacons) leaves through the `SerialLink`'s
+`Publisher`; the beacons are announced through middleware's `Announce`
+trait (`discovery::beacon::PubSubDiscovery`) over the bus's `Uplink`, a
+`Publisher` onto the link task's outbound queue. The link task reads with
+`next_frame` rather than the link's `Subscriber` or `Responder`, because
+requests and publications share the stream and each of those traits
+waits for one frame kind and drops the other on a link without an inbox
+(none here, to save its `.bss`, as esp-base's E23); requests on served
+keys keep going through `rp_base::requests::handle` (V20), whose answer
+also carries a stop, the service's notes and a start, which a
+`transport::Handler` result cannot express. The wire protocol is
+unchanged.
+
+Discovery on the serial link (`rp_base::beacons`), so a Pico behind the
+MCU gateway (RG8, RG9) is announced in the cluster: the device publishes
+`disc/<kind>` beacons (format version 1) for at most 4 records, the
+gateway's per-device cap. Its own record has kind `mw/node`, instance
+`rp-` and the node id in lower-case hex, node the chip unique id (V1),
+endpoint local and TXT `chip=` and `fw=`; while a payload runs, each key
+it serves (ABI 5) is a record of that kind (a request to the kind
+reaches the payload), same node and instance, no TXT, in slot order,
+three at most beside the node record (the rest are logged once per run).
+Every record has TTL 30 s and is sent again every 15 s; when a run ends
+(stop, trap, `begin`, an activated commit) its keys get one goodbye each,
+withdrawals going out before new announcements so the gateway's cap is
+never exceeded; the node record is never withdrawn (an unplugged board
+expires). The gateway refuses beacons until it has bound the device on a
+`sys/info` reply, so answering `sys/info` sends every record again, at
+most every 5 s, behind the response. A payload cannot publish on
+`disc/...` (nor `sys/...`), as on esp-base (E18), since the gateway
+announces every beacon on the link as the device's.
+
 Flash maps (offsets from the start of flash; every region whole 4 KiB
 sectors, checked by `layout::FlashMap::check`):
 
@@ -1750,11 +3141,14 @@ in the table above is physical for reads, erases and writes alike. On a
 board without a partition table nothing is translated and the window is
 the identity, so the same build works there (without the updater).
 
-RAM: the RP2040 build has no heap (no runtime) and 26 KB of static RAM,
-leaving about 238 KiB of stack. The RP2350 build holds a 384 KiB heap arena
-in `.bss` (static RAM 440 KB in all, the firmware updater's 5 KiB sector
+RAM: the RP2040 build has no heap (no runtime) and 27 KB of static RAM
+(the beacon announcer's 2.6 KiB included, V21), leaving about 237 KiB of
+stack. The RP2350 build holds a 384 KiB heap arena
+in `.bss` (static RAM 436 KB in all, the firmware updater's 5 KiB sector
 stash, the 4 KiB SPI transfer buffer, the 512-byte reply a served request
-may need (V20) and the main task's larger future included), leaving about 90 KiB
+may need (V20), the beacon announcer and the main task's larger future
+included; the controller is no longer stored twice in that future),
+leaving about 94 KiB
 for the main stack, above the 31 KiB a payload load needs on the ESP32-S3. Payloads get
 128 KiB of linear memory and images up to 64 KiB; on 32 bits the heap
 bound of a 64 KiB image at the full memory cap is 344 KiB (296 KiB while
@@ -1770,7 +3164,7 @@ Payload ABI on the RP2350 (the RP2040 runs no payloads):
 
 | ABI call | RP base |
 |---|---|
-| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes |
+| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes; `publish` on `sys/...` or `disc/...` is `InvalidKey` (V24) |
 | `gpio_output`, `gpio_input`, `gpio_write`, `gpio_read` | yes: GPIO 0–22 and 25 (LED); 24 (VBUS sense) input only; 23 and 29 reserved; `Busy` on a pin an SPI or I2C bus holds |
 | `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller loop, delivered to `on_irq` |
 | `adc_read` | yes: GPIO 26–28 (ADC0–ADC2), 12-bit; those pins are analog only |
@@ -1808,7 +3202,9 @@ Known gaps: neither board has a presence button wired, so there is no
 re-key window (a claimed device is re-keyed by erasing the trust region,
 for example `picotool erase` of its two sectors); the RP2040 stores
 payloads but cannot run them until wasmi supports targets without CAS
-atomics; nothing has run on silicon yet.
+atomics; the device announces but does not browse (beacons from the host
+reach a subscribed payload like any publication); nothing has run on
+silicon yet, so neither has a Pico behind the gateway (V25).
 
 - [x] V1 `sys/info` reports the chip (`rp2040`, `rp2350`), the firmware
   version (`+no-wasm` on the RP2040), the store capacity and, as node id,
@@ -1975,11 +3371,880 @@ atomics; nothing has run on silicon yet.
   `m7_without_the_runtime_sys_info_reports_no_capability`; clippy rp2350
   and rp2040, `firmware-rp/build.sh rp2350`. The controller's use of it
   (`shell/controller.rs`) is untested on hardware.
+- [x] V21 The device's discovery records: its own, kind `mw/node`,
+  instance `rp-<node id in hex>`, node the chip unique id, endpoint local,
+  TTL 30 s, TXT `chip=` and `fw=` (an entry that does not fit is left
+  out), a version 1 beacon on `disc/mw/node` under 70 bytes; then one per
+  key the running payload serves, of that kind, in slot order, at most 4
+  records in all (the gateway's `MAX_DEVICE_SERVICES`); repeats, `disc/`
+  keys, keys over `MAX_KIND_LEN` and keys beyond the cap are left out and
+  counted, at most `MAX_SERVES` keys looked at; the device never browses —
+  `beacons::tests::v21_the_node_record_names_the_chip_unique_id_chip_and_firmware`,
+  `v21_served_keys_are_announced_as_kinds_beside_the_node_record_up_to_the_cap`,
+  `v21_the_device_never_browses`.
+- [x] V22 The announcer (`PubSubDiscovery` over a `Publisher`) keeps the
+  records in step: an unchanged record is not sent again, a new or changed
+  one is announced, one no longer wanted is withdrawn with a goodbye
+  before anything new is announced; each record is sent again every half
+  TTL (15 s); when a run ends the served keys get their goodbyes and the
+  node record stays. Over a real `SerialLink` whose bytes are decoded as
+  publish frames on `disc/<kind>` and folded into a directory under the
+  gateway's E21 rules, every record names the device's node (goodbyes
+  none), the device never holds more than 4 and none is refused, even when
+  a payload serving three keys is swapped for one serving three others;
+  with the real interpreter, the `pico-led` phase server's key is
+  announced while it runs and withdrawn after `stop` and after an upload,
+  and announced again on restart —
+  `beacons::tests::v22_plan_withdraws_what_is_not_wanted_and_leaves_unchanged_records_alone`,
+  `v22_the_announcer_on_the_serial_link_refreshes_and_says_goodbye_when_the_run_ends`;
+  `requests::tests::v22_the_pico_led_phase_key_is_announced_while_it_runs_and_withdrawn_when_the_run_ends`.
+  The controller's use of it (`shell/controller.rs`: each session pass,
+  the refresh wake-up) is untested on hardware.
+- [x] V23 Answering `sys/info` (the gateway's bind, RG9) sends every
+  wanted record again, behind the response, at most once per 5 s; within
+  that only what changed is sent, and a resend restarts the record's
+  refresh interval —
+  `beacons::tests::v23_answering_sys_info_resends_every_record_at_most_every_five_seconds`.
+- [x] V24 A payload cannot publish on `disc/...` or `sys/...` (E18 on the
+  serial link: the gateway announces every beacon on the link as the
+  device's), and a served `disc/` key is never announced; other keys, such
+  as `discovery/x`, are unaffected —
+  `beacons::tests::v24_a_payload_cannot_publish_beacons_or_system_keys`.
+  The device shell's use of it (`RpDevice::publish`) is in
+  `shell/device.rs`.
+- [ ] V25 A Pico 2 running `pico-led`, attached to `mw-gateway`, shows up in
+  a cluster session's `ZenohDiscovery` browse as `mw/node` and as its
+  phase key with node = its chip unique id, and the phase key goes `Down`
+  after `mwctl stop`. Not yet run on hardware.
 - [ ] V12 On a Pico and a Pico 2 flashed with the UF2 images (the Pico 2
   with its factory UF2), the CDC port enumerates, `mwctl info` reports the
   chip and node id, an upload survives a power cycle, and on the Pico 2
   `blink` toggles GPIO 8 and publishes `app/blink/state`. Not yet run on
   hardware.
+
+### Linux payload host (`pi-node/`, PN…)
+
+`mw-pi-node` (crate `pi-node/`, package and binary `mw-pi-node`) makes a
+Linux host, a Raspberry Pi Zero 2 W or Pi 3 on a 64-bit OS in the first
+place, a base firmware in a process: it runs WASM payloads itself,
+accepts the same signed payload updates as the microcontroller base
+firmwares, and joins the cluster through the same gateway. On the wire it
+is a board: COBS frames, `sys/info`, `sys/loader/*`, `sys/payload/*`,
+`sys/trust/*` and `sys/log` as esp-base and rp-base serve them, so
+`mwctl` and the web console speak to it unchanged.
+
+Shared rather than copied, as rp-base does it: esp-base with its default
+features off and `trust` on gives the request table, the loader state
+machine, the payload lifecycle and the trust rules (`esp_base::dispatch`),
+the two-slot payload store (`esp_base::store`, `esp_base::image`), the
+pinned key (`esp_base::trust_store`), served-key routing
+(`esp_base::serve`) and the payload timer table
+(`esp_base::periph::timers`); payloads run in `wasm-host`. None of them
+changed. Two manifest changes make the sharing possible: esp-base
+declares `rust-version` 1.91, what its library needs (the chip builds
+still need 1.95, which esp-hal 1.2 declares and cargo enforces), so the
+root workspace's default toolchain builds it; and the root manifest no
+longer lists `"."` among its members (the root package is a member
+anyway), because that entry made every path under the root an explicit
+member and defeated `exclude` for the path dependency on `firmware/`.
+
+What the crate adds, each part a pure core or a thin shell:
+
+* the configuration (`config`, `MW_PI_NODE_STATE`, `MW_PI_NODE_NODE_ID`,
+  `MW_PI_NODE_MACHINE_ID`, `MW_PI_NODE_MEMORY_BYTES`,
+  `MW_PI_NODE_LOCAL_SERIAL`; the in-process gateway reads its own
+  `MW_GATEWAY_*`, of which `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` go
+  unused, and the runner its `MW_*`, `MW_ZENOH_ROUTER` required);
+* the node id (`node_id`): `MW_PI_NODE_NODE_ID` when set, otherwise the
+  first 8 bytes of SHA-256 over a domain string and the systemd machine
+  id, which is stable across reboots and stays off the wire; without
+  either the node does not start;
+* the flash (`flash`, `layout`): a NOR flash model with the ESP and RP
+  drivers' rules whose sectors persist as files under
+  `<state>/flash/`, payload store 512 KiB (two 256 KiB slots, 252 KiB
+  images) and trust record 8 KiB;
+* the request service (`service`), rp-base's over that flash with no
+  firmware updater: `sys/fw/*` is `NotFound`, as on the RP2040, and the
+  binary is updated by the host's package manager;
+* the payload device (`device`) and the controller (`controller`), one
+  synchronous state machine for the service and the running payload;
+* the shell (`shell`): the device thread over its serial links and the
+  gateway on the other end of a `gateway::io::ChannelIo` pair, inside the
+  one process.
+
+Payload ABI on the node:
+
+| ABI call | mw-pi-node |
+|---|---|
+| `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes: publications and `sys/log` lines to every link, the gateway relaying `app/**` to Zenoh; a monotonic clock from the node's start |
+| `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller, delivered to `on_irq` |
+| `serve`, `node_id` (ABI 5) | yes: any non-`sys` key; requests on served keys reach `on_request` with a 512-byte reply; `node_id` is the node id `sys/info` reports |
+| `gpio_*`, `gpio_irq`, `adc_read`, `spi_*`, `dma_read`, `i2c_*`, `uart_*`, `pwm_*`, `route_*` | `Unsupported` |
+
+Storage and power loss. Each sector is one file, replaced atomically
+(written to a temporary file, `fsync`ed, renamed over the sector's file,
+the directory `fsync`ed); an erased sector is a missing file, so a fresh
+state directory reads as blank flash. Writes go to the memory image and
+mark their sector dirty; the dirty sector is stored before any other
+sector is touched and whenever the service syncs, which it does after
+every storage action but a chunk write. At most one sector is ever ahead
+of the disk, so after a crash the disk holds the image after a prefix of
+the operations, the model esp-base's store and trust record are proven
+against, and no sector is ever torn; a reply confirming an activation or
+a claim is sent only once it is on disk. A failed store poisons the flash
+(every later operation fails, so requests answer `Internal`) until a
+restart re-reads the disk. The state directory is locked while the node
+runs. With no presence button there is no re-key window: a claimed node
+is re-keyed by stopping it and deleting the trust sectors
+(`flash/sector-0128`, `flash/sector-0129`).
+
+The process. The device thread runs a current-thread tokio runtime, so a
+payload call (fuel bounded) never holds up the gateway's tasks, and owns
+the controller and one `SerialLink` per link: the gateway's, and
+optionally a local one (`MW_PI_NODE_LOCAL_SERIAL`: a USB gadget's
+`/dev/ttyGS0` or one end of a PTY pair, opened with the gateway's
+`io::open_serial`, for `mwctl`). Requests are answered on the link they
+came from; publications, log lines and status changes go to all. The
+gateway (`mw_gateway::start_with_store`, as `mw-gateway`'s own binary
+starts it) binds to the node id from `sys/info`, relays `app/**` to Zenoh
+and serves `gw/sys`; the binary runs `mw_gateway::service` (named
+`mw/gateway`, the gateway's fixed service name) under the runner until
+SIGTERM or SIGINT, then stops the payload, syncs the flash and withdraws
+what the gateway announced. Updates through the cluster go through the
+gateway's update gate (RG20–RG27), never through `MW_GATEWAY_SYS_ALLOW`:
+the caller must be an updater (`MW_GATEWAY_UPDATERS`), the node claimed,
+commits signed, start and stop signed control requests over the node id's
+first six bytes with a counter above the gateway's floor, and every
+mutating request must carry an `x-request-id`; `sys/trust/claim` never
+passes, so a node is claimed over its local link (physical access, like
+a board's USB cable). The floor is computed and persisted as in
+`mw-gateway` (`state::floor_at_start`, `ControlStore`); when
+`MW_GATEWAY_STATE` is unset the store lives in `<MW_PI_NODE_STATE>/gateway`,
+so one directory holds all of the node's state. `mw-update` drives the
+node as it drives any board behind a gateway. The cluster cannot reach a
+payload's served
+`app/...` keys through the gateway at all; the local link can. Tests
+marked *(mw-pi-node)* run under `cargo test -p mw-pi-node` and
+`cargo test --workspace`; none opens a serial port or a GPIO chip, and
+network tests use 127.0.0.1 only.
+
+- [x] PN1 `PiNodeConfig::from_env` parses `MW_PI_NODE_STATE` (default
+  `/var/lib/mw-pi-node`), `MW_PI_NODE_NODE_ID` (16 hex digits, not all
+  zeros, winning over the machine id), `MW_PI_NODE_MACHINE_ID` (default
+  `/etc/machine-id`), `MW_PI_NODE_MEMORY_BYTES` (64 KiB to 64 MiB, default
+  1 MiB) and `MW_PI_NODE_LOCAL_SERIAL`; empty is unset and a malformed
+  value names its variable —
+  `config::tests::pn1_defaults`, `pn1_parses_every_variable`,
+  `pn1_malformed_values_name_the_variable` *(mw-pi-node)*.
+- [x] PN2 The node id is the configured one or the first 8 bytes of
+  SHA-256 over `mw-pi-node/node-id/v1\0` and the machine id (32 hex
+  digits, case folded, blanks trimmed): the same machine gives the same
+  id, another machine another, malformed ids and an all-zero id are
+  refused —
+  `node_id::tests::pn2_machine_id_hashes_to_a_stable_node_id`,
+  `pn2_a_configured_node_id_wins_and_is_checked` *(mw-pi-node)*.
+- [x] PN3 The flash model follows the NOR rules (4-byte aligned reads and
+  writes inside the device, writes only clear bits, 4 KiB erases to
+  `0xFF`, a blank device reads erased); one dirty sector is stored before
+  another is written or erased and on sync; a failed store poisons the
+  flash; and power loss at every store of a claim followed by a signed
+  upload leaves, after a restart, the old or the new image and the old or
+  the new trust record, the new image never with the old `min_version`,
+  and nothing a reply confirmed lost —
+  `flash::nor::tests::pn3_spans_are_aligned_and_bounded`,
+  `pn3_writes_only_clear_bits_and_split_by_sector`;
+  `flash::tests::pn3_blank_flash_reads_erased_and_writes_follow_nor_rules`,
+  `pn3_one_dirty_sector_is_stored_before_another_is_touched_and_on_sync`,
+  `pn3_a_failed_store_poisons_the_flash`;
+  `service::tests::pn3_power_loss_at_any_store_leaves_the_old_or_the_new_image_and_record`
+  *(mw-pi-node)*.
+- [x] PN4 Sectors persist under `<state>/flash/` as whole 4096-byte files
+  named `sector-NNNN`; an erased sector is a missing file; a leftover
+  temporary file (a crash before the rename) leaves the old sector and is
+  removed at open; a sector file of another length is refused, naming it;
+  a second process cannot open a locked state directory —
+  `flash::dir::tests::pn4_file_names_are_canonical`,
+  `pn4_sectors_persist_as_whole_files_and_erased_is_missing`,
+  `pn4_one_process_holds_the_state_directory`; `pi-node/tests/node.rs`:
+  `pn4_the_state_directory_is_held_by_one_node` *(mw-pi-node)*.
+- [x] PN5 The service answers like a board: `sys/info` names the chip
+  `linux-<arch>` (`linux-aarch64` on the Pi), the version, the node id,
+  `Caps::SERVE`, ABI 5 and a 252 KiB capacity; every `sys/fw/*` key is
+  `NotFound`; the trust rules are esp-base's (unclaimed accepts unsigned,
+  a claim pins the key, then unsigned, replayed and older commits and a
+  second claim are `Denied` with the installed image kept) and the image,
+  key and `min_version` survive a restart, for an Ed25519 and a P-256
+  pinned key alike (TK1: the key's own algorithm verifies, a signature by
+  the other kind or another key is `Denied`); an unreadable trust record
+  refuses installs and claims `Unavailable`; the regions are whole
+  sectors —
+  `service::tests::pn5_sys_info_names_the_linux_node_and_fw_keys_are_not_found`,
+  `pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart`,
+  `pn5_a_p256_key_claims_and_signs_as_on_a_board_and_survives_restart`,
+  `pn5_an_unreadable_trust_record_refuses_installs`;
+  `layout::tests::pn5_regions_are_whole_sectors_and_do_not_overlap`
+  *(mw-pi-node)*.
+- [x] PN6 The payload device publishes into a bounded outbox (64, dropping
+  the newest and counting; `sys/...` keys `InvalidKey`; more than one
+  serial frame `InvalidArgument`), logs on `sys/log` cut to one frame on a
+  character boundary, reads the clock, accepts `serve` for non-`sys` keys,
+  answers `node_id`, runs four software timers as `Timer` events, and
+  answers every peripheral call `Unsupported` —
+  `device::tests::pn6_publish_log_clock_serve_and_node_id`,
+  `pn6_the_outbox_is_bounded_and_drops_the_newest`,
+  `pn6_timers_fire_as_events_and_peripherals_are_unsupported`
+  *(mw-pi-node)*.
+- [x] PN7 The controller, with the real interpreter: a started payload's
+  served key answers through `on_request` with the node id, other keys
+  are `NotFound`, a subscribed publication reaches `on_message`, `tick`
+  and timer 0 run when due and `next_wake_us` says when; a trap in a
+  request answers `Internal` and leaves its keys `Unavailable` until a
+  restart, as after a stop, and an upload clears them (`NotFound`); a
+  `begin` while running stops the payload; an installed payload starts at
+  boot; an image that is not WASM or wants more memory than the cap fails
+  to start with `Internal` —
+  `controller::tests::pn7_a_started_payload_serves_publishes_ticks_and_fires_timers`,
+  `pn7_traps_stop_and_uploads_end_the_run_and_settle_the_served_keys`,
+  `pn7_an_installed_payload_starts_at_boot_and_bad_images_fail_to_start`
+  *(mw-pi-node)*.
+- [x] PN8 End to end in one process, the device thread on a real state
+  directory, the gateway on the other end of a `ChannelIo` pair (started
+  with its control counter store and floor, the store under the node's
+  state) and Zenoh on loopback: through `gw/sys` as the runner calls it,
+  `sys/info` reports the node; a claim through `gw/sys` is `Denied` even
+  for the updater, and the claim with the golden vector's test key goes
+  over the local link; a caller that is not an updater, or anonymous, is
+  `Denied`; the updater's unsigned upload of the WAT fixture is `Denied`
+  and a signed one installs; an unsigned start is `Denied`, a signed one
+  runs the payload and its replay is `Denied`; its tick publications
+  arrive on the cluster session, a cluster sample on the downlink filter
+  comes back republished, its ABI 5 served key answers over the local link
+  with the node id, `sys/log` holds its lines and an unsigned stop is
+  `Denied`; stopping syncs the flash and the accepted counter is in the
+  gateway's store; after a restart on the same directory the payload
+  starts by itself and a replayed commit and a second claim are `Denied` —
+  `pi-node/tests/node.rs`:
+  `pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves`;
+  `config::tests::pn1_the_gateway_state_defaults_under_the_node_state`
+  *(mw-pi-node)*.
+- [x] PN9 The crate is host only: no embedded feature set depends on it,
+  and of `middleware`'s embedded features it enables only `serial`,
+  `trust` and `espnow` (esp-base's core always builds the ESP-NOW frame
+  codec) beside `zenoh` — `scripts/check-features.sh` (block "PN9", and
+  `mw-pi-node` in `CLOUD_CRATES` for every F1 set).
+- [x] PN10 It builds for the Pi's target: `cargo check --target
+  aarch64-unknown-linux-musl -p mw-pi-node` type-checks (the `psm` build
+  script needs a C compiler for the target: `CC_aarch64_unknown_linux_musl`
+  pointing at any aarch64 GCC or clang will do for a check). A linked
+  static binary is the nix package's job (`nix/binaries.nix` entry
+  `mw-pi-node`).
+- [ ] PN11 On a Pi Zero 2 W or Pi 3: the node starts from the SD image,
+  binds in the cluster, takes a signed upload through `gw/sys` and keeps
+  its payload and key across a power cut. Not yet run on hardware.
+- [ ] PN12 Peripherals through the kernel's character devices (GPIO on
+  `/dev/gpiochipN`, SPI on `/dev/spidevB.C`, I2C on `/dev/i2c-N`) with a
+  pin policy for the Pi's header. Not implemented: every peripheral call
+  is `Unsupported` (PN6).
+- [ ] PN13 The cluster reaches a payload's served keys. Not possible
+  through the gateway as of this change: `gw/sys` passes `sys/...` keys
+  only (RG12), so a served `app/...` key answers over the local link
+  alone (PN8). Needs an additive gateway kind that forwards requests on
+  the device's served keys.
+
+### i.MX RT base firmware (`firmware-imxrt/`)
+
+The base firmware for the NXP MIMXRT1050-EVKB (i.MX RT1052, Cortex-M7,
+512 KiB FlexRAM, 64 MiB HyperFlash S26KS512S on FlexSPI, 32 MiB SDRAM).
+It speaks the protocol of the ESP and RP base firmwares, unchanged, over
+LPUART1 at 115200 baud, which the board's OpenSDA debugger exposes as a
+USB virtual COM port, so `mwctl --port /dev/ttyACM0` works against it as
+it does against esp-base. The request decisions come from `esp-base`'s
+library (`dispatch`, `store`, `image`, `trust_store`, `start`) as on the
+RP base firmware; this crate adds the RT1050's flash map, boot header,
+HyperFlash driver, A/B bootloader and board profile.
+
+The HAL is embassy-nxp (`mimxrt1062` feature, pinned git revision: the
+crate is not on crates.io). It gives a safe `init` (peripheral
+singletons), the embassy executor, a PIT time driver (24 MHz oscillator /
+24 = 1 MHz, independent of the boot clocks) and, with `unstable-pac`, the
+chiptool PAC through which every register is read and written without
+`unsafe`. `imxrt-ral` and `imxrt-iomuxc` were not used: their peripheral
+instances and pads are only reachable through `unsafe` constructors. The
+RT1062 register map is a superset of the RT1052's for the blocks used
+(CCM, IOMUXC, GPIO1–5, LPUART, LPI2C, LPSPI, ADC, PIT, FlexSPI); blocks
+the RT1052 lacks (GPIO6–9, OCRAM2, FlexSPI2) are never touched, and on
+i.MX RT an access to a block whose clock gate is off stalls the bus until
+a power cycle, so nothing reads a peripheral before enabling its clock.
+The firmware (with the WASM runtime, about 630 KB like the RP2350's) is
+larger than the 512 KiB FlexRAM, and the HyperFlash cannot be read while
+it erases or programs, so the firmware never executes from HyperFlash: it
+is linked to run from the board's SDRAM (MT48LC16M16A2, 32 MiB at
+0x80000000), with its stack and hot statics in DTCM and the payload heap
+in SDRAM, I and D caches on. The bootloader is linked by `imxrt-rt`
+(`Family::Imxrt1050`), copied to ITCM by its startup.
+
+#### Boot, A/B slots and the bootloader
+
+The RT1050 boot ROM boots one image at a fixed place (FCB at 0, IVT at
+0x1000) and has no A/B support (unlike the RP2350's). A small bootloader
+lives in HyperFlash block 0 with the boot header; the boot ROM boots it,
+and it boots one of two firmware slots:
+
+1. It reads the update record (the persisted `middleware::fw_ota` record:
+   anti-rollback floor, confirmed slot, pending update and its trial
+   attempts).
+2. It checks the candidate slot: the slot image header (magic, header
+   version, image version, length, SHA-256) must be well formed and fit
+   the slot. It copies the image into SDRAM at the firmware's link
+   address and the SHA-256 of that copy must match, so what was checked
+   is what runs. A slot that fails is never booted.
+3. A pending update not yet tried boots once on trial: the attempt is
+   persisted before the jump, with the watchdog armed. A trial that ends
+   in a reset without `sys/fw/confirm` (the watchdog, a panic, a power
+   cut) rolls back: the next boot runs the confirmed slot. A confirmed
+   slot that fails its check boots the other slot if that one passes.
+4. It jumps: VTOR, MSP and the reset vector of the copy's vector table.
+
+The jump is the firmware's one `unsafe` operation (`cortex_m::asm::bootload`),
+an explicit exception to the project's no-`unsafe` rule, agreed for the
+bootloader only: Rust has no safe way to transfer control to another
+image, and without it A/B needs a swap that rewrites the running slot (a
+power cut during that rewrite bricks the board). The bootloader crate is
+`#![deny(unsafe_code)]` with a single `#[allow(unsafe_code)]` on the jump
+function, whose rustdoc states the invariants checked before it is
+called (the copy passed step 2, its vector table's SP is in RAM and its
+reset vector inside the copy). Everything before the jump is pure,
+host-tested decision code (`imxrt_base::ab`). The bootloader is never
+updated over the air; it is written by factory flashing only.
+
+Because the image runs from its SDRAM copy, one build serves both slots
+(the RT1050 cannot remap flash addresses, so slot-linked images would
+need two builds per release). `sys/fw/begin` answers the inactive slot,
+as on the RP2350. The update
+protocol is `middleware::fw_ota`'s unchanged (`sys/fw/*`, signed commit
+by the pinned key, `min_version` floor, trial and confirm); the RP2350's
+picobin checks move behind an image-format trait so the RT1050 plugs in
+its own header, and the RP2350 behaviour and its tests stay as they are.
+
+#### Flash map
+
+HyperFlash, 64 MiB at 0x60000000, erased in 256 KiB blocks (the uniform
+sectors of the S26KS512S; checked against the chip's CFI on hardware,
+RT13). Every region is whole blocks (`layout::FlashMap::check`); the
+exact offsets are `imxrt_base::layout`'s.
+
+| region | contents |
+|---|---|
+| block 0 | FCB (0x0), IVT, boot data and DCD (0x1000), the bootloader (from 0x2000) |
+| update record | two blocks, written alternately (a power cut leaves the old or the new record) |
+| slot A, slot B | two equal firmware slots, each a slot image header followed by the SDRAM-linked image |
+| trust record | two blocks (esp-base's trust store) |
+| config | two blocks, written alternately: the board configuration record (the Zenoh endpoint, `sys/zenoh/endpoint`) |
+| payload store | esp-base's two-slot store, the ESP partition's 124 KiB slot capacity |
+
+The FCB is the board's factory one (HyperFlash, DQS sampling, DDR, word
+addressed, 64 MiB), built from typed fields by `boot_header` and placed
+at link time from an object file `build.rs` writes, so no `unsafe`
+`#[link_section]` static is needed. The DCD (device configuration data,
+which the boot ROM executes before the bootloader) is the SDRAM setup of
+NXP's SDK for this board (`evkbimxrt1050` `dcd.c`, BSD-3-Clause): SEMC
+clock, pads and the SDRAM's mode registers.
+
+#### Board peripherals
+
+Payload pins are the EVKB's logical board pins, mapped to pads by
+`board_pins::boards::RT1050_EVKB` (the table and its sources are in that
+module's rustdoc, taken from NXP's MCUXpresso SDK board files for the
+`evkbimxrt1050`): the Arduino header's digital pins, its analog inputs on
+ADC1, the USER LED (D18) and the USER button (SW8). I2C bus 0 is LPI2C1
+on the Arduino A4/A5 pins (also the FXOS8700CQ accelerometer), SPI bus 0
+is LPSPI1 on the Arduino D10–D13 pins. LPUART1 (the console and protocol
+link) and the HyperFlash, SDRAM and boot pins are reserved.
+
+#### Requirements
+
+- [x] RT1 `boot_header` builds the FCB from typed fields (HyperFlash, DQS
+  read sampling, DDR, word addressable, 64 MiB, the HyperFlash read
+  sequence in the LUT) byte-identical to the board's factory FCB
+  (`firmware-imxrt/fixtures/rt1050-evkb-factory-fcb.bin`, read from the
+  board over SWD) —
+  `boot_header::fcb::tests::rt1_fcb_matches_the_factory_block`,
+  `rt1_fcb_fields_at_the_boot_rom_offsets`, `rt1_fcb_fields_are_independent`.
+- [x] RT2 `boot_header` builds the IVT, boot data and DCD for the
+  bootloader: tag, version, entry (the vector table), DCD and self
+  pointers, boot data (start, length, plugin flag), at the offsets the
+  boot ROM reads; the DCD's commands are the SDK's SDRAM setup, in the
+  boot ROM's DCD encoding (header, write-data and check-data commands,
+  big-endian); a length past the flash or a misaligned entry is refused —
+  `boot_header::evkb_sdram::tests::rt2_dcd_is_the_sdk_sdram_setup` (byte-identical
+  to the SDK `dcd.c`, `fixtures/evkbimxrt1050-dcd.bin`),
+  `rt2_dcd_maps_sdram_at_0x8000_0000`; `boot_header::dcd::tests::*`;
+  `boot_header::ivt::tests::rt2_ivt_fields_at_the_boot_rom_offsets`,
+  `rt2_ivt_refuses_bad_length_or_entry`;
+  `boot_header::tests::rt2_boot_region_places_fcb_ivt_boot_data_and_dcd`,
+  `rt2_boot_region_refuses_bad_images`, `rt2_dcd_fits_before_the_bootloader`.
+- [x] RT3 The flash map is whole 256 KiB blocks, inside the 64 MiB
+  HyperFlash, free of overlaps, with block 0 for the bootloader, a
+  two-block update record, two equal firmware slots, a two-block trust
+  record and the payload store with the ESP payload capacity; the linker
+  layouts of the bootloader and of the firmware (one SDRAM-linked build for
+  both slots) match it —
+  `layout::tests::rt3_the_evkb_map_is_whole_blocks_inside_the_flash_without_overlap`,
+  `rt3_the_link_layouts_match_the_map` (`memory-app.x`, `boot-image.x` and
+  `build.rs`'s bootloader region against the map), and the other `rt3_`
+  tests of `layout` (adapters, refusals).
+- [x] RT4 `hyperflash` encodes the FlexSPI LUT sequences for the
+  S26KS512S (DDR read, register read, CFI entry and exit, word program
+  with its unlock cycles, sector erase, status read) in the LUT
+  instruction format, and plans every program as buffer writes that never
+  cross the flash's write buffer, every erase as one block, every wait
+  for status with a bound —
+  `hyperflash::lut::tests::*`;
+  `hyperflash::s26ks512s::tests::rt4_lut_matches_the_sdk_hyperflash_sequences`,
+  `rt4_read_sequence_is_the_factory_one`, `rt4_no_chip_erase_in_the_lut`;
+  `hyperflash::plan::tests::rt4_program_chunks_never_cross_the_write_buffer`,
+  `rt4_erase_is_one_sector_per_command`, `rt4_program_refuses_odd_or_out_of_range`;
+  `hyperflash::status::tests::rt4_status_wait_is_bounded`;
+  `hyperflash::cfi::tests::*`.
+- [x] RT5 The slot image header: a well-formed header gives the image's
+  version, length and SHA-256; a bad magic or header version, a length
+  past the slot or the SDRAM image region, or a hash that does not match
+  is refused, each with its own reason —
+  `ab::header::tests::rt5_a_well_formed_header_gives_version_length_and_hash_and_the_copy_is_the_image`,
+  `rt5_each_defect_is_refused_with_its_own_reason`,
+  `rt5_an_image_filling_the_slot_exactly_is_accepted`.
+- [x] RT6 The boot decision: the confirmed slot boots when it passes its
+  check; a pending update boots once on trial with the attempt persisted
+  first; a trial that reset without confirm rolls back to the confirmed
+  slot; a slot that fails its check never boots and the other slot boots
+  if it passes; a spent trial is never booted again, so a rollback slot
+  that fails too is recovery (the user's choice over a last-resort
+  retry of the trial); neither passing is recovery with each slot's
+  reason —
+  `ab::boot::tests::rt6_the_confirmed_slot_boots_when_it_passes`,
+  `rt6_a_pending_update_boots_once_on_trial_with_the_attempt_persisted_first`,
+  `rt6_an_unconfirmed_trial_rolls_back`,
+  `rt6_a_failing_slot_never_boots_and_the_other_boots_if_it_passes`,
+  `rt6_neither_slot_passing_is_recovery_with_both_reasons`;
+  `ab::record::tests::rt6_saves_alternate_blocks_and_load_takes_the_newest`.
+- [x] RT7 `fw_ota` checks images through a trait: the RP2350's picobin
+  checks are one implementation (every RP2350 test unchanged and
+  passing), the RT1050 header another; the RT1050 platform answers
+  `begin` with the inactive slot, refuses at commit an image whose header
+  does not match what was received, and on `reboot` and `confirm` writes
+  the record the bootloader reads —
+  `fw_ota::format` (`ImageFormat`, `Picobin` for the RP2350:
+  firmware-rp 71 tests unchanged);
+  `ab::tests::rt7_a_full_update_trial_and_confirm`,
+  `rt7_commit_refuses_an_image_whose_header_does_not_match_what_was_received`,
+  `rt7_each_slot_block_is_erased_once_before_its_first_program_and_the_header_is_written_last`,
+  `rt7_an_unconfirmed_trial_or_an_abort_rolls_back_and_the_record_settles`,
+  `rt7_a_fallback_boot_records_the_running_slot_so_the_next_update_still_boots_on_trial`,
+  `rt7_the_platform_refuses_the_running_slot_and_a_foreign_geometry`.
+- [x] RT8 Power loss: a cut at every flash operation of an update (begin,
+  chunks, commit, reboot, the bootloader's attempt write, confirm) leaves
+  a state the next boot recovers to a bootable, verified slot (RAM flash
+  model with power-cut injection) —
+  `ab::tests::rt8_a_power_cut_at_every_flash_operation_leaves_a_bootable_verified_slot`
+  (a cut at each of about 524 erase and write operations of factory boot,
+  update, trial, confirm and settle, then three boots and a further
+  update), `rt8_a_power_cut_during_the_bootloaders_attempt_write_keeps_the_board_bootable`;
+  `ab::record::tests::rt8_a_cut_save_leaves_the_old_record_or_the_new_one`.
+- [x] RT9 The bootloader fits block 0 after the boot header and its only
+  `unsafe` is the jump (`#![deny(unsafe_code)]`, one allowed function) —
+  the build gate: `build.sh`'s `cargo build --features boot` links it
+  into imxrt-rt's 256 KiB FLASH region (fails to link if larger; 26 832
+  bytes on 2026-11-13, boot header included), checked against the map by
+  `layout::tests::rt3_the_link_layouts_match_the_map`;
+  `src/bin/imxrt-boot.rs` is `#![deny(unsafe_code)]` with one
+  `#[allow(unsafe_code)]` on `jump` (every other crate file, the library,
+  the firmware and the flasher, is `#![forbid(unsafe_code)]`).
+- [x] RT10 `board_pins::boards::RT1050_EVKB`: the logical pins, their
+  pads, reserved and input-only pins, ADC channels, I2C bus 0 (LPI2C1)
+  and the SPI routing (LPSPI1) follow the SDK board files; the map is
+  offered through `by_chip("rt1050")` —
+  board-pins `imxrt::evkb::tests::rt10_arduino_pins_map_to_the_sdk_pads`,
+  `rt10_peripheral_functions_match_the_sdk_iomuxc_macros`,
+  `rt10_analog_inputs_are_adc1`, `rt10_no_logical_pin_reaches_a_board_pad`;
+  `imxrt::tests::rt10_pad_rules_match_the_sdk_iomuxc_macros`;
+  `boards::tests::rt10_rt1050_evkb_map`;
+  `spi::tests::rt10_lpspi1_is_fixed_to_arduino_d13_d11_d12`. The ADC1
+  inputs of A2–A5 follow the RT1050 pad rule; no SDK file confirms them.
+- [x] RT11 The board profile: chip name `rt1050`, the payload heap in
+  SDRAM outside the firmware's run copy and statics, the RP2350's WASM
+  caps (128 KiB memory, 64 KiB images) so a payload accepted for one
+  runtime board loads on the others, the pin policy mapped to `AbiError`
+  as on the other firmwares —
+  `chip::tests::rt11_profile_is_the_rt1050_with_the_runtime`,
+  `rt11_heap_plan_fits_the_sdram_and_matches_the_rp2350_caps`,
+  `rt11_pin_policy_maps_to_abi_errors`, `rt11_adc_reads_a0_to_a5_on_adc1`,
+  `rt11_i2c_bus_0_is_lpi2c1_on_a4_a5`, `rt11_spi_pins_resolve_onto_lpspi1`.
+- [x] RT12 On the EVKB, the firmware serves the serial protocol on
+  LPUART1 / the OpenSDA VCOM: `mwctl --port /dev/ttyACM0 info` reports
+  the chip and node id — 2026-11-13: `mwctl --port
+  /dev/serial/by-id/usb-SEGGER_J-Link_000621000000-if00 info` three times
+  in a row: chip rt1050, node 310441d265f82484 (OCOTP CFG1:CFG0,
+  `node::tests::rt12_node_id_is_the_fused_unique_id_high_word_first`), ABI
+  v5, capacity 65536; an unsigned upload on the unclaimed board survived a
+  WDOG1 reset; `trust claim` pinned a new key (kept across a reset); then
+  an unsigned commit was `Denied` and a signed 20 014-byte upload (42
+  chunks) installed. Receive is LPUART1's eDMA ring in DTCM, no interrupt
+  (an IRQ handler would need `unsafe`): `app/uart.rs`.
+- [x] RT13 On the EVKB, the HyperFlash driver reads the CFI (sector
+  layout as RT3 assumes), erases and programs a scratch block and reads it
+  back — 2026-11-12/13: the CFI query (QRY, 64 MiB, 512-byte write buffer,
+  one region of 256 × 256 KiB sectors, typical sector erase 1 s, 4 s at
+  most) and `imxrt_base::hyperflash`'s plans on sector 255 from a
+  RAM-loaded probe; then the firmware's own driver
+  (`imxrt_base::shell::flexspi::HyperFlash`, in `imxrt-flasher`) erased
+  sector 255 (0x3FC0000), programmed 3 KiB of random data, read it back
+  itself and `tools/flash.py` read it back over SWD through the FlexSPI
+  window, both equal to the file; the same driver then programmed and
+  verified the bootloader and slot A (RT14).
+- [x] RT14 On the EVKB, the bootloader and a slot A image, programmed
+  and read back over SWD against the ELFs, boot from HyperFlash (SW7 OFF,
+  ON, ON, OFF): the DCD brings up SDRAM, the bootloader copies and checks
+  slot A and the firmware serves RT12; with neither slot valid the
+  bootloader boots nothing and prints each slot's reason on LPUART1 — the
+  boot chain on 2026-11-13 (bootloader 26 832 bytes at 0x0, slot A at
+  0x400000, programmed by `tools/flash.py` and read back byte-identical
+  over SWD; `imxrt-boot: slot A v0.1 ... SHA-256 ok`, the firmware serving
+  RT12). Fallback and recovery the same day: with the confirmed slot B's
+  header erased the bootloader booted A (`slot A v0.4 ... SHA-256 ok`,
+  `fw info`: B empty); with both erased it printed `RECOVERY: no bootable
+  slot: A no image (bad magic), B no image (bad magic)` every 3 s and
+  booted nothing.
+- [x] RT15 On the EVKB, `mwctl fw update` installs a slot B image, it
+  boots on trial and `confirm` keeps it; an unconfirmed trial reset rolls
+  back to slot A — 2026-11-13: `mwctl fw update imxrt-base-0.2.slot --key`
+  installed slot B in 11.4 s, the bootloader printed `slot B on trial
+  v0.2`, mwctl confirmed it, and 70 s later (past the trial window) the
+  board had not reset (`fw info`: B running, confirmed 0.2). Then v0.4 with
+  `--no-reboot` and `fw reboot`: `slot A on trial v0.4`, not confirmed;
+  within 75 s the RTWDOG reset the board, the bootloader read `pending A,
+  rebooted: true, attempts: 1` and booted `slot B v0.2`, `fw info`: rolled
+  back 0.4. The firmware arms the RTWDOG on a trial (60 s, LPO ÷256: CS
+  0x35A0, TOVAL 7680 read back during the trial) and `sys/fw/confirm`
+  stops it: `ab::watchdog::tests::rt15_*`; mwctl takes MWRT slot images
+  (`fw::tests::rt15_*`, `fw_ota::rt_image::tests::rt15_*`). A signed fw
+  commit raises `min_version` before the trial (shared `fw_ota`
+  behaviour), so a rolled-back version cannot be sent again.
+- [x] RT16 On the EVKB, a payload toggles an Arduino header pin (the
+  USER LED shares GPIO_AD_B0_09 with the Ethernet PHY's reset and is
+  reserved), reads the USER button, and reads the FXOS8700CQ's WHO_AM_I
+  (0xC7) over I2C bus 0 — 2026-11-13, a 600-byte WAT payload: `i2c_open(0,
+  100 kHz)` 0, `i2c_transfer(0x1F, [0x0D])` 0, WHO_AM_I 0xC7; D8
+  (GPIO1_IO03) toggled every 250 ms, its pad following DR when read with
+  SION set over SWD; SW8 read 1 released and 0 while the user held it.
+  embassy-nxp's `Flex::set_level` writes DR_SET/DR_CLEAR, which the RT1052
+  lacks, so outputs are a read-modify-write of DR (`app/device.rs`). Host
+  tests: `pins::tests::rt16_gpio_modes_follow_the_esp_base_rules`,
+  `periph::{i2c,spi,adc}::tests::rt16_*`, `requests::tests::rt16_*`.
+- [x] SC1 The sample batch wire format: header fields, little-endian
+  samples, round trip; truncated, unknown-version, count past the
+  message or format/channels mismatches are refused; a gap in
+  `first_index` is reported with its size — `stream::samples::tests::sc1_*`
+  (header layout, i16/µ-law/levels round trips, each refusal, gaps).
+- [x] SC2 `route_source` accepts `Imu` and `Microphone` configurations
+  within their ranges and refuses others (`InvalidArgument`); the import
+  table and ABI 1–5 modules are unchanged; `sys/info` carries the
+  capability bit (bit 2 IMU, bit 3 microphone, beside the Colorlight
+  line's bit 1 `BRIDGE`), which `mwctl info` prints as a `sources:` line
+  and protocol-wasm `decodeDeviceInfo` names in `capNames` —
+  `wasm_abi::route::tests::sc2_*`,
+  `loader::tests::sc2_source_capability_bits`, mwctl
+  `report::tests::info_notes_protocol_only_firmware`, web
+  `protocol.test.ts` "round-trips sys/info", wasm-host
+  `abi::tests::sc2_route_source_plans_imu_and_microphone_routes`, the SDK's
+  `sc2_sampled_sources_validate_before_the_host`; every earlier test
+  unchanged except `source_kinds_and_formats`, which asserted kind 2 was
+  invalid (now kind 4).
+- [x] SC3 A route that owns an I2C device makes a payload's transfer to
+  that address `Busy` until the route stops — `route::I2cOwners`
+  (`sc3_a_route_owns_its_i2c_device_until_it_stops`), wasm-host
+  `link::tests::sc3_*` and `tests/sc3.rs` (busy until stopped, released
+  when the device stops the route).
+- [x] SC4 FXOS8700CQ core: the register plan for each rate and range,
+  the conversion of raw 14-bit accelerometer and 16-bit magnetometer
+  data to `i16` with the header's scale, the data-ready decision —
+  `sensors::fxos8700::tests::sc4_*` and the route's batching
+  `sensors::imu_route::tests::sc7_*` (whole batches with exact indices,
+  not-ready re-polls, overruns counted, resynchronisation, rates the device
+  lacks refused). Register values from the SDK as recalled; the plan
+  verified on the board (SC7: WHO_AM_I 0xC7, ±2 g at 50 Hz reads 1 g).
+- [x] SC5 WM8960 and SAI1 core: the codec register list for recording
+  from the onboard microphone at each rate, the SAI clock dividers
+  (8, 16, 32, 48 kHz from the audio PLL), fixed-point RMS and peak, and
+  the µ-law encoder against the G.711 table — `sensors::{wm8960,sai,audio}::tests::sc5_*`
+  (32 and 48 kHz take a 12.288 MHz MCLK: the codec's ADC dividers cannot
+  make them from 6.144 MHz). Verified against the RT1052 SDK
+  (`fsl_clock.c` `CLOCK_InitAudioPll`, `fsl_sai.c` `SAI_RxEnable`,
+  `fsl_iomuxc.h`, `PERI_I2S.h`/`PERI_CCM*.h` bit positions), MicroPython's
+  `ports/mimxrt/machine_i2s.c` and WM8960 notes for the MIMXRT boards and
+  Zephyr's EVK pinctrl, then on the board (SC8). Corrected then: the
+  microphone is on the codec's right input (`RMR` keeps word 1),
+  `MISC2.AUDIO_DIV` is 0 for ÷1, the receiver takes DMA requests (`FRDE`,
+  `RFW` 0), the transmitter has channel 0 enabled as the SDK configures
+  it (`sensors::sai::tests::sc8_*`, `wm8960::tests::sc8_*`). The
+  `fsl_wm8960.c` file itself was not available; its register list was
+  checked field by field against the WM8960 register map.
+- [x] SC6 `payload-sim` and the browser simulator offer a fake IMU (a
+  deterministic tilt pattern) and a fake microphone (a tone and chirp),
+  and a payload streaming either runs in both —
+  `stream::samples::fake::tests::sc6_*`, payload-sim
+  `sc6_a_payload_streams_the_fake_imu_and_microphone` and `tests/sc6.rs`,
+  protocol-wasm `sc6_*`; `web/test/sensors.test.ts` (2 tests, the decoder's
+  refusals and the simulator streaming both sources), with the whole web
+  suite (334 tests) and `tsc --noEmit` passing on 2026-11-14 (vitest 5
+  needs Node >= 20.12).
+- [x] SC7 On the EVKB, flat on the bench the IMU stream reads about +1 g
+  on Z and about −1 g upside down, at the configured rate — 2026-11-14,
+  v0.53 (`wasm,usb,eth`): `firmware-imxrt/tests/payloads/imu.wat` (50 Hz,
+  ±2 g, 3 channels, 10 samples per batch on `imu/raw`) through
+  `RtDevice::route_samples` (`app/device.rs`: WHO_AM_I check, the route's
+  plan over LPI2C1 at 400 kHz, polled from the controller loop's alarm,
+  one STATUS+XYZ burst per poll), read with `mwctl monitor --samples` over
+  USB CDC: 490 samples in 49 batches with no index gap, 48.98 Hz measured
+  from the batch timestamps (the sensor's own ODR clock; 0 lost, 0 failed
+  reads). Flat: mean X 0.081 g, Y −0.176 g, Z +1.029 g (16866 counts at
+  16384/g), |g| 1.048; upside down (290 settled samples): X 0.076 g,
+  Y −0.081 g, Z −0.924 g (Z offset +0.053 g, sensitivity 0.977). The same
+  batches reached `examples/zenoh_board.rs --key imu/raw` over Ethernet
+  (sequences 0..5, gap 0; `sys/info` caps 3 = SERVE | SOURCE_IMU, with
+  SOURCE_IMU then bit 1). Since the merge with the Colorlight line, whose
+  `Caps::BRIDGE` holds bit 1, SOURCE_IMU is bit 2 and SOURCE_MICROPHONE
+  bit 3, so the same firmware reports caps 5 (and today's, with the
+  microphone route, 13) — `loader::tests::sc2_source_capability_bits`.
+  `sys/payload/stop` left CTRL_REG1 at 0x24 (ACTIVE 0; the part keeps DR
+  and LNOISE, which change only in standby) as a payload read it back
+  over I2C afterwards, its transfer to 0x1F no longer `Busy`.
+  Found on the way: the stream contract's IMU scale is i16 full scale =
+  ±range (`samples::accel_scale_ug`, 61 µg at ±2 g), while the core
+  published 14-bit counts (4096/g): `fxos8700::Sample::write_to` now
+  emits counts × 4 (the part's left-justified value), checked by
+  `imu_route::tests::sc7_*` (value × header scale ≈ 1 g) and mwctl
+  `report::tests::samples_lines_decode_imu_pcm_mulaw_and_levels_batches`.
+  `sys/info` caps carry SOURCE_IMU with the runtime only
+  (`service::tests::rt12_info_*`).
+- [x] SC8 On the EVKB, the microphone levels rise for a clap or speech,
+  and a 1 kHz tone from a phone is the dominant frequency of a 16 kHz PCM
+  capture taken over USB or TCP — 2026-11-15, v0.54–v0.60:
+  `RtDevice` runs one microphone route (`app/device.rs`, handle 1): the
+  WM8960 over LPI2C1 (`wm8960::record_plan` at the route's gain), SAI1
+  receiving the codec's right word (`app/sai.rs`: PLL4 786.432 MHz, MCLK
+  6.144 MHz, TX the clock master and RX synchronous, eDMA channel 1 into
+  a 4096-word DTCM ring, `app/edma.rs`) drained every 5 ms into
+  `sensors::mic_route` (`mic_route::tests::sc8_*`: PCM, µ-law and levels
+  against a sine and silence, the batch period, a gap dropping the
+  partial batch, level blocks realigned). Levels
+  (`firmware-imxrt/tests/payloads/mic_levels.wat`, 800-sample blocks at
+  16 kHz): quiet RMS 20–40 / peak 50–100; claps peak 16365–28800 (about
+  50 dB up), speech RMS 200–580; batches every 250.0 ms, and a 32.5 h
+  run published 468183 batches with 0 samples lost, the indices giving
+  16000.0000 Hz on the board clock. Tone (`mic_pcm.wat`, 160-sample
+  batches; a 1 kHz sine at −6 dBFS from the dev machine's speaker 1 m
+  away): over USB CDC (`mwctl monitor --samples | tools/mic_capture.py
+  --expect 1000`) a gap-free 10.00 s run, dominant 1000.0 Hz, SNR
+  23.8 dB, RMS 454; over Zenoh (`examples/zenoh_board.rs --samples-lines`)
+  the longest run 4.63 s, 1000.0 Hz, SNR 26.7 dB. Over Zenoh to this
+  Wi-Fi host the stream loses bursts of about 0.7 s (see the gaps below);
+  over USB it lost nothing in 32 s of simultaneous capture. `sys/info`
+  caps carry SOURCE_MICROPHONE with the runtime.
+- [x] FL1 Multi-link bus: requests are answered on their link; a
+  publication reaches exactly the links whose filters match; a full link
+  queue drops and counts that link's publications without delaying the
+  others; `sys/link/sub` and `unsub` change only the asking link —
+  `links::tests::fl1_*` (9); on the EVKB 2026-11-13, `mwctl request
+  sys/link/sub 'sys/**'` on LPUART1 stopped the payload's `rt16/state`
+  there (0 in 2 s) and `sys/link/sub '**'` brought it back (8 in 2 s). The
+  Zenoh link takes every non-`sys` publication: in client mode the router
+  does not declare its subscribers to the board.
+- [x] FL2 ChipIdea USB core: queue head and transfer descriptor encoding,
+  the endpoint and setup state decisions, the CDC zero-length-packet rule
+  (shared with the RP base), all over the `AtomicU32` DMA memory model —
+  `usb::{dma,regs,control,phy}::tests::fl2_*` (37) and
+  `usb::tests::fl6_publications_are_dropped_while_the_host_is_away`.
+- [x] FL3 ENET and KSZ8081 core: descriptor ring encoding and ownership
+  hand-off, the MDIO read and write plans, the PHY reset, auto-negotiation
+  and link-status decisions, the RMII clock settings —
+  `enet::{clock,mdio,ksz8081,mac,desc}::tests::fl3_*` (34), each register
+  value the RAM probe used on the board asserted.
+- [x] FL4 `zenoh::wire` builds without `std` and is shared by the host
+  backend (every Zenoh test unchanged) and `zenoh_lite` — the pure
+  encodings live in the always-built `zenoh_wire` (re-exported as
+  `zenoh::wire`, whose tests are unchanged);
+  `zenoh_wire::tests::fl4_stream_id_is_fnv1a_over_origin_then_key`,
+  `fl4_node_keys_build_and_parse_without_heap`,
+  `fl4_attachments_round_trip_in_no_std_module`; `scripts/check-features.sh`
+  (ungated module, thumbv6m and thumbv7em builds).
+- [x] FL5 On the EVKB, USB and ENET DMA reach the DTCM buffers — ENET
+  first from a RAM-loaded probe on 2026-11-13 (descriptor rings and frame
+  buffers as `AtomicU32` statics in DTCM, 43 frames received, two sent, no
+  bus error), then on 2026-11-14 with the firmware's own drivers in one
+  build (`APP_FEATURES=wasm,usb,eth`, v0.51): the USB controller's queue
+  heads, transfer descriptors and buffers in DTCM carried the CDC traffic
+  of FL6, and the ENET rings carried DHCP and the Zenoh session of FL7
+  (driver counters: frames received and sent, `bus errors 0`).
+- [x] FL6 On the EVKB, the board enumerates as a high-speed CDC-ACM port
+  and `mwctl --port /dev/ttyACM1 info` answers — 2026-11-14, v0.51: it
+  enumerates as 1fc9:0094 (`usb-middleware_imxrt-base_<node>-if00`, bulk
+  512), `mwctl info` answers over it, and eight rounds of `mwctl monitor`
+  on the CDC port (12 publications per 3 s, the payload's 4 Hz) alternating
+  with `info` on LPUART1 all answered; uploads over CDC installed (20 KB,
+  600 B). With Ethernet up at the same time a 750 KB `fw update` over
+  LPUART1 completed (74 s).
+
+  What had stalled the firmware with USB or Ethernet built in (2026-11-13)
+  was the PIT time driver (found with J-Link's non-halting PC sampling,
+  `DWT_PCSR`, and the reset pin, `r0`/`r1`, since halts and breakpoints had
+  disturbed it): at embassy-nxp's 1 MHz PERCLK one PIT register access took
+  297 core cycles (33 at 24 MHz), so the driver saturated the core under
+  the polled drivers' timers, and its interrupt handler trusted a TFLG read
+  that came back stale, returning without clearing the flag forever.
+  `firmware-imxrt/vendor/embassy-nxp` (VENDORED.md) runs the PIT at 24 MHz
+  with a matching `tick-hz-24_000_000` and re-evaluates the alarm on every
+  PIT interrupt. Also fixed on the way: FlexSPI IP commands run with
+  interrupts masked (an interrupt between TX FIFO pushes starves the
+  HyperBus write), and every erase and program first resets a
+  write-buffer abort and clears the HyperFlash's sticky status bits
+  (`hyperflash::plan::recover_steps`,
+  `rt4_recovery_resets_a_write_buffer_abort_then_clears_the_status`).
+- [x] FL7 On the EVKB, the board gets a DHCP address, opens a Zenoh
+  session to a router on the LAN, and a host `ZenohTransport` subscribes
+  to its IMU channel and queries `@mw/<node>/sys/info` — 2026-11-14, v0.43
+  and v0.51: the board took a DHCP lease, connected to the endpoint set
+  with `mwctl request sys/zenoh/endpoint tcp/192.168.1.190:7447` (persisted,
+  `config::tests::fl7_*`), opened the session, and the host's
+  `cargo run --example zenoh_board --features zenoh` (a zenoh 1.10 peer
+  listening on TCP) received the payload's `rt16/state` publications with
+  the board's sender id and sequences 0..4 without gaps, and its
+  `Target::Node` query of `sys/info` answered chip rt1050, node
+  310441d265f82484 (`sys/board`: NotFound, the board has no esp-base
+  profile). The IMU channel itself (`imu/raw`) followed with SC7.
+- [x] ZN1 `zenoh_lite` codec: every message of the subset encodes and
+  decodes (variable-length integers, extensions skipped when unknown and
+  refused when mandatory), byte-identical to the `zenoh` 1.10 codec for
+  the same messages (host test against `zenoh-codec` =1.10.1) —
+  `zenoh_lite::codec::transport::tests::zn1_transport_messages_are_byte_identical_to_zenoh_codec`,
+  `zenoh_lite::codec::network::tests::zn1_network_messages_are_byte_identical_to_zenoh_codec`,
+  `zenoh_lite::codec::tests::zn1_zints_round_trip_at_every_length_boundary`,
+  `zn1_unknown_extensions_skip_and_mandatory_ones_refuse`, and the
+  truncation, batch-limit and OAM tests in `codec::{transport,network}::tests`.
+  Fragmentation, QoS priorities, compression, auth and peer mode are not
+  in the subset (oversized messages are refused, fragments dropped).
+- [x] ZN2 Session state machine: handshake, lease and keep-alive timing,
+  sequence numbers, close and reconnect with bounded backoff, every
+  malformed or out-of-order input refused without panicking —
+  `zenoh_lite::session::tests::*` (handshake with the cookie, keep-alive
+  and lease on the clock, per-channel sequence numbers and wrap,
+  out-of-order frames refused, timeout and backoff bounds, close until
+  restart, `zn2_random_and_mutated_batches_never_panic` over 20 000
+  rounds); `zenoh_lite::tables::tests::*`;
+  `zenoh_lite::client::tests::zn2_client_opens_redeclares_answers_interests_and_resolves_router_ids`
+  (a scripted router: a real zenoh peer never sends a client an Interest
+  or a key-expression declaration).
+- [x] ZN3 Interop on the host: `zenoh_lite` over a TCP socket to a real
+  `zenoh` 1.10 session (router or peer listener): a `ZenohTransport`
+  subscriber receives its publications with their attachments and gaps,
+  its queryable answers `get`s, and it receives a Zenoh publisher's
+  samples on the keys it declared — `tests/zenoh_lite.rs`:
+  `zn3_host_subscriber_receives_lite_publications_with_attachments_and_gaps`,
+  `zn3_lite_queryable_answers_host_gets`,
+  `zn3_lite_receives_host_publications_on_declared_keys`,
+  `zn3_lite_requests_reach_a_host_responder`,
+  `zn3_keep_alives_hold_a_short_lease_while_idle`.
+- [x] ZN4 Management over Zenoh: only `sys/info` and `sys/trust/info`
+  answer on an unclaimed board; after the claim, a request that changes
+  the board needs a signature by the pinned key; a refused request leaves
+  the board unchanged — `zenoh_mgmt::tests::zn4_*` (against the real
+  service on the RAM flash: state, flash log, image and `sys/fw/info`
+  unchanged after every refusal; signed start/stop admitted once, its
+  counter persisted by `Service::accept_control` and refused on replay
+  across reboots; `sys/zenoh/endpoint` never over Zenoh). On the board
+  (2026-11-15, v0.57): `examples/zenoh_board.rs --stop rt-key.pem
+  02:d2:65:f8:24:84` sent an unsigned `sys/payload/stop` (`Denied`), a
+  signed one (accepted, the payload stopped) and the same signed body
+  again (`Denied`: counter not above the last).
+
+- [x] ZN5 Signed updates over Zenoh (the ESP-NOW rules on the network):
+  on a claimed board `sys/loader/begin|chunk` stage beside the running
+  payload and the owner's commit must be signed (unsigned: `Denied`, the
+  transfer ends); `sys/fw/begin|chunk|commit` reach the A/B updater, whose
+  commit needs the firmware signature; `sys/payload/start|stop` and
+  `sys/fw/reboot|confirm|abort` need a signed control request for the
+  board's Ethernet MAC whose counter is persisted before it acts. One
+  payload and one firmware transfer at a time, owned by the requester
+  whose `begin` started it (`Service::set_origin`: the serial links are
+  one requester, Zenoh another); another's `chunk` or `commit` is
+  `InvalidRequest` without touching the transfer. The board declares one
+  per-node queryable for every system key (`@mw/node/<id>/sys/**`,
+  `zenoh_lite` `declare_node_prefix_queryable`) besides its six broadcast
+  ones, seven declarations in all. mwctl (feature `zenoh`) sends any
+  command to one board with `--zenoh <ENDPOINT>` or `--zenoh-listen
+  <ENDPOINT>` and `--node <ID>`, signing controls with a fresh counter
+  each (also every confirm retry), and after a firmware reboot waits for
+  the board on trial and confirms it — `zenoh_mgmt::tests::zn5_*`
+  (staged upload: unsigned, other key, used version and tampered chunk
+  refused with the payload still running, signed activated and surviving
+  a reboot; transfer ownership both ways; a firmware update with unsigned,
+  other-key and wrong-slot commits refused, a serial commit refused on a
+  Zenoh transfer, the signed reboot resetting into B, the replayed reboot
+  refused, the trial confirmed only by a signed confirm, a reboot
+  signature never a confirm; a signed abort), the ZN4 tests with the new
+  table, `zenoh_lite::tables::tests::zn5_one_node_prefix_queryable_answers_every_key_under_it`,
+  `tests/zenoh_lite.rs`
+  `zn5_one_node_prefix_queryable_answers_every_per_node_key_under_it`
+  (against zenoh 1.10), mwctl `cli::tests::zenoh_routes_need_a_node_and_keys_for_what_changes_the_board`,
+  `zlink::tests::node_ids_and_rt_targets`. On the board: pending (TK6).
+
+  Payload subscriptions over Zenoh (2026-11-15, v0.57): the board
+  declares a subscriber for each of the running payload's subscription
+  keys (`Bus::set_subscriptions`, refreshed by the controller every
+  loop and cleared when the payload ends; `app/zenoh.rs`
+  `follow_subscriptions`; `zenoh_mgmt::tests::gap_payload_subscriptions_become_zenoh_declarations`)
+  and undeclares them when they go (`zenoh_lite`
+  `undeclare_subscriber`,
+  `client::tests::zn2_client_undeclares_a_subscriber_and_then_drops_its_samples`);
+  a new session declares them again. With the echo template running, a
+  host put on `app/echo/in` reached the payload and its answer on
+  `app/echo/out` came back over Zenoh; stopping it logged one
+  undeclared, a reconnect one declared.
+
+#### Known gaps (2026-11-15)
+
+- **Zenoh PCM to a Wi-Fi host loses bursts.** A 16 kHz PCM route (100
+  batches/s, about 40 KB/s) reached `zenoh_board` over Ethernet → Wi-Fi
+  with 0.7 s holes: 28 % lost with the original 8-deep link queue and
+  2 KiB TCP send buffer, about 2 bursts per 35 s after raising them (32
+  publications per link, 32 KiB, ENET 8 RX / 4 TX descriptors). The
+  same batches over USB had no gap, so the board drains the route; the
+  fixed burst size points at TCP retransmission stalls on the Wi-Fi
+  side. Not pursued further: a wired host, or the levels/µ-law modes
+  (a tenth of the rate), avoid it.
+- **SWD stopped answering** (2026-11-15) while the firmware runs and
+  right after a reset, with J-Link and probe-rs (it hangs at "Connecting
+  to target via SWD"); a board power cycle with v0.58 did not clear it,
+  nor did going back to the session-start firmware (v0.59 = `17fabde`)
+  with only the probe power-cycled, so whether the firmware is the cause
+  is open. Updates over USB work throughout. `tools/flash.py`'s new
+  post-reset check (VTOR must point into SDRAM, else a second WDOG1
+  reset; `--reset` alone) is therefore not yet run on the board.
+  Still so on 2026-11-16 (v0.60 running, a JLinkExe nRESET pulse did not
+  help). It blocks the move to the TPM release key: the board is claimed
+  by an earlier Ed25519 key whose seed file was not at hand, so 0.61
+  (P-256, ZN5; built, `imxrt-base-0.61.slot`) cannot be signed for it,
+  and erasing its trust region needs SWD (`tools/flash.py --erase
+  0xC0000:0x80000 ...`). With either the seed or SWD back: erase or sign,
+  `fw update` 0.61 over USB, `trust claim --pkcs11 mw-release`, then the
+  TK6 / ZN5 checks over USB, LPUART and Zenoh (`mwctl --features zenoh
+  --zenoh-listen tcp/0.0.0.0:7447 --node 310441d265f82484 ...`).
+- **SPI** (LPSPI1, routed on the board map, RT10) is not offered to
+  payloads: `spi_*` answer `Unsupported` (`app/device.rs` table).
+- **USB `fw update`** used to fail with a broken pipe when the CDC port
+  vanished at the reboot; mwctl now counts that as the reboot
+  (`Error::is_port_lost`, `fw::tests::rt15_a_usb_port_that_vanishes_with_the_reboot_is_a_reboot`)
+  and reconnects and confirms: one `mwctl fw update` over USB took 16 s
+  on the board (v0.58).
 
 ### Host tool (`tools/mwctl`)
 
@@ -2403,6 +4668,7 @@ SPI (ABI 2) and I2C (ABI 3) per base firmware:
 | ESP8266 (`firmware-esp8266/`) | no payloads run (too little DRAM for wasmi) | same |
 | Pico 2, RP2350 (`firmware-rp/`) | bus 0 on SPI0 or SPI1, pins checked against the function table, FIFO pumped (V15, V17) | buses 0 (GP4/GP5) and 1 (GP6/GP7), up to 1 MHz (V16) |
 | Pico, RP2040 (`firmware-rp/`) | no payloads run (no CAS atomics); the bus drivers are built and the pure core host tested | same |
+| RT1050-EVKB (`firmware-imxrt/`) | not offered (`Unsupported`; LPSPI1 is on the board map only) | bus 0: LPI2C1 on A4/A5 (GPIO_AD_B1_01/00), 10 kHz–1 MHz; the FXOS8700CQ (0x1F) and WM8960 (0x1A) are `Busy` while their source route runs |
 
 - [x] X1 ABI 3 is a superset of ABI 2 (six imports appended to
   `wasm_abi::IMPORTS`, `ABI_VERSION` 3), and ABI 1 and ABI 2 payloads still
@@ -2549,22 +4815,26 @@ camera's XCLK (GPIO 0, a strapping pin) and timers 2–3 are `Unsupported`.
 
 ### Signed payloads (trust)
 
-From 0.4 a device can pin an Ed25519 public key (the root of trust, held by
-the browser or by `mwctl`) on first use; from then on it installs a payload
-only when the commit is signed by that key with a strictly increasing
-version. The rules and wire types live in `middleware::loader::trust`; the
-SHA-256 and Ed25519 checks sit behind the `trust` cargo feature (no_std, no
-heap: `sha2` 0.10.9 with `compress`, `ed25519-dalek` 2.2.0 verify only, no
-default features). The ESP base firmware (`firmware/`) enables it for every
-chip; the ESP8266 firmware does not.
+From 0.4 a device can pin a public key (the root of trust, held by the
+browser, by `mwctl`, or inside a hardware token that `mwctl` reaches over
+PKCS#11) on first use; from then on it installs a payload only when the
+commit is signed by that key with a strictly increasing version. The rules
+and wire types live in `middleware::loader::trust`; the SHA-256 image
+hashing and signature checks sit behind the `trust` cargo feature (no_std,
+no heap: `sha2` 0.10.9 with `compress`, `ed25519-dalek` 2.2.0 verify only,
+`p256` 0.13 `ecdsa` without default features); since O20 `sha2` and
+`loader::sha256` are built without `trust` too, for the rpc reply cache. A pinned key is **Ed25519** (32
+bytes) or **ECDSA P-256** (33 bytes, compressed SEC1) — see *Hardware-held
+keys* below. Every base firmware enables it: the ESP base firmware for
+every chip, the RP and RT1050 firmwares, and (E26) the ESP8266 firmware.
 
 System keys (all integers little-endian; the full table, including the 0.3
 keys, is in the `loader` module docs):
 
 | key                 | request body                                  | response body |
 |---------------------|-----------------------------------------------|---------------|
-| `sys/trust/info`    | empty                                         | `[state u8][min_version u32][key 32, iff state != 0]`; state 0 Unclaimed, 1 Claimed, 2 Claimed with the re-key window open |
-| `sys/trust/claim`   | `[public key 32]`                             | empty; `Denied` when claimed and the window is closed |
+| `sys/trust/info`    | empty                                         | `[state u8][min_version u32][key 32 or 33, iff state != 0]`; state 0 Unclaimed, 1 Claimed, 2 Claimed with the re-key window open |
+| `sys/trust/claim`   | `[public key 32 or 33]`                       | empty; `Denied` when claimed and the window is closed |
 | `sys/loader/commit` | empty (unsigned) or `[version u32][signature 64]` | empty; `Denied` when the trust rules refuse it |
 
 The signature is Ed25519 (RFC 8032) over the 54-byte message
@@ -2687,8 +4957,129 @@ first claimant pins the key — claim a device before exposing it.
 - [ ] T14 On hardware (ESP32-S3): claim, signed upload, refusal of an
   unsigned and of a replayed upload with the previous payload still
   running, the trust record surviving reboot, and BOOT-held re-keying.
-  Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`); not yet run on
-  a board.
+  Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`). Evidence so
+  far (the over-the-air runs on an ESP32-S3, which claim over its
+  USB-Serial-JTAG first): claim and a signed upload (O10), unsigned,
+  stale and older versions refused (O11), a claimed trust record loading
+  after a reflash and reboot (O19). Open: BOOT-held re-keying on a board.
+
+#### Hardware-held keys (TK…)
+
+Release signing keys live in hardware tokens, which sign ECDSA P-256 (a
+TPM 2.0 has no Ed25519; neither do PIV cards). So the trust model has two
+key kinds ([`KeyKind`]): Ed25519 and P-256. The wire is unchanged for
+Ed25519 (a 32-byte claim, a 37-byte `sys/trust/info`), a P-256 key is 33
+bytes on the wire (compressed SEC1, prefix 02/03; `sys/trust/info` is 38
+bytes), and the length gives the kind. Both signatures are 64 bytes
+(Ed25519 `R || S`; P-256 raw `r || s`, SHA-256 of the message), so
+commit, control and firmware bodies are the same for both. A device
+verifies with the **pinned** key's algorithm only: a signature never picks
+its own.
+
+The release key, `mw-release`, is a P-256 key generated inside the TPM 2.0
+of the release workstation (Infineon SLB9672) through `tpm2-pkcs11`,
+token `mw`, not extractable; its public half is `keys/mw-release.pub`
+(wire form `02fd5072…7c654a`, SPKI SHA-256 `a0f52006…d45d`). mwctl signs
+with it through any PKCS#11 module (`--pkcs11 mw-release`; module, token
+and PIN from `PKCS11_MODULE`, `PKCS11_TOKEN`, `PKCS11_PIN` in the
+environment or `~/.env`, never on a command line). A browser cannot reach
+PKCS#11: the web app verifies and claims P-256 keys but signs only with its
+own Ed25519 key, and tells the user to sign with mwctl when a device
+trusts a hardware key.
+
+- [x] TK1 Two key kinds in `loader::trust`: `PublicKey::{Ed25519, P256}`,
+  claims of 32 or 33 bytes (anything else, an uncompressed or off-curve
+  point included, is `InvalidRequest`), `TrustInfo` 37 or 38 bytes, one
+  `verify_signature` dispatching on the pinned key (Ed25519
+  `verify_strict`; P-256 rejects r or s of 0 or ≥ n; either S half is
+  accepted, a version or counter stops replays), and `fw_ota` verifying
+  firmware commits through it; `ControlOp` gains `FwReboot`, `FwConfirm`,
+  `FwAbort` (3–5) — `loader::trust::tests`:
+  `claim_bodies_are_32_byte_ed25519_or_33_byte_p256`,
+  `trust_info_round_trips_every_state`, `key_kinds_round_trip_through_bytes`,
+  `control_ops_have_fixed_codes_and_keys`, `crypto::p256_openssl_vector_verifies`
+  (a vector made with OpenSSL 3, `web/test/fixtures/trust-vector-p256.json`),
+  `crypto::p256_commit_denials` (unsigned, replay, rollback, other key,
+  tampered image, bumped version, corrupt, zero and out-of-range
+  signatures), `crypto::kinds_never_cross`, `crypto::p256_claim_needs_a_curve_point`;
+  the Ed25519 tests unchanged.
+- [x] TK2 Trust record format 3 (`firmware/src/trust_store.rs`, shared by
+  the ESP, RP, RT1050 and ESP8266 firmwares): a kind byte and a 40-byte
+  key slot (padding must be zero), 68 bytes; formats 1 and 2 load as
+  Ed25519 and migrate on the next save with the save's power-loss safety —
+  `trust_store::tests::format_2_records_load_as_ed25519_and_migrate_to_format_3`
+  (every byte of a format-2 record checked, a cut at every flash operation
+  of the migration, a re-key to P-256),
+  `p256_records_round_trip_and_keep_their_padding_zero`, the format-1 and
+  torn-write tests.
+- [x] TK3 Cost per firmware, measured 2026-11-16. Code (P-256 / Ed25519
+  symbols): RP2040 15.1 / 11.9 KB, RP2350 16.2 / 13.4 KB, RT1050 13.4 /
+  9.0 KB, ESP32-C3 20.7 / 21.5 KB, ESP32 and ESP32-S3 28.0 / 24.1 KB,
+  ESP8266 32.7 / 18.5 KB (in IROM; its static DRAM is unchanged: 2.9 KB
+  rodata, no data or bss). No static RAM, no heap. Worst-case stack of one
+  verify (`scripts/verify-stack/run.sh`: LLVM frame sizes over the call
+  graph, no indirect calls on the path): P-256 4.4 KB on Cortex-M0+
+  (RP2040), 4.6 KB on Cortex-M7 (RT1050), 4.3 KB on RV32IMC (ESP32-C3);
+  Ed25519, which every firmware already ran, 7.7, 7.6 and 8.3 KB. The two
+  algorithms are separate non-inlined functions, so P-256 never adds to
+  the deepest stack a firmware already had. Xtensa is not measured (no
+  stack-size section from its toolchain).
+- [x] TK4 mwctl signs through a `Signer` (a seed file, or
+  `pkcs11::Pkcs11Signer` with `cryptoki`, the module dlopen()ed at run
+  time): `--pkcs11 <LABEL>` wherever `--key` is taken, `key new|pub
+  --pkcs11`, `key init-token` (refuses unless exactly one token is
+  uninitialised). The token's raw ECDSA signature is normalised to low S
+  and verified against its public key before use; PINs are read into
+  `AuthPin` from the environment or `~/.env` and appear in no argument,
+  log line or error — mwctl `pkcs11::tests::softhsm_end_to_end` (SoftHSM2
+  in a child test process: init, P-256 and Ed25519 key generation, label
+  reuse refused, wrong PIN refused without the PIN in the error, payload
+  commits, control requests and an RP2350 firmware update signed in the
+  token and accepted by the device code; other key, tampered image and
+  replays refused), `env_file_lines_are_read_by_name`,
+  `public_keys_convert_to_the_device_wire_form`,
+  `a_missing_pin_names_the_variable_only`;
+  `sign::tests::p256_openssl_vector_verifies_on_the_host`;
+  `cli::tests::pkcs11_keys_name_a_token_label`.
+- [x] TK5 The release key exists in the TPM (2026-11-16): `mwctl key
+  init-token mw` and `key new --pkcs11 mw-release` (random PINs written to
+  `~/.env` by a script, mode 0600, never printed), `key pub --pkcs11
+  mw-release` reads back the same key as `pkcs11-tool`'s SPKI export.
+- [x] TK6 A release signed by the TPM key is accepted by a device, and
+  the other-key, tampered and replay refusals hold, on hardware
+  (2026-11-17, ESP32-S3 `e8:3d:c1:f6:0a:c8` on its USB-Serial-JTAG,
+  firmware 0.6.0 with P-256, flashed with `--erase-parts
+  nvs,payload,trust` after a full-flash backup): `trust claim --pkcs11
+  mw-release` pinned the TPM key (`trust info`: `02fd5072…` (p256)); a
+  TPM-signed `upload echo.wasm --version 100 --start` installed and ran;
+  refused with `Denied`: unsigned, signed by another (Ed25519) key at 101,
+  TPM-signed at 100 (replay) and 99 (older), a second claim; a corrupted
+  chunk with a valid signature failed its CRC (`InvalidRequest`), the
+  previous payload kept each time. A TPM-signed `blink.wasm` at 101
+  installed; after a reset the key and `min_version` 101 were still
+  pinned, blink autostarted (`app/blink/state` toggling), and the same
+  upload at 101 was `Denied`. Still open: the EVKB (USB, LPUART, Zenoh)
+  and the ESP-NOW path (no bridge attached), see ZN5 and the RT1050's
+  *Known gaps*.
+- [x] TK7 The web app parses 37- and 38-byte trust info, claims 33-byte
+  keys and verifies P-256 signatures (WebCrypto ECDSA; the compressed key
+  decompressed in `decompressP256`); a device pinned to a P-256 key
+  refuses browser uploads with a message pointing to mwctl —
+  `web/test/trust.test.ts` "P-256 pinned keys (hardware tokens)" (the
+  OpenSSL vector, kinds never cross, off-curve points refused).
+- [ ] TK8 Signed A/B firmware updates where the base firmware has none
+  yet: ESP32 / S3 / C3 (`otadata` + `ota_0`/`ota_1`, the ESP app image
+  format, the bootloader's rollback), RP2040 (`embassy-boot-rp`), ESP8266
+  (a second-stage bootloader; go/no-go spike first). Not started: each
+  touches its board's boot path, which the plan allows only after that
+  board's recovery path (esptool, BOOTSEL / SWD) is proven on the board,
+  and none of those boards was free on 2026-11-16. Since 2026-11-17 an
+  ESP32-S3 runs the base firmware (its ROM download mode over
+  USB-Serial-JTAG, the recovery path, works; its previous firmware is
+  backed up), so the ESP32-S3 updater can start there. The shared pieces they will reuse are
+  ready: `fw_ota` verifies both key kinds (TK1), mwctl signs with the TPM
+  (TK4) and drives `fw update` over any endpoint, ESP-NOW included once
+  the CLI's refusal is lifted for a board that has the updater.
 
 ### Over-the-air payload update (O…)
 
@@ -2710,6 +5101,28 @@ requester resends on timeout with the **same** id; the responder replays a
 cached response to a repeat instead of running the handler again, so a
 resent `commit` or `start` never acts twice. Responses go unicast to the
 requester.
+
+**Reply cache bound to request content** (from 2026-10-31, after a
+security review found cross-request poisoning: the cache was keyed by
+`(peer MAC, id)` alone, so a station spoofing a victim's MAC could send
+the victim's next id first, have its own request run and cached, and the
+victim's genuine request with that id, a signed `start` or `stop`
+included, would be taken for a repeat, never run, and answered with the
+spoofed result). Every cache entry and the request in flight also carry a
+`rpc::RequestDigest`: SHA-256 over a domain tag, the key length, the key
+and the body, truncated to 128 bits (local state, not on the wire). Only
+a byte-identical request replays; the same `(peer, id)` with another
+digest is a different request, admitted as a new one (executed when
+nothing is in flight, busy otherwise) with its own cache entry, so a
+legitimate retransmission stays idempotent and a spoofed request can
+neither suppress nor answer for a genuine one. The other entry is kept
+until least recently used, so alternating requests do not re-run each
+other. A CRC-32 was rejected: an attacker can match any CRC. SHA-256 is
+`sha2`'s block function behind `loader::sha256`, which is therefore built
+in every configuration (no_std, no heap). This does not authenticate the
+MAC: a spoofer can still send its own requests in the victim's name, a
+spoofed request in flight delays the genuine one by a resend, and signed
+control requests remain the authority for start, stop and commit.
 
 **Policy** (`esp_base::ota::admit`, before dispatch, over the air only;
 from 2026-10-30, after a security review found that anyone in radio range
@@ -2973,6 +5386,18 @@ host → bridge.
   the gated build was flashed again and the refusals, staging, signed
   stop/start, replay and a signed `upload echo.wasm --start` (3006)
   repeated with the same results.
+- [x] O20 The responder cache is bound to the request content: a spoofed
+  request with a victim's `(peer, id)` and other content does not suppress
+  the genuine request, which runs and gets its own result (also while the
+  spoofed one is in flight); a genuine retransmission still replays without
+  running the handler; digests separate key, body and their split; entries
+  sharing a `(peer, id)` share the bounded LRU cache —
+  `rpc::tests::o20_a_spoofed_request_with_the_same_id_does_not_suppress_the_genuine_one`,
+  `o20_a_spoofed_request_in_flight_does_not_suppress_the_genuine_one`,
+  `o20_request_digests_bind_key_and_body`,
+  `o20_same_id_entries_share_the_bounded_cache`;
+  `espnow::rpc::tests::o20_a_spoofed_request_with_the_next_id_does_not_suppress_the_genuine_one`;
+  replay of retransmissions stays covered by O3 and O4.
 
 ### A/B firmware OTA (RP2350)
 
@@ -3987,6 +6412,105 @@ The contract is `wasm_abi::serve`, pure and heap-free.
   delivers publications between units and to listeners after the
   publishing call returns, and takes units off the network — `cargo test -p protocol-wasm simulator`: "q19_a_phase_unit_serves_its_phase_under_its_node_id", "adc_levels_are_set_from_js_and_clamped"; `web/test/recipe.run.test.ts`: "gives each unit a distinct node and routes requests by the key's node", "publishes each unit's state reports on the bus and delivers to other units' subscriptions".
 
+### LED strips (ABI 7, LS…)
+
+Payloads drive WS2812-style one-wire RGB LED chains (WS2812B, SK6812 and
+compatibles), such as the Conagotchi badge's eight LEDs on GPIO45
+(conagotchi-badge-ui FR-57, upstream item U4). The payload names the data
+pin and the chain length and sends whole frames of G, R, B bytes; the host
+generates the pulse train, so a payload never times a pulse and the
+interpreter's speed does not matter. A write is synchronous and bounded:
+at most `ledstrip::MAX_LEDS` (64) LEDs of about 30 µs each, plus the
+`ledstrip::RESET_US` (300 µs) latch gap the host waits out before a frame
+that follows the previous one too closely. The contract is
+`wasm_abi::ledstrip`; strips raise no events.
+
+- [x] LS1 ABI 7 is a superset of ABI 6: `ledstrip_open` (2 params),
+  `ledstrip_write` (3) and `ledstrip_close` (1) are appended to
+  `wasm_abi::IMPORTS` after ABI 6's `route_bridge` (`ABI6_IMPORTS` marks
+  the ABI 6 prefix, so the strips take neither a slot nor a revision of
+  the serving or bridge imports), `ABI_VERSION` is 7, ABI 1–6 modules
+  still load because imports are checked by name and signature only, and
+  an ABI 6 host does not know the strip imports —
+  `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`,
+  `an_abi4_host_does_not_know_the_abi5_imports`;
+  `wasm-host/tests/abi7.rs` `ls1_every_import_links_and_abi6_payloads_still_load`,
+  `ls1_wrong_signatures_are_refused`; `wasm-host/tests/abi4.rs`
+  `r1_every_import_links_and_older_revisions_still_load`; `abi-check`
+  `tests/payloads.rs` `abi4_examples_import_nothing_newer`;
+  `web/test/protocol.test.ts` "mirror middleware::wasm_abi".
+- [x] LS2 Arguments are validated in one place before any pointer: pin
+  `0..=255`, count `1..=MAX_LEDS`, handle `< MAX_LEDSTRIPS` (2), frame
+  length a non-zero multiple of 3 of at most `MAX_FRAME` (192) bytes; the
+  frame is copied out of guest memory into a host buffer before the device
+  runs; device errors reach the payload as codes, a device handle outside
+  `0..MAX_LEDSTRIPS` as `NoResources`, and a board without strips answers
+  `Unsupported` — `wasm_abi::ledstrip::tests::*`;
+  `abi::tests::ls2_ledstrip_write_checks_arguments_before_pointer`;
+  `wasm-host/tests/abi7.rs`
+  `ls2_open_write_close_pass_parsed_arguments_and_frame_bytes`,
+  `ls2_bad_arguments_never_reach_the_device`,
+  `ls2_device_errors_rogue_handles_and_defaults_reach_the_payload_as_codes`.
+- [x] LS3 The ESP firmware's pure encoder turns G, R, B bytes into RMT pulse
+  codes, one per bit, most significant bit first, with the WS2812 timing
+  at 80 MHz (T0H 400 ns / T0L 850 ns, T1H 800 ns / T1L 450 ns) and the last
+  code's low phase of length 0 as the end marker; a frame that does not
+  fit the output is refused, and the latch wait is bounded by `RESET_US`
+  and the transmit wait by the frame's wire time plus a margin —
+  `esp_base::ledstrip::tests::ls3_*` (`ls3_timing_is_whole_ticks_at_80_mhz`,
+  `ls3_code_values_match_the_rmt_layout`,
+  `ls3_bytes_are_sent_msb_first_with_an_end_marker`,
+  `ls3_a_whole_led_is_24_codes_in_grb_order`,
+  `ls3_a_frame_that_does_not_fit_is_refused`,
+  `ls3_encode_into_builds_the_callers_code_type`,
+  `ls3_deadline_covers_the_wire_time`,
+  `ls3_latch_wait_is_bounded_and_wrapping_safe`).
+- [x] LS4 The firmware checks the data pin like `gpio_output` and claims
+  it for the strip (a pin held by SPI, UART, PWM, I2C, the camera or a
+  route is refused, and `gpio_*` on a strip pin is refused), drives one
+  strip on RMT channel 0 with the whole frame in channel memory (no CPU
+  refills a radio interrupt could delay), refuses a longer chain with
+  `Unsupported` (8 LEDs on ESP32-S3, 10 on ESP32: four 48- or 64-word
+  blocks), and releases the pin when the strip closes or the payload
+  stops — `esp_base::ledstrip::tests::ls4_*`
+  (`ls4_capacity_is_what_fits_channel_ram`, `ls4_limits_are_validated`,
+  `ls4_handles_are_bounded`, `ls4_open_reopen_and_close`,
+  `ls4_two_strip_boards_hand_out_two_handles`,
+  `ls4_frames_are_checked_against_the_strip`);
+  `periph::claims::tests::ls4_ledstrip_pins_are_driven_owned_and_exclusive`.
+  The release on payload stop is the pin lease's drop in the shell and is
+  not regression-tested.
+- [x] LS5 The ESP firmware builds for ESP32 and ESP32-S3 with strips, and for
+  ESP32-C3 (no payload runtime there, so no strip import is served) —
+  `firmware/build.sh esp32`, `esp32s3`, `esp32c3`.
+- [x] LS6 Both simulators implement strips, so payloads using them can be
+  tested off hardware: `payload-sim` and the browser simulator record each
+  strip's last frame and make it observable (`payload-sim` prints a
+  `ledstrip<h> #rrggbb …` line per write and the final colours at the end
+  of a run; the browser simulator raises `ledstripOpen` / `ledstrip` /
+  `ledstripClose` events and answers `ledstrips()`) — `payload-sim`
+  `sim::ledstrip::tests::*`, `tests/ls6.rs`
+  `ls6_ledstrip_frames_in_the_simulator`; `protocol-wasm`
+  `simulator::tests::ls6_device_strips_record_frames_and_hold_their_pin`,
+  `ls6_payload_drives_a_strip`, `simulator::ledstrip::tests::*`;
+  `web/test/ledstrip.test.ts`.
+- [x] LS7 The payload SDK offers a safe LED-strip wrapper that validates
+  with the ABI parsers before calling the host and encodes colours into a
+  fixed buffer, with no new `unsafe` — `mw-payload` `ledstrip::tests::*`
+  (`grb_is_wire_order`, `encode_writes_grb_per_led`,
+  `encode_refuses_empty_and_oversized_frames`,
+  `open_validates_before_the_host`, `writes_validate_before_the_host`,
+  `frames_are_checked_against_the_strip`); `abi-check`
+  `tests::ledstrip_imports_need_no_on_irq`.
+- [x] LS8 The `ledstrip` example (a moving rainbow on `COUNT` LEDs, data pin
+  from a constant) builds for `wasm32` with the payload scripts and
+  validates against the ABI — `ledstrip` `tests::*`
+  (`wheel_hits_the_primaries`, `rainbow_moves_with_the_offset`, …);
+  `abi-check` `tests/payloads.rs` `rust_ledstrip_example`,
+  `ledstrip_fits_the_badge`; `payloads/scripts/check-all.sh`.
+- [ ] LS9 On hardware (manual run, not regression-tested): the badge shows
+  the rainbow on its eight LEDs on GPIO45.
+
 ### JPEG decode in WASM (J…)
 
 `payloads/jpeg` (`mw-jpeg`): the badge-side decoder of R14, a `no_std`,
@@ -4572,6 +7096,173 @@ payload does. The version-4 reader accepts every older file.
   board). Firmware has no `s88/unit` announcement yet (rp-base has no
   discovery at all; esp-base's beacons would need the payload to name its
   unit).
+
+### Colorlight 5A-75B (`gateware-5a75b/`, CL…)
+
+A Colorlight 5A-75B v7.0 LED receiver card (Lattice LFE5U-25F, 24 288
+LUT4, 56 block RAMs; two Broadcom B50612D Gigabit PHYs over RGMII; 4 MB
+SDRAM; W25Q32 SPI flash) is a middleware node with **two independent
+links**, one per Ethernet port, each its own IPv4 address. There is **no
+soft CPU**: LiteEth's hardware MAC/ARP/ICMP/IP/UDP stack runs on each
+PHY, and the middleware is gateware — a frame core, a system request
+responder, a bridge engine, and a WebAssembly core (loader, interpreter,
+import unit) whose exact semantics are a Rust reference model.
+
+Payloads configure **channel bridging**: `route_bridge` (ABI 6) fills a
+hardware rule table and the board forwards matching publications from
+one link to the other by itself; low-rate messages may still reach the
+payload's `on_message` and `tick` (the slow path).
+
+**Trust is unsigned**: uploads are checked with CRC-32 and SHA-256 in
+hardware and the board reports itself unclaimed (`sys/trust/info`);
+Ed25519 does not fit the 25F next to two Ethernet stacks.
+
+Toolchain: `nix develop ./gateware-5a75b` (flake: yosys, nextpnr-ecp5,
+Project Trellis, openFPGALoader, Verilator, Python with Migen, LiteX,
+LiteEth, liteiclink and litex-boards 2026.08, cocotb, pytest).
+`pytest gateware-5a75b/tests` runs every cocotb + Verilator test;
+`python soc.py` builds the bitstream; `python blinky.py` builds the JTAG
+bring-up design.
+
+Facts that shape the design:
+
+- One raw serial frame per UDP datagram (`middleware::udp`), port 7448:
+  `[kind][id][key_len|status][key][payload][crc16 LE]`, CRC-16/CCITT-FALSE
+  kept (the gateware checks it while the datagram streams in), at most
+  1024 bytes and keys of at most 128.
+- The two PHYs share one MDIO bus (P3/T2) and one reset (P5); the
+  platform (`mw5a75b/platform.py`) gives each `eth` resource its data
+  pins and adds a single `eth_mdio`. Autonegotiation needs no MDIO, so
+  the bus is idle and the reset is not driven.
+- LiteEth's system-side IPv4 checksum and ICMP FIFO close timing at about
+  60 MHz on the -6 part (litex-boards' Colorlight targets run there too),
+  so the system clock is **50 MHz**; the node handles one byte per cycle,
+  so a link forwards up to **400 Mbit/s**, not Gigabit line rate. The
+  RGMII domains run at 125 MHz; the second port's transmit path was
+  routing-bound on every placement seed, so its output gets one more
+  register stage (`mw5a75b/rgmii.py`).
+- Linear memory is **16 KiB** (block RAM). The WAT templates declare one
+  64 KiB page and so load only with 1-byte pages (as `bridge.wat` and the
+  golden vectors do); the Rust SDK examples place their data above
+  16 KiB and need a byte-pages build with a smaller stack
+  (`payloads/scripts/build-byte-pages.sh`).
+
+Requirements:
+
+- [x] CL1 UDP transport: a datagram is exactly `frame::encode_raw`'s
+  bytes, decoded with `frame::decode`; `UdpTransport` (feature `udp`)
+  implements `Requester` (fresh id per attempt, resend every 300 ms until
+  the timeout, 2 s by default; stale answers discarded; remote errors not
+  retried), `Publisher` and `Subscriber` (publications read during a
+  request are queued, 64 at most, newest dropped); `Target::Node` other
+  than the peer is refused; `mwctl --udp HOST[:PORT]` (default port 7448,
+  bracketed IPv6) runs every device command but `reset` and `fw` over a
+  `UdpLink`, retrying like the serial link — `udp::tests::cl1_*`,
+  `udp::link::tests::cl1_*`; mwctl `udp::tests::cl1_*` (info, upload,
+  start against the fake device over loopback UDP, a lost datagram
+  resent, noise), `cli::tests::cl1_udp_replaces_the_port`;
+  `scripts/check-features.sh` (`udp` is a host feature).
+- [x] CL2 ABI 6 `route_bridge(src_link, key_ptr, key_len, dst_link) ->
+  handle`, appended so ABI 1–5 are prefixes: links `0..8`, distinct
+  (`InvalidArgument`), checked before the pointer pair (`OutOfBounds`)
+  and the key (exact, or a segment prefix written `prefix/**`; malformed
+  or under `sys` is `InvalidKey`); handles `16..32` shared with
+  `route_stop`/`route_stat` (forwarded / dropped counts); identical rules
+  de-duplicated, a full table of 16 `NoResources`; bridging never
+  consumes (a subscription still sees the message); `publish` goes out on
+  every link. wasm-host `Device::route_bridge` defaults to `Unsupported`
+  (single-link boards); payload-sim is a fake two-port board (`!link`,
+  `bridge…`/`link… tx` lines); `payloads/templates/bridge.wat`;
+  board-pins `COLORLIGHT_5A75B` (`ecp5`: GPIO 0 LED, GPIO 1 button, no
+  SPI); `sys/info` `Caps::BRIDGE` (bit 1), printed by mwctl —
+  `wasm_abi::bridge::tests::cl2_*`, `wasm_abi::tests::*`;
+  `wasm-host/tests/abi6.rs` `cl2_*`; `tools/payload-sim/tests/bridge.rs`;
+  board-pins `boards::tests::cl2_the_5a75b_offers_its_led_and_button_only`;
+  `loader::tests` (caps), mwctl `report::tests`.
+- [x] CL3 `wasm-hdl-ref` (no_std, no heap) is the WASM core as Rust: a
+  one-pass loader (type, import, function, table, memory, global,
+  export, element, code, data sections) compiling every body into a
+  32-bit internal code with resolved branch targets, keep and drop counts
+  (`isa.rs`: the side table precomputed, no LEB decoding at run time), an
+  interpreter with fuel, a 1024-slot value stack and 32 nested calls, and
+  an import unit with `wasm-host`'s checks in `wasm-host`'s order. The
+  subset is i32, `i64.const` into `i64.store`, `memory.copy`/`fill`,
+  `call_indirect`; anything else is `Unsupported` at load. Every WAT
+  template, the three generated phase payloads, the Rust SDK builds
+  (echo, dimmer, blink, button) and an every-op module run through it
+  and through wasmi with the same board calls, results and final memory;
+  traps match by class; load errors by kind — `wasm-hdl-ref/tests/diff.rs`
+  `cl3_*`, unit tests `cl3_*`; `scripts/check-features.sh` (builds for
+  thumbv6m).
+- [x] CL4 Golden vectors from the model (`wasm-hdl-ref/tests/vectors.rs`,
+  checked in under `gateware-5a75b/tests/vectors/`, stale files fail the
+  test): frames with their decoding, bridge-table operations, and per
+  module the compiled image plus an event script with the expected
+  calls, results, globals, memory CRC and instruction count. The frame
+  core (`mw5a75b/frame.py`: CRC-16 through a two-byte delay line, kind,
+  id, key checked while streaming, body into a block-RAM buffer held
+  until consumed; a CRC appender) decodes every frame vector and
+  re-encodes every valid one byte for byte, with and without idle cycles
+  and under back-pressure — `tests/test_frame.py`.
+- [x] CL5 The bridge engine (`mw5a75b/bridge.py`): 16 rules, key bytes in
+  one byte lane each of a 128 × 128-bit memory, matched against all rules
+  in one pass while a key streams in (one matcher per link, one for
+  installing, which also finds an identical rule); counters in RAM with
+  queued accounting and back-pressure — every `bridge.json` operation
+  answers as `BridgeTable` does — `tests/test_bridge.py`.
+- [ ] CL6 Upload and storage. The `.wasm` is uploaded to the board and
+  compiled there. Done: the hardware loader (`mw5a75b/loader.py`), the
+  model's loader in gateware — a bounded LEB128 reader, every section
+  with the model's checks in the model's order (import names matched
+  against the 33 ABI names and export names against the 7 the runtime
+  calls, both UTF-8 checked), and the body compiler (a 64-entry control
+  stack in LUT RAM, a 256-entry operand-type stack, resolved branch words,
+  forward branches chained and patched at `end`). From each vector's
+  module bytes alone it builds the model's image word for word (code,
+  function table, table 0, globals, exports, initial memory) and the
+  script then runs as the model says; all 40 refused modules
+  (`loaderr.json`: bad imports, signatures, exports, memory, floats,
+  i64, multi-value, start, passive segments, oversized tables and
+  globals, truncations, bad header) fail with the model's error kind —
+  `tests/test_system.py`. Loader, runtime and bridge table together
+  synthesize to about 12.7k LUT4 + 2.0k carry cells and 36 block RAMs, so
+  the full design is tight on the 25F. Open: `sys/loader/begin|chunk|commit`
+  into the image RAM with streaming CRC-32 and SHA-256, the two SPI
+  flash slots (the image activated after the CRC check, compiled from
+  the active slot at reset), and `sys/payload/start|stop|status`.
+- [x] CL7 The WASM interpreter (`mw5a75b/wasm.py`) and the hardware import
+  unit and runtime (`mw5a75b/imports.py`: `log`/`publish` as frames on
+  every link with a peer, an 8-slot subscription table with matchers on
+  the incoming keys, `set_tick`, LED and button, `node_id`, the bridge
+  imports, `Unsupported` otherwise; `init`, `tick`, deliveries) reproduce
+  every wasm vector: board-visible calls, results, globals, final memory
+  CRC and executed instruction count — `tests/test_wasm.py` (interpreter
+  with the import rules in the testbench), `tests/test_runtime.py`
+  (interpreter, import unit and bridge table in gateware).
+- [ ] CL8 The node and the SoC: each link answers `sys/info` (chip
+  `ecp5`, firmware `0.1.0`, ABI 6, capacity 16 KiB, node id from the
+  link-0 MAC, `Caps::BRIDGE`), `sys/trust/info` (unclaimed) and
+  `NotFound` to the request's sender, learns its peer from every valid
+  frame, and forwards a bridged publication to the other link's peer
+  (dropped and counted while that link has no peer). The peer is the last
+  unicast sender of a valid frame and is not authenticated: anyone on a
+  link's network can become its peer and receive what is forwarded
+  there, which matches an unclaimed board that accepts unsigned uploads;
+  a configured, persisted peer belongs to `sys/net/addr` — simulated,
+  `tests/test_node.py`. `soc.py` builds both LiteEth stacks around the
+  node for `LFE5U-25F-6BG256C` (about a third of the LUTs, 50 MHz system
+  clock met). Open: the runtime and the loader in the SoC, `sys/net/addr`
+  (addresses persisted in flash; build-time defaults 192.168.1.50 and
+  192.168.2.50 now), `sys/log`, `sys/payload/*`, 125 MHz RGMII timing on
+  the second port, and on the board (the FT4232H-56Q MiniModule, serial FT4YW8B7, never
+  the KD240 carrier's FT4232H: `openFPGALoader -c ft4232 --ftdi-serial
+  FT4YW8B7`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
+  both answering ARP, ping and `mwctl --udp <ip> info`, tx_delay tuned
+  per port, the bitstream booting from flash.
+- [ ] CL9 Bridging on the board: `bridge.wat` uploaded over port 0
+  survives a power cycle; a publication on a bridged prefix sent to
+  port 0 arrives on port 1 and an unbridged one does not, with the rule
+  counters agreeing — open (needs CL6, CL8).
 
 ## Known limitations (0.3)
 

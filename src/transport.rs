@@ -9,11 +9,15 @@
 //! paths are `middleware::transport::X`:
 //!
 //! * [`meta`] — [`SenderId`], [`SampleMeta`] (sender, sequence, gap) and
-//!   [`RequestMeta`] (sender, authenticated principal, deadline).
+//!   [`RequestMeta`] (sender, authenticated principal, deadline, trace
+//!   context, request id).
+//! * [`trace`] — the W3C [`TraceParent`] and the `x-request-id`
+//!   [`RequestId`] carried in [`RequestMeta`] and [`RequestOptions`]
+//!   (pure, no heap).
 //! * [`pubsub`] — [`Publisher`], [`Subscriber`] (with its required
 //!   [`Delivery`] and [`Limits`] declarations), [`Subscribe`] and [`Split`].
-//! * [`reqrep`] — [`Requester`] (with [`RequestOptions`]: timeout and
-//!   [`Target`]), [`Gather`] (every reply, bounded by count and time), the
+//! * [`reqrep`] — [`Requester`] (with [`RequestOptions`]: timeout,
+//!   [`Target`] and the trace context to send), [`Gather`] (every reply, bounded by count and time), the
 //!   pure [`Handler`] over a [`Request`], [`HandlerError`] and
 //!   [`Responder`].
 //! * `memory` (feature `memory`, `std`) — an in-process backend implementing
@@ -78,6 +82,7 @@
 pub mod meta;
 pub mod pubsub;
 pub mod reqrep;
+pub mod trace;
 
 #[cfg(feature = "memory")]
 pub mod memory;
@@ -88,6 +93,7 @@ pub use reqrep::{
     Flow, Gather, Handler, HandlerError, Reply, Request, RequestOptions, Requester, Responder,
     Target, handler_fn,
 };
+pub use trace::{RequestId, TraceParent};
 
 use crate::key::Key;
 

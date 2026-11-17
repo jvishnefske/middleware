@@ -16,6 +16,14 @@
 //!   sends the reply. Handler errors become gRPC statuses through
 //!   [`status::to_status`](super::status::to_status).
 //!
+//! A handler that must await (an async mesh handler, a gateway forwarding
+//! to a device) takes calls one at a time with
+//! [`GrpcResponder::next_call`] instead: a [`PendingCall`] exposes the
+//! key, body and [`RequestMeta`] and is answered with
+//! [`PendingCall::reply`] (or [`PendingCall::reply_status`]), so the
+//! caller's task can await between the two without holding a borrowed
+//! scratch buffer. Dropping it unanswered fails the call with `INTERNAL`.
+//!
 //! Which keys exist is the handler's decision: every non-bus path reaches
 //! it, and it answers `HandlerError::NotFound` (sent as `UNIMPLEMENTED`) for
 //! keys it does not serve.
@@ -40,15 +48,23 @@
 //!   on arrival and handed to the handler as the milliseconds left when
 //!   [`serve_one`](Responder::serve_one) runs it (`Some(0)` once passed,
 //!   rounded down). `None` without the header or with a malformed one.
+//! * `trace` — the W3C `traceparent` header
+//!   ([`extract_trace`]); `None` when absent
+//!   or invalid.
+//! * `request_id` — the `x-request-id` header
+//!   ([`extract_request_id`]); `None`
+//!   when absent, longer than 64 bytes or not visible ASCII.
 
 use super::GrpcError;
 use super::bus::{CLIENT_HEADER, parse_client_id};
 use super::codec::RawCodec;
 use super::status::to_status;
 use super::timeout::{GRPC_TIMEOUT_HEADER, GrpcTimeout};
+use super::trace::{extract_request_id, extract_trace};
 use crate::key::Key;
 use crate::transport::{
-    Handler, HandlerError, Request as MwRequest, RequestMeta, Responder, SenderId,
+    Handler, HandlerError, Request as MwRequest, RequestId, RequestMeta, Responder, SenderId,
+    TraceParent,
 };
 use bytes::Bytes;
 use core::convert::Infallible;
@@ -87,6 +103,10 @@ pub struct CallMeta {
     pub principal: Option<String>,
     /// The `grpc-timeout` budget, measured from arrival.
     pub timeout: Option<Duration>,
+    /// From the `traceparent` header.
+    pub trace: Option<TraceParent>,
+    /// From the `x-request-id` header (validated as a [`RequestId`]).
+    pub request_id: Option<String>,
 }
 
 /// Reads [`CallMeta`] from a call's metadata; pure.
@@ -112,6 +132,8 @@ pub fn call_meta(metadata: &MetadataMap, source: PrincipalSource) -> CallMeta {
         sender,
         principal,
         timeout,
+        trace: extract_trace(metadata),
+        request_id: extract_request_id(metadata),
     }
 }
 
@@ -130,6 +152,8 @@ struct Call {
     sender: Option<SenderId>,
     principal: Option<String>,
     deadline: Option<Instant>,
+    trace: Option<TraceParent>,
+    request_id: Option<String>,
     reply: oneshot::Sender<Result<Bytes, Status>>,
 }
 
@@ -230,6 +254,8 @@ impl UnaryService<Bytes> for UnaryMethod {
             sender: meta.sender,
             principal: meta.principal,
             deadline,
+            trace: meta.trace,
+            request_id: meta.request_id,
             reply,
         };
         let queued = self.tx.try_send(call);
@@ -266,9 +292,84 @@ pub fn run_handler<H: Handler>(
 }
 
 /// Caller half of [`responder`]; implements [`Responder`].
+///
+/// [`Responder::serve_one`] runs a synchronous [`Handler`] in place. A
+/// caller whose handler is async, or that routes calls to other tasks,
+/// takes them one by one with [`GrpcResponder::next_call`] instead and
+/// answers each [`PendingCall`] when it is done.
 #[derive(Debug)]
 pub struct GrpcResponder {
     rx: mpsc::Receiver<Call>,
+}
+
+impl GrpcResponder {
+    /// Waits for the next queued call; [`GrpcError::Closed`] once every
+    /// [`ResponderService`] clone is gone and the queue is empty. Cancel
+    /// safe: a dropped wait leaves the call queued.
+    pub async fn next_call(&mut self) -> Result<PendingCall, GrpcError> {
+        self.rx
+            .recv()
+            .await
+            .map(|call| PendingCall { call })
+            .ok_or(GrpcError::Closed)
+    }
+}
+
+/// One unary call taken off a [`GrpcResponder`] with
+/// [`GrpcResponder::next_call`], owned so it can be moved to another task.
+/// The client waits until [`PendingCall::reply`] (or
+/// [`PendingCall::reply_status`]); a call dropped unanswered fails with
+/// status `INTERNAL`.
+#[derive(Debug)]
+pub struct PendingCall {
+    call: Call,
+}
+
+impl PendingCall {
+    /// The key (`Service/Method`) the call addressed.
+    pub fn key(&self) -> &str {
+        &self.call.key
+    }
+
+    /// The request body.
+    pub fn body(&self) -> &[u8] {
+        &self.call.request
+    }
+
+    /// When the caller's `grpc-timeout` runs out, measured from arrival.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.call.deadline
+    }
+
+    /// The metadata a handler sees, as described in the module docs, with
+    /// `deadline_ms` measured at `now`.
+    pub fn meta(&self, now: Instant) -> RequestMeta<'_> {
+        RequestMeta {
+            sender: self.call.sender,
+            principal: self.call.principal.as_deref(),
+            deadline_ms: self.call.deadline.map(|d| remaining_ms(d, now)),
+            trace: self.call.trace,
+            request_id: self.call.request_id.as_deref().and_then(RequestId::new),
+        }
+    }
+
+    /// Whether the client stopped waiting (it disconnected, or the call
+    /// was cancelled); a reply would reach nobody.
+    pub fn is_abandoned(&self) -> bool {
+        self.call.reply.is_closed()
+    }
+
+    /// Answers the call: the response bytes, or the handler's error as a
+    /// gRPC status ([`to_status`]). A client that disconnected is ignored.
+    pub fn reply(self, result: Result<&[u8], HandlerError>) {
+        let reply = result.map(Bytes::copy_from_slice).map_err(to_status);
+        let _ = self.call.reply.send(reply);
+    }
+
+    /// Answers the call with `status` (which should not be `OK`).
+    pub fn reply_status(self, status: Status) {
+        let _ = self.call.reply.send(Err(status));
+    }
 }
 
 impl Responder for GrpcResponder {
@@ -289,6 +390,8 @@ impl Responder for GrpcResponder {
             sender: call.sender,
             principal: call.principal.as_deref(),
             deadline_ms: call.deadline.map(|d| remaining_ms(d, Instant::now())),
+            trace: call.trace,
+            request_id: call.request_id.as_deref().and_then(RequestId::new),
         };
         let reply = match Key::new(&call.key) {
             Ok(key) => run_handler(handler, key, &call.request, meta, scratch).map_err(to_status),
@@ -367,6 +470,77 @@ mod tests {
         m.insert(GRPC_TIMEOUT_HEADER, "soon".parse().unwrap());
         let meta = call_meta(&m, PrincipalSource::None);
         assert_eq!((meta.sender, meta.timeout), (None, None));
+    }
+
+    #[test]
+    fn k18_call_meta_reads_traceparent_and_request_id() {
+        let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let mut m = MetadataMap::new();
+        m.insert("traceparent", tp.parse().unwrap());
+        m.insert("x-request-id", "abc-1".parse().unwrap());
+        let meta = call_meta(&m, PrincipalSource::None);
+        assert_eq!(meta.trace, TraceParent::parse(tp));
+        assert!(meta.trace.is_some());
+        assert_eq!(meta.request_id.as_deref(), Some("abc-1"));
+        m.insert("traceparent", "garbage".parse().unwrap());
+        m.insert("x-request-id", "two words".parse().unwrap());
+        let meta = call_meta(&m, PrincipalSource::None);
+        assert_eq!((meta.trace, meta.request_id), (None, None));
+    }
+
+    #[tokio::test]
+    async fn ms6_next_call_hands_over_an_owned_call_answered_later() {
+        let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let (svc, mut resp) = responder(2);
+        let call = |body: &'static [u8]| {
+            let mut m = UnaryMethod {
+                key: "s/m".to_owned(),
+                tx: svc.tx.clone(),
+                principals: PrincipalSource::None,
+            };
+            let mut req = Request::new(Bytes::from_static(body));
+            req.metadata_mut()
+                .insert("traceparent", tp.parse().unwrap());
+            req.metadata_mut()
+                .insert(GRPC_TIMEOUT_HEADER, "1S".parse().unwrap());
+            req.metadata_mut()
+                .insert("x-request-id", "r-1".parse().unwrap());
+            tokio::spawn(m.call(req))
+        };
+        let first = call(b"hi");
+        let pending = resp.next_call().await.unwrap();
+        assert_eq!((pending.key(), pending.body()), ("s/m", &b"hi"[..]));
+        let meta = pending.meta(Instant::now());
+        assert_eq!(meta.trace, TraceParent::parse(tp));
+        assert_eq!(meta.request_id.map(|r| r.as_str()), Some("r-1"));
+        assert!(meta.deadline_ms.is_some_and(|d| d <= 1_000));
+        assert!(pending.deadline().is_some());
+        assert!(!pending.is_abandoned());
+        // Answered from another task.
+        tokio::spawn(async move { pending.reply(Ok(b"yo")) })
+            .await
+            .unwrap();
+        let reply = first.await.unwrap().unwrap();
+        assert_eq!(&reply.into_inner()[..], b"yo");
+        // A handler error is the mapped status; a status passes as is.
+        let second = call(b"x");
+        resp.next_call()
+            .await
+            .unwrap()
+            .reply(Err(HandlerError::Denied));
+        let e = second.await.unwrap().unwrap_err();
+        assert_eq!(e.code(), tonic::Code::PermissionDenied);
+        let third = call(b"y");
+        resp.next_call()
+            .await
+            .unwrap()
+            .reply_status(Status::unavailable("busy"));
+        assert_eq!(
+            third.await.unwrap().unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        drop(svc);
+        assert!(matches!(resp.next_call().await, Err(GrpcError::Closed)));
     }
 
     #[test]

@@ -350,9 +350,9 @@ impl AnnounceTable {
     /// host `host` (dotted, e.g. `cam-1.local`; at most 64 bytes of
     /// letters, digits and hyphens).
     pub fn new(host: &str) -> Result<Self, AnnounceError> {
-        let ok = host.split('.').all(|l| {
-            !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        });
+        let ok = host
+            .split('.')
+            .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
         if !ok {
             return Err(WireError::InvalidName.into());
         }
@@ -380,7 +380,8 @@ impl AnnounceTable {
     ) -> (Self, Result<(), AnnounceError>) {
         let checked = (|| {
             let record = ServiceRecord::new(service).ok_or(RecordError::BufferTooSmall)?;
-            let label = String::try_from(service.instance).map_err(|_| RecordError::BufferTooSmall)?;
+            let label =
+                String::try_from(service.instance).map_err(|_| RecordError::BufferTooSmall)?;
             let slot = Slot {
                 record,
                 label,
@@ -416,7 +417,11 @@ impl AnnounceTable {
                 *old = Slot {
                     label,
                     phase,
-                    renames: if old.phase == Phase::Conflicted { 0 } else { old.renames },
+                    renames: if old.phase == Phase::Conflicted {
+                        0
+                    } else {
+                        old.renames
+                    },
                     ..new
                 };
                 (self, Ok(()))
@@ -508,10 +513,14 @@ impl AnnounceTable {
                     due_ms: now_ms + PROBE_INTERVAL_MS,
                 },
             ),
-            Phase::Probing { .. } => (announcement(slot, &host, out), after_announcement(0, now_ms)),
-            Phase::Announcing { sent, .. } => {
-                (announcement(slot, &host, out), after_announcement(sent, now_ms))
-            }
+            Phase::Probing { .. } => (
+                announcement(slot, &host, out),
+                after_announcement(0, now_ms),
+            ),
+            Phase::Announcing { sent, .. } => (
+                announcement(slot, &host, out),
+                after_announcement(sent, now_ms),
+            ),
             Phase::Live | Phase::Conflicted => return (self, Ok(Step::Idle(None))),
         };
         match msg {
@@ -653,7 +662,10 @@ impl AnnounceTable {
                 w = w.question(name, q.qtype, false)?;
             }
         }
-        for (section, list) in [(Section::Answer, &answers), (Section::Additional, &additional)] {
+        for (section, list) in [
+            (Section::Answer, &answers),
+            (Section::Additional, &additional),
+        ] {
             for &(i, rec) in list.iter() {
                 if section == Section::Additional && answers.contains(&(i, rec)) {
                     continue;
@@ -676,7 +688,10 @@ impl AnnounceTable {
         } else {
             Destination::Multicast
         };
-        Ok(Some(Reply { len: w.finish(), to }))
+        Ok(Some(Reply {
+            len: w.finish(),
+            to,
+        }))
     }
 
     /// True if an earlier slot in `list` has an address record for the same
@@ -763,8 +778,8 @@ fn announcement(slot: &Slot, host: &str, out: &mut [u8]) -> Result<usize, Announ
 mod tests {
     extern crate std;
     use super::*;
-    use crate::transport::SenderId;
     use crate::dns::wire::{Instance, Response, encode_query, encode_query_for};
+    use crate::transport::SenderId;
     use std::vec::Vec as StdVec;
 
     const KIND: ServiceKind<'static> = ServiceKind::from_static("conf/svc");
@@ -834,7 +849,10 @@ mod tests {
         let q = m.questions().next().unwrap();
         assert_eq!((q.qtype, q.unicast_response), (ANY, true));
         let mut text = [0u8; 255];
-        assert_eq!(q.name.write_text(&mut text), Ok("unit-1._conf-svc._tcp.local"));
+        assert_eq!(
+            q.name.write_text(&mut text),
+            Ok("unit-1._conf-svc._tcp.local")
+        );
         // The proposed SRV and TXT ride in the authority section.
         assert_eq!(m.records().count(), 2);
         let (t, next) = idle(t, 0);
@@ -855,7 +873,10 @@ mod tests {
         assert_eq!(i.txt.unwrap().get(b"ver"), Some(&b"5"[..]));
         assert_eq!(i.ttl, 120);
         // Unique records carry the cache-flush bit, the shared PTR not.
-        assert!(r.records().all(|rec| rec.cache_flush != matches!(rec.data, Rdata::Ptr(_))));
+        assert!(
+            r.records()
+                .all(|rec| rec.cache_flush != matches!(rec.data, Rdata::Ptr(_)))
+        );
         let (t, next) = idle(t, 750);
         assert_eq!(next, Some(1750));
         let (t, again) = send(t, 1750);
@@ -955,7 +976,10 @@ mod tests {
         let resp = Response::parse(&msg).unwrap().unwrap();
         assert_eq!(resp.message().id(), 77);
         assert_eq!(resp.message().questions().count(), 1);
-        assert!(resp.records().all(|r| r.ttl == LEGACY_UNICAST_TTL && !r.cache_flush));
+        assert!(
+            resp.records()
+                .all(|r| r.ttl == LEGACY_UNICAST_TTL && !r.cache_flush)
+        );
 
         // QU bit from port 5353: unicast to the source.
         let mut q = [0u8; 128];
@@ -964,7 +988,10 @@ mod tests {
             .question(TextName::service(ty()), TYPE_PTR, true)
             .unwrap()
             .finish();
-        assert_eq!(reply(&t, &q[..len], MDNS_PORT).unwrap().0.to, Destination::Source);
+        assert_eq!(
+            reply(&t, &q[..len], MDNS_PORT).unwrap().0.to,
+            Destination::Source
+        );
 
         // SRV of the instance; A of the host; nothing for another name.
         let srv_q = |name: TextName<'_>, qtype| {
@@ -977,11 +1004,17 @@ mod tests {
         let m = Message::parse(&msg).unwrap();
         let first = m.records().next().unwrap();
         assert!(matches!(first.data, Rdata::Srv(s) if s.port == 7447));
-        let (_, msg) = reply(&t, &srv_q(TextName::new("unit.local").unwrap(), TYPE_A), MDNS_PORT)
-            .unwrap();
+        let (_, msg) = reply(
+            &t,
+            &srv_q(TextName::new("unit.local").unwrap(), TYPE_A),
+            MDNS_PORT,
+        )
+        .unwrap();
         let m = Message::parse(&msg).unwrap();
         assert_eq!(m.records().count(), 1);
-        assert!(matches!(m.records().next().unwrap().data, Rdata::A(a) if a.octets() == [10, 0, 0, 7]));
+        assert!(
+            matches!(m.records().next().unwrap().data, Rdata::A(a) if a.octets() == [10, 0, 0, 7])
+        );
         let other = TextName::new("other.local").unwrap();
         assert!(reply(&t, &srv_q(other, TYPE_A), MDNS_PORT).is_none());
         // Malformed datagrams are ignored.
@@ -1020,7 +1053,10 @@ mod tests {
         let len = r.unwrap().unwrap();
         assert!(t.is_empty());
         let resp = Response::parse(&out[..len]).unwrap().unwrap();
-        assert!(matches!(resp.instances(ty()).next(), Some(Instance::Gone(_))));
+        assert!(matches!(
+            resp.instances(ty()).next(),
+            Some(Instance::Gone(_))
+        ));
         assert!(resp.records().all(|r| r.ttl == 0));
         // Probing only, or unknown: nothing to say.
         let (t, _) = table().register(&service("unit-1"), 0);
@@ -1041,7 +1077,10 @@ mod tests {
             Endpoint::Local,
             Endpoint::Socket("0.0.0.0:80".parse().unwrap()),
         ] {
-            assert_eq!(t.clone().register(&bad(e), 0).1, Err(AnnounceError::Endpoint));
+            assert_eq!(
+                t.clone().register(&bad(e), 0).1,
+                Err(AnnounceError::Endpoint)
+            );
         }
         let unmappable = Service {
             kind: ServiceKind::from_static("Bad/Kind"),

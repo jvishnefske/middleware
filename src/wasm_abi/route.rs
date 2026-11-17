@@ -58,6 +58,22 @@
 //! complete baseline JPEG stream (`SOI` … `EOI`), e.g. YCbCr 4:2:0 as an
 //! OV2640 emits it.
 //!
+//! # Sampled sources
+//!
+//! [`SourceKind::Imu`] and [`SourceKind::Microphone`] publish
+//! [`crate::stream::samples`] batches instead of chunked frames: each
+//! message stands alone and carries [`SampleSource::samples`] units. Their
+//! configs are [`ImuConfig`] ([`IMU_CFG_LEN`] bytes: rate, range,
+//! channels, samples per message) and [`MicConfig`] ([`MIC_CFG_LEN`]
+//! bytes: rate, gain, [`AudioMode`] levels, µ-law or PCM, units per
+//! message, level block); [`parse_route_source`] parses any kind. A
+//! value outside its table is `InvalidArgument`, and so is a sampled
+//! source on a board without it; `sys/info` lists the ones a board offers
+//! ([`crate::loader::Caps::source`]). A sampled route counts against
+//! [`MAX_ROUTES`], stops with its payload and owns the I2C device it
+//! streams from: a payload's `i2c_transfer` to that address is `Busy`
+//! until the route stops ([`I2cOwners`]).
+//!
 //! # `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)`
 //!
 //! `bus` is an SPI bus already opened with `spi_open`. `cfg` is
@@ -132,6 +148,11 @@ pub enum SourceKind {
     TestPattern = 0,
     /// The board's camera.
     Camera = 1,
+    /// The board's accelerometer (and magnetometer): [`ImuConfig`] sample
+    /// batches.
+    Imu = 2,
+    /// The board's microphone: [`MicConfig`] sample batches.
+    Microphone = 3,
 }
 
 impl SourceKind {
@@ -140,17 +161,28 @@ impl SourceKind {
         match v {
             0 => Ok(SourceKind::TestPattern),
             1 => Ok(SourceKind::Camera),
+            2 => Ok(SourceKind::Imu),
+            3 => Ok(SourceKind::Microphone),
             _ => Err(AbiError::InvalidArgument),
         }
+    }
+
+    /// Whether the source publishes [`crate::stream::samples`] batches
+    /// rather than chunked frames.
+    pub const fn is_sampled(self) -> bool {
+        matches!(self, SourceKind::Imu | SourceKind::Microphone)
     }
 }
 
 /// The `cfg_len` `route_source` requires for `kind`: [`SOURCE_CFG_LEN`]
-/// for the test pattern, [`CAMERA_CFG_LEN`] for the camera.
+/// for the test pattern, [`CAMERA_CFG_LEN`] for the camera,
+/// [`IMU_CFG_LEN`] and [`MIC_CFG_LEN`] for the sampled sources.
 pub const fn source_cfg_len(kind: SourceKind) -> usize {
     match kind {
         SourceKind::TestPattern => SOURCE_CFG_LEN,
         SourceKind::Camera => CAMERA_CFG_LEN,
+        SourceKind::Imu => IMU_CFG_LEN,
+        SourceKind::Microphone => MIC_CFG_LEN,
     }
 }
 
@@ -181,7 +213,9 @@ impl CameraPins {
     /// Every pin, in wire order (D0..D7, VSYNC, HREF, PCLK).
     pub const fn all(&self) -> [u8; CAMERA_PINS_LEN] {
         let d = self.data;
-        [d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], self.vsync, self.href, self.pclk]
+        [
+            d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], self.vsync, self.href, self.pclk,
+        ]
     }
 
     /// The pin block bytes ([`CameraPins::all`]).
@@ -268,9 +302,12 @@ impl Source {
 /// [`SourceConfig`], plus for the camera its [`CameraPins`]. A camera config
 /// must be JPEG (the sensor's compressed output); anything else, or a
 /// length other than [`source_cfg_len`], is `InvalidArgument`.
+/// A sampled source ([`SourceKind::Imu`] and [`SourceKind::Microphone`])
+/// is not a frame source and is `InvalidArgument` here
+/// ([`parse_route_source`] takes every kind).
 pub fn parse_source(kind: SourceKind, cfg: &[u8]) -> Result<(Source, SourceConfig), AbiError> {
     let bad = AbiError::InvalidArgument;
-    if cfg.len() != source_cfg_len(kind) {
+    if cfg.len() != source_cfg_len(kind) || kind.is_sampled() {
         return Err(bad);
     }
     let (head, pins) = cfg.split_at_checked(SOURCE_CFG_LEN).ok_or(bad)?;
@@ -280,7 +317,506 @@ pub fn parse_source(kind: SourceKind, cfg: &[u8]) -> Result<(Source, SourceConfi
         SourceKind::Camera if config.format == PixelFormat::Jpeg => {
             Ok((Source::Camera(CameraPins::parse(pins)?), config))
         }
-        SourceKind::Camera => Err(bad),
+        SourceKind::Camera | SourceKind::Imu | SourceKind::Microphone => Err(bad),
+    }
+}
+
+/// What a `route_source` call asks for: a frame source with its config, or
+/// a sampled source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteSource {
+    /// Chunked frames ([`SourceKind::TestPattern`], [`SourceKind::Camera`]).
+    Frames(Source, SourceConfig),
+    /// Sample batches ([`SourceKind::Imu`], [`SourceKind::Microphone`]).
+    Samples(SampleSource),
+}
+
+/// Parses the `cfg` bytes of `route_source` for a source of any `kind`:
+/// [`parse_source`] for the frame sources, [`ImuConfig::parse`] and
+/// [`MicConfig::parse`] for the sampled ones.
+pub fn parse_route_source(kind: SourceKind, cfg: &[u8]) -> Result<RouteSource, AbiError> {
+    match kind {
+        SourceKind::TestPattern | SourceKind::Camera => {
+            let (source, config) = parse_source(kind, cfg)?;
+            Ok(RouteSource::Frames(source, config))
+        }
+        SourceKind::Imu => Ok(RouteSource::Samples(SampleSource::Imu(ImuConfig::parse(
+            cfg,
+        )?))),
+        SourceKind::Microphone => Ok(RouteSource::Samples(SampleSource::Microphone(
+            MicConfig::parse(cfg)?,
+        ))),
+    }
+}
+
+/// Exact length of a `route_source` config for [`SourceKind::Imu`].
+pub const IMU_CFG_LEN: usize = 8;
+
+/// Exact length of a `route_source` config for [`SourceKind::Microphone`].
+pub const MIC_CFG_LEN: usize = 8;
+
+// [`SampleSource::encode`] returns one buffer for both.
+const _: () = assert!(IMU_CFG_LEN == MIC_CFG_LEN);
+
+/// The IMU sample rates a config may ask for, in Hz (the FXOS8700CQ's
+/// whole-hertz output data rates).
+pub const IMU_RATES_HZ: [u16; 5] = [50, 100, 200, 400, 800];
+
+/// The IMU full-scale ranges a config may ask for, in ±g.
+pub const IMU_RANGES_G: [u8; 3] = [2, 4, 8];
+
+/// The microphone sample rates a config may ask for, in Hz.
+pub const MIC_RATES_HZ: [u16; 4] = [8_000, 16_000, 32_000, 48_000];
+
+/// Highest microphone input gain, in dB.
+pub const MAX_MIC_GAIN_DB: u8 = 30;
+
+/// Longest level block, in audio samples.
+pub const MAX_LEVEL_BLOCK: u16 = 4_096;
+
+const fn contains_u16(set: &[u16], v: u16) -> bool {
+    let mut i = 0;
+    while i < set.len() {
+        if set[i] == v {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether `units` per message, each `unit_bytes` long and lasting
+/// `samples_per_unit` samples at `rate_hz`, fit one batch and are at least
+/// [`MIN_PERIOD_MS`] apart.
+const fn batch_fits(units: u16, unit_bytes: usize, samples_per_unit: u32, rate_hz: u16) -> bool {
+    if units == 0 || units as usize * unit_bytes > crate::stream::samples::MAX_BATCH_DATA {
+        return false;
+    }
+    let samples = units as u64 * samples_per_unit as u64;
+    samples * 1000 >= rate_hz as u64 * MIN_PERIOD_MS as u64
+}
+
+/// A validated `route_source` config for [`SourceKind::Imu`]
+/// ([`IMU_CFG_LEN`] bytes, little-endian):
+///
+/// | bytes | field                                                         |
+/// |-------|---------------------------------------------------------------|
+/// | 2     | sample rate in Hz, one of [`IMU_RATES_HZ`]                     |
+/// | 1     | full scale in ±g, one of [`IMU_RANGES_G`]                      |
+/// | 1     | channels: 3 (accelerometer) or 6 (and magnetometer)            |
+/// | 2     | samples per message, `1..`, at most one [`MAX_BATCH`](crate::stream::samples::MAX_BATCH) and at least [`MIN_PERIOD_MS`] of samples |
+/// | 2     | flags, must be 0                                              |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImuConfig {
+    /// Sample rate in Hz.
+    pub rate_hz: u16,
+    /// Full scale in ±g.
+    pub range_g: u8,
+    /// Whether each sample carries the magnetometer too (6 channels).
+    pub mag: bool,
+    /// Samples per message.
+    pub samples: u16,
+}
+
+impl ImuConfig {
+    /// A config, validated.
+    pub const fn new(rate_hz: u16, range_g: u8, mag: bool, samples: u16) -> Result<Self, AbiError> {
+        ImuConfig {
+            rate_hz,
+            range_g,
+            mag,
+            samples,
+        }
+        .validated()
+    }
+
+    /// Channels per sample (3 or 6).
+    pub const fn channels(&self) -> u8 {
+        if self.mag { 6 } else { 3 }
+    }
+
+    /// Checks every rule of the table.
+    pub const fn validated(self) -> Result<Self, AbiError> {
+        let ranges = [
+            IMU_RANGES_G[0] as u16,
+            IMU_RANGES_G[1] as u16,
+            IMU_RANGES_G[2] as u16,
+        ];
+        if !contains_u16(&IMU_RATES_HZ, self.rate_hz) || !contains_u16(&ranges, self.range_g as u16)
+        {
+            return Err(AbiError::InvalidArgument);
+        }
+        if !batch_fits(self.samples, self.channels() as usize * 2, 1, self.rate_hz) {
+            return Err(AbiError::InvalidArgument);
+        }
+        Ok(self)
+    }
+
+    /// Parses the `cfg` bytes of `route_source`.
+    pub fn parse(cfg: &[u8]) -> Result<Self, AbiError> {
+        let bad = AbiError::InvalidArgument;
+        let b: &[u8; IMU_CFG_LEN] = cfg.try_into().map_err(|_| bad)?;
+        let [r0, r1, range_g, channels, s0, s1, f0, f1] = *b;
+        if f0 != 0 || f1 != 0 {
+            return Err(bad);
+        }
+        let mag = match channels {
+            3 => false,
+            6 => true,
+            _ => return Err(bad),
+        };
+        ImuConfig::new(
+            u16::from_le_bytes([r0, r1]),
+            range_g,
+            mag,
+            u16::from_le_bytes([s0, s1]),
+        )
+    }
+
+    /// The `cfg` bytes for `route_source`.
+    pub const fn encode(&self) -> [u8; IMU_CFG_LEN] {
+        let [r0, r1] = self.rate_hz.to_le_bytes();
+        let [s0, s1] = self.samples.to_le_bytes();
+        [r0, r1, self.range_g, self.channels(), s0, s1, 0, 0]
+    }
+
+    /// Time between two messages, in µs.
+    pub const fn period_us(&self) -> u64 {
+        self.samples as u64 * 1_000_000 / self.rate_hz as u64
+    }
+
+    /// The batch header of `count` samples from `first_index`, the first
+    /// taken at `timestamp_us`.
+    pub const fn header(
+        &self,
+        first_index: u64,
+        timestamp_us: u64,
+        count: u16,
+    ) -> crate::stream::samples::BatchHeader {
+        use crate::stream::samples::{BatchHeader, SampleFormat, SensorKind, accel_scale_ug};
+        BatchHeader {
+            kind: SensorKind::Imu,
+            format: SampleFormat::I16,
+            channels: self.channels(),
+            rate_hz: self.rate_hz as u32,
+            first_index,
+            timestamp_us,
+            count,
+            range: self.range_g as u16,
+            scale: accel_scale_ug(self.range_g as u16),
+        }
+    }
+}
+
+/// What a microphone route publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioMode {
+    /// RMS and peak per block of samples
+    /// ([`SampleFormat::Levels`](crate::stream::samples::SampleFormat::Levels)).
+    Levels = 0,
+    /// G.711 µ-law samples.
+    MuLaw = 1,
+    /// Linear `s16le` samples.
+    Pcm = 2,
+}
+
+impl AudioMode {
+    /// Parses a mode code.
+    pub const fn from_u8(v: u8) -> Result<Self, AbiError> {
+        match v {
+            0 => Ok(AudioMode::Levels),
+            1 => Ok(AudioMode::MuLaw),
+            2 => Ok(AudioMode::Pcm),
+            _ => Err(AbiError::InvalidArgument),
+        }
+    }
+
+    /// The batch format of this mode.
+    pub const fn format(self) -> crate::stream::samples::SampleFormat {
+        use crate::stream::samples::SampleFormat;
+        match self {
+            AudioMode::Levels => SampleFormat::Levels,
+            AudioMode::MuLaw => SampleFormat::MuLaw,
+            AudioMode::Pcm => SampleFormat::I16,
+        }
+    }
+}
+
+/// A validated `route_source` config for [`SourceKind::Microphone`]
+/// ([`MIC_CFG_LEN`] bytes, little-endian; the microphone is mono):
+///
+/// | bytes | field                                                         |
+/// |-------|---------------------------------------------------------------|
+/// | 2     | sample rate in Hz, one of [`MIC_RATES_HZ`]                     |
+/// | 1     | input gain in dB, `0..=MAX_MIC_GAIN_DB`                        |
+/// | 1     | [`AudioMode`] (0 = levels, 1 = µ-law, 2 = PCM)                  |
+/// | 2     | units per message (samples, or level blocks), `1..`, at most one [`MAX_BATCH`](crate::stream::samples::MAX_BATCH) and at least [`MIN_PERIOD_MS`] of audio |
+/// | 2     | levels: samples per block, `1..=MAX_LEVEL_BLOCK`; otherwise 0  |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MicConfig {
+    /// Sample rate in Hz.
+    pub rate_hz: u16,
+    /// Input gain in dB.
+    pub gain_db: u8,
+    /// What is published.
+    pub mode: AudioMode,
+    /// Units per message.
+    pub samples: u16,
+    /// Samples per level block ([`AudioMode::Levels`]; 0 otherwise).
+    pub block: u16,
+}
+
+impl MicConfig {
+    /// A config, validated.
+    pub const fn new(
+        rate_hz: u16,
+        gain_db: u8,
+        mode: AudioMode,
+        samples: u16,
+        block: u16,
+    ) -> Result<Self, AbiError> {
+        MicConfig {
+            rate_hz,
+            gain_db,
+            mode,
+            samples,
+            block,
+        }
+        .validated()
+    }
+
+    /// Checks every rule of the table.
+    pub const fn validated(self) -> Result<Self, AbiError> {
+        let bad = Err(AbiError::InvalidArgument);
+        if !contains_u16(&MIC_RATES_HZ, self.rate_hz) || self.gain_db > MAX_MIC_GAIN_DB {
+            return bad;
+        }
+        let per_unit = match self.mode {
+            AudioMode::Levels if self.block >= 1 && self.block <= MAX_LEVEL_BLOCK => self.block,
+            AudioMode::MuLaw | AudioMode::Pcm if self.block == 0 => 1,
+            _ => return bad,
+        };
+        if !batch_fits(
+            self.samples,
+            self.mode.format().channel_bytes(),
+            per_unit as u32,
+            self.rate_hz,
+        ) {
+            return bad;
+        }
+        Ok(self)
+    }
+
+    /// Parses the `cfg` bytes of `route_source`.
+    pub fn parse(cfg: &[u8]) -> Result<Self, AbiError> {
+        let b: &[u8; MIC_CFG_LEN] = cfg.try_into().map_err(|_| AbiError::InvalidArgument)?;
+        let [r0, r1, gain_db, mode, s0, s1, b0, b1] = *b;
+        MicConfig::new(
+            u16::from_le_bytes([r0, r1]),
+            gain_db,
+            AudioMode::from_u8(mode)?,
+            u16::from_le_bytes([s0, s1]),
+            u16::from_le_bytes([b0, b1]),
+        )
+    }
+
+    /// The `cfg` bytes for `route_source`.
+    pub const fn encode(&self) -> [u8; MIC_CFG_LEN] {
+        let [r0, r1] = self.rate_hz.to_le_bytes();
+        let [s0, s1] = self.samples.to_le_bytes();
+        let [b0, b1] = self.block.to_le_bytes();
+        [r0, r1, self.gain_db, self.mode as u8, s0, s1, b0, b1]
+    }
+
+    /// Audio samples one unit spans (the block for levels, else 1).
+    pub const fn samples_per_unit(&self) -> u32 {
+        match self.mode {
+            AudioMode::Levels => self.block as u32,
+            AudioMode::MuLaw | AudioMode::Pcm => 1,
+        }
+    }
+
+    /// Time between two messages, in µs.
+    pub const fn period_us(&self) -> u64 {
+        self.samples as u64 * self.samples_per_unit() as u64 * 1_000_000 / self.rate_hz as u64
+    }
+
+    /// The batch header of `count` units from `first_index`, the first
+    /// taken at `timestamp_us`.
+    pub const fn header(
+        &self,
+        first_index: u64,
+        timestamp_us: u64,
+        count: u16,
+    ) -> crate::stream::samples::BatchHeader {
+        use crate::stream::samples::{BatchHeader, SensorKind};
+        BatchHeader {
+            kind: SensorKind::Microphone,
+            format: self.mode.format(),
+            channels: 1,
+            rate_hz: self.rate_hz as u32,
+            first_index,
+            timestamp_us,
+            count,
+            range: self.gain_db as u16,
+            scale: match self.mode {
+                AudioMode::Levels => self.block as u32,
+                AudioMode::MuLaw | AudioMode::Pcm => 0,
+            },
+        }
+    }
+}
+
+/// A sampled source with its config: what `route_source` starts for
+/// [`SourceKind::Imu`] and [`SourceKind::Microphone`]. Every message on
+/// the key is one [`crate::stream::samples`] batch of
+/// [`SampleSource::samples`] units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleSource {
+    /// The accelerometer (and magnetometer).
+    Imu(ImuConfig),
+    /// The microphone.
+    Microphone(MicConfig),
+}
+
+impl SampleSource {
+    /// The source's kind.
+    pub const fn kind(&self) -> SourceKind {
+        match self {
+            SampleSource::Imu(_) => SourceKind::Imu,
+            SampleSource::Microphone(_) => SourceKind::Microphone,
+        }
+    }
+
+    /// The `cfg` bytes of `route_source` ([`IMU_CFG_LEN`] or
+    /// [`MIC_CFG_LEN`]).
+    pub const fn encode(&self) -> [u8; IMU_CFG_LEN] {
+        match self {
+            SampleSource::Imu(c) => c.encode(),
+            SampleSource::Microphone(c) => c.encode(),
+        }
+    }
+
+    /// Units per message.
+    pub const fn samples(&self) -> u16 {
+        match self {
+            SampleSource::Imu(c) => c.samples,
+            SampleSource::Microphone(c) => c.samples,
+        }
+    }
+
+    /// Time between two messages, in µs.
+    pub const fn period_us(&self) -> u64 {
+        match self {
+            SampleSource::Imu(c) => c.period_us(),
+            SampleSource::Microphone(c) => c.period_us(),
+        }
+    }
+
+    /// The batch header of `count` units from `first_index`.
+    pub const fn header(
+        &self,
+        first_index: u64,
+        timestamp_us: u64,
+        count: u16,
+    ) -> crate::stream::samples::BatchHeader {
+        match self {
+            SampleSource::Imu(c) => c.header(first_index, timestamp_us, count),
+            SampleSource::Microphone(c) => c.header(first_index, timestamp_us, count),
+        }
+    }
+
+    /// The deterministic fake batch ([`crate::stream::samples::fake`]) of
+    /// `count` units from `first_index` into `out`; returns its length.
+    pub fn fake_batch(
+        &self,
+        first_index: u64,
+        timestamp_us: u64,
+        count: u16,
+        out: &mut [u8],
+    ) -> Result<usize, crate::stream::samples::BatchError> {
+        use crate::stream::samples::fake;
+        match self {
+            SampleSource::Imu(c) => fake::imu_batch(c, first_index, timestamp_us, count, out),
+            SampleSource::Microphone(c) => {
+                fake::mic_batch(c, first_index, timestamp_us, count, out)
+            }
+        }
+    }
+}
+
+/// An I2C device: a bus and a 7-bit address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct I2cDevice {
+    /// I2C bus number.
+    pub bus: u8,
+    /// 7-bit address.
+    pub addr: u8,
+}
+
+/// Which route owns which I2C device: a route that streams from a device
+/// on the payload's I2C bus (the IMU, the audio codec) owns its address,
+/// and a payload's `i2c_transfer` to it is `Busy` until the route stops.
+/// Other addresses on the same bus stay the payload's.
+///
+/// Pure and fixed-size: one optional device per route handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct I2cOwners {
+    slots: [Option<I2cDevice>; MAX_ROUTES],
+}
+
+impl I2cOwners {
+    /// Nothing owned.
+    pub const fn new() -> Self {
+        I2cOwners {
+            slots: [None; MAX_ROUTES],
+        }
+    }
+
+    /// The route owning `dev`, if any.
+    pub fn owner(&self, dev: I2cDevice) -> Option<u8> {
+        self.slots
+            .iter()
+            .position(|s| *s == Some(dev))
+            .and_then(|h| u8::try_from(h).ok())
+    }
+
+    /// May a new route take `dev`? `Busy` if another route owns it.
+    pub fn check_free(&self, dev: I2cDevice) -> Result<(), AbiError> {
+        match self.owner(dev) {
+            Some(_) => Err(AbiError::Busy),
+            None => Ok(()),
+        }
+    }
+
+    /// Route `handle` now owns `dev`. `InvalidArgument` for a handle past
+    /// [`MAX_ROUTES`], `Busy` if another route owns `dev`.
+    pub fn claim(self, handle: u8, dev: I2cDevice) -> Result<Self, AbiError> {
+        if self.owner(dev).is_some_and(|h| h != handle) {
+            return Err(AbiError::Busy);
+        }
+        let mut next = self;
+        let slot = next
+            .slots
+            .get_mut(usize::from(handle))
+            .ok_or(AbiError::InvalidArgument)?;
+        *slot = Some(dev);
+        Ok(next)
+    }
+
+    /// Route `handle` stopped: its device is the payload's again.
+    pub fn release(self, handle: u8) -> Self {
+        let mut next = self;
+        if let Some(slot) = next.slots.get_mut(usize::from(handle)) {
+            *slot = None;
+        }
+        next
+    }
+
+    /// The rule for a payload's `i2c_transfer` to `addr` on `bus`: `Busy`
+    /// while a route owns that device, `Ok` otherwise.
+    pub fn check_transfer(&self, bus: u8, addr: u8) -> Result<(), AbiError> {
+        self.check_free(I2cDevice { bus, addr })
     }
 }
 
@@ -667,11 +1203,13 @@ impl RouteStat {
     }
 }
 
-/// Parses a route handle argument (`0..MAX_ROUTES`).
+/// Parses a route handle argument: a DMA route (`0..MAX_ROUTES`) or,
+/// since ABI 6, a bridge
+/// ([`bridge::BRIDGE_BASE`](super::bridge::BRIDGE_BASE)`..+MAX_BRIDGES`).
 pub fn route_handle(v: i32) -> Result<u8, AbiError> {
     u8::try_from(v)
         .ok()
-        .filter(|&h| usize::from(h) < MAX_ROUTES)
+        .filter(|&h| usize::from(h) < MAX_ROUTES || super::bridge::handle_index(h).is_some())
         .ok_or(AbiError::InvalidArgument)
 }
 
@@ -684,7 +1222,7 @@ mod tests {
     fn source_kinds_and_formats() {
         assert_eq!(SourceKind::from_i32(0), Ok(SourceKind::TestPattern));
         assert_eq!(SourceKind::from_i32(1), Ok(SourceKind::Camera));
-        assert_eq!(SourceKind::from_i32(2), Err(AbiError::InvalidArgument));
+        assert_eq!(SourceKind::from_i32(4), Err(AbiError::InvalidArgument));
         assert_eq!(SourceKind::from_i32(-1), Err(AbiError::InvalidArgument));
         assert_eq!(PixelFormat::from_u8(0), Ok(PixelFormat::Rgb565Be));
         assert_eq!(PixelFormat::from_u8(1), Ok(PixelFormat::Jpeg));
@@ -795,20 +1333,36 @@ mod tests {
             Ok((Source::TestPattern, cfg))
         );
         let bad = Err(AbiError::InvalidArgument);
-        assert_eq!(parse_source(SourceKind::TestPattern, &bytes), bad, "pins on a pattern");
+        assert_eq!(
+            parse_source(SourceKind::TestPattern, &bytes),
+            bad,
+            "pins on a pattern"
+        );
         assert_eq!(parse_source(SourceKind::Camera, &bytes[..20]), bad, "short");
         assert_eq!(parse_source(SourceKind::Camera, &tp[..n]), bad, "no pins");
         let mut rgb = bytes;
         rgb[4] = 0;
         rgb[0] = 120;
         rgb[2] = 120;
-        assert_eq!(parse_source(SourceKind::Camera, &rgb), bad, "camera must be JPEG");
+        assert_eq!(
+            parse_source(SourceKind::Camera, &rgb),
+            bad,
+            "camera must be JPEG"
+        );
         let mut dup = bytes;
         dup[20] = 5; // PCLK on D0's pin
-        assert_eq!(parse_source(SourceKind::Camera, &dup), bad, "pins must differ");
+        assert_eq!(
+            parse_source(SourceKind::Camera, &dup),
+            bad,
+            "pins must differ"
+        );
         let mut flags = bytes;
         flags[5] = 1;
-        assert_eq!(parse_source(SourceKind::Camera, &flags), bad, "head rules apply");
+        assert_eq!(
+            parse_source(SourceKind::Camera, &flags),
+            bad,
+            "head rules apply"
+        );
         assert_eq!(CameraPins::parse(&[0; 10]), Err(AbiError::InvalidArgument));
         assert_eq!(
             CameraPins::parse(&CameraPins::AI_THINKER.encode()),
@@ -917,6 +1471,204 @@ mod tests {
     }
 
     #[test]
+    fn sc2_source_kinds_and_config_lengths() {
+        assert_eq!(SourceKind::from_i32(2), Ok(SourceKind::Imu));
+        assert_eq!(SourceKind::from_i32(3), Ok(SourceKind::Microphone));
+        assert_eq!(SourceKind::from_i32(4), Err(AbiError::InvalidArgument));
+        assert_eq!(source_cfg_len(SourceKind::Imu), IMU_CFG_LEN);
+        assert_eq!(source_cfg_len(SourceKind::Microphone), MIC_CFG_LEN);
+        assert!(SourceKind::Imu.is_sampled() && SourceKind::Microphone.is_sampled());
+        assert!(!SourceKind::TestPattern.is_sampled() && !SourceKind::Camera.is_sampled());
+    }
+
+    #[test]
+    fn sc2_imu_config_layout_and_ranges() {
+        let bad = Err(AbiError::InvalidArgument);
+        let c = ImuConfig::new(100, 4, true, 10).unwrap();
+        let b = c.encode();
+        assert_eq!(b, [100, 0, 4, 6, 10, 0, 0, 0]);
+        assert_eq!(ImuConfig::parse(&b), Ok(c));
+        let src = SampleSource::Imu(c);
+        assert_eq!(
+            parse_route_source(SourceKind::Imu, &b),
+            Ok(RouteSource::Samples(src))
+        );
+        assert_eq!(
+            (src.kind(), src.encode(), src.samples()),
+            (SourceKind::Imu, b, 10)
+        );
+        assert_eq!(c.period_us(), 100_000);
+        assert_eq!(c.channels(), 6);
+        for rate in IMU_RATES_HZ {
+            assert!(ImuConfig::new(rate, 2, false, 8).is_ok(), "{rate}");
+        }
+        assert_eq!(ImuConfig::new(0, 2, false, 1), bad);
+        assert_eq!(ImuConfig::new(60, 2, false, 1), bad, "not an FXOS rate");
+        assert_eq!(ImuConfig::new(100, 3, false, 1), bad, "range");
+        assert_eq!(ImuConfig::new(100, 16, false, 1), bad, "range");
+        assert_eq!(ImuConfig::new(100, 2, false, 0), bad, "no samples");
+        assert_eq!(ImuConfig::new(800, 2, false, 7), bad, "under MIN_PERIOD_MS");
+        assert!(ImuConfig::new(800, 2, false, 8).is_ok());
+        assert!(
+            ImuConfig::new(800, 2, false, 80).is_ok(),
+            "80 x 6 B = 480 B"
+        );
+        assert_eq!(ImuConfig::new(800, 2, false, 81), bad, "past one batch");
+        assert!(ImuConfig::new(800, 2, true, 40).is_ok());
+        assert_eq!(ImuConfig::new(800, 2, true, 41), bad, "past one batch");
+        let mut ch = b;
+        ch[3] = 4;
+        assert_eq!(ImuConfig::parse(&ch), bad, "channels");
+        let mut fl = b;
+        fl[7] = 1;
+        assert_eq!(ImuConfig::parse(&fl), bad, "flags");
+        assert_eq!(ImuConfig::parse(&b[..7]), bad, "short");
+        assert_eq!(
+            parse_route_source(SourceKind::Imu, &[0; 9]),
+            Err(AbiError::InvalidArgument),
+            "long"
+        );
+        let h = c.header(5, 7, 10);
+        assert_eq!((h.channels, h.rate_hz, h.range, h.scale), (6, 100, 4, 122));
+        assert_eq!(h.check(), Ok(()));
+    }
+
+    #[test]
+    fn sc2_microphone_config_layout_and_ranges() {
+        let bad = Err(AbiError::InvalidArgument);
+        let pcm = MicConfig::new(16_000, 12, AudioMode::Pcm, 160, 0).unwrap();
+        let b = pcm.encode();
+        assert_eq!(b, [0x80, 0x3e, 12, 2, 160, 0, 0, 0]);
+        assert_eq!(MicConfig::parse(&b), Ok(pcm));
+        assert_eq!(
+            parse_route_source(SourceKind::Microphone, &b),
+            Ok(RouteSource::Samples(SampleSource::Microphone(pcm)))
+        );
+        assert_eq!(pcm.period_us(), 10_000);
+        let lv = MicConfig::new(16_000, 0, AudioMode::Levels, 1, 256).unwrap();
+        assert_eq!(lv.period_us(), 16_000);
+        assert_eq!(lv.header(0, 0, 1).scale, 256);
+        assert!(MicConfig::new(8_000, 0, AudioMode::MuLaw, 480, 0).is_ok());
+        for rate in MIC_RATES_HZ {
+            assert!(MicConfig::new(rate, 0, AudioMode::Levels, 4, MAX_LEVEL_BLOCK).is_ok());
+        }
+        assert_eq!(
+            MicConfig::new(44_100, 0, AudioMode::Pcm, 240, 0),
+            bad,
+            "rate"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 31, AudioMode::Pcm, 160, 0),
+            bad,
+            "gain"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Pcm, 241, 0),
+            bad,
+            "past one batch"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Pcm, 159, 0),
+            bad,
+            "under 10 ms"
+        );
+        assert_eq!(MicConfig::new(16_000, 0, AudioMode::MuLaw, 481, 0), bad);
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 4),
+            bad,
+            "block on PCM"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 1, 0),
+            bad,
+            "no block"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 1, 4_097),
+            bad,
+            "block"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 1, 100),
+            bad,
+            "6.25 ms"
+        );
+        assert_eq!(
+            MicConfig::new(16_000, 0, AudioMode::Levels, 121, 256),
+            bad,
+            "past one batch"
+        );
+        let mut m = b;
+        m[3] = 3;
+        assert_eq!(MicConfig::parse(&m), bad, "mode");
+        assert_eq!(MicConfig::parse(&b[..7]), bad);
+    }
+
+    #[test]
+    fn sc2_frame_and_sample_parsers_keep_to_their_kinds() {
+        let bad = Err(AbiError::InvalidArgument);
+        let imu = ImuConfig::new(100, 2, false, 10).unwrap().encode();
+        assert_eq!(parse_source(SourceKind::Imu, &imu), bad);
+        assert_eq!(parse_source(SourceKind::Microphone, &imu), bad);
+        let cfg = SourceConfig::new(120, 120, 100).unwrap();
+        let (tp, n) = Source::TestPattern.encode(&cfg);
+        assert_eq!(
+            parse_route_source(SourceKind::TestPattern, &tp[..n]),
+            Ok(RouteSource::Frames(Source::TestPattern, cfg))
+        );
+        assert_eq!(
+            parse_route_source(SourceKind::Imu, &tp[..n]),
+            Err(AbiError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn sc3_a_route_owns_its_i2c_device_until_it_stops() {
+        let imu = I2cDevice { bus: 0, addr: 0x1f };
+        let codec = I2cDevice { bus: 0, addr: 0x1a };
+        let owners = I2cOwners::new();
+        assert_eq!(owners.check_transfer(0, 0x1f), Ok(()));
+        let owners = owners.claim(1, imu).unwrap();
+        assert_eq!(owners.check_transfer(0, 0x1f), Err(AbiError::Busy));
+        assert_eq!(
+            owners.check_transfer(0, 0x1a),
+            Ok(()),
+            "other addresses stay free"
+        );
+        assert_eq!(
+            owners.check_transfer(1, 0x1f),
+            Ok(()),
+            "other buses stay free"
+        );
+        assert_eq!(owners.owner(imu), Some(1));
+        assert_eq!(owners.check_free(imu), Err(AbiError::Busy));
+        assert_eq!(
+            owners.claim(2, imu),
+            Err(AbiError::Busy),
+            "one owner per device"
+        );
+        assert_eq!(
+            owners.claim(1, imu),
+            Ok(owners),
+            "claiming again is a no-op"
+        );
+        assert_eq!(
+            owners.claim(MAX_ROUTES as u8, codec),
+            Err(AbiError::InvalidArgument)
+        );
+        let owners = owners.claim(2, codec).unwrap();
+        assert_eq!(owners.check_transfer(0, 0x1a), Err(AbiError::Busy));
+        let owners = owners.release(1);
+        assert_eq!(
+            owners.check_transfer(0, 0x1f),
+            Ok(()),
+            "stopped: the payload's again"
+        );
+        assert_eq!(owners.check_transfer(0, 0x1a), Err(AbiError::Busy));
+        assert_eq!(owners.release(2).release(9), I2cOwners::default());
+    }
+
+    #[test]
     fn stats_and_handles() {
         let s = RouteStats {
             frames: 1,
@@ -935,5 +1687,9 @@ mod tests {
             Err(AbiError::InvalidArgument)
         );
         assert_eq!(route_handle(-1), Err(AbiError::InvalidArgument));
+        assert_eq!(route_handle(16), Ok(16), "a bridge handle (ABI 6)");
+        assert_eq!(route_handle(31), Ok(31));
+        assert_eq!(route_handle(32), Err(AbiError::InvalidArgument));
+        assert_eq!(route_handle(15), Err(AbiError::InvalidArgument));
     }
 }

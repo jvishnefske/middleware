@@ -65,7 +65,8 @@ fn write_wasm(name: &str, wat_src: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     // Tests run in parallel and write the same file: write a private copy
     // and rename it into place, so a reader never sees a truncated module.
-    let tmp = path.with_extension(format!("{:?}.tmp", std::thread::current().id()).replace(['(', ')'], ""));
+    let tmp = path
+        .with_extension(format!("{:?}.tmp", std::thread::current().id()).replace(['(', ')'], ""));
     std::fs::write(&tmp, wat::parse_str(wat_src).expect("valid WAT")).expect("write wasm");
     std::fs::rename(&tmp, &path).expect("rename wasm");
     path

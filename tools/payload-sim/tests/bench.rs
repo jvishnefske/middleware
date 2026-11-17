@@ -61,7 +61,9 @@ fn build(package: &str) -> PathBuf {
         .status()
         .expect("build-byte-pages.sh runs");
     assert!(status.success(), "building {package} failed");
-    dir.join(format!("target/byte-pages/wasm32-unknown-unknown/release/{package}.wasm"))
+    dir.join(format!(
+        "target/byte-pages/wasm32-unknown-unknown/release/{package}.wasm"
+    ))
 }
 
 fn within_5_percent(measured: u64, documented: u64) -> bool {
@@ -73,20 +75,42 @@ fn bench_fuel_constants_match_the_measured_steps() {
     let wasm = std::fs::read(build("bench")).expect("bench payload");
     let mut p = Payload::load(&wasm, SimDevice::new(None), LIMITS).expect("bench loads");
     let steps = constant("JPEG_STEPS_PER_FRAME");
-    let step = Event { kind: EventKind::Timer, source: 0, value: 1, time_us: 0 };
+    let step = Event {
+        kind: EventKind::Timer,
+        source: 0,
+        value: 1,
+        time_us: 0,
+    };
     let (mut mix, mut jpeg) = (Vec::new(), Vec::new());
     for i in 0..2 * steps {
         let before = p.fuel_stats().total;
-        assert!(p.dispatch(step).expect("step runs without a trap"), "step {i}: on_irq exported");
+        assert!(
+            p.dispatch(step).expect("step runs without a trap"),
+            "step {i}: on_irq exported"
+        );
         let used = p.fuel_stats().total - before;
-        if i % 2 == 0 { mix.push(used) } else { jpeg.push(used) }
+        if i % 2 == 0 {
+            mix.push(used)
+        } else {
+            jpeg.push(used)
+        }
     }
     let mix_avg = mix.iter().sum::<u64>() / mix.len() as u64;
     let frame: u64 = jpeg.iter().sum();
     let max = mix.iter().chain(&jpeg).copied().max().unwrap_or(0);
-    eprintln!("mix step {mix_avg} fuel (min {:?}, max {:?}); jpeg frame {frame} fuel; max step {max}", mix.iter().min(), mix.iter().max());
-    assert!(within_5_percent(mix_avg, constant("MIX_FUEL")), "MIX_FUEL: measured {mix_avg}");
-    assert!(within_5_percent(frame, constant("JPEG_FRAME_FUEL")), "JPEG_FRAME_FUEL: measured {frame}");
+    eprintln!(
+        "mix step {mix_avg} fuel (min {:?}, max {:?}); jpeg frame {frame} fuel; max step {max}",
+        mix.iter().min(),
+        mix.iter().max()
+    );
+    assert!(
+        within_5_percent(mix_avg, constant("MIX_FUEL")),
+        "MIX_FUEL: measured {mix_avg}"
+    );
+    assert!(
+        within_5_percent(frame, constant("JPEG_FRAME_FUEL")),
+        "JPEG_FRAME_FUEL: measured {frame}"
+    );
     assert!(max < FUEL_TARGET, "largest step {max}");
     // The same frame again costs the same: the frame ended exactly after
     // JPEG_STEPS_PER_FRAME steps and the next one starts over.

@@ -143,6 +143,69 @@ pub fn upload_plan_chunked(
     Ok(steps)
 }
 
+/// The initial linear memory a module declares, in bytes: its memory
+/// section's first memory, `initial` pages times the page size (64 KiB, or
+/// 1 byte with the custom-page-sizes flag). `None` when the module has no
+/// memory section or cannot be read that far (the device's loader reports
+/// what is wrong with it).
+pub fn initial_memory_bytes(wasm: &[u8]) -> Option<u64> {
+    fn leb(b: &[u8], at: &mut usize) -> Option<u64> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let x = *b.get(*at)?;
+            *at += 1;
+            v |= u64::from(x & 0x7F) << shift;
+            if x & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+        None
+    }
+    if wasm.get(..8)? != b"\0asm\x01\0\0\0" {
+        return None;
+    }
+    let mut at = 8;
+    while at < wasm.len() {
+        let id = wasm[at];
+        at += 1;
+        let size = usize::try_from(leb(wasm, &mut at)?).ok()?;
+        let end = at.checked_add(size)?;
+        if id == 5 {
+            let mut p = at;
+            if leb(wasm, &mut p)? == 0 {
+                return None;
+            }
+            let flags = leb(wasm, &mut p)?;
+            let initial = leb(wasm, &mut p)?;
+            if flags & 1 != 0 {
+                leb(wasm, &mut p)?;
+            }
+            let page = if flags & 8 != 0 {
+                1u64 << leb(wasm, &mut p)?.min(16)
+            } else {
+                65536
+            };
+            return initial.checked_mul(page);
+        }
+        at = end;
+    }
+    None
+}
+
+/// Why `wasm` cannot run on a device whose linear memory is `limit` bytes
+/// (the Colorlight 5A-75B: 16 KiB), or `None` when it fits or cannot tell.
+pub fn memory_misfit(wasm: &[u8], limit: u64) -> Option<String> {
+    let need = initial_memory_bytes(wasm)?;
+    (need > limit).then(|| {
+        format!(
+            "the module's initial memory is {need} bytes, more than the device's {limit}: \
+             with 64 KiB pages one page is already too much, so declare 1-byte pages, e.g. \
+             (memory (export \"memory\") 4096 4096 (pagesize 1)) as payloads/templates/bridge.wat \
+             does (custom-page-sizes)"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +288,25 @@ mod tests {
             Err(middleware::HandlerError::InvalidRequest),
             "commit rejects the CRC"
         );
+    }
+
+    #[test]
+    fn cl8_memory_section_is_read_for_the_16k_check() {
+        // (memory 1): one 64 KiB page.
+        let one_page = b"\0asm\x01\0\0\0\x05\x03\x01\x00\x01";
+        assert_eq!(initial_memory_bytes(one_page), Some(65536));
+        assert!(
+            memory_misfit(one_page, 16384)
+                .unwrap()
+                .contains("pagesize 1")
+        );
+        // (memory 4096 4096 (pagesize 1)): flags 0b1001, log2 0.
+        let bytes = b"\0asm\x01\0\0\0\x01\x01\x00\x05\x07\x01\x09\x80\x20\x80\x20\x00";
+        assert_eq!(initial_memory_bytes(bytes), Some(4096));
+        assert_eq!(memory_misfit(bytes, 16384), None);
+        assert_eq!(initial_memory_bytes(b"\0asm\x01\0\0\0"), None);
+        assert_eq!(initial_memory_bytes(b"junk"), None);
+        assert_eq!(initial_memory_bytes(b"\0asm\x01\0\0\0\x05\x80"), None);
     }
 
     #[test]

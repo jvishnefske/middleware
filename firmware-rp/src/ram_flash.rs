@@ -29,7 +29,12 @@ pub struct RamFlash<const N: usize> {
 impl<const N: usize> RamFlash<N> {
     /// Zeroed flash with no fault armed.
     pub fn new() -> Self {
-        RamFlash { mem: [0x00; N], erase_calls: 0, ops: 0, cut: None }
+        RamFlash {
+            mem: [0x00; N],
+            erase_calls: 0,
+            ops: 0,
+            cut: None,
+        }
     }
 
     /// Arms power loss at the `op`-th erase or write from now.
@@ -87,8 +92,15 @@ impl<const N: usize> NorFlash for RamFlash<N> {
         }
         let admitted = self.admit(bytes.len());
         let n = admitted.unwrap_or_else(|n| n);
-        let dst = self.mem.get_mut(offset as usize..offset as usize + bytes.len());
-        for (d, s) in dst.ok_or(NorFlashErrorKind::OutOfBounds)?.iter_mut().zip(bytes).take(n) {
+        let dst = self
+            .mem
+            .get_mut(offset as usize..offset as usize + bytes.len());
+        for (d, s) in dst
+            .ok_or(NorFlashErrorKind::OutOfBounds)?
+            .iter_mut()
+            .zip(bytes)
+            .take(n)
+        {
             *d &= *s;
         }
         admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
@@ -98,7 +110,11 @@ impl<const N: usize> NorFlash for RamFlash<N> {
         if !from.is_multiple_of(SECTOR) || !to.is_multiple_of(SECTOR) || from > to {
             return Err(NorFlashErrorKind::NotAligned);
         }
-        let len = self.mem.get(from as usize..to as usize).ok_or(NorFlashErrorKind::OutOfBounds)?.len();
+        let len = self
+            .mem
+            .get(from as usize..to as usize)
+            .ok_or(NorFlashErrorKind::OutOfBounds)?
+            .len();
         self.erase_calls += 1;
         let admitted = self.admit(len);
         let n = admitted.unwrap_or_else(|n| n);
@@ -128,7 +144,13 @@ pub struct VecFlash {
 impl VecFlash {
     /// `mem` as the flash contents, no fault armed.
     pub fn new(mem: std::vec::Vec<u8>) -> Self {
-        VecFlash { mem, erase_calls: 0, write_calls: 0, ops: 0, cut: None }
+        VecFlash {
+            mem,
+            erase_calls: 0,
+            write_calls: 0,
+            ops: 0,
+            cut: None,
+        }
     }
 
     /// Erased flash of `n` bytes.
@@ -190,8 +212,15 @@ impl NorFlash for VecFlash {
         self.write_calls += 1;
         let admitted = self.admit(bytes.len());
         let n = admitted.unwrap_or_else(|n| n);
-        let dst = self.mem.get_mut(offset as usize..offset as usize + bytes.len());
-        for (d, s) in dst.ok_or(NorFlashErrorKind::OutOfBounds)?.iter_mut().zip(bytes).take(n) {
+        let dst = self
+            .mem
+            .get_mut(offset as usize..offset as usize + bytes.len());
+        for (d, s) in dst
+            .ok_or(NorFlashErrorKind::OutOfBounds)?
+            .iter_mut()
+            .zip(bytes)
+            .take(n)
+        {
             *d &= *s;
         }
         admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
@@ -201,7 +230,11 @@ impl NorFlash for VecFlash {
         if !from.is_multiple_of(SECTOR) || !to.is_multiple_of(SECTOR) || from > to {
             return Err(NorFlashErrorKind::NotAligned);
         }
-        let len = self.mem.get(from as usize..to as usize).ok_or(NorFlashErrorKind::OutOfBounds)?.len();
+        let len = self
+            .mem
+            .get(from as usize..to as usize)
+            .ok_or(NorFlashErrorKind::OutOfBounds)?
+            .len();
         self.erase_calls += 1;
         let admitted = self.admit(len);
         let n = admitted.unwrap_or_else(|n| n);

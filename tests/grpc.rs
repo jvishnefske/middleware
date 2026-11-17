@@ -787,6 +787,66 @@ mod mesh {
         })
     }
 
+    /// A responder server whose handler answers with the `traceparent`
+    /// and request id it saw, `"<traceparent>|<request id>"` (`-` for none).
+    async fn trace_echo_server() -> Running {
+        let (svc, mut resp) = responder(8);
+        tokio::spawn(async move {
+            let mut h = middleware::transport::handler_fn(|r, out| {
+                let text = format!(
+                    "{}|{}",
+                    r.meta.trace.map_or("-".to_owned(), |t| t.to_string()),
+                    r.meta.request_id.map_or("-", |i| i.as_str())
+                );
+                let dst = out
+                    .get_mut(..text.len())
+                    .ok_or(HandlerError::BufferTooSmall)?;
+                dst.copy_from_slice(text.as_bytes());
+                Ok(text.len())
+            });
+            let mut scratch = [0u8; 256];
+            while resp.serve_one(&mut h, &mut scratch).await.is_ok() {}
+        });
+        serve_on_loopback(GrpcServer::new().with_responder(svc)).await
+    }
+
+    /// `MeshClient` sends `RequestOptions::trace` and `request_id` on a
+    /// request and on every call of a gather (K18).
+    #[tokio::test]
+    async fn k18_mesh_client_injects_trace_on_request_and_gather() {
+        use middleware::{RequestId, TraceParent};
+        const TP: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let (a, b) = (trace_echo_server().await, trace_echo_server().await);
+        let d = Directory::<4>::new();
+        let (d, _) = d.observe(&up(1, a.addr), 0);
+        let (d, _) = d.observe(&up(2, b.addr), 0);
+        let mut c = MeshClient::<4>::new(KIND, MeshDialer::direct()).with_directory(d);
+        let opts = RequestOptions::DEFAULT
+            .with_timeout(Duration::from_secs(2))
+            .with_trace(TraceParent::parse(TP).unwrap())
+            .with_request_id(RequestId::new("mesh-req-1").unwrap());
+        let expected = format!("{TP}|mesh-req-1");
+        let mut out = [0u8; 128];
+        let r = within(c.request_with(REVERSE, b"", &mut out, &opts))
+            .await
+            .unwrap();
+        assert_eq!(std::str::from_utf8(r).unwrap(), expected);
+        let mut replies = Vec::new();
+        let n = within(c.request_each(REVERSE, b"", &mut out, &opts, 8, |r| {
+            replies.push(r.result.map(<[u8]>::to_vec));
+            Flow::Continue
+        }))
+        .await
+        .unwrap();
+        assert_eq!(n, 2);
+        for r in replies {
+            assert_eq!(String::from_utf8(r.unwrap()).unwrap(), expected);
+        }
+        // Without trace options the handler sees none.
+        let r = within(c.request(REVERSE, b"", &mut out)).await.unwrap();
+        assert_eq!(std::str::from_utf8(r).unwrap(), "-|-");
+    }
+
     #[tokio::test]
     async fn i7_mesh_client_routes_by_node_and_gathers_every_endpoint() {
         let (a, b) = (node_server(1).await, node_server(2).await);
@@ -912,6 +972,55 @@ mod mesh {
         assert_eq!(b.tracked(), 0);
     }
 
+    /// MS9: an endpoint browsed without a node id gets the one its health
+    /// service sends in `mw-node`; a browser's own node id wins.
+    #[tokio::test]
+    async fn ms9_mesh_browse_records_the_node_header_as_the_endpoint_node() {
+        let node = SenderId([0x42; 8]);
+        let (svc, mut health_state) = health();
+        let srv = serve_on_loopback(GrpcServer::new().with_health(svc.with_node(node))).await;
+        let bus = MemoryBus::new();
+        let mut dns = bus.node(SenderId([0xD0; 8])).discovery().unwrap();
+        let mut b: MeshBrowse<_, 4> = MeshBrowse::new(
+            bus.node(SenderId([0xB0; 8])).discovery().unwrap(),
+            MeshDialer::direct(),
+        );
+        b.browse(KeyFilter::Exact(KIND.key())).await.unwrap();
+        let service = Service {
+            kind: KIND,
+            instance: "pod-3",
+            node: None,
+            endpoint: Endpoint::Socket(srv.addr),
+            txt: b"",
+            ttl_s: 60,
+        };
+        health_state.announce(&service).await.unwrap();
+        dns.announce(&service).await.unwrap();
+        let mut buf = [0u8; 512];
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert_eq!(
+            e,
+            Event::Up(Service {
+                node: Some(node),
+                ..service
+            })
+        );
+        // Fed into a directory, Target::Node reaches it.
+        let (d, _) = Directory::<4>::new().observe(&e, 0);
+        let targets = middleware::grpc::mesh::targets(&d, KIND, Target::Node(node));
+        assert_eq!(targets, [(Some(node), srv.addr.to_string())]);
+        // A node the browser reports itself is kept.
+        let own = SenderId([0x07; 8]);
+        let named = Service {
+            instance: "pod-4",
+            node: Some(own),
+            ..service
+        };
+        dns.announce(&named).await.unwrap();
+        let e = within(b.next(&mut buf)).await.unwrap();
+        assert!(matches!(e, Event::Up(s) if s.instance == "pod-4" && s.node == Some(own)));
+    }
+
     #[tokio::test]
     async fn i8_mesh_browse_reports_down_when_dns_withdraws() {
         let (svc, mut health_state) = health();
@@ -1022,6 +1131,7 @@ mod conformance_cases {
         type Requester = GrpcTransport<InterceptedService<Channel, Interceptor>>;
         type Responder = GrpcResponder;
         const PROPAGATES_DEADLINE: bool = true;
+        const PROPAGATES_TRACE: bool = true;
 
         async fn connect(&mut self, _key: Key<'static>) -> (Self::Requester, GrpcResponder) {
             let (resp, addr) = self.responder_server().await;
@@ -1190,6 +1300,11 @@ mod conformance_cases {
     #[tokio::test]
     async fn k15_grpc_handler_sees_sender_principal_and_deadline() {
         reqrep::handler_sees_caller_identity(&mut Grpc::default()).await;
+    }
+
+    #[tokio::test]
+    async fn k18_grpc_trace_is_propagated() {
+        reqrep::trace_is_propagated(&mut Grpc::default()).await;
     }
 
     #[tokio::test]

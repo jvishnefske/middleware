@@ -1,15 +1,15 @@
 //! RAM model of the ESP8266 SPI flash behind [`RawFlash`] (test builds
 //! only).
 //!
-//! It backs exactly the payload region (`REGION_BASE..REGION_BASE +
-//! REGION_SIZE`, absolute addresses) and behaves like NOR flash: memory
+//! It backs exactly the driver's window (`REGION_BASE..REGION_BASE +
+//! WINDOW_SIZE`, absolute addresses) and behaves like NOR flash: memory
 //! starts as `0x00` (not erased), `erase_sector` sets a sector to `0xFF`,
 //! and `program` ANDs bits in. It panics on any access the real device
 //! would mishandle: outside the region, a program crossing a 256-byte page
 //! (SPI page program wraps), or a misaligned sector erase. Every operation
 //! is recorded so tests can check how the driver drove the device.
 
-use super::{DeviceError, PAGE, REGION_BASE, REGION_SIZE, RawFlash, SECTOR};
+use super::{DeviceError, PAGE, REGION_BASE, RawFlash, SECTOR, WINDOW_SIZE};
 
 /// One recorded device operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,15 +27,25 @@ pub struct RamFlash {
     mem: Vec<u8>,
     ops: Vec<Op>,
     fail: bool,
+    fail_writes: bool,
 }
 
 impl RamFlash {
     /// Unerased (all `0x00`) region.
     pub fn new() -> Self {
         RamFlash {
-            mem: vec![0; REGION_SIZE as usize],
+            mem: vec![0; WINDOW_SIZE as usize],
             ops: Vec::new(),
             fail: false,
+            fail_writes: false,
+        }
+    }
+
+    /// A device that reads but fails every program and erase.
+    pub fn failing_writes() -> Self {
+        RamFlash {
+            fail_writes: true,
+            ..Self::new()
         }
     }
 
@@ -76,6 +86,14 @@ impl RamFlash {
     fn result(&self) -> Result<(), DeviceError> {
         if self.fail { Err(DeviceError) } else { Ok(()) }
     }
+
+    fn write_result(&self) -> Result<(), DeviceError> {
+        if self.fail || self.fail_writes {
+            Err(DeviceError)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Default for RamFlash {
@@ -95,7 +113,7 @@ impl RawFlash for RamFlash {
 
     fn program(&mut self, addr: u32, data: &[u8]) -> Result<(), DeviceError> {
         self.ops.push(Op::Program(addr, data.len()));
-        self.result()?;
+        self.write_result()?;
         assert!(!data.is_empty(), "empty program at {addr:#x}");
         let first_page = addr / PAGE;
         let last_page = (addr + data.len() as u32 - 1) / PAGE;
@@ -114,7 +132,7 @@ impl RawFlash for RamFlash {
 
     fn erase_sector(&mut self, addr: u32) -> Result<(), DeviceError> {
         self.ops.push(Op::Erase(addr));
-        self.result()?;
+        self.write_result()?;
         assert_eq!(addr % SECTOR, 0, "misaligned erase at {addr:#x}");
         let r = self.index(addr, SECTOR as usize);
         self.mem[r].fill(0xFF);

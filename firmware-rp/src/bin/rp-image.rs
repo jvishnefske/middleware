@@ -34,9 +34,11 @@ use rp_base::ota::uf2;
 
 fn run(input: &Path, out_dir: &Path) -> Result<(), String> {
     let file = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-    let img = mwctl::fw::load_image(&file, None).map_err(|e| format!("{}: {e}", input.display()))?;
+    let img =
+        mwctl::fw::load_image(&file, None).map_err(|e| format!("{}: {e}", input.display()))?;
     let ab = RP2350.ab().ok_or("the RP2350 map has no A/B slots")?;
-    let def = check_update(&img.bytes, ab.a.size).map_err(|e| format!("{}: {e:?}", input.display()))?;
+    let def =
+        check_update(&img.bytes, ab.a.size).map_err(|e| format!("{}: {e:?}", input.display()))?;
     let v = mwctl::fw::format_version(img.version);
     let name = |suffix: &str| -> PathBuf { out_dir.join(format!("rp-base-rp2350-{v}-{suffix}")) };
     let write = |path: PathBuf, bytes: &[u8]| -> Result<PathBuf, String> {
@@ -45,15 +47,22 @@ fn run(input: &Path, out_dir: &Path) -> Result<(), String> {
     };
 
     let mut factory = vec![0xFFu8; factory_len(&RP2350, img.bytes.len()).ok_or("image too large")?];
-    factory_flash(&img.bytes, &RP2350, &mut factory).map_err(|e| format!("factory image: {e:?}"))?;
+    factory_flash(&img.bytes, &RP2350, &mut factory)
+        .map_err(|e| format!("factory image: {e:?}"))?;
     let to_uf2 = |pages: Vec<uf2::Page>, family: u32| -> Result<Vec<u8>, String> {
         let mut out = vec![0u8; pages.len() * uf2::BLOCK];
         let n = uf2::write(pages.into_iter(), family, &mut out).ok_or("UF2 buffer")?;
         out.truncate(n);
         Ok(out)
     };
-    let update_uf2 = to_uf2(uf2::update_pages(&img.bytes).collect(), uf2::FAMILY_RP2350_ARM_S)?;
-    let factory_uf2 = to_uf2(uf2::factory_pages(&factory, &RP2350).collect(), uf2::FAMILY_ABSOLUTE)?;
+    let update_uf2 = to_uf2(
+        uf2::update_pages(&img.bytes).collect(),
+        uf2::FAMILY_RP2350_ARM_S,
+    )?;
+    let factory_uf2 = to_uf2(
+        uf2::factory_pages(&factory, &RP2350).collect(),
+        uf2::FAMILY_ABSOLUTE,
+    )?;
 
     let written = [
         write(name("update.bin"), &img.bytes)?,

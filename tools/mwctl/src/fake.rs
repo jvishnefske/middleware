@@ -14,9 +14,9 @@
 //! when unclaimed (or when built [`FakeDevice::with_rekey_window`], until a
 //! claim closes it) and is `Denied` otherwise; once claimed, a commit must
 //! be signed by that key over `signed_message(len, version, sha256)` with a
-//! version above `min_version`, else `Denied`. The check uses
-//! `ed25519-dalek` directly, because mwctl builds `middleware` with no
-//! features (the crate's own check needs `trust`).
+//! version above `min_version`, else `Denied`. The check is mwctl's host
+//! copy ([`crate::sign::verify`], Ed25519 and P-256), because mwctl builds
+//! `middleware` with no features (the crate's own check needs `trust`).
 //!
 //! (`esp_base` itself is not used: it requires rustc 1.95 through its own
 //! toolchain file, which the host workspace does not use.)
@@ -30,21 +30,32 @@
 //! boots a fresh updater; [`FakeDevice::fw_reset`] resets it at any time
 //! (the trial watchdog, a reset button).
 //!
+//! With [`FakeDevice::with_fw_rt`] it is an i.MX RT1050 as far as the
+//! updater's image checks go: the service runs with the RT slot image
+//! format (`fw_ota::rt_image::RtSlotImage`), so an update must send an
+//! `MWRT` slot image (header first). The slots, record and reboots are
+//! still the RP2350 bootrom model's, so the images ([`rt_image`]) are RT
+//! slot images whose bytes also hold an IMAGE_DEF block loop the model's
+//! bootrom can boot (test images only; a real RT image has none).
+//!
 //! A [`Script`] injects faults by request ordinal (1-based, counting every
 //! request frame received): drop the request, drop its reply, or hold the
 //! reply back until the next reply is sent. A read with nothing queued
 //! returns `Ok(0)` at once, which the link treats as a timeout.
 
 use crate::link::Transport;
-use crate::sign::image_sha256;
-use ed25519_dalek::{Signature, VerifyingKey};
+use crate::sign::{image_sha256, is_valid_key, verify};
 use middleware::Key;
-use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
-use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
-use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
-use middleware::transport::HandlerError;
+use middleware::fw_ota::picobin::{
+    EXE_TBYB, RP2350_ARM_S_EXE, image_def_block_bytes, sentinel_block_bytes,
+};
+use middleware::fw_ota::rt_image::{RtHeader, RtSlotImage};
 use middleware::fw_ota::service::{Context, FwService};
 use middleware::fw_ota::sim::Rp2350Sim;
+use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
+use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, NetAddr, PayloadStatus, keys};
+use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
+use middleware::transport::HandlerError;
 use middleware::wasm_abi::ABI_VERSION;
 use std::collections::VecDeque;
 use std::io;
@@ -64,6 +75,11 @@ pub struct Script {
     pub late_reply: Vec<usize>,
     /// Bytes emitted before the first reply (boot garbage).
     pub preamble: Vec<u8>,
+    /// A USB CDC port that disappears when the device resets: the reply
+    /// to the request that triggered the reset is lost and the port then
+    /// fails every read and write with a broken pipe until
+    /// [`FakeDevice::reappear`] (the host reopening the path).
+    pub vanish_on_reset: bool,
 }
 
 pub struct FakeDevice {
@@ -87,29 +103,93 @@ pub struct FakeDevice {
     rekey_open: bool,
     board: Option<Vec<u8>>,
     fw: Option<Fw>,
+    net: Vec<NetAddr>,
+    gone: bool,
 }
 
 /// The firmware updater on the bootrom model.
 struct Fw {
     sim: Rp2350Sim,
-    svc: FwService,
+    svc: Svc,
     self_test_ok: bool,
 }
 
+/// The updater, by image format.
+enum Svc {
+    /// The RP2350's (picobin).
+    Rp(FwService),
+    /// The i.MX RT1050's slot image.
+    Rt(FwService<RtSlotImage>),
+}
+
 impl Fw {
-    fn boot(mut sim: Rp2350Sim, self_test_ok: bool) -> Fw {
+    fn boot(mut sim: Rp2350Sim, self_test_ok: bool, rt: bool) -> Fw {
         if sim.booted().is_none() {
             sim.power_on().expect("a bootable image");
         }
-        let svc = FwService::boot(&mut sim).expect("updater boots");
-        Fw { sim, svc, self_test_ok }
+        let svc = if rt {
+            Svc::Rt(FwService::boot_for(&mut sim).expect("updater boots"))
+        } else {
+            Svc::Rp(FwService::boot(&mut sim).expect("updater boots"))
+        };
+        Fw {
+            sim,
+            svc,
+            self_test_ok,
+        }
     }
 
     fn reset(self) -> Fw {
+        let rt = matches!(self.svc, Svc::Rt(_));
         let mut sim = self.sim;
         sim.reset().expect("a bootable image");
-        Fw::boot(sim, self.self_test_ok)
+        Fw::boot(sim, self.self_test_ok, rt)
     }
+
+    fn handle(
+        &mut self,
+        ctx: &Context,
+        key: Key<'_>,
+        body: &[u8],
+        out: &mut [u8],
+    ) -> Option<Result<usize, HandlerError>> {
+        match &mut self.svc {
+            Svc::Rp(svc) => svc.handle(&mut self.sim, ctx, key, body, out),
+            Svc::Rt(svc) => svc.handle(&mut self.sim, ctx, key, body, out),
+        }
+    }
+}
+
+/// Slot offset of [`rt_image`]'s IMAGE_DEF block (after the RT header).
+const RT_IMAGE_DEF_AT: usize = 0x140;
+/// Slot offset of [`rt_image`]'s sentinel block (the first sector's last
+/// page, as the model's bootrom requires).
+const RT_SENTINEL_AT: usize = 0xF40;
+
+/// An RT slot image (header and a `len`-byte image, `len` at least
+/// 4 KiB) of version `version` (`major << 16 | minor`) for
+/// [`FakeDevice::with_fw_rt`]. Its bytes also hold an IMAGE_DEF block loop
+/// of the same version, flagged TBYB when `tbyb`, so the bootrom model
+/// boots it; the other image bytes are a function of `seed`.
+pub fn rt_image(len: usize, version: u32, tbyb: bool, seed: u8) -> Vec<u8> {
+    let at = |slot_offset: usize| slot_offset - middleware::fw_ota::rt_image::HEADER_LEN;
+    let mut image: Vec<u8> = (0..len)
+        .map(|i| {
+            (i as u32)
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(u32::from(seed)) as u8
+        })
+        .collect();
+    let flags = RP2350_ARM_S_EXE | if tbyb { EXE_TBYB } else { 0 };
+    let link = (RT_SENTINEL_AT - RT_IMAGE_DEF_AT) as i32;
+    let def = image_def_block_bytes(flags, (version >> 16) as u16, version as u16, link);
+    image[at(RT_IMAGE_DEF_AT)..at(RT_IMAGE_DEF_AT) + def.len()].copy_from_slice(&def);
+    let sentinel = sentinel_block_bytes(-link);
+    image[at(RT_SENTINEL_AT)..at(RT_SENTINEL_AT) + sentinel.len()].copy_from_slice(&sentinel);
+    let header = RtHeader::for_image(Version(version), &image).expect("a small image");
+    let mut slot = header.encode().to_vec();
+    slot.extend_from_slice(&image);
+    slot
 }
 
 impl FakeDevice {
@@ -135,6 +215,8 @@ impl FakeDevice {
             rekey_open: false,
             board: None,
             fw: None,
+            net: Vec::new(),
+            gone: false,
         }
     }
 
@@ -148,6 +230,26 @@ impl FakeDevice {
     }
 
     /// The same device reporting `caps` in `sys/info` (none by default).
+    /// A two-link board answering `sys/net/addr` (the Colorlight
+    /// 5A-75B's defaults), as its gateware does.
+    pub fn with_links(self) -> Self {
+        let link = |n: u8| NetAddr {
+            ip: [192, 168, 1 + n, 50],
+            mac: [0x02, 0x5A, 0x75, 0xB0, 0, n],
+            peer_ip: [0; 4],
+            peer_port: 0,
+        };
+        FakeDevice {
+            net: vec![link(0), link(1)],
+            ..self
+        }
+    }
+
+    /// Link `n`'s current addresses.
+    pub fn net(&self, n: usize) -> NetAddr {
+        self.net[n]
+    }
+
     pub fn with_caps(self, caps: Caps) -> Self {
         FakeDevice { caps, ..self }
     }
@@ -156,15 +258,36 @@ impl FakeDevice {
     /// it is not).
     pub fn with_fw(self, sim: Rp2350Sim) -> Self {
         FakeDevice {
-            fw: Some(Fw::boot(sim, true)),
+            fw: Some(Fw::boot(sim, true, false)),
             ..self
         }
+    }
+
+    /// An i.MX RT1050's updater (the RT slot image format) on `sim`, whose
+    /// slots hold [`rt_image`]s (see the module docs).
+    pub fn with_fw_rt(self, sim: Rp2350Sim) -> Self {
+        FakeDevice {
+            fw: Some(Fw::boot(sim, true, true)),
+            ..self
+        }
+    }
+
+    /// The port is back after a [`Script::vanish_on_reset`] reset (the
+    /// host reopened it).
+    pub fn reappear(&mut self) {
+        self.gone = false;
     }
 
     /// Resets the bootrom model now (watchdog or reset button) and boots a
     /// fresh updater.
     pub fn fw_reset(&mut self) {
         self.fw = self.fw.take().map(Fw::reset);
+    }
+
+    /// The bootrom model, with [`FakeDevice::with_fw`] or
+    /// [`FakeDevice::with_fw_rt`].
+    pub fn fw_sim(&self) -> Option<&Rp2350Sim> {
+        self.fw.as_ref().map(|fw| &fw.sim)
     }
 
     /// Sets whether the firmware's self-test passed.
@@ -206,11 +329,11 @@ impl FakeDevice {
         if auth.version <= min_version {
             return Err(HandlerError::Denied);
         }
-        let vk = VerifyingKey::from_bytes(&key.0).map_err(|_| HandlerError::Denied)?;
         let len = u32::try_from(image.len()).map_err(|_| HandlerError::Denied)?;
         let m = signed_message(len, auth.version, &image_sha256(image));
-        vk.verify_strict(&m, &Signature::from_bytes(&auth.signature.0))
-            .map_err(|_| HandlerError::Denied)?;
+        if !verify(&key, &m, &auth.signature) {
+            return Err(HandlerError::Denied);
+        }
         Ok(TrustState::Claimed {
             key,
             min_version: auth.version,
@@ -278,9 +401,30 @@ impl FakeDevice {
                 trust: self.trust,
                 self_test_ok: fw.self_test_ok,
             };
-            if let Some(r) = fw.svc.handle(&mut fw.sim, &ctx, key, body, out) {
+            if let Some(r) = fw.handle(&ctx, key, body, out) {
                 return r;
             }
+        }
+        if key == keys::NET_ADDR && !self.net.is_empty() {
+            let link = *body.first().ok_or(HandlerError::InvalidRequest)?;
+            let slot = self
+                .net
+                .get_mut(usize::from(link))
+                .ok_or(HandlerError::InvalidRequest)?;
+            return match body.len() {
+                1 => {
+                    let r = slot.set_body(link);
+                    out.get_mut(..r.len())
+                        .ok_or(HandlerError::BufferTooSmall)?
+                        .copy_from_slice(&r);
+                    Ok(r.len())
+                }
+                n if n == 1 + NetAddr::LEN => {
+                    *slot = NetAddr::decode(&body[1..]).ok_or(HandlerError::InvalidRequest)?;
+                    Ok(0)
+                }
+                _ => Err(HandlerError::InvalidRequest),
+            };
         }
         let cmd = Command::parse(key, body)?.ok_or(HandlerError::NotFound)?;
         match cmd {
@@ -297,7 +441,9 @@ impl FakeDevice {
             .ok_or(HandlerError::BufferTooSmall),
             Command::Board => {
                 let body = self.board.as_deref().ok_or(HandlerError::NotFound)?;
-                out.get_mut(..body.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(body);
+                out.get_mut(..body.len())
+                    .ok_or(HandlerError::BufferTooSmall)?
+                    .copy_from_slice(body);
                 Ok(body.len())
             }
             Command::Start if !self.runtime => Err(HandlerError::NotFound),
@@ -322,7 +468,7 @@ impl FakeDevice {
                 .encode(out)
                 .ok_or(HandlerError::BufferTooSmall),
             Command::TrustClaim { key } => {
-                if VerifyingKey::from_bytes(&key.0).is_err() {
+                if !is_valid_key(&key) {
                     return Err(HandlerError::InvalidRequest);
                 }
                 if self.trust.is_claimed() && !self.rekey_open {
@@ -406,14 +552,25 @@ impl FakeDevice {
         self.on_request(cobs);
         // A reboot the updater scheduled fires after the reply is out (or
         // lost).
-        if self.fw.as_ref().is_some_and(|fw| fw.sim.scheduled().is_some()) {
+        if self
+            .fw
+            .as_ref()
+            .is_some_and(|fw| fw.sim.scheduled().is_some())
+        {
             self.fw_reset();
+            if self.script.vanish_on_reset {
+                self.tx.clear();
+                self.gone = true;
+            }
         }
     }
 }
 
 impl Transport for FakeDevice {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.gone {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         self.raw_rx.extend_from_slice(bytes);
         for &b in bytes {
             if let Split::Frame(_) = self.splitter.push(b) {
@@ -425,6 +582,9 @@ impl Transport for FakeDevice {
     }
 
     fn read(&mut self, buf: &mut [u8], _timeout: Duration) -> io::Result<usize> {
+        if self.gone {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
         let n = buf.len().min(self.tx.len());
         for (dst, src) in buf.iter_mut().zip(self.tx.drain(..n)) {
             *dst = src;

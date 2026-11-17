@@ -7,7 +7,7 @@
 //! imports the ABI 5 functions is refused by an ABI 4 host.
 
 use middleware::wasm_abi::serve::{MAX_REPLY, MAX_REQUEST, MAX_SERVES};
-use middleware::wasm_abi::{ABI4_IMPORTS, IMPORTS, import_in};
+use middleware::wasm_abi::{ABI4_IMPORTS, ABI5_IMPORTS, import_in};
 use middleware::{HandlerError, Key, RequestMeta, SenderId};
 use wasm_host::{AbiError, Device, Limits, LoadError, Payload, Pull, Trap};
 
@@ -354,7 +354,7 @@ fn s10_abi5_imports_are_unknown_to_an_abi4_host() {
     let names = ["publish", "serve", "node_id"];
     let unknown: Vec<_> = names.iter().filter(|n| import_in(4, n).is_none()).collect();
     assert_eq!(unknown, [&"serve", &"node_id"]);
-    assert_eq!(IMPORTS.len(), ABI4_IMPORTS + 2);
+    assert_eq!(ABI5_IMPORTS, ABI4_IMPORTS + 2);
     // This host knows them; a module importing an import it does not know
     // fails to load with UnknownImport, exactly what an ABI 4 host reports
     // for `serve`.

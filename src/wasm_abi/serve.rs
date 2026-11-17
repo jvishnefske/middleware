@@ -98,7 +98,8 @@ pub fn encode_meta(meta: &RequestMeta<'_>) -> [u8; REQUEST_META_LEN] {
 
 /// Decodes a meta block. Unknown flag bits or non-zero reserved bytes are
 /// [`AbiError::InvalidArgument`] (a newer host); a short block is
-/// [`AbiError::OutOfBounds`].
+/// [`AbiError::OutOfBounds`]. The block carries no trace context or request
+/// id (K19: the device links carry none), so both are `None`.
 pub fn decode_meta(block: &[u8]) -> Result<RequestMeta<'static>, AbiError> {
     let block: &[u8; REQUEST_META_LEN] = block
         .get(..REQUEST_META_LEN)
@@ -115,6 +116,8 @@ pub fn decode_meta(block: &[u8]) -> Result<RequestMeta<'static>, AbiError> {
         sender: (flags & META_SENDER != 0).then_some(SenderId(sender)),
         principal: None,
         deadline_ms: (flags & META_DEADLINE != 0).then_some(deadline),
+        trace: None,
+        request_id: None,
     })
 }
 

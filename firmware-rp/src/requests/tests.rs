@@ -10,12 +10,12 @@ extern crate std;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
+use middleware::Key;
 use middleware::crc::Crc32;
 use middleware::loader::{Caps, DeviceInfo, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME};
 use middleware::transport::{HandlerError, RequestMeta, SenderId};
 use middleware::wasm_abi::{AbiError, Pull};
-use middleware::Key;
 use recipe_core::phase::{Command, PhaseState};
 use recipe_core::wire;
 use wasm_host::{Device, Limits, Payload};
@@ -30,7 +30,10 @@ type Flash = RamFlash<0x1_4000>;
 type Svc<'f> = Service<&'f mut Flash, Absent>;
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = std::format!("{}/../tools/payload-sim/tests/fixtures/phase/{name}.wasm", env!("CARGO_MANIFEST_DIR"));
+    let path = std::format!(
+        "{}/../tools/payload-sim/tests/fixtures/phase/{name}.wasm",
+        env!("CARGO_MANIFEST_DIR")
+    );
     std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
@@ -46,7 +49,13 @@ struct Board {
 
 impl Board {
     fn new(node: SenderId) -> Self {
-        Board { node, now: 0, led: Vec::new(), wire: Vec::new(), served: Vec::new() }
+        Board {
+            node,
+            now: 0,
+            led: Vec::new(),
+            wire: Vec::new(),
+            served: Vec::new(),
+        }
     }
 
     /// The `[pub]` frames written since the last call, as (key, body).
@@ -71,8 +80,12 @@ impl Device for Board {
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
         let mut scratch = [0u8; MAX_RAW_FRAME];
         let mut out = [0u8; MAX_WIRE_FRAME];
-        let n = frame::encode(&Frame::Publish { key, payload: data }, &mut scratch, &mut out)
-            .map_err(|_| AbiError::Transport)?;
+        let n = frame::encode(
+            &Frame::Publish { key, payload: data },
+            &mut scratch,
+            &mut out,
+        )
+        .map_err(|_| AbiError::Transport)?;
         self.wire.extend_from_slice(&out[..n]);
         Ok(())
     }
@@ -119,14 +132,32 @@ impl<'f> Host<'f> {
         let mut scratch = [0u8; MAX_RAW_FRAME];
         let mut wire_in = [0u8; MAX_WIRE_FRAME];
         let k = Key::new(key).expect("key");
-        let n = frame::encode(&Frame::Request { id: self.id, key: k, payload: body }, &mut scratch, &mut wire_in).unwrap();
+        let n = frame::encode(
+            &Frame::Request {
+                id: self.id,
+                key: k,
+                payload: body,
+            },
+            &mut scratch,
+            &mut wire_in,
+        )
+        .unwrap();
         // Device side: decode, route, answer.
         let mut rx = wire_in[..n - 1].to_vec();
-        let Frame::Request { id, key, payload } = frame::decode_wire(&mut rx).unwrap() else { panic!("request") };
+        let Frame::Request { id, key, payload } = frame::decode_wire(&mut rx).unwrap() else {
+            panic!("request")
+        };
         let mut out = [0u8; 512];
         // USB frames name no sender (the device's link has no peer) and no
         // deadline.
-        let Answer { handled, trapped } = handle(&mut self.svc, self.payload.as_mut(), key, payload, &RequestMeta::NONE, &mut out);
+        let Answer { handled, trapped } = handle(
+            &mut self.svc,
+            self.payload.as_mut(),
+            key,
+            payload,
+            &RequestMeta::NONE,
+            &mut out,
+        );
         let result: Result<&[u8], HandlerError> = match handled.reply {
             Reply::Now(r) => r.map(|n| &out[..n]),
             Reply::Start => {
@@ -136,7 +167,8 @@ impl<'f> Host<'f> {
         };
         let stop = handled.stop || trapped.is_some();
         let mut wire_out = [0u8; MAX_WIRE_FRAME];
-        let m = frame::encode(&Frame::Response { id, result }, &mut scratch, &mut wire_out).unwrap();
+        let m =
+            frame::encode(&Frame::Response { id, result }, &mut scratch, &mut wire_out).unwrap();
         if stop && let Some(p) = self.payload.take() {
             ended(&mut self.svc, &p);
         }
@@ -157,7 +189,8 @@ impl<'f> Host<'f> {
         let header = store.header().expect("installed");
         let mut image = std::vec![0u8; header.len as usize];
         store.load(header, &mut image).expect("loads");
-        let payload = Payload::load(&image, Board::new(self.svc.node()), Limits::default()).expect("instantiates");
+        let payload = Payload::load(&image, Board::new(self.svc.node()), Limits::default())
+            .expect("instantiates");
         self.svc.started();
         self.payload = Some(payload);
     }
@@ -205,24 +238,36 @@ impl<'f> Host<'f> {
 fn phase_keys(node: SenderId) -> (String, String) {
     let mut a = [0u8; wire::MAX_KEY];
     let mut b = [0u8; wire::MAX_KEY];
-    let cmd = wire::command_key(node.0, "LED", "Blink", &mut a).unwrap().to_string();
-    let state = wire::state_key(node.0, "LED", "Blink", &mut b).unwrap().to_string();
+    let cmd = wire::command_key(node.0, "LED", "Blink", &mut a)
+        .unwrap()
+        .to_string();
+    let state = wire::state_key(node.0, "LED", "Blink", &mut b)
+        .unwrap()
+        .to_string();
     (cmd, state)
 }
 
 fn command(c: Command, id: u32, args: &[i32]) -> Vec<u8> {
     let mut buf = [0u8; wire::MAX_BODY];
-    wire::encode_command(c, id, args, &mut buf).unwrap().to_vec()
+    wire::encode_command(c, id, args, &mut buf)
+        .unwrap()
+        .to_vec()
 }
 
 fn ack(state: PhaseState, id: u32, accepted: bool) -> Vec<u8> {
     let mut buf = [0u8; wire::MAX_BODY];
-    wire::encode_ack(accepted, state, id, &mut buf).unwrap().to_vec()
+    wire::encode_ack(accepted, state, id, &mut buf)
+        .unwrap()
+        .to_vec()
 }
 
 fn host(flash: &mut Flash) -> Host<'_> {
     let (svc, _) = Service::open(flash, &MAP, FACTS, Absent);
-    Host { svc, payload: None, id: 0 }
+    Host {
+        svc,
+        payload: None,
+        id: 0,
+    }
 }
 
 /// Collapses repeats (heartbeats repeat the state).
@@ -248,7 +293,10 @@ fn m7_the_pico_led_phase_server_runs_blink_to_complete_through_the_request_servi
     assert_eq!((info.node, info.caps), (Some(NODE), Caps::SERVE));
 
     // Before any payload: the phase key is nobody's.
-    assert_eq!(h.request(&cmd, &command(Command::Start, 1, &[250, 3])).0, Err(HandlerError::NotFound));
+    assert_eq!(
+        h.request(&cmd, &command(Command::Start, 1, &[250, 3])).0,
+        Err(HandlerError::NotFound)
+    );
 
     h.upload(&fixture("pico-led"));
     assert_eq!(h.request(keys::START.as_str(), &[]).0, Ok(Vec::new()));
@@ -265,20 +313,33 @@ fn m7_the_pico_led_phase_server_runs_blink_to_complete_through_the_request_servi
     // A sys key while the payload serves still reaches the firmware.
     assert!(DeviceInfo::decode(&h.request(keys::INFO.as_str(), &[]).0.unwrap()).is_some());
     // Start again while Running: rejected with the current state.
-    assert_eq!(h.request(&cmd, &command(Command::Start, 8, &[250, 3])).0, Ok(ack(PhaseState::Running, 8, false)));
+    assert_eq!(
+        h.request(&cmd, &command(Command::Start, 8, &[250, 3])).0,
+        Ok(ack(PhaseState::Running, 8, false))
+    );
     // Out of range (times 1..=10): InvalidRequest from the payload.
-    assert_eq!(h.request(&cmd, &command(Command::Start, 9, &[250, 11])).0, Err(HandlerError::InvalidRequest));
+    assert_eq!(
+        h.request(&cmd, &command(Command::Start, 9, &[250, 11])).0,
+        Err(HandlerError::InvalidRequest)
+    );
 
     // Three toggles at 250 ms, then Complete.
     h.run_for(1_000);
     let seen = changes(&h.states(&state));
     assert_eq!(seen.last(), Some(&PhaseState::Complete), "{seen:?}");
-    assert!(seen.iter().all(|s| matches!(s, PhaseState::Running | PhaseState::Complete)), "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|s| matches!(s, PhaseState::Running | PhaseState::Complete)),
+        "{seen:?}"
+    );
     // init drove the LED low; then three toggles.
     assert_eq!(h.board().led, [false, true, false, true]);
 
     // Reset: Resetting (LED off), then Idle.
-    assert_eq!(h.request(&cmd, &command(Command::Reset, 10, &[])).0, Ok(ack(PhaseState::Resetting, 10, true)));
+    assert_eq!(
+        h.request(&cmd, &command(Command::Reset, 10, &[])).0,
+        Ok(ack(PhaseState::Resetting, 10, true))
+    );
     h.run_for(100);
     let after = changes(&h.states(&state));
     assert_eq!(after.last(), Some(&PhaseState::Idle), "{after:?}");
@@ -289,13 +350,19 @@ fn m7_the_pico_led_phase_server_runs_blink_to_complete_through_the_request_servi
     assert_eq!(h.request(keys::STOP.as_str(), &[]).0, Ok(Vec::new()));
     assert!(h.payload.is_none());
     assert_eq!(h.svc.served().iter().collect::<Vec<_>>(), [cmd.as_str()]);
-    assert_eq!(h.request(&cmd, &command(Command::Start, 11, &[250, 3])).0, Err(HandlerError::Unavailable));
+    assert_eq!(
+        h.request(&cmd, &command(Command::Start, 11, &[250, 3])).0,
+        Err(HandlerError::Unavailable)
+    );
     assert_eq!(h.request("app/other", &[]).0, Err(HandlerError::NotFound));
 
     // A new image clears the table: NotFound until a payload serves it.
     h.upload(&fixture("pico-led"));
     assert!(h.svc.served().is_empty());
-    assert_eq!(h.request(&cmd, &command(Command::Start, 12, &[250, 3])).0, Err(HandlerError::NotFound));
+    assert_eq!(
+        h.request(&cmd, &command(Command::Start, 12, &[250, 3])).0,
+        Err(HandlerError::NotFound)
+    );
 }
 
 /// A payload whose `on_request` traps (`unreachable`), serving `app/boom`.
@@ -330,10 +397,16 @@ fn m7_a_trap_answers_internal_stops_the_payload_and_its_key_is_then_unavailable(
     assert_eq!((r, trapped), (Err(HandlerError::Internal), true));
     assert!(h.payload.is_none(), "the shell drops a trapped payload");
     assert_eq!(h.svc.status(), PayloadStatus::Trapped);
-    assert_eq!(h.request("app/boom", b"x").0, Err(HandlerError::Unavailable));
+    assert_eq!(
+        h.request("app/boom", b"x").0,
+        Err(HandlerError::Unavailable)
+    );
     // sys/info is the firmware's, trapped or not.
     let body = h.request(keys::INFO.as_str(), &[]).0.unwrap();
-    assert_eq!(DeviceInfo::decode(&body).unwrap().status, PayloadStatus::Trapped);
+    assert_eq!(
+        DeviceInfo::decode(&body).unwrap().status,
+        PayloadStatus::Trapped
+    );
     // A restart serves again.
     assert_eq!(h.request(keys::START.as_str(), &[]).0, Ok(Vec::new()));
     assert_eq!(h.request("app/boom", b"x").0, Err(HandlerError::Internal));
@@ -342,12 +415,65 @@ fn m7_a_trap_answers_internal_stops_the_payload_and_its_key_is_then_unavailable(
 #[test]
 fn m7_without_the_runtime_sys_info_reports_no_capability() {
     let mut f = flash();
-    let facts = crate::service::Facts { runtime: false, firmware: "0.1.0+no-wasm", chip: "rp2040", ..FACTS };
+    let facts = crate::service::Facts {
+        runtime: false,
+        firmware: "0.1.0+no-wasm",
+        chip: "rp2040",
+        ..FACTS
+    };
     let (mut svc, _) = Service::open(&mut *f, &MAP, facts, Absent);
     let svc = &mut svc;
     let mut out = [0u8; 128];
     let handled = svc.handle(keys::INFO, &[], &mut out);
-    let Reply::Now(Ok(n)) = handled.reply else { panic!("info") };
+    let Reply::Now(Ok(n)) = handled.reply else {
+        panic!("info")
+    };
     let info = DeviceInfo::decode(&out[..n]).unwrap();
     assert_eq!((info.node, info.caps), (Some(NODE), Caps::NONE));
+}
+
+/// V22 with the real interpreter: the pico-led phase server's key is
+/// announced (beside the node record) while it runs, from the live table
+/// `Payload::serves`, and withdrawn with a goodbye when it stops; a
+/// restart announces it again, an upload (which ends the run) withdraws it.
+#[test]
+fn v22_the_pico_led_phase_key_is_announced_while_it_runs_and_withdrawn_when_the_run_ends() {
+    use crate::beacons::tests::{Gateway, goodbye, up};
+    use crate::beacons::{Announcer, Identity, wanted};
+    use embassy_futures::block_on;
+
+    let mut f = flash();
+    let mut h = host(&mut f);
+    let (cmd, _) = phase_keys(NODE);
+    let id = Identity::new(&FACTS);
+    let (link, mut gw) = Gateway::link(NODE);
+    let mut a = Announcer::new(link);
+    // What the controller does after each step: the records for the
+    // running payload's served keys, or none.
+    let sync = |h: &Host<'_>, a: &mut Announcer<_>| {
+        let served = h.payload.as_ref().into_iter().flat_map(|p| p.serves());
+        block_on(a.sync(&wanted(&id, served))).expect("sent")
+    };
+
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [up("mw/node")]);
+    h.upload(&fixture("pico-led"));
+    assert_eq!(h.request(keys::START.as_str(), &[]).0, Ok(Vec::new()));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [up(&cmd)]);
+    assert_eq!(gw.kinds(), ["mw/node", cmd.as_str()]);
+
+    assert_eq!(h.request(keys::STOP.as_str(), &[]).0, Ok(Vec::new()));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [goodbye(&cmd)]);
+    assert_eq!(gw.kinds(), ["mw/node"]);
+
+    assert_eq!(h.request(keys::START.as_str(), &[]).0, Ok(Vec::new()));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [up(&cmd)]);
+    // An upload's begin stops the payload (the controller drops it).
+    h.payload = None;
+    h.upload(&fixture("pico-led"));
+    assert_eq!(sync(&h, &mut a), 1);
+    assert_eq!(gw.heard(), [goodbye(&cmd)]);
 }

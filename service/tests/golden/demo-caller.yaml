@@ -1,0 +1,243 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: demo-caller
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-caller
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+spec:
+  selector:
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/name: demo-caller
+  ports:
+  - name: grpc
+    appProtocol: grpc
+    protocol: TCP
+    port: 50051
+    targetPort: grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-caller-pods
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/name: demo-caller
+  ports:
+  - name: grpc
+    appProtocol: grpc
+    protocol: TCP
+    port: 50051
+    targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-caller
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: demo-caller
+      app.kubernetes.io/name: demo-caller
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: demo-caller
+        app.kubernetes.io/instance: demo-caller
+        app.kubernetes.io/managed-by: mw-service
+        app.kubernetes.io/name: demo-caller
+        app.kubernetes.io/version: latest
+        sidecar.istio.io/inject: 'true'
+        version: latest
+      annotations:
+        kubectl.kubernetes.io/default-container: demo-caller
+        proxy.istio.io/config: |
+          holdApplicationUntilProxyStarts: true
+          terminationDrainDuration: 7s
+          proxyMetadata:
+            EXIT_ON_ZERO_ACTIVE_CONNECTIONS: 'true'
+            MINIMUM_DRAIN_DURATION: 7s
+        sidecar.istio.io/rewriteAppHTTPProbers: 'true'
+    spec:
+      serviceAccountName: demo-caller
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: demo-caller
+        image: demo-caller:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: grpc
+          containerPort: 50051
+          protocol: TCP
+        env:
+        - name: MW_PORT
+          value: '50051'
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://k8s-monitoring-alloy.observability.svc.cluster.local:4317
+        - name: MW_SERVICE_MAP
+          value: demo/echo=demo-echo-pods.apps:grpc
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        startupProbe:
+          grpc:
+            port: 50051
+            service: ''
+          periodSeconds: 1
+          timeoutSeconds: 1
+          failureThreshold: 60
+        readinessProbe:
+          grpc:
+            port: 50051
+            service: ''
+          periodSeconds: 2
+          timeoutSeconds: 1
+          failureThreshold: 1
+        livenessProbe:
+          grpc:
+            port: 50051
+            service: ''
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+          readOnly: false
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Mi
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: demo-caller
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: demo-caller
+      app.kubernetes.io/name: demo-caller
+  action: ALLOW
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: demo-caller
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+spec:
+  host: demo-caller.apps.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: demo-caller-pods
+  namespace: apps
+  labels:
+    app: demo-caller
+    app.kubernetes.io/instance: demo-caller
+    app.kubernetes.io/managed-by: mw-service
+    app.kubernetes.io/name: demo-caller
+    app.kubernetes.io/version: latest
+    version: latest
+spec:
+  host: demo-caller-pods.apps.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL

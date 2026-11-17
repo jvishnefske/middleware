@@ -114,6 +114,7 @@ describe("loader helpers", () => {
       chip: "esp32s3",
       firmware: "0.1.0",
       caps: 0,
+      capNames: [],
       serves: false,
     });
     expect(proto.decodeDeviceInfo(body.slice(0, 3))).toBeUndefined();
@@ -126,6 +127,12 @@ describe("loader helpers", () => {
     const old = proto.encodeDeviceInfo({ abiVersion: 5, capacity: 1, status: 1, chip: "rp2350", firmware: "0.1.0", node });
     expect(proto.decodeDeviceInfo(old)).toMatchObject({ node, caps: 0, serves: false });
     expect(() => proto.encodeDeviceInfo({ abiVersion: 5, capacity: 1, status: 1, chip: "x", firmware: "y", caps: 1 })).toThrow();
+    // Every named bit decodes by name: bit 1 bridge (Colorlight), bits 2 and 3 the
+    // RT1050-EVKB's sample sources (caps 13 = serve | imu | microphone).
+    const evkb = proto.encodeDeviceInfo({ abiVersion: 6, capacity: 1, status: 1, chip: "rt1050", firmware: "0.1.0", node, caps: 13 });
+    expect(proto.decodeDeviceInfo(evkb)).toMatchObject({ caps: 13, capNames: ["serve", "source_imu", "source_microphone"], serves: true });
+    const bridge = proto.encodeDeviceInfo({ abiVersion: 6, capacity: 1, status: 1, chip: "ecp5", firmware: "0.1.0", node, caps: 2 });
+    expect(proto.decodeDeviceInfo(bridge)).toMatchObject({ caps: 2, capNames: ["bridge"], serves: false });
   });
 });
 
@@ -194,10 +201,14 @@ describe("ABI constants", () => {
       "route_stat",
       "serve",
       "node_id",
+      "route_bridge",
+      "ledstrip_open",
+      "ledstrip_write",
+      "ledstrip_close",
     ]);
     expect(abi.imports.find((i) => i.name === "publish")).toEqual({ name: "publish", params: 4, returns: true });
     expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq", onRequest: "on_request" });
-    expect(abi.version).toBe(5);
+    expect(abi.version).toBe(7);
     expect(abi.errors.InvalidKey).toBe(-6);
     expect(proto.constants.keys.status).toBe("sys/payload/status");
   });

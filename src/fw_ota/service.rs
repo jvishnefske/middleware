@@ -9,6 +9,12 @@
 //! feature for SHA-256 ([`ImageHash`], over [`FwPlatform::read`]) and
 //! Ed25519.
 //!
+//! The image format is the type parameter `F` ([`ImageFormat`]): it
+//! inspects the image at commit, re-checks a committed image at boot and
+//! summarises each slot for `sys/fw/info`. It defaults to the RP2350's
+//! [`Picobin`], whose constructor is [`FwService::boot`]; another format
+//! starts with [`FwService::boot_for`] (`FwService::<MyFormat>::boot_for`).
+//!
 //! Every platform failure is answered `Internal`; the state is then the
 //! one before the request, except where the effect already took hold
 //! (documented per effect in [`FwService::handle_command`]). Every effect
@@ -20,8 +26,8 @@
 //! frame and takes `&mut` to it, as the shell is the one place state is
 //! mutated in place.
 
-use super::machine::{BootAction, BootFacts, Effect, Env, Facts, FwUpdate, acceptable};
-use super::picobin::{ImageDef, find_image_def};
+use super::format::{ImageFormat, ImageInfo, Picobin};
+use super::machine::{BootAction, BootFacts, Effect, Env, Facts, FwUpdate};
 use super::platform::{BootInfo, FwPlatform};
 use super::record::{FwRecord, Pending};
 use super::wire::{Command, FwInfo, SlotInfo};
@@ -46,16 +52,18 @@ pub struct Context {
     pub self_test_ok: bool,
 }
 
-/// The firmware updater of one device. See the module docs.
-pub struct FwService {
+/// The firmware updater of one device, for images of format `F`. See the
+/// module docs.
+pub struct FwService<F = Picobin> {
     state: FwUpdate,
     record: FwRecord,
     boot: BootInfo,
     running_version: Version,
     stash: [u8; SECTOR as usize],
+    format: core::marker::PhantomData<F>,
 }
 
-impl core::fmt::Debug for FwService {
+impl<F> core::fmt::Debug for FwService<F> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("FwService")
             .field("state", &self.state)
@@ -69,31 +77,38 @@ fn internal<E>(_: E) -> HandlerError {
     HandlerError::Internal
 }
 
-fn read_word<P: FwPlatform>(p: &mut P, slot: Slot, at: u32) -> Result<u32, P::Error> {
-    let mut w = [0u8; 4];
-    p.read(slot, at, &mut w)?;
-    Ok(u32::from_le_bytes(w))
+/// Reads `buf` at image offset `at` of `slot`, the first sector from
+/// `stash` when given (bytes past the stash, or a read straddling its end,
+/// come from flash).
+fn read_image<P: FwPlatform>(
+    p: &mut P,
+    slot: Slot,
+    stash: Option<&[u8; SECTOR as usize]>,
+    at: u32,
+    buf: &mut [u8],
+) -> Result<(), P::Error> {
+    let end = at as usize + buf.len();
+    match stash.and_then(|s| s.get(at as usize..end)) {
+        Some(src) => {
+            buf.copy_from_slice(src);
+            Ok(())
+        }
+        None => p.read(slot, at, buf),
+    }
 }
 
-/// The IMAGE_DEF of the `len`-byte image in `slot`, reading the first
-/// sector from `stash` when given.
-fn image_def<P: FwPlatform>(
+/// What format `F` finds in the `len`-byte image in `slot`, reading the
+/// first sector from `stash` when given.
+fn inspect<F: ImageFormat, P: FwPlatform>(
     p: &mut P,
     slot: Slot,
     len: u32,
     stash: Option<&[u8; SECTOR as usize]>,
-) -> Result<Option<ImageDef>, P::Error> {
-    let read = |at: u32| -> Result<u32, P::Error> {
-        match stash {
-            Some(s) if at + 4 <= SECTOR => {
-                let i = at as usize;
-                Ok(s.get(i..i + 4)
-                    .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])))
-            }
-            _ => read_word(p, slot, at),
-        }
-    };
-    find_image_def(read, len)
+) -> Result<Option<F::Info>, P::Error> {
+    F::inspect(
+        &mut |at, buf: &mut [u8]| read_image(p, slot, stash, at, buf),
+        len,
+    )
 }
 
 /// SHA-256 of the `len`-byte image in `slot`, the first sector from
@@ -122,40 +137,49 @@ fn hash<P: FwPlatform>(
     Ok(h.finish())
 }
 
-/// What `slot` holds: a valid RP2350 executable's version and TBYB flag.
-fn slot_info<P: FwPlatform>(p: &mut P, slot: Slot) -> Result<SlotInfo, P::Error> {
+/// What `slot` holds, as format `F` summarises it (the RP2350: a valid
+/// executable's version and TBYB flag).
+fn slot_info<F: ImageFormat, P: FwPlatform>(p: &mut P, slot: Slot) -> Result<SlotInfo, P::Error> {
     let size = p.slot_size();
-    Ok(match image_def(p, slot, size, None)? {
-        Some(d) if d.is_exe() && d.is_rp2350() => SlotInfo {
-            version: Some(Version(d.version_u32())),
-            tbyb: d.is_tbyb(),
-        },
-        _ => SlotInfo::default(),
-    })
+    F::slot_info(&mut |at, buf: &mut [u8]| p.read(slot, at, buf), size)
 }
 
 /// Whether `slot` still holds exactly the committed image `p`.
-fn intact<P: FwPlatform>(plat: &mut P, p: &Pending) -> Result<bool, P::Error> {
+fn intact<F: ImageFormat, P: FwPlatform>(plat: &mut P, p: &Pending) -> Result<bool, P::Error> {
     if p.len == 0 || p.len > plat.slot_size() {
         return Ok(false);
     }
-    let def = image_def(plat, p.slot, p.len, None)?;
-    if !def.is_some_and(|d| acceptable(&d, p.version)) {
+    let info = inspect::<F, P>(plat, p.slot, p.len, None)?;
+    if !info.is_some_and(|d| d.acceptable(p.version)) {
         return Ok(false);
     }
     Ok(hash(plat, p.slot, p.len, None)? == p.sha256)
 }
 
-impl FwService {
-    /// Starts the updater at boot: reads the boot info, the record and the
-    /// running image's version, reconciles them ([`FwUpdate::boot`]) and
-    /// performs the resulting persist or discard.
+impl FwService<Picobin> {
+    /// Starts the RP2350 updater at boot ([`FwService::boot_for`] with the
+    /// [`Picobin`] format).
     pub fn boot<P: FwPlatform>(p: &mut P) -> Result<Self, P::Error> {
+        Self::boot_for(p)
+    }
+}
+
+impl<F: ImageFormat> FwService<F> {
+    /// Starts the updater for images of format `F` at boot: reads the boot
+    /// info, the record and the running image's version, reconciles them
+    /// ([`FwUpdate::boot`]) and performs the resulting persist or discard.
+    pub fn boot_for<P: FwPlatform>(p: &mut P) -> Result<Self, P::Error> {
         let boot = p.boot_info()?;
         let mut record = p.load_record()?;
-        let running_version = Version(slot_info(p, boot.running)?.version.map_or(0, |v| v.0));
+        let running_version = Version(
+            slot_info::<F, P>(p, boot.running)?
+                .version
+                .map_or(0, |v| v.0),
+        );
         let pending_intact = match record.pending {
-            Some(pd) if !boot.trial && pd.slot != boot.running && !pd.rebooted => intact(p, &pd)?,
+            Some(pd) if !boot.trial && pd.slot != boot.running && !pd.rebooted => {
+                intact::<F, P>(p, &pd)?
+            }
             _ => false,
         };
         let facts = BootFacts {
@@ -186,6 +210,7 @@ impl FwService {
             boot,
             running_version,
             stash: [0xFF; SECTOR as usize],
+            format: core::marker::PhantomData,
         })
     }
 
@@ -313,7 +338,7 @@ impl FwService {
             }
             Effect::Verify { slot, len } => {
                 let sha256 = hash(p, slot, len, Some(&self.stash)).map_err(internal)?;
-                let image = image_def(p, slot, len, Some(&self.stash)).map_err(internal)?;
+                let image = inspect::<F, P>(p, slot, len, Some(&self.stash)).map_err(internal)?;
                 let (verified, r) = after.verified(&Facts { sha256, image });
                 self.state = verified;
                 match r? {
@@ -398,8 +423,8 @@ impl FwService {
         ctx: &Context,
         out: &mut [u8],
     ) -> Result<usize, HandlerError> {
-        let a = slot_info(p, Slot::A).map_err(internal)?;
-        let b = slot_info(p, Slot::B).map_err(internal)?;
+        let a = slot_info::<F, P>(p, Slot::A).map_err(internal)?;
+        let b = slot_info::<F, P>(p, Slot::B).map_err(internal)?;
         let (target, version, len, received) = self.state.progress();
         FwInfo {
             state: self.state.code(),

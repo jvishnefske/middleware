@@ -162,9 +162,12 @@ pub struct Timeouts {
     /// Per-attempt response timeout.
     pub request: Duration,
     /// Floor for requests that erase or program flash before answering:
-    /// `sys/loader/begin`, `sys/fw/begin` and `sys/fw/confirm` (the
-    /// bootrom's buy rewrites a sector); `sys/fw/commit`, which hashes the
-    /// whole image and writes its first sector, waits three times as long.
+    /// `sys/loader/begin`, `sys/loader/commit` and `sys/trust/claim` (a
+    /// signed commit and a claim save the trust record: on the RT1050 that
+    /// erases a 256 KiB HyperFlash block, up to 4 s), `sys/fw/begin` and
+    /// `sys/fw/confirm` (the bootrom's buy rewrites a sector);
+    /// `sys/fw/commit`, which hashes the whole image and writes its first
+    /// sector, waits three times as long.
     pub begin: Duration,
     /// Additional attempts after a timeout.
     pub retries: u32,
@@ -184,9 +187,15 @@ impl Timeouts {
     /// The per-attempt timeout for a request on `key`.
     pub fn for_key(&self, key: Key<'_>) -> Duration {
         use middleware::fw_ota::keys as fw;
+        use middleware::loader::keys as loader;
         if key == fw::COMMIT {
             self.request.max(self.begin * 3)
-        } else if key == middleware::loader::keys::BEGIN || key == fw::BEGIN || key == fw::CONFIRM {
+        } else if key == loader::BEGIN
+            || key == loader::COMMIT
+            || key == loader::TRUST_CLAIM
+            || key == fw::BEGIN
+            || key == fw::CONFIRM
+        {
             self.request.max(self.begin)
         } else {
             self.request
@@ -429,10 +438,15 @@ mod tests {
     }
 
     #[test]
-    fn timeouts_extend_begin_only() {
+    fn timeouts_extend_the_requests_that_erase() {
         let t = Timeouts::default();
         assert_eq!(t.for_key(keys::BEGIN), Duration::from_millis(5000));
         assert_eq!(t.for_key(keys::CHUNK), Duration::from_millis(1000));
+        // A signed commit and a claim save the trust record (an RT1050
+        // HyperFlash block erase, up to 4 s).
+        assert_eq!(t.for_key(keys::COMMIT), Duration::from_millis(5000));
+        assert_eq!(t.for_key(keys::TRUST_CLAIM), Duration::from_millis(5000));
+        assert_eq!(t.for_key(keys::INFO), Duration::from_millis(1000));
         let slow = Timeouts {
             request: Duration::from_secs(9),
             ..t

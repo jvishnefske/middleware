@@ -122,6 +122,10 @@ mwctl = { path = "../tools/mwctl" }
 # with recipe-core's wire contract, and build a trapping payload from WAT.
 recipe-core = { path = "../recipe-core" }
 wat = "1"
+# The beacon tests run the announcer (async, over a `SerialLink` on an
+# in-memory cable) to completion on the host.
+embassy-futures = "0.1.2"
+embedded-io-async = "0.7"
 
 [profile.dev]
 opt-level = "s"

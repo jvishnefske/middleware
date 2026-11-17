@@ -1,8 +1,15 @@
-//! Pure core of the ESP base firmware.
+//! The ESP base firmware: its pure core and (feature `shell`) its
+//! imperative shell.
 //!
-//! Everything here is deterministic decision logic with no hardware access,
-//! so it is unit tested on the host (`cargo test --lib`, no chip feature):
+//! Everything outside `shell` is deterministic decision logic with no
+//! hardware access, so it is unit tested on the host (`cargo test --lib`,
+//! no chip feature):
 //!
+//! * [`board`] — board profiles: a chip [`chip::Profile`] adapted to a
+//!   board (`sys/info` name and firmware version, reserved and released
+//!   pins, presence button, safe-mode pin, image cap, fuel per call), with
+//!   `const fn` builders a board crate uses, and the boot decision whether
+//!   the stored payload autostarts (safe mode).
 //! * [`chip`] — per-chip profiles: name, heap plan, WASM memory limit,
 //!   largest payload image, and the GPIO tables that decide which pins a
 //!   payload may touch (flash/PSRAM, USB D+/D-, and console UART pins are
@@ -31,6 +38,9 @@
 //! * [`perf`] — the payload loop's time accounting: wall time and fuel per
 //!   payload operation, waits, yields and the radio task's time, folded into
 //!   a reporting window and logged as two `sys/log` lines.
+//! * [`ledstrip`] — the ABI 7 LED strips: the WS2812 pulse encoder (G, R,
+//!   B bytes to RMT pulse codes), the chain length that fits RMT channel
+//!   RAM, the transmit deadline and latch wait, and the strip table.
 //! * [`periph`] — the ABI 2 and ABI 3 peripheral decisions: pin claims,
 //!   the timer deadline table, the DMA channel state machine, the UART
 //!   receive ring, the PWM table, and the events ISRs and completions push.
@@ -51,17 +61,51 @@
 //!   cover the payload's bound (`wasm_host::Limits::heap_needed`) plus
 //!   a margin.
 //!
-//! The imperative shell (`src/main.rs` and `src/shell/`) is only compiled
-//! with a chip feature (`esp32`, `esp32s3`, `esp32c3`). It owns the UARTs,
-//! USB-Serial-JTAG, flash and GPIO, performs the [`dispatch::Action`]s and
-//! runs the payload.
+//! The imperative shell (`shell`, `src/shell/`) is only compiled with a
+//! chip feature (`esp32`, `esp32s3`, `esp32c3`, each of which enables
+//! `shell`). It owns the UARTs, USB-Serial-JTAG, flash and GPIO, performs
+//! the [`dispatch::Action`]s and runs the payload. It is a library module
+//! so a board crate can run it with its own [`board::Board`]
+//! (`shell::run`); the `esp-base` binary (`src/main.rs`) is the same call
+//! with the chip default.
+//!
+//! The pure core forbids `unsafe` (`#![forbid(unsafe_code)]` without
+//! `shell`). With `shell` the crate denies it instead, as the binary did
+//! before the shell moved here, because the shell keeps the one audited
+//! exception it already had: `shell::adc` re-takes an ADC1 pin singleton
+//! with `steal` under a local `#[allow(unsafe_code)]` (see its docs). No
+//! other module may use `unsafe`.
 #![no_std]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "shell"), forbid(unsafe_code))]
+#![cfg_attr(feature = "shell", deny(unsafe_code))]
+#![deny(
+    clippy::mem_forget,
+    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
+    holding buffers for the duration of a data transfer."
+)]
 
+#[cfg(all(
+    feature = "shell",
+    not(any(feature = "esp32", feature = "esp32s3", feature = "esp32c3"))
+))]
+compile_error!("the shell needs exactly one chip feature: esp32, esp32s3 or esp32c3");
+
+#[cfg(any(
+    all(feature = "esp32", feature = "esp32s3"),
+    all(feature = "esp32", feature = "esp32c3"),
+    all(feature = "esp32s3", feature = "esp32c3"),
+))]
+compile_error!("enable exactly one chip feature: esp32, esp32s3 or esp32c3");
+
+#[cfg(feature = "shell")]
+extern crate alloc;
+
+pub mod board;
 pub mod camera;
 pub mod chip;
 pub mod dispatch;
 pub mod image;
+pub mod ledstrip;
 pub mod ota;
 pub mod perf;
 pub mod periph;
@@ -71,6 +115,8 @@ pub mod radio;
 mod ram_flash;
 pub mod route;
 pub mod serve;
+#[cfg(feature = "shell")]
+pub mod shell;
 pub mod start;
 pub mod store;
 pub mod trust_store;

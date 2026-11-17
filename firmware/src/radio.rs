@@ -133,7 +133,10 @@ impl<const N: usize> Default for Peers<N> {
 impl<const N: usize> Peers<N> {
     /// No peers.
     pub const fn new() -> Self {
-        Peers { macs: [None; N], clock: 0 }
+        Peers {
+            macs: [None; N],
+            clock: 0,
+        }
     }
 
     /// Records a send to `mac`; returns the next table and the driver
@@ -151,7 +154,13 @@ impl<const N: usize> Peers<N> {
             *slot = Some((mac, clock));
             return (next, PeerChange::Add);
         }
-        let oldest = (0..N).max_by_key(|&i| next.macs.get(i).copied().flatten().map_or(0, |(_, t)| clock.wrapping_sub(t)));
+        let oldest = (0..N).max_by_key(|&i| {
+            next.macs
+                .get(i)
+                .copied()
+                .flatten()
+                .map_or(0, |(_, t)| clock.wrapping_sub(t))
+        });
         match oldest.and_then(|i| next.macs.get_mut(i)) {
             Some(slot) => {
                 let old = slot.map(|(m, _)| m);
@@ -206,35 +215,60 @@ pub struct Counters {
 impl Counters {
     /// No counts.
     pub const fn new() -> Self {
-        Counters { rx: 0, rx_dropped: 0, rx_bad: 0, tx: 0, tx_dropped: 0, tx_failed: 0 }
+        Counters {
+            rx: 0,
+            rx_dropped: 0,
+            rx_bad: 0,
+            tx: 0,
+            tx_dropped: 0,
+            tx_failed: 0,
+        }
     }
 
     /// One sample delivered (`true`) or dropped on a full queue.
     pub const fn received(self, queued: bool) -> Self {
         if queued {
-            Counters { rx: self.rx.saturating_add(1), ..self }
+            Counters {
+                rx: self.rx.saturating_add(1),
+                ..self
+            }
         } else {
-            Counters { rx_dropped: self.rx_dropped.saturating_add(1), ..self }
+            Counters {
+                rx_dropped: self.rx_dropped.saturating_add(1),
+                ..self
+            }
         }
     }
 
     /// One malformed frame or receive error.
     pub const fn bad(self) -> Self {
-        Counters { rx_bad: self.rx_bad.saturating_add(1), ..self }
+        Counters {
+            rx_bad: self.rx_bad.saturating_add(1),
+            ..self
+        }
     }
 
     /// One broadcast that succeeded (`true`) or failed.
     pub const fn sent(self, ok: bool) -> Self {
         if ok {
-            Counters { tx: self.tx.saturating_add(1), ..self }
+            Counters {
+                tx: self.tx.saturating_add(1),
+                ..self
+            }
         } else {
-            Counters { tx_failed: self.tx_failed.saturating_add(1), ..self }
+            Counters {
+                tx_failed: self.tx_failed.saturating_add(1),
+                ..self
+            }
         }
     }
 
     /// `n` publishes dropped before reaching the radio.
     pub const fn dropped(self, n: u32) -> Self {
-        Counters { tx_dropped: self.tx_dropped.saturating_add(n), ..self }
+        Counters {
+            tx_dropped: self.tx_dropped.saturating_add(n),
+            ..self
+        }
     }
 
     /// Losses so far: everything dropped or failed.
@@ -272,32 +306,53 @@ pub struct RpcCounters {
 impl RpcCounters {
     /// No counts.
     pub const fn new() -> Self {
-        RpcCounters { executed: 0, replayed: 0, busy: 0, dropped: 0, tx_failed: 0 }
+        RpcCounters {
+            executed: 0,
+            replayed: 0,
+            busy: 0,
+            dropped: 0,
+            tx_failed: 0,
+        }
     }
 
     /// One request handed to the controller.
     pub const fn executed(self) -> Self {
-        RpcCounters { executed: self.executed.saturating_add(1), ..self }
+        RpcCounters {
+            executed: self.executed.saturating_add(1),
+            ..self
+        }
     }
 
     /// One repeat answered from the cache.
     pub const fn replayed(self) -> Self {
-        RpcCounters { replayed: self.replayed.saturating_add(1), ..self }
+        RpcCounters {
+            replayed: self.replayed.saturating_add(1),
+            ..self
+        }
     }
 
     /// One request dropped while another was in flight.
     pub const fn busy(self) -> Self {
-        RpcCounters { busy: self.busy.saturating_add(1), ..self }
+        RpcCounters {
+            busy: self.busy.saturating_add(1),
+            ..self
+        }
     }
 
     /// `n` requests dropped before the controller.
     pub const fn dropped(self, n: u32) -> Self {
-        RpcCounters { dropped: self.dropped.saturating_add(n), ..self }
+        RpcCounters {
+            dropped: self.dropped.saturating_add(n),
+            ..self
+        }
     }
 
     /// One response that could not be sent.
     pub const fn tx_failed(self) -> Self {
-        RpcCounters { tx_failed: self.tx_failed.saturating_add(1), ..self }
+        RpcCounters {
+            tx_failed: self.tx_failed.saturating_add(1),
+            ..self
+        }
     }
 
     /// Whether to log the counters now: they changed since the last report
@@ -345,14 +400,45 @@ mod tests {
         let (_, c) = p.send_to(m(2));
         assert_eq!(c, PeerChange::Replace(m(3)));
         assert_eq!(Peers::<0>::new().send_to(m(1)).1, PeerChange::Add);
-        let c = RpcCounters::new().executed().replayed().busy().dropped(2).tx_failed();
-        assert_eq!(c, RpcCounters { executed: 1, replayed: 1, busy: 1, dropped: 2, tx_failed: 1 });
+        let c = RpcCounters::new()
+            .executed()
+            .replayed()
+            .busy()
+            .dropped(2)
+            .tx_failed();
+        assert_eq!(
+            c,
+            RpcCounters {
+                executed: 1,
+                replayed: 1,
+                busy: 1,
+                dropped: 2,
+                tx_failed: 1
+            }
+        );
         assert!(c.report(&RpcCounters::new(), REPORT_INTERVAL_MS));
-        assert!(!c.report(&RpcCounters::new(), REPORT_INTERVAL_MS - 1), "rate limited");
+        assert!(
+            !c.report(&RpcCounters::new(), REPORT_INTERVAL_MS - 1),
+            "rate limited"
+        );
         assert!(!c.report(&c, u32::MAX), "nothing new");
-        let full = RpcCounters { executed: u32::MAX, replayed: u32::MAX, busy: u32::MAX, dropped: u32::MAX, tx_failed: u32::MAX };
-        assert_eq!(full.executed().replayed().busy().dropped(3).tx_failed(), full);
-        const { assert!(RPC_BODY >= middleware::loader::MAX_INFO_LEN, "sys/info (with the 0.5 node id) fits the cache") };
+        let full = RpcCounters {
+            executed: u32::MAX,
+            replayed: u32::MAX,
+            busy: u32::MAX,
+            dropped: u32::MAX,
+            tx_failed: u32::MAX,
+        };
+        assert_eq!(
+            full.executed().replayed().busy().dropped(3).tx_failed(),
+            full
+        );
+        const {
+            assert!(
+                RPC_BODY >= middleware::loader::MAX_INFO_LEN,
+                "sys/info (with the 0.5 node id) fits the cache"
+            )
+        };
     }
 
     /// The combined air policy (E18 with O6/O16): a payload's publishes and
@@ -375,24 +461,41 @@ mod tests {
             keys::START,
             keys::STOP,
         ];
-        for key in ota.iter().chain(&[Key::new("disc/cam/jpeg").expect("valid")]) {
+        for key in ota
+            .iter()
+            .chain(&[Key::new("disc/cam/jpeg").expect("valid")])
+        {
             assert!(!goes_over_air(*key) && !carries_routes(*key), "{key:?}");
         }
         for key in ota {
-            assert!(!FILTERS.iter().any(|f| f.matches(key)), "{key:?} is never received as a sample");
+            assert!(
+                !FILTERS.iter().any(|f| f.matches(key)),
+                "{key:?} is never received as a sample"
+            );
         }
         // An `app/...` publish carrying a whole request frame (a would-be
         // `sys/payload/stop` with a 72-byte body) is still a sample: its
         // frame starts with `MW`, so the request tap never sees it.
         let mut req = [0u8; MAX_FRAME];
-        let msg = Message::Request { id: 1, to: [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24], key: keys::STOP, body: &[0; 72] };
+        let msg = Message::Request {
+            id: 1,
+            to: [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24],
+            key: keys::STOP,
+            body: &[0; 72],
+        };
         let n = msg.encode(&mut req).expect("fits");
         let inner = req.get(..n).expect("encoded");
         assert!(is_rpc(inner));
         let key = Key::new("app/x").expect("valid");
         assert!(goes_over_air(key));
         let mut frame = [0u8; MAX_FRAME];
-        let m = Frame { seq: 0, key, payload: inner }.encode(&mut frame).expect("fits");
+        let m = Frame {
+            seq: 0,
+            key,
+            payload: inner,
+        }
+        .encode(&mut frame)
+        .expect("fits");
         let sent = frame.get(..m).expect("encoded");
         assert!(!is_rpc(sent) && Message::decode(sent).is_err());
         assert_eq!(Frame::decode(sent).map(|f| f.payload), Ok(inner));
@@ -402,12 +505,21 @@ mod tests {
     fn e18_beacons_are_received_but_payloads_cannot_send_them() {
         let k = |s| Key::new(s).expect("valid");
         assert_eq!(FILTERS, [APP_FILTER, DISC_FILTER]);
-        assert!(FILTERS.iter().any(|f| f.matches(k("disc/cam/jpeg"))), "received");
-        assert!(!goes_over_air(k("disc/cam/jpeg")), "a payload cannot forge a beacon");
+        assert!(
+            FILTERS.iter().any(|f| f.matches(k("disc/cam/jpeg"))),
+            "received"
+        );
+        assert!(
+            !goes_over_air(k("disc/cam/jpeg")),
+            "a payload cannot forge a beacon"
+        );
         assert!(!goes_over_air(k("disc")) && !carries_routes(k("disc/cam/jpeg")));
         assert!(is_beacon(k("disc/cam/jpeg")) && is_beacon(k("disc")));
         assert!(!is_beacon(k("discover/x")) && !is_beacon(k("app/disc")));
-        assert!(!FILTERS.iter().any(|f| f.matches(k("discover/x"))), "segment-wise prefix");
+        assert!(
+            !FILTERS.iter().any(|f| f.matches(k("discover/x"))),
+            "segment-wise prefix"
+        );
         assert!(
             !FILTERS.iter().any(|f| f.matches(k("sys/info"))),
             "sys/ never admitted"
@@ -416,10 +528,23 @@ mod tests {
 
     #[test]
     fn r11_r12_counters_saturate_and_report_on_new_losses() {
-        let c = Counters::new().received(true).received(false).bad().sent(true).sent(false).dropped(2);
+        let c = Counters::new()
+            .received(true)
+            .received(false)
+            .bad()
+            .sent(true)
+            .sent(false)
+            .dropped(2);
         assert_eq!(
             c,
-            Counters { rx: 1, rx_dropped: 1, rx_bad: 1, tx: 1, tx_dropped: 2, tx_failed: 1 }
+            Counters {
+                rx: 1,
+                rx_dropped: 1,
+                rx_bad: 1,
+                tx: 1,
+                tx_dropped: 2,
+                tx_failed: 1
+            }
         );
         assert_eq!(c.losses(), 5);
         assert!(c.report(0, REPORT_INTERVAL_MS));
@@ -433,7 +558,15 @@ mod tests {
             tx_dropped: u32::MAX,
             tx_failed: u32::MAX,
         };
-        assert_eq!(full.received(true).received(false).bad().sent(true).sent(false).dropped(9), full);
+        assert_eq!(
+            full.received(true)
+                .received(false)
+                .bad()
+                .sent(true)
+                .sent(false)
+                .dropped(9),
+            full
+        );
         assert_eq!(full.losses(), u32::MAX);
     }
 }

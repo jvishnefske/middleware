@@ -120,12 +120,15 @@ pub fn commands(tx: &[u8], rx_len: usize) -> impl Iterator<Item = Cmd> + '_ {
     let total = tx.len() + rx_len;
     let writes = tx.iter().map(|&byte| (false, byte));
     let reads = core::iter::repeat_n((true, 0u8), rx_len);
-    writes.chain(reads).enumerate().map(move |(i, (read, byte))| Cmd {
-        read,
-        byte,
-        restart: read && i == tx.len() && !tx.is_empty(),
-        stop: i + 1 == total,
-    })
+    writes
+        .chain(reads)
+        .enumerate()
+        .map(move |(i, (read, byte))| Cmd {
+            read,
+            byte,
+            restart: read && i == tx.len() && !tx.is_empty(),
+            stop: i + 1 == total,
+        })
 }
 
 /// The time bound of a transfer, in µs: twice its bus time at `freq_hz`
@@ -194,7 +197,10 @@ mod tests {
                 let period = u32::from(t.hcnt) + u32::from(t.lcnt);
                 let actual = clk / period;
                 // Within 1 % of the request.
-                assert!(actual.abs_diff(freq) * 100 <= freq, "{clk} {freq}: {actual}");
+                assert!(
+                    actual.abs_diff(freq) * 100 <= freq,
+                    "{clk} {freq}: {actual}"
+                );
                 assert!(t.lcnt > t.hcnt, "low longer than high");
                 assert!(t.spklen >= 1 && u32::from(t.sda_hold) + 2 <= u32::from(t.lcnt));
             }
@@ -202,47 +208,98 @@ mod tests {
         // 100 kHz at 125 MHz: the Pico SDK's numbers.
         assert_eq!(
             Timing::new(125_000_000, 100_000),
-            Ok(Timing { hcnt: 500, lcnt: 750, spklen: 46, sda_hold: 38 })
+            Ok(Timing {
+                hcnt: 500,
+                lcnt: 750,
+                spklen: 46,
+                sda_hold: 38
+            })
         );
         // 10 kHz at 150 MHz: the spike filter register saturates.
         assert_eq!(Timing::new(150_000_000, 10_000).map(|t| t.spklen), Ok(255));
         // Fast-mode Plus uses the shorter hold.
-        assert_eq!(Timing::new(150_000_000, 1_000_000).map(|t| t.sda_hold), Ok(19));
+        assert_eq!(
+            Timing::new(150_000_000, 1_000_000).map(|t| t.sda_hold),
+            Ok(19)
+        );
     }
 
     #[test]
     fn v16_clocks_outside_the_abi_or_the_divider_are_refused() {
-        assert_eq!(Timing::new(125_000_000, 9_999), Err(AbiError::InvalidArgument));
-        assert_eq!(Timing::new(125_000_000, 1_000_001), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            Timing::new(125_000_000, 9_999),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(
+            Timing::new(125_000_000, 1_000_001),
+            Err(AbiError::InvalidArgument)
+        );
         assert_eq!(Timing::new(0, 100_000), Err(AbiError::InvalidArgument));
         // A slow peripheral clock cannot make Fast-mode Plus or a long low count.
-        assert_eq!(Timing::new(12_000_000, 1_000_000), Err(AbiError::Unsupported));
+        assert_eq!(
+            Timing::new(12_000_000, 1_000_000),
+            Err(AbiError::Unsupported)
+        );
         assert_eq!(Timing::new(4_000_000, 400_000), Err(AbiError::Unsupported));
         // A fast one overflows the 16-bit counts at 10 kHz.
-        assert_eq!(Timing::new(2_000_000_000, 10_000), Err(AbiError::Unsupported));
+        assert_eq!(
+            Timing::new(2_000_000_000, 10_000),
+            Err(AbiError::Unsupported)
+        );
     }
 
     #[test]
     fn v16_transfers_are_writes_then_reads_after_a_repeated_start() {
-        let w = |byte, restart, stop| Cmd { read: false, byte, restart, stop };
-        let r = |restart, stop| Cmd { read: true, byte: 0, restart, stop };
+        let w = |byte, restart, stop| Cmd {
+            read: false,
+            byte,
+            restart,
+            stop,
+        };
+        let r = |restart, stop| Cmd {
+            read: true,
+            byte: 0,
+            restart,
+            stop,
+        };
         let write_read: heapless::Vec<Cmd, 8> = commands(&[0x0A, 0x0B], 2).collect();
         assert_eq!(
             write_read.as_slice(),
-            &[w(0x0A, false, false), w(0x0B, false, false), r(true, false), r(false, true)]
+            &[
+                w(0x0A, false, false),
+                w(0x0B, false, false),
+                r(true, false),
+                r(false, true)
+            ]
         );
         let write: heapless::Vec<Cmd, 4> = commands(&[1, 2, 3], 0).collect();
-        assert_eq!(write.as_slice(), &[w(1, false, false), w(2, false, false), w(3, false, true)]);
+        assert_eq!(
+            write.as_slice(),
+            &[w(1, false, false), w(2, false, false), w(3, false, true)]
+        );
         let read: heapless::Vec<Cmd, 4> = commands(&[], 3).collect();
-        assert_eq!(read.as_slice(), &[r(false, false), r(false, false), r(false, true)]);
+        assert_eq!(
+            read.as_slice(),
+            &[r(false, false), r(false, false), r(false, true)]
+        );
         let one: heapless::Vec<Cmd, 2> = commands(&[], 1).collect();
         assert_eq!(one.as_slice(), &[r(false, true)]);
         assert_eq!(commands(&[0; MAX_I2C], MAX_I2C).count(), 2 * MAX_I2C);
-        assert_eq!(commands(&[0; MAX_I2C], MAX_I2C).filter(|c| c.stop).count(), 1);
-        assert_eq!(check_lengths(0, 0), Err(AbiError::Unsupported), "no address-only probe");
+        assert_eq!(
+            commands(&[0; MAX_I2C], MAX_I2C).filter(|c| c.stop).count(),
+            1
+        );
+        assert_eq!(
+            check_lengths(0, 0),
+            Err(AbiError::Unsupported),
+            "no address-only probe"
+        );
         assert_eq!(check_lengths(1, 0), Ok(()));
         assert_eq!(check_lengths(0, MAX_I2C), Ok(()));
-        assert_eq!(check_lengths(MAX_I2C + 1, 0), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            check_lengths(MAX_I2C + 1, 0),
+            Err(AbiError::InvalidArgument)
+        );
     }
 
     #[test]
@@ -254,7 +311,10 @@ mod tests {
         let worst = timeout_us(10_000, MAX_I2C, MAX_I2C);
         assert!(worst < 250_000, "{worst}");
         assert!(timeout_us(1_000_000, 1, 0) >= MARGIN_US);
-        assert!(timeout_us(0, 1, 1) > 0, "a zero clock is clamped, not a division by zero");
+        assert!(
+            timeout_us(0, 1, 1) > 0,
+            "a zero clock is clamped, not a division by zero"
+        );
         // More bytes or a slower clock never shorten the bound.
         assert!(timeout_us(100_000, 2, 0) > timeout_us(100_000, 1, 0));
         assert!(timeout_us(50_000, 1, 0) > timeout_us(100_000, 1, 0));
@@ -265,9 +325,18 @@ mod tests {
         assert_eq!(Fault::from_abort_source(0), None);
         assert_eq!(Fault::from_abort_source(1), Some(Fault::AddressNack));
         assert_eq!(Fault::from_abort_source(1 << 3), Some(Fault::DataNack));
-        assert_eq!(Fault::from_abort_source(1 << 12), Some(Fault::ArbitrationLost));
+        assert_eq!(
+            Fault::from_abort_source(1 << 12),
+            Some(Fault::ArbitrationLost)
+        );
         assert_eq!(Fault::from_abort_source(1 << 16), Some(Fault::Abort));
-        for f in [Fault::AddressNack, Fault::DataNack, Fault::ArbitrationLost, Fault::Abort, Fault::Timeout] {
+        for f in [
+            Fault::AddressNack,
+            Fault::DataNack,
+            Fault::ArbitrationLost,
+            Fault::Abort,
+            Fault::Timeout,
+        ] {
             assert_eq!(f.abi(), AbiError::Transport);
         }
     }

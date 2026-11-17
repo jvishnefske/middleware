@@ -1,7 +1,7 @@
 //! I2C for payloads on the ESP32 and ESP32-S3 (ABI 3 `i2c_open` /
 //! `i2c_transfer`): controller I2C0 as bus 0.
 //!
-//! The board pin map (`esp_base::chip`) wires bus 0 to SDA GPIO26 / SCL
+//! The board pin map (`crate::chip`) wires bus 0 to SDA GPIO26 / SCL
 //! GPIO27 on the ESP32 (the ESP32-CAM's camera sensor SCCB) and to SDA
 //! GPIO5 / SCL GPIO6 on the ESP32-S3. Both chips have the same
 //! `I2CEXT0_SDA` / `I2CEXT0_SCL` matrix signals, so this module is the same
@@ -9,7 +9,7 @@
 //! mode; `i2c_open` applies the clock and the per-byte timeout, and the
 //! device routes the signals to the mapped pins through the pin bank (open
 //! drain, pull-up). Buses other than 0 and clocks above 400 kHz are
-//! `Unsupported` (`esp_base::periph::i2c::open_plan`; esp-hal itself
+//! `Unsupported` (`crate::periph::i2c::open_plan`; esp-hal itself
 //! refuses more than 400 kHz on the ESP32, and the ESP32-S3 keeps the same
 //! cap).
 //!
@@ -24,7 +24,7 @@
 //! must not hang it. esp-hal's defaults do not bound that on the ESP32-S3
 //! (hardware bus timeout disabled, state-machine timeouts at 2^23 bus
 //! cycles), so `open` sets esp-hal's software timeout to
-//! `SoftwareTimeout::PerByte(esp_base::periph::i2c::byte_timeout_us(freq))`
+//! `SoftwareTimeout::PerByte(crate::periph::i2c::byte_timeout_us(freq))`
 //! on both chips: two byte times plus 100 µs per byte, applied per FIFO
 //! chunk. A transfer then returns within `(tx + rx + 6)` byte budgets (about
 //! 37 ms at 100 kHz, 19 ms at 400 kHz, 255 ms at 10 kHz for 64 bytes each
@@ -32,9 +32,9 @@
 //! stop) after a timeout. On the ESP32 the hardware SCL timeout (esp-hal's
 //! default maximum, about 13 ms of an unchanging SCL) also stays armed.
 
+use crate::periph::i2c::open_plan;
 use esp_hal::Blocking;
 use esp_hal::gpio::{InputSignal, OutputSignal};
-use esp_base::periph::i2c::open_plan;
 use esp_hal::i2c::master::{Config, I2c, SoftwareTimeout};
 use esp_hal::time::{Duration, Rate};
 use wasm_host::{AbiError, I2cConfig};
@@ -63,8 +63,12 @@ impl Bus0 {
         let byte_us = open_plan(cfg.bus, cfg.freq_hz)?;
         let config = Config::default()
             .with_frequency(Rate::from_hz(cfg.freq_hz))
-            .with_software_timeout(SoftwareTimeout::PerByte(Duration::from_micros(u64::from(byte_us))));
-        self.i2c.apply_config(&config).map_err(|_| AbiError::Unsupported)?;
+            .with_software_timeout(SoftwareTimeout::PerByte(Duration::from_micros(u64::from(
+                byte_us,
+            ))));
+        self.i2c
+            .apply_config(&config)
+            .map_err(|_| AbiError::Unsupported)?;
         self.open = true;
         Ok(())
     }

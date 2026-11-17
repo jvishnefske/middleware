@@ -157,11 +157,7 @@ struct Run {
 /// sink routes drawing) is kept out of [`Run::peak`]: the peak is reset
 /// before each call into the payload and read after it, with the
 /// previous step's outbox and event lines already dropped.
-fn run(
-    p: &mut Payload<SimDevice>,
-    feed: &[(String, Vec<u8>)],
-    keep: impl Fn(&str) -> bool,
-) -> Run {
+fn run(p: &mut Payload<SimDevice>, feed: &[(String, Vec<u8>)], keep: impl Fn(&str) -> bool) -> Run {
     let mut out = Run::default();
     let mut ticks = 0;
     let call = |out: &mut Run| {

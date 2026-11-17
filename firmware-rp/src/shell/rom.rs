@@ -33,7 +33,9 @@ impl RpRom {
     /// Takes the watchdog (not started, not fed: the boot ROM's trial
     /// watchdog keeps running until the buy).
     pub fn new(watchdog: Peri<'static, WATCHDOG>) -> Self {
-        RpRom { watchdog: Watchdog::new(watchdog) }
+        RpRom {
+            watchdog: Watchdog::new(watchdog),
+        }
     }
 }
 
@@ -42,7 +44,10 @@ impl Rom for RpRom {
 
     fn xip_map(&mut self) -> XipMap {
         let a = pac::QMI.atrans(0).read();
-        XipMap { base: u32::from(a.base()) * ATRANS_UNIT, size: u32::from(a.size()) * ATRANS_UNIT }
+        XipMap {
+            base: u32::from(a.base()) * ATRANS_UNIT,
+            size: u32::from(a.size()) * ATRANS_UNIT,
+        }
     }
 
     fn reboot(&mut self, reboot: Reboot, delay_ms: u32) -> Result<(), i32> {

@@ -23,6 +23,13 @@
 //! runs; [`SimDevice::sensor_summary`] reports what it wrote. There is no
 //! image sensor model: the camera source route is `Unsupported`.
 //!
+//! The sampled sources (SC6): `route_source` with `SourceKind::Imu` or
+//! `SourceKind::Microphone` runs the deterministic fake IMU (a tilt about
+//! X) or fake microphone (a tone and a chirp) of
+//! `middleware::stream::samples::fake`, one sample batch per message;
+//! the fake IMU owns [`FAKE_IMU_ADDR`] and the microphone
+//! [`FAKE_CODEC_ADDR`] on I2C bus 0 while they stream.
+//!
 //! The ABI 4 DMA routes (requirement R10) run in [`route`]: a test-pattern
 //! source route publishes each due frame as chunks (one printed summary
 //! line per frame), and a sink route consumes the messages on its key,
@@ -45,8 +52,26 @@
 //! (`Payload::request`, a [`REQ_REPLY_CAP`]-byte reply buffer and a
 //! [`REQ_DEADLINE_MS`] deadline); [`render_reply`] prints the outcome as
 //! `reply <key> <hex>` or `reply <key> error <HandlerError>`.
+//!
+//! ABI 6: the board is a fake two-port device (links 0 and 1, like the
+//! Colorlight 5A-75B) with a real [`BridgeTable`]. `route_bridge` prints
+//! `bridge<handle> link<src> <key> -> link<dst>`; stdin message lines
+//! arrive on link 0, and `!link <n> <key> [<text>]` ([`Command::Link`])
+//! delivers one on link `n`. Each arrival is matched against the rules
+//! first ([`SimDevice::link_receive`], printing `link<dst> tx <key>
+//! <payload>` per forwarded copy), then offered to the payload as usual.
+//! ABI 7: LED strips (requirement LS6) are synchronous and raise no
+//! events: [`ledstrip::LedStrips`] records each strip's LEDs, every write
+//! prints the colours it set, and [`SimDevice::ledstrip_summary`] reports
+//! each open strip's LEDs at the end of a run. A strip's data pin passes
+//! the `gpio_output` checks (a pin past [`PINS`] is `Unsupported`, a sink
+//! route's D/C pin `InvalidArgument`); while the strip is open the pin is
+//! no plain GPIO, so every `gpio_*` call on it and a sink route naming it
+//! as D/C pin are `InvalidArgument`, as on the firmware. Closing the strip
+//! returns the pin to idle.
 
 pub mod bus;
+pub mod ledstrip;
 pub mod panel;
 pub mod periph;
 pub mod route;
@@ -54,16 +79,19 @@ pub mod route;
 use std::fmt::Write as _;
 
 use middleware::stream::{Action, FrameSource, Sink};
+use middleware::wasm_abi::bridge::{self, Bridge, BridgeTable};
 use middleware::wasm_abi::events::{EventQueue, MAX_EVENTS};
 use middleware::{HandlerError, Key, SenderId};
 use wasm_host::{
-    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, Limits, Pull, PwmSpec,
-    RouteStat, SinkConfig, Source, SourceConfig, SpiConfig, TimerSpec, UartConfig,
+    AbiError, Device, DmaChannel, Edge, Event, EventKind, I2cConfig, I2cDevice, LedStripSpec,
+    Limits, Pull, PwmSpec, RouteStat, SampleSource, SinkConfig, Source, SourceConfig, SpiConfig,
+    TimerSpec, UartConfig,
 };
 
+use ledstrip::{LedStrips, render_rgb};
 use panel::Panel;
 use periph::{Adc, I2c, Pwm, Spi, Timers, Uart};
-use route::{Route, Routes, SinkRoute, SourceRoute};
+use route::{Route, Routes, SampleRoute, SinkRoute, SourceRoute};
 
 /// Parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +136,13 @@ pub const REQ_REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
 /// Deadline `!req` requests carry, in milliseconds.
 pub const REQ_DEADLINE_MS: u32 = 1000;
 
+/// I2C address (bus 0) of the fake IMU, the FXOS8700CQ's: a route from it
+/// makes a payload's transfer there `Busy` (SC3).
+pub const FAKE_IMU_ADDR: u8 = 0x1f;
+
+/// I2C address (bus 0) of the fake microphone's codec, the WM8960's.
+pub const FAKE_CODEC_ADDR: u8 = 0x1a;
+
 /// The peer board's node: `node` with its last byte plus one (wrapping).
 pub fn peer_node(node: SenderId) -> SenderId {
     let mut id = node.0;
@@ -139,7 +174,11 @@ stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input,\n\
 `!i2c <bus> <reg> <value>` presets a register of the I2C device at 0x50 (hex 0x.. or decimal),\n\
-`!req <key> [<hex>]` sends a request to the payload serving <key>";
+`!req <key> [<hex>]` sends a request to the payload serving <key>,\n\
+`!link <0|1> <key> [<text>]` is a publication arriving on that link (stdin lines arrive on link 0);\n\
+bridge rules (ABI 6 route_bridge) forward matching arrivals to the other link;\n\
+--memory-bytes 16384 is the Colorlight 5A-75B (ecp5) profile: its gateware core has 16 KiB of\n\
+linear memory, so declare 1-byte pages, e.g. (memory (export \"memory\") 4096 4096 (pagesize 1))";
 
 /// Parses the arguments after the program name.
 pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
@@ -271,6 +310,16 @@ pub enum Command {
         /// The request body (empty when no hex is given).
         body: Vec<u8>,
     },
+    /// `!link <n> <key> [<text>]`: a publication arriving on link `n` (ABI
+    /// 6), matched against the bridge rules, then offered to the payload.
+    Link {
+        /// The link it arrived on (0 or 1).
+        link: u8,
+        /// The key.
+        key: String,
+        /// The payload (the text after the key, may be empty).
+        data: Vec<u8>,
+    },
 }
 
 /// Parses a command line; `Ok(None)` when the line is not a command.
@@ -339,6 +388,22 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, String> {
             Ok(Some(Command::Req {
                 key: key.to_string(),
                 body,
+            }))
+        }
+        "link" => {
+            let usage = "!link needs <0|1> <key> [<text>]";
+            let (n, rest) = args.split_once(' ').ok_or(usage)?;
+            let link = match n {
+                "0" => 0,
+                "1" => 1,
+                _ => return Err(usage.to_string()),
+            };
+            let (key, data) = rest.split_once(' ').unwrap_or((rest, ""));
+            Key::new(key).map_err(|e| format!("bad key {key:?}: {e:?}"))?;
+            Ok(Some(Command::Link {
+                link,
+                key: key.to_string(),
+                data: data.as_bytes().to_vec(),
             }))
         }
         "uart" if !args.is_empty() => Ok(Some(Command::Uart(args.as_bytes().to_vec()))),
@@ -437,6 +502,9 @@ pub struct SimDevice {
     i2c: I2c,
     /// What `node_id` returns.
     node: SenderId,
+    /// ABI 6 forwarding rules between links 0 and 1.
+    bridges: BridgeTable,
+    strips: LedStrips,
 }
 
 impl Default for SimDevice {
@@ -468,6 +536,8 @@ impl SimDevice {
             adc: Adc::default(),
             i2c: I2c::default(),
             node: DEFAULT_NODE,
+            bridges: BridgeTable::new(),
+            strips: LedStrips::default(),
         }
     }
 
@@ -534,6 +604,26 @@ impl SimDevice {
                 self.route_event(EventKind::RouteDropped, frame.handle, n);
             }
         }
+        for batch in self.routes.due_batches(self.now_us) {
+            let skipped = if batch.skipped > 0 {
+                format!(", {} skipped", batch.skipped)
+            } else {
+                String::new()
+            };
+            self.event(format!(
+                "route{} batch {} -> {} ({} B{skipped})",
+                batch.handle,
+                batch.number,
+                batch.key,
+                batch.data.len()
+            ));
+            self.outbox.push((batch.key, batch.data));
+            self.route_event(EventKind::RouteFrames, batch.handle, 1);
+            if batch.skipped > 0 {
+                let n = i32::try_from(batch.skipped).unwrap_or(i32::MAX);
+                self.route_event(EventKind::RouteDropped, batch.handle, n);
+            }
+        }
     }
 
     /// When the next timer is due, in microseconds.
@@ -582,6 +672,21 @@ impl SimDevice {
         ]
     }
 
+    /// One line per open LED strip with the colour each LED last received:
+    /// `ledstrip<h> pin <p>: #rrggbb ...`, nearest the pin first.
+    pub fn ledstrip_summary(&self) -> Vec<String> {
+        self.strips
+            .iter()
+            .map(|(h, spec, grb)| format!("ledstrip{h} pin {}: {}", spec.pin, render_rgb(grb)))
+            .collect()
+    }
+
+    /// The G, R, B bytes every LED of strip `handle` last received.
+    #[cfg(test)]
+    pub fn ledstrip_colours(&self, handle: u8) -> Option<&[u8]> {
+        self.strips.colours(handle)
+    }
+
     /// One line per running route with its counters.
     pub fn route_summary(&self) -> Vec<String> {
         self.routes
@@ -589,6 +694,7 @@ impl SimDevice {
             .map(|(h, r)| {
                 let (kind, key) = match r {
                     Route::Source(s) => ("source", &s.key),
+                    Route::Samples(s) => ("samples", &s.key),
                     Route::Sink(s) => ("sink", &s.key),
                 };
                 let s = self.routes.stats(h).unwrap_or_default();
@@ -632,6 +738,21 @@ impl SimDevice {
             self.route_event(EventKind::RouteFrames, handle, 1);
         }
         true
+    }
+
+    /// A publication arriving on `link` (ABI 6): forwards it on every
+    /// destination link a bridge rule names, printing `link<n> tx <key>
+    /// <payload>` for each, and counts it on the matching rules. Returns
+    /// the destination link mask.
+    pub fn link_receive(&mut self, link: u8, key: Key<'_>, data: &[u8]) -> u8 {
+        let f = self.bridges.route(link, key);
+        for dst in 0..8u8 {
+            if f.links & (1 << dst) != 0 {
+                self.event(format!("link{dst} tx {key} {}", render(data)));
+            }
+        }
+        self.bridges.account(f, f.links);
+        f.links
     }
 
     fn route_event(&mut self, kind: EventKind, handle: u8, value: i32) {
@@ -704,6 +825,7 @@ impl SimDevice {
                 Ok(())
             }
             Command::Req { key, .. } => Err(format!("!req {key}: requests go to the payload")),
+            Command::Link { key, .. } => Err(format!("!link {key}: arrivals go through the shell")),
             Command::I2c { bus, reg, value } => {
                 self.i2c.preset(bus, reg, value)?;
                 self.event(format!(
@@ -755,10 +877,20 @@ impl SimDevice {
         });
     }
 
-    /// `Busy` if a sink route owns `pin` as its D/C pin.
+    /// `Busy` if a sink route owns `pin` as its D/C pin,
+    /// `InvalidArgument` if an LED strip drives it.
     fn pin_free(&self, pin: u8) -> Result<(), AbiError> {
         if self.routes.owns_pin(pin) {
             Err(AbiError::Busy)
+        } else {
+            self.strip_free(pin)
+        }
+    }
+
+    /// `InvalidArgument` if an open LED strip drives `pin`.
+    fn strip_free(&self, pin: u8) -> Result<(), AbiError> {
+        if self.strips.owns_pin(pin) {
+            Err(AbiError::InvalidArgument)
         } else {
             Ok(())
         }
@@ -816,6 +948,7 @@ impl Device for SimDevice {
     /// Outputs read back their level; inputs read the level set by `!gpio`,
     /// or their pull (up = high) until one is set.
     fn gpio_read(&mut self, pin: u8) -> Result<bool, AbiError> {
+        self.strip_free(pin)?;
         match *self.pin(pin)? {
             Mode::Output(level) => Ok(level),
             Mode::Input(_) => self.input_level(pin).ok_or(AbiError::InvalidArgument),
@@ -833,6 +966,7 @@ impl Device for SimDevice {
 
     /// Only input pins take interrupts; [`Edge::Off`] purges pending edges.
     fn gpio_irq(&mut self, pin: u8, edge: Edge) -> Result<(), AbiError> {
+        self.strip_free(pin)?;
         if !matches!(*self.pin(pin)?, Mode::Input(_)) {
             return Err(AbiError::InvalidArgument);
         }
@@ -993,9 +1127,48 @@ impl Device for SimDevice {
         self.event(format!(
             "route{handle} source {:?} {}x{} {:?} every {} ms on {key} ({} B chunks)",
             source.kind(),
-            cfg.width, cfg.height, cfg.format, cfg.period_ms, cfg.chunk_data
+            cfg.width,
+            cfg.height,
+            cfg.format,
+            cfg.period_ms,
+            cfg.chunk_data
         ));
         Ok(handle)
+    }
+
+    /// The fake IMU and microphone (SC6) of
+    /// [`middleware::stream::samples::fake`], every config the ABI allows;
+    /// the first batch is due when its last unit has been taken.
+    fn route_samples(&mut self, source: SampleSource, key: Key<'_>) -> Result<u8, AbiError> {
+        let handle = self.routes.add(Route::Samples(SampleRoute {
+            key: key.as_str().to_string(),
+            fake: middleware::stream::samples::fake::FakeRoute::new(source, self.now_us),
+            stats: Default::default(),
+        }))?;
+        self.event(format!(
+            "route{handle} source {:?} {} per batch every {} us on {key}",
+            source.kind(),
+            source.samples(),
+            source.period_us()
+        ));
+        Ok(handle)
+    }
+
+    /// The fake IMU sits at the FXOS8700CQ's address and the fake
+    /// microphone's codec at the WM8960's, both on bus 0, as on the
+    /// RT1050-EVKB: a payload's transfer to them is `Busy` while their
+    /// route runs.
+    fn sample_device(&self, source: &SampleSource) -> Option<I2cDevice> {
+        Some(match source {
+            SampleSource::Imu(_) => I2cDevice {
+                bus: 0,
+                addr: FAKE_IMU_ADDR,
+            },
+            SampleSource::Microphone(_) => I2cDevice {
+                bus: 0,
+                addr: FAKE_CODEC_ADDR,
+            },
+        })
     }
 
     /// `Busy` unless `bus` is open and no other sink owns it; `Unsupported`
@@ -1024,6 +1197,11 @@ impl Device for SimDevice {
     }
 
     fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
+        if bridge::handle_index(handle).is_some() {
+            self.bridges.remove(handle)?;
+            self.event(format!("bridge{handle} stop"));
+            return Ok(());
+        }
         self.routes.stop(handle)?;
         for kind in [
             EventKind::RouteFrames,
@@ -1037,7 +1215,30 @@ impl Device for SimDevice {
     }
 
     fn route_stat(&mut self, handle: u8, stat: RouteStat) -> Result<u32, AbiError> {
+        if bridge::handle_index(handle).is_some() {
+            let s = self.bridges.get(handle).ok_or(AbiError::Busy)?.stats;
+            return Ok(match stat {
+                RouteStat::Frames | RouteStat::Chunks => s.forwarded,
+                RouteStat::FramesDropped | RouteStat::ChunksDropped => s.dropped,
+            });
+        }
         Ok(stat.of(&self.routes.stats(handle)?))
+    }
+
+    fn route_bridge(&mut self, b: &Bridge<'_>) -> Result<u8, AbiError> {
+        if b.src > 1 || b.dst > 1 {
+            return Err(AbiError::Unsupported);
+        }
+        let handle = self.bridges.add(b)?;
+        let key = match b.filter {
+            middleware::Filter::Exact(k) => k.as_str().to_string(),
+            middleware::Filter::Prefix(k) => format!("{k}/**"),
+        };
+        self.event(format!(
+            "bridge{handle} link{} {key} -> link{}",
+            b.src, b.dst
+        ));
+        Ok(handle)
     }
 
     fn serve(&mut self, key: Key<'_>) -> Result<(), AbiError> {
@@ -1048,12 +1249,142 @@ impl Device for SimDevice {
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Ok(self.node)
     }
+
+    /// The pin is checked like [`Device::gpio_output`], except that a sink
+    /// route's D/C pin is `InvalidArgument`; reopening a strip's own pin
+    /// resizes it. The pin stops being plain GPIO (its mode becomes unused
+    /// and its interrupt off). Prints
+    /// `ledstrip<h> open pin <p> <n> leds`.
+    fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {
+        self.pin(spec.pin)?;
+        if self.routes.owns_pin(spec.pin) {
+            return Err(AbiError::InvalidArgument);
+        }
+        let handle = self.strips.open(spec)?;
+        *self.pin(spec.pin)? = Mode::Unused;
+        self.set_edge(spec.pin, Edge::Off);
+        self.event(format!(
+            "ledstrip{handle} open pin {} {} leds",
+            spec.pin,
+            spec.count.get()
+        ));
+        Ok(handle)
+    }
+
+    /// Records the frame and prints `ledstrip<h> <#rrggbb> ...`, one colour
+    /// per LED written (RGB order, converted from the G, R, B wire bytes).
+    fn ledstrip_write(&mut self, handle: u8, grb: &[u8]) -> Result<(), AbiError> {
+        self.strips.write(handle, grb)?;
+        self.event(format!("ledstrip{handle} {}", render_rgb(grb)));
+        Ok(())
+    }
+
+    /// Frees the handle and returns the pin to idle; prints
+    /// `ledstrip<h> close`.
+    fn ledstrip_close(&mut self, handle: u8) -> Result<(), AbiError> {
+        let pin = self.strips.close(handle)?;
+        *self.pin(pin)? = Mode::Unused;
+        self.event(format!("ledstrip{handle} close"));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use wasm_host::CameraPins;
+
+    /// The SC6 fixture shared with the browser simulator's tests.
+    const SENSOR_STREAM: &str = include_str!("../../../web/test/fixtures/sensor_stream.wat");
+
+    fn i32_at(data: &[u8]) -> Vec<i32> {
+        data.chunks_exact(4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+
+    #[test]
+    fn sc6_a_payload_streams_the_fake_imu_and_microphone() {
+        use middleware::stream::samples::{self, Gap, SensorKind, fake};
+        let wasm = wat::parse_str(SENSOR_STREAM).unwrap();
+        let mut p =
+            wasm_host::Payload::load(&wasm, SimDevice::new(None), Limits::default()).unwrap();
+        let mut published = p.device().take_outbox();
+        for ms in (10..=1000).step_by(10) {
+            p.device().advance_to(ms * 1000);
+            while let Some(e) = p.device().pop_event() {
+                p.dispatch(e).unwrap();
+            }
+            published.extend(p.device().take_outbox());
+        }
+        let on = |key: &str| -> Vec<Vec<u8>> {
+            published
+                .iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, d)| d.clone())
+                .collect()
+        };
+        assert_eq!(
+            on("app/started")
+                .iter()
+                .map(|d| i32_at(d))
+                .collect::<Vec<_>>(),
+            [vec![0, 1]]
+        );
+        // Both routes publish every 100 ms; the sixth RouteFrames (at 300
+        // ms, three per route) stops the IMU.
+        assert_eq!(
+            on("app/stopped")
+                .iter()
+                .map(|d| i32_at(d))
+                .collect::<Vec<_>>(),
+            [vec![0]]
+        );
+        let imu: Vec<_> = on("app/imu")
+            .iter()
+            .map(|d| samples::decode(d).unwrap().header)
+            .collect();
+        assert_eq!(imu.len(), 3, "stopped after three batches");
+        for (n, h) in imu.iter().enumerate() {
+            assert_eq!(
+                (h.kind, h.channels, h.count, h.rate_hz),
+                (SensorKind::Imu, 3, 5, 50)
+            );
+            assert_eq!(
+                (h.first_index, h.timestamp_us),
+                (5 * n as u64, 100_000 * n as u64)
+            );
+        }
+        assert_eq!(samples::gap(&imu[0], &imu[1]), Gap::None);
+        let first = on("app/imu")[0].clone();
+        let b = samples::decode(&first).unwrap();
+        assert!(
+            b.i16_values()
+                .take(3)
+                .eq(fake::imu_sample(0, 50, 2).into_iter().take(3))
+        );
+        let mic = on("app/mic");
+        assert_eq!(mic.len(), 10, "the microphone keeps streaming");
+        let last = samples::decode(mic.last().unwrap()).unwrap();
+        assert_eq!(
+            (last.header.kind, last.header.first_index),
+            (SensorKind::Microphone, 18)
+        );
+        assert!(
+            last.levels()
+                .all(|(rms, peak)| rms > 10_000 && peak > 16_000)
+        );
+        // The fake IMU sits where the EVKB's FXOS8700CQ does.
+        assert_eq!(
+            p.device().sample_device(&SampleSource::Imu(
+                wasm_host::ImuConfig::new(50, 2, false, 5).unwrap()
+            )),
+            Some(I2cDevice {
+                bus: 0,
+                addr: FAKE_IMU_ADDR
+            })
+        );
+    }
 
     #[test]
     fn abi5_req_commands_node_option_and_reply_lines() {
@@ -1412,6 +1743,75 @@ mod tests {
         assert_eq!(d.gpio_output(200), Err(AbiError::Unsupported));
         assert_eq!(d.events.len(), 3);
         assert!(d.events[1].ends_with("gpio 2 = high"));
+    }
+
+    fn strip(pin: u8, count: i32) -> LedStripSpec {
+        LedStripSpec::parse(i32::from(pin), count).unwrap()
+    }
+
+    #[test]
+    fn ledstrips_record_frames_and_hold_their_pin() {
+        let mut d = SimDevice::default();
+        d.gpio_input(5, Pull::Up).unwrap();
+        d.gpio_irq(5, Edge::Rising).unwrap();
+        assert_eq!(d.ledstrip_open(strip(5, 3)), Ok(0));
+        assert!(
+            d.events
+                .last()
+                .unwrap()
+                .ends_with("ledstrip0 open pin 5 3 leds")
+        );
+        d.ledstrip_write(0, &[0, 0xff, 0, 0xff, 0, 0]).unwrap();
+        assert!(
+            d.events
+                .last()
+                .unwrap()
+                .ends_with("ledstrip0 #ff0000 #00ff00")
+        );
+        assert_eq!(
+            d.ledstrip_colours(0),
+            Some(&[0, 0xff, 0, 0xff, 0, 0, 0, 0, 0][..])
+        );
+        assert_eq!(
+            d.ledstrip_write(0, &[0; 12]),
+            Err(AbiError::InvalidArgument),
+            "longer than the strip"
+        );
+        assert_eq!(d.ledstrip_write(1, &[0; 3]), Err(AbiError::Busy));
+        // The pin is the strip's, not GPIO, until closed.
+        assert_eq!(d.gpio_output(5), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_input(5, Pull::Up), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_write(5, true), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_read(5), Err(AbiError::InvalidArgument));
+        assert_eq!(d.gpio_irq(5, Edge::Rising), Err(AbiError::InvalidArgument));
+        assert_eq!(d.ledstrip_open(strip(5, 1)), Ok(0), "reopen resizes");
+        assert_eq!(d.ledstrip_open(strip(6, 1)), Ok(1));
+        assert_eq!(d.ledstrip_open(strip(7, 1)), Err(AbiError::NoResources));
+        assert_eq!(d.ledstrip_open(strip(200, 1)), Err(AbiError::Unsupported));
+        assert_eq!(
+            d.ledstrip_summary(),
+            ["ledstrip0 pin 5: #ff0000", "ledstrip1 pin 6: #000000"]
+        );
+        d.ledstrip_close(0).unwrap();
+        assert!(d.events.last().unwrap().ends_with("ledstrip0 close"));
+        assert_eq!(d.ledstrip_close(0), Err(AbiError::Busy));
+        assert_eq!(d.gpio_read(5), Err(AbiError::InvalidArgument), "idle");
+        d.gpio_output(5).unwrap();
+        assert_eq!(d.ledstrip_summary().len(), 1);
+    }
+
+    #[test]
+    fn ledstrips_and_sink_routes_do_not_share_pins() {
+        let mut d = SimDevice::default();
+        d.spi_open(spi_cfg()).unwrap();
+        let cfg = SinkConfig::new(9, 64).unwrap();
+        let key = Key::new("px").unwrap();
+        d.route_sink(key, 0, &cfg).unwrap();
+        assert_eq!(d.ledstrip_open(strip(9, 1)), Err(AbiError::InvalidArgument));
+        d.ledstrip_open(strip(10, 1)).unwrap();
+        let cfg = SinkConfig::new(10, 64).unwrap();
+        d.route_stop(0).unwrap();
+        assert_eq!(d.route_sink(key, 0, &cfg), Err(AbiError::InvalidArgument));
     }
 
     #[test]

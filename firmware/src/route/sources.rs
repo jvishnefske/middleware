@@ -103,7 +103,11 @@ impl Default for SourceTable {
 impl SourceTable {
     /// No routes.
     pub const fn new() -> Self {
-        SourceTable { slots: [None; MAX_ROUTES], epoch: 0, last: 0 }
+        SourceTable {
+            slots: [None; MAX_ROUTES],
+            epoch: 0,
+            last: 0,
+        }
     }
 
     /// The table with `route` running on `key` as handle `handle` (a
@@ -128,7 +132,10 @@ impl SourceTable {
 
     /// The table with no routes (payload stop); epochs keep counting.
     pub const fn clear(self) -> Self {
-        SourceTable { slots: [None; MAX_ROUTES], ..self }
+        SourceTable {
+            slots: [None; MAX_ROUTES],
+            ..self
+        }
     }
 
     /// Whether route `handle` runs.
@@ -138,7 +145,11 @@ impl SourceTable {
 
     /// The counters of route `handle`, if it runs.
     pub fn stats(&self, handle: u8) -> Option<RouteStats> {
-        self.slots.get(usize::from(handle)).copied().flatten().map(|s| s.route.stats())
+        self.slots
+            .get(usize::from(handle))
+            .copied()
+            .flatten()
+            .map(|s| s.route.stats())
     }
 
     /// The next chunk to send at `now_ms`, round robin over the routes.
@@ -146,12 +157,24 @@ impl SourceTable {
         let mut wait: Option<u32> = None;
         for i in 1..=MAX_ROUTES {
             let index = (usize::from(self.last) + i) % MAX_ROUTES;
-            let Some(Some(slot)) = self.slots.get(index) else { continue };
+            let Some(Some(slot)) = self.slots.get(index) else {
+                continue;
+            };
             match slot.route.next(now_ms) {
                 Next::Capture => {
                     let handle = index as u8; // index < MAX_ROUTES
-                    let capture = Capture { handle, epoch: slot.epoch, cfg: slot.route.config() };
-                    return (SourceTable { last: handle, ..self }, Due::Capture(capture));
+                    let capture = Capture {
+                        handle,
+                        epoch: slot.epoch,
+                        cfg: slot.route.config(),
+                    };
+                    return (
+                        SourceTable {
+                            last: handle,
+                            ..self
+                        },
+                        Due::Capture(capture),
+                    );
                 }
                 Next::Send(plan) => {
                     let handle = index as u8; // index < MAX_ROUTES
@@ -164,7 +187,13 @@ impl SourceTable {
                         feed: slot.route.feed(),
                         plan,
                     };
-                    return (SourceTable { last: handle, ..self }, Due::Send(job));
+                    return (
+                        SourceTable {
+                            last: handle,
+                            ..self
+                        },
+                        Due::Send(job),
+                    );
                 }
                 Next::Wait(ms) => wait = Some(wait.map_or(ms, |w| w.min(ms))),
             }
@@ -175,7 +204,12 @@ impl SourceTable {
     /// Folds the result of `capture` (a frame of that many bytes in the
     /// shell's frame buffer, or why there is none) into its route; nothing
     /// when the route stopped or restarted since.
-    pub fn captured(self, capture: Capture, result: Result<u32, CaptureFault>, now_ms: u32) -> (Self, Report) {
+    pub fn captured(
+        self,
+        capture: Capture,
+        result: Result<u32, CaptureFault>,
+        now_ms: u32,
+    ) -> (Self, Report) {
         let mut next = self;
         let Some(Some(slot)) = next.slots.get_mut(usize::from(capture.handle)) else {
             return (self, Report::NONE);
@@ -196,7 +230,11 @@ impl SourceTable {
     /// The key of the first running route that captures from the camera
     /// (what the camera beacon announces, `esp_base::radio::disc`).
     pub fn camera_key(&self) -> Option<&RouteKey> {
-        self.slots.iter().flatten().find(|s| matches!(s.route.feed(), Feed::Camera { .. })).map(|s| &s.key)
+        self.slots
+            .iter()
+            .flatten()
+            .find(|s| matches!(s.route.feed(), Feed::Camera { .. }))
+            .map(|s| &s.key)
     }
 
     /// Folds the broadcast of `job`'s chunk (`ok`, at `now_ms`) into its
@@ -209,8 +247,11 @@ impl SourceTable {
         if slot.epoch != epoch {
             return (self, Report::NONE);
         }
-        let (route, report) =
-            if ok { slot.route.published(now_ms) } else { slot.route.failed(now_ms) };
+        let (route, report) = if ok {
+            slot.route.published(now_ms)
+        } else {
+            slot.route.failed(now_ms)
+        };
         slot.route = route;
         (next, report)
     }
@@ -244,10 +285,19 @@ mod tests {
         assert_eq!(t.due(0).1, Due::Wait(50));
         let (t, d) = t.due(50);
         let j = job(d);
-        assert_eq!((j.handle, j.key.as_str(), j.frame, j.plan.range.clone()), (2, "app/a", 0, 0..8));
+        assert_eq!(
+            (j.handle, j.key.as_str(), j.frame, j.plan.range.clone()),
+            (2, "app/a", 0, 0..8)
+        );
         // A 2×2 frame is one chunk: finishing it completes the frame.
         let (t, rep) = t.finish(j.handle, j.epoch, true, 51);
-        assert_eq!(rep, Report { frames: 1, dropped: 0 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 1,
+                dropped: 0
+            }
+        );
         assert_eq!(t.stats(2).map(|s| s.frames), Some(1));
         assert_eq!(t.due(51).1, Due::Wait(99));
         assert!(t.running(2));
@@ -258,14 +308,30 @@ mod tests {
 
     #[test]
     fn r15_camera_routes_ask_for_a_capture_then_send_its_chunks() {
-        let cam = SourceRoute::camera(SourceConfig::jpeg(240, 240, 500).expect("valid"), 0).expect("valid");
+        let cam = SourceRoute::camera(SourceConfig::jpeg(240, 240, 500).expect("valid"), 0)
+            .expect("valid");
         let t = SourceTable::new().start(1, key("app/cam/jpeg"), cam);
         assert!(t.has_camera());
-        assert_eq!(t.camera_key().map(|k| middleware::AsKey::as_key(k).as_str()), Some("app/cam/jpeg"));
-        assert!(!SourceTable::new().start(0, key("app/a"), route(10, 0)).has_camera());
-        assert_eq!(SourceTable::new().start(0, key("app/a"), route(10, 0)).camera_key(), None);
+        assert_eq!(
+            t.camera_key()
+                .map(|k| middleware::AsKey::as_key(k).as_str()),
+            Some("app/cam/jpeg")
+        );
+        assert!(
+            !SourceTable::new()
+                .start(0, key("app/a"), route(10, 0))
+                .has_camera()
+        );
+        assert_eq!(
+            SourceTable::new()
+                .start(0, key("app/a"), route(10, 0))
+                .camera_key(),
+            None
+        );
         let (t, d) = t.due(0);
-        let Due::Capture(c) = d else { panic!("capture, got {d:?}") };
+        let Due::Capture(c) = d else {
+            panic!("capture, got {d:?}")
+        };
         assert_eq!((c.handle, c.cfg.width), (1, 240));
         // Until the result arrives the table asks again (the shell captures
         // one frame at a time).
@@ -278,15 +344,30 @@ mod tests {
         assert_eq!(j.plan.header.total, 200);
         // A stale capture result (route restarted) is ignored.
         let restarted = t.stop(1).start(1, key("app/cam/jpeg"), cam);
-        assert_eq!(restarted.captured(c, Err(CaptureFault::Timeout), 60), (restarted, Report::NONE));
+        assert_eq!(
+            restarted.captured(c, Err(CaptureFault::Timeout), 60),
+            (restarted, Report::NONE)
+        );
         // A failure drops the frame.
         let (_, rep) = t.stop(1).start(1, key("app/cam/jpeg"), cam).captured(
-            Capture { epoch: restarted.epoch, ..c },
+            Capture {
+                epoch: restarted.epoch,
+                ..c
+            },
             Err(CaptureFault::Overflow),
             60,
         );
-        assert_eq!(rep, Report { frames: 0, dropped: 1 });
-        assert_eq!(t.captured(Capture { handle: 9, ..c }, Ok(1), 0).1, Report::NONE);
+        assert_eq!(
+            rep,
+            Report {
+                frames: 0,
+                dropped: 1
+            }
+        );
+        assert_eq!(
+            t.captured(Capture { handle: 9, ..c }, Ok(1), 0).1,
+            Report::NONE
+        );
     }
 
     #[test]
@@ -316,8 +397,20 @@ mod tests {
         assert_eq!(restarted.clear().due(0).1, Due::Idle);
         // A failed broadcast drops the frame.
         let (_, rep) = restarted.finish(1, restarted.epoch, false, 1);
-        assert_eq!(rep, Report { frames: 0, dropped: 1 });
+        assert_eq!(
+            rep,
+            Report {
+                frames: 0,
+                dropped: 1
+            }
+        );
         // Out-of-range handles change nothing.
-        assert_eq!(SourceTable::new().start(9, key("app/a"), route(10, 0)).due(0).1, Due::Idle);
+        assert_eq!(
+            SourceTable::new()
+                .start(9, key("app/a"), route(10, 0))
+                .due(0)
+                .1,
+            Due::Idle
+        );
     }
 }

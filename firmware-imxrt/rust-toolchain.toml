@@ -1,0 +1,7 @@
+# Host unit tests and the firmware build use stable (rustc >= 1.95, which
+# the shared `esp-base` core requires). MIMXRT1050: thumbv7em-none-eabihf
+# (Cortex-M7 with FPU).
+[toolchain]
+channel = "stable"
+components = ["rust-src", "clippy"]
+targets = ["thumbv7em-none-eabihf"]
