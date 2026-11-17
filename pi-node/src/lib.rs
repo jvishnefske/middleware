@@ -63,7 +63,11 @@ pub fn open_state_flash(state: &Path) -> io::Result<SectorFlash<DirSectors>> {
 
 /// What `sys/info` reports for node `node`.
 pub fn facts(node: SenderId) -> service::Facts {
-    service::Facts { chip: service::CHIP, firmware: env!("CARGO_PKG_VERSION"), node }
+    service::Facts {
+        chip: service::CHIP,
+        firmware: env!("CARGO_PKG_VERSION"),
+        node,
+    }
 }
 
 /// The gateway's control counter floor at start, as `mw-gateway`'s

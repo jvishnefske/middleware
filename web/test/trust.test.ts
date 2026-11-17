@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   BackupError,
   PBKDF2_MIN_ITERATIONS,
+  decompressP256,
   createBackup,
   createSigningKey,
   exportPublicKey,
@@ -28,6 +29,7 @@ import {
   commitBody,
   encodeTrustInfo,
   fromHex,
+  keyKind,
   parseCommitBody,
   parseTrustInfo,
   planUpload,
@@ -123,7 +125,8 @@ describe("trust info", () => {
     expect(() => parseTrustInfo(Uint8Array.of(3, 0, 0, 0, 0))).toThrow(/unknown state/);
     expect(() => parseTrustInfo(Uint8Array.from([0, 0, 0, 0, 0, ...pk]))).toThrow(TrustFormatError);
     expect(() => parseTrustInfo(Uint8Array.of(1, 0, 0, 0, 0))).toThrow(TrustFormatError);
-    expect(() => parseTrustInfo(Uint8Array.from([1, 0, 0, 0, 0, ...pk, 0]))).toThrow(TrustFormatError);
+    // 39 bytes is neither kind (38 would be a P-256 key: the length decides).
+    expect(() => parseTrustInfo(Uint8Array.from([1, 0, 0, 0, 0, ...pk, 0, 0]))).toThrow(TrustFormatError);
   });
 
   it("relates the device key to this browser's key and decides the upload", () => {
@@ -151,6 +154,80 @@ describe("trust info", () => {
     expect(chooseVersion(1_761_500_000_000, 1_761_500_000)).toEqual({ version: 1_761_500_001, bumped: true });
     expect(chooseVersion(5_000, 4_000_000_000)).toEqual({ version: 4_000_000_001, bumped: true });
     expect(() => chooseVersion(0, 0xffffffff)).toThrow(TrustFormatError);
+  });
+});
+
+interface P256Vector {
+  public_key: string;
+  message: string;
+  signature: string;
+  commit_body: string;
+  control_message: string;
+  control_signature: string;
+}
+
+const p256 = JSON.parse(readFileSync(new URL("./fixtures/trust-vector-p256.json", import.meta.url), "utf8")) as P256Vector;
+
+describe("P-256 pinned keys (hardware tokens)", () => {
+  const pk = fromHex(p256.public_key);
+
+  it("tells the kinds apart by length and SEC1 prefix", () => {
+    expect(keyKind(fromHex(vector.public_key))).toBe("ed25519");
+    expect(keyKind(pk)).toBe("p256");
+    expect(keyKind(Uint8Array.from([4, ...pk.subarray(1)]))).toBeNull();
+    expect(keyKind(new Uint8Array(65))).toBeNull();
+    expect(claimBody(pk)).toEqual(pk);
+  });
+
+  it("parses and encodes a 38-byte trust info", () => {
+    const body = Uint8Array.from([1, 0x60, 0x5b, 0xfe, 0x68, ...pk]);
+    const info = parseTrustInfo(body);
+    expect(info).toEqual({ state: "claimed", minVersion: vector.version, key: pk });
+    expect(encodeTrustInfo(info)).toEqual(body);
+    expect(() => parseTrustInfo(Uint8Array.from([1, 0, 0, 0, 0, 4, ...pk.subarray(1)]))).toThrow(TrustFormatError);
+  });
+
+  it("verifies the OpenSSL vector, and nothing else", async () => {
+    const message = fromHex(p256.message);
+    const sig = fromHex(p256.signature);
+    expect(toHex(signedMessage(vector.image_len, vector.version, fromHex(vector.sha256)))).toBe(p256.message);
+    expect(await verifySignature(pk, message, sig)).toBe(true);
+    expect(await verifySignature(pk, fromHex(p256.control_message), fromHex(p256.control_signature))).toBe(true);
+    const bad = sig.slice();
+    bad[5] ^= 1;
+    expect(await verifySignature(pk, message, bad)).toBe(false);
+    expect(await verifySignature(pk, message.subarray(1), sig)).toBe(false);
+    // Kinds never cross: the Ed25519 vector's signature under the P-256 key
+    // and the other way round.
+    expect(await verifySignature(pk, message, fromHex(vector.signature))).toBe(false);
+    expect(await verifySignature(fromHex(vector.public_key), message, sig)).toBe(false);
+    expect(parseCommitBody(fromHex(p256.commit_body))?.signature).toEqual(sig);
+  });
+
+  it("decompresses points and refuses x off the curve", () => {
+    const point = decompressP256(pk);
+    expect(point?.length).toBe(65);
+    expect(point?.[0]).toBe(4);
+    expect(toHex(point!.subarray(1, 33))).toBe(p256.public_key.slice(2));
+    const flipped = pk.slice();
+    flipped[0] = flipped[0] === 2 ? 3 : 2;
+    const other = decompressP256(flipped);
+    expect(toHex(other!.subarray(33))).not.toBe(toHex(point!.subarray(33)));
+    let offCurve = 0;
+    for (let x = 0; x < 16; x++) {
+      const k = new Uint8Array(33);
+      k[0] = 2;
+      k[32] = x;
+      if (decompressP256(k) === null) offCurve++;
+    }
+    expect(offCurve).toBeGreaterThan(0);
+    expect(decompressP256(fromHex(vector.public_key))).toBeNull();
+  });
+
+  it("a device pinned to a P-256 key refuses browser uploads (different key)", () => {
+    const info = parseTrustInfo(Uint8Array.from([1, 0, 0, 0, 0, ...pk]));
+    expect(relateKeys(info, fromHex(vector.public_key))).toBe("different");
+    expect(planUpload(info, fromHex(vector.public_key), 0)).toEqual({ kind: "refuse", reason: "different-key" });
   });
 });
 

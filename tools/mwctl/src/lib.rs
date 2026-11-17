@@ -50,10 +50,13 @@ pub mod device;
 pub mod error;
 pub mod fw;
 pub mod link;
+pub mod pkcs11;
 pub mod plan;
 pub mod report;
 pub mod sign;
 pub mod udp;
+#[cfg(feature = "zenoh")]
+pub mod zlink;
 
 #[cfg(test)]
 mod fake;

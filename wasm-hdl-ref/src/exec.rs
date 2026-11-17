@@ -140,7 +140,11 @@ impl<const MEM: usize> Core<MEM> {
             }
             fuel -= 1;
             self.executed = self.executed.saturating_add(1);
-            let w = *self.code.get(pc).filter(|_| pc < self.code_len).ok_or(Trap::BadCode)?;
+            let w = *self
+                .code
+                .get(pc)
+                .filter(|_| pc < self.code_len)
+                .ok_or(Trap::BadCode)?;
             pc += 1;
             let a = isa::arg(w);
             // Locals and operands of this frame live at `fp..sp`.
@@ -189,10 +193,16 @@ impl<const MEM: usize> Core<MEM> {
                     let addr = self.spop(&mut sp, floor)?;
                     let v = match a {
                         load::W32 => i32::from_le_bytes(self.mem_bytes(self.ea(addr, off, 4)?)?),
-                        load::S8 => i32::from(self.mem_bytes::<1>(self.ea(addr, off, 1)?)?[0] as i8),
+                        load::S8 => {
+                            i32::from(self.mem_bytes::<1>(self.ea(addr, off, 1)?)?[0] as i8)
+                        }
                         load::U8 => i32::from(self.mem_bytes::<1>(self.ea(addr, off, 1)?)?[0]),
-                        load::S16 => i32::from(i16::from_le_bytes(self.mem_bytes(self.ea(addr, off, 2)?)?)),
-                        load::U16 => i32::from(u16::from_le_bytes(self.mem_bytes(self.ea(addr, off, 2)?)?)),
+                        load::S16 => {
+                            i32::from(i16::from_le_bytes(self.mem_bytes(self.ea(addr, off, 2)?)?))
+                        }
+                        load::U16 => {
+                            i32::from(u16::from_le_bytes(self.mem_bytes(self.ea(addr, off, 2)?)?))
+                        }
                         _ => return Err(Trap::BadCode),
                     };
                     self.spush(&mut sp, v)?;
@@ -296,10 +306,7 @@ impl<const MEM: usize> Core<MEM> {
                 isa::BRTABLE => {
                     let i = self.spop(&mut sp, floor)? as u32;
                     let pick = if i < a { i } else { a };
-                    let bw = *self
-                        .code
-                        .get(pc + pick as usize)
-                        .ok_or(Trap::BadCode)?;
+                    let bw = *self.code.get(pc + pick as usize).ok_or(Trap::BadCode)?;
                     if isa::op(bw) != isa::BR {
                         return Err(Trap::BadCode);
                     }

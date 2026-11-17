@@ -52,7 +52,10 @@ fn hex_digits(s: &str, n: usize) -> Option<Vec<u8>> {
         return None;
     }
     (0..n / 2)
-        .map(|i| s.get(2 * i..2 * i + 2).and_then(|p| u8::from_str_radix(p, 16).ok()))
+        .map(|i| {
+            s.get(2 * i..2 * i + 2)
+                .and_then(|p| u8::from_str_radix(p, 16).ok())
+        })
         .collect()
 }
 
@@ -68,7 +71,9 @@ fn nonzero(id: [u8; 8]) -> Result<SenderId, NodeIdError> {
 pub fn parse_node_id(text: &str) -> Result<SenderId, NodeIdError> {
     let t = text.trim();
     let bytes = hex_digits(t, 16).ok_or_else(|| NodeIdError::Configured(t.to_owned()))?;
-    let id: [u8; 8] = bytes.try_into().map_err(|_| NodeIdError::Configured(t.to_owned()))?;
+    let id: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| NodeIdError::Configured(t.to_owned()))?;
     nonzero(id)
 }
 
@@ -91,7 +96,10 @@ pub fn from_machine_id(contents: &str) -> Result<SenderId, NodeIdError> {
 
 /// The node id: the configured one when set, else the one derived from
 /// the machine id file's contents (`None` when it could not be read).
-pub fn resolve(configured: Option<&str>, machine_id: Option<&str>) -> Result<SenderId, NodeIdError> {
+pub fn resolve(
+    configured: Option<&str>,
+    machine_id: Option<&str>,
+) -> Result<SenderId, NodeIdError> {
     match (configured, machine_id) {
         (Some(c), _) => parse_node_id(c),
         (None, Some(m)) => from_machine_id(m),
@@ -127,21 +135,45 @@ mod tests {
         // Another machine, another node.
         let b = from_machine_id("4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c8").expect("id");
         assert_ne!(a, b);
-        for bad in ["", "uninitialized", "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c", "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c7a", "zf6a1c0e9b2d47e8a3c5d7f9e1b3a5c7"] {
-            assert!(matches!(from_machine_id(bad), Err(NodeIdError::MachineId(_))), "{bad:?}");
+        for bad in [
+            "",
+            "uninitialized",
+            "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c",
+            "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c7a",
+            "zf6a1c0e9b2d47e8a3c5d7f9e1b3a5c7",
+        ] {
+            assert!(
+                matches!(from_machine_id(bad), Err(NodeIdError::MachineId(_))),
+                "{bad:?}"
+            );
         }
     }
 
     #[test]
     fn pn2_a_configured_node_id_wins_and_is_checked() {
         let id = parse_node_id(" 0123456789ABCDEF\n").expect("id");
-        assert_eq!(id, SenderId([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]));
+        assert_eq!(
+            id,
+            SenderId([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])
+        );
         assert_eq!(hex(id), "0123456789abcdef");
         assert_eq!(resolve(Some("0123456789abcdef"), Some(MACHINE_ID)), Ok(id));
         assert_eq!(resolve(None, Some(MACHINE_ID)), from_machine_id(MACHINE_ID));
-        assert!(matches!(resolve(None, None), Err(NodeIdError::MachineId(_))));
-        for bad in ["", "0123", "0123456789abcdeg", "0123456789abcdef00", "+123456789abcdef"] {
-            assert!(matches!(parse_node_id(bad), Err(NodeIdError::Configured(_))), "{bad:?}");
+        assert!(matches!(
+            resolve(None, None),
+            Err(NodeIdError::MachineId(_))
+        ));
+        for bad in [
+            "",
+            "0123",
+            "0123456789abcdeg",
+            "0123456789abcdef00",
+            "+123456789abcdef",
+        ] {
+            assert!(
+                matches!(parse_node_id(bad), Err(NodeIdError::Configured(_))),
+                "{bad:?}"
+            );
         }
         assert_eq!(parse_node_id("0000000000000000"), Err(NodeIdError::Zero));
     }

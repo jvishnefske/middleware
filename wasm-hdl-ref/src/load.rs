@@ -29,8 +29,8 @@ use middleware::wasm_abi::{self, IMPORT_MODULE, exports};
 
 use crate::isa::{self, NONE, word};
 use crate::{
-    CALL_DEPTH, CODE_WORDS, Core, Func, LoadError, MAX_CTRL, MAX_FUNCS, MAX_GLOBALS,
-    MAX_LOCALS, MAX_OPERANDS, MAX_PARAMS, MAX_TABLE, MAX_TYPES,
+    CALL_DEPTH, CODE_WORDS, Core, Func, LoadError, MAX_CTRL, MAX_FUNCS, MAX_GLOBALS, MAX_LOCALS,
+    MAX_OPERANDS, MAX_PARAMS, MAX_TABLE, MAX_TYPES,
 };
 
 /// A byte reader over the module.
@@ -385,7 +385,10 @@ impl<const MEM: usize> Core<MEM> {
             let idx = s.u32()?;
             match kind {
                 0x00 => {
-                    let f = self.funcs.get(idx as usize).filter(|_| (idx as usize) < self.nfuncs);
+                    let f = self
+                        .funcs
+                        .get(idx as usize)
+                        .filter(|_| (idx as usize) < self.nfuncs);
                     let f = *f.ok_or(LoadError::Malformed)?;
                     let shape = (f.params, f.results);
                     let slot = match name {
@@ -683,7 +686,11 @@ impl Compiler<'_> {
         let here = self.len as u16;
         let slots = self.slots;
         let c = self.ctrl.get_mut(i).ok_or(LoadError::Malformed)?;
-        let keep = if c.kind == Kind::Loop { 0 } else { u32::from(c.results) };
+        let keep = if c.kind == Kind::Loop {
+            0
+        } else {
+            u32::from(c.results)
+        };
         let drop = slots
             .checked_sub(c.slots + keep as usize)
             .ok_or(LoadError::Malformed)?;
@@ -707,8 +714,10 @@ impl Compiler<'_> {
             let w = *self.code.get(usize::from(at)).ok_or(LoadError::Malformed)?;
             let (next, keep, drop) = isa::unbranch(isa::arg(w));
             let a = isa::branch(to, keep, drop).ok_or(LoadError::Malformed)?;
-            *self.code.get_mut(usize::from(at)).ok_or(LoadError::Malformed)? =
-                word(isa::op(w), a);
+            *self
+                .code
+                .get_mut(usize::from(at))
+                .ok_or(LoadError::Malformed)? = word(isa::op(w), a);
             at = next;
         }
         Err(LoadError::Malformed)
@@ -732,7 +741,10 @@ impl Compiler<'_> {
         if idx as usize >= self.nfuncs {
             return Err(LoadError::Malformed);
         }
-        self.funcs.get(idx as usize).copied().ok_or(LoadError::Malformed)
+        self.funcs
+            .get(idx as usize)
+            .copied()
+            .ok_or(LoadError::Malformed)
     }
 
     fn function(&mut self, b: &mut Rd<'_>, results: u8) -> R<()> {
@@ -791,9 +803,14 @@ impl Compiler<'_> {
                     let here = self.len as u16;
                     let unless = c.unless;
                     if unless != NONE {
-                        let w = *self.code.get(usize::from(unless)).ok_or(LoadError::Malformed)?;
-                        *self.code.get_mut(usize::from(unless)).ok_or(LoadError::Malformed)? =
-                            word(isa::op(w), u32::from(here));
+                        let w = *self
+                            .code
+                            .get(usize::from(unless))
+                            .ok_or(LoadError::Malformed)?;
+                        *self
+                            .code
+                            .get_mut(usize::from(unless))
+                            .ok_or(LoadError::Malformed)? = word(isa::op(w), u32::from(here));
                     }
                     let t = self.top_mut()?;
                     t.unless = NONE;
@@ -812,9 +829,14 @@ impl Compiler<'_> {
                 self.patch(c.fixups, here)?;
                 if c.unless != NONE {
                     // An `if` without `else`: false skips to the end.
-                    let w = *self.code.get(usize::from(c.unless)).ok_or(LoadError::Malformed)?;
-                    *self.code.get_mut(usize::from(c.unless)).ok_or(LoadError::Malformed)? =
-                        word(isa::op(w), u32::from(here));
+                    let w = *self
+                        .code
+                        .get(usize::from(c.unless))
+                        .ok_or(LoadError::Malformed)?;
+                    *self
+                        .code
+                        .get_mut(usize::from(c.unless))
+                        .ok_or(LoadError::Malformed)? = word(isa::op(w), u32::from(here));
                 }
                 self.nvals = c.vals;
                 self.slots = c.slots;
@@ -1079,7 +1101,14 @@ impl Compiler<'_> {
                     _ => return Err(LoadError::Unsupported("0xFC instruction")),
                 }
             }
-            0x29..=0x35 | 0x38 | 0x39 | 0x3C..=0x3E | 0x43 | 0x44 | 0x50..=0x66 | 0x79..=0xBF
+            0x29..=0x35
+            | 0x38
+            | 0x39
+            | 0x3C..=0x3E
+            | 0x43
+            | 0x44
+            | 0x50..=0x66
+            | 0x79..=0xBF
             | 0xC2..=0xC4 => return Err(LoadError::Unsupported("i64 or float instruction")),
             _ => return Err(LoadError::Unsupported("instruction")),
         }

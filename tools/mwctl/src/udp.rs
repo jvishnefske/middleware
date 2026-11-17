@@ -44,7 +44,9 @@ impl Datagram for UdpSocket {
             Err(e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
                 ) =>
             {
                 Ok(None)
@@ -273,7 +275,10 @@ mod tests {
     #[test]
     fn cl1_default_port_and_address_forms() {
         assert_eq!(with_default_port("10.0.0.5").unwrap(), "10.0.0.5:7448");
-        assert_eq!(with_default_port("board.lan:9000").unwrap(), "board.lan:9000");
+        assert_eq!(
+            with_default_port("board.lan:9000").unwrap(),
+            "board.lan:9000"
+        );
         assert_eq!(with_default_port("fe80::1").unwrap(), "[fe80::1]:7448");
         assert_eq!(with_default_port("[fe80::1]").unwrap(), "[fe80::1]:7448");
         assert_eq!(with_default_port("[fe80::1]:7").unwrap(), "[fe80::1]:7");

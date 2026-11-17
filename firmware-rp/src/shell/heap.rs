@@ -20,7 +20,8 @@ pub const SIZE: usize = PROFILE.heap;
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::empty();
 
-static ARENA: ConstStaticCell<[MaybeUninit<u8>; SIZE]> = ConstStaticCell::new([MaybeUninit::uninit(); SIZE]);
+static ARENA: ConstStaticCell<[MaybeUninit<u8>; SIZE]> =
+    ConstStaticCell::new([MaybeUninit::uninit(); SIZE]);
 
 /// Gives the arena to the allocator. Called once, first thing at boot.
 pub fn init() {

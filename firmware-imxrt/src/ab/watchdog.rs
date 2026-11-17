@@ -93,7 +93,11 @@ mod tests {
         let running = trial_cs() | FLG;
         let stopped = released_cs(running);
         assert!(!enabled(stopped));
-        assert_eq!(stopped & FLG, 0, "FLG is write-one-to-clear: not written back");
+        assert_eq!(
+            stopped & FLG,
+            0,
+            "FLG is write-one-to-clear: not written back"
+        );
         assert_ne!(stopped & UPDATE, 0);
         assert_ne!(stopped & CMD32EN, 0);
         assert_eq!(stopped & (CLK_LPO | PRES), CLK_LPO | PRES);
@@ -101,7 +105,11 @@ mod tests {
 
     #[test]
     fn rt15_the_software_reset_is_srs_low_with_wdog_b_quiet() {
-        assert_eq!(WDOG1_SOFTWARE_RESET & (1 << 4), 0, "SRS asserted (active low)");
+        assert_eq!(
+            WDOG1_SOFTWARE_RESET & (1 << 4),
+            0,
+            "SRS asserted (active low)"
+        );
         assert_ne!(WDOG1_SOFTWARE_RESET & (1 << 5), 0, "WDA deasserted");
     }
 }

@@ -180,7 +180,11 @@ impl FlashMap {
     /// The A/B slots and the update record, when the map has them.
     pub const fn ab(&self) -> Option<AbMap> {
         match (self.firmware_b, self.fw_record) {
-            (Some(b), Some(record)) => Some(AbMap { a: self.firmware, b, record }),
+            (Some(b), Some(record)) => Some(AbMap {
+                a: self.firmware,
+                b,
+                record,
+            }),
             _ => None,
         }
     }
@@ -207,7 +211,8 @@ impl FlashMap {
         let ab = (self.partition_table, self.firmware_b, self.fw_record);
         match ab {
             (None, None, None) => {}
-            (Some(_), Some(b), Some(r)) if b.size == self.firmware.size && r.size == FW_RECORD_LEN => {}
+            (Some(_), Some(b), Some(r))
+                if b.size == self.firmware.size && r.size == FW_RECORD_LEN => {}
             _ => return Err(LayoutError::AbShape),
         }
         // At most six regions: every pair is compared once.
@@ -258,7 +263,9 @@ mod tests {
 
     /// The `LENGTH` of the `FLASH` line of a `memory.x`.
     fn flash_length(memory_x: &str) -> Option<u32> {
-        let line = memory_x.lines().find(|l| l.trim_start().starts_with("FLASH"))?;
+        let line = memory_x
+            .lines()
+            .find(|l| l.trim_start().starts_with("FLASH"))?;
         let hex = line.split("LENGTH = 0x").nth(1)?;
         let digits: &str = hex.split(|c: char| !c.is_ascii_hexdigit()).next()?;
         u32::from_str_radix(digits, 16).ok()
@@ -286,7 +293,10 @@ mod tests {
         assert_eq!(ab.record.size, 2 * SECTOR);
         assert!(!ab.record.overlaps(&ab.a) && !ab.record.overlaps(&ab.b));
         // The payload store and the trust record did not move.
-        assert_eq!((RP2350.payload.offset, RP2350.trust.offset), (0x30_0000, 0x34_0000));
+        assert_eq!(
+            (RP2350.payload.offset, RP2350.trust.offset),
+            (0x30_0000, 0x34_0000)
+        );
         assert_eq!(ab.record.end(), RP2350.payload.offset);
         assert_eq!(RP2040.ab(), None);
         assert_eq!(RP2040.partition_table, None);
@@ -294,8 +304,14 @@ mod tests {
 
     #[test]
     fn v2_memory_x_flash_lengths_match_the_maps() {
-        assert_eq!(flash_length(include_str!("../memory-rp2040.x")), Some(RP2040.linked_firmware()));
-        assert_eq!(flash_length(include_str!("../memory-rp2350.x")), Some(RP2350.linked_firmware()));
+        assert_eq!(
+            flash_length(include_str!("../memory-rp2040.x")),
+            Some(RP2040.linked_firmware())
+        );
+        assert_eq!(
+            flash_length(include_str!("../memory-rp2350.x")),
+            Some(RP2350.linked_firmware())
+        );
         assert_eq!(RP2040.linked_firmware(), 0x18_0000 - 0x100);
         assert_eq!(RP2350.linked_firmware(), 0x18_0000 - 0x2000);
         assert_eq!(RP2350.linked_firmware(), RP2350.ab().unwrap().b.size);
@@ -303,25 +319,55 @@ mod tests {
 
     #[test]
     fn v2_check_refuses_broken_maps() {
-        let unaligned = FlashMap { payload: Region::new(0x18_0100, 0x4_0000), ..RP2040 };
+        let unaligned = FlashMap {
+            payload: Region::new(0x18_0100, 0x4_0000),
+            ..RP2040
+        };
         assert_eq!(unaligned.check(), Err(LayoutError::Unaligned));
-        let overlap = FlashMap { trust: Region::new(0x1B_F000, 0x2000), ..RP2040 };
+        let overlap = FlashMap {
+            trust: Region::new(0x1B_F000, 0x2000),
+            ..RP2040
+        };
         assert_eq!(overlap.check(), Err(LayoutError::Overlap));
-        let beyond = FlashMap { trust: Region::new(0x1F_F000, 0x2000), ..RP2040 };
+        let beyond = FlashMap {
+            trust: Region::new(0x1F_F000, 0x2000),
+            ..RP2040
+        };
         assert_eq!(beyond.check(), Err(LayoutError::OutOfFlash));
-        let late = FlashMap { firmware: Region::new(0x1000, 0x17_F000), ..RP2040 };
+        let late = FlashMap {
+            firmware: Region::new(0x1000, 0x17_F000),
+            ..RP2040
+        };
         assert_eq!(late.check(), Err(LayoutError::FirmwareNotFirst));
-        let small = FlashMap { trust: Region::new(0x1C_0000, 0x1000), ..RP2040 };
+        let small = FlashMap {
+            trust: Region::new(0x1C_0000, 0x1000),
+            ..RP2040
+        };
         assert_eq!(small.check(), Err(LayoutError::TrustSize));
-        let slot_b = FlashMap { firmware_b: Some(Region::new(0x17_0000, 0x17_E000)), ..RP2350 };
+        let slot_b = FlashMap {
+            firmware_b: Some(Region::new(0x17_0000, 0x17_E000)),
+            ..RP2350
+        };
         assert_eq!(slot_b.check(), Err(LayoutError::Overlap));
-        let short_b = FlashMap { firmware_b: Some(Region::new(0x18_0000, 0x1_0000)), ..RP2350 };
+        let short_b = FlashMap {
+            firmware_b: Some(Region::new(0x18_0000, 0x1_0000)),
+            ..RP2350
+        };
         assert_eq!(short_b.check(), Err(LayoutError::AbShape));
-        let no_record = FlashMap { fw_record: None, ..RP2350 };
+        let no_record = FlashMap {
+            fw_record: None,
+            ..RP2350
+        };
         assert_eq!(no_record.check(), Err(LayoutError::AbShape));
-        let no_table = FlashMap { partition_table: None, ..RP2350 };
+        let no_table = FlashMap {
+            partition_table: None,
+            ..RP2350
+        };
         assert_eq!(no_table.check(), Err(LayoutError::FirmwareNotFirst));
-        let big_record = FlashMap { fw_record: Some(Region::new(0x2F_D000, 0x3000)), ..RP2350 };
+        let big_record = FlashMap {
+            fw_record: Some(Region::new(0x2F_D000, 0x3000)),
+            ..RP2350
+        };
         assert_eq!(big_record.check(), Err(LayoutError::AbShape));
         assert!(!Region::new(0, 0).is_aligned());
     }

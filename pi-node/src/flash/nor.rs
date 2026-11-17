@@ -20,7 +20,9 @@ pub fn span(offset: u32, len: usize, capacity: usize) -> Result<Range<usize>, No
         return Err(NorFlashErrorKind::NotAligned);
     }
     let start = offset as usize;
-    let end = start.checked_add(len).ok_or(NorFlashErrorKind::OutOfBounds)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(NorFlashErrorKind::OutOfBounds)?;
     if end > capacity {
         return Err(NorFlashErrorKind::OutOfBounds);
     }
@@ -80,12 +82,24 @@ mod tests {
         assert_eq!(span(2, 4, 64), Err(NorFlashErrorKind::NotAligned));
         assert_eq!(span(4, 3, 64), Err(NorFlashErrorKind::NotAligned));
         assert_eq!(span(60, 8, 64), Err(NorFlashErrorKind::OutOfBounds));
-        assert_eq!(span(u32::MAX - 3, 4, usize::MAX), Ok((u32::MAX - 3) as usize..u32::MAX as usize + 1));
+        assert_eq!(
+            span(u32::MAX - 3, 4, usize::MAX),
+            Ok((u32::MAX - 3) as usize..u32::MAX as usize + 1)
+        );
         assert_eq!(erase_sectors(0, 8192, 8192), Ok(0..2));
         assert_eq!(erase_sectors(4096, 4096, 8192), Ok(1..1));
-        assert_eq!(erase_sectors(1, 4096, 8192), Err(NorFlashErrorKind::NotAligned));
-        assert_eq!(erase_sectors(8192, 4096, 8192), Err(NorFlashErrorKind::NotAligned));
-        assert_eq!(erase_sectors(0, 12288, 8192), Err(NorFlashErrorKind::OutOfBounds));
+        assert_eq!(
+            erase_sectors(1, 4096, 8192),
+            Err(NorFlashErrorKind::NotAligned)
+        );
+        assert_eq!(
+            erase_sectors(8192, 4096, 8192),
+            Err(NorFlashErrorKind::NotAligned)
+        );
+        assert_eq!(
+            erase_sectors(0, 12288, 8192),
+            Err(NorFlashErrorKind::OutOfBounds)
+        );
     }
 
     #[test]

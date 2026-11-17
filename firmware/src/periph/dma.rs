@@ -58,7 +58,11 @@ impl DmaState {
     pub const fn complete(self, result: Result<(), AbiError>) -> (Self, Option<i32>) {
         match (self, result) {
             (DmaState::InFlight { len }, Ok(())) => {
-                let value = if len > i32::MAX as usize { i32::MAX } else { len as i32 };
+                let value = if len > i32::MAX as usize {
+                    i32::MAX
+                } else {
+                    len as i32
+                };
                 (DmaState::Done { len }, Some(value))
             }
             (DmaState::InFlight { .. }, Err(e)) => (DmaState::Idle, Some(e.code())),
@@ -92,20 +96,38 @@ mod tests {
         assert_eq!(s.take(), Ok((DmaState::Idle, 0)), "nothing received yet");
         let s = s.start(8).unwrap();
         assert!(s.in_flight());
-        assert_eq!(s.start(4), Err(AbiError::Busy), "second transfer while in flight");
+        assert_eq!(
+            s.start(4),
+            Err(AbiError::Busy),
+            "second transfer while in flight"
+        );
         assert_eq!(s.take(), Err(AbiError::Busy), "dma_read while in flight");
         let (s, value) = s.complete(Ok(()));
         assert_eq!((s, value), (DmaState::Done { len: 8 }, Some(8)));
         let (s, n) = s.take().unwrap();
         assert_eq!(n, 8);
-        assert_eq!(s.take(), Ok((DmaState::Idle, 0)), "consumed by the first read");
+        assert_eq!(
+            s.take(),
+            Ok((DmaState::Idle, 0)),
+            "consumed by the first read"
+        );
     }
 
     #[test]
     fn d6_errors_and_aborts_return_to_idle() {
-        let (s, value) = DmaState::Idle.start(3).unwrap().complete(Err(AbiError::Transport));
-        assert_eq!((s, value), (DmaState::Idle, Some(AbiError::Transport.code())));
-        assert_eq!(DmaState::Idle.complete(Ok(())), (DmaState::Idle, None), "spurious completion");
+        let (s, value) = DmaState::Idle
+            .start(3)
+            .unwrap()
+            .complete(Err(AbiError::Transport));
+        assert_eq!(
+            (s, value),
+            (DmaState::Idle, Some(AbiError::Transport.code()))
+        );
+        assert_eq!(
+            DmaState::Idle.complete(Ok(())),
+            (DmaState::Idle, None),
+            "spurious completion"
+        );
         assert_eq!(DmaState::Idle.start(3).unwrap().abort(), DmaState::Idle);
         // Starting again from Done discards unread data.
         let done = DmaState::Done { len: 4 };

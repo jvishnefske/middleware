@@ -40,7 +40,11 @@ use middleware::transport::{HandlerError, Limits, Publisher, SenderId};
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
 
 /// Largest inbound body: a loader chunk with its offset, or a publication.
-pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE { 4 + CHUNK_MAX } else { MAX_MESSAGE };
+pub const MAX_BODY: usize = if 4 + CHUNK_MAX > MAX_MESSAGE {
+    4 + CHUNK_MAX
+} else {
+    MAX_MESSAGE
+};
 
 /// Largest reply body: a payload's reply to a request on a key it serves
 /// (`esp_base::serve::REPLY_CAPACITY`, 512); `sys/info` is at most 85
@@ -90,7 +94,12 @@ impl Inbound {
         let mut k = String::new();
         k.push_str(key.as_str()).ok()?;
         let body = Vec::from_slice(body).ok()?;
-        Some(Inbound { kind, key: k, body, peer })
+        Some(Inbound {
+            kind,
+            key: k,
+            body,
+            peer,
+        })
     }
 
     /// What a payload may know of the request: the link's peer as sender.
@@ -192,7 +201,9 @@ impl Bus {
         let mut k = String::new();
         k.push_str(key.as_str()).map_err(|_| TooLarge)?;
         let payload = Vec::from_slice(data).map_err(|_| TooLarge)?;
-        self.outbound.immediate_publisher().publish_immediate(Outbound { key: k, payload });
+        self.outbound
+            .immediate_publisher()
+            .publish_immediate(Outbound { key: k, payload });
         Ok(())
     }
 

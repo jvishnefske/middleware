@@ -81,16 +81,28 @@ macro_rules! board {
             }
             fn gpio_output(&mut self, pin: u8) -> Result<(), AbiError> {
                 self.line(format!("gpio_output {pin}"));
-                if pin < 2 { Ok(()) } else { Err(AbiError::Unsupported) }
+                if pin < 2 {
+                    Ok(())
+                } else {
+                    Err(AbiError::Unsupported)
+                }
             }
             fn gpio_input(&mut self, pin: u8, pull: Pull) -> Result<(), AbiError> {
                 self.line(format!("gpio_input {pin} {pull:?}"));
-                if pin < 2 { Ok(()) } else { Err(AbiError::Unsupported) }
+                if pin < 2 {
+                    Ok(())
+                } else {
+                    Err(AbiError::Unsupported)
+                }
             }
             fn gpio_write(&mut self, pin: u8, high: bool) -> Result<(), AbiError> {
                 self.line(format!("gpio_write {pin} {high}"));
                 self.led = high;
-                if pin < 2 { Ok(()) } else { Err(AbiError::Unsupported) }
+                if pin < 2 {
+                    Ok(())
+                } else {
+                    Err(AbiError::Unsupported)
+                }
             }
             fn gpio_read(&mut self, pin: u8) -> Result<bool, AbiError> {
                 self.line(format!("gpio_read {pin}"));
@@ -157,4 +169,3 @@ pub fn script(subs: &[String], serves: &[String]) -> Vec<Step> {
     }
     s
 }
-

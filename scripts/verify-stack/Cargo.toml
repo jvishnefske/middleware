@@ -1,0 +1,15 @@
+[package]
+name = "verify-stack"
+version = "0.0.0"
+edition = "2024"
+[lib]
+crate-type = ["staticlib"]
+[dependencies]
+middleware = { path = "../..", default-features = false, features = ["trust"] }
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+[workspace]

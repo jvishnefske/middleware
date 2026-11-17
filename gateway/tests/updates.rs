@@ -20,7 +20,7 @@ use middleware::fw_ota::sim::{self, Rp2350Sim};
 use middleware::fw_ota::{Slot, StateCode};
 use middleware::grpc::{GrpcServer, PrincipalSource, responder};
 use middleware::key::Key;
-use middleware::loader::trust::{PublicKey, TrustState, Version};
+use middleware::loader::trust::{ControlCounter, ControlOp, PublicKey, TrustState, Version};
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
 use middleware::serial::frame::Frame;
 use middleware::serial::link::{RECV_BUF_LEN, SerialLink};
@@ -35,7 +35,7 @@ use mw_gateway::{GatewayConfig, Report, serve_sys, start_with_store};
 use mw_service::StaticEndpoints;
 use mwctl::device::Device;
 use mwctl::fw::load_image;
-use mwctl::sign::Seed;
+use mwctl::sign::{P256Key, Seed, Signer};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tonic::body::Body;
@@ -52,6 +52,17 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 
 fn seed() -> Seed {
     Seed::from_file_bytes(&SEED).expect("seed")
+}
+
+/// The Ed25519 key file's signer, as `mw-update --key` loads it.
+fn signer() -> Box<dyn Signer + Send> {
+    Box::new(seed())
+}
+
+/// A P-256 key, as a token holds one (TEST KEY ONLY: the OpenSSL vector's
+/// scalar).
+fn p256() -> P256Key {
+    P256Key::from_scalar(&[0x20; 32]).expect("scalar")
 }
 
 /// What the fake device saw: (key, body length).
@@ -197,8 +208,7 @@ fn spawn_device(
     seen
 }
 
-fn claimed_pico2() -> FakeDevice {
-    let key = PublicKey(seed().public_key().0);
+fn claimed_pico2(key: PublicKey) -> FakeDevice {
     let mut sim = Rp2350Sim::new(256 * 1024);
     sim.program(Slot::A, &sim::image(40_000, V1_0, false, 1));
     FakeDevice {
@@ -328,9 +338,18 @@ async fn rig_with(slow: Option<(Key<'static>, Duration)>) -> Rig {
 }
 
 async fn rig_in(slow: Option<(Key<'static>, Duration)>, store: ControlStore) -> Rig {
+    rig_claimed(slow, store, seed().public_key()).await
+}
+
+/// [`rig_in`] with the device claimed by `key`.
+async fn rig_claimed(
+    slow: Option<(Key<'static>, Duration)>,
+    store: ControlStore,
+    key: PublicKey,
+) -> Rig {
     let (cluster, session) = zenoh_pair().await;
     let (device_io, gateway_io) = pair();
-    let mut seen = spawn_device(device_io, claimed_pico2(), slow);
+    let mut seen = spawn_device(device_io, claimed_pico2(key), slow);
     let config = GatewayConfig::from_env(&|k: &str| {
         (k == "MW_GATEWAY_UPDATERS").then(|| UPDATER.to_owned())
     })
@@ -398,7 +417,7 @@ async fn run_job(entry: &str, job: Job) -> Result<String, mwctl::error::Error> {
 fn upload(image: &[u8], start: bool) -> Job {
     Job::Upload {
         image: image.to_vec(),
-        seed: seed(),
+        signer: signer(),
         version: Version(1_761_500_000),
         start: start.then_some(middleware::loader::trust::ControlCounter(1_761_500_000_123)),
     }
@@ -467,7 +486,7 @@ async fn rg25_an_updater_uploads_a_signed_payload_and_others_are_denied() {
         &rig.updater,
         Job::Control {
             op: middleware::loader::trust::ControlOp::Start,
-            seed: Seed::from_file_bytes(&[9u8; 32]).expect("seed"),
+            signer: Box::new(Seed::from_file_bytes(&[9u8; 32]).expect("seed")),
             counter: middleware::loader::trust::ControlCounter(1_761_500_000_999),
         },
     )
@@ -600,7 +619,7 @@ async fn rg26_an_rp2350_firmware_update_reaches_the_device_and_is_confirmed() {
         &rig.stranger,
         Job::FwUpdate {
             image: image.clone(),
-            seed: seed(),
+            signer: signer(),
             reboot: true,
         },
     )
@@ -612,7 +631,7 @@ async fn rg26_an_rp2350_firmware_update_reaches_the_device_and_is_confirmed() {
         &rig.updater,
         Job::FwUpdate {
             image,
-            seed: seed(),
+            signer: signer(),
             reboot: true,
         },
     )
@@ -656,7 +675,7 @@ async fn rg27_a_start_whose_counter_cannot_be_persisted_is_refused_not_forwarded
         &rig.updater,
         Job::Control {
             op: middleware::loader::trust::ControlOp::Start,
-            seed: seed(),
+            signer: signer(),
             counter: middleware::loader::trust::ControlCounter(1_761_500_000_500),
         },
     )
@@ -686,5 +705,76 @@ async fn rg27_an_accepted_start_is_persisted_before_it_reaches_the_device() {
         Persisted::At(middleware::loader::trust::ControlCounter(1_761_500_000_123))
     );
     let _ = rig.gateway.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A device claimed with a P-256 key (a token key, `mw-update --pkcs11`):
+/// the gateway checks the signed start against it with the device's own
+/// verification and forwards it, persisted first (RG27); a forged start
+/// (another key, or the Ed25519 key file) is refused at the gateway and
+/// never reaches the device.
+#[tokio::test(flavor = "multi_thread")]
+async fn rg20_a_p256_claimed_devices_signed_start_passes_and_a_forged_one_is_refused() {
+    let dir = state_dir("p256");
+    let mut rig = rig_claimed(None, ControlStore::in_dir(&dir), p256().public_key()).await;
+    let image = b"\0asm-p256".to_vec();
+    let text = run_job(
+        &rig.updater,
+        Job::Upload {
+            image: image.clone(),
+            signer: Box::new(p256()),
+            version: Version(1_761_500_000),
+            start: None,
+        },
+    )
+    .await
+    .expect("a P-256 signed upload");
+    assert!(text.contains("installed"), "{text}");
+    rig.drain();
+    for forger in [
+        Box::new(P256Key::from_scalar(&[0x21; 32]).expect("scalar")) as Box<dyn Signer + Send>,
+        signer(),
+    ] {
+        let err = run_job(
+            &rig.updater,
+            Job::Control {
+                op: ControlOp::Start,
+                signer: forger,
+                counter: ControlCounter(1_761_500_000_700),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status(), Some(HandlerError::Denied), "{err}");
+    }
+    assert!(
+        rig.drain().iter().all(|(k, _)| k != "sys/payload/start"),
+        "a forged start never reaches the device"
+    );
+    let text = run_job(
+        &rig.updater,
+        Job::Control {
+            op: ControlOp::Start,
+            signer: Box::new(p256()),
+            counter: ControlCounter(1_761_500_000_800),
+        },
+    )
+    .await
+    .expect("signed P-256 start");
+    assert!(text.starts_with("started"), "{text}");
+    let seen = rig.drain();
+    assert_eq!(
+        seen.iter()
+            .find(|(k, _)| k == "sys/payload/start")
+            .map(|s| s.1),
+        Some(0),
+        "forwarded as the serial start: {seen:?}"
+    );
+    assert_eq!(
+        ControlStore::in_dir(&dir).load(),
+        Persisted::At(ControlCounter(1_761_500_000_800))
+    );
+    let report = rig.gateway.stop().await;
+    assert!(report.updates.denied >= 2, "{report:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

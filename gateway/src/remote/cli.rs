@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mw_service::endpoints::{StaticEndpoint, StaticEndpoints};
+pub use mwctl::cli::KeySpec;
 
 use crate::shell::SYS_KIND;
 
@@ -17,19 +18,26 @@ USAGE:
 COMMANDS:
     info                       sys/info and sys/trust/info of the gateway's device
     upload <FILE.wasm>         Install a payload (sys/loader begin/chunk/commit)
-        --key <KEYFILE>            sign the commit (required: the gateway forwards
-                                   only signed commits, to a claimed device)
+        --key <KEYFILE>            sign the commit (Ed25519 key file; a key is
+                                   required: the gateway forwards only signed
+                                   commits, to a claimed device)
+        --pkcs11 <LABEL>           sign with that key in a PKCS#11 token instead
+                                   (P-256, e.g. mw-release in the TPM; module
+                                   PKCS11_MODULE, token PKCS11_TOKEN, PIN
+                                   PKCS11_PIN or ~/.env)
         --version <N>              signed version, above the device's last one
                                    [default: current Unix time in seconds]
         --start                    then send a signed sys/payload/start
     start | stop               sys/payload/start or stop, signed (required)
-        --key <KEYFILE>            the device's pinned key
+        --key <KEYFILE> | --pkcs11 <LABEL>
+                                   the device's pinned key
         --counter <N>              control counter, above the last accepted
                                    [default: current Unix time in milliseconds]
     fw info                    RP2350: firmware update state
     fw update <IMAGE>          RP2350: install a firmware image (UF2 or raw .bin) in
                                the inactive slot, reboot into it on trial and confirm
-        --key <KEYFILE>            sign the commit (required)
+        --key <KEYFILE> | --pkcs11 <LABEL>
+                                   sign the commit (required)
         --version <MAJOR.MINOR>    expected image version (checked against its IMAGE_DEF)
         --no-reboot                stop after the commit
     fw reboot | fw confirm | fw abort
@@ -63,8 +71,8 @@ pub enum Cmd {
     Upload {
         /// The payload image.
         file: PathBuf,
-        /// The signing key file.
-        key: PathBuf,
+        /// The signing key: a key file or a token key.
+        key: KeySpec,
         /// The signed version, if given.
         version: Option<u32>,
         /// Start it afterwards.
@@ -76,8 +84,8 @@ pub enum Cmd {
     Control {
         /// Start, not stop.
         start: bool,
-        /// The signing key file.
-        key: PathBuf,
+        /// The signing key: a key file or a token key.
+        key: KeySpec,
         /// The control counter, if given.
         counter: Option<u64>,
     },
@@ -87,8 +95,8 @@ pub enum Cmd {
     FwUpdate {
         /// The firmware image.
         file: PathBuf,
-        /// The signing key file.
-        key: PathBuf,
+        /// The signing key: a key file or a token key.
+        key: KeySpec,
         /// The expected version (`MAJOR.MINOR`), if given.
         version: Option<String>,
         /// Reboot and confirm after the commit.
@@ -136,7 +144,8 @@ where
     let mut endpoint: Option<String> = None;
     let mut timeout = DEFAULT_TIMEOUT;
     let mut attempts = DEFAULT_ATTEMPTS;
-    let mut key: Option<PathBuf> = None;
+    let mut key: Option<KeySpec> = None;
+    let mut keys_given = 0;
     let mut version: Option<String> = None;
     let mut counter: Option<u64> = None;
     let mut start = false;
@@ -165,7 +174,14 @@ where
                     .filter(|n| (1..=10).contains(n))
                     .ok_or_else(|| format!("--attempts {v}: not 1..=10"))?;
             }
-            "--key" => key = Some(PathBuf::from(value("--key")?)),
+            "--key" => {
+                key = Some(KeySpec::File(PathBuf::from(value("--key")?)));
+                keys_given += 1;
+            }
+            "--pkcs11" => {
+                key = Some(KeySpec::Pkcs11(value("--pkcs11")?));
+                keys_given += 1;
+            }
             "--version" => version = Some(value("--version")?),
             "--counter" => {
                 let v = value("--counter")?;
@@ -180,10 +196,13 @@ where
             _ => words.push(a),
         }
     }
+    if keys_given > 1 {
+        return Err("give one key: --key <KEYFILE> or --pkcs11 <LABEL>".into());
+    }
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    let need_key = |key: &Option<PathBuf>| {
+    let need_key = |key: &Option<KeySpec>| {
         key.clone().ok_or_else(|| {
-            "--key is required: the gateway forwards only signed requests".to_owned()
+            "--key or --pkcs11 is required: the gateway forwards only signed requests".to_owned()
         })
     };
     let refuse = |what: &str, cmd: &str| Err(format!("{what} is not an option of {cmd}"));
@@ -191,7 +210,7 @@ where
         ["info"] | ["fw", "info"] | ["fw", "reboot"] | ["fw", "confirm"] | ["fw", "abort"] => {
             if key.is_some() || version.is_some() || counter.is_some() || start || no_reboot {
                 return refuse(
-                    "--key/--version/--counter/--start/--no-reboot",
+                    "--key/--pkcs11/--version/--counter/--start/--no-reboot",
                     &words.join(" "),
                 );
             }
@@ -373,6 +392,16 @@ mod tests {
         ] {
             assert_eq!(run(&["--endpoint", EP, "fw", w], None).unwrap().cmd, cmd);
         }
+        // A token key instead of a key file.
+        let c = run(&["--endpoint", EP, "start", "--pkcs11", "mw-release"], None).unwrap();
+        assert_eq!(
+            c.cmd,
+            Cmd::Control {
+                start: true,
+                key: KeySpec::Pkcs11("mw-release".into()),
+                counter: None
+            }
+        );
         assert_eq!(parse(["--help"], None), Ok(Parsed::Help));
     }
 
@@ -423,6 +452,11 @@ mod tests {
                 &["--endpoint", EP, "start", "--key", "k", "--start"][..],
                 None,
             ),
+            (
+                &["--endpoint", EP, "stop", "--key", "k", "--pkcs11", "t"][..],
+                None,
+            ),
+            (&["--endpoint", EP, "info", "--pkcs11", "t"][..], None),
             (&["--endpoint", EP, "--timeout", "0", "info"][..], None),
             (&["--endpoint", EP, "--attempts", "11", "info"][..], None),
             (&["--endpoint", EP, "--bogus", "info"][..], None),

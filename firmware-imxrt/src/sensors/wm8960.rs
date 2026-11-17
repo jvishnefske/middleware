@@ -160,7 +160,11 @@ pub const fn pga_for_gain_db(db: u8) -> u8 {
     let db = if db > 30 { 30 } else { db } as u16;
     let steps = (db * 4 + 1) / 3;
     let code = PGA_0DB as u16 + steps;
-    if code > PGA_MAX as u16 { PGA_MAX } else { code as u8 }
+    if code > PGA_MAX as u16 {
+        PGA_MAX
+    } else {
+        code as u8
+    }
 }
 
 /// Number of writes in [`record_plan`].
@@ -253,7 +257,10 @@ mod tests {
         for db in 0..=30u8 {
             let code = pga_for_gain_db(db);
             let back = (f64::from(code) - f64::from(PGA_0DB)) * 0.75;
-            assert!((back - f64::from(db)).abs() <= 0.375 + 1e-9, "{db} dB -> {code:#x}");
+            assert!(
+                (back - f64::from(db)).abs() <= 0.375 + 1e-9,
+                "{db} dB -> {code:#x}"
+            );
         }
     }
 

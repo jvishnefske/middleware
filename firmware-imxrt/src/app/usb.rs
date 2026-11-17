@@ -50,8 +50,8 @@ use embassy_nxp::pac::usb::regs as r;
 use embassy_time::Timer;
 use embassy_usb::class::cdc_acm::device::{self as cdc_acm, BufferedReceiver, CdcAcmClass, Sender};
 use embassy_usb::driver::{
-    self as drv, Direction, EndpointAddress, EndpointAllocError, EndpointConfig, EndpointError, EndpointInfo,
-    EndpointType, Event, Unsupported,
+    self as drv, Direction, EndpointAddress, EndpointAllocError, EndpointConfig, EndpointError,
+    EndpointInfo, EndpointType, Event, Unsupported,
 };
 use embassy_usb::{Builder, UsbDevice, UsbDeviceSpeed};
 use embedded_io_async::{ErrorKind, ErrorType, Write};
@@ -122,7 +122,15 @@ const USB: pac::usb::Usb = pac::USB1;
 /// The endpoint direction of queue head `slot`.
 fn slot_ep(slot: usize) -> Option<Ep> {
     let number = u8::try_from(slot / 2).ok()?;
-    Ep::new(number, if slot.is_multiple_of(2) { Dir::Out } else { Dir::In }).ok()
+    Ep::new(
+        number,
+        if slot.is_multiple_of(2) {
+            Dir::Out
+        } else {
+            Dir::In
+        },
+    )
+    .ok()
 }
 
 /// The bus address of a static's first word.
@@ -133,7 +141,9 @@ fn addr_of(words: &[AtomicU32]) -> u32 {
 /// The bounce buffer of `slot`.
 fn buffer(slot: usize) -> &'static [AtomicU32] {
     let start = slot.saturating_mul(BUF_WORDS);
-    BUFS.0.get(start..start.saturating_add(BUF_WORDS)).unwrap_or(&[])
+    BUFS.0
+        .get(start..start.saturating_add(BUF_WORDS))
+        .unwrap_or(&[])
 }
 
 /// The bus address of `slot`'s bounce buffer.
@@ -148,7 +158,11 @@ fn dtd_addr(slot: usize) -> u32 {
 
 /// The port speed as last seen.
 fn speed() -> PortSpeed {
-    if FULL_SPEED.load(SeqCst) != 0 { PortSpeed::Full } else { PortSpeed::High }
+    if FULL_SPEED.load(SeqCst) != 0 {
+        PortSpeed::Full
+    } else {
+        PortSpeed::High
+    }
 }
 
 /// The packet size of the CDC data endpoints at the current speed.
@@ -224,8 +238,15 @@ fn setup_pending() -> bool {
 /// `false` if the core refused (never for the sizes used here).
 fn prime_transfer(ep: Ep, len: u32) -> bool {
     let slot = ep.qh_index();
-    let Ok(dtd) = dma::dtd(&DTDS.0, slot) else { return false };
-    let transfer = dma::Transfer { buffer: buffer_addr(slot), len, ioc: true, next: None };
+    let Ok(dtd) = dma::dtd(&DTDS.0, slot) else {
+        return false;
+    };
+    let transfer = dma::Transfer {
+        buffer: buffer_addr(slot),
+        len,
+        ioc: true,
+        next: None,
+    };
     if dma::encode_dtd(dtd, transfer).is_err() {
         return false;
     }
@@ -256,8 +277,13 @@ fn clear_complete(ep: Ep) {
 fn init_queue_heads(max_packet: &[u16; SLOTS]) {
     for slot in 0..dma::QH_COUNT {
         let Some(ep) = slot_ep(slot) else { continue };
-        let Ok(qh) = dma::qh(&QHS.0, ep) else { continue };
-        let mp = max_packet.get(slot).copied().unwrap_or(core_usb::FS_BULK_MAX_PACKET);
+        let Ok(qh) = dma::qh(&QHS.0, ep) else {
+            continue;
+        };
+        let mp = max_packet
+            .get(slot)
+            .copied()
+            .unwrap_or(core_usb::FS_BULK_MAX_PACKET);
         let _ = dma::init_qh(qh, control::reset_qh_config(slot, mp));
     }
 }
@@ -271,14 +297,24 @@ fn power_up() {
             pac::CCM_ANALOG.pll_usb1().modify(|w| w.0 = bypass);
             pac::CCM_ANALOG.pll_usb1().modify(|w| w.0 = start);
             spin_until_zero(|| !pac::CCM_ANALOG.pll_usb1().read().0 & phy::PLL_LOCK);
-            pac::CCM_ANALOG.pll_usb1().modify(|w| w.0 = phy::pll_usb1_unbypass(start));
+            pac::CCM_ANALOG
+                .pll_usb1()
+                .modify(|w| w.0 = phy::pll_usb1_unbypass(start));
         }
     }
     let usbphy = pac::USBPHY1;
-    usbphy.ctrl_set().write_value(pac::usbphy::regs::CtrlSet(phy::PHY_SFTRST));
-    usbphy.ctrl_clr().write_value(pac::usbphy::regs::CtrlClr(phy::PHY_CTRL_CLEAR));
-    usbphy.pwd().write_value(pac::usbphy::regs::Pwd(phy::PHY_PWD_ON));
-    usbphy.ctrl_set().write_value(pac::usbphy::regs::CtrlSet(phy::PHY_CTRL_SET));
+    usbphy
+        .ctrl_set()
+        .write_value(pac::usbphy::regs::CtrlSet(phy::PHY_SFTRST));
+    usbphy
+        .ctrl_clr()
+        .write_value(pac::usbphy::regs::CtrlClr(phy::PHY_CTRL_CLEAR));
+    usbphy
+        .pwd()
+        .write_value(pac::usbphy::regs::Pwd(phy::PHY_PWD_ON));
+    usbphy
+        .ctrl_set()
+        .write_value(pac::usbphy::regs::CtrlSet(phy::PHY_CTRL_SET));
     usbphy.tx().modify(|w| w.0 = phy::phy_tx(w.0));
 }
 
@@ -332,7 +368,10 @@ impl Driver {
             return None;
         }
         power_up();
-        let driver = Driver { used: [0; 2], eps: [None; SLOTS] };
+        let driver = Driver {
+            used: [0; 2],
+            eps: [None; SLOTS],
+        };
         controller_init(&driver.max_packets());
         Some(driver)
     }
@@ -347,7 +386,11 @@ impl Driver {
         mp
     }
 
-    fn alloc(&mut self, config: &EndpointConfig, dir: Dir) -> Result<(Ep, EndpointInfo), EndpointAllocError> {
+    fn alloc(
+        &mut self,
+        config: &EndpointConfig,
+        dir: Dir,
+    ) -> Result<(Ep, EndpointInfo), EndpointAllocError> {
         if usize::from(config.max_packet_size) > BUF_BYTES {
             return Err(EndpointAllocError);
         }
@@ -366,7 +409,10 @@ impl Driver {
             *u |= 1 << n;
         }
         if let Some(slot) = self.eps.get_mut(ep.qh_index()) {
-            *slot = Some(EpCfg { ty: ep_type(config.ep_type), max_packet: config.max_packet_size });
+            *slot = Some(EpCfg {
+                ty: ep_type(config.ep_type),
+                max_packet: config.max_packet_size,
+            });
         }
         let direction = match dir {
             Dir::Out => Direction::Out,
@@ -389,20 +435,46 @@ impl<'a> drv::Driver<'a> for Driver {
     type ControlPipe = ControlPipe;
     type Bus = Bus;
 
-    fn alloc_endpoint_out(&mut self, config: &EndpointConfig) -> Result<EndpointOut, EndpointAllocError> {
+    fn alloc_endpoint_out(
+        &mut self,
+        config: &EndpointConfig,
+    ) -> Result<EndpointOut, EndpointAllocError> {
         let (ep, info) = self.alloc(config, Dir::Out)?;
-        Ok(EndpointOut { data: DataEp { info, ep, pending: None } })
+        Ok(EndpointOut {
+            data: DataEp {
+                info,
+                ep,
+                pending: None,
+            },
+        })
     }
 
-    fn alloc_endpoint_in(&mut self, config: &EndpointConfig) -> Result<EndpointIn, EndpointAllocError> {
+    fn alloc_endpoint_in(
+        &mut self,
+        config: &EndpointConfig,
+    ) -> Result<EndpointIn, EndpointAllocError> {
         let (ep, info) = self.alloc(config, Dir::In)?;
-        Ok(EndpointIn { data: DataEp { info, ep, pending: None } })
+        Ok(EndpointIn {
+            data: DataEp {
+                info,
+                ep,
+                pending: None,
+            },
+        })
     }
 
     fn start(self, _control_max_packet_size: u16) -> (Bus, ControlPipe) {
         let max_packet = self.max_packets();
         init_queue_heads(&max_packet);
-        (Bus { eps: self.eps, max_packet, inited: false, suspended: false }, ControlPipe)
+        (
+            Bus {
+                eps: self.eps,
+                max_packet,
+                inited: false,
+                suspended: false,
+            },
+            ControlPipe,
+        )
     }
 }
 
@@ -419,12 +491,12 @@ impl Bus {
     fn bus_reset(&mut self) {
         for step in control::BUS_RESET {
             match step {
-                control::ResetStep::ClearSetupStat => {
-                    USB.endptsetupstat().write_value(r::Endptsetupstat(USB.endptsetupstat().read().0))
-                }
-                control::ResetStep::ClearComplete => {
-                    USB.endptcomplete().write_value(r::Endptcomplete(USB.endptcomplete().read().0))
-                }
+                control::ResetStep::ClearSetupStat => USB
+                    .endptsetupstat()
+                    .write_value(r::Endptsetupstat(USB.endptsetupstat().read().0)),
+                control::ResetStep::ClearComplete => USB
+                    .endptcomplete()
+                    .write_value(r::Endptcomplete(USB.endptcomplete().read().0)),
                 control::ResetStep::WaitPrimeIdle => {
                     spin_until_zero(|| USB.endptprime().read().0);
                 }
@@ -439,7 +511,9 @@ impl Bus {
                     init_queue_heads(&self.max_packet);
                 }
                 control::ResetStep::CheckPortReset => {
-                    if control::bus_reset_outcome(USB.portsc1().read().0) == control::BusReset::TooLate {
+                    if control::bus_reset_outcome(USB.portsc1().read().0)
+                        == control::BusReset::TooLate
+                    {
                         controller_init(&self.max_packet);
                         USB.usbcmd().modify(|w| w.0 = regs::usbcmd_run(w.0));
                     }
@@ -516,11 +590,15 @@ impl drv::Bus for Bus {
     }
 
     fn endpoint_set_enabled(&mut self, ep_addr: EndpointAddress, enabled: bool) {
-        let Ok(ep) = Ep::from_address(ep_addr.into()) else { return };
+        let Ok(ep) = Ep::from_address(ep_addr.into()) else {
+            return;
+        };
         if ep.number() == 0 {
             return;
         }
-        let Some(cfg) = self.eps.get(ep.qh_index()).copied().flatten() else { return };
+        let Some(cfg) = self.eps.get(ep.qh_index()).copied().flatten() else {
+            return;
+        };
         if enabled {
             if let Ok(qh) = dma::qh(&QHS.0, ep) {
                 let _ = dma::init_qh(qh, QhConfig::data(speed().data_max_packet(cfg.max_packet)));
@@ -541,7 +619,8 @@ impl drv::Bus for Bus {
     }
 
     fn endpoint_is_stalled(&mut self, ep_addr: EndpointAddress) -> bool {
-        Ep::from_address(ep_addr.into()).is_ok_and(|ep| regs::is_stalled(ctrl_read(ep.number()), ep))
+        Ep::from_address(ep_addr.into())
+            .is_ok_and(|ep| regs::is_stalled(ctrl_read(ep.number()), ep))
     }
 
     async fn remote_wakeup(&mut self) -> Result<(), Unsupported> {
@@ -645,7 +724,12 @@ impl drv::ControlPipe for ControlPipe {
         }
     }
 
-    async fn data_out(&mut self, buf: &mut [u8], _first: bool, _last: bool) -> Result<usize, EndpointError> {
+    async fn data_out(
+        &mut self,
+        buf: &mut [u8],
+        _first: bool,
+        _last: bool,
+    ) -> Result<usize, EndpointError> {
         let len = buf.len().min(usize::from(core_usb::EP0_MAX_PACKET)) as u32;
         let epoch = EPOCH.load(SeqCst);
         if !prime_transfer(Ep::EP0_OUT, len) {
@@ -653,15 +737,22 @@ impl drv::ControlPipe for ControlPipe {
         }
         let n = ep0_wait(Ep::EP0_OUT, len, epoch).await? as usize;
         let out = buf.get_mut(..n).ok_or(EndpointError::BufferOverflow)?;
-        dma::copy_from_words(buffer(Ep::EP0_OUT.qh_index()), out).map_err(|_| EndpointError::BufferOverflow)?;
+        dma::copy_from_words(buffer(Ep::EP0_OUT.qh_index()), out)
+            .map_err(|_| EndpointError::BufferOverflow)?;
         Ok(n)
     }
 
-    async fn data_in(&mut self, data: &[u8], _first: bool, last: bool) -> Result<(), EndpointError> {
+    async fn data_in(
+        &mut self,
+        data: &[u8],
+        _first: bool,
+        last: bool,
+    ) -> Result<(), EndpointError> {
         if data.len() > usize::from(core_usb::EP0_MAX_PACKET) {
             return Err(EndpointError::BufferOverflow);
         }
-        dma::copy_to_words(buffer(Ep::EP0_IN.qh_index()), data).map_err(|_| EndpointError::BufferOverflow)?;
+        dma::copy_to_words(buffer(Ep::EP0_IN.qh_index()), data)
+            .map_err(|_| EndpointError::BufferOverflow)?;
         let epoch = EPOCH.load(SeqCst);
         let len = data.len() as u32;
         if !prime_transfer(Ep::EP0_IN, len) {
@@ -741,7 +832,10 @@ impl DataEp {
 
     /// Primes `len` bytes of the bounce buffer.
     fn prime(&mut self, len: u32) -> Result<Pending, EndpointError> {
-        let p = Pending { epoch: EPOCH.load(SeqCst), len };
+        let p = Pending {
+            epoch: EPOCH.load(SeqCst),
+            len,
+        };
         if !prime_transfer(self.ep, len) {
             return Err(EndpointError::Disabled);
         }
@@ -827,7 +921,8 @@ impl drv::EndpointOut for EndpointOut {
         };
         let n = d.wait(p).await? as usize;
         let out = buf.get_mut(..n).ok_or(EndpointError::BufferOverflow)?;
-        dma::copy_from_words(buffer(d.ep.qh_index()), out).map_err(|_| EndpointError::BufferOverflow)?;
+        dma::copy_from_words(buffer(d.ep.qh_index()), out)
+            .map_err(|_| EndpointError::BufferOverflow)?;
         Ok(n)
     }
 }
@@ -846,7 +941,8 @@ impl drv::EndpointIn for EndpointIn {
         if let Some(p) = d.pending {
             d.wait(p).await?;
         }
-        dma::copy_to_words(buffer(d.ep.qh_index()), buf).map_err(|_| EndpointError::BufferOverflow)?;
+        dma::copy_to_words(buffer(d.ep.qh_index()), buf)
+            .map_err(|_| EndpointError::BufferOverflow)?;
         let p = d.prime(buf.len() as u32)?;
         d.wait(p).await?;
         Ok(())
@@ -962,7 +1058,9 @@ async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
 /// for the caller to serve.
 pub fn start(spawner: Spawner, serial: &'static str) -> Result<UsbLink, StartError> {
     let mem = USB_MEMORY.try_take().ok_or(StartError::Taken)?;
-    let state = CDC_STATE.try_init(cdc_acm::State::new()).ok_or(StartError::Taken)?;
+    let state = CDC_STATE
+        .try_init(cdc_acm::State::new())
+        .ok_or(StartError::Taken)?;
     let driver = Driver::new().ok_or(StartError::Taken)?;
     let mut config = embassy_usb::Config::new(core_usb::VID, core_usb::PID);
     config.manufacturer = Some(core_usb::MANUFACTURER);
@@ -971,10 +1069,20 @@ pub fn start(spawner: Spawner, serial: &'static str) -> Result<UsbLink, StartErr
     config.max_power = 100;
     config.max_packet_size_0 = 64;
     config.max_speed = UsbDeviceSpeed::High;
-    let mut builder = Builder::new(driver, config, &mut mem.config, &mut mem.bos, &mut mem.msos, &mut mem.control);
+    let mut builder = Builder::new(
+        driver,
+        config,
+        &mut mem.config,
+        &mut mem.bos,
+        &mut mem.msos,
+        &mut mem.control,
+    );
     let class = CdcAcmClass::new(&mut builder, state, cdc_acm::Config::new());
     let device = builder.build();
     let (tx, rx) = class.split();
     spawner.spawn(usb_task(device).map_err(|_| StartError::Spawn)?);
-    Ok(SerialLink::with_inbox(Duplex::new(rx.into_buffered(&mut mem.rx), CdcWriter::new(tx))))
+    Ok(SerialLink::with_inbox(Duplex::new(
+        rx.into_buffered(&mut mem.rx),
+        CdcWriter::new(tx),
+    )))
 }

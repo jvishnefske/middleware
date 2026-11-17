@@ -9,7 +9,7 @@ use crate::layout::SECTORS;
 use middleware::loader::DeviceInfo;
 use middleware::loader::trust::{TrustInfo, Version};
 use mwctl::plan::upload_plan;
-use mwctl::sign::{Seed, sign_commit};
+use mwctl::sign::{P256Key, Seed, Signer, sign_commit};
 
 /// The golden vector's key (`web/test/fixtures/trust-vector.json`, TEST
 /// KEY ONLY: seed 00..1f).
@@ -24,7 +24,11 @@ pub fn test_seed() -> Seed {
 pub const NODE: SenderId = SenderId([0x9a, 0x51, 0x0c, 0x77, 0x02, 0xe4, 0x18, 0x3b]);
 
 pub fn facts() -> Facts {
-    Facts { chip: CHIP, firmware: "0.6.0", node: NODE }
+    Facts {
+        chip: CHIP,
+        firmware: "0.6.0",
+        node: NODE,
+    }
 }
 
 type Svc<'d> = Service<SectorFlash<MemSectors<'d>>>;
@@ -48,12 +52,14 @@ fn call(s: &mut Svc<'_>, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, HandlerEr
 
 /// An image of `len` bytes (not WASM: the service only stores it).
 fn image(len: usize, seed: u8) -> Vec<u8> {
-    (0..len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed)).collect()
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed))
+        .collect()
 }
 
 /// Uploads `img`, signed as `version` when given; the commit's reply.
 fn upload(s: &mut Svc<'_>, img: &[u8], version: Option<u32>) -> Result<Vec<u8>, HandlerError> {
-    let auth = version.and_then(|v| sign_commit(img, &test_seed(), Version(v)));
+    let auth = version.and_then(|v| sign_commit(img, &test_seed(), Version(v)).ok());
     let steps = upload_plan(img, None, auth).expect("plan");
     let (commit, transfer) = steps.split_last().expect("steps");
     for step in transfer {
@@ -94,10 +100,18 @@ fn pn5_sys_info_names_the_linux_node_and_fw_keys_are_not_found() {
     assert_eq!(info.status, PayloadStatus::Empty);
     // A board without firmware OTA: every sys/fw/* key is unknown.
     for k in middleware::fw_ota::keys::ALL {
-        assert_eq!(call(&mut s, k, b"x"), Err(HandlerError::NotFound), "{}", k.as_str());
+        assert_eq!(
+            call(&mut s, k, b"x"),
+            Err(HandlerError::NotFound),
+            "{}",
+            k.as_str()
+        );
     }
     // Start with nothing installed is refused, as on a board.
-    assert_eq!(call(&mut s, keys::START, &[]), Err(HandlerError::InvalidRequest));
+    assert_eq!(
+        call(&mut s, keys::START, &[]),
+        Err(HandlerError::InvalidRequest)
+    );
 }
 
 #[test]
@@ -110,12 +124,34 @@ fn pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart()
         // Unclaimed: trust on first use, unsigned accepted.
         upload(&mut s, &old, None).expect("unsigned upload");
         assert_eq!(installed(&mut s), Some(old.clone()));
-        call(&mut s, keys::TRUST_CLAIM, &test_seed().public_key().0).expect("claim");
-        let ti = TrustInfo::decode(&call(&mut s, keys::TRUST_INFO, &[]).expect("info")).expect("decode");
-        assert!(matches!(ti.state, TrustState::Claimed { min_version: Version(0), .. }), "{ti:?}");
+        call(
+            &mut s,
+            keys::TRUST_CLAIM,
+            &test_seed().public_key().as_bytes(),
+        )
+        .expect("claim");
+        let ti =
+            TrustInfo::decode(&call(&mut s, keys::TRUST_INFO, &[]).expect("info")).expect("decode");
+        assert!(
+            matches!(
+                ti.state,
+                TrustState::Claimed {
+                    min_version: Version(0),
+                    ..
+                }
+            ),
+            "{ti:?}"
+        );
         // Claimed: unsigned and a second claim are denied.
         assert_eq!(upload(&mut s, &new, None), Err(HandlerError::Denied));
-        assert_eq!(call(&mut s, keys::TRUST_CLAIM, &Seed::new([9; 32]).public_key().0), Err(HandlerError::Denied));
+        assert_eq!(
+            call(
+                &mut s,
+                keys::TRUST_CLAIM,
+                &Seed::new([9; 32]).public_key().as_bytes()
+            ),
+            Err(HandlerError::Denied)
+        );
         assert_eq!(installed(&mut s), Some(old.clone()));
         // Signed: accepted, min_version raised; a replay is denied.
         upload(&mut s, &new, Some(100)).expect("signed upload");
@@ -129,17 +165,66 @@ fn pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart()
     assert!(matches!(boot.installed, Some(Ok(h)) if h.len == 5000));
     assert!(matches!(
         boot.trust.map(|p| p.trust),
-        Some(TrustState::Claimed { min_version: Version(100), .. })
+        Some(TrustState::Claimed {
+            min_version: Version(100),
+            ..
+        })
     ));
     assert_eq!(s.status(), PayloadStatus::Stopped);
     assert_eq!(upload(&mut s, &old, Some(100)), Err(HandlerError::Denied));
     upload(&mut s, &old, Some(101)).expect("newer version");
 }
 
+#[test]
+fn pn5_a_p256_key_claims_and_signs_as_on_a_board_and_survives_restart() {
+    // TEST KEY ONLY: the OpenSSL vector's scalar (a token key's kind).
+    let key = P256Key::from_scalar(&[0x20; 32]).expect("scalar");
+    let signed = |s: &mut Svc<'_>, img: &[u8], by: &dyn Signer, v: u32| {
+        let auth = sign_commit(img, by, Version(v)).expect("sign");
+        let steps = upload_plan(img, None, Some(auth)).expect("plan");
+        let (commit, transfer) = steps.split_last().expect("steps");
+        for step in transfer {
+            call(s, step.key, &step.body)?;
+        }
+        call(s, commit.key, &commit.body)
+    };
+    let img = image(4000, 3);
+    let mut disk = Disk::default();
+    {
+        let (mut s, _) = open(&mut disk, None);
+        call(&mut s, keys::TRUST_CLAIM, key.public_key().as_bytes()).expect("P-256 claim");
+        let ti =
+            TrustInfo::decode(&call(&mut s, keys::TRUST_INFO, &[]).expect("info")).expect("decode");
+        assert!(
+            matches!(ti.state, TrustState::Claimed { key: k, .. } if k == key.public_key()),
+            "{ti:?}"
+        );
+        // Signed by the Ed25519 key or another P-256 key: denied.
+        assert_eq!(
+            signed(&mut s, &img, &test_seed(), 10),
+            Err(HandlerError::Denied)
+        );
+        let other = P256Key::from_scalar(&[0x21; 32]).expect("scalar");
+        assert_eq!(signed(&mut s, &img, &other, 10), Err(HandlerError::Denied));
+        signed(&mut s, &img, &key, 10).expect("P-256 signed upload");
+        assert_eq!(installed(&mut s), Some(img.clone()));
+    }
+    let (mut s, boot) = open(&mut disk, None);
+    assert!(matches!(
+        boot.trust.map(|p| p.trust),
+        Some(TrustState::Claimed { key: k, min_version: Version(10) }) if k == key.public_key()
+    ));
+    assert_eq!(signed(&mut s, &img, &key, 10), Err(HandlerError::Denied));
+    signed(&mut s, &img, &key, 11).expect("newer version");
+}
+
 /// Claims and installs a signed image on a node whose flash loses power
 /// after `cut` stores; the replies.
-fn claim_and_install(s: &mut Svc<'_>, img: &[u8]) -> (Result<Vec<u8>, HandlerError>, Result<Vec<u8>, HandlerError>) {
-    let claim = call(s, keys::TRUST_CLAIM, &test_seed().public_key().0);
+fn claim_and_install(
+    s: &mut Svc<'_>,
+    img: &[u8],
+) -> (Result<Vec<u8>, HandlerError>, Result<Vec<u8>, HandlerError>) {
+    let claim = call(s, keys::TRUST_CLAIM, &test_seed().public_key().as_bytes());
     let commit = match claim {
         Ok(_) => upload(s, img, Some(7)),
         Err(e) => Err(e),
@@ -164,7 +249,9 @@ fn pn3_power_loss_at_any_store_leaves_the_old_or_the_new_image_and_record() {
         let (claim, commit) = claim_and_install(&mut s, &new);
         claim.expect("claim");
         commit.expect("commit");
-        s.store_mut().map(|st| st.flash().sectors().stores()).expect("store")
+        s.store_mut()
+            .map(|st| st.flash().sectors().stores())
+            .expect("store")
     };
     assert!(total > 4, "{total}");
     for cut in 0..total {
@@ -182,7 +269,10 @@ fn pn3_power_loss_at_any_store_leaves_the_old_or_the_new_image_and_record() {
         match trust {
             TrustState::Unclaimed => assert!(!claim_ok, "cut {cut}: a confirmed claim was lost"),
             TrustState::Claimed { min_version, .. } => {
-                assert!(min_version == Version(0) || min_version == Version(7), "cut {cut}: {min_version:?}");
+                assert!(
+                    min_version == Version(0) || min_version == Version(7),
+                    "cut {cut}: {min_version:?}"
+                );
                 // The new image never runs with the old min_version.
                 if img == new {
                     assert_eq!(min_version, Version(7), "cut {cut}");
@@ -201,7 +291,14 @@ fn pn5_an_unreadable_trust_record_refuses_installs() {
     let mut disk = Disk::default();
     // A poisoned flash: the first store fails, and every read after it.
     let (mut s, _) = open(&mut disk, Some(0));
-    assert_eq!(call(&mut s, keys::TRUST_CLAIM, &test_seed().public_key().0), Err(HandlerError::Internal));
+    assert_eq!(
+        call(
+            &mut s,
+            keys::TRUST_CLAIM,
+            &test_seed().public_key().as_bytes()
+        ),
+        Err(HandlerError::Internal)
+    );
     // Now the flash is poisoned; reopening the service on it reads no
     // trust record, so installs fail closed.
     let flash = s.store_mut().map(|st| st.flash().poisoned());
@@ -213,7 +310,13 @@ fn pn5_an_unreadable_trust_record_refuses_installs() {
     assert!(f.sync().is_err());
     let (mut s, boot) = Service::open(f, facts());
     assert_eq!(boot.trust, None);
-    assert_eq!(call(&mut s, keys::BEGIN, &[0; 8]), Err(HandlerError::Unavailable));
-    assert_eq!(call(&mut s, keys::TRUST_CLAIM, &[0; 32]), Err(HandlerError::Unavailable));
+    assert_eq!(
+        call(&mut s, keys::BEGIN, &[0; 8]),
+        Err(HandlerError::Unavailable)
+    );
+    assert_eq!(
+        call(&mut s, keys::TRUST_CLAIM, &[0; 32]),
+        Err(HandlerError::Unavailable)
+    );
     assert!(call(&mut s, keys::INFO, &[]).is_ok());
 }

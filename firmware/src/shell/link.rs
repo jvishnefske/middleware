@@ -89,7 +89,14 @@ pub async fn serve<IO: Read + Write>(mut link: PortLink<IO>, port: Port, bus: &'
             Either::First(Err(_)) => Timer::after(ERROR_BACKOFF).await,
             Either::Second(msg) => {
                 if let Ok(key) = middleware::Key::new(&msg.key) {
-                    send(&mut link, &Frame::Publish { key, payload: &msg.payload }).await;
+                    send(
+                        &mut link,
+                        &Frame::Publish {
+                            key,
+                            payload: &msg.payload,
+                        },
+                    )
+                    .await;
                 }
             }
         }

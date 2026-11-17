@@ -53,8 +53,8 @@
 //!    `sys/trust/*`, unknown keys) is decided by
 //!    `esp_base::dispatch::handle_request`, the ESP base firmware's own pure
 //!    dispatcher, exactly as on the RP base firmware: no re-key window
-//!    (no presence button is wired), no staging (requests come over the
-//!    serial link, never over the air), no esp-base chip profile
+//!    (no presence button is wired), staging only for requests over Zenoh
+//!    (see *Origins and transfers* below), no esp-base chip profile
 //!    (`sys/board` is `NotFound`). `sys/info` reports [`Facts::chip`],
 //!    [`Facts::firmware`], the payload capacity, the status, the node id
 //!    and, with the runtime ([`Facts::runtime`]), [`RUNTIME_CAPS`].
@@ -65,6 +65,29 @@
 //!    action replies `Internal` and leaves the state of
 //!    `esp_base::dispatch::after_storage_failure` with the trust record on
 //!    flash adopted, so RAM never trusts less than a reboot would.
+//!
+//! # Origins and transfers
+//!
+//! The shell names the requester of each request with
+//! [`Service::set_origin`]: [`Origin::Serial`] for the USB CDC and LPUART
+//! links (one requester: whoever holds the board), [`Origin::Air`] with
+//! the board's Ethernet MAC for the Zenoh link (every Zenoh peer is one
+//! requester: queries name no authenticated sender). The Zenoh gate
+//! (`crate::zenoh_mgmt`) has admitted a Zenoh request before it gets here.
+//!
+//! * Over Zenoh a payload upload **stages** beside the running payload
+//!   (`Context::staging`, as over ESP-NOW): `begin` and `chunk` write the
+//!   inactive slot only and the payload keeps running until a commit
+//!   signed by the pinned key activates the new image.
+//! * One payload transfer and one firmware transfer exist at a time. The
+//!   requester whose `begin` started a transfer owns it
+//!   (`esp_base::ota::owner_after` for the loader; the same rule for
+//!   `sys/fw/*`); a `begin` from anyone takes it over, and a `chunk` or
+//!   `commit` from another requester is `InvalidRequest` without touching
+//!   the transfer, so a Zenoh peer cannot spoil a serial upload with
+//!   chunks, nor the other way round. [`Service::abandon_transfer`] ends
+//!   the payload transfer when the gate refused its owner's unsigned
+//!   commit (`esp_base::ota::Refusal::abandons_transfer`).
 //!
 //! When the trust record cannot be read at boot (either sector
 //! unreadable) the service fails closed, as RP V13: the payload requests
@@ -117,13 +140,14 @@ use core::fmt;
 use embedded_storage::nor_flash::NorFlash;
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::image::Header;
+pub use esp_base::ota::Origin;
 use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{PARTITION_LEN, Persisted, RECORD_LEN, TrustStore};
 use heapless::Vec;
 use middleware::fw_ota::BootInfo;
 use middleware::loader::trust::TrustState;
-use middleware::loader::{Caps, PayloadStatus, keys};
+use middleware::loader::{Caps, Loader, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
@@ -155,7 +179,9 @@ fn trust_readable<F: NorFlash>(flash: &mut F, base: u32) -> bool {
 /// The `sys/info` capabilities of a build with the runtime: requests on
 /// payload keys (`SERVE`), the FXOS8700CQ source route (`SOURCE_IMU`,
 /// SC7) and the microphone route (`SOURCE_MICROPHONE`, SC8).
-pub const RUNTIME_CAPS: Caps = Caps::SERVE.with(Caps::SOURCE_IMU).with(Caps::SOURCE_MICROPHONE);
+pub const RUNTIME_CAPS: Caps = Caps::SERVE
+    .with(Caps::SOURCE_IMU)
+    .with(Caps::SOURCE_MICROPHONE);
 
 /// What `sys/info` reports about this build, besides the store capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +363,12 @@ pub struct Service<F> {
     /// The configuration record on flash; `None` when it could not be read
     /// at boot.
     config: Option<config::Stored>,
+    /// The requester of the request being handled ([`Service::set_origin`]).
+    origin: Origin,
+    /// The requester that owns the payload transfer in progress.
+    owner: Option<Origin>,
+    /// The requester that owns the firmware transfer in progress.
+    fw_owner: Option<Origin>,
 }
 
 impl<F: NorFlash> Service<F> {
@@ -404,6 +436,9 @@ impl<F: NorFlash> Service<F> {
             served: ServedKeys::new(),
             config_region: map.config,
             config,
+            origin: Origin::Serial,
+            owner: None,
+            fw_owner: None,
         };
         Ok((
             svc,
@@ -503,6 +538,47 @@ impl<F: NorFlash> Service<F> {
         }
     }
 
+    /// Names the requester of the requests that follow (see the module
+    /// docs): the shell sets it before every request.
+    pub fn set_origin(&mut self, origin: Origin) {
+        self.origin = origin;
+    }
+
+    /// The requester of the request being handled.
+    pub const fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// The requester that owns the payload transfer in progress (`None`
+    /// when the loader is idle).
+    pub const fn loader_owner(&self) -> Option<Origin> {
+        self.owner
+    }
+
+    /// The requester that owns the firmware transfer in progress.
+    pub const fn fw_owner(&self) -> Option<Origin> {
+        self.fw_owner
+    }
+
+    /// Ends the payload transfer in progress, as a refused commit does: the
+    /// Zenoh gate refused its owner's unsigned commit. The running payload
+    /// keeps running (a Zenoh transfer only ever wrote the inactive slot).
+    pub fn abandon_transfer(&mut self) {
+        self.state = self.state.storage_failed();
+        self.owner = None;
+    }
+
+    /// Whether `key` continues a transfer another requester owns.
+    fn foreign(
+        &self,
+        owner: Option<Origin>,
+        key: Key<'_>,
+        chunk: Key<'_>,
+        commit: Key<'_>,
+    ) -> bool {
+        owner.is_some_and(|o| o != self.origin) && (key == chunk || key == commit)
+    }
+
     /// Records whether the protocol link is up (an input of the
     /// [`SelfTest`]).
     pub fn set_link_ready(&mut self, ready: bool) {
@@ -546,7 +622,22 @@ impl<F: NorFlash> Service<F> {
         if self.trust.is_none() && loader_needs_trust(key) {
             return Handled::now(Err(HandlerError::Unavailable));
         }
-        let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
+        if self.foreign(self.owner, key, keys::CHUNK, keys::COMMIT) {
+            return Handled::now(Err(HandlerError::InvalidRequest));
+        }
+        let ctx = Context {
+            staging: matches!(self.origin, Origin::Air(_)),
+            ..self.ctx
+        };
+        let outcome = handle_request(self.state, &ctx, &Request::new(key, body), out);
+        let h = self.perform(key, outcome);
+        let receiving = matches!(self.state.loader(), Loader::Receiving { .. });
+        self.owner = esp_base::ota::owner_after(self.owner, self.origin, key, receiving);
+        h
+    }
+
+    /// Performs a dispatch outcome (storage, notes, state).
+    fn perform(&mut self, key: Key<'_>, outcome: Outcome<'_>) -> Handled {
         if outcome.action == Action::Start {
             return Handled {
                 reply: Reply::Start,
@@ -616,6 +707,26 @@ impl<F: NorFlash> Service<F> {
 
     /// A `sys/fw/*` request, to the A/B updater only.
     fn handle_fw(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
+        use middleware::fw_ota::keys as fwk;
+        if self.foreign(self.fw_owner, key, fwk::CHUNK, fwk::COMMIT) {
+            return Handled::now(Err(HandlerError::InvalidRequest));
+        }
+        let h = self.handle_fw_owned(key, body, out);
+        let receiving = matches!(
+            self.fw.state(),
+            Some(middleware::fw_ota::FwUpdate::Receiving(_))
+        );
+        // The loader's ownership rule (`esp_base::ota::owner_after`) for
+        // the firmware transfer.
+        self.fw_owner = match (receiving, key == fwk::BEGIN) {
+            (false, _) => None,
+            (true, true) => Some(self.origin),
+            (true, false) => self.fw_owner,
+        };
+        h
+    }
+
+    fn handle_fw_owned(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
         let ctx = FwContext {
             node: self.node(),
             trust: self.trust.as_ref().map(|_| self.state.trust()),
@@ -710,7 +821,12 @@ impl<F: NorFlash> Service<F> {
                 trust: TrustState::Claimed { key, .. },
             } => {
                 push(Note::Pinned {
-                    prefix: [key.0[0], key.0[1], key.0[2], key.0[3]],
+                    prefix: [
+                        key.as_bytes()[0],
+                        key.as_bytes()[1],
+                        key.as_bytes()[2],
+                        key.as_bytes()[3],
+                    ],
                 });
             }
             _ => {}

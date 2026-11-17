@@ -259,7 +259,12 @@ pub struct Expired<'a> {
 
 impl fmt::Display for Expired<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "disc: down {} {} (expired)", Safe(self.kind.as_str()), Safe(self.instance))
+        write!(
+            f,
+            "disc: down {} {} (expired)",
+            Safe(self.kind.as_str()),
+            Safe(self.instance)
+        )
     }
 }
 
@@ -290,7 +295,10 @@ impl Neighbours {
     }
 
     fn refuse(self) -> Self {
-        Neighbours { refused: self.refused.saturating_add(1), ..self }
+        Neighbours {
+            refused: self.refused.saturating_add(1),
+            ..self
+        }
     }
 
     /// Records held by `node`.
@@ -341,15 +349,15 @@ impl Neighbours {
             return (Neighbours { dir, refused }.refuse(), None);
         }
         let known = dir.len();
-        let heard = matches!(change, Change::Added | Change::Updated | Change::Removed)
-        .then_some(Heard {
-            change,
-            kind: service.kind,
-            instance: service.instance,
-            node: service.node,
-            ttl_s: service.ttl_s,
-            known,
-        });
+        let heard =
+            matches!(change, Change::Added | Change::Updated | Change::Removed).then_some(Heard {
+                change,
+                kind: service.kind,
+                instance: service.instance,
+                node: service.node,
+                ttl_s: service.ttl_s,
+                known,
+            });
         (Neighbours { dir, refused }, heard)
     }
 
@@ -519,7 +527,14 @@ mod tests {
 
     /// A beacon for `instance` of [`CAM_KIND`] declaring `node`.
     fn svc_beacon(instance: &str, node: Option<SenderId>, ttl_s: u32, out: &mut [u8; 64]) -> usize {
-        let svc = Service { kind: CAM_KIND, instance, node, endpoint: Endpoint::Local, txt: &[], ttl_s };
+        let svc = Service {
+            kind: CAM_KIND,
+            instance,
+            node,
+            endpoint: Endpoint::Local,
+            txt: &[],
+            ttl_s,
+        };
         encode(&svc, out).unwrap()
     }
 
@@ -591,6 +606,9 @@ mod tests {
         );
         assert!(line.bytes().all(|b| (0x20..=0x7E).contains(&b)));
         let expired: std::vec::Vec<_> = d.expired(30_000).map(|e| e.to_string()).collect();
-        assert_eq!(expired, ["disc: down cam/jpeg x\\x1b[2J\\x0d\\x0adisc: up \\x5c \\xc3\\xa9 (expired)"]);
+        assert_eq!(
+            expired,
+            ["disc: down cam/jpeg x\\x1b[2J\\x0d\\x0adisc: up \\x5c \\xc3\\xa9 (expired)"]
+        );
     }
 }

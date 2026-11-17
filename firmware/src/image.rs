@@ -107,7 +107,11 @@ impl Header {
         let len = word(1)?;
         let crc = word(2)?;
         let generation = Generation(word(3)?);
-        (len != 0 && len <= capacity).then_some(Header { len, crc, generation })
+        (len != 0 && len <= capacity).then_some(Header {
+            len,
+            crc,
+            generation,
+        })
     }
 }
 
@@ -158,7 +162,9 @@ impl Region {
     /// down to whole sectors.
     pub const fn new(size: u32) -> Self {
         let half = size / 2;
-        Region { slot_size: half - half % SECTOR }
+        Region {
+            slot_size: half - half % SECTOR,
+        }
     }
 
     /// Size of one slot (header sector plus image area).
@@ -193,7 +199,9 @@ impl Region {
         }
         let from = self.header_offset(slot);
         let sectors = len.div_ceil(SECTOR);
-        let to = from.checked_add(SECTOR)?.checked_add(sectors.checked_mul(SECTOR)?)?;
+        let to = from
+            .checked_add(SECTOR)?
+            .checked_add(sectors.checked_mul(SECTOR)?)?;
         Some((from, to))
     }
 }
@@ -233,7 +241,11 @@ impl Default for WordWriter {
 impl WordWriter {
     /// Expects the first chunk at offset 0.
     pub const fn new() -> Self {
-        WordWriter { next: 0, tail: [0xFF; WORD as usize], tail_len: 0 }
+        WordWriter {
+            next: 0,
+            tail: [0xFF; WORD as usize],
+            tail_len: 0,
+        }
     }
 
     /// Image offset of the next expected byte.
@@ -242,7 +254,11 @@ impl WordWriter {
     }
 
     /// Accepts `data` at `offset` and returns the writes it completes.
-    pub fn push<'a>(self, offset: u32, data: &'a [u8]) -> Result<(Self, WritePlan<'a>), OutOfOrder> {
+    pub fn push<'a>(
+        self,
+        offset: u32,
+        data: &'a [u8],
+    ) -> Result<(Self, WritePlan<'a>), OutOfOrder> {
         if offset != self.next {
             return Err(OutOfOrder);
         }
@@ -252,7 +268,11 @@ impl WordWriter {
         let mut tail_len = self.tail_len;
         let word = WORD as usize;
         // Complete a pending partial word first.
-        let fill = if tail_len > 0 { (word - tail_len).min(data.len()) } else { 0 };
+        let fill = if tail_len > 0 {
+            (word - tail_len).min(data.len())
+        } else {
+            0
+        };
         let (front, rest) = data.split_at(fill);
         for (dst, src) in tail.iter_mut().skip(tail_len).zip(front) {
             *dst = *src;
@@ -267,7 +287,11 @@ impl WordWriter {
         }
         if tail_len > 0 {
             // The chunk ended inside the pending word.
-            let next = WordWriter { next: end, tail, tail_len };
+            let next = WordWriter {
+                next: end,
+                tail,
+                tail_len,
+            };
             return Ok((next, WritePlan { head, body: None }));
         }
         let aligned = rest.len() - rest.len() % word;
@@ -276,7 +300,11 @@ impl WordWriter {
         for (dst, src) in tail.iter_mut().zip(remainder) {
             *dst = *src;
         }
-        let next = WordWriter { next: end, tail, tail_len: remainder.len() };
+        let next = WordWriter {
+            next: end,
+            tail,
+            tail_len: remainder.len(),
+        };
         Ok((next, WritePlan { head, body }))
     }
 
@@ -291,7 +319,11 @@ mod tests {
     use super::*;
 
     fn header(generation: u32) -> Header {
-        Header { len: 1234, crc: 0xDEAD_BEEF, generation: Generation(generation) }
+        Header {
+            len: 1234,
+            crc: 0xDEAD_BEEF,
+            generation: Generation(generation),
+        }
     }
 
     #[test]
@@ -300,7 +332,11 @@ mod tests {
         assert_eq!(Header::decode(&h.encode(), 4096), Some(h));
         assert_eq!(Header::decode(&[0xFF; HEADER_LEN], u32::MAX), None);
         assert_eq!(Header::decode(&h.encode(), 1233), None);
-        let zero = Header { len: 0, crc: 0, generation: Generation(0) };
+        let zero = Header {
+            len: 0,
+            crc: 0,
+            generation: Generation(0),
+        };
         assert_eq!(Header::decode(&zero.encode(), 10), None);
         assert_eq!(Header::decode(&h.encode()[..15], 4096), None);
         // Fields written but the magic word still erased: a torn header.
@@ -314,14 +350,23 @@ mod tests {
         let r = Region::new(256 * 1024);
         assert_eq!(r.slot_size(), 128 * 1024);
         assert_eq!(r.capacity(), 124 * 1024);
-        assert_eq!((r.header_offset(Slot::A), r.data_offset(Slot::A)), (0, SECTOR));
-        assert_eq!((r.header_offset(Slot::B), r.data_offset(Slot::B)), (0x2_0000, 0x2_1000));
+        assert_eq!(
+            (r.header_offset(Slot::A), r.data_offset(Slot::A)),
+            (0, SECTOR)
+        );
+        assert_eq!(
+            (r.header_offset(Slot::B), r.data_offset(Slot::B)),
+            (0x2_0000, 0x2_1000)
+        );
         assert_eq!(r.erase_span(Slot::A, 1), Some((0, 2 * SECTOR)));
         assert_eq!(r.erase_span(Slot::A, SECTOR), Some((0, 2 * SECTOR)));
         assert_eq!(r.erase_span(Slot::A, SECTOR + 1), Some((0, 3 * SECTOR)));
         assert_eq!(r.erase_span(Slot::A, r.capacity()), Some((0, 0x2_0000)));
         assert_eq!(r.erase_span(Slot::B, 1), Some((0x2_0000, 0x2_2000)));
-        assert_eq!(r.erase_span(Slot::B, r.capacity()), Some((0x2_0000, 0x4_0000)));
+        assert_eq!(
+            r.erase_span(Slot::B, r.capacity()),
+            Some((0x2_0000, 0x4_0000))
+        );
         assert_eq!(r.erase_span(Slot::B, r.capacity() + 1), None);
         assert_eq!(Region::new(SECTOR * 4 + 5).capacity(), SECTOR);
         assert_eq!(Region::new(SECTOR * 3).capacity(), 0);
@@ -349,10 +394,22 @@ mod tests {
         assert_eq!(newest(None, None), None);
         assert_eq!(newest(Some(header(3)), None), Some((Slot::A, header(3))));
         assert_eq!(newest(None, Some(header(3))), Some((Slot::B, header(3))));
-        assert_eq!(newest(Some(header(3)), Some(header(4))), Some((Slot::B, header(4))));
-        assert_eq!(newest(Some(header(5)), Some(header(4))), Some((Slot::A, header(5))));
-        assert_eq!(newest(Some(header(0)), Some(header(u32::MAX))), Some((Slot::A, header(0))));
-        assert_eq!(newest(Some(header(9)), Some(header(9))), Some((Slot::A, header(9))));
+        assert_eq!(
+            newest(Some(header(3)), Some(header(4))),
+            Some((Slot::B, header(4)))
+        );
+        assert_eq!(
+            newest(Some(header(5)), Some(header(4))),
+            Some((Slot::A, header(5)))
+        );
+        assert_eq!(
+            newest(Some(header(0)), Some(header(u32::MAX))),
+            Some((Slot::A, header(0)))
+        );
+        assert_eq!(
+            newest(Some(header(9)), Some(header(9))),
+            Some((Slot::A, header(9)))
+        );
         assert_eq!(
             newest(Some(header(0)), Some(header(0x8000_0000))),
             Some((Slot::A, header(0)))
@@ -399,7 +456,16 @@ mod tests {
     #[test]
     fn word_writer_aligns_any_chunking() {
         let image: [u8; 101] = core::array::from_fn(|i| (i * 7 + 1) as u8);
-        for sizes in [&[1usize][..], &[3], &[4], &[5], &[2, 7], &[64], &[101], &[1, 4, 6, 3]] {
+        for sizes in [
+            &[1usize][..],
+            &[3],
+            &[4],
+            &[5],
+            &[2, 7],
+            &[64],
+            &[101],
+            &[1, 4, 6, 3],
+        ] {
             replay(&image, sizes);
         }
         replay(&image[..8], &[8]);

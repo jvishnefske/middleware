@@ -196,10 +196,16 @@ impl MicRoute {
                 if batch.is_some() {
                     self.batches = self.batches.saturating_add(1);
                 }
-                return Fed { consumed: i + 1, batch };
+                return Fed {
+                    consumed: i + 1,
+                    batch,
+                };
             }
         }
-        Fed { consumed: len, batch: None }
+        Fed {
+            consumed: len,
+            batch: None,
+        }
     }
 }
 
@@ -216,7 +222,9 @@ mod tests {
     /// sample `start`.
     fn sine(hz: f64, amp: f64, rate: u32, start: usize, n: usize) -> StdVec<i16> {
         (start..start + n)
-            .map(|i| (amp * (2.0 * core::f64::consts::PI * hz * i as f64 / f64::from(rate)).sin()) as i16)
+            .map(|i| {
+                (amp * (2.0 * core::f64::consts::PI * hz * i as f64 / f64::from(rate)).sin()) as i16
+            })
             .collect()
     }
 
@@ -256,8 +264,14 @@ mod tests {
         let mut back = StdVec::new();
         for (k, b) in batches.iter().enumerate() {
             let b = decode(b).unwrap();
-            assert_eq!((b.header.kind, b.header.format), (SensorKind::Microphone, SampleFormat::I16));
-            assert_eq!((b.header.first_index, b.header.count), (k as u64 * 160, 160));
+            assert_eq!(
+                (b.header.kind, b.header.format),
+                (SensorKind::Microphone, SampleFormat::I16)
+            );
+            assert_eq!(
+                (b.header.first_index, b.header.count),
+                (k as u64 * 160, 160)
+            );
             // 10 ms apart, the first sample at t0 + index / rate.
             assert_eq!(b.header.timestamp_us, 1_000_000 + k as u64 * 10_000);
             back.extend(b.i16_values());
@@ -274,7 +288,14 @@ mod tests {
         assert_eq!(batches.len(), 10);
         let decoded: StdVec<i16> = batches
             .iter()
-            .flat_map(|b| decode(b).unwrap().data.iter().map(|c| mulaw_decode(*c)).collect::<StdVec<_>>())
+            .flat_map(|b| {
+                decode(b)
+                    .unwrap()
+                    .data
+                    .iter()
+                    .map(|c| mulaw_decode(*c))
+                    .collect::<StdVec<_>>()
+            })
             .collect();
         for (a, b) in input.iter().zip(&decoded) {
             // µ-law's step at 20000 is 1024; anywhere it is at most 1/16
@@ -314,7 +335,13 @@ mod tests {
         let cfg = MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 0).unwrap();
         let mut r = MicRoute::new(cfg, 0).unwrap();
         let mut out = [0u8; MAX_BATCH];
-        assert_eq!(r.feed(0, &[1; 100], &mut out), Fed { consumed: 100, batch: None });
+        assert_eq!(
+            r.feed(0, &[1; 100], &mut out),
+            Fed {
+                consumed: 100,
+                batch: None
+            }
+        );
         r.gap(50);
         assert_eq!(r.lost(), 150, "100 pending + 50 lost");
         let fed = r.feed(20_000, &[2; 160], &mut out);
@@ -354,7 +381,13 @@ mod tests {
         let b = r.feed(0, &input[160..], &mut out);
         assert_eq!((b.consumed, b.batch.is_some()), (160, true));
         let c = r.feed(0, &input[320..], &mut out);
-        assert_eq!(c, Fed { consumed: 80, batch: None });
+        assert_eq!(
+            c,
+            Fed {
+                consumed: 80,
+                batch: None
+            }
+        );
     }
 
     #[test]
@@ -366,7 +399,13 @@ mod tests {
             let cfg = MicConfig::new(hz, 0, AudioMode::Levels, 1, hz / 100).unwrap();
             assert_eq!(MicRoute::new(cfg, 0).unwrap().rate().hz(), u32::from(hz));
         }
-        let bad = MicConfig { rate_hz: 11_025, gain_db: 0, mode: AudioMode::Pcm, samples: 441, block: 0 };
+        let bad = MicConfig {
+            rate_hz: 11_025,
+            gain_db: 0,
+            mode: AudioMode::Pcm,
+            samples: 441,
+            block: 0,
+        };
         assert!(MicRoute::new(bad, 0).is_err());
     }
 }

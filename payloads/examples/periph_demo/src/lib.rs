@@ -159,7 +159,9 @@ pub fn spi_line(outcome: SpiOutcome) -> LogLine {
     line.push_str(TAG).push_str("spi loopback ");
     match outcome {
         SpiOutcome::Ok => {
-            line.push_str("ok (").push_u32(LEN as u32).push_str(" bytes)");
+            line.push_str("ok (")
+                .push_u32(LEN as u32)
+                .push_str(" bytes)");
         }
         SpiOutcome::Failed(e) => {
             line.push_str("error ").push_u32(e.code().unsigned_abs());

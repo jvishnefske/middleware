@@ -152,6 +152,8 @@
 //! queries between declarations inside that one session.
 
 pub mod discovery;
+#[cfg(feature = "zenoh-otel")]
+pub mod otel;
 pub mod responder;
 pub mod subscriber;
 pub mod wire;
@@ -174,7 +176,7 @@ use crate::dedup::{Sequence, fnv1a64};
 use crate::key::{Key, KeyError, KeyFilter, MAX_KEY_LEN};
 use crate::transport::{
     Flow, Gather, HandlerError, Limits, Publisher, Reply, RequestOptions, Requester, SenderId,
-    Subscribe, Target, copy_into,
+    Subscribe, Target, TraceParent, copy_into,
 };
 
 #[cfg(doc)]
@@ -252,6 +254,26 @@ pub enum ZenohError {
     /// Peers answered a record fetch with different records for one
     /// service, so none is trusted and no event is reported for it.
     ConflictingRecords,
+}
+
+#[cfg(feature = "zenoh-otel")]
+impl ZenohError {
+    /// A short stable name for span attributes and metric labels.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ZenohError::Zenoh(_) => "zenoh",
+            ZenohError::BufferTooSmall { .. } => "buffer_too_small",
+            ZenohError::InvalidKey(_) => "invalid_key",
+            ZenohError::Handler(e) => otel::handler_name(*e),
+            ZenohError::NoReply => "no_reply",
+            ZenohError::Closed => "closed",
+            ZenohError::InvalidEndpoint => "invalid_endpoint",
+            ZenohError::InvalidInstance => "invalid_instance",
+            ZenohError::Record(_) => "record",
+            ZenohError::NotBrowsing => "not_browsing",
+            ZenohError::ConflictingRecords => "conflicting_records",
+        }
+    }
 }
 
 impl core::fmt::Display for ZenohError {
@@ -365,6 +387,8 @@ pub struct ZenohTransport {
     origin: u32,
     streams: BTreeMap<String, Sequence>,
     local_delivery: bool,
+    #[cfg(feature = "zenoh-otel")]
+    trace_context: bool,
 }
 
 impl Clone for ZenohTransport {
@@ -377,6 +401,8 @@ impl Clone for ZenohTransport {
             origin: next_origin(),
             streams: BTreeMap::new(),
             local_delivery: self.local_delivery,
+            #[cfg(feature = "zenoh-otel")]
+            trace_context: self.trace_context,
         }
     }
 }
@@ -394,6 +420,8 @@ impl ZenohTransport {
             origin: next_origin(),
             streams: BTreeMap::new(),
             local_delivery: false,
+            #[cfg(feature = "zenoh-otel")]
+            trace_context: false,
         }
     }
 
@@ -424,6 +452,19 @@ impl ZenohTransport {
     pub fn with_local_delivery(self, local_delivery: bool) -> Self {
         Self {
             local_delivery,
+            ..self
+        }
+    }
+
+    /// Returns a transport that puts its span's trace context on its
+    /// publications (attachment kind 3, see [`wire`]) and queries (the
+    /// query trace extension, in place of `RequestOptions::trace`), so
+    /// subscribers and responders continue the trace. Off by default: kind 3
+    /// is only for networks whose nodes all decode it. Feature `zenoh-otel`.
+    #[cfg(feature = "zenoh-otel")]
+    pub fn with_trace_context(self, trace_context: bool) -> Self {
+        Self {
+            trace_context,
             ..self
         }
     }
@@ -482,13 +523,18 @@ impl ZenohTransport {
         ZenohDiscovery::new(self.session.clone()).with_timeout(self.timeout)
     }
 
-    /// Sends the query for `key` per `options` with `target` routing.
+    /// Sends the query for `key` per `options` with `target` routing. The
+    /// attachment's trace extension carries `trace` (the caller passes
+    /// `options.trace`, or the request span's context with
+    /// [`with_trace_context`](Self::with_trace_context)) and
+    /// `options.request_id`.
     fn query(
         &self,
         key: Key<'_>,
         request: &[u8],
         options: &RequestOptions<'_>,
         target: QueryTarget,
+        trace: Option<TraceParent>,
     ) -> Result<FifoChannelHandler<ZenohReply>, ZenohError> {
         use ::zenoh::Wait;
         let timeout = options.timeout.unwrap_or(self.timeout);
@@ -501,8 +547,7 @@ impl ZenohTransport {
             Target::Node(id) => wire::node_key(id, key),
         };
         let attachment =
-            wire::encode_query(self.sender, deadline_ms, options.trace, options.request_id)
-                .to_vec();
+            wire::encode_query(self.sender, deadline_ms, trace, options.request_id).to_vec();
         let replies = self
             .session
             .get(selector)
@@ -528,13 +573,27 @@ impl Publisher for ZenohTransport {
     async fn publish(&mut self, key: Key<'_>, payload: &[u8]) -> Result<(), ZenohError> {
         let seq = self.streams.get(key.as_str()).copied().unwrap_or_default();
         self.streams.insert(key.as_str().to_owned(), seq.next());
-        let attachment = wire::encode_pub(self.sender, seq, wire::stream_id(self.origin, key));
-        self.session
+        let stream = wire::stream_id(self.origin, key);
+        #[cfg(feature = "zenoh-otel")]
+        let op = otel::Op::publish(key.as_str(), self.sender, seq.get(), stream, payload.len());
+        #[cfg(feature = "zenoh-otel")]
+        let trace = op.trace().filter(|_| self.trace_context);
+        #[cfg(not(feature = "zenoh-otel"))]
+        let trace: Option<TraceParent> = None;
+        let attachment = match trace {
+            Some(t) => wire::encode_pub_traced(self.sender, seq, stream, &t).to_vec(),
+            None => wire::encode_pub(self.sender, seq, stream).to_vec(),
+        };
+        let result = self
+            .session
             .put(key.as_str(), payload)
-            .attachment(attachment.to_vec())
+            .attachment(attachment)
             .congestion_control(CongestionControl::Block)
-            .await?;
-        Ok(())
+            .await
+            .map_err(ZenohError::from);
+        #[cfg(feature = "zenoh-otel")]
+        op.end(payload.len(), result.as_ref().err().map(ZenohError::name));
+        result
     }
 }
 
@@ -574,7 +633,33 @@ impl Requester for ZenohTransport {
         response: &'b mut [u8],
         options: &RequestOptions<'_>,
     ) -> Result<&'b [u8], ZenohError> {
-        let replies = self.query(key, request, options, QueryTarget::BestMatching)?;
+        #[cfg(feature = "zenoh-otel")]
+        {
+            let op = otel::Op::request(key.as_str(), options.target, request.len(), options.trace);
+            let trace = op.trace().filter(|_| self.trace_context).or(options.trace);
+            let result = self
+                .request_best(key, request, response, options, trace)
+                .await;
+            op.end(0, result.as_ref().err().map(ZenohError::name));
+            result
+        }
+        #[cfg(not(feature = "zenoh-otel"))]
+        self.request_best(key, request, response, options, options.trace)
+            .await
+    }
+}
+
+impl ZenohTransport {
+    /// `request_with`'s body: the first successful reply wins.
+    async fn request_best<'b>(
+        &self,
+        key: Key<'_>,
+        request: &[u8],
+        response: &'b mut [u8],
+        options: &RequestOptions<'_>,
+        trace: Option<TraceParent>,
+    ) -> Result<&'b [u8], ZenohError> {
+        let replies = self.query(key, request, options, QueryTarget::BestMatching, trace)?;
         let mut last_error = None;
         // The channel closes once every responder has answered or the
         // timeout elapses, so this loop is bounded by the timeout.
@@ -663,7 +748,20 @@ impl Gather for ZenohTransport {
         if max_replies == 0 {
             return Ok(0);
         }
-        let replies = self.query(key, request, options, QueryTarget::All)?;
+        #[cfg(feature = "zenoh-otel")]
+        let op = otel::Op::request(key.as_str(), options.target, request.len(), options.trace);
+        #[cfg(feature = "zenoh-otel")]
+        let trace = op.trace().filter(|_| self.trace_context).or(options.trace);
+        #[cfg(not(feature = "zenoh-otel"))]
+        let trace = options.trace;
+        let replies = match self.query(key, request, options, QueryTarget::All, trace) {
+            Ok(r) => r,
+            Err(e) => {
+                #[cfg(feature = "zenoh-otel")]
+                op.end(0, Some(e.name()));
+                return Err(e);
+            }
+        };
         let mut seen = 0;
         // Bounded by `max_replies` and by the query timeout, after which
         // Zenoh closes the channel.
@@ -681,6 +779,8 @@ impl Gather for ZenohTransport {
                 break;
             }
         }
+        #[cfg(feature = "zenoh-otel")]
+        op.end(0, None);
         Ok(seen)
     }
 }

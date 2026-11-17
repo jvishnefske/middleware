@@ -27,7 +27,7 @@
 //! | `sys/loader/commit` | `Denied` | `Denied` | owner first (else `InvalidRequest`, transfer untouched); then a signed body (`[version][signature]`) only: unsigned is `Denied` and ends the owner's transfer; forwarded, the device verifies the signature; the transfer ends with the answer |
 //! | `sys/fw/commit` | `Denied` | `Denied` | as `sys/loader/commit`, with the 64-byte firmware signature |
 //! | `sys/fw/reboot`, `confirm`, `abort` | `Denied` | `Denied` | forwarded unless another caller's transfer is live (`InvalidRequest`); `abort` ends the caller's own |
-//! | `sys/payload/start`, `stop` | `Denied` | `Denied` | a signed control body only (`[counter u64][signature 64]` by the pinned key over `mw-control-v1`, op, the device's MAC, counter), verified here, counter strictly above the last accepted; forwarded with an empty body (the serial form). Unsigned or not verifying: `Denied` |
+//! | `sys/payload/start`, `stop` | `Denied` | `Denied` | a signed control body only (`[counter u64][signature 64]` by the pinned key over `mw-control-v1`, op, the device's MAC, counter), verified here with the device's own check for the pinned key's kind (Ed25519 or ECDSA P-256, `loader::trust::verify_signature`), counter strictly above the last accepted; forwarded with an empty body (the serial form). Unsigned or not verifying: `Denied` |
 //! | `sys/trust/claim` | `Denied` | `Denied` | `Denied` (physical presence only) |
 //!
 //! Every other `sys/...` key is the plain allowlist's (`SysAllow`:
@@ -97,7 +97,7 @@ use middleware::key::Key;
 use middleware::loader::keys;
 use middleware::loader::trust::{
     ControlCounter, ControlOp, PublicKey, SIGNATURE_LEN, SignedCommit, SignedControl, TrustInfo,
-    TrustState, control_message,
+    TrustState, control_message, verify_signature,
 };
 use middleware::serial::frame::{FRAME_OVERHEAD, MAX_RAW_FRAME};
 use middleware::transport::HandlerError;
@@ -463,14 +463,13 @@ pub fn control_target(node: SenderId) -> [u8; 6] {
     [b[0], b[1], b[2], b[3], b[4], b[5]]
 }
 
-/// Verifies a signed control request (Ed25519, strict) against `key`.
+/// Verifies a signed control request against `key` with the device's own
+/// check ([`verify_signature`]): the algorithm of the key's kind, Ed25519
+/// `verify_strict` or ECDSA P-256 / SHA-256, so the gate admits exactly
+/// what the device would.
 fn verify_control(key: &PublicKey, op: ControlOp, target: &[u8; 6], auth: &SignedControl) -> bool {
-    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key.0) else {
-        return false;
-    };
     let message = control_message(op, target, auth.counter);
-    let sig = ed25519_dalek::Signature::from_bytes(&auth.signature.0);
-    vk.verify_strict(&message, &sig).is_ok()
+    verify_signature(key, &message, &auth.signature)
 }
 
 impl UpdateGate {
@@ -768,7 +767,7 @@ mod tests {
     }
 
     fn pinned() -> PublicKey {
-        PublicKey(seed().verifying_key().to_bytes())
+        PublicKey::Ed25519(seed().verifying_key().to_bytes())
     }
 
     fn trust_info(state: TrustState) -> Vec<u8> {
@@ -1171,6 +1170,71 @@ mod tests {
             0,
         );
         assert_eq!(r, Err(Refusal::Unbound));
+    }
+
+    #[test]
+    fn rg20_a_p256_pinned_key_is_verified_as_the_device_does() {
+        use mwctl::sign::{P256Key, Signer as _, sign_control};
+        // TEST KEY ONLY: the OpenSSL vector's scalar.
+        let key = P256Key::from_scalar(&[0x20; 32]).unwrap();
+        let state = TrustState::Claimed {
+            key: key.public_key(),
+            min_version: Version(0),
+        };
+        let g = UpdateGate::new(Updaters::new([UPD]).unwrap(), Some(ControlCounter(FLOOR)))
+            .observe_trust(Ok(&trust_info(state)));
+        assert_eq!(g.trust(), DeviceTrust::Claimed(key.public_key()));
+        let target = control_target(NODE);
+        let p256 = |op: ControlOp, counter: u64, target: [u8; 6]| {
+            sign_control(&key, op, &target, ControlCounter(counter))
+                .unwrap()
+                .encode()
+                .to_vec()
+        };
+        let start = p256(ControlOp::Start, FLOOR + 5, target);
+        let mut forged = start.clone();
+        forged[20] ^= 1;
+        let refused = [
+            forged,
+            // Another P-256 key, the Ed25519 test key, the wrong op or
+            // device, an old counter.
+            sign_control(
+                &P256Key::from_scalar(&[0x21; 32]).unwrap(),
+                ControlOp::Start,
+                &target,
+                ControlCounter(FLOOR + 5),
+            )
+            .unwrap()
+            .encode()
+            .to_vec(),
+            control(ControlOp::Start, FLOOR + 5, target),
+            p256(ControlOp::Stop, FLOOR + 5, target),
+            p256(ControlOp::Start, FLOOR + 5, [2, 0, 0, 0, 0, 9]),
+            p256(ControlOp::Start, FLOOR, target),
+        ];
+        for body in &refused {
+            let (_, r) = admit(g.clone(), as_(UPD, "p-1"), UpdateOp::Start, body);
+            assert_eq!(r, Err(Refusal::ControlRefused));
+            // The device's own rule refuses the same request.
+            let auth = SignedControl::parse_body(body).unwrap().unwrap();
+            assert!(
+                state
+                    .accept_control(ControlCounter(FLOOR), ControlOp::Start, &target, &auth)
+                    .is_err()
+            );
+        }
+        let (g, r) = admit(g, as_(UPD, "p-2"), UpdateOp::Start, &start);
+        let (body, t) = forwarded(&r).expect("a signed P-256 start passes");
+        assert!(body.is_empty());
+        assert_eq!(t.persist(), Some(ControlCounter(FLOOR + 5)));
+        let g = g.complete(t, Ok(b""), 1_000);
+        let auth = SignedControl::parse_body(&start).unwrap().unwrap();
+        assert_eq!(
+            state.accept_control(ControlCounter(FLOOR), ControlOp::Start, &target, &auth),
+            Ok(ControlCounter(FLOOR + 5))
+        );
+        let (_, r) = admit(g, as_(UPD, "p-3"), UpdateOp::Start, &start);
+        assert_eq!(r, Err(Refusal::ControlRefused), "used up");
     }
 
     #[test]

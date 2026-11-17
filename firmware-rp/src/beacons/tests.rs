@@ -12,12 +12,12 @@ use std::vec::Vec as StdVec;
 
 use embassy_futures::block_on;
 use embedded_io_async::{ErrorType, Read, Write};
+use middleware::Key;
 use middleware::discovery::beacon::{beacon_key, decode, encode, kind_of};
 use middleware::discovery::{Change, Directory, Event, ServiceKind};
 use middleware::dns::wire::Txt;
 use middleware::serial::frame::{self, Frame};
 use middleware::serial::link::SerialLink;
-use middleware::Key;
 
 use super::*;
 use crate::service::tests::{FACTS, NODE};
@@ -71,7 +71,14 @@ pub(crate) struct Heard {
 impl Gateway {
     pub(crate) fn link(node: SenderId) -> (Link, Gateway) {
         let (tx, rx) = channel();
-        (SerialLink::with_inbox(Cable(tx)), Gateway { rx, node, services: Directory::new() })
+        (
+            SerialLink::with_inbox(Cable(tx)),
+            Gateway {
+                rx,
+                node,
+                services: Directory::new(),
+            },
+        )
     }
 
     /// Beacons written since the last call, folded into the directory.
@@ -87,27 +94,49 @@ impl Gateway {
             let service = decode(kind, payload).expect("a version 1 beacon");
             // E21: a beacon naming another node would be refused.
             assert!(service.node.is_none_or(|n| n == self.node), "{service:?}");
-            let bound = Service { node: Some(self.node), ..service };
-            let (dir, change) = core::mem::replace(&mut self.services, Directory::new()).observe(&Event::from_service(bound), 0);
+            let bound = Service {
+                node: Some(self.node),
+                ..service
+            };
+            let (dir, change) = core::mem::replace(&mut self.services, Directory::new())
+                .observe(&Event::from_service(bound), 0);
             self.services = dir;
             // The cap: a new record is never refused.
-            assert!(!matches!(change, Change::Full | Change::Rejected), "{change:?}");
-            out.push(Heard { kind: kind.as_str().to_string(), ttl_s: service.ttl_s, node: service.node });
+            assert!(
+                !matches!(change, Change::Full | Change::Rejected),
+                "{change:?}"
+            );
+            out.push(Heard {
+                kind: kind.as_str().to_string(),
+                ttl_s: service.ttl_s,
+                node: service.node,
+            });
         }
         out
     }
 
     pub(crate) fn kinds(&self) -> StdVec<StdString> {
-        self.services.iter().map(|s| s.kind.as_str().to_string()).collect()
+        self.services
+            .iter()
+            .map(|s| s.kind.as_str().to_string())
+            .collect()
     }
 }
 
 pub(crate) fn up(kind: &str) -> Heard {
-    Heard { kind: kind.to_string(), ttl_s: BEACON_TTL_S, node: Some(NODE) }
+    Heard {
+        kind: kind.to_string(),
+        ttl_s: BEACON_TTL_S,
+        node: Some(NODE),
+    }
 }
 
 pub(crate) fn goodbye(kind: &str) -> Heard {
-    Heard { kind: kind.to_string(), ttl_s: 0, node: None }
+    Heard {
+        kind: kind.to_string(),
+        ttl_s: 0,
+        node: None,
+    }
 }
 
 fn kinds<'a>(w: &Wanted<'a>) -> StdVec<&'a str> {
@@ -123,14 +152,20 @@ fn v21_the_node_record_names_the_chip_unique_id_chip_and_firmware() {
     assert_eq!(id.instance().len(), INSTANCE_LEN);
 
     let r = id.node_record();
-    assert_eq!((r.kind, r.node, r.endpoint, r.ttl_s), (NODE_KIND, Some(NODE), Endpoint::Local, BEACON_TTL_S));
+    assert_eq!(
+        (r.kind, r.node, r.endpoint, r.ttl_s),
+        (NODE_KIND, Some(NODE), Endpoint::Local, BEACON_TTL_S)
+    );
     let txt = Txt::new(r.txt).expect("valid TXT");
     assert_eq!(txt.get(b"chip"), Some(FACTS.chip.as_bytes()));
     assert_eq!(txt.get(b"fw"), Some(FACTS.firmware.as_bytes()));
 
     // It is a version 1 beacon on disc/mw/node that decodes back.
     let mut key = [0u8; 128];
-    assert_eq!(beacon_key(r.kind, &mut key).unwrap().as_str(), "disc/mw/node");
+    assert_eq!(
+        beacon_key(r.kind, &mut key).unwrap().as_str(),
+        "disc/mw/node"
+    );
     let mut out = [0u8; 128];
     let n = encode(&r, &mut out).unwrap();
     assert!(n < 70, "{n} bytes");
@@ -138,7 +173,10 @@ fn v21_the_node_record_names_the_chip_unique_id_chip_and_firmware() {
 
     // A firmware string too long for one TXT string is left out.
     let long = std::string::String::from_utf8(std::vec![b'9'; 300]).unwrap();
-    let facts = Facts { firmware: std::boxed::Box::leak(long.into_boxed_str()), ..FACTS };
+    let facts = Facts {
+        firmware: std::boxed::Box::leak(long.into_boxed_str()),
+        ..FACTS
+    };
     let id = Identity::new(&facts);
     let txt = Txt::new(id.txt()).expect("valid TXT");
     assert_eq!(txt.get(b"fw"), None);
@@ -155,14 +193,29 @@ fn v21_served_keys_are_announced_as_kinds_beside_the_node_record_up_to_the_cap()
     // Each served key is a record of that kind, same node and instance,
     // no TXT, in slot order.
     let w = wanted(&id, ["node/246f/phase/LED.Blink", "app/echo"].into_iter());
-    assert_eq!(kinds(&w), ["mw/node", "node/246f/phase/LED.Blink", "app/echo"]);
+    assert_eq!(
+        kinds(&w),
+        ["mw/node", "node/246f/phase/LED.Blink", "app/echo"]
+    );
     let echo = w.records()[2];
-    assert_eq!((echo.instance, echo.node, echo.txt, echo.ttl_s), (id.instance(), Some(NODE), &[][..], BEACON_TTL_S));
+    assert_eq!(
+        (echo.instance, echo.node, echo.txt, echo.ttl_s),
+        (id.instance(), Some(NODE), &[][..], BEACON_TTL_S)
+    );
 
     // Beyond the cap (node + 3), repeats, keys that cannot be kinds: left
     // out and counted, never more than MAX_RECORDS.
     let long = std::format!("app/{}", "x".repeat(MAX_KIND_LEN));
-    let served = ["app/a", "app/a", "disc/app/a", long.as_str(), "not a key/", "app/b", "app/c", "app/d"];
+    let served = [
+        "app/a",
+        "app/a",
+        "disc/app/a",
+        long.as_str(),
+        "not a key/",
+        "app/b",
+        "app/c",
+        "app/d",
+    ];
     let w = wanted(&id, served.into_iter());
     assert_eq!(kinds(&w), ["mw/node", "app/a", "app/b", "app/c"]);
     assert_eq!(w.omitted, 5);
@@ -181,21 +234,33 @@ fn v22_plan_withdraws_what_is_not_wanted_and_leaves_unchanged_records_alone() {
 
     // Nothing announced: announce all, node record first.
     let p = plan(&running, &[]);
-    assert_eq!((ix(&p.withdraw), ix(&p.announce)), (std::vec![], std::vec![0, 1, 2]));
+    assert_eq!(
+        (ix(&p.withdraw), ix(&p.announce)),
+        (std::vec![], std::vec![0, 1, 2])
+    );
 
     // All announced: nothing to do.
     assert_eq!(plan(&running, running.records()), Plan::default());
 
     // The run ended: the served keys are withdrawn, the node record stays.
     let p = plan(&idle, running.records());
-    assert_eq!((ix(&p.withdraw), ix(&p.announce)), (std::vec![1, 2], std::vec![]));
+    assert_eq!(
+        (ix(&p.withdraw), ix(&p.announce)),
+        (std::vec![1, 2], std::vec![])
+    );
 
     // A changed record (another firmware) is announced again; a replaced
     // key is withdrawn and the new one announced; app/b is unchanged.
-    let other = Identity::new(&Facts { firmware: "9.9", ..FACTS });
+    let other = Identity::new(&Facts {
+        firmware: "9.9",
+        ..FACTS
+    });
     let next = wanted(&other, ["app/c", "app/b"].into_iter());
     let p = plan(&next, running.records());
-    assert_eq!((ix(&p.withdraw), ix(&p.announce)), (std::vec![1], std::vec![0, 1]));
+    assert_eq!(
+        (ix(&p.withdraw), ix(&p.announce)),
+        (std::vec![1], std::vec![0, 1])
+    );
     // Only the first MAX_RECORDS announced records are looked at.
     let many = [running.records()[1]; 6];
     assert_eq!(plan(&idle, &many).withdraw.len(), MAX_RECORDS);
@@ -237,7 +302,10 @@ fn v22_the_announcer_on_the_serial_link_refreshes_and_says_goodbye_when_the_run_
 
         // A payload serving more than fits: three keys, and the gateway
         // never refuses one (the assertions in `heard`).
-        let big = wanted(&id, ["app/1", "app/2", "app/3", "app/4", "app/5"].into_iter());
+        let big = wanted(
+            &id,
+            ["app/1", "app/2", "app/3", "app/4", "app/5"].into_iter(),
+        );
         assert_eq!(a.sync(&big).await, Ok(3));
         assert_eq!(gw.heard().len(), 3);
         assert_eq!(gw.kinds().len(), MAX_RECORDS);
@@ -246,7 +314,10 @@ fn v22_the_announcer_on_the_serial_link_refreshes_and_says_goodbye_when_the_run_
         let swap = wanted(&id, ["app/6", "app/7", "app/8"].into_iter());
         assert_eq!(a.sync(&swap).await, Ok(6));
         let heard = gw.heard();
-        assert_eq!(heard.iter().take(3).map(|h| h.ttl_s).collect::<StdVec<_>>(), [0, 0, 0]);
+        assert_eq!(
+            heard.iter().take(3).map(|h| h.ttl_s).collect::<StdVec<_>>(),
+            [0, 0, 0]
+        );
         assert_eq!(gw.kinds().len(), MAX_RECORDS);
     });
 }
@@ -294,7 +365,10 @@ fn v24_a_payload_cannot_publish_beacons_or_system_keys() {
     // A served `disc` key is never announced either.
     let id = Identity::new(&FACTS);
     assert_eq!(id.served_record("disc/cam/jpeg"), None);
-    assert_eq!(ServiceKind::new(k("app/x")), id.served_record("app/x").unwrap().kind);
+    assert_eq!(
+        ServiceKind::new(k("app/x")),
+        id.served_record("app/x").unwrap().kind
+    );
 }
 
 #[test]
@@ -304,4 +378,3 @@ fn v21_the_device_never_browses() {
     assert_eq!(s.try_recv(&mut buf).map(|o| o.is_none()), Ok(true));
     assert!(block_on(s.recv(&mut buf)).is_err());
 }
-

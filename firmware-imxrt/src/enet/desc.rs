@@ -54,7 +54,11 @@ pub const MIN_TX_FRAME: usize = 60;
 /// The length to send a frame of `len` bytes as: at least
 /// [`MIN_TX_FRAME`] (the bytes after `len` being zero).
 pub const fn padded_len(len: usize) -> usize {
-    if len < MIN_TX_FRAME { MIN_TX_FRAME } else { len }
+    if len < MIN_TX_FRAME {
+        MIN_TX_FRAME
+    } else {
+        len
+    }
 }
 
 /// Receive: owned by the DMA (empty).
@@ -114,7 +118,11 @@ pub struct Cursor {
 impl Cursor {
     /// The first descriptor of a ring of `len`; `None` for an empty ring.
     pub const fn new(len: usize) -> Option<Cursor> {
-        if len == 0 { None } else { Some(Cursor { index: 0, len }) }
+        if len == 0 {
+            None
+        } else {
+            Some(Cursor { index: 0, len })
+        }
     }
 
     /// The descriptor index.
@@ -265,7 +273,11 @@ fn take(cell: &AtomicU32) -> u32 {
 
 fn descriptor_count(words: &[AtomicU32]) -> Option<usize> {
     let n = words.len() / DESC_WORDS;
-    if n == 0 || !words.len().is_multiple_of(DESC_WORDS) { None } else { Some(n) }
+    if n == 0 || !words.len().is_multiple_of(DESC_WORDS) {
+        None
+    } else {
+        Some(n)
+    }
 }
 
 /// The receive ring: descriptors over `words`, a cursor at the next
@@ -296,7 +308,10 @@ impl<'a> RxRing<'a> {
         if buffers.len() != self.cursor.count() {
             return Err(RingError::BufferCount);
         }
-        if buffers.iter().any(|a| *a == 0 || !a.is_multiple_of(RX_BUFFER_ALIGN)) {
+        if buffers
+            .iter()
+            .any(|a| *a == 0 || !a.is_multiple_of(RX_BUFFER_ALIGN))
+        {
             return Err(RingError::BufferAlignment);
         }
         let n = self.cursor.count();
@@ -410,7 +425,9 @@ impl<'a> TxRing<'a> {
 /// `out` and the buffer.
 pub fn copy_frame(buffer: &[AtomicU32], len: usize, out: &mut [u8]) -> usize {
     let n = len.min(out.len()).min(buffer.len().saturating_mul(4));
-    let Some(dst) = out.get_mut(..n) else { return 0 };
+    let Some(dst) = out.get_mut(..n) else {
+        return 0;
+    };
     for (chunk, word) in dst.chunks_mut(4).zip(buffer) {
         let bytes = word.load(Ordering::Relaxed).to_le_bytes();
         for (d, s) in chunk.iter_mut().zip(bytes) {
@@ -505,8 +522,14 @@ mod tests {
         let words = mem::<4>();
         let mut ring = RxRing::new(&words).expect("ring");
         assert_eq!(ring.init(&[0x2000_0000]), Err(RingError::BufferCount));
-        assert_eq!(ring.init(&[0x2000_0000, 0x2000_0608]), Err(RingError::BufferAlignment));
-        assert_eq!(ring.init(&[0, 0x2000_0600]), Err(RingError::BufferAlignment));
+        assert_eq!(
+            ring.init(&[0x2000_0000, 0x2000_0608]),
+            Err(RingError::BufferAlignment)
+        );
+        assert_eq!(
+            ring.init(&[0, 0x2000_0600]),
+            Err(RingError::BufferAlignment)
+        );
         assert_eq!(load(&words, 0), 0, "nothing written when refused");
     }
 
@@ -536,17 +559,50 @@ mod tests {
     fn fl3_rx_decode_length_and_flags() {
         assert_eq!(RxFrame::decode(0, RX_E | L | 60), None);
         let f = RxFrame::decode(2, L | RX_BC | 342).expect("frame");
-        assert_eq!((f.index, f.len, f.last, f.broadcast, f.multicast), (2, 342, true, true, false));
+        assert_eq!(
+            (f.index, f.len, f.last, f.broadcast, f.multicast),
+            (2, 342, true, true, false)
+        );
         assert_eq!(f.good_len(), Some(342));
         let f = RxFrame::decode(0, L | RX_MC | RX_M | 90).expect("frame");
         assert!(f.multicast && f.miss);
         assert_eq!(f.good_len(), Some(90), "a promiscuous miss is not an error");
         for (bit, which) in [
-            (RX_LG, RxErrors { too_long: true, ..RxErrors::default() }),
-            (RX_NO, RxErrors { non_octet: true, ..RxErrors::default() }),
-            (RX_CR, RxErrors { crc: true, ..RxErrors::default() }),
-            (RX_OV, RxErrors { overrun: true, ..RxErrors::default() }),
-            (RX_TR, RxErrors { truncated: true, ..RxErrors::default() }),
+            (
+                RX_LG,
+                RxErrors {
+                    too_long: true,
+                    ..RxErrors::default()
+                },
+            ),
+            (
+                RX_NO,
+                RxErrors {
+                    non_octet: true,
+                    ..RxErrors::default()
+                },
+            ),
+            (
+                RX_CR,
+                RxErrors {
+                    crc: true,
+                    ..RxErrors::default()
+                },
+            ),
+            (
+                RX_OV,
+                RxErrors {
+                    overrun: true,
+                    ..RxErrors::default()
+                },
+            ),
+            (
+                RX_TR,
+                RxErrors {
+                    truncated: true,
+                    ..RxErrors::default()
+                },
+            ),
         ] {
             let f = RxFrame::decode(0, L | bit | 64).expect("frame");
             assert_eq!(f.errors, which);
@@ -557,8 +613,14 @@ mod tests {
         // Not the last buffer, empty, or longer than the buffer: not good.
         assert_eq!(RxFrame::decode(0, 64).and_then(|f| f.good_len()), None);
         assert_eq!(RxFrame::decode(0, L).and_then(|f| f.good_len()), None);
-        assert_eq!(RxFrame::decode(0, L | 1537).and_then(|f| f.good_len()), None);
-        assert_eq!(RxFrame::decode(0, L | 1536).and_then(|f| f.good_len()), Some(1536));
+        assert_eq!(
+            RxFrame::decode(0, L | 1537).and_then(|f| f.good_len()),
+            None
+        );
+        assert_eq!(
+            RxFrame::decode(0, L | 1536).and_then(|f| f.good_len()),
+            Some(1536)
+        );
         // Every word decodes without panicking.
         for w in [0u32, u32::MAX, 0x7FFF_FFFF, 0x5555_5555] {
             let _ = RxFrame::decode(usize::MAX, w).and_then(|f| f.good_len());
@@ -593,7 +655,10 @@ mod tests {
         assert_eq!(ring.init(&[1, 2]), Err(RingError::BufferCount));
         assert_eq!(ring.init(&[1, 0, 3]), Err(RingError::BufferAlignment));
         assert_eq!(ring.init(&[0x100, 0x700, 0xD00]), Ok(()));
-        assert_eq!((load(&words, 0), load(&words, 2), load(&words, 4)), (0, 0, W));
+        assert_eq!(
+            (load(&words, 0), load(&words, 2), load(&words, 4)),
+            (0, 0, W)
+        );
         assert_eq!(ring.submit(0), Err(RingError::BadLength));
         assert_eq!(ring.submit(MAX_TX_FRAME + 1), Err(RingError::BadLength));
         assert_eq!(ring.cursor().index(), 0, "a refusal does not advance");

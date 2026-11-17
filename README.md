@@ -9,6 +9,7 @@ request/response behind one set of traits, with pluggable transports.
 | `serial`   | COBS-framed link over any byte stream             | `no_std`, no heap            |
 | `espnow`   | ESP-NOW broadcast pub/sub                         | `no_std`, no heap            |
 | `zenoh`    | Zenoh pub/sub, get/queryable, liveliness discovery | `std` + tokio               |
+| `zenoh-otel` | OpenTelemetry spans and metrics of the Zenoh backend, optional W3C trace context on the wire (off unless enabled) | `zenoh` + `opentelemetry` API |
 | `grpc`     | gRPC unary calls, a bus service, health           | `std` + tokio + tonic        |
 | `istio`    | Istio mesh helpers and `grpc::mesh` for `grpc`    | `std`                        |
 | `mdns`     | mDNS browse (`MdnsSocket`) and announce (`MdnsAnnouncer`) | `std` + tokio        |
@@ -16,7 +17,7 @@ request/response behind one set of traits, with pluggable transports.
 | `memory`   | in-process backend for tests and examples         | `std` + tokio                |
 | `kv-file`  | durable key-value store (`kv::file::FileKv`), an append-only log | `std`          |
 | `zenoh-lite` | heap-free Zenoh 1.x client (`zenoh_lite`) for boards: pub/sub, queryables, requests over one byte stream | `no_std`, no heap |
-| `trust`    | signed payload checks (SHA-256, Ed25519 verify)   | `no_std`, no heap            |
+| `trust`    | signed payload checks (SHA-256; Ed25519 and ECDSA P-256 verify) | `no_std`, no heap |
 | `postcard` | serde codec                                       | `no_std`                     |
 | `prost`    | protobuf codec                                    | `no_std` + `alloc`           |
 
@@ -384,14 +385,16 @@ node, the gateway and Zenoh in one process on loopback.
 | path                 | what                                                         |
 |----------------------|--------------------------------------------------------------|
 | `firmware/`          | ESP base firmware (ESP32, ESP32-S3, ESP32-C3; ESP-NOW for `app/...` keys and DMA routes on ESP32/ESP32-S3): `./build.sh <chip>` |
-| `firmware-esp8266/`  | ESP8266 base firmware, protocol only: `./build.sh`, `./flash.sh` |
+| `firmware-esp8266/`  | ESP8266 base firmware, protocol only, signed payloads: `./build.sh`, `./flash.sh` |
 | `firmware-rp/`       | RP base firmware over USB CDC-ACM: Raspberry Pi Pico (RP2040, stores payloads only) and Pico 2 (RP2350, runs them): `./build.sh rp2040` or `./build.sh rp2350` (ELF and UF2) |
-| `firmware-imxrt/`   | i.MX RT1050-EVKB base firmware: A/B bootloader in HyperFlash, the protocol on LPUART1, WASM payloads, `mwctl fw update`: `./build.sh image`, `./build.sh flash boot a` (SWD) |
+| `firmware-imxrt/`   | i.MX RT1050-EVKB base firmware: A/B bootloader in HyperFlash, the protocol on LPUART1 and USB CDC, a Zenoh node on Ethernet, WASM payloads with IMU and microphone source routes (`tests/payloads/{imu,mic_levels,mic_pcm}.wat`; `mwctl monitor --samples`, `tools/mic_capture.py`), `mwctl fw update`: `./build.sh image`, `./build.sh flash boot a` (SWD) |
 | `gateware-5a75b/`    | Colorlight 5A-75B v7.0 (ECP5) gateware, no CPU: two Ethernet links, frame core, bridge engine, WASM core (`nix develop ./gateware-5a75b`, `pytest tests`, `python soc.py`); work in progress, see design.md CL… |
 | `wasm-hdl-ref/`      | the gateware WASM core as a no_std Rust model, tested against wasmi; writes the gateware's golden vectors |
-| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`, or one UDP node with `--udp <host>[:port]`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads) |
+| `tools/mwctl/`       | host CLI for one serial port: `cargo run -p mwctl -- --port /dev/ttyUSB0 info`, or one UDP node with `--udp <host>[:port]`; over the air through the bridge with `--espnow <MAC>` (claimed devices, signed uploads); over Zenoh with `--features zenoh` and `--zenoh[-listen] <ENDPOINT> --node <ID>`; signs with a key file (`--key`) or a key in a PKCS#11 token such as the TPM (`--pkcs11 mw-release`) |
+| `keys/`              | public halves of the release keys (`mw-release.pub`: P-256 in the release workstation's TPM) |
 | `tools/espnow-bridge/` | ESP8266 USB↔ESP-NOW bridge sketch for `mwctl --espnow` (`check.sh`: codec test and build; upload with `arduino-cli upload --fqbn esp8266:esp8266:generic -p <port>`) |
 | `wasm-host/`         | WASM payload runtime (wasmi) implementing `wasm_abi`          |
+| `tools/mw-otel/`     | OTLP export for running middleware: `init()` for host services, `mw-otel-bridge` (boards' `sys/log` as logs, `sys/info` as `mw.node.up`, traffic as spans and metrics; `cargo run -p mw-otel -- --listen tcp/0.0.0.0:7447`), a Grafana dashboard (`grafana/`) and a collector config (`deploy/`) |
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
 | `tools/jpeg-fixtures/` | regenerate (or `--check`) the fake camera's baked JPEG frames in `fixtures/cam/` (8 frames at 240×240 and 120×120, baseline 4:2:0): `cargo run -p jpeg-fixtures` |
 | `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |

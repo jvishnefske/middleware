@@ -57,13 +57,13 @@
 //! 600 bytes per 15 s on the link.
 
 use heapless::{String, Vec};
+use middleware::Key;
 use middleware::discovery::beacon::{BEACON_PREFIX, PubSubDiscovery, PubSubError};
 use middleware::discovery::directory::{MAX_INSTANCE_LEN, MAX_KIND_LEN, MAX_TXT_LEN};
 use middleware::discovery::{Announce, Endpoint, Service, ServiceKind};
 use middleware::loader::is_system_key;
 use middleware::transport::{Delivery, Limits, Overflow, Publisher, Sample, SenderId, Subscriber};
 use middleware::wasm_abi::serve::MAX_SERVES;
-use middleware::Key;
 
 use crate::service::Facts;
 
@@ -121,7 +121,11 @@ impl Identity {
         let mut txt = Vec::new();
         push_entry(&mut txt, b"chip=", facts.chip.as_bytes());
         push_entry(&mut txt, b"fw=", facts.firmware.as_bytes());
-        Identity { node: facts.node, instance, txt }
+        Identity {
+            node: facts.node,
+            instance,
+            txt,
+        }
     }
 
     /// The node id every record names.
@@ -173,7 +177,9 @@ impl Identity {
 /// Appends the TXT string `key` `value` if it fits.
 fn push_entry<const N: usize>(txt: &mut Vec<u8, N>, key: &[u8], value: &[u8]) {
     let len = key.len() + value.len();
-    let Ok(len_byte) = u8::try_from(len) else { return };
+    let Ok(len_byte) = u8::try_from(len) else {
+        return;
+    };
     if txt.len() + 1 + len > N.min(MAX_TXT_LEN) {
         return;
     }
@@ -206,7 +212,9 @@ pub fn wanted<'a, 's: 'a>(id: &'a Identity, served: impl Iterator<Item = &'s str
     let _ = records.push(id.node_record());
     let mut omitted = 0;
     for key in served.take(MAX_SERVES) {
-        let fresh = id.served_record(key).filter(|r| !records.iter().any(|w| w.kind == r.kind));
+        let fresh = id
+            .served_record(key)
+            .filter(|r| !records.iter().any(|w| w.kind == r.kind));
         match fresh {
             Some(record) if records.push(record).is_ok() => {}
             _ => omitted += 1,
@@ -235,7 +243,11 @@ pub struct Plan {
 pub fn plan(wanted: &Wanted<'_>, announced: &[Service<'_>]) -> Plan {
     let mut out = Plan::default();
     for (i, old) in announced.iter().enumerate().take(MAX_RECORDS) {
-        if !wanted.records.iter().any(|w| w.kind == old.kind && w.instance == old.instance) {
+        if !wanted
+            .records
+            .iter()
+            .any(|w| w.kind == old.kind && w.instance == old.instance)
+        {
             // At most MAX_RECORDS indices.
             let _ = out.withdraw.push(i);
         }
@@ -258,7 +270,10 @@ struct Gone {
 
 impl Gone {
     fn of(service: &Service<'_>) -> Option<Self> {
-        Some(Gone { kind: String::try_from(service.kind.as_str()).ok()?, instance: String::try_from(service.instance).ok()? })
+        Some(Gone {
+            kind: String::try_from(service.kind.as_str()).ok()?,
+            instance: String::try_from(service.instance).ok()?,
+        })
     }
 }
 
@@ -280,7 +295,12 @@ impl Kick {
     pub fn after_info(self, now_ms: u64) -> (Self, bool) {
         match self.last_ms {
             Some(t) if now_ms < t.saturating_add(KICK_INTERVAL_MS) => (self, false),
-            _ => (Kick { last_ms: Some(now_ms) }, true),
+            _ => (
+                Kick {
+                    last_ms: Some(now_ms),
+                },
+                true,
+            ),
         }
     }
 }
@@ -322,7 +342,10 @@ pub struct Announcer<P> {
 impl<P: Publisher> Announcer<P> {
     /// Nothing announced yet.
     pub fn new(publisher: P) -> Self {
-        Announcer { disc: PubSubDiscovery::new(publisher, NoBrowse), kick: Kick::new() }
+        Announcer {
+            disc: PubSubDiscovery::new(publisher, NoBrowse),
+            kick: Kick::new(),
+        }
     }
 
     /// What is announced.
@@ -343,7 +366,11 @@ impl<P: Publisher> Announcer<P> {
     /// to `wanted` and, unless a kick re-sent them less than
     /// [`KICK_INTERVAL_MS`] ago, sends every wanted record, changed or
     /// not. Returns the beacons sent.
-    pub async fn after_info(&mut self, wanted: &Wanted<'_>, now_ms: u64) -> Result<usize, AnnounceError<P::Error>> {
+    pub async fn after_info(
+        &mut self,
+        wanted: &Wanted<'_>,
+        now_ms: u64,
+    ) -> Result<usize, AnnounceError<P::Error>> {
         let (kick, resend) = self.kick.after_info(now_ms);
         self.kick = kick;
         self.apply(wanted, resend).await
@@ -354,20 +381,34 @@ impl<P: Publisher> Announcer<P> {
     /// sends it again and restarts its interval). Withdrawals go one at a
     /// time, re-planned after each (each changes what is announced), at
     /// most [`MAX_RECORDS`] of them.
-    async fn apply(&mut self, wanted: &Wanted<'_>, every: bool) -> Result<usize, AnnounceError<P::Error>> {
+    async fn apply(
+        &mut self,
+        wanted: &Wanted<'_>,
+        every: bool,
+    ) -> Result<usize, AnnounceError<P::Error>> {
         let mut sent = 0;
         for _ in 0..MAX_RECORDS {
             let gone = {
-                let now: Vec<Service<'_>, MAX_RECORDS> = self.disc.announced().take(MAX_RECORDS).collect();
-                plan(wanted, &now).withdraw.first().and_then(|&i| now.get(i)).and_then(Gone::of)
+                let now: Vec<Service<'_>, MAX_RECORDS> =
+                    self.disc.announced().take(MAX_RECORDS).collect();
+                plan(wanted, &now)
+                    .withdraw
+                    .first()
+                    .and_then(|&i| now.get(i))
+                    .and_then(Gone::of)
             };
             let Some(gone) = gone else { break };
-            let Ok(kind) = Key::new(&gone.kind) else { break };
-            self.disc.withdraw(ServiceKind::new(kind), &gone.instance).await?;
+            let Ok(kind) = Key::new(&gone.kind) else {
+                break;
+            };
+            self.disc
+                .withdraw(ServiceKind::new(kind), &gone.instance)
+                .await?;
             sent += 1;
         }
         let changed = {
-            let now: Vec<Service<'_>, MAX_RECORDS> = self.disc.announced().take(MAX_RECORDS).collect();
+            let now: Vec<Service<'_>, MAX_RECORDS> =
+                self.disc.announced().take(MAX_RECORDS).collect();
             plan(wanted, &now).announce
         };
         for (i, record) in wanted.records().iter().enumerate() {

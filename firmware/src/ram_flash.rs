@@ -26,7 +26,12 @@ pub struct RamFlash<const N: usize> {
 impl<const N: usize> RamFlash<N> {
     /// Zeroed flash with no fault armed.
     pub fn new() -> Self {
-        RamFlash { mem: [0x00; N], erases: 0, ops: 0, cut: None }
+        RamFlash {
+            mem: [0x00; N],
+            erases: 0,
+            ops: 0,
+            cut: None,
+        }
     }
 
     /// Arms power loss at the `op`-th erase or write from now.
@@ -81,8 +86,15 @@ impl<const N: usize> NorFlash for RamFlash<N> {
         }
         let admitted = self.admit(bytes.len());
         let n = admitted.unwrap_or_else(|n| n);
-        let dst = self.mem.get_mut(offset as usize..offset as usize + bytes.len());
-        for (d, s) in dst.ok_or(NorFlashErrorKind::OutOfBounds)?.iter_mut().zip(bytes).take(n) {
+        let dst = self
+            .mem
+            .get_mut(offset as usize..offset as usize + bytes.len());
+        for (d, s) in dst
+            .ok_or(NorFlashErrorKind::OutOfBounds)?
+            .iter_mut()
+            .zip(bytes)
+            .take(n)
+        {
             *d &= *s;
         }
         admitted.map(|_| ()).map_err(|_| NorFlashErrorKind::Other)
@@ -91,7 +103,10 @@ impl<const N: usize> NorFlash for RamFlash<N> {
         if !from.is_multiple_of(SECTOR) || !to.is_multiple_of(SECTOR) {
             return Err(NorFlashErrorKind::NotAligned);
         }
-        let span = self.mem.get_mut(from as usize..to as usize).ok_or(NorFlashErrorKind::OutOfBounds)?;
+        let span = self
+            .mem
+            .get_mut(from as usize..to as usize)
+            .ok_or(NorFlashErrorKind::OutOfBounds)?;
         let len = span.len();
         let admitted = self.admit(len);
         let n = admitted.unwrap_or_else(|n| n);

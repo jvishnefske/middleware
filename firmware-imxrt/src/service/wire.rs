@@ -155,7 +155,7 @@ fn rt12_mwctl_info_upload_start_and_trust_claim_work_unchanged() {
             .is_err(),
         "unsigned refused"
     );
-    let auth = sign_commit(&signed_img, &seed, Version(7));
+    let auth = sign_commit(&signed_img, &seed, Version(7)).ok();
     d.upload(
         &signed_img,
         UploadOptions {

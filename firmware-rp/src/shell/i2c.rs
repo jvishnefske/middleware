@@ -88,17 +88,25 @@ fn configure(bus: u8, timing: &Timing) -> Result<(), AbiError> {
     });
     r.ic_tx_tl().write(|w| w.set_tx_tl(0));
     r.ic_rx_tl().write(|w| w.set_rx_tl(0));
-    r.ic_fs_scl_hcnt().write(|w| w.set_ic_fs_scl_hcnt(timing.hcnt));
-    r.ic_fs_scl_lcnt().write(|w| w.set_ic_fs_scl_lcnt(timing.lcnt));
-    r.ic_fs_spklen().write(|w| w.set_ic_fs_spklen(timing.spklen));
-    r.ic_sda_hold().modify(|w| w.set_ic_sda_tx_hold(timing.sda_hold));
+    r.ic_fs_scl_hcnt()
+        .write(|w| w.set_ic_fs_scl_hcnt(timing.hcnt));
+    r.ic_fs_scl_lcnt()
+        .write(|w| w.set_ic_fs_scl_lcnt(timing.lcnt));
+    r.ic_fs_spklen()
+        .write(|w| w.set_ic_fs_spklen(timing.spklen));
+    r.ic_sda_hold()
+        .modify(|w| w.set_ic_sda_tx_hold(timing.sda_hold));
     r.ic_enable().write(|w| w.set_enable(true));
     Ok(())
 }
 
 /// Waits until `ready` or the deadline; checks the abort source on every
 /// poll. Bounded by `deadline`.
-fn wait(r: pac::i2c::I2c, deadline: Instant, ready: impl Fn(pac::i2c::I2c) -> bool) -> Result<(), Fault> {
+fn wait(
+    r: pac::i2c::I2c,
+    deadline: Instant,
+    ready: impl Fn(pac::i2c::I2c) -> bool,
+) -> Result<(), Fault> {
     loop {
         if let Some(fault) = Fault::from_abort_source(r.ic_tx_abrt_source().read().0) {
             r.ic_clr_tx_abrt().read();
@@ -114,14 +122,26 @@ fn wait(r: pac::i2c::I2c, deadline: Instant, ready: impl Fn(pac::i2c::I2c) -> bo
 }
 
 /// Runs one transfer on an enabled controller.
-fn run(r: pac::i2c::I2c, addr: u8, tx: &[u8], rx: &mut [u8], deadline: Instant) -> Result<(), Fault> {
+fn run(
+    r: pac::i2c::I2c,
+    addr: u8,
+    tx: &[u8],
+    rx: &mut [u8],
+    deadline: Instant,
+) -> Result<(), Fault> {
     r.ic_enable().write(|w| w.set_enable(false));
     r.ic_tar().write(|w| w.set_ic_tar(u16::from(addr)));
     r.ic_enable().write(|w| w.set_enable(true));
     r.ic_clr_tx_abrt().read();
     r.ic_clr_stop_det().read();
     let mut slots = rx.iter_mut();
-    for Cmd { read, byte, restart, stop } in commands(tx, slots.len()) {
+    for Cmd {
+        read,
+        byte,
+        restart,
+        stop,
+    } in commands(tx, slots.len())
+    {
         wait(r, deadline, |r| r.ic_txflr().read().txflr() < FIFO_DEPTH)?;
         r.ic_data_cmd().write(|w| {
             w.set_restart(restart);
@@ -149,13 +169,20 @@ impl I2cBuses {
     pub fn new(i2c0: Peri<'static, I2C0>, i2c1: Peri<'static, I2C1>) -> Self {
         hold_reset(0, true);
         hold_reset(1, true);
-        I2cBuses { _i2c0: i2c0, _i2c1: i2c1, freq: [None; 2] }
+        I2cBuses {
+            _i2c0: i2c0,
+            _i2c1: i2c1,
+            freq: [None; 2],
+        }
     }
 
     /// Opens (or retunes) `bus` at `freq_hz`; `Unsupported` for a clock the
     /// controller cannot make.
     pub fn open(&mut self, bus: u8, freq_hz: u32) -> Result<(), AbiError> {
-        let slot = self.freq.get_mut(usize::from(bus)).ok_or(AbiError::Unsupported)?;
+        let slot = self
+            .freq
+            .get_mut(usize::from(bus))
+            .ok_or(AbiError::Unsupported)?;
         let timing = Timing::new(embassy_rp::clocks::clk_peri_freq(), freq_hz)?;
         configure(bus, &timing)?;
         *slot = Some(freq_hz);
@@ -165,8 +192,19 @@ impl I2cBuses {
     /// One blocking transfer (see the module docs): `Busy` before
     /// `open`, `Unsupported` for an address-only probe, `Transport` for any
     /// bus fault or the deadline.
-    pub fn transfer(&mut self, bus: u8, addr: u8, tx: &[u8], rx: &mut [u8]) -> Result<(), AbiError> {
-        let freq = self.freq.get(usize::from(bus)).copied().flatten().ok_or(AbiError::Busy)?;
+    pub fn transfer(
+        &mut self,
+        bus: u8,
+        addr: u8,
+        tx: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), AbiError> {
+        let freq = self
+            .freq
+            .get(usize::from(bus))
+            .copied()
+            .flatten()
+            .ok_or(AbiError::Busy)?;
         check_lengths(tx.len(), rx.len())?;
         let r = regs(bus)?;
         let budget = Duration::from_micros(u64::from(timeout_us(freq, tx.len(), rx.len())));

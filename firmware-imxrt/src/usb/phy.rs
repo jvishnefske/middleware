@@ -85,7 +85,8 @@ pub const PHY_SFTRST: u32 = 1 << 31;
 /// Written to `USBPHY_CTRL_CLR` first: out of reset, clocks ungated.
 pub const PHY_CTRL_CLEAR: u32 = PHY_SFTRST | PHY_CLKGATE;
 /// Written to `USBPHY_CTRL_SET` after `PWD` = 0.
-pub const PHY_CTRL_SET: u32 = PHY_ENUTMILEVEL2 | PHY_ENUTMILEVEL3 | PHY_ENAUTOCLR_PHY_PWD | PHY_ENAUTOCLR_CLKGATE;
+pub const PHY_CTRL_SET: u32 =
+    PHY_ENUTMILEVEL2 | PHY_ENUTMILEVEL3 | PHY_ENAUTOCLR_PHY_PWD | PHY_ENAUTOCLR_CLKGATE;
 /// `USBPHY_PWD` value: every part of the PHY powered.
 pub const PHY_PWD_ON: u32 = 0;
 
@@ -117,14 +118,26 @@ mod tests {
     #[test]
     fn fl2_a_stopped_usb_pll_starts_bypassed_at_480_mhz_then_leaves_bypass() {
         let cur = 0x0001_2000 | PLL_DIV_SELECT | (0b01 << 14);
-        let PllUsb1::Start { bypass, start } = pll_usb1(cur) else { panic!("not started") };
+        let PllUsb1::Start { bypass, start } = pll_usb1(cur) else {
+            panic!("not started")
+        };
         assert_eq!(bypass & PLL_BYPASS, PLL_BYPASS);
-        assert_eq!(bypass & PLL_BYPASS_CLK_SRC, 0, "bypass to the 24 MHz oscillator");
-        assert_eq!(start & (PLL_POWER | PLL_ENABLE | PLL_EN_USB_CLKS), PLL_POWER | PLL_ENABLE | PLL_EN_USB_CLKS);
+        assert_eq!(
+            bypass & PLL_BYPASS_CLK_SRC,
+            0,
+            "bypass to the 24 MHz oscillator"
+        );
+        assert_eq!(
+            start & (PLL_POWER | PLL_ENABLE | PLL_EN_USB_CLKS),
+            PLL_POWER | PLL_ENABLE | PLL_EN_USB_CLKS
+        );
         assert_eq!(start & PLL_DIV_SELECT, 0, "x20: 480 MHz");
         assert_eq!(pll_usb1_unbypass(start) & PLL_BYPASS, 0);
         // A locked but bypassed PLL is restarted, not trusted.
-        assert!(matches!(pll_usb1(PLL_POWER | PLL_ENABLE | PLL_LOCK | PLL_BYPASS), PllUsb1::Start { .. }));
+        assert!(matches!(
+            pll_usb1(PLL_POWER | PLL_ENABLE | PLL_LOCK | PLL_BYPASS),
+            PllUsb1::Start { .. }
+        ));
     }
 
     #[test]

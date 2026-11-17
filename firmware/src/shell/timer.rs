@@ -40,7 +40,10 @@ impl Alarm {
     /// Arms the hardware for the table's next deadline, or stops it.
     fn rearm(&mut self, now: u64) -> Result<(), AbiError> {
         match self.table.alarm_in(now) {
-            Some(us) => self.hw.schedule(Duration::from_micros(us)).map_err(|_| AbiError::Unsupported),
+            Some(us) => self
+                .hw
+                .schedule(Duration::from_micros(us))
+                .map_err(|_| AbiError::Unsupported),
             None => {
                 self.hw.stop();
                 Ok(())
@@ -49,10 +52,15 @@ impl Alarm {
     }
 }
 
-static ALARM: Mutex<CriticalSectionRawMutex, RefCell<Option<Alarm>>> = Mutex::new(RefCell::new(None));
+static ALARM: Mutex<CriticalSectionRawMutex, RefCell<Option<Alarm>>> =
+    Mutex::new(RefCell::new(None));
 
 fn with<R>(f: impl FnOnce(&mut Alarm) -> R) -> Option<R> {
-    ALARM.lock(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.as_mut().map(f)))
+    ALARM.lock(|cell| {
+        cell.try_borrow_mut()
+            .ok()
+            .and_then(|mut a| a.as_mut().map(f))
+    })
 }
 
 #[handler]
@@ -79,7 +87,10 @@ pub fn init(timer: TimgTimer<'static>) {
     hw.listen();
     ALARM.lock(|cell| {
         if let Ok(mut slot) = cell.try_borrow_mut() {
-            *slot = Some(Alarm { hw, table: Timers::new() });
+            *slot = Some(Alarm {
+                hw,
+                table: Timers::new(),
+            });
         }
     });
 }

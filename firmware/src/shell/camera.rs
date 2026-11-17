@@ -119,7 +119,8 @@ struct Parts {
 }
 
 /// Where the camera rests (see the module docs).
-static HOME: Mutex<CriticalSectionRawMutex, RefCell<Option<Parts>>> = Mutex::new(RefCell::new(None));
+static HOME: Mutex<CriticalSectionRawMutex, RefCell<Option<Parts>>> =
+    Mutex::new(RefCell::new(None));
 
 fn with_home<R>(f: impl FnOnce(&mut Option<Parts>) -> R) -> Option<R> {
     HOME.lock(|c| c.try_borrow_mut().ok().map(|mut h| f(&mut h)))
@@ -132,7 +133,9 @@ pub fn install(i2s0: I2S0<'static>, dma: DMA_I2S0<'static>) -> bool {
         .with_sample_rate(Rate::from_hz(312_500))
         .with_data_format(DataFormat::Data16Channel16)
         .with_channels(Channels::MONO);
-    let Ok(i2s) = I2s::new(i2s0, dma, config) else { return false };
+    let Ok(i2s) = I2s::new(i2s0, dma, config) else {
+        return false;
+    };
     let rx = i2s.i2s_rx.build();
     let regs = I2S0::regs();
     regs.conf().modify(|_, w| {
@@ -152,14 +155,23 @@ pub fn install(i2s0: I2S0<'static>, dma: DMA_I2S0<'static>) -> bool {
         w.rx_fifo_mod_force_en().set_bit()
     });
     regs.timing().modify(|_, w| w.rx_dsync_sw().set_bit());
-    with_home(|h| *h = Some(Parts { rx, ring: None, frame: None, captures: 0 })).is_some()
+    with_home(|h| {
+        *h = Some(Parts {
+            rx,
+            ring: None,
+            frame: None,
+            captures: 0,
+        })
+    })
+    .is_some()
 }
 
 /// `n` zeroed heap bytes, 4-byte aligned, kept forever; `NoResources`
 /// when the heap cannot hold them.
 fn leak_bytes(n: usize) -> Result<&'static mut [u8], AbiError> {
     let mut v: Vec<u8> = Vec::new();
-    v.try_reserve_exact(n + 4).map_err(|_| AbiError::NoResources)?;
+    v.try_reserve_exact(n + 4)
+        .map_err(|_| AbiError::NoResources)?;
     v.resize(n + 4, 0);
     let all = v.leak();
     let skew = all.as_ptr() as usize % 4;
@@ -170,7 +182,8 @@ fn leak_bytes(n: usize) -> Result<&'static mut [u8], AbiError> {
 /// The DMA ring.
 fn ring() -> Result<DmaRxStreamBuf, AbiError> {
     let mut d: Vec<DmaDescriptor> = Vec::new();
-    d.try_reserve_exact(DESCRIPTORS).map_err(|_| AbiError::NoResources)?;
+    d.try_reserve_exact(DESCRIPTORS)
+        .map_err(|_| AbiError::NoResources)?;
     d.resize(DESCRIPTORS, DmaDescriptor::EMPTY);
     let descriptors = DmaAlignedMut::new(d.leak()).map_err(|_| AbiError::NoResources)?;
     let buffer = DmaAlignedMut::new(leak_bytes(RING_BYTES)?).map_err(|_| AbiError::NoResources)?;
@@ -260,7 +273,14 @@ pub async fn capture() -> (Result<u32, CaptureFault>, Seen) {
         }
         Err((_, rx, ring)) => (Err(CaptureFault::Hardware), rx, ring),
     };
-    with_home(|h| *h = Some(Parts { rx, ring: Some(ring), frame: Some(frame), captures }));
+    with_home(|h| {
+        *h = Some(Parts {
+            rx,
+            ring: Some(ring),
+            frame: Some(frame),
+            captures,
+        })
+    });
     (result, seen)
 }
 
@@ -308,7 +328,9 @@ async fn drain(
             continue;
         }
         transfer.consume(used);
-        seen.raw = seen.raw.saturating_add(u32::try_from(used).unwrap_or(u32::MAX));
+        seen.raw = seen
+            .raw
+            .saturating_add(u32::try_from(used).unwrap_or(u32::MAX));
         let bytes = scratch.get(..n).unwrap_or(&[]);
         let (next, _, status) = asm.feed(bytes, frame);
         asm = next;

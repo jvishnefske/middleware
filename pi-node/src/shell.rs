@@ -102,7 +102,10 @@ async fn recv(link: &mut Link, buf: &mut [u8]) -> Result<Inbound, ()> {
             key: key.as_str().to_owned(),
             body: payload.to_vec(),
         }),
-        Ok(Frame::Publish { key, payload }) => Ok(Inbound::Publish { key: key.as_str().to_owned(), body: payload.to_vec() }),
+        Ok(Frame::Publish { key, payload }) => Ok(Inbound::Publish {
+            key: key.as_str().to_owned(),
+            body: payload.to_vec(),
+        }),
         Ok(Frame::Response { .. }) => Ok(Inbound::Other),
         Err(_) => Err(()),
     }
@@ -118,7 +121,10 @@ async fn recv_opt(link: Option<&mut Link>, buf: &mut [u8]) -> Result<Inbound, ()
 
 /// Sends `frame`, bounded by [`SEND_TIMEOUT`]; `false` on failure.
 async fn send(link: &mut Link, frame: &Frame<'_>) -> bool {
-    matches!(tokio::time::timeout(SEND_TIMEOUT, link.send(frame)).await, Ok(Ok(())))
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, link.send(frame)).await,
+        Ok(Ok(()))
+    )
 }
 
 struct Links {
@@ -142,7 +148,10 @@ impl Links {
             if key == keys::LOG {
                 tracing::info!(target: "mw_pi_node::device", "{}", String::from_utf8_lossy(&o.payload));
             }
-            let frame = Frame::Publish { key, payload: &o.payload };
+            let frame = Frame::Publish {
+                key,
+                payload: &o.payload,
+            };
             let ok = send(&mut self.gateway, &frame).await;
             self.count(ok);
             if let Some(l) = self.local.as_mut() {
@@ -182,7 +191,9 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
         if *stop.borrow() {
             return Ended::Stopped;
         }
-        let delay = ctl.next_wake_us().map(|at| Duration::from_micros(at.saturating_sub(ctl.clock().now_us())));
+        let delay = ctl
+            .next_wake_us()
+            .map(|at| Duration::from_micros(at.saturating_sub(ctl.clock().now_us())));
         let timer = async move {
             match delay {
                 Some(d) => tokio::time::sleep(d).await,
@@ -211,7 +222,10 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
                     Ok(k) => ctl.request(k, &body, &RequestMeta::NONE),
                     Err(_) => Err(middleware::transport::HandlerError::InvalidRequest),
                 };
-                let frame = Frame::Response { id, result: result.as_deref().map_err(|e| *e) };
+                let frame = Frame::Response {
+                    id,
+                    result: result.as_deref().map_err(|e| *e),
+                };
                 let link = match origin {
                     Origin::Gateway => Some(&mut links.gateway),
                     Origin::Local => links.local.as_mut(),
@@ -251,46 +265,55 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
 ) -> io::Result<DeviceTask> {
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
-    let thread = std::thread::Builder::new().name("mw-pi-node-device".into()).spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build();
-        let rt = match runtime {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!("mw-pi-node: device runtime: {e}");
-                let _ = report.send(DeviceReport {
-                    ended: None,
-                    status: None,
-                    dropped: 0,
-                    send_failed: 0,
-                    synced: false,
-                });
-                return;
-            }
-        };
-        let r = rt.block_on(async move {
-            let (mut ctl, boot) = Controller::open(flash, facts, limits, SystemClock::start());
-            let mut links = Links {
-                gateway: SerialLink::with_inbox(gateway),
-                local: local.map(SerialLink::with_inbox),
-                send_failed: 0,
+    let thread = std::thread::Builder::new()
+        .name("mw-pi-node-device".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build();
+            let rt = match runtime {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("mw-pi-node: device runtime: {e}");
+                    let _ = report.send(DeviceReport {
+                        ended: None,
+                        status: None,
+                        dropped: 0,
+                        send_failed: 0,
+                        synced: false,
+                    });
+                    return;
+                }
             };
-            ctl.boot(&boot);
-            let ended = run(&mut ctl, &mut links, &mut stopped).await;
-            let synced = ctl.shutdown().is_ok();
-            if ended == Ended::Stopped {
-                links.broadcast(ctl.drain()).await;
-            }
-            DeviceReport {
-                ended: Some(ended),
-                status: Some(ctl.status()),
-                dropped: ctl.dropped(),
-                send_failed: links.send_failed,
-                synced,
-            }
-        });
-        let _ = report.send(r);
-    })?;
-    Ok(DeviceTask { stop, done: Some(done), finished: None, thread: Some(thread) })
+            let r = rt.block_on(async move {
+                let (mut ctl, boot) = Controller::open(flash, facts, limits, SystemClock::start());
+                let mut links = Links {
+                    gateway: SerialLink::with_inbox(gateway),
+                    local: local.map(SerialLink::with_inbox),
+                    send_failed: 0,
+                };
+                ctl.boot(&boot);
+                let ended = run(&mut ctl, &mut links, &mut stopped).await;
+                let synced = ctl.shutdown().is_ok();
+                if ended == Ended::Stopped {
+                    links.broadcast(ctl.drain()).await;
+                }
+                DeviceReport {
+                    ended: Some(ended),
+                    status: Some(ctl.status()),
+                    dropped: ctl.dropped(),
+                    send_failed: links.send_failed,
+                    synced,
+                }
+            });
+            let _ = report.send(r);
+        })?;
+    Ok(DeviceTask {
+        stop,
+        done: Some(done),
+        finished: None,
+        thread: Some(thread),
+    })
 }
 
 impl DeviceTask {
@@ -313,7 +336,13 @@ impl DeviceTask {
         if let Some(t) = self.thread.take() {
             let _ = tokio::task::spawn_blocking(move || t.join()).await;
         }
-        report.unwrap_or(DeviceReport { ended: None, status: None, dropped: 0, send_failed: 0, synced: false })
+        report.unwrap_or(DeviceReport {
+            ended: None,
+            status: None,
+            dropped: 0,
+            send_failed: 0,
+            synced: false,
+        })
     }
 }
 
@@ -390,13 +419,23 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     gateway: GatewayParts,
     session: ZenohTransport,
 ) -> Result<(PiNode, SysForward), StartError> {
-    let DeviceParts { flash, facts, limits, local } = device;
-    let GatewayParts { bridge, options, store } = gateway;
+    let DeviceParts {
+        flash,
+        facts,
+        limits,
+        local,
+    } = device;
+    let GatewayParts {
+        bridge,
+        options,
+        store,
+    } = gateway;
     let (device_io, gateway_io) = pair();
     let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
         .await
         .map_err(StartError::Zenoh)?;
-    let device = spawn_device(flash, facts, limits, device_io, local).map_err(StartError::Thread)?;
+    let device =
+        spawn_device(flash, facts, limits, device_io, local).map_err(StartError::Thread)?;
     Ok((PiNode { device, gateway }, sys))
 }
 

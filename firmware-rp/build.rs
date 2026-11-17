@@ -23,7 +23,9 @@ use std::path::PathBuf;
 mod image;
 
 fn version() -> Result<image::FwVersion, String> {
-    let given = env::var("RP_BASE_FW_VERSION").ok().filter(|v| !v.is_empty());
+    let given = env::var("RP_BASE_FW_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty());
     let text = match given {
         Some(v) => v,
         None => format!(
@@ -32,7 +34,8 @@ fn version() -> Result<image::FwVersion, String> {
             env::var("CARGO_PKG_VERSION_MINOR").unwrap_or_default()
         ),
     };
-    image::parse_version(&text).ok_or_else(|| format!("RP_BASE_FW_VERSION {text:?} is not MAJOR.MINOR (each 0..=65535)"))
+    image::parse_version(&text)
+        .ok_or_else(|| format!("RP_BASE_FW_VERSION {text:?} is not MAJOR.MINOR (each 0..=65535)"))
 }
 
 fn main() {

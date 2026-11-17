@@ -151,7 +151,10 @@ fn rust_serve_echo_example() {
 #[test]
 fn as_serve_template() {
     if let Some(r) = assemblyscript("serve") {
-        assert!(has(&r.exports, &["memory", "init", "mw_alloc", "on_request"]));
+        assert!(has(
+            &r.exports,
+            &["memory", "init", "mw_alloc", "on_request"]
+        ));
         assert!(has(&r.imports, &["serve", "node_id"]));
     }
 }
@@ -247,7 +250,9 @@ fn rust_periph_demo_example() {
     let abi3 = &middleware::wasm_abi::IMPORTS[..middleware::wasm_abi::ABI3_IMPORTS];
     let byte_pages = byte_pages("periph_demo");
     if byte_pages.is_none() {
-        eprintln!("periph_demo: no byte-page build; run scripts/build-byte-pages.sh -p periph_demo");
+        eprintln!(
+            "periph_demo: no byte-page build; run scripts/build-byte-pages.sh -p periph_demo"
+        );
     }
     for r in std::iter::once(validate(&release("periph_demo"))).chain(byte_pages) {
         assert!(has(&r.exports, ALL_EXPORTS));

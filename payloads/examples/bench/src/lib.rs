@@ -214,8 +214,16 @@ impl Bench {
             frame: Frame::Start,
             seed: 1,
             window: Window {
-                mix: Timing { steps: 0, total_us: 0, max_us: 0 },
-                jpeg: Timing { steps: 0, total_us: 0, max_us: 0 },
+                mix: Timing {
+                    steps: 0,
+                    total_us: 0,
+                    max_us: 0,
+                },
+                jpeg: Timing {
+                    steps: 0,
+                    total_us: 0,
+                    max_us: 0,
+                },
                 frames: 0,
                 frames_us: 0,
                 last_frame_ms: 0,
@@ -227,12 +235,7 @@ impl Bench {
 
     /// Runs one step; `clock()` is read before and after it (microseconds,
     /// wrapping), `now_ms` is the time of the step.
-    pub fn step(
-        &mut self,
-        bufs: &mut Buffers,
-        now_ms: u32,
-        mut clock: impl FnMut() -> u32,
-    ) {
+    pub fn step(&mut self, bufs: &mut Buffers, now_ms: u32, mut clock: impl FnMut() -> u32) {
         let t0 = clock();
         match self.next {
             Work::Mix => {
@@ -256,7 +259,9 @@ impl Bench {
                     (Frame::Decoding { us: so_far, at_ms }, true) => {
                         let w = &mut self.window;
                         w.frames = w.frames.saturating_add(1);
-                        w.frames_us = w.frames_us.saturating_add(u64::from(so_far.saturating_add(us)));
+                        w.frames_us = w
+                            .frames_us
+                            .saturating_add(u64::from(so_far.saturating_add(us)));
                         w.last_frame_ms = now_ms.wrapping_sub(at_ms);
                         Frame::Start
                     }
@@ -397,7 +402,10 @@ mod exports {
                 log_err("subscribe", e);
             }
             mw_payload::log("bench: started");
-            let mut app = App { bench: Bench::new(), timer: None };
+            let mut app = App {
+                bench: Bench::new(),
+                timer: None,
+            };
             app.arm();
             app
         }
@@ -413,7 +421,8 @@ mod exports {
         fn on_irq(&mut self, event: Event) {
             if let Event::Timer { id: STEP_TIMER, .. } = event {
                 if let Some(mut bufs) = BUFS.borrow_mut() {
-                    self.bench.step(&mut bufs, mw_payload::now_ms(), mw_payload::irq::now_us);
+                    self.bench
+                        .step(&mut bufs, mw_payload::now_ms(), mw_payload::irq::now_us);
                 }
                 self.arm();
             }
@@ -453,8 +462,14 @@ mod tests {
         }
         let w = bench.window;
         assert_eq!(bench.errors, 0);
-        assert_eq!((w.mix.steps, w.jpeg.steps), (JPEG_STEPS_PER_FRAME, JPEG_STEPS_PER_FRAME));
-        assert_eq!(w.frames, 1, "one frame in exactly JPEG_STEPS_PER_FRAME steps");
+        assert_eq!(
+            (w.mix.steps, w.jpeg.steps),
+            (JPEG_STEPS_PER_FRAME, JPEG_STEPS_PER_FRAME)
+        );
+        assert_eq!(
+            w.frames, 1,
+            "one frame in exactly JPEG_STEPS_PER_FRAME steps"
+        );
         assert_eq!(w.frames_us, 10 * u64::from(JPEG_STEPS_PER_FRAME));
         assert_eq!(w.last_frame_ms, 2 * (JPEG_STEPS_PER_FRAME - 1));
         assert_eq!(bench.frame, Frame::Start);

@@ -29,14 +29,20 @@ default = []
 wdt-test = []
 
 [dependencies]
-# Pure core of the ESP base firmware: dispatch, payload store, chip tables.
-# Default features off: no chip feature, so no esp-hal dependencies.
-esp-base = { path = "../firmware", default-features = false }
+# Pure core of the ESP base firmware: dispatch, payload store, trust store,
+# chip tables. No chip feature, so no esp-hal dependencies; `trust` for
+# signed payloads (SHA-256, Ed25519 and P-256 verification, no heap).
+esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
 # Frame codec, loader commands and keys need no optional features.
 middleware = { path = "..", default-features = false }
 embedded-storage = "0.3.2"
 embedded-hal = { version = "0.2", features = ["unproven"] }
 nb = "1.0"
+
+[dev-dependencies]
+# Host tests sign payloads with both key kinds the device verifies.
+ed25519-dalek = { version = "2.2", default-features = false }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 esp8266-hal = "0.5.1"

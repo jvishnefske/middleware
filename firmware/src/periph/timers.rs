@@ -53,7 +53,9 @@ pub struct Timers {
 impl Timers {
     /// No timer running.
     pub const fn new() -> Self {
-        Timers { slots: [None; MAX_TIMERS] }
+        Timers {
+            slots: [None; MAX_TIMERS],
+        }
     }
 
     /// The slot of timer `id`.
@@ -96,7 +98,8 @@ impl Timers {
     /// How long to arm the alarm for at `now` (at least [`MIN_ALARM_US`]),
     /// or `None` to leave it stopped.
     pub fn alarm_in(&self, now: u64) -> Option<u64> {
-        self.next_deadline().map(|d| d.saturating_sub(now).max(MIN_ALARM_US))
+        self.next_deadline()
+            .map(|d| d.saturating_sub(now).max(MIN_ALARM_US))
     }
 
     /// Fires every timer due at `now`. Returns the new table and the fired
@@ -111,13 +114,20 @@ impl Timers {
             }
             let id = id as u8;
             let period = u64::from(s.period.max(1));
-            let periods = if s.periodic { 1 + (now - s.deadline) / period } else { 1 };
+            let periods = if s.periodic {
+                1 + (now - s.deadline) / period
+            } else {
+                1
+            };
             let rearmed = s.periodic.then(|| Slot {
                 deadline: s.deadline.saturating_add(periods.saturating_mul(period)),
                 ..*s
             });
             next = next.with(id, rearmed);
-            let fired = Fired { id, periods: u32::try_from(periods).unwrap_or(u32::MAX) };
+            let fired = Fired {
+                id,
+                periods: u32::try_from(periods).unwrap_or(u32::MAX),
+            };
             // At most MAX_TIMERS entries: the push cannot fail.
             let _ = due.push((s.deadline, fired));
         }
@@ -131,7 +141,11 @@ mod tests {
     use super::*;
 
     fn spec(id: u8, period_us: u32, periodic: bool) -> TimerSpec {
-        TimerSpec { id, period_us, periodic }
+        TimerSpec {
+            id,
+            period_us,
+            periodic,
+        }
     }
 
     #[test]
@@ -180,8 +194,17 @@ mod tests {
     fn d8_stop_and_restart() {
         let t = Timers::new().start(spec(1, 100, true), 0).stop(1);
         assert!(t.is_idle());
-        let t = t.start(spec(1, 100, true), 0).start(spec(1, 250, false), 50);
-        assert_eq!(t.slot(1), Some(Slot { deadline: 300, period: 250, periodic: false }));
+        let t = t
+            .start(spec(1, 100, true), 0)
+            .start(spec(1, 250, false), 50);
+        assert_eq!(
+            t.slot(1),
+            Some(Slot {
+                deadline: 300,
+                period: 250,
+                periodic: false
+            })
+        );
         // A deadline already passed still arms the alarm.
         assert_eq!(t.alarm_in(400), Some(MIN_ALARM_US));
         // Out-of-range ids are ignored (the ABI parser rejects them first).

@@ -25,8 +25,12 @@ impl Console {
             w.set_uart_clk_podf(pac::ccm::vals::UartClkPodf::Divide1);
         });
         pac::CCM.ccgr5().modify(|w| w.set_cg12(0b11));
-        pac::IOMUXC.sw_mux_ctl_pad_gpio_ad_b0_12().write(|w| w.set_mux_mode(2));
-        pac::IOMUXC.sw_mux_ctl_pad_gpio_ad_b0_13().write(|w| w.set_mux_mode(2));
+        pac::IOMUXC
+            .sw_mux_ctl_pad_gpio_ad_b0_12()
+            .write(|w| w.set_mux_mode(2));
+        pac::IOMUXC
+            .sw_mux_ctl_pad_gpio_ad_b0_13()
+            .write(|w| w.set_mux_mode(2));
         let u = pac::LPUART1;
         u.global().write(|w| w.set_rst(true));
         u.global().write(|w| w.set_rst(false));
@@ -49,7 +53,9 @@ impl Console {
                     break;
                 }
             }
-            pac::LPUART1.data().write_value(pac::lpuart::regs::Data(u32::from(b)));
+            pac::LPUART1
+                .data()
+                .write_value(pac::lpuart::regs::Data(u32::from(b)));
         }
     }
 }

@@ -51,7 +51,10 @@ pub fn route(pin: u8, function: Function) {
         w.set_pue(function == Function::I2c);
         w.set_pde(false);
     });
-    pac::IO_BANK0.gpio(n).ctrl().write(|w| w.set_funcsel(function.funcsel()));
+    pac::IO_BANK0
+        .gpio(n)
+        .ctrl()
+        .write(|w| w.set_funcsel(function.funcsel()));
 }
 
 /// Gives `pin` back to SIO, the pad as `Flex::new` sets it. A pin past
@@ -66,5 +69,8 @@ pub fn to_gpio(pin: u8) {
         w.set_iso(false);
         w.set_ie(true);
     });
-    pac::IO_BANK0.gpio(n).ctrl().write(|w| w.set_funcsel(FUNC_SIO));
+    pac::IO_BANK0
+        .gpio(n)
+        .ctrl()
+        .write(|w| w.set_funcsel(FUNC_SIO));
 }

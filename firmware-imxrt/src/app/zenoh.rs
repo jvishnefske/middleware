@@ -3,16 +3,21 @@
 //! to the configured router or peer listener.
 //!
 //! [`run`] waits for the DHCP lease, connects, opens the session and
-//! declares the board's management queryables (`sys/info`,
-//! `sys/trust/info`, `sys/board`, `sys/fw/info`, `sys/payload/start`,
-//! `sys/payload/stop`, each also as its per-node key `@mw/node/<id>/...`),
-//! then serves the session: whichever comes first of
+//! declares the board's management queryables: the broadcast ones
+//! (`sys/info`, `sys/trust/info`, `sys/board`, `sys/fw/info`,
+//! `sys/payload/start`, `sys/payload/stop`) and one per-node queryable for
+//! every system key, `@mw/node/<id>/sys/**` (ZN5: uploads, firmware
+//! updates and their signed controls address one board), seven
+//! declarations in all, which leaves the table room for every
+//! subscription a payload may have; then it serves the session:
+//! whichever comes first of
 //!
 //! * a query: copied into an [`Inbound`] request on [`LinkId::ZENOH`] for
 //!   the controller, which gates it ([`imxrt_base::zenoh_mgmt`]: only
-//!   `sys/info` and `sys/trust/info` on an unclaimed board, signed
-//!   start/stop once claimed) and answers on this link; the answer goes
-//!   back as the query's reply;
+//!   `sys/info` and `sys/trust/info` on an unclaimed board; once claimed,
+//!   read-only keys, staged uploads and firmware transfers whose commits
+//!   are signed, and signed start/stop/fw reboot/confirm/abort) and
+//!   answers on this link; the answer goes back as the query's reply;
 //! * a sample on a declared subscription: an inbound publication (the
 //!   session declares a subscriber for each of the running payload's
 //!   subscription keys, [`Bus::subscriptions`], and follows their changes;
@@ -39,10 +44,10 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
 use imxrt_base::config::Endpoint;
 use imxrt_base::links::LinkId;
-use middleware::loader::keys;
-use middleware::transport::Publisher;
 use imxrt_base::zenoh_mgmt::{SubSet, subscription_diff};
 use middleware::key::Filter;
+use middleware::loader::keys;
+use middleware::transport::Publisher;
 use middleware::zenoh_lite::{Clock, Config, Event, ZenohLite, Zid};
 
 use super::bus::{Bus, Inbound, Kind};
@@ -50,9 +55,15 @@ use super::bus::{Bus, Inbound, Kind};
 /// Delay before a reconnect.
 const RETRY: Duration = Duration::from_secs(2);
 
-/// The management keys declared as queryables.
-const QUERYABLES: [middleware::Key<'static>; 6] =
-    [keys::INFO, keys::TRUST_INFO, keys::BOARD, middleware::fw_ota::keys::INFO, keys::START, keys::STOP];
+/// The management keys declared as broadcast queryables.
+const QUERYABLES: [middleware::Key<'static>; 6] = [
+    keys::INFO,
+    keys::TRUST_INFO,
+    keys::BOARD,
+    middleware::fw_ota::keys::INFO,
+    keys::START,
+    keys::STOP,
+];
 
 /// embassy-time as the client's clock.
 pub struct EmbassyClock;
@@ -77,7 +88,8 @@ pub fn zid(uid: [u8; 8]) -> Option<Zid> {
 
 /// The endpoint the next connect uses: the service's
 /// `sys/zenoh/endpoint`, kept current by the controller ([`set_endpoint`]).
-static ENDPOINT: BlockingMutex<CriticalSectionRawMutex, Cell<Option<Endpoint>>> = BlockingMutex::new(Cell::new(None));
+static ENDPOINT: BlockingMutex<CriticalSectionRawMutex, Cell<Option<Endpoint>>> =
+    BlockingMutex::new(Cell::new(None));
 
 /// Sets the endpoint the next connect uses.
 pub fn set_endpoint(e: Option<Endpoint>) {
@@ -105,8 +117,15 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
             bus.log(format_args!(
                 "eth: link {}, DHCP {} (rx {} dropped {} tx {} bus errors {})",
                 if stack.is_link_up() { "up" } else { "down" },
-                if stack.is_config_up() { "bound" } else { "pending" },
-                st.rx_frames, st.rx_dropped, st.tx_frames, st.bus_errors
+                if stack.is_config_up() {
+                    "bound"
+                } else {
+                    "pending"
+                },
+                st.rx_frames,
+                st.rx_dropped,
+                st.tx_frames,
+                st.bus_errors
             ));
         }
         waited = waited.wrapping_add(1);
@@ -128,7 +147,10 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
         };
         let mut sock = TcpSocket::new(stack, &mut rx, &mut tx);
         sock.set_timeout(Some(Duration::from_secs(30)));
-        let remote = (embassy_net::Ipv4Address::new(ep.addr[0], ep.addr[1], ep.addr[2], ep.addr[3]), ep.port);
+        let remote = (
+            embassy_net::Ipv4Address::new(ep.addr[0], ep.addr[1], ep.addr[2], ep.addr[3]),
+            ep.port,
+        );
         if let Err(e) = sock.connect(remote).await {
             let st = super::enet::stats();
             bus.log(format_args!(
@@ -146,18 +168,29 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
         }
         let mut declared = true;
         for key in QUERYABLES {
-            declared &= client.declare_queryable(key).await.is_ok();
+            declared &= client.declare_plain_queryable(key).await.is_ok();
         }
+        declared &= client
+            .declare_node_prefix_queryable(middleware::Key::from_static("sys"))
+            .await
+            .is_ok();
         bus.log(format_args!(
             "zenoh: session open (sender {:02x}{:02x}{:02x}{:02x}..., queryables {})",
             client.sender_id().0[0],
             client.sender_id().0[1],
             client.sender_id().0[2],
             client.sender_id().0[3],
-            if declared { "declared" } else { "partly declared" }
+            if declared {
+                "declared"
+            } else {
+                "partly declared"
+            }
         ));
         let mut declared = SubSet::new();
-        if follow_subscriptions(&mut client, bus, &mut declared).await.is_err() {
+        if follow_subscriptions(&mut client, bus, &mut declared)
+            .await
+            .is_err()
+        {
             Timer::after(RETRY).await;
             continue;
         }
@@ -171,14 +204,23 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
             .await
             {
                 Either3::Third(()) => {
-                    if follow_subscriptions(&mut client, bus, &mut declared).await.is_err() {
+                    if follow_subscriptions(&mut client, bus, &mut declared)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 Either3::First(Ok(Event::Query(q))) => {
                     next_id = next_id.wrapping_add(1);
                     let id = next_id;
-                    let result = match Inbound::new(LinkId::ZENOH, Kind::Request { id }, q.key, q.body, q.meta.sender) {
+                    let result = match Inbound::new(
+                        LinkId::ZENOH,
+                        Kind::Request { id },
+                        q.key,
+                        q.body,
+                        q.meta.sender,
+                    ) {
                         Some(msg) => {
                             bus.send_inbound(msg).await;
                             bus.wait_reply(LinkId::ZENOH, id).await.result
@@ -193,7 +235,13 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
                     }
                 }
                 Either3::First(Ok(Event::Sample(s))) => {
-                    if let Some(msg) = Inbound::new(LinkId::ZENOH, Kind::Publish, s.key, s.payload, s.meta.sender) {
+                    if let Some(msg) = Inbound::new(
+                        LinkId::ZENOH,
+                        Kind::Publish,
+                        s.key,
+                        s.payload,
+                        s.meta.sender,
+                    ) {
                         bus.send_inbound(msg).await;
                     }
                 }
@@ -227,15 +275,29 @@ where
     let want = bus.subscriptions();
     let (gone, new) = subscription_diff(declared, &want);
     for k in &gone {
-        let Ok(key) = middleware::Key::new(k) else { continue };
-        client.undeclare_subscriber(Filter::Exact(key)).await.map_err(|_| ())?;
+        let Ok(key) = middleware::Key::new(k) else {
+            continue;
+        };
+        client
+            .undeclare_subscriber(Filter::Exact(key))
+            .await
+            .map_err(|_| ())?;
     }
     for k in &new {
-        let Ok(key) = middleware::Key::new(k) else { continue };
-        client.declare_subscriber(Filter::Exact(key)).await.map_err(|_| ())?;
+        let Ok(key) = middleware::Key::new(k) else {
+            continue;
+        };
+        client
+            .declare_subscriber(Filter::Exact(key))
+            .await
+            .map_err(|_| ())?;
     }
     if !gone.is_empty() || !new.is_empty() {
-        bus.log(format_args!("zenoh: payload subscriptions: {} declared, {} undeclared", new.len(), gone.len()));
+        bus.log(format_args!(
+            "zenoh: payload subscriptions: {} declared, {} undeclared",
+            new.len(),
+            gone.len()
+        ));
     }
     *declared = want;
     Ok(())

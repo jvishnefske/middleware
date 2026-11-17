@@ -51,7 +51,11 @@ pub const REPLY_CAPACITY: usize = MAX_REPLY;
 /// firmware's own; they are answered by the dispatcher whatever a payload
 /// asks). The device's `serve` answers [`AbiError::InvalidKey`] otherwise.
 pub fn servable(key: Key<'_>) -> Result<(), AbiError> {
-    if is_system_key(key) { Err(AbiError::InvalidKey) } else { Ok(()) }
+    if is_system_key(key) {
+        Err(AbiError::InvalidKey)
+    } else {
+        Ok(())
+    }
 }
 
 /// The served keys of the payload run that ended, at most
@@ -73,7 +77,11 @@ impl ServedKeys {
         let mut table = Vec::new();
         for key in keys.take(MAX_SERVES) {
             let ok = Key::new(key).is_ok_and(|k| servable(k).is_ok());
-            if !ok || table.iter().any(|k: &String<MAX_KEY_LEN>| k.as_str() == key) {
+            if !ok
+                || table
+                    .iter()
+                    .any(|k: &String<MAX_KEY_LEN>| k.as_str() == key)
+            {
                 continue;
             }
             let mut s = String::new();
@@ -117,7 +125,11 @@ pub enum Route {
 /// Routes a request on `key`: `served` is the running payload's live
 /// table while `status` is `Running`, otherwise the last run's
 /// ([`ServedKeys`]). See the module docs for the table.
-pub fn route_request<'s>(key: Key<'_>, status: PayloadStatus, mut served: impl Iterator<Item = &'s str>) -> Route {
+pub fn route_request<'s>(
+    key: Key<'_>,
+    status: PayloadStatus,
+    mut served: impl Iterator<Item = &'s str>,
+) -> Route {
     if is_system_key(key) || !served.any(|s| s == key.as_str()) {
         return Route::System;
     }
@@ -142,8 +154,14 @@ pub struct PayloadReply {
 /// stops the payload.
 pub fn payload_reply<T>(result: Result<Result<usize, HandlerError>, T>) -> PayloadReply {
     match result {
-        Ok(reply) => PayloadReply { reply, trapped: false },
-        Err(_) => PayloadReply { reply: Err(HandlerError::Internal), trapped: true },
+        Ok(reply) => PayloadReply {
+            reply,
+            trapped: false,
+        },
+        Err(_) => PayloadReply {
+            reply: Err(HandlerError::Internal),
+            trapped: true,
+        },
     }
 }
 
@@ -173,9 +191,19 @@ mod tests {
     #[test]
     fn m7_sys_keys_always_go_to_the_dispatcher_and_can_never_be_served() {
         let served = ["sys/info", PHASE];
-        for status in [PayloadStatus::Running, PayloadStatus::Stopped, PayloadStatus::Trapped] {
-            assert_eq!(route_request(k("sys/info"), status, served.iter().copied()), Route::System);
-            assert_eq!(route_request(k("sys/payload/stop"), status, served.iter().copied()), Route::System);
+        for status in [
+            PayloadStatus::Running,
+            PayloadStatus::Stopped,
+            PayloadStatus::Trapped,
+        ] {
+            assert_eq!(
+                route_request(k("sys/info"), status, served.iter().copied()),
+                Route::System
+            );
+            assert_eq!(
+                route_request(k("sys/payload/stop"), status, served.iter().copied()),
+                Route::System
+            );
         }
         assert_eq!(servable(k("sys/info")), Err(AbiError::InvalidKey));
         assert_eq!(servable(k("sys")), Err(AbiError::InvalidKey));
@@ -192,37 +220,77 @@ mod tests {
         let run = |key, status| route_request(k(key), status, served.iter().copied());
         assert_eq!(run(PHASE, PayloadStatus::Running), Route::Payload);
         // Exact match only: keys have no wildcards.
-        assert_eq!(run("unit/e6613852831f2a0b/phase/LED.Blink/state", PayloadStatus::Running), Route::System);
-        assert_eq!(run("unit/e6613852831f2a0b/phase", PayloadStatus::Running), Route::System);
+        assert_eq!(
+            run(
+                "unit/e6613852831f2a0b/phase/LED.Blink/state",
+                PayloadStatus::Running
+            ),
+            Route::System
+        );
+        assert_eq!(
+            run("unit/e6613852831f2a0b/phase", PayloadStatus::Running),
+            Route::System
+        );
         assert_eq!(run("app/ping", PayloadStatus::Running), Route::System);
         // Nothing served: the dispatcher answers NotFound, as before.
-        assert_eq!(route_request(k(PHASE), PayloadStatus::Running, [].iter().copied()), Route::System);
+        assert_eq!(
+            route_request(k(PHASE), PayloadStatus::Running, [].iter().copied()),
+            Route::System
+        );
     }
 
     #[test]
     fn m7_a_stopped_trapped_or_loading_payload_is_unavailable_on_its_keys() {
         let last = ServedKeys::from_run([PHASE].into_iter());
-        for status in [PayloadStatus::Stopped, PayloadStatus::Trapped, PayloadStatus::Loading, PayloadStatus::Empty] {
-            assert_eq!(route_request(k(PHASE), status, last.iter()), Route::Refuse(HandlerError::Unavailable), "{status:?}");
-            assert_eq!(route_request(k("app/other"), status, last.iter()), Route::System);
+        for status in [
+            PayloadStatus::Stopped,
+            PayloadStatus::Trapped,
+            PayloadStatus::Loading,
+            PayloadStatus::Empty,
+        ] {
+            assert_eq!(
+                route_request(k(PHASE), status, last.iter()),
+                Route::Refuse(HandlerError::Unavailable),
+                "{status:?}"
+            );
+            assert_eq!(
+                route_request(k("app/other"), status, last.iter()),
+                Route::System
+            );
         }
     }
 
     #[test]
     fn m7_a_trap_answers_internal_and_stops_the_payload() {
         struct Trap;
-        assert_eq!(payload_reply::<Trap>(Ok(Ok(9))), PayloadReply { reply: Ok(9), trapped: false });
+        assert_eq!(
+            payload_reply::<Trap>(Ok(Ok(9))),
+            PayloadReply {
+                reply: Ok(9),
+                trapped: false
+            }
+        );
         assert_eq!(
             payload_reply::<Trap>(Ok(Err(HandlerError::InvalidRequest))),
-            PayloadReply { reply: Err(HandlerError::InvalidRequest), trapped: false }
+            PayloadReply {
+                reply: Err(HandlerError::InvalidRequest),
+                trapped: false
+            }
         );
-        assert_eq!(payload_reply::<Trap>(Err(Trap)), PayloadReply { reply: Err(HandlerError::Internal), trapped: true });
+        assert_eq!(
+            payload_reply::<Trap>(Err(Trap)),
+            PayloadReply {
+                reply: Err(HandlerError::Internal),
+                trapped: true
+            }
+        );
         assert_eq!(REPLY_CAPACITY, 512);
     }
 
     #[test]
     fn m7_the_table_is_bounded_deduplicated_and_cleared_when_the_image_changes() {
-        let many: std::vec::Vec<std::string::String> = (0..12).map(|i| std::format!("app/k{i}")).collect();
+        let many: std::vec::Vec<std::string::String> =
+            (0..12).map(|i| std::format!("app/k{i}")).collect();
         let t = ServedKeys::from_run(many.iter().map(|s| s.as_str()));
         assert_eq!(t.len(), MAX_SERVES);
         assert_eq!(t.iter().next(), Some("app/k0"));
@@ -230,8 +298,30 @@ mod tests {
         assert_eq!(t2.iter().collect::<std::vec::Vec<_>>(), ["app/a", "app/b"]);
         // Upload clears; a staged begin, writes, start and stop keep them.
         assert!(served_after(&Action::Erase { len: 4, stop: true }, t2.clone()).is_empty());
-        assert!(served_after(&Action::Activate { len: 4, crc: 0, trust: None }, t2.clone()).is_empty());
-        for keep in [Action::Erase { len: 4, stop: false }, Action::Write { offset: 0, data: &[1] }, Action::Stop, Action::Start, Action::None] {
+        assert!(
+            served_after(
+                &Action::Activate {
+                    len: 4,
+                    crc: 0,
+                    trust: None
+                },
+                t2.clone()
+            )
+            .is_empty()
+        );
+        for keep in [
+            Action::Erase {
+                len: 4,
+                stop: false,
+            },
+            Action::Write {
+                offset: 0,
+                data: &[1],
+            },
+            Action::Stop,
+            Action::Start,
+            Action::None,
+        ] {
             assert_eq!(served_after(&keep, t2.clone()), t2, "{keep:?}");
         }
     }

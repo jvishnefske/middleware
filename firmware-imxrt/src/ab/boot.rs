@@ -354,7 +354,13 @@ mod tests {
                 &r,
                 verdicts(Err(Refusal::BadMagic), Err(Refusal::PastSlot), &mut order),
             );
-            assert_eq!(d, Decision::Recovery { a: Refusal::BadMagic, b });
+            assert_eq!(
+                d,
+                Decision::Recovery {
+                    a: Refusal::BadMagic,
+                    b
+                }
+            );
             assert_eq!(d.handoff(), None);
             assert_eq!(order.len(), checked);
         }

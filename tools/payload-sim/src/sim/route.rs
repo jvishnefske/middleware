@@ -480,7 +480,10 @@ mod tests {
         let b = routes.due_batches(100_000);
         assert_eq!((b.len(), b[0].handle, b[0].number), (1, h, 0));
         let first = samples::decode(&b[0].data).unwrap().header;
-        assert_eq!((first.kind, first.channels, first.count), (SensorKind::Imu, 6, 5));
+        assert_eq!(
+            (first.kind, first.channels, first.count),
+            (SensorKind::Imu, 6, 5)
+        );
         let b = routes.due_batches(400_000);
         assert_eq!((b[0].number, b[0].skipped), (3, 2));
         let next = samples::decode(&b[0].data).unwrap().header;

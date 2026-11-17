@@ -116,7 +116,10 @@ mod tests {
     #[test]
     fn fl3_rcr_tcr_match_probe_for_100_full() {
         // Probe: (1518 << 16) | (1 << 14) | (1 << 8) | (1 << 2) | (1 << 3).
-        assert_eq!(RCR_PROBE, (1518 << 16) | (1 << 14) | (1 << 8) | (1 << 2) | (1 << 3));
+        assert_eq!(
+            RCR_PROBE,
+            (1518 << 16) | (1 << 14) | (1 << 8) | (1 << 2) | (1 << 3)
+        );
         assert_eq!(rcr(Link::FAST_FULL, true), RCR_PROBE);
         assert_eq!(tcr(Link::FAST_FULL), TCR_PROBE);
         assert_eq!(TCR_PROBE, 1 << 2);
@@ -128,7 +131,10 @@ mod tests {
         let l = |speed, duplex| Link { speed, duplex };
         assert_eq!(rcr(l(Speed::Mbps100, Duplex::Full), false), base);
         assert_eq!(rcr(l(Speed::Mbps100, Duplex::Half), false), base | RCR_DRT);
-        assert_eq!(rcr(l(Speed::Mbps10, Duplex::Full), false), base | RCR_RMII_10T);
+        assert_eq!(
+            rcr(l(Speed::Mbps10, Duplex::Full), false),
+            base | RCR_RMII_10T
+        );
         assert_eq!(
             rcr(l(Speed::Mbps10, Duplex::Half), false),
             base | RCR_RMII_10T | RCR_DRT
@@ -164,6 +170,9 @@ mod tests {
             let m = mac_from_uid(uid);
             assert_eq!(m[0] & 0b11, 0b10);
         }
-        assert_ne!(mac_from_uid([0, 0, 0, 0, 0, 0, 0, 1]), mac_from_uid([0, 0, 0, 0, 0, 0, 0, 2]));
+        assert_ne!(
+            mac_from_uid([0, 0, 0, 0, 0, 0, 0, 1]),
+            mac_from_uid([0, 0, 0, 0, 0, 0, 0, 2])
+        );
     }
 }

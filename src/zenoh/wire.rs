@@ -14,7 +14,7 @@ use crate::transport::SenderId;
 #[cfg(test)]
 use crate::dedup::Sequence;
 #[cfg(test)]
-use crate::transport::{HandlerError, SampleMeta, Target};
+use crate::transport::{HandlerError, SampleMeta, Target, TraceParent};
 
 /// `id` as 16 lowercase hex digits.
 pub fn zid16(id: SenderId) -> String {
@@ -67,6 +67,63 @@ mod tests {
         }
         // A query attachment is not a publication.
         assert_eq!(decode_pub(&encode_query(ID, 5, None, None)), None);
+    }
+
+    /// The example from the W3C Trace Context specification.
+    fn trace() -> TraceParent {
+        TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+            .expect("spec traceparent")
+    }
+
+    #[test]
+    fn traced_publications_keep_their_header_and_carry_the_context() {
+        let a = encode_pub_traced(ID, Sequence::new(9), 0xDEAD_BEEF, &trace());
+        assert_eq!(a.len(), 41);
+        assert_eq!(&a[..2], b"mw");
+        assert_eq!(a[2], 3);
+        assert_eq!(&a[16..32], &trace().trace_id());
+        assert_eq!(&a[32..40], &trace().span_id());
+        assert_eq!(a[40], 1);
+        assert_eq!(
+            decode_pub(&a),
+            Some(PubHeader {
+                sender: ID,
+                seq: 9,
+                stream: Some(0xDEAD_BEEF)
+            })
+        );
+        assert_eq!(decode_trace(&a), Some(trace()));
+        // Untraced attachments have none; a truncated one decodes as nothing.
+        assert_eq!(decode_trace(&encode_pub(ID, Sequence::new(9), 1)), None);
+        assert_eq!(decode_pub(&a[..40]), None);
+        assert_eq!(decode_trace(&a[..40]), None);
+        // An all-zero context is invalid: the header still decodes.
+        let mut z = a;
+        z[PUB_ATTACHMENT_LEN..].fill(0);
+        assert!(decode_pub(&z).is_some());
+        assert_eq!(decode_trace(&z), None);
+    }
+
+    #[test]
+    fn traced_queries_carry_the_context_in_the_query_extension() {
+        // Queries have no traced kind of their own: the trace rides in the
+        // K18 extension, and `decode_trace` reads it from there.
+        let q = encode_query(ID, 3000, Some(trace()), None);
+        assert_eq!(q.len(), QUERY_ATTACHMENT_LEN + 1 + TRACE_CONTEXT_LEN);
+        assert_eq!(q[2], 0x10);
+        let h = decode_query(&q).expect("query");
+        assert_eq!(
+            (h.sender, h.deadline_ms, h.trace),
+            (ID, 3000, Some(trace()))
+        );
+        assert_eq!(decode_trace(&q), Some(trace()));
+        assert_eq!(decode_trace(&encode_query(ID, 3000, None, None)), None);
+        // Neither kind is mistaken for the other.
+        assert_eq!(decode_pub(&q), None);
+        assert_eq!(
+            decode_query(&encode_pub_traced(ID, Sequence::new(1), 1, &trace())),
+            None
+        );
     }
 
     #[test]

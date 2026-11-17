@@ -25,7 +25,8 @@
 #   * the MCU gateway `mw-gateway` and the robot app `mw-robot` (design.md
 #     RG19) are host only: no embedded set depends on them, the robot enables
 #     no embedded feature, and the gateway enables only the serial link
-#     codec (`serial`, the wire it speaks) beside its host features;
+#     codec (`serial`, the wire it speaks) and `trust` (the device's own
+#     signature check, for signed start/stop) beside its host features;
 #   * the Linux payload host `mw-pi-node` (design.md PN9) is host only: no
 #     embedded set depends on it, and of the embedded features it enables
 #     only what the device side needs (`serial`, the link it serves;
@@ -39,7 +40,7 @@ RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-pi-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite'
-HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
+HOST_FEATURES='std|zenoh|zenoh-otel|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -119,11 +120,18 @@ done
 echo "== Y11: [fw-sim] on host"
 cargo build --quiet --no-default-features --features fw-sim
 
-for set in "zenoh" "grpc" "grpc,istio" "mdns" "dns-sd" "memory" "udp" "mdns,dns-sd" "zenoh,grpc,istio,prost,mdns,dns-sd"; do
+for set in "zenoh" "zenoh-otel" "grpc" "grpc,istio" "mdns" "dns-sd" "memory" "udp" "mdns,dns-sd" "zenoh,grpc,istio,prost,mdns,dns-sd"; do
     echo "== F2: [$set] on host"
     cargo build --quiet --no-default-features --features "$set"
     if features_of_self --no-default-features --features "$set" | grep -Eqx "$EMBEDDED_FEATURES"; then
         fail "[$set] enables an embedded feature ($EMBEDDED_FEATURES)"
+    fi
+done
+
+echo "== OT5: zenoh-otel is off unless asked for"
+for set in "zenoh" "zenoh,grpc,istio,prost,mdns,dns-sd,memory"; do
+    if deps --no-default-features --features "$set" | grep -q '^opentelemetry'; then
+        fail "[$set] pulls in OpenTelemetry without zenoh-otel"
     fi
 done
 
@@ -154,11 +162,11 @@ fi
 echo "== RG19: mw-gateway and mw-robot are host only"
 cargo build --quiet -p mw-gateway -p mw-robot
 gw_features="$(features_of_self -p mw-gateway | sort -u)"
-for want in zenoh serial; do
+for want in zenoh serial trust; do
     grep -qx "$want" <<<"$gw_features" || fail "mw-gateway does not enable middleware/$want"
 done
-if grep -Eqx 'ble|espnow|trust|cam-fixtures|zenoh-lite' <<<"$gw_features"; then
-    fail "mw-gateway enables an embedded feature other than serial"
+if grep -Eqx 'ble|espnow|cam-fixtures|zenoh-lite' <<<"$gw_features"; then
+    fail "mw-gateway enables an embedded feature other than serial and trust"
 fi
 robot_features="$(features_of_self -p mw-robot | sort -u)"
 if grep -Eqx "$EMBEDDED_FEATURES" <<<"$robot_features"; then
