@@ -1,4 +1,4 @@
-//! `mw --dry-run` for every command, as a process (design.md M54).
+//! `mw --dry-run` for every command, as a process (design.md MS64).
 //!
 //! `PATH` is emptied, so if a dry run started any program (nix, kubectl,
 //! ssh, curl, just) it would fail; the cached kubeconfig is absent and
@@ -49,7 +49,7 @@ fn ok(name: &str, args: &[&str], extra_env: &[(&str, &str)]) -> String {
 }
 
 #[test]
-fn m54_every_command_dry_runs_without_side_effects() {
+fn ms64_every_command_dry_runs_without_side_effects() {
     let build = ok("build", &["build", "demo-echo"], &[]);
     assert!(build.contains(" 1. (cd "), "{build}");
     assert!(
@@ -160,7 +160,7 @@ fn m54_every_command_dry_runs_without_side_effects() {
 }
 
 #[test]
-fn m54_usage_and_plan_errors_exit_2() {
+fn ms64_usage_and_plan_errors_exit_2() {
     let (out, _) = mw("bad-name", &["build", "Bad_Name"], &[]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("not a valid name"));

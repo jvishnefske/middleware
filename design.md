@@ -1498,6 +1498,63 @@ end-to-end run on the lab cluster (MS17), each checking its items here.
   `tests::body_selects_gather_node_or_any`,
   `spec_declares_the_dependency_and_callers` *(mw-service examples)*.
 
+#### Ops CLI `mw` (MS60–MS69)
+
+`tools/mw` (package `mw`, std, no `middleware` dependency) is the cluster
+counterpart of `mwctl`. A command and the environment (`MW_*` variables,
+whether the cached lab kubeconfig exists, the clock) are planned purely
+into typed steps that carry their exact argument vectors; a thin executor
+runs them. Tests marked *(mw)* run under `cargo test -p mw`; none contacts
+a cluster, node or network service.
+
+- [x] MS60 Every command (`build`, `load`, `apply`, `zenoh apply`,
+  `status`, `logs`, `down`, `trace`, `robot enroll`) has its plan pinned
+  by a unit test, and every name that reaches an argument vector is
+  validated first (RFC 1123 labels, tags, selectors, hosts that cannot be
+  read as options) — `tools/mw/src/plan.rs`: the `ms60_*` tests, including
+  `ms60_names_are_validated_before_reaching_argv` and
+  `ms60_a_missing_kubeconfig_is_fetched_first` *(mw)*.
+- [x] MS61 `mw trace` tells a trace id from a request id, builds Tempo's
+  `/api/traces/<id>` and `/api/search` (logfmt tag, percent-encoded,
+  bounded window) URLs, parses Tempo's OTLP JSON shapes and prints a span
+  tree whose walk terminates on cycles and orphans —
+  `tools/mw/src/tempo.rs`: `ms61_queries_are_told_apart`, `ms61_urls`,
+  `ms61_search_response_gives_trace_ids`,
+  `ms61_fixture_trace_renders_as_a_tree` (hand-written fixture
+  `tools/mw/tests/fixtures/tempo-trace.json`),
+  `ms61_other_tempo_shapes_parse`, `ms61_cycles_and_orphans_terminate`
+  *(mw)*.
+- [x] MS62 `mw robot enroll` parses the lab's `robot-join` output (token,
+  ports, SPIFFE bundle) while ignoring other lines, and renders the robot's
+  `/var/lib/mw-robot/` files (`join-token` mode 0600, `bundle.spiffe`,
+  `enrollment.env`) — `tools/mw/src/robot.rs`:
+  `ms62_parses_the_lab_output_with_extra_lines`,
+  `ms62_tolerates_other_ports_bare_tokens_and_no_header`,
+  `ms62_rejects_missing_token_or_bundle`,
+  `ms62_files_follow_the_robot_dir_contract` *(mw)*.
+- [x] MS63 `mw zenoh apply` renders the router's `user:password`
+  dictionary Secret and one `zenoh-<svc>` Secret (`user\npassword`) per
+  service from 192-bit hex passwords — `tools/mw/src/zenoh.rs`:
+  `ms63_passwords_are_hex`,
+  `ms63_secrets_hold_the_dictionary_and_per_service_credentials` *(mw)*.
+- [x] MS64 `mw --dry-run` prints every command's plan and runs nothing:
+  with an empty `PATH` every command succeeds and writes no file; usage
+  and planning errors exit 2 — `tools/mw/tests/dry_run.rs`:
+  `ms64_every_command_dry_runs_without_side_effects`,
+  `ms64_usage_and_plan_errors_exit_2` *(mw)*.
+- [x] MS65 The executor runs each step as a program with an argument
+  vector (no shell), pipes a source's output to `kubectl apply -f -` only
+  after the source succeeded, and stops at the first failing step —
+  `tools/mw/tests/exec.rs` (fake nix, kubectl, cargo, just and curl on
+  `PATH`): `ms65_steps_run_as_argv_and_pipe_manifests`,
+  `ms65_the_first_failure_stops_the_run` *(mw)*.
+- [x] MS66 Generated Zenoh passwords reach only kubectl's standard input
+  (never a file under the repository), robot enrollment files land with
+  their modes, and `mw trace` prints the tree for both id kinds —
+  `tools/mw/tests/exec.rs`: `ms66_zenoh_passwords_reach_only_kubectl`,
+  `ms66_robot_enrollment_lands_in_the_robot_dir`,
+  `ms66_trace_prints_span_trees_from_tempo` *(mw)*.
+
 ### Containers and the robot VM (nix, MS40–MS58)
 
 The top-level `flake.nix` builds every service binary listed in
@@ -2080,63 +2137,6 @@ below without a prefix runs under every one of those modules that applies.
   `damage_before_an_intact_frame_is_corruption`.
 - [ ] KV11 *(kv-file)* A failed append or sync rolls back or poisons the
   store as documented. Not yet tested: needs fault injection.
-
-#### Ops CLI `mw` (M50–M59)
-
-`tools/mw` (package `mw`, std, no `middleware` dependency) is the cluster
-counterpart of `mwctl`. A command and the environment (`MW_*` variables,
-whether the cached lab kubeconfig exists, the clock) are planned purely
-into typed steps that carry their exact argument vectors; a thin executor
-runs them. Tests marked *(mw)* run under `cargo test -p mw`; none contacts
-a cluster, node or network service.
-
-- [x] M50 Every command (`build`, `load`, `apply`, `zenoh apply`,
-  `status`, `logs`, `down`, `trace`, `robot enroll`) has its plan pinned
-  by a unit test, and every name that reaches an argument vector is
-  validated first (RFC 1123 labels, tags, selectors, hosts that cannot be
-  read as options) — `tools/mw/src/plan.rs`: the `m50_*` tests, including
-  `m50_names_are_validated_before_reaching_argv` and
-  `m50_a_missing_kubeconfig_is_fetched_first` *(mw)*.
-- [x] M51 `mw trace` tells a trace id from a request id, builds Tempo's
-  `/api/traces/<id>` and `/api/search` (logfmt tag, percent-encoded,
-  bounded window) URLs, parses Tempo's OTLP JSON shapes and prints a span
-  tree whose walk terminates on cycles and orphans —
-  `tools/mw/src/tempo.rs`: `m51_queries_are_told_apart`, `m51_urls`,
-  `m51_search_response_gives_trace_ids`,
-  `m51_fixture_trace_renders_as_a_tree` (hand-written fixture
-  `tools/mw/tests/fixtures/tempo-trace.json`),
-  `m51_other_tempo_shapes_parse`, `m51_cycles_and_orphans_terminate`
-  *(mw)*.
-- [x] M52 `mw robot enroll` parses the lab's `robot-join` output (token,
-  ports, SPIFFE bundle) while ignoring other lines, and renders the robot's
-  `/var/lib/mw-robot/` files (`join-token` mode 0600, `bundle.spiffe`,
-  `enrollment.env`) — `tools/mw/src/robot.rs`:
-  `m52_parses_the_lab_output_with_extra_lines`,
-  `m52_tolerates_other_ports_bare_tokens_and_no_header`,
-  `m52_rejects_missing_token_or_bundle`,
-  `m52_files_follow_the_robot_dir_contract` *(mw)*.
-- [x] M53 `mw zenoh apply` renders the router's `user:password`
-  dictionary Secret and one `zenoh-<svc>` Secret (`user\npassword`) per
-  service from 192-bit hex passwords — `tools/mw/src/zenoh.rs`:
-  `m53_passwords_are_hex`,
-  `m53_secrets_hold_the_dictionary_and_per_service_credentials` *(mw)*.
-- [x] M54 `mw --dry-run` prints every command's plan and runs nothing:
-  with an empty `PATH` every command succeeds and writes no file; usage
-  and planning errors exit 2 — `tools/mw/tests/dry_run.rs`:
-  `m54_every_command_dry_runs_without_side_effects`,
-  `m54_usage_and_plan_errors_exit_2` *(mw)*.
-- [x] M55 The executor runs each step as a program with an argument
-  vector (no shell), pipes a source's output to `kubectl apply -f -` only
-  after the source succeeded, and stops at the first failing step —
-  `tools/mw/tests/exec.rs` (fake nix, kubectl, cargo, just and curl on
-  `PATH`): `m55_steps_run_as_argv_and_pipe_manifests`,
-  `m55_the_first_failure_stops_the_run` *(mw)*.
-- [x] M56 Generated Zenoh passwords reach only kubectl's standard input
-  (never a file under the repository), robot enrollment files land with
-  their modes, and `mw trace` prints the tree for both id kinds —
-  `tools/mw/tests/exec.rs`: `m56_zenoh_passwords_reach_only_kubectl`,
-  `m56_robot_enrollment_lands_in_the_robot_dir`,
-  `m56_trace_prints_span_trees_from_tempo` *(mw)*.
 
 ## Device platform: ESP base firmware, WASM payloads, web tooling
 

@@ -205,7 +205,7 @@ mod tests {
     const OUT: &str = include_str!("../tests/fixtures/robot-join.txt");
 
     #[test]
-    fn m52_parses_the_lab_output_with_extra_lines() {
+    fn ms62_parses_the_lab_output_with_extra_lines() {
         let j = parse_join(OUT).unwrap();
         assert_eq!(j.token, "7c0b6e1a-4a8d-4f61-9b36-2f1d0c9e8a77");
         assert_eq!((j.spire_port, j.mesh_port), (30081, 30443));
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn m52_tolerates_other_ports_bare_tokens_and_no_header() {
+    fn ms62_tolerates_other_ports_bare_tokens_and_no_header() {
         let out = "Token: abc-123\nSPIRE server: any node address, port 31081; mesh for robots: port 31443\nnoise\n{\"keys\":[]} trailing\n";
         let j = parse_join(out).unwrap();
         assert_eq!(j.token, "abc-123");
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn m52_rejects_missing_token_or_bundle() {
+    fn ms62_rejects_missing_token_or_bundle() {
         assert_eq!(
             parse_join("join token (single use, 1h): \ntrust bundle:\n{\"keys\":[]}"),
             Err(JoinError::NoToken)
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn m52_files_follow_the_robot_dir_contract() {
+    fn ms62_files_follow_the_robot_dir_contract() {
         let j = Join {
             token: "tok".into(),
             spire_port: 30081,

@@ -1,5 +1,5 @@
 //! The shell (`mw` without `--dry-run`) against fake programs (design.md
-//! M55, M56).
+//! MS65, MS66).
 //!
 //! Each test puts small `/bin/sh` stand-ins for nix, kubectl, cargo, just
 //! and curl first on the child's `PATH`. They record their argument vector
@@ -121,7 +121,7 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn m55_steps_run_as_argv_and_pipe_manifests() {
+fn ms65_steps_run_as_argv_and_pipe_manifests() {
     let lab = Lab::new("apply");
     success(&lab.mw(&["apply", "demo-echo", "--replicas", "2"], &[]));
     let repo = lab.repo().display().to_string();
@@ -141,7 +141,7 @@ fn m55_steps_run_as_argv_and_pipe_manifests() {
 }
 
 #[test]
-fn m55_the_first_failure_stops_the_run() {
+fn ms65_the_first_failure_stops_the_run() {
     let lab = Lab::new("fail");
     let out = lab.mw(&["apply", "demo-echo"], &[("FAKE_NIX_EXIT", "3")]);
     assert_eq!(out.status.code(), Some(1));
@@ -151,7 +151,7 @@ fn m55_the_first_failure_stops_the_run() {
 }
 
 #[test]
-fn m56_zenoh_passwords_reach_only_kubectl() {
+fn ms66_zenoh_passwords_reach_only_kubectl() {
     let lab = Lab::new("zenoh");
     success(&lab.mw(&["zenoh", "apply", "demo-echo", "demo-caller"], &[]));
     let repo = lab.repo();
@@ -200,7 +200,7 @@ fn m56_zenoh_passwords_reach_only_kubectl() {
 }
 
 #[test]
-fn m56_robot_enrollment_lands_in_the_robot_dir() {
+fn ms66_robot_enrollment_lands_in_the_robot_dir() {
     let lab = Lab::new("robot");
     let vm = lab.root.join("vm-share");
     let vm_s = vm.display().to_string();
@@ -233,7 +233,7 @@ fn m56_robot_enrollment_lands_in_the_robot_dir() {
 }
 
 #[test]
-fn m56_trace_prints_span_trees_from_tempo() {
+fn ms66_trace_prints_span_trees_from_tempo() {
     let lab = Lab::new("trace");
     let tempo = [("MW_TEMPO_URL", "http://tempo.test:3200")];
     let by_id = success(&lab.mw(&["trace", "4bf92f3577b34da6a3ce929d0e0e4736"], &tempo));

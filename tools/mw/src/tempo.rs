@@ -317,7 +317,7 @@ mod tests {
     const SEARCH: &str = include_str!("../tests/fixtures/tempo-search.json");
 
     #[test]
-    fn m51_queries_are_told_apart() {
+    fn ms61_queries_are_told_apart() {
         assert_eq!(
             Query::parse("0AF7651916CD43DD8448EB211C80319C"),
             Some(Query::TraceId("0af7651916cd43dd8448eb211c80319c".into()))
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn m51_urls() {
+    fn ms61_urls() {
         assert_eq!(trace_url("http://t", "ab"), "http://t/api/traces/ab");
         assert_eq!(percent_encode("a b/c:d=\"e\"~"), "a%20b%2Fc%3Ad%3D%22e%22~");
         assert_eq!(
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn m51_search_response_gives_trace_ids() {
+    fn ms61_search_response_gives_trace_ids() {
         assert_eq!(
             parse_search(SEARCH).unwrap(),
             ["4bf92f3577b34da6a3ce929d0e0e4736"]
@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn m51_fixture_trace_renders_as_a_tree() {
+    fn ms61_fixture_trace_renders_as_a_tree() {
         let spans = parse_trace(TRACE).unwrap();
         assert_eq!(spans.len(), 5);
         let tree = format_tree("4bf92f3577b34da6a3ce929d0e0e4736", &spans);
@@ -384,7 +384,7 @@ trace 4bf92f3577b34da6a3ce929d0e0e4736: 5 spans, 12.500 ms
     }
 
     #[test]
-    fn m51_other_tempo_shapes_parse() {
+    fn ms61_other_tempo_shapes_parse() {
         let v2 = r#"{"trace":{"resourceSpans":[{"resource":{"attributes":[]},
             "instrumentationLibrarySpans":[{"spans":[
               {"spanId":"b","parentSpanId":"a","name":"child","kind":"SPAN_KIND_CLIENT",
@@ -411,7 +411,7 @@ trace t: 2 spans, 3.000 ms
     }
 
     #[test]
-    fn m51_cycles_and_orphans_terminate() {
+    fn ms61_cycles_and_orphans_terminate() {
         let span = |id: &str, parent: Option<&str>, start: u64| Span {
             id: id.into(),
             parent: parent.map(Into::into),

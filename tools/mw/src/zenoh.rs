@@ -77,7 +77,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn m53_passwords_are_hex() {
+    fn ms63_passwords_are_hex() {
         let mut b = [0u8; PASSWORD_BYTES];
         b[0] = 0xab;
         b[23] = 0x01;
@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn m53_secrets_hold_the_dictionary_and_per_service_credentials() {
+    fn ms63_secrets_hold_the_dictionary_and_per_service_credentials() {
         let ns = Name::parse("namespace", "apps").unwrap();
         let a = Name::parse("service", "demo-echo").unwrap();
         let b = Name::parse("service", "demo-caller").unwrap();

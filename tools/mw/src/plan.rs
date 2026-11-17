@@ -1231,7 +1231,7 @@ mod tests {
     const SSH: &str = "-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR";
 
     #[test]
-    fn m50_build_plans_binary_and_image_per_bin() {
+    fn ms60_build_plans_binary_and_image_per_bin() {
         assert_eq!(
             argvs(&["build", "demo-echo", "demo-caller"], &env()),
             [
@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_load_copies_and_imports_on_every_node() {
+    fn ms60_load_copies_and_imports_on_every_node() {
         let p = argvs(&["load", "demo-echo"], &env());
         assert_eq!(
             p,
@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_apply_renders_with_the_local_image_and_scales() {
+    fn ms60_apply_renders_with_the_local_image_and_scales() {
         let p = argvs(&["apply", "demo-echo", "--replicas", "3"], &env());
         assert_eq!(
             p,
@@ -1307,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_a_missing_kubeconfig_is_fetched_first() {
+    fn ms60_a_missing_kubeconfig_is_fetched_first() {
         let mut e = env();
         e.kubeconfig = Kubeconfig::Fetch(PathBuf::from("/repo/target/mw/lab.yaml"));
         let steps = plan(&cmd(&["status"]), &e).unwrap();
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_zenoh_apply_plans_specs_secrets_router_and_restarts() {
+    fn ms60_zenoh_apply_plans_specs_secrets_router_and_restarts() {
         let p = argvs(&["zenoh", "apply", "demo-echo", "demo-caller"], &env());
         assert_eq!(
             p,
@@ -1362,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_status_logs_down_select_by_label() {
+    fn ms60_status_logs_down_select_by_label() {
         assert_eq!(
             argvs(&["status"], &env()),
             [format!(
@@ -1394,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_trace_by_trace_id_port_forwards_then_fetches() {
+    fn ms60_trace_by_trace_id_port_forwards_then_fetches() {
         let id = "0af7651916cd43dd8448eb211c80319c";
         let steps = plan(&cmd(&["trace", id]), &env()).unwrap();
         assert_eq!(
@@ -1425,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_trace_by_request_id_searches_the_window() {
+    fn ms60_trace_by_request_id_searches_the_window() {
         let mut e = env();
         e.tempo_url = Some("http://tempo:3200".into());
         let steps = plan(&cmd(&["trace", "2b4c-req", "--since", "2h"]), &e).unwrap();
@@ -1449,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_robot_enroll_joins_writes_and_copies() {
+    fn ms60_robot_enroll_joins_writes_and_copies() {
         let p = argvs(
             &["robot", "enroll", "r1", "--robot-host", "192.168.66.20"],
             &env(),
@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn m50_names_are_validated_before_reaching_argv() {
+    fn ms60_names_are_validated_before_reaching_argv() {
         for bad in ["", "-rf", "Demo", "a_b", "a-", "a;rm", &"a".repeat(64)] {
             let build = Command::Build {
                 bins: vec![bad.to_owned()],
