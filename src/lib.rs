@@ -97,9 +97,9 @@
 #![allow(async_fn_in_trait)]
 
 pub mod codec;
+pub mod crc;
 pub mod dedup;
 pub mod discovery;
-pub mod crc;
 pub mod dns;
 pub mod fw_ota;
 pub mod key;

@@ -6,7 +6,9 @@
 //! the device (a `RouteStopped` event, even without `on_irq`).
 
 use middleware::Key;
-use wasm_host::{AbiError, Device, Event, EventKind, I2cDevice, Limits, Payload, Pull, SampleSource};
+use wasm_host::{
+    AbiError, Device, Event, EventKind, I2cDevice, Limits, Payload, Pull, SampleSource,
+};
 
 const IMU: I2cDevice = I2cDevice { bus: 0, addr: 0x1f };
 
@@ -30,7 +32,8 @@ impl Board {
 impl Device for Board {
     fn log(&mut self, _: &str) {}
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
-        self.published.push((key.as_str().to_string(), data.to_vec()));
+        self.published
+            .push((key.as_str().to_string(), data.to_vec()));
         Ok(())
     }
     fn now_ms(&mut self) -> u32 {

@@ -1,0 +1,14 @@
+{
+  "comment": "middleware signed-payload golden vector, P-256 (ECDSA-SHA256, raw r||s), made with OpenSSL 3; TEST KEY ONLY (private scalar = 32 bytes of 0x20). Same image, version and message as trust-vector.json. ECDSA is randomised: re-signing gives another valid signature, so check by verifying.",
+  "private_scalar": "2020202020202020202020202020202020202020202020202020202020202020",
+  "public_key": "020e539e011304a06ad552227a677a388cee251cfe15486e5ae02230a79d590ee0",
+  "image_len": 1000,
+  "image": "byte i = (i*7+3) & 0xff for i in 0..len",
+  "version": 1761500000,
+  "sha256": "1e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371",
+  "message": "6d772d7061796c6f61642d763100e8030000605bfe681e9bc38cbf860b9ec31918b065f9b52476c549a782e0e7990bed8ce3868d2371",
+  "signature": "404856b8d6872cf9fc82259fe1394169328fc855a8d50c24f159352446c3433379c60da8ca20d8e3e3a0f8aafbd8ffaaabf4c26344c1c8b8e1ef806348d46a39",
+  "commit_body": "605bfe68404856b8d6872cf9fc82259fe1394169328fc855a8d50c24f159352446c3433379c60da8ca20d8e3e3a0f8aafbd8ffaaabf4c26344c1c8b8e1ef806348d46a39",
+  "control_message": "6d772d636f6e74726f6c2d76310002e4b06381d3247bef94219a010000",
+  "control_signature": "13a2cbe7ec620160350f20e7a014e2c92c9efcc2af2f0a969d94c0fddfebc265ea063023674856ed7a750f41ba96e68a3779c9d2aa7d59c35abc1c8175993f5f"
+}

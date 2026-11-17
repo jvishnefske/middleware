@@ -414,7 +414,11 @@ mod tests {
             .find(|l| l.trim_start().starts_with(name) && l.contains("ORIGIN"))
             .unwrap_or_else(|| panic!("no MEMORY region {name}"));
         let field = |key: &str| {
-            let v = line.split(key).nth(1).unwrap().trim_start_matches([' ', '=']);
+            let v = line
+                .split(key)
+                .nth(1)
+                .unwrap()
+                .trim_start_matches([' ', '=']);
             let v = v.split([',', ' ']).next().unwrap();
             if let Some(hex) = v.strip_prefix("0x") {
                 u32::from_str_radix(hex, 16).unwrap()
@@ -435,17 +439,30 @@ mod tests {
         // The firmware runs from the SDRAM image region, one slot's size.
         let app = include_str!("../memory-app.x");
         assert_eq!(region(app, "FLASH"), (SDRAM_IMAGE.base, SDRAM_IMAGE.size));
-        assert_eq!(SDRAM_IMAGE.size, m.slot_a.size, "the image region holds one slot");
+        assert_eq!(
+            SDRAM_IMAGE.size, m.slot_a.size,
+            "the image region holds one slot"
+        );
         assert_eq!(m.slot_a.size, m.slot_b.size);
         // The bootloader's APP_IMAGE is the same region.
         let boot = include_str!("../boot-image.x");
-        assert_eq!(region(boot, "SDRAM_IMAGE"), (SDRAM_IMAGE.base, SDRAM_IMAGE.size));
+        assert_eq!(
+            region(boot, "SDRAM_IMAGE"),
+            (SDRAM_IMAGE.base, SDRAM_IMAGE.size)
+        );
         // The bootloader is linked into the boot block (imxrt-rt's FLASH
         // region, so a bootloader that outgrows it fails to link: RT9).
         let build = include_str!("../build.rs");
         extern crate std;
-        let boot_size = std::format!("from_flexspi(imxrt_rt::Family::Imxrt1050, {} * 1024)", m.boot.size / 1024);
-        assert!(build.contains(&boot_size), "build.rs must link the bootloader into {} bytes", m.boot.size);
+        let boot_size = std::format!(
+            "from_flexspi(imxrt_rt::Family::Imxrt1050, {} * 1024)",
+            m.boot.size / 1024
+        );
+        assert!(
+            build.contains(&boot_size),
+            "build.rs must link the bootloader into {} bytes",
+            m.boot.size
+        );
         assert_eq!((m.boot.offset, m.boot.size), (0, BLOCK));
     }
 }

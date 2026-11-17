@@ -33,7 +33,7 @@ use super::picobin::{ImageDef, SENTINEL_FROM};
 use super::record::{FwRecord, Pending};
 use super::wire::{Command, StateCode, signed_message};
 use super::{CHUNK_LEN, CHUNKS_PER_SECTOR, MAX_CHUNKS, MAX_IMAGE, SECTOR, Slot};
-use crate::loader::trust::{Signature, TrustState, Version};
+use crate::loader::trust::{PublicKey, Signature, TrustState, Version};
 use crate::transport::{HandlerError, SenderId};
 
 /// Which chunks of an image have been written: one bit per chunk.
@@ -357,8 +357,8 @@ type Step<'a> = (FwUpdate, Result<Effect<'a>, HandlerError>);
 
 /// Checks a commit's authorization against the root of trust: unclaimed
 /// devices accept any commit (trust on first use, as for payloads); a
-/// claimed device needs a signature by its pinned key that verifies
-/// strictly over `message`. Without the `trust` feature nothing can be
+/// claimed device needs a signature by its pinned key that verifies over
+/// `message` with the pinned key's algorithm (Ed25519 or P-256). Without the `trust` feature nothing can be
 /// verified, so a claimed device refuses every commit.
 fn authorize(
     trust: &TrustState,
@@ -369,19 +369,18 @@ fn authorize(
         return Ok(());
     };
     let signature = signature.ok_or(HandlerError::Denied)?;
-    verify(&key.0, &signature.0, message)
+    verify(key, signature, message)
 }
 
 #[cfg(feature = "trust")]
-fn verify(key: &[u8; 32], signature: &[u8; 64], message: &[u8]) -> Result<(), HandlerError> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(key).map_err(|_| HandlerError::Denied)?;
-    let sig = ed25519_dalek::Signature::from_bytes(signature);
-    vk.verify_strict(message, &sig)
-        .map_err(|_| HandlerError::Denied)
+fn verify(key: &PublicKey, signature: &Signature, message: &[u8]) -> Result<(), HandlerError> {
+    crate::loader::trust::verify_signature(key, message, signature)
+        .then_some(())
+        .ok_or(HandlerError::Denied)
 }
 
 #[cfg(not(feature = "trust"))]
-fn verify(_key: &[u8; 32], _signature: &[u8; 64], _message: &[u8]) -> Result<(), HandlerError> {
+fn verify(_key: &PublicKey, _signature: &Signature, _message: &[u8]) -> Result<(), HandlerError> {
     Err(HandlerError::Denied)
 }
 
@@ -1077,7 +1076,7 @@ mod tests {
         use crate::loader::trust::PublicKey;
         use ed25519_dalek::{Signer, SigningKey};
         let sk = SigningKey::from_bytes(&[7; 32]);
-        let key = PublicKey(sk.verifying_key().to_bytes());
+        let key = PublicKey::Ed25519(sk.verifying_key().to_bytes());
         let env = Env {
             trust: TrustState::Claimed {
                 key,
@@ -1146,7 +1145,7 @@ mod tests {
         use crate::loader::trust::PublicKey;
         let env = Env {
             trust: TrustState::Claimed {
-                key: PublicKey([1; 32]),
+                key: PublicKey::Ed25519([1; 32]),
                 min_version: Version(0),
             },
             ..env()

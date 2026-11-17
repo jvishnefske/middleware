@@ -63,7 +63,10 @@ pub fn pins(mask: u32) -> impl Iterator<Item = u8> {
 impl Claims {
     /// Nothing claimed.
     pub const fn new() -> Self {
-        Claims { spi: 0, i2c: [0; 2] }
+        Claims {
+            spi: 0,
+            i2c: [0; 2],
+        }
     }
 
     /// Who holds `pin`, if anyone.
@@ -142,7 +145,12 @@ impl Claims {
     }
 
     /// Claims an SPI route's pins, replacing the bus's previous ones.
-    pub fn claim_spi(self, profile: &Profile, gpio: &Pins, route: &SpiRoute) -> Result<Self, AbiError> {
+    pub fn claim_spi(
+        self,
+        profile: &Profile,
+        gpio: &Pins,
+        route: &SpiRoute,
+    ) -> Result<Self, AbiError> {
         let spi = self.check(
             profile,
             gpio,
@@ -159,7 +167,12 @@ impl Claims {
 
     /// Claims I2C `bus`'s board-mapped SDA and SCL (both driven open drain
     /// and read back); returns the new claims and `(sda, scl)`.
-    pub fn claim_i2c(self, profile: &Profile, gpio: &Pins, bus: u8) -> Result<(Self, (u8, u8)), AbiError> {
+    pub fn claim_i2c(
+        self,
+        profile: &Profile,
+        gpio: &Pins,
+        bus: u8,
+    ) -> Result<(Self, (u8, u8)), AbiError> {
         let (sda, scl) = profile.i2c_pins(bus)?;
         if sda == scl {
             return Err(AbiError::InvalidArgument);
@@ -168,7 +181,10 @@ impl Claims {
             profile,
             gpio,
             Owner::I2c(bus),
-            &[(Some(sda), Direction::Output), (Some(scl), Direction::Output)],
+            &[
+                (Some(sda), Direction::Output),
+                (Some(scl), Direction::Output),
+            ],
         )?;
         let mut i2c = self.i2c;
         *i2c.get_mut(usize::from(bus)).ok_or(AbiError::Unsupported)? = mask;
@@ -183,7 +199,11 @@ mod tests {
     use middleware::wasm_abi::periph::SpiConfig;
 
     fn route(p: &Profile, sck: i32, mosi: i32, miso: i32, cs: i32) -> SpiRoute {
-        SpiRoute::resolve(p, &SpiConfig::parse(0, sck, mosi, miso, cs, 1000, 0).unwrap()).unwrap()
+        SpiRoute::resolve(
+            p,
+            &SpiConfig::parse(0, sck, mosi, miso, cs, 1000, 0).unwrap(),
+        )
+        .unwrap()
     }
 
     fn list(mask: u32) -> heapless::Vec<u8, 8> {
@@ -194,7 +214,9 @@ mod tests {
     fn v18_buses_hold_their_pins_and_gpio_is_busy_on_them() {
         for p in [&RP2040, &RP2350] {
             let gpio = Pins::new();
-            let c = Claims::new().claim_spi(p, &gpio, &route(p, 18, 19, 16, 17)).unwrap();
+            let c = Claims::new()
+                .claim_spi(p, &gpio, &route(p, 18, 19, 16, 17))
+                .unwrap();
             assert_eq!(list(c.pins_of(Owner::Spi)).as_slice(), &[16, 17, 18, 19]);
             let (c, pins_0) = c.claim_i2c(p, &gpio, 0).unwrap();
             assert_eq!(pins_0, (4, 5));
@@ -220,30 +242,46 @@ mod tests {
         let gpio = Pins::new();
         let (c, _) = Claims::new().claim_i2c(p, &gpio, 0).unwrap();
         // SPI0 RX on GPIO 4 is I2C bus 0's SDA.
-        assert_eq!(c.claim_spi(p, &gpio, &route(p, 6, 7, 4, -1)), Err(AbiError::Busy));
+        assert_eq!(
+            c.claim_spi(p, &gpio, &route(p, 6, 7, 4, -1)),
+            Err(AbiError::Busy)
+        );
         // CS on I2C bus 0's SCL.
-        assert_eq!(c.claim_spi(p, &gpio, &route(p, 18, 19, 16, 5)), Err(AbiError::Busy));
+        assert_eq!(
+            c.claim_spi(p, &gpio, &route(p, 18, 19, 16, 5)),
+            Err(AbiError::Busy)
+        );
         let c = c.claim_spi(p, &gpio, &route(p, 2, 3, 0, 1)).unwrap();
         // I2C bus 1 is free, but not if SPI held its pins.
-        let c2 = Claims::new().claim_spi(p, &gpio, &route(p, 6, 7, -1, -1)).unwrap();
+        let c2 = Claims::new()
+            .claim_spi(p, &gpio, &route(p, 6, 7, -1, -1))
+            .unwrap();
         assert_eq!(c2.claim_i2c(p, &gpio, 1), Err(AbiError::Busy));
         // A pin the payload configured as GPIO cannot become a bus pin.
         let gpio = Pins::new().output(p, 19).unwrap().input(p, 6).unwrap();
-        assert_eq!(Claims::new().claim_spi(p, &gpio, &route(p, 18, 19, 16, -1)), Err(AbiError::Busy));
+        assert_eq!(
+            Claims::new().claim_spi(p, &gpio, &route(p, 18, 19, 16, -1)),
+            Err(AbiError::Busy)
+        );
         assert_eq!(Claims::new().claim_i2c(p, &gpio, 1), Err(AbiError::Busy));
         assert!(Claims::new().claim_i2c(p, &gpio, 0).is_ok());
         // A failed claim leaves the previous value untouched (values).
         assert_eq!(c.owner(4), Some(Owner::I2c(0)));
         assert_eq!(c.owner(0), Some(Owner::Spi));
         // Bus 2 does not exist on this board map.
-        assert_eq!(Claims::new().claim_i2c(p, &Pins::new(), 2), Err(AbiError::Unsupported));
+        assert_eq!(
+            Claims::new().claim_i2c(p, &Pins::new(), 2),
+            Err(AbiError::Unsupported)
+        );
     }
 
     #[test]
     fn v18_reopening_spi_replaces_its_pins_and_release_frees_one_owner() {
         let p = &RP2040;
         let gpio = Pins::new();
-        let c = Claims::new().claim_spi(p, &gpio, &route(p, 18, 19, 16, 17)).unwrap();
+        let c = Claims::new()
+            .claim_spi(p, &gpio, &route(p, 18, 19, 16, 17))
+            .unwrap();
         let (c, _) = c.claim_i2c(p, &gpio, 1).unwrap();
         let c = c.claim_spi(p, &gpio, &route(p, 10, 11, -1, 9)).unwrap();
         assert_eq!(list(c.pins_of(Owner::Spi)).as_slice(), &[9, 10, 11]);
@@ -267,7 +305,11 @@ mod tests {
             // GPIO 26-28 are SPI1 / I2C1 capable but analog only on the board.
             for (sck, mosi, miso) in [(26, 27, 28), (14, 27, -1), (14, 15, 28)] {
                 let cfg = SpiConfig::parse(0, sck, mosi, miso, -1, 1000, 0).unwrap();
-                assert_eq!(SpiRoute::resolve(p, &cfg), Err(AbiError::Unsupported), "{sck} {mosi} {miso}");
+                assert_eq!(
+                    SpiRoute::resolve(p, &cfg),
+                    Err(AbiError::Unsupported),
+                    "{sck} {mosi} {miso}"
+                );
             }
             // The chip select must be able to drive.
             let cfg = SpiConfig::parse(0, 18, 19, -1, 23, 1000, 0).unwrap();

@@ -77,7 +77,8 @@ pub enum PlatformError<FE, RE> {
 }
 
 /// A platform result for flash `F` and ROM `R`.
-pub type PlatformResult<T, F, R> = Result<T, PlatformError<<F as ErrorType>::Error, <R as Rom>::Error>>;
+pub type PlatformResult<T, F, R> =
+    Result<T, PlatformError<<F as ErrorType>::Error, <R as Rom>::Error>>;
 
 /// The record (sequence number and record) read from each record sector.
 type Records = [Option<(u32, FwRecord)>; 2];
@@ -94,7 +95,12 @@ impl<'a, F: NorFlash, R: Rom> RpPlatform<'a, F, R> {
     /// The platform over `flash` and `rom` for the slots of `ab`;
     /// `running` once known (from a previous [`FwPlatform::boot_info`]).
     pub fn new(flash: &'a mut F, rom: &'a mut R, ab: AbMap, running: Option<Slot>) -> Self {
-        RpPlatform { flash, rom, ab, running }
+        RpPlatform {
+            flash,
+            rom,
+            ab,
+            running,
+        }
     }
 
     /// The running slot, once known.
@@ -120,7 +126,11 @@ impl<'a, F: NorFlash, R: Rom> RpPlatform<'a, F, R> {
     }
 
     fn writable(&self, slot: Slot) -> PlatformResult<(), F, R> {
-        if self.running == Some(slot) { Err(PlatformError::Running) } else { Ok(()) }
+        if self.running == Some(slot) {
+            Err(PlatformError::Running)
+        } else {
+            Ok(())
+        }
     }
 
     /// Reads `buf` at physical `at`, bouncing what the flash's read size
@@ -144,8 +154,12 @@ impl<'a, F: NorFlash, R: Rom> RpPlatform<'a, F, R> {
             let span = tmp.get_mut(..hi - lo).ok_or(PlatformError::Bounds)?;
             let lo32 = u32::try_from(lo).map_err(|_| PlatformError::Bounds)?;
             self.flash.read(lo32, span).map_err(PlatformError::Flash)?;
-            let src = span.get(start - lo..start - lo + n).ok_or(PlatformError::Bounds)?;
-            buf.get_mut(done..done + n).ok_or(PlatformError::Bounds)?.copy_from_slice(src);
+            let src = span
+                .get(start - lo..start - lo + n)
+                .ok_or(PlatformError::Bounds)?;
+            buf.get_mut(done..done + n)
+                .ok_or(PlatformError::Bounds)?
+                .copy_from_slice(src);
             done += n;
         }
         Ok(())
@@ -164,10 +178,14 @@ impl<'a, F: NorFlash, R: Rom> RpPlatform<'a, F, R> {
         }
         if !tail.is_empty() {
             let mut pad = [0xFFu8; MAX_GRANULE];
-            pad.get_mut(..tail.len()).ok_or(PlatformError::Bounds)?.copy_from_slice(tail);
+            pad.get_mut(..tail.len())
+                .ok_or(PlatformError::Bounds)?
+                .copy_from_slice(tail);
             let off = u32::try_from(whole).map_err(|_| PlatformError::Bounds)?;
             let p = pad.get(..g).ok_or(PlatformError::Bounds)?;
-            self.flash.write(at + off, p).map_err(PlatformError::Flash)?;
+            self.flash
+                .write(at + off, p)
+                .map_err(PlatformError::Flash)?;
         }
         Ok(())
     }
@@ -212,7 +230,9 @@ impl<'a, F: NorFlash, R: Rom> RpPlatform<'a, F, R> {
     }
 
     fn reboot(&mut self, r: Reboot) -> PlatformResult<(), F, R> {
-        self.rom.reboot(r, REBOOT_DELAY_MS).map_err(PlatformError::Rom)
+        self.rom
+            .reboot(r, REBOOT_DELAY_MS)
+            .map_err(PlatformError::Rom)
     }
 }
 
@@ -221,10 +241,14 @@ impl<F: NorFlash, R: Rom> FwPlatform for RpPlatform<'_, F, R> {
 
     fn boot_info(&mut self) -> Result<BootInfo, Self::Error> {
         let xip = self.rom.xip_map();
-        let running = running_slot(&self.ab, xip).ok_or(PlatformError::NotPartitioned { base: xip.base })?;
+        let running =
+            running_slot(&self.ab, xip).ok_or(PlatformError::NotPartitioned { base: xip.base })?;
         let def = self.image_def(running)?.ok_or(PlatformError::NoImage)?;
         self.running = Some(running);
-        Ok(BootInfo { running, trial: def.is_tbyb() })
+        Ok(BootInfo {
+            running,
+            trial: def.is_tbyb(),
+        })
     }
 
     fn slot_size(&self) -> u32 {
@@ -238,8 +262,14 @@ impl<F: NorFlash, R: Rom> FwPlatform for RpPlatform<'_, F, R> {
 
     fn erase(&mut self, slot: Slot, sector: u32) -> Result<(), Self::Error> {
         self.writable(slot)?;
-        let from = self.at(slot, sector.checked_mul(SECTOR).ok_or(PlatformError::Bounds)?, SECTOR as usize)?;
-        self.flash.erase(from, from + SECTOR).map_err(PlatformError::Flash)
+        let from = self.at(
+            slot,
+            sector.checked_mul(SECTOR).ok_or(PlatformError::Bounds)?,
+            SECTOR as usize,
+        )?;
+        self.flash
+            .erase(from, from + SECTOR)
+            .map_err(PlatformError::Flash)
     }
 
     fn write(&mut self, slot: Slot, offset: u32, data: &[u8]) -> Result<(), Self::Error> {
@@ -264,7 +294,9 @@ impl<F: NorFlash, R: Rom> FwPlatform for RpPlatform<'_, F, R> {
         };
         let bytes = record.encode(seq.wrapping_add(1));
         let at = self.ab.record.offset + target * SECTOR;
-        self.flash.erase(at, at + SECTOR).map_err(PlatformError::Flash)?;
+        self.flash
+            .erase(at, at + SECTOR)
+            .map_err(PlatformError::Flash)?;
         let (magic, fields) = bytes.split_at(4);
         self.write_phys(at + 4, fields)?;
         self.write_phys(at, magic)

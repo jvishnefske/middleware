@@ -145,9 +145,9 @@ impl<'a> Command<'a> {
         match key.as_str() {
             k if k == keys::INFO.as_str() => empty(Command::Info),
             k if k == keys::BOARD.as_str() => empty(Command::Board),
-            k if k == keys::COMMIT.as_str() => {
-                Ok(Some(Command::Commit { auth: SignedCommit::parse_body(body)? }))
-            }
+            k if k == keys::COMMIT.as_str() => Ok(Some(Command::Commit {
+                auth: SignedCommit::parse_body(body)?,
+            })),
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
             k if k == keys::TRUST_INFO.as_str() => empty(Command::TrustInfo),
@@ -210,8 +210,9 @@ impl<'a> Command<'a> {
                 Some(body.len())
             }
             Command::TrustClaim { key } => {
-                out.get_mut(..key.0.len())?.copy_from_slice(&key.0);
-                Some(key.0.len())
+                let bytes = key.as_bytes();
+                out.get_mut(..bytes.len())?.copy_from_slice(bytes);
+                Some(bytes.len())
             }
             Command::Info
             | Command::Board
@@ -739,10 +740,22 @@ impl<'a> BoardInfo<'a> {
         put(&self.abi_version.to_le_bytes())?;
         put(&self.max_image.to_le_bytes())?;
         put(&self.max_memory.to_le_bytes())?;
-        for mask in [self.gpio, self.reserved, self.input_only, self.strapping, self.adc] {
+        for mask in [
+            self.gpio,
+            self.reserved,
+            self.input_only,
+            self.strapping,
+            self.adc,
+        ] {
             put(&mask.to_le_bytes())?;
         }
-        put(&[self.pwm_max_bits, self.flags, self.uart_tx, self.uart_rx, self.pwm_pins.len() as u8])?;
+        put(&[
+            self.pwm_max_bits,
+            self.flags,
+            self.uart_tx,
+            self.uart_rx,
+            self.pwm_pins.len() as u8,
+        ])?;
         put(self.pwm_pins)?;
         Some(at)
     }
@@ -1027,7 +1040,7 @@ mod tests {
             Command::Stop,
             Command::TrustInfo,
             Command::TrustClaim {
-                key: trust::PublicKey([3; 32]),
+                key: trust::PublicKey::Ed25519([3; 32]),
             },
         ] {
             let mut body = [0u8; 80];
@@ -1131,8 +1144,18 @@ mod tests {
         assert_eq!(BoardInfo::decode(&buf[..n]), None);
         assert!(BOARD.encode(&mut [0u8; 63]).is_none());
         let many = [0u8; BOARD_PWM_MAX + 1];
-        assert!(BoardInfo { pwm_pins: &many, ..BOARD }.encode(&mut [0u8; 128]).is_none());
-        let max = BoardInfo { pwm_pins: &many[..BOARD_PWM_MAX], ..BOARD };
+        assert!(
+            BoardInfo {
+                pwm_pins: &many,
+                ..BOARD
+            }
+            .encode(&mut [0u8; 128])
+            .is_none()
+        );
+        let max = BoardInfo {
+            pwm_pins: &many[..BOARD_PWM_MAX],
+            ..BOARD
+        };
         assert_eq!(max.encode(&mut [0u8; 128]), Some(BOARD_INFO_MAX));
     }
 
@@ -1141,14 +1164,29 @@ mod tests {
         let mut buf = [0u8; BOARD_INFO_MAX];
         let n = BOARD.encode(&mut buf).unwrap();
         let hex = concat!(
-            "01", "0300", "00400100", "00000200",
-            "ffff3ffcffff0100", "000018fc3f180000", "0000000000000000",
-            "0900000000600000", "fe07000000000000",
-            "0e", "03", "2b", "2c", "08", "0b0c0d0e0f101112",
+            "01",
+            "0300",
+            "00400100",
+            "00000200",
+            "ffff3ffcffff0100",
+            "000018fc3f180000",
+            "0000000000000000",
+            "0900000000600000",
+            "fe07000000000000",
+            "0e",
+            "03",
+            "2b",
+            "2c",
+            "08",
+            "0b0c0d0e0f101112",
         );
         assert_eq!(hex.len(), 2 * n);
         for (i, b) in buf[..n].iter().enumerate() {
-            assert_eq!(u8::from_str_radix(&hex[2 * i..2 * i + 2], 16), Ok(*b), "byte {i}");
+            assert_eq!(
+                u8::from_str_radix(&hex[2 * i..2 * i + 2], 16),
+                Ok(*b),
+                "byte {i}"
+            );
         }
     }
 
@@ -1209,7 +1247,10 @@ mod tests {
             node: Some(node),
             caps: Caps::NONE,
         };
-        let v06 = DeviceInfo { caps: Caps::SERVE, ..v05 };
+        let v06 = DeviceInfo {
+            caps: Caps::SERVE,
+            ..v05
+        };
         let mut a = [0u8; MAX_INFO_LEN];
         let mut b = [0u8; MAX_INFO_LEN];
         let n05 = v05.encode(&mut a).unwrap();
@@ -1226,7 +1267,10 @@ mod tests {
             assert_eq!(DeviceInfo::decode(&b[..n05 + cut]), Some(v05), "cut {cut}");
         }
         // Reserved bits survive a round trip; later fields are ignored.
-        let future = DeviceInfo { caps: Caps(0x8000_0003), ..v05 };
+        let future = DeviceInfo {
+            caps: Caps(0x8000_0003),
+            ..v05
+        };
         let n = future.encode(&mut b).unwrap();
         let mut longer = [7u8; MAX_INFO_LEN + 5];
         longer[..n].copy_from_slice(&b[..n]);
@@ -1249,7 +1293,10 @@ mod tests {
         assert_eq!(Caps::BRIDGE.0, 2, "the Colorlight gateware hard-codes bit 1");
         assert_eq!((Caps::SOURCE_IMU.0, Caps::SOURCE_MICROPHONE.0), (4, 8));
         assert_eq!(Caps::source(SourceKind::Imu), Some(Caps::SOURCE_IMU));
-        assert_eq!(Caps::source(SourceKind::Microphone), Some(Caps::SOURCE_MICROPHONE));
+        assert_eq!(
+            Caps::source(SourceKind::Microphone),
+            Some(Caps::SOURCE_MICROPHONE)
+        );
         assert_eq!(Caps::source(SourceKind::Camera), None);
         assert_eq!(Caps::source(SourceKind::TestPattern), None);
         let caps = Caps::SERVE.with(Caps::SOURCE_IMU);

@@ -23,8 +23,12 @@
 //!   start and a firmware confirm, at least 15 s for a firmware commit (the
 //!   device hashes the image), as `mwctl` waits on the serial port.
 //! * [`job`] and [`execute`] — the inputs a command needs (files read
-//!   through an injected reader, signatures made with the current time as
-//!   version and counter by default) and the device operations run for it.
+//!   through an injected reader, a token key opened through an injected
+//!   opener, signatures made with the current time as version and counter
+//!   by default) and the device operations run for it. The signing key is
+//!   any `mwctl::sign::Signer`: an Ed25519 key file (`--key`) or a key in a
+//!   PKCS#11 token (`--pkcs11`, P-256 in a TPM), whichever kind the device
+//!   pinned.
 //!
 //! Every request goes out signed: the gateway forwards only signed commits
 //! and signed start/stop requests ([`crate::update`]). The control target is
@@ -56,12 +60,12 @@ use mwctl::error::Error;
 use mwctl::fw::{FwImage, UpdateOptions, load_image, parse_version};
 use mwctl::link::{Endpoint, Event};
 use mwctl::report::{format_fw_info, format_info, format_trust};
-use mwctl::sign::{Seed, counter_at, sign_commit, sign_control, version_at};
+use mwctl::sign::{Seed, Signer, counter_at, sign_commit, sign_control, version_at};
 use std::time::Instant;
 
 use crate::bridge::encode_sys_request;
 use crate::update::control_target;
-use cli::Cmd;
+use cli::{Cmd, KeySpec};
 
 /// How often `fw update` tries the confirm after the reboot.
 pub const CONFIRM_ATTEMPTS: u32 = 30;
@@ -244,7 +248,7 @@ pub enum Job {
         /// The image.
         image: Vec<u8>,
         /// The signing key.
-        seed: Seed,
+        signer: Box<dyn Signer + Send>,
         /// The signed version.
         version: Version,
         /// The counter of the start to send after it, if any.
@@ -255,7 +259,7 @@ pub enum Job {
         /// Which.
         op: ControlOp,
         /// The signing key.
-        seed: Seed,
+        signer: Box<dyn Signer + Send>,
         /// The counter.
         counter: ControlCounter,
     },
@@ -266,7 +270,7 @@ pub enum Job {
         /// The checked image.
         image: FwImage,
         /// The signing key.
-        seed: Seed,
+        signer: Box<dyn Signer + Send>,
         /// Reboot and confirm.
         reboot: bool,
     },
@@ -278,16 +282,23 @@ pub enum Job {
     FwAbort,
 }
 
-/// Loads what `cmd` needs, reading files with `read` and taking default
-/// versions and counters from `now`. Pure apart from `read`.
+/// Loads what `cmd` needs, reading files with `read`, opening a token key
+/// by its label with `open_token`, and taking default versions and
+/// counters from `now`. Pure apart from `read` and `open_token`.
 pub fn job(
     cmd: &Cmd,
     read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+    open_token: impl Fn(&str) -> Result<Box<dyn Signer + Send>, Error>,
     now: SystemTime,
 ) -> Result<Job, Error> {
-    let seed = |p: &Path| -> Result<Seed, Error> {
-        let bytes = read(p).map_err(Error::File)?;
-        Ok(Seed::from_file_bytes(&bytes)?)
+    let signer = |k: &KeySpec| -> Result<Box<dyn Signer + Send>, Error> {
+        match k {
+            KeySpec::File(p) => {
+                let bytes = read(p).map_err(Error::File)?;
+                Ok(Box::new(Seed::from_file_bytes(&bytes)?))
+            }
+            KeySpec::Pkcs11(label) => open_token(label),
+        }
     };
     let counter = |c: Option<u64>| -> Result<ControlCounter, Error> {
         match c {
@@ -309,7 +320,7 @@ pub fn job(
             counter: c,
         } => Job::Upload {
             image: read(file).map_err(Error::File)?,
-            seed: seed(key)?,
+            signer: signer(key)?,
             version: match version {
                 Some(v) => Version(*v),
                 None => version_at(now)?,
@@ -326,7 +337,7 @@ pub fn job(
             } else {
                 ControlOp::Stop
             },
-            seed: seed(key)?,
+            signer: signer(key)?,
             counter: counter(*c)?,
         },
         Cmd::FwUpdate {
@@ -344,7 +355,7 @@ pub fn job(
             };
             Job::FwUpdate {
                 image: load_image(&read(file).map_err(Error::File)?, expected)?,
-                seed: seed(key)?,
+                signer: signer(key)?,
                 reboot: *reboot,
             }
         }
@@ -375,16 +386,15 @@ pub fn execute<E: Endpoint>(
         }
         Job::Upload {
             image,
-            seed,
+            signer,
             version,
             start,
         } => {
-            let auth = sign_commit(&image, &seed, version)
-                .ok_or_else(|| Error::Fw("image too large".into()))?;
+            let auth = sign_commit(&image, &*signer, version)?;
             let start_auth = match start {
                 Some(counter) => {
                     let t = target(device)?;
-                    Some(sign_control(&seed, ControlOp::Start, &t, counter))
+                    Some(sign_control(&*signer, ControlOp::Start, &t, counter)?)
                 }
                 None => None,
             };
@@ -402,12 +412,18 @@ pub fn execute<E: Endpoint>(
                 if start.is_some() { ", started" } else { "" }
             ))
         }
-        Job::Control { op, seed, counter } => {
+        Job::Control {
+            op,
+            signer,
+            counter,
+        } => {
             let t = target(device)?;
-            let auth = Some(sign_control(&seed, op, &t, counter));
+            let auth = Some(sign_control(&*signer, op, &t, counter)?);
             match op {
                 ControlOp::Start => device.start_signed(auth)?,
                 ControlOp::Stop => device.stop_signed(auth)?,
+                // `job` builds start and stop only.
+                _ => return Err(Error::Fw(format!("{op:?} is not a payload control"))),
             }
             Ok(format!(
                 "{} (counter {})",
@@ -422,12 +438,15 @@ pub fn execute<E: Endpoint>(
         Job::FwInfo => Ok(format_fw_info(&device.fw_info()?)),
         Job::FwUpdate {
             image,
-            seed,
+            signer,
             reboot,
         } => {
+            // Over gw/sys the reboot travels as the serial form (unsigned):
+            // the gateway is the device's serial side.
             let opts = UpdateOptions {
-                key: Some(&seed),
+                key: Some(&*signer),
                 reboot,
+                control: None,
             };
             let done = device.fw_update(&image, opts, |_| {})?;
             if reboot {
@@ -559,6 +578,10 @@ mod tests {
         assert!(e.take_events().is_empty());
     }
 
+    fn no_token(label: &str) -> Result<Box<dyn Signer + Send>, Error> {
+        Err(Error::Fw(format!("no token key {label}")))
+    }
+
     #[test]
     fn rg24_jobs_load_their_inputs() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_761_500_000_123);
@@ -579,7 +602,7 @@ mod tests {
             version,
             start,
             ..
-        } = job(&up, read, now).unwrap()
+        } = job(&up, read, no_token, now).unwrap()
         else {
             panic!()
         };
@@ -592,7 +615,7 @@ mod tests {
             counter: Some(5),
         };
         assert!(matches!(
-            job(&stop, read, now).unwrap(),
+            job(&stop, read, no_token, now).unwrap(),
             Job::Control {
                 op: ControlOp::Stop,
                 counter: ControlCounter(5),
@@ -604,17 +627,48 @@ mod tests {
             key: "nope".into(),
             counter: None,
         };
-        assert!(matches!(job(&missing, read, now), Err(Error::File(_))));
+        assert!(matches!(job(&missing, read, no_token, now), Err(Error::File(_))));
         let bad_fw = Cmd::FwUpdate {
             file: "p.wasm".into(),
             key: "k".into(),
             version: None,
             reboot: true,
         };
-        assert!(matches!(job(&bad_fw, read, now), Err(Error::Image(_))));
+        assert!(matches!(job(&bad_fw, read, no_token, now), Err(Error::Image(_))));
         assert!(matches!(
-            job(&Cmd::FwAbort, read, now).unwrap(),
+            job(&Cmd::FwAbort, read, no_token, now).unwrap(),
             Job::FwAbort
+        ));
+        // A token key goes through the opener, by its label; the key file
+        // is Ed25519, the token key here P-256.
+        let p256 = |label: &str| -> Result<Box<dyn Signer + Send>, Error> {
+            assert_eq!(label, "mw-release");
+            Ok(Box::new(
+                mwctl::sign::P256Key::from_scalar(&[0x20; 32]).expect("scalar"),
+            ))
+        };
+        let token_stop = Cmd::Control {
+            start: false,
+            key: KeySpec::Pkcs11("mw-release".into()),
+            counter: Some(5),
+        };
+        let Job::Control { signer, .. } = job(&token_stop, read, p256, now).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            signer.public_key().kind(),
+            middleware::loader::trust::KeyKind::P256
+        );
+        let Job::Control { signer, .. } = job(&stop, read, p256, now).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            signer.public_key().kind(),
+            middleware::loader::trust::KeyKind::Ed25519
+        );
+        assert!(matches!(
+            job(&token_stop, read, no_token, now),
+            Err(Error::Fw(_))
         ));
     }
 }

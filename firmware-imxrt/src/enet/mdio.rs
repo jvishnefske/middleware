@@ -50,12 +50,7 @@ const fn frame(op: u32, phy: u8, reg: u8, data: u16) -> Option<u32> {
         return None;
     }
     Some(
-        MMFR_ST_CLAUSE22
-            | op
-            | ((phy as u32) << 23)
-            | ((reg as u32) << 18)
-            | MMFR_TA
-            | data as u32,
+        MMFR_ST_CLAUSE22 | op | ((phy as u32) << 23) | ((reg as u32) << 18) | MMFR_TA | data as u32,
     )
 }
 
@@ -97,7 +92,11 @@ pub const fn mscr_for_ipg(ipg_hz: u32) -> Option<u32> {
     // Cycles of hold: ceil(ipg_hz * 10 ns), at least one.
     let cycles = (ipg_hz as u64 * MDIO_HOLD_MIN_NS as u64).div_ceil(1_000_000_000);
     let hold = if cycles == 0 { 0 } else { cycles - 1 };
-    let hold = if hold > MSCR_HOLDTIME_MAX as u64 { MSCR_HOLDTIME_MAX } else { hold as u32 };
+    let hold = if hold > MSCR_HOLDTIME_MAX as u64 {
+        MSCR_HOLDTIME_MAX
+    } else {
+        hold as u32
+    };
     Some((speed << MSCR_MII_SPEED_SHIFT) | (hold << MSCR_HOLDTIME_SHIFT))
 }
 

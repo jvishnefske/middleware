@@ -48,7 +48,11 @@ pub fn store_flash(flash: FlashDriver) -> StoreFlash {
 #[cfg(feature = "rp2350")]
 pub fn store_flash(flash: FlashDriver) -> StoreFlash {
     super::rom::map_untranslated_window();
-    Sectored(rp_base::flash::Window::new(flash, FLASH_SIZE as u32, FLASH_SIZE as u32))
+    Sectored(rp_base::flash::Window::new(
+        flash,
+        FLASH_SIZE as u32,
+        FLASH_SIZE as u32,
+    ))
 }
 
 /// Firmware version reported in `sys/info`: the image's `major.minor`
@@ -79,5 +83,7 @@ pub fn unique_id(flash: &mut FlashDriver) -> [u8; 8] {
 /// The chip's 64-bit unique id: the OTP chip id on the RP2350.
 #[cfg(feature = "rp2350")]
 pub fn unique_id(_flash: &mut FlashDriver) -> [u8; 8] {
-    embassy_rp::otp::get_chipid().map(u64::to_be_bytes).unwrap_or([0; 8])
+    embassy_rp::otp::get_chipid()
+        .map(u64::to_be_bytes)
+        .unwrap_or([0; 8])
 }

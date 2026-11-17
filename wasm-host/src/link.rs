@@ -800,15 +800,29 @@ mod tests {
         fn gpio_read(&mut self, _: u8) -> Result<bool, AbiError> {
             Ok(false)
         }
-        fn i2c_transfer(&mut self, _: u8, addr: u8, _: &[u8], _: &mut [u8]) -> Result<(), AbiError> {
+        fn i2c_transfer(
+            &mut self,
+            _: u8,
+            addr: u8,
+            _: &[u8],
+            _: &mut [u8],
+        ) -> Result<(), AbiError> {
             self.i2c.push(addr);
             Ok(())
         }
-        fn route_samples(&mut self, source: route::SampleSource, _: Key<'_>) -> Result<u8, AbiError> {
+        fn route_samples(
+            &mut self,
+            source: route::SampleSource,
+            _: Key<'_>,
+        ) -> Result<u8, AbiError> {
             if source.kind() == route::SourceKind::Microphone {
                 return Err(AbiError::InvalidArgument);
             }
-            let free = self.routes.iter().position(|r| !r).ok_or(AbiError::NoResources)?;
+            let free = self
+                .routes
+                .iter()
+                .position(|r| !r)
+                .ok_or(AbiError::NoResources)?;
             self.routes[free] = true;
             u8::try_from(free).map_err(|_| AbiError::NoResources)
         }
@@ -817,7 +831,10 @@ mod tests {
                 .then_some(route::I2cDevice { bus: 0, addr: 0x1f })
         }
         fn route_stop(&mut self, handle: u8) -> Result<(), AbiError> {
-            let slot = self.routes.get_mut(usize::from(handle)).ok_or(AbiError::Busy)?;
+            let slot = self
+                .routes
+                .get_mut(usize::from(handle))
+                .ok_or(AbiError::Busy)?;
             if !*slot {
                 return Err(AbiError::Busy);
             }
@@ -843,8 +860,16 @@ mod tests {
             Err(AbiError::Busy),
             "the route owns the IMU"
         );
-        assert_eq!(i2c_transfer_call(&mut mem, &mut st, to(0x1a)), Ok(()), "other devices stay free");
-        assert_eq!(st.device.i2c, vec![0x1f, 0x1a], "a Busy transfer never reaches the bus");
+        assert_eq!(
+            i2c_transfer_call(&mut mem, &mut st, to(0x1a)),
+            Ok(()),
+            "other devices stay free"
+        );
+        assert_eq!(
+            st.device.i2c,
+            vec![0x1f, 0x1a],
+            "a Busy transfer never reaches the bus"
+        );
         assert_eq!(
             route_source_call(&mem, &mut st, (2, 0, 7, 16, 8)),
             Err(AbiError::Busy),
@@ -859,7 +884,11 @@ mod tests {
             Err(AbiError::InvalidArgument)
         );
         assert_eq!(route_stop_call(&mut st, 0), Ok(()));
-        assert_eq!(i2c_transfer_call(&mut mem, &mut st, to(0x1f)), Ok(()), "stopped: free again");
+        assert_eq!(
+            i2c_transfer_call(&mut mem, &mut st, to(0x1f)),
+            Ok(()),
+            "stopped: free again"
+        );
         assert_eq!(route_stop_call(&mut st, 0), Err(AbiError::Busy));
     }
 

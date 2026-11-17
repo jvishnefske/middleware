@@ -44,6 +44,12 @@ fn main() -> ExitCode {
         eprintln!("imxrt-image: {output}: {e}");
         return ExitCode::FAILURE;
     }
-    println!("{output}: v{}.{}, {} + {} bytes", ver.0 >> 16, ver.0 & 0xFFFF, out.len() - image.len(), image.len());
+    println!(
+        "{output}: v{}.{}, {} + {} bytes",
+        ver.0 >> 16,
+        ver.0 & 0xFFFF,
+        out.len() - image.len(),
+        image.len()
+    );
     ExitCode::SUCCESS
 }

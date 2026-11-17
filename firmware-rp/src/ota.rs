@@ -79,7 +79,11 @@ impl<R: Rom> AbUpdate<R> {
     /// and `rom`. The backend is returned either way, with this boot or
     /// why the updater did not start; without it, it answers
     /// `Unavailable`.
-    pub fn boot<F: NorFlash>(flash: &mut F, mut rom: R, ab: AbMap) -> (Self, PlatformResult<BootInfo, F, R>) {
+    pub fn boot<F: NorFlash>(
+        flash: &mut F,
+        mut rom: R,
+        ab: AbMap,
+    ) -> (Self, PlatformResult<BootInfo, F, R>) {
         let mut p = RpPlatform::new(flash, &mut rom, ab, None);
         let svc = FwService::boot(&mut p);
         let (svc, result) = match svc {
@@ -132,7 +136,10 @@ impl<F: NorFlash, R: Rom> FwUpdate<F> for AbUpdate<R> {
         let (Some(svc), Some(flash)) = (self.svc.as_mut(), flash) else {
             return Err(HandlerError::Unavailable);
         };
-        let Some(trust) = ctx.trust.or_else(|| (!needs_trust(key)).then_some(TrustState::Unclaimed)) else {
+        let Some(trust) = ctx
+            .trust
+            .or_else(|| (!needs_trust(key)).then_some(TrustState::Unclaimed))
+        else {
             return Err(HandlerError::Unavailable);
         };
         let running = Some(svc.boot_info().running);
@@ -140,7 +147,12 @@ impl<F: NorFlash, R: Rom> FwUpdate<F> for AbUpdate<R> {
         // With the record unreadable only requests that authorize nothing
         // get here; the placeholder trust is never consulted by them (the
         // updater checks signatures at commit only).
-        let c = Context { node: ctx.node, trust, self_test_ok: ctx.self_test.ok() };
-        svc.handle(&mut p, &c, key, body, out).unwrap_or(Err(HandlerError::NotFound))
+        let c = Context {
+            node: ctx.node,
+            trust,
+            self_test_ok: ctx.self_test.ok(),
+        };
+        svc.handle(&mut p, &c, key, body, out)
+            .unwrap_or(Err(HandlerError::NotFound))
     }
 }

@@ -181,21 +181,37 @@ mod tests {
             self.cancelled = true;
         }
         fn finish(self) -> Parts {
-            let Parts { id, transfers, cancelled } = self.parts;
-            Parts { id, transfers: transfers + 1, cancelled: cancelled + u8::from(self.cancelled) }
+            let Parts {
+                id,
+                transfers,
+                cancelled,
+            } = self.parts;
+            Parts {
+                id,
+                transfers: transfers + 1,
+                cancelled: cancelled + u8::from(self.cancelled),
+            }
         }
     }
 
     fn parts(id: u8) -> Parts {
-        Parts { id, transfers: 0, cancelled: 0 }
+        Parts {
+            id,
+            transfers: 0,
+            cancelled: 0,
+        }
     }
 
     fn go(p: Parts) -> Result<Xfer, (AbiError, Parts)> {
-        Ok(Xfer { parts: p, cancelled: false })
+        Ok(Xfer {
+            parts: p,
+            cancelled: false,
+        })
     }
 
     fn start(slot: &mut HwSlot<Xfer>) -> Result<(), AbiError> {
-        slot.step(|hw| hw.start(go)).unwrap_or(Err(AbiError::Unsupported))
+        slot.step(|hw| hw.start(go))
+            .unwrap_or(Err(AbiError::Unsupported))
     }
 
     fn reclaim(slot: &mut HwSlot<Xfer>) {
@@ -209,7 +225,10 @@ mod tests {
         assert_eq!(slot.close(), Some(parts(7)));
         let mut slot = HwSlot::<Xfer>::new(parts(7));
         reclaim(&mut slot);
-        assert!(slot.get().and_then(DmaHw::parts).is_some(), "reclaim on idle keeps the parts");
+        assert!(
+            slot.get().and_then(DmaHw::parts).is_some(),
+            "reclaim on idle keeps the parts"
+        );
         assert_eq!(slot.close(), Some(parts(7)));
     }
 
@@ -218,7 +237,14 @@ mod tests {
         let mut slot = HwSlot::<Xfer>::new(parts(1));
         assert_eq!(start(&mut slot), Ok(()));
         assert!(slot.get().is_some_and(DmaHw::in_flight));
-        assert_eq!(slot.close(), Some(Parts { id: 1, transfers: 1, cancelled: 1 }));
+        assert_eq!(
+            slot.close(),
+            Some(Parts {
+                id: 1,
+                transfers: 1,
+                cancelled: 1
+            })
+        );
     }
 
     #[test]
@@ -232,7 +258,14 @@ mod tests {
         if let Some(t) = slot.get_mut().and_then(DmaHw::transfer_mut) {
             t.cancel(); // a route timeout cancels in place
         }
-        assert_eq!(slot.close(), Some(Parts { id: 2, transfers: 2, cancelled: 1 }));
+        assert_eq!(
+            slot.close(),
+            Some(Parts {
+                id: 2,
+                transfers: 2,
+                cancelled: 1
+            })
+        );
     }
 
     #[test]
@@ -242,7 +275,14 @@ mod tests {
         assert_eq!(start(&mut slot), Err(AbiError::Busy));
         assert!(slot.get().is_some_and(DmaHw::in_flight));
         reclaim(&mut slot);
-        assert_eq!(slot.get().and_then(DmaHw::parts), Some(&Parts { id: 3, transfers: 1, cancelled: 0 }));
+        assert_eq!(
+            slot.get().and_then(DmaHw::parts),
+            Some(&Parts {
+                id: 3,
+                transfers: 1,
+                cancelled: 0
+            })
+        );
     }
 
     #[test]

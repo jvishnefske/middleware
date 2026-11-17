@@ -58,7 +58,11 @@ impl ImuRoute {
         let cfg = cfg.validated()?;
         let odr = Odr::from_hz(u32::from(cfg.rate_hz), cfg.mag).ok_or(AbiError::InvalidArgument)?;
         let range = Range::from_g(cfg.range_g).ok_or(AbiError::InvalidArgument)?;
-        let fx = fxos8700::Config { odr, range, magnetometer: cfg.mag };
+        let fx = fxos8700::Config {
+            odr,
+            range,
+            magnetometer: cfg.mag,
+        };
         let period_us = 1_000_000 / u64::from(cfg.rate_hz.max(1));
         if usize::from(cfg.samples) * usize::from(cfg.channels()) > MAX_VALUES {
             return Err(AbiError::InvalidArgument);
@@ -151,7 +155,8 @@ impl ImuRoute {
         if self.taken < self.cfg.samples {
             return None;
         }
-        let header = SampleSource::Imu(self.cfg).header(self.first_index, self.batch_ts, self.taken);
+        let header =
+            SampleSource::Imu(self.cfg).header(self.first_index, self.batch_ts, self.taken);
         let len = samples::encode_i16(&header, &self.values, out).ok();
         self.first_index = self.first_index.saturating_add(u64::from(self.taken));
         self.taken = 0;
@@ -195,11 +200,20 @@ mod tests {
         let b = decode(&published[1]).unwrap();
         assert_eq!(b.header.kind, SensorKind::Imu);
         assert_eq!(b.header.format, SampleFormat::I16);
-        assert_eq!((b.header.first_index, b.header.count, b.header.channels), (4, 4, 3));
+        assert_eq!(
+            (b.header.first_index, b.header.count, b.header.channels),
+            (4, 4, 3)
+        );
         let z: std::vec::Vec<i16> = b.i16_values().skip(2).step_by(3).collect();
-        assert_eq!(z, [16384; 4], "+1 g on Z: 16384 per g at +-2 g, as the header says");
+        assert_eq!(
+            z, [16384; 4],
+            "+1 g on Z: 16384 per g at +-2 g, as the header says"
+        );
         let ug = i64::from(z[0]) * i64::from(b.header.scale);
-        assert!((ug - 1_000_000).abs() < 1_000, "value x scale is about 1 g in ug: {ug}");
+        assert!(
+            (ug - 1_000_000).abs() < 1_000,
+            "value x scale is about 1 g in ug: {ug}"
+        );
         assert_eq!(r.batches(), 2);
     }
 
@@ -233,10 +247,15 @@ mod tests {
         // 50, 100, 200, 400, 800 Hz are FXOS8700 rates; with the
         // magnetometer (hybrid) 800 Hz is not.
         for hz in [50, 100, 200, 400, 800] {
-            assert!(ImuRoute::new(ImuConfig::new(hz, 4, false, 16).unwrap(), 0).is_ok(), "{hz}");
+            assert!(
+                ImuRoute::new(ImuConfig::new(hz, 4, false, 16).unwrap(), 0).is_ok(),
+                "{hz}"
+            );
         }
         assert_eq!(
-            ImuConfig::new(800, 4, true, 16).and_then(|c| ImuRoute::new(c, 0)).err(),
+            ImuConfig::new(800, 4, true, 16)
+                .and_then(|c| ImuRoute::new(c, 0))
+                .err(),
             Some(AbiError::InvalidArgument)
         );
     }

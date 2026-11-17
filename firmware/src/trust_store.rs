@@ -3,31 +3,35 @@
 //!
 //! The `trust` partition (`partitions.csv`, 0x350000, two 4 KiB sectors)
 //! holds one [`Record`] at the start of each sector. The current format
-//! (2) is [`RECORD_LEN`] bytes:
+//! (3) is [`RECORD_LEN`] bytes:
 //!
 //! | offset | field                                      |
 //! |--------|--------------------------------------------|
 //! | 0      | magic `b"MWTR"`                            |
-//! | 4      | format version (2)                         |
+//! | 4      | format version (3)                         |
 //! | 5      | state: 0 Unclaimed, 1 Claimed              |
-//! | 6      | zero (2 bytes)                             |
+//! | 6      | key kind ([`KeyKind`]: 1 Ed25519, 2 P-256; 0 when Unclaimed) |
+//! | 7      | zero                                       |
 //! | 8      | sequence number u32 LE                     |
 //! | 12     | `min_version` u32 LE                       |
-//! | 16     | public key (32 bytes, zero when Unclaimed) |
-//! | 48     | last accepted control counter u64 LE ([`ControlCounter`], zero when Unclaimed) |
-//! | 56     | CRC-32 of bytes 0..56, u32 LE              |
+//! | 16     | public key (32 or 33 bytes), zero padded to 40; all zero when Unclaimed |
+//! | 56     | last accepted control counter u64 LE ([`ControlCounter`], zero when Unclaimed) |
+//! | 64     | CRC-32 of bytes 0..64, u32 LE              |
 //!
-//! # Migration from format 1
+//! # Migration from formats 1 and 2
 //!
-//! Format 1 (firmware before signed control requests) is the same up to
-//! offset 48, where its CRC-32 of bytes 0..48 ends a 52-byte record; it has
-//! no control counter. [`Record::decode`] reads both: a format-1 record
-//! loads with control counter 0. Nothing is rewritten at boot; the next
-//! save (a claim, a signed commit or an accepted control request) writes a
-//! format-2 record into the other sector with the next sequence number, so
-//! the migration has the same power-loss safety as any save: until it
-//! completes, the format-1 record is the newest valid one. A format-2 record
-//! is never written back as format 1.
+//! Both older formats hold an Ed25519 key at offset 16 (32 bytes) and zero
+//! at offsets 6 and 7. Format 2 continues with the control counter at 48
+//! and the CRC-32 of bytes 0..56 at 56 (60 bytes); format 1 (firmware
+//! before signed control requests) ends with the CRC-32 of bytes 0..48 at
+//! 48 (52 bytes) and has no counter. [`Record::decode`] reads all three: an
+//! older record loads as an Ed25519 key, a format-1 one with control
+//! counter 0. Nothing is rewritten at boot; the next save (a claim, a
+//! signed commit or an accepted control request) writes a format-3 record
+//! into the other sector with the next sequence number, so the migration
+//! has the same power-loss safety as any save: until it completes, the old
+//! record is the newest valid one. A record is never written back in an
+//! older format.
 //!
 //! # Power-loss safety
 //!
@@ -62,19 +66,28 @@ use crate::image::{SECTOR, WORD};
 use crate::store::StoreError;
 use embedded_storage::nor_flash::NorFlash;
 use middleware::crc::Crc32;
-use middleware::loader::trust::{ControlCounter, KEY_LEN, PublicKey, TrustState, Version};
+use middleware::loader::trust::{ControlCounter, KeyKind, PublicKey, TrustState, Version};
 
 /// Bytes of one current-format record on flash.
-pub const RECORD_LEN: usize = 60;
+pub const RECORD_LEN: usize = 68;
+/// Bytes of a format-2 record.
+pub const RECORD_V2_LEN: usize = 60;
 /// Bytes of a format-1 record.
 pub const RECORD_V1_LEN: usize = 52;
 /// Smallest trust partition: two sectors.
 pub const PARTITION_LEN: u32 = 2 * SECTOR;
 const MAGIC: [u8; 4] = *b"MWTR";
 /// The format [`Record::encode`] writes.
-pub const FORMAT: u8 = 2;
+pub const FORMAT: u8 = 3;
+const FORMAT_V2: u8 = 2;
 const FORMAT_V1: u8 = 1;
-const CRC_AT: usize = 56;
+const KEY_AT: usize = 16;
+/// Room for the key in format 3 (the longest key, zero padded).
+const KEY_SLOT: usize = 40;
+const CONTROL_AT: usize = KEY_AT + KEY_SLOT;
+const CRC_AT: usize = CONTROL_AT + 8;
+const CONTROL_V2_AT: usize = 48;
+const CRC_V2_AT: usize = 56;
 const CRC_V1_AT: usize = 48;
 
 /// Everything the trust partition persists.
@@ -104,52 +117,76 @@ impl Record {
     /// The record's bytes, in the current format.
     pub fn encode(&self) -> [u8; RECORD_LEN] {
         let mut b = [0u8; RECORD_LEN];
-        let (flag, min, key) = match self.state.trust {
-            TrustState::Unclaimed => (0u8, 0u32, [0u8; KEY_LEN]),
-            TrustState::Claimed { key, min_version } => (1, min_version.0, key.0),
-        };
-        let control = if flag == 0 { 0 } else { self.state.control.0 };
         b[..4].copy_from_slice(&MAGIC);
         b[4] = FORMAT;
-        b[5] = flag;
         b[8..12].copy_from_slice(&self.seq.to_le_bytes());
-        b[12..16].copy_from_slice(&min.to_le_bytes());
-        b[16..48].copy_from_slice(&key);
-        b[48..56].copy_from_slice(&control.to_le_bytes());
+        if let TrustState::Claimed { key, min_version } = self.state.trust {
+            let bytes = key.as_bytes();
+            b[5] = 1;
+            b[6] = key.kind() as u8;
+            b[12..16].copy_from_slice(&min_version.0.to_le_bytes());
+            b[KEY_AT..KEY_AT + bytes.len()].copy_from_slice(bytes);
+            b[CONTROL_AT..CRC_AT].copy_from_slice(&self.state.control.0.to_le_bytes());
+        }
         let crc = Crc32::checksum(&b[..CRC_AT]);
         b[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
         b
     }
 
-    /// Decodes a record of format 2 or 1 (`b` holds [`RECORD_LEN`] bytes
-    /// read from the sector start; a format-1 record uses the first
-    /// [`RECORD_V1_LEN`] and loads with control counter 0). `None` unless
-    /// magic, format, CRC and fields are all valid.
+    /// Decodes a record of format 3, 2 or 1 (`b` holds [`RECORD_LEN`]
+    /// bytes read from the sector start; an older record uses only its
+    /// first [`RECORD_V2_LEN`] or [`RECORD_V1_LEN`], holds an Ed25519 key,
+    /// and a format-1 one loads with control counter 0). `None` unless
+    /// magic, format, CRC and every field, padding included, are valid.
     pub fn decode(b: &[u8; RECORD_LEN]) -> Option<Self> {
-        if b[..4] != MAGIC || b[6] != 0 || b[7] != 0 {
+        if b[..4] != MAGIC || b[7] != 0 {
             return None;
         }
-        let (crc_at, control) = match b[4] {
-            FORMAT => {
-                let mut c = [0u8; 8];
-                c.copy_from_slice(&b[48..56]);
-                (CRC_AT, u64::from_le_bytes(c))
-            }
-            FORMAT_V1 => (CRC_V1_AT, 0),
+        let u64_at = |at: usize| {
+            let mut c = [0u8; 8];
+            c.copy_from_slice(b.get(at..at + 8)?);
+            Some(u64::from_le_bytes(c))
+        };
+        // (CRC offset, kind byte, end of the key slot, control counter)
+        let (crc_at, kind, slot_end, control) = match b[4] {
+            FORMAT => (CRC_AT, b[6], CONTROL_AT, u64_at(CONTROL_AT)?),
+            FORMAT_V2 if b[6] == 0 => (CRC_V2_AT, 0, CONTROL_V2_AT, u64_at(CONTROL_V2_AT)?),
+            FORMAT_V1 if b[6] == 0 => (CRC_V1_AT, 0, CRC_V1_AT, 0),
             _ => return None,
         };
         if Crc32::checksum(b.get(..crc_at)?) != word(b, crc_at)? {
             return None;
         }
-        let mut key = [0u8; KEY_LEN];
-        key.copy_from_slice(&b[16..48]);
+        let slot = b.get(KEY_AT..slot_end)?;
         let min = word(b, 12)?;
-        let trust = match b[5] {
-            0 if min == 0 && key == [0; KEY_LEN] && control == 0 => TrustState::Unclaimed,
-            1 => TrustState::Claimed { key: PublicKey(key), min_version: Version(min) },
+        let trust = match (b[5], b[4]) {
+            (0, _) if kind == 0 && min == 0 && control == 0 && slot.iter().all(|&x| x == 0) => {
+                TrustState::Unclaimed
+            }
+            (1, FORMAT) => {
+                let kind = KeyKind::from_byte(kind)?;
+                let key = PublicKey::from_kind(kind, slot)?;
+                if slot[kind.key_len()..].iter().any(|&x| x != 0) {
+                    return None;
+                }
+                TrustState::Claimed {
+                    key,
+                    min_version: Version(min),
+                }
+            }
+            (1, _) => TrustState::Claimed {
+                key: PublicKey::from_kind(KeyKind::Ed25519, slot)?,
+                min_version: Version(min),
+            },
             _ => return None,
         };
-        Some(Record { seq: word(b, 8)?, state: Persisted { trust, control: ControlCounter(control) } })
+        Some(Record {
+            seq: word(b, 8)?,
+            state: Persisted {
+                trust,
+                control: ControlCounter(control),
+            },
+        })
     }
 }
 
@@ -168,7 +205,11 @@ impl TrustStore {
     /// least [`PARTITION_LEN`] bytes) and returns the store and the newest
     /// valid state (Unclaimed when there is none). Unreadable sectors count
     /// as invalid.
-    pub fn open<F: NorFlash>(flash: &mut F, base: u32, size: u32) -> Result<(Self, Persisted), StoreError> {
+    pub fn open<F: NorFlash>(
+        flash: &mut F,
+        base: u32,
+        size: u32,
+    ) -> Result<(Self, Persisted), StoreError> {
         if !base.is_multiple_of(SECTOR) {
             return Err(StoreError::Flash);
         }
@@ -188,7 +229,11 @@ impl TrustStore {
             }
         }
         let persisted = newest.map_or(Persisted::default(), |(_, r)| r.state);
-        let store = TrustStore { base, current: newest.map(|(s, r)| (s, r.seq)), persisted };
+        let store = TrustStore {
+            base,
+            current: newest.map(|(s, r)| (s, r.seq)),
+            persisted,
+        };
         Ok((store, persisted))
     }
 
@@ -197,7 +242,11 @@ impl TrustStore {
     /// error the previous record is still the one [`TrustStore::open`]
     /// finds. A state that would lower `min_version` or the control
     /// counter for the same key is refused with [`StoreError::Rollback`].
-    pub fn save<F: NorFlash>(&mut self, flash: &mut F, state: &Persisted) -> Result<(), StoreError> {
+    pub fn save<F: NorFlash>(
+        &mut self,
+        flash: &mut F,
+        state: &Persisted,
+    ) -> Result<(), StoreError> {
         if lowers(&self.persisted, state) {
             return Err(StoreError::Rollback);
         }
@@ -208,8 +257,12 @@ impl TrustStore {
         let at = self.base + sector * SECTOR;
         let bytes = Record { seq, state: *state }.encode();
         let (magic, fields) = bytes.split_at(WORD as usize);
-        flash.erase(at, at + SECTOR).map_err(|_| StoreError::Flash)?;
-        flash.write(at + WORD, fields).map_err(|_| StoreError::Flash)?;
+        flash
+            .erase(at, at + SECTOR)
+            .map_err(|_| StoreError::Flash)?;
+        flash
+            .write(at + WORD, fields)
+            .map_err(|_| StoreError::Flash)?;
         flash.write(at, magic).map_err(|_| StoreError::Flash)?;
         self.current = Some((sector, seq));
         self.persisted = *state;
@@ -232,8 +285,14 @@ impl TrustStore {
 pub fn lowers(current: &Persisted, next: &Persisted) -> bool {
     match (current.trust, next.trust) {
         (
-            TrustState::Claimed { key: a, min_version: old },
-            TrustState::Claimed { key: b, min_version: new },
+            TrustState::Claimed {
+                key: a,
+                min_version: old,
+            },
+            TrustState::Claimed {
+                key: b,
+                min_version: new,
+            },
         ) => a == b && (new.0 < old.0 || next.control < current.control),
         (TrustState::Claimed { .. }, TrustState::Unclaimed) => true,
         _ => false,
@@ -253,12 +312,18 @@ mod tests {
 
     fn with_control(k: u8, min: u32, control: u64) -> Persisted {
         Persisted {
-            trust: TrustState::Claimed { key: PublicKey([k; 32]), min_version: Version(min) },
+            trust: TrustState::Claimed {
+                key: PublicKey::Ed25519([k; 32]),
+                min_version: Version(min),
+            },
             control: ControlCounter(control),
         }
     }
 
-    const UNCLAIMED: Persisted = Persisted { trust: TrustState::Unclaimed, control: ControlCounter(0) };
+    const UNCLAIMED: Persisted = Persisted {
+        trust: TrustState::Unclaimed,
+        control: ControlCounter(0),
+    };
 
     fn open(flash: &mut Flash) -> (TrustStore, Persisted) {
         TrustStore::open(flash, BASE, PARTITION_LEN).unwrap()
@@ -269,7 +334,10 @@ mod tests {
         let mut flash = Flash::new();
         let (mut ts, _) = open(&mut flash);
         ts.save(&mut flash, &claimed(1, 100)).unwrap();
-        assert_eq!(ts.save(&mut flash, &claimed(1, 99)), Err(StoreError::Rollback));
+        assert_eq!(
+            ts.save(&mut flash, &claimed(1, 99)),
+            Err(StoreError::Rollback)
+        );
         assert_eq!(ts.save(&mut flash, &UNCLAIMED), Err(StoreError::Rollback));
         assert_eq!(ts.persisted(), claimed(1, 100));
         // Same key upwards, and a re-key (new key at 0), are allowed.
@@ -277,12 +345,19 @@ mod tests {
         ts.save(&mut flash, &claimed(2, 0)).unwrap();
         assert_eq!(ts.persisted(), claimed(2, 0));
         let (reopened, state) = open(&mut flash);
-        assert_eq!((reopened.persisted(), state), (claimed(2, 0), claimed(2, 0)));
+        assert_eq!(
+            (reopened.persisted(), state),
+            (claimed(2, 0), claimed(2, 0))
+        );
     }
 
     #[test]
     fn records_round_trip_and_reject_damage() {
-        for state in [UNCLAIMED, claimed(3, 1_761_500_000), with_control(3, 7, 1_761_500_000_123)] {
+        for state in [
+            UNCLAIMED,
+            claimed(3, 1_761_500_000),
+            with_control(3, 7, 1_761_500_000_123),
+        ] {
             let r = Record { seq: 9, state };
             let b = r.encode();
             assert_eq!(Record::decode(&b), Some(r));
@@ -303,7 +378,10 @@ mod tests {
         flash.mem.fill(0xFF);
         assert_eq!(open(&mut flash).1, UNCLAIMED);
         assert!(TrustStore::open(&mut flash, BASE + 4, PARTITION_LEN).is_err());
-        assert_eq!(TrustStore::open(&mut flash, BASE, SECTOR), Err(StoreError::TooLarge));
+        assert_eq!(
+            TrustStore::open(&mut flash, BASE, SECTOR),
+            Err(StoreError::TooLarge)
+        );
     }
 
     #[test]
@@ -318,7 +396,10 @@ mod tests {
             assert_eq!(reopened, store);
             assert_eq!(store.current, Some(((n - 1) % 2, n)));
         }
-        assert!(flash.mem[..BASE as usize].iter().all(|&b| b == 0), "outside partition untouched");
+        assert!(
+            flash.mem[..BASE as usize].iter().all(|&b| b == 0),
+            "outside partition untouched"
+        );
     }
 
     /// Power lost at every flash operation of a save: afterwards the store
@@ -336,7 +417,10 @@ mod tests {
                     store.save(&mut flash, &claimed(p as u8, p * 100)).unwrap();
                 }
                 flash.cut_at(cut);
-                assert!(store.save(&mut flash, &new).is_err(), "prior {prior} cut {cut}");
+                assert!(
+                    store.save(&mut flash, &new).is_err(),
+                    "prior {prior} cut {cut}"
+                );
                 flash.restore();
                 let (mut store, got) = open(&mut flash);
                 match old {
@@ -377,8 +461,15 @@ mod tests {
         let mut flash = Flash::new();
         let (mut ts, _) = open(&mut flash);
         ts.save(&mut flash, &with_control(1, 5, 100)).unwrap();
-        assert_eq!(ts.save(&mut flash, &with_control(1, 5, 99)), Err(StoreError::Rollback));
-        assert_eq!(ts.save(&mut flash, &with_control(1, 6, 0)), Err(StoreError::Rollback), "a commit keeps the counter");
+        assert_eq!(
+            ts.save(&mut flash, &with_control(1, 5, 99)),
+            Err(StoreError::Rollback)
+        );
+        assert_eq!(
+            ts.save(&mut flash, &with_control(1, 6, 0)),
+            Err(StoreError::Rollback),
+            "a commit keeps the counter"
+        );
         ts.save(&mut flash, &with_control(1, 5, 100)).unwrap();
         ts.save(&mut flash, &with_control(1, 6, 101)).unwrap();
         // A re-key starts the counter over.
@@ -390,8 +481,8 @@ mod tests {
     fn v1_record(seq: u32, state: &TrustState) -> [u8; RECORD_V1_LEN] {
         let mut b = [0u8; RECORD_V1_LEN];
         let (flag, min, key) = match *state {
-            TrustState::Unclaimed => (0u8, 0u32, [0u8; KEY_LEN]),
-            TrustState::Claimed { key, min_version } => (1, min_version.0, key.0),
+            TrustState::Unclaimed => (0u8, 0u32, [0u8; 32]),
+            TrustState::Claimed { key, min_version } => (1, min_version.0, ed(&key)),
         };
         b[..4].copy_from_slice(b"MWTR");
         b[4] = 1;
@@ -404,6 +495,137 @@ mod tests {
         b
     }
 
+    fn ed(key: &PublicKey) -> [u8; 32] {
+        match key {
+            PublicKey::Ed25519(k) => *k,
+            PublicKey::P256(_) => panic!("old formats hold Ed25519 keys"),
+        }
+    }
+
+    /// A format-2 record exactly as the previous firmware wrote it.
+    fn v2_record(seq: u32, state: &Persisted) -> [u8; RECORD_V2_LEN] {
+        let mut b = [0u8; RECORD_V2_LEN];
+        let (flag, min, key, control) = match state.trust {
+            TrustState::Unclaimed => (0u8, 0u32, [0u8; 32], 0),
+            TrustState::Claimed { key, min_version } => {
+                (1, min_version.0, ed(&key), state.control.0)
+            }
+        };
+        b[..4].copy_from_slice(b"MWTR");
+        b[4] = 2;
+        b[5] = flag;
+        b[8..12].copy_from_slice(&seq.to_le_bytes());
+        b[12..16].copy_from_slice(&min.to_le_bytes());
+        b[16..48].copy_from_slice(&key);
+        b[48..56].copy_from_slice(&control.to_le_bytes());
+        let crc = Crc32::checksum(&b[..56]);
+        b[56..].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+
+    fn p256(seed: u8, min: u32, control: u64) -> Persisted {
+        let mut k = [seed; 33];
+        k[0] = 3;
+        Persisted {
+            trust: TrustState::Claimed {
+                key: PublicKey::P256(k),
+                min_version: Version(min),
+            },
+            control: ControlCounter(control),
+        }
+    }
+
+    #[test]
+    fn format_2_records_load_as_ed25519_and_migrate_to_format_3() {
+        let old = with_control(0xAB, 3000, 1_761_500_000_123);
+        let mut flash = Flash::new();
+        put(&mut flash, 0, &v2_record(4, &claimed(0xAB, 1000)));
+        put(&mut flash, 1, &v2_record(5, &old));
+        let (mut ts, got) = open(&mut flash);
+        assert_eq!((got, ts.current), (old, Some((1, 5))));
+        let mut padded = [0xFFu8; RECORD_LEN];
+        padded[..RECORD_V2_LEN].copy_from_slice(&v2_record(5, &old));
+        for i in 0..RECORD_V2_LEN {
+            let mut bad = padded;
+            bad[i] ^= 0x01;
+            assert_eq!(Record::decode(&bad), None, "byte {i}");
+        }
+        // A format-2 record cannot claim a kind byte.
+        let mut kinded = v2_record(5, &old);
+        kinded[6] = 2;
+        let crc = Crc32::checksum(&kinded[..56]);
+        kinded[56..].copy_from_slice(&crc.to_le_bytes());
+        padded[..RECORD_V2_LEN].copy_from_slice(&kinded);
+        assert_eq!(Record::decode(&padded), None);
+        // The next save writes format 3 into sector 0, sector 1 untouched;
+        // a migration cut short keeps the format-2 state.
+        let next = with_control(0xAB, 3001, 1_761_500_000_124);
+        ts.save(&mut flash, &next).unwrap();
+        assert_eq!(flash.mem[BASE as usize + 4], FORMAT);
+        let s1 = (BASE + SECTOR) as usize;
+        assert_eq!(&flash.mem[s1..s1 + RECORD_V2_LEN], &v2_record(5, &old));
+        assert_eq!(open(&mut flash).1, next);
+        for cut in 0..3 {
+            let mut flash = Flash::new();
+            put(&mut flash, 1, &v2_record(5, &old));
+            let (mut ts, _) = open(&mut flash);
+            flash.cut_at(cut);
+            assert!(ts.save(&mut flash, &next).is_err(), "cut {cut}");
+            flash.restore();
+            let (mut ts, got) = open(&mut flash);
+            assert_eq!(got, old, "cut {cut}");
+            ts.save(&mut flash, &next).unwrap();
+            assert_eq!(open(&mut flash).1, next);
+        }
+        // A re-key to P-256 from a migrated Ed25519 record.
+        let mut flash = Flash::new();
+        put(&mut flash, 1, &v2_record(5, &old));
+        let (mut ts, _) = open(&mut flash);
+        ts.save(&mut flash, &p256(9, 0, 0)).unwrap();
+        assert_eq!(open(&mut flash).1, p256(9, 0, 0));
+    }
+
+    #[test]
+    fn p256_records_round_trip_and_keep_their_padding_zero() {
+        let state = p256(0x5A, 77, 1_761_500_000_999);
+        let b = Record { seq: 3, state }.encode();
+        assert_eq!(b[6], KeyKind::P256 as u8);
+        assert_eq!(&b[16 + 33..56], &[0; 7]);
+        assert_eq!(Record::decode(&b), Some(Record { seq: 3, state }));
+        let reseal = |mut b: [u8; RECORD_LEN]| {
+            let crc = Crc32::checksum(&b[..CRC_AT]);
+            b[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
+            b
+        };
+        let mut pad = b;
+        pad[50] = 1;
+        assert_eq!(Record::decode(&reseal(pad)), None, "padding must be zero");
+        let mut kind = b;
+        kind[6] = KeyKind::Ed25519 as u8;
+        assert_eq!(
+            Record::decode(&reseal(kind)),
+            None,
+            "Ed25519 slot with a 33rd byte"
+        );
+        let mut unknown = b;
+        unknown[6] = 9;
+        assert_eq!(Record::decode(&reseal(unknown)), None);
+        let mut prefix = b;
+        prefix[16] = 4;
+        assert_eq!(Record::decode(&reseal(prefix)), None, "not compressed SEC1");
+        let e = Record {
+            seq: 4,
+            state: claimed(1, 2),
+        }
+        .encode();
+        assert_eq!(e[6], KeyKind::Ed25519 as u8);
+        let mut ed_kind_zero = e;
+        ed_kind_zero[6] = 0;
+        assert_eq!(Record::decode(&reseal(ed_kind_zero)), None);
+        // P-256 and Ed25519 with the same leading bytes are different keys.
+        assert!(!lowers(&p256(1, 50, 50), &claimed(1, 0)));
+    }
+
     /// Writes `bytes` at the start of `sector` as the old firmware did.
     fn put(flash: &mut Flash, sector: u32, bytes: &[u8]) {
         let at = (BASE + sector * SECTOR) as usize;
@@ -413,13 +635,32 @@ mod tests {
 
     #[test]
     fn format_1_records_load_with_counter_zero_and_migrate_on_the_next_save() {
-        let old = TrustState::Claimed { key: PublicKey([0xAB; 32]), min_version: Version(3000) };
+        let old = TrustState::Claimed {
+            key: PublicKey::Ed25519([0xAB; 32]),
+            min_version: Version(3000),
+        };
         // The board's history: sector 0 seq 4, sector 1 seq 5 (newest).
         let mut flash = Flash::new();
-        put(&mut flash, 0, &v1_record(4, &TrustState::Claimed { key: PublicKey([0xAB; 32]), min_version: Version(1000) }));
+        put(
+            &mut flash,
+            0,
+            &v1_record(
+                4,
+                &TrustState::Claimed {
+                    key: PublicKey::Ed25519([0xAB; 32]),
+                    min_version: Version(1000),
+                },
+            ),
+        );
         put(&mut flash, 1, &v1_record(5, &old));
         let (mut ts, got) = open(&mut flash);
-        assert_eq!(got, Persisted { trust: old, control: ControlCounter(0) });
+        assert_eq!(
+            got,
+            Persisted {
+                trust: old,
+                control: ControlCounter(0)
+            }
+        );
         assert_eq!(ts.current, Some((1, 5)));
         // A damaged format-1 record is refused like any other.
         for i in 0..RECORD_V1_LEN {
@@ -428,9 +669,12 @@ mod tests {
             bad[i] ^= 0x01;
             assert_eq!(Record::decode(&bad), None, "byte {i}");
         }
-        // The first save (a control counter) writes format 2 into sector 0
+        // The first save (a control counter) writes format 3 into sector 0
         // with seq 6; the format-1 record in sector 1 stays untouched.
-        let next = Persisted { trust: old, control: ControlCounter(1_761_500_000_123) };
+        let next = Persisted {
+            trust: old,
+            control: ControlCounter(1_761_500_000_123),
+        };
         ts.save(&mut flash, &next).unwrap();
         let s0 = (BASE) as usize;
         assert_eq!(flash.mem[s0 + 4], FORMAT);
@@ -448,7 +692,14 @@ mod tests {
             assert!(ts.save(&mut flash, &next).is_err(), "cut {cut}");
             flash.restore();
             let (mut ts, got) = open(&mut flash);
-            assert_eq!(got, Persisted { trust: old, control: ControlCounter(0) }, "cut {cut}");
+            assert_eq!(
+                got,
+                Persisted {
+                    trust: old,
+                    control: ControlCounter(0)
+                },
+                "cut {cut}"
+            );
             ts.save(&mut flash, &next).unwrap();
             assert_eq!(open(&mut flash).1, next);
         }
@@ -460,18 +711,33 @@ mod tests {
 
     #[test]
     fn unknown_formats_and_an_unclaimed_record_with_a_counter_are_refused() {
-        let mut b = Record { seq: 1, state: with_control(1, 1, 1) }.encode();
-        b[4] = 3;
+        let mut b = Record {
+            seq: 1,
+            state: with_control(1, 1, 1),
+        }
+        .encode();
+        b[4] = 4;
         let crc = Crc32::checksum(&b[..CRC_AT]);
         b[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
-        assert_eq!(Record::decode(&b), None, "format 3");
-        let mut u = Record { seq: 1, state: UNCLAIMED }.encode();
-        u[48] = 1;
+        assert_eq!(Record::decode(&b), None, "format 4");
+        let mut u = Record {
+            seq: 1,
+            state: UNCLAIMED,
+        }
+        .encode();
+        u[CONTROL_AT] = 1;
         let crc = Crc32::checksum(&u[..CRC_AT]);
         u[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(Record::decode(&u), None);
         // Encoding an unclaimed state never stores a counter.
-        let e = Record { seq: 2, state: Persisted { trust: TrustState::Unclaimed, control: ControlCounter(5) } }.encode();
+        let e = Record {
+            seq: 2,
+            state: Persisted {
+                trust: TrustState::Unclaimed,
+                control: ControlCounter(5),
+            },
+        }
+        .encode();
         assert_eq!(Record::decode(&e).map(|r| r.state), Some(UNCLAIMED));
     }
 }

@@ -20,14 +20,13 @@ path = "src/bin/mw-update.rs"
 # Host backends only (Zenoh for the fabric, the serial link codec); never
 # an embedded feature set (scripts/check-features.sh, RG19).
 # `grpc` and `istio` (host) for `shell::serve_sys` and its sidecar
-# principal; the update gate uses the always-built trust wire types and
-# verifies control signatures with ed25519-dalek itself, so no `trust`.
-middleware = { path = "..", features = ["zenoh", "serial", "grpc", "istio"] }
+# principal; `trust` for the update gate's control-signature check, which
+# calls the device's own `verify_signature` (Ed25519 and P-256 alike).
+middleware = { path = "..", features = ["zenoh", "serial", "trust", "grpc", "istio"] }
 mw-service = { path = "../service" }
 # mwctl's pure protocol operations (upload, fw update, signing) for
 # mw-update; mwctl itself stays free of cloud dependencies.
 mwctl = { path = "../tools/mwctl" }
-ed25519-dalek = "2.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 # The trait SerialLink reads and writes through.
 embedded-io-async = "0.7"
@@ -39,7 +38,10 @@ tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 # The fake device in tests runs the real FwService on the in-memory
 # RP2350 bootrom model and checks signed commits (tests only).
-middleware = { path = "..", features = ["zenoh", "serial", "grpc", "istio", "fw-sim"] }
+middleware = { path = "..", features = ["zenoh", "serial", "trust", "grpc", "istio", "fw-sim"] }
+# Test keys: the signing halves the gate never needs.
+ed25519-dalek = "2.2"
+p256 = { version = "0.13", features = ["ecdsa"] }
 # The tests' stand-in sidecar sets x-forwarded-client-cert.
 tonic = "0.14"
 http = "1"

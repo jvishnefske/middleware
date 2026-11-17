@@ -80,12 +80,21 @@ pub struct Cost {
 
 impl Cost {
     /// Nothing ran.
-    pub const ZERO: Cost = Cost { calls: 0, fuel: 0, us: 0 };
+    pub const ZERO: Cost = Cost {
+        calls: 0,
+        fuel: 0,
+        us: 0,
+    };
 
     /// The cost between two readings of a payload's cumulative
     /// `(calls, fuel)` counters and the clock (`start_us`, `end_us`).
     /// Counters or a clock that went backwards count as zero.
-    pub const fn between(before: (u64, u64), after: (u64, u64), start_us: u64, end_us: u64) -> Cost {
+    pub const fn between(
+        before: (u64, u64),
+        after: (u64, u64),
+        start_us: u64,
+        end_us: u64,
+    ) -> Cost {
         Cost {
             calls: after.0.saturating_sub(before.0),
             fuel: after.1.saturating_sub(before.1),
@@ -106,7 +115,11 @@ pub struct KindStats {
 }
 
 impl KindStats {
-    const ZERO: KindStats = KindStats { calls: 0, fuel: 0, us: 0 };
+    const ZERO: KindStats = KindStats {
+        calls: 0,
+        fuel: 0,
+        us: 0,
+    };
 
     const fn add(self, c: Cost) -> KindStats {
         KindStats {
@@ -132,7 +145,10 @@ impl RadioTime {
 
     /// `frames` more frames handled in `us` microseconds.
     pub const fn add(self, us: u64, frames: u32) -> RadioTime {
-        RadioTime { us: self.us.saturating_add(us), frames: self.frames.saturating_add(frames) }
+        RadioTime {
+            us: self.us.saturating_add(us),
+            frames: self.frames.saturating_add(frames),
+        }
     }
 }
 
@@ -156,7 +172,14 @@ pub struct Window {
 impl Window {
     /// An empty window starting at `now_us`.
     pub const fn new(now_us: u64) -> Window {
-        Window { start_us: now_us, kinds: [KindStats::ZERO; 3], max_op_us: 0, max_op_fuel: 0, wait_us: 0, yield_us: 0 }
+        Window {
+            start_us: now_us,
+            kinds: [KindStats::ZERO; 3],
+            max_op_us: 0,
+            max_op_fuel: 0,
+            wait_us: 0,
+            yield_us: 0,
+        }
     }
 
     /// The window with one more operation of `kind` that cost `cost`.
@@ -167,8 +190,16 @@ impl Window {
         kinds[i] = kinds[i].add(cost);
         Window {
             kinds,
-            max_op_us: if cost.us > self.max_op_us { cost.us } else { self.max_op_us },
-            max_op_fuel: if cost.fuel > self.max_op_fuel { cost.fuel } else { self.max_op_fuel },
+            max_op_us: if cost.us > self.max_op_us {
+                cost.us
+            } else {
+                self.max_op_us
+            },
+            max_op_fuel: if cost.fuel > self.max_op_fuel {
+                cost.fuel
+            } else {
+                self.max_op_fuel
+            },
             ..self
         }
     }
@@ -176,13 +207,19 @@ impl Window {
     /// The window with `us` more microseconds of waiting for input.
     #[must_use]
     pub const fn waited(self, us: u64) -> Window {
-        Window { wait_us: self.wait_us.saturating_add(us), ..self }
+        Window {
+            wait_us: self.wait_us.saturating_add(us),
+            ..self
+        }
     }
 
     /// The window with `us` more microseconds of yielding.
     #[must_use]
     pub const fn yielded(self, us: u64) -> Window {
-        Window { yield_us: self.yield_us.saturating_add(us), ..self }
+        Window {
+            yield_us: self.yield_us.saturating_add(us),
+            ..self
+        }
     }
 
     /// Whether the window is [`REPORT_INTERVAL_US`] long at `now_us`.
@@ -192,14 +229,19 @@ impl Window {
 
     /// All operations together.
     pub const fn wasm(&self) -> KindStats {
-        self.kinds[0].add(as_cost(self.kinds[1])).add(as_cost(self.kinds[2]))
+        self.kinds[0]
+            .add(as_cost(self.kinds[1]))
+            .add(as_cost(self.kinds[2]))
     }
 
     /// The window's report at `now_us`, with the radio task's time.
     pub const fn summary(&self, now_us: u64, radio: RadioTime) -> Summary {
         let wall_us = now_us.saturating_sub(self.start_us);
         let wasm = self.wasm();
-        let host_us = wall_us.saturating_sub(wasm.us).saturating_sub(self.wait_us).saturating_sub(self.yield_us);
+        let host_us = wall_us
+            .saturating_sub(wasm.us)
+            .saturating_sub(self.wait_us)
+            .saturating_sub(self.yield_us);
         Summary {
             wall_us,
             wasm,
@@ -217,7 +259,11 @@ impl Window {
 }
 
 const fn as_cost(k: KindStats) -> Cost {
-    Cost { calls: k.calls, fuel: k.fuel, us: k.us }
+    Cost {
+        calls: k.calls,
+        fuel: k.fuel,
+        us: k.us,
+    }
 }
 
 /// `n * scale / d`, 0 when `d` is 0, saturating.
@@ -226,7 +272,11 @@ pub const fn ratio(n: u64, scale: u64, d: u64) -> u64 {
         return 0;
     }
     let q = (n as u128 * scale as u128) / d as u128;
-    if q > u64::MAX as u128 { u64::MAX } else { q as u64 }
+    if q > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        q as u64
+    }
 }
 
 /// A finished window, ready to log ([`Summary::wasm_line`],
@@ -298,9 +348,19 @@ impl fmt::Display for HostLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = self.0;
         f.write_str("perf:")?;
-        for (name, k) in [("msg", s.kinds[0]), ("irq", s.kinds[1]), ("tick", s.kinds[2])] {
+        for (name, k) in [
+            ("msg", s.kinds[0]),
+            ("irq", s.kinds[1]),
+            ("tick", s.kinds[2]),
+        ] {
             let sep = if name == "msg" { " " } else { ", " };
-            write!(f, "{sep}{name} {}/{}k/{} ms", k.calls, k.fuel / 1000, k.us / 1000)?;
+            write!(
+                f,
+                "{sep}{name} {}/{}k/{} ms",
+                k.calls,
+                k.fuel / 1000,
+                k.us / 1000
+            )?;
         }
         write!(
             f,
@@ -339,11 +399,39 @@ mod tests {
             .op(CallKind::Tick, cost(1, 5_000, 300))
             .waited(7_000)
             .yielded(2_000);
-        assert_eq!(w.kinds[0], KindStats { calls: 2, fuel: 3_000, us: 400 });
-        assert_eq!(w.kinds[1], KindStats { calls: 2, fuel: 350_000, us: 27_000 });
-        assert_eq!(w.kinds[2], KindStats { calls: 1, fuel: 5_000, us: 300 });
+        assert_eq!(
+            w.kinds[0],
+            KindStats {
+                calls: 2,
+                fuel: 3_000,
+                us: 400
+            }
+        );
+        assert_eq!(
+            w.kinds[1],
+            KindStats {
+                calls: 2,
+                fuel: 350_000,
+                us: 27_000
+            }
+        );
+        assert_eq!(
+            w.kinds[2],
+            KindStats {
+                calls: 1,
+                fuel: 5_000,
+                us: 300
+            }
+        );
         assert_eq!((w.max_op_us, w.max_op_fuel), (15_000, 250_000));
-        assert_eq!(w.wasm(), KindStats { calls: 5, fuel: 358_000, us: 27_700 });
+        assert_eq!(
+            w.wasm(),
+            KindStats {
+                calls: 5,
+                fuel: 358_000,
+                us: 27_700
+            }
+        );
     }
 
     #[test]
@@ -367,7 +455,13 @@ mod tests {
         assert_eq!(s.busy_permille, 800);
         assert_eq!(s.fuel_per_s, 1_500_000);
         assert_eq!(s.host_us, 300_000);
-        assert_eq!(s.radio, RadioTime { us: 120_000, frames: 1_450 });
+        assert_eq!(
+            s.radio,
+            RadioTime {
+                us: 120_000,
+                frames: 1_450
+            }
+        );
     }
 
     #[test]
@@ -399,7 +493,11 @@ mod tests {
         // Every count ten digits wide (far beyond a 5 s window) still fits
         // `MAX_LOG`; the bus truncates anything longer.
         const W: u64 = u32::MAX as u64;
-        let big = KindStats { calls: W, fuel: W, us: W };
+        let big = KindStats {
+            calls: W,
+            fuel: W,
+            us: W,
+        };
         let s = Summary {
             wall_us: W,
             wasm: big,
@@ -411,7 +509,10 @@ mod tests {
             wait_us: W,
             yield_us: W,
             host_us: W,
-            radio: RadioTime { us: W, frames: u32::MAX },
+            radio: RadioTime {
+                us: W,
+                frames: u32::MAX,
+            },
         };
         assert!(format!("{}", s.wasm_line()).len() <= middleware::wasm_abi::MAX_LOG);
         assert!(format!("{}", s.host_line()).len() <= middleware::wasm_abi::MAX_LOG);

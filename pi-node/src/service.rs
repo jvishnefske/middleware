@@ -389,7 +389,8 @@ impl<F: NorFlash + Durable> Service<F> {
                 }
             }
             Action::Claim { trust: TrustState::Claimed { key, .. } } => {
-                notes.push(Note::Pinned { prefix: [key.0[0], key.0[1], key.0[2], key.0[3]] });
+                let k = key.as_bytes();
+                notes.push(Note::Pinned { prefix: [k[0], k[1], k[2], k[3]] });
             }
             _ => {}
         }

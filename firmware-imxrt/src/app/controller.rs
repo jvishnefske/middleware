@@ -100,8 +100,6 @@ impl Controller {
         Controller { svc, bus, mac }
     }
 
-
-
     /// Runs forever: starts a stored payload (with `wasm`), then serves
     /// requests.
     pub async fn run(mut self) -> ! {
@@ -121,7 +119,11 @@ impl Controller {
             // Never reached without the runtime (start is NotFound), but
             // answer rather than leave the link waiting.
             #[cfg(not(feature = "wasm"))]
-            self.bus.reply(Reply { link: id.0, id: id.1, result: Err(HandlerError::NotFound) });
+            self.bus.reply(Reply {
+                link: id.0,
+                id: id.1,
+                result: Err(HandlerError::NotFound),
+            });
         }
     }
 
@@ -137,27 +139,65 @@ impl Controller {
         self.svc.set_link_ready(true);
         let link = msg.link;
         let Ok(key) = Key::new(&msg.key) else {
-            return (Some(Reply { link, id, result: Err(HandlerError::InvalidRequest) }), false, false);
+            return (
+                Some(Reply {
+                    link,
+                    id,
+                    result: Err(HandlerError::InvalidRequest),
+                }),
+                false,
+                false,
+            );
         };
+        // The requester (`Service::set_origin`): the serial links are one,
+        // every Zenoh peer is another.
+        self.svc.set_origin(imxrt_base::service::Origin::Serial);
         // Over Zenoh, the management gate decides first (unclaimed: only
-        // `sys/info` and `sys/trust/info`; claimed: read-only keys, and a
-        // start/stop signed by the pinned key, whose counter is persisted
-        // before it acts). A refused request changes nothing.
+        // `sys/info` and `sys/trust/info`; claimed: read-only keys, staged
+        // uploads with a signed commit, firmware transfers with a signed
+        // commit, and start/stop/fw reboot/confirm/abort signed by the
+        // pinned key, whose counter is persisted before it acts). A
+        // refused request changes nothing (but the owner's unsigned commit
+        // ends its own upload).
         #[cfg(feature = "eth")]
         let mut gated_body: Option<&[u8]> = None;
         #[cfg(feature = "eth")]
         if link == LinkId::ZENOH {
             use imxrt_base::zenoh_mgmt::{self, Admission};
+            self.svc.set_origin(zenoh_mgmt::origin(self.mac));
             let facts = zenoh_mgmt::facts(self.svc.state(), self.mac);
-            match zenoh_mgmt::admit(&facts, key, &msg.body) {
+            match zenoh_mgmt::admit(&facts, self.svc.loader_owner(), key, &msg.body) {
                 Err(refusal) => {
-                    self.bus.log(format_args!("zenoh: {} refused ({})", key.as_str(), refusal.reason()));
-                    return (Some(Reply { link, id, result: Err(refusal.error()) }), false, false);
+                    if refusal.abandons_transfer() {
+                        self.svc.abandon_transfer();
+                    }
+                    self.bus.log(format_args!(
+                        "zenoh: {} refused ({})",
+                        key.as_str(),
+                        refusal.reason()
+                    ));
+                    return (
+                        Some(Reply {
+                            link,
+                            id,
+                            result: Err(refusal.error()),
+                        }),
+                        false,
+                        false,
+                    );
                 }
                 Ok(Admission::Dispatch) => {}
                 Ok(Admission::Control { counter }) => {
                     if self.svc.accept_control(counter).is_err() {
-                        return (Some(Reply { link, id, result: Err(HandlerError::Internal) }), false, false);
+                        return (
+                            Some(Reply {
+                                link,
+                                id,
+                                result: Err(HandlerError::Internal),
+                            }),
+                            false,
+                            false,
+                        );
                     }
                     gated_body = Some(&[]);
                 }
@@ -170,15 +210,33 @@ impl Controller {
         // `sys/link/sub` / `unsub`: the asking link's filter, before the
         // service.
         if let Some(r) = self.bus.link_request(link, key, body) {
-            return (Some(Reply { link, id, result: r.map(|()| Vec::new()) }), false, false);
+            return (
+                Some(Reply {
+                    link,
+                    id,
+                    result: r.map(|()| Vec::new()),
+                }),
+                false,
+                false,
+            );
         }
         let before = self.svc.status();
         let mut out = [0u8; MAX_REPLY];
         #[cfg(feature = "wasm")]
         let handled = {
-            let answer = imxrt_base::requests::handle(&mut self.svc, payload, key, body, &msg.meta(), &mut out);
+            let answer = imxrt_base::requests::handle(
+                &mut self.svc,
+                payload,
+                key,
+                body,
+                &msg.meta(),
+                &mut out,
+            );
             if let Some(trap) = &answer.trapped {
-                self.bus.log(format_args!("payload trapped on request {}: {trap}", key.as_str()));
+                self.bus.log(format_args!(
+                    "payload trapped on request {}: {trap}",
+                    key.as_str()
+                ));
             }
             answer.handled
         };
@@ -193,7 +251,13 @@ impl Controller {
             },
             Route::System | Route::Payload => self.svc.handle(key, body, &mut out),
         };
-        let Handled { reply, stop, notes, reset: reset_after, release_watchdog } = handled;
+        let Handled {
+            reply,
+            stop,
+            notes,
+            reset: reset_after,
+            release_watchdog,
+        } = handled;
         #[cfg(feature = "eth")]
         if key == imxrt_base::config::ZENOH_ENDPOINT {
             super::zenoh::set_endpoint(self.svc.zenoh_endpoint());
@@ -213,7 +277,9 @@ impl Controller {
                 link,
                 id,
                 result: r.and_then(|n| {
-                    out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall)
+                    out.get(..n)
+                        .and_then(|b| Vec::from_slice(b).ok())
+                        .ok_or(HandlerError::BufferTooSmall)
                 }),
             }),
         };
@@ -262,18 +328,24 @@ impl Controller {
     fn load(&mut self) -> Result<Payload<RtDevice>, StartError> {
         let limits = imxrt_base::budget::limits(&RT1050);
         let store = self.svc.store_mut();
-        let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
+        let header = store
+            .header()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
         check_heap(heap::free(), header.len).map_err(StartError::NoHeap)?;
         let len = header.len as usize;
         let mut image = AllocVec::new();
-        image.try_reserve_exact(len).map_err(|_| StartError::NoMemory)?;
+        image
+            .try_reserve_exact(len)
+            .map_err(|_| StartError::NoMemory)?;
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
         let bound = limits.heap_needed(&image);
-        let needed = check_heap_holding(heap::free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
+        let needed = check_heap_holding(heap::free(), image.capacity(), bound)
+            .map_err(StartError::NoHeap)?;
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
-        let device = RtDevice::new(self.bus, &RT1050, self.svc.node()).ok_or(StartError::NoHardware)?;
+        let device =
+            RtDevice::new(self.bus, &RT1050, self.svc.node()).ok_or(StartError::NoHardware)?;
         let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
@@ -297,7 +369,11 @@ impl Controller {
     async fn running(&mut self, pending: Option<(LinkId, u8)>) {
         let answer = |bus: &Bus, result: Result<(), HandlerError>| {
             if let Some((link, id)) = pending {
-                bus.reply(Reply { link, id, result: result.map(|()| Vec::new()) });
+                bus.reply(Reply {
+                    link,
+                    id,
+                    result: result.map(|()| Vec::new()),
+                });
             }
         };
         let before = self.svc.status();
@@ -332,7 +408,9 @@ impl Controller {
             self.bus.set_subscriptions(payload.subscriptions());
             payload.device().poll(now_us());
             for _ in 0..MAX_EVENTS {
-                let Some(event) = payload.device().pop_event() else { break };
+                let Some(event) = payload.device().pop_event() else {
+                    break;
+                };
                 if let Err(trap) = payload.dispatch(event) {
                     self.trapped(&trap);
                     return;
@@ -340,12 +418,13 @@ impl Controller {
             }
             let overflow = payload.device().overflow();
             if let Some(n) = overflow_report(dropped, overflow) {
-                self.bus.log(format_args!("event queue full: {n} events dropped"));
+                self.bus
+                    .log(format_args!("event queue full: {n} events dropped"));
             }
             dropped = overflow;
-            let tick = payload
-                .next_tick()
-                .map(|due| Instant::now() + Duration::from_millis(u64::from(tick_delay(now_ms(), due))));
+            let tick = payload.next_tick().map(|due| {
+                Instant::now() + Duration::from_millis(u64::from(tick_delay(now_ms(), due)))
+            });
             let alarm = payload.device().next_alarm_us().map(Instant::from_micros);
             let wake = match (tick, alarm) {
                 (Some(a), Some(b)) => Some(a.min(b)),
@@ -368,7 +447,9 @@ impl Controller {
                 }
                 Either::First(msg) => match msg.kind {
                     Kind::Publish => {
-                        let Ok(key) = Key::new(&msg.key) else { continue };
+                        let Ok(key) = Key::new(&msg.key) else {
+                            continue;
+                        };
                         if route_publication(&self.svc.state(), key, payload.subscriptions())
                             && let Err(trap) = payload.deliver(key, &msg.body)
                         {
@@ -379,7 +460,11 @@ impl Controller {
                     Kind::Request { id } => {
                         let (reply, stop, then_reset) = self.handle(id, &msg, Some(&mut *payload));
                         // A start while running is answered by dispatch.
-                        let reply = reply.unwrap_or(Reply { link: msg.link, id, result: Ok(Vec::new()) });
+                        let reply = reply.unwrap_or(Reply {
+                            link: msg.link,
+                            id,
+                            result: Ok(Vec::new()),
+                        });
                         self.answer(reply, then_reset).await;
                         if stop {
                             self.bus.log(format_args!("payload stopped"));

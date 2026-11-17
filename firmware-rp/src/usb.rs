@@ -80,7 +80,10 @@ mod tests {
     fn v10_a_frame_ending_on_a_full_packet_gets_a_zero_length_packet() {
         assert!(needs_zlp(64, MAX_PACKET));
         assert!(!needs_zlp(63, MAX_PACKET));
-        assert!(!needs_zlp(0, MAX_PACKET), "nothing written since the last flush");
+        assert!(
+            !needs_zlp(0, MAX_PACKET),
+            "nothing written since the last flush"
+        );
         assert_eq!(pid(crate::chip::Chip::Rp2040), 0x000A);
         assert_eq!(pid(crate::chip::Chip::Rp2350), 0x0009);
     }

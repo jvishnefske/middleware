@@ -144,7 +144,7 @@ impl Sys {
     /// Uploads `image` as the updater (signed as `version`, when given);
     /// the commit's reply.
     async fn upload(&mut self, image: &[u8], version: Option<u32>) -> Result<Vec<u8>, HandlerError> {
-        let auth = version.and_then(|v| sign_commit(image, &test_seed(), Version(v)));
+        let auth = version.and_then(|v| sign_commit(image, &test_seed(), Version(v)).ok());
         let steps = upload_plan(image, None, auth).expect("plan");
         let (commit, transfer) = steps.split_last().expect("steps");
         for step in transfer {
@@ -157,7 +157,7 @@ impl Sys {
     async fn signed_start(&mut self, counter: u64) -> Result<Vec<u8>, HandlerError> {
         let mut target = [0u8; TARGET_LEN];
         target.copy_from_slice(&NODE.0[..TARGET_LEN]);
-        let body = sign_control(&test_seed(), ControlOp::Start, &target, ControlCounter(counter)).encode();
+        let body = sign_control(&test_seed(), ControlOp::Start, &target, ControlCounter(counter)).expect("sign").encode();
         self.call(keys::START, &body).await
     }
 
@@ -238,10 +238,10 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     // Claim over the local link: physical access. Through gw/sys a claim
     // is always refused, even for an updater.
     assert_eq!(
-        sys.call(keys::TRUST_CLAIM, &test_seed().public_key().0).await,
+        sys.call(keys::TRUST_CLAIM, &test_seed().public_key().as_bytes()).await,
         Err(HandlerError::Denied)
     );
-    local_request(&mut local, "sys/trust/claim", &test_seed().public_key().0).await.expect("claim");
+    local_request(&mut local, "sys/trust/claim", &test_seed().public_key().as_bytes()).await.expect("claim");
     // The gateway learns the claim from a forwarded sys/trust/info.
     sys.call(keys::TRUST_INFO, &[]).await.expect("trust info");
 
@@ -314,7 +314,7 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     sys.call(keys::TRUST_INFO, &[]).await.expect("trust info");
     assert_eq!(sys.upload(&image, Some(1_761_500_000)).await, Err(HandlerError::Denied));
     assert!(matches!(
-        local_request(&mut local, "sys/trust/claim", &Seed::new([9; 32]).public_key().0).await,
+        local_request(&mut local, "sys/trust/claim", &Seed::new([9; 32]).public_key().as_bytes()).await,
         Err(LinkError::Handler(HandlerError::Denied))
     ));
     let report = pi.stop().await;

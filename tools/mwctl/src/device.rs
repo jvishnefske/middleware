@@ -29,8 +29,8 @@ use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
-use middleware::{Key, SenderId};
 use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, NetAddr, PayloadStatus, keys};
+use middleware::{Key, SenderId};
 use std::time::Instant;
 
 /// Suffix of the firmware version of builds without the WASM runtime.
@@ -191,13 +191,17 @@ impl<L: Endpoint> Device<L> {
         let body = self.link.request(keys::NET_ADDR, &[link])?;
         match NetAddr::decode_reply(&body) {
             Some((l, a)) if l == link => Ok(a),
-            _ => Err(Error::Malformed { key: keys::NET_ADDR.as_str().to_owned() }),
+            _ => Err(Error::Malformed {
+                key: keys::NET_ADDR.as_str().to_owned(),
+            }),
         }
     }
 
     /// `sys/net/addr` set.
     pub fn set_net_addr(&mut self, link: u8, addr: &NetAddr) -> Result<(), Error> {
-        self.link.request(keys::NET_ADDR, &addr.set_body(link)).map(drop)
+        self.link
+            .request(keys::NET_ADDR, &addr.set_body(link))
+            .map(drop)
     }
 
     /// `mwctl net`: reads link `link`, then, when anything is given, sets
@@ -541,7 +545,7 @@ mod tests {
     }
 
     fn signed(img: &[u8], version: u32) -> UploadOptions {
-        let auth = sign_commit(img, &vector_seed(), Version(version));
+        let auth = sign_commit(img, &vector_seed(), Version(version)).ok();
         UploadOptions {
             auth,
             ..UploadOptions::default()
@@ -554,14 +558,29 @@ mod tests {
         let a = d.net(1, None, None, None).unwrap();
         assert_eq!(a.ip, [192, 168, 2, 50]);
         assert!(!a.pinned());
-        let b = d.net(1, Some([192, 168, 2, 51]), None, Some(([10, 0, 1, 9], 7000))).unwrap();
-        assert_eq!((b.ip, b.mac, b.peer_ip, b.peer_port), ([192, 168, 2, 51], a.mac, [10, 0, 1, 9], 7000));
+        let b = d
+            .net(
+                1,
+                Some([192, 168, 2, 51]),
+                None,
+                Some(([10, 0, 1, 9], 7000)),
+            )
+            .unwrap();
+        assert_eq!(
+            (b.ip, b.mac, b.peer_ip, b.peer_port),
+            ([192, 168, 2, 51], a.mac, [10, 0, 1, 9], 7000)
+        );
         assert_eq!(d.link().transport().net(1), b);
         assert_eq!(d.net(0, None, None, None).unwrap().ip, [192, 168, 1, 50]);
         let e = d.net(2, None, None, None).unwrap_err();
         assert!(e.to_string().contains("no such link"), "{e}");
-        let e = device(FakeDevice::new("esp32", "0.6.0", 4096, true)).net(0, None, None, None).unwrap_err();
-        assert!(e.to_string().contains("no configurable network links"), "{e}");
+        let e = device(FakeDevice::new("esp32", "0.6.0", 4096, true))
+            .net(0, None, None, None)
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("no configurable network links"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -586,7 +605,9 @@ mod tests {
         let n = info.encode(&mut body).unwrap();
         let fake = FakeDevice::new("esp32", "0.6.0", 4096, true).with_board(body[..n].to_vec());
         assert_eq!(device(fake).board().unwrap().info(), info);
-        let err = device(FakeDevice::new("esp32", "0.5.0", 4096, true)).board().unwrap_err();
+        let err = device(FakeDevice::new("esp32", "0.5.0", 4096, true))
+            .board()
+            .unwrap_err();
         assert!(err.to_string().contains("not"), "{err}");
     }
 
@@ -676,7 +697,7 @@ mod tests {
         // Signed by another key: denied too.
         let other = crate::sign::Seed::new([42; 32]);
         let bad = UploadOptions {
-            auth: sign_commit(&image(200), &other, Version(9)),
+            auth: sign_commit(&image(200), &other, Version(9)).ok(),
             ..UploadOptions::default()
         };
         let err = d.upload(&image(200), bad, |_| {}).unwrap_err();

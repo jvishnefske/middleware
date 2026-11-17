@@ -19,7 +19,9 @@ use imxrt_base::ab::watchdog;
 /// Resets the chip into the bootloader. Never returns.
 pub fn reset() -> ! {
     pac::CCM.ccgr3().modify(|w| w.set_cg8(0b11));
-    pac::WDOG1.wcr().write_value(pac::wdog::regs::Wcr(watchdog::WDOG1_SOFTWARE_RESET));
+    pac::WDOG1
+        .wcr()
+        .write_value(pac::wdog::regs::Wcr(watchdog::WDOG1_SOFTWARE_RESET));
     // The reset takes effect within a few cycles; should it not, the
     // core's own reset request.
     cortex_m::asm::delay(10_000);
@@ -40,9 +42,15 @@ pub fn arm_trial() {
     pac::CCM.ccgr5().modify(|w| w.set_cg2(0b11));
     let toval = watchdog::trial_toval(watchdog::TRIAL_SECONDS);
     cortex_m::interrupt::free(|_| {
-        pac::RTWDOG.cnt().write_value(pac::rtwdog::regs::Cnt(watchdog::RTWDOG_UNLOCK));
-        pac::RTWDOG.toval().write_value(pac::rtwdog::regs::Toval(toval));
-        pac::RTWDOG.cs().write_value(pac::rtwdog::regs::Cs(watchdog::trial_cs()));
+        pac::RTWDOG
+            .cnt()
+            .write_value(pac::rtwdog::regs::Cnt(watchdog::RTWDOG_UNLOCK));
+        pac::RTWDOG
+            .toval()
+            .write_value(pac::rtwdog::regs::Toval(toval));
+        pac::RTWDOG
+            .cs()
+            .write_value(pac::rtwdog::regs::Cs(watchdog::trial_cs()));
     });
 }
 
@@ -52,8 +60,12 @@ pub fn release() {
     if armed() {
         let cs = pac::RTWDOG.cs().read().0;
         cortex_m::interrupt::free(|_| {
-            pac::RTWDOG.cnt().write_value(pac::rtwdog::regs::Cnt(watchdog::RTWDOG_UNLOCK));
-            pac::RTWDOG.cs().write_value(pac::rtwdog::regs::Cs(watchdog::released_cs(cs)));
+            pac::RTWDOG
+                .cnt()
+                .write_value(pac::rtwdog::regs::Cnt(watchdog::RTWDOG_UNLOCK));
+            pac::RTWDOG
+                .cs()
+                .write_value(pac::rtwdog::regs::Cs(watchdog::released_cs(cs)));
         });
     }
 }

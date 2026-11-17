@@ -188,26 +188,40 @@ impl<F: NorFlash> PayloadStore<F> {
             return Err(StoreError::TooLarge);
         }
         let slot = self.inactive_slot();
-        let (from, to) = self.region.erase_span(slot, len).ok_or(StoreError::TooLarge)?;
-        self.flash.erase(self.base + from, self.base + to).map_err(|_| StoreError::Flash)?;
-        self.transfer = Some(Transfer { slot, writer: WordWriter::new() });
+        let (from, to) = self
+            .region
+            .erase_span(slot, len)
+            .ok_or(StoreError::TooLarge)?;
+        self.flash
+            .erase(self.base + from, self.base + to)
+            .map_err(|_| StoreError::Flash)?;
+        self.transfer = Some(Transfer {
+            slot,
+            writer: WordWriter::new(),
+        });
         Ok(())
     }
 
     /// Writes image bytes at `offset` (in order) into the transfer's slot.
     pub fn write(&mut self, offset: u32, data: &[u8]) -> Result<(), StoreError> {
         let t = self.transfer.ok_or(StoreError::OutOfOrder)?;
-        let end = offset.checked_add(data.len() as u32).ok_or(StoreError::TooLarge)?;
+        let end = offset
+            .checked_add(data.len() as u32)
+            .ok_or(StoreError::TooLarge)?;
         if end > self.capacity() {
             return Err(StoreError::TooLarge);
         }
         let (next, plan) = t.writer.push(offset, data)?;
         let at = self.base + self.region.data_offset(t.slot);
         if let Some((off, word)) = plan.head {
-            self.flash.write(at + off, &word).map_err(|_| StoreError::Flash)?;
+            self.flash
+                .write(at + off, &word)
+                .map_err(|_| StoreError::Flash)?;
         }
         if let Some((off, bytes)) = plan.body {
-            self.flash.write(at + off, bytes).map_err(|_| StoreError::Flash)?;
+            self.flash
+                .write(at + off, bytes)
+                .map_err(|_| StoreError::Flash)?;
         }
         self.transfer = Some(Transfer { writer: next, ..t });
         Ok(())
@@ -240,18 +254,26 @@ impl<F: NorFlash> PayloadStore<F> {
         }
         if let Some((off, word)) = t.writer.finish() {
             let at = self.base + self.region.data_offset(t.slot);
-            self.flash.write(at + off, &word).map_err(|_| StoreError::Flash)?;
+            self.flash
+                .write(at + off, &word)
+                .map_err(|_| StoreError::Flash)?;
         }
         if self.crc_of(t.slot, len)? != crc {
             return Err(StoreError::Crc);
         }
         before_header(&mut self.flash)?;
         let generation = self.latest.map_or(Generation::FIRST, Generation::next);
-        let header = Header { len, crc, generation };
+        let header = Header {
+            len,
+            crc,
+            generation,
+        };
         let bytes = header.encode();
         let (magic, fields) = bytes.split_at(WORD as usize);
         let at = self.base + self.region.header_offset(t.slot);
-        self.flash.write(at + WORD, fields).map_err(|_| StoreError::Flash)?;
+        self.flash
+            .write(at + WORD, fields)
+            .map_err(|_| StoreError::Flash)?;
         self.flash.write(at, magic).map_err(|_| StoreError::Flash)?;
         self.active = Ok((t.slot, header));
         self.latest = Some(generation);
@@ -281,7 +303,9 @@ impl<F: NorFlash> PayloadStore<F> {
         }
         if !tail.is_empty() {
             let mut w = [0u8; WORD as usize];
-            self.flash.read(at + aligned as u32, &mut w).map_err(|_| StoreError::Flash)?;
+            self.flash
+                .read(at + aligned as u32, &mut w)
+                .map_err(|_| StoreError::Flash)?;
             for (dst, src) in tail.iter_mut().zip(w) {
                 *dst = src;
             }
@@ -310,7 +334,11 @@ impl<F: NorFlash> PayloadStore<F> {
     /// `Crc` if a header was present but its image did not match).
     pub fn verify(&mut self) -> Result<Header, StoreError> {
         let (slot, header) = self.active?;
-        if self.crc_of(slot, header.len)? == header.crc { Ok(header) } else { Err(StoreError::Crc) }
+        if self.crc_of(slot, header.len)? == header.crc {
+            Ok(header)
+        } else {
+            Err(StoreError::Crc)
+        }
     }
 
     /// Reads the active image described by `header` into `buf` (exactly
@@ -321,7 +349,11 @@ impl<F: NorFlash> PayloadStore<F> {
             return Err(StoreError::Buffer);
         }
         self.read_image(slot, 0, buf)?;
-        if Crc32::checksum(buf) == header.crc { Ok(()) } else { Err(StoreError::Crc) }
+        if Crc32::checksum(buf) == header.crc {
+            Ok(())
+        } else {
+            Err(StoreError::Crc)
+        }
     }
 }
 
@@ -350,7 +382,11 @@ mod tests {
         open(store.flash)
     }
 
-    fn try_install(store: &mut PayloadStore<RamFlash>, image: &[u8], chunk: usize) -> Result<(), StoreError> {
+    fn try_install(
+        store: &mut PayloadStore<RamFlash>,
+        image: &[u8],
+        chunk: usize,
+    ) -> Result<(), StoreError> {
         store.erase(image.len() as u32)?;
         for (i, part) in image.chunks(chunk).enumerate() {
             store.write((i * chunk) as u32, part)?;
@@ -386,21 +422,33 @@ mod tests {
         let mut buf = [0u8; 5003];
         store.load(header, &mut buf).unwrap();
         assert_eq!(buf, image);
-        assert!(store.flash.mem[..BASE as usize].iter().all(|&b| b == 0), "outside partition untouched");
+        assert!(
+            store.flash.mem[..BASE as usize].iter().all(|&b| b == 0),
+            "outside partition untouched"
+        );
     }
 
     #[test]
     fn first_install_on_empty_flash_uses_slot_a() {
         let mut store = open(RamFlash::new());
-        assert_eq!((store.active_slot(), store.verify()), (None, Err(StoreError::NoImage)));
+        assert_eq!(
+            (store.active_slot(), store.verify()),
+            (None, Err(StoreError::NoImage))
+        );
         let image = pattern(300, 1);
         install(&mut store, &image, 64);
         assert_eq!(store.active_slot(), Some(Slot::A));
-        assert_eq!(store.header().map(|h| h.generation), Some(Generation::FIRST));
+        assert_eq!(
+            store.header().map(|h| h.generation),
+            Some(Generation::FIRST)
+        );
         let mut store = reboot(store);
         assert_eq!(store.active_slot(), Some(Slot::A));
         assert_eq!(contents(&mut store), Some(image));
-        assert!(store.flash.mem[SLOT_B as usize..].iter().all(|&b| b == 0), "slot B untouched");
+        assert!(
+            store.flash.mem[SLOT_B as usize..].iter().all(|&b| b == 0),
+            "slot B untouched"
+        );
     }
 
     #[test]
@@ -412,7 +460,11 @@ mod tests {
         assert_eq!(store.header().map(|h| h.len), Some(5));
         assert_eq!(contents(&mut store), Some(vec![1, 2, 3, 4, 5]));
         assert_eq!(store.activate(100, 0), Err(StoreError::OutOfOrder));
-        assert_eq!(store.activate(50, 0), Err(StoreError::OutOfOrder), "transfer ended");
+        assert_eq!(
+            store.activate(50, 0),
+            Err(StoreError::OutOfOrder),
+            "transfer ended"
+        );
         let mut store = reboot(store);
         assert_eq!(store.active_slot(), Some(Slot::A));
         assert_eq!(contents(&mut store), Some(vec![1, 2, 3, 4, 5]));
@@ -429,16 +481,27 @@ mod tests {
         install(&mut store, &old, 217);
         let new = pattern(5000, 2);
         store.erase(new.len() as u32).unwrap();
-        assert_eq!(contents(&mut store), Some(old.clone()), "after the staging erase");
+        assert_eq!(
+            contents(&mut store),
+            Some(old.clone()),
+            "after the staging erase"
+        );
         for (i, part) in new.chunks(217).enumerate() {
             store.write((i * 217) as u32, part).unwrap();
             assert_eq!(store.header().map(|h| h.len), Some(3000));
         }
-        assert_eq!(contents(&mut store), Some(old.clone()), "a start mid-transfer loads the active image");
+        assert_eq!(
+            contents(&mut store),
+            Some(old.clone()),
+            "a start mid-transfer loads the active image"
+        );
         // A spoofed chunk spoiled it: the declared CRC does not match.
         let mut spoiled = new.clone();
         spoiled[100] ^= 0xFF;
-        assert_eq!(store.activate(5000, Crc32::checksum(&spoiled)), Err(StoreError::Crc));
+        assert_eq!(
+            store.activate(5000, Crc32::checksum(&spoiled)),
+            Err(StoreError::Crc)
+        );
         assert_eq!(contents(&mut store), Some(old.clone()));
         let mut store = reboot(store);
         assert_eq!(contents(&mut store), Some(old));
@@ -455,14 +518,20 @@ mod tests {
         let new = pattern(900, 5);
         store.erase(900).unwrap();
         store.write(0, &new).unwrap();
-        assert_eq!(store.activate(900, Crc32::checksum(&new) ^ 1), Err(StoreError::Crc));
+        assert_eq!(
+            store.activate(900, Crc32::checksum(&new) ^ 1),
+            Err(StoreError::Crc)
+        );
         assert_eq!(store.active_slot(), Some(Slot::A));
         assert_eq!(contents(&mut store), Some(old.clone()));
         let mut store = reboot(store);
         assert_eq!(store.active_slot(), Some(Slot::A));
         assert_eq!(contents(&mut store), Some(old));
         let raw = &store.flash.mem[SLOT_B as usize..SLOT_B as usize + HEADER_LEN];
-        assert!(raw.iter().all(|&b| b == 0xFF), "no header written for the rejected image");
+        assert!(
+            raw.iter().all(|&b| b == 0xFF),
+            "no header written for the rejected image"
+        );
     }
 
     #[test]
@@ -488,7 +557,10 @@ mod tests {
         let at = BASE as usize + 12;
         store.flash.mem[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         let mut store = reboot(store);
-        assert_eq!(store.header().map(|h| h.generation), Some(Generation(u32::MAX)));
+        assert_eq!(
+            store.header().map(|h| h.generation),
+            Some(Generation(u32::MAX))
+        );
         install(&mut store, &[2; 40], 40);
         let mut store = reboot(store);
         assert_eq!(store.active_slot(), Some(Slot::B));
@@ -524,7 +596,11 @@ mod tests {
         assert_eq!((store.active_slot(), store.header()), (None, None));
         assert_eq!(store.verify(), Err(StoreError::Crc));
         let mut buf = [0u8; 64];
-        let h = Header { len: 64, crc: 0, generation: Generation(1) };
+        let h = Header {
+            len: 64,
+            crc: 0,
+            generation: Generation(1),
+        };
         assert_eq!(store.load(h, &mut buf), Err(StoreError::NoImage));
         // Recovery: a new image installs into slot A above both generations.
         install(&mut store, &[5u8; 64], 64);
@@ -565,7 +641,10 @@ mod tests {
             let got = contents(&mut store);
             if done {
                 assert_eq!(got.as_deref(), Some(new), "cut {cut}: completed install");
-                assert!(cut > 2, "the sweep cut at least the erase and header writes");
+                assert!(
+                    cut > 2,
+                    "the sweep cut at least the erase and header writes"
+                );
                 return;
             }
             assert!(
@@ -575,7 +654,11 @@ mod tests {
             let after = pattern(222, cut);
             install(&mut store, &after, chunk);
             let mut store = reboot(store);
-            assert_eq!(contents(&mut store), Some(after), "cut {cut}: install after recovery");
+            assert_eq!(
+                contents(&mut store),
+                Some(after),
+                "cut {cut}: install after recovery"
+            );
         }
         panic!("install never completed");
     }
@@ -586,7 +669,11 @@ mod tests {
         power_loss_sweep(&[pattern(300, 1)], &pattern(410, 2), 7);
         // Two prior images: the new one overwrites the older slot A while
         // slot B holds the image to keep. Multi-sector image.
-        power_loss_sweep(&[pattern(5003, 3), pattern(4100, 4)], &pattern(6000, 5), 256);
+        power_loss_sweep(
+            &[pattern(5003, 3), pattern(4100, 4)],
+            &pattern(6000, 5),
+            256,
+        );
         // First install on empty flash: empty or the new image.
         power_loss_sweep(&[], &pattern(300, 6), 7);
     }
@@ -619,7 +706,12 @@ mod tests {
         store.write(0, &new).unwrap();
         let header_b = SLOT_B as usize;
         let r = store.activate_with(400, Crc32::checksum(&new), |f| {
-            assert!(f.mem[header_b..header_b + HEADER_LEN].iter().all(|&b| b == 0xFF), "no header yet");
+            assert!(
+                f.mem[header_b..header_b + HEADER_LEN]
+                    .iter()
+                    .all(|&b| b == 0xFF),
+                "no header yet"
+            );
             Ok(())
         });
         assert_eq!(r, Ok(()));
@@ -632,12 +724,20 @@ mod tests {
         let mut store = PayloadStore::new(RamFlash::new(), BASE, SIZE as u32, 1000).unwrap();
         assert_eq!(store.capacity(), 1000);
         assert_eq!(store.erase(1001), Err(StoreError::TooLarge));
-        assert_eq!(store.write(0, &[0]), Err(StoreError::OutOfOrder), "no transfer");
+        assert_eq!(
+            store.write(0, &[0]),
+            Err(StoreError::OutOfOrder),
+            "no transfer"
+        );
         store.erase(1000).unwrap();
         assert_eq!(store.flash.erases, 1);
         assert_eq!(store.write(4, &[0]), Err(StoreError::OutOfOrder));
         assert_eq!(store.write(999, &[0, 0]), Err(StoreError::TooLarge));
-        assert_eq!(store.activate(0, 0), Err(StoreError::OutOfOrder), "empty image");
+        assert_eq!(
+            store.activate(0, 0),
+            Err(StoreError::OutOfOrder),
+            "empty image"
+        );
         assert!(PayloadStore::new(RamFlash::new(), 3, SIZE as u32, 10).is_err());
         let full = open(RamFlash::new());
         assert_eq!(full.capacity(), SIZE as u32 / 2 - SECTOR);

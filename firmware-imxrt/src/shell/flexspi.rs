@@ -61,8 +61,10 @@ pub enum FlashError {
 /// (detail the status word), 4 Busy (detail the status word), 5 Lut,
 /// 6 Plan; `[0, 0]` until a failure.
 #[used]
-pub static LAST_ERROR: [core::sync::atomic::AtomicU32; 2] =
-    [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)];
+pub static LAST_ERROR: [core::sync::atomic::AtomicU32; 2] = [
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+];
 
 fn record(e: &FlashError, detail: u32) {
     use core::sync::atomic::Ordering::Relaxed;
@@ -144,7 +146,9 @@ impl HyperFlash {
         });
         let cscmr1 = pac::CCM.cscmr1().read().0;
         let cscmr1 = (cscmr1 & !((0b11 << 29) | (0b111 << 23))) | (3 << 29) | (3 << 23);
-        pac::CCM.cscmr1().write_value(pac::ccm::regs::Cscmr1(cscmr1));
+        pac::CCM
+            .cscmr1()
+            .write_value(pac::ccm::regs::Cscmr1(cscmr1));
         pac::CCM.ccgr6().modify(|w| w.set_cg5(3));
 
         pad!(sw_mux_ctl_pad_gpio_sd_b1_00, sw_pad_ctl_pad_gpio_sd_b1_00);
@@ -175,8 +179,9 @@ impl HyperFlash {
         }
         f.mcr0().modify(|w| w.set_mdis(true));
         // MCR0: RXCLKSRC = 3 (DQS from the flash), COMBINATIONEN, grant waits.
-        f.mcr0()
-            .write_value(pac::flex_spi::regs::Mcr0(0xFFFF_0000 | (1 << 13) | (3 << 4) | (1 << 1)));
+        f.mcr0().write_value(pac::flex_spi::regs::Mcr0(
+            0xFFFF_0000 | (1 << 13) | (3 << 4) | (1 << 1),
+        ));
         // MCR2: SCKBDIFFOPT (SCLK B is the differential clock), CLRAHBBUFOPT 0.
         let mcr2 = f.mcr2().read().0;
         f.mcr2()
@@ -187,8 +192,9 @@ impl HyperFlash {
         f.flsha1cr0()
             .write_value(pac::flex_spi::regs::Flsha1cr0(FLASH_SIZE / 1024));
         // FLSHCR1A1: TCSS 3, TCSH 0, WA, CAS 3, CSINTERVAL 2.
-        f.flshcr1(0)
-            .write_value(pac::flex_spi::regs::Flshcr1(3 | (1 << 10) | (3 << 11) | (2 << 16)));
+        f.flshcr1(0).write_value(pac::flex_spi::regs::Flshcr1(
+            3 | (1 << 10) | (3 << 11) | (2 << 16),
+        ));
         // FLSHCR2A1: AHB read sequence 0, AHB write sequence 1, AWRWAIT 20.
         f.flshcr2(0)
             .write_value(pac::flex_spi::regs::Flshcr2((1 << 8) | (20 << 16)));
@@ -233,7 +239,12 @@ impl HyperFlash {
         r
     }
 
-    fn issue_masked(&mut self, c: &IpCommand, data: &[u8], rx: &mut [u8]) -> Result<(), FlashError> {
+    fn issue_masked(
+        &mut self,
+        c: &IpCommand,
+        data: &[u8],
+        rx: &mut [u8],
+    ) -> Result<(), FlashError> {
         let f = pac::FLEXSPI;
         wait_idle()?;
         f.iptxfcr().write_value(pac::flex_spi::regs::Iptxfcr(1)); // clear, watermark 8 B
@@ -257,7 +268,9 @@ impl HyperFlash {
             Transfer::WriteWord(w) => {
                 flag(6)?;
                 f.tfdr(0)
-                    .write_value(pac::flex_spi::regs::Tfdr(u32::from_le_bytes([w[0], w[1], 0, 0])));
+                    .write_value(pac::flex_spi::regs::Tfdr(u32::from_le_bytes([
+                        w[0], w[1], 0, 0,
+                    ])));
                 f.tfdr(1).write_value(pac::flex_spi::regs::Tfdr(0));
                 f.intr().write_value(pac::flex_spi::regs::Intr(1 << 6));
             }
@@ -270,9 +283,13 @@ impl HyperFlash {
                     let mut b = [0xFFu8; 8];
                     b[..chunk.len()].copy_from_slice(chunk);
                     f.tfdr(0)
-                        .write_value(pac::flex_spi::regs::Tfdr(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+                        .write_value(pac::flex_spi::regs::Tfdr(u32::from_le_bytes([
+                            b[0], b[1], b[2], b[3],
+                        ])));
                     f.tfdr(1)
-                        .write_value(pac::flex_spi::regs::Tfdr(u32::from_le_bytes([b[4], b[5], b[6], b[7]])));
+                        .write_value(pac::flex_spi::regs::Tfdr(u32::from_le_bytes([
+                            b[4], b[5], b[6], b[7],
+                        ])));
                     f.intr().write_value(pac::flex_spi::regs::Intr(1 << 6));
                 }
             }
@@ -361,7 +378,8 @@ impl NorFlash for HyperFlash {
     const ERASE_SIZE: usize = SECTOR_SIZE as usize;
 
     fn erase(&mut self, from: u32, to: u32) -> Result<(), FlashError> {
-        let sectors = plan::erase_sectors(from, (to - from) as usize).map_err(|_| FlashError::Plan)?;
+        let sectors =
+            plan::erase_sectors(from, (to - from) as usize).map_err(|_| FlashError::Plan)?;
         // Sticky error bits from an earlier failed or cut operation would
         // fail this one: reset and clear them first (plan::recover_steps).
         self.run(&plan::recover_steps(), &[])?;

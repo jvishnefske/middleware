@@ -79,7 +79,10 @@ pub const fn lan_interface(flags: u32) -> bool {
 /// Parses a `/sys/class/net/<if>/flags` value (`0x1003`).
 pub fn parse_interface_flags(text: &str) -> Option<u32> {
     let t = text.trim();
-    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    let hex = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
     u32::from_str_radix(hex, 16).ok()
 }
 
@@ -351,7 +354,8 @@ mod tests {
 
     #[test]
     fn proc_net_route_yields_connected_subnets_only() {
-        let header = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT";
+        let header =
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT";
         let line = |iface: &str, dest: [u8; 4], gw: [u8; 4], flags: &str, mask: [u8; 4]| {
             format!(
                 "{iface}\t{}\t{}\t{flags}\t0\t0\t0\t{}\t0\t0\t0",
@@ -363,7 +367,13 @@ mod tests {
         let text = [
             header.into(),
             // Default route via a gateway: not on-link.
-            line("eth0", [0, 0, 0, 0], [192, 168, 1, 254], "0003", [0, 0, 0, 0]),
+            line(
+                "eth0",
+                [0, 0, 0, 0],
+                [192, 168, 1, 254],
+                "0003",
+                [0, 0, 0, 0],
+            ),
             // The LAN.
             line("eth0", [192, 168, 1, 0], [0; 4], "0001", [255, 255, 255, 0]),
             // A WireGuard / tun peer network and a VPN on a point-to-point
@@ -438,7 +448,14 @@ mod tests {
     #[test]
     fn on_link_sources_are_loopback_link_local_or_connected() {
         let on_link = OnLink::new().with(Subnet::new(Ipv4Addr::new(10, 0, 0, 0), 8).unwrap());
-        for ok in ["127.0.0.1", "169.254.3.4", "10.20.30.40", "::1", "fe80::1", "::ffff:10.1.1.1"] {
+        for ok in [
+            "127.0.0.1",
+            "169.254.3.4",
+            "10.20.30.40",
+            "::1",
+            "fe80::1",
+            "::ffff:10.1.1.1",
+        ] {
             assert!(on_link.contains(ok.parse().unwrap()), "{ok}");
         }
         for off in ["8.8.8.8", "192.168.0.1", "2001:db8::1", "fec0::1"] {
@@ -456,13 +473,22 @@ mod tests {
             outstanding: Some(pending.ids()),
         };
         let p = OriginPolicy::OnLink;
-        assert_eq!(check(p, &on_link, sa("8.8.8.8:5353"), Kind::Query), Err(Reject::OffLink));
-        assert_eq!(check(p, &on_link, sa("169.254.1.1:40000"), Kind::Query), Ok(()));
+        assert_eq!(
+            check(p, &on_link, sa("8.8.8.8:5353"), Kind::Query),
+            Err(Reject::OffLink)
+        );
+        assert_eq!(
+            check(p, &on_link, sa("169.254.1.1:40000"), Kind::Query),
+            Ok(())
+        );
         assert_eq!(
             check(p, &on_link, sa("169.254.1.1:40000"), one_shot(7)),
             Err(Reject::SourcePort)
         );
-        assert_eq!(check(p, &on_link, sa("169.254.1.1:5353"), one_shot(8)), Ok(()));
+        assert_eq!(
+            check(p, &on_link, sa("169.254.1.1:5353"), one_shot(8)),
+            Ok(())
+        );
         assert_eq!(
             check(p, &on_link, sa("169.254.1.1:5353"), one_shot(9)),
             Err(Reject::UnknownId)

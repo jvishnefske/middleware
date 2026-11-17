@@ -123,10 +123,22 @@ pub fn stats() -> Stats {
 fn encode_link(link: Option<Link>) -> u8 {
     match link {
         None => 0,
-        Some(Link { speed: Speed::Mbps10, duplex: Duplex::Half }) => 1,
-        Some(Link { speed: Speed::Mbps100, duplex: Duplex::Half }) => 2,
-        Some(Link { speed: Speed::Mbps10, duplex: Duplex::Full }) => 3,
-        Some(Link { speed: Speed::Mbps100, duplex: Duplex::Full }) => 4,
+        Some(Link {
+            speed: Speed::Mbps10,
+            duplex: Duplex::Half,
+        }) => 1,
+        Some(Link {
+            speed: Speed::Mbps100,
+            duplex: Duplex::Half,
+        }) => 2,
+        Some(Link {
+            speed: Speed::Mbps10,
+            duplex: Duplex::Full,
+        }) => 3,
+        Some(Link {
+            speed: Speed::Mbps100,
+            duplex: Duplex::Full,
+        }) => 4,
     }
 }
 
@@ -184,9 +196,13 @@ fn mdio_write(reg: u8, data: u16) -> Option<()> {
 fn clocks() -> Result<(), EnetError> {
     // IOMUXC (CCGR4 CG1) and IOMUXC_GPR (CG2): normally on from boot.
     pac::CCM.ccgr4().modify(|w| w.0 |= (3 << 2) | (3 << 4));
-    pac::CCM.ccgr1().modify(|w| w.0 |= clock::CCGR1_ENET | clock::CCGR1_GPIO1);
+    pac::CCM
+        .ccgr1()
+        .modify(|w| w.0 |= clock::CCGR1_ENET | clock::CCGR1_GPIO1);
     let pll = clock::pll_enet_50mhz(pac::CCM_ANALOG.pll_enet().read().0);
-    pac::CCM_ANALOG.pll_enet().write_value(pac::ccm_analog::regs::PllEnet(pll));
+    pac::CCM_ANALOG
+        .pll_enet()
+        .write_value(pac::ccm_analog::regs::PllEnet(pll));
     let mut locked = false;
     for _ in 0..clock::PLL_LOCK_POLL_BOUND {
         if clock::pll_enet_locked(pac::CCM_ANALOG.pll_enet().read().0) {
@@ -197,7 +213,9 @@ fn clocks() -> Result<(), EnetError> {
     if !locked {
         return Err(EnetError::PllLock);
     }
-    pac::IOMUXC_GPR.gpr1().modify(|w| w.0 = clock::gpr1_rmii_ref_out(w.0));
+    pac::IOMUXC_GPR
+        .gpr1()
+        .modify(|w| w.0 = clock::gpr1_rmii_ref_out(w.0));
     Ok(())
 }
 
@@ -208,30 +226,97 @@ fn pads() {
     const PAD_ENET: u32 = 0xB0E9;
     macro_rules! pad {
         ($m:ident, $c:ident, $alt:expr, $cfg:expr) => {
-            pac::IOMUXC.$m().write_value(pac::iomuxc::regs::MuxCtl($alt));
+            pac::IOMUXC
+                .$m()
+                .write_value(pac::iomuxc::regs::MuxCtl($alt));
             pac::IOMUXC.$c().write_value(pac::iomuxc::regs::Ctl($cfg));
         };
     }
-    pad!(sw_mux_ctl_pad_gpio_b1_04, sw_pad_ctl_pad_gpio_b1_04, 3, PAD_ENET); // RX_DATA0
-    pad!(sw_mux_ctl_pad_gpio_b1_05, sw_pad_ctl_pad_gpio_b1_05, 3, PAD_ENET); // RX_DATA1
-    pad!(sw_mux_ctl_pad_gpio_b1_06, sw_pad_ctl_pad_gpio_b1_06, 3, PAD_ENET); // RX_EN
-    pad!(sw_mux_ctl_pad_gpio_b1_07, sw_pad_ctl_pad_gpio_b1_07, 3, PAD_ENET); // TX_DATA0
-    pad!(sw_mux_ctl_pad_gpio_b1_08, sw_pad_ctl_pad_gpio_b1_08, 3, PAD_ENET); // TX_DATA1
-    pad!(sw_mux_ctl_pad_gpio_b1_09, sw_pad_ctl_pad_gpio_b1_09, 3, PAD_ENET); // TX_EN
-    pad!(sw_mux_ctl_pad_gpio_b1_10, sw_pad_ctl_pad_gpio_b1_10, 6 | 0x10, 0x31); // REF_CLK, SION
-    pad!(sw_mux_ctl_pad_gpio_b1_11, sw_pad_ctl_pad_gpio_b1_11, 3, PAD_ENET); // RX_ER
-    pad!(sw_mux_ctl_pad_gpio_emc_40, sw_pad_ctl_pad_gpio_emc_40, 4, PAD_ENET); // MDC
-    pad!(sw_mux_ctl_pad_gpio_emc_41, sw_pad_ctl_pad_gpio_emc_41, 4, 0xB829); // MDIO
-    pad!(sw_mux_ctl_pad_gpio_ad_b0_09, sw_pad_ctl_pad_gpio_ad_b0_09, 5, 0xB0A9); // PHY reset
-    pad!(sw_mux_ctl_pad_gpio_ad_b0_10, sw_pad_ctl_pad_gpio_ad_b0_10, 5, 0xB0A9); // PHY int
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_04,
+        sw_pad_ctl_pad_gpio_b1_04,
+        3,
+        PAD_ENET
+    ); // RX_DATA0
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_05,
+        sw_pad_ctl_pad_gpio_b1_05,
+        3,
+        PAD_ENET
+    ); // RX_DATA1
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_06,
+        sw_pad_ctl_pad_gpio_b1_06,
+        3,
+        PAD_ENET
+    ); // RX_EN
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_07,
+        sw_pad_ctl_pad_gpio_b1_07,
+        3,
+        PAD_ENET
+    ); // TX_DATA0
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_08,
+        sw_pad_ctl_pad_gpio_b1_08,
+        3,
+        PAD_ENET
+    ); // TX_DATA1
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_09,
+        sw_pad_ctl_pad_gpio_b1_09,
+        3,
+        PAD_ENET
+    ); // TX_EN
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_10,
+        sw_pad_ctl_pad_gpio_b1_10,
+        6 | 0x10,
+        0x31
+    ); // REF_CLK, SION
+    pad!(
+        sw_mux_ctl_pad_gpio_b1_11,
+        sw_pad_ctl_pad_gpio_b1_11,
+        3,
+        PAD_ENET
+    ); // RX_ER
+    pad!(
+        sw_mux_ctl_pad_gpio_emc_40,
+        sw_pad_ctl_pad_gpio_emc_40,
+        4,
+        PAD_ENET
+    ); // MDC
+    pad!(
+        sw_mux_ctl_pad_gpio_emc_41,
+        sw_pad_ctl_pad_gpio_emc_41,
+        4,
+        0xB829
+    ); // MDIO
+    pad!(
+        sw_mux_ctl_pad_gpio_ad_b0_09,
+        sw_pad_ctl_pad_gpio_ad_b0_09,
+        5,
+        0xB0A9
+    ); // PHY reset
+    pad!(
+        sw_mux_ctl_pad_gpio_ad_b0_10,
+        sw_pad_ctl_pad_gpio_ad_b0_10,
+        5,
+        0xB0A9
+    ); // PHY int
     let m = pac::IOMUXC;
     m.enet_ipg_clk_rmii_select_input()
         .write_value(pac::iomuxc::regs::EnetIpgClkRmiiSelectInput(1));
-    m.enet_mdio_select_input().write_value(pac::iomuxc::regs::EnetMdioSelectInput(1));
-    m.enet0_rxdata_select_input().write_value(pac::iomuxc::regs::Enet0RxdataSelectInput(1));
-    m.enet1_rxdata_select_input().write_value(pac::iomuxc::regs::Enet1RxdataSelectInput(1));
-    m.enet_rxen_select_input().write_value(pac::iomuxc::regs::EnetRxenSelectInput(1));
-    m.enet_rxerr_select_input().write_value(pac::iomuxc::regs::EnetRxerrSelectInput(1));
+    m.enet_mdio_select_input()
+        .write_value(pac::iomuxc::regs::EnetMdioSelectInput(1));
+    m.enet0_rxdata_select_input()
+        .write_value(pac::iomuxc::regs::Enet0RxdataSelectInput(1));
+    m.enet1_rxdata_select_input()
+        .write_value(pac::iomuxc::regs::Enet1RxdataSelectInput(1));
+    m.enet_rxen_select_input()
+        .write_value(pac::iomuxc::regs::EnetRxenSelectInput(1));
+    m.enet_rxerr_select_input()
+        .write_value(pac::iomuxc::regs::EnetRxerrSelectInput(1));
 }
 
 /// The PHY's hardware reset: GPIO1_IO09 low, high, settle; GPIO1_IO10 (the
@@ -260,7 +345,8 @@ fn mac_reset() -> Result<(), EnetError> {
         return Err(EnetError::MacReset);
     }
     // The slowest MDC (IPG / 128): below 2.5 MHz whatever the IPG clock.
-    e.mscr().write_value(pac::enet::regs::Mscr(mdio::MSCR_PROBE));
+    e.mscr()
+        .write_value(pac::enet::regs::Mscr(mdio::MSCR_PROBE));
     Ok(())
 }
 
@@ -289,14 +375,20 @@ async fn phy_init() -> Result<(), EnetError> {
 
 /// Programs RCR and TCR for `link` and starts the MAC on freshly
 /// initialised rings. The MAC must be disabled (ECR.ETHEREN clear).
-fn mac_start(rx: &mut RxRing<'static>, tx: &mut TxRing<'static>, link: Link) -> Result<(), EnetError> {
+fn mac_start(
+    rx: &mut RxRing<'static>,
+    tx: &mut TxRing<'static>,
+    link: Link,
+) -> Result<(), EnetError> {
     rx.init(&rx_addrs()).map_err(EnetError::Ring)?;
     tx.init(&tx_addrs()).map_err(EnetError::Ring)?;
     let e = pac::ENET;
-    e.rcr().write_value(pac::enet::regs::Rcr(mac::rcr(link, PROMISCUOUS)));
+    e.rcr()
+        .write_value(pac::enet::regs::Rcr(mac::rcr(link, PROMISCUOUS)));
     e.tcr().write_value(pac::enet::regs::Tcr(mac::tcr(link)));
     e.ecr().write_value(pac::enet::regs::Ecr(mac::ECR_ENABLE));
-    e.rdar().write_value(pac::enet::regs::Rdar(mac::DESCRIPTOR_ACTIVE));
+    e.rdar()
+        .write_value(pac::enet::regs::Rdar(mac::DESCRIPTOR_ACTIVE));
     Ok(())
 }
 
@@ -345,7 +437,8 @@ pub async fn new(mac_addr: [u8; 6]) -> Result<(EnetDriver, EnetPoller), EnetErro
     let (palr, paur) = mac::station_address(mac_addr);
     e.palr().write_value(pac::enet::regs::Palr(palr));
     e.paur().write_value(pac::enet::regs::Paur(paur));
-    e.tfwr().write_value(pac::enet::regs::Tfwr(mac::TFWR_STORE_AND_FORWARD));
+    e.tfwr()
+        .write_value(pac::enet::regs::Tfwr(mac::TFWR_STORE_AND_FORWARD));
     e.mrbr().write_value(pac::enet::regs::Mrbr(mac::MRBR));
     e.rdsr().write_value(pac::enet::regs::Rdsr(rdsr));
     e.tdsr().write_value(pac::enet::regs::Tdsr(tdsr));
@@ -374,7 +467,9 @@ impl EnetDriver {
                 Some(_) => {
                     let _ = self.rx.release();
                     RX_DROPPED.fetch_add(1, Relaxed);
-                    pac::ENET.rdar().write_value(pac::enet::regs::Rdar(mac::DESCRIPTOR_ACTIVE));
+                    pac::ENET
+                        .rdar()
+                        .write_value(pac::enet::regs::Rdar(mac::DESCRIPTOR_ACTIVE));
                 }
             }
         }
@@ -387,7 +482,9 @@ impl EnetDriver {
         if link == self.programmed {
             return;
         }
-        pac::ENET.ecr().write_value(pac::enet::regs::Ecr(mac::ECR_DBSWP));
+        pac::ENET
+            .ecr()
+            .write_value(pac::enet::regs::Ecr(mac::ECR_DBSWP));
         if mac_start(&mut self.rx, &mut self.tx, link).is_ok() {
             self.programmed = link;
         }
@@ -414,12 +511,17 @@ impl embassy_net_driver::RxToken for EnetRxToken<'_> {
         let n = self
             .ring
             .peek()
-            .and_then(|fr| fr.good_len().map(|len| desc::copy_frame(rx_buffer(fr.index), len, self.frame)))
+            .and_then(|fr| {
+                fr.good_len()
+                    .map(|len| desc::copy_frame(rx_buffer(fr.index), len, self.frame))
+            })
             .unwrap_or(0);
         if self.ring.release().is_ok() {
             RX_FRAMES.fetch_add(1, Relaxed);
         }
-        pac::ENET.rdar().write_value(pac::enet::regs::Rdar(mac::DESCRIPTOR_ACTIVE));
+        pac::ENET
+            .rdar()
+            .write_value(pac::enet::regs::Rdar(mac::DESCRIPTOR_ACTIVE));
         match self.frame.get_mut(..n) {
             Some(data) => f(data),
             None => f(&mut []),
@@ -446,7 +548,9 @@ impl embassy_net_driver::TxToken for EnetTxToken<'_> {
             && self.ring.submit(send).is_ok()
         {
             TX_FRAMES.fetch_add(1, Relaxed);
-            pac::ENET.tdar().write_value(pac::enet::regs::Tdar(mac::DESCRIPTOR_ACTIVE));
+            pac::ENET
+                .tdar()
+                .write_value(pac::enet::regs::Tdar(mac::DESCRIPTOR_ACTIVE));
         }
         r
     }
@@ -467,8 +571,14 @@ impl embassy_net_driver::Driver for EnetDriver {
             return None;
         }
         Some((
-            EnetRxToken { ring: &mut self.rx, frame: &mut self.rx_frame },
-            EnetTxToken { ring: &mut self.tx, frame: &mut self.tx_frame },
+            EnetRxToken {
+                ring: &mut self.rx,
+                frame: &mut self.rx_frame,
+            },
+            EnetTxToken {
+                ring: &mut self.tx,
+                frame: &mut self.tx_frame,
+            },
         ))
     }
 
@@ -478,7 +588,10 @@ impl embassy_net_driver::Driver for EnetDriver {
             TX_WAIT.store(true, Relaxed);
             return None;
         }
-        Some(EnetTxToken { ring: &mut self.tx, frame: &mut self.tx_frame })
+        Some(EnetTxToken {
+            ring: &mut self.tx,
+            frame: &mut self.tx_frame,
+        })
     }
 
     fn link_state(&mut self, cx: &mut Context) -> LinkState {
@@ -486,7 +599,11 @@ impl embassy_net_driver::Driver for EnetDriver {
         match decode_link(LINK.load(Relaxed)) {
             Some(link) => {
                 self.follow_link(link);
-                if link == self.programmed { LinkState::Up } else { LinkState::Down }
+                if link == self.programmed {
+                    LinkState::Up
+                } else {
+                    LinkState::Down
+                }
             }
             None => LinkState::Down,
         }
@@ -506,11 +623,19 @@ impl embassy_net_driver::Driver for EnetDriver {
 }
 
 fn rx_frame_waiting() -> bool {
-    RX_DESC.0.iter().step_by(desc::DESC_WORDS).any(|w| w.load(Relaxed) & desc::RX_E == 0)
+    RX_DESC
+        .0
+        .iter()
+        .step_by(desc::DESC_WORDS)
+        .any(|w| w.load(Relaxed) & desc::RX_E == 0)
 }
 
 fn tx_descriptor_free() -> bool {
-    TX_DESC.0.iter().step_by(desc::DESC_WORDS).any(|w| w.load(Relaxed) & desc::TX_R == 0)
+    TX_DESC
+        .0
+        .iter()
+        .step_by(desc::DESC_WORDS)
+        .any(|w| w.load(Relaxed) & desc::TX_R == 0)
 }
 
 /// The link from BMSR (read twice: its link bit latches low) and PHY
@@ -542,7 +667,9 @@ pub async fn poll_task(_poller: EnetPoller) -> ! {
         }
         let eir = pac::ENET.eir().read().0;
         if eir & mac::EIR_EBERR != 0 {
-            pac::ENET.eir().write_value(pac::enet::regs::Eir(mac::EIR_EBERR));
+            pac::ENET
+                .eir()
+                .write_value(pac::enet::regs::Eir(mac::EIR_EBERR));
             BUS_ERRORS.fetch_add(1, Relaxed);
         }
         if Instant::now() >= next_link {

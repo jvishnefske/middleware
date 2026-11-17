@@ -19,7 +19,9 @@
 //! on the bus; programs and reads must therefore start on an even offset
 //! and programs move whole 16-bit words.
 
-use super::s26ks512s::{CFI_ENTRY_ADDR, CMD_CFI_ENTRY, CMD_CLEAR_STATUS, CMD_RESET_ASO_EXIT, UNLOCK_ADDR_1};
+use super::s26ks512s::{
+    CFI_ENTRY_ADDR, CMD_CFI_ENTRY, CMD_CLEAR_STATUS, CMD_RESET_ASO_EXIT, UNLOCK_ADDR_1,
+};
 use super::s26ks512s::{ERASE_SECTOR, PROGRAM, READ_DATA, READ_STATUS, UNLOCK, WRITE_DATA};
 use super::status::{ERASE_WAIT, PROGRAM_WAIT, PollBound};
 use super::{FLASH_SIZE, SECTOR_COUNT, SECTOR_SIZE, WRITE_BUFFER_SIZE};
@@ -381,7 +383,13 @@ mod tests {
     #[test]
     fn rt4_recovery_resets_a_write_buffer_abort_then_clears_the_status() {
         let [u, reset, clear] = recover_steps();
-        assert!(matches!(u, Step::Issue(IpCommand { sequence: UNLOCK, .. })));
+        assert!(matches!(
+            u,
+            Step::Issue(IpCommand {
+                sequence: UNLOCK,
+                ..
+            })
+        ));
         for (step, cmd) in [(reset, 0x00F0u16), (clear, 0x0071)] {
             match step {
                 Step::Issue(c) => {

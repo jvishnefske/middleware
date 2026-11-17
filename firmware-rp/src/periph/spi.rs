@@ -109,7 +109,11 @@ pub struct Pump {
 impl Pump {
     /// A transfer of `len` bytes, nothing moved yet.
     pub const fn new(len: usize) -> Self {
-        Pump { len, sent: 0, received: 0 }
+        Pump {
+            len,
+            sent: 0,
+            received: 0,
+        }
     }
 
     /// The transfer length.
@@ -125,23 +129,39 @@ impl Pump {
     /// The index of the next byte to push, if one may go now: bytes remain
     /// and fewer than [`FIFO_DEPTH`] are in flight.
     pub const fn next_send(&self) -> Option<usize> {
-        if self.sent < self.len && self.sent - self.received < FIFO_DEPTH { Some(self.sent) } else { None }
+        if self.sent < self.len && self.sent - self.received < FIFO_DEPTH {
+            Some(self.sent)
+        } else {
+            None
+        }
     }
 
     /// After pushing the byte [`Pump::next_send`] named.
     pub const fn sent_one(self) -> Self {
-        let sent = if self.sent < self.len { self.sent + 1 } else { self.sent };
+        let sent = if self.sent < self.len {
+            self.sent + 1
+        } else {
+            self.sent
+        };
         Pump { sent, ..self }
     }
 
     /// Where the next received byte goes, if one is owed.
     pub const fn next_receive(&self) -> Option<usize> {
-        if self.received < self.sent { Some(self.received) } else { None }
+        if self.received < self.sent {
+            Some(self.received)
+        } else {
+            None
+        }
     }
 
     /// After storing the byte [`Pump::next_receive`] named.
     pub const fn received_one(self) -> Self {
-        let received = if self.received < self.sent { self.received + 1 } else { self.received };
+        let received = if self.received < self.sent {
+            self.received + 1
+        } else {
+            self.received
+        };
         Pump { received, ..self }
     }
 
@@ -169,10 +189,24 @@ mod tests {
     #[test]
     fn v17_the_divider_never_exceeds_the_request_and_is_the_closest() {
         for clk in CLOCKS {
-            for khz in [3, 10, 100, 400, 1_000, 8_000, 10_000, 20_000, 33_000, MAX_SPI_KHZ as u32] {
+            for khz in [
+                3,
+                10,
+                100,
+                400,
+                1_000,
+                8_000,
+                10_000,
+                20_000,
+                33_000,
+                MAX_SPI_KHZ as u32,
+            ] {
                 let freq = khz * 1000;
                 let c = Clock::new(clk, freq).unwrap();
-                assert!(c.cpsdvsr.is_multiple_of(2) && (2..=254).contains(&c.cpsdvsr), "{c:?}");
+                assert!(
+                    c.cpsdvsr.is_multiple_of(2) && (2..=254).contains(&c.cpsdvsr),
+                    "{c:?}"
+                );
                 assert!(c.hz(clk) <= freq, "{clk} {freq}: {}", c.hz(clk));
                 // No valid divisor between the ideal ratio and the one chosen.
                 let ideal = clk.div_ceil(freq);
@@ -182,16 +216,29 @@ mod tests {
             }
         }
         // 1 MHz at 125 MHz: 125 = 2 * 62.5 has no exact divisor, so 126.
-        assert_eq!(Clock::new(125_000_000, 1_000_000).map(|c| c.divisor()), Ok(126));
+        assert_eq!(
+            Clock::new(125_000_000, 1_000_000).map(|c| c.divisor()),
+            Ok(126)
+        );
         // 40 MHz at 150 MHz: 37.5 MHz (divisor 4), not faster.
-        assert_eq!(Clock::new(150_000_000, 40_000_000).map(|c| c.hz(150_000_000)), Ok(37_500_000));
+        assert_eq!(
+            Clock::new(150_000_000, 40_000_000).map(|c| c.hz(150_000_000)),
+            Ok(37_500_000)
+        );
         // Faster than clk_peri / 2 is clamped to it.
-        assert_eq!(Clock::new(125_000_000, 100_000_000).map(|c| c.divisor()), Ok(2));
+        assert_eq!(
+            Clock::new(125_000_000, 100_000_000).map(|c| c.divisor()),
+            Ok(2)
+        );
     }
 
     #[test]
     fn v17_clocks_below_the_slowest_divider_are_unsupported() {
-        assert_eq!(Clock::new(125_000_000, 1_000), Err(AbiError::Unsupported), "ABI minimum 1 kHz");
+        assert_eq!(
+            Clock::new(125_000_000, 1_000),
+            Err(AbiError::Unsupported),
+            "ABI minimum 1 kHz"
+        );
         assert_eq!(Clock::new(150_000_000, 2_000), Err(AbiError::Unsupported));
         let slowest = Clock::new(125_000_000, 1_923).unwrap();
         assert_eq!((slowest.cpsdvsr, slowest.scr), (254, 255));
@@ -252,7 +299,10 @@ mod tests {
             assert!(run(len, 1, 1) <= len);
         }
         let p = Pump::new(2);
-        assert_eq!((p.next_send(), p.next_receive(), p.done(), p.len()), (Some(0), None, false, 2));
+        assert_eq!(
+            (p.next_send(), p.next_receive(), p.done(), p.len()),
+            (Some(0), None, false, 2)
+        );
         // Calls out of order are no-ops, never past the length.
         let p = p.received_one();
         assert_eq!(p.next_receive(), None);

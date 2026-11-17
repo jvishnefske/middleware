@@ -15,8 +15,8 @@ use std::io;
 use std::time::Duration;
 use std::vec::Vec as StdVec;
 
-use middleware::loader::{PayloadStatus, keys};
 use middleware::loader::trust::Version;
+use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use mwctl::device::{Device, UploadOptions};
 use mwctl::link::{Link, Timeouts, Transport};
@@ -36,7 +36,11 @@ struct Wire<'f, U> {
 impl<'f, U: FwUpdate<&'f mut Flash>> Wire<'f, U> {
     fn new(flash: &'f mut Flash, facts: Facts, fw: U) -> Self {
         let (svc, _) = Service::open(flash, &MAP, facts, fw);
-        Wire { svc, splitter: Splitter::new(), tx: VecDeque::new() }
+        Wire {
+            svc,
+            splitter: Splitter::new(),
+            tx: VecDeque::new(),
+        }
     }
 
     fn emit(&mut self, f: &Frame<'_>) {
@@ -55,7 +59,10 @@ impl<'f, U: FwUpdate<&'f mut Flash>> Wire<'f, U> {
         let h = self.svc.handle(key, payload, &mut out);
         for note in &h.notes {
             let line = std::format!("{note}");
-            self.emit(&Frame::Publish { key: keys::LOG, payload: line.as_bytes() });
+            self.emit(&Frame::Publish {
+                key: keys::LOG,
+                payload: line.as_bytes(),
+            });
         }
         let result = match h.reply {
             Reply::Now(r) => r.map(|n| out[..n].to_vec()),
@@ -67,7 +74,10 @@ impl<'f, U: FwUpdate<&'f mut Flash>> Wire<'f, U> {
         };
         if self.svc.status() != before {
             let status = [self.svc.status() as u8];
-            self.emit(&Frame::Publish { key: keys::STATUS, payload: &status });
+            self.emit(&Frame::Publish {
+                key: keys::STATUS,
+                payload: &status,
+            });
         }
         let body = result.as_deref().map_err(|e| *e);
         self.emit(&Frame::Response { id, result: body });
@@ -95,7 +105,11 @@ impl<'f, U: FwUpdate<&'f mut Flash>> Transport for Wire<'f, U> {
 }
 
 fn device<'f, U: FwUpdate<&'f mut Flash>>(wire: Wire<'f, U>) -> Device<Link<Wire<'f, U>>> {
-    let t = Timeouts { request: Duration::from_millis(50), begin: Duration::from_millis(50), retries: 1 };
+    let t = Timeouts {
+        request: Duration::from_millis(50),
+        begin: Duration::from_millis(50),
+        retries: 1,
+    };
     Device::new(Link::new(wire, t))
 }
 
@@ -104,12 +118,26 @@ fn v9_mwctl_info_upload_and_start_work_unchanged() {
     let mut f = flash();
     let mut d = device(Wire::new(&mut f, FACTS, Unsupported));
     let info = d.info().unwrap();
-    assert_eq!((info.chip.as_str(), info.firmware.as_str()), ("rp2350", "0.1.0"));
-    assert_eq!((info.capacity, info.status, info.node), (28 * 1024, PayloadStatus::Empty, Some(NODE)));
+    assert_eq!(
+        (info.chip.as_str(), info.firmware.as_str()),
+        ("rp2350", "0.1.0")
+    );
+    assert_eq!(
+        (info.capacity, info.status, info.node),
+        (28 * 1024, PayloadStatus::Empty, Some(NODE))
+    );
     assert!(info.runs_payloads());
     let img = image(5000, 11);
     let mut steps = 0;
-    d.upload(&img, UploadOptions { start: true, ..UploadOptions::default() }, |_| steps += 1).unwrap();
+    d.upload(
+        &img,
+        UploadOptions {
+            start: true,
+            ..UploadOptions::default()
+        },
+        |_| steps += 1,
+    )
+    .unwrap();
     assert!(steps > 2);
     assert_eq!(d.info().unwrap().status, PayloadStatus::Running);
     d.stop().unwrap();
@@ -135,16 +163,39 @@ fn v9_mwctl_signed_upload_and_trust_work_unchanged() {
     let img = image(3000, 12);
     // Unsigned: the device refuses, the CLI reports it.
     assert!(d.upload(&img, UploadOptions::default(), |_| {}).is_err());
-    let auth = sign_commit(&img, &seed, Version(7));
-    d.upload(&img, UploadOptions { auth, ..UploadOptions::default() }, |_| {}).unwrap();
+    let auth = sign_commit(&img, &seed, Version(7)).ok();
+    d.upload(
+        &img,
+        UploadOptions {
+            auth,
+            ..UploadOptions::default()
+        },
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(d.info().unwrap().status, PayloadStatus::Stopped);
-    let replay = sign_commit(&img, &seed, Version(7));
-    assert!(d.upload(&img, UploadOptions { auth: replay, ..UploadOptions::default() }, |_| {}).is_err());
+    let replay = sign_commit(&img, &seed, Version(7)).ok();
+    assert!(
+        d.upload(
+            &img,
+            UploadOptions {
+                auth: replay,
+                ..UploadOptions::default()
+            },
+            |_| {}
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn v11_mwctl_sees_a_no_wasm_rp2040() {
-    let facts = Facts { chip: "rp2040", firmware: "0.1.0+no-wasm", runtime: false, ..FACTS };
+    let facts = Facts {
+        chip: "rp2040",
+        firmware: "0.1.0+no-wasm",
+        runtime: false,
+        ..FACTS
+    };
     let mut f = flash();
     let mut d = device(Wire::new(&mut f, facts, Absent));
     let info = d.info().unwrap();

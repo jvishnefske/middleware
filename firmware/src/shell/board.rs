@@ -44,11 +44,11 @@ use super::presence::BootButton;
 use {
     super::adc::{ATTENUATION, AdcUnit},
     super::gpio::PinBank,
+    esp_hal::Blocking,
     esp_hal::analog::adc::{Adc, AdcConfig},
     esp_hal::gpio::Flex,
-    esp_hal::peripherals::{IO_MUX, LEDC, TIMG1},
-    esp_hal::Blocking,
     esp_hal::i2c::master::I2c,
+    esp_hal::peripherals::{IO_MUX, LEDC, TIMG1},
     esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDma},
 };
 
@@ -180,7 +180,10 @@ fn uart(
     rx: impl esp_hal::gpio::interconnect::PeripheralInput<'static>,
 ) -> Result<Uart<'static, Async>, ConfigError> {
     let config = UartConfig::default().with_baudrate(BAUD);
-    Ok(Uart::new(uart0, config)?.with_tx(tx).with_rx(rx).into_async())
+    Ok(Uart::new(uart0, config)?
+        .with_tx(tx)
+        .with_rx(rx)
+        .into_async())
 }
 
 /// Builds a [`PinBank`] from `GPIOn` fields of `p`.

@@ -41,7 +41,16 @@ pub type Page = (u32, [u8; PAGE]);
 /// Encodes page `index` of `count`, `page` at flash offset `offset`.
 pub fn block(offset: u32, page: &[u8; PAGE], index: u32, count: u32, family: u32) -> [u8; BLOCK] {
     let mut b = [0u8; BLOCK];
-    let words = [MAGIC_START0, MAGIC_START1, FLAG_FAMILY_ID, FLASH_BASE + offset, PAGE as u32, index, count, family];
+    let words = [
+        MAGIC_START0,
+        MAGIC_START1,
+        FLAG_FAMILY_ID,
+        FLASH_BASE + offset,
+        PAGE as u32,
+        index,
+        count,
+        family,
+    ];
     for (w, o) in words.iter().zip(b.as_chunks_mut::<4>().0) {
         *o = w.to_le_bytes();
     }
@@ -68,8 +77,13 @@ pub fn update_pages(image: &[u8]) -> impl Iterator<Item = Page> + Clone + '_ {
 
 /// The factory flash's pages (see the module docs): `flash` is
 /// [`super::factory::factory_flash`]'s output for `map`.
-pub fn factory_pages<'a>(flash: &'a [u8], map: &FlashMap) -> impl Iterator<Item = Page> + Clone + 'a {
-    let erased = map.ab().map(|ab| [ab.b.offset, ab.record.offset, ab.record.offset + SECTOR]);
+pub fn factory_pages<'a>(
+    flash: &'a [u8],
+    map: &FlashMap,
+) -> impl Iterator<Item = Page> + Clone + 'a {
+    let erased = map
+        .ab()
+        .map(|ab| [ab.b.offset, ab.record.offset, ab.record.offset + SECTOR]);
     pages(0, flash).chain(erased.into_iter().flatten().map(|at| (at, [0xFFu8; PAGE])))
 }
 

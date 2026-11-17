@@ -55,31 +55,43 @@ pub fn new(rx: UartRx, tx: UartTx) -> UartLink {
 
 /// Sends one frame; `false` when it timed out or failed.
 async fn send<IO: Read + Write>(link: &mut SerialLink<IO, INBOX>, frame: &Frame<'_>) -> bool {
-    matches!(with_timeout(SEND_TIMEOUT, link.send(frame)).await, Ok(Ok(())))
+    matches!(
+        with_timeout(SEND_TIMEOUT, link.send(frame)).await,
+        Ok(Ok(()))
+    )
 }
 
 /// Runs the protocol on one serial link forever.
-pub async fn serve<IO: Read + Write>(mut link: SerialLink<IO, INBOX>, id_of_link: LinkId, bus: &'static Bus) -> ! {
+pub async fn serve<IO: Read + Write>(
+    mut link: SerialLink<IO, INBOX>,
+    id_of_link: LinkId,
+    bus: &'static Bus,
+) -> ! {
     let mut buf = [0u8; MAX_RAW_FRAME];
     let mut host = Host::Present;
     loop {
         match select(link.next_frame(&mut buf), bus.next_outbound(id_of_link)).await {
             Either::First(Ok(Frame::Request { id, key, payload })) => {
                 host = host.after_receive();
-                let result = match Inbound::new(id_of_link, Kind::Request { id }, key, payload, link.peer()) {
-                    Some(msg) => {
-                        bus.send_inbound(msg).await;
-                        bus.wait_reply(id_of_link, id).await.result
-                    }
-                    None => Err(HandlerError::BufferTooSmall),
-                };
+                let result =
+                    match Inbound::new(id_of_link, Kind::Request { id }, key, payload, link.peer())
+                    {
+                        Some(msg) => {
+                            bus.send_inbound(msg).await;
+                            bus.wait_reply(id_of_link, id).await.result
+                        }
+                        None => Err(HandlerError::BufferTooSmall),
+                    };
                 let body = result.as_ref().map(|v| v.as_slice()).map_err(|e| *e);
-                host = host.after_send(send(&mut link, &Frame::Response { id, result: body }).await);
+                host =
+                    host.after_send(send(&mut link, &Frame::Response { id, result: body }).await);
                 bus.reply_sent(id_of_link, id);
             }
             Either::First(Ok(Frame::Publish { key, payload })) => {
                 host = host.after_receive();
-                if let Some(msg) = Inbound::new(id_of_link, Kind::Publish, key, payload, link.peer()) {
+                if let Some(msg) =
+                    Inbound::new(id_of_link, Kind::Publish, key, payload, link.peer())
+                {
                     bus.send_inbound(msg).await;
                 }
             }
@@ -91,7 +103,16 @@ pub async fn serve<IO: Read + Write>(mut link: SerialLink<IO, INBOX>, id_of_link
             // While the host is away (a CDC port nobody reads), dropped.
             Either::Second(msg) => {
                 if host.sends_publications() {
-                    host = host.after_send(send(&mut link, &Frame::Publish { key: msg.key(), payload: &msg.payload }).await);
+                    host = host.after_send(
+                        send(
+                            &mut link,
+                            &Frame::Publish {
+                                key: msg.key(),
+                                payload: &msg.payload,
+                            },
+                        )
+                        .await,
+                    );
                 }
             }
         }

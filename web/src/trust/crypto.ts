@@ -1,6 +1,8 @@
 // WebCrypto side of payload signing (requirement U13): Ed25519 keys,
-// image signatures, key fingerprints, and the passphrase-encrypted backup
-// file. No storage and no DOM here; `keyStore.ts` persists what this
+// image signatures, key fingerprints, signature checks for both pinned key
+// kinds (Ed25519, and ECDSA P-256 for keys held in hardware tokens, which
+// only mwctl can sign with: a browser cannot reach PKCS#11), and the
+// passphrase-encrypted backup file. No storage and no DOM here; `keyStore.ts` persists what this
 // module produces.
 //
 // Backup file (JSON, `format: "middleware-signing-key"`, `version: 1`): the
@@ -11,7 +13,7 @@
 // `public_key` was edited fails to decrypt instead of restoring under a
 // wrong identity.
 
-import { MESSAGE_LEN, PUBLIC_KEY_LEN, TrustFormatError, commitBody, fromHex, signedMessage, toHex } from "./wire";
+import { MESSAGE_LEN, PUBLIC_KEY_LEN, TrustFormatError, commitBody, fromHex, keyKind, signedMessage, toHex } from "./wire";
 
 export const ED25519 = { name: "Ed25519" } as const;
 /** PKCS#8 DER header for a raw 32-byte Ed25519 seed (RFC 8410). */
@@ -106,10 +108,80 @@ export async function signImage(privateKey: CryptoKey, image: Uint8Array, versio
   return { version, sha256: digest, message, signature, body: commitBody(version, signature) };
 }
 
+// P-256 (secp256r1) field prime and curve coefficient b, for decompressing
+// a pinned key (WebCrypto's raw import takes the uncompressed point).
+const P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn;
+const P256_B = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bn;
+
+function modPow(base: bigint, exp: bigint, m: bigint): bigint {
+  let r = 1n;
+  let b = base % m;
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) r = (r * b) % m;
+    b = (b * b) % m;
+    e >>= 1n;
+  }
+  return r;
+}
+
+function bytesToBig(b: Uint8Array): bigint {
+  return b.reduce((acc, x) => (acc << 8n) | BigInt(x), 0n);
+}
+
+function bigTo32(n: bigint): Uint8Array {
+  const out = new Uint8Array(32);
+  let v = n;
+  for (let i = 31; i >= 0; i--) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
+}
+
+/**
+ * The uncompressed SEC1 form (65 bytes, 04||x||y) of a compressed P-256
+ * public key (33 bytes, 02/03||x); null if x is not on the curve.
+ */
+export function decompressP256(key: Uint8Array): Uint8Array | null {
+  if (keyKind(key) !== "p256") return null;
+  const x = bytesToBig(key.subarray(1));
+  if (x >= P256_P) return null;
+  const rhs = (((x * x) % P256_P) * x - 3n * x + P256_B) % P256_P;
+  const c = (rhs + P256_P) % P256_P;
+  // p = 3 (mod 4): the square root is c^((p+1)/4), if one exists.
+  let y = modPow(c, (P256_P + 1n) / 4n, P256_P);
+  if ((y * y) % P256_P !== c) return null;
+  if (Number(y & 1n) !== (key[0] & 1)) y = P256_P - y;
+  const out = new Uint8Array(65);
+  out[0] = 4;
+  out.set(key.subarray(1), 1);
+  out.set(bigTo32(y), 33);
+  return out;
+}
+
+/**
+ * Whether `signature` (64 bytes) over `message` verifies against the
+ * pinned `publicKey`, with the key's own algorithm: Ed25519 for a 32-byte
+ * key, ECDSA P-256 / SHA-256 over raw r||s for a 33-byte one.
+ */
 export async function verifySignature(publicKey: Uint8Array, message: Uint8Array, signature: Uint8Array): Promise<boolean> {
   try {
-    const k = await subtle().importKey("raw", ab(publicKey), ED25519, true, ["verify"]);
-    return await subtle().verify(ED25519, k, ab(signature), ab(message));
+    switch (keyKind(publicKey)) {
+      case "ed25519": {
+        const k = await subtle().importKey("raw", ab(publicKey), ED25519, true, ["verify"]);
+        return await subtle().verify(ED25519, k, ab(signature), ab(message));
+      }
+      case "p256": {
+        const point = decompressP256(publicKey);
+        if (!point || signature.length !== 64) return false;
+        const alg = { name: "ECDSA", namedCurve: "P-256" } as const;
+        const k = await subtle().importKey("raw", ab(point), alg, true, ["verify"]);
+        return await subtle().verify({ name: "ECDSA", hash: "SHA-256" }, k, ab(signature), ab(message));
+      }
+      default:
+        return false;
+    }
   } catch {
     return false;
   }

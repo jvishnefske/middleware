@@ -121,7 +121,11 @@ pub const fn deviceaddr(addr: u8, advance: bool) -> Result<u32, Error> {
         return Err(Error::BadAddress);
     }
     let value = (addr as u32) << DEVICEADDR_USBADR_SHIFT;
-    Ok(if advance { value | DEVICEADDR_USBADRA } else { value })
+    Ok(if advance {
+        value | DEVICEADDR_USBADRA
+    } else {
+        value
+    })
 }
 
 /// The `ENDPTLISTADDR` value for a queue head list at bus address
@@ -180,7 +184,11 @@ impl PortSpeed {
         match self {
             PortSpeed::High => described,
             PortSpeed::Full | PortSpeed::Low => {
-                if described < super::FS_BULK_MAX_PACKET { described } else { super::FS_BULK_MAX_PACKET }
+                if described < super::FS_BULK_MAX_PACKET {
+                    described
+                } else {
+                    super::FS_BULK_MAX_PACKET
+                }
             }
         }
     }
@@ -242,7 +250,11 @@ pub const fn endptctrl(number: u8, out: Option<EpType>, inn: Option<EpType>) -> 
     if number == 0 || number >= super::ENDPOINTS {
         return Err(Error::NoSuchEndpoint);
     }
-    let unused = if out.is_some() || inn.is_some() { EpType::Bulk.bits() } else { 0 };
+    let unused = if out.is_some() || inn.is_some() {
+        EpType::Bulk.bits()
+    } else {
+        0
+    };
     let rx = match out {
         Some(t) => (t.bits() << CTRL_RXT_SHIFT) | CTRL_RXE | CTRL_RXR,
         None => unused << CTRL_RXT_SHIFT,
@@ -267,7 +279,11 @@ pub const fn stall_bit(ep: Ep) -> u32 {
 /// clears both on the next setup packet). Unstalling a data endpoint also
 /// resets its data toggle, as `CLEAR_FEATURE(ENDPOINT_HALT)` requires.
 pub const fn set_stall(current: u32, ep: Ep, stalled: bool) -> u32 {
-    let bits = if ep.number() == 0 { CTRL_RXS | CTRL_TXS } else { stall_bit(ep) };
+    let bits = if ep.number() == 0 {
+        CTRL_RXS | CTRL_TXS
+    } else {
+        stall_bit(ep)
+    };
     if stalled {
         current | bits
     } else if ep.number() == 0 {
@@ -288,7 +304,11 @@ pub const fn is_stalled(endptctrl: u32, ep: Ep) -> bool {
 
 /// `ENDPTSETUPSTAT`'s bit for control endpoint `number`.
 pub const fn setupstat_bit(number: u8) -> Result<u32, Error> {
-    if number < super::ENDPOINTS { Ok(1 << number) } else { Err(Error::NoSuchEndpoint) }
+    if number < super::ENDPOINTS {
+        Ok(1 << number)
+    } else {
+        Err(Error::NoSuchEndpoint)
+    }
 }
 
 /// The `ENDPTFLUSH` value that cancels both directions of `number`.
@@ -318,7 +338,14 @@ mod tests {
         assert!(s.reset && s.port_change);
         assert!(!s.transfer && !s.error && !s.system_error && !s.suspend);
         let all = Status::from_usbsts(u32::MAX);
-        assert!(all.transfer && all.error && all.port_change && all.system_error && all.reset && all.suspend);
+        assert!(
+            all.transfer
+                && all.error
+                && all.port_change
+                && all.system_error
+                && all.reset
+                && all.suspend
+        );
     }
 
     #[test]
@@ -339,7 +366,10 @@ mod tests {
     fn fl2_port_speed_decodes_from_pspd() {
         assert_eq!(PortSpeed::from_portsc1(2 << 26), Some(PortSpeed::High));
         assert_eq!(PortSpeed::from_portsc1(0), Some(PortSpeed::Full));
-        assert_eq!(PortSpeed::from_portsc1((1 << 26) | PORTSC1_PR), Some(PortSpeed::Low));
+        assert_eq!(
+            PortSpeed::from_portsc1((1 << 26) | PORTSC1_PR),
+            Some(PortSpeed::Low)
+        );
         assert_eq!(PortSpeed::from_portsc1(3 << 26), None);
         assert_eq!(PortSpeed::High.bulk_max_packet(), 512);
         assert_eq!(PortSpeed::Full.bulk_max_packet(), 64);
@@ -352,11 +382,17 @@ mod tests {
     fn fl2_endptctrl_enables_types_and_resets_toggles() {
         // CDC data interface: bulk OUT and bulk IN.
         let bulk = endptctrl(2, Some(EpType::Bulk), Some(EpType::Bulk)).unwrap();
-        assert_eq!(bulk, (2 << 2) | (1 << 6) | (1 << 7) | (2 << 18) | (1 << 22) | (1 << 23));
+        assert_eq!(
+            bulk,
+            (2 << 2) | (1 << 6) | (1 << 7) | (2 << 18) | (1 << 22) | (1 << 23)
+        );
         // CDC notification: interrupt IN only; the unused OUT half is bulk.
         let int = endptctrl(1, None, Some(EpType::Interrupt)).unwrap();
         assert_eq!(int, (2 << 2) | (3 << 18) | (1 << 22) | (1 << 23));
-        assert_eq!(endptctrl(3, Some(EpType::Control), None), Ok((1 << 6) | (1 << 7) | (2 << 18)));
+        assert_eq!(
+            endptctrl(3, Some(EpType::Control), None),
+            Ok((1 << 6) | (1 << 7) | (2 << 18))
+        );
         assert_eq!(endptctrl(4, None, None), Ok(0));
         assert_eq!(endptctrl(0, None, None), Err(Error::NoSuchEndpoint));
         assert_eq!(endptctrl(8, None, None), Err(Error::NoSuchEndpoint));
@@ -367,11 +403,16 @@ mod tests {
     fn fl2_stall_sets_one_direction_and_ep0_stalls_both() {
         let in2 = Ep::new(2, Dir::In).unwrap();
         let out2 = Ep::new(2, Dir::Out).unwrap();
-        let ctrl = endptctrl(2, Some(EpType::Bulk), Some(EpType::Bulk)).unwrap() & !(CTRL_RXR | CTRL_TXR);
+        let ctrl =
+            endptctrl(2, Some(EpType::Bulk), Some(EpType::Bulk)).unwrap() & !(CTRL_RXR | CTRL_TXR);
         let stalled = set_stall(ctrl, in2, true);
         assert_eq!(stalled, ctrl | CTRL_TXS);
         assert!(is_stalled(stalled, in2) && !is_stalled(stalled, out2));
-        assert_eq!(set_stall(stalled, in2, false), ctrl | CTRL_TXR, "unstall resets the toggle");
+        assert_eq!(
+            set_stall(stalled, in2, false),
+            ctrl | CTRL_TXR,
+            "unstall resets the toggle"
+        );
         let ep0 = set_stall(ENDPTCTRL0, Ep::EP0_IN, true);
         assert_eq!(ep0, ENDPTCTRL0 | CTRL_RXS | CTRL_TXS);
         assert_eq!(set_stall(ep0, Ep::EP0_OUT, false), ENDPTCTRL0);

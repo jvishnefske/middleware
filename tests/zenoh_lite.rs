@@ -267,6 +267,86 @@ async fn zn3_lite_queryable_answers_host_gets() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zn5_one_node_prefix_queryable_answers_every_per_node_key_under_it() {
+    let (mut host, mut lite) = host_and_lite(3).await;
+    lite.declare_plain_queryable(Key::from_static("zn5/info"))
+        .await
+        .expect("declare");
+    lite.declare_node_prefix_queryable(Key::from_static("zn5"))
+        .await
+        .expect("declare");
+    let lite_id = lite.sender_id();
+    let seen = RefCell::new(Vec::new());
+    let serve = async {
+        let mut handler = |r: &Request<'_>, resp: &mut [u8]| {
+            seen.borrow_mut().push(r.key.as_str().to_owned());
+            reverse(r, resp)
+        };
+        let mut scratch = [0u8; 256];
+        for _ in 0..4 {
+            lite.serve_one(&mut handler, &mut scratch)
+                .await
+                .expect("serve");
+        }
+    };
+    let ask = async {
+        let mut out = [0u8; 64];
+        let node = RequestOptions::DEFAULT.with_target(Target::Node(lite_id));
+        // Until the declarations are known on the host's side.
+        let mut first = None;
+        for _ in 0..50 {
+            match host
+                .request_with(
+                    Key::from_static("zn5/loader/chunk"),
+                    b"abc",
+                    &mut out,
+                    &node,
+                )
+                .await
+            {
+                Ok(r) => {
+                    first = Some(r.to_vec());
+                    break;
+                }
+                Err(ZenohError::NoReply) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(e) => panic!("{e:?}"),
+            }
+        }
+        assert_eq!(first.as_deref(), Some(&b"cba"[..]));
+        let r = host
+            .request_with(Key::from_static("zn5/fw/reboot"), b"xy", &mut out, &node)
+            .await
+            .expect("node request");
+        assert_eq!(r, b"yx");
+        // The plain key answers broadcast queries, and per-node through
+        // the prefix.
+        let r = host
+            .request(Key::from_static("zn5/info"), b"12", &mut out)
+            .await
+            .expect("plain request");
+        assert_eq!(r, b"21");
+        let r = host
+            .request_with(Key::from_static("zn5/info"), b"34", &mut out, &node)
+            .await
+            .expect("node request");
+        assert_eq!(r, b"43");
+        // A key outside the prefix finds no queryable.
+        let r = host
+            .request_with(Key::from_static("other/x"), b"1", &mut out, &node)
+            .await;
+        assert!(matches!(r, Err(ZenohError::NoReply)), "{r:?}");
+    };
+    tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(serve, ask) })
+        .await
+        .expect("in time");
+    assert_eq!(
+        seen.into_inner(),
+        ["zn5/loader/chunk", "zn5/fw/reboot", "zn5/info", "zn5/info"],
+        "the board sees each concrete key"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn zn3_lite_receives_host_publications_on_declared_keys() {
     let (mut host, mut lite) = host_and_lite(3).await;
     let host_id = host.sender_id();

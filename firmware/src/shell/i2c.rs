@@ -32,9 +32,9 @@
 //! stop) after a timeout. On the ESP32 the hardware SCL timeout (esp-hal's
 //! default maximum, about 13 ms of an unchanging SCL) also stays armed.
 
+use esp_base::periph::i2c::open_plan;
 use esp_hal::Blocking;
 use esp_hal::gpio::{InputSignal, OutputSignal};
-use esp_base::periph::i2c::open_plan;
 use esp_hal::i2c::master::{Config, I2c, SoftwareTimeout};
 use esp_hal::time::{Duration, Rate};
 use wasm_host::{AbiError, I2cConfig};
@@ -63,8 +63,12 @@ impl Bus0 {
         let byte_us = open_plan(cfg.bus, cfg.freq_hz)?;
         let config = Config::default()
             .with_frequency(Rate::from_hz(cfg.freq_hz))
-            .with_software_timeout(SoftwareTimeout::PerByte(Duration::from_micros(u64::from(byte_us))));
-        self.i2c.apply_config(&config).map_err(|_| AbiError::Unsupported)?;
+            .with_software_timeout(SoftwareTimeout::PerByte(Duration::from_micros(u64::from(
+                byte_us,
+            ))));
+        self.i2c
+            .apply_config(&config)
+            .map_err(|_| AbiError::Unsupported)?;
         self.open = true;
         Ok(())
     }

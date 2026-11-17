@@ -1,0 +1,30 @@
+[package]
+name = "mw-otel"
+version = "0.1.0"
+edition = "2024"
+description = "OpenTelemetry for running middleware: OTLP exporter setup for host services, and a Zenoh bridge that exports the boards' sys/log, traffic and sys/info"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mw-otel-bridge"
+path = "src/main.rs"
+
+[dependencies]
+# The Zenoh backend with its spans and metrics (off by default in the
+# library; this tool is what turns it on).
+middleware = { path = "../..", features = ["zenoh-otel"] }
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics", "logs"] }
+# OTLP over HTTP/protobuf (Prometheus' OTLP receiver speaks only this).
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-appender-tracing = "0.33"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics", "logs", "testing"] }

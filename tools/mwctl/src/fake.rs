@@ -14,9 +14,9 @@
 //! when unclaimed (or when built [`FakeDevice::with_rekey_window`], until a
 //! claim closes it) and is `Denied` otherwise; once claimed, a commit must
 //! be signed by that key over `signed_message(len, version, sha256)` with a
-//! version above `min_version`, else `Denied`. The check uses
-//! `ed25519-dalek` directly, because mwctl builds `middleware` with no
-//! features (the crate's own check needs `trust`).
+//! version above `min_version`, else `Denied`. The check is mwctl's host
+//! copy ([`crate::sign::verify`], Ed25519 and P-256), because mwctl builds
+//! `middleware` with no features (the crate's own check needs `trust`).
 //!
 //! (`esp_base` itself is not used: it requires rustc 1.95 through its own
 //! toolchain file, which the host workspace does not use.)
@@ -44,17 +44,18 @@
 //! returns `Ok(0)` at once, which the link treats as a timeout.
 
 use crate::link::Transport;
-use crate::sign::image_sha256;
-use ed25519_dalek::{Signature, VerifyingKey};
+use crate::sign::{image_sha256, is_valid_key, verify};
 use middleware::Key;
+use middleware::fw_ota::picobin::{
+    EXE_TBYB, RP2350_ARM_S_EXE, image_def_block_bytes, sentinel_block_bytes,
+};
+use middleware::fw_ota::rt_image::{RtHeader, RtSlotImage};
+use middleware::fw_ota::service::{Context, FwService};
+use middleware::fw_ota::sim::Rp2350Sim;
 use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, NetAddr, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
-use middleware::fw_ota::picobin::{EXE_TBYB, RP2350_ARM_S_EXE, image_def_block_bytes, sentinel_block_bytes};
-use middleware::fw_ota::rt_image::{RtHeader, RtSlotImage};
-use middleware::fw_ota::service::{Context, FwService};
-use middleware::fw_ota::sim::Rp2350Sim;
 use middleware::wasm_abi::ABI_VERSION;
 use std::collections::VecDeque;
 use std::io;
@@ -131,7 +132,11 @@ impl Fw {
         } else {
             Svc::Rp(FwService::boot(&mut sim).expect("updater boots"))
         };
-        Fw { sim, svc, self_test_ok }
+        Fw {
+            sim,
+            svc,
+            self_test_ok,
+        }
     }
 
     fn reset(self) -> Fw {
@@ -141,7 +146,13 @@ impl Fw {
         Fw::boot(sim, self.self_test_ok, rt)
     }
 
-    fn handle(&mut self, ctx: &Context, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Option<Result<usize, HandlerError>> {
+    fn handle(
+        &mut self,
+        ctx: &Context,
+        key: Key<'_>,
+        body: &[u8],
+        out: &mut [u8],
+    ) -> Option<Result<usize, HandlerError>> {
         match &mut self.svc {
             Svc::Rp(svc) => svc.handle(&mut self.sim, ctx, key, body, out),
             Svc::Rt(svc) => svc.handle(&mut self.sim, ctx, key, body, out),
@@ -162,7 +173,13 @@ const RT_SENTINEL_AT: usize = 0xF40;
 /// boots it; the other image bytes are a function of `seed`.
 pub fn rt_image(len: usize, version: u32, tbyb: bool, seed: u8) -> Vec<u8> {
     let at = |slot_offset: usize| slot_offset - middleware::fw_ota::rt_image::HEADER_LEN;
-    let mut image: Vec<u8> = (0..len).map(|i| (i as u32).wrapping_mul(2_654_435_761).wrapping_add(u32::from(seed)) as u8).collect();
+    let mut image: Vec<u8> = (0..len)
+        .map(|i| {
+            (i as u32)
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(u32::from(seed)) as u8
+        })
+        .collect();
     let flags = RP2350_ARM_S_EXE | if tbyb { EXE_TBYB } else { 0 };
     let link = (RT_SENTINEL_AT - RT_IMAGE_DEF_AT) as i32;
     let def = image_def_block_bytes(flags, (version >> 16) as u16, version as u16, link);
@@ -309,11 +326,11 @@ impl FakeDevice {
         if auth.version <= min_version {
             return Err(HandlerError::Denied);
         }
-        let vk = VerifyingKey::from_bytes(&key.0).map_err(|_| HandlerError::Denied)?;
         let len = u32::try_from(image.len()).map_err(|_| HandlerError::Denied)?;
         let m = signed_message(len, auth.version, &image_sha256(image));
-        vk.verify_strict(&m, &Signature::from_bytes(&auth.signature.0))
-            .map_err(|_| HandlerError::Denied)?;
+        if !verify(&key, &m, &auth.signature) {
+            return Err(HandlerError::Denied);
+        }
         Ok(TrustState::Claimed {
             key,
             min_version: auth.version,
@@ -416,7 +433,9 @@ impl FakeDevice {
             .ok_or(HandlerError::BufferTooSmall),
             Command::Board => {
                 let body = self.board.as_deref().ok_or(HandlerError::NotFound)?;
-                out.get_mut(..body.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(body);
+                out.get_mut(..body.len())
+                    .ok_or(HandlerError::BufferTooSmall)?
+                    .copy_from_slice(body);
                 Ok(body.len())
             }
             Command::Start if !self.runtime => Err(HandlerError::NotFound),
@@ -441,7 +460,7 @@ impl FakeDevice {
                 .encode(out)
                 .ok_or(HandlerError::BufferTooSmall),
             Command::TrustClaim { key } => {
-                if VerifyingKey::from_bytes(&key.0).is_err() {
+                if !is_valid_key(&key) {
                     return Err(HandlerError::InvalidRequest);
                 }
                 if self.trust.is_claimed() && !self.rekey_open {
@@ -525,7 +544,11 @@ impl FakeDevice {
         self.on_request(cobs);
         // A reboot the updater scheduled fires after the reply is out (or
         // lost).
-        if self.fw.as_ref().is_some_and(|fw| fw.sim.scheduled().is_some()) {
+        if self
+            .fw
+            .as_ref()
+            .is_some_and(|fw| fw.sim.scheduled().is_some())
+        {
             self.fw_reset();
             if self.script.vanish_on_reset {
                 self.tx.clear();

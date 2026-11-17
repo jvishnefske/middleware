@@ -44,14 +44,32 @@ mod controller;
 mod device;
 #[cfg(feature = "wasm")]
 mod heap;
-#[cfg_attr(not(feature = "wasm"), allow(dead_code, reason = "the RP2040 runs no payloads yet; built so its register code is checked"))]
+#[cfg_attr(
+    not(feature = "wasm"),
+    allow(
+        dead_code,
+        reason = "the RP2040 runs no payloads yet; built so its register code is checked"
+    )
+)]
 mod i2c;
 mod link;
-#[cfg_attr(not(feature = "wasm"), allow(dead_code, reason = "the RP2040 runs no payloads yet; built so its register code is checked"))]
+#[cfg_attr(
+    not(feature = "wasm"),
+    allow(
+        dead_code,
+        reason = "the RP2040 runs no payloads yet; built so its register code is checked"
+    )
+)]
 mod pads;
 #[cfg(all(feature = "fw-update", feature = "rp2350"))]
 mod rom;
-#[cfg_attr(not(feature = "wasm"), allow(dead_code, reason = "the RP2040 runs no payloads yet; built so its register code is checked"))]
+#[cfg_attr(
+    not(feature = "wasm"),
+    allow(
+        dead_code,
+        reason = "the RP2040 runs no payloads yet; built so its register code is checked"
+    )
+)]
 mod spi;
 
 use embassy_executor::Spawner;
@@ -131,7 +149,12 @@ async fn link_task(link: UsbLink, bus: &'static Bus) {
 }
 
 /// Brings up USB: the device task and the CDC link task.
-fn start_usb(spawner: Spawner, usb: embassy_rp::Peri<'static, USB>, serial: &'static str, bus: &'static Bus) {
+fn start_usb(
+    spawner: Spawner,
+    usb: embassy_rp::Peri<'static, USB>,
+    serial: &'static str,
+    bus: &'static Bus,
+) {
     let driver = Driver::new(usb, Irqs);
     let mut config = embassy_usb::Config::new(VID, pid(PROFILE.chip));
     config.manufacturer = Some(MANUFACTURER);
@@ -140,13 +163,22 @@ fn start_usb(spawner: Spawner, usb: embassy_rp::Peri<'static, USB>, serial: &'st
     config.max_power = 100;
     config.max_packet_size_0 = 64;
     let mem = USB_MEMORY.take();
-    let mut builder =
-        Builder::new(driver, config, &mut mem.config, &mut mem.bos, &mut mem.msos, &mut mem.control);
+    let mut builder = Builder::new(
+        driver,
+        config,
+        &mut mem.config,
+        &mut mem.bos,
+        &mut mem.msos,
+        &mut mem.control,
+    );
     builder.handler(USB_STATE.init(UsbState { bus }));
     let class = CdcAcmClass::new(&mut builder, CDC_STATE.init(CdcState::new()), MAX_PACKET);
     let device = builder.build();
     let (tx, rx) = class.split();
-    let link = SerialLink::with_inbox(Duplex::new(rx.into_buffered(&mut mem.rx), CdcWriter::new(tx)));
+    let link = SerialLink::with_inbox(Duplex::new(
+        rx.into_buffered(&mut mem.rx),
+        CdcWriter::new(tx),
+    ));
     spawner.spawn(usb_task(device).unwrap());
     spawner.spawn(link_task(link, bus).unwrap());
 }
@@ -163,17 +195,33 @@ fn log_boot(bus: &Bus, uid: [u8; 8], boot: &rp_base::service::Boot, capacity: u3
     ));
     match boot.installed {
         None => bus.log(format_args!("payload store unreadable; loader disabled")),
-        Some(Ok(h)) => bus.log(format_args!("stored payload: {} bytes, crc {:08x}", h.len, h.crc)),
+        Some(Ok(h)) => bus.log(format_args!(
+            "stored payload: {} bytes, crc {:08x}",
+            h.len, h.crc
+        )),
         Some(Err(e)) => bus.log(format_args!("no valid stored payload: {e}")),
     }
     match boot.trust {
-        None => bus.log(format_args!("trust record unreadable; payload and firmware installs refused")),
-        Some(Persisted { trust: TrustState::Unclaimed, .. }) => {
-            bus.log(format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"))
-        }
-        Some(Persisted { trust: TrustState::Claimed { key, min_version }, .. }) => bus.log(format_args!(
-            "trust: claimed by key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
-            key.0[0], key.0[1], key.0[2], key.0[3], min_version.0
+        None => bus.log(format_args!(
+            "trust record unreadable; payload and firmware installs refused"
+        )),
+        Some(Persisted {
+            trust: TrustState::Unclaimed,
+            ..
+        }) => bus.log(format_args!(
+            "trust: unclaimed; any payload accepted until sys/trust/claim"
+        )),
+        Some(Persisted {
+            trust: TrustState::Claimed { key, min_version },
+            ..
+        }) => bus.log(format_args!(
+            "trust: claimed by {} key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
+            key.kind().name(),
+            key.as_bytes()[0],
+            key.as_bytes()[1],
+            key.as_bytes()[2],
+            key.as_bytes()[3],
+            min_version.0
         )),
     }
 }
@@ -202,7 +250,9 @@ fn open_fw(
             record.min_version.0 >> 16,
             record.min_version.0 & 0xffff,
         )),
-        (Err(e), _, _) => bus.log(format_args!("fw: updater unavailable ({e:?}); flash the factory UF2")),
+        (Err(e), _, _) => bus.log(format_args!(
+            "fw: updater unavailable ({e:?}); flash the factory UF2"
+        )),
         _ => bus.log(format_args!("fw: updater unavailable")),
     }
     (flash, fw)
@@ -210,7 +260,8 @@ fn open_fw(
 
 /// The SPI bus's transfer buffer.
 #[cfg(feature = "wasm")]
-static SPI_BUFFER: ConstStaticCell<spi::Buffer> = ConstStaticCell::new([0; middleware::wasm_abi::periph::MAX_DMA]);
+static SPI_BUFFER: ConstStaticCell<spi::Buffer> =
+    ConstStaticCell::new([0; middleware::wasm_abi::periph::MAX_DMA]);
 
 /// The payload's bus controllers.
 #[cfg(feature = "wasm")]
@@ -284,13 +335,38 @@ pub async fn run(spawner: Spawner) -> ! {
             Channel::new_pin(p.PIN_28, Pull::None),
         ];
         let pins = [
-            p.PIN_0.into(), p.PIN_1.into(), p.PIN_2.into(), p.PIN_3.into(), p.PIN_4.into(),
-            p.PIN_5.into(), p.PIN_6.into(), p.PIN_7.into(), p.PIN_8.into(), p.PIN_9.into(),
-            p.PIN_10.into(), p.PIN_11.into(), p.PIN_12.into(), p.PIN_13.into(), p.PIN_14.into(),
-            p.PIN_15.into(), p.PIN_16.into(), p.PIN_17.into(), p.PIN_18.into(), p.PIN_19.into(),
-            p.PIN_20.into(), p.PIN_21.into(), p.PIN_22.into(), p.PIN_24.into(), p.PIN_25.into(),
+            p.PIN_0.into(),
+            p.PIN_1.into(),
+            p.PIN_2.into(),
+            p.PIN_3.into(),
+            p.PIN_4.into(),
+            p.PIN_5.into(),
+            p.PIN_6.into(),
+            p.PIN_7.into(),
+            p.PIN_8.into(),
+            p.PIN_9.into(),
+            p.PIN_10.into(),
+            p.PIN_11.into(),
+            p.PIN_12.into(),
+            p.PIN_13.into(),
+            p.PIN_14.into(),
+            p.PIN_15.into(),
+            p.PIN_16.into(),
+            p.PIN_17.into(),
+            p.PIN_18.into(),
+            p.PIN_19.into(),
+            p.PIN_20.into(),
+            p.PIN_21.into(),
+            p.PIN_22.into(),
+            p.PIN_24.into(),
+            p.PIN_25.into(),
         ];
-        let buses = Buses { spi0: p.SPI0, spi1: p.SPI1, i2c0: p.I2C0, i2c1: p.I2C1 };
+        let buses = Buses {
+            spi0: p.SPI0,
+            spi1: p.SPI1,
+            i2c0: p.I2C0,
+            i2c1: p.I2C1,
+        };
         install_payload_hw(pins, p.ADC, analog, buses);
         bus.log(format_args!("heap: {} B free after boot", heap::free()));
     }

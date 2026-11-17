@@ -159,21 +159,40 @@ impl Responder for ZenohResponder<'_> {
         let waited_ms = u64::try_from(arrived.elapsed().as_millis()).unwrap_or(u64::MAX);
         let attachment = query.attachment().map(|a| a.to_bytes());
         let meta = request_meta(attachment.as_deref(), waited_ms);
+        #[cfg(feature = "zenoh-otel")]
+        let op = super::otel::Op::handle(
+            self.key.as_str(),
+            meta.sender,
+            attachment.as_deref().and_then(wire::decode_trace),
+        );
         let request = query.payload().map(|p| p.to_bytes()).unwrap_or_default();
-        match run_handler(handler, self.key, &request, meta, scratch) {
-            Ok(response) => {
+        let (sent, handled) = match run_handler(handler, self.key, &request, meta, scratch) {
+            Ok(response) => (
                 query
                     .reply(query.key_expr().clone(), response)
                     .attachment(wire::encode_reply(self.sender).to_vec())
-                    .await?
-            }
-            Err(e) => {
+                    .await,
+                None,
+            ),
+            Err(e) => (
                 query
                     .reply_err(wire::encode_reply_error(e, self.sender).to_vec())
-                    .await?
-            }
-        }
-        Ok(())
+                    .await,
+                Some(e),
+            ),
+        };
+        let sent = sent.map_err(ZenohError::from);
+        #[cfg(feature = "zenoh-otel")]
+        op.end(
+            0,
+            match (&handled, &sent) {
+                (Some(e), _) => Some(super::otel::handler_name(*e)),
+                (None, Err(e)) => Some(e.name()),
+                (None, Ok(())) => None,
+            },
+        );
+        let _ = handled;
+        sent
     }
 }
 

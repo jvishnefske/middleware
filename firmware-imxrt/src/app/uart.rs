@@ -91,7 +91,9 @@ pub struct UartTx {
 
 /// Brings up LPUART1 at 115200 8N1 with both FIFOs and the receive DMA,
 /// and returns its two halves.
-pub fn split(uart: embassy_nxp::Peri<'static, embassy_nxp::peripherals::LPUART1>) -> (UartRx, UartTx) {
+pub fn split(
+    uart: embassy_nxp::Peri<'static, embassy_nxp::peripherals::LPUART1>,
+) -> (UartRx, UartTx) {
     let console = Console::new(uart);
     let u = pac::LPUART1;
     // FIFOs on (flushed), receive watermark 0 (a request per byte).
@@ -193,7 +195,9 @@ impl Write for UartTx {
                 }
                 Timer::after(TX_POLL).await;
             }
-            pac::LPUART1.data().write_value(pac::lpuart::regs::Data(u32::from(b)));
+            pac::LPUART1
+                .data()
+                .write_value(pac::lpuart::regs::Data(u32::from(b)));
             n += 1;
         }
         Ok(n)
@@ -201,7 +205,9 @@ impl Write for UartTx {
 
     async fn flush(&mut self) -> Result<(), Never> {
         let deadline = Instant::now() + FLUSH_TIMEOUT;
-        while pac::LPUART1.stat().read().tc() == pac::lpuart::vals::Tc::Active && Instant::now() < deadline {
+        while pac::LPUART1.stat().read().tc() == pac::lpuart::vals::Tc::Active
+            && Instant::now() < deadline
+        {
             Timer::after(TX_POLL).await;
         }
         Ok(())

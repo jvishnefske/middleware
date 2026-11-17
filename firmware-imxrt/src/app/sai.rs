@@ -61,7 +61,8 @@ pub fn start_clocks(rate: AudioRate) -> Result<(), AbiError> {
     a.pll_audio_num().write_value(PllAudioNum(c.pll_num));
     a.pll_audio_denom().write_value(PllAudioDenom(c.pll_denom));
     a.misc2().modify(|w| w.0 &= !sai::MISC2_AUDIO_DIV);
-    a.pll_audio().write_value(PllAudio(c.pll_audio() | sai::PLL_BYPASS));
+    a.pll_audio()
+        .write_value(PllAudio(c.pll_audio() | sai::PLL_BYPASS));
     let deadline = Instant::now() + LOCK_TIMEOUT;
     while a.pll_audio().read().0 & sai::PLL_LOCK == 0 {
         if Instant::now() > deadline {
@@ -84,8 +85,10 @@ pub fn start_clocks(rate: AudioRate) -> Result<(), AbiError> {
     let m = pac::IOMUXC;
     m.sai1_mclk2_select_input()
         .write_value(pac::iomuxc::regs::Sai1Mclk2SelectInput(sai::PAD_DAISY));
-    m.sw_pad_ctl_pad_gpio_ad_b1_09().write_value(pac::iomuxc::regs::Ctl(PAD_SAI));
-    m.sw_mux_ctl_pad_gpio_ad_b1_09().write_value(pac::iomuxc::regs::MuxCtl(sai::PAD_ALT));
+    m.sw_pad_ctl_pad_gpio_ad_b1_09()
+        .write_value(pac::iomuxc::regs::Ctl(PAD_SAI));
+    m.sw_mux_ctl_pad_gpio_ad_b1_09()
+        .write_value(pac::iomuxc::regs::MuxCtl(sai::PAD_ALT));
     Ok(())
 }
 
@@ -118,9 +121,18 @@ pub fn start(rate: AudioRate, now_us: u64) -> SaiRx {
     m.sai1_tx_sync_select_input()
         .write_value(pac::iomuxc::regs::Sai1TxSyncSelectInput(sai::PAD_DAISY));
     for (ctl, mux) in [
-        (m.sw_pad_ctl_pad_gpio_ad_b1_12(), m.sw_mux_ctl_pad_gpio_ad_b1_12()),
-        (m.sw_pad_ctl_pad_gpio_ad_b1_14(), m.sw_mux_ctl_pad_gpio_ad_b1_14()),
-        (m.sw_pad_ctl_pad_gpio_ad_b1_15(), m.sw_mux_ctl_pad_gpio_ad_b1_15()),
+        (
+            m.sw_pad_ctl_pad_gpio_ad_b1_12(),
+            m.sw_mux_ctl_pad_gpio_ad_b1_12(),
+        ),
+        (
+            m.sw_pad_ctl_pad_gpio_ad_b1_14(),
+            m.sw_mux_ctl_pad_gpio_ad_b1_14(),
+        ),
+        (
+            m.sw_pad_ctl_pad_gpio_ad_b1_15(),
+            m.sw_mux_ctl_pad_gpio_ad_b1_15(),
+        ),
     ] {
         ctl.write_value(pac::iomuxc::regs::Ctl(PAD_SAI));
         mux.write_value(pac::iomuxc::regs::MuxCtl(sai::PAD_ALT));
@@ -209,6 +221,9 @@ impl SaiRx {
             self.tail = (self.tail + 1) % RING_LEN;
             n += 1;
         }
-        Drained { samples: n, lost: 0 }
+        Drained {
+            samples: n,
+            lost: 0,
+        }
     }
 }

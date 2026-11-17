@@ -42,11 +42,11 @@ pub mod header;
 pub mod io;
 pub mod platform;
 pub mod record;
-pub mod watchdog;
 #[cfg(test)]
 pub(crate) mod test_flash;
 #[cfg(test)]
 mod tests;
+pub mod watchdog;
 
 pub use boot::{Decision, Handoff, decide};
 pub use header::{HEADER_LEN, Refusal, SlotHeader};
