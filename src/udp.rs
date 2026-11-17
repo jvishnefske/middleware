@@ -56,10 +56,10 @@ pub use link::{DEFAULT_TIMEOUT, RESEND_AFTER, UdpError, UdpTransport};
 mod tests {
     extern crate std;
     use super::*;
-    use std::vec;
     use crate::crc::crc16;
     use crate::key::Key;
     use crate::transport::HandlerError;
+    use std::vec;
 
     const K: Key<'static> = Key::from_static("demo/a");
 

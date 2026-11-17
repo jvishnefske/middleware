@@ -34,7 +34,8 @@ impl Device for TwoPort {
         self.logs.push(line.to_string());
     }
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
-        self.published.push((key.as_str().to_string(), data.to_vec()));
+        self.published
+            .push((key.as_str().to_string(), data.to_vec()));
         Ok(())
     }
     fn now_ms(&mut self) -> u32 {
@@ -160,7 +161,8 @@ fn cl2_a_single_link_board_answers_unsupported() {
     impl Device for Probe {
         fn log(&mut self, _: &str) {}
         fn publish(&mut self, _: Key<'_>, d: &[u8]) -> Result<(), AbiError> {
-            self.0.push(i32::from_le_bytes(d.try_into().expect("4 bytes")));
+            self.0
+                .push(i32::from_le_bytes(d.try_into().expect("4 bytes")));
             Ok(())
         }
         fn now_ms(&mut self) -> u32 {
@@ -203,7 +205,10 @@ fn cl2_the_bridge_template_loads_and_installs_both_rules() {
     assert_eq!(p.deliver(Key::from_static("ctl/bridge"), b"1"), Ok(true));
     assert_eq!(p.device().table.iter().count(), 2);
     p.tick(2000).expect("tick");
-    assert_eq!(p.device().published.last().expect("stats").1, 0i32.to_le_bytes());
+    assert_eq!(
+        p.device().published.last().expect("stats").1,
+        0i32.to_le_bytes()
+    );
 }
 
 #[test]

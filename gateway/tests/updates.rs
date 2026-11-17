@@ -764,7 +764,9 @@ async fn rg20_a_p256_claimed_devices_signed_start_passes_and_a_forged_one_is_ref
     assert!(text.starts_with("started"), "{text}");
     let seen = rig.drain();
     assert_eq!(
-        seen.iter().find(|(k, _)| k == "sys/payload/start").map(|s| s.1),
+        seen.iter()
+            .find(|(k, _)| k == "sys/payload/start")
+            .map(|s| s.1),
         Some(0),
         "forwarded as the serial start: {seen:?}"
     );

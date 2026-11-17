@@ -179,7 +179,11 @@ pub struct Handled {
 impl Handled {
     /// An immediate reply, nothing else.
     pub fn now(reply: Result<usize, HandlerError>) -> Self {
-        Handled { reply: Reply::Now(reply), stop: false, notes: Vec::new() }
+        Handled {
+            reply: Reply::Now(reply),
+            stop: false,
+            notes: Vec::new(),
+        }
     }
 }
 
@@ -205,7 +209,11 @@ pub struct Service<F> {
 /// Whether both trust sectors can be read.
 fn trust_readable<F: NorFlash>(flash: &mut F) -> bool {
     let mut buf = [0u8; RECORD_LEN];
-    (0..2u32).all(|s| flash.read(TRUST_OFFSET + s * esp_base::image::SECTOR, &mut buf).is_ok())
+    (0..2u32).all(|s| {
+        flash
+            .read(TRUST_OFFSET + s * esp_base::image::SECTOR, &mut buf)
+            .is_ok()
+    })
 }
 
 impl<F: NorFlash + Durable> Service<F> {
@@ -224,7 +232,9 @@ impl<F: NorFlash + Durable> Service<F> {
         let mut store = PayloadStore::new(flash, PAYLOAD_OFFSET, PAYLOAD_SIZE, MAX_IMAGE).ok();
         let installed = store.as_mut().map(PayloadStore::verify);
         let p = persisted.unwrap_or_default();
-        let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(p.trust).with_control(p.control);
+        let state = State::boot(matches!(installed, Some(Ok(_))))
+            .with_trust(p.trust)
+            .with_control(p.control);
         let ctx = Context {
             chip: facts.chip,
             firmware: facts.firmware,
@@ -237,8 +247,20 @@ impl<F: NorFlash + Durable> Service<F> {
             node: Some(facts.node),
             caps: Caps::SERVE,
         };
-        let svc = Service { state, ctx, store, trust, served: ServedKeys::new() };
-        (svc, Boot { installed, trust: persisted })
+        let svc = Service {
+            state,
+            ctx,
+            store,
+            trust,
+            served: ServedKeys::new(),
+        };
+        (
+            svc,
+            Boot {
+                installed,
+                trust: persisted,
+            },
+        )
     }
 
     /// The dispatcher state.
@@ -315,7 +337,11 @@ impl<F: NorFlash + Durable> Service<F> {
         }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
         if outcome.action == Action::Start {
-            return Handled { reply: Reply::Start, stop: false, notes: Vec::new() };
+            return Handled {
+                reply: Reply::Start,
+                stop: false,
+                notes: Vec::new(),
+            };
         }
         let mut notes = Vec::new();
         let mut stop = outcome.action.stops_payload();
@@ -334,7 +360,11 @@ impl<F: NorFlash + Durable> Service<F> {
                 Err(HandlerError::Internal)
             }
         };
-        Handled { reply: Reply::Now(reply), stop, notes }
+        Handled {
+            reply: Reply::Now(reply),
+            stop,
+            notes,
+        }
     }
 
     /// Performs the outcome's storage action, then syncs (all but writes).
@@ -343,12 +373,28 @@ impl<F: NorFlash + Durable> Service<F> {
         match outcome.action {
             Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => return self.store()?.write(offset, data),
-            Action::Activate { len, crc, trust: None } => self.store()?.activate(len, crc),
-            Action::Activate { len, crc, trust: Some(next) } => {
+            Action::Activate {
+                len,
+                crc,
+                trust: None,
+            } => self.store()?.activate(len, crc),
+            Action::Activate {
+                len,
+                crc,
+                trust: Some(next),
+            } => {
                 let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
                     return Err(StoreError::Flash);
                 };
-                store.activate_with(len, crc, |flash| ts.save(flash, &Persisted { trust: next, control }))
+                store.activate_with(len, crc, |flash| {
+                    ts.save(
+                        flash,
+                        &Persisted {
+                            trust: next,
+                            control,
+                        },
+                    )
+                })
             }
             Action::Claim { trust } => {
                 let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
@@ -382,15 +428,21 @@ impl<F: NorFlash + Durable> Service<F> {
             Action::Activate { len, trust, .. } => {
                 notes.push(Note::Installed { len });
                 if let Some(TrustState::Claimed { min_version, .. }) = trust {
-                    notes.push(Note::SignedAccepted { min_version: min_version.0 });
+                    notes.push(Note::SignedAccepted {
+                        min_version: min_version.0,
+                    });
                 }
                 if self.state.status() == PayloadStatus::Running {
                     notes.push(Note::ReplacesRunning);
                 }
             }
-            Action::Claim { trust: TrustState::Claimed { key, .. } } => {
+            Action::Claim {
+                trust: TrustState::Claimed { key, .. },
+            } => {
                 let k = key.as_bytes();
-                notes.push(Note::Pinned { prefix: [k[0], k[1], k[2], k[3]] });
+                notes.push(Note::Pinned {
+                    prefix: [k[0], k[1], k[2], k[3]],
+                });
             }
             _ => {}
         }

@@ -189,7 +189,12 @@ async fn ot1_spans_and_metrics_cross_two_sessions() {
     let k18 = TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
         .expect("spec traceparent");
     let out = plain
-        .request_with(R, b"xy", &mut resp, &RequestOptions::DEFAULT.with_trace(k18))
+        .request_with(
+            R,
+            b"xy",
+            &mut resp,
+            &RequestOptions::DEFAULT.with_trace(k18),
+        )
         .await
         .expect("K18 request");
     assert_eq!(out, b"yx");

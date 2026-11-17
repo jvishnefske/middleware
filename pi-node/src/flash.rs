@@ -82,7 +82,12 @@ impl<S: Sectors> SectorFlash<S> {
                 dst.copy_from_slice(&data[..]);
             }
         }
-        Ok(SectorFlash { sectors, mem, dirty: None, poisoned: false })
+        Ok(SectorFlash {
+            sectors,
+            mem,
+            dirty: None,
+            poisoned: false,
+        })
     }
 
     /// The backend (to inspect what is durable).
@@ -96,12 +101,18 @@ impl<S: Sectors> SectorFlash<S> {
     }
 
     fn live(&self) -> Result<(), NorFlashErrorKind> {
-        if self.poisoned { Err(NorFlashErrorKind::Other) } else { Ok(()) }
+        if self.poisoned {
+            Err(NorFlashErrorKind::Other)
+        } else {
+            Ok(())
+        }
     }
 
     fn sector(&self, index: u32) -> Option<&SectorBytes> {
         let at = index as usize * SECTOR as usize;
-        self.mem.get(at..at + SECTOR as usize).and_then(|s| s.try_into().ok())
+        self.mem
+            .get(at..at + SECTOR as usize)
+            .and_then(|s| s.try_into().ok())
     }
 
     /// Stores sector `index` from memory; poisons on failure.
@@ -169,7 +180,10 @@ impl<S: Sectors> NorFlash for SectorFlash<S> {
             let src = bytes
                 .get(part.start - r.start..part.end - r.start)
                 .ok_or(NorFlashErrorKind::OutOfBounds)?;
-            let dst = self.mem.get_mut(part).ok_or(NorFlashErrorKind::OutOfBounds)?;
+            let dst = self
+                .mem
+                .get_mut(part)
+                .ok_or(NorFlashErrorKind::OutOfBounds)?;
             nor::program(dst, src);
             self.dirty = Some(index);
         }
@@ -240,18 +254,27 @@ mod tests {
             // A write that crosses into sector 1 stores sector 0 first.
             f.write(4092, &[9; 8]).expect("write");
             assert_eq!(f.sectors().stores(), 1);
-            assert_eq!(f.sectors().durable(0).map(|s| s[..8].to_vec()), Some(vec![1, 2, 3, 4, 5, 6, 7, 8]));
+            assert_eq!(
+                f.sectors().durable(0).map(|s| s[..8].to_vec()),
+                Some(vec![1, 2, 3, 4, 5, 6, 7, 8])
+            );
             assert_eq!(f.sectors().durable(1), None);
             f.sync().expect("sync");
             assert_eq!(f.sectors().stores(), 2);
-            assert_eq!(f.sectors().durable(1).map(|s| s[..4].to_vec()), Some(vec![9; 4]));
+            assert_eq!(
+                f.sectors().durable(1).map(|s| s[..4].to_vec()),
+                Some(vec![9; 4])
+            );
             // A sync with nothing dirty stores nothing.
             f.sync().expect("sync");
             assert_eq!(f.sectors().stores(), 2);
             // Erasing stores the dirty sector first, then the erase.
             f.write(8192, &[0; 4]).expect("write");
             f.erase(0, 4096).expect("erase");
-            assert_eq!(f.sectors().durable(2).map(|s| s[..4].to_vec()), Some(vec![0; 4]));
+            assert_eq!(
+                f.sectors().durable(2).map(|s| s[..4].to_vec()),
+                Some(vec![0; 4])
+            );
             assert_eq!(f.sectors().durable(0), None);
         }
         // Reopened: what was stored is what reads back.

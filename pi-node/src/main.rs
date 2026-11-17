@@ -13,13 +13,13 @@ use std::process::ExitCode;
 
 use middleware::zenoh::{SessionConfig, ZenohTransport};
 use mw_gateway::config::DEFAULT_BAUD;
-use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
+use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_pi_node::config::{NodeIdSource, gateway_state_dir};
 use mw_pi_node::{
-    DeviceParts, GatewayParts, PiNodeConfig, control_floor, facts, limits, node_id, open_state_flash, start,
-    wall_clock_ms,
+    DeviceParts, GatewayParts, PiNodeConfig, control_floor, facts, limits, node_id,
+    open_state_flash, start, wall_clock_ms,
 };
 use mw_service::run::{USAGE, terminate_signal};
 use mw_service::{Command, Config};
@@ -34,7 +34,11 @@ fn main() -> ExitCode {
     };
     let configs = GatewayConfig::from_process_env()
         .map_err(|e| e.to_string())
-        .and_then(|g| PiNodeConfig::from_process_env().map(|n| (g, n)).map_err(|e| e.to_string()));
+        .and_then(|g| {
+            PiNodeConfig::from_process_env()
+                .map(|n| (g, n))
+                .map_err(|e| e.to_string())
+        });
     let (mut gateway, node) = match configs {
         Ok(c) => c,
         Err(e) => {
@@ -47,7 +51,10 @@ fn main() -> ExitCode {
     if command != Command::Run {
         let result = service(&gateway, SysForward::detached())
             .map_err(|e| e.to_string())
-            .and_then(|s| s.execute(&command, &mut std::io::stdout().lock()).map_err(|e| e.to_string()));
+            .and_then(|s| {
+                s.execute(&command, &mut std::io::stdout().lock())
+                    .map_err(|e| e.to_string())
+            });
         return match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -56,7 +63,10 @@ fn main() -> ExitCode {
             }
         };
     }
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("tokio: {e}");
@@ -78,7 +88,8 @@ fn main() -> ExitCode {
 }
 
 async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
-    let runner_config = Config::from_process_env().map_err(|e| format!("invalid environment: {e}"))?;
+    let runner_config =
+        Config::from_process_env().map_err(|e| format!("invalid environment: {e}"))?;
     let router = runner_config
         .zenoh_router
         .clone()
@@ -91,14 +102,22 @@ async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
             node_id::from_machine_id(&contents).map_err(|e| format!("{}: {e}", path.display()))?
         }
     };
-    let flash = open_state_flash(&node.state).map_err(|e| format!("state {}: {e}", node.state.display()))?;
+    let flash = open_state_flash(&node.state)
+        .map_err(|e| format!("state {}: {e}", node.state.display()))?;
     let local = match &node.local_serial {
         // A gadget port or a PTY ignores the rate; 115200 suits a UART.
-        Some(path) => Some(io::open_serial(path, DEFAULT_BAUD).map_err(|e| format!("local serial: {e}"))?),
+        Some(path) => {
+            Some(io::open_serial(path, DEFAULT_BAUD).map_err(|e| format!("local serial: {e}"))?)
+        }
         None => None,
     };
-    let zenoh = SessionConfig::new().connect(router).build().map_err(|e| format!("zenoh config: {e}"))?;
-    let session = ZenohTransport::open(zenoh).await.map_err(|e| format!("zenoh: {e}"))?;
+    let zenoh = SessionConfig::new()
+        .connect(router)
+        .build()
+        .map_err(|e| format!("zenoh config: {e}"))?;
+    let session = ZenohTransport::open(zenoh)
+        .await
+        .map_err(|e| format!("zenoh: {e}"))?;
     eprintln!(
         "mw-pi-node: node {} ({}), state {}",
         node_id::hex(id),
@@ -113,9 +132,20 @@ async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
             gateway.state_dir.display()
         );
     }
-    let device = DeviceParts { flash, facts: facts(id), limits: limits(node.memory_bytes), local };
-    let parts = GatewayParts { bridge: gateway.bridge_with_floor(floor), options: gateway.shell_options(), store };
-    let (mut pi, sys) = start(device, parts, session).await.map_err(|e| e.to_string())?;
+    let device = DeviceParts {
+        flash,
+        facts: facts(id),
+        limits: limits(node.memory_bytes),
+        local,
+    };
+    let parts = GatewayParts {
+        bridge: gateway.bridge_with_floor(floor),
+        options: gateway.shell_options(),
+        store,
+    };
+    let (mut pi, sys) = start(device, parts, session)
+        .await
+        .map_err(|e| e.to_string())?;
     let svc = service(&gateway, sys).map_err(|e| e.to_string())?;
     let (stop_runner, runner_stopped) = tokio::sync::oneshot::channel::<()>();
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {

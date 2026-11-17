@@ -112,7 +112,10 @@ mod tests {
         assert_eq!(q.len(), QUERY_ATTACHMENT_LEN + 1 + TRACE_CONTEXT_LEN);
         assert_eq!(q[2], 0x10);
         let h = decode_query(&q).expect("query");
-        assert_eq!((h.sender, h.deadline_ms, h.trace), (ID, 3000, Some(trace())));
+        assert_eq!(
+            (h.sender, h.deadline_ms, h.trace),
+            (ID, 3000, Some(trace()))
+        );
         assert_eq!(decode_trace(&q), Some(trace()));
         assert_eq!(decode_trace(&encode_query(ID, 3000, None, None)), None);
         // Neither kind is mistaken for the other.

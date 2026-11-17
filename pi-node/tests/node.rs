@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use middleware::loader::trust::{ControlCounter, ControlOp, TARGET_LEN, Version};
 use middleware::loader::{Caps, DeviceInfo, PayloadStatus, keys};
 use middleware::serial::link::{INBOX_BYTES, LinkError, SerialLink};
 use middleware::transport::{
@@ -32,19 +33,19 @@ use middleware::transport::{
 use middleware::zenoh::{SessionConfig, ZenohSubscriber, ZenohTransport};
 use middleware::{Key, KeyFilter, SenderId};
 use mw_gateway::bridge::encode_sys_request;
-use mw_gateway::state::{ControlStore, Persisted};
 use mw_gateway::io::{ChannelIo, pair};
+use mw_gateway::state::{ControlStore, Persisted};
 use mw_gateway::{GatewayConfig, SysForward, service};
+use mw_pi_node::config::gateway_state_dir;
 use mw_pi_node::service::CHIP;
 use mw_pi_node::shell::Ended;
-use mw_pi_node::config::gateway_state_dir;
 use mw_pi_node::{
-    DeviceParts, GatewayParts, PiNode, control_floor, facts, limits, open_state_flash, start, wall_clock_ms,
+    DeviceParts, GatewayParts, PiNode, control_floor, facts, limits, open_state_flash, start,
+    wall_clock_ms,
 };
 use mw_service::{Ctx, Links, Served};
 use mwctl::plan::upload_plan;
 use mwctl::sign::{Seed, sign_commit, sign_control};
-use middleware::loader::trust::{ControlCounter, ControlOp, TARGET_LEN, Version};
 
 const NODE: SenderId = SenderId([0x5e, 0x11, 0x0d, 0xe0, 0x2a, 0x9c, 0x41, 0x07]);
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -64,7 +65,8 @@ fn demo() -> Vec<u8> {
 }
 
 fn state_dir(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("pi-node-{name}-{}", std::process::id()));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pi-node-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -79,8 +81,14 @@ async fn zenoh_pair() -> (ZenohTransport, ZenohTransport) {
         .expect("addr")
         .port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
-    let cluster = SessionConfig::new().listen(endpoint.clone()).build().expect("config");
-    let node = SessionConfig::new().connect(endpoint).build().expect("config");
+    let cluster = SessionConfig::new()
+        .listen(endpoint.clone())
+        .build()
+        .expect("config");
+    let node = SessionConfig::new()
+        .connect(endpoint)
+        .build()
+        .expect("config");
     let cluster = ZenohTransport::open(cluster).await.expect("open cluster");
     let node = ZenohTransport::open(node).await.expect("open node");
     (cluster, node)
@@ -110,13 +118,20 @@ struct Sys {
 
 impl Sys {
     fn new(sys: SysForward, state: &Path) -> Self {
-        let (spec, served) = service(&gateway_config(state), sys).expect("service").into_parts();
+        let (spec, served) = service(&gateway_config(state), sys)
+            .expect("service")
+            .into_parts();
         assert_eq!(spec.serves, ["gw/sys"]);
         Sys { served, ids: 0 }
     }
 
     /// One call as `principal` (anonymous for `None`) with a fresh request id.
-    async fn call_as(&mut self, principal: Option<&str>, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, HandlerError> {
+    async fn call_as(
+        &mut self,
+        principal: Option<&str>,
+        key: Key<'_>,
+        body: &[u8],
+    ) -> Result<Vec<u8>, HandlerError> {
         self.ids += 1;
         let id = format!("pn8-{}", self.ids);
         let meta = RequestMeta::NONE.with_request_id_str(&id);
@@ -143,7 +158,11 @@ impl Sys {
 
     /// Uploads `image` as the updater (signed as `version`, when given);
     /// the commit's reply.
-    async fn upload(&mut self, image: &[u8], version: Option<u32>) -> Result<Vec<u8>, HandlerError> {
+    async fn upload(
+        &mut self,
+        image: &[u8],
+        version: Option<u32>,
+    ) -> Result<Vec<u8>, HandlerError> {
         let auth = version.and_then(|v| sign_commit(image, &test_seed(), Version(v)).ok());
         let steps = upload_plan(image, None, auth).expect("plan");
         let (commit, transfer) = steps.split_last().expect("steps");
@@ -157,7 +176,14 @@ impl Sys {
     async fn signed_start(&mut self, counter: u64) -> Result<Vec<u8>, HandlerError> {
         let mut target = [0u8; TARGET_LEN];
         target.copy_from_slice(&NODE.0[..TARGET_LEN]);
-        let body = sign_control(&test_seed(), ControlOp::Start, &target, ControlCounter(counter)).expect("sign").encode();
+        let body = sign_control(
+            &test_seed(),
+            ControlOp::Start,
+            &target,
+            ControlCounter(counter),
+        )
+        .expect("sign")
+        .encode();
         self.call(keys::START, &body).await
     }
 
@@ -180,17 +206,29 @@ impl Sys {
 /// Waits for a publication on the subscriber; its payload.
 async fn next(sub: &mut ZenohSubscriber) -> Vec<u8> {
     let mut buf = vec![0u8; 2048];
-    let s = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf)).await.expect("in time").expect("sample");
+    let s = tokio::time::timeout(TIMEOUT, sub.recv(&mut buf))
+        .await
+        .expect("in time")
+        .expect("sample");
     s.payload.to_vec()
 }
 
 type Local = SerialLink<ChannelIo, INBOX_BYTES>;
 
-async fn local_request(link: &mut Local, key: &'static str, body: &[u8]) -> Result<Vec<u8>, LinkError<mw_gateway::io::Closed>> {
+async fn local_request(
+    link: &mut Local,
+    key: &'static str,
+    body: &[u8],
+) -> Result<Vec<u8>, LinkError<mw_gateway::io::Closed>> {
     let mut out = vec![0u8; 1024];
     let r = tokio::time::timeout(
         TIMEOUT,
-        link.request_with(Key::from_static(key), body, &mut out, &RequestOptions::default()),
+        link.request_with(
+            Key::from_static(key),
+            body,
+            &mut out,
+            &RequestOptions::default(),
+        ),
     )
     .await
     .expect("in time")?;
@@ -208,7 +246,11 @@ async fn node(state: &Path, session: ZenohTransport) -> (PiNode, Sys, Local) {
         limits: limits(1024 * 1024),
         local: Some(local_node),
     };
-    let gateway = GatewayParts { bridge: config.bridge_with_floor(floor), options: config.shell_options(), store };
+    let gateway = GatewayParts {
+        bridge: config.bridge_with_floor(floor),
+        options: config.shell_options(),
+        store,
+    };
     let (pi, sys) = start(device, gateway, session).await.expect("start");
     (pi, Sys::new(sys, state), SerialLink::with_inbox(local_test))
 }
@@ -222,8 +264,14 @@ fn now_ms() -> u64 {
 async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     let state = state_dir("e2e");
     let (mut cluster, session) = zenoh_pair().await;
-    let mut count = cluster.subscribe(KeyFilter::Exact(Key::from_static("app/pi/count"))).await.expect("subscribe");
-    let mut out = cluster.subscribe(KeyFilter::Exact(Key::from_static("app/pi/out"))).await.expect("subscribe");
+    let mut count = cluster
+        .subscribe(KeyFilter::Exact(Key::from_static("app/pi/count")))
+        .await
+        .expect("subscribe");
+    let mut out = cluster
+        .subscribe(KeyFilter::Exact(Key::from_static("app/pi/out")))
+        .await
+        .expect("subscribe");
     let (pi, mut sys, mut local) = node(&state, session).await;
 
     // sys/info through gw/sys: the node is a board named after its platform.
@@ -238,20 +286,35 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     // Claim over the local link: physical access. Through gw/sys a claim
     // is always refused, even for an updater.
     assert_eq!(
-        sys.call(keys::TRUST_CLAIM, &test_seed().public_key().as_bytes()).await,
+        sys.call(keys::TRUST_CLAIM, &test_seed().public_key().as_bytes())
+            .await,
         Err(HandlerError::Denied)
     );
-    local_request(&mut local, "sys/trust/claim", &test_seed().public_key().as_bytes()).await.expect("claim");
+    local_request(
+        &mut local,
+        "sys/trust/claim",
+        &test_seed().public_key().as_bytes(),
+    )
+    .await
+    .expect("claim");
     // The gateway learns the claim from a forwarded sys/trust/info.
     sys.call(keys::TRUST_INFO, &[]).await.expect("trust info");
 
     let image = demo();
     // Not an updater: refused before the device.
-    assert_eq!(sys.call_as(Some(STRANGER), keys::BEGIN, &[0; 8]).await, Err(HandlerError::Denied));
-    assert_eq!(sys.call_as(None, keys::BEGIN, &[0; 8]).await, Err(HandlerError::Denied));
+    assert_eq!(
+        sys.call_as(Some(STRANGER), keys::BEGIN, &[0; 8]).await,
+        Err(HandlerError::Denied)
+    );
+    assert_eq!(
+        sys.call_as(None, keys::BEGIN, &[0; 8]).await,
+        Err(HandlerError::Denied)
+    );
     // Unsigned commit: refused; signed: installs.
     assert_eq!(sys.upload(&image, None).await, Err(HandlerError::Denied));
-    sys.upload(&image, Some(1_761_500_000)).await.expect("signed upload");
+    sys.upload(&image, Some(1_761_500_000))
+        .await
+        .expect("signed upload");
     // Unsigned start refused; a signed start runs it; its replay is refused.
     assert_eq!(sys.call(keys::START, &[]).await, Err(HandlerError::Denied));
     let counter = now_ms() + 1_000;
@@ -268,8 +331,13 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     let echoed = tokio::time::timeout(TIMEOUT, async {
         let mut buf = vec![0u8; 256];
         loop {
-            cluster.publish(Key::from_static("app/pi/in"), b"from the cluster").await.expect("publish");
-            if let Ok(Ok(s)) = tokio::time::timeout(Duration::from_millis(200), out.recv(&mut buf)).await {
+            cluster
+                .publish(Key::from_static("app/pi/in"), b"from the cluster")
+                .await
+                .expect("publish");
+            if let Ok(Ok(s)) =
+                tokio::time::timeout(Duration::from_millis(200), out.recv(&mut buf)).await
+            {
                 return s.payload.to_vec();
             }
         }
@@ -279,7 +347,9 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     assert_eq!(echoed, b"from the cluster");
 
     // The ABI 5 served key answers over the local link with the node id.
-    let reply = local_request(&mut local, "app/pi/echo", b"hello").await.expect("echo");
+    let reply = local_request(&mut local, "app/pi/echo", b"hello")
+        .await
+        .expect("echo");
     assert_eq!(&reply[..8], &NODE.0);
     assert_eq!(&reply[8..], b"hello");
     assert!(matches!(
@@ -306,15 +376,29 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     // Restart on the same state directory: the payload starts by itself,
     // the pinned key and min_version hold.
     let (mut cluster, session) = zenoh_pair().await;
-    let mut count = cluster.subscribe(KeyFilter::Exact(Key::from_static("app/pi/count"))).await.expect("subscribe");
+    let mut count = cluster
+        .subscribe(KeyFilter::Exact(Key::from_static("app/pi/count")))
+        .await
+        .expect("subscribe");
     let (pi, mut sys, mut local) = node(&state, session).await;
     let raw = sys.info().await;
-    assert_eq!(DeviceInfo::decode(&raw).expect("decode").status, PayloadStatus::Running);
+    assert_eq!(
+        DeviceInfo::decode(&raw).expect("decode").status,
+        PayloadStatus::Running
+    );
     next(&mut count).await;
     sys.call(keys::TRUST_INFO, &[]).await.expect("trust info");
-    assert_eq!(sys.upload(&image, Some(1_761_500_000)).await, Err(HandlerError::Denied));
+    assert_eq!(
+        sys.upload(&image, Some(1_761_500_000)).await,
+        Err(HandlerError::Denied)
+    );
     assert!(matches!(
-        local_request(&mut local, "sys/trust/claim", &Seed::new([9; 32]).public_key().as_bytes()).await,
+        local_request(
+            &mut local,
+            "sys/trust/claim",
+            &Seed::new([9; 32]).public_key().as_bytes()
+        )
+        .await,
         Err(LinkError::Handler(HandlerError::Denied))
     ));
     let report = pi.stop().await;

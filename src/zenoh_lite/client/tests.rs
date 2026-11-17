@@ -374,10 +374,16 @@ fn k19_lite_request_meta_reads_both_query_forms() {
     // The 0.5 attachment: sender and deadline, no trace.
     let plain = wire::encode_query(id, 250, None, None);
     let m = request_meta(Some(&plain));
-    assert_eq!((m.sender, m.deadline_ms, m.trace, m.request_id), (Some(id), Some(250), None, None));
+    assert_eq!(
+        (m.sender, m.deadline_ms, m.trace, m.request_id),
+        (Some(id), Some(250), None, None)
+    );
     // The extended one: the trace too; the request id is not carried.
     let extended = wire::encode_query(id, 250, Some(t), Some(rid));
     let m = request_meta(Some(&extended));
-    assert_eq!((m.sender, m.deadline_ms, m.trace, m.request_id), (Some(id), Some(250), Some(t), None));
+    assert_eq!(
+        (m.sender, m.deadline_ms, m.trace, m.request_id),
+        (Some(id), Some(250), Some(t), None)
+    );
     assert_eq!(request_meta(None), RequestMeta::NONE);
 }

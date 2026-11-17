@@ -110,7 +110,9 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         };
         self.outbox.log(&installed);
         match boot.trust {
-            None => self.outbox.log("trust: record unreadable; installs refused"),
+            None => self
+                .outbox
+                .log("trust: record unreadable; installs refused"),
             Some(p) => self.outbox.log(&format!("trust: {:?}", p.trust)),
         }
         if self.svc.state().startable() {
@@ -140,7 +142,12 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     }
 
     /// Handles one request: the reply body or the error.
-    pub fn request(&mut self, key: Key<'_>, body: &[u8], meta: &RequestMeta<'_>) -> Result<Vec<u8>, HandlerError> {
+    pub fn request(
+        &mut self,
+        key: Key<'_>,
+        body: &[u8],
+        meta: &RequestMeta<'_>,
+    ) -> Result<Vec<u8>, HandlerError> {
         let mut out = vec![0u8; MAX_RAW_FRAME];
         let running = self.payload.is_some() && self.svc.status() == PayloadStatus::Running;
         let route = match self.payload.as_ref() {
@@ -153,7 +160,11 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             Route::System | Route::Payload => self.ask_service(key, body, &mut out),
         };
         self.settle();
-        result.and_then(|n| out.get(..n).map(<[u8]>::to_vec).ok_or(HandlerError::BufferTooSmall))
+        result.and_then(|n| {
+            out.get(..n)
+                .map(<[u8]>::to_vec)
+                .ok_or(HandlerError::BufferTooSmall)
+        })
     }
 
     /// A request on a key the running payload serves.
@@ -164,14 +175,19 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         meta: &RequestMeta<'_>,
         out: &mut [u8],
     ) -> Result<usize, HandlerError> {
-        let Some(p) = self.payload.as_mut() else { return Err(HandlerError::NotFound) };
+        let Some(p) = self.payload.as_mut() else {
+            return Err(HandlerError::NotFound);
+        };
         let cap = out.len().min(REPLY_CAPACITY);
         let result = p.request(key, body, meta, out.get_mut(..cap).unwrap_or_default());
         let trap = result.as_ref().err().cloned();
         let answered = payload_reply(result);
         if answered.trapped {
             let what = trap.map_or_else(|| "poisoned".to_owned(), |t| t.to_string());
-            self.outbox.log(&format!("payload trapped on request {}: {what}", key.as_str()));
+            self.outbox.log(&format!(
+                "payload trapped on request {}: {what}",
+                key.as_str()
+            ));
             self.svc.trapped();
             self.end_run();
         }
@@ -179,7 +195,12 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     }
 
     /// A request for the service (`sys/...`, or a key nothing serves).
-    fn ask_service(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Result<usize, HandlerError> {
+    fn ask_service(
+        &mut self,
+        key: Key<'_>,
+        body: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, HandlerError> {
         let Handled { reply, stop, notes } = self.svc.handle(key, body, out);
         for note in &notes {
             self.outbox.log(&note.to_string());
@@ -199,7 +220,9 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     pub fn publication(&mut self, key: Key<'_>, body: &[u8]) {
         let state = self.svc.state();
         let delivered = match self.payload.as_mut() {
-            Some(p) if route_publication(&state, key, p.subscriptions()) => p.deliver(key, body).map(|_| ()),
+            Some(p) if route_publication(&state, key, p.subscriptions()) => {
+                p.deliver(key, body).map(|_| ())
+            }
             _ => Ok(()),
         };
         if let Err(trap) = delivered {
@@ -220,10 +243,17 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.settle();
     }
 
-    fn run_due(p: &mut Payload<PiDevice<C>>, clock: &C, dropped: &mut u32, outbox: &mut Outbox) -> Result<(), Trap> {
+    fn run_due(
+        p: &mut Payload<PiDevice<C>>,
+        clock: &C,
+        dropped: &mut u32,
+        outbox: &mut Outbox,
+    ) -> Result<(), Trap> {
         p.device().fire_timers();
         for _ in 0..MAX_EVENTS {
-            let Some(event) = p.device().pop_event() else { break };
+            let Some(event) = p.device().pop_event() else {
+                break;
+            };
             p.dispatch(event)?;
         }
         let overflow = p.device().overflow();
@@ -238,9 +268,9 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     pub fn next_wake_us(&mut self) -> Option<u64> {
         let p = self.payload.as_mut()?;
         let now_us = self.clock.now_us();
-        let tick = p
-            .next_tick()
-            .map(|due| now_us.saturating_add(u64::from(tick_delay(self.clock.now_ms(), due)) * 1000));
+        let tick = p.next_tick().map(|due| {
+            now_us.saturating_add(u64::from(tick_delay(self.clock.now_ms(), due)) * 1000)
+        });
         let alarm = p.device().next_alarm_us();
         match (tick, alarm) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -255,7 +285,10 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
 
     /// Publications dropped because the outboxes were full.
     pub fn dropped(&mut self) -> u32 {
-        let device = self.payload.as_mut().map_or(0, |p| p.device().outbox().dropped());
+        let device = self
+            .payload
+            .as_mut()
+            .map_or(0, |p| p.device().outbox().dropped());
         self.outbox.dropped().saturating_add(device)
     }
 
@@ -291,8 +324,13 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
 
     fn load(&mut self) -> Result<(Payload<PiDevice<C>>, u32), StartError> {
         let node = self.svc.node();
-        let store = self.svc.store_mut().ok_or(StartError::Store(StoreError::NoImage))?;
-        let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
+        let store = self
+            .svc
+            .store_mut()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
+        let header = store
+            .header()
+            .ok_or(StartError::Store(StoreError::NoImage))?;
         let mut image = vec![0u8; header.len as usize];
         store.load(header, &mut image).map_err(StartError::Store)?;
         let compiled = Compiled::new(&image, self.limits).map_err(StartError::Load)?;

@@ -239,7 +239,10 @@ impl FakeDevice {
             peer_ip: [0; 4],
             peer_port: 0,
         };
-        FakeDevice { net: vec![link(0), link(1)], ..self }
+        FakeDevice {
+            net: vec![link(0), link(1)],
+            ..self
+        }
     }
 
     /// Link `n`'s current addresses.
@@ -404,11 +407,16 @@ impl FakeDevice {
         }
         if key == keys::NET_ADDR && !self.net.is_empty() {
             let link = *body.first().ok_or(HandlerError::InvalidRequest)?;
-            let slot = self.net.get_mut(usize::from(link)).ok_or(HandlerError::InvalidRequest)?;
+            let slot = self
+                .net
+                .get_mut(usize::from(link))
+                .ok_or(HandlerError::InvalidRequest)?;
             return match body.len() {
                 1 => {
                     let r = slot.set_body(link);
-                    out.get_mut(..r.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(&r);
+                    out.get_mut(..r.len())
+                        .ok_or(HandlerError::BufferTooSmall)?
+                        .copy_from_slice(&r);
                     Ok(r.len())
                 }
                 n if n == 1 + NetAddr::LEN => {

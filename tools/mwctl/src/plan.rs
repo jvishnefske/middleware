@@ -180,7 +180,11 @@ pub fn initial_memory_bytes(wasm: &[u8]) -> Option<u64> {
             if flags & 1 != 0 {
                 leb(wasm, &mut p)?;
             }
-            let page = if flags & 8 != 0 { 1u64 << leb(wasm, &mut p)?.min(16) } else { 65536 };
+            let page = if flags & 8 != 0 {
+                1u64 << leb(wasm, &mut p)?.min(16)
+            } else {
+                65536
+            };
             return initial.checked_mul(page);
         }
         at = end;
@@ -291,7 +295,11 @@ mod tests {
         // (memory 1): one 64 KiB page.
         let one_page = b"\0asm\x01\0\0\0\x05\x03\x01\x00\x01";
         assert_eq!(initial_memory_bytes(one_page), Some(65536));
-        assert!(memory_misfit(one_page, 16384).unwrap().contains("pagesize 1"));
+        assert!(
+            memory_misfit(one_page, 16384)
+                .unwrap()
+                .contains("pagesize 1")
+        );
         // (memory 4096 4096 (pagesize 1)): flags 0b1001, log2 0.
         let bytes = b"\0asm\x01\0\0\0\x01\x01\x00\x05\x07\x01\x09\x80\x20\x80\x20\x00";
         assert_eq!(initial_memory_bytes(bytes), Some(4096));

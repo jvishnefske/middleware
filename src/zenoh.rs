@@ -624,10 +624,7 @@ impl Requester for ZenohTransport {
         #[cfg(feature = "zenoh-otel")]
         {
             let op = otel::Op::request(key.as_str(), options.target, request.len(), options.trace);
-            let trace = op
-                .trace()
-                .filter(|_| self.trace_context)
-                .or(options.trace);
+            let trace = op.trace().filter(|_| self.trace_context).or(options.trace);
             let result = self
                 .request_best(key, request, response, options, trace)
                 .await;
@@ -742,10 +739,7 @@ impl Gather for ZenohTransport {
         #[cfg(feature = "zenoh-otel")]
         let op = otel::Op::request(key.as_str(), options.target, request.len(), options.trace);
         #[cfg(feature = "zenoh-otel")]
-        let trace = op
-            .trace()
-            .filter(|_| self.trace_context)
-            .or(options.trace);
+        let trace = op.trace().filter(|_| self.trace_context).or(options.trace);
         #[cfg(not(feature = "zenoh-otel"))]
         let trace = options.trace;
         let replies = match self.query(key, request, options, QueryTarget::All, trace) {

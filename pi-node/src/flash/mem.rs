@@ -26,14 +26,22 @@ pub struct MemSectors<'d> {
 impl<'d> MemSectors<'d> {
     /// The backend over `disk`, with no fault armed.
     pub fn new(disk: &'d mut Disk) -> Self {
-        MemSectors { disk, stores: 0, cut: None }
+        MemSectors {
+            disk,
+            stores: 0,
+            cut: None,
+        }
     }
 
     /// The same backend losing power after `n` successful stores: the
     /// `n`-th store from now (counting from 0) and every later one fail
     /// and change nothing, as a store is atomic.
     pub fn cut_after(self, n: usize) -> Self {
-        MemSectors { cut: Some(n), stores: 0, ..self }
+        MemSectors {
+            cut: Some(n),
+            stores: 0,
+            ..self
+        }
     }
 
     /// Stores attempted so far (failed ones included).
@@ -49,7 +57,11 @@ impl<'d> MemSectors<'d> {
 
 impl Sectors for MemSectors<'_> {
     fn load(&mut self, count: u32) -> io::Result<Vec<(u32, Box<SectorBytes>)>> {
-        Ok(self.disk.range(..count).map(|(i, b)| (*i, b.clone())).collect())
+        Ok(self
+            .disk
+            .range(..count)
+            .map(|(i, b)| (*i, b.clone()))
+            .collect())
     }
 
     fn store(&mut self, index: u32, data: Option<&SectorBytes>) -> io::Result<()> {

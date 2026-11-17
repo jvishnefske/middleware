@@ -183,11 +183,9 @@ impl BridgeTable {
     /// Installs `b` (or finds the identical rule) and returns its handle.
     pub fn add(&mut self, b: &Bridge<'_>) -> Result<u8, AbiError> {
         let filter = b.filter.to_buf().map_err(|_| AbiError::InvalidKey)?;
-        if let Some(i) = self
-            .rules
-            .iter()
-            .position(|r| matches!(r, Some(r) if r.src == b.src && r.dst == b.dst && r.filter == filter))
-        {
+        if let Some(i) = self.rules.iter().position(
+            |r| matches!(r, Some(r) if r.src == b.src && r.dst == b.dst && r.filter == filter),
+        ) {
             return Ok(handle_of(i));
         }
         let i = self
@@ -320,7 +318,13 @@ mod tests {
         assert_eq!((b, c), (BRIDGE_BASE + 1, BRIDGE_BASE + 2));
 
         let f = t.route(0, K("demo/x"));
-        assert_eq!(f, Forward { links: 0b10, rules: 0b011 });
+        assert_eq!(
+            f,
+            Forward {
+                links: 0b10,
+                rules: 0b011
+            }
+        );
         assert_eq!(t.route(0, K("demo")).rules, 0b001);
         assert_eq!(t.route(0, K("demox")), Forward::default());
         assert_eq!(t.route(1, K("demo/x")), Forward::default());
@@ -328,8 +332,20 @@ mod tests {
 
         t.account(f, 0b10);
         t.account(t.route(0, K("demo/y")), 0);
-        assert_eq!(t.get(a).unwrap().stats, BridgeStats { forwarded: 1, dropped: 1 });
-        assert_eq!(t.get(b).unwrap().stats, BridgeStats { forwarded: 1, dropped: 0 });
+        assert_eq!(
+            t.get(a).unwrap().stats,
+            BridgeStats {
+                forwarded: 1,
+                dropped: 1
+            }
+        );
+        assert_eq!(
+            t.get(b).unwrap().stats,
+            BridgeStats {
+                forwarded: 1,
+                dropped: 0
+            }
+        );
 
         assert_eq!(t.remove(b), Ok(()));
         assert_eq!(t.remove(b), Err(AbiError::Busy));
@@ -350,7 +366,10 @@ mod tests {
             let h = t.add(&parse(0, k.as_bytes(), 1).unwrap()).unwrap();
             assert_eq!(handle_index(h), Some(i));
         }
-        assert_eq!(t.add(&parse(0, b"kg", 1).unwrap()), Err(AbiError::NoResources));
+        assert_eq!(
+            t.add(&parse(0, b"kg", 1).unwrap()),
+            Err(AbiError::NoResources)
+        );
         assert_eq!(t.iter().count(), MAX_BRIDGES);
         t.clear();
         assert_eq!(t.iter().count(), 0);

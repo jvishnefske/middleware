@@ -1194,7 +1194,10 @@ impl Device for SimDevice {
             middleware::Filter::Exact(k) => k.as_str().to_string(),
             middleware::Filter::Prefix(k) => format!("{k}/**"),
         };
-        self.event(format!("bridge{handle} link{} {key} -> link{}", b.src, b.dst));
+        self.event(format!(
+            "bridge{handle} link{} {key} -> link{}",
+            b.src, b.dst
+        ));
         Ok(handle)
     }
 

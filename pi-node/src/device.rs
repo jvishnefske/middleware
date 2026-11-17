@@ -93,12 +93,19 @@ impl Default for Outbox {
 impl Outbox {
     /// An empty outbox holding at most `capacity` publications.
     pub fn with_capacity(capacity: usize) -> Self {
-        Outbox { queue: VecDeque::with_capacity(capacity), capacity, dropped: 0 }
+        Outbox {
+            queue: VecDeque::with_capacity(capacity),
+            capacity,
+            dropped: 0,
+        }
     }
 
     /// Queues a publication; `false` (counted) when full.
     pub fn push(&mut self, key: Key<'_>, payload: &[u8]) -> bool {
-        self.push_out(Out { key: key.as_str().to_owned(), payload: payload.to_vec() })
+        self.push_out(Out {
+            key: key.as_str().to_owned(),
+            payload: payload.to_vec(),
+        })
     }
 
     /// Queues an owned publication; `false` (counted) when full.
@@ -155,7 +162,13 @@ pub struct PiDevice<C> {
 impl<C: Clock> PiDevice<C> {
     /// A device reading `clock`, answering `node_id` with `node`.
     pub fn new(clock: C, node: SenderId) -> Self {
-        PiDevice { clock, node, timers: Timers::new(), events: EventQueue::new(), outbox: Outbox::default() }
+        PiDevice {
+            clock,
+            node,
+            timers: Timers::new(),
+            events: EventQueue::new(),
+            outbox: Outbox::default(),
+        }
     }
 
     /// When the earliest running timer is due, in µs on the clock.
@@ -202,7 +215,11 @@ impl<C: Clock> wasm_host::Device for PiDevice<C> {
         if !fits_frame(key, data.len()) {
             return Err(AbiError::InvalidArgument);
         }
-        if self.outbox.push(key, data) { Ok(()) } else { Err(AbiError::Transport) }
+        if self.outbox.push(key, data) {
+            Ok(())
+        } else {
+            Err(AbiError::Transport)
+        }
     }
 
     fn now_ms(&mut self) -> u32 {
@@ -280,21 +297,37 @@ mod tests {
         clock.0.set(5_000_123);
         assert_eq!(d.now_ms(), 5_000);
         assert_eq!(d.now_us(), 5_000_123);
-        d.publish(Key::from_static("app/pi/x"), b"hi").expect("publish");
-        assert_eq!(d.publish(Key::from_static("sys/payload/status"), b"x"), Err(AbiError::InvalidKey));
+        d.publish(Key::from_static("app/pi/x"), b"hi")
+            .expect("publish");
+        assert_eq!(
+            d.publish(Key::from_static("sys/payload/status"), b"x"),
+            Err(AbiError::InvalidKey)
+        );
         let big = vec![0u8; MAX_RAW_FRAME];
-        assert_eq!(d.publish(Key::from_static("app/pi/x"), &big), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            d.publish(Key::from_static("app/pi/x"), &big),
+            Err(AbiError::InvalidArgument)
+        );
         d.log("hello");
         let out: Vec<Out> = d.outbox().drain().collect();
         assert_eq!(
             out,
             [
-                Out { key: "app/pi/x".into(), payload: b"hi".to_vec() },
-                Out { key: "sys/log".into(), payload: b"hello".to_vec() },
+                Out {
+                    key: "app/pi/x".into(),
+                    payload: b"hi".to_vec()
+                },
+                Out {
+                    key: "sys/log".into(),
+                    payload: b"hello".to_vec()
+                },
             ]
         );
         assert_eq!(d.serve(Key::from_static("app/pi/echo")), Ok(()));
-        assert_eq!(d.serve(Key::from_static("sys/info")), Err(AbiError::InvalidKey));
+        assert_eq!(
+            d.serve(Key::from_static("sys/info")),
+            Err(AbiError::InvalidKey)
+        );
         assert_eq!(d.node_id(), Ok(NODE));
     }
 
@@ -303,9 +336,13 @@ mod tests {
         let clock = Manual::default();
         let mut d = PiDevice::new(&clock, NODE);
         for i in 0..OUTBOX {
-            d.publish(Key::from_static("app/n"), &[i as u8]).expect("room");
+            d.publish(Key::from_static("app/n"), &[i as u8])
+                .expect("room");
         }
-        assert_eq!(d.publish(Key::from_static("app/n"), b"late"), Err(AbiError::Transport));
+        assert_eq!(
+            d.publish(Key::from_static("app/n"), b"late"),
+            Err(AbiError::Transport)
+        );
         d.log("also dropped");
         assert_eq!(d.outbox().dropped(), 2);
         let first: Vec<u8> = d.outbox().drain().map(|o| o.payload[0]).collect();
@@ -322,7 +359,8 @@ mod tests {
     fn pn6_timers_fire_as_events_and_peripherals_are_unsupported() {
         let clock = Manual::default();
         let mut d = PiDevice::new(&clock, NODE);
-        d.timer_start(TimerSpec::parse(1, 1000, 1).expect("spec")).expect("start");
+        d.timer_start(TimerSpec::parse(1, 1000, 1).expect("spec"))
+            .expect("start");
         assert_eq!(d.next_alarm_us(), Some(1000));
         clock.0.set(2_500);
         d.fire_timers();
@@ -339,10 +377,19 @@ mod tests {
         assert_eq!(d.gpio_read(4), Err(AbiError::Unsupported));
         assert_eq!(d.adc_read(26), Err(AbiError::Unsupported));
         assert_eq!(
-            d.i2c_open(I2cConfig { bus: 0, freq_hz: 100_000 }),
+            d.i2c_open(I2cConfig {
+                bus: 0,
+                freq_hz: 100_000
+            }),
             u
         );
-        assert_eq!(d.spi_open(SpiConfig::parse(0, 2, 3, 4, 5, 1000, 0).expect("spi")), u);
-        assert_eq!(d.uart_open(UartConfig::parse(1, 4, 5, 115_200).expect("uart")), u);
+        assert_eq!(
+            d.spi_open(SpiConfig::parse(0, 2, 3, 4, 5, 1000, 0).expect("spi")),
+            u
+        );
+        assert_eq!(
+            d.uart_open(UartConfig::parse(1, 4, 5, 115_200).expect("uart")),
+            u
+        );
     }
 }

@@ -752,8 +752,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let port = match (&zenoh, port) {
         (Some(_), Some(_)) => return Err("--port and --zenoh exclude each other".into()),
         (Some(_), None) => String::new(),
-        (None, port) => port
-            .ok_or("--port <PATH> (or --udp <HOST>) is required (mwctl never scans for ports)")?,
+        (None, port) => {
+            port.ok_or("--port <PATH> (or --udp <HOST>) is required (mwctl never scans for ports)")?
+        }
     };
     Ok(Parsed::Run(Cli {
         port,

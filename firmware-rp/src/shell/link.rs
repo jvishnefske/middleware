@@ -119,14 +119,20 @@ pub type UsbLink = SerialLink<Duplex<BufferedReceiver<'static, UsbDriver>, CdcWr
 
 /// Sends one frame; `false` when it timed out or failed.
 async fn send(link: &mut UsbLink, frame: &Frame<'_>) -> bool {
-    matches!(with_timeout(SEND_TIMEOUT, link.send(frame)).await, Ok(Ok(())))
+    matches!(
+        with_timeout(SEND_TIMEOUT, link.send(frame)).await,
+        Ok(Ok(()))
+    )
 }
 
 /// Publishes through the link's `Publisher`; `false` when it timed out or
 /// failed. A cancelled publish leaves the rest of its frame for the next
 /// send, so the host never sees a torn frame.
 async fn publish(link: &mut UsbLink, key: middleware::Key<'_>, payload: &[u8]) -> bool {
-    matches!(with_timeout(SEND_TIMEOUT, Publisher::publish(link, key, payload)).await, Ok(Ok(())))
+    matches!(
+        with_timeout(SEND_TIMEOUT, Publisher::publish(link, key, payload)).await,
+        Ok(Ok(()))
+    )
 }
 
 /// Runs the protocol on the CDC port forever.

@@ -32,10 +32,10 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use middleware::wasm_abi::bridge;
 use middleware::wasm_abi::periph::{
     self, I2cConfig, MAX_I2C, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
-use middleware::wasm_abi::bridge;
 use middleware::wasm_abi::route::{self, RouteStat};
 use middleware::wasm_abi::{self, AbiError, IMPORT_MODULE, MAX_MESSAGE, guest_range};
 use wasmi::{Caller, Engine, Extern, Linker, StoreLimits};

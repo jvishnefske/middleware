@@ -627,14 +627,20 @@ mod tests {
             key: "nope".into(),
             counter: None,
         };
-        assert!(matches!(job(&missing, read, no_token, now), Err(Error::File(_))));
+        assert!(matches!(
+            job(&missing, read, no_token, now),
+            Err(Error::File(_))
+        ));
         let bad_fw = Cmd::FwUpdate {
             file: "p.wasm".into(),
             key: "k".into(),
             version: None,
             reboot: true,
         };
-        assert!(matches!(job(&bad_fw, read, no_token, now), Err(Error::Image(_))));
+        assert!(matches!(
+            job(&bad_fw, read, no_token, now),
+            Err(Error::Image(_))
+        ));
         assert!(matches!(
             job(&Cmd::FwAbort, read, no_token, now).unwrap(),
             Job::FwAbort

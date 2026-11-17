@@ -160,7 +160,12 @@ mod tests {
     use middleware::SenderId;
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).to_owned())
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_owned())
+        }
     }
 
     #[test]
@@ -168,11 +173,15 @@ mod tests {
         let c = PiNodeConfig::from_env(&env(&[])).expect("defaults");
         assert_eq!(c, PiNodeConfig::default());
         assert_eq!(c.state, PathBuf::from("/var/lib/mw-pi-node"));
-        assert_eq!(c.node_id, NodeIdSource::MachineId(PathBuf::from("/etc/machine-id")));
+        assert_eq!(
+            c.node_id,
+            NodeIdSource::MachineId(PathBuf::from("/etc/machine-id"))
+        );
         assert_eq!(c.memory_bytes, 1024 * 1024);
         assert_eq!(c.local_serial, None);
         // Empty is unset.
-        let c = PiNodeConfig::from_env(&env(&[(ENV_STATE, ""), (ENV_MEMORY_BYTES, " ")])).expect("empty");
+        let c = PiNodeConfig::from_env(&env(&[(ENV_STATE, ""), (ENV_MEMORY_BYTES, " ")]))
+            .expect("empty");
         assert_eq!(c, PiNodeConfig::default());
     }
 
@@ -186,7 +195,10 @@ mod tests {
         ]))
         .expect("config");
         assert_eq!(c.state, PathBuf::from("/srv/node"));
-        assert_eq!(c.node_id, NodeIdSource::MachineId(PathBuf::from("/run/machine-id")));
+        assert_eq!(
+            c.node_id,
+            NodeIdSource::MachineId(PathBuf::from("/run/machine-id"))
+        );
         assert_eq!(c.memory_bytes, 65536);
         assert_eq!(c.local_serial.as_deref(), Some("/dev/ttyGS0"));
         // A configured node id wins over the machine id file.
@@ -196,16 +208,28 @@ mod tests {
             (ENV_MEMORY_BYTES, "67108864"),
         ]))
         .expect("config");
-        assert_eq!(c.node_id, NodeIdSource::Configured(SenderId([0, 0, 0, 0, 0, 0, 0, 0xff])));
+        assert_eq!(
+            c.node_id,
+            NodeIdSource::Configured(SenderId([0, 0, 0, 0, 0, 0, 0, 0xff]))
+        );
         assert_eq!(c.memory_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
     fn pn1_the_gateway_state_defaults_under_the_node_state() {
         let node = Path::new("/var/lib/mw-pi-node");
-        assert_eq!(gateway_state_dir(None, node), PathBuf::from("/var/lib/mw-pi-node/gateway"));
-        assert_eq!(gateway_state_dir(Some(" "), node), PathBuf::from("/var/lib/mw-pi-node/gateway"));
-        assert_eq!(gateway_state_dir(Some("/srv/gw"), node), PathBuf::from("/srv/gw"));
+        assert_eq!(
+            gateway_state_dir(None, node),
+            PathBuf::from("/var/lib/mw-pi-node/gateway")
+        );
+        assert_eq!(
+            gateway_state_dir(Some(" "), node),
+            PathBuf::from("/var/lib/mw-pi-node/gateway")
+        );
+        assert_eq!(
+            gateway_state_dir(Some("/srv/gw"), node),
+            PathBuf::from("/srv/gw")
+        );
     }
 
     #[test]

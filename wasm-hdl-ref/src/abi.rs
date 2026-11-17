@@ -324,7 +324,12 @@ impl<const MEM: usize> Core<MEM> {
     /// Delivers a publication on a subscribed key (as
     /// `wasm_host::Payload::deliver`): `Ok(false)` when not subscribed,
     /// too long, or refused by `mw_alloc`.
-    pub fn deliver<H: Host>(&mut self, key: Key<'_>, data: &[u8], host: &mut H) -> Result<bool, Trap> {
+    pub fn deliver<H: Host>(
+        &mut self,
+        key: Key<'_>,
+        data: &[u8],
+        host: &mut H,
+    ) -> Result<bool, Trap> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }

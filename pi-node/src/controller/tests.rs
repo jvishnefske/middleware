@@ -55,11 +55,17 @@ fn install(c: &mut Ctl<'_>, image: &[u8]) {
 
 /// The publications on `key` in `outs`.
 fn on<'o>(outs: &'o [Out], key: &str) -> Vec<&'o [u8]> {
-    outs.iter().filter(|o| o.key == key).map(|o| o.payload.as_slice()).collect()
+    outs.iter()
+        .filter(|o| o.key == key)
+        .map(|o| o.payload.as_slice())
+        .collect()
 }
 
 fn logs(outs: &[Out]) -> Vec<String> {
-    on(outs, "sys/log").iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect()
+    on(outs, "sys/log")
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect()
 }
 
 #[test]
@@ -69,16 +75,29 @@ fn pn7_a_started_payload_serves_publishes_ticks_and_fires_timers() {
     let (mut c, boot) = open(&mut disk, clock.clone());
     c.boot(&boot);
     let outs = c.drain();
-    assert_eq!(on(&outs, "sys/payload/status"), [&[PayloadStatus::Empty as u8][..]]);
-    assert!(logs(&outs)[0].starts_with("mw-pi-node "), "{:?}", logs(&outs));
+    assert_eq!(
+        on(&outs, "sys/payload/status"),
+        [&[PayloadStatus::Empty as u8][..]]
+    );
+    assert!(
+        logs(&outs)[0].starts_with("mw-pi-node "),
+        "{:?}",
+        logs(&outs)
+    );
     install(&mut c, &demo());
     assert_eq!(req(&mut c, "sys/payload/start", &[]), Ok(Vec::new()));
     assert!(c.running());
     let outs = c.drain();
     let lines = logs(&outs);
-    assert!(lines.iter().any(|l| l == "pi: gpio unsupported"), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l == "pi: gpio unsupported"),
+        "{lines:?}"
+    );
     assert!(lines.iter().any(|l| l == "pi: started"), "{lines:?}");
-    assert_eq!(on(&outs, "sys/payload/status").last(), Some(&&[PayloadStatus::Running as u8][..]));
+    assert_eq!(
+        on(&outs, "sys/payload/status").last(),
+        Some(&&[PayloadStatus::Running as u8][..])
+    );
     // sys/info says requests on served keys reach the payload.
     let info = req(&mut c, "sys/info", &[]).expect("info");
     assert_eq!(DeviceInfo::decode(&info).expect("decode").caps, Caps::SERVE);
@@ -86,7 +105,10 @@ fn pn7_a_started_payload_serves_publishes_ticks_and_fires_timers() {
     let reply = req(&mut c, "app/pi/echo", b"ping").expect("echo");
     assert_eq!(&reply[..8], &NODE.0);
     assert_eq!(&reply[8..], b"ping");
-    assert_eq!(req(&mut c, "app/pi/other", b""), Err(HandlerError::NotFound));
+    assert_eq!(
+        req(&mut c, "app/pi/other", b""),
+        Err(HandlerError::NotFound)
+    );
     // A publication on a subscribed key reaches on_message.
     c.publication(Key::from_static("app/pi/in"), b"hello");
     c.publication(Key::from_static("app/pi/nobody"), b"x");
@@ -121,22 +143,33 @@ fn pn7_traps_stop_and_uploads_end_the_run_and_settle_the_served_keys() {
     assert_eq!(req(&mut c, "app/pi/trap", b""), Err(HandlerError::Internal));
     assert!(!c.running());
     assert_eq!(c.status(), PayloadStatus::Trapped);
-    assert!(logs(&c.drain()).iter().any(|l| l.starts_with("payload trapped on request app/pi/trap")));
-    assert_eq!(req(&mut c, "app/pi/echo", b""), Err(HandlerError::Unavailable));
+    assert!(
+        logs(&c.drain())
+            .iter()
+            .any(|l| l.starts_with("payload trapped on request app/pi/trap"))
+    );
+    assert_eq!(
+        req(&mut c, "app/pi/echo", b""),
+        Err(HandlerError::Unavailable)
+    );
     // Started again, then stopped: Unavailable again.
     req(&mut c, "sys/payload/start", &[]).expect("restart");
     assert!(req(&mut c, "app/pi/echo", b"").is_ok());
     req(&mut c, "sys/payload/stop", &[]).expect("stop");
     assert!(!c.running());
     assert_eq!(c.status(), PayloadStatus::Stopped);
-    assert_eq!(req(&mut c, "app/pi/echo", b""), Err(HandlerError::Unavailable));
+    assert_eq!(
+        req(&mut c, "app/pi/echo", b""),
+        Err(HandlerError::Unavailable)
+    );
     // A new upload clears them: NotFound, as for any key nothing serves.
     install(&mut c, &demo());
     assert_eq!(req(&mut c, "app/pi/echo", b""), Err(HandlerError::NotFound));
     // A begin while running stops the payload first.
     req(&mut c, "sys/payload/start", &[]).expect("start");
     let steps = upload_plan(&demo(), None, None).expect("plan");
-    c.request(steps[0].key, &steps[0].body, &RequestMeta::NONE).expect("begin");
+    c.request(steps[0].key, &steps[0].body, &RequestMeta::NONE)
+        .expect("begin");
     assert!(!c.running());
     assert_eq!(c.status(), PayloadStatus::Loading);
 }
@@ -161,15 +194,26 @@ fn pn7_an_installed_payload_starts_at_boot_and_bad_images_fail_to_start() {
         // An image that is not WASM installs (the store does not look
         // inside) but fails to start: Internal, Trapped, logged.
         install(&mut c, b"not a wasm module");
-        assert_eq!(req(&mut c, "sys/payload/start", &[]), Err(HandlerError::Internal));
+        assert_eq!(
+            req(&mut c, "sys/payload/start", &[]),
+            Err(HandlerError::Internal)
+        );
         assert_eq!(c.status(), PayloadStatus::Trapped);
-        assert!(logs(&c.drain()).iter().any(|l| l.starts_with("payload start failed")));
+        assert!(
+            logs(&c.drain())
+                .iter()
+                .any(|l| l.starts_with("payload start failed"))
+        );
     }
     // A payload over the memory cap is refused at load.
     let big = wat::parse_str(r#"(module (memory (export "memory") 32))"#).expect("WAT");
     let flash = SectorFlash::open(MemSectors::new(&mut disk), SECTORS).expect("flash");
-    let (mut c, boot) = Controller::open(flash, facts(), crate::limits(64 * 1024), Manual::default());
+    let (mut c, boot) =
+        Controller::open(flash, facts(), crate::limits(64 * 1024), Manual::default());
     c.boot(&boot);
     install(&mut c, &big);
-    assert_eq!(req(&mut c, "sys/payload/start", &[]), Err(HandlerError::Internal));
+    assert_eq!(
+        req(&mut c, "sys/payload/start", &[]),
+        Err(HandlerError::Internal)
+    );
 }
