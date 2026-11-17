@@ -1,0 +1,17 @@
+{
+  "traces": [
+    {
+      "traceID": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "rootServiceName": "demo-caller.apps",
+      "rootTraceName": "demo-caller",
+      "startTimeUnixNano": "1730000000000000000",
+      "durationMs": 12
+    }
+  ],
+  "metrics": {
+    "inspectedTraces": 42,
+    "inspectedBytes": "81920",
+    "completedJobs": 1,
+    "totalJobs": 1
+  }
+}

@@ -1,0 +1,35 @@
+Entry ID         : 3f2a9c4e-1b7d-4c55-8e0f-6a2b9d1c7e30
+SPIFFE ID        : spiffe://infra.local/robot/r1
+Parent ID        : spiffe://infra.local/robot/r1/agent
+Revision         : 0
+X509-SVID TTL    : default
+JWT-SVID TTL     : default
+Selector         : unix:uid:1000
+
+join token (single use, 1h): 7c0b6e1a-4a8d-4f61-9b36-2f1d0c9e8a77
+SPIRE server: any node address, port 30081; mesh for robots: port 30443
+trust bundle (SPIFFE format, trust_bundle_format = "spiffe"):
+{
+    "keys": [
+        {
+            "use": "x509-svid",
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "kkEn5E2Hd_rvCRDCVMNj3deN0ADij9uJVmN-El0CJz0",
+            "y": "qNrnjhtzrtTR0bRgI2jPIC1nEgcWNX63YcZOEzyo1iA",
+            "x5c": [
+                "MIIBjzCCATWgAwIBAgIQZ3l0aGlzaXNub3RhcmVhbGNlcnQwCgYIKoZIzj0EAwIw"
+            ]
+        },
+        {
+            "use": "jwt-svid",
+            "kty": "EC",
+            "kid": "C6vs25welZOx6WksNYfbMfiw9l96pMnD",
+            "crv": "P-256",
+            "x": "ngLYQnlfF6GsojUwqtcEE3WgTNG2RUlsGhK73RNEl5k",
+            "y": "tKbiDSUSsQ3F1P7wteeHNXIcU-cx6CgSbroeQrQHTLM"
+        }
+    ],
+    "spiffe_sequence": 1,
+    "spiffe_refresh_hint": 300
+}

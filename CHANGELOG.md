@@ -233,6 +233,11 @@
 - The RP2040 (Pico 1) has no bootrom A/B support and is out of scope; `mwctl` refuses an RP2040 UF2.
 - The RP base firmware integration is below ("RP2350 A/B firmware OTA integration", Y12–Y13); the hardware checks (Y14–Y15) are not done yet.
 
+### 0.6: ops CLI `mw` (M16, M50–M56)
+- New workspace tool `tools/mw` (package `mw`, std; depends only on serde_json and getrandom, not on `middleware`), the cluster counterpart of the serial `mwctl`. Commands: `build`, `load`, `apply [--namespace] [--replicas] [--tag]`, `zenoh apply`, `status`, `logs [--since]`, `down`, `trace [--attr] [--since]`, `robot enroll [--selector] [--robot-dir | --robot-host]`, each with `--dry-run`.
+- Functional core, imperative shell: `plan::plan(&Command, &Env) -> Result<Vec<Step>, PlanError>` produces typed steps with their exact argument vectors; `exec::execute` runs them with `std::process::Command` (no shell), stops at the first failure, and pipes manifests to `kubectl apply -f -` only after their source succeeded.
+- `mw trace` parses Tempo's OTLP JSON (`batches` / `resourceSpans`, `scopeSpans` / `instrumentationLibrarySpans`) and prints a span tree; `mw robot enroll` parses the lab's `robot-join` output and writes `join-token`, `bundle.spiffe` and `enrollment.env`; `mw zenoh apply` sends freshly generated passwords only to cluster Secrets.
+
 ## 0.5.0
 
 ### Migration from 0.4
