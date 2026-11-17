@@ -1798,6 +1798,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "serde",
+ "serde_json",
  "serde_norway",
  "tokio",
  "tokio-stream",

@@ -23,9 +23,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json",
 opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["grpc-tonic", "trace"] }
-# The runner's Zenoh client configuration (`zenoh::Config`); the same
-# zenoh as `middleware`'s `zenoh` feature, nothing new in the tree.
+# Zenoh 1.10, the same zenoh as `middleware`'s `zenoh` feature (one zenoh
+# in the tree): the runner's client configuration (`zenoh::Config`) and the
+# router's ACL model (`zenoh_router`), key-expression inclusion exactly as
+# the router evaluates it.
 zenoh = "1.10"
+# Renders the router's config (JSON, which is JSON5) deterministically.
+serde_json = "1"
 
 [dev-dependencies]
 middleware = { path = "..", features = ["grpc", "istio", "dns-sd", "zenoh", "postcard"] }

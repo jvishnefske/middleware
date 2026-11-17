@@ -50,6 +50,9 @@
 //!   (serving, drain, discovery of called kinds, node ids, telemetry,
 //!   Zenoh).
 //! * [`manifest`] — `--print-manifests` rendering.
+//! * [`zenoh_router`] — the Zenoh router (zenohd): per-service
+//!   credentials, access-control rules derived from the specs, its config
+//!   and Kubernetes manifests ([`render_router`]).
 //! * [`error`] — [`ServiceError`].
 //!
 //! # Status
@@ -78,6 +81,7 @@ pub mod manifest;
 pub mod run;
 pub mod spec;
 pub mod stack;
+pub mod zenoh_router;
 
 pub use builder::{SampleHook, Served, Service, ServiceBuilder};
 pub use config::{Config, ConfigError};
@@ -92,3 +96,4 @@ pub use manifest::ManifestOptions;
 pub use run::{ArgsError, Command, RunOptions};
 pub use spec::{Mebibytes, MilliCpu, Resources, ServiceSpec, SpecError};
 pub use stack::block_on_thread;
+pub use zenoh_router::{RouterBundle, RouterError, RouterOptions, RouterPlan, render_router};

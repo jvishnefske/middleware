@@ -56,6 +56,16 @@
 - Memory backend: carries both. Serial link, BLE and ESP-NOW: carry neither (handlers see `None`).
 - Conformance: new case `reqrep::trace_is_propagated`; **breaking for fixtures:** `ReqRepFixture` requires `const PROPAGATES_TRACE: bool`. Memory, gRPC and Zenoh propagate; the serial fixture declares `false`.
 
+### 0.6: Zenoh router with authentication and ACLs (Z19–Z22)
+- New `mw_service::zenoh_router`: renders a zenohd deployment from the services' `ServiceSpec`s. `principals` (who needs credentials), `plan` (router config and committable manifests, no secrets), `render_router` (plus the `usrpwd` dictionary and Secrets), `RouterOptions` (namespace, image, trust domain, listen address, extra grants, robots, robot route; serde, lab defaults), `router_locator` (`tcp/zenohd.<ns>.svc.cluster.local:7447` for `MW_ZENOH_ROUTER`).
+- `zenoh_router::acl`: the access-control model. Each principal may use exactly what its spec declares (publish, subscribe, answer and announce its served kinds, query its called kinds, browse `@mw/svc/**`), default deny; `AclModel::permits` evaluates it the way zenoh 1.10 does.
+- `zenoh_router::credentials`: the credentials file (one line `<user>:<password>`, the runner's MS10 format, read from `MW_ZENOH_CREDENTIALS`, Secret `zenoh-<user>` key `credentials` mounted at `/var/run/mw/zenoh/credentials`), `Password` (redacted `Debug`), the router dictionary (Secret `zenohd-auth` key `dictionary`).
+- `zenoh_router::config`: zenohd's JSON5 config (router mode, scouting off, `usrpwd`, `access_control`). Clients connect with the runner's `run::zenoh::client_config`.
+- `zenoh_router::k8s`: ServiceAccount, ConfigMap, Deployment, Service (`zenoh` 7447, `appProtocol: tcp`), an L4 AuthorizationPolicy by mTLS principal, and the robots' Gateway TLS server and VirtualService `tcp` route via the ingress gateway (SNI `zenoh.infra.local` on 30443).
+- Generated `deploy/zenoh/` (config, manifests, the specs and options they come from) and the example `zenoh_router_manifests` (`--out`, `--users`, `--credentials`).
+- The Zenoh trust-model docs (`zenoh`, `zenoh::discovery`) describe what the router adds.
+- Dependencies (mw-service only): `zenoh` 1.10 (already in the tree through `middleware`) and `serde_json`.
+
 ### 0.6: runner internals (MS6–MS10, MS20–MS23)
 - `mw-service` serves: `Service::run` / `run_with` / new `run_with_options(config, RunOptions, shutdown)` bind h2c on `0.0.0.0:<port>`, mount health (node id in `mw-node`) and a responder trusting the sidecar's `x-forwarded-client-cert`, enforce `allow_callers` in process (`PERMISSION_DENIED`, also for unidentified callers), run one serve task per served kind (kinds concurrent, each kind serial, bounded queue, the caller's deadline bounds the handler), and drive `Lifecycle`: `NOT_SERVING` on SIGTERM/SIGINT or the shutdown future, answer through the drain grace, stop accepting, finish in-flight calls within `RunOptions::stop_timeout` (default 5 s), flush traces (2 s). A second signal stops at once.
 - Telemetry: JSON logs on stdout (`RUST_LOG`, `Service::run` only), one log line per request; with `OTEL_EXPORTER_OTLP_ENDPOINT`, OTLP/gRPC export of one server span per request (parent: the inbound `traceparent`; id: `Ctx::trace`) with resource `service.name`, `k8s.namespace.name`, `k8s.pod.name`.
