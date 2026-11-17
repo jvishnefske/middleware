@@ -11,9 +11,16 @@
 //! ([`mwctl::sign::sign_control`], counter `--counter` or the Unix time in
 //! milliseconds). `key new` / `key pub` touch only the key file: `key
 //! new` reads 32 bytes from `/dev/urandom` and creates the file with mode
-//! 0600, refusing to overwrite one.
+//! 0600, refusing to overwrite one. Every key option also takes
+//! `--pkcs11 <LABEL>`, a key in a PKCS#11 token ([`mwctl::pkcs11`]); the
+//! token is opened (and its PIN read from `PKCS11_PIN` or `~/.env`) once
+//! per run, only when a signature or the public key is needed.
 //!
-//! `fw update` (RP2350, serial only) loads and checks the image
+//! Over Zenoh (`--zenoh`, feature `zenoh`) every command goes to one board
+//! through [`mwctl::zlink::ZenohLink`]; `fw reboot|confirm|abort` and the
+//! reboot and confirm of `fw update` are signed control requests there.
+//!
+//! `fw update` over a serial port loads and checks the image
 //! ([`mwctl::fw::load_image`]), sends it with progress, and unless
 //! `--no-reboot` reboots the device into it on trial; the USB CDC port
 //! disappears while the device resets, so it closes the port, reopens the
@@ -25,17 +32,19 @@
 
 mod port;
 
+use middleware::fw_ota::StateCode;
+use middleware::loader::trust::KeyKind;
 use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, Version};
 use mwctl::air::{AirLink, AirTiming};
 use mwctl::bridge::{Mac, Msg, format_mac};
-use mwctl::cli::{self, Cmd, KeyCmd, Parsed};
+use mwctl::cli::{self, Cmd, KeyCmd, KeySpec, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
-use mwctl::link::{Endpoint, Event, Link, Timeouts};
-use middleware::fw_ota::StateCode;
 use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
+use mwctl::link::{Endpoint, Event, Link, Timeouts};
+use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::report::{format_board, format_event, format_fw_info, format_info, format_trust};
-use mwctl::sign::{SEED_LEN, Seed, counter_at, hex, sign_commit, sign_control, version_at};
+use mwctl::sign::{SEED_LEN, Seed, Signer, counter_at, hex, sign_commit, sign_control, version_at};
 use port::SerialTransport;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -90,10 +99,52 @@ fn read_seed(path: &Path) -> Result<Seed, Error> {
     Ok(Seed::from_file_bytes(&bytes)?)
 }
 
-/// `key new` / `key pub`.
+/// Opens the signing key `spec` names: a seed file, or a token key
+/// (logging in with `PKCS11_PIN`).
+fn open_signer(spec: &KeySpec) -> Result<Box<dyn Signer>, Error> {
+    match spec {
+        KeySpec::File(path) => Ok(Box::new(read_seed(path)?)),
+        KeySpec::Pkcs11(label) => {
+            let at = Location::from_settings();
+            let pin = pkcs11::pin(pkcs11::ENV_PIN)?;
+            let signer = Pkcs11Signer::open(&at, label, &pin)?;
+            eprintln!("signing with {signer:?} via {}", at.module.display());
+            Ok(Box::new(signer))
+        }
+    }
+}
+
+/// `key new` / `key pub` / `key init-token`.
 fn key(cmd: KeyCmd) -> Result<(), Error> {
     match cmd {
-        KeyCmd::New { file } => {
+        KeyCmd::New {
+            key: KeySpec::Pkcs11(label),
+        } => {
+            let at = Location::from_settings();
+            let pin = pkcs11::pin(pkcs11::ENV_PIN)?;
+            let public = pkcs11::generate(&at, &label, KeyKind::P256, &pin)?;
+            eprintln!(
+                "generated P-256 key '{label}' in the token of {} (not extractable)",
+                at.module.display()
+            );
+            println!("{}", hex(public.as_bytes()));
+        }
+        KeyCmd::Pub {
+            key: KeySpec::Pkcs11(label),
+        } => {
+            let signer = open_signer(&KeySpec::Pkcs11(label))?;
+            println!("{}", hex(signer.public_key().as_bytes()));
+        }
+        KeyCmd::InitToken { token } => {
+            let at = Location::from_settings();
+            let so = pkcs11::pin(pkcs11::ENV_SO_PIN)?;
+            let user = pkcs11::pin(pkcs11::ENV_PIN)?;
+            pkcs11::init_token(&at.module, &token, &so, &user)?;
+            eprintln!("initialised token '{token}' of {}", at.module.display());
+        }
+        KeyCmd::New {
+            key: KeySpec::File(file),
+        } => {
             let mut seed = [0u8; SEED_LEN];
             std::fs::File::open("/dev/urandom")
                 .and_then(|mut r| r.read_exact(&mut seed))
@@ -112,14 +163,19 @@ fn key(cmd: KeyCmd) -> Result<(), Error> {
                 "wrote signing key {} (mode 0600); keep it secret",
                 file.display()
             );
-            println!("{}", hex(&seed.public_key().0));
+            println!("{}", hex(seed.public_key().as_bytes()));
         }
-        KeyCmd::Pub { file } => println!("{}", hex(&read_seed(&file)?.public_key().0)),
+        KeyCmd::Pub {
+            key: KeySpec::File(file),
+        } => println!("{}", hex(read_seed(&file)?.public_key().as_bytes())),
     }
     Ok(())
 }
 
 fn run(cli: cli::Cli) -> Result<(), Error> {
+    if let Some(z) = &cli.zenoh {
+        return run_zenoh(&cli, z);
+    }
     let mut transport = SerialTransport::open(&cli.port, cli.baud)?;
     if cli.cmd == Cmd::Reset {
         transport.reset()?;
@@ -184,7 +240,11 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
 fn is_fw(cmd: &Cmd) -> bool {
     matches!(
         cmd,
-        Cmd::FwInfo | Cmd::FwUpdate { .. } | Cmd::FwReboot | Cmd::FwConfirm | Cmd::FwAbort
+        Cmd::FwInfo
+            | Cmd::FwUpdate { .. }
+            | Cmd::FwReboot { .. }
+            | Cmd::FwConfirm { .. }
+            | Cmd::FwAbort { .. }
     )
 }
 
@@ -194,15 +254,22 @@ fn fw_command(transport: SerialTransport, cli: &cli::Cli, timeouts: Timeouts) ->
     let confirm_attempts = (RECONNECT_SECONDS * 1000 / RETRY_PAUSE.as_millis() as u64) as u32;
     let result = match &cli.cmd {
         Cmd::FwInfo => dev.fw_info().map(|i| print!("{}", format_fw_info(&i))),
-        Cmd::FwReboot => dev.fw_reboot().map(|()| println!("rebooting into the committed image on trial")),
-        Cmd::FwConfirm => dev
+        Cmd::FwReboot { .. } => dev
+            .fw_reboot()
+            .map(|()| println!("rebooting into the committed image on trial")),
+        Cmd::FwConfirm { .. } => dev
             .fw_confirm(confirm_attempts, || std::thread::sleep(RETRY_PAUSE))
             .map(|()| println!("confirmed: the new firmware is permanent")),
-        Cmd::FwAbort => dev.fw_abort().map(|()| println!("aborted")),
-        Cmd::FwUpdate { file, key, version, reboot } => {
+        Cmd::FwAbort { .. } => dev.fw_abort().map(|()| println!("aborted")),
+        Cmd::FwUpdate {
+            file,
+            key,
+            version,
+            reboot,
+        } => {
             let bytes = std::fs::read(file).map_err(|e| io_context(file, e))?;
             let image = load_image(&bytes, *version)?;
-            let seed = key.as_deref().map(read_seed).transpose()?;
+            let signer = key.as_ref().map(open_signer).transpose()?;
             println!(
                 "firmware {} ({} bytes{}), version {}",
                 file.display(),
@@ -211,7 +278,15 @@ fn fw_command(transport: SerialTransport, cli: &cli::Cli, timeouts: Timeouts) ->
                 format_version(image.version)
             );
             let began = Instant::now();
-            let r = dev.fw_update(&image, FwOptions { key: seed.as_ref(), reboot: *reboot }, progress);
+            let r = dev.fw_update(
+                &image,
+                FwOptions {
+                    key: signer.as_deref(),
+                    reboot: *reboot,
+                    control: None,
+                },
+                progress,
+            );
             eprintln!();
             let done = r?;
             println!(
@@ -226,10 +301,17 @@ fn fw_command(transport: SerialTransport, cli: &cli::Cli, timeouts: Timeouts) ->
             }
             print_events(&dev.take_events());
             drop(dev);
-            eprintln!("rebooting into slot {} on trial; reconnecting to {}", done.slot.name(), cli.port);
+            eprintln!(
+                "rebooting into slot {} on trial; reconnecting to {}",
+                done.slot.name(),
+                cli.port
+            );
             let mut dev = reconnect(cli, timeouts)?;
             dev.fw_confirm(confirm_attempts, || std::thread::sleep(RETRY_PAUSE))?;
-            println!("confirmed: slot {} is the permanent firmware", done.slot.name());
+            println!(
+                "confirmed: slot {} is the permanent firmware",
+                done.slot.name()
+            );
             print_events(&dev.take_events());
             return Ok(());
         }
@@ -275,29 +357,188 @@ fn reconnect(cli: &cli::Cli, timeouts: Timeouts) -> Result<Device<Link<SerialTra
 fn control_auth(
     op: ControlOp,
     target: Option<Mac>,
-    key: Option<&Path>,
+    key: Option<&KeySpec>,
     counter: Option<u64>,
 ) -> Result<Option<SignedControl>, Error> {
     let (Some(target), Some(key)) = (target, key) else {
         return Ok(None);
     };
-    let seed = read_seed(key)?;
+    let signer = open_signer(key)?;
     let counter = match counter {
         Some(c) => ControlCounter(c),
         None => counter_at(SystemTime::now())?,
     };
     eprintln!(
         "signing {} for {} as counter {} with {}",
-        if op == ControlOp::Start {
-            "start"
-        } else {
-            "stop"
-        },
+        op_name(op),
         format_mac(&target),
         counter.0,
-        key.display()
+        key
     );
-    Ok(Some(sign_control(&seed, op, &target, counter)))
+    Ok(Some(sign_control(&*signer, op, &target, counter)?))
+}
+
+fn op_name(op: ControlOp) -> &'static str {
+    match op {
+        ControlOp::Start => "start",
+        ControlOp::Stop => "stop",
+        ControlOp::FwReboot => "fw reboot",
+        ControlOp::FwConfirm => "fw confirm",
+        ControlOp::FwAbort => "fw abort",
+    }
+}
+
+/// How long `--zenoh` waits for the board to answer at first (it may be
+/// reconnecting to a host that just started listening).
+#[cfg(feature = "zenoh")]
+const ZENOH_WAIT_SECONDS: u64 = 30;
+/// How long a firmware update over Zenoh waits for the board to come back
+/// on trial (reset, boot, DHCP, reconnect) before confirming.
+#[cfg(feature = "zenoh")]
+const ZENOH_TRIAL_SECONDS: u64 = 90;
+
+#[cfg(not(feature = "zenoh"))]
+fn run_zenoh(_cli: &cli::Cli, _z: &cli::ZenohTarget) -> Result<(), Error> {
+    Err(Error::Io(std::io::Error::other(
+        "this mwctl was built without Zenoh: cargo build -p mwctl --features zenoh",
+    )))
+}
+
+/// A command to one board over Zenoh ([`mwctl::zlink`]).
+#[cfg(feature = "zenoh")]
+fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
+    use middleware::transport::SenderId;
+    use mwctl::fw::ControlSigner;
+    use mwctl::zlink::{Route, ZenohLink};
+    let node = SenderId(z.node);
+    let route = match &z.route {
+        cli::ZenohRoute::Connect(e) => Route::Connect(e.clone()),
+        cli::ZenohRoute::Listen(e) => Route::Listen(e.clone()),
+    };
+    let target = z.target.unwrap_or_else(|| mwctl::zlink::target(node));
+    eprintln!(
+        "zenoh: {} {}, board {}, control target {}",
+        match &route {
+            Route::Connect(_) => "connecting to",
+            Route::Listen(_) => "listening on",
+        },
+        match &route {
+            Route::Connect(e) | Route::Listen(e) => e,
+        },
+        hex(&z.node),
+        format_mac(&target)
+    );
+    let mut link = ZenohLink::open(&route, node)?;
+    link.wait_for_board(Duration::from_secs(ZENOH_WAIT_SECONDS))?;
+    let mut dev = Device::new(link);
+    let key = match &cli.cmd {
+        Cmd::FwUpdate { key, .. }
+        | Cmd::FwReboot { key }
+        | Cmd::FwConfirm { key }
+        | Cmd::FwAbort { key } => key.clone(),
+        _ => None,
+    };
+    let Some(spec) = key.filter(|_| is_fw(&cli.cmd)) else {
+        if is_fw(&cli.cmd) {
+            // fw info.
+            return dev.fw_info().map(|i| print!("{}", format_fw_info(&i)));
+        }
+        let r = command(&mut dev, cli.cmd.clone(), Some(target));
+        print_events(&dev.take_events());
+        return r;
+    };
+    let signer = open_signer(&spec)?;
+    // Strictly increasing counters, also within one millisecond.
+    let last = std::cell::Cell::new(0u64);
+    let sign = |op: ControlOp| -> Result<SignedControl, Error> {
+        let now = counter_at(SystemTime::now())?.0;
+        let c = ControlCounter(now.max(last.get() + 1));
+        last.set(c.0);
+        eprintln!(
+            "signing {} for {} as counter {}",
+            op_name(op),
+            format_mac(&target),
+            c.0
+        );
+        Ok(sign_control(&*signer, op, &target, c)?)
+    };
+    let control = Some(ControlSigner(&sign));
+    let attempts = (ZENOH_TRIAL_SECONDS * 1000 / RETRY_PAUSE.as_millis() as u64) as u32;
+    match &cli.cmd {
+        Cmd::FwReboot { .. } => dev
+            .fw_reboot_signed(control)
+            .map(|()| println!("rebooting into the committed image on trial")),
+        Cmd::FwConfirm { .. } => dev
+            .fw_confirm_signed(attempts, || std::thread::sleep(RETRY_PAUSE), control)
+            .map(|()| println!("confirmed: the new firmware is permanent")),
+        Cmd::FwAbort { .. } => dev.fw_abort_signed(control).map(|()| println!("aborted")),
+        Cmd::FwUpdate {
+            file,
+            version,
+            reboot,
+            ..
+        } => {
+            let bytes = std::fs::read(file).map_err(|e| io_context(file, e))?;
+            let image = load_image(&bytes, *version)?;
+            println!(
+                "firmware {} ({} bytes), version {}, over Zenoh",
+                file.display(),
+                image.bytes.len(),
+                format_version(image.version)
+            );
+            let began = Instant::now();
+            let done = dev.fw_update(
+                &image,
+                FwOptions {
+                    key: Some(&*signer),
+                    reboot: *reboot,
+                    control,
+                },
+                progress,
+            );
+            eprintln!();
+            let done = done?;
+            println!(
+                "installed in slot {} in {:.2} s",
+                done.slot.name(),
+                began.elapsed().as_secs_f64()
+            );
+            if !done.rebooted {
+                println!("not rebooted (--no-reboot): run `fw reboot`, then `fw confirm`");
+                return Ok(());
+            }
+            eprintln!(
+                "rebooting into slot {} on trial; waiting for the board",
+                done.slot.name()
+            );
+            // The board drops its session, resets, boots the trial and
+            // reconnects: poll until it answers on trial.
+            let end = Instant::now() + Duration::from_secs(ZENOH_TRIAL_SECONDS);
+            loop {
+                match dev.fw_info() {
+                    Ok(i) if i.state == StateCode::Trial => break,
+                    Ok(i) if !matches!(i.state, StateCode::Committed) => {
+                        return Err(Error::Fw(format!(
+                            "the board came back {} in slot {} instead of on trial",
+                            i.state.name(),
+                            i.running.name()
+                        )));
+                    }
+                    _ if Instant::now() >= end => {
+                        return Err(Error::Fw("the board did not come back on trial".into()));
+                    }
+                    _ => std::thread::sleep(RETRY_PAUSE),
+                }
+            }
+            dev.fw_confirm_signed(attempts, || std::thread::sleep(RETRY_PAUSE), control)?;
+            println!(
+                "confirmed: slot {} is the permanent firmware",
+                done.slot.name()
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Runs one device command over any endpoint; `target` is the device's
@@ -307,14 +548,27 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
         Cmd::Request { key, body } => {
-            let key = middleware::Key::new(&key).map_err(|_| Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("'{key}' is not a valid key"))))?;
-            dev.request(key, body.as_bytes()).map(|reply| match std::str::from_utf8(&reply) {
-                Ok(t) if !t.chars().any(char::is_control) => println!("{t}"),
-                _ => println!("{}", reply.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")),
-            })
+            let key = middleware::Key::new(&key).map_err(|_| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("'{key}' is not a valid key"),
+                ))
+            })?;
+            dev.request(key, body.as_bytes())
+                .map(|reply| match std::str::from_utf8(&reply) {
+                    Ok(t) if !t.chars().any(char::is_control) => println!("{t}"),
+                    _ => println!(
+                        "{}",
+                        reply
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                })
         }
         Cmd::Start { key, counter } => {
-            match control_auth(ControlOp::Start, target, key.as_deref(), counter)
+            match control_auth(ControlOp::Start, target, key.as_ref(), counter)
                 .and_then(|auth| dev.start_signed(auth))
             {
                 Ok(()) => {
@@ -329,16 +583,19 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 }
             }
         }
-        Cmd::Stop { key, counter } => {
-            control_auth(ControlOp::Stop, target, key.as_deref(), counter)
-                .and_then(|auth| dev.stop_signed(auth))
-                .map(|()| println!("payload stopped"))
-        }
+        Cmd::Stop { key, counter } => control_auth(ControlOp::Stop, target, key.as_ref(), counter)
+            .and_then(|auth| dev.stop_signed(auth))
+            .map(|()| println!("payload stopped")),
         Cmd::TrustInfo => dev.trust_info().map(|t| print!("{}", format_trust(&t))),
         Cmd::TrustClaim { key } => {
-            let public = read_seed(&key)?.public_key();
-            dev.trust_claim(public)
-                .map(|()| println!("claimed: pinned key {}", hex(&public.0)))
+            let public = open_signer(&key)?.public_key();
+            dev.trust_claim(public).map(|()| {
+                println!(
+                    "claimed: pinned {} key {}",
+                    public.kind().name(),
+                    hex(public.as_bytes())
+                )
+            })
         }
         Cmd::Upload {
             file,
@@ -352,20 +609,19 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 eprintln!("test hook: corrupting chunk {i}; the device must reject the commit");
             }
             let start_auth = match start {
-                true => control_auth(ControlOp::Start, target, key.as_deref(), None)?,
+                true => control_auth(ControlOp::Start, target, key.as_ref(), None)?,
                 false => None,
             };
             let auth = match key {
                 None => None,
                 Some(k) => {
-                    let seed = read_seed(&k)?;
+                    let signer = open_signer(&k)?;
                     let v = match version {
                         Some(v) => Version(v),
                         None => version_at(SystemTime::now())?,
                     };
-                    let auth = sign_commit(&image, &seed, v)
-                        .ok_or(Error::Plan(mwctl::plan::PlanError::TooLarge(image.len())))?;
-                    eprintln!("signing as version {} with {}", v.0, k.display());
+                    let auth = sign_commit(&image, &*signer, v)?;
+                    eprintln!("signing as version {} with {k}", v.0);
                     Some(auth)
                 }
             };
@@ -395,13 +651,20 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
         }
         Cmd::Monitor { seconds, samples } => monitor(dev, seconds, samples),
         // Serial only, handled by `fw_command` (the CLI refuses --espnow).
-        Cmd::Reset | Cmd::FwInfo | Cmd::FwUpdate { .. } | Cmd::FwReboot | Cmd::FwConfirm | Cmd::FwAbort => {
-            Ok(())
-        }
+        Cmd::Reset
+        | Cmd::FwInfo
+        | Cmd::FwUpdate { .. }
+        | Cmd::FwReboot { .. }
+        | Cmd::FwConfirm { .. }
+        | Cmd::FwAbort { .. } => Ok(()),
     }
 }
 
-fn monitor<L: Endpoint>(dev: &mut Device<L>, seconds: Option<u64>, samples: bool) -> Result<(), Error> {
+fn monitor<L: Endpoint>(
+    dev: &mut Device<L>,
+    seconds: Option<u64>,
+    samples: bool,
+) -> Result<(), Error> {
     let end = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     match seconds {
         Some(s) => eprintln!("monitoring for {s} s"),

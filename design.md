@@ -404,6 +404,55 @@ with scouting off. All run under `--features zenoh`.
   `zenoh::discovery::tests::differing_records_conflict_and_equal_ones_agree`,
   `zenoh::discovery::tests::records_must_name_the_token_kind_and_instance`.
 
+### Zenoh telemetry (`zenoh-otel`, OT…)
+
+Debug channel trace, logs and metrics for running middleware, exported to a
+Grafana stack over OTLP. The library records through the OpenTelemetry API
+only (`zenoh::otel`), behind the feature `zenoh-otel`, which is **off by
+default** and implied by no other feature; `tools/mw-otel` installs the
+exporters and runs `mw-otel-bridge`, the Zenoh node that exports what the
+boards (the EVKB over Ethernet, any host service) publish.
+
+- [x] OT1 With `zenoh-otel` a publication, its delivery, a request and its
+  handling are spans (`mw publish|deliver|request|handle <key>`, producer /
+  consumer / client / server) with the key, sender, sequence, stream, gap
+  and size as attributes; with `with_trace_context(true)` the delivery is
+  the publication's child and the handling the request's child across two
+  sessions, and a handler error marks both ends —
+  `tests/zenoh_otel.rs`: `ot1_spans_and_metrics_cross_two_sessions` (OT1-OT4 checks in sequence: the providers are process globals).
+- [x] OT2 The trace context crosses the wire only on request: attachment
+  kinds 3 (publication) and `0x12` (query) are the existing attachments
+  followed by the 25-byte binary W3C trace context; senders write them only
+  with `with_trace_context(true)`; every decoder (host and `zenoh_lite`)
+  reads their sender, sequence, stream and deadline as before; an all-zero
+  context is ignored; `traceparent` text round-trips —
+  `zenoh::wire::tests::traced_publications_keep_their_header_and_carry_the_context`,
+  `zenoh::wire::tests::traced_queries_keep_their_header_and_carry_the_context`,
+  `zenoh::wire::tests::traceparent_text_round_trips`; OT1's untraced check.
+- [x] OT3 Metrics `mw.zenoh.published`, `delivered`, `lost` (sequence gaps),
+  `bytes` (in / out), `request.duration` and `handle.duration`, by key
+  (and sender, outcome) — `ot1_spans_and_metrics_cross_two_sessions`.
+- [x] OT4 `mw-otel-bridge` exports the boards' `sys/log` lines as OTLP log
+  records (scope `mw.device`, sender, key, seq; control characters escaped),
+  `mw.node.up` per node from `sys/info` rounds (chip, firmware, payload
+  status), and the delivery spans and metrics of its subscriptions; by
+  default it does not subscribe to raw sample streams (`mic/pcm`,
+  `imu/raw`), which a board would then send —
+  `mw_otel::tests::*`; run 2026-11-16 against a local OpenTelemetry Collector
+  0.116.1 (file exporter) with `examples/fake_board.rs`: 61 + 12 + 6
+  delivery spans, 7 `sys/info` request spans, the six log lines with their
+  attributes, `mw.node.up` = 1 with the fake chip and firmware.
+- [x] OT5 Without `zenoh-otel` nothing of OpenTelemetry is compiled in and
+  the wire bytes are unchanged (16-byte publication attachment) —
+  `scripts/check-features.sh` (OT5: no `opentelemetry` in `zenoh` or the
+  full host set; `zenoh-otel` builds on the host and enables no embedded
+  feature).
+- [ ] OT6 The bridge's data in the shared Grafana (10.51.200.16): the
+  dashboard `tools/mw-otel/grafana/middleware-debug.json` shows the EVKB's
+  log, node and traffic panels. Open: that Grafana's service-account token
+  is rejected (401), its Prometheus accepts OTLP but its proxy refuses
+  writes from outside the cluster, and no Loki or Tempo was found there.
+
 ### gRPC (`grpc`)
 
 - [x] G1 Unary request to key `Service/Method` is a gRPC call on
@@ -1297,8 +1346,10 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   `link.rs`) and builds. Hardware evidence so far: UART0 behind a CH340 on an
   ESP8266EX (`firmware-esp8266`, 2026-10-25): `mwctl info`, `upload`,
   `reset` + `monitor` and `start` all ran against `/dev/ttyUSB0`, including
-  recovery from the ROM's 74880-baud boot output. ESP32 family and
-  USB-Serial-JTAG still need a hardware test.
+  recovery from the ROM's 74880-baud boot output. USB-Serial-JTAG on an
+  ESP32-S3: the O10/O19 runs claimed and uploaded over `/dev/ttyACM0`
+  (the S3's own USB). Still open: UART0 on an ESP32 and USB-Serial-JTAG
+  on a C3.
 - [x] E3 Answers `sys/info`; installs payloads with the loader into a flash
   region, verifying CRC-32; the payload survives reboot —
   `firmware` core tests `dispatch::tests::info_reports_device`, `full_transfer_installs_then_start_and_stop`, `abandoned_transfer_keeps_installed_payload`, `oversized_begin_from_idle_keeps_installed_payload`, `resent_last_chunk_is_acknowledged_without_rewriting`; `store::tests::installed_image_survives_reopen_and_verifies`, `interrupted_transfer_keeps_previous_image`, `corruption_is_detected`, `limits_and_ordering_are_enforced` (RAM flash model; silicon untested).
@@ -1605,6 +1656,22 @@ handlers); the unsafe asm stays in that vendored dependency.
   said Stopped. A second good upload (into the other slot) then installed
   and survived `mwctl reset`, and a repeated corrupt upload again left
   status Stopped.
+
+- [x] E26 Signed payloads on the ESP8266 (`esp-base` with `trust`): the
+  trust record in the two sectors at `0x140000` (`flash::TRUST_OFFSET`,
+  right after the payload region; the driver's window grows to
+  `0x100000..0x142000`), `sys/trust/info|claim`, signed commits with
+  Ed25519 or P-256 keys, `min_version` saved inside
+  `PayloadStore::activate_with`, fail closed on an unreadable record; no
+  re-key window (erase the two sectors with esptool) —
+  `controller::tests::signed::e26_an_ed25519_claim_requires_signed_commits`,
+  `e26_a_p256_claim_requires_signed_commits` (claim, unsigned / other key /
+  tampered refused, signed installed, replay refused, the key and
+  `min_version` across a reboot),
+  `e26_the_trust_record_lives_after_the_payload_region`,
+  `e26_an_unreadable_trust_record_refuses_installs_and_claims`; the release
+  build (`build.sh`) and `test.sh` (clippy `-D warnings`). Not yet on the
+  board.
 
 ### RP base firmware (`firmware-rp/`)
 
@@ -2220,8 +2287,17 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   (8, 16, 32, 48 kHz from the audio PLL), fixed-point RMS and peak, and
   the µ-law encoder against the G.711 table — `sensors::{wm8960,sai,audio}::tests::sc5_*`
   (32 and 48 kHz take a 12.288 MHz MCLK: the codec's ADC dividers cannot
-  make them from 6.144 MHz). The codec list follows `fsl_wm8960.c` as
-  recalled, unchecked against the file and the board.
+  make them from 6.144 MHz). Verified against the RT1052 SDK
+  (`fsl_clock.c` `CLOCK_InitAudioPll`, `fsl_sai.c` `SAI_RxEnable`,
+  `fsl_iomuxc.h`, `PERI_I2S.h`/`PERI_CCM*.h` bit positions), MicroPython's
+  `ports/mimxrt/machine_i2s.c` and WM8960 notes for the MIMXRT boards and
+  Zephyr's EVK pinctrl, then on the board (SC8). Corrected then: the
+  microphone is on the codec's right input (`RMR` keeps word 1),
+  `MISC2.AUDIO_DIV` is 0 for ÷1, the receiver takes DMA requests (`FRDE`,
+  `RFW` 0), the transmitter has channel 0 enabled as the SDK configures
+  it (`sensors::sai::tests::sc8_*`, `wm8960::tests::sc8_*`). The
+  `fsl_wm8960.c` file itself was not available; its register list was
+  checked field by field against the WM8960 register map.
 - [x] SC6 `payload-sim` and the browser simulator offer a fake IMU (a
   deterministic tilt pattern) and a fake microphone (a tone and chirp),
   and a payload streaming either runs in both —
@@ -2256,9 +2332,30 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   `report::tests::samples_lines_decode_imu_pcm_mulaw_and_levels_batches`.
   `sys/info` caps carry SOURCE_IMU with the runtime only
   (`service::tests::rt12_info_*`).
-- [ ] SC8 On the EVKB, the microphone levels rise for a clap or speech,
+- [x] SC8 On the EVKB, the microphone levels rise for a clap or speech,
   and a 1 kHz tone from a phone is the dominant frequency of a 16 kHz PCM
-  capture taken over USB or TCP. Not yet run on hardware.
+  capture taken over USB or TCP — 2026-11-15, v0.54–v0.60:
+  `RtDevice` runs one microphone route (`app/device.rs`, handle 1): the
+  WM8960 over LPI2C1 (`wm8960::record_plan` at the route's gain), SAI1
+  receiving the codec's right word (`app/sai.rs`: PLL4 786.432 MHz, MCLK
+  6.144 MHz, TX the clock master and RX synchronous, eDMA channel 1 into
+  a 4096-word DTCM ring, `app/edma.rs`) drained every 5 ms into
+  `sensors::mic_route` (`mic_route::tests::sc8_*`: PCM, µ-law and levels
+  against a sine and silence, the batch period, a gap dropping the
+  partial batch, level blocks realigned). Levels
+  (`firmware-imxrt/tests/payloads/mic_levels.wat`, 800-sample blocks at
+  16 kHz): quiet RMS 20–40 / peak 50–100; claps peak 16365–28800 (about
+  50 dB up), speech RMS 200–580; batches every 250.0 ms, and a 32.5 h
+  run published 468183 batches with 0 samples lost, the indices giving
+  16000.0000 Hz on the board clock. Tone (`mic_pcm.wat`, 160-sample
+  batches; a 1 kHz sine at −6 dBFS from the dev machine's speaker 1 m
+  away): over USB CDC (`mwctl monitor --samples | tools/mic_capture.py
+  --expect 1000`) a gap-free 10.00 s run, dominant 1000.0 Hz, SNR
+  23.8 dB, RMS 454; over Zenoh (`examples/zenoh_board.rs --samples-lines`)
+  the longest run 4.63 s, 1000.0 Hz, SNR 26.7 dB. Over Zenoh to this
+  Wi-Fi host the stream loses bursts of about 0.7 s (see the gaps below);
+  over USB it lost nothing in 32 s of simultaneous capture. `sys/info`
+  caps carry SOURCE_MICROPHONE with the runtime.
 - [x] FL1 Multi-link bus: requests are answered on their link; a
   publication reaches exactly the links whose filters match; a full link
   queue drops and counts that link's publications without delaying the
@@ -2369,7 +2466,91 @@ link) and the HyperFlash, SDRAM and boot pins are reserved.
   service on the RAM flash: state, flash log, image and `sys/fw/info`
   unchanged after every refusal; signed start/stop admitted once, its
   counter persisted by `Service::accept_control` and refused on replay
-  across reboots; `sys/zenoh/endpoint` never over Zenoh).
+  across reboots; `sys/zenoh/endpoint` never over Zenoh). On the board
+  (2026-11-15, v0.57): `examples/zenoh_board.rs --stop rt-key.pem
+  02:d2:65:f8:24:84` sent an unsigned `sys/payload/stop` (`Denied`), a
+  signed one (accepted, the payload stopped) and the same signed body
+  again (`Denied`: counter not above the last).
+
+- [x] ZN5 Signed updates over Zenoh (the ESP-NOW rules on the network):
+  on a claimed board `sys/loader/begin|chunk` stage beside the running
+  payload and the owner's commit must be signed (unsigned: `Denied`, the
+  transfer ends); `sys/fw/begin|chunk|commit` reach the A/B updater, whose
+  commit needs the firmware signature; `sys/payload/start|stop` and
+  `sys/fw/reboot|confirm|abort` need a signed control request for the
+  board's Ethernet MAC whose counter is persisted before it acts. One
+  payload and one firmware transfer at a time, owned by the requester
+  whose `begin` started it (`Service::set_origin`: the serial links are
+  one requester, Zenoh another); another's `chunk` or `commit` is
+  `InvalidRequest` without touching the transfer. The board declares one
+  per-node queryable for every system key (`@mw/node/<id>/sys/**`,
+  `zenoh_lite` `declare_node_prefix_queryable`) besides its six broadcast
+  ones, seven declarations in all. mwctl (feature `zenoh`) sends any
+  command to one board with `--zenoh <ENDPOINT>` or `--zenoh-listen
+  <ENDPOINT>` and `--node <ID>`, signing controls with a fresh counter
+  each (also every confirm retry), and after a firmware reboot waits for
+  the board on trial and confirms it — `zenoh_mgmt::tests::zn5_*`
+  (staged upload: unsigned, other key, used version and tampered chunk
+  refused with the payload still running, signed activated and surviving
+  a reboot; transfer ownership both ways; a firmware update with unsigned,
+  other-key and wrong-slot commits refused, a serial commit refused on a
+  Zenoh transfer, the signed reboot resetting into B, the replayed reboot
+  refused, the trial confirmed only by a signed confirm, a reboot
+  signature never a confirm; a signed abort), the ZN4 tests with the new
+  table, `zenoh_lite::tables::tests::zn5_one_node_prefix_queryable_answers_every_key_under_it`,
+  `tests/zenoh_lite.rs`
+  `zn5_one_node_prefix_queryable_answers_every_per_node_key_under_it`
+  (against zenoh 1.10), mwctl `cli::tests::zenoh_routes_need_a_node_and_keys_for_what_changes_the_board`,
+  `zlink::tests::node_ids_and_rt_targets`. On the board: pending (TK6).
+
+  Payload subscriptions over Zenoh (2026-11-15, v0.57): the board
+  declares a subscriber for each of the running payload's subscription
+  keys (`Bus::set_subscriptions`, refreshed by the controller every
+  loop and cleared when the payload ends; `app/zenoh.rs`
+  `follow_subscriptions`; `zenoh_mgmt::tests::gap_payload_subscriptions_become_zenoh_declarations`)
+  and undeclares them when they go (`zenoh_lite`
+  `undeclare_subscriber`,
+  `client::tests::zn2_client_undeclares_a_subscriber_and_then_drops_its_samples`);
+  a new session declares them again. With the echo template running, a
+  host put on `app/echo/in` reached the payload and its answer on
+  `app/echo/out` came back over Zenoh; stopping it logged one
+  undeclared, a reconnect one declared.
+
+#### Known gaps (2026-11-15)
+
+- **Zenoh PCM to a Wi-Fi host loses bursts.** A 16 kHz PCM route (100
+  batches/s, about 40 KB/s) reached `zenoh_board` over Ethernet → Wi-Fi
+  with 0.7 s holes: 28 % lost with the original 8-deep link queue and
+  2 KiB TCP send buffer, about 2 bursts per 35 s after raising them (32
+  publications per link, 32 KiB, ENET 8 RX / 4 TX descriptors). The
+  same batches over USB had no gap, so the board drains the route; the
+  fixed burst size points at TCP retransmission stalls on the Wi-Fi
+  side. Not pursued further: a wired host, or the levels/µ-law modes
+  (a tenth of the rate), avoid it.
+- **SWD stopped answering** (2026-11-15) while the firmware runs and
+  right after a reset, with J-Link and probe-rs (it hangs at "Connecting
+  to target via SWD"); a board power cycle with v0.58 did not clear it,
+  nor did going back to the session-start firmware (v0.59 = `17fabde`)
+  with only the probe power-cycled, so whether the firmware is the cause
+  is open. Updates over USB work throughout. `tools/flash.py`'s new
+  post-reset check (VTOR must point into SDRAM, else a second WDOG1
+  reset; `--reset` alone) is therefore not yet run on the board.
+  Still so on 2026-11-16 (v0.60 running, a JLinkExe nRESET pulse did not
+  help). It blocks the move to the TPM release key: the board is claimed
+  by an earlier Ed25519 key whose seed file was not at hand, so 0.61
+  (P-256, ZN5; built, `imxrt-base-0.61.slot`) cannot be signed for it,
+  and erasing its trust region needs SWD (`tools/flash.py --erase
+  0xC0000:0x80000 ...`). With either the seed or SWD back: erase or sign,
+  `fw update` 0.61 over USB, `trust claim --pkcs11 mw-release`, then the
+  TK6 / ZN5 checks over USB, LPUART and Zenoh (`mwctl --features zenoh
+  --zenoh-listen tcp/0.0.0.0:7447 --node 310441d265f82484 ...`).
+- **SPI** (LPSPI1, routed on the board map, RT10) is not offered to
+  payloads: `spi_*` answer `Unsupported` (`app/device.rs` table).
+- **USB `fw update`** used to fail with a broken pipe when the CDC port
+  vanished at the reboot; mwctl now counts that as the reboot
+  (`Error::is_port_lost`, `fw::tests::rt15_a_usb_port_that_vanishes_with_the_reboot_is_a_reboot`)
+  and reconnects and confirms: one `mwctl fw update` over USB took 16 s
+  on the board (v0.58).
 - [x] H1 (was T1 before 0.4, renamed so T* names the trust requirements)
   Protocol logic is tested against an in-memory device running the
   real splitter and loader —
@@ -2782,6 +2963,7 @@ SPI (ABI 2) and I2C (ABI 3) per base firmware:
 | ESP8266 (`firmware-esp8266/`) | no payloads run (too little DRAM for wasmi) | same |
 | Pico 2, RP2350 (`firmware-rp/`) | bus 0 on SPI0 or SPI1, pins checked against the function table, FIFO pumped (V15, V17) | buses 0 (GP4/GP5) and 1 (GP6/GP7), up to 1 MHz (V16) |
 | Pico, RP2040 (`firmware-rp/`) | no payloads run (no CAS atomics); the bus drivers are built and the pure core host tested | same |
+| RT1050-EVKB (`firmware-imxrt/`) | not offered (`Unsupported`; LPSPI1 is on the board map only) | bus 0: LPI2C1 on A4/A5 (GPIO_AD_B1_01/00), 10 kHz–1 MHz; the FXOS8700CQ (0x1F) and WM8960 (0x1A) are `Busy` while their source route runs |
 
 - [x] X1 ABI 3 is a superset of ABI 2 (six imports appended to
   `wasm_abi::IMPORTS`, `ABI_VERSION` 3), and ABI 1 and ABI 2 payloads still
@@ -2928,22 +3110,25 @@ camera's XCLK (GPIO 0, a strapping pin) and timers 2–3 are `Unsupported`.
 
 ### Signed payloads (trust)
 
-From 0.4 a device can pin an Ed25519 public key (the root of trust, held by
-the browser or by `mwctl`) on first use; from then on it installs a payload
-only when the commit is signed by that key with a strictly increasing
-version. The rules and wire types live in `middleware::loader::trust`; the
-SHA-256 and Ed25519 checks sit behind the `trust` cargo feature (no_std, no
-heap: `sha2` 0.10.9 with `compress`, `ed25519-dalek` 2.2.0 verify only, no
-default features). The ESP base firmware (`firmware/`) enables it for every
-chip; the ESP8266 firmware does not.
+From 0.4 a device can pin a public key (the root of trust, held by the
+browser, by `mwctl`, or inside a hardware token that `mwctl` reaches over
+PKCS#11) on first use; from then on it installs a payload only when the
+commit is signed by that key with a strictly increasing version. The rules
+and wire types live in `middleware::loader::trust`; the SHA-256 and
+signature checks sit behind the `trust` cargo feature (no_std, no heap:
+`sha2` 0.10.9 with `compress`, `ed25519-dalek` 2.2.0 verify only, `p256`
+0.13 `ecdsa` without default features). A pinned key is **Ed25519** (32
+bytes) or **ECDSA P-256** (33 bytes, compressed SEC1) — see *Hardware-held
+keys* below. Every base firmware enables it: the ESP base firmware for
+every chip, the RP and RT1050 firmwares, and (E26) the ESP8266 firmware.
 
 System keys (all integers little-endian; the full table, including the 0.3
 keys, is in the `loader` module docs):
 
 | key                 | request body                                  | response body |
 |---------------------|-----------------------------------------------|---------------|
-| `sys/trust/info`    | empty                                         | `[state u8][min_version u32][key 32, iff state != 0]`; state 0 Unclaimed, 1 Claimed, 2 Claimed with the re-key window open |
-| `sys/trust/claim`   | `[public key 32]`                             | empty; `Denied` when claimed and the window is closed |
+| `sys/trust/info`    | empty                                         | `[state u8][min_version u32][key 32 or 33, iff state != 0]`; state 0 Unclaimed, 1 Claimed, 2 Claimed with the re-key window open |
+| `sys/trust/claim`   | `[public key 32 or 33]`                       | empty; `Denied` when claimed and the window is closed |
 | `sys/loader/commit` | empty (unsigned) or `[version u32][signature 64]` | empty; `Denied` when the trust rules refuse it |
 
 The signature is Ed25519 (RFC 8032) over the 54-byte message
@@ -3066,8 +3251,129 @@ first claimant pins the key — claim a device before exposing it.
 - [ ] T14 On hardware (ESP32-S3): claim, signed upload, refusal of an
   unsigned and of a replayed upload with the previous payload still
   running, the trust record surviving reboot, and BOOT-held re-keying.
-  Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`); not yet run on
-  a board.
+  Builds (`firmware/build.sh esp32s3`, `esp32`, `esp32c3`). Evidence so
+  far (the over-the-air runs on an ESP32-S3, which claim over its
+  USB-Serial-JTAG first): claim and a signed upload (O10), unsigned,
+  stale and older versions refused (O11), a claimed trust record loading
+  after a reflash and reboot (O19). Open: BOOT-held re-keying on a board.
+
+#### Hardware-held keys (TK…)
+
+Release signing keys live in hardware tokens, which sign ECDSA P-256 (a
+TPM 2.0 has no Ed25519; neither do PIV cards). So the trust model has two
+key kinds ([`KeyKind`]): Ed25519 and P-256. The wire is unchanged for
+Ed25519 (a 32-byte claim, a 37-byte `sys/trust/info`), a P-256 key is 33
+bytes on the wire (compressed SEC1, prefix 02/03; `sys/trust/info` is 38
+bytes), and the length gives the kind. Both signatures are 64 bytes
+(Ed25519 `R || S`; P-256 raw `r || s`, SHA-256 of the message), so
+commit, control and firmware bodies are the same for both. A device
+verifies with the **pinned** key's algorithm only: a signature never picks
+its own.
+
+The release key, `mw-release`, is a P-256 key generated inside the TPM 2.0
+of the release workstation (Infineon SLB9672) through `tpm2-pkcs11`,
+token `mw`, not extractable; its public half is `keys/mw-release.pub`
+(wire form `02fd5072…7c654a`, SPKI SHA-256 `a0f52006…d45d`). mwctl signs
+with it through any PKCS#11 module (`--pkcs11 mw-release`; module, token
+and PIN from `PKCS11_MODULE`, `PKCS11_TOKEN`, `PKCS11_PIN` in the
+environment or `~/.env`, never on a command line). A browser cannot reach
+PKCS#11: the web app verifies and claims P-256 keys but signs only with its
+own Ed25519 key, and tells the user to sign with mwctl when a device
+trusts a hardware key.
+
+- [x] TK1 Two key kinds in `loader::trust`: `PublicKey::{Ed25519, P256}`,
+  claims of 32 or 33 bytes (anything else, an uncompressed or off-curve
+  point included, is `InvalidRequest`), `TrustInfo` 37 or 38 bytes, one
+  `verify_signature` dispatching on the pinned key (Ed25519
+  `verify_strict`; P-256 rejects r or s of 0 or ≥ n; either S half is
+  accepted, a version or counter stops replays), and `fw_ota` verifying
+  firmware commits through it; `ControlOp` gains `FwReboot`, `FwConfirm`,
+  `FwAbort` (3–5) — `loader::trust::tests`:
+  `claim_bodies_are_32_byte_ed25519_or_33_byte_p256`,
+  `trust_info_round_trips_every_state`, `key_kinds_round_trip_through_bytes`,
+  `control_ops_have_fixed_codes_and_keys`, `crypto::p256_openssl_vector_verifies`
+  (a vector made with OpenSSL 3, `web/test/fixtures/trust-vector-p256.json`),
+  `crypto::p256_commit_denials` (unsigned, replay, rollback, other key,
+  tampered image, bumped version, corrupt, zero and out-of-range
+  signatures), `crypto::kinds_never_cross`, `crypto::p256_claim_needs_a_curve_point`;
+  the Ed25519 tests unchanged.
+- [x] TK2 Trust record format 3 (`firmware/src/trust_store.rs`, shared by
+  the ESP, RP, RT1050 and ESP8266 firmwares): a kind byte and a 40-byte
+  key slot (padding must be zero), 68 bytes; formats 1 and 2 load as
+  Ed25519 and migrate on the next save with the save's power-loss safety —
+  `trust_store::tests::format_2_records_load_as_ed25519_and_migrate_to_format_3`
+  (every byte of a format-2 record checked, a cut at every flash operation
+  of the migration, a re-key to P-256),
+  `p256_records_round_trip_and_keep_their_padding_zero`, the format-1 and
+  torn-write tests.
+- [x] TK3 Cost per firmware, measured 2026-11-16. Code (P-256 / Ed25519
+  symbols): RP2040 15.1 / 11.9 KB, RP2350 16.2 / 13.4 KB, RT1050 13.4 /
+  9.0 KB, ESP32-C3 20.7 / 21.5 KB, ESP32 and ESP32-S3 28.0 / 24.1 KB,
+  ESP8266 32.7 / 18.5 KB (in IROM; its static DRAM is unchanged: 2.9 KB
+  rodata, no data or bss). No static RAM, no heap. Worst-case stack of one
+  verify (`scripts/verify-stack/run.sh`: LLVM frame sizes over the call
+  graph, no indirect calls on the path): P-256 4.4 KB on Cortex-M0+
+  (RP2040), 4.6 KB on Cortex-M7 (RT1050), 4.3 KB on RV32IMC (ESP32-C3);
+  Ed25519, which every firmware already ran, 7.7, 7.6 and 8.3 KB. The two
+  algorithms are separate non-inlined functions, so P-256 never adds to
+  the deepest stack a firmware already had. Xtensa is not measured (no
+  stack-size section from its toolchain).
+- [x] TK4 mwctl signs through a `Signer` (a seed file, or
+  `pkcs11::Pkcs11Signer` with `cryptoki`, the module dlopen()ed at run
+  time): `--pkcs11 <LABEL>` wherever `--key` is taken, `key new|pub
+  --pkcs11`, `key init-token` (refuses unless exactly one token is
+  uninitialised). The token's raw ECDSA signature is normalised to low S
+  and verified against its public key before use; PINs are read into
+  `AuthPin` from the environment or `~/.env` and appear in no argument,
+  log line or error — mwctl `pkcs11::tests::softhsm_end_to_end` (SoftHSM2
+  in a child test process: init, P-256 and Ed25519 key generation, label
+  reuse refused, wrong PIN refused without the PIN in the error, payload
+  commits, control requests and an RP2350 firmware update signed in the
+  token and accepted by the device code; other key, tampered image and
+  replays refused), `env_file_lines_are_read_by_name`,
+  `public_keys_convert_to_the_device_wire_form`,
+  `a_missing_pin_names_the_variable_only`;
+  `sign::tests::p256_openssl_vector_verifies_on_the_host`;
+  `cli::tests::pkcs11_keys_name_a_token_label`.
+- [x] TK5 The release key exists in the TPM (2026-11-16): `mwctl key
+  init-token mw` and `key new --pkcs11 mw-release` (random PINs written to
+  `~/.env` by a script, mode 0600, never printed), `key pub --pkcs11
+  mw-release` reads back the same key as `pkcs11-tool`'s SPKI export.
+- [x] TK6 A release signed by the TPM key is accepted by a device, and
+  the other-key, tampered and replay refusals hold, on hardware
+  (2026-11-17, ESP32-S3 `e8:3d:c1:f6:0a:c8` on its USB-Serial-JTAG,
+  firmware 0.6.0 with P-256, flashed with `--erase-parts
+  nvs,payload,trust` after a full-flash backup): `trust claim --pkcs11
+  mw-release` pinned the TPM key (`trust info`: `02fd5072…` (p256)); a
+  TPM-signed `upload echo.wasm --version 100 --start` installed and ran;
+  refused with `Denied`: unsigned, signed by another (Ed25519) key at 101,
+  TPM-signed at 100 (replay) and 99 (older), a second claim; a corrupted
+  chunk with a valid signature failed its CRC (`InvalidRequest`), the
+  previous payload kept each time. A TPM-signed `blink.wasm` at 101
+  installed; after a reset the key and `min_version` 101 were still
+  pinned, blink autostarted (`app/blink/state` toggling), and the same
+  upload at 101 was `Denied`. Still open: the EVKB (USB, LPUART, Zenoh)
+  and the ESP-NOW path (no bridge attached), see ZN5 and the RT1050's
+  *Known gaps*.
+- [x] TK7 The web app parses 37- and 38-byte trust info, claims 33-byte
+  keys and verifies P-256 signatures (WebCrypto ECDSA; the compressed key
+  decompressed in `decompressP256`); a device pinned to a P-256 key
+  refuses browser uploads with a message pointing to mwctl —
+  `web/test/trust.test.ts` "P-256 pinned keys (hardware tokens)" (the
+  OpenSSL vector, kinds never cross, off-curve points refused).
+- [ ] TK8 Signed A/B firmware updates where the base firmware has none
+  yet: ESP32 / S3 / C3 (`otadata` + `ota_0`/`ota_1`, the ESP app image
+  format, the bootloader's rollback), RP2040 (`embassy-boot-rp`), ESP8266
+  (a second-stage bootloader; go/no-go spike first). Not started: each
+  touches its board's boot path, which the plan allows only after that
+  board's recovery path (esptool, BOOTSEL / SWD) is proven on the board,
+  and none of those boards was free on 2026-11-16. Since 2026-11-17 an
+  ESP32-S3 runs the base firmware (its ROM download mode over
+  USB-Serial-JTAG, the recovery path, works; its previous firmware is
+  backed up), so the ESP32-S3 updater can start there. The shared pieces they will reuse are
+  ready: `fw_ota` verifies both key kinds (TK1), mwctl signs with the TPM
+  (TK4) and drives `fw update` over any endpoint, ESP-NOW included once
+  the CLI's refusal is lifted for a board that has the updater.
 
 ### Over-the-air payload update (O…)
 

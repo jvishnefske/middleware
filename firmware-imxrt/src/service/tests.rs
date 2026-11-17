@@ -139,7 +139,9 @@ fn rt12_info_reports_the_rt1050_chip_firmware_runtime_and_node_id() {
     assert_eq!(i.node, Some(NODE));
     assert_eq!(
         i.caps,
-        Caps::SERVE.with(Caps::SOURCE_IMU).with(Caps::SOURCE_MICROPHONE),
+        Caps::SERVE
+            .with(Caps::SOURCE_IMU)
+            .with(Caps::SOURCE_MICROPHONE),
         "the runtime serves requests on payload keys and offers both sample routes"
     );
     assert!(i.caps.contains(Caps::SOURCE_IMU) && i.caps.contains(Caps::SOURCE_MICROPHONE));
@@ -211,7 +213,7 @@ fn rt12_an_upload_survives_a_reboot_and_the_store_erases_whole_blocks() {
         assert_eq!(h.notes.as_slice(), &[Note::Installed { len: 60_000 }]);
         assert_eq!(s.status(), PayloadStatus::Stopped);
         // A claim, so the trust record is written too.
-        ok(&mut s, keys::TRUST_CLAIM, &public(1).0);
+        ok(&mut s, keys::TRUST_CLAIM, public(1).as_bytes());
     }
     // Reboot: reopen on the same flash.
     let (mut s, boot) = open(&mut f);
@@ -276,7 +278,7 @@ fn signer(seed: u8) -> SigningKey {
 }
 
 fn public(seed: u8) -> PublicKey {
-    PublicKey(signer(seed).verifying_key().to_bytes())
+    PublicKey::Ed25519(signer(seed).verifying_key().to_bytes())
 }
 
 fn signed(seed: u8, image: &[u8], version: u32) -> [u8; SIGNED_COMMIT_LEN] {
@@ -302,7 +304,7 @@ fn rt12_a_pinned_key_and_its_min_version_survive_reboots() {
         // Trust on first use: unsigned accepted.
         transfer(&mut s, &img);
         assert_eq!(call(&mut s, keys::COMMIT, &[]).0, Ok(StdVec::new()));
-        let (r, h) = call(&mut s, keys::TRUST_CLAIM, &public(1).0);
+        let (r, h) = call(&mut s, keys::TRUST_CLAIM, public(1).as_bytes());
         assert_eq!(r, Ok(StdVec::new()));
         assert!(matches!(h.notes.as_slice(), [Note::Pinned { .. }]));
     }
@@ -331,7 +333,7 @@ fn rt12_a_pinned_key_and_its_min_version_survive_reboots() {
             ]
         );
         // A second claim is refused: no re-key window on this board.
-        let (r, h) = call(&mut s, keys::TRUST_CLAIM, &public(2).0);
+        let (r, h) = call(&mut s, keys::TRUST_CLAIM, public(2).as_bytes());
         assert_eq!(r, Err(HandlerError::Denied));
         assert_eq!(h.notes.as_slice(), &[Note::ClaimDenied]);
     }
@@ -358,7 +360,7 @@ fn rt12_min_version_reaches_flash_before_the_new_header() {
         let (mut s, _) = open(&mut f);
         transfer(&mut s, &old);
         ok(&mut s, keys::COMMIT, &[]);
-        ok(&mut s, keys::TRUST_CLAIM, &public(1).0);
+        ok(&mut s, keys::TRUST_CLAIM, public(1).as_bytes());
         transfer(&mut s, &new);
         // The trust save is ops 0-2 (erase, fields, magic); the slot
         // header's first write, op 3, is cut.
@@ -423,7 +425,7 @@ impl NorFlash for NoTrust<'_> {
 }
 
 /// The encoded body of a `sys/fw/*` command.
-fn fw_body(cmd: &Command<'_>) -> StdVec<u8> {
+pub(crate) fn fw_body(cmd: &Command<'_>) -> StdVec<u8> {
     let mut out = [0u8; 600];
     let n = cmd.encode_body(&mut out).unwrap();
     out[..n].to_vec()
@@ -439,7 +441,7 @@ fn rt12_an_unreadable_trust_record_refuses_installs_and_claims() {
     assert_eq!(boot.installed, Err(StoreError::NoImage), "the store opened");
     let mut chunk = 0u32.to_le_bytes().to_vec();
     chunk.extend_from_slice(&img[..48]);
-    let claim = public(1).0;
+    let claim = public(1).as_bytes().to_vec();
     let fw_image = slot_image(V1_1, 9, 600);
     let fw_begin = fw_body(&Command::Begin {
         len: fw_image.len() as u32,
@@ -482,11 +484,11 @@ fn rt12_an_unreadable_trust_record_refuses_installs_and_claims() {
     assert_eq!(call(&mut s, keys::COMMIT, &[]).0, Ok(StdVec::new()));
 }
 
-const V1_0: u32 = 0x0001_0000;
-const V1_1: u32 = 0x0001_0001;
+pub(crate) const V1_0: u32 = 0x0001_0000;
+pub(crate) const V1_1: u32 = 0x0001_0001;
 
 /// A slot image (header + `body` bytes) of version `v`.
-fn slot_image(v: u32, seed: u8, body: usize) -> StdVec<u8> {
+pub(crate) fn slot_image(v: u32, seed: u8, body: usize) -> StdVec<u8> {
     let body: StdVec<u8> = (0..body)
         .map(|i| (i as u8).wrapping_mul(29) ^ seed)
         .collect();
@@ -500,7 +502,7 @@ fn slot_image(v: u32, seed: u8, body: usize) -> StdVec<u8> {
 
 /// The bootloader: load the record, decide, persist a trial's attempt
 /// first.
-fn bootloader(flash: &mut BlockFlash) -> Decision {
+pub(crate) fn bootloader(flash: &mut BlockFlash) -> Decision {
     let mut dest = vec![0u8; AB.slot_size() as usize];
     let stored = record::load(flash, AB.record).unwrap();
     let d = decide(&stored.record, |s| check_slot(flash, &AB, s, &mut dest[..]));

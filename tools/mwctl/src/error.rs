@@ -8,7 +8,7 @@
 //! requires.
 
 use crate::plan::PlanError;
-use crate::sign::KeyError;
+use crate::sign::{KeyError, SignError};
 use middleware::loader::keys;
 use middleware::serial::frame::FrameError;
 use middleware::transport::HandlerError;
@@ -47,6 +47,8 @@ pub enum Error {
     Plan(PlanError),
     /// A signing key file or version could not be used.
     Key(KeyError),
+    /// Signing failed (a PKCS#11 token refused, an image too large).
+    Sign(SignError),
     /// The USB↔ESP-NOW bridge did not answer or misbehaved.
     Bridge(String),
     /// A firmware image file cannot be installed.
@@ -90,6 +92,12 @@ impl From<KeyError> for Error {
     }
 }
 
+impl From<SignError> for Error {
+    fn from(e: SignError) -> Self {
+        Error::Sign(e)
+    }
+}
+
 impl Error {
     /// Whether this is the serial port itself going away: a USB CDC device
     /// that resets drops off the bus, and the open port then fails with a
@@ -97,8 +105,10 @@ impl Error {
     /// that means the reboot happened.
     pub fn is_port_lost(&self) -> bool {
         let Error::Io(e) = self else { return false };
-        matches!(e.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected)
-            || matches!(e.raw_os_error(), Some(5 | 6 | 19 | 32))
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected
+        ) || matches!(e.raw_os_error(), Some(5 | 6 | 19 | 32))
     }
 
     /// The device status behind this error, looking through upload context.
@@ -143,14 +153,18 @@ pub fn explain(key: &str, status: HandlerError) -> &'static str {
         InvalidRequest if is(fw::BEGIN) => {
             "an update is committed or on trial: run `fw confirm` or `fw abort` first"
         }
-        BufferTooSmall if is(fw::BEGIN) => "the image is larger than the device's firmware partition",
+        BufferTooSmall if is(fw::BEGIN) => {
+            "the image is larger than the device's firmware partition"
+        }
         InvalidRequest if is(fw::CHUNK) => "chunk out of range or no firmware transfer in progress",
         InvalidRequest if is(fw::COMMIT) => {
             "the device rejected the image: transfer incomplete, SHA-256 mismatch after writing, or its \
              IMAGE_DEF is not an RP2350 TBYB executable of the declared version (the transfer was \
              abandoned; the running firmware is unchanged)"
         }
-        InvalidRequest if is(fw::REBOOT) => "nothing is committed: send the image (fw update) first",
+        InvalidRequest if is(fw::REBOOT) => {
+            "nothing is committed: send the image (fw update) first"
+        }
         InvalidRequest if is(fw::CONFIRM) => {
             "the device is not running a new image on trial (nothing to confirm)"
         }
@@ -237,6 +251,7 @@ impl fmt::Display for Error {
             Error::Image(e) => write!(f, "{e}"),
             Error::Fw(e) => write!(f, "firmware update: {e}"),
             Error::Key(e) => write!(f, "{e}"),
+            Error::Sign(e) => write!(f, "{e}"),
             Error::Upload {
                 step,
                 steps,
@@ -296,7 +311,10 @@ mod tests {
             assert!(!status_name(s).is_empty());
         }
         assert_eq!(status_name(HandlerError::Denied), "Denied");
-        assert_eq!(status_name(HandlerError::DeadlineExceeded), "DeadlineExceeded");
+        assert_eq!(
+            status_name(HandlerError::DeadlineExceeded),
+            "DeadlineExceeded"
+        );
         assert!(explain("sys/loader/commit", HandlerError::Denied).contains("--key"));
         assert!(explain("sys/trust/claim", HandlerError::Denied).contains("BOOT"));
         assert!(explain("sys/payload/stop", HandlerError::Denied).contains("--counter"));

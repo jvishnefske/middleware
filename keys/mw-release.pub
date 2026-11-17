@@ -1,0 +1,24 @@
+# mw-release: the middleware release signing key (public half only).
+#
+# Algorithm   ECDSA P-256 / SHA-256 (devices verify raw r||s, 64 bytes)
+# Held in     TPM 2.0 (Infineon SLB9672, firmware 15.24) of the release
+#             workstation, via tpm2-pkcs11, token "mw", label "mw-release".
+#             Generated inside the TPM on 2026-11-16; not extractable.
+#             No other copy of the private key exists: if that TPM is
+#             cleared or lost, devices claimed to this key must be
+#             re-claimed by hand (BOOT-button re-key window, or a USB/SWD
+#             reflash of the trust record).
+# Sign with   mwctl --pkcs11 mw-release ...   (PKCS11_MODULE, PKCS11_TOKEN,
+#             PKCS11_PIN from the environment or ~/.env; needs group tss)
+# Pin with    mwctl --port <PORT> trust claim --pkcs11 mw-release
+#
+# Device wire form (sys/trust/claim body, compressed SEC1, 33 bytes):
+02fd50725bc57d9d6db78985f1844bd067a2d71b647d1342329295dfadd37c654a
+#
+# SHA-256 of the DER SubjectPublicKeyInfo:
+# a0f5200636852bb0da568ba398e7325686725cc3698fadcc214f18bd65ded45d
+#
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/VByW8V9nW23iYXxhEvQZ6LXG2R9
+E0IykpXfrdN8ZUqxwuZ6S8OhyS70J7gTsIBLUtUyYqTFb1wFHje45WNhbA==
+-----END PUBLIC KEY-----

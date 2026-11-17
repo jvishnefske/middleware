@@ -17,13 +17,13 @@ use std::vec;
 use std::vec::Vec;
 
 use middleware::Key;
+use middleware::SenderId;
 use middleware::fw_ota::picobin::{ImageDef, find_image_def_in};
 use middleware::fw_ota::record::{FwRecord, Pending};
 use middleware::fw_ota::{FwPlatform, Slot, StateCode, keys as fw_keys};
 use middleware::loader::trust::Version;
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
-use middleware::SenderId;
 use mwctl::device::Device;
 use mwctl::fw::{UpdateOptions, Updated, load_image};
 use mwctl::link::{Link, Timeouts, Transport};
@@ -31,7 +31,9 @@ use mwctl::sign::Seed;
 
 use super::AbUpdate;
 use super::factory::{FactoryError, check_update, clear_tbyb, factory_flash, factory_len};
-use super::image::{FwVersion, SENTINEL_OFFSET, START_BLOCK_OFFSET, UPDATE_FLAGS, sentinel_block, start_block};
+use super::image::{
+    FwVersion, SENTINEL_OFFSET, START_BLOCK_OFFSET, UPDATE_FLAGS, sentinel_block, start_block,
+};
 use super::platform::{PlatformError, RpPlatform};
 use super::rom::{Reboot, Rom, XIP_BASE, XipMap};
 use super::table::partition_table_bytes;
@@ -40,7 +42,13 @@ use crate::ram_flash::VecFlash;
 use crate::service::{Facts, Reply, Service};
 
 const NODE: SenderId = SenderId([0x05, 0x6E, 0x9F, 0x22, 0x90, 0x64, 0x46, 0x3F]);
-const FACTS: Facts = Facts { chip: "rp2350", firmware: "1.0", runtime: true, node: NODE, max_image: 64 * 1024 };
+const FACTS: Facts = Facts {
+    chip: "rp2350",
+    firmware: "1.0",
+    runtime: true,
+    node: NODE,
+    max_image: 64 * 1024,
+};
 const FLASH: usize = RP2350.flash_size as usize;
 const V1_0: FwVersion = FwVersion { major: 1, minor: 0 };
 const V1_1: FwVersion = FwVersion { major: 1, minor: 1 };
@@ -91,7 +99,10 @@ fn rom_boot(mem: &[u8], reboot: Option<Reboot>) -> XipMap {
     let ab = ab();
     let table = partition_table_bytes(&ab);
     if mem[..table.len()] != table {
-        return XipMap { base: 0, size: 0x400 * 4096 };
+        return XipMap {
+            base: 0,
+            size: 0x400 * 4096,
+        };
     }
     let target = match reboot {
         Some(Reboot::FlashUpdate { start }) => Some(start - XIP_BASE),
@@ -113,7 +124,10 @@ fn rom_boot(mem: &[u8], reboot: Option<Reboot>) -> XipMap {
         }
     }
     let r = best.map(|(_, r)| r).expect("a bootable image");
-    XipMap { base: r.offset, size: r.size }
+    XipMap {
+        base: r.offset,
+        size: r.size,
+    }
 }
 
 /// The ROM and chip: records reboots, the watchdog and masked sections.
@@ -162,12 +176,18 @@ struct Board {
 
 /// The RP2350 map with the trust record out of the flash: it cannot be
 /// read, as after a flash fault.
-const NO_TRUST: FlashMap = FlashMap { trust: Region::new(0x40_0000, 0x2000), ..RP2350 };
+const NO_TRUST: FlashMap = FlashMap {
+    trust: Region::new(0x40_0000, 0x2000),
+    ..RP2350
+};
 
 fn start(mem: Vec<u8>, reboot: Option<Reboot>, usb: bool, map: &FlashMap) -> Svc {
     let xip = rom_boot(&mem, reboot);
     let mut flash = VecFlash::new(mem);
-    let rom = TestRom { xip: Some(xip), ..TestRom::default() };
+    let rom = TestRom {
+        xip: Some(xip),
+        ..TestRom::default()
+    };
     let (fw, _) = AbUpdate::boot(&mut flash, rom, ab());
     let (mut svc, _) = Service::open(flash, map, FACTS, fw);
     svc.set_usb_configured(usb);
@@ -181,7 +201,14 @@ impl Board {
 
     fn power_on_with(mem: Vec<u8>, map: FlashMap) -> Board {
         let svc = start(mem, None, true, &map);
-        Board { svc, usb: true, splitter: Splitter::new(), tx: VecDeque::new(), boots: 1, map }
+        Board {
+            svc,
+            usb: true,
+            splitter: Splitter::new(),
+            tx: VecDeque::new(),
+            boots: 1,
+            map,
+        }
     }
 
     fn mem(&mut self) -> &mut Vec<u8> {
@@ -251,7 +278,11 @@ impl Transport for Board {
 }
 
 fn device(board: Board) -> Device<Link<Board>> {
-    let t = Timeouts { request: Duration::from_millis(50), begin: Duration::from_millis(50), retries: 1 };
+    let t = Timeouts {
+        request: Duration::from_millis(50),
+        begin: Duration::from_millis(50),
+        retries: 1,
+    };
     Device::new(Link::new(board, t))
 }
 
@@ -266,16 +297,30 @@ fn fw_image(v: FwVersion, seed: u8) -> mwctl::fw::FwImage {
 #[test]
 fn y12_slots_are_bounded_and_the_running_one_is_never_written() {
     let mut flash = VecFlash::new(factory(V1_0));
-    let mut rom = TestRom { xip: Some(XipMap { base: ab().a.offset, size: ab().a.size }), ..TestRom::default() };
+    let mut rom = TestRom {
+        xip: Some(XipMap {
+            base: ab().a.offset,
+            size: ab().a.size,
+        }),
+        ..TestRom::default()
+    };
     let mut p = RpPlatform::new(&mut flash, &mut rom, ab(), None);
     let boot = p.boot_info().unwrap();
-    assert_eq!((boot.running, boot.trial), (Slot::A, false), "the factory image is bought");
+    assert_eq!(
+        (boot.running, boot.trial),
+        (Slot::A, false),
+        "the factory image is bought"
+    );
     assert_eq!(p.slot_size(), 0x17_E000);
     assert_eq!(p.erase(Slot::A, 0), Err(PlatformError::Running));
     assert_eq!(p.write(Slot::A, 0, &[0; 4]), Err(PlatformError::Running));
     let mut b = [0u8; 4];
     p.read(Slot::A, START_BLOCK_OFFSET, &mut b).unwrap();
-    assert_eq!(u32::from_le_bytes(b), 0xffff_ded3, "the running slot reads at its partition");
+    assert_eq!(
+        u32::from_le_bytes(b),
+        0xffff_ded3,
+        "the running slot reads at its partition"
+    );
     // Slot B: bounded, a short tail padded, odd reads bounced.
     let end = p.slot_size();
     assert_eq!(p.erase(Slot::B, end / 4096), Err(PlatformError::Bounds));
@@ -301,14 +346,24 @@ fn y12_slots_are_bounded_and_the_running_one_is_never_written() {
 fn y12_the_record_alternates_sectors_and_survives_power_cuts() {
     let rec = |n: u32| FwRecord {
         min_version: Version(n),
-        pending: Some(Pending { slot: Slot::B, version: Version(n), len: n * 100, sha256: [n as u8; 32], rebooted: n.is_multiple_of(2) }),
+        pending: Some(Pending {
+            slot: Slot::B,
+            version: Version(n),
+            len: n * 100,
+            sha256: [n as u8; 32],
+            rebooted: n.is_multiple_of(2),
+        }),
     };
     let record = ab().record;
     let mut flash = VecFlash::erased(FLASH);
     let mut rom = TestRom::default();
     {
         let mut p = RpPlatform::new(&mut flash, &mut rom, ab(), Some(Slot::A));
-        assert_eq!(p.load_record().unwrap(), FwRecord::EMPTY, "a new board has none");
+        assert_eq!(
+            p.load_record().unwrap(),
+            FwRecord::EMPTY,
+            "a new board has none"
+        );
         for n in 1..=5 {
             p.persist(&rec(n)).unwrap();
             assert_eq!(p.load_record().unwrap(), rec(n));
@@ -326,13 +381,23 @@ fn y12_the_record_alternates_sectors_and_survives_power_cuts() {
         let r = RpPlatform::new(&mut flash, &mut rom, ab(), Some(Slot::A)).persist(&rec(6));
         assert!(r.is_err(), "op {op}");
         flash.restore();
-        let got = RpPlatform::new(&mut flash, &mut rom, ab(), Some(Slot::A)).load_record().unwrap();
+        let got = RpPlatform::new(&mut flash, &mut rom, ab(), Some(Slot::A))
+            .load_record()
+            .unwrap();
         assert_eq!(got, rec(5), "op {op}: the torn save does not count");
         flash.mem = before;
     }
     // Nothing outside the record sectors was written.
-    assert!(flash.mem[..record.offset as usize].iter().all(|&b| b == 0xFF));
-    assert!(flash.mem[record.end() as usize..].iter().all(|&b| b == 0xFF));
+    assert!(
+        flash.mem[..record.offset as usize]
+            .iter()
+            .all(|&b| b == 0xFF)
+    );
+    assert!(
+        flash.mem[record.end() as usize..]
+            .iter()
+            .all(|&b| b == 0xFF)
+    );
 }
 
 /// A board on its first trial of `v` in slot B (factory 1.0 in A).
@@ -341,9 +406,20 @@ fn trial_in_b(v: FwVersion) -> (VecFlash, TestRom) {
     let img = image(v, 25_000, 7);
     let b = ab().b.offset as usize;
     mem[b..b + img.len()].copy_from_slice(&img);
-    let xip = rom_boot(&mem, Some(Reboot::FlashUpdate { start: XIP_BASE + ab().b.offset }));
+    let xip = rom_boot(
+        &mem,
+        Some(Reboot::FlashUpdate {
+            start: XIP_BASE + ab().b.offset,
+        }),
+    );
     assert_eq!(xip.base, ab().b.offset);
-    (VecFlash::new(mem), TestRom { xip: Some(xip), ..TestRom::default() })
+    (
+        VecFlash::new(mem),
+        TestRom {
+            xip: Some(xip),
+            ..TestRom::default()
+        },
+    )
 }
 
 #[test]
@@ -352,16 +428,27 @@ fn y12_explicit_buy_clears_tbyb_in_place_masked_and_stops_the_watchdog() {
     let before = flash.mem.clone();
     {
         let mut p = RpPlatform::new(&mut flash, &mut rom, ab(), None);
-        assert_eq!(p.explicit_buy(), Err(PlatformError::NoBoot), "boot_info first");
+        assert_eq!(
+            p.explicit_buy(),
+            Err(PlatformError::NoBoot),
+            "boot_info first"
+        );
         let boot = p.boot_info().unwrap();
-        assert_eq!((boot.running, boot.trial), (Slot::B, true), "a running TBYB image is a trial");
+        assert_eq!(
+            (boot.running, boot.trial),
+            (Slot::B, true),
+            "a running TBYB image is a trial"
+        );
         p.explicit_buy().unwrap();
         assert!(!p.boot_info().unwrap().trial);
     }
     assert_eq!((rom.masked, rom.watchdog_stopped), (1, true));
     // Only the IMAGE_TYPE flags changed: the TBYB bit, in slot B's first sector.
     let diff: Vec<usize> = (0..FLASH).filter(|&i| flash.mem[i] != before[i]).collect();
-    assert_eq!(diff, vec![ab().b.offset as usize + START_BLOCK_OFFSET as usize + 7]);
+    assert_eq!(
+        diff,
+        vec![ab().b.offset as usize + START_BLOCK_OFFSET as usize + 7]
+    );
     assert_eq!(def(&flash.mem, ab().b).unwrap().flags, 0x1021);
     // Bought: a normal boot now picks B (1.1 > 1.0).
     assert_eq!(rom_boot(&flash.mem, None).base, ab().b.offset);
@@ -370,7 +457,10 @@ fn y12_explicit_buy_clears_tbyb_in_place_masked_and_stops_the_watchdog() {
     rom.watchdog_stopped = false;
     let mut p = RpPlatform::new(&mut flash, &mut rom, ab(), Some(Slot::B));
     p.explicit_buy().unwrap();
-    assert_eq!((flash.erase_calls, rom.watchdog_stopped, rom.masked), (erases, true, 1));
+    assert_eq!(
+        (flash.erase_calls, rom.watchdog_stopped, rom.masked),
+        (erases, true, 1)
+    );
 }
 
 #[test]
@@ -382,9 +472,16 @@ fn y12_a_torn_buy_leaves_slot_b_unbootable_and_a_boots() {
         flash.cut_at(op);
         let r = RpPlatform::new(&mut flash, &mut rom, ab(), Some(Slot::B)).explicit_buy();
         assert!(matches!(r, Err(PlatformError::Flash(_))), "op {op}: {r:?}");
-        assert!(!rom.watchdog_stopped, "op {op}: a failed buy leaves the trial watchdog running");
+        assert!(
+            !rom.watchdog_stopped,
+            "op {op}: a failed buy leaves the trial watchdog running"
+        );
         flash.restore();
-        assert_eq!(def(&flash.mem, ab().b), None, "op {op}: the sentinel keeps a torn sector unbootable");
+        assert_eq!(
+            def(&flash.mem, ab().b),
+            None,
+            "op {op}: the sentinel keeps a torn sector unbootable"
+        );
         assert_eq!(rom_boot(&flash.mem, None).base, ab().a.offset, "op {op}");
     }
 }
@@ -396,15 +493,26 @@ fn y12_without_the_partition_table_the_updater_is_unavailable() {
     let img = image(V1_0, 20_000, 3);
     mem[..img.len()].copy_from_slice(&img);
     let mut flash = VecFlash::new(mem);
-    let rom = TestRom { xip: Some(rom_boot(&flash.mem, None)), ..TestRom::default() };
+    let rom = TestRom {
+        xip: Some(rom_boot(&flash.mem, None)),
+        ..TestRom::default()
+    };
     let (fw, boot) = AbUpdate::boot(&mut flash, rom, ab());
-    assert_eq!(boot.map(|_| ()), Err(PlatformError::NotPartitioned { base: 0 }));
+    assert_eq!(
+        boot.map(|_| ()),
+        Err(PlatformError::NotPartitioned { base: 0 })
+    );
     assert_eq!(fw.state(), None);
     let (mut svc, _) = Service::open(flash, &RP2350, FACTS, fw);
     let mut out = [0u8; 64];
     for k in fw_keys::ALL {
         let h = svc.handle(k, &[], &mut out);
-        assert_eq!(h.reply, Reply::Now(Err(HandlerError::Unavailable)), "{}", k.as_str());
+        assert_eq!(
+            h.reply,
+            Reply::Now(Err(HandlerError::Unavailable)),
+            "{}",
+            k.as_str()
+        );
     }
     // The payload side works as before.
     let h = svc.handle(middleware::loader::keys::INFO, &[], &mut out);
@@ -427,7 +535,10 @@ fn y13_factory_flash_is_the_table_and_the_update_image_bought_in_slot_a() {
     assert_eq!(diff, vec![def_update.type_offset as usize + 3]);
     let d = find_image_def_in(slot).unwrap();
     assert!(!d.is_tbyb() && d.is_exe() && d.is_rp2350());
-    assert_eq!((d.version_u32(), d.window_tail), (0x0001_0000, SENTINEL_OFFSET));
+    assert_eq!(
+        (d.version_u32(), d.window_tail),
+        (0x0001_0000, SENTINEL_OFFSET)
+    );
     // Slot B and everything after the image are erased.
     assert!(mem[a + img.len()..].iter().all(|&b| b == 0xFF));
     assert_eq!(rom_boot(&mem, None).base, ab().a.offset);
@@ -444,22 +555,50 @@ fn y13_images_mwctl_refuses_are_refused_here_too() {
     let mut not_tbyb = good.clone();
     let d = find_image_def_in(&good).unwrap();
     clear_tbyb(&mut not_tbyb, &d).unwrap();
-    assert_eq!(check_update(&not_tbyb, ab().a.size), Err(FactoryError::NotTbyb));
+    assert_eq!(
+        check_update(&not_tbyb, ab().a.size),
+        Err(FactoryError::NotTbyb)
+    );
     let mut no_sentinel = good.clone();
     no_sentinel[SENTINEL_OFFSET as usize..0x1000].fill(0xFF);
     put(&mut no_sentinel, START_BLOCK_OFFSET + 20, &[0]);
-    assert_eq!(check_update(&no_sentinel, ab().a.size), Err(FactoryError::NoSentinel));
+    assert_eq!(
+        check_update(&no_sentinel, ab().a.size),
+        Err(FactoryError::NoSentinel)
+    );
     let mut rp2040 = good.clone();
-    put(&mut rp2040, START_BLOCK_OFFSET + 4, &[0x42 | 1 << 8 | 0x8021 << 16]);
-    assert_eq!(check_update(&rp2040, ab().a.size), Err(FactoryError::NotRp2350Exe));
-    assert_eq!(check_update(&[0xFF; 8192], ab().a.size), Err(FactoryError::NoImageDef));
-    assert_eq!(check_update(&good, 8_000), Err(FactoryError::TooLarge { len: 9_000, slot: 8_000 }));
+    put(
+        &mut rp2040,
+        START_BLOCK_OFFSET + 4,
+        &[0x42 | 1 << 8 | 0x8021 << 16],
+    );
+    assert_eq!(
+        check_update(&rp2040, ab().a.size),
+        Err(FactoryError::NotRp2350Exe)
+    );
+    assert_eq!(
+        check_update(&[0xFF; 8192], ab().a.size),
+        Err(FactoryError::NoImageDef)
+    );
+    assert_eq!(
+        check_update(&good, 8_000),
+        Err(FactoryError::TooLarge {
+            len: 9_000,
+            slot: 8_000
+        })
+    );
     for bad in [&not_tbyb, &no_sentinel, &rp2040] {
         assert!(load_image(bad, None).is_err(), "mwctl agrees");
     }
     let mut out = vec![0u8; 100];
-    assert_eq!(factory_flash(&good, &RP2350, &mut out), Err(FactoryError::Layout));
-    assert_eq!(factory_flash(&good, &crate::layout::RP2040, &mut out), Err(FactoryError::Layout));
+    assert_eq!(
+        factory_flash(&good, &RP2350, &mut out),
+        Err(FactoryError::Layout)
+    );
+    assert_eq!(
+        factory_flash(&good, &crate::layout::RP2040, &mut out),
+        Err(FactoryError::Layout)
+    );
     // clear_tbyb refuses an IMAGE_DEF that does not match the bytes.
     let mut short = good[..0x100].to_vec();
     assert_eq!(clear_tbyb(&mut short, &d), Err(FactoryError::TypeItem));
@@ -471,17 +610,34 @@ fn y12_mwctl_updates_confirms_and_rolls_back_a_pico_2() {
     let mut d = device(Board::power_on(factory(V1_0)));
     // (1) Factory: slot A, 1.0, idle.
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.slots[0].version, i.slots[1].version), (StateCode::Idle, Slot::A, Some(Version(0x0001_0000)), None));
+    assert_eq!(
+        (i.state, i.running, i.slots[0].version, i.slots[1].version),
+        (StateCode::Idle, Slot::A, Some(Version(0x0001_0000)), None)
+    );
     assert!(i.self_test_ok);
     d.trust_claim(seed.public_key()).unwrap();
     // (2) Update to 1.1, signed: into B, flash-update reboot, trial.
     let img = fw_image(V1_1, 1);
-    let opts = UpdateOptions { key: Some(&seed), reboot: true };
+    let opts = UpdateOptions {
+        key: Some(&seed),
+        reboot: true,
+        control: None,
+    };
     let done = d.fw_update(&img, opts, |_| {}).unwrap();
-    assert_eq!(done, Updated { slot: Slot::B, rebooted: true, reboot_unanswered: false });
+    assert_eq!(
+        done,
+        Updated {
+            slot: Slot::B,
+            rebooted: true,
+            reboot_unanswered: false
+        }
+    );
     assert_eq!(board(&mut d).boots, 2);
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.version), (StateCode::Trial, Slot::B, Version(0x0001_0001)));
+    assert_eq!(
+        (i.state, i.running, i.version),
+        (StateCode::Trial, Slot::B, Version(0x0001_0001))
+    );
     assert!(i.slots[1].tbyb);
     assert_eq!(i.min_version, Version(0x0001_0001));
     // (3) Confirm: bought in place, watchdog stopped, then a reset boots B.
@@ -490,8 +646,15 @@ fn y12_mwctl_updates_confirms_and_rolls_back_a_pico_2() {
     assert!(board(&mut d).fw().rom().watchdog_stopped);
     board(&mut d).reset(None);
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.slots[1].tbyb), (StateCode::Idle, Slot::B, false));
-    assert_eq!(i.slots[0].version, Some(Version(0x0001_0000)), "the factory image stays in A");
+    assert_eq!(
+        (i.state, i.running, i.slots[1].tbyb),
+        (StateCode::Idle, Slot::B, false)
+    );
+    assert_eq!(
+        i.slots[0].version,
+        Some(Version(0x0001_0000)),
+        "the factory image stays in A"
+    );
     // (4) Update to 1.2 into A, reset during the trial without a confirm.
     let img = fw_image(V1_2, 2);
     let done = d.fw_update(&img, opts, |_| {}).unwrap();
@@ -500,7 +663,10 @@ fn y12_mwctl_updates_confirms_and_rolls_back_a_pico_2() {
     assert_eq!((i.state, i.running), (StateCode::Trial, Slot::A));
     board(&mut d).reset(None);
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.version), (StateCode::RolledBack, Slot::B, Version(0x0001_0002)));
+    assert_eq!(
+        (i.state, i.running, i.version),
+        (StateCode::RolledBack, Slot::B, Version(0x0001_0002))
+    );
     assert!(i.slots[0].tbyb, "the unbought image is left in A");
     // 1.2 is used up; 1.3 goes through.
     assert!(d.fw_update(&img, opts, |_| {}).is_err());
@@ -509,7 +675,10 @@ fn y12_mwctl_updates_confirms_and_rolls_back_a_pico_2() {
     d.fw_confirm(3, || {}).unwrap();
     board(&mut d).reset(None);
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.slots[0].version), (StateCode::Idle, Slot::A, Some(Version(0x0001_0003))));
+    assert_eq!(
+        (i.state, i.running, i.slots[0].version),
+        (StateCode::Idle, Slot::A, Some(Version(0x0001_0003)))
+    );
     // The payload store and the trust record were never touched by any of it.
     assert!(d.trust_info().unwrap().state.is_claimed());
 }
@@ -518,7 +687,16 @@ fn y12_mwctl_updates_confirms_and_rolls_back_a_pico_2() {
 fn y12_confirm_waits_for_the_self_test() {
     let mut d = device(Board::power_on(factory(V1_0)));
     let img = fw_image(V1_1, 4);
-    d.fw_update(&img, UpdateOptions { key: None, reboot: false }, |_| {}).unwrap();
+    d.fw_update(
+        &img,
+        UpdateOptions {
+            key: None,
+            reboot: false,
+            control: None,
+        },
+        |_| {},
+    )
+    .unwrap();
     assert_eq!(d.fw_info().unwrap().state, StateCode::Committed);
     // The new firmware boots, but USB is not configured yet.
     board(&mut d).usb = false;
@@ -532,7 +710,10 @@ fn y12_confirm_waits_for_the_self_test() {
     board(&mut d).svc.set_usb_configured(true);
     let mut tries = 0;
     d.fw_confirm(2, || tries += 1).unwrap();
-    assert_eq!((d.fw_info().unwrap().state, tries), (StateCode::Confirmed, 0));
+    assert_eq!(
+        (d.fw_info().unwrap().state, tries),
+        (StateCode::Confirmed, 0)
+    );
 }
 
 #[test]
@@ -561,10 +742,28 @@ fn y13_the_built_update_image_installs_through_mwctl() {
     check_update(&img.bytes, ab().a.size).unwrap();
     // A factory board one version lower (0.1) than anything shipped.
     let mut d = device(Board::power_on(factory(FwVersion { major: 0, minor: 1 })));
-    let done = d.fw_update(&img, UpdateOptions { key: None, reboot: false }, |_| {}).unwrap();
+    let done = d
+        .fw_update(
+            &img,
+            UpdateOptions {
+                key: None,
+                reboot: false,
+                control: None,
+            },
+            |_| {},
+        )
+        .unwrap();
     assert_eq!((done.slot, done.rebooted), (Slot::B, false));
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.target, i.version, i.len), (StateCode::Committed, Some(Slot::B), img.version, img.bytes.len() as u32));
+    assert_eq!(
+        (i.state, i.target, i.version, i.len),
+        (
+            StateCode::Committed,
+            Some(Slot::B),
+            img.version,
+            img.bytes.len() as u32
+        )
+    );
     d.fw_reboot().unwrap();
     assert_eq!(d.fw_info().unwrap().state, StateCode::Trial);
     d.fw_confirm(2, || {}).unwrap();
@@ -582,7 +781,10 @@ fn y13_uf2s_reassemble_to_the_images_and_the_factory_one_erases_b_and_the_record
     let img = image(V1_0, 20_001, 5);
     let to_uf2 = |pages: Vec<uf2::Page>, family| {
         let mut out = vec![0u8; pages.len() * BLOCK];
-        assert_eq!(uf2::write(pages.into_iter(), family, &mut out), Some(out.len()));
+        assert_eq!(
+            uf2::write(pages.into_iter(), family, &mut out),
+            Some(out.len())
+        );
         out
     };
     // Update: mwctl reads it back as the image (the last page padded).
@@ -591,29 +793,62 @@ fn y13_uf2s_reassemble_to_the_images_and_the_factory_one_erases_b_and_the_record
     let back = mwctl::fw::uf2_to_bin(&update).unwrap();
     assert_eq!(&back[..img.len()], &img[..]);
     assert!(back[img.len()..].iter().all(|&b| b == 0xFF));
-    assert_eq!(load_image(&update, None).unwrap().version, Version(0x0001_0000));
+    assert_eq!(
+        load_image(&update, None).unwrap().version,
+        Version(0x0001_0000)
+    );
     // Every block: magic, family flag, its address, 256 bytes, index/count.
     let n = (update.len() / BLOCK) as u32;
     for (i, b) in update.chunks(BLOCK).enumerate() {
         let w = |at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
-        assert_eq!((w(0), w(4), w(8), w(16), w(20), w(24), w(28)), (0x0A32_4655, 0x9E5D_5157, 0x2000, 256, i as u32, n, FAMILY_RP2350_ARM_S));
-        assert_eq!((w(12), w(508)), (0x1000_0000 + (i * PAGE) as u32, 0x0AB1_6F30));
+        assert_eq!(
+            (w(0), w(4), w(8), w(16), w(20), w(24), w(28)),
+            (
+                0x0A32_4655,
+                0x9E5D_5157,
+                0x2000,
+                256,
+                i as u32,
+                n,
+                FAMILY_RP2350_ARM_S
+            )
+        );
+        assert_eq!(
+            (w(12), w(508)),
+            (0x1000_0000 + (i * PAGE) as u32, 0x0AB1_6F30)
+        );
     }
     // Factory: absolute, from flash offset 0, plus erased pages at slot B
     // and at both record sectors; payload store and trust untouched.
     let mut flat = vec![0u8; factory_len(&RP2350, img.len()).unwrap()];
     factory_flash(&img, &RP2350, &mut flat).unwrap();
-    let factory_uf2 = to_uf2(uf2::factory_pages(&flat, &RP2350).collect(), FAMILY_ABSOLUTE);
-    let addrs: Vec<u32> = factory_uf2.chunks(BLOCK).map(|b| u32::from_le_bytes(b[12..16].try_into().unwrap())).collect();
+    let factory_uf2 = to_uf2(
+        uf2::factory_pages(&flat, &RP2350).collect(),
+        FAMILY_ABSOLUTE,
+    );
+    let addrs: Vec<u32> = factory_uf2
+        .chunks(BLOCK)
+        .map(|b| u32::from_le_bytes(b[12..16].try_into().unwrap()))
+        .collect();
     assert_eq!(addrs[0], 0x1000_0000);
     let extra = &addrs[flat.len().div_ceil(PAGE)..];
     assert_eq!(extra, &[0x1018_0000, 0x102F_E000, 0x102F_F000]);
-    assert!(addrs.iter().all(|&a| a < 0x1030_0000), "payload store and trust record kept");
+    assert!(
+        addrs.iter().all(|&a| a < 0x1030_0000),
+        "payload store and trust record kept"
+    );
     let back = mwctl::fw::uf2_to_bin(&factory_uf2).unwrap();
     assert_eq!(&back[..flat.len()], &flat[..]);
     assert!(back[flat.len()..].iter().all(|&b| b == 0xFF));
-    assert_eq!(rom_boot(&back, None).base, ab().a.offset, "the factory UF2 boots slot A");
-    assert_eq!(uf2::write(uf2::update_pages(&img), FAMILY_ABSOLUTE, &mut [0u8; 100]), None);
+    assert_eq!(
+        rom_boot(&back, None).base,
+        ab().a.offset,
+        "the factory UF2 boots slot A"
+    );
+    assert_eq!(
+        uf2::write(uf2::update_pages(&img), FAMILY_ABSOLUTE, &mut [0u8; 100]),
+        None
+    );
 }
 
 #[test]
@@ -621,28 +856,56 @@ fn y16_an_unreadable_trust_record_refuses_firmware_installs() {
     let mut d = device(Board::power_on_with(factory(V1_0), NO_TRUST));
     // info still answers; the self-test fails (trust record not open).
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.self_test_ok), (StateCode::Idle, Slot::A, false));
+    assert_eq!(
+        (i.state, i.running, i.self_test_ok),
+        (StateCode::Idle, Slot::A, false)
+    );
     // begin, chunk and commit are Unavailable: the device does not fall
     // back to "unclaimed, accept anything".
-    let err = d.fw_update(&fw_image(V1_1, 1), UpdateOptions::default(), |_| {}).unwrap_err();
+    let err = d
+        .fw_update(&fw_image(V1_1, 1), UpdateOptions::default(), |_| {})
+        .unwrap_err();
     assert_eq!(err.status(), Some(HandlerError::Unavailable), "{err}");
     let b = board(&mut d);
     let mut out = [0u8; 64];
     let mut chunk = vec![0u8; 4];
     chunk.extend_from_slice(&[1; 16]);
-    for (k, body) in [(fw_keys::CHUNK, &chunk[..]), (fw_keys::COMMIT, &[][..]), (fw_keys::COMMIT, &[0u8; 64][..])] {
+    for (k, body) in [
+        (fw_keys::CHUNK, &chunk[..]),
+        (fw_keys::COMMIT, &[][..]),
+        (fw_keys::COMMIT, &[0u8; 64][..]),
+    ] {
         let h = b.svc.handle(k, body, &mut out);
-        assert_eq!(h.reply, Reply::Now(Err(HandlerError::Unavailable)), "{}", k.as_str());
+        assert_eq!(
+            h.reply,
+            Reply::Now(Err(HandlerError::Unavailable)),
+            "{}",
+            k.as_str()
+        );
     }
-    assert!(b.mem()[ab().b.offset as usize..ab().b.end() as usize].iter().all(|&x| x == 0xFF), "slot B untouched");
+    assert!(
+        b.mem()[ab().b.offset as usize..ab().b.end() as usize]
+            .iter()
+            .all(|&x| x == 0xFF),
+        "slot B untouched"
+    );
     // abort changes nothing that needs authorizing and still answers.
     d.fw_abort().unwrap();
     assert_eq!(d.fw_info().unwrap().state, StateCode::Idle);
     // The payload loader refuses installs and claims too.
     let b = board(&mut d);
-    for k in [middleware::loader::keys::BEGIN, middleware::loader::keys::COMMIT, middleware::loader::keys::TRUST_CLAIM] {
+    for k in [
+        middleware::loader::keys::BEGIN,
+        middleware::loader::keys::COMMIT,
+        middleware::loader::keys::TRUST_CLAIM,
+    ] {
         let h = b.svc.handle(k, &[0u8; 32], &mut out);
-        assert_eq!(h.reply, Reply::Now(Err(HandlerError::Unavailable)), "{}", k.as_str());
+        assert_eq!(
+            h.reply,
+            Reply::Now(Err(HandlerError::Unavailable)),
+            "{}",
+            k.as_str()
+        );
     }
 }
 
@@ -650,12 +913,24 @@ fn y16_an_unreadable_trust_record_refuses_firmware_installs() {
 fn y16_a_trial_booted_with_the_trust_record_unreadable_is_never_bought() {
     // Committed while the record was readable (authorized then) ...
     let mut d = device(Board::power_on(factory(V1_0)));
-    d.fw_update(&fw_image(V1_1, 2), UpdateOptions { key: None, reboot: false }, |_| {}).unwrap();
+    d.fw_update(
+        &fw_image(V1_1, 2),
+        UpdateOptions {
+            key: None,
+            reboot: false,
+            control: None,
+        },
+        |_| {},
+    )
+    .unwrap();
     // ... then the trial boot cannot read it.
     board(&mut d).map = NO_TRUST;
     d.fw_reboot().unwrap();
     let i = d.fw_info().unwrap();
-    assert_eq!((i.state, i.running, i.self_test_ok), (StateCode::Trial, Slot::B, false));
+    assert_eq!(
+        (i.state, i.running, i.self_test_ok),
+        (StateCode::Trial, Slot::B, false)
+    );
     let err = d.fw_confirm(2, || {}).unwrap_err();
     assert_eq!(err.status(), Some(HandlerError::Unavailable));
     // A reset reverts it.

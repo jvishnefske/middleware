@@ -717,6 +717,37 @@ where
         .await
     }
 
+    /// Declares a queryable on `key` only, without its per-node key (the
+    /// node answers it for broadcast queries; per-node queries come through
+    /// [`ZenohLite::declare_node_prefix_queryable`]).
+    pub async fn declare_plain_queryable(&mut self, key: Key<'_>) -> Res<(), S> {
+        let (decls, index) = self
+            .decls
+            .add_plain_queryable(key)
+            .map_err(LiteError::Table)?;
+        self.decls = decls;
+        match index {
+            Some(i) => self.declare_from(i).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Declares one per-node queryable for every key under `prefix`
+    /// (`@mw/node/<id>/<prefix>/**`): a query on a per-node key under it
+    /// arrives as a [`QueryEvent`] on that key. One declaration however
+    /// many keys the node answers.
+    pub async fn declare_node_prefix_queryable(&mut self, prefix: Key<'_>) -> Res<(), S> {
+        let (decls, index) = self
+            .decls
+            .add_node_prefix_queryable(prefix, self.sender)
+            .map_err(LiteError::Table)?;
+        self.decls = decls;
+        match index {
+            Some(i) => self.declare_from(i).await,
+            None => Ok(()),
+        }
+    }
+
     /// Declares a queryable on `key` and on its per-node key (now if open,
     /// and after every open).
     pub async fn declare_queryable(&mut self, key: Key<'_>) -> Res<(), S> {
@@ -960,7 +991,7 @@ where
     async fn answer_busy(&mut self, rid: u32, expr: Option<Expr>) -> Res<(), S> {
         self.stats.busy_queries = self.stats.busy_queries.saturating_add(1);
         match expr {
-            Some(e) if self.decls.queryable_for(&e).is_some() => {
+            Some(e) if self.decls.queryable_key(&e).is_some() => {
                 self.send_reply(rid, &e, Err(HandlerError::Unavailable))
                     .await
             }
@@ -1034,10 +1065,7 @@ where
                 NetworkMessage::Request(q) => {
                     let rid = q.id;
                     let expr = resolve(&self.maps, &q.wire_expr);
-                    let decl_key = expr
-                        .as_deref()
-                        .and_then(|e| self.decls.queryable_for(e))
-                        .map(|d| d.key);
+                    let decl_key = expr.as_deref().and_then(|e| self.decls.queryable_key(e));
                     let (Some(key), Some(reply_to), true) =
                         (decl_key, expr.clone(), want != Want::Samples)
                     else {

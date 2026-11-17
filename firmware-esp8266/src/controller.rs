@@ -18,13 +18,23 @@
 //!   (`begin` erases the inactive slot, `chunk` writes it, `commit`
 //!   activates it), so a rejected or interrupted upload leaves the previous
 //!   image installed and the status returns to `Stopped`;
-//!   `sys/payload/stop` (`Ok`, nothing runs). Signed payloads are not
-//!   enabled here (`esp-base` without its `trust` feature): `sys/trust/*`
-//!   is `NotFound` and a signature in a commit body is accepted unchecked. `sys/payload/start` is
+//!   `sys/payload/stop` (`Ok`, nothing runs). `sys/payload/start` is
 //!   answered `NotFound` by dispatch because [`Context::runtime`] is
 //!   `false`, exactly as on the ESP32-C3 build without `wasm`. Publications
 //!   and responses from the host are ignored: there is no payload to
 //!   deliver them to.
+//! * Signed payloads (requirement E26, `esp-base`'s `trust`): the trust
+//!   record (`esp_base::trust_store`) lives in the two sectors at
+//!   [`TRUST_OFFSET`], right after the payload region. `sys/trust/info`
+//!   and `sys/trust/claim` work as on the other base firmwares (trust on
+//!   first use; Ed25519 or P-256 keys); once claimed a commit must be
+//!   signed by the pinned key with a version above the last, and the
+//!   raised `min_version` is saved inside `PayloadStore::activate_with`
+//!   (after the CRC check, before the slot header). There is no re-key
+//!   window (no presence button is read): to re-key, erase the trust
+//!   sectors with esptool over the UART. A trust record that cannot be
+//!   read at boot fails closed: the requests that install or pin anything
+//!   ([`loader_needs_trust`]) answer `Unavailable`.
 //! * A failed storage action logs `storage: <error>`, applies
 //!   [`State::storage_failed`] (back to `Stopped` if an image is installed,
 //!   else `Empty`) and replies `Internal`. A successful
@@ -40,13 +50,21 @@ use embedded_storage::nor_flash::NorFlash;
 use esp_base::chip::Profile;
 use esp_base::dispatch::{Action, Context, Outcome, State, handle_request};
 use esp_base::store::{PayloadStore, StoreError};
+use esp_base::trust_store::{PARTITION_LEN, Persisted, TrustStore};
 use middleware::Key;
+use middleware::loader::trust::TrustState;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::Frame;
 use middleware::transport::{HandlerError, Request};
 use middleware::wasm_abi::MAX_LOG;
 
-use crate::flash::REGION_SIZE;
+use crate::flash::{REGION_SIZE, TRUST_OFFSET};
+
+/// Whether a request depends on the trust record: installing a payload
+/// and pinning a key. Without a readable record they are `Unavailable`.
+pub fn loader_needs_trust(key: Key<'_>) -> bool {
+    key == keys::BEGIN || key == keys::CHUNK || key == keys::COMMIT || key == keys::TRUST_CLAIM
+}
 
 /// Firmware version reported in `sys/info`; the suffix marks a build
 /// without the WASM runtime.
@@ -107,6 +125,8 @@ pub struct Controller<F> {
     state: State,
     ctx: Context<'static>,
     store: Option<PayloadStore<F>>,
+    /// The trust record; `None` when it could not be read (fail closed).
+    trust: Option<TrustStore>,
 }
 
 impl<F: NorFlash> Controller<F> {
@@ -117,7 +137,28 @@ impl<F: NorFlash> Controller<F> {
         let mut store = PayloadStore::new(flash, 0, REGION_SIZE, profile.max_image).ok();
         let installed = store.as_mut().map(PayloadStore::verify);
         let capacity = store.as_ref().map_or(0, PayloadStore::capacity);
-        let state = State::boot(matches!(installed, Some(Ok(_))));
+        // `TrustStore::open` reads a sector it cannot read as holding no
+        // record (Unclaimed); here an unreadable sector makes the record
+        // unavailable instead, so the controller fails closed.
+        let opened = store.as_mut().and_then(|s| {
+            let mut probe = [0u8; esp_base::trust_store::RECORD_LEN];
+            let readable = (0..2u32).all(|i| {
+                s.flash()
+                    .read(TRUST_OFFSET + i * crate::flash::SECTOR, &mut probe)
+                    .is_ok()
+            });
+            readable
+                .then(|| TrustStore::open(s.flash(), TRUST_OFFSET, PARTITION_LEN).ok())
+                .flatten()
+        });
+        let (trust, persisted) = match opened {
+            Some((t, p)) => (Some(t), Some(p)),
+            None => (None, None),
+        };
+        let p = persisted.unwrap_or_default();
+        let state = State::boot(matches!(installed, Some(Ok(_))))
+            .with_trust(p.trust)
+            .with_control(p.control);
         let ctx = Context {
             chip: profile.name,
             firmware: FIRMWARE,
@@ -146,8 +187,38 @@ impl<F: NorFlash> Controller<F> {
             ),
             Some(Err(e)) => log(out, format_args!("no valid stored payload: {e}")),
         }
+        match persisted.map(|p| p.trust) {
+            None => log(
+                out,
+                format_args!("trust record unreadable; installs and claims refused"),
+            ),
+            Some(TrustState::Unclaimed) => log(
+                out,
+                format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"),
+            ),
+            Some(TrustState::Claimed { key, min_version }) => {
+                let k = key.as_bytes();
+                log(
+                    out,
+                    format_args!(
+                        "trust: claimed by {} key {:02x}{:02x}{:02x}{:02x}..., min_version {}",
+                        key.kind().name(),
+                        k[0],
+                        k[1],
+                        k[2],
+                        k[3],
+                        min_version.0
+                    ),
+                );
+            }
+        }
         publish_status(out, state.status());
-        Controller { state, ctx, store }
+        Controller {
+            state,
+            ctx,
+            store,
+            trust,
+        }
     }
 
     /// Current dispatcher state.
@@ -170,11 +241,52 @@ impl<F: NorFlash> Controller<F> {
     /// Dispatches one request, performs its storage action, and replies.
     fn request(&mut self, id: u8, key: Key<'_>, body: &[u8], out: &mut impl Outbound) {
         let mut reply = [0u8; MAX_REPLY];
+        if self.trust.is_none() && loader_needs_trust(key) {
+            out.respond(id, Err(HandlerError::Unavailable));
+            return;
+        }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), &mut reply);
         let result = match self.storage(&outcome) {
             Ok(()) => {
-                if let Action::Activate { len, .. } = outcome.action {
-                    log(out, format_args!("payload installed ({len} bytes)"));
+                match outcome.action {
+                    Action::Activate { len, trust, .. } => {
+                        log(out, format_args!("payload installed ({len} bytes)"));
+                        if let Some(TrustState::Claimed { min_version, .. }) = trust {
+                            log(
+                                out,
+                                format_args!(
+                                    "trust: signed payload accepted, min_version {}",
+                                    min_version.0
+                                ),
+                            );
+                        }
+                    }
+                    Action::Claim {
+                        trust: TrustState::Claimed { key, .. },
+                    } => {
+                        let k = key.as_bytes();
+                        log(
+                            out,
+                            format_args!(
+                                "trust: {} key {:02x}{:02x}{:02x}{:02x}... pinned, min_version 0",
+                                key.kind().name(),
+                                k[0],
+                                k[1],
+                                k[2],
+                                k[3]
+                            ),
+                        );
+                    }
+                    _ => {}
+                }
+                if outcome.reply == Err(HandlerError::Denied) {
+                    log(
+                        out,
+                        format_args!(
+                            "trust: {} denied (claimed: needs the pinned key's signature and a newer version)",
+                            key.as_str()
+                        ),
+                    );
                 }
                 self.set_state(outcome.state, out);
                 // Without a runtime dispatch never asks to start; refuse
@@ -187,7 +299,10 @@ impl<F: NorFlash> Controller<F> {
             }
             Err(e) => {
                 log(out, format_args!("storage: {e}"));
-                self.set_state(self.state.storage_failed(), out);
+                // The trust record may already be on flash (saved before
+                // the slot header): adopt what a reboot would load.
+                let failed = self.adopt_persisted(self.state.storage_failed());
+                self.set_state(failed, out);
                 Err(HandlerError::Internal)
             }
         };
@@ -200,13 +315,49 @@ impl<F: NorFlash> Controller<F> {
     }
 
     fn storage(&mut self, outcome: &Outcome<'_>) -> Result<(), StoreError> {
+        let control = outcome.state.control();
         match outcome.action {
             Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
-            // Built without `trust`: commits are never checked, so there is
-            // never a trust record to persist.
-            Action::Activate { len, crc, .. } => self.store()?.activate(len, crc),
+            Action::Activate {
+                len,
+                crc,
+                trust: None,
+            } => self.store()?.activate(len, crc),
+            Action::Activate {
+                len,
+                crc,
+                trust: Some(next),
+            } => {
+                let ts = self.trust.as_mut().ok_or(StoreError::Flash)?;
+                let store = self.store.as_mut().ok_or(StoreError::NoImage)?;
+                store.activate_with(len, crc, |flash| {
+                    ts.save(
+                        flash,
+                        &Persisted {
+                            trust: next,
+                            control,
+                        },
+                    )
+                })
+            }
+            Action::Claim { trust } => {
+                let ts = self.trust.as_mut().ok_or(StoreError::Flash)?;
+                let store = self.store.as_mut().ok_or(StoreError::NoImage)?;
+                ts.save(store.flash(), &Persisted { trust, control })
+            }
             Action::None | Action::Start | Action::Stop => Ok(()),
+        }
+    }
+
+    /// `state` with the trust record on flash adopted.
+    fn adopt_persisted(&self, state: State) -> State {
+        match self.trust.as_ref() {
+            Some(ts) => {
+                let p = ts.persisted();
+                state.with_trust(p.trust).with_control(p.control)
+            }
+            None => state,
         }
     }
 
@@ -565,7 +716,10 @@ mod tests {
 
     #[test]
     fn device_failure_replies_internal_and_empties() {
-        let mut flash = RegionFlash::new(RamFlash::failing());
+        // Reads work (the trust record opens), every erase and program
+        // fails. A device whose reads fail too refuses installs earlier,
+        // `Unavailable` (signed::e26_an_unreadable_trust_record_...).
+        let mut flash = RegionFlash::new(RamFlash::failing_writes());
         let (mut ctl, mut rec) = boot(&mut flash);
         assert_eq!(
             req(&mut ctl, &mut rec, 1, keys::BEGIN, &begin_body(10, 0)),
@@ -583,6 +737,219 @@ mod tests {
         let line = &rec.publications[0].1;
         assert_eq!(line.len(), MAX_LOG);
         assert!(core::str::from_utf8(line).is_ok());
+    }
+
+    mod signed {
+        //! E26: signed payloads on the ESP8266, with an Ed25519 key and a
+        //! P-256 (hardware token) key.
+        use super::*;
+        use middleware::loader::sha256::ImageHash;
+        use middleware::loader::trust::{
+            PublicKey, Signature, SignedCommit, TrustCode, TrustInfo, Version, signed_message,
+        };
+
+        enum Key {
+            Ed(ed25519_dalek::SigningKey),
+            P256(p256::ecdsa::SigningKey),
+        }
+
+        impl Key {
+            fn ed(seed: u8) -> Self {
+                Key::Ed(ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
+            }
+            fn p256(scalar: u8) -> Self {
+                Key::P256(p256::ecdsa::SigningKey::from_bytes(&[scalar; 32].into()).unwrap())
+            }
+            fn public(&self) -> PublicKey {
+                match self {
+                    Key::Ed(k) => PublicKey::Ed25519(k.verifying_key().to_bytes()),
+                    Key::P256(k) => {
+                        PublicKey::from_bytes(k.verifying_key().to_encoded_point(true).as_bytes())
+                            .unwrap()
+                    }
+                }
+            }
+            fn commit(&self, image: &[u8], version: u32) -> Vec<u8> {
+                let m = signed_message(
+                    image.len() as u32,
+                    Version(version),
+                    &ImageHash::digest(image),
+                );
+                let sig = match self {
+                    Key::Ed(k) => {
+                        use ed25519_dalek::Signer;
+                        k.sign(&m).to_bytes()
+                    }
+                    Key::P256(k) => {
+                        use p256::ecdsa::signature::Signer;
+                        let s: p256::ecdsa::Signature = k.sign(&m);
+                        s.to_bytes().into()
+                    }
+                };
+                SignedCommit {
+                    version: Version(version),
+                    signature: Signature(sig),
+                }
+                .encode()
+                .to_vec()
+            }
+        }
+
+        fn signed_upload(
+            ctl: &mut Ctl,
+            rec: &mut Recorder,
+            image: &[u8],
+            commit: &[u8],
+        ) -> Result<Vec<u8>, HandlerError> {
+            req(
+                ctl,
+                rec,
+                2,
+                keys::BEGIN,
+                &begin_body(image.len() as u32, Crc32::checksum(image)),
+            )?;
+            for (i, part) in image.chunks(CHUNK_MAX).enumerate() {
+                let mut body = ((i * CHUNK_MAX) as u32).to_le_bytes().to_vec();
+                body.extend_from_slice(part);
+                req(ctl, rec, 3, keys::CHUNK, &body)?;
+            }
+            req(ctl, rec, 4, keys::COMMIT, commit)
+        }
+
+        fn trust(ctl: &mut Ctl, rec: &mut Recorder) -> TrustInfo {
+            TrustInfo::decode(&req(ctl, rec, 9, keys::TRUST_INFO, &[]).unwrap()).unwrap()
+        }
+
+        fn claimed_signed_flow(key: Key) {
+            let mut flash = ram();
+            let (mut ctl, mut rec) = boot(&mut flash);
+            assert_eq!(trust(&mut ctl, &mut rec).code(), TrustCode::Unclaimed);
+            assert!(rec.logs().iter().any(|l| l.starts_with("trust: unclaimed")));
+            // Trust on first use: claim over the UART.
+            let public = key.public();
+            assert_eq!(
+                req(&mut ctl, &mut rec, 5, keys::TRUST_CLAIM, public.as_bytes()),
+                Ok(vec![])
+            );
+            assert!(
+                rec.logs().iter().any(|l| l.contains("pinned")),
+                "{:?}",
+                rec.logs()
+            );
+            assert_eq!(
+                req(
+                    &mut ctl,
+                    &mut rec,
+                    5,
+                    keys::TRUST_CLAIM,
+                    Key::ed(9).public().as_bytes()
+                ),
+                Err(HandlerError::Denied),
+                "no re-key without presence"
+            );
+            let img = image(3000);
+            // Unsigned, another key, tampered: Denied, nothing installed.
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &img, &[]),
+                Err(HandlerError::Denied)
+            );
+            let other = Key::ed(42).commit(&img, 10);
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &img, &other),
+                Err(HandlerError::Denied)
+            );
+            let mut tampered = img.clone();
+            tampered[7] ^= 1;
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &tampered, &key.commit(&img, 10)),
+                Err(HandlerError::Denied)
+            );
+            assert_eq!(ctl.state().status(), PayloadStatus::Empty);
+            // Signed by the pinned key: installed; min_version raised.
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &img, &key.commit(&img, 10)),
+                Ok(vec![])
+            );
+            assert_eq!(ctl.state().status(), PayloadStatus::Stopped);
+            assert!(
+                rec.logs()
+                    .iter()
+                    .any(|l| l == "trust: signed payload accepted, min_version 10")
+            );
+            // A replay of the same version is refused.
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &img, &key.commit(&img, 10)),
+                Err(HandlerError::Denied)
+            );
+            // Across a reboot: the key and min_version persist.
+            let (mut ctl, mut rec) = boot(&mut flash);
+            let info = trust(&mut ctl, &mut rec);
+            assert_eq!(
+                info.state,
+                TrustState::Claimed {
+                    key: public,
+                    min_version: Version(10)
+                }
+            );
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &img, &key.commit(&img, 10)),
+                Err(HandlerError::Denied)
+            );
+            assert_eq!(
+                signed_upload(&mut ctl, &mut rec, &img, &key.commit(&img, 11)),
+                Ok(vec![])
+            );
+        }
+
+        #[test]
+        fn e26_an_ed25519_claim_requires_signed_commits() {
+            claimed_signed_flow(Key::ed(1));
+        }
+
+        #[test]
+        fn e26_a_p256_claim_requires_signed_commits() {
+            claimed_signed_flow(Key::p256(0x20));
+        }
+
+        #[test]
+        fn e26_the_trust_record_lives_after_the_payload_region() {
+            let mut flash = ram();
+            let (mut ctl, mut rec) = boot(&mut flash);
+            req(
+                &mut ctl,
+                &mut rec,
+                5,
+                keys::TRUST_CLAIM,
+                Key::ed(1).public().as_bytes(),
+            )
+            .unwrap();
+            let base = REGION_BASE + TRUST_OFFSET;
+            assert_eq!(&[flash.raw().byte(base), flash.raw().byte(base + 1)], b"MW");
+            // The payload slots are untouched by the claim (still erased
+            // or zero, as booted).
+            assert_ne!(flash.raw().byte(REGION_BASE), b'M');
+        }
+
+        #[test]
+        fn e26_an_unreadable_trust_record_refuses_installs_and_claims() {
+            let mut flash = RegionFlash::new(RamFlash::failing());
+            let (mut ctl, mut rec) = boot(&mut flash);
+            assert!(
+                rec.logs().iter().any(|l| l.contains("unreadable")),
+                "{:?}",
+                rec.logs()
+            );
+            for (k, body) in [
+                (keys::BEGIN, &begin_body(10, 0)[..]),
+                (keys::COMMIT, &[][..]),
+                (keys::TRUST_CLAIM, &[1u8; 32][..]),
+            ] {
+                assert_eq!(
+                    req(&mut ctl, &mut rec, 1, k, body),
+                    Err(HandlerError::Unavailable)
+                );
+            }
+        }
     }
 
     /// End to end over the fake UART: wire bytes in, wire bytes out.

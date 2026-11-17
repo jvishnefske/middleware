@@ -18,7 +18,7 @@ import {
   restoreBackup,
 } from "../trust/crypto";
 import { type KeyStorage, type StoredKey, storedKey } from "../trust/keyStore";
-import { type KeyRelation, type TrustInfo, canClaim, relateKeys } from "../trust/wire";
+import { type KeyRelation, type TrustInfo, canClaim, keyKind, relateKeys } from "../trust/wire";
 import { errorText, h } from "./dom";
 
 export interface TrustPanel {
@@ -297,6 +297,12 @@ export function trustPanel(storage: KeyStorage): TrustPanel {
         case "match":
           return { text: `Uploads are signed with ${groupFingerprint(mine?.fingerprint ?? "")}.`, warn: false };
         case "different":
+          if (info?.key && keyKind(info.key) === "p256") {
+            return {
+              text: "The device trusts a hardware (P-256) key, such as the release key in a TPM: a browser cannot sign with it. Upload with mwctl --pkcs11, or re-key the device.",
+              warn: true,
+            };
+          }
           return { text: "The device trusts a different key: uploads will be refused. Restore that key, or re-key the device.", warn: true };
         case "no-local-key":
           return { text: "The device is claimed and this browser has no key: restore the key from its backup.", warn: true };
