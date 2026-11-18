@@ -334,6 +334,22 @@ pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
             l.routes, l.subscriptions, l.channels, l.max_message
         );
     }
+    if let Some(b) = &m.board {
+        let _ = writeln!(
+            s,
+            "board:            {}",
+            String::from_utf8_lossy(b.as_bytes())
+        );
+    }
+    if let Some(c) = m.control {
+        let _ = writeln!(
+            s,
+            "control modules:  {} points on {} page{} of sys/manifest/cm",
+            c.points,
+            c.pages,
+            if c.pages == 1 { "" } else { "s" }
+        );
+    }
     s
 }
 
@@ -556,6 +572,11 @@ mod tests {
             .with_limits(Limits {
                 routes: 2,
                 ..Limits::ABI
+            })
+            .with_board(BoardName::new("ZynqMP KD240 revA/B/1").unwrap())
+            .with_control(ControlModules {
+                points: 10,
+                pages: 1,
             });
         let s = format_manifest(&m);
         for line in [
@@ -567,7 +588,9 @@ mod tests {
             "IMU:              50 100 200 400 800 Hz; ±2/4/8 g; with magnetometer 50 100 200 400 Hz\n",
             "microphone:       8000 16000 32000 48000 Hz; levels pcm; gain 0-30 dB\n",
             "links:            0 serial 2 kind9\n",
-            "limits:           2 routes, 8 subscriptions, 8 channels, 512-byte messages\n",
+            "limits:           2 routes, 8 subscriptions, 16 channels, 512-byte messages\n",
+            "board:            ZynqMP KD240 revA/B/1\n",
+            "control modules:  10 points on 1 page of sys/manifest/cm\n",
         ] {
             assert!(s.contains(line), "{line:?} in\n{s}");
         }

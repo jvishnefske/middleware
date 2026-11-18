@@ -111,6 +111,7 @@ pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
     })
     .with_limits(Limits {
         routes: 0,
+        subscriptions: middleware::wasm_abi::SLOT_MAX as u8,
         ..Limits::ABI
     });
 

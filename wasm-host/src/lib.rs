@@ -482,6 +482,11 @@ pub struct Limits {
     /// overflow. wasmi's frame list grows on demand up to this many
     /// entries. Default [`DEFAULT_CALL_DEPTH`].
     pub max_call_depth: u32,
+    /// The most keys the payload may subscribe to, its bound input channels
+    /// included. Default [`wasm_abi::MAX_SUBSCRIPTIONS`]; a host with room
+    /// gives more ([`Limits::with_subscriptions`]), up to
+    /// [`wasm_abi::SLOT_MAX`].
+    pub max_subscriptions: u8,
 }
 
 impl Limits {
@@ -503,6 +508,21 @@ impl Limits {
             fuel_per_call: wasm_abi::FUEL_PER_CALL,
             max_stack_bytes: DEFAULT_STACK_BYTES,
             max_call_depth: DEFAULT_CALL_DEPTH,
+            max_subscriptions: wasm_abi::MAX_SUBSCRIPTIONS as u8,
+        }
+    }
+
+    /// The same limits with up to `n` subscriptions (at most
+    /// [`wasm_abi::SLOT_MAX`]).
+    pub const fn with_subscriptions(self, n: u8) -> Self {
+        let n = if (n as usize) > wasm_abi::SLOT_MAX {
+            wasm_abi::SLOT_MAX as u8
+        } else {
+            n
+        };
+        Limits {
+            max_subscriptions: n,
+            ..self
         }
     }
 
@@ -628,7 +648,7 @@ fn resolve<D: Device>(
     if decls.is_empty() {
         return Ok(());
     }
-    let free = wasm_abi::MAX_SUBSCRIPTIONS - st.subscriptions.len();
+    let free = st.max_subscriptions.saturating_sub(st.subscriptions.len());
     let steps =
         channels::plan(&decls, binding, st.exports.messages, free).map_err(LoadError::Bind)?;
     let mut resolved = Vec::new();
@@ -832,8 +852,9 @@ impl<D: Device + 'static> Payload<D> {
             .try_reserve_exact(wasm_abi::periph::MAX_DMA)
             .map_err(|_| LoadError::OutOfMemory)?;
         let mut subscriptions = Vec::new();
+        let max_subscriptions = usize::from(limits.max_subscriptions);
         subscriptions
-            .try_reserve_exact(wasm_abi::MAX_SUBSCRIPTIONS)
+            .try_reserve_exact(max_subscriptions)
             .map_err(|_| LoadError::OutOfMemory)?;
         let mut serves = Vec::new();
         serves
@@ -842,6 +863,7 @@ impl<D: Device + 'static> Payload<D> {
         let state = State {
             device,
             subscriptions,
+            max_subscriptions,
             serves,
             schedule: None,
             exports,
@@ -998,7 +1020,7 @@ impl<D: Device + 'static> Payload<D> {
         if data.len() > MAX_MESSAGE {
             return Ok(false);
         }
-        // Both fit in i32: slot < MAX_SUBSCRIPTIONS, len <= MAX_MESSAGE.
+        // Both fit in i32: slot < SLOT_MAX, len <= MAX_MESSAGE.
         let (slot, len) = (slot as i32, data.len() as i32);
         let ptr = self.call::<i32, i32>(wasm_abi::exports::ALLOC, len)?;
         let memory = self
