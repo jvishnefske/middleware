@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The 5A-75B design (CL8): two Ethernet links, each with LiteEth's
 hardware MAC/ARP/ICMP/IP/UDP stack, UDP port 7448 into the middleware
-node (frame core, system requests, bridge engine). No CPU.
+node (frame core, system requests, upload and flash store, WASM payload
+runtime, bridge engine). No CPU.
 
     python soc.py                    # build build/mw5a75b/mw5a75b.bit
     python soc.py --ip0 192.168.1.50 --ip1 192.168.2.50
@@ -19,6 +20,13 @@ transmit side runs from it (LiteEth's ECP5 RGMII PHY), with `--tx-delay`
 (0..2 ns, per port: the v7.0 port 2 may need tuning) applied in the
 output delay elements.
 
+Each link's IP and MAC come from the node (`System.net`): the command
+line gives the defaults, a `sys/net/addr` setting kept in flash replaces
+them at boot. The payload slots and settings live in the configuration
+flash past 1 MiB (`mw5a75b/flash.py`); its clock leaves through
+`USRMCLK`. The user LED is the payload's GPIO 0 once it claims it, a
+1 Hz heartbeat otherwise; the button is GPIO 1.
+
 The B50612D PHYs need no MDIO set-up for 1000BASE-T autonegotiation, so
 the shared MDIO bus (`eth_mdio`) is left idle for now: MDC low, MDIO
 released. The PHY reset (P5) is not driven.
@@ -26,7 +34,7 @@ released. The PHY reset (P5) is not driven.
 
 import argparse
 
-from migen import ClockDomain, ClockDomainsRenamer, Module, Signal, TSTriple
+from migen import ClockDomain, ClockDomainsRenamer, Instance, Module, Mux, Signal, TSTriple
 from litex.soc.cores.clock import ECP5PLL
 from liteeth.core import LiteEthUDPIPCore
 from liteeth.phy.ecp5rgmii import LiteEthPHYRGMII
@@ -49,15 +57,11 @@ class CRG(Module):
         pll.create_clkout(self.cd_sys, SYS_CLK)
 
 
-def _ip(s):
-    a = [int(x) for x in s.split(".")]
-    return a[0] << 24 | a[1] << 16 | a[2] << 8 | a[3]
-
-
 class Top(Module):
-    def __init__(self, platform, ips, macs, tx_delay, ports=(0, 1)):
+    def __init__(self, platform, ips, macs, tx_delay, ports=(0, 1), with_sha256=True):
         self.submodules.crg = CRG(platform)
-        self.submodules.node = node = Node(macs=macs)
+        self.submodules.node = node = Node(macs=macs, ips=ips, with_sha256=with_sha256,
+                                           ms_cycles=int(SYS_CLK // 1000))
 
         for n in ports:
             ethphy = ClockDomainsRenamer({"eth_rx": f"eth{n}_rx", "eth_tx": f"eth{n}_tx"})(
@@ -68,8 +72,8 @@ class Top(Module):
                     tx_delay=tx_delay[n],
                 ))
             setattr(self.submodules, f"ethphy{n}", ethphy)
-            ip = Signal(32, reset=_ip(ips[n]), name=f"ip{n}")
-            mac = Signal(48, reset=macs[n], name=f"mac{n}")
+            ip = node.sys.net[n].ip
+            mac = node.sys.net[n].mac
             core = ClockDomainsRenamer({"eth_rx": f"eth{n}_rx", "eth_tx": f"eth{n}_tx"})(
                 LiteEthUDPIPCore(ethphy, mac_address=mac, ip_address=ip, clk_freq=SYS_CLK,
                                  with_icmp=True))
@@ -105,11 +109,20 @@ class Top(Module):
         self.specials += t.get_tristate(mdio.mdio)
         self.comb += mdio.mdc.eq(0), t.oe.eq(0), t.o.eq(0)
 
-        # Heartbeat on the user LED (active low), about 1 Hz.
+        # Configuration flash: payload slots and settings.
+        flash = platform.request("spiflash")
+        s = node.sys
+        self.comb += flash.cs_n.eq(s.flash_cs_n), flash.mosi.eq(s.flash_mosi)
+        self.comb += s.flash_miso.eq(flash.miso)
+        self.specials += Instance("USRMCLK", i_USRMCLKI=s.flash_sclk, i_USRMCLKTS=0)
+
+        # User LED (active low): the payload's pin 0, else a 1 Hz heartbeat.
         led_n = platform.request("user_led_n")
-        beat = Signal(27)
+        beat = Signal(26)
         self.sync += beat.eq(beat + 1)
-        self.comb += led_n.eq(~beat[26])
+        self.comb += led_n.eq(~Mux(node.led_claimed, node.led, beat[25]))
+        btn_n = platform.request("user_btn_n")
+        self.comb += node.button.eq(~btn_n)
 
 
 def main():
@@ -125,12 +138,14 @@ def main():
     p.add_argument("--build-dir", default="build/mw5a75b")
     p.add_argument("--no-compile", action="store_true", help="write the Verilog only")
     p.add_argument("--seed", type=int, default=1, help="nextpnr placement seed")
+    p.add_argument("--no-sha256", action="store_true",
+                   help="leave out the SHA-256 core (the install log carries no digest)")
     a = p.parse_args()
     mac = lambda s: int(s.replace(":", ""), 16)
     platform = Platform()
     ports = (0, 1) if a.only_port is None else (a.only_port,)
     top = Top(platform, ips=(a.ip0, a.ip1), macs=(mac(a.mac0), mac(a.mac1)),
-              tx_delay=(a.tx_delay0, a.tx_delay1), ports=ports)
+              tx_delay=(a.tx_delay0, a.tx_delay1), ports=ports, with_sha256=not a.no_sha256)
     platform.build(top, build_name="mw5a75b", build_dir=a.build_dir,
                    run=not a.no_compile, seed=a.seed)
 

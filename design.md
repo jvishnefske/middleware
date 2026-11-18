@@ -7210,8 +7210,8 @@ Requirements:
   installing, which also finds an identical rule); counters in RAM with
   queued accounting and back-pressure — every `bridge.json` operation
   answers as `BridgeTable` does — `tests/test_bridge.py`.
-- [ ] CL6 Upload and storage. The `.wasm` is uploaded to the board and
-  compiled there. Done: the hardware loader (`mw5a75b/loader.py`), the
+- [x] CL6 Upload and storage. The `.wasm` is uploaded to the board and
+  compiled there. The hardware loader (`mw5a75b/loader.py`), the
   model's loader in gateware — a bounded LEB128 reader, every section
   with the model's checks in the model's order (import names matched
   against the 33 ABI names and export names against the 7 the runtime
@@ -7224,12 +7224,30 @@ Requirements:
   (`loaderr.json`: bad imports, signatures, exports, memory, floats,
   i64, multi-value, start, passive segments, oversized tables and
   globals, truncations, bad header) fail with the model's error kind —
-  `tests/test_system.py`. Loader, runtime and bridge table together
-  synthesize to about 12.7k LUT4 + 2.0k carry cells and 36 block RAMs, so
-  the full design is tight on the 25F. Open: `sys/loader/begin|chunk|commit`
-  into the image RAM with streaming CRC-32 and SHA-256, the two SPI
-  flash slots (the image activated after the CRC check, compiled from
-  the active slot at reset), and `sys/payload/start|stop|status`.
+  `tests/test_system.py`. The upload path (`mw5a75b/upload.py`,
+  `system.py`): `sys/loader/begin|chunk|commit` as `Loader::step` with the
+  16 KiB capacity (resends acknowledged, out of order abandoned, length
+  and CRC-32 checked; bodies parsed as `Command::parse`), the chunks
+  written into the image RAM while a streaming CRC-32 and a one round per
+  cycle SHA-256 core (`mw5a75b/sha256.py`, leave it out with
+  `soc.py --no-sha256`) follow them; the commit compiles, and a refused
+  module answers `InvalidRequest`, logs `load refused: <error>` and puts
+  the installed payload back from flash; `sys/payload/start|stop` and the
+  status as the base firmware's dispatch has it. `upload.json` (from a
+  model shell over `Command::parse` + `Loader::step`, compiling with the
+  reference model: 13 request sequences, 11 CRC-32/SHA-256 check values)
+  — `tests/test_upload.py` (the cores), `tests/test_node.py::
+  test_cl6_upload_requests_follow_the_loader` (every case as frames on a
+  link: each response code and the status after it, the `payload
+  installed sha256 <digest>` log). Storage (`mw5a75b/flash.py`): two
+  16 KiB slots and a settings sector in the W25Q32 past 1 MiB, the
+  inactive slot erased at begin and programmed after a successful commit,
+  its header (magic last) with `seq + 1`; at reset the newest valid slot
+  (CRC-32 checked) is compiled and started — with a behavioural W25Q32
+  (`tests/flashmodel.py`): reboot from flash, a second payload in the
+  other slot, a torn header falling back to the first, erased flash
+  booting Empty (`tests/test_node.py::test_cl8_full_node`). The real
+  flash is exercised only on the board (CL9).
 - [x] CL7 The WASM interpreter (`mw5a75b/wasm.py`) and the hardware import
   unit and runtime (`mw5a75b/imports.py`: `log`/`publish` as frames on
   every link with a peer, an 8-slot subscription table with matchers on
