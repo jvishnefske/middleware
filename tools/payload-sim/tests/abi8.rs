@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use middleware::Key;
 use middleware::loader::binding::{BINDING_MAX, Binding, Target};
 use middleware::loader::trust::Version;
 use middleware::wasm_abi::route::{AudioMode, MicConfig, RouteSource, SampleSource};
+use middleware::{Key, SenderId};
 
 fn level_meter() -> &'static PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
@@ -104,4 +104,74 @@ fn bd6_without_a_binding_the_required_channel_fails_the_load() {
         out.contains("channel audio is required and not bound"),
         "{out}"
     );
+}
+
+/// The SC6 fixture: fake microphone levels at 8 kHz on `app/mic`.
+fn sensor_stream() -> PathBuf {
+    let wat = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/test/fixtures/sensor_stream.wat"),
+    )
+    .unwrap();
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sensor_stream.wasm");
+    std::fs::write(&path, wat::parse_str(&wat).unwrap()).unwrap();
+    path
+}
+
+fn remote_binding(name: &str, node: SenderId) -> PathBuf {
+    let mut b = Binding::new([0; 32], Version(1));
+    b.bind(
+        "audio",
+        Target::Remote {
+            node,
+            key: Key::from_static("app/mic"),
+        },
+    )
+    .unwrap();
+    b.bind("level", Target::Key(Key::from_static("lab/level")))
+        .unwrap();
+    let mut out = [0u8; BINDING_MAX];
+    let n = b.encode(&mut out).unwrap();
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, &out[..n]).unwrap();
+    path
+}
+
+/// PR3: a channel bound to a key on another node takes that node's
+/// publications only. The `--peer` board (node 0..02, the default node
+/// plus one) runs the microphone levels route on `app/mic`.
+#[test]
+fn pr3_a_remote_channel_takes_the_named_node_only() {
+    let peer = sensor_stream();
+    let good = remote_binding("bind-remote.bin", SenderId([0, 0, 0, 0, 0, 0, 0, 2]));
+    let args = |b: &PathBuf| {
+        vec![
+            "--virtual".to_string(),
+            "--until-ms".into(),
+            "1500".into(),
+            "--peer".into(),
+            peer.to_string_lossy().into_owned(),
+            "--bind".into(),
+            b.to_string_lossy().into_owned(),
+        ]
+    };
+    let run_with = |a: Vec<String>| {
+        let out = Command::new(env!("CARGO_BIN_EXE_payload-sim"))
+            .arg(level_meter())
+            .args(a)
+            .stdin(Stdio::null())
+            .output()
+            .expect("runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let (ok, out) = run_with(args(&good));
+    assert!(ok, "{out}");
+    assert!(out.contains("subscriptions: [app/mic]"), "{out}");
+    assert!(out.contains("publish lab/level rms "), "{out}");
+    let other = remote_binding("bind-other.bin", SenderId([9; 8]));
+    let (ok, out) = run_with(args(&other));
+    assert!(ok, "{out}");
+    assert!(!out.contains("publish lab/level"), "{out}");
 }

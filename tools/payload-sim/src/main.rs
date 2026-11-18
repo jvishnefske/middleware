@@ -207,13 +207,14 @@ fn drain(p: &mut Sim) -> Result<(), Trap> {
     Ok(())
 }
 
-/// Offers a message to a board: its sink routes first, then its
-/// subscriptions. Returns whether anything took it.
-fn offer(p: &mut Sim, key: Key<'_>, data: &[u8]) -> Result<bool, Trap> {
+/// Offers a message from `sender` (`None`: stdin, the board itself) to a
+/// board: its sink routes first, then its subscriptions. Returns whether
+/// anything took it.
+fn offer(p: &mut Sim, key: Key<'_>, data: &[u8], sender: Option<SenderId>) -> Result<bool, Trap> {
     if p.device().route_receive(key.as_str(), data) {
         return Ok(true);
     }
-    p.deliver(key, data)
+    p.deliver_from(key, data, sender)
 }
 
 impl Bench {
@@ -238,6 +239,7 @@ impl Bench {
                     continue;
                 };
                 let outbox = sender.device().take_outbox();
+                let from_node = wasm_host::Device::node_id(sender.device()).ok();
                 // Node-internal channel keys (`ch/...`, a local source
                 // bound to a channel) go back to the same board only.
                 let (local, outbox): (Vec<_>, Vec<_>) = outbox
@@ -246,7 +248,7 @@ impl Bench {
                 for (key, data) in &local {
                     moved = true;
                     let Ok(key) = Key::new(key) else { continue };
-                    let r = offer(&mut sender.payload, key, data);
+                    let r = offer(&mut sender.payload, key, data, None);
                     sender.fault(r)?;
                 }
                 if !local.is_empty() {
@@ -265,7 +267,7 @@ impl Bench {
                         continue;
                     }
                     let Ok(key) = Key::new(&key) else { continue };
-                    let r = offer(&mut receiver.payload, key, &data);
+                    let r = offer(&mut receiver.payload, key, &data, from_node);
                     receiver.fault(r)?;
                 }
                 flush(&mut receiver.payload);
@@ -425,7 +427,7 @@ fn arrive(p: &mut Sim, link: u8, key: &str, data: &[u8]) -> Result<(), Trap> {
         return Ok(());
     };
     let forwarded = p.device().link_receive(link, key, data);
-    let r = match offer(p, key, data) {
+    let r = match offer(p, key, data, None) {
         Ok(false) if forwarded == 0 => {
             p.device().note(format!("drop {key}"));
             Ok(())
@@ -442,7 +444,7 @@ fn deliver(p: &mut Sim, line: &str) -> Result<(), Trap> {
     let result = match sim::parse_line(line) {
         Ok(Some((key, data))) => {
             let forwarded = p.device().link_receive(0, key, data);
-            match offer(p, key, data) {
+            match offer(p, key, data, None) {
                 Ok(false) if forwarded == 0 => {
                     p.device().note(format!("drop {key}"));
                     Ok(())

@@ -99,3 +99,54 @@ describe("channel bindings", () => {
     expect(() => proto.newSimulator(wasm, () => {}, NODE)).toThrow(/audio is required/);
   });
 });
+
+describe("remote channels through the board (PR4)", () => {
+  it("lists the board's peers, reads a peer's manifest and flags an unheard node", async () => {
+    const PEER = "00000000000000aa";
+    const { host, device: devSide } = serialPair();
+    const client = new DeviceClient(host, proto, {});
+    const device = new FakeDevice(proto, devSide, { peers: [{ node: PEER, manifest: proto.simulatorManifest(PEER)! }] });
+    client.start();
+    open.push({ client, device });
+    expect(await client.peers()).toEqual([PEER]);
+    const m = proto.decodeManifest((await client.peerManifestBody(PEER))!)!;
+    expect(m.node).toBe(PEER);
+    const wasm = await payload();
+    const manifest = proto.simulatorManifest(NODE)!;
+    const remote = (node: string) =>
+      setTarget({ imageSha256: SHA, version: 1, entries: [] }, "audio", { kind: "remote", node, key: "mic/level" });
+    expect(bindingIssues(proto, manifest, wasm, remote(PEER), await client.peers())).toEqual([]);
+    const [unheard] = bindingIssues(proto, manifest, wasm, remote("00000000000000bb"), [PEER]);
+    expect(unheard.message).toMatch(/has not heard node 00000000000000bb/);
+  });
+
+  it("delivers a board's publications to a simulated unit bound to it, and only its", async () => {
+    const { MixedNet } = await import("../src/sim/net");
+    const { SimBus } = await import("../src/sim/bus");
+    const wasm = await payload();
+    const bus = new SimBus(proto);
+    const net = new MixedNet(bus);
+    const BOARD = "00000000000000aa";
+    let publish: ((key: string, data: Uint8Array) => void) | null = null;
+    net.attach("board", {
+      connected: true,
+      node: BOARD,
+      request: async () => null,
+      onPublish: (f) => {
+        publish = f;
+        return () => {};
+      },
+      onPresence: () => () => {},
+    });
+    const record = setTarget(
+      setTarget({ imageSha256: SHA, version: 1, entries: [] }, "audio", { kind: "remote", node: BOARD, key: "mic/level" }),
+      "level",
+      { kind: "key", key: "lab/level" },
+    );
+    const heard: string[] = [];
+    bus.onPublish((unit, key) => heard.push(`${unit} ${key}`));
+    bus.add("unit", wasm, { binding: proto.encodeBinding(record) });
+    publish!("mic/level", Uint8Array.of(1, 2, 3));
+    expect(heard).toEqual(["unit lab/level"]);
+  });
+});

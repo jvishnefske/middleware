@@ -598,6 +598,20 @@ mod tests {
         );
     }
 
+    /// PR1: forwarding is for the serial links; over Zenoh a request on
+    /// `sys/peer/...` (or `sys/peers`) is refused before the service.
+    #[test]
+    fn pr1_no_forwarding_from_the_network() {
+        let s = claimed_running();
+        for k in ["sys/peer/abababababababab/info", "sys/peers"] {
+            assert_eq!(
+                admit(&facts(s.state(), MAC), None, Key::new(k).unwrap(), &[]),
+                Err(Refusal::NotOverZenoh),
+                "{k}"
+            );
+        }
+    }
+
     /// A claimed board (key 1) with a signed payload installed, running.
     fn claimed_running() -> Svc {
         let mut s = open();

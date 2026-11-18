@@ -161,6 +161,30 @@ impl<L: Endpoint> Device<L> {
         })
     }
 
+    /// `sys/peers` (PR2): the node ids the board has heard.
+    pub fn peers(&mut self) -> Result<Vec<SenderId>, Error> {
+        let body = self.request(keys::PEERS, &[])?;
+        middleware::loader::peers::decode(&body)
+            .map(Iterator::collect)
+            .ok_or_else(|| Error::Malformed {
+                key: keys::PEERS.as_str().to_owned(),
+            })
+    }
+
+    /// `node`'s manifest, asked through the connected board (PR1,
+    /// `sys/peer/<id>/manifest`).
+    pub fn peer_manifest(&mut self, node: SenderId) -> Result<Manifest, Error> {
+        let key = middleware::loader::peers::peer_key(node, "manifest")
+            .ok_or_else(|| Error::Payload("peer key too long".into()))?;
+        let body = self.request(
+            Key::new(&key).map_err(|_| Error::Payload("bad peer key".into()))?,
+            &[],
+        )?;
+        Manifest::decode(&body).map_err(|_| Error::Malformed {
+            key: key.as_str().to_owned(),
+        })
+    }
+
     /// `sys/manifest` (MF4), decoded. Firmware without one answers
     /// `NotFound`.
     pub fn manifest(&mut self) -> Result<Manifest, Error> {
@@ -649,6 +673,24 @@ mod tests {
         assert!(d.bind(b"junk").is_err());
         let none = FakeDevice::new("esp32c3", "0.6.0+no-wasm", 4096, false);
         assert!(device(none).bind(&rec).is_err());
+    }
+
+    #[test]
+    fn pr2_peers_and_a_peer_manifest_come_through_the_board() {
+        use middleware::loader::manifest::{Groups, Manifest};
+        let peer = SenderId([0xab; 8]);
+        let m = Manifest::new(7)
+            .with_groups(Groups::CHANNELS)
+            .with_node(peer);
+        let mut body = [0u8; 64];
+        let n = m.encode(&mut body).unwrap();
+        let fake =
+            FakeDevice::new("rt1050", "0.6.0", 4096, true).with_peer(peer, body[..n].to_vec());
+        let mut d = device(fake);
+        assert_eq!(d.peers().unwrap(), [peer]);
+        assert_eq!(d.peer_manifest(peer).unwrap(), m);
+        let e = d.peer_manifest(SenderId([1; 8])).unwrap_err();
+        assert_eq!(e.status(), Some(HandlerError::Unavailable));
     }
 
     #[test]
