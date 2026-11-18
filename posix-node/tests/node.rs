@@ -3,7 +3,7 @@
 //! on the other end of its `ChannelIo` pair, and a "cluster" Zenoh session
 //! listening on one explicit 127.0.0.1 port (reserved by binding port 0,
 //! never probed) that the node's session connects to. A local link (the
-//! second `ChannelIo` pair, what `MW_PI_NODE_LOCAL_SERIAL` opens on a
+//! second `ChannelIo` pair, what `MW_POSIX_NODE_LOCAL_SERIAL` opens on a
 //! host) carries requests on the payload's served keys, which `gw/sys`
 //! does not pass. No serial port is opened.
 //!
@@ -36,11 +36,11 @@ use mw_gateway::bridge::encode_sys_request;
 use mw_gateway::io::{ChannelIo, pair};
 use mw_gateway::state::{ControlStore, Persisted};
 use mw_gateway::{GatewayConfig, SysForward, service};
-use mw_pi_node::config::gateway_state_dir;
-use mw_pi_node::service::CHIP;
-use mw_pi_node::shell::Ended;
-use mw_pi_node::{
-    DeviceParts, GatewayParts, PiNode, control_floor, facts, limits, open_state_flash, start,
+use mw_posix_node::config::gateway_state_dir;
+use mw_posix_node::service::CHIP;
+use mw_posix_node::shell::Ended;
+use mw_posix_node::{
+    DeviceParts, GatewayParts, PosixNode, control_floor, facts, limits, open_state_flash, start,
     wall_clock_ms,
 };
 use mw_service::{Ctx, Links, Served};
@@ -66,7 +66,7 @@ fn demo() -> Vec<u8> {
 
 fn state_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("pi-node-{name}-{}", std::process::id()));
+        .join(format!("posix-node-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -182,7 +182,7 @@ impl Sys {
             &target,
             ControlCounter(counter),
         )
-        .expect("sign")
+        .unwrap()
         .encode();
         self.call(keys::START, &body).await
     }
@@ -235,7 +235,7 @@ async fn local_request(
     Ok(r.to_vec())
 }
 
-async fn node(state: &Path, session: ZenohTransport) -> (PiNode, Sys, Local) {
+async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Sys, Local) {
     let (local_test, local_node) = pair();
     let config = gateway_config(state);
     let store = ControlStore::in_dir(&config.state_dir);
@@ -286,14 +286,14 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     // Claim over the local link: physical access. Through gw/sys a claim
     // is always refused, even for an updater.
     assert_eq!(
-        sys.call(keys::TRUST_CLAIM, &test_seed().public_key().as_bytes())
+        sys.call(keys::TRUST_CLAIM, test_seed().public_key().as_bytes())
             .await,
         Err(HandlerError::Denied)
     );
     local_request(
         &mut local,
         "sys/trust/claim",
-        &test_seed().public_key().as_bytes(),
+        test_seed().public_key().as_bytes(),
     )
     .await
     .expect("claim");
@@ -396,7 +396,7 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
         local_request(
             &mut local,
             "sys/trust/claim",
-            &Seed::new([9; 32]).public_key().as_bytes()
+            Seed::new([9; 32]).public_key().as_bytes()
         )
         .await,
         Err(LinkError::Handler(HandlerError::Denied))

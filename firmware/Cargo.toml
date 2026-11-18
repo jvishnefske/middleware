@@ -3,7 +3,7 @@ name = "esp-base"
 version = "0.6.0"
 edition = "2024"
 # The library (the pure core) builds with 1.91, so host crates in the
-# parent workspace (`pi-node/`, default toolchain) can depend on it. The
+# parent workspace (`posix-node/`, default toolchain) can depend on it. The
 # chip builds need 1.95, which esp-hal 1.2 declares and cargo enforces.
 rust-version = "1.91"
 description = "ESP base firmware: serves the middleware serial protocol and runs WASM payloads"

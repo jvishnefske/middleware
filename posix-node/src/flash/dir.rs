@@ -67,7 +67,7 @@ impl DirSectors {
             TryLockError::WouldBlock => io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!(
-                    "{}: another mw-pi-node holds this state directory",
+                    "{}: another mw-posix-node holds this state directory",
                     lock_path.display()
                 ),
             ),
@@ -161,7 +161,7 @@ mod tests {
     /// test and process.
     fn scratch(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("mw-pi-node-unit-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("mw-posix-node-unit-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("scratch dir");
         dir
@@ -236,7 +236,7 @@ mod tests {
         let held = DirSectors::open(&state).expect("open");
         let e = DirSectors::open(&state).expect_err("locked");
         assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
-        assert!(e.to_string().contains("another mw-pi-node"), "{e}");
+        assert!(e.to_string().contains("another mw-posix-node"), "{e}");
         drop(held);
         DirSectors::open(&state).expect("free again");
         let _ = fs::remove_dir_all(&state);

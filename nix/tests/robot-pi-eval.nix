@@ -20,7 +20,7 @@
 #   * the image is an `img.zst` with the Pi firmware partition
 { pkgs, lib, configs, piServices }:
 let
-  ours = [ "mw-robot" "mw-envoy" "mw-gateway" ] ++ lib.optional (lib.elem "mw-pi-node" piServices) "mw-pi-node";
+  ours = [ "mw-robot" "mw-envoy" "mw-gateway" ] ++ lib.optional (lib.elem "mw-posix-node" piServices) "mw-posix-node";
   secretNames = [ "join-token" "bundle.spiffe" "robot.env" "wpa_supplicant.conf" "authorized_keys" ];
 
   checkOne = name: c:

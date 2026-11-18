@@ -3,7 +3,7 @@
 #
 # On the main thread of a static musl binary the stack cannot be measured,
 # and the Zenoh configuration parse (pest, through json5) refused to run
-# there ("stack limit reached"), so mw-gateway and mw-pi-node exited at
+# there ("stack limit reached"), so mw-gateway and mw-posix-node exited at
 # once. Each binary here is started with a router on loopback that nothing
 # listens on, in a fresh state directory, for a few seconds: it must not
 # report a configuration error. What it does next (wait for the router,
@@ -27,8 +27,8 @@ in
 pkgs.runCommand "static-startup" { nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep ]; } (''
   set -eu
   ${run "mw-gateway" ''MW_GATEWAY_SERIAL=/dev/null MW_GATEWAY_STATE="$state"''}
-'' + pkgs.lib.optionalString (binaries ? mw-pi-node) ''
-  ${run "mw-pi-node" ''MW_PI_NODE_STATE="$state" MW_PI_NODE_NODE_ID=0102030405060708''}
+'' + pkgs.lib.optionalString (binaries ? mw-posix-node) ''
+  ${run "mw-posix-node" ''MW_POSIX_NODE_STATE="$state" MW_POSIX_NODE_NODE_ID=0102030405060708''}
 '' + ''
   touch $out
 '')

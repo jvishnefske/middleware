@@ -34,7 +34,7 @@
       # the build (nix files, prose), so editing them rebuilds nothing.
       # payloads/jpeg and payloads/sdk stay: tools/payload-sim depends on
       # them by path. esp-base's library (firmware/Cargo.toml, build.rs and
-      # src) stays: pi-node depends on it by path; its build script only
+      # src) stays: posix-node depends on it by path; its build script only
       # adds linker arguments for ESP targets.
       src = lib.fileset.toSource {
         root = ./.;
@@ -58,8 +58,8 @@
         ]);
       };
 
-      # nix/binaries.nix entries whose crate directory exists (mw-pi-node
-      # joins once pi-node/ lands).
+      # nix/binaries.nix entries whose crate directory exists (mw-posix-node
+      # joins once posix-node/ lands).
       binaryList = lib.filterAttrs
         (_: b: builtins.pathExists (./. + "/${b.dir}/Cargo.toml"))
         (import ./nix/binaries.nix);
@@ -111,7 +111,7 @@
       piPackages = bs: {
         robotPackage = bs.mw-robot;
         gatewayPackage = bs.mw-gateway;
-        piNodePackage = bs.mw-pi-node or null;
+        posixNodePackage = bs.mw-posix-node or null;
       };
       robotPi = { native }: nixpkgs.lib.nixosSystem {
         modules = [
@@ -129,7 +129,7 @@
 
       # The services the Pi must have (checks.robot-pi-eval, robot-pi-image).
       piServices = [ "mw-robot" "mw-envoy" "spire-agent" "spiffe-helper" "mw-gateway" "mw-provision" "mw-net-config" "mw-wifi" "sshd" ]
-        ++ lib.optional (binaryList ? mw-pi-node) "mw-pi-node";
+        ++ lib.optional (binaryList ? mw-posix-node) "mw-posix-node";
 
       launcher = pkgs.replaceVarsWith {
         name = "robot-vm";
@@ -189,7 +189,10 @@
 
       nixosModules.robot = ./nix/robot.nix;
       nixosModules.robot-pi-gateway = ./nix/gateway.nix;
-      nixosModules.robot-pi-node = ./nix/pi-node.nix;
+      nixosModules.posix-node = ./nix/posix-node.nix;
+      nixosModules.robot-posix-node = ./nix/posix-node.nix;
+      # The module's name before posix-node hosted more than Pis.
+      nixosModules.robot-pi-node = ./nix/posix-node.nix;
       nixosConfigurations.robot-vm = robotVm;
       nixosConfigurations.robot-pi = robotPiNative;
       nixosConfigurations.robot-pi-cross = robotPiCross;

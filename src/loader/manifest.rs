@@ -25,6 +25,7 @@
 //! | 8   | [`tag::SINK_SPI`] | largest frame in bytes, u32                      |
 //! | 9   | [`tag::LINK`]     | link id u8, [`LinkKind`] u8 (one record per link) |
 //! | 10  | [`tag::LIMITS`]   | routes u8, subscriptions u8, channels u8, max message u16 |
+//! | 11  | [`tag::BOARD`]    | the board's model, UTF-8, 1 to [`BOARD_NAME_MAX`] bytes ([`BoardName`]) |
 //!
 //! Decoding is forward compatible, unlike `sys/board`'s exact length:
 //! an unknown tag is skipped, and a known record longer than its body
@@ -54,6 +55,9 @@ pub const MANIFEST_MAX: usize = 384;
 /// Most links a manifest carries.
 pub const MAX_LINKS: usize = 4;
 
+/// Longest board name a manifest carries, in bytes.
+pub const BOARD_NAME_MAX: usize = 32;
+
 /// Record tags.
 pub mod tag {
     /// The node id.
@@ -76,6 +80,60 @@ pub mod tag {
     pub const LINK: u8 = 9;
     /// Runtime limits.
     pub const LIMITS: u8 = 10;
+    /// The board's model.
+    pub const BOARD: u8 = 11;
+}
+
+/// Which board a node runs on, as its own description names it: a Linux
+/// node's device-tree model (`/proc/device-tree/model`, such as
+/// `ZynqMP KD240 revA/B/1` or `Raspberry Pi 4 Model B Rev 1.4`). `sys/info`'s
+/// chip says the architecture (`linux-aarch64`); this says the board, so a
+/// tool can tell a Kria from a Pi. UTF-8, cut to [`BOARD_NAME_MAX`] bytes at
+/// a character boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoardName {
+    len: u8,
+    bytes: [u8; BOARD_NAME_MAX],
+}
+
+impl BoardName {
+    /// `name`, cut to [`BOARD_NAME_MAX`] bytes at a character boundary;
+    /// `None` when empty.
+    pub const fn new(name: &str) -> Option<Self> {
+        let b = name.as_bytes();
+        let mut len = if b.len() < BOARD_NAME_MAX {
+            b.len()
+        } else {
+            BOARD_NAME_MAX
+        };
+        // Back off from inside a multi-byte character.
+        while len > 0 && len < b.len() && (b[len] & 0xc0) == 0x80 {
+            len -= 1;
+        }
+        if len == 0 {
+            return None;
+        }
+        let mut bytes = [0u8; BOARD_NAME_MAX];
+        let mut i = 0;
+        while i < len {
+            bytes[i] = b[i];
+            i += 1;
+        }
+        Some(BoardName {
+            len: len as u8,
+            bytes,
+        })
+    }
+
+    /// The name's bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    /// The name, if it is UTF-8 (one a peer sent may not be).
+    pub fn as_str(&self) -> Option<&str> {
+        core::str::from_utf8(self.as_bytes()).ok()
+    }
 }
 
 /// Why a manifest did not decode.
@@ -437,6 +495,8 @@ pub struct Manifest {
     n_links: u8,
     /// Runtime limits.
     pub limits: Option<Limits>,
+    /// The board.
+    pub board: Option<BoardName>,
 }
 
 const NO_LINK: Link = Link {
@@ -460,6 +520,15 @@ impl Manifest {
             links: [NO_LINK; MAX_LINKS],
             n_links: 0,
             limits: None,
+            board: None,
+        }
+    }
+
+    /// With the board's name.
+    pub const fn with_board(self, board: BoardName) -> Self {
+        Manifest {
+            board: Some(board),
+            ..self
         }
     }
 
@@ -646,6 +715,9 @@ impl Manifest {
                 &[l.routes, l.subscriptions, l.channels, m[0], m[1]],
             )?;
         }
+        if let Some(b) = &self.board {
+            w.record(tag::BOARD, b.as_bytes())?;
+        }
         Some(w.at)
     }
 
@@ -723,6 +795,18 @@ impl Manifest {
                         subscriptions: b[1],
                         channels: b[2],
                         max_message: u16::from_le_bytes([b[3], b[4]]),
+                    });
+                }
+                tag::BOARD => {
+                    // Raw bytes, cut as a sender would have; a name that
+                    // is not UTF-8 is kept and `as_str` says so.
+                    need(1)?;
+                    let n = body.len().min(BOARD_NAME_MAX);
+                    let mut bytes = [0u8; BOARD_NAME_MAX];
+                    bytes[..n].copy_from_slice(&body[..n]);
+                    m.board = Some(BoardName {
+                        len: n as u8,
+                        bytes,
                     });
                 }
                 _ => {}
@@ -834,6 +918,7 @@ mod tests {
                 kind: LinkKind::ZENOH,
             })
             .with_limits(Limits::ABI)
+            .with_board(BoardName::new("ZynqMP KD240 revA/B/1").unwrap())
     }
 
     fn encode(m: &Manifest) -> ([u8; MANIFEST_MAX], usize) {
@@ -906,7 +991,7 @@ mod tests {
 
     #[test]
     fn mf1_the_largest_manifest_fits_a_reply() {
-        let mut m = full();
+        let mut m = full().with_board(BoardName::new(&"x".repeat(80)).unwrap());
         for id in 2..MAX_LINKS as u8 {
             m = m.with_link(Link {
                 id,
@@ -917,6 +1002,34 @@ mod tests {
         assert!(n <= MANIFEST_MAX && MANIFEST_MAX <= crate::wasm_abi::MAX_MESSAGE);
         let mut short = [0u8; 8];
         assert_eq!(m.encode(&mut short), None);
+    }
+
+    #[test]
+    fn mf6_board_names() {
+        let kd = BoardName::new("ZynqMP KD240 revA/B/1").unwrap();
+        assert_eq!(kd.as_str(), Some("ZynqMP KD240 revA/B/1"));
+        assert_eq!(BoardName::new(""), None);
+        // Cut to the limit, never inside a character.
+        let long = BoardName::new(&"a".repeat(40)).unwrap();
+        assert_eq!(long.as_bytes().len(), BOARD_NAME_MAX);
+        let name = format!("{}é", "a".repeat(BOARD_NAME_MAX - 1));
+        let cut = BoardName::new(&name).unwrap();
+        assert_eq!(cut.as_str(), Some(&name[..BOARD_NAME_MAX - 1]));
+        // On the wire: tag 11, the bytes; an older decoder skips it.
+        let m = Manifest::new(8).with_board(kd);
+        let (out, n) = encode(&m);
+        assert_eq!(&out[n - 23..n - 21], &[tag::BOARD, 21]);
+        assert_eq!(Manifest::decode(&out[..n]).unwrap().board, Some(kd));
+        assert_eq!(
+            Manifest::decode(&[1, 8, 0, tag::BOARD, 0]),
+            Err(ManifestError::Short(tag::BOARD))
+        );
+        // A peer's name that is not UTF-8 is kept as bytes.
+        let odd = Manifest::decode(&[1, 8, 0, tag::BOARD, 2, 0xff, 0xfe])
+            .unwrap()
+            .board
+            .unwrap();
+        assert_eq!((odd.as_bytes(), odd.as_str()), (&[0xff, 0xfe][..], None));
     }
 
     #[test]

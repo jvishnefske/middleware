@@ -62,4 +62,17 @@ describe("node manifest", () => {
     const old = Object.fromEntries(capabilityRows(info, null, null));
     expect(old["Manifest"]).toContain("not reported");
   });
+
+  it("names a Linux node's board from its BOARD record (tag 11)", () => {
+    const model = new TextEncoder().encode("ZynqMP KD240 revA/B/1");
+    const base = proto.simulatorManifest(NODE)!;
+    const body = new Uint8Array([...base, 11, model.length, ...model]);
+    const m = proto.decodeManifest(body)!;
+    expect(m.board).toBe("ZynqMP KD240 revA/B/1");
+    expect(proto.decodeManifest(base)!.board).toBeUndefined();
+    const info = proto.decodeDeviceInfo(
+      proto.encodeDeviceInfo({ abiVersion: 7, capacity: 1, status: 1, chip: "linux-aarch64", firmware: "0.6.0", node: NODE, caps: 1 }),
+    )!;
+    expect(Object.fromEntries(capabilityRows(info, m, null))["Board model"]).toBe("ZynqMP KD240 revA/B/1");
+  });
 });

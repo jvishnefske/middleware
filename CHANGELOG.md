@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### `pi-node` is now `posix-node` (PN14, PN15)
+- Renamed: the directory `posix-node/`, the package and binary `mw-posix-node`, the library `mw_posix_node`, `PosixNodeConfig`, the NixOS module `nix/posix-node.nix` (`services.mw-posix-node`, user and StateDirectory `mw-posix-node`), the flake's `nixosModules.posix-node` (and `robot-posix-node`; `robot-pi-node` stays as an alias) and `nix/binaries.nix` entry. It hosts payloads on Linux boards beyond the Pi (the Kria KD240).
+- Kept: `MW_PI_NODE_*` still work when the new `MW_POSIX_NODE_*` name is unset, with a warning; `/var/lib/mw-pi-node` is used when `/var/lib/mw-posix-node` does not exist, and the NixOS module moves it into the new directory once; the node id's hash domain is unchanged, so every node keeps its id.
+- `sys/manifest` record `BOARD` (tag 11, `manifest::BoardName`, at most 32 bytes): a Linux node's device-tree model. Older decoders skip it. protocol-wasm `decodeManifest` returns it as `board`; the Device page shows it.
+
 ### Stream adapters (AD1–AD4)
 - `stream::adapt` (pure, stateful): `PcmToLevels { block }` (2..=4096, blocks aligned from sample 0 across batches, a gap realigns), `PcmToMuLaw`, `Decimate { factor }`, `ImuToMagnitude`; `Adapter::output` maps stream shapes; loss passes through as index gaps.
 - wasm-host resolves `Target::Adapted` (a local source must fit after the adapter, `BindError::Adapter`) and runs the adapter on delivery before `on_message`.
