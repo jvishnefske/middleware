@@ -48,7 +48,7 @@ use esp_base::image::Header;
 use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, RECORD_LEN, TrustStore};
-use middleware::loader::manifest::{Groups, Limits, Link, LinkKind, Manifest};
+use middleware::loader::manifest::{BoardName, Groups, Limits, Link, LinkKind, Manifest};
 use middleware::loader::trust::TrustState;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
@@ -74,6 +74,8 @@ pub struct Facts {
     pub firmware: &'static str,
     /// The node id ([`crate::node_id`]).
     pub node: SenderId,
+    /// The board, for the manifest's `BOARD` record ([`crate::facts`]).
+    pub board: Option<BoardName>,
 }
 
 /// The `sys/info` chip name of this build: `linux-` and the architecture
@@ -106,6 +108,16 @@ pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
         routes: 0,
         ..Limits::ABI
     });
+
+/// [`MANIFEST`] with the board named, for the life of the process. A
+/// process opens its service once (the tests a few times), so the few
+/// hundred bytes leaked per board are bounded.
+pub fn manifest_for(board: Option<BoardName>) -> &'static Manifest {
+    match board {
+        None => &MANIFEST,
+        Some(b) => Box::leak(Box::new(MANIFEST.with_board(b))),
+    }
+}
 
 /// What [`Service::open`] found on flash, for the start log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +281,7 @@ impl<F: NorFlash + Durable> Service<F> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
-            manifest: Some(&MANIFEST),
+            manifest: Some(manifest_for(facts.board)),
         };
         let svc = Service {
             state,

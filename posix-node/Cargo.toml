@@ -1,5 +1,5 @@
 [package]
-name = "mw-pi-node"
+name = "mw-posix-node"
 version = "0.6.0"
 edition = "2024"
 # `File::try_lock` (the state directory's lock) is 1.89; esp-base's core
@@ -9,7 +9,7 @@ description = "Linux payload host (Raspberry Pi): runs WASM payloads with the ba
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "mw-pi-node"
+name = "mw-posix-node"
 path = "src/main.rs"
 
 [dependencies]

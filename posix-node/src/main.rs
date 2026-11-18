@@ -1,7 +1,7 @@
-//! The `mw-pi-node` binary: see the crate docs. Prints the gateway
+//! The `mw-posix-node` binary: see the crate docs. Prints the gateway
 //! service's spec or manifests like every `mw-service` binary
 //! (`--print-spec`, `--print-manifests`); otherwise reads its
-//! configuration (`MW_PI_NODE_*`, `MW_GATEWAY_*`, the runner's `MW_*`;
+//! configuration (`MW_POSIX_NODE_*`, `MW_GATEWAY_*`, the runner's `MW_*`;
 //! `MW_ZENOH_ROUTER` is required), derives the node id, opens the state
 //! directory, connects to the Zenoh router, starts the node and runs the
 //! `gw/sys` service until SIGTERM/SIGINT (exit 0) or until the device
@@ -16,9 +16,9 @@ use mw_gateway::config::DEFAULT_BAUD;
 use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
 use mw_gateway::{GatewayConfig, SysForward, io, service};
-use mw_pi_node::config::{NodeIdSource, gateway_state_dir};
-use mw_pi_node::{
-    DeviceParts, GatewayParts, PiNodeConfig, control_floor, facts, limits, node_id,
+use mw_posix_node::config::{NodeIdSource, gateway_state_dir};
+use mw_posix_node::{
+    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, facts, limits, node_id,
     open_state_flash, start, wall_clock_ms,
 };
 use mw_service::run::{USAGE, terminate_signal};
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
     let configs = GatewayConfig::from_process_env()
         .map_err(|e| e.to_string())
         .and_then(|g| {
-            PiNodeConfig::from_process_env()
+            PosixNodeConfig::from_process_env()
                 .map(|n| (g, n))
                 .map_err(|e| e.to_string())
         });
@@ -46,6 +46,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    for old in &node.deprecated {
+        eprintln!(
+            "warning: {old} is the name from before mw-pi-node became mw-posix-node; it still works, but rename it"
+        );
+    }
     // The gateway's state lives under the node's unless set explicitly.
     gateway.state_dir = gateway_state_dir(std::env::var(GW_ENV_STATE).ok().as_deref(), &node.state);
     if command != Command::Run {
@@ -81,13 +86,13 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("mw-pi-node: {e}");
+            eprintln!("mw-posix-node: {e}");
             ExitCode::FAILURE
         }
     }
 }
 
-async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
+async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String> {
     let runner_config =
         Config::from_process_env().map_err(|e| format!("invalid environment: {e}"))?;
     let router = runner_config
@@ -97,8 +102,12 @@ async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
     let id = match &node.node_id {
         NodeIdSource::Configured(id) => *id,
         NodeIdSource::MachineId(path) => {
-            let contents = std::fs::read_to_string(path)
-                .map_err(|e| format!("{}: {e} (set MW_PI_NODE_NODE_ID instead)", path.display()))?;
+            let contents = std::fs::read_to_string(path).map_err(|e| {
+                format!(
+                    "{}: {e} (set MW_POSIX_NODE_NODE_ID instead)",
+                    path.display()
+                )
+            })?;
             node_id::from_machine_id(&contents).map_err(|e| format!("{}: {e}", path.display()))?
         }
     };
@@ -119,16 +128,16 @@ async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("zenoh: {e}"))?;
     eprintln!(
-        "mw-pi-node: node {} ({}), state {}",
+        "mw-posix-node: node {} ({}), state {}",
         node_id::hex(id),
-        mw_pi_node::service::CHIP,
+        mw_posix_node::service::CHIP,
         node.state.display()
     );
     let store = ControlStore::in_dir(&gateway.state_dir);
     let floor = control_floor(&store, wall_clock_ms());
     if floor.is_none() {
         eprintln!(
-            "mw-pi-node: no control counter floor in {} and no synced clock; signed start/stop through gw/sys refused",
+            "mw-posix-node: no control counter floor in {} and no synced clock; signed start/stop through gw/sys refused",
             gateway.state_dir.display()
         );
     }
@@ -162,6 +171,6 @@ async fn run(gateway: GatewayConfig, node: PiNodeConfig) -> Result<(), String> {
     };
     let _ = stop_runner.send(());
     let report = pi.stop().await;
-    eprintln!("mw-pi-node: {report:?}");
+    eprintln!("mw-posix-node: {report:?}");
     outcome
 }

@@ -27,7 +27,7 @@
 #     no embedded feature, and the gateway enables only the serial link
 #     codec (`serial`, the wire it speaks) and `trust` (the device's own
 #     signature check, for signed start/stop) beside its host features;
-#   * the Linux payload host `mw-pi-node` (design.md PN9) is host only: no
+#   * the Linux payload host `mw-posix-node` (design.md PN9) is host only: no
 #     embedded set depends on it, and of the embedded features it enables
 #     only what the device side needs (`serial`, the link it serves;
 #     `trust`, signed commits; `espnow`, which esp-base's pure core always
@@ -38,7 +38,7 @@ cd "$(dirname "$0")/.."
 EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
-CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-pi-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
+CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-posix-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|smbus|trust|cam-fixtures|zenoh-lite'
 HOST_FEATURES='std|zenoh|zenoh-otel|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
 
@@ -177,18 +177,18 @@ if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target
     fail "the embedded core depends on mw-gateway or mw-robot"
 fi
 
-echo "== PN9: mw-pi-node is host only"
-cargo build --quiet -p mw-pi-node
-pn_features="$(features_of_self -p mw-pi-node | sort -u)"
+echo "== PN9: mw-posix-node is host only"
+cargo build --quiet -p mw-posix-node
+pn_features="$(features_of_self -p mw-posix-node | sort -u)"
 for want in zenoh serial trust; do
-    grep -qx "$want" <<<"$pn_features" || fail "mw-pi-node does not enable middleware/$want"
+    grep -qx "$want" <<<"$pn_features" || fail "mw-posix-node does not enable middleware/$want"
 done
 if grep -Eqx 'ble|cam-fixtures|zenoh-lite' <<<"$pn_features"; then
-    fail "mw-pi-node enables an embedded feature other than serial, trust and espnow"
+    fail "mw-posix-node enables an embedded feature other than serial, trust and espnow"
 fi
 if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
-        | grep -Eq '^mw-pi-node '; then
-    fail "the embedded core depends on mw-pi-node"
+        | grep -Eq '^mw-posix-node '; then
+    fail "the embedded core depends on mw-posix-node"
 fi
 
 echo "OK: feature isolation holds"

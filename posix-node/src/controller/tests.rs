@@ -80,7 +80,7 @@ fn pn7_a_started_payload_serves_publishes_ticks_and_fires_timers() {
         [&[PayloadStatus::Empty as u8][..]]
     );
     assert!(
-        logs(&outs)[0].starts_with("mw-pi-node "),
+        logs(&outs)[0].starts_with("mw-posix-node "),
         "{:?}",
         logs(&outs)
     );

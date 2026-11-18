@@ -1,4 +1,4 @@
-//! `mw-pi-node`: a Linux host (a Raspberry Pi Zero 2 W or Pi 3 on a 64-bit
+//! `mw-posix-node`: a Linux host (a Raspberry Pi Zero 2 W or Pi 3 on a 64-bit
 //! OS, or any Linux machine) that runs WASM payloads itself, accepts the
 //! same signed payload updates as the microcontroller base firmwares, and
 //! joins the cluster through the same gateway.
@@ -13,8 +13,8 @@
 //! the payload timer table (`esp_base::periph::timers`). Payloads run in
 //! `wasm-host`. This crate adds what differs on Linux:
 //!
-//! * [`config`] — `MW_PI_NODE_*`, parsed purely from the environment.
-//! * [`node_id`] — the node id from `MW_PI_NODE_NODE_ID` or the systemd
+//! * [`config`] — `MW_POSIX_NODE_*`, parsed purely from the environment.
+//! * [`node_id`] — the node id from `MW_POSIX_NODE_NODE_ID` or the systemd
 //!   machine id, hashed.
 //! * [`flash`] — a NOR flash model whose sectors persist atomically and
 //!   durably as files in the state directory (`flash::dir`), with an
@@ -52,8 +52,8 @@ use wasm_host::Limits;
 use flash::SectorFlash;
 use flash::dir::DirSectors;
 
-pub use config::PiNodeConfig;
-pub use shell::{DeviceParts, GatewayParts, PiNode, Report, start};
+pub use config::PosixNodeConfig;
+pub use shell::{DeviceParts, GatewayParts, PosixNode, Report, start};
 
 /// The node's flash in the state directory `state` (created if missing,
 /// locked while the returned flash lives).
@@ -61,13 +61,29 @@ pub fn open_state_flash(state: &Path) -> io::Result<SectorFlash<DirSectors>> {
     SectorFlash::open(DirSectors::open(state)?, layout::SECTORS)
 }
 
-/// What `sys/info` reports for node `node`.
+/// What `sys/info` and `sys/manifest` report for node `node`, with the
+/// board read from [`DEVICE_TREE_MODEL`] (none on a host without a device
+/// tree).
 pub fn facts(node: SenderId) -> service::Facts {
+    let model = std::fs::read(DEVICE_TREE_MODEL).ok();
     service::Facts {
         chip: service::CHIP,
         firmware: env!("CARGO_PKG_VERSION"),
         node,
+        board: model.as_deref().and_then(board_from_model),
     }
+}
+
+/// Where Linux shows the device tree's `model`.
+pub const DEVICE_TREE_MODEL: &str = "/proc/device-tree/model";
+
+/// The manifest's board name from the device tree's `model` property: a
+/// NUL-terminated string (`ZynqMP KD240 revA/B/1`, `Raspberry Pi 4 Model B
+/// Rev 1.4`). Pure.
+pub fn board_from_model(raw: &[u8]) -> Option<middleware::loader::manifest::BoardName> {
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let text = std::str::from_utf8(&raw[..end]).ok()?.trim();
+    middleware::loader::manifest::BoardName::new(text)
 }
 
 /// The gateway's control counter floor at start, as `mw-gateway`'s

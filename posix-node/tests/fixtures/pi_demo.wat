@@ -1,4 +1,4 @@
-;; mw-pi-node test payload (ABI 5, hand-written WAT).
+;; mw-posix-node test payload (ABI 5, hand-written WAT).
 ;;
 ;; init:       subscribes to "app/pi/in", serves "app/pi/echo" and
 ;;             "app/pi/trap", ticks every 20 ms, starts timer 0 (30 ms,

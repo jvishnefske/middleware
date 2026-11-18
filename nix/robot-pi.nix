@@ -1,5 +1,5 @@
 # The Pi robot's role (design.md MS50-MS54): nix/robot.nix plus the MCU
-# gateway (nix/gateway.nix), the Linux payload host (nix/pi-node.nix, once
+# gateway (nix/gateway.nix), the Linux payload host (nix/posix-node.nix, once
 # its crate exists), runtime networking and SSH, and the memory budget of
 # a 512 MiB Raspberry Pi Zero 2 W. Nothing here is Pi hardware: the SD
 # image (nix/robot-pi-sd.nix) adds that, and checks.robot-pi-boots runs
@@ -7,7 +7,7 @@
 #
 # Runtime files, all in /var/lib/mw-robot (README "Raspberry Pi image"):
 #   join-token, bundle.spiffe, robot.env   as nix/robot.nix; robot.env also
-#                        carries MW_GATEWAY_*, the pi-node's variables and
+#                        carries MW_GATEWAY_*, the posix-node's variables and
 #                        the static address below
 #   wpa_supplicant.conf  Wi-Fi networks; mw-wifi runs wpa_supplicant on
 #                        wlan0 only when it exists
@@ -30,7 +30,7 @@
 # Memory (512 MiB): Envoy with one worker (--concurrency 1), Go's soft
 # limit on spire-agent and spiffe-helper (GOMEMLIMIT), a MemoryMax on every
 # service of ours, a zstd zram swap of half the RAM, and a small journal.
-{ robotPackage, gatewayPackage, piNodePackage ? null }:
+{ robotPackage, gatewayPackage, posixNodePackage ? null }:
 { config, lib, pkgs, ... }:
 let
   stateDir = "/var/lib/mw-robot";
@@ -97,7 +97,7 @@ let
   '';
 in
 {
-  imports = [ ./robot.nix ./gateway.nix ./pi-node.nix ];
+  imports = [ ./robot.nix ./gateway.nix ./posix-node.nix ];
 
   system.stateVersion = "26.05";
 
@@ -116,9 +116,9 @@ in
     wants = [ "mw-provision.service" ];
     after = [ "mw-provision.service" ];
   };
-  services.mw-pi-node = lib.mkIf (piNodePackage != null) {
+  services.mw-posix-node = lib.mkIf (posixNodePackage != null) {
     enable = true;
-    package = piNodePackage;
+    package = posixNodePackage;
   };
 
   # --- memory ---------------------------------------------------------
@@ -192,7 +192,7 @@ in
     before = [
       "mw-net-config.service" "mw-wifi.service" "systemd-networkd.service"
       "spire-agent.service" "mw-envoy.service" "mw-robot.service"
-      "mw-gateway.service" "mw-pi-node.service" "sshd.service"
+      "mw-gateway.service" "mw-posix-node.service" "sshd.service"
     ];
     unitConfig.DefaultDependencies = false;
     serviceConfig = {

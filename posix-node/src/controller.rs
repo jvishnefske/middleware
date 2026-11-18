@@ -99,7 +99,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     pub fn boot(&mut self, boot: &Boot) {
         let node = crate::node_id::hex(self.svc.node());
         self.outbox.log(&format!(
-            "mw-pi-node {} up: node {node}, capacity {} bytes",
+            "mw-posix-node {} up: node {node}, capacity {} bytes",
             env!("CARGO_PKG_VERSION"),
             self.svc.capacity()
         ));

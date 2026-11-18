@@ -1639,9 +1639,9 @@ SPIRE (1.11) is too far behind the lab's SPIRE server (1.15). Checks named
 The Raspberry Pi robot (MS49–MS56) is the same robot module on a
 Raspberry Pi Zero 2 W or Pi 3 (both BCM2710, aarch64), which is also the
 MCU gateway for one USB-attached board running the RP base firmware and
-the host of the Linux payload runner `mw-pi-node`. `nix/robot-pi.nix` is
+the host of the Linux payload runner `mw-posix-node`. `nix/robot-pi.nix` is
 that role without Pi hardware, `nix/robot-pi-sd.nix` puts it on nixpkgs'
-`sd-image-aarch64`, `nix/gateway.nix` and `nix/pi-node.nix` are the two
+`sd-image-aarch64`, `nix/gateway.nix` and `nix/posix-node.nix` are the two
 service modules. `nixosConfigurations.robot-pi` evaluates for an aarch64
 build machine, `robot-pi-cross` for an x86_64 one (cross compiled, with
 the kernel and Envoy substituted from the native aarch64 cache).
@@ -1652,8 +1652,8 @@ the kernel and Envoy substituted from the native aarch64 cache).
   compiler for `ring`), `packages.aarch64-linux.<name>` builds it natively;
   the x86_64 builds are unchanged (same derivations) —
   `checks.aarch64-static` (readelf: AArch64, no interpreter, no
-  `NEEDED`). Entries whose directory does not exist yet (`mw-pi-node`
-  until `pi-node/` lands) are skipped by the flake. *Verified cross
+  `NEEDED`). Entries whose directory does not exist yet (`mw-posix-node`
+  until `posix-node/` lands) are skipped by the flake. *Verified cross
   compiled; the native aarch64 build is exercised by the release job
   (MS55).*
 - [x] MS50 The Pi role runs the robot module with Envoy at one worker, Go
@@ -1680,7 +1680,7 @@ the kernel and Envoy substituted from the native aarch64 cache).
   `checks.robot-pi-eval`, `checks.robot-pi-boots` (subtests "gateway
   waits for the board", "udev rule installed and valid"). *The board
   appearing and the gateway starting on it is a hardware step (MS56).*
-- [x] MS52 `mw-pi-node` runs as the system user `mw-pi-node` with its own
+- [x] MS52 `mw-posix-node` runs as the system user `mw-posix-node` with its own
   state directory, `MW_ZENOH_ROUTER` on the robot Envoy, `MW_PORT` 50053
   (the gateway has 50052), hardening without `MemoryDenyWriteExecute` (a
   wasm runtime may compile code) and no device access unless
@@ -1729,13 +1729,13 @@ the kernel and Envoy substituted from the native aarch64 cache).
 - [x] MS57 The static musl service binaries get past their Zenoh
   configuration at start: on the main thread of a static musl binary
   `stacker` cannot measure the stack and the configuration parse failed
-  with "stack limit reached", so `mw-gateway` and `mw-pi-node` drive their
+  with "stack limit reached", so `mw-gateway` and `mw-posix-node` drive their
   runtime on one spawned thread with an 8 MiB stack
   (`mw_service::block_on_thread`, `MAIN_STACK_BYTES`) —
   `stack::tests::ms57_the_future_runs_on_a_spawned_thread_and_returns_its_output`,
   `ms57_the_zenoh_configuration_parses_on_that_thread`,
   `ms57_a_panic_on_the_thread_reaches_the_caller` *(mw-service)*;
-  `checks.static-startup` (the x86_64 static `mw-gateway` and `mw-pi-node`
+  `checks.static-startup` (the x86_64 static `mw-gateway` and `mw-posix-node`
   started against a loopback router report no configuration error).
 - [x] MS58 The Pi image does not wait for `network-online.target`
   (`systemd.network.wait-online.enable = false`): an unprovisioned Pi
@@ -2353,7 +2353,7 @@ as a UF2 file. Afterwards, application logic ships as WASM payloads loaded over 
 same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI),
 the chip's native USB-Serial-JTAG, or the RP chips' USB CDC-ACM port.
 A Linux host (a Raspberry Pi) runs the same base firmware core as a
-process, `mw-pi-node`, behind an in-process gateway (see "Linux payload
+process, `mw-posix-node`, behind an in-process gateway (see "Linux payload
 host"). Payloads talk to the world through the middleware ABI in
 `wasm_abi`.
 
@@ -3422,11 +3422,12 @@ silicon yet, so neither has a Pico behind the gateway (V25).
   `blink` toggles GPIO 8 and publishes `app/blink/state`. Not yet run on
   hardware.
 
-### Linux payload host (`pi-node/`, PN…)
+### Linux payload host (`posix-node/`, PN…)
 
-`mw-pi-node` (crate `pi-node/`, package and binary `mw-pi-node`) makes a
-Linux host, a Raspberry Pi Zero 2 W or Pi 3 on a 64-bit OS in the first
-place, a base firmware in a process: it runs WASM payloads itself,
+`mw-posix-node` (crate `posix-node/`, package and binary `mw-posix-node`;
+`mw-pi-node` until it hosted more than Pis) makes a Linux host, a
+Raspberry Pi Zero 2 W or Pi 3 on a 64-bit OS in the first place and the
+Kria KD240 after it, a base firmware in a process: it runs WASM payloads itself,
 accepts the same signed payload updates as the microcontroller base
 firmwares, and joins the cluster through the same gateway. On the wire it
 is a board: COBS frames, `sys/info`, `sys/loader/*`, `sys/payload/*`,
@@ -3450,12 +3451,12 @@ member and defeated `exclude` for the path dependency on `firmware/`.
 
 What the crate adds, each part a pure core or a thin shell:
 
-* the configuration (`config`, `MW_PI_NODE_STATE`, `MW_PI_NODE_NODE_ID`,
-  `MW_PI_NODE_MACHINE_ID`, `MW_PI_NODE_MEMORY_BYTES`,
-  `MW_PI_NODE_LOCAL_SERIAL`; the in-process gateway reads its own
+* the configuration (`config`, `MW_POSIX_NODE_STATE`, `MW_POSIX_NODE_NODE_ID`,
+  `MW_POSIX_NODE_MACHINE_ID`, `MW_POSIX_NODE_MEMORY_BYTES`,
+  `MW_POSIX_NODE_LOCAL_SERIAL`; the in-process gateway reads its own
   `MW_GATEWAY_*`, of which `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` go
   unused, and the runner its `MW_*`, `MW_ZENOH_ROUTER` required);
-* the node id (`node_id`): `MW_PI_NODE_NODE_ID` when set, otherwise the
+* the node id (`node_id`): `MW_POSIX_NODE_NODE_ID` when set, otherwise the
   first 8 bytes of SHA-256 over a domain string and the systemd machine
   id, which is stable across reboots and stays off the wire; without
   either the node does not start;
@@ -3474,7 +3475,7 @@ What the crate adds, each part a pure core or a thin shell:
 
 Payload ABI on the node:
 
-| ABI call | mw-pi-node |
+| ABI call | mw-posix-node |
 |---|---|
 | `log`, `publish`, `subscribe`, `set_tick`, `now_ms`, `now_us` | yes: publications and `sys/log` lines to every link, the gateway relaying `app/**` to Zenoh; a monotonic clock from the node's start |
 | `timer_start`, `timer_stop`, `irq_overflow` | yes: four software timers fired by the controller, delivered to `on_irq` |
@@ -3501,7 +3502,7 @@ is re-keyed by stopping it and deleting the trust sectors
 The process. The device thread runs a current-thread tokio runtime, so a
 payload call (fuel bounded) never holds up the gateway's tasks, and owns
 the controller and one `SerialLink` per link: the gateway's, and
-optionally a local one (`MW_PI_NODE_LOCAL_SERIAL`: a USB gadget's
+optionally a local one (`MW_POSIX_NODE_LOCAL_SERIAL`: a USB gadget's
 `/dev/ttyGS0` or one end of a PTY pair, opened with the gateway's
 `io::open_serial`, for `mwctl`). Requests are answered on the link they
 came from; publications, log lines and status changes go to all. The
@@ -3519,30 +3520,30 @@ mutating request must carry an `x-request-id`; `sys/trust/claim` never
 passes, so a node is claimed over its local link (physical access, like
 a board's USB cable). The floor is computed and persisted as in
 `mw-gateway` (`state::floor_at_start`, `ControlStore`); when
-`MW_GATEWAY_STATE` is unset the store lives in `<MW_PI_NODE_STATE>/gateway`,
+`MW_GATEWAY_STATE` is unset the store lives in `<MW_POSIX_NODE_STATE>/gateway`,
 so one directory holds all of the node's state. `mw-update` drives the
 node as it drives any board behind a gateway. The cluster cannot reach a
 payload's served
 `app/...` keys through the gateway at all; the local link can. Tests
-marked *(mw-pi-node)* run under `cargo test -p mw-pi-node` and
+marked *(mw-posix-node)* run under `cargo test -p mw-posix-node` and
 `cargo test --workspace`; none opens a serial port or a GPIO chip, and
 network tests use 127.0.0.1 only.
 
-- [x] PN1 `PiNodeConfig::from_env` parses `MW_PI_NODE_STATE` (default
-  `/var/lib/mw-pi-node`), `MW_PI_NODE_NODE_ID` (16 hex digits, not all
-  zeros, winning over the machine id), `MW_PI_NODE_MACHINE_ID` (default
-  `/etc/machine-id`), `MW_PI_NODE_MEMORY_BYTES` (64 KiB to 64 MiB, default
-  1 MiB) and `MW_PI_NODE_LOCAL_SERIAL`; empty is unset and a malformed
+- [x] PN1 `PosixNodeConfig::from_env` parses `MW_POSIX_NODE_STATE` (default
+  `/var/lib/mw-posix-node`), `MW_POSIX_NODE_NODE_ID` (16 hex digits, not all
+  zeros, winning over the machine id), `MW_POSIX_NODE_MACHINE_ID` (default
+  `/etc/machine-id`), `MW_POSIX_NODE_MEMORY_BYTES` (64 KiB to 64 MiB, default
+  1 MiB) and `MW_POSIX_NODE_LOCAL_SERIAL`; empty is unset and a malformed
   value names its variable —
   `config::tests::pn1_defaults`, `pn1_parses_every_variable`,
-  `pn1_malformed_values_name_the_variable` *(mw-pi-node)*.
+  `pn1_malformed_values_name_the_variable` *(mw-posix-node)*.
 - [x] PN2 The node id is the configured one or the first 8 bytes of
-  SHA-256 over `mw-pi-node/node-id/v1\0` and the machine id (32 hex
+  SHA-256 over `mw-posix-node/node-id/v1\0` and the machine id (32 hex
   digits, case folded, blanks trimmed): the same machine gives the same
   id, another machine another, malformed ids and an all-zero id are
   refused —
   `node_id::tests::pn2_machine_id_hashes_to_a_stable_node_id`,
-  `pn2_a_configured_node_id_wins_and_is_checked` *(mw-pi-node)*.
+  `pn2_a_configured_node_id_wins_and_is_checked` *(mw-posix-node)*.
 - [x] PN3 The flash model follows the NOR rules (4-byte aligned reads and
   writes inside the device, writes only clear bits, 4 KiB erases to
   `0xFF`, a blank device reads erased); one dirty sector is stored before
@@ -3557,7 +3558,7 @@ network tests use 127.0.0.1 only.
   `pn3_one_dirty_sector_is_stored_before_another_is_touched_and_on_sync`,
   `pn3_a_failed_store_poisons_the_flash`;
   `service::tests::pn3_power_loss_at_any_store_leaves_the_old_or_the_new_image_and_record`
-  *(mw-pi-node)*.
+  *(mw-posix-node)*.
 - [x] PN4 Sectors persist under `<state>/flash/` as whole 4096-byte files
   named `sector-NNNN`; an erased sector is a missing file; a leftover
   temporary file (a crash before the rename) leaves the old sector and is
@@ -3565,8 +3566,8 @@ network tests use 127.0.0.1 only.
   a second process cannot open a locked state directory —
   `flash::dir::tests::pn4_file_names_are_canonical`,
   `pn4_sectors_persist_as_whole_files_and_erased_is_missing`,
-  `pn4_one_process_holds_the_state_directory`; `pi-node/tests/node.rs`:
-  `pn4_the_state_directory_is_held_by_one_node` *(mw-pi-node)*.
+  `pn4_one_process_holds_the_state_directory`; `posix-node/tests/node.rs`:
+  `pn4_the_state_directory_is_held_by_one_node` *(mw-posix-node)*.
 - [x] PN5 The service answers like a board: `sys/info` names the chip
   `linux-<arch>` (`linux-aarch64` on the Pi), the version, the node id,
   `Caps::SERVE`, ABI 5 and a 252 KiB capacity; every `sys/fw/*` key is
@@ -3583,7 +3584,7 @@ network tests use 127.0.0.1 only.
   `pn5_a_p256_key_claims_and_signs_as_on_a_board_and_survives_restart`,
   `pn5_an_unreadable_trust_record_refuses_installs`;
   `layout::tests::pn5_regions_are_whole_sectors_and_do_not_overlap`
-  *(mw-pi-node)*.
+  *(mw-posix-node)*.
 - [x] PN6 The payload device publishes into a bounded outbox (64, dropping
   the newest and counting; `sys/...` keys `InvalidKey`; more than one
   serial frame `InvalidArgument`), logs on `sys/log` cut to one frame on a
@@ -3593,7 +3594,7 @@ network tests use 127.0.0.1 only.
   `device::tests::pn6_publish_log_clock_serve_and_node_id`,
   `pn6_the_outbox_is_bounded_and_drops_the_newest`,
   `pn6_timers_fire_as_events_and_peripherals_are_unsupported`
-  *(mw-pi-node)*.
+  *(mw-posix-node)*.
 - [x] PN7 The controller, with the real interpreter: a started payload's
   served key answers through `on_request` with the node id, other keys
   are `NotFound`, a subscribed publication reaches `on_message`, `tick`
@@ -3606,7 +3607,7 @@ network tests use 127.0.0.1 only.
   `controller::tests::pn7_a_started_payload_serves_publishes_ticks_and_fires_timers`,
   `pn7_traps_stop_and_uploads_end_the_run_and_settle_the_served_keys`,
   `pn7_an_installed_payload_starts_at_boot_and_bad_images_fail_to_start`
-  *(mw-pi-node)*.
+  *(mw-posix-node)*.
 - [x] PN8 End to end in one process, the device thread on a real state
   directory, the gateway on the other end of a `ChannelIo` pair (started
   with its control counter store and floor, the store under the node's
@@ -3623,21 +3624,21 @@ network tests use 127.0.0.1 only.
   `Denied`; stopping syncs the flash and the accepted counter is in the
   gateway's store; after a restart on the same directory the payload
   starts by itself and a replayed commit and a second claim are `Denied` —
-  `pi-node/tests/node.rs`:
+  `posix-node/tests/node.rs`:
   `pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves`;
   `config::tests::pn1_the_gateway_state_defaults_under_the_node_state`
-  *(mw-pi-node)*.
+  *(mw-posix-node)*.
 - [x] PN9 The crate is host only: no embedded feature set depends on it,
   and of `middleware`'s embedded features it enables only `serial`,
   `trust` and `espnow` (esp-base's core always builds the ESP-NOW frame
   codec) beside `zenoh` — `scripts/check-features.sh` (block "PN9", and
-  `mw-pi-node` in `CLOUD_CRATES` for every F1 set).
+  `mw-posix-node` in `CLOUD_CRATES` for every F1 set).
 - [x] PN10 It builds for the Pi's target: `cargo check --target
-  aarch64-unknown-linux-musl -p mw-pi-node` type-checks (the `psm` build
+  aarch64-unknown-linux-musl -p mw-posix-node` type-checks (the `psm` build
   script needs a C compiler for the target: `CC_aarch64_unknown_linux_musl`
   pointing at any aarch64 GCC or clang will do for a check). A linked
   static binary is the nix package's job (`nix/binaries.nix` entry
-  `mw-pi-node`).
+  `mw-posix-node`).
 - [ ] PN11 On a Pi Zero 2 W or Pi 3: the node starts from the SD image,
   binds in the cluster, takes a signed upload through `gw/sys` and keeps
   its payload and key across a power cut. Not yet run on hardware.
@@ -3650,6 +3651,22 @@ network tests use 127.0.0.1 only.
   only (RG12), so a served `app/...` key answers over the local link
   alone (PN8). Needs an additive gateway kind that forwards requests on
   the device's served keys.
+- [x] PN14 The manifest names the board: `sys/manifest` carries a `BOARD`
+  record (tag 11, [`BoardName`], at most 32 bytes of UTF-8) read from
+  `/proc/device-tree/model` (`ZynqMP KD240 revA/B/1`, `Raspberry Pi 4
+  Model B Rev 1.4`), and none without a device tree; `sys/info`'s chip
+  stays the architecture (`linux-aarch64`). The web console decodes it
+  (`decodeManifest` `board`) and shows it. *(mw-posix-node
+  `pn14_the_manifest_names_the_board`, middleware `mf6_board_names`, web
+  `nodeManifest.test.ts`)*
+- [x] PN15 The rename keeps what a node had: every `MW_POSIX_NODE_*`
+  variable is still read as `MW_PI_NODE_*` when unset (and warned about),
+  the default state directory falls back to `/var/lib/mw-pi-node` when
+  only that exists (the NixOS module moves it once), and the node id's
+  hash domain stays `mw-pi-node/node-id/v1` so ids do not change.
+  *(mw-posix-node `pn1_the_old_names_still_work_and_are_reported`,
+  `pn1_an_existing_old_state_directory_is_kept`,
+  `node_ids_survive_the_rename`)*
 
 ### i.MX RT base firmware (`firmware-imxrt/`)
 
@@ -6583,7 +6600,7 @@ record longer than its body keeps its known prefix.
   firmware-imxrt `service::tests::mf3_the_manifest_agrees_with_the_sensor_routes`,
   `zenoh_mgmt::tests::zn4_a_claimed_board_answers_read_only_requests`,
   `zn4_an_unclaimed_board_answers_only_info_and_trust_info`;
-  mw-pi-node `device::tests::mf3_the_manifest_lists_only_what_the_device_does`;
+  mw-posix-node `device::tests::mf3_the_manifest_lists_only_what_the_device_does`;
   payload-sim `sim::tests::mf3_the_manifest_agrees_with_the_simulated_board`,
   `tests/abi5.rs` `mf3_the_board_answers_sys_manifest` (`!req sys/manifest`);
   protocol-wasm `simulator::tests::mf3_the_manifest_agrees_with_the_simulated_board`.
@@ -6697,10 +6714,10 @@ those publications to its own payload and sends them on no link.
   keeps the previous record): the ESP `binding` partition at `0x352000`
   (a table without it answers `Unavailable`), the RP maps at
   `0x1C2000` / `0x342000`, RT1050 blocks 9–10 (one sector per block,
-  `RtFlash`'s binding window), pi-node sectors 130–131. A stored binding
+  `RtFlash`'s binding window), posix-node sectors 130–131. A stored binding
   is used only for the image it names — esp-base `binding_store::tests::bd3_*`;
   firmware-imxrt `service::flash::tests::rt12_the_windows_reach_only_the_trust_and_payload_regions`,
-  `layout::tests::rt3_*`; rp-base `layout::tests::v2_*`; mw-pi-node
+  `layout::tests::rt3_*`; rp-base `layout::tests::v2_*`; mw-posix-node
   `layout::tests::pn5_regions_are_whole_sectors_and_do_not_overlap`.
 - [x] BD4 The runtime resolves the binding before `init`
   (`Payload::instantiate_bound`): a local source starts through the
@@ -6711,7 +6728,7 @@ those publications to its own payload and sends them on no link.
   many keys, inputs without `on_message` and a route the device refuses
   fail the load (`LoadError::Bind`, naming the channel; the shells log
   it). Remote targets are PR3's, adapted ones AD's. Every
-  shell (esp-base, rp-base, RT1050, pi-node) loads the stored record and
+  shell (esp-base, rp-base, RT1050, posix-node) loads the stored record and
   passes it for the image it starts. `ch/...` belongs to the runtime: a
   payload's own `publish`, `subscribe`, `serve` and routes on it are
   `InvalidKey`, publications on it from any link are dropped
