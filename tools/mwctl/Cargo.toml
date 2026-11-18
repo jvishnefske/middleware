@@ -37,3 +37,5 @@ optional = true
 # The fake device runs the real firmware updater on the in-memory RP2350
 # bootrom model. Tests only: the shipped mwctl uses no middleware feature.
 middleware = { path = "../..", features = ["fw-sim"] }
+# ecp5::tests compiles payloads/templates/bridge.wat (1-byte pages).
+wat = "1"
