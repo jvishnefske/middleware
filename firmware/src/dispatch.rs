@@ -28,6 +28,10 @@
 //! | `sys/payload/start`  | `Empty`/`Loading`    | none (`InvalidRequest`) | unchanged |
 //! | `sys/payload/start`  | built without runtime | none (`NotFound`) | unchanged |
 //! | `sys/payload/stop`   | `Running`/`Trapped`  | `Stop`     | `Stopped`    |
+//! | `sys/payload/bind`   | runtime, trust allows | `Bind` (applies at the next start) | unchanged; the shell records the binding with [`State::bound`] |
+//! | `sys/payload/bind`   | trust refuses        | none (`Denied`) | unchanged |
+//! | `sys/payload/binding` | runtime             | `Binding` (the shell replies the stored record, `NotFound` without one) | unchanged |
+//! | `sys/payload/bind`, `binding` | built without runtime | none (`NotFound`) | unchanged |
 //! | other `sys/...`      | —                    | none (`NotFound`) | unchanged |
 //! | application key      | —                    | none (`NotFound`) | unchanged |
 //!
@@ -85,6 +89,7 @@
 
 use middleware::Key;
 use middleware::loader::trust::{ControlCounter, TrustState};
+use middleware::loader::binding::BindingMark;
 use middleware::loader::manifest::Manifest;
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
 use middleware::transport::{HandlerError, Request, SenderId};
@@ -150,6 +155,8 @@ pub struct State {
     /// The last accepted signed control request's counter.
     #[cfg(feature = "trust")]
     control: ControlCounter,
+    /// The stored binding's image and version (BD2).
+    binding: Option<BindingMark>,
 }
 
 impl State {
@@ -165,7 +172,19 @@ impl State {
             trust: TrustState::Unclaimed,
             #[cfg(feature = "trust")]
             control: ControlCounter(0),
+            binding: None,
         }
+    }
+
+    /// The same state with the stored binding's mark: read from flash at
+    /// boot, or just saved by the shell after [`Action::Bind`].
+    pub const fn bound(self, binding: Option<BindingMark>) -> Self {
+        State { binding, ..self }
+    }
+
+    /// The stored binding's image and version.
+    pub const fn binding(&self) -> Option<BindingMark> {
+        self.binding
     }
 
     /// The same state with the root of trust read from flash at boot.
@@ -325,6 +344,17 @@ pub enum Action<'a> {
     Start,
     /// Stop the payload.
     Stop,
+    /// Persist `record` as the payload's binding (BD3), then record `mark`
+    /// with [`State::bound`]. A running payload keeps its old channels
+    /// until it is started again.
+    Bind {
+        /// The encoded binding record.
+        record: &'a [u8],
+        /// Its image and version.
+        mark: BindingMark,
+    },
+    /// Reply the stored binding record (`NotFound` without one).
+    Binding,
 }
 
 impl Action<'_> {
@@ -423,6 +453,26 @@ pub fn handle_request<'a>(
             }
             None => Outcome::reply(state, Err(HandlerError::NotFound)),
         },
+        Command::Bind { .. } | Command::Binding if !ctx.runtime => {
+            Outcome::reply(state, Err(HandlerError::NotFound))
+        }
+        Command::Bind { request } => {
+            // A claimed device takes a binding signed by its key with a
+            // version above the stored one for the same image; over a
+            // network (`staging`) never unsigned (BD2).
+            #[cfg(feature = "trust")]
+            if let Err(e) = state.trust.accept_binding(&request, state.binding, ctx.staging) {
+                return Outcome::reply(state, Err(e));
+            }
+            Outcome::act(
+                state,
+                Action::Bind {
+                    record: request.record,
+                    mark: request.binding.mark(),
+                },
+            )
+        }
+        Command::Binding => Outcome::act(state, Action::Binding),
         Command::Start if !ctx.runtime => Outcome::reply(state, Err(HandlerError::NotFound)),
         Command::Start => match state.status {
             PayloadStatus::Empty | PayloadStatus::Loading => {
@@ -570,6 +620,7 @@ pub const fn tick_delay(now: u32, deadline: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use middleware::crc::Crc32;
     use middleware::loader::keys;
@@ -721,6 +772,52 @@ mod tests {
             handle_request(s, &none, &Request::new(keys::MANIFEST, &[]), &mut out).reply,
             Err(HandlerError::NotFound)
         );
+    }
+
+    /// A binding record for `image` at `version` (one key target).
+    fn bind_record(image: [u8; 32], version: u32) -> std::vec::Vec<u8> {
+        use middleware::loader::binding::{BINDING_MAX, Binding, Target};
+        let mut b = Binding::new(image, middleware::loader::trust::Version(version));
+        b.bind("cmd", Target::Key(Key::from_static("a/b"))).unwrap();
+        let mut out = [0u8; BINDING_MAX];
+        let n = b.encode(&mut out).unwrap();
+        out[..n].to_vec()
+    }
+
+    #[test]
+    fn bd2_bind_is_an_action_and_binding_a_read() {
+        use middleware::loader::binding::BindingMark;
+        use middleware::loader::trust::{PublicKey, Version};
+        let rec = bind_record([1; 32], 3);
+        let s = State::boot(true);
+        let o = req(s, keys::BIND, &rec);
+        let mark = BindingMark { image_sha256: [1; 32], version: Version(3) };
+        assert_eq!(o.action, Action::Bind { record: &rec, mark });
+        assert_eq!(o.reply, Ok(0));
+        assert_eq!(req(s, keys::BINDING, &[]).action, Action::Binding);
+        assert_eq!(req(s, keys::BIND, b"junk").reply, Err(HandlerError::InvalidRequest));
+        let none = Context { runtime: false, ..CTX };
+        let mut out = [0u8; 16];
+        for k in [keys::BIND, keys::BINDING] {
+            let body: &[u8] = if k == keys::BIND { &rec } else { &[] };
+            let o = handle_request(s, &none, &Request::new(k, body), &mut out);
+            assert_eq!((o.reply, o.action), (Err(HandlerError::NotFound), Action::None));
+        }
+        // Claimed: unsigned over a network is denied; over serial a version
+        // not above the stored one for the same image is denied.
+        let claimed = s.with_trust(TrustState::Claimed {
+            key: PublicKey::Ed25519([9; 32]),
+            min_version: Version(0),
+        });
+        let air = Context { staging: true, ..CTX };
+        let o = handle_request(claimed, &air, &Request::new(keys::BIND, &rec), &mut out);
+        assert_eq!((o.reply, o.action), (Err(HandlerError::Denied), Action::None));
+        assert!(matches!(req(claimed, keys::BIND, &rec).action, Action::Bind { .. }));
+        let stored = claimed.bound(Some(mark));
+        assert_eq!(stored.binding(), Some(mark));
+        assert_eq!(req(stored, keys::BIND, &rec).reply, Err(HandlerError::Denied));
+        assert!(matches!(req(stored, keys::BIND, &bind_record([1; 32], 4)).action, Action::Bind { .. }));
+        assert!(matches!(req(stored, keys::BIND, &bind_record([2; 32], 1)).action, Action::Bind { .. }));
     }
 
     #[test]
@@ -1258,6 +1355,8 @@ mod tests {
                     Action::Claim { trust } => Action::Claim { trust },
                     Action::Start => Action::Start,
                     Action::Stop => Action::Stop,
+                    Action::Bind { .. } => Action::None,
+                    Action::Binding => Action::Binding,
                 };
                 Outcome {
                     state: self.state,

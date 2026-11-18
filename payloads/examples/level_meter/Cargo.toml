@@ -1,0 +1,13 @@
+[package]
+name = "level_meter"
+description = "Example middleware payload: microphone level meter on bound channels (ABI 7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mw-payload = { path = "../../sdk" }

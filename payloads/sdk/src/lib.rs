@@ -91,6 +91,15 @@
 //! * [`serve::node_id`] — the device's 8-byte node id ([`serve::node_hex`]
 //!   formats it for keys).
 //!
+//! Added with ABI 7 (requires firmware implementing [`ABI_VERSION`] 7):
+//!
+//! * [`channels!`] declares named channels in the image's `mw.channels`
+//!   section; [`channel::Channel::open`] returns what the node's binding
+//!   made of each, an input's slot or an output to
+//!   [`channel::Output::publish`] on. Write payload logic against
+//!   [`channel::Input`], [`channel::SampleInput`] and [`channel::Output`]
+//!   so it runs the same on boards, simulators and in host tests.
+//!
 //! Received messages are copied by the host into one fixed receive buffer of
 //! [`MAX_MESSAGE`] bytes that `mw_alloc` hands out; there is no heap.
 //!
@@ -99,7 +108,7 @@
 //! The project forbids `unsafe`. Talking to a WASM host cannot be done
 //! without it, so this crate is `#![deny(unsafe_code)]` and the exception is
 //! confined to the private module `sys` (`src/sys.rs`), the only module
-//! with `#[allow(unsafe_code)]`. It contains exactly four things, each with
+//! with `#[allow(unsafe_code)]`. It contains exactly five things, each with
 //! a `SAFETY:` comment:
 //!
 //! 1. The `unsafe extern "C"` block declaring the `"mw"` host imports. Every
@@ -126,6 +135,9 @@
 //!    fixed ABI names. The attribute is written in this crate and the
 //!    expansion has no `#[allow(unsafe_code)]`, so a payload crate may be
 //!    `#![forbid(unsafe_code)]` (requirement P5; see [`payload!`]).
+//! 5. The `channels!` section macro, defined in `sys`, whose expansion
+//!    carries `#[unsafe(link_section = "mw.channels")]` on one byte-array
+//!    static (wasm32 only): the fixed ABI section name.
 //!
 //! On non-wasm targets the imports are replaced by inert stubs (`log` does
 //! nothing, `now_ms` / `now_us` return 0, the rest return
@@ -142,6 +154,7 @@
 #![deny(missing_docs)]
 
 pub mod adc;
+pub mod channel;
 pub mod dma;
 pub mod gpio;
 pub mod i2c;

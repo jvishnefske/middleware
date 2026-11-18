@@ -149,6 +149,14 @@ fn rust_serve_echo_example() {
 }
 
 #[test]
+fn rust_level_meter_example() {
+    let r = validate(&release("level_meter"));
+    assert!(has(&r.exports, &["memory", "init", "mw_alloc", "on_message"]));
+    assert!(has(&r.imports, &["channel_open", "channel_publish"]));
+    assert_eq!(r.channels, ["audio", "level"]);
+}
+
+#[test]
 fn as_serve_template() {
     if let Some(r) = assemblyscript("serve") {
         assert!(has(&r.exports, &["memory", "init", "mw_alloc", "on_request"]));

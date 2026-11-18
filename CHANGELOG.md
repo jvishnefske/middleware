@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### ABI 7 channels and bindings (CH1–CH6, BD1–BD7)
+- ABI 7: payloads declare named channels in a `mw.channels` custom section (`wasm_abi::channels`, pure, `const` encoder) and open them with `channel_open` / `channel_publish`; `ABI_VERSION` 7, `ABI6_IMPORTS`. ABI 1–6 payloads load unchanged.
+- Bindings (`loader::binding`): a separately signed record maps each channel to a local source, a key, a key from one node or an adapted stream; `sys/payload/bind` (signature over `binding_message`, `TrustState::accept_binding`) and `sys/payload/binding`; `Command::Bind`, `Command::Binding`. It applies at the next start, so payloads are rebound without re-upload.
+- wasm-host: `Compiled::channels`, `Payload::instantiate_bound` resolves the binding before `init` (`channels::plan`, `LoadError::Channels`, `LoadError::Bind`); `link::start_route`. Remote and adapted targets are refused for now.
+- esp-base: `binding_store` (A/B record, `perform`, `for_image`); dispatcher `Action::Bind` / `Action::Binding`, `State::bound`. Binding regions: ESP partition `binding` at 0x352000 (`partitions.csv`), RP 0x1C2000 / 0x342000, RT1050 blocks 9–10, pi-node sectors 130–131. Every shell starts the payload with the stored binding for its image; `ch/...` keys are node-internal (the RT1050 bus, payload-sim and the browser simulator deliver them locally only). The RT1050's Zenoh gate admits signed binds only.
+- Manifests gain the `channels` import group; `Limits::ABI` offers eight channels.
+- SDK: `channels!`, `channel::{Channel, Input, SampleInput, Output}`; example `level_meter`; abi-check reports and checks the channels.
+- Tools: `mwctl bind <wasm> CHANNEL=TARGET ... [--key]`, `mwctl binding`; `payload-sim --bind`; protocol-wasm `readChannels`, `encodeChannels`, `withChannels`, `encodeBinding`, `decodeBinding`, `bindingMessage`, `encodeBindBody`, `checkBinding`, simulator `binding`; web Channel binding panel (`device/binding.ts`, `ui/bindingPanel.ts`), `DeviceClient.bind`, `binding`, `manifestBody`.
+
 ### Node manifests (MF1–MF5)
 - New `sys/manifest` (`middleware::loader::manifest`, pure, no alloc): what a node offers payloads as `[tag][len][body]` records an older host skips (import groups, I2C and SPI buses, IMU and microphone sources with their rate, range and mode masks, frame sources, SPI sinks, links, limits; at most 384 bytes). `Manifest::caps` derives the `sys/info` bits, `ImuSource`/`MicSource`/`FrameSources::accepts` say whether a config is offered. `loader::keys::MANIFEST`, `Command::Manifest`.
 - Breaking (esp-base): `dispatch::Context::caps` is replaced by `Context::manifest: Option<&Manifest>` (`Context::caps()` derives the bits); `sys/manifest` is answered from it with `Context::node`.

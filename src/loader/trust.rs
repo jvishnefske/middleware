@@ -631,6 +631,44 @@ mod verify {
             })
         }
 
+        /// Decides a `sys/payload/bind` (BD2). Unclaimed: accepted (TOFU;
+        /// a signature, if present, is ignored). Claimed: the binding's
+        /// version must be above `last`'s when `last` is for the same
+        /// image; a signed binding must verify against the pinned key over
+        /// [`binding_message`](crate::loader::binding::binding_message);
+        /// an unsigned one is accepted only when not `remote` (a serial
+        /// port: physical access, as for unsigned start and stop). Every
+        /// failure is `Denied`.
+        pub fn accept_binding(
+            &self,
+            request: &crate::loader::binding::BindRequest<'_>,
+            last: Option<crate::loader::binding::BindingMark>,
+            remote: bool,
+        ) -> Result<(), HandlerError> {
+            use crate::loader::binding::binding_message;
+            let TrustState::Claimed { key, .. } = self else {
+                return Ok(());
+            };
+            let denied = HandlerError::Denied;
+            let b = &request.binding;
+            if last.is_some_and(|m| m.image_sha256 == b.image_sha256 && b.version <= m.version) {
+                return Err(denied);
+            }
+            match request.auth {
+                None if remote => Err(denied),
+                None => Ok(()),
+                Some(auth) => {
+                    let record = crate::loader::sha256::ImageHash::digest(request.record);
+                    let message = binding_message(&b.image_sha256, auth.version, &record);
+                    if verify_signature(key, &message, &auth.signature) {
+                        Ok(())
+                    } else {
+                        Err(denied)
+                    }
+                }
+            }
+        }
+
         /// Decides a signed control request `op` addressed to `target`
         /// (the device's own MAC), given the `last` counter accepted.
         /// Accepted only when Claimed, `auth.counter > last` and the
@@ -960,6 +998,58 @@ mod tests {
                 key: key_of(&signer()),
                 min_version: Version(min),
             }
+        }
+
+        /// BD2: a binding request with `auth` signed by `s` (or unsigned).
+        fn bind_body(s: Option<&SigningKey>, image: [u8; 32], version: u32, key: &'static str) -> Vec<u8> {
+            use crate::loader::binding::{BINDING_MAX, Binding, SignedBinding, Target, binding_message};
+            let mut b = Binding::new(image, Version(version));
+            b.bind("cmd", Target::Key(crate::key::Key::from_static(key))).unwrap();
+            let mut out = [0u8; BINDING_MAX];
+            let n = b.encode(&mut out).unwrap();
+            let mut body = out[..n].to_vec();
+            if let Some(s) = s {
+                let m = binding_message(&image, Version(version), &ImageHash::digest(&out[..n]));
+                let auth = SignedBinding {
+                    version: Version(version),
+                    signature: Signature(s.sign(&m).to_bytes()),
+                };
+                body.extend_from_slice(&auth.encode());
+            }
+            body
+        }
+
+        #[test]
+        fn bd2_bindings_need_the_pinned_key_and_a_new_version_per_image() {
+            use crate::loader::binding::{BindRequest, BindingMark};
+            let t = claimed(0);
+            let accept = |body: &[u8], last: Option<BindingMark>, remote: bool| {
+                t.accept_binding(&BindRequest::parse(body).unwrap(), last, remote)
+            };
+            let signed = bind_body(Some(&signer()), [1; 32], 5, "a/b");
+            assert_eq!(accept(&signed, None, true), Ok(()));
+            // Replay or an older version for the same image.
+            let mark = |v: u32| Some(BindingMark { image_sha256: [1; 32], version: Version(v) });
+            assert_eq!(accept(&signed, mark(5), false), Err(HandlerError::Denied));
+            assert_eq!(accept(&signed, mark(6), true), Err(HandlerError::Denied));
+            assert_eq!(accept(&signed, mark(4), true), Ok(()));
+            // Another image's binding starts over.
+            let other = Some(BindingMark { image_sha256: [2; 32], version: Version(9) });
+            assert_eq!(accept(&signed, other, true), Ok(()));
+            // Another key, a tampered record, unsigned over a network.
+            let mallory = bind_body(Some(&SigningKey::from_bytes(&[42; 32])), [1; 32], 5, "a/b");
+            assert_eq!(accept(&mallory, None, false), Err(HandlerError::Denied));
+            let mut tampered = signed.clone();
+            let at = tampered.len() - 68 - 1;
+            tampered[at] ^= 1;
+            assert_eq!(accept(&tampered, None, false), Err(HandlerError::Denied));
+            let unsigned = bind_body(None, [1; 32], 5, "a/b");
+            assert_eq!(accept(&unsigned, None, true), Err(HandlerError::Denied));
+            assert_eq!(accept(&unsigned, None, false), Ok(()));
+            assert_eq!(accept(&unsigned, mark(5), false), Err(HandlerError::Denied));
+            // Unclaimed takes anything.
+            let open = TrustState::Unclaimed;
+            assert_eq!(open.accept_binding(&BindRequest::parse(&mallory).unwrap(), mark(9), true), Ok(()));
         }
 
         #[test]

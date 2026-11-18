@@ -58,6 +58,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod binding_store;
 pub mod camera;
 pub mod chip;
 pub mod dispatch;

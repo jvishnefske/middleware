@@ -43,6 +43,8 @@ pub struct Report {
     /// Page size of that memory in bytes: 65536, or 1 for a module linked
     /// with `--page-size=1`.
     pub memory_page_bytes: Option<u64>,
+    /// The channels the `mw.channels` section declares (ABI 7), in order.
+    pub channels: Vec<String>,
 }
 
 impl Report {
@@ -218,6 +220,18 @@ pub fn check(wasm: &[u8]) -> Result<Report, Vec<String>> {
                 ));
             }
         }
+    }
+
+    // ABI 7: a well-formed `mw.channels` section; inputs need on_message.
+    use middleware::wasm_abi::channels::{Channels, Direction};
+    match Channels::from_module(wasm) {
+        Ok(c) => {
+            report.channels = c.iter().map(|c| c.name.to_string()).collect();
+            if c.iter().any(|c| c.dir == Direction::In) && !has(exports::ON_MESSAGE) {
+                errors.push("mw.channels: an input channel requires the on_message and mw_alloc exports".into());
+            }
+        }
+        Err(e) => errors.push(format!("mw.channels: {e:?}")),
     }
 
     if errors.is_empty() {

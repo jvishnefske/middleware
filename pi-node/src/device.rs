@@ -354,7 +354,7 @@ mod tests {
         use middleware::loader::manifest::Groups;
         use middleware::wasm_abi::route::{ImuConfig, SampleSource};
         let m = crate::service::MANIFEST;
-        assert_eq!(m.groups, Groups::TIMERS.with(Groups::SERVE));
+        assert_eq!(m.groups, Groups::TIMERS.with(Groups::SERVE).with(Groups::CHANNELS));
         let clock = Manual::default();
         let mut d = PiDevice::new(&clock, NODE);
         let imu = SampleSource::Imu(ImuConfig::new(100, 2, false, 10).expect("cfg"));

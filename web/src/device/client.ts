@@ -251,16 +251,39 @@ export class DeviceClient {
   /** Reads `sys/manifest` (MF4); null when the firmware has none and
    * answers NotFound. */
   async manifest(opts?: RequestOptions): Promise<Manifest | null> {
-    let body: Uint8Array;
+    const body = await this.manifestBody(opts);
+    if (!body) return null;
+    const m = this.proto.decodeManifest(body);
+    if (!m) throw new Error("malformed sys/manifest response");
+    return m;
+  }
+
+  /** The raw `sys/manifest` body (what `checkBinding` takes); null for
+   * NotFound. */
+  async manifestBody(opts?: RequestOptions): Promise<Uint8Array | null> {
     try {
-      body = await this.request(this.proto.constants.keys.manifest, new Uint8Array(), opts);
+      return await this.request(this.proto.constants.keys.manifest, new Uint8Array(), opts);
     } catch (e) {
       if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
       throw e;
     }
-    const m = this.proto.decodeManifest(body);
-    if (!m) throw new Error("malformed sys/manifest response");
-    return m;
+  }
+
+  /** Installs a channel binding (`sys/payload/bind`, ABI 7): `body` is
+   * `encodeBindBody(record, signature?)`. It applies at the payload's
+   * next start. */
+  async bind(body: Uint8Array, opts?: RequestOptions): Promise<void> {
+    await this.request(this.proto.constants.keys.bind, body, opts);
+  }
+
+  /** Reads the stored binding record; null without one (NotFound). */
+  async binding(opts?: RequestOptions): Promise<Uint8Array | null> {
+    try {
+      return await this.request(this.proto.constants.keys.binding, new Uint8Array(), opts);
+    } catch (e) {
+      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
+      throw e;
+    }
   }
 
   /** Reads `sys/trust/info`; null when the firmware predates trust and

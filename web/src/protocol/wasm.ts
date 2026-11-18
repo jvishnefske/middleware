@@ -113,10 +113,59 @@ export interface Manifest {
   capNames: string[];
 }
 
+/** A channel a payload declares in its `mw.channels` section (ABI 7). */
+export interface ChannelDecl {
+  name: string;
+  dir: "in" | "out";
+  kind: "bytes" | "samples" | "frames";
+  sensor: "imu" | "mic" | null;
+  /** Mask over sample format codes (i16 0, mulaw 1, levels 2) or pixel
+   * formats; 0 = any. */
+  formats: number;
+  /** Channels per unit, 0 = any. */
+  channels: number;
+  rateMin: number;
+  rateMax: number;
+  required: boolean;
+}
+
+/** A local source a channel binds to. */
+export type LocalSource =
+  | { kind: "local"; source: "mic"; rateHz: number; gainDb: number; mode: "levels" | "mulaw" | "pcm"; units: number; block: number }
+  | { kind: "local"; source: "imu"; rateHz: number; rangeG: number; mag: boolean; units: number }
+  | { kind: "local"; source: "testPattern" | "camera"; cfg: Uint8Array };
+
+/** A stream transformation applied before `on_message`. */
+export type Adapter =
+  | { kind: "pcmToLevels"; block: number }
+  | { kind: "pcmToMuLaw" }
+  | { kind: "decimate"; factor: number }
+  | { kind: "imuToMagnitude" };
+
+/** Where a channel's data comes from or goes to. */
+export type Endpoint = LocalSource | { kind: "key"; key: string } | { kind: "remote"; node: string; key: string };
+export type BindingTarget = Endpoint | { kind: "adapted"; adapter: Adapter; inner: Endpoint };
+
+/** A binding record: which image it is for, its version, each channel's target. */
+export interface BindingRecord {
+  imageSha256: Uint8Array;
+  version: number;
+  entries: { name: string; target: BindingTarget }[];
+}
+
+/** One problem `checkBinding` found, with its one-click fix when there is one. */
+export interface BindingIssue {
+  channel: string;
+  message: string;
+  fix?: LocalSource | { kind: "keyNamed" } | { kind: "remove" };
+}
+
 export interface LoaderStepResult {
   statusCode: number;
   status: string;
-  action?: "app" | "info" | "board" | "manifest" | "start" | "stop" | "erase" | "write" | "activate";
+  action?: "app" | "info" | "board" | "manifest" | "bind" | "binding" | "start" | "stop" | "erase" | "write" | "activate";
+  /** For "bind", the record to store. */
+  body?: Uint8Array;
   offset?: number;
   data?: Uint8Array;
   len?: number;
@@ -131,6 +180,8 @@ export interface ProtocolConstants {
     info: string;
     board: string;
     manifest: string;
+    bind: string;
+    binding: string;
     begin: string;
     chunk: string;
     commit: string;
@@ -360,6 +411,21 @@ export interface Protocol {
   /** The browser simulator's `sys/manifest` body with `node` (16 hex digits)
    * as its node id; undefined without the simulator or for a bad node. */
   simulatorManifest(node: string): Uint8Array | undefined;
+  /** The channels a payload declares (empty without a section); throws for a malformed one. */
+  readChannels(wasm: Uint8Array): ChannelDecl[];
+  /** A `mw.channels` section body for these declarations. */
+  encodeChannels(decls: readonly ChannelDecl[]): Uint8Array;
+  /** `wasm` with a `mw.channels` section appended. */
+  withChannels(wasm: Uint8Array, section: Uint8Array): Uint8Array;
+  /** Encodes a binding record; throws for what a device would refuse. */
+  encodeBinding(b: BindingRecord): Uint8Array;
+  decodeBinding(record: Uint8Array): BindingRecord | undefined;
+  /** What a binding signature covers. */
+  bindingMessage(record: Uint8Array): Uint8Array;
+  /** A `sys/payload/bind` body, signed when a signature is given. */
+  encodeBindBody(record: Uint8Array, signature?: Uint8Array): Uint8Array;
+  /** Issues of a binding for a payload on a node (its `sys/manifest`). */
+  checkBinding(manifest: Uint8Array, wasm: Uint8Array, record: Uint8Array): BindingIssue[];
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
   readonly constants: ProtocolConstants;
@@ -386,9 +452,10 @@ export interface Protocol {
   /** The S88 phase state model: states, commands, and next[state][command..., Done]. */
   phaseModel(): { states: string[]; commands: string[]; next: (string | null)[][] };
   /** Loads a payload into the simulator on a device with node id `node`
-   * (16 hex digits; default 0000000000000001); throws on rejection or
-   * init trap. */
-  newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void, node?: string): Simulator;
+   * (16 hex digits; default 0000000000000001), its channels resolved
+   * against the encoded `binding` when given; throws on rejection, an
+   * unresolved binding or an init trap. */
+  newSimulator(wasm: Uint8Array, onEvent: (e: SimEvent) => void, node?: string, binding?: Uint8Array): Simulator;
   /** Compiles, allocates and builds a control recipe run; throws with the
    * allocation failure's message. */
   newRecipeRun(recipe: MasterRecipe, classes: readonly PhaseClass[], units: readonly RunUnit[], config?: RunConfig): RecipeRunHandle;
@@ -413,6 +480,14 @@ function wrap(): Protocol {
     decodeBoardInfo: (data) => pkg.decodeBoardInfo(data) as BoardInfo | undefined,
     decodeManifest: (data) => pkg.decodeManifest(data) as Manifest | undefined,
     simulatorManifest: (node) => pkg.simulatorManifest?.(node) ?? undefined,
+    readChannels: (wasm) => pkg.readChannels(wasm) as ChannelDecl[],
+    encodeChannels: (decls) => pkg.encodeChannels([...decls]),
+    withChannels: (wasm, section) => pkg.withChannels(wasm, section),
+    encodeBinding: (b) => pkg.encodeBinding(b),
+    decodeBinding: (record) => pkg.decodeBinding(record) as BindingRecord | undefined,
+    bindingMessage: (record) => pkg.bindingMessage(record),
+    encodeBindBody: (record, signature) => pkg.encodeBindBody(record, signature),
+    checkBinding: (manifest, wasm, record) => pkg.checkBinding(manifest, wasm, record) as BindingIssue[],
     encodeDeviceInfo: (i) =>
       pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware, i.node, i.caps),
     payloadStatusName: pkg.payloadStatusName,
@@ -436,13 +511,14 @@ function wrap(): Protocol {
     allocateRecipe: (recipe, classes, units) => pkg.allocateRecipe(recipe, [...classes], [...units]) as Allocation,
     simulateRecipe: (recipe, classes, units, script, untilMs) => pkg.simulateRecipe(recipe, [...classes], [...units], [...script], untilMs) as SimulatedRun,
     phaseModel: () => pkg.phaseModel() as { states: string[]; commands: string[]; next: (string | null)[][] },
-    newSimulator: (wasm, onEvent, node) => {
+    newSimulator: (wasm, onEvent, node, binding) => {
       // `Simulator` exists only when protocol-wasm was built with the
       // `simulator` feature (the default).
-      const Ctor = (pkg as unknown as { Simulator?: new (w: Uint8Array, f: (e: unknown) => void, node?: string) => Simulator })
-        .Simulator;
+      const Ctor = (
+        pkg as unknown as { Simulator?: new (w: Uint8Array, f: (e: unknown) => void, node?: string, binding?: Uint8Array) => Simulator }
+      ).Simulator;
       if (!hasSimulator || !Ctor) throw new Error("protocol-wasm was built without the simulator feature");
-      return new Ctor(wasm, (e) => onEvent(e as SimEvent), node);
+      return new Ctor(wasm, (e) => onEvent(e as SimEvent), node, binding);
     },
     newRecipeRun: (recipe, classes, units, config) =>
       new pkg.RecipeRun(recipe, [...classes], [...units], config ?? {}) as unknown as RecipeRunHandle,

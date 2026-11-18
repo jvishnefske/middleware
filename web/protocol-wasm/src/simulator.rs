@@ -101,7 +101,8 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
                 .with(Groups::PWM)
                 .with(Groups::ADC)
                 .with(Groups::ROUTES)
-                .with(Groups::SERVE),
+                .with(Groups::SERVE)
+                .with(Groups::CHANNELS),
         )
         .with_spi(SpiBuses { buses: middleware::wasm_abi::periph::SPI_BUSES as u8 })
         .with_imu(ImuSource::ALL)
@@ -580,7 +581,25 @@ impl Simulator {
         limits: Option<Limits>,
         device: SimDevice,
     ) -> Result<Self, SimError> {
-        let payload = Payload::load(wasm, device, limits.unwrap_or_default())
+        Self::load_bound(wasm, limits, device, None)
+    }
+
+    /// [`Simulator::load_on`] with the payload's channels resolved against
+    /// the encoded binding `binding` (ABI 7; `middleware::loader::binding`).
+    /// The image it names is not checked: the page binds what it runs.
+    pub fn load_bound(
+        wasm: &[u8],
+        limits: Option<Limits>,
+        device: SimDevice,
+        binding: Option<&[u8]>,
+    ) -> Result<Self, SimError> {
+        let binding = binding
+            .map(middleware::loader::binding::Binding::decode)
+            .transpose()
+            .map_err(|e| SimError::Load(format!("binding: {e:?}")))?;
+        let compiled = wasm_host::Compiled::new(wasm, limits.unwrap_or_default())
+            .map_err(|e| SimError::Load(e.to_string()))?;
+        let payload = Payload::instantiate_bound(compiled, device, binding.as_ref())
             .map_err(|e| SimError::Load(e.to_string()))?;
         Ok(Self {
             payload,
@@ -628,7 +647,27 @@ impl Simulator {
         dev.set_time_us(now_us);
         dev.periph().complete_dma(now_us);
         dev.periph().advance(now_us);
+        let before = dev.events.len();
         dev.advance_sensors(now_us);
+        // Batches of a local source bound to a channel (`ch/...`) go back
+        // to this payload, as on a board.
+        let internal: Vec<(String, Vec<u8>)> = dev.events[before..]
+            .iter()
+            .filter_map(|e| match e {
+                SimEvent::Publish { key, data }
+                    if Key::new(key).is_ok_and(middleware::loader::binding::is_internal_key) =>
+                {
+                    Some((key.clone(), data.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (key, data) in internal {
+            if let Ok(k) = Key::new(&key) {
+                let r = self.payload.deliver(k, &data);
+                self.trap(r)?;
+            }
+        }
         let r = self.payload.tick((now_us / 1000) as u32);
         self.trap(r)?;
         let mut popped = 0;

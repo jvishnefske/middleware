@@ -16,7 +16,9 @@
 //!   trust region (through [`SectorPerBlock`]);
 //! * the payload window, the payload region one to one (through
 //!   [`BlockErase`]: an erase must start on a block boundary of the region
-//!   and erases every block it touches).
+//!   and erases every block it touches);
+//! * the binding window, `[binding.offset, binding.offset + 8 KiB)`: the
+//!   binding store's two sectors, like the trust window (BD3).
 //!
 //! Anything outside the windows (boot block, update record, firmware
 //! slots) is `OutOfBounds`, so neither store can reach the A/B regions;
@@ -30,6 +32,7 @@
 use crate::layout::erase::ViewError;
 use crate::layout::{BLOCK, BlockErase, FlashMap, Region, SECTOR, SectorPerBlock};
 use embedded_storage::nor_flash::{ErrorType, NorFlash, ReadNorFlash};
+use esp_base::binding_store::REGION_LEN as BINDING_LEN;
 use esp_base::trust_store::PARTITION_LEN;
 
 /// Where a logical span lies: the window and the offset inside it.
@@ -37,6 +40,7 @@ use esp_base::trust_store::PARTITION_LEN;
 enum Window {
     Trust(u32),
     Payload(u32),
+    Binding(u32),
 }
 
 /// The trust and payload windows over a block-erased flash. See the
@@ -46,6 +50,7 @@ pub struct RtFlash<F> {
     flash: F,
     trust: Region,
     payload: Region,
+    binding: Region,
 }
 
 impl<F: NorFlash> RtFlash<F> {
@@ -63,6 +68,7 @@ impl<F: NorFlash> RtFlash<F> {
             flash,
             trust: map.trust,
             payload: map.payload,
+            binding: map.binding,
         }
     }
 
@@ -86,6 +92,8 @@ impl<F: NorFlash> RtFlash<F> {
             Ok(Window::Trust(at - self.trust.offset))
         } else if inside(self.payload.offset, self.payload.size) {
             Ok(Window::Payload(at - self.payload.offset))
+        } else if inside(self.binding.offset, BINDING_LEN) {
+            Ok(Window::Binding(at - self.binding.offset))
         } else {
             Err(ViewError::OutOfBounds)
         }
@@ -97,6 +105,10 @@ impl<F: NorFlash> RtFlash<F> {
 
     fn payload_view(&mut self) -> Result<BlockErase<&mut F>, ViewError<F::Error>> {
         BlockErase::new(&mut self.flash, self.payload)
+    }
+
+    fn binding_view(&mut self) -> Result<SectorPerBlock<&mut F>, ViewError<F::Error>> {
+        SectorPerBlock::new(&mut self.flash, self.binding)
     }
 }
 
@@ -111,13 +123,15 @@ impl<F: NorFlash> ReadNorFlash for RtFlash<F> {
         match self.locate(offset, bytes.len())? {
             Window::Trust(at) => self.trust_view()?.read(at, bytes),
             Window::Payload(at) => self.payload_view()?.read(at, bytes),
+            Window::Binding(at) => self.binding_view()?.read(at, bytes),
         }
     }
 
-    /// One past the highest logical offset of either window.
+    /// One past the highest logical offset of any window.
     fn capacity(&self) -> usize {
         let trust_end = self.trust.offset.saturating_add(PARTITION_LEN);
-        trust_end.max(self.payload.end()) as usize
+        let binding_end = self.binding.offset.saturating_add(BINDING_LEN);
+        trust_end.max(self.payload.end()).max(binding_end) as usize
     }
 }
 
@@ -129,6 +143,7 @@ impl<F: NorFlash> NorFlash for RtFlash<F> {
         match self.locate(offset, bytes.len())? {
             Window::Trust(at) => self.trust_view()?.write(at, bytes),
             Window::Payload(at) => self.payload_view()?.write(at, bytes),
+            Window::Binding(at) => self.binding_view()?.write(at, bytes),
         }
     }
 
@@ -139,6 +154,7 @@ impl<F: NorFlash> NorFlash for RtFlash<F> {
         match self.locate(from, len as usize)? {
             Window::Trust(at) => self.trust_view()?.erase(at, at + len),
             Window::Payload(at) => self.payload_view()?.erase(at, at + len),
+            Window::Binding(at) => self.binding_view()?.erase(at, at + len),
         }
     }
 }
@@ -185,12 +201,20 @@ mod tests {
         );
         v.erase(t + SECTOR, t + 2 * SECTOR).unwrap();
         v.erase(p, p + 3 * SECTOR).unwrap();
-        assert_eq!(v.capacity(), MAP.payload.end() as usize);
+        assert_eq!(v.capacity(), (MAP.binding.offset + BINDING_LEN) as usize);
         assert_eq!(f.bytes((t + BLOCK) as usize, 2), [0xFF, 0xFF]);
         assert_eq!(
             f.log[2..],
             [Op::Erase(t + BLOCK, t + 2 * BLOCK), Op::Erase(p, p + BLOCK)],
             "whole blocks"
         );
+        // The binding window's second sector is its region's second block.
+        let mut v = RtFlash::new(&mut f, &MAP);
+        let bd = MAP.binding.offset;
+        v.write(bd + SECTOR, &[5, 6]).unwrap();
+        v.read(bd + SECTOR, &mut b).unwrap();
+        assert_eq!(b, [5, 6]);
+        assert_eq!(v.write(bd + BINDING_LEN, &[0, 0]), Err(ViewError::OutOfBounds));
+        assert_eq!(f.bytes((bd + BLOCK) as usize, 2), [5, 6]);
     }
 }

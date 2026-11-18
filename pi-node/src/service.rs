@@ -45,6 +45,7 @@ use embedded_storage::nor_flash::NorFlash;
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::image::Header;
 use esp_base::serve::{Route, ServedKeys, route_request, served_after};
+use esp_base::binding_store::{self, BindingStore};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, RECORD_LEN, TrustStore};
 use middleware::loader::trust::TrustState;
@@ -54,7 +55,7 @@ use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
 use crate::flash::Durable;
-use crate::layout::{MAX_IMAGE, PAYLOAD_OFFSET, PAYLOAD_SIZE, TRUST_OFFSET, TRUST_SIZE};
+use crate::layout::{BINDING_OFFSET, BINDING_SIZE, MAX_IMAGE, PAYLOAD_OFFSET, PAYLOAD_SIZE, TRUST_OFFSET, TRUST_SIZE};
 
 /// Whether a request depends on the trust record: installing a payload
 /// (`begin`, `chunk`, `commit`) and pinning a key (`sys/trust/claim`).
@@ -94,7 +95,7 @@ pub const CHIP: &str = if cfg!(not(target_os = "linux")) {
 /// peripheral is `Unsupported` (see `crate::device`), so no other group
 /// and no source; the serial link to the gateway.
 pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
-    .with_groups(Groups::TIMERS.with(Groups::SERVE))
+    .with_groups(Groups::TIMERS.with(Groups::SERVE).with(Groups::CHANNELS))
     .with_link(Link { id: 0, kind: LinkKind::SERIAL })
     .with_limits(Limits { routes: 0, ..Limits::ABI });
 
@@ -208,6 +209,9 @@ pub struct Service<F> {
     ctx: Context<'static>,
     store: Option<PayloadStore<F>>,
     trust: Option<TrustStore>,
+    /// The payload's channel binding (BD3); `None` when its region could
+    /// not be read (binds are then `Unavailable`).
+    binding: Option<BindingStore>,
     /// The served keys of the payload run that ended.
     served: ServedKeys,
 }
@@ -231,10 +235,14 @@ impl<F: NorFlash + Durable> Service<F> {
             Some((t, p)) => (Some(t), Some(p)),
             None => (None, None),
         };
+        let binding = BindingStore::open(&mut flash, BINDING_OFFSET, BINDING_SIZE).ok();
         let mut store = PayloadStore::new(flash, PAYLOAD_OFFSET, PAYLOAD_SIZE, MAX_IMAGE).ok();
         let installed = store.as_mut().map(PayloadStore::verify);
         let p = persisted.unwrap_or_default();
-        let state = State::boot(matches!(installed, Some(Ok(_)))).with_trust(p.trust).with_control(p.control);
+        let state = State::boot(matches!(installed, Some(Ok(_))))
+            .with_trust(p.trust)
+            .with_control(p.control)
+            .bound(binding.and_then(|b| b.mark()));
         let ctx = Context {
             chip: facts.chip,
             firmware: facts.firmware,
@@ -247,7 +255,7 @@ impl<F: NorFlash + Durable> Service<F> {
             node: Some(facts.node),
             manifest: Some(&MANIFEST),
         };
-        let svc = Service { state, ctx, store, trust, served: ServedKeys::new() };
+        let svc = Service { state, ctx, store, trust, binding, served: ServedKeys::new() };
         (svc, Boot { installed, trust: persisted })
     }
 
@@ -300,6 +308,14 @@ impl<F: NorFlash + Durable> Service<F> {
         }
     }
 
+    /// Copies the stored binding record into `out` (at least
+    /// `middleware::loader::binding::BINDING_MAX` bytes) for a start; its
+    /// length, `None` without one or when it cannot be read.
+    pub fn binding_record(&mut self, out: &mut [u8]) -> Option<usize> {
+        let (b, st) = (self.binding.as_ref()?, self.store.as_mut()?);
+        b.load(st.flash(), out).ok().flatten()
+    }
+
     /// The payload was loaded and runs.
     pub fn started(&mut self) {
         self.state = self.state.started();
@@ -324,6 +340,19 @@ impl<F: NorFlash + Durable> Service<F> {
             return Handled::now(Err(HandlerError::Unavailable));
         }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
+        if matches!(outcome.action, Action::Bind { .. } | Action::Binding) {
+            let done = match self.store.as_mut() {
+                Some(st) => binding_store::perform(self.binding.as_mut(), st.flash(), &outcome, out),
+                None => Some((outcome.state, Err(HandlerError::Unavailable))),
+            };
+            if let Some((next, mut reply)) = done {
+                if matches!(outcome.action, Action::Bind { .. }) && reply.is_ok() && self.sync().is_err() {
+                    reply = Err(HandlerError::Internal);
+                }
+                self.state = next;
+                return Handled::now(reply);
+            }
+        }
         if outcome.action == Action::Start {
             return Handled { reply: Reply::Start, stop: false, notes: Vec::new() };
         }
@@ -366,7 +395,8 @@ impl<F: NorFlash + Durable> Service<F> {
                 };
                 ts.save(store.flash(), &Persisted { trust, control })
             }
-            Action::None | Action::Start | Action::Stop => return Ok(()),
+            // Performed by `binding_store::perform` in `handle`.
+            Action::None | Action::Start | Action::Stop | Action::Bind { .. } | Action::Binding => return Ok(()),
         }?;
         self.sync()
     }

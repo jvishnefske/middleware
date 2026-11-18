@@ -156,6 +156,44 @@ pub fn format_board(b: &BoardInfo<'_>) -> String {
     s
 }
 
+/// A binding record for printing: the image, the version, one line per
+/// channel; `None` when it does not decode.
+pub fn format_binding(record: &[u8]) -> Option<String> {
+    use middleware::loader::binding::{Binding, Endpoint, Target};
+    use middleware::wasm_abi::route::{RouteSource, SampleSource};
+    let b = Binding::decode(record).ok()?;
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let endpoint = |e: &Endpoint<'_>| match e {
+        Endpoint::Key(k) => format!("key {}", k.as_str()),
+        Endpoint::Remote { node, key } => format!("key {} from {}", key.as_str(), hex(&node.0)),
+        Endpoint::Local(RouteSource::Samples(SampleSource::Microphone(m))) => format!(
+            "microphone {} Hz {:?}, gain {} dB, {} units per message{}",
+            m.rate_hz,
+            m.mode,
+            m.gain_db,
+            m.samples,
+            if m.block > 0 { format!(", {}-sample blocks", m.block) } else { String::new() }
+        ),
+        Endpoint::Local(RouteSource::Samples(SampleSource::Imu(c))) => format!(
+            "IMU {} Hz ±{} g{}, {} samples per message",
+            c.rate_hz,
+            c.range_g,
+            if c.mag { " with magnetometer" } else { "" },
+            c.samples
+        ),
+        Endpoint::Local(RouteSource::Frames(s, c)) => format!("{:?} {}x{}", s.kind(), c.width, c.height),
+    };
+    let mut s = format!("image:   {}\nversion: {}\n", hex(&b.image_sha256), b.version.0);
+    for (name, t) in b.entries() {
+        let line = match t {
+            Target::Adapted { inner, adapter } => format!("{} through {adapter:?}", endpoint(&inner)),
+            other => endpoint(&other.parts().0),
+        };
+        let _ = writeln!(s, "{name}: {line}");
+    }
+    Some(s)
+}
+
 /// `sys/manifest` for printing (MF4): one `name: value` line per record
 /// the node sent.
 pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
@@ -437,7 +475,7 @@ mod tests {
             "IMU:              50 100 200 400 800 Hz; ±2/4/8 g; with magnetometer 50 100 200 400 Hz\n",
             "microphone:       8000 16000 32000 48000 Hz; levels pcm; gain 0-30 dB\n",
             "links:            0 serial 2 kind9\n",
-            "limits:           2 routes, 8 subscriptions, 0 channels, 512-byte messages\n",
+            "limits:           2 routes, 8 subscriptions, 8 channels, 512-byte messages\n",
         ] {
             assert!(s.contains(line), "{line:?} in\n{s}");
         }

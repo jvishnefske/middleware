@@ -19,6 +19,7 @@ members = [
     "examples/bench",
     "examples/periph_demo",
     "examples/serve_echo",
+    "examples/level_meter",
     "gc9a01",
     "jpeg",
     "abi-check",
@@ -44,6 +45,7 @@ default-members = [
     "examples/bench",
     "examples/periph_demo",
     "examples/serve_echo",
+    "examples/level_meter",
     "gc9a01",
 ]
 

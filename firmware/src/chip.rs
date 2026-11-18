@@ -405,6 +405,7 @@ impl Profile {
             .with(Groups::DMA)
             .with(Groups::ROUTES)
             .with(Groups::SERVE)
+            .with(Groups::CHANNELS)
             .with(pick(!self.pwm_pins.is_empty(), Groups::PWM))
             .with(pick(self.pins.adc_mask() != 0, Groups::ADC))
             .with(pick(i2c > 0, Groups::I2C));

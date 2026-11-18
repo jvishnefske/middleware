@@ -406,7 +406,7 @@ impl Limits {
     pub const ABI: Limits = Limits {
         routes: crate::wasm_abi::route::MAX_ROUTES as u8,
         subscriptions: crate::wasm_abi::MAX_SUBSCRIPTIONS as u8,
-        channels: 0,
+        channels: crate::wasm_abi::channels::MAX_CHANNELS as u8,
         max_message: crate::wasm_abi::MAX_MESSAGE as u16,
     };
 }

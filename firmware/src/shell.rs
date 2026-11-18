@@ -77,6 +77,7 @@ use embassy_executor::Spawner;
 use esp_base::chip::FlashSettings;
 use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
+use esp_base::binding_store::BindingStore;
 use esp_base::trust_store::{Persisted, TrustStore};
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
@@ -98,6 +99,10 @@ use esp_hal::usb::usb_serial_jtag::UsbSerialJtag;
 const PAYLOAD_PARTITION: &str = "payload";
 /// Label of the trust data partition in `partitions.csv`.
 const TRUST_PARTITION: &str = "trust";
+/// Label of the binding data partition in `partitions.csv` (BD3); a
+/// device flashed with an older table has none, and binds are
+/// `Unavailable` there.
+const BINDING_PARTITION: &str = "binding";
 
 /// The chip's eFuse base MAC (the Wi-Fi station address).
 pub(crate) fn base_mac() -> [u8; 6] {
@@ -150,6 +155,8 @@ struct Storage {
     /// The persisted root of trust and control counter (Unclaimed without
     /// a trust partition).
     state: Persisted,
+    /// The binding partition, when present and readable.
+    binding: Option<BindingStore>,
 }
 
 /// Opens the payload partition named [`PAYLOAD_PARTITION`] and the trust
@@ -161,9 +168,10 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
         store: None,
         trust: None,
         state: Persisted::default(),
+        binding: None,
     };
     let mut table = [0u8; PARTITION_TABLE_MAX_LEN];
-    let (payload, trust) = {
+    let (payload, trust, binding) = {
         let Ok(parts) = read_partition_table(&mut flash, &mut table) else {
             return none;
         };
@@ -173,17 +181,19 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
                 .find(|e| e.label_as_str() == label)
                 .map(|e| (e.offset(), e.len()))
         };
-        (find(PAYLOAD_PARTITION), find(TRUST_PARTITION))
+        (find(PAYLOAD_PARTITION), find(TRUST_PARTITION), find(BINDING_PARTITION))
     };
     let (trust, state) = match trust.map(|(at, len)| TrustStore::open(&mut flash, at, len)) {
         Some(Ok((t, s))) => (Some(t), s),
         _ => (None, Persisted::default()),
     };
+    let binding = binding.and_then(|(at, len)| BindingStore::open(&mut flash, at, len).ok());
     let store = payload.and_then(|(at, len)| PayloadStore::new(flash, at, len, limit).ok());
     Storage {
         store,
         trust,
         state,
+        binding,
     }
 }
 
@@ -231,13 +241,15 @@ pub async fn run(spawner: Spawner) -> ! {
         mut store,
         trust,
         state: persisted,
+        binding,
     } = open_storage(flash, profile.max_image);
     let trust_state = persisted.trust;
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
     let state = State::boot(matches!(installed, Some(Ok(_))))
         .with_trust(trust_state)
-        .with_control(persisted.control);
+        .with_control(persisted.control)
+        .bound(binding.and_then(|b| b.mark()));
     let ctx = Context {
         chip: profile.name,
         firmware: FIRMWARE,
@@ -332,9 +344,9 @@ pub async fn run(spawner: Spawner) -> ! {
             "heap: {} B free after boot",
             esp_alloc::HEAP.free()
         ));
-        Controller::new(state, ctx, store, trust, own_mac(), bus, profile)
+        Controller::new(state, ctx, store, trust, binding, own_mac(), bus, profile)
     };
     #[cfg(not(feature = "wasm"))]
-    let controller = Controller::new(state, ctx, store, trust, own_mac(), bus);
+    let controller = Controller::new(state, ctx, store, trust, binding, own_mac(), bus);
     controller.run().await
 }

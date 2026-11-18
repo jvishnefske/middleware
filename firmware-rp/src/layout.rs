@@ -12,7 +12,8 @@
 //! | `0x000000` | 1.5 MiB  | firmware: 256-byte boot2, then the image       |
 //! | `0x180000` | 256 KiB  | payload store: two 128 KiB slots (124 KiB images) |
 //! | `0x1C0000` | 8 KiB    | trust record: two alternately written sectors |
-//! | `0x1C2000` | 248 KiB  | unused                                         |
+//! | `0x1C2000` | 8 KiB    | payload channel binding: two alternately written sectors |
+//! | `0x1C4000` | 240 KiB  | unused                                         |
 //!
 //! RP2350A, Raspberry Pi Pico 2 (4 MiB, [`RP2350`]), with A/B firmware
 //! slots for over-the-air updates ([`crate::ota`]):
@@ -25,7 +26,8 @@
 //! | `0x2FE000` | 8 KiB     | firmware-update record: two alternately written sectors |
 //! | `0x300000` | 256 KiB   | payload store: two 128 KiB slots (124 KiB images) |
 //! | `0x340000` | 8 KiB     | trust record                                  |
-//! | `0x342000` | 760 KiB   | unused                                        |
+//! | `0x342000` | 8 KiB     | payload channel binding                       |
+//! | `0x344000` | 752 KiB   | unused                                        |
 //!
 //! The partition table ([`crate::ota::table`]) makes slots A and B an A/B
 //! pair; the boot ROM boots the valid image with the higher version and
@@ -121,6 +123,9 @@ pub struct FlashMap {
     pub payload: Region,
     /// The trust record ([`esp_base::trust_store::TrustStore`]).
     pub trust: Region,
+    /// The payload's channel binding
+    /// ([`esp_base::binding_store::BindingStore`]).
+    pub binding: Region,
 }
 
 /// Why a flash map is invalid.
@@ -135,7 +140,7 @@ pub enum LayoutError {
     /// The first region (partition table, else firmware) does not start
     /// at offset 0.
     FirmwareNotFirst,
-    /// The trust region is not the trust store's two sectors.
+    /// The trust or binding region is not its store's two sectors.
     TrustSize,
     /// Slot B, the partition table and the update record come together,
     /// slot B has slot A's size and the record is [`FW_RECORD_LEN`].
@@ -163,6 +168,7 @@ impl FlashMap {
             self.fw_record,
             Some(self.payload),
             Some(self.trust),
+            Some(self.binding),
         ]
         .into_iter()
         .flatten()
@@ -201,7 +207,9 @@ impl FlashMap {
         if first.offset != 0 {
             return Err(LayoutError::FirmwareNotFirst);
         }
-        if self.trust.size != esp_base::trust_store::PARTITION_LEN {
+        if self.trust.size != esp_base::trust_store::PARTITION_LEN
+            || self.binding.size != esp_base::binding_store::REGION_LEN
+        {
             return Err(LayoutError::TrustSize);
         }
         let ab = (self.partition_table, self.firmware_b, self.fw_record);
@@ -210,8 +218,8 @@ impl FlashMap {
             (Some(_), Some(b), Some(r)) if b.size == self.firmware.size && r.size == FW_RECORD_LEN => {}
             _ => return Err(LayoutError::AbShape),
         }
-        // At most six regions: every pair is compared once.
-        let all: heapless::Vec<Region, 6> = self.regions().collect();
+        // At most seven regions: every pair is compared once.
+        let all: heapless::Vec<Region, 7> = self.regions().collect();
         for (i, a) in all.iter().enumerate() {
             if !a.is_aligned() {
                 return Err(LayoutError::Unaligned);
@@ -237,6 +245,7 @@ pub const RP2040: FlashMap = FlashMap {
     fw_record: None,
     payload: Region::new(0x18_0000, 0x4_0000),
     trust: Region::new(0x1C_0000, 0x2000),
+    binding: Region::new(0x1C_2000, 0x2000),
 };
 
 /// Raspberry Pi Pico 2: RP2350A with 4 MiB of flash.
@@ -249,6 +258,7 @@ pub const RP2350: FlashMap = FlashMap {
     fw_record: Some(Region::new(0x2F_E000, FW_RECORD_LEN)),
     payload: Region::new(0x30_0000, 0x4_0000),
     trust: Region::new(0x34_0000, 0x2000),
+    binding: Region::new(0x34_2000, 0x2000),
 };
 
 #[cfg(test)]
@@ -270,8 +280,8 @@ mod tests {
             assert_eq!(map.check(), Ok(()), "{map:?}");
             assert_eq!(Slots::new(map.payload.size).capacity(), 124 * 1024);
         }
-        assert_eq!(RP2040.unused(), 248 * 1024);
-        assert_eq!(RP2350.unused(), 760 * 1024);
+        assert_eq!(RP2040.unused(), 240 * 1024);
+        assert_eq!(RP2350.unused(), 752 * 1024);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! |--------|--------|------|
 //! | payload store (two slots) | 0x00000 | 512 KiB |
 //! | trust record (two sectors) | 0x80000 | 8 KiB |
+//! | channel binding (two sectors) | 0x82000 | 8 KiB |
 //!
 //! Each payload slot is 256 KiB: a header sector and 252 KiB of image
 //! (`esp_base::image::Region`), twice the ESP partition's because a Linux
@@ -25,8 +26,13 @@ pub const PAYLOAD_SIZE: u32 = 512 * 1024;
 pub const TRUST_OFFSET: u32 = PAYLOAD_OFFSET + PAYLOAD_SIZE;
 /// Size of the trust record.
 pub const TRUST_SIZE: u32 = PARTITION_LEN;
+/// Offset of the payload's channel binding (`esp_base::binding_store`).
+/// A state directory from before it reads as erased there: no binding.
+pub const BINDING_OFFSET: u32 = TRUST_OFFSET + TRUST_SIZE;
+/// Size of the binding region.
+pub const BINDING_SIZE: u32 = esp_base::binding_store::REGION_LEN;
 /// The flash's size in sectors.
-pub const SECTORS: u32 = (TRUST_OFFSET + TRUST_SIZE) / SECTOR;
+pub const SECTORS: u32 = (BINDING_OFFSET + BINDING_SIZE) / SECTOR;
 /// The largest image a slot holds (what `sys/info` reports as capacity).
 pub const MAX_IMAGE: u32 = Region::new(PAYLOAD_SIZE).capacity();
 
@@ -39,10 +45,14 @@ mod tests {
 
     #[test]
     fn pn5_regions_are_whole_sectors_and_do_not_overlap() {
-        for (offset, size) in [(PAYLOAD_OFFSET, PAYLOAD_SIZE), (TRUST_OFFSET, TRUST_SIZE)] {
+        for (offset, size) in [
+            (PAYLOAD_OFFSET, PAYLOAD_SIZE),
+            (TRUST_OFFSET, TRUST_SIZE),
+            (BINDING_OFFSET, BINDING_SIZE),
+        ] {
             assert!(offset.is_multiple_of(SECTOR) && size.is_multiple_of(SECTOR));
         }
-        assert_eq!(SECTORS, 130);
+        assert_eq!(SECTORS, 132);
         assert_eq!(MAX_IMAGE, 252 * 1024);
     }
 }

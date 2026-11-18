@@ -27,6 +27,8 @@ export interface RequestMetaIn {
 export interface SessionOptions {
   /** The device's node id (16 hex digits). */
   node?: string;
+  /** An encoded binding record the payload's channels are resolved against (ABI 7). */
+  binding?: Uint8Array;
 }
 
 export interface Clock {
@@ -80,7 +82,7 @@ export class SimSession {
     opts: SessionOptions = {},
   ) {
     this.t0 = clock.now();
-    this.sim = proto.newSimulator(wasm, (e) => this.apply(e), opts.node);
+    this.sim = proto.newSimulator(wasm, (e) => this.apply(e), opts.node, opts.binding);
     this.events.onPins?.(this.pinTable);
   }
 

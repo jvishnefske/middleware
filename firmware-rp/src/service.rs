@@ -51,6 +51,7 @@ use embedded_storage::nor_flash::NorFlash;
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::image::Header;
 use esp_base::serve::{Route, ServedKeys, route_request, served_after};
+use esp_base::binding_store::{self, BindingStore};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, TrustStore};
 use heapless::Vec;
@@ -114,7 +115,8 @@ pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
             .with(Groups::SPI)
             .with(Groups::DMA)
             .with(Groups::I2C)
-            .with(Groups::SERVE),
+            .with(Groups::SERVE)
+            .with(Groups::CHANNELS),
     )
     .with_spi(SpiBuses { buses: 1 })
     .with_i2c(I2cBuses {
@@ -245,6 +247,9 @@ pub struct Service<F, U> {
     ctx: Context<'static>,
     store: Option<PayloadStore<F>>,
     trust: Option<TrustStore>,
+    /// The payload's channel binding (BD3); `None` when its region could
+    /// not be read (binds are then `Unavailable`).
+    binding: Option<BindingStore>,
     fw: U,
     usb_configured: bool,
     /// The served keys of the payload run that ended.
@@ -268,13 +273,15 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             Some((t, p)) => (Some(t), Some(p)),
             None => (None, None),
         };
+        let binding = BindingStore::open(&mut flash, map.binding.offset, map.binding.size).ok();
         let mut store =
             PayloadStore::new(flash, map.payload.offset, map.payload.size, facts.max_image).ok();
         let installed = store.as_mut().map(PayloadStore::verify);
         let p = persisted.unwrap_or_default();
         let state = State::boot(matches!(installed, Some(Ok(_))))
             .with_trust(p.trust)
-            .with_control(p.control);
+            .with_control(p.control)
+            .bound(binding.and_then(|b| b.mark()));
         let ctx = Context {
             chip: facts.chip,
             firmware: facts.firmware,
@@ -292,6 +299,7 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             ctx,
             store,
             trust,
+            binding,
             fw,
             usb_configured: false,
             served: ServedKeys::new(),
@@ -374,6 +382,14 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
         self.state = self.state.started();
     }
 
+    /// Copies the stored binding record into `out` (at least
+    /// `middleware::loader::binding::BINDING_MAX` bytes) for a start; its
+    /// length, `None` without one or when it cannot be read.
+    pub fn binding_record(&mut self, out: &mut [u8]) -> Option<usize> {
+        let (b, st) = (self.binding.as_ref()?, self.store.as_mut()?);
+        b.load(st.flash(), out).ok().flatten()
+    }
+
     /// The payload trapped or ran out of fuel.
     pub fn trapped(&mut self) {
         self.state = self.state.trapped();
@@ -402,6 +418,16 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             return Handled::now(Err(HandlerError::Unavailable));
         }
         let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
+        if matches!(outcome.action, Action::Bind { .. } | Action::Binding) {
+            let done = match self.store.as_mut() {
+                Some(st) => binding_store::perform(self.binding.as_mut(), st.flash(), &outcome, out),
+                None => Some((outcome.state, Err(HandlerError::Unavailable))),
+            };
+            if let Some((next, reply)) = done {
+                self.state = next;
+                return Handled::now(reply);
+            }
+        }
         if outcome.action == Action::Start {
             return Handled {
                 reply: Reply::Start,
@@ -469,7 +495,8 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
                 };
                 ts.save(store.flash(), &Persisted { trust, control })
             }
-            Action::None | Action::Start | Action::Stop => Ok(()),
+            // Performed by `binding_store::perform` before this.
+            Action::None | Action::Start | Action::Stop | Action::Bind { .. } | Action::Binding => Ok(()),
         }
     }
 
@@ -556,9 +583,10 @@ pub(crate) mod tests {
     use std::vec::Vec as StdVec;
 
     /// A small flash map with the real regions' structure: 64 KiB of
-    /// payload store (two 32 KiB slots, 28 KiB images) and the trust record.
+    /// payload store (two 32 KiB slots, 28 KiB images), the trust record
+    /// and the binding region.
     pub const MAP: FlashMap = FlashMap {
-        flash_size: 0x1_4000,
+        flash_size: 0x1_6000,
         boot: BootKind::ImageDef,
         partition_table: None,
         firmware: Region::new(0, 0x2000),
@@ -566,9 +594,10 @@ pub(crate) mod tests {
         fw_record: None,
         payload: Region::new(0x2000, 0x1_0000),
         trust: Region::new(0x1_2000, 0x2000),
+        binding: Region::new(0x1_4000, 0x2000),
     };
 
-    pub type Flash = RamFlash<0x1_4000>;
+    pub type Flash = RamFlash<0x1_6000>;
 
     pub const NODE: SenderId = SenderId([0xE6, 0x61, 0x38, 0x52, 0x83, 0x1F, 0x2A, 0x0B]);
 

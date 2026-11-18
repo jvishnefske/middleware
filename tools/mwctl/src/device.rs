@@ -29,7 +29,7 @@ use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
-use middleware::{Key, SenderId};
+use middleware::{HandlerError, Key, SenderId};
 use middleware::loader::manifest::Manifest;
 use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, NetAddr, PayloadStatus, keys};
 use std::time::Instant;
@@ -168,6 +168,21 @@ impl<L: Endpoint> Device<L> {
         Manifest::decode(&body).map_err(|_| Error::Malformed {
             key: keys::MANIFEST.as_str().to_owned(),
         })
+    }
+
+    /// `sys/payload/bind` (ABI 7): `body` is the binding record, optionally
+    /// followed by its signature trailer.
+    pub fn bind(&mut self, body: &[u8]) -> Result<(), Error> {
+        self.request(keys::BIND, body).map(drop)
+    }
+
+    /// `sys/payload/binding`: the stored record, `None` without one.
+    pub fn binding(&mut self) -> Result<Option<Vec<u8>>, Error> {
+        match self.request(keys::BINDING, &[]) {
+            Ok(r) => Ok(Some(r)),
+            Err(e) if e.status() == Some(HandlerError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// `sys/board`. Firmware older than 0.6 answers `NotFound`.
@@ -600,6 +615,21 @@ mod tests {
             .board()
             .unwrap_err();
         assert!(err.to_string().contains("not"), "{err}");
+    }
+
+    #[test]
+    fn bd5_bind_stores_a_record_and_binding_reads_it_back() {
+        let mut d = device(FakeDevice::new("rt1050", "0.6.0", 4096, true));
+        assert_eq!(d.binding().unwrap(), None);
+        let rec = crate::bindspec::record([3; 32], 7, &["audio=mic:16000:levels".into()]).unwrap();
+        d.bind(&rec).unwrap();
+        assert_eq!(d.binding().unwrap(), Some(rec.clone()));
+        let text = crate::report::format_binding(&rec).unwrap();
+        assert!(text.contains("version: 7"), "{text}");
+        assert!(text.contains("audio: microphone 16000 Hz Levels, gain 0 dB, 10 units per message, 160-sample blocks"), "{text}");
+        assert!(d.bind(b"junk").is_err());
+        let none = FakeDevice::new("esp32c3", "0.6.0+no-wasm", 4096, false);
+        assert!(device(none).bind(&rec).is_err());
     }
 
     #[test]

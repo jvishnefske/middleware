@@ -295,10 +295,22 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
         let mut image = vec![0u8; header.len as usize];
         store.load(header, &mut image).map_err(StartError::Store)?;
+        // The stored binding, if it is for this image (BD4).
+        let mut record = [0u8; middleware::loader::binding::BINDING_MAX];
+        let binding = match self.svc.binding_record(&mut record) {
+            Some(n) => match esp_base::binding_store::for_image(&record[..n], &image) {
+                Ok(b) => Some(b),
+                Err(why) => {
+                    self.outbox.log(&format!("payload: stored binding ignored ({why:?})"));
+                    None
+                }
+            },
+            None => None,
+        };
         let compiled = Compiled::new(&image, self.limits).map_err(StartError::Load)?;
         drop(image);
         let device = PiDevice::new(self.clock.clone(), node);
-        let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
+        let payload = Payload::instantiate_bound(compiled, device, binding.as_ref()).map_err(StartError::Load)?;
         Ok((payload, header.len))
     }
 

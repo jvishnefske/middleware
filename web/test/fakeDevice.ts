@@ -170,6 +170,8 @@ export class FakeDevice {
   activated: { len: number; crc: number } | null = null;
   started = false;
   status = 0;
+  /** The stored `sys/payload/bind` record. */
+  boundRecord: Uint8Array | null = null;
   private readonly loader;
   private readonly writer: WritableStreamDefaultWriter<Uint8Array>;
   private readonly done: Promise<void>;
@@ -308,6 +310,16 @@ export class FakeDevice {
             firmware: "0.1.0-fake",
             ...(this.script.runs ? { node: this.script.runs.node, caps: this.script.runs.caps ?? 1 } : {}),
           });
+          break;
+        case "bind":
+          // No trust check here: the dispatcher's rules are Rust-tested.
+          this.boundRecord = r.body ?? null;
+          break;
+        case "binding":
+          if (!this.boundRecord) {
+            return silent ? undefined : this.send(this.proto.encodeResponse(req.id, NOT_FOUND, new Uint8Array()));
+          }
+          body = this.boundRecord;
           break;
         case "manifest":
           if (!this.script.manifest) {

@@ -6,9 +6,13 @@
 # `trust` holds the pinned payload-signing key and min_version (see
 # src/trust_store.rs): two 4 KiB sectors written alternately, so a power
 # cut while one is rewritten leaves the other's record intact.
+# `binding` holds the payload's channel binding (src/binding_store.rs), two
+# sectors written alternately; a device flashed with a table without it
+# answers sys/payload/bind with Unavailable.
 # Name,    Type, SubType,   Offset,   Size,     Flags
 nvs,       data, nvs,       0x9000,   0x6000,
 phy_init,  data, phy,       0xf000,   0x1000,
 factory,   app,  factory,   0x10000,  0x300000,
 payload,   data, undefined, 0x310000, 0x40000,
 trust,     data, undefined, 0x350000, 0x2000,
+binding,   data, undefined, 0x352000, 0x2000,

@@ -26,7 +26,7 @@ use crate::ram_flash::RamFlash;
 use crate::service::tests::{FACTS, MAP, NODE, flash};
 use crate::service::{Reply, Service};
 
-type Flash = RamFlash<0x1_4000>;
+type Flash = RamFlash<0x1_6000>;
 type Svc<'f> = Service<&'f mut Flash, Absent>;
 
 fn fixture(name: &str) -> Vec<u8> {

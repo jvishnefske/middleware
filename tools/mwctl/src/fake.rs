@@ -103,6 +103,8 @@ pub struct FakeDevice {
     rekey_open: bool,
     board: Option<Vec<u8>>,
     manifest: Option<Vec<u8>>,
+    /// The stored `sys/payload/bind` record.
+    binding: Option<Vec<u8>>,
     fw: Option<Fw>,
     net: Vec<NetAddr>,
     gone: bool,
@@ -216,6 +218,7 @@ impl FakeDevice {
             rekey_open: false,
             board: None,
             manifest: None,
+            binding: None,
             fw: None,
             net: Vec::new(),
             gone: false,
@@ -442,6 +445,18 @@ impl FakeDevice {
             }
             .encode(out)
             .ok_or(HandlerError::BufferTooSmall),
+            Command::Bind { .. } | Command::Binding if !self.runtime => Err(HandlerError::NotFound),
+            Command::Bind { request } => {
+                self.binding = Some(request.record.to_vec());
+                Ok(0)
+            }
+            Command::Binding => {
+                let body = self.binding.as_deref().ok_or(HandlerError::NotFound)?;
+                out.get_mut(..body.len())
+                    .ok_or(HandlerError::BufferTooSmall)?
+                    .copy_from_slice(body);
+                Ok(body.len())
+            }
             Command::Manifest => {
                 let body = self.manifest.as_deref().ok_or(HandlerError::NotFound)?;
                 out.get_mut(..body.len())

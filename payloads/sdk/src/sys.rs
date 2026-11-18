@@ -97,6 +97,9 @@ mod imports {
         // ABI 5: `serve` reads the key only; `node_id` writes 8 bytes.
         pub safe fn serve(key_ptr: i32, key_len: i32) -> i32;
         pub fn node_id(ptr: i32) -> i32;
+        // ABI 7: both only read guest memory (the name, the message).
+        pub safe fn channel_open(name_ptr: i32, name_len: i32) -> i32;
+        pub safe fn channel_publish(handle: i32, ptr: i32, len: i32) -> i32;
     }
 }
 
@@ -200,10 +203,16 @@ mod imports {
     pub unsafe fn node_id(_p: i32) -> i32 {
         UNSUPPORTED
     }
+    pub fn channel_open(_np: i32, _nl: i32) -> i32 {
+        UNSUPPORTED
+    }
+    pub fn channel_publish(_h: i32, _p: i32, _l: i32) -> i32 {
+        UNSUPPORTED
+    }
 }
 
 pub(crate) use imports::{
-    adc_read, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
+    adc_read, channel_open, channel_publish, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
     log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, route_sink, route_source,
     route_stat, route_stop, serve, set_tick, spi_open, spi_transfer, subscribe, timer_start,
     timer_stop, uart_open, uart_write,
@@ -432,6 +441,24 @@ macro_rules! payload {
                     [slot, req_ptr, req_len, meta_ptr, reply_ptr, reply_cap],
                 )
             }
+        };
+    };
+}
+
+/// Places the encoded channel declarations `$decls` (a const
+/// `&[Decl]`) in the module's `mw.channels` custom section (ABI 7). Used
+/// by [`channels!`](crate::channels); `link_section` is an unsafe
+/// attribute only because a wrong section name could clash with the
+/// linker's own, and this one is the fixed ABI name.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __mw_channels_section {
+    ($decls:expr) => {
+        const _: () = {
+            const LEN: usize = $crate::channel::encoded_len($decls);
+            #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "mw.channels"))]
+            #[used]
+            static MW_CHANNELS: [u8; LEN] = $crate::channel::encode::<LEN>($decls);
         };
     };
 }

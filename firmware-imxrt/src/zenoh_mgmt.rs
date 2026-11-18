@@ -16,7 +16,8 @@
 //! | request over Zenoh                   | unclaimed | claimed |
 //! |--------------------------------------|-----------|---------|
 //! | `sys/info`, `sys/trust/info`         | answered  | answered |
-//! | `sys/board`, `sys/manifest`, `sys/fw/info` | `Denied`  | answered (read only) |
+//! | `sys/board`, `sys/manifest`, `sys/payload/binding`, `sys/fw/info` | `Denied`  | answered (read only) |
+//! | `sys/payload/bind`                   | `Denied`  | signed only ([`Refusal::UnsignedBinding`] otherwise); the dispatcher's `TrustState::accept_binding` checks the pinned key and that the version is above the stored binding's for that image |
 //! | `sys/loader/begin`, `chunk`          | `Denied`  | staged into the inactive payload slot beside the running payload (the service dispatches Zenoh requests with `Context::staging`); a `chunk` from a requester that does not own the transfer is `InvalidRequest` ([`Refusal::NotOwner`]) |
 //! | `sys/loader/commit`                  | `Denied`  | the owner's, and signed ([`SignedCommit`](middleware::loader::trust::SignedCommit): the dispatcher's `TrustState::accept_commit`, pinned key, version above the last); the owner's unsigned commit is `Denied` and ends the transfer ([`Refusal::abandons_transfer`]) |
 //! | `sys/fw/begin`, `chunk`, `commit`    | `Denied`  | to the A/B updater: the transfer belongs to the requester whose `begin` started it (the service refuses another's `chunk`/`commit` with `InvalidRequest`), and `commit` needs the firmware signature by the pinned key (`middleware::fw_ota`: image, version, slot and node bound) |
@@ -68,6 +69,7 @@ use esp_base::dispatch::State;
 use esp_base::ota::{self, Mac, Origin};
 use middleware::Key;
 use middleware::fw_ota::keys as fw_keys;
+use middleware::loader::binding::BindRequest;
 use middleware::loader::trust::{ControlOp, SignedControl};
 use middleware::loader::{is_system_key, keys};
 use middleware::transport::{HandlerError, SenderId};
@@ -79,8 +81,8 @@ pub use esp_base::ota::{Admission, Facts};
 pub const UNCLAIMED_KEYS: [Key<'static>; 2] = [keys::INFO, keys::TRUST_INFO];
 
 /// The read-only requests a claimed board answers over Zenoh.
-pub const READ_ONLY_KEYS: [Key<'static>; 5] =
-    [keys::INFO, keys::TRUST_INFO, keys::BOARD, keys::MANIFEST, fw_keys::INFO];
+pub const READ_ONLY_KEYS: [Key<'static>; 6] =
+    [keys::INFO, keys::TRUST_INFO, keys::BOARD, keys::MANIFEST, keys::BINDING, fw_keys::INFO];
 
 /// The payload transfer requests a claimed board accepts over Zenoh
 /// (staged; the commit signed).
@@ -145,6 +147,9 @@ pub enum Refusal {
     /// A payload `chunk` or `commit` while another requester (a serial
     /// link) owns the transfer.
     NotOwner,
+    /// A `sys/payload/bind` without a signature (or malformed); the
+    /// dispatcher then checks the signature itself (BD2).
+    UnsignedBinding,
 }
 
 impl Refusal {
@@ -177,6 +182,7 @@ impl Refusal {
             }
             Refusal::UnsignedCommit => "payload commit over Zenoh must be signed; transfer ended",
             Refusal::NotOwner => "another requester owns the transfer",
+            Refusal::UnsignedBinding => "a payload binding over Zenoh must be signed by the pinned key",
         }
     }
 }
@@ -199,6 +205,14 @@ pub fn admit(
     }
     if READ_ONLY_KEYS.contains(&key) || FW_TRANSFER_KEYS.contains(&key) {
         return Ok(Admission::Dispatch);
+    }
+    if key == keys::BIND {
+        // Signed only; the dispatcher verifies the signature and version
+        // (it dispatches Zenoh requests with `Context::staging`).
+        return match BindRequest::parse(body) {
+            Some(BindRequest { auth: Some(_), .. }) => Ok(Admission::Dispatch),
+            _ => Err(Refusal::UnsignedBinding),
+        };
     }
     if LOADER_KEYS.contains(&key) || key == keys::START || key == keys::STOP {
         // The radio gate's own checks: claimed, an air key, transfer
@@ -490,6 +504,62 @@ mod tests {
             Ok(StdVec::new())
         );
         assert!(s.state().trust().is_claimed());
+    }
+
+    /// A `sys/payload/bind` body for [`image`] at `version`, signed by
+    /// key `seed` (unsigned without one), and the record alone.
+    fn bind_body(seed: Option<u8>, version: u32) -> (StdVec<u8>, StdVec<u8>) {
+        use middleware::loader::binding::{BINDING_MAX, Binding, SignedBinding, Target, binding_message};
+        let sha = ImageHash::digest(&image());
+        let mut b = Binding::new(sha, Version(version));
+        b.bind("cmd", Target::Key(Key::from_static("app/cmd"))).unwrap();
+        let mut out = [0u8; BINDING_MAX];
+        let n = b.encode(&mut out).unwrap();
+        let record = out[..n].to_vec();
+        let mut body = record.clone();
+        if let Some(seed) = seed {
+            let m = binding_message(&sha, Version(version), &ImageHash::digest(&record));
+            let auth = SignedBinding {
+                version: Version(version),
+                signature: Signature(signer(seed).sign(&m).to_bytes()),
+            };
+            body.extend_from_slice(&auth.encode());
+        }
+        (body, record)
+    }
+
+    #[test]
+    fn bd2_over_zenoh_a_binding_must_be_signed_and_survives_a_reboot() {
+        let mut s = claimed_running();
+        let (unsigned, _) = bind_body(None, 1);
+        assert_eq!(zenoh(&mut s, keys::BIND, &unsigned), Err(HandlerError::Denied));
+        assert_eq!(
+            admit(&facts(s.state(), MAC), None, keys::BIND, &unsigned),
+            Err(Refusal::UnsignedBinding)
+        );
+        let (mallory, _) = bind_body(Some(2), 1);
+        assert_eq!(zenoh(&mut s, keys::BIND, &mallory), Err(HandlerError::Denied));
+        assert_eq!(zenoh(&mut s, keys::BINDING, &[]), Err(HandlerError::NotFound));
+        let (signed, record) = bind_body(Some(1), 1);
+        assert_eq!(zenoh(&mut s, keys::BIND, &signed), Ok(StdVec::new()));
+        assert_eq!(zenoh(&mut s, keys::BINDING, &[]), Ok(record.clone()));
+        // A replay, then a newer version.
+        assert_eq!(zenoh(&mut s, keys::BIND, &signed), Err(HandlerError::Denied));
+        let (v2, record2) = bind_body(Some(1), 2);
+        assert_eq!(zenoh(&mut s, keys::BIND, &v2), Ok(StdVec::new()));
+        let mut r = reboot(&mut s);
+        assert_eq!(serial(&mut r, keys::BINDING, &[]), Ok(record2));
+        assert_eq!(r.state().binding().map(|m| m.version), Some(Version(2)));
+        assert_eq!(zenoh(&mut r, keys::BIND, &v2), Err(HandlerError::Denied));
+        // Over serial an unsigned binding with a higher version is taken.
+        let (v3, record3) = bind_body(None, 3);
+        assert_eq!(serial(&mut r, keys::BIND, &v3), Ok(StdVec::new()));
+        let mut out = [0u8; 128];
+        let n = r.binding_record(&mut out).unwrap();
+        assert_eq!(&out[..n], &record3[..]);
+        // An unclaimed board takes nothing over Zenoh.
+        let mut u = open();
+        assert_eq!(zenoh(&mut u, keys::BIND, &signed), Err(HandlerError::Denied));
     }
 
     /// A claimed board (key 1) with a signed payload installed, running.

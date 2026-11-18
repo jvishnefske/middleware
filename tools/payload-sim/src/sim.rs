@@ -114,6 +114,10 @@ pub struct Options {
     /// The first board's node id (`--node`, 16 hex digits); a `--peer`
     /// board's is the same with the last byte plus one.
     pub node: SenderId,
+    /// A channel binding record (`--bind`, `middleware::loader::binding`)
+    /// the first payload's channels are resolved against (ABI 7); applied
+    /// whatever image it names.
+    pub bind: Option<String>,
 }
 
 /// The first board's node id when `--node` is not given.
@@ -137,7 +141,7 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
     use middleware::wasm_abi::route::{MAX_DIM, MAX_MIC_GAIN_DB, PixelFormat, SourceKind};
     Manifest::new(middleware::wasm_abi::ABI_VERSION)
         .with_groups(Groups(
-            Groups::BRIDGE.0 | (Groups::BRIDGE.0 - 1), // gpio .. bridge
+            Groups::CHANNELS.0 | (Groups::CHANNELS.0 - 1), // gpio .. channels
         ))
         .with_i2c(I2cBuses {
             buses: I2C_BUSES as u8,
@@ -198,7 +202,7 @@ pub fn render_reply(key: &str, outcome: Result<&[u8], HandlerError>) -> String {
 /// Usage text printed on argument errors.
 pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
                          [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE]\n\
-                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>] [--node HEX16]\n\
+                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>] [--node HEX16] [--bind <binding.bin>]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input,\n\
@@ -225,6 +229,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         dump_panel: None,
         panel_dc: None,
         node: DEFAULT_NODE,
+        bind: None,
     };
     let mut it = args.iter().map(AsRef::as_ref);
     while let Some(arg) = it.next() {
@@ -241,6 +246,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
             "--until-ms" => opts.until_ms = Some(number(value("--until-ms")?)?),
             "--spi-pattern" => opts.spi_pattern = Some(hex(value("--spi-pattern")?)?),
             "--peer" => opts.peer = Some(value("--peer")?.to_string()),
+            "--bind" => opts.bind = Some(value("--bind")?.to_string()),
             "--loss" => {
                 opts.loss = number(value("--loss")?)?;
                 if opts.loss > bus::MAX_LOSS {

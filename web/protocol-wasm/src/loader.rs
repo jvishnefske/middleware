@@ -224,6 +224,10 @@ pub enum Action {
     /// `sys/manifest`: the device answers with its manifest (the loader
     /// holds none).
     Manifest,
+    /// `sys/payload/bind`: the record to store (the device checks trust).
+    Bind(Vec<u8>),
+    /// `sys/payload/binding`: the device answers with its stored record.
+    Binding,
     /// `sys/payload/start`.
     Start,
     /// `sys/payload/stop`.
@@ -359,6 +363,8 @@ impl DeviceLoader {
                     Command::Stop => Action::Stop,
                     Command::Board => Action::Board,
                     Command::Manifest => Action::Manifest,
+                    Command::Bind { request } => Action::Bind(request.record.to_vec()),
+                    Command::Binding => Action::Binding,
                     _ => Action::Info,
                 };
                 (next, Ok(action))

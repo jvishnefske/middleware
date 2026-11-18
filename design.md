@@ -5897,6 +5897,143 @@ record longer than its body keeps its known prefix.
   (50–400 Hz with the magnetometer) and the microphone at 8–48 kHz, over
   USB and over Zenoh.
 
+#### Channels (CH…)
+
+A payload declares its channels in a `mw.channels` custom section
+(`middleware::wasm_abi::channels`): `[version 1][n]`, then per channel
+its name (`a-z0-9_`, at most 24 bytes), direction, data kind (bytes,
+samples, frames), the sensor, format mask, channel count and rate range a
+samples channel accepts, and whether it is required; at most eight. The
+section is part of the image, so the signed commit covers it. ABI 7 adds
+`channel_open(name)`, which returns an input's subscription slot (the
+first argument of `on_message`) or an output's handle (`OUTPUT_BASE +
+index`), and `channel_publish(handle, data)`.
+
+- [x] CH1 The section is a pure, no-alloc codec with a `const` encoder
+  (the SDK builds it at compile time) and a custom-section walker shared
+  with the runtime: declarations round trip; a cut, trailing bytes,
+  another version, more than eight, a bad or repeated name, a bad field,
+  reserved flags, the section twice or a broken section header are
+  refused; a samples channel accepts exactly its sensor, formats,
+  channels and rate range — `middleware` `wasm_abi::channels::tests::ch1_declarations_round_trip_through_the_section`,
+  `ch1_malformed_sections_are_refused`,
+  `ch1_sample_constraints_decide_what_a_channel_accepts`,
+  `sections_walk_and_stop_on_a_malformed_header`.
+- [x] CH2 ABI 7 is a superset of ABI 6: `channel_open` (2 params) and
+  `channel_publish` (3) are appended to `IMPORTS`, `ABI6_IMPORTS` = 33,
+  `ABI_VERSION` = 7; an ABI 6 host does not know them; ABI 1–6 payloads
+  load unchanged — `wasm_abi::tests::revisions_are_prefixes_of_the_import_table`,
+  `an_abi4_host_does_not_know_the_abi5_imports`;
+  `wasm-host/tests/abi6.rs` `cl2_abi5_hosts_do_not_know_route_bridge_and_older_payloads_still_load`;
+  `wasm-host/tests/abi7.rs` `ch2_an_abi6_host_does_not_know_the_channel_imports`.
+- [x] CH3 `wasm-host` reads the declarations while compiling
+  (`Compiled::channels`), refuses a malformed section
+  (`LoadError::Channels`), and a module without one ignores any binding;
+  the channel table is part of the W10 heap bound — `wasm-host/tests/abi7.rs`
+  `ch3_a_malformed_section_is_refused_and_modules_without_one_ignore_bindings`;
+  `payload-sim` `tests/heap.rs`.
+- [x] CH4 `channel_open` answers the slot or the output handle,
+  `Unsupported` for an unbound optional channel and `InvalidArgument` for
+  an undeclared name; `channel_publish` publishes on the bound key and
+  refuses an input or unbound handle — `wasm-host` `channels::tests::ch5_the_table_opens_inputs_by_slot_and_outputs_by_handle`;
+  `tests/abi7.rs` `bd4_a_local_source_starts_on_the_internal_key_before_init`,
+  `bd4_a_key_target_subscribes_and_an_unbound_optional_output_is_unsupported`.
+- [x] CH5 The Rust SDK declares channels with `channels!{ name: in
+  samples(mic, levels, 8000..=48000), level: out bytes optional }` (the
+  one new `unsafe` attribute, `link_section` on the section static) and
+  opens them with `Channel::open`; payload logic is written against the
+  `Input`, `SampleInput` and `Output` traits and tested on the host with
+  a fake output. Example `level_meter` names no key and no route —
+  `mw-payload` `channel::tests::ch6_the_macro_declares_and_encodes_the_section`,
+  `ch6_handles_route_messages_and_outputs_refuse_inputs`; `level_meter`
+  `tests::declares_a_levels_input_and_an_optional_output`,
+  `publishes_the_loudest_block_of_each_batch`; `abi-check`
+  `tests/payloads.rs` `rust_level_meter_example` (inputs need
+  `on_message`).
+- [x] CH6 The browser reads and writes declarations (protocol-wasm
+  `readChannels`, `encodeChannels`, `withChannels` for WAT payloads) —
+  `web/test/binding.test.ts`: "reads the declarations back and
+  round-trips a binding".
+
+#### Bindings (BD…)
+
+A binding record (`middleware::loader::binding`) names the image it is
+for (SHA-256) and a version, and maps channel names to targets: `Local`
+(a `route_source` config the runtime starts), `Key`, `Remote { node,
+key }`, or `Adapted { inner, adapter }`. It is installed with
+`sys/payload/bind` (the record, optionally `[version][signature]` over
+`"mw-binding-v1\0" || image sha256 || version || sha256(record)`) and
+read back with `sys/payload/binding`. It applies at the payload's next
+start, so a payload is rebound without being uploaded again. A local
+source publishes on the node-internal key `ch/<name>`: the node delivers
+those publications to its own payload and sends them on no link.
+
+- [x] BD1 The record is a pure, no-alloc TLV codec of at most 1 KiB:
+  every target round trips; truncation, trailing bytes, another version,
+  more than eight entries, bad or repeated names, sys keys, unknown
+  targets, configs `route_source` would refuse and nested adaptation are
+  refused; `ch/...` keys are internal — `loader::binding::tests::bd1_*`.
+- [x] BD2 A bind body is the record and an optional trailer of the same
+  version. Unclaimed devices take any binding; a claimed one needs the
+  version above the stored binding's for the same image (another image
+  starts over), a signature by the pinned key (Ed25519 or P-256) when one
+  is sent or the request comes over a network, and accepts an unsigned
+  one over serial. The RT1050's Zenoh gate admits only signed binds
+  (claimed) and reads `sys/payload/binding` read-only; the dispatcher
+  answers `NotFound` without the runtime — `loader::binding::tests::bd2_bind_bodies_carry_an_optional_signature_of_the_same_version`;
+  `loader::trust::tests::crypto::bd2_bindings_need_the_pinned_key_and_a_new_version_per_image`;
+  esp-base `dispatch::tests::bd2_bind_is_an_action_and_binding_a_read`;
+  firmware-imxrt `zenoh_mgmt::tests::bd2_over_zenoh_a_binding_must_be_signed_and_survives_a_reboot`.
+- [x] BD3 The binding persists in a two-sector A/B region
+  (`esp_base::binding_store`: magic, sequence, length, CRC; a cut save
+  keeps the previous record): the ESP `binding` partition at `0x352000`
+  (a table without it answers `Unavailable`), the RP maps at
+  `0x1C2000` / `0x342000`, RT1050 blocks 9–10 (one sector per block,
+  `RtFlash`'s binding window), pi-node sectors 130–131. A stored binding
+  is used only for the image it names — esp-base `binding_store::tests::bd3_*`;
+  firmware-imxrt `service::flash::tests::rt12_the_windows_reach_only_the_trust_and_payload_regions`,
+  `layout::tests::rt3_*`; rp-base `layout::tests::v2_*`; mw-pi-node
+  `layout::tests::pn5_regions_are_whole_sectors_and_do_not_overlap`.
+- [x] BD4 The runtime resolves the binding before `init`
+  (`Payload::instantiate_bound`): a local source starts through the
+  device on `ch/<name>` with the I2C ownership rules of `route_source`
+  and is subscribed; a key target is subscribed; an output records its
+  key; a required channel unbound, a source that does not fit the
+  declaration, an output bound to a source, two inputs on one key, too
+  many keys, inputs without `on_message` and a route the device refuses
+  fail the load (`LoadError::Bind`, naming the channel; the shells log
+  it). Remote and adapted targets are refused until PR and AD. Every
+  shell (esp-base, rp-base, RT1050, pi-node) loads the stored record and
+  passes it for the image it starts; the RT1050 bus loops `ch/...`
+  publications back to its payload — `wasm-host` `channels::tests::bd4_*`,
+  `tests/abi7.rs` `bd4_*`; esp-base `binding_store::tests::bd3_a_binding_applies_only_to_its_image`,
+  `bd3_perform_saves_reads_and_records_the_mark`.
+- [x] BD5 Hosts check and install bindings: protocol-wasm
+  `checkBinding(manifest, wasm, record)` lists issues with one-click
+  fixes (required channel unbound, output on a source, wrong kind or
+  sensor or format, a rate, mode or source the node does not offer, an
+  entry for no channel) and suggests a local source the manifest offers
+  and the channel takes; `encodeBinding`, `decodeBinding`,
+  `bindingMessage`, `encodeBindBody`; the web Device page's Channel
+  binding panel and `installBinding` (signed like an upload);
+  `mwctl bind <wasm> CHANNEL=TARGET ... [--key]` and `mwctl binding` —
+  protocol-wasm `binding::tests::bd5_*`; mwctl `bindspec::tests::bd5_*`,
+  `device::tests::bd5_bind_stores_a_record_and_binding_reads_it_back`;
+  `web/test/binding.test.ts`: "checks a binding against the manifest and
+  fixes it in one click", "installs a binding on an unclaimed board and
+  reads it back".
+- [x] BD6 End to end in the simulators: `payload-sim --bind` runs
+  `level_meter` with the fake microphone's levels on `ch/audio` and its
+  readings on the bound key, a second binding of the same image changes
+  the rate and the key, and no binding fails the load; the browser
+  simulator does the same — `payload-sim` `tests/abi7.rs` `bd6_*`;
+  `web/test/binding.test.ts`: "runs a bound payload in the simulator: the
+  microphone's levels reach the output key".
+- [ ] BD7 On the RT1050-EVKB: `level_meter` bound to the local
+  microphone's levels reports levels matching SC8's; rebinding without
+  re-upload changes them at the next start; an unsigned bind over Zenoh
+  is refused.
+
 ### JPEG decode in WASM (J…)
 
 `payloads/jpeg` (`mw-jpeg`): the badge-side decoder of R14, a `no_std`,
