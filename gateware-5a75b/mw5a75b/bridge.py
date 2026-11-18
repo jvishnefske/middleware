@@ -34,8 +34,10 @@ counters, after any accounting already queued (which belongs to the
 rule the slot held before).
 """
 
-from migen import Array, Cat, FSM, If, Memory, Module, Mux, NextState, NextValue, Signal
+from migen import Array, Cat, If, Memory, Module, Mux, NextState, NextValue, Signal
 from migen.genlib.fifo import SyncFIFO
+
+from .gotofsm import GotoFSM
 
 N_RULES = 16
 MAX_KEY = 128
@@ -48,7 +50,7 @@ SLASH = ord("/")
 class KeyMatcher(Module):
     """Follows one streamed key against every rule's lane."""
 
-    def __init__(self, rd, lens):
+    def __init__(self, rd, lens, whole=False):
         self.start = Signal()
         self.stb = Signal()
         self.idx = Signal(8)
@@ -63,16 +65,32 @@ class KeyMatcher(Module):
         idx1 = Signal(8)
         byte1 = Signal(8)
         self.sync += stb1.eq(self.stb), idx1.eq(self.idx), byte1.eq(self.byte)
+        if whole:
+            # Every streamed byte is compared (a key of a rule's length).
+            for r in range(N_RULES):
+                lane = rd.dat_r[8 * r:8 * r + 8]
+                self.sync += If(self.start, self.alive[r].eq(1)
+                             ).Elif(stb1 & (byte1 != lane), self.alive[r].eq(0))
+            return
+        # The key's bytes come in order from index 0, so `idx1 < len` is
+        # "the byte at len has not passed yet" (`past`), with no comparator.
+        past = Signal(N_RULES)
+        is_slash = Signal()
+        self.comb += is_slash.eq(byte1 == SLASH)
         for r in range(N_RULES):
             lane = rd.dat_r[8 * r:8 * r + 8]
+            at = Signal()
+            self.comb += at.eq(idx1 == lens[r])
             self.sync += If(self.start,
                 self.alive[r].eq(1),
                 self.slash[r].eq(0),
+                past[r].eq(0),
             ).Elif(stb1,
-                If(idx1 < lens[r],
+                If(~past[r] & ~at,
                     If(byte1 != lane, self.alive[r].eq(0)),
-                ).Elif(idx1 == lens[r],
-                    self.slash[r].eq(byte1 == SLASH),
+                ).Elif(at,
+                    self.slash[r].eq(is_slash),
+                    past[r].eq(1),
                 ),
             )
 
@@ -127,10 +145,10 @@ class BridgeTable(Module):
         wr = keys.get_port(write_capable=True, we_granularity=8)
         self.specials += wr
 
-        def matcher():
+        def matcher(whole=False):
             rd = keys.get_port(has_re=False)
             self.specials += rd
-            m = KeyMatcher(rd, lens)
+            m = KeyMatcher(rd, lens, whole)
             self.submodules += m
             return m
 
@@ -157,9 +175,8 @@ class BridgeTable(Module):
             for r in range(N_RULES):
                 self.comb += hit[r].eq(
                     valid[r] & (src[r] == l) & m.alive[r]
-                    & Mux(prefix[r],
-                          (k == lens[r]) | ((k > lens[r]) & m.slash[r]),
-                          k == lens[r]))
+                    # slash: a byte at index len was '/', so key_len > len.
+                    & ((k == lens[r]) | (prefix[r] & m.slash[r])))
             links = Signal(8, name=f"m{l}_hitlinks")
             for j in range(8):
                 self.comb += links[j].eq(
@@ -174,7 +191,9 @@ class BridgeTable(Module):
             ]
 
         # --- installing ---------------------------------------------------
-        am = matcher()
+        # The new rule's key: only rules of its length can be the same, so
+        # every byte is compared and `alive` alone decides.
+        am = matcher(whole=True)
         a_src = Signal(3)
         a_dst = Signal(3)
         a_prefix = Signal()
@@ -287,7 +306,7 @@ class BridgeTable(Module):
         r_i = Signal(5)
         c_adr = Signal(5)
         dsts = Array(dst)
-        fsm = FSM(reset_state="IDLE")
+        fsm = GotoFSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += cp.adr.eq(c_adr)
         zero_low = Signal(4)

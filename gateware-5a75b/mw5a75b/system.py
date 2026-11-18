@@ -9,8 +9,8 @@ Requests (`req_*`, from a link's frame decoder; the body is read through
     sys/trust/info      unclaimed: [0][0 0 0 0]
     sys/loader/begin    \\
     sys/loader/chunk     > `upload.UploadState` (Loader::step)
-    sys/loader/commit   /  then compile; store in flash
-    sys/payload/start   compile from the image RAM, `init`
+    sys/loader/commit   /  then install; store in flash
+    sys/payload/start   install from the image RAM, `init`
     sys/payload/stop
     sys/net/addr        [link] -> [link][ip 4][mac 6][peer ip 4][peer port u16];
                         [link][ip 4][mac 6][peer ip 4][peer port u16] -> empty
@@ -21,7 +21,9 @@ Bodies are checked as `Command::parse` does (a malformed body is
 base firmware (`firmware/src/dispatch.rs`): a begin stops the payload
 (Loading), a failed transfer returns to Stopped or Empty, a commit
 installs (Stopped), `start` runs `init` (Running, or Trapped), `stop`
-stops. The board compiles at commit: a module the loader refuses is
+stops. The upload is an image the host compiled
+(`wasm-hdl-ref/src/image.rs`), not a `.wasm`: the board installs it at
+commit (`installer.Installer`); an image the installer refuses is
 `InvalidRequest`, logged on `sys/log`, and the installed payload is put
 back from flash. Stopping, trapping or replacing a payload removes its
 bridge rules; its subscriptions and tick go at the next start.
@@ -30,7 +32,7 @@ Flash (`flash.Store`): a begin erases the inactive slot in the
 background, a successful commit programs it (image, then header with
 `seq + 1`); a begin while that program is pending answers `Unavailable`.
 At reset the newest valid slot is copied into the image RAM (CRC-32
-checked), compiled and started; the settings sector sets the links'
+checked), installed and started; the settings sector sets the links'
 addresses. `sys/net/addr` changes are applied after the response (it
 still leaves from the old address) and persisted.
 
@@ -46,15 +48,17 @@ to the requester (`tx_resp`).
 """
 
 from migen import (
-    Array, Cat, Constant, FSM, If, Memory, Module, Mux, NextState, NextValue, Signal,
+    Array, Cat, Constant, If, Memory, Module, Mux, NextState, NextValue, Signal,
 )
 
 from .flash import SETTINGS, SETTINGS_LEN, SET_MAGIC, MAGIC, SLOT_BASE, IMG_OFF, Store
+from .gotofsm import GotoFSM
 from .imports import R_TRAP, Runtime
-from .loader import ERRORS, Loader
+from .installer import ERRORS, Installer
+from .narrow import gt
 from .sha256 import Sha256
 from .upload import (
-    BUFFER_TOO_SMALL, Crc32, EMPTY, INVALID_REQUEST, LOADING, NOT_FOUND, OK, RUNNING, STOPPED,
+    BUFFER_TOO_SMALL, EMPTY, INVALID_REQUEST, LOADING, NOT_FOUND, OK, RUNNING, STOPPED,
     TRAPPED, UNAVAILABLE, UploadState,
 )
 from .wasm import TRAPS
@@ -186,7 +190,7 @@ class System(Module):
         # # #
 
         self.submodules.runtime = rt = Runtime(bridge=bridge)
-        self.submodules.loader = ld = Loader(rt.core)
+        self.submodules.installer = ld = Installer(rt.core)
         self.submodules.upload = up = UploadState(CAPACITY)
         imp = rt.imports
         core = rt.core
@@ -225,7 +229,7 @@ class System(Module):
         trap_code = Signal(4)
         trap_clr = Signal()
         ev_link = Signal()
-        ev = FSM(reset_state="IDLE")
+        ev = GotoFSM(reset_state="IDLE")
         self.submodules += ev
         ev_idle = Signal()
         self.comb += ev_idle.eq(ev.ongoing("IDLE"))
@@ -373,7 +377,7 @@ class System(Module):
         self.comb += hex_i.eq((p - d0 - n1 - n2)[:6])
         self.comb += rport.adr.eq(radr)
 
-        em = FSM(reset_state="IDLE")
+        em = GotoFSM(reset_state="IDLE")
         self.submodules += em
         self.comb += em_busy.eq(~em.ongoing("IDLE"))
         lens = Signal(8)
@@ -467,7 +471,6 @@ class System(Module):
         h_seq = [Signal(32, name=f"h{s}_seq") for s in range(2)]
         h_ok = [Signal(name=f"h{s}_ok") for s in range(2)]
         tried = Signal(2)
-        self.submodules.flcrc = flcrc = Crc32()
 
         self.comb += [
             self.buf_adr.eq((r_base + ri)[:10]),
@@ -490,7 +493,7 @@ class System(Module):
         set_prog_busy = Signal()
         self.sync += If(set_prog_busy, prog_busy.eq(1))
 
-        fsm = FSM(reset_state="BOOT")
+        fsm = GotoFSM(reset_state="BOOT")
         self.submodules += fsm
         # Image RAM writes: chunk copies and flash copies.
         img_adr = Signal(14)
@@ -560,7 +563,7 @@ class System(Module):
         for s in range(2):
             self.sync += If(fsm.ongoing("BOOT_HDR3") & (fl_slot == s),
                 h_len[s].eq(hl[:15]), h_crc[s].eq(hc), h_seq[s].eq(hs),
-                h_ok[s].eq((hm == MAGIC) & (hl != 0) & (hl <= CAPACITY)),
+                h_ok[s].eq((hm == MAGIC) & (hl != 0) & ~gt(hl, CAPACITY)),
             )
         fsm.act("BOOT_HDR3",
             If(fl_slot == 0, NextValue(fl_slot, 1), NextState("BOOT_HDR")
@@ -585,28 +588,29 @@ class System(Module):
             ),
         )
         # Copy slot `fl_slot` (fl_len bytes) into the image RAM, CRC checked,
-        # then compile; boot starts it, a restore leaves it Stopped.
-        self.comb += flcrc.din.eq(store.rd_byte)
+        # then install; boot starts it, a restore leaves it Stopped.
+        # The flash image's CRC uses the upload's engine.
+        self.comb += up.ext_din.eq(store.rd_byte)
         fsm.act("FL_COPY",
-            flcrc.init.eq(1),
+            up.ext_init.eq(1),
             flash_read(Mux(fl_slot, SLOT_BASE[1], SLOT_BASE[0]) + IMG_OFF, fl_len, "FL_COPY2"),
         )
         fsm.act("FL_COPY2",
             If(store.rd_stb,
                 img_we.eq(1), img_adr.eq(fl_i[:14]), img_dat.eq(store.rd_byte),
-                flcrc.stb.eq(1),
+                up.ext_stb.eq(1),
                 NextValue(fl_i, fl_i + 1),
             ),
             If(store.done, NextValue(fl_i, 0), NextState("FL_CHECK")),
         )
         fsm.act("FL_CHECK",
-            If(flcrc.value == fl_crc,
+            If(up.crc_value == fl_crc,
                 ld.img_len.eq(fl_len), ld.start.eq(1),
-                NextState("FL_COMPILE"),
+                NextState("FL_INSTALL"),
             ).Elif(fl_boot, NextState("BOOT_PICK")
             ).Else(NextValue(installed, 0), *set_status(EMPTY), NextState("IDLE")),
         )
-        fsm.act("FL_COMPILE",
+        fsm.act("FL_INSTALL",
             ld.img_len.eq(fl_len),
             If(ld.done,
                 If(ld.error != 0,
@@ -787,10 +791,10 @@ class System(Module):
             lock.eq(1),
             If(ev_idle & ~prog_busy,
                 ld.img_len.eq(up.length), ld.start.eq(1),
-                NextState("COMMIT_COMPILE"),
+                NextState("COMMIT_INSTALL"),
             ),
         )
-        fsm.act("COMMIT_COMPILE",
+        fsm.act("COMMIT_INSTALL",
             lock.eq(1),
             ld.img_len.eq(up.length),
             If(ld.done,
@@ -817,7 +821,7 @@ class System(Module):
             )
         else:
             fsm.act("COMMIT_SHA", *log(m_inst), *respond(OK))
-        # A refused module: answer, then put the installed payload back.
+        # A refused image: answer, then put the installed payload back.
         fsm.act("RESTORE",
             If(~em_busy,
                 em_go.eq(1), em_id.eq(r_id), em_link.eq(r_link),
@@ -828,22 +832,22 @@ class System(Module):
                 ).Else(*set_status(EMPTY), NextState("IDLE")),
             ),
         )
-        # start: compile from the image RAM (a fresh instance), reset, init
+        # start: install from the image RAM (a fresh instance), reset, init
         fsm.act("START",
             *release(),
             lock.eq(1),
             If(ev_idle & ~prog_busy,
                 ld.img_len.eq(inst_len), ld.start.eq(1),
-                NextState("START_COMPILE"),
+                NextState("START_INSTALL"),
             ),
         )
-        fsm.act("START_COMPILE",
+        fsm.act("START_INSTALL",
             lock.eq(1),
             ld.img_len.eq(inst_len),
             If(ld.done,
                 NextValue(fl_boot, 0),
                 If(ld.error == 0, NextState("RUN_RESET")).Else(
-                    # Cannot happen: the image compiled when installed.
+                    # Cannot happen: the image installed at commit.
                     *set_status(TRAPPED), *respond(OK)),
             ),
         )

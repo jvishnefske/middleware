@@ -5,12 +5,17 @@
 //!   the corrupt ones the decoder must drop), for the frame core;
 //! * `bridge.json` — rule-table operations (install, de-duplicate, match,
 //!   count, stop) with the [`BridgeTable`] answers, for the bridge engine;
-//! * `loaderr.json` — modules the loader must refuse, with the error kind;
-//! * `wasm/<name>.json` — a module, the image the loader must build from
-//!   it (code words, function table, table 0, globals, exports, initial
-//!   memory), and an event script with the board calls, results and final
-//!   memory the interpreter must produce, all from the reference model
-//!   with the 5A-75B's 16 KiB memory.
+//! * `imgerr.json` — images the installer must refuse, with the error kind;
+//! * `wasm/<name>.json` — a module, its compiled image as the host uploads
+//!   it (`blob`, [`wasm_hdl_ref::image`]), what the installer must build
+//!   from that (code words, function table, table 0, globals, exports,
+//!   initial memory), and an event script with the board calls, results
+//!   and final memory the interpreter must produce, all from the
+//!   reference model with the 5A-75B's 16 KiB memory;
+//! * `upload.json` — the upload path's request sequences (with images).
+//!
+//! The script runs on a core that installed the image, not on the one
+//! that compiled the module, so the vectors also check the round trip.
 //!
 //! The test fails when a checked-in file differs from what the model
 //! produces now; `UPDATE_VECTORS=1 cargo test -p wasm-hdl-ref --test
@@ -242,11 +247,32 @@ fn module(name: &str) -> (String, Vec<u8>) {
 
 const OPS: &str = include_str!("ops.wat");
 
+/// The image the host uploads for `wasm` (compiled by the model).
+fn image_of(wasm: &[u8]) -> Vec<u8> {
+    let mut c = Box::new(Colorlight::new());
+    c.load(wasm).unwrap_or_else(|e| panic!("load: {e:?}"));
+    let mut out = vec![0u8; wasm_hdl_ref::COLORLIGHT_MEMORY];
+    let n = c.emit_image(&mut out).unwrap();
+    out.truncate(n);
+    // The round trip: installing the image gives the compiled core.
+    let mut d = Box::new(Colorlight::new());
+    d.install(&out).unwrap();
+    assert_eq!(c.code(), d.code());
+    assert_eq!(c.funcs(), d.funcs());
+    assert_eq!(c.table(), d.table());
+    assert_eq!(c.globals(), d.globals());
+    assert_eq!(c.memory(), d.memory());
+    assert_eq!(c.exports(), d.exports());
+    out
+}
+
 fn wasm_vector(name: &str, wasm: &[u8], steps: &[Step]) -> String {
     let clock = Rc::new(Cell::new(0));
     let mut rec = Rec::new(clock.clone());
+    let blob = image_of(wasm);
     let mut c = Box::new(Colorlight::new());
-    c.load(wasm).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    c.install(&blob)
+        .unwrap_or_else(|e| panic!("{name}: install: {e:?}"));
     let image_memory = c.memory().to_vec();
     let image = format!(
         concat!(
@@ -336,11 +362,12 @@ fn wasm_vector(name: &str, wasm: &[u8], steps: &[Step]) -> String {
         }
     }
     format!(
-        "{{\n  \"name\": {},\n  \"memory_bytes\": {},\n  \"fuel_per_call\": {},\n  \"module\": \"{}\",\n{image},\n  \"steps\": {},\n  \"expect\": {{\n    \"trace\": {},\n    \"results\": {},\n    \"globals\": {},\n    \"memory_crc32\": {},\n    \"executed\": {}\n  }}\n}}\n",
+        "{{\n  \"name\": {},\n  \"memory_bytes\": {},\n  \"fuel_per_call\": {},\n  \"module\": \"{}\",\n  \"blob\": \"{}\",\n{image},\n  \"steps\": {},\n  \"expect\": {{\n    \"trace\": {},\n    \"results\": {},\n    \"globals\": {},\n    \"memory_crc32\": {},\n    \"executed\": {}\n  }}\n}}\n",
         q(name),
         wasm_hdl_ref::COLORLIGHT_MEMORY,
         c.fuel_per_call,
         hex(wasm),
+        hex(&blob),
         list(&step_json, |s| s.clone()),
         list(&rec.trace, |s| q(s)),
         list(&results, |s| q(s)),
@@ -518,160 +545,103 @@ fn cl4_bridge_vectors() {
     );
 }
 
+fn error_kind(e: wasm_hdl_ref::LoadError) -> String {
+    use wasm_hdl_ref::LoadError::*;
+    match e {
+        Unsupported(_) => "Unsupported".into(),
+        TooLarge(_) => "TooLarge".into(),
+        MemoryTooLarge { .. } => "MemoryTooLarge".into(),
+        e => format!("{e:?}"),
+    }
+}
+
+/// Images the installer must refuse (the host's compiler never writes
+/// them): truncations, trailing bytes, a bad magic or version, counts past
+/// the core's tables, a bad page size, memory past 16 KiB or a maximum
+/// under the initial length, exports and table entries naming no
+/// function, a data segment past the initial memory.
 #[test]
-fn cl4_load_error_vectors() {
-    let wat_cases: &[(&str, &str)] = &[
-        (
-            "unknown import",
-            r#"(module (import "mw" "nope" (func)) (memory (export "memory") 1 (pagesize 1)))"#,
-        ),
-        (
-            "other module",
-            r#"(module (import "env" "log" (func (param i32 i32))) (memory (export "memory") 1 (pagesize 1)))"#,
-        ),
-        (
-            "bad signature",
-            r#"(module (import "mw" "log" (func (param i32))) (memory (export "memory") 1 (pagesize 1)))"#,
-        ),
-        (
-            "bad export",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "tick")))"#,
-        ),
-        (
-            "bad export result",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "mw_alloc") (param i32)))"#,
-        ),
-        ("missing memory", r#"(module (memory 1 (pagesize 1)))"#),
-        ("no memory", r#"(module (func))"#),
-        (
-            "memory too large",
-            r#"(module (memory (export "memory") 1))"#,
-        ),
-        (
-            "memory too large bytes",
-            r#"(module (memory (export "memory") 16385 (pagesize 1)))"#,
-        ),
-        (
-            "float",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (f32.const 1))))"#,
-        ),
-        (
-            "i64 add",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (i64.add (i64.const 1) (i64.const 2)))))"#,
-        ),
-        (
-            "i64 local",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (local i64)))"#,
-        ),
-        (
-            "i64 param",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i64)))"#,
-        ),
-        (
-            "multi value",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (result i32 i32) (i32.const 1) (i32.const 2)))"#,
-        ),
-        (
-            "block i64",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (block (result i64) (i64.const 1)))))"#,
-        ),
-        (
-            "start",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func $s) (start $s))"#,
-        ),
-        (
-            "i64 global",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (global i64 (i64.const 0)))"#,
-        ),
-        (
-            "memory.init",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x") (func (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1))))"#,
-        ),
-        (
-            "passive data",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x"))"#,
-        ),
-        (
-            "data past memory",
-            r#"(module (memory (export "memory") 4 (pagesize 1)) (data (i32.const 2) "xyz"))"#,
-        ),
-        (
-            "imported memory",
-            r#"(module (import "mw" "memory" (memory 1)))"#,
-        ),
-        (
-            "two tables",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (table 1 funcref))"#,
-        ),
-        (
-            "table too large",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (table 65 funcref))"#,
-        ),
-        (
-            "elem past table",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (func $f) (elem (i32.const 1) $f))"#,
-        ),
-        (
-            "too many params",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32)))"#,
-        ),
-        (
-            "too many globals",
-            r#"(module (memory (export "memory") 1 (pagesize 1))
-            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
-            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
-            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
-            (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
-            (global i32 (i32.const 0)))"#,
-        ),
-        (
-            "global from global",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (global $a i32 (i32.const 0)) (global i32 (global.get $a)))"#,
-        ),
-        (
-            "exported table",
-            r#"(module (memory (export "memory") 1 (pagesize 1)) (table (export "t") 1 funcref))"#,
-        ),
-    ];
-    let mut entries: Vec<String> = Vec::new();
-    let mut push = |name: &str, wasm: &[u8]| {
+fn cl4_image_error_vectors() {
+    let wasm = wat::parse_str(
+        r#"(module
+  (import "mw" "log" (func $log (param i32 i32)))
+  (memory (export "memory") 64 128 (pagesize 1))
+  (table 2 funcref)
+  (elem (i32.const 0) $f)
+  (global (mut i32) (i32.const 5))
+  (data (i32.const 8) "abc")
+  (func $f (export "init") (call $log (i32.const 8) (i32.const 3))))"#,
+    )
+    .unwrap();
+    let good = image_of(&wasm);
+    use wasm_hdl_ref::image::{FUNC_BYTES, HEADER};
+    let code = u16::from_le_bytes([good[4], good[5]]) as usize;
+    let tab = HEADER + 4 * code + 2 * FUNC_BYTES;
+    let seg = tab + 2 * 2 + 4;
+    let set = |at: usize, v: &[u8]| {
+        let mut b = good.clone();
+        b[at..at + v.len()].copy_from_slice(v);
+        b
+    };
+    let mut cases: Vec<(String, Vec<u8>)> = vec![("good".into(), good.clone())];
+    for cut in [
+        0,
+        2,
+        4,
+        15,
+        HEADER - 1,
+        HEADER,
+        HEADER + 3,
+        tab,
+        seg + 3,
+        good.len() - 1,
+    ] {
+        cases.push((format!("cut at {cut}"), good[..cut].to_vec()));
+    }
+    let mut long = good.clone();
+    long.push(0);
+    cases.push(("trailing byte".into(), long));
+    cases.push(("bad magic".into(), set(0, b"MWX")));
+    cases.push(("bad version".into(), set(3, &[2])));
+    cases.push(("wasm module".into(), wasm.clone()));
+    let u16le = |v: u16| v.to_le_bytes();
+    cases.push(("code too long".into(), set(4, &u16le(4097))));
+    cases.push(("too many functions".into(), set(6, &[129])));
+    cases.push(("table too large".into(), set(7, &[65])));
+    cases.push(("too many globals".into(), set(8, &[17])));
+    cases.push(("page size".into(), set(9, &[1])));
+    cases.push(("memory too large".into(), set(12, &u16le(16385))));
+    cases.push(("maximum too large".into(), set(14, &u16le(16385))));
+    cases.push(("maximum under initial".into(), set(14, &u16le(63))));
+    cases.push(("export past the functions".into(), set(16, &u16le(2))));
+    cases.push((
+        "last export past the functions".into(),
+        set(26, &u16le(200)),
+    ));
+    cases.push((
+        "table entry past the functions".into(),
+        set(tab + 2, &u16le(2)),
+    ));
+    cases.push(("segment past memory".into(), set(seg, &u16le(62))));
+    cases.push((
+        "segment length past memory".into(),
+        set(seg + 2, &u16le(57)),
+    ));
+    cases.push(("segment count too high".into(), set(10, &u16le(2))));
+    let mut entries = Vec::new();
+    for (name, img) in &cases {
         let mut c = Box::new(Colorlight::new());
-        let e = match c.load(wasm) {
-            Ok(()) => "Ok".to_string(),
-            Err(wasm_hdl_ref::LoadError::Unsupported(_)) => "Unsupported".to_string(),
-            Err(wasm_hdl_ref::LoadError::TooLarge(_)) => "TooLarge".to_string(),
-            Err(wasm_hdl_ref::LoadError::MemoryTooLarge { .. }) => "MemoryTooLarge".to_string(),
-            Err(e) => format!("{e:?}"),
-        };
+        let e = c.install(img).map_or_else(error_kind, |()| "Ok".into());
+        assert_eq!(e == "Ok", name == "good", "{name}: {e}");
         entries.push(format!(
-            r#"    {{"name": {}, "module": "{}", "error": {}}}"#,
+            r#"    {{"name": {}, "image": "{}", "error": {}}}"#,
             q(name),
-            hex(wasm),
+            hex(img),
             q(&e)
         ));
-    };
-    for (name, src) in wat_cases {
-        push(name, &wat::parse_str(src).unwrap());
     }
-    // Truncations and corruptions of a valid module.
-    let (_, good) = module("bridge");
-    for cut in [0usize, 4, 8, 9, 20, good.len() / 2, good.len() - 1] {
-        push(&format!("bridge cut at {cut}"), &good[..cut]);
-    }
-    let mut bad_magic = good.clone();
-    bad_magic[1] = b'x';
-    push("bad magic", &bad_magic);
-    let mut bad_version = good.clone();
-    bad_version[4] = 2;
-    push("bad version", &bad_version);
-    let mut trailing = good.clone();
-    trailing.extend([0x0B, 0x00]);
-    push("trailing junk", &trailing);
-    let mut unknown_section = good.clone();
-    unknown_section.extend([0x0D, 0x00]);
-    push("unknown section", &unknown_section);
     golden(
-        "loaderr.json",
+        "imgerr.json",
         &format!("{{\"cases\": [\n{}\n]}}\n", entries.join(",\n")),
     );
 }
@@ -683,8 +653,9 @@ fn cl4_load_error_vectors() {
 /// `begin` stops the payload (Loading), a failed transfer returns to the
 /// resting status, a commit installs (Stopped), `start` runs `init`
 /// (Running, or Trapped when it traps), `stop` stops. Unlike the
-/// microcontrollers, the board compiles the module at commit: a module the
-/// loader refuses is answered `InvalidRequest` and the previous payload
+/// microcontrollers, the board takes an image the host compiled
+/// ([`wasm_hdl_ref::image`]) and installs it at commit: an image the
+/// installer refuses is answered `InvalidRequest` and the previous payload
 /// stays installed. Commits are unsigned (the board is unclaimed; a
 /// signature body is parsed and ignored).
 struct Shell {
@@ -713,14 +684,14 @@ impl Shell {
         }
     }
 
-    fn compiles(wasm: &[u8]) -> bool {
+    fn installs(img: &[u8]) -> bool {
         let mut c = Box::new(Colorlight::new());
-        c.load(wasm).is_ok()
+        c.install(img).is_ok()
     }
 
-    fn init_traps(wasm: &[u8]) -> bool {
+    fn init_traps(img: &[u8]) -> bool {
         let mut c = Box::new(Colorlight::new());
-        c.load(wasm).unwrap();
+        c.install(img).unwrap();
         let mut rec = Rec::new(Rc::new(Cell::new(0)));
         c.init(&mut rec).is_err()
     }
@@ -781,7 +752,7 @@ impl Shell {
                 0
             }
             Ok(Effect::Activate { .. }) => {
-                if Self::compiles(&self.staging) {
+                if Self::installs(&self.staging) {
                     self.installed = Some(std::mem::take(&mut self.staging));
                     self.status = Stopped;
                     0
@@ -826,13 +797,16 @@ fn upload_reqs(img: &[u8], size: usize) -> Reqs {
 #[test]
 fn cl6_upload_vectors() {
     use middleware::loader::sha256;
-    let (_, good) = module("bridge");
-    let (_, blink) = module("blink");
-    let traps = wat::parse_str(
-        r#"(module (memory (export "memory") 16 (pagesize 1)) (func (export "init") unreachable))"#,
-    )
-    .unwrap();
-    let refused = wat::parse_str(r#"(module (memory (export "memory") 1))"#).unwrap();
+    let good = image_of(&module("bridge").1);
+    let blink = image_of(&module("blink").1);
+    let traps = image_of(
+        &wat::parse_str(
+            r#"(module (memory (export "memory") 16 (pagesize 1)) (func (export "init") unreachable))"#,
+        )
+        .unwrap(),
+    );
+    // A module uploaded as it is: not an image.
+    let refused = wat::parse_str(r#"(module (memory (export "memory") 1 (pagesize 1)))"#).unwrap();
     let cut = good[..good.len() / 2].to_vec();
     let n = good.len() as u32;
     let crc = Crc32::checksum(&good);
@@ -889,7 +863,7 @@ fn cl6_upload_vectors() {
         v.extend(s("sys/payload/stop", vec![]));
         v
     }));
-    cases.push(("refused module keeps the installed one", {
+    cases.push(("refused image keeps the installed one", {
         let mut v = upload_reqs(&good, 512);
         v.extend(s("sys/payload/start", vec![]));
         v.extend(upload_reqs(&refused, 512));

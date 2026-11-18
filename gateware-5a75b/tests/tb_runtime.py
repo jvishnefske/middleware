@@ -151,7 +151,7 @@ async def run_vector(dut, name, board):
     board.trace = []
     board.buf = b""
     await event_reset(dut)
-    # Load the image (what the loader builds).
+    # Load the image (what the installer builds).
     for i, w in enumerate(im["code"]):
         dut.ld_code_adr.value, dut.ld_code_dat.value, dut.ld_code_we.value = i, w, 1
         await RisingEdge(dut.sys_clk)

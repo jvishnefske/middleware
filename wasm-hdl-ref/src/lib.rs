@@ -12,6 +12,8 @@
 //!
 //! * [`isa`] — the 32-bit internal code in code RAM.
 //! * `load` — [`Core::load`]: one-pass parse and compile ([`LoadError`]).
+//! * [`image`] — [`Core::emit_image`] and [`Core::install`]: the compiled
+//!   payload as the image the host uploads to the board (CL6).
 //! * `exec` — the interpreter: value stack, call frames, fuel, traps
 //!   ([`Trap`]).
 //! * `abi` — the import unit and the event entry points
@@ -47,6 +49,7 @@
 
 mod abi;
 mod exec;
+pub mod image;
 pub mod isa;
 mod load;
 

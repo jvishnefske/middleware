@@ -31,9 +31,11 @@ payload until the next load (`ev_reset`).
 """
 
 from migen import (
-    Array, Cat, Constant, FSM, If, Memory, Module, Mux, NextState, NextValue, Signal,
+    Array, Cat, Constant, If, Memory, Module, Mux, NextState, NextValue, Signal,
 )
 
+from .gotofsm import GotoFSM
+from .narrow import gt, lt, sum_gt
 from .wasm import WasmCore
 
 # ABI import indices (wasm_abi::IMPORTS order).
@@ -152,9 +154,12 @@ class SubMatcher(Module):
         self.comb += rd.adr.eq(self.idx[:7])
         stb1, idx1, byte1 = Signal(), Signal(8), Signal(8)
         self.sync += stb1.eq(self.stb), idx1.eq(self.idx), byte1.eq(self.byte)
+        # A hit needs key_len == len, and then every streamed byte (there
+        # are key_len of them) lies within the subscription's key: no
+        # per-lane bound on the index.
         for s in range(N_SUBS):
             self.sync += If(self.start, alive[s].eq(1)).Elif(
-                stb1 & (idx1 < lens[s]) & (byte1 != rd.dat_r[8 * s:8 * s + 8]),
+                stb1 & (byte1 != rd.dat_r[8 * s:8 * s + 8]),
                 alive[s].eq(0))
             self.comb += self.hit[s].eq(alive[s] & (s < count) & (self.key_len == lens[s]))
         self.slot = Signal(3, name="sub_slot")
@@ -244,7 +249,7 @@ class ImportUnit(Module):
 
         # Guest ranges: p + n <= mem_len with u32 p and n.
         def in_range(p, n):
-            return (Cat(p, Constant(0, 1)) + Cat(n, Constant(0, 1))) <= mem_len
+            return ~sum_gt(p, n, mem_len)
 
         # Streaming reads of guest memory: `rd_at` .. `rd_at + rd_n`.
         rd_at = Signal(33)
@@ -268,7 +273,7 @@ class ImportUnit(Module):
         hdr_i = Signal(2)
         node_i = Signal(4)
 
-        fsm = FSM(reset_state="IDLE")
+        fsm = GotoFSM(reset_state="IDLE")
         self.submodules += fsm
 
         def answer(v):
@@ -285,15 +290,15 @@ class ImportUnit(Module):
                 If(in_range(a0, a1),
                     NextValue(is_log, 1),
                     NextValue(dat_at, a0),
-                    NextValue(dat_n, Mux(a1 > MAX_LOG, MAX_LOG, a1)),
+                    NextValue(dat_n, Mux(gt(a1, MAX_LOG), MAX_LOG, a1)),
                     NextValue(rd_at, a0), NextValue(rd_i, 0),
-                    NextValue(rd_n, Mux(a1 > MAX_LOG, MAX_LOG, a1)),
+                    NextValue(rd_n, Mux(gt(a1, MAX_LOG), MAX_LOG, a1)),
                     utf.start.eq(1),
                     NextState("UTF_RD"),
                 ).Else(*answer(0)),
             ).Elif(idx == I_PUBLISH,
                 If(~in_range(a0, a1) | ~in_range(a2, a3), *answer(E_OOB)
-                ).Elif(a3 > MAX_MESSAGE, *answer(E_INVALID_ARG)
+                ).Elif(gt(a3, MAX_MESSAGE), *answer(E_INVALID_ARG)
                 ).Else(
                     NextValue(is_log, 0),
                     NextValue(key_at, a0), NextValue(key_n, a1),
@@ -315,7 +320,7 @@ class ImportUnit(Module):
                     self.tick_set.eq(1),
                     NextValue(self.tick_on, 0),
                     *answer(0),
-                ).Elif(a0[31] | (a0 < MIN_TICK), *answer(E_INVALID_ARG)
+                ).Elif(a0[31] | lt(a0, MIN_TICK), *answer(E_INVALID_ARG)
                 ).Elif(~self.has_tick, *answer(E_UNSUPPORTED)
                 ).Else(
                     self.tick_set.eq(1),
@@ -325,12 +330,12 @@ class ImportUnit(Module):
                     *answer(0),
                 ),
             ).Elif((idx >= I_GPIO_OUTPUT) & (idx <= I_GPIO_READ),
-                If(a0 > 255, *answer(E_INVALID_ARG)
-                ).Elif((idx == I_GPIO_INPUT) & (a1 > 2), *answer(E_INVALID_ARG)
-                ).Elif((idx == I_GPIO_WRITE) & (a1 > 1), *answer(E_INVALID_ARG)
+                If(gt(a0, 255), *answer(E_INVALID_ARG)
+                ).Elif((idx == I_GPIO_INPUT) & gt(a1, 2), *answer(E_INVALID_ARG)
+                ).Elif((idx == I_GPIO_WRITE) & gt(a1, 1), *answer(E_INVALID_ARG)
                 ).Elif(idx == I_GPIO_READ,
                     *answer(Mux(a0 == 1, self.button, Mux(a0 == 0, self.led, 0))),
-                ).Elif(a0 > 1, *answer(E_UNSUPPORTED)
+                ).Elif(gt(a0, 1), *answer(E_UNSUPPORTED)
                 ).Else(
                     If((idx == I_GPIO_OUTPUT) & (a0 == 0), NextValue(self.led_enabled, 1)),
                     If((idx == I_GPIO_WRITE) & (a0 == 0), NextValue(self.led, a1[0])),
@@ -348,14 +353,14 @@ class ImportUnit(Module):
                     NextValue(key_at, a1), NextValue(key_n, a2),
                     NextValue(prefix, 0),
                     NextValue(tail, 0),
-                    NextValue(rd_at, a1 + a2 - Mux(a2 >= 3, 3, a2)),
-                    NextValue(rd_i, 0), NextValue(rd_n, Mux(a2 >= 3, 3, a2)),
+                    NextValue(rd_at, a1 + a2 - Mux(gt(a2, 2), 3, a2)),
+                    NextValue(rd_i, 0), NextValue(rd_n, Mux(gt(a2, 2), 3, a2)),
                     NextState("TAIL_RD"),
                 ),
             ).Elif((idx == I_ROUTE_STOP) | (idx == I_ROUTE_STAT),
-                If(~((a0 < 4) | ((a0 >= 16) & (a0 < 32))), *answer(E_INVALID_ARG)
-                ).Elif((idx == I_ROUTE_STAT) & (a1 > 3), *answer(E_INVALID_ARG)
-                ).Elif(a0 < 4, *answer(E_BUSY)
+                If(~(lt(a0, 4) | (gt(a0, 15) & lt(a0, 32))), *answer(E_INVALID_ARG)
+                ).Elif((idx == I_ROUTE_STAT) & gt(a1, 3), *answer(E_INVALID_ARG)
+                ).Elif(lt(a0, 4), *answer(E_BUSY)
                 ).Else(
                     NextValue(self.br_handle, a0),
                     NextState("BR_STOP_STAT"),
@@ -534,7 +539,7 @@ class ImportUnit(Module):
         fsm.act("BKEY_END",
             # `sys` exactly or `sys/...` (any first segment `sys`).
             If(~kc.valid | kc.sys, *answer(E_INVALID_KEY)
-            ).Elif((a0 > 1) | (a3 > 1), *answer(E_UNSUPPORTED)
+            ).Elif(gt(a0, 1) | gt(a3, 1), *answer(E_UNSUPPORTED)
             ).Else(
                 self.br_add_start.eq(1),
                 self.br_add_src.eq(a0[:3]), self.br_add_dst.eq(a3[:3]),
@@ -579,7 +584,7 @@ class Runtime(Module):
         self.submodules.core = core = WasmCore(mem_bytes)
         self.submodules.imports = imp = ImportUnit(core, bridge, n_match)
         aw = len(core.ext_mem_adr)
-        # Exports (function index, valid bit) from the loader.
+        # Exports (function index, valid bit) from the installer.
         self.exp_init = Signal(9)
         self.exp_tick = Signal(9)
         self.exp_alloc = Signal(9)
@@ -602,7 +607,7 @@ class Runtime(Module):
         self.ev_result = Signal(8)
         self.poisoned = Signal()
         self.running = Signal()
-        # Loader / debug access to linear memory while no event runs.
+        # Installer / debug access to linear memory while no event runs.
         self.ld_mem_sel = Signal()
         self.ld_mem_adr = Signal(aw)
         self.ld_mem_dat = Signal(8)
@@ -632,7 +637,7 @@ class Runtime(Module):
         nxt = Signal(32)
         self.comb += nxt.eq(imp.tick_due + imp.tick_period)
 
-        fsm = FSM(reset_state="IDLE")
+        fsm = GotoFSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += self.running.eq(~fsm.ongoing("IDLE") & ~fsm.ongoing("DONE"))
         fsm.act("IDLE",
@@ -676,8 +681,7 @@ class Runtime(Module):
             ),
         )
         alloc_ok = Signal()
-        self.comb += alloc_ok.eq((Cat(core.call_result, Constant(0, 1))
-                                  + self.dlv_len) <= core.mem_len)
+        self.comb += alloc_ok.eq(~sum_gt(core.call_result, self.dlv_len, core.mem_len))
         fsm.act("ALLOC",
             If(core.call_done,
                 If(core.trap != 0, *trapped()
@@ -701,7 +705,7 @@ class Runtime(Module):
             NextValue(i, i + 1),
             NextState("COPY_RD"),
         )
-        # The one mux onto the core's memory port: the loader while idle,
+        # The one mux onto the core's memory port: the installer while idle,
         # the delivery copy, otherwise the import unit.
         self.comb += [
             If(self.ld_mem_sel & fsm.ongoing("IDLE"),

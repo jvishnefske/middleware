@@ -33,10 +33,14 @@ them to LiteEth UDP ports and the flash pads, and takes each link's IP
 and MAC address from `System.net`.
 """
 
-from migen import Array, Cat, Constant, FSM, If, Module, Mux, NextState, NextValue, Signal
+from functools import reduce
+from operator import or_
+
+from migen import Cat, Constant, If, Module, Mux, NextState, NextValue, Signal
 
 from .bridge import BridgeTable
 from .frame import KIND_PUBLISH, KIND_REQUEST, CrcAppender, FrameDecoder
+from .gotofsm import GotoFSM
 from .imports import KeyCheck, MAX_MESSAGE
 from .system import KEYS, System
 
@@ -79,13 +83,19 @@ class KeyClassifier(Module):
         self.hit = Signal(len(keys))
         self.idx_out = Signal(max=len(keys) + 1)
         alive = Signal(len(keys))
+        # Decoded once for every key: the position, the byte, the length.
+        width = max(len(key) for key in keys)
+        at = [Signal() for _ in range(width)]
+        self.comb += [at[p].eq(self.idx == p) for p in range(width)]
+        is_c = {c: Signal() for c in sorted({c for key in keys for c in key})}
+        self.comb += [sig.eq(self.byte == c) for c, sig in is_c.items()]
+        len_is = {n: Signal() for n in sorted({len(key) for key in keys})}
+        self.comb += [sig.eq(self.key_len == n) for n, sig in len_is.items()]
         for k, key in enumerate(keys):
-            rom = Array(Constant(b, 8) for b in key)
-            self.sync += If(self.start, alive[k].eq(1)).Elif(
-                self.stb & ((self.idx >= len(key))
-                            | (self.byte != rom[self.idx[:max(1, (len(key) - 1).bit_length())]])),
-                alive[k].eq(0))
-            self.comb += self.hit[k].eq(alive[k] & (self.key_len == len(key)))
+            # The byte matches when idx is a position of the key holding it.
+            ok = reduce(or_, [at[p] & is_c[c] for p, c in enumerate(key)])
+            self.sync += If(self.start, alive[k].eq(1)).Elif(self.stb & ~ok, alive[k].eq(0))
+            self.comb += self.hit[k].eq(alive[k] & len_is[len(key)])
         for k in reversed(range(len(keys))):
             self.comb += If(self.hit[k], self.idx_out.eq(k + 1))
 
@@ -203,7 +213,7 @@ class Node(Module):
             self.sync += If(b.m_valid[n], dlv_ok.eq((sm.hit != 0) & ~kc.sys
                                                     & (plen <= MAX_MESSAGE)))
 
-            fsm = FSM(reset_state="WAIT")
+            fsm = GotoFSM(reset_state="WAIT")
             self.submodules += fsm
             unicast = Signal(name=f"rx{n}_unicast")
             self.comb += unicast.eq((rx_ip != 0) & (rx_ip != 0xFFFF_FFFF)
