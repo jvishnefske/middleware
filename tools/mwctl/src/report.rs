@@ -6,6 +6,8 @@
 //!   version and the pinned key in hex.
 //! * [`format_board`] — `sys/board`: limits, flags and each pin class as a
 //!   GPIO list, then the PWM table.
+//! * [`format_manifest`] — `sys/manifest`: import groups, capabilities,
+//!   buses, each source with its rates, links and limits, one per line.
 //! * [`format_event`] — one line per publication: `sys/log` as text,
 //!   `sys/payload/status` by name, anything else as UTF-8 or hex; noise runs
 //!   as their length and printable characters.
@@ -156,6 +158,74 @@ pub fn format_board(b: &BoardInfo<'_>) -> String {
         );
     }
     s.push('\n');
+    s
+}
+
+/// `sys/manifest` for printing (MF4): one `name: value` line per record
+/// the node sent.
+pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
+    use middleware::loader::manifest::Groups;
+    let join = |v: Vec<String>| if v.is_empty() { "-".to_owned() } else { v.join(" ") };
+    let named = |mask: u8, names: &[&str]| {
+        join(names.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, n)| (*n).to_owned()).collect())
+    };
+    let plural = |n: u32, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}es") };
+    let mut s = format!("ABI:              v{}\n", m.abi);
+    if let Some(node) = m.node {
+        let _ = writeln!(s, "node:             {}", node.0.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    }
+    let groups = Groups::NAMED.iter().filter(|(g, _)| m.groups.contains(*g)).map(|(_, n)| (*n).to_owned()).collect();
+    let _ = writeln!(s, "groups:           {}", join(groups));
+    let caps = Caps::NAMED.iter().filter(|(c, _)| m.caps().contains(*c)).map(|(_, n)| (*n).to_owned()).collect();
+    let _ = writeln!(s, "caps:             {}", join(caps));
+    if let Some(i) = m.i2c {
+        let _ = writeln!(s, "I2C:              {}, {}-{} Hz", plural(i.buses.into(), "bus"), i.min_hz, i.max_hz);
+    }
+    if let Some(sp) = m.spi {
+        let _ = writeln!(s, "SPI:              {}", plural(sp.buses.into(), "bus"));
+    }
+    let hz = |v: Vec<u16>| join(v.iter().map(|r| r.to_string()).collect());
+    if let Some(i) = m.imu {
+        let ranges: Vec<String> = i.ranges_g().map(|g| g.to_string()).collect();
+        let _ = write!(s, "IMU:              {} Hz; ±{} g", hz(i.rates_hz().collect()), ranges.join("/"));
+        let mag: Vec<u16> = i.mag_rates_hz().collect();
+        if mag.is_empty() {
+            s.push_str("; no magnetometer\n");
+        } else {
+            let _ = writeln!(s, "; with magnetometer {} Hz", hz(mag));
+        }
+    }
+    if let Some(mc) = m.mic {
+        let _ = writeln!(
+            s,
+            "microphone:       {} Hz; {}; gain 0-{} dB",
+            hz(mc.rates_hz().collect()),
+            named(mc.modes, &["levels", "mulaw", "pcm"]),
+            mc.max_gain_db
+        );
+    }
+    if let Some(f) = m.frames {
+        let _ = writeln!(
+            s,
+            "frames:           {}; {}; up to {}x{}",
+            named(f.kinds, &["test-pattern", "camera"]),
+            named(f.formats, &["rgb565", "jpeg"]),
+            f.max_width,
+            f.max_height
+        );
+    }
+    if let Some(sk) = m.sink_spi {
+        let _ = writeln!(s, "SPI sink:         frames up to {} bytes", sk.max_frame);
+    }
+    let links = m.links().iter().map(|l| format!("{} {}", l.id, l.kind.name().map_or_else(|| format!("kind{}", l.kind.0), str::to_owned))).collect();
+    let _ = writeln!(s, "links:            {}", join(links));
+    if let Some(l) = m.limits {
+        let _ = writeln!(
+            s,
+            "limits:           {} routes, {} subscriptions, {} channels, {}-byte messages",
+            l.routes, l.subscriptions, l.channels, l.max_message
+        );
+    }
     s
 }
 
@@ -345,6 +415,41 @@ pub fn format_event(e: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mf4_manifest_lines_name_every_record() {
+        use middleware::loader::manifest::*;
+        let m = Manifest::new(6)
+            .with_node(SenderId([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]))
+            .with_groups(Groups::GPIO.with(Groups::I2C).with(Groups::SERVE))
+            .with_i2c(I2cBuses { buses: 1, min_hz: 10_000, max_hz: 1_000_000 })
+            .with_imu(ImuSource {
+                rates: ImuSource::rates_mask(&[50, 100, 200, 400, 800]),
+                ranges: 0b111,
+                mag_rates: ImuSource::rates_mask(&[50, 100, 200, 400]),
+            })
+            .with_mic(MicSource { rates: 0b1111, modes: 0b101, max_gain_db: 30 })
+            .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+            .with_link(Link { id: 2, kind: LinkKind(9) })
+            .with_limits(Limits { routes: 2, ..Limits::ABI });
+        let s = format_manifest(&m);
+        for line in [
+            "ABI:              v6\n",
+            "node:             0011223344556677\n",
+            "groups:           gpio i2c serve\n",
+            "caps:             serve source_imu source_microphone\n",
+            "I2C:              1 bus, 10000-1000000 Hz\n",
+            "IMU:              50 100 200 400 800 Hz; ±2/4/8 g; with magnetometer 50 100 200 400 Hz\n",
+            "microphone:       8000 16000 32000 48000 Hz; levels pcm; gain 0-30 dB\n",
+            "links:            0 serial 2 kind9\n",
+            "limits:           2 routes, 8 subscriptions, 0 channels, 512-byte messages\n",
+        ] {
+            assert!(s.contains(line), "{line:?} in\n{s}");
+        }
+        assert!(!s.contains("SPI"));
+        let bare = format_manifest(&Manifest::new(6));
+        assert_eq!(bare, "ABI:              v6\ngroups:           -\ncaps:             -\nlinks:            -\n");
+    }
 
     #[test]
     fn samples_lines_decode_imu_pcm_mulaw_and_levels_batches() {

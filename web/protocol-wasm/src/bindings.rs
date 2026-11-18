@@ -271,6 +271,124 @@ pub fn decode_board_info(data: &[u8]) -> Option<Object> {
     Some(o)
 }
 
+/// Decodes a `sys/manifest` response (MF4) into `{version, abi, node?,
+/// groups, groupNames, i2c?: {buses, minHz, maxHz}, spi?: {buses},
+/// imu?: {ratesHz, rangesG, magRatesHz}, mic?: {ratesHz, modes, maxGainDb},
+/// frames?: {kinds, formats, maxWidth, maxHeight}, sinkSpi?: {maxFrame},
+/// links: [{id, kind, kindName}], limits?: {routes, subscriptions,
+/// channels, maxMessage}, caps, capNames}`; `modes`, `kinds` and `formats`
+/// are names (`levels`/`mulaw`/`pcm`, `testPattern`/`camera`,
+/// `rgb565`/`jpeg`). `undefined` when malformed.
+#[wasm_bindgen(js_name = decodeManifest)]
+pub fn decode_manifest(data: &[u8]) -> Option<Object> {
+    use middleware::loader::manifest::{Groups, Manifest, VERSION};
+    let m = Manifest::decode(data).ok()?;
+    let nums = |v: &mut dyn Iterator<Item = u32>| v.map(JsValue::from).collect::<Array>();
+    let named = |mask: u8, names: &[&str]| {
+        names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, n)| JsValue::from_str(n))
+            .collect::<Array>()
+    };
+    let o = Object::new();
+    set(&o, "version", VERSION);
+    set(&o, "abi", m.abi);
+    if let Some(node) = m.node {
+        let hex: String = node.0.iter().map(|b| format!("{b:02x}")).collect();
+        set(&o, "node", hex);
+    }
+    set(&o, "groups", m.groups.0);
+    let groups: Array = Groups::NAMED
+        .iter()
+        .filter(|(g, _)| m.groups.contains(*g))
+        .map(|(_, n)| JsValue::from_str(n))
+        .collect();
+    set(&o, "groupNames", groups);
+    if let Some(i) = m.i2c {
+        let b = Object::new();
+        set(&b, "buses", i.buses);
+        set(&b, "minHz", i.min_hz);
+        set(&b, "maxHz", i.max_hz);
+        set(&o, "i2c", b);
+    }
+    if let Some(sp) = m.spi {
+        let b = Object::new();
+        set(&b, "buses", sp.buses);
+        set(&o, "spi", b);
+    }
+    if let Some(i) = m.imu {
+        let b = Object::new();
+        set(&b, "ratesHz", nums(&mut i.rates_hz().map(u32::from)));
+        set(&b, "rangesG", nums(&mut i.ranges_g().map(u32::from)));
+        set(&b, "magRatesHz", nums(&mut i.mag_rates_hz().map(u32::from)));
+        set(&o, "imu", b);
+    }
+    if let Some(mc) = m.mic {
+        let b = Object::new();
+        set(&b, "ratesHz", nums(&mut mc.rates_hz().map(u32::from)));
+        set(&b, "modes", named(mc.modes, &["levels", "mulaw", "pcm"]));
+        set(&b, "maxGainDb", mc.max_gain_db);
+        set(&o, "mic", b);
+    }
+    if let Some(f) = m.frames {
+        let b = Object::new();
+        set(&b, "kinds", named(f.kinds, &["testPattern", "camera"]));
+        set(&b, "formats", named(f.formats, &["rgb565", "jpeg"]));
+        set(&b, "maxWidth", f.max_width);
+        set(&b, "maxHeight", f.max_height);
+        set(&o, "frames", b);
+    }
+    if let Some(sk) = m.sink_spi {
+        let b = Object::new();
+        set(&b, "maxFrame", sk.max_frame);
+        set(&o, "sinkSpi", b);
+    }
+    let links: Array = m
+        .links()
+        .iter()
+        .map(|l| {
+            let b = Object::new();
+            set(&b, "id", l.id);
+            set(&b, "kind", l.kind.0);
+            set(&b, "kindName", l.kind.name().unwrap_or("unknown"));
+            JsValue::from(b)
+        })
+        .collect();
+    set(&o, "links", links);
+    if let Some(l) = m.limits {
+        let b = Object::new();
+        set(&b, "routes", l.routes);
+        set(&b, "subscriptions", l.subscriptions);
+        set(&b, "channels", l.channels);
+        set(&b, "maxMessage", l.max_message);
+        set(&o, "limits", b);
+    }
+    let caps = m.caps();
+    set(&o, "caps", caps.0);
+    let names: Array = middleware::loader::Caps::NAMED
+        .iter()
+        .filter(|(bit, _)| caps.contains(*bit))
+        .map(|(_, name)| JsValue::from_str(name))
+        .collect();
+    set(&o, "capNames", names);
+    Some(o)
+}
+
+/// The browser simulator's `sys/manifest` body
+/// ([`crate::simulator::MANIFEST`]) with `node` (16 hex digits) as its
+/// node id, for the page's simulated device and the tests' fake device.
+#[cfg(feature = "simulator")]
+#[wasm_bindgen(js_name = simulatorManifest)]
+pub fn simulator_manifest(node: &str) -> Option<Vec<u8>> {
+    let id = parse_node(node)?;
+    let mut out = vec![0u8; middleware::loader::manifest::MANIFEST_MAX];
+    let n = crate::simulator::MANIFEST.with_node(id).encode(&mut out)?;
+    out.truncate(n);
+    Some(out)
+}
+
 /// SHA-256 of `data` (32 bytes), computed by the device loader's hasher.
 #[wasm_bindgen]
 pub fn sha256(data: &[u8]) -> Vec<u8> {
@@ -390,6 +508,7 @@ impl JsDeviceLoader {
                 Action::App => "app",
                 Action::Info => "info",
                 Action::Board => "board",
+                Action::Manifest => "manifest",
                 Action::Start => "start",
                 Action::Stop => "stop",
                 Action::Erase(len) => {
@@ -435,6 +554,7 @@ pub fn protocol() -> Object {
     for (name, key) in [
         ("info", keys::INFO),
         ("board", keys::BOARD),
+        ("manifest", keys::MANIFEST),
         ("begin", keys::BEGIN),
         ("chunk", keys::CHUNK),
         ("commit", keys::COMMIT),

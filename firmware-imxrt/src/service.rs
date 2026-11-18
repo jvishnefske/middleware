@@ -57,7 +57,8 @@
 //!    (see *Origins and transfers* below), no esp-base chip profile
 //!    (`sys/board` is `NotFound`). `sys/info` reports [`Facts::chip`],
 //!    [`Facts::firmware`], the payload capacity, the status, the node id
-//!    and, with the runtime ([`Facts::runtime`]), [`RUNTIME_CAPS`].
+//!    and the capabilities of [`MANIFEST`] (none without the runtime,
+//!    [`Facts::runtime`]); `sys/manifest` answers [`MANIFEST`] (MF3).
 //! 3. The storage action is performed as the RP and ESP controllers do:
 //!    erase and write the inactive payload slot, activate it (a raised
 //!    `min_version` saved inside `PayloadStore::activate_with`, after the
@@ -147,7 +148,8 @@ use esp_base::trust_store::{PARTITION_LEN, Persisted, RECORD_LEN, TrustStore};
 use heapless::Vec;
 use middleware::fw_ota::BootInfo;
 use middleware::loader::trust::TrustState;
-use middleware::loader::{Caps, Loader, PayloadStatus, keys};
+use middleware::loader::manifest::{Groups, I2cBuses, ImuSource, Limits, Link, LinkKind, Manifest, MicSource};
+use middleware::loader::{Loader, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
@@ -176,12 +178,50 @@ fn trust_readable<F: NorFlash>(flash: &mut F, base: u32) -> bool {
     (0..2u32).all(|s| flash.read(base + s * SECTOR, &mut buf).is_ok())
 }
 
-/// The `sys/info` capabilities of a build with the runtime: requests on
-/// payload keys (`SERVE`), the FXOS8700CQ source route (`SOURCE_IMU`,
-/// SC7) and the microphone route (`SOURCE_MICROPHONE`, SC8).
-pub const RUNTIME_CAPS: Caps = Caps::SERVE
-    .with(Caps::SOURCE_IMU)
-    .with(Caps::SOURCE_MICROPHONE);
+/// What a build with the runtime offers payloads (`sys/manifest`, MF3),
+/// next to what `RtDevice` implements: GPIO, timers, the ADC, LPI2C1
+/// (bus 0), requests on payload keys (`SERVE`), the FXOS8700CQ source
+/// route (SC7: every ABI rate and range for the accelerometer alone,
+/// 50–400 Hz with the magnetometer, whose hybrid mode halves the output
+/// data rate) and the microphone route (SC8: the four [`AudioRate`]s,
+/// every mode, up to 30 dB); links LPUART1 and, as built, USB and Zenoh.
+/// Its [`Manifest::caps`] are what `sys/info` reports
+/// (`SERVE | SOURCE_IMU | SOURCE_MICROPHONE`).
+///
+/// [`AudioRate`]: crate::sensors::AudioRate
+pub const MANIFEST: Manifest = {
+    let m = Manifest::new(middleware::wasm_abi::ABI_VERSION)
+        .with_groups(
+            Groups::GPIO
+                .with(Groups::TIMERS)
+                .with(Groups::ADC)
+                .with(Groups::I2C)
+                .with(Groups::ROUTES)
+                .with(Groups::SERVE),
+        )
+        .with_i2c(I2cBuses {
+            buses: 1,
+            min_hz: *middleware::wasm_abi::periph::I2C_FREQ_HZ.start() as u32,
+            max_hz: *middleware::wasm_abi::periph::I2C_FREQ_HZ.end() as u32,
+        })
+        .with_imu(ImuSource {
+            rates: ImuSource::rates_mask(&[50, 100, 200, 400, 800]),
+            ranges: ImuSource::ALL.ranges,
+            mag_rates: ImuSource::rates_mask(&[50, 100, 200, 400]),
+        })
+        .with_mic(MicSource {
+            rates: 0b1111,
+            modes: 0b111,
+            max_gain_db: middleware::wasm_abi::route::MAX_MIC_GAIN_DB,
+        })
+        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+        .with_limits(Limits { routes: 2, ..Limits::ABI });
+    let m = if cfg!(feature = "usb") { m.with_link(Link { id: 1, kind: LinkKind::USB }) } else { m };
+    if cfg!(feature = "eth") { m.with_link(Link { id: 2, kind: LinkKind::ZENOH }) } else { m }
+};
+
+/// [`MANIFEST`] for a build without the runtime.
+pub const MANIFEST_NO_RUNTIME: Manifest = MANIFEST.without_runtime();
 
 /// What `sys/info` reports about this build, besides the store capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,11 +460,7 @@ impl<F: NorFlash> Service<F> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
-            caps: if facts.runtime {
-                RUNTIME_CAPS
-            } else {
-                Caps::NONE
-            },
+            manifest: Some(if facts.runtime { &MANIFEST } else { &MANIFEST_NO_RUNTIME }),
         };
         let svc = Service {
             state,

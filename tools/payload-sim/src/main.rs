@@ -335,6 +335,17 @@ impl Bench {
         let Some(n) = self.nodes.get_mut(i) else {
             return Ok(());
         };
+        // The board's shell answers `sys/manifest` (MF3), never the payload.
+        if k == middleware::loader::keys::MANIFEST {
+            let mut out = [0u8; middleware::loader::manifest::MANIFEST_MAX];
+            let node = wasm_host::Device::node_id(n.device()).unwrap_or(sim::DEFAULT_NODE);
+            let line = match sim::MANIFEST.with_node(node).encode(&mut out) {
+                Some(len) => sim::render_reply(key, Ok(&out[..len])),
+                None => sim::render_reply(key, Err(HandlerError::Internal)),
+            };
+            n.device().note(line);
+            return self.pump();
+        }
         let meta = RequestMeta::NONE.with_deadline_ms(sim::REQ_DEADLINE_MS);
         let mut reply = [0u8; sim::REQ_REPLY_CAP];
         let r = n.payload.request(k, body, &meta, &mut reply);
