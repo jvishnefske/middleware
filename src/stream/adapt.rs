@@ -158,6 +158,11 @@ impl AdapterState {
 
     fn apply(&mut self, b: &Batch<'_>, out: &mut [u8]) -> Result<Option<usize>, BatchError> {
         let h = b.header;
+        // Indices come from the network: a batch whose last index would
+        // pass u64::MAX is refused, so no index arithmetic below overflows.
+        if h.first_index.checked_add(u64::from(h.count)).is_none() {
+            return Err(BatchError::Mismatch);
+        }
         let mut data = [0u8; MAX_BATCH_DATA];
         match self.adapter {
             Adapter::PcmToMuLaw => {
@@ -197,23 +202,25 @@ impl AdapterState {
             Adapter::Decimate { factor } => {
                 let f = u64::from(factor);
                 let unit = h.unit_bytes();
-                let first = h.first_index.div_ceil(f) * f;
+                // The first unit whose index is a multiple of the factor, as
+                // an offset into the batch (no overflow: a remainder).
+                let offset = (f - h.first_index % f) % f;
                 let mut n: u16 = 0;
                 let mut at = 0;
-                let mut idx = first;
-                while idx < h.next_index() {
-                    let i = (idx - h.first_index) as usize;
-                    data[at..at + unit].copy_from_slice(&b.data[i * unit..(i + 1) * unit]);
+                // Bounded by the batch's count, not by index arithmetic.
+                for i in (offset..u64::from(h.count)).step_by(usize::from(factor)) {
+                    let i = i as usize;
+                    let src = b.data.get(i * unit..(i + 1) * unit).ok_or(BatchError::Truncated)?;
+                    data[at..at + unit].copy_from_slice(src);
                     at += unit;
                     n += 1;
-                    idx += f;
                 }
                 if n == 0 {
                     return Ok(None);
                 }
-                let skip_us = (first - h.first_index) * 1_000_000 / u64::from(h.rate_hz.max(1));
+                let skip_us = offset.saturating_mul(1_000_000) / u64::from(h.rate_hz.max(1));
                 let oh = BatchHeader {
-                    first_index: first / f,
+                    first_index: h.first_index.div_ceil(f),
                     timestamp_us: h.timestamp_us.saturating_add(skip_us),
                     count: n,
                     rate_hz: decimated_rate(h.rate_hz, factor),
@@ -251,7 +258,7 @@ impl AdapterState {
                 if !idx.is_multiple_of(blk) {
                     continue; // realigning to the next block
                 }
-                self.acc_ts = h.timestamp_us + i as u64 * 1_000_000 / rate;
+                self.acc_ts = h.timestamp_us.saturating_add(i as u64 * 1_000_000 / rate);
             }
             let m = v.unsigned_abs();
             self.acc_sum = self.acc_sum.saturating_add(u64::from(m) * u64::from(m));
@@ -396,6 +403,24 @@ mod tests {
         assert_eq!(feed(&mut a, &mic(0, &[1, 2])), None);
         assert_eq!(a.feed(b"junk", &mut out), None);
         assert_eq!(a.refused(), 2);
+    }
+
+    #[test]
+    fn ad2_indices_near_the_end_of_u64_are_refused_not_wrapped() {
+        let pcm: Vec<i16> = (0..10).collect();
+        for a in [Adapter::Decimate { factor: 4 }, Adapter::PcmToLevels { block: 2 }, Adapter::PcmToMuLaw] {
+            let mut s = AdapterState::new(a);
+            // The last index would pass u64::MAX: refused and counted.
+            let mut m = mic(0, &pcm);
+            m[8..16].copy_from_slice(&(u64::MAX - 3).to_le_bytes());
+            assert_eq!(feed(&mut s, &m), None, "{a:?}");
+            assert_eq!(s.refused(), 1, "{a:?}");
+            // Exactly up to the end is fine.
+            m[8..16].copy_from_slice(&(u64::MAX - 10).to_le_bytes());
+            m[16..24].copy_from_slice(&u64::MAX.to_le_bytes()); // timestamp
+            let _ = feed(&mut s, &m);
+            assert_eq!(s.refused(), 1, "{a:?}");
+        }
     }
 
     #[test]
