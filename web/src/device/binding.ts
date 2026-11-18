@@ -99,8 +99,10 @@ export async function installBinding(
     return plan;
   }
   if (!key) throw new TrustRefusal("no-local-key");
+  const node = (await client.info(opts)).node;
+  if (!node) throw new Error("the device reports no node id to sign the binding for");
   const bytes = proto.encodeBinding({ ...record, version: plan.version });
-  const message = proto.bindingMessage(bytes);
+  const message = proto.bindingMessage(bytes, node);
   const signature = new Uint8Array(
     await crypto.subtle.sign({ name: "Ed25519" }, key.privateKey, message.slice().buffer as ArrayBuffer),
   );

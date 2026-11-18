@@ -102,6 +102,9 @@ impl LinkId {
     pub const USB: LinkId = LinkId(1);
     /// Ethernet, the Zenoh session.
     pub const ZENOH: LinkId = LinkId(2);
+    /// The board itself: publications of its local channel sources
+    /// (`ch/...`), looped back to its payload. Never a real link.
+    pub const LOCAL: LinkId = LinkId(3);
     /// Every link id, in index order.
     pub const ALL: [LinkId; MAX_LINKS] = [LinkId(0), LinkId(1), LinkId(2), LinkId(3)];
 

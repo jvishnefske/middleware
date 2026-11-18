@@ -436,8 +436,8 @@ export interface Protocol {
   /** Encodes a binding record; throws for what a device would refuse. */
   encodeBinding(b: BindingRecord): Uint8Array;
   decodeBinding(record: Uint8Array): BindingRecord | undefined;
-  /** What a binding signature covers. */
-  bindingMessage(record: Uint8Array): Uint8Array;
+  /** What a binding signature covers, for the device with node id `node`. */
+  bindingMessage(record: Uint8Array, node: string): Uint8Array;
   /** A `sys/payload/bind` body, signed when a signature is given. */
   encodeBindBody(record: Uint8Array, signature?: Uint8Array): Uint8Array;
   /** Issues of a binding for a payload on a node (its `sys/manifest`). */
@@ -501,7 +501,7 @@ function wrap(): Protocol {
     withChannels: (wasm, section) => pkg.withChannels(wasm, section),
     encodeBinding: (b) => pkg.encodeBinding(b),
     decodeBinding: (record) => pkg.decodeBinding(record) as BindingRecord | undefined,
-    bindingMessage: (record) => pkg.bindingMessage(record),
+    bindingMessage: (record, node) => pkg.bindingMessage(record, node),
     encodeBindBody: (record, signature) => pkg.encodeBindBody(record, signature),
     checkBinding: (manifest, wasm, record) => pkg.checkBinding(manifest, wasm, record) as BindingIssue[],
     encodeDeviceInfo: (i) =>

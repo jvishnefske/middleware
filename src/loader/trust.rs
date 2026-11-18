@@ -631,18 +631,21 @@ mod verify {
             })
         }
 
-        /// Decides a `sys/payload/bind` (BD2). Unclaimed: accepted (TOFU;
-        /// a signature, if present, is ignored). Claimed: the binding's
-        /// version must be above `last`'s when `last` is for the same
-        /// image; a signed binding must verify against the pinned key over
-        /// [`binding_message`](crate::loader::binding::binding_message);
-        /// an unsigned one is accepted only when not `remote` (a serial
-        /// port: physical access, as for unsigned start and stop). Every
-        /// failure is `Denied`.
+        /// Decides a `sys/payload/bind` (BD2) on the device with node id
+        /// `own`. Unclaimed: accepted (TOFU; a signature, if present, is
+        /// ignored). Claimed: the binding's version must be above `last`'s
+        /// whatever image either is for (so no earlier binding can be
+        /// replayed, not even after a binding for another image); a signed
+        /// binding must verify against the pinned key over
+        /// [`binding_message`](crate::loader::binding::binding_message) for
+        /// `own`; an unsigned one is accepted only when not `remote` (a
+        /// serial port: physical access, as for unsigned start and stop).
+        /// Every failure is `Denied`.
         pub fn accept_binding(
             &self,
             request: &crate::loader::binding::BindRequest<'_>,
             last: Option<crate::loader::binding::BindingMark>,
+            own: crate::transport::SenderId,
             remote: bool,
         ) -> Result<(), HandlerError> {
             use crate::loader::binding::binding_message;
@@ -651,7 +654,7 @@ mod verify {
             };
             let denied = HandlerError::Denied;
             let b = &request.binding;
-            if last.is_some_and(|m| m.image_sha256 == b.image_sha256 && b.version <= m.version) {
+            if last.is_some_and(|m| b.version <= m.version) {
                 return Err(denied);
             }
             match request.auth {
@@ -659,7 +662,7 @@ mod verify {
                 None => Ok(()),
                 Some(auth) => {
                     let record = crate::loader::sha256::ImageHash::digest(request.record);
-                    let message = binding_message(&b.image_sha256, auth.version, &record);
+                    let message = binding_message(own, &b.image_sha256, auth.version, &record);
                     if verify_signature(key, &message, &auth.signature) {
                         Ok(())
                     } else {
@@ -967,6 +970,7 @@ mod tests {
         use super::vector;
         use crate::loader::ImageDigest;
         use crate::loader::sha256::ImageHash;
+        use crate::transport::SenderId;
         use ed25519_dalek::{Signer, SigningKey};
 
         fn signer() -> SigningKey {
@@ -1000,6 +1004,9 @@ mod tests {
             }
         }
 
+        /// The device the BD2 bindings are signed for.
+        const NODE: SenderId = SenderId([4; 8]);
+
         /// BD2: a binding request with `auth` signed by `s` (or unsigned).
         fn bind_body(
             s: Option<&SigningKey>,
@@ -1017,7 +1024,12 @@ mod tests {
             let n = b.encode(&mut out).unwrap();
             let mut body = out[..n].to_vec();
             if let Some(s) = s {
-                let m = binding_message(&image, Version(version), &ImageHash::digest(&out[..n]));
+                let m = binding_message(
+                    NODE,
+                    &image,
+                    Version(version),
+                    &ImageHash::digest(&out[..n]),
+                );
                 let auth = SignedBinding {
                     version: Version(version),
                     signature: Signature(s.sign(&m).to_bytes()),
@@ -1032,7 +1044,7 @@ mod tests {
             use crate::loader::binding::{BindRequest, BindingMark};
             let t = claimed(0);
             let accept = |body: &[u8], last: Option<BindingMark>, remote: bool| {
-                t.accept_binding(&BindRequest::parse(body).unwrap(), last, remote)
+                t.accept_binding(&BindRequest::parse(body).unwrap(), last, NODE, remote)
             };
             let signed = bind_body(Some(&signer()), [1; 32], 5, "a/b");
             assert_eq!(accept(&signed, None, true), Ok(()));
@@ -1046,12 +1058,22 @@ mod tests {
             assert_eq!(accept(&signed, mark(5), false), Err(HandlerError::Denied));
             assert_eq!(accept(&signed, mark(6), true), Err(HandlerError::Denied));
             assert_eq!(accept(&signed, mark(4), true), Ok(()));
-            // Another image's binding starts over.
-            let other = Some(BindingMark {
-                image_sha256: [2; 32],
-                version: Version(9),
-            });
-            assert_eq!(accept(&signed, other, true), Ok(()));
+            // Versions rise across images: no replay after another
+            // image's binding either.
+            let other = |v: u32| {
+                Some(BindingMark {
+                    image_sha256: [2; 32],
+                    version: Version(v),
+                })
+            };
+            assert_eq!(accept(&signed, other(9), true), Err(HandlerError::Denied));
+            assert_eq!(accept(&signed, other(4), true), Ok(()));
+            // Signed for another device.
+            let r = BindRequest::parse(&signed).unwrap();
+            assert_eq!(
+                t.accept_binding(&r, None, SenderId([9; 8]), true),
+                Err(HandlerError::Denied)
+            );
             // Another key, a tampered record, unsigned over a network.
             let mallory = bind_body(Some(&SigningKey::from_bytes(&[42; 32])), [1; 32], 5, "a/b");
             assert_eq!(accept(&mallory, None, false), Err(HandlerError::Denied));
@@ -1066,7 +1088,7 @@ mod tests {
             // Unclaimed takes anything.
             let open = TrustState::Unclaimed;
             assert_eq!(
-                open.accept_binding(&BindRequest::parse(&mallory).unwrap(), mark(9), true),
+                open.accept_binding(&BindRequest::parse(&mallory).unwrap(), mark(9), NODE, true),
                 Ok(())
             );
         }
