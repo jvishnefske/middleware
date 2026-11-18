@@ -45,7 +45,7 @@ describe("channel bindings", () => {
     );
     const bytes = proto.encodeBinding(b);
     expect(proto.decodeBinding(bytes)).toEqual(b);
-    expect(proto.bindingMessage(bytes).length).toBe(14 + 32 + 4 + 32);
+    expect(proto.bindingMessage(bytes, NODE).length).toBe(14 + 8 + 32 + 4 + 32);
     expect(proto.encodeBindBody(bytes, new Uint8Array(64)).length).toBe(bytes.length + 68);
     expect(() => proto.encodeBinding(setTarget(b, "audio", { kind: "key", key: "sys/info" }))).toThrow();
     expect(describeTarget(b.entries[0].target)).toBe("microphone 16000 Hz levels, gain 20 dB");

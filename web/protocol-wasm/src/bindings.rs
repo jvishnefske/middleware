@@ -2646,16 +2646,21 @@ pub fn decode_binding(record: &[u8]) -> Option<Object> {
     Some(o)
 }
 
-/// The message a binding signature covers ([`binding_message`]): the
-/// record's image and version and its SHA-256.
+/// The message a binding signature covers ([`binding_message`]) for the
+/// device with node id `node` (16 hex digits, as `sys/info` reports it):
+/// the node, the record's image and version and the record's SHA-256.
 ///
 /// [`binding_message`]: middleware::loader::binding::binding_message
 #[wasm_bindgen(js_name = bindingMessage)]
-pub fn binding_message(record: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn binding_message(record: &[u8], node: &str) -> Result<Vec<u8>, JsError> {
     let b = middleware::loader::binding::Binding::decode(record)
         .map_err(|e| js_err(&format!("{e:?}")))?;
+    let node = parse_node(node).ok_or_else(|| js_err("a node id is 16 hex digits"))?;
     let sha = middleware::loader::sha256::ImageHash::digest(record);
-    Ok(middleware::loader::binding::binding_message(&b.image_sha256, b.version, &sha).to_vec())
+    Ok(
+        middleware::loader::binding::binding_message(node, &b.image_sha256, b.version, &sha)
+            .to_vec(),
+    )
 }
 
 /// A `sys/payload/bind` body: `record`, then with a 64-byte `signature`

@@ -461,9 +461,10 @@ pub fn handle_request<'a>(
             // version above the stored one for the same image; over a
             // network (`staging`) never unsigned (BD2).
             #[cfg(feature = "trust")]
+            let own = ctx.node.unwrap_or(SenderId([0; 8]));
             if let Err(e) = state
                 .trust
-                .accept_binding(&request, state.binding, ctx.staging)
+                .accept_binding(&request, state.binding, own, ctx.staging)
             {
                 return Outcome::reply(state, Err(e));
             }
@@ -603,7 +604,9 @@ fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32, staging: bool) -
     }
 }
 
-/// Whether a publication from the host on `key` goes to the payload.
+/// Whether a publication from the host on `key` goes to the payload: not
+/// a system key, and not a node-internal channel key (`ch/...`, BD4),
+/// which only this node's own local sources publish, never a link.
 pub fn route_publication<'s>(
     state: &State,
     key: Key<'_>,
@@ -611,6 +614,7 @@ pub fn route_publication<'s>(
 ) -> bool {
     state.status == PayloadStatus::Running
         && !is_system_key(key)
+        && !middleware::loader::binding::is_internal_key(key)
         && subscriptions.any(|s| s == key.as_str())
 }
 
@@ -819,7 +823,7 @@ mod tests {
             );
         }
         // Claimed: unsigned over a network is denied; over serial a version
-        // not above the stored one for the same image is denied.
+        // not above the stored one is denied.
         let claimed = s.with_trust(TrustState::Claimed {
             key: PublicKey::Ed25519([9; 32]),
             min_version: Version(0),
@@ -847,8 +851,13 @@ mod tests {
             req(stored, keys::BIND, &bind_record([1; 32], 4)).action,
             Action::Bind { .. }
         ));
+        // Versions rise across images: no replay after another image's.
+        assert_eq!(
+            req(stored, keys::BIND, &bind_record([2; 32], 1)).reply,
+            Err(HandlerError::Denied)
+        );
         assert!(matches!(
-            req(stored, keys::BIND, &bind_record([2; 32], 1)).action,
+            req(stored, keys::BIND, &bind_record([2; 32], 5)).action,
             Action::Bind { .. }
         ));
     }
@@ -1149,6 +1158,13 @@ mod tests {
         ));
         let sys = ["sys/log"];
         assert!(!route_publication(&running, keys::LOG, sys.iter().copied()));
+        // A node-internal channel key never comes from a link (BD4).
+        let ch = ["ch/audio"];
+        assert!(!route_publication(
+            &running,
+            Key::from_static("ch/audio"),
+            ch.iter().copied()
+        ));
     }
 
     const STAGING: Context<'static> = Context {
