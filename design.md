@@ -6060,7 +6060,8 @@ takes publications only from `node`, as the link reports the sender.
   refused); the RT1050 forwards them from its serial links over Zenoh
   (`ZenohLite::request_with` targeted at the node, 2 s) and answers
   `Unavailable` without a session or an answer; over Zenoh itself
-  `sys/peer/...` and `sys/peers` are refused — `middleware`
+  `sys/peer/...` and `sys/peers` are refused by the gate (the controller
+  answers them only for serial links) — `middleware`
   `loader::peers::tests::pr1_only_read_only_keys_of_other_nodes_are_forwarded`;
   firmware-imxrt `zenoh_mgmt::tests::pr1_no_forwarding_from_the_network`.
 - [x] PR2 `sys/peers` is `[n][id 8]*n` of at most sixteen nodes, newest
@@ -6071,7 +6072,11 @@ takes publications only from `node`, as the link reports the sender.
 - [x] PR3 A remote channel delivers only what its node sent
   (`Payload::deliver_from`; an unknown sender is refused); its output
   publishes normally; the RT1050 passes each Zenoh sample's sender,
-  payload-sim the `--peer` board's node id — `wasm-host`
+  payload-sim the `--peer` board's node id. This is routing, not
+  authentication: the sender is what the link reports, over Zenoh the
+  publisher's own attachment, which nothing verifies (as `sys/peers` is
+  what was heard). A channel whose data must be trusted needs a link that
+  authenticates its peers — `wasm-host`
   `channels::tests::ch5_the_table_opens_inputs_by_slot_and_outputs_by_handle`,
   `tests/abi7.rs` `pr3_a_remote_channel_takes_its_node_only`; payload-sim
   `tests/abi7.rs` `pr3_a_remote_channel_takes_the_named_node_only`.

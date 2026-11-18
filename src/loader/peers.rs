@@ -16,7 +16,8 @@
 //! * **`sys/peers`** ([`PeerSet`]): the node ids the board has heard,
 //!   from the senders of the samples it received and the nodes that
 //!   answered forwarded requests, newest last, at most [`MAX_PEERS`]
-//!   (the oldest is forgotten). The reply is `[n u8]` then `n` ids of 8
+//!   (the oldest is forgotten). Heard, not verified: a sample's sender is
+//!   what its publisher wrote in its attachment. The reply is `[n u8]` then `n` ids of 8
 //!   bytes ([`PeerSet::encode`], [`decode`]).
 
 use super::keys;
