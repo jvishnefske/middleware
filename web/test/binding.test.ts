@@ -150,3 +150,25 @@ describe("remote channels through the board (PR4)", () => {
     expect(heard).toEqual(["unit lab/level"]);
   });
 });
+
+describe("adapters (AD3)", () => {
+  it("checks and runs PCM through the levels adapter for a levels channel", async () => {
+    const wasm = await payload();
+    const manifest = proto.simulatorManifest(NODE)!;
+    const pcm = { kind: "local" as const, source: "mic" as const, rateHz: 16000, gainDb: 0, mode: "pcm" as const, units: 160, block: 0 };
+    const record = setTarget(
+      setTarget({ imageSha256: SHA, version: 1, entries: [] }, "audio", { kind: "adapted", adapter: { kind: "pcmToLevels", block: 160 }, inner: pcm }),
+      "level",
+      { kind: "key", key: "lab/level" },
+    );
+    expect(bindingIssues(proto, manifest, wasm, record)).toEqual([]);
+    const wrong = setTarget(record, "audio", { kind: "adapted", adapter: { kind: "pcmToMuLaw" }, inner: pcm });
+    expect(bindingIssues(proto, manifest, wasm, wrong)[0].message).toMatch(/does not take what PcmToMuLaw makes/);
+    const events: SimEvent[] = [];
+    const sim = proto.newSimulator(wasm, (e) => events.push(e), NODE, proto.encodeBinding(record));
+    for (let ms = 10; ms <= 100; ms += 10) sim.step(ms * 1000);
+    const out = events.filter((e) => e.kind === "publish" && e.key === "lab/level");
+    expect(out.length).toBeGreaterThanOrEqual(5);
+    expect(describeTarget(record.entries[0].target)).toBe("microphone 16000 Hz pcm, gain 0 dB → pcmToLevels");
+  });
+});

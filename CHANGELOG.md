@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Stream adapters (AD1–AD4)
+- `stream::adapt` (pure, stateful): `PcmToLevels { block }` (2..=4096, blocks aligned from sample 0 across batches, a gap realigns), `PcmToMuLaw`, `Decimate { factor }`, `ImuToMagnitude`; `Adapter::output` maps stream shapes; loss passes through as index gaps.
+- wasm-host resolves `Target::Adapted` (a local source must fit after the adapter, `BindError::Adapter`) and runs the adapter on delivery before `on_message`.
+- The sample batch format admits a one-channel IMU stream (the magnitude) in Rust and the web decoder.
+- Breaking (behaviour): `stream::samples::mulaw_encode` now follows the reference `g711.c` (as the RT1050 always did): a negative sample rounds toward −∞, so −1 encodes to 0x7E. The RT1050's `sensors::audio` uses middleware's levels and µ-law.
+- protocol-wasm `checkBinding` checks adapters against their source and the channel.
+
 ### Peers through the connected board (PR1–PR5)
 - `loader::peers`: `sys/peer/<id16>/{info,manifest,board}` keys that a board forwards to another node (`peer_key`, `forwardable`), `PeerSet` and the `sys/peers` reply; `keys::PEERS`.
 - RT1050: serial requests on those keys are asked over Zenoh (`ZenohLite::request_with` to the node) and the reply relayed; `sys/peers` from sample senders and forwarded replies; both refused over Zenoh.
