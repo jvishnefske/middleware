@@ -85,10 +85,38 @@ export interface BoardInfo {
   pwmPins: number[];
 }
 
+/** A decoded `sys/manifest` body (MF4): what a node offers payloads. */
+export interface Manifest {
+  version: number;
+  abi: number;
+  /** Node id as 16 hex digits, when the node sent one. */
+  node?: string;
+  /** Import groups served (bitmask) and their names: "gpio", "timers", "irq",
+   * "spi", "uart", "dma", "pwm", "adc", "i2c", "routes", "serve", "bridge",
+   * "channels". */
+  groups: number;
+  groupNames: string[];
+  i2c?: { buses: number; minHz: number; maxHz: number };
+  spi?: { buses: number };
+  /** IMU source: rates for 3-channel samples, ranges in ±g, rates with the
+   * magnetometer (empty: none). */
+  imu?: { ratesHz: number[]; rangesG: number[]; magRatesHz: number[] };
+  /** Microphone source: rates, modes ("levels", "mulaw", "pcm"), highest gain. */
+  mic?: { ratesHz: number[]; modes: string[]; maxGainDb: number };
+  /** Frame sources: kinds ("testPattern", "camera"), formats ("rgb565", "jpeg"). */
+  frames?: { kinds: string[]; formats: string[]; maxWidth: number; maxHeight: number };
+  sinkSpi?: { maxFrame: number };
+  links: { id: number; kind: number; kindName: string }[];
+  limits?: { routes: number; subscriptions: number; channels: number; maxMessage: number };
+  /** The `sys/info` capability bits the manifest implies, and their names. */
+  caps: number;
+  capNames: string[];
+}
+
 export interface LoaderStepResult {
   statusCode: number;
   status: string;
-  action?: "app" | "info" | "board" | "start" | "stop" | "erase" | "write" | "activate";
+  action?: "app" | "info" | "board" | "manifest" | "start" | "stop" | "erase" | "write" | "activate";
   offset?: number;
   data?: Uint8Array;
   len?: number;
@@ -102,6 +130,7 @@ export interface ProtocolConstants {
   keys: {
     info: string;
     board: string;
+    manifest: string;
     begin: string;
     chunk: string;
     commit: string;
@@ -343,6 +372,10 @@ export interface Protocol {
   decodeDeviceInfo(data: Uint8Array): DeviceInfo | undefined;
   encodeDeviceInfo(info: Omit<DeviceInfo, "statusName" | "caps" | "capNames" | "serves"> & { caps?: number }): Uint8Array;
   decodeBoardInfo(data: Uint8Array): BoardInfo | undefined;
+  decodeManifest(data: Uint8Array): Manifest | undefined;
+  /** The browser simulator's `sys/manifest` body with `node` (16 hex digits)
+   * as its node id; undefined without the simulator or for a bad node. */
+  simulatorManifest(node: string): Uint8Array | undefined;
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
   readonly constants: ProtocolConstants;
@@ -394,6 +427,8 @@ function wrap(): Protocol {
     uploadPlan: (image, chunk) => pkg.uploadPlan(image, chunk ?? constants.chunkMax) as UploadStep[],
     decodeDeviceInfo: (data) => pkg.decodeDeviceInfo(data) as DeviceInfo | undefined,
     decodeBoardInfo: (data) => pkg.decodeBoardInfo(data) as BoardInfo | undefined,
+    decodeManifest: (data) => pkg.decodeManifest(data) as Manifest | undefined,
+    simulatorManifest: (node) => pkg.simulatorManifest?.(node) ?? undefined,
     encodeDeviceInfo: (i) =>
       pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware, i.node, i.caps),
     payloadStatusName: pkg.payloadStatusName,

@@ -210,6 +210,26 @@ mod tests {
     use super::*;
     use esp_base::image::Region as Slots;
 
+    /// MF3: the manifest's buses are the pin map's, and it lists no
+    /// source `RpDevice` lacks (it keeps the default `route_samples`).
+    #[test]
+    fn mf3_the_manifest_agrees_with_the_pin_map() {
+        use crate::service::{MANIFEST, MANIFEST_NO_RUNTIME};
+        use middleware::loader::Caps;
+        use middleware::wasm_abi::route::{ImuConfig, SampleSource};
+        for p in [RP2040, RP2350] {
+            let buses = MANIFEST.i2c.unwrap().buses;
+            assert!((0..buses).all(|b| p.i2c_pins(b).is_ok()));
+            assert!(p.i2c_pins(buses).is_err());
+            assert!((0..p.gpio_count).any(|q| p.adc_channel(q).is_ok()));
+        }
+        let imu = SampleSource::Imu(ImuConfig::new(100, 2, false, 10).unwrap());
+        assert!(!MANIFEST.accepts_samples(&imu));
+        assert!(MANIFEST.frames.is_none() && MANIFEST.sink_spi.is_none());
+        assert_eq!(MANIFEST.caps(), Caps::SERVE);
+        assert_eq!(MANIFEST_NO_RUNTIME.caps(), Caps::NONE);
+    }
+
     #[test]
     fn v8_pins_follow_the_pico_board_map() {
         for p in [RP2040, RP2350] {

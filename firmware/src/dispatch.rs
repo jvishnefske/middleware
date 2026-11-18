@@ -9,8 +9,10 @@
 //!
 //! | request              | condition            | action     | status after |
 //! |----------------------|----------------------|------------|--------------|
-//! | `sys/info`           | —                    | none       | unchanged (ends with [`Context::node`] and [`Context::caps`]) |
+//! | `sys/info`           | —                    | none       | unchanged (ends with [`Context::node`] and the manifest's [`Caps`]) |
 //! | `sys/board`          | —                    | none (reply [`Profile::board_info`]) | unchanged |
+//! | `sys/manifest`       | [`Context::manifest`] | none (reply the manifest with [`Context::node`]) | unchanged |
+//! | `sys/manifest`       | no manifest          | none (`NotFound`) | unchanged |
 //! | `sys/loader/begin`   | fits                 | `Erase { stop: true }` | `Loading` |
 //! | `sys/loader/begin`   | fits, [`Context::staging`] | `Erase { stop: false }` | unchanged |
 //! | `sys/loader/chunk`   | in order, fits       | `Write`    | unchanged    |
@@ -83,6 +85,7 @@
 
 use middleware::Key;
 use middleware::loader::trust::{ControlCounter, TrustState};
+use middleware::loader::manifest::Manifest;
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
 use middleware::transport::{HandlerError, Request, SenderId};
 use middleware::wasm_abi::ABI_VERSION;
@@ -116,11 +119,22 @@ pub struct Context<'a> {
     /// at the end of `sys/info`; the id its radio frames carry as sender.
     /// `None` leaves it out (a pre-0.5 response).
     pub node: Option<SenderId>,
-    /// What the firmware can do beyond its ABI, sent after the node id
-    /// ([`Caps::SERVE`] when the shell routes requests on served keys to
-    /// the payload, [`crate::serve`]). Needs `node`: `sys/info` answers
-    /// `BufferTooSmall` for capabilities without one.
-    pub caps: Caps,
+    /// What the node offers payloads (`sys/manifest`, MF1–MF5): built
+    /// from consts next to the board's `Device` implementation, with
+    /// [`Manifest::without_runtime`] for a build without the runtime. The
+    /// `sys/info` capability bits are [`Manifest::caps`] (none without a
+    /// manifest), so the two never disagree; they follow the node id, so
+    /// `sys/info` answers `BufferTooSmall` for capabilities without one.
+    /// `sys/manifest` carries [`Context::node`] whatever the manifest's
+    /// own node says.
+    pub manifest: Option<&'a Manifest>,
+}
+
+impl Context<'_> {
+    /// The `sys/info` capability bits: the manifest's.
+    pub fn caps(&self) -> Caps {
+        self.manifest.map_or(Caps::NONE, Manifest::caps)
+    }
 }
 
 /// Dispatcher state: loader progress and payload status.
@@ -388,7 +402,7 @@ pub fn handle_request<'a>(
                 chip: ctx.chip,
                 firmware: ctx.firmware,
                 node: ctx.node,
-                caps: ctx.caps,
+                caps: ctx.caps(),
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
@@ -396,6 +410,16 @@ pub fn handle_request<'a>(
             Some(profile) => {
                 let board = profile.board_info(ABI_VERSION);
                 Outcome::reply(state, board.encode(out).ok_or(HandlerError::BufferTooSmall))
+            }
+            None => Outcome::reply(state, Err(HandlerError::NotFound)),
+        },
+        Command::Manifest => match ctx.manifest {
+            Some(m) => {
+                let m = match ctx.node {
+                    Some(node) => m.with_node(node),
+                    None => m.without_node(),
+                };
+                Outcome::reply(state, m.encode(out).ok_or(HandlerError::BufferTooSmall))
             }
             None => Outcome::reply(state, Err(HandlerError::NotFound)),
         },
@@ -549,8 +573,10 @@ mod tests {
     use super::*;
     use middleware::crc::Crc32;
     use middleware::loader::keys;
+    use middleware::loader::manifest::Groups;
 
     const NODE: SenderId = SenderId::from_mac([0x24, 0x6F, 0x28, 0xAB, 0xCD, 0xEF]);
+    const SERVE: Manifest = Manifest::new(ABI_VERSION).with_groups(Groups::SERVE);
     const CTX: Context<'static> = Context {
         chip: "esp32c3",
         firmware: "0.1.0",
@@ -560,7 +586,7 @@ mod tests {
         rekey_window: false,
         staging: false,
         node: Some(NODE),
-        caps: Caps::SERVE,
+        manifest: Some(&SERVE),
     };
 
     fn req<'a>(state: State, key: Key<'a>, body: &'a [u8]) -> Outcome<'a> {
@@ -598,7 +624,7 @@ mod tests {
         assert_eq!(&out[n - 4..n], &[1, 0, 0, 0]);
         let without = Context {
             node: None,
-            caps: Caps::NONE,
+            manifest: None,
             ..CTX
         };
         let m = handle_request(
@@ -644,7 +670,7 @@ mod tests {
         assert_eq!(info.caps, Caps::SERVE);
         // A shell that does not route requests reports no capability.
         let plain = Context {
-            caps: Caps::NONE,
+            manifest: None,
             ..CTX
         };
         let n = handle_request(
@@ -664,6 +690,37 @@ mod tests {
             &mut tiny,
         );
         assert_eq!(o.reply, Err(HandlerError::BufferTooSmall));
+    }
+
+    #[test]
+    fn mf3_manifest_carries_the_node_and_agrees_with_info() {
+        let mut out = [0u8; 512];
+        let s = State::boot(true);
+        let o = handle_request(s, &CTX, &Request::new(keys::MANIFEST, &[]), &mut out);
+        assert_eq!((o.state, o.action), (s, Action::None));
+        let m = Manifest::decode(&out[..o.reply.unwrap()]).unwrap();
+        assert_eq!(m, SERVE.with_node(NODE));
+        let n = handle_request(s, &CTX, &Request::new(keys::INFO, &[]), &mut out)
+            .reply
+            .unwrap();
+        assert_eq!(DeviceInfo::decode(&out[..n]).unwrap().caps, m.caps());
+        assert_eq!(
+            req(s, keys::MANIFEST, b"x").reply,
+            Err(HandlerError::InvalidRequest)
+        );
+        let mut tiny = [0u8; 4];
+        assert_eq!(
+            handle_request(s, &CTX, &Request::new(keys::MANIFEST, &[]), &mut tiny).reply,
+            Err(HandlerError::BufferTooSmall)
+        );
+        let none = Context {
+            manifest: None,
+            ..CTX
+        };
+        assert_eq!(
+            handle_request(s, &none, &Request::new(keys::MANIFEST, &[]), &mut out).reply,
+            Err(HandlerError::NotFound)
+        );
     }
 
     #[test]

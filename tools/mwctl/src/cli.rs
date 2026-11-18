@@ -15,7 +15,7 @@
 //!
 //! `--zenoh <ENDPOINT>` (connect) or `--zenoh-listen <ENDPOINT>` with
 //! `--node <ID>` sends the command to that board over a Zenoh session
-//! instead of a port (mwctl built with feature `zenoh`): `info`, `board`,
+//! instead of a port (mwctl built with feature `zenoh`): `info`, `board`, `manifest`,
 //! `trust info`, `request`, `upload`, `start`, `stop` and `fw *`. There
 //! `upload`, `start`, `stop`, `fw update`, `fw reboot`, `fw confirm` and
 //! `fw abort` need a key (signed commits, signed control requests for the
@@ -51,6 +51,9 @@ COMMANDS:
     info                       Print chip, firmware, ABI, capacity and payload status
     board                      Print the board description (sys/board): pin classes,
                                PWM pins, limits; firmware 0.6 or later
+    manifest                   Print what the node offers payloads (sys/manifest):
+                               import groups, buses, sources and their rates, links,
+                               limits
     upload <FILE.wasm>         Install a payload (sys/loader begin/chunk/commit)
         --key <KEYFILE>            sign the commit (Ed25519); without it the commit is
                                    unsigned, which only an unclaimed device accepts
@@ -238,6 +241,8 @@ pub enum Cmd {
     Info,
     /// `board`.
     Board,
+    /// `manifest`.
+    Manifest,
     /// `upload`.
     Upload {
         /// Payload image.
@@ -680,6 +685,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let cmd = match name.as_str() {
         "info" => Cmd::Info,
         "board" => Cmd::Board,
+        "manifest" => Cmd::Manifest,
         "upload" => Cmd::Upload {
             file: PathBuf::from(pos.next().ok_or("upload needs a .wasm file")?),
             start,
@@ -1112,6 +1118,7 @@ mod tests {
     fn parses_trust_key_and_signed_upload_commands() {
         assert_eq!(run("--port p trust info").cmd, Cmd::TrustInfo);
         assert_eq!(run("--port p board").cmd, Cmd::Board);
+        assert_eq!(run("--port p manifest").cmd, Cmd::Manifest);
         assert_eq!(
             run("trust claim --key k.key --port p").cmd,
             Cmd::TrustClaim {

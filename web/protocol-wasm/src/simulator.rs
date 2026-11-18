@@ -94,6 +94,37 @@ pub const MAX_DISPATCH_PER_STEP: usize = MAX_EVENTS;
 /// default too).
 pub const DEFAULT_NODE: SenderId = SenderId([0, 0, 0, 0, 0, 0, 0, 1]);
 
+/// What the browser's simulated board offers payloads (`sys/manifest`,
+/// MF3), next to [`SimDevice`]: GPIO with interrupts, timers, SPI and the
+/// UART with DMA, PWM, the ADC, requests on payload keys and the fake IMU
+/// and microphone at every config the ABI allows ([`MAX_ROUTES`] routes);
+/// no I2C, no frame routes, no bridges; one serial link (the page).
+pub const MANIFEST: middleware::loader::manifest::Manifest = {
+    use middleware::loader::manifest::*;
+    Manifest::new(middleware::wasm_abi::ABI_VERSION)
+        .with_groups(
+            Groups::GPIO
+                .with(Groups::IRQ)
+                .with(Groups::TIMERS)
+                .with(Groups::SPI)
+                .with(Groups::UART)
+                .with(Groups::DMA)
+                .with(Groups::PWM)
+                .with(Groups::ADC)
+                .with(Groups::ROUTES)
+                .with(Groups::SERVE),
+        )
+        .with_spi(SpiBuses { buses: middleware::wasm_abi::periph::SPI_BUSES as u8 })
+        .with_imu(ImuSource::ALL)
+        .with_mic(MicSource {
+            rates: 0b1111,
+            modes: 0b111,
+            max_gain_db: middleware::wasm_abi::route::MAX_MIC_GAIN_DB,
+        })
+        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+        .with_limits(Limits::ABI)
+};
+
 /// The reply buffer [`Simulator::request`] offers (the ABI's maximum).
 pub const REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
 
@@ -840,6 +871,34 @@ impl Simulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MF3: every sample config the manifest lists starts a route on the
+    /// simulated board, and what it leaves out the board refuses.
+    #[test]
+    fn mf3_the_manifest_agrees_with_the_simulated_board() {
+        use middleware::wasm_abi::route::{
+            AudioMode, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig, Source, SourceConfig,
+        };
+        use wasm_host::I2cConfig;
+        let key = Key::from_static("s");
+        for rate in IMU_RATES_HZ {
+            let cfg = ImuConfig::new(rate, 4, true, 10).unwrap();
+            assert!(MANIFEST.imu.unwrap().accepts(&cfg));
+            assert!(SimDevice::new().route_samples(SampleSource::Imu(cfg), key).is_ok());
+        }
+        for rate in MIC_RATES_HZ {
+            let cfg = MicConfig::new(rate, 0, AudioMode::Levels, 4, 1024).unwrap();
+            assert!(MANIFEST.mic.unwrap().accepts(&cfg));
+            assert!(SimDevice::new().route_samples(SampleSource::Microphone(cfg), key).is_ok());
+        }
+        let mut d = SimDevice::new();
+        assert!(MANIFEST.i2c.is_none());
+        assert!(d.i2c_open(I2cConfig { bus: 0, freq_hz: 100_000 }).is_err());
+        assert!(MANIFEST.frames.is_none());
+        let cfg = SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap();
+        assert!(d.route_source(Source::TestPattern, key, cfg).is_err());
+        assert_eq!(MANIFEST.limits.unwrap().routes as usize, MAX_ROUTES);
+    }
 
     #[test]
     fn device_records_events_and_reads_virtual_pins() {

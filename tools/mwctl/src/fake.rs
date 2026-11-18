@@ -102,6 +102,7 @@ pub struct FakeDevice {
     trust: TrustState,
     rekey_open: bool,
     board: Option<Vec<u8>>,
+    manifest: Option<Vec<u8>>,
     fw: Option<Fw>,
     net: Vec<NetAddr>,
     gone: bool,
@@ -214,9 +215,19 @@ impl FakeDevice {
             trust: TrustState::Unclaimed,
             rekey_open: false,
             board: None,
+            manifest: None,
             fw: None,
             net: Vec::new(),
             gone: false,
+        }
+    }
+
+    /// Answers `sys/manifest` with `body`; without it the key is
+    /// `NotFound`, as on firmware without a manifest.
+    pub fn with_manifest(self, body: Vec<u8>) -> Self {
+        FakeDevice {
+            manifest: Some(body),
+            ..self
         }
     }
 
@@ -439,6 +450,13 @@ impl FakeDevice {
             }
             .encode(out)
             .ok_or(HandlerError::BufferTooSmall),
+            Command::Manifest => {
+                let body = self.manifest.as_deref().ok_or(HandlerError::NotFound)?;
+                out.get_mut(..body.len())
+                    .ok_or(HandlerError::BufferTooSmall)?
+                    .copy_from_slice(body);
+                Ok(body.len())
+            }
             Command::Board => {
                 let body = self.board.as_deref().ok_or(HandlerError::NotFound)?;
                 out.get_mut(..body.len())

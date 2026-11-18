@@ -8,6 +8,7 @@
 //! |---------------------|---------------------------------|--------------------|
 //! | `sys/info`          | empty                           | [`DeviceInfo`]     |
 //! | `sys/board`         | empty                           | [`BoardInfo`]      |
+//! | `sys/manifest`      | empty                           | [`manifest::Manifest`] |
 //! | `sys/loader/begin`  | `[len u32 LE][crc32 u32 LE]`    | empty              |
 //! | `sys/loader/chunk`  | `[offset u32 LE][≤CHUNK_MAX bytes]` | empty          |
 //! | `sys/loader/commit` | empty, or `[version u32 LE][signature 64]` | empty   |
@@ -43,6 +44,7 @@
 //! signature in the commit body is parsed and passed on, never checked.
 //! [`sha256`] itself is always built (the rpc responder cache uses it).
 
+pub mod manifest;
 pub mod sha256;
 pub mod trust;
 
@@ -63,6 +65,8 @@ pub mod keys {
     pub const INFO: Key<'static> = Key::from_static("sys/info");
     /// Board description request (pin classes, limits).
     pub const BOARD: Key<'static> = Key::from_static("sys/board");
+    /// Node manifest request ([`super::manifest`]).
+    pub const MANIFEST: Key<'static> = Key::from_static("sys/manifest");
     /// Starts a transfer.
     pub const BEGIN: Key<'static> = Key::from_static("sys/loader/begin");
     /// Carries one chunk.
@@ -92,6 +96,8 @@ pub enum Command<'a> {
     Info,
     /// `sys/board`.
     Board,
+    /// `sys/manifest`.
+    Manifest,
     /// `sys/loader/begin`.
     Begin {
         /// Total image length in bytes.
@@ -145,6 +151,7 @@ impl<'a> Command<'a> {
         match key.as_str() {
             k if k == keys::INFO.as_str() => empty(Command::Info),
             k if k == keys::BOARD.as_str() => empty(Command::Board),
+            k if k == keys::MANIFEST.as_str() => empty(Command::Manifest),
             k if k == keys::COMMIT.as_str() => Ok(Some(Command::Commit {
                 auth: SignedCommit::parse_body(body)?,
             })),
@@ -180,6 +187,7 @@ impl<'a> Command<'a> {
         match self {
             Command::Info => keys::INFO,
             Command::Board => keys::BOARD,
+            Command::Manifest => keys::MANIFEST,
             Command::Begin { .. } => keys::BEGIN,
             Command::Chunk { .. } => keys::CHUNK,
             Command::Commit { .. } => keys::COMMIT,
@@ -216,6 +224,7 @@ impl<'a> Command<'a> {
             }
             Command::Info
             | Command::Board
+            | Command::Manifest
             | Command::Commit { auth: None }
             | Command::Start
             | Command::Stop
@@ -382,6 +391,7 @@ impl Loader {
             (
                 Command::Info
                 | Command::Board
+                | Command::Manifest
                 | Command::Start
                 | Command::Stop
                 | Command::TrustInfo
@@ -443,6 +453,10 @@ pub const MAX_INFO_LEN: usize = 2 + 4 + 1 + 1 + MAX_NAME + 1 + MAX_NAME + NODE_I
 /// on served keys to the payload. Bits without a name here are reserved:
 /// firmware sends them as 0 and decoders keep them, so a newer firmware's
 /// bits survive a round trip through an older host.
+///
+/// Firmware derives the bits from its node manifest
+/// ([`manifest::Manifest::caps`]), which says the same in more detail
+/// (`sys/manifest`), so the two never disagree.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Caps(pub u32);
 
@@ -1037,6 +1051,7 @@ mod tests {
         for cmd in [
             Command::Info,
             Command::Board,
+            Command::Manifest,
             Command::Begin {
                 len: 10,
                 crc: 0xDEAD_BEEF,

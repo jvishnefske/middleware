@@ -11,7 +11,7 @@
 // with wire status 5 rejects with `DeniedError`, whose message says how to
 // recover (the device pins a different key; hold BOOT to re-key).
 
-import type { BoardInfo, DeviceInfo, LineEvent, Protocol } from "../protocol/wasm";
+import type { BoardInfo, DeviceInfo, LineEvent, Manifest, Protocol } from "../protocol/wasm";
 import { DENIED_CODE, TRUST_KEYS, type TrustInfo, claimBody, parseTrustInfo } from "../trust/wire";
 
 export interface ByteStreams {
@@ -246,6 +246,21 @@ export class DeviceClient {
     const board = this.proto.decodeBoardInfo(body);
     if (!board) throw new Error("malformed sys/board response");
     return board;
+  }
+
+  /** Reads `sys/manifest` (MF4); null when the firmware has none and
+   * answers NotFound. */
+  async manifest(opts?: RequestOptions): Promise<Manifest | null> {
+    let body: Uint8Array;
+    try {
+      body = await this.request(this.proto.constants.keys.manifest, new Uint8Array(), opts);
+    } catch (e) {
+      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
+      throw e;
+    }
+    const m = this.proto.decodeManifest(body);
+    if (!m) throw new Error("malformed sys/manifest response");
+    return m;
   }
 
   /** Reads `sys/trust/info`; null when the firmware predates trust and

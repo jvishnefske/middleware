@@ -392,4 +392,22 @@ mod tests {
             u
         );
     }
+
+    /// MF3: the manifest lists the timers and serving, nothing the device
+    /// answers `Unsupported` (above), and no sampled source.
+    #[test]
+    fn mf3_the_manifest_lists_only_what_the_device_does() {
+        use middleware::loader::Caps;
+        use middleware::loader::manifest::Groups;
+        use middleware::wasm_abi::route::{ImuConfig, SampleSource};
+        let m = crate::service::MANIFEST;
+        assert_eq!(m.groups, Groups::TIMERS.with(Groups::SERVE));
+        let clock = Manual::default();
+        let mut d = PiDevice::new(&clock, NODE);
+        let imu = SampleSource::Imu(ImuConfig::new(100, 2, false, 10).expect("cfg"));
+        assert!(!m.accepts_samples(&imu));
+        assert!(d.route_samples(imu, middleware::Key::from_static("a")).is_err());
+        assert!((m.i2c, m.spi, m.frames) == (None, None, None));
+        assert_eq!(m.caps(), Caps::SERVE);
+    }
 }

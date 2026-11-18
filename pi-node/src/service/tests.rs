@@ -94,7 +94,7 @@ fn pn5_sys_info_names_the_linux_node_and_fw_keys_are_not_found() {
     }
     assert_eq!(info.firmware, "0.6.0");
     assert_eq!(info.node, Some(NODE));
-    assert_eq!(info.caps, Caps::SERVE);
+    assert_eq!(info.caps, middleware::loader::Caps::SERVE);
     assert_eq!(info.capacity, 252 * 1024);
     assert_eq!(info.abi_version, middleware::wasm_abi::ABI_VERSION);
     assert_eq!(info.status, PayloadStatus::Empty);

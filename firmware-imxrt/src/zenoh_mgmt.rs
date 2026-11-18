@@ -16,7 +16,7 @@
 //! | request over Zenoh                   | unclaimed | claimed |
 //! |--------------------------------------|-----------|---------|
 //! | `sys/info`, `sys/trust/info`         | answered  | answered |
-//! | `sys/board`, `sys/fw/info`           | `Denied`  | answered (read only) |
+//! | `sys/board`, `sys/manifest`, `sys/fw/info` | `Denied`  | answered (read only) |
 //! | `sys/loader/begin`, `chunk`          | `Denied`  | staged into the inactive payload slot beside the running payload (the service dispatches Zenoh requests with `Context::staging`); a `chunk` from a requester that does not own the transfer is `InvalidRequest` ([`Refusal::NotOwner`]) |
 //! | `sys/loader/commit`                  | `Denied`  | the owner's, and signed ([`SignedCommit`](middleware::loader::trust::SignedCommit): the dispatcher's `TrustState::accept_commit`, pinned key, version above the last); the owner's unsigned commit is `Denied` and ends the transfer ([`Refusal::abandons_transfer`]) |
 //! | `sys/fw/begin`, `chunk`, `commit`    | `Denied`  | to the A/B updater: the transfer belongs to the requester whose `begin` started it (the service refuses another's `chunk`/`commit` with `InvalidRequest`), and `commit` needs the firmware signature by the pinned key (`middleware::fw_ota`: image, version, slot and node bound) |
@@ -79,8 +79,8 @@ pub use esp_base::ota::{Admission, Facts};
 pub const UNCLAIMED_KEYS: [Key<'static>; 2] = [keys::INFO, keys::TRUST_INFO];
 
 /// The read-only requests a claimed board answers over Zenoh.
-pub const READ_ONLY_KEYS: [Key<'static>; 4] =
-    [keys::INFO, keys::TRUST_INFO, keys::BOARD, fw_keys::INFO];
+pub const READ_ONLY_KEYS: [Key<'static>; 5] =
+    [keys::INFO, keys::TRUST_INFO, keys::BOARD, keys::MANIFEST, fw_keys::INFO];
 
 /// The payload transfer requests a claimed board accepts over Zenoh
 /// (staged; the commit signed).
@@ -464,6 +464,7 @@ mod tests {
         let before = snapshot(&mut s);
         let mut refused = changing(&img);
         refused.push((keys::BOARD, StdVec::new()));
+        refused.push((keys::MANIFEST, StdVec::new()));
         refused.push((fw_keys::INFO, StdVec::new()));
         refused.push((keys::STOP, control(1, ControlOp::Stop, &MAC, 1)));
         for (key, body) in &refused {

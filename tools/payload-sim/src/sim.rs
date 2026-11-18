@@ -136,6 +136,46 @@ pub const REQ_REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
 /// Deadline `!req` requests carry, in milliseconds.
 pub const REQ_DEADLINE_MS: u32 = 1000;
 
+/// What the simulated board offers payloads (`sys/manifest`, MF3): every
+/// ABI 6 group (`SimDevice` implements them all), both I2C buses, one SPI
+/// bus with sink routes, the test-pattern source (RGB565 and the JPEG
+/// fixtures) but no camera, the fake IMU and microphone at every rate,
+/// range, mode and gain the ABI allows, and two links (stdin/stdout and
+/// the bridged second link).
+pub const MANIFEST: middleware::loader::manifest::Manifest = {
+    use middleware::loader::manifest::*;
+    use middleware::wasm_abi::periph::{I2C_BUSES, I2C_FREQ_HZ, SPI_BUSES};
+    use middleware::wasm_abi::route::{MAX_DIM, MAX_MIC_GAIN_DB, PixelFormat, SourceKind};
+    Manifest::new(middleware::wasm_abi::ABI_VERSION)
+        .with_groups(Groups(
+            Groups::BRIDGE.0 | (Groups::BRIDGE.0 - 1), // gpio .. bridge
+        ))
+        .with_i2c(I2cBuses {
+            buses: I2C_BUSES as u8,
+            min_hz: *I2C_FREQ_HZ.start() as u32,
+            max_hz: *I2C_FREQ_HZ.end() as u32,
+        })
+        .with_spi(SpiBuses { buses: SPI_BUSES as u8 })
+        .with_imu(ImuSource::ALL)
+        .with_mic(MicSource {
+            rates: 0b1111,
+            modes: 0b111,
+            max_gain_db: MAX_MIC_GAIN_DB,
+        })
+        .with_frames(FrameSources {
+            kinds: 1 << SourceKind::TestPattern as u8,
+            formats: 1 << PixelFormat::Rgb565Be as u8 | 1 << PixelFormat::Jpeg as u8,
+            max_width: MAX_DIM,
+            max_height: MAX_DIM,
+        })
+        .with_sink_spi(SpiSink {
+            max_frame: middleware::stream::MAX_FRAME_BYTES,
+        })
+        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+        .with_link(Link { id: 1, kind: LinkKind::SERIAL })
+        .with_limits(Limits::ABI)
+};
+
 /// I2C address (bus 0) of the fake IMU, the FXOS8700CQ's: a route from it
 /// makes a payload's transfer there `Busy` (SC3).
 pub const FAKE_IMU_ADDR: u8 = 0x1f;
@@ -1301,6 +1341,55 @@ mod tests {
         data.chunks_exact(4)
             .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
             .collect()
+    }
+
+    /// MF3: the manifest lists what `SimDevice` accepts: every listed
+    /// sample config starts a route, the buses it lists open and the next
+    /// one does not, the camera and a third link are refused.
+    #[test]
+    fn mf3_the_manifest_agrees_with_the_simulated_board() {
+        use middleware::wasm_abi::bridge::Bridge;
+        use middleware::wasm_abi::route::{AudioMode, IMU_RANGES_G, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig, SourceKind};
+        let m = MANIFEST;
+        let key = Key::from_static("s");
+        for rate in IMU_RATES_HZ {
+            for range in IMU_RANGES_G {
+                let cfg = ImuConfig::new(rate, range, true, 10).unwrap();
+                assert!(m.imu.unwrap().accepts(&cfg));
+                assert!(SimDevice::new(None).route_samples(SampleSource::Imu(cfg), key).is_ok());
+            }
+        }
+        for rate in MIC_RATES_HZ {
+            let cfg = MicConfig::new(rate, 30, AudioMode::Levels, 4, 1024).unwrap();
+            assert!(m.mic.unwrap().accepts(&cfg));
+            assert!(SimDevice::new(None).route_samples(SampleSource::Microphone(cfg), key).is_ok());
+        }
+        let mut d = SimDevice::new(None);
+        let buses = m.i2c.unwrap().buses;
+        for bus in 0..buses {
+            assert!(d.i2c_open(I2cConfig { bus, freq_hz: 100_000 }).is_ok());
+        }
+        assert!(d.i2c_open(I2cConfig { bus: buses, freq_hz: 100_000 }).is_err());
+        let frames = m.frames.unwrap();
+        assert!(!frames.has(SourceKind::Camera));
+        let cfg = SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap();
+        assert!(frames.accepts(SourceKind::TestPattern, &cfg));
+        assert!(d.route_source(Source::TestPattern, key, cfg).is_ok());
+        assert_eq!(
+            d.route_source(Source::Camera(CameraPins::AI_THINKER), key, cfg),
+            Err(AbiError::Unsupported)
+        );
+        let links = m.links().len() as u8;
+        let filter = middleware::Filter::Exact(key);
+        assert!(d.route_bridge(&Bridge { src: 0, dst: links - 1, filter }).is_ok());
+        assert!(d.route_bridge(&Bridge { src: 0, dst: links, filter }).is_err());
+        assert_eq!(
+            m.caps(),
+            middleware::loader::Caps::SERVE
+                .with(middleware::loader::Caps::BRIDGE)
+                .with(middleware::loader::Caps::SOURCE_IMU)
+                .with(middleware::loader::Caps::SOURCE_MICROPHONE)
+        );
     }
 
     #[test]

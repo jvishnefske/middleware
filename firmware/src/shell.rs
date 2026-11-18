@@ -124,7 +124,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::Uart;
 use esp_storage::FlashStorage;
-use middleware::loader::Caps;
+use middleware::loader::manifest::Manifest;
 use middleware::loader::trust::TrustState;
 use static_cell::ConstStaticCell;
 
@@ -166,6 +166,8 @@ pub const CHIP: Profile = board::PROFILE;
 pub const SAFE_MODE_SETTLE_MS: u32 = 1;
 
 static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
+/// The chip's `sys/manifest` (MF3), built once at boot.
+static MANIFEST: static_cell::StaticCell<Manifest> = static_cell::StaticCell::new();
 
 #[embassy_executor::task]
 async fn uart_link(mut uart: Uart<'static, Async>, bus: &'static Bus) {
@@ -334,11 +336,11 @@ pub async fn run(spawner: Spawner, board: &'static Board) -> ! {
         node: Some(node_id()),
         // With the runtime the controller routes requests on served keys
         // to the payload (`crate::serve`); `node_id` answers this node.
-        caps: if cfg!(feature = "wasm") {
-            Caps::SERVE
-        } else {
-            Caps::NONE
-        },
+        manifest: Some(MANIFEST.init(profile.manifest(
+            cfg!(feature = "wasm"),
+            cfg!(feature = "espnow"),
+            cfg!(feature = "cam-fixtures"),
+        ))),
     };
 
     bus.log(format_args!(

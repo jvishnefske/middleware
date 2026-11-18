@@ -55,7 +55,8 @@ use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, TrustStore};
 use heapless::Vec;
 use middleware::loader::trust::TrustState;
-use middleware::loader::{Caps, PayloadStatus, keys};
+use middleware::loader::manifest::{Groups, I2cBuses, Limits, Link, LinkKind, Manifest, SpiBuses};
+use middleware::loader::{PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
@@ -99,6 +100,33 @@ pub struct Facts {
     /// Largest image accepted (the store slot caps it too).
     pub max_image: u32,
 }
+
+/// What a build with the runtime offers payloads (`sys/manifest`, MF3),
+/// next to what `RpDevice` implements on the Pico pin map (both chips):
+/// GPIO, timers, the ADC, SPI (one bus, the RP function table's blocks)
+/// with DMA, the two I2C buses, requests on payload keys; no routes, no
+/// sampled sources; the USB CDC-ACM link.
+pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
+    .with_groups(
+        Groups::GPIO
+            .with(Groups::TIMERS)
+            .with(Groups::ADC)
+            .with(Groups::SPI)
+            .with(Groups::DMA)
+            .with(Groups::I2C)
+            .with(Groups::SERVE),
+    )
+    .with_spi(SpiBuses { buses: 1 })
+    .with_i2c(I2cBuses {
+        buses: 2,
+        min_hz: *middleware::wasm_abi::periph::I2C_FREQ_HZ.start() as u32,
+        max_hz: *middleware::wasm_abi::periph::I2C_FREQ_HZ.end() as u32,
+    })
+    .with_link(Link { id: 0, kind: LinkKind::USB })
+    .with_limits(Limits { routes: 0, ..Limits::ABI });
+
+/// [`MANIFEST`] for a build without the runtime.
+pub const MANIFEST_NO_RUNTIME: Manifest = MANIFEST.without_runtime();
 
 /// What [`Service::open`] found on flash, for the boot log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,11 +285,7 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
-            caps: if facts.runtime {
-                Caps::SERVE
-            } else {
-                Caps::NONE
-            },
+            manifest: Some(if facts.runtime { &MANIFEST } else { &MANIFEST_NO_RUNTIME }),
         };
         let svc = Service {
             state,

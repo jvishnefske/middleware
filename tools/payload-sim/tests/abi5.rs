@@ -67,3 +67,21 @@ fn s11_the_default_node_is_one() {
     let out = run(&["--virtual"], "!req app/echo\n");
     assert!(out.contains("reply app/echo 0000000000000001\n"), "{out}");
 }
+
+/// MF3: `!req sys/manifest` is answered by the simulated board (with its
+/// node id), not by the payload.
+#[test]
+fn mf3_the_board_answers_sys_manifest() {
+    use middleware::loader::manifest::Manifest;
+    let out = run(&["--virtual", "--node", "246f28aa01fe0000"], "!req sys/manifest\n");
+    let hex = out
+        .lines()
+        .find_map(|l| l.split("reply sys/manifest ").nth(1))
+        .unwrap_or_else(|| panic!("no reply in {out}"));
+    let bytes: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
+        .collect();
+    let m = Manifest::decode(&bytes).expect("manifest");
+    assert_eq!(m.node.map(|n| n.0), Some([0x24, 0x6f, 0x28, 0xaa, 0x01, 0xfe, 0, 0]));
+    assert!(m.imu.is_some() && m.mic.is_some());
+}

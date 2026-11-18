@@ -728,7 +728,7 @@ impl Shell {
                 return 0;
             }
             Command::Info | Command::TrustInfo => return 0,
-            Command::Board | Command::TrustClaim { .. } => return HandlerError::NotFound.code(),
+            Command::Board | Command::Manifest | Command::TrustClaim { .. } => return HandlerError::NotFound.code(),
         }
         let (next, r) = self
             .loader
