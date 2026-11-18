@@ -105,6 +105,9 @@ pub struct FakeDevice {
     manifest: Option<Vec<u8>>,
     /// The stored `sys/payload/bind` record.
     binding: Option<Vec<u8>>,
+    /// Peers heard and their manifests, answered through
+    /// `sys/peers` and `sys/peer/<id>/manifest` (PR1, PR2).
+    peers: Vec<(middleware::SenderId, Vec<u8>)>,
     fw: Option<Fw>,
     net: Vec<NetAddr>,
     gone: bool,
@@ -219,10 +222,17 @@ impl FakeDevice {
             board: None,
             manifest: None,
             binding: None,
+            peers: Vec::new(),
             fw: None,
             net: Vec::new(),
             gone: false,
         }
+    }
+
+    /// The same device having heard `node`, whose manifest is `manifest`.
+    pub fn with_peer(mut self, node: middleware::SenderId, manifest: Vec<u8>) -> Self {
+        self.peers.push((node, manifest));
+        self
     }
 
     /// Answers `sys/manifest` with `body`; without it the key is
@@ -418,6 +428,31 @@ impl FakeDevice {
             if let Some(r) = fw.handle(&ctx, key, body, out) {
                 return r;
             }
+        }
+        let copy = |out: &mut [u8], b: &[u8]| -> Result<usize, HandlerError> {
+            out.get_mut(..b.len())
+                .ok_or(HandlerError::BufferTooSmall)?
+                .copy_from_slice(b);
+            Ok(b.len())
+        };
+        if key == keys::PEERS {
+            let mut set = middleware::loader::peers::PeerSet::new();
+            for (n, _) in &self.peers {
+                set.record(*n);
+            }
+            let n = set.encode(out).ok_or(HandlerError::BufferTooSmall)?;
+            return Ok(n);
+        }
+        if let Some((node, path)) = middleware::loader::peers::forwardable(key, NODE) {
+            let m = self
+                .peers
+                .iter()
+                .find(|(n, _)| *n == node)
+                .ok_or(HandlerError::Unavailable)?;
+            return match path {
+                p if p == keys::MANIFEST => copy(out, &m.1.clone()),
+                _ => Err(HandlerError::NotFound),
+            };
         }
         if key == keys::NET_ADDR && !self.net.is_empty() {
             let link = *body.first().ok_or(HandlerError::InvalidRequest)?;

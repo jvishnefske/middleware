@@ -12,8 +12,9 @@
 //! |-------------|----------------|------|
 //! | in          | `Local(source)` | start the source route on the channel's internal key `ch/<name>` and subscribe to it |
 //! | in          | `Key(key)`     | subscribe to `key` |
-//! | in          | `Remote` or `Adapted` | refused for now ([`BindError::Unsupported`]) |
-//! | out         | `Key(key)`     | `channel_publish` publishes on `key` |
+//! | in          | `Remote { node, key }` | subscribe to `key`, deliver only what `node` sent ([`Payload::deliver_from`](crate::Payload::deliver_from)) |
+//! | in          | `Adapted`      | refused for now ([`BindError::Unsupported`]) |
+//! | out         | `Key(key)` or `Remote { key, .. }` | `channel_publish` publishes on `key` |
 //! | out         | `Local` or `Adapted` | refused ([`BindError::Direction`]) |
 //! | required    | none           | refused ([`BindError::Unbound`]) |
 //! | optional    | none           | unbound: `channel_open` answers `Unsupported` |
@@ -30,11 +31,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
-use middleware::Key;
 use middleware::loader::binding::{Binding, Target};
 use middleware::stream::samples::{SampleFormat, SensorKind};
 use middleware::wasm_abi::channels::{Channel, DataKind, Direction};
 use middleware::wasm_abi::route::{RouteSource, SampleSource};
+use middleware::{Key, SenderId};
 
 pub use middleware::wasm_abi::channels::{ChannelError, OUTPUT_BASE};
 
@@ -167,12 +168,14 @@ pub enum Step {
     /// Optional and unbound.
     Unbound,
     /// Input: subscribe to `key`, after starting `route` on it for a
-    /// local source.
+    /// local source; deliver only from `from` when set.
     Input {
         /// The subscribed key.
         key: String,
         /// The local source route to start on `key` first.
         route: Option<RouteSource>,
+        /// Only this sender's messages are delivered.
+        from: Option<SenderId>,
     },
     /// Output: `channel_publish` publishes on `key`.
     Output {
@@ -247,10 +250,9 @@ pub fn plan(
         };
         let step = match d.dir {
             Direction::Out => match target {
-                Target::Key(k) => Step::Output {
+                Target::Key(k) | Target::Remote { key: k, .. } => Step::Output {
                     key: k.as_str().to_string(),
                 },
-                Target::Remote { .. } => return Err(BindError::Unsupported(name())),
                 Target::Local(_) | Target::Adapted { .. } => {
                     return Err(BindError::Direction(name()));
                 }
@@ -259,15 +261,14 @@ pub fn plan(
                 if !delivers {
                     return Err(BindError::NoDelivery(name()));
                 }
-                let (key, route) = match target {
+                let (key, route, from) = match target {
                     Target::Local(source) => {
                         fits(d, &source)?;
-                        (internal_key(&d.name), Some(source))
+                        (internal_key(&d.name), Some(source), None)
                     }
-                    Target::Key(k) => (k.as_str().to_string(), None),
-                    Target::Remote { .. } | Target::Adapted { .. } => {
-                        return Err(BindError::Unsupported(name()));
-                    }
+                    Target::Key(k) => (k.as_str().to_string(), None, None),
+                    Target::Remote { node, key } => (key.as_str().to_string(), None, Some(node)),
+                    Target::Adapted { .. } => return Err(BindError::Unsupported(name())),
                 };
                 if inputs.contains(&key) {
                     return Err(BindError::SharedKey(name()));
@@ -276,7 +277,7 @@ pub fn plan(
                     return Err(BindError::NoResources(name()));
                 }
                 inputs.push(key.clone());
-                Step::Input { key, route }
+                Step::Input { key, route, from }
             }
         };
         steps.push(step);
@@ -293,6 +294,8 @@ pub enum Resolved {
     Input {
         /// The subscription slot (`on_message`'s first argument).
         slot: usize,
+        /// Only this sender's messages are delivered.
+        from: Option<SenderId>,
     },
     /// Published on `key`.
     Output {
@@ -329,6 +332,19 @@ impl ChannelTable {
             Some(Resolved::Output { .. }) => Ok(OUTPUT_BASE + i as i32),
             _ => Err(AbiError::Unsupported),
         }
+    }
+
+    /// Whether a message on `slot` from `sender` may be delivered: always
+    /// unless a remote channel listens on the slot and `sender` is not its
+    /// node (an unknown sender included).
+    pub fn admits(&self, slot: usize, sender: Option<SenderId>) -> bool {
+        self.resolved.iter().all(|r| match r {
+            Resolved::Input {
+                slot: s,
+                from: Some(node),
+            } if *s == slot => sender == Some(*node),
+            _ => true,
+        })
     }
 
     /// The key an output handle publishes on; `InvalidArgument` for any
@@ -406,6 +422,7 @@ mod tests {
                 Step::Input {
                     key: "ch/audio".into(),
                     route: Some(levels(16_000)),
+                    from: None,
                 },
                 Step::Unbound,
                 Step::Output {
@@ -471,12 +488,29 @@ mod tests {
             BindError::NoDelivery("audio".into())
         );
         let remote = Target::Remote {
-            node: middleware::SenderId([1; 8]),
+            node: SenderId([1; 8]),
             key: Key::from_static("mic/level"),
         };
+        let steps = plan(
+            &d,
+            Some(&bind(&[("audio", remote), ("level", remote)])),
+            true,
+            8,
+        )
+        .unwrap();
         assert_eq!(
-            err(&[("audio", remote)], true, 8),
-            BindError::Unsupported("audio".into())
+            steps[0],
+            Step::Input {
+                key: "mic/level".into(),
+                route: None,
+                from: Some(SenderId([1; 8]))
+            }
+        );
+        assert_eq!(
+            steps[2],
+            Step::Output {
+                key: "mic/level".into()
+            }
         );
         let adapted = Target::Adapted {
             inner: middleware::loader::binding::Endpoint::Local(pcm()),
@@ -494,7 +528,10 @@ mod tests {
         let t = ChannelTable {
             decls: decls(),
             resolved: alloc::vec![
-                Resolved::Input { slot: 2 },
+                Resolved::Input {
+                    slot: 2,
+                    from: Some(SenderId([5; 8]))
+                },
                 Resolved::Unbound,
                 Resolved::Output {
                     key: "lab/level".into()
@@ -513,5 +550,10 @@ mod tests {
         for h in [2, OUTPUT_BASE, OUTPUT_BASE + 1, OUTPUT_BASE + 9, -1] {
             assert_eq!(t.output_key(h), Err(AbiError::InvalidArgument), "{h}");
         }
+        // PR3: the remote input on slot 2 admits only its node.
+        assert!(t.admits(2, Some(SenderId([5; 8]))));
+        assert!(!t.admits(2, Some(SenderId([6; 8]))));
+        assert!(!t.admits(2, None));
+        assert!(t.admits(1, None));
     }
 }

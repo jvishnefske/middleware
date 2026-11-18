@@ -147,6 +147,9 @@ export interface FakeDeviceScript {
   /** `sys/manifest` body (e.g. `proto.simulatorManifest(node)`); without it
    * the device answers NotFound, as firmware without a manifest. */
   manifest?: Uint8Array;
+  /** Nodes heard (`sys/peers`) and their manifests, answered through
+   * `sys/peer/<node>/manifest` as a forwarding board would. */
+  peers?: { node: string; manifest: Uint8Array }[];
   /** Runs uploaded payloads and routes served keys to them (see above). */
   runs?: FakeRuntime;
 }
@@ -296,6 +299,17 @@ export class FakeDevice {
         accepted = check.version;
         loaderBody = new Uint8Array();
       }
+    }
+    if (this.script.peers) {
+      if (req.key === this.proto.constants.keys.peers) {
+        const ids = this.script.peers.map((p) => p.node);
+        const body = new Uint8Array(1 + 8 * ids.length);
+        body[0] = ids.length;
+        ids.forEach((id, i) => body.set(id.match(/../g)!.map((b) => parseInt(b, 16)), 1 + 8 * i));
+        return silent ? undefined : this.send(this.proto.encodeResponse(req.id, 0, body));
+      }
+      const peer = this.script.peers.find((p) => req.key === this.proto.peerKey(p.node, "manifest"));
+      if (peer) return silent ? undefined : this.send(this.proto.encodeResponse(req.id, 0, peer.manifest));
     }
     const r = this.loader.step(req.key, loaderBody);
     let body: Uint8Array = new Uint8Array();

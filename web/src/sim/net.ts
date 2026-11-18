@@ -14,9 +14,10 @@
 // * `onPresence` hears a board leaving or coming back by itself (the
 //   cable pulled: the port closed); `setOnline` is the page's Lose / Find,
 //   which for a board only stops or resumes talking to it.
-// * A board's publications are not delivered to the simulated units'
-//   subscriptions (the units of the worked example talk only to the
-//   engine); the SimBus still delivers between simulated units.
+// * A board's publications are delivered to the simulated units'
+//   subscriptions too, with the board's node id as sender, so a simulated
+//   unit's channel bound to a key on that board (ABI 8, PR4) hears it; the
+//   SimBus delivers between simulated units as before.
 
 import type { RequestResult } from "../protocol/wasm";
 import { type PublishListener, SimBus } from "./bus";
@@ -74,6 +75,7 @@ export class MixedNet implements PlantNet {
     entry.off.push(
       link.onPublish((key, data) => {
         for (const f of [...this.publishers]) f(unit, key, data);
+        if (entry.online) this.bus.inject(unit, link.node.toLowerCase(), key, data);
       }),
       link.onPresence((connected) => {
         for (const f of [...this.presence]) f(unit, connected);

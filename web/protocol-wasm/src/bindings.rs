@@ -562,6 +562,7 @@ pub fn protocol() -> Object {
         ("manifest", keys::MANIFEST),
         ("bind", keys::BIND),
         ("binding", keys::BINDING),
+        ("peers", keys::PEERS),
         ("begin", keys::BEGIN),
         ("chunk", keys::CHUNK),
         ("commit", keys::COMMIT),
@@ -2167,9 +2168,21 @@ mod sim {
             self.sim.handles_irq()
         }
 
-        /// Delivers a message; returns whether a subscription matched.
-        pub fn deliver(&mut self, key: &str, data: &[u8]) -> Result<bool, JsError> {
-            let r = self.sim.deliver(key, data);
+        /// Delivers a message from `sender` (16 hex digits; unknown when
+        /// omitted); returns whether a subscription matched.
+        pub fn deliver(
+            &mut self,
+            key: &str,
+            data: &[u8],
+            sender: Option<String>,
+        ) -> Result<bool, JsError> {
+            let sender = match sender {
+                Some(h) => {
+                    Some(parse_node(&h).ok_or_else(|| JsError::new("a node id is 16 hex digits"))?)
+                }
+                None => None,
+            };
+            let r = self.sim.deliver_from(key, data, sender);
             self.finish(r)
         }
 
@@ -2323,6 +2336,27 @@ pub fn read_channels(module_bytes: &[u8]) -> Result<Array, JsError> {
     let c = middleware::wasm_abi::channels::Channels::from_module(module_bytes)
         .map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
     Ok(c.iter().map(|c| JsValue::from(channel_object(c))).collect())
+}
+
+/// The node ids of a `sys/peers` reply, as 16 hex digits each;
+/// `undefined` when malformed.
+#[wasm_bindgen(js_name = decodePeers)]
+pub fn decode_peers(data: &[u8]) -> Option<Vec<String>> {
+    Some(
+        middleware::loader::peers::decode(data)?
+            .map(node_hex)
+            .collect(),
+    )
+}
+
+/// The key that reaches `node`'s `sys/<what>` (`info`, `manifest`,
+/// `board`) through the connected board (`sys/peer/<id>/<what>`).
+#[wasm_bindgen(js_name = peerKey)]
+pub fn peer_key(node: &str, what: &str) -> Result<String, JsError> {
+    let id = parse_node(node).ok_or_else(|| js_err("a node id is 16 hex digits"))?;
+    middleware::loader::peers::peer_key(id, what)
+        .map(|k| k.as_str().to_owned())
+        .ok_or_else(|| js_err("peer key too long"))
 }
 
 /// Encodes channel declarations (the objects [`read_channels`] returns)
@@ -2689,13 +2723,15 @@ pub fn encode_bind_body(record: &[u8], signature: Option<Vec<u8>>) -> Result<Vec
 /// Checks `record` for the payload `wasm` on the node whose `sys/manifest`
 /// is `manifest` (BD5): `[{channel, message, fix?}]` where `fix` is a
 /// target ([`encode_binding`]'s form), `{kind: "keyNamed"}` (bind to a key
-/// named after the channel) or `{kind: "remove"}`. Throws when an input
-/// does not decode.
+/// named after the channel) or `{kind: "remove"}`. With `peers` (16-hex-
+/// digit node ids, the board's `sys/peers`) a remote target naming another
+/// node is an issue too (PR4). Throws when an input does not decode.
 #[wasm_bindgen(js_name = checkBinding)]
 pub fn check_binding(
     manifest: &[u8],
     module_bytes: &[u8],
     record: &[u8],
+    peers: Option<Vec<String>>,
 ) -> Result<Array, JsError> {
     use crate::binding::{Fix, check};
     let m = middleware::loader::manifest::Manifest::decode(manifest)
@@ -2704,7 +2740,14 @@ pub fn check_binding(
         .map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
     let b = middleware::loader::binding::Binding::decode(record)
         .map_err(|e| js_err(&format!("binding: {e:?}")))?;
-    Ok(check(&m, &c, &b)
+    let peers: Option<Vec<middleware::SenderId>> = peers
+        .map(|p| {
+            p.iter()
+                .map(|h| parse_node(h).ok_or_else(|| js_err("a node id is 16 hex digits")))
+                .collect()
+        })
+        .transpose()?;
+    Ok(check(&m, &c, &b, peers.as_deref())
         .into_iter()
         .map(|i| {
             let o = Object::new();

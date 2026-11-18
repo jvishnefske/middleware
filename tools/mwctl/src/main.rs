@@ -601,7 +601,21 @@ fn command_with<L: Endpoint>(
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
-        Cmd::Manifest => dev.manifest().map(|m| print!("{}", format_manifest(&m))),
+        Cmd::Manifest { of: None } => dev.manifest().map(|m| print!("{}", format_manifest(&m))),
+        Cmd::Manifest { of: Some(id) } => dev
+            .peer_manifest(middleware::SenderId(id))
+            .map(|m| print!("{}", format_manifest(&m))),
+        Cmd::Peers => dev.peers().map(|p| {
+            if p.is_empty() {
+                println!("no peers heard");
+            }
+            for id in p {
+                println!(
+                    "{}",
+                    id.0.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
+            }
+        }),
         Cmd::Binding => dev.binding().map(|r| match r {
             None => println!("no binding stored"),
             Some(r) => print!(

@@ -42,6 +42,7 @@ use imxrt_base::links::{LinkId, LinkKind, Links, MAX_LINKS, Publication};
 use imxrt_base::zenoh_mgmt::{SubSet, subscription_set};
 use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
+use middleware::loader::peers::PeerSet;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, is_system_key, keys};
 #[cfg(feature = "wasm")]
 use middleware::transport::RequestMeta;
@@ -154,6 +155,20 @@ pub struct Reply {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TooLarge;
 
+/// A serial request for another node's `sys/info|manifest|board`
+/// (`middleware::loader::peers`), for the Zenoh link to ask and answer.
+#[cfg_attr(not(feature = "eth"), allow(dead_code))]
+pub struct Forward {
+    /// Where the reply goes.
+    pub link: LinkId,
+    /// The request's correlation id there.
+    pub id: u8,
+    /// The node asked.
+    pub node: SenderId,
+    /// What is asked of it (`sys/info`, `sys/manifest`, `sys/board`).
+    pub key: Key<'static>,
+}
+
 /// Shared channels.
 pub struct Bus {
     inbound: Channel<Mutex, Inbound, INBOUND_DEPTH>,
@@ -163,6 +178,9 @@ pub struct Bus {
     routing: BlockingMutex<Mutex, RefCell<Routing>>,
     subscriptions: BlockingMutex<Mutex, RefCell<SubSet>>,
     subscriptions_changed: Signal<Mutex, ()>,
+    forwards: Channel<Mutex, Forward, 2>,
+    peers: BlockingMutex<Mutex, RefCell<PeerSet>>,
+    zenoh_open: BlockingMutex<Mutex, core::cell::Cell<bool>>,
 }
 
 /// The slot of `link` in a per-link array (every [`LinkId`] is below
@@ -183,7 +201,45 @@ impl Bus {
             routing: BlockingMutex::new(RefCell::new(Links::evkb())),
             subscriptions: BlockingMutex::new(RefCell::new(SubSet::new())),
             subscriptions_changed: Signal::new(),
+            forwards: Channel::new(),
+            peers: BlockingMutex::new(RefCell::new(PeerSet::new())),
+            zenoh_open: BlockingMutex::new(core::cell::Cell::new(false)),
         }
+    }
+
+    /// Hands a forwarded request to the Zenoh link (PR1): `Err` when no
+    /// session is open or two are already waiting (the caller replies
+    /// `Unavailable`).
+    pub fn forward(&self, f: Forward) -> Result<(), Forward> {
+        if !self.zenoh_open.lock(core::cell::Cell::get) {
+            return Err(f);
+        }
+        self.forwards.try_send(f).map_err(|e| match e {
+            embassy_sync::channel::TrySendError::Full(f) => f,
+        })
+    }
+
+    /// Waits for the next forwarded request.
+    #[cfg_attr(not(feature = "eth"), allow(dead_code))]
+    pub async fn next_forward(&self) -> Forward {
+        self.forwards.receive().await
+    }
+
+    /// Whether the Zenoh session is open (forwards are refused otherwise).
+    #[cfg_attr(not(feature = "eth"), allow(dead_code))]
+    pub fn set_zenoh_open(&self, open: bool) {
+        self.zenoh_open.lock(|c| c.set(open));
+    }
+
+    /// Records a node heard (a sample's sender, a forwarded reply's node).
+    #[cfg_attr(not(feature = "eth"), allow(dead_code))]
+    pub fn heard(&self, node: SenderId) {
+        self.peers.lock(|p| p.borrow_mut().record(node));
+    }
+
+    /// The nodes heard (`sys/peers`, PR2).
+    pub fn peers(&self) -> PeerSet {
+        self.peers.lock(|p| *p.borrow())
     }
 
     /// Records the running payload's subscription keys (none when it has

@@ -6710,7 +6710,7 @@ those publications to its own payload and sends them on no link.
   declaration, an output bound to a source, two inputs on one key, too
   many keys, inputs without `on_message` and a route the device refuses
   fail the load (`LoadError::Bind`, naming the channel; the shells log
-  it). Remote and adapted targets are refused until PR and AD. Every
+  it). Remote targets are PR3's; adapted ones are refused until AD. Every
   shell (esp-base, rp-base, RT1050, pi-node) loads the stored record and
   passes it for the image it starts. `ch/...` belongs to the runtime: a
   payload's own `publish`, `subscribe`, `serve` and routes on it are
@@ -6748,6 +6748,49 @@ those publications to its own payload and sends them on no link.
   microphone's levels reports levels matching SC8's; rebinding without
   re-upload changes them at the next start; an unsigned bind over Zenoh
   is refused.
+
+#### Peers through the connected board (PR…)
+
+A browser on a board's serial port reaches other nodes through that
+board. The serial keys `sys/peer/<id16>/info`, `.../manifest` and
+`.../board` (`middleware::loader::peers`; `@` is not a key byte, so the
+per-node Zenoh form cannot travel on a serial link) are forwarded by the
+board as a query to that node's `sys/info`, `sys/manifest` or `sys/board`
+and the reply relayed back; `sys/peers` lists the node ids the board has
+heard. A channel bound to `Remote { node, key }` subscribes to `key` and
+takes publications only from `node`, as the link reports the sender.
+
+- [x] PR1 Only those three read-only keys of another node are forwarded
+  (not the board's own, nothing that changes a node, malformed ids
+  refused); the RT1050 forwards them from its serial links over Zenoh
+  (`ZenohLite::request_with` targeted at the node, 2 s) and answers
+  `Unavailable` without a session or an answer; over Zenoh itself
+  `sys/peer/...` and `sys/peers` are refused — `middleware`
+  `loader::peers::tests::pr1_only_read_only_keys_of_other_nodes_are_forwarded`;
+  firmware-imxrt `zenoh_mgmt::tests::pr1_no_forwarding_from_the_network`.
+- [x] PR2 `sys/peers` is `[n][id 8]*n` of at most sixteen nodes, newest
+  last, from the senders of the samples the board received and the nodes
+  that answered forwarded requests; boards that do not forward answer
+  `NotFound`; `mwctl peers`, `mwctl manifest --of <id>` — `loader::peers::tests::pr2_the_peer_set_keeps_the_newest_and_round_trips`;
+  mwctl `device::tests::pr2_peers_and_a_peer_manifest_come_through_the_board`.
+- [x] PR3 A remote channel delivers only what its node sent
+  (`Payload::deliver_from`; an unknown sender is refused); its output
+  publishes normally; the RT1050 passes each Zenoh sample's sender,
+  payload-sim the `--peer` board's node id — `wasm-host`
+  `channels::tests::ch5_the_table_opens_inputs_by_slot_and_outputs_by_handle`,
+  `tests/abi8.rs` `pr3_a_remote_channel_takes_its_node_only`; payload-sim
+  `tests/abi8.rs` `pr3_a_remote_channel_takes_the_named_node_only`.
+- [x] PR4 The browser lists the board's peers, reads a peer's manifest
+  through the board (`DeviceClient.peers`, `peerManifestBody`), checks a
+  remote target against the peers (`checkBinding`'s `peers`), offers peers
+  in the binding panel, and `MixedNet` delivers a board's publications to
+  the simulated units with the board's node as sender —
+  `web/test/binding.test.ts`: "lists the board's peers, reads a peer's
+  manifest and flags an unheard node", "delivers a board's publications
+  to a simulated unit bound to it, and only its".
+- [ ] PR5 On the RT1050-EVKB: a peer's manifest read through the board
+  from the browser over Web Serial; `level_meter` bound to `mic/level` of
+  a second node (`examples/zenoh_board.rs` acting as one).
 
 ### JPEG decode in WASM (J…)
 

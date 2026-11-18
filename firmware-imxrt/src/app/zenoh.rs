@@ -36,7 +36,7 @@
 
 use core::cell::Cell;
 
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select4};
 use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
@@ -47,10 +47,10 @@ use imxrt_base::links::LinkId;
 use imxrt_base::zenoh_mgmt::{SubSet, subscription_diff};
 use middleware::key::Filter;
 use middleware::loader::keys;
-use middleware::transport::Publisher;
-use middleware::zenoh_lite::{Clock, Config, Event, ZenohLite, Zid};
+use middleware::transport::{HandlerError, Publisher, RequestOptions, Requester, Target};
+use middleware::zenoh_lite::{Clock, Config, Event, LiteError, ZenohLite, Zid};
 
-use super::bus::{Bus, Inbound, Kind};
+use super::bus::{Bus, Forward, Inbound, Kind, Reply};
 
 /// Delay before a reconnect.
 const RETRY: Duration = Duration::from_secs(2);
@@ -195,15 +195,22 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
             continue;
         }
         let mut buf = [0u8; 1024];
+        bus.set_zenoh_open(true);
         loop {
-            match select3(
+            match select4(
                 client.next_event(&mut buf),
                 bus.next_outbound(LinkId::ZENOH),
                 bus.subscriptions_changed(),
+                bus.next_forward(),
             )
             .await
             {
-                Either3::Third(()) => {
+                Either4::Fourth(f) => {
+                    if !forward(&mut client, bus, f).await {
+                        break;
+                    }
+                }
+                Either4::Third(()) => {
                     if follow_subscriptions(&mut client, bus, &mut declared)
                         .await
                         .is_err()
@@ -211,7 +218,7 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
                         break;
                     }
                 }
-                Either3::First(Ok(Event::Query(q))) => {
+                Either4::First(Ok(Event::Query(q))) => {
                     next_id = next_id.wrapping_add(1);
                     let id = next_id;
                     let result = match Inbound::new(
@@ -234,7 +241,10 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
                         break;
                     }
                 }
-                Either3::First(Ok(Event::Sample(s))) => {
+                Either4::First(Ok(Event::Sample(s))) => {
+                    if let Some(node) = s.meta.sender {
+                        bus.heard(node);
+                    }
                     if let Some(msg) = Inbound::new(
                         LinkId::ZENOH,
                         Kind::Publish,
@@ -245,19 +255,60 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
                         bus.send_inbound(msg).await;
                     }
                 }
-                Either3::First(Err(e)) => {
+                Either4::First(Err(e)) => {
                     bus.log(format_args!("zenoh: session lost: {e:?}"));
                     break;
                 }
-                Either3::Second(p) => {
+                Either4::Second(p) => {
                     if client.publish(p.key(), &p.payload).await.is_err() {
                         break;
                     }
                 }
             }
         }
+        bus.set_zenoh_open(false);
         Timer::after(RETRY).await;
     }
+}
+
+/// How long a forwarded request waits for the node's reply.
+const FORWARD_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(2);
+
+/// Asks `f.node` for `f.key` (PR1) and replies on `f.link`: the node's
+/// reply, its error, or `Unavailable` when it did not answer. `false` when
+/// the session failed meanwhile.
+async fn forward<S, C>(client: &mut ZenohLite<S, C>, bus: &Bus, f: Forward) -> bool
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+    C: Clock,
+{
+    let opts = RequestOptions::DEFAULT
+        .with_timeout(FORWARD_TIMEOUT)
+        .with_target(Target::Node(f.node));
+    let mut out = [0u8; 512];
+    let (result, alive) = match client.request_with(f.key, &[], &mut out, &opts).await {
+        Ok(r) => {
+            bus.heard(f.node);
+            (
+                heapless::Vec::from_slice(r).map_err(|_| HandlerError::BufferTooSmall),
+                true,
+            )
+        }
+        Err(LiteError::Handler(e)) => {
+            bus.heard(f.node);
+            (Err(e), true)
+        }
+        Err(LiteError::NoReply | LiteError::BufferTooSmall { .. } | LiteError::InvalidKey) => {
+            (Err(HandlerError::Unavailable), true)
+        }
+        Err(_) => (Err(HandlerError::Unavailable), false),
+    };
+    bus.reply(Reply {
+        link: f.link,
+        id: f.id,
+        result,
+    });
+    alive
 }
 
 /// Declares a subscriber for each of the payload's subscription keys not

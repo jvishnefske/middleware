@@ -49,7 +49,7 @@ export type PublishListener = (unit: string, key: string, data: Uint8Array) => v
 export class SimBus {
   private readonly units: BusUnit[] = [];
   private readonly listeners: PublishListener[] = [];
-  private queue: { from: string; key: string; data: Uint8Array }[] = [];
+  private queue: { from: string; key: string; data: Uint8Array; node?: string }[] = [];
   private draining = false;
   private stopTimer: (() => void) | null = null;
   /** Deliveries dropped past MAX_HOPS. */
@@ -63,7 +63,7 @@ export class SimBus {
   /** Loads a unit's payload on a new session (node `node` or the next
    * default) and joins it to the bus. Throws if the id is taken or
    * wasm-host rejects the payload. */
-  add(id: string, wasm: Uint8Array, opts: { node?: string | null; events?: SessionEvents } = {}): SimSession {
+  add(id: string, wasm: Uint8Array, opts: { node?: string | null; events?: SessionEvents; binding?: Uint8Array } = {}): SimSession {
     if (this.unit(id)) throw new Error(`unit ${id} is already on the bus`);
     const node = (opts.node ?? defaultNode(this.units.length)).toLowerCase();
     if (this.units.some((u) => u.session.nodeId === node)) throw new Error(`node ${node} is already on the bus`);
@@ -84,7 +84,7 @@ export class SimBus {
         },
       },
       this.clock,
-      { node },
+      { node, binding: opts.binding },
     );
     this.units.push({ id, session, online: true });
     this.queue.push(...early);
@@ -140,14 +140,26 @@ export class SimBus {
           this.queue = [];
           break;
         }
-        for (const f of [...this.listeners]) f(m.from, m.key, m.data);
+        // An injected board publication (`node` set) was heard by the
+        // board's own listeners already.
+        if (m.node === undefined) for (const f of [...this.listeners]) f(m.from, m.key, m.data);
+        // The sender's node id, so a unit's channel bound to a remote node
+        // takes that node's publications only (ABI 8).
+        const node = m.node ?? this.unit(m.from)?.session.nodeId;
         for (const u of this.units) {
-          if (u.id !== m.from && u.online && !u.session.trapped) u.session.deliver(m.key, m.data);
+          if (u.id !== m.from && u.online && !u.session.trapped) u.session.deliver(m.key, m.data, node);
         }
       }
     } finally {
       this.draining = false;
     }
+  }
+
+  /** Delivers a publication from a board outside the bus (`unit`, node
+   * `node`) to every online simulated unit (PR4, `MixedNet`). */
+  inject(unit: string, node: string, key: string, data: Uint8Array): void {
+    this.queue.push({ from: unit, key, data, node });
+    this.drain();
   }
 
   /** The online unit a request for `key` goes to, if any. */
