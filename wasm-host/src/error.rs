@@ -131,6 +131,12 @@ pub enum LoadError {
     OutOfMemory,
     /// Instantiation failed (data segment out of range, `start` trapped, ...).
     Instantiate(String),
+    /// The module's `mw.channels` section is malformed (ABI 8).
+    Channels(middleware::wasm_abi::channels::ChannelError),
+    /// The binding does not resolve the module's channels (ABI 8): a
+    /// required channel unbound, a target that does not fit, a route the
+    /// device refused.
+    Bind(crate::channels::BindError),
     /// The `init` export trapped.
     Init {
         /// Why `init` failed.
@@ -152,6 +158,8 @@ impl fmt::Display for LoadError {
             }
             LoadError::BadExport { name } => write!(f, "export {name} has the wrong signature"),
             LoadError::MissingMemory => f.write_str("module does not export `memory`"),
+            LoadError::Channels(e) => write!(f, "malformed mw.channels section: {e:?}"),
+            LoadError::Bind(e) => write!(f, "binding: {e}"),
             LoadError::MemoryTooLarge { bytes, max } => {
                 write!(f, "memory needs {bytes} bytes, limit is {max}")
             }

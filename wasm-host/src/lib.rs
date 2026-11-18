@@ -130,6 +130,7 @@
 extern crate alloc;
 
 pub mod abi;
+pub mod channels;
 mod error;
 pub mod heap;
 pub mod link;
@@ -616,6 +617,45 @@ pub enum Ticked {
     NoTickExport,
 }
 
+/// Carries out [`channels::plan`] on a fresh payload's state: starts the
+/// local routes, subscribes the bound input keys, records the outputs.
+fn resolve<D: Device>(
+    st: &mut State<D>,
+    decls: Vec<channels::Decl>,
+    binding: Option<&middleware::loader::binding::Binding<'_>>,
+) -> Result<(), LoadError> {
+    use channels::{BindError, Resolved, Step};
+    if decls.is_empty() {
+        return Ok(());
+    }
+    let free = wasm_abi::MAX_SUBSCRIPTIONS - st.subscriptions.len();
+    let steps =
+        channels::plan(&decls, binding, st.exports.messages, free).map_err(LoadError::Bind)?;
+    let mut resolved = Vec::new();
+    resolved
+        .try_reserve_exact(steps.len())
+        .map_err(|_| LoadError::OutOfMemory)?;
+    for (d, step) in decls.iter().zip(steps) {
+        resolved.push(match step {
+            Step::Unbound => Resolved::Unbound,
+            Step::Output { key } => Resolved::Output { key },
+            Step::Input { key, route } => {
+                if let Some(source) = route {
+                    let k = middleware::Key::new(&key)
+                        .map_err(|_| LoadError::Bind(BindError::Mismatch(d.name.clone())))?;
+                    link::start_route(st, source, k)
+                        .map_err(|e| LoadError::Bind(BindError::Route(d.name.clone(), e)))?;
+                }
+                let slot = st.subscriptions.len();
+                st.subscriptions.push(key);
+                Resolved::Input { slot }
+            }
+        });
+    }
+    st.channels = channels::ChannelTable { decls, resolved };
+    Ok(())
+}
+
 /// A loaded, running payload bound to a device.
 ///
 /// `D: 'static` is required because wasmi stores host closures and the
@@ -698,6 +738,7 @@ pub struct Compiled {
     module: Module,
     exports: Exports,
     limits: Limits,
+    channels: Vec<channels::Decl>,
 }
 
 impl Compiled {
@@ -708,17 +749,31 @@ impl Compiled {
         let engine = Engine::new(&limits.config());
         let module = Module::new(&engine, wasm).map_err(|e| LoadError::Invalid(e.to_string()))?;
         let exports = validate(wasm, &module, &limits)?;
+        let declared =
+            wasm_abi::channels::Channels::from_module(wasm).map_err(LoadError::Channels)?;
+        let mut channels = Vec::new();
+        channels
+            .try_reserve_exact(declared.len())
+            .map_err(|_| LoadError::OutOfMemory)?;
+        channels.extend(declared.iter().map(channels::Decl::from_channel));
         Ok(Compiled {
             engine,
             module,
             exports,
             limits,
+            channels,
         })
     }
 
     /// The limits the module was compiled under.
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// The channels the module declares (its `mw.channels` section, ABI 8),
+    /// in declaration order.
+    pub fn channels(&self) -> &[channels::Decl] {
+        &self.channels
     }
 }
 
@@ -738,11 +793,28 @@ impl<D: Device + 'static> Payload<D> {
     /// [`LoadError::Init`] carrying the trap and that log, so the caller can
     /// show why `init` failed. On success the log is discarded.
     pub fn instantiate(compiled: Compiled, device: D) -> Result<Self, LoadError> {
+        Self::instantiate_bound(compiled, device, None)
+    }
+
+    /// [`Payload::instantiate`] with the module's channels resolved
+    /// against `binding` before `init` (ABI 8, [`channels`]): local sources
+    /// are started on their internal keys through the device, bound input
+    /// keys become subscriptions, outputs remember their keys. A required
+    /// channel left unbound, or a binding that does not fit the
+    /// declarations, fails with [`LoadError::Bind`] naming the channel
+    /// (with no binding, every channel is unbound). A module without
+    /// channels ignores the binding.
+    pub fn instantiate_bound(
+        compiled: Compiled,
+        device: D,
+        binding: Option<&middleware::loader::binding::Binding<'_>>,
+    ) -> Result<Self, LoadError> {
         let Compiled {
             engine,
             module,
             exports,
             limits,
+            channels: decls,
         } = compiled;
         // The DMA copy buffer and the subscription list at their largest
         // now, so the imports that use them never reallocate later.
@@ -772,6 +844,7 @@ impl<D: Device + 'static> Payload<D> {
             scratch,
             init_log: None,
             i2c_owners: route::I2cOwners::new(),
+            channels: channels::ChannelTable::default(),
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -781,6 +854,7 @@ impl<D: Device + 'static> Payload<D> {
         let instance = linker
             .instantiate_and_start(&mut store, &module)
             .map_err(instantiate)?;
+        resolve(store.data_mut(), decls, binding)?;
         let mut payload = Payload {
             store,
             instance,
@@ -902,6 +976,11 @@ impl<D: Device + 'static> Payload<D> {
         }
         self.call::<(i32, i32, i32), ()>(wasm_abi::exports::ON_MESSAGE, (slot, ptr, len))?;
         Ok(true)
+    }
+
+    /// The channel table: declarations and what each resolved to (ABI 8).
+    pub fn channels(&self) -> &channels::ChannelTable {
+        &self.store.data().channels
     }
 
     /// Keys the payload serves (ABI 5), in slot order.

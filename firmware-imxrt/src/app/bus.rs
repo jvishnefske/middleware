@@ -252,8 +252,16 @@ impl Bus {
 
     /// Publishes without blocking, to every link whose filter selects
     /// `key` (`sys/...` keys never go to the Zenoh link: the board's system
-    /// keys are served there as queryables, `crate::zenoh_mgmt`).
+    /// keys are served there as queryables, `crate::zenoh_mgmt`), or, for
+    /// a node-internal channel key, to this board's own payload.
     pub fn publish(&self, key: Key<'_>, data: &[u8]) -> Result<(), TooLarge> {
+        // A local source bound to a payload channel (`ch/...`, BD4) goes
+        // back to this board's payload only, never on a link; dropped
+        // when the inbound queue is full (the route counts it).
+        if middleware::loader::binding::is_internal_key(key) {
+            let msg = Inbound::new(LinkId::UART, Kind::Publish, key, data, None).ok_or(TooLarge)?;
+            return self.inbound.try_send(msg).map_err(|_| TooLarge);
+        }
         let fanout = self.routing.lock(|r| {
             r.borrow_mut()
                 .publish(key, data, |_, k| !is_system_key(k))

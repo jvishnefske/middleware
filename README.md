@@ -469,3 +469,13 @@ takes (the RT1050-EVKB's IMU at 50–800 Hz, 50–400 Hz with the
 magnetometer; its microphone at 8–48 kHz), its links and limits
 (`mwctl manifest`, the web Device page; design.md MF1–MF5). The `sys/info`
 capability bits are derived from it.
+
+Payloads (ABI 8) can name their data instead of keys and routes: they
+declare channels in the image (`mw_payload::channels!`) and open them by
+name, and a separately signed binding decides what each channel is on a
+given node (a local source such as the microphone at 16 kHz levels, a key,
+or a key from one other node). `mwctl bind payload.wasm
+audio=mic:16000:levels level=key:lab/level`, the web Device page's Channel
+binding panel, or `payload-sim --bind` install one; the payload is rebound
+without being uploaded again (design.md CH1–CH6, BD1–BD7; example
+`payloads/examples/level_meter`).

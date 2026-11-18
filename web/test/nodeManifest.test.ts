@@ -31,7 +31,7 @@ describe("node manifest", () => {
     const body = proto.simulatorManifest(NODE)!;
     const m = proto.decodeManifest(body)!;
     expect(m.node).toBe(NODE);
-    expect(m.groupNames).toEqual(["gpio", "timers", "irq", "spi", "uart", "dma", "pwm", "adc", "routes", "serve"]);
+    expect(m.groupNames).toEqual(["gpio", "timers", "irq", "spi", "uart", "dma", "pwm", "adc", "routes", "serve", "channels"]);
     expect(m.imu).toEqual({ ratesHz: [50, 100, 200, 400, 800], rangesG: [2, 4, 8], magRatesHz: [50, 100, 200, 400, 800] });
     expect(m.mic).toEqual({ ratesHz: [8000, 16000, 32000, 48000], modes: ["levels", "mulaw", "pcm"], maxGainDb: 30 });
     expect(m.links).toEqual([{ id: 0, kind: 0, kindName: "serial" }]);
@@ -57,7 +57,7 @@ describe("node manifest", () => {
     expect(rows["IMU"]).toBe("50, 100, 200, 400, 800 Hz, ±2/4/8 g; with magnetometer 50, 100, 200, 400, 800 Hz");
     expect(rows["Microphone"]).toBe("8000, 16000, 32000, 48000 Hz; levels, mulaw, pcm; gain 0–30 dB");
     expect(rows["Links"]).toBe("0 serial");
-    expect(rows["Limits"]).toBe("4 routes, 8 subscriptions, 0 channels, 512-byte messages");
+    expect(rows["Limits"]).toBe("4 routes, 8 subscriptions, 8 channels, 512-byte messages");
     expect(rows["Board"]).toBeUndefined();
     const old = Object.fromEntries(capabilityRows(info, null, null));
     expect(old["Manifest"]).toContain("not reported");

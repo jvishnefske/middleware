@@ -217,7 +217,7 @@ fn cl2_abi5_hosts_do_not_know_route_bridge_and_older_payloads_still_load() {
     assert_eq!(ABI6_IMPORTS, ABI5_IMPORTS + 1);
     assert_eq!(IMPORTS[ABI6_IMPORTS - 1].name, "route_bridge");
     // An ABI 1 payload (log/publish/subscribe, 64 KiB page) and an ABI 5
-    // one load on this ABI 6 host unchanged.
+    // one load on this host unchanged.
     for wat in [
         include_str!("../../payloads/templates/echo.wat"),
         include_str!("../../payloads/templates/blink.wat"),

@@ -126,7 +126,7 @@ impl Groups {
     pub const SERVE: Groups = Groups(1 << 10);
     /// `route_bridge` (ABI 6; [`Caps::BRIDGE`]).
     pub const BRIDGE: Groups = Groups(1 << 11);
-    /// `channel_open`, `channel_publish` with bindings (ABI 7).
+    /// `channel_open`, `channel_publish` with bindings (ABI 8).
     pub const CHANNELS: Groups = Groups(1 << 12);
 
     /// Every named group with its name, lowest bit first.
@@ -395,7 +395,7 @@ pub struct Limits {
     pub routes: u8,
     /// Subscriptions a payload may hold.
     pub subscriptions: u8,
-    /// Channels a payload may declare (ABI 7; 0 before).
+    /// Channels a payload may declare (ABI 8; 0 before).
     pub channels: u8,
     /// Largest message, bytes.
     pub max_message: u16,
@@ -406,7 +406,7 @@ impl Limits {
     pub const ABI: Limits = Limits {
         routes: crate::wasm_abi::route::MAX_ROUTES as u8,
         subscriptions: crate::wasm_abi::MAX_SUBSCRIPTIONS as u8,
-        channels: 0,
+        channels: crate::wasm_abi::channels::MAX_CHANNELS as u8,
         max_message: crate::wasm_abi::MAX_MESSAGE as u16,
     };
 }
@@ -657,7 +657,8 @@ impl Manifest {
         for r in records {
             let (t, body) = r?;
             let need = |n: usize| body.get(..n).ok_or(ManifestError::Short(t));
-            let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+            let u32_at =
+                |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
             match t {
                 tag::NODE => {
                     let b = need(8)?;
@@ -864,7 +865,10 @@ mod tests {
         assert_eq!(Manifest::decode(&v), Ok(full()));
         // A SPI record with an appended field.
         let mut w = vec![1, 7, 0, tag::SPI, 3, 4, 0xAA, 0xBB];
-        assert_eq!(Manifest::decode(&w).map(|m| m.spi), Ok(Some(SpiBuses { buses: 4 })));
+        assert_eq!(
+            Manifest::decode(&w).map(|m| m.spi),
+            Ok(Some(SpiBuses { buses: 4 }))
+        );
         // ...but not a shorter one.
         w = vec![1, 7, 0, tag::I2C, 2, 1, 0];
         assert_eq!(Manifest::decode(&w), Err(ManifestError::Short(tag::I2C)));
@@ -971,8 +975,14 @@ mod tests {
         assert_eq!(mic.rates_hz().collect::<Vec<_>>(), [16_000]);
         let levels = MicConfig::new(16_000, 20, AudioMode::Levels, 10, 160).unwrap();
         assert!(mic.accepts(&levels));
-        assert!(!mic.accepts(&MicConfig { gain_db: 21, ..levels }));
-        assert!(!mic.accepts(&MicConfig { rate_hz: 8_000, ..levels }));
+        assert!(!mic.accepts(&MicConfig {
+            gain_db: 21,
+            ..levels
+        }));
+        assert!(!mic.accepts(&MicConfig {
+            rate_hz: 8_000,
+            ..levels
+        }));
         let pcm = MicConfig::new(16_000, 0, AudioMode::Pcm, 200, 0).unwrap();
         assert!(!mic.accepts(&pcm));
         let m = Manifest::new(7).with_mic(mic);

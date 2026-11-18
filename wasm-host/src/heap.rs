@@ -14,7 +14,8 @@
 //!    [`abi::memory_reach`](crate::abi::memory_reach)), the value
 //!    stack (allocated once, in full), the call frame list up to the depth
 //!    cap, and the fixed host state: linker, store, instance, the DMA copy
-//!    buffer, the subscription and served-key lists and `init`'s bounded log
+//!    buffer, the subscription and served-key lists, the channel table
+//!    (ABI 8) and `init`'s bounded log
 //!    ([`run_bytes`]). The image is not counted: the caller frees it
 //!    between the phases.
 //!
@@ -82,6 +83,9 @@ pub const RUNTIME_FIXED: u32 = MAX_DMA as u32
     + (MAX_SUBSCRIPTIONS as u32) * (middleware::key::MAX_KEY_LEN as u32 + 4 * PTR)
     + (MAX_SERVES as u32) * (middleware::key::MAX_KEY_LEN as u32 + 4 * PTR)
     + (INIT_LOG_LINES as u32) * (MAX_LOG as u32 + 4 * PTR)
+    // ABI 8: each declared channel's name and resolution (an output's key).
+    + (middleware::wasm_abi::channels::MAX_CHANNELS as u32)
+        * (middleware::wasm_abi::channels::MAX_NAME as u32 + middleware::key::MAX_KEY_LEN as u32 + 12 * PTR)
     + 3072 * PTR;
 
 /// wasmi's module for an image of `image_len` bytes.

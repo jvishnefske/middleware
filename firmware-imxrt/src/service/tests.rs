@@ -17,11 +17,11 @@ use embedded_storage::nor_flash::{ErrorType, NorFlashErrorKind, ReadNorFlash};
 use middleware::crc::Crc32;
 use middleware::fw_ota::wire::{Command, FwInfo};
 use middleware::fw_ota::{CHUNK_LEN, FwUpdate as FwState, Slot, keys as fw_keys};
-use middleware::loader::{Caps, DeviceInfo};
 use middleware::loader::sha256::ImageHash;
 use middleware::loader::trust::{
     PublicKey, SIGNED_COMMIT_LEN, Signature, SignedCommit, Version, signed_message,
 };
+use middleware::loader::{Caps, DeviceInfo};
 use std::vec;
 use std::vec::Vec as StdVec;
 
@@ -981,7 +981,9 @@ fn fl7_the_endpoint_note_reads_as_a_log_line() {
 fn mf3_the_manifest_agrees_with_the_sensor_routes() {
     use crate::sensors::imu_route::ImuRoute;
     use crate::sensors::mic_route::MicRoute;
-    use middleware::wasm_abi::route::{AudioMode, IMU_RANGES_G, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig};
+    use middleware::wasm_abi::route::{
+        AudioMode, IMU_RANGES_G, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig,
+    };
     let imu = MANIFEST.imu.unwrap();
     for rate in IMU_RATES_HZ {
         for range in IMU_RANGES_G {
@@ -995,10 +997,17 @@ fn mf3_the_manifest_agrees_with_the_sensor_routes() {
             }
         }
     }
-    assert_eq!(imu.mag_rates_hz().collect::<StdVec<_>>(), [50, 100, 200, 400]);
+    assert_eq!(
+        imu.mag_rates_hz().collect::<StdVec<_>>(),
+        [50, 100, 200, 400]
+    );
     let mic = MANIFEST.mic.unwrap();
     for rate in MIC_RATES_HZ {
-        for (mode, units, block) in [(AudioMode::Levels, 10, 160), (AudioMode::MuLaw, 480, 0), (AudioMode::Pcm, 240, 0)] {
+        for (mode, units, block) in [
+            (AudioMode::Levels, 10, 160),
+            (AudioMode::MuLaw, 480, 0),
+            (AudioMode::Pcm, 240, 0),
+        ] {
             for gain in [0, mic.max_gain_db] {
                 // PCM at 32 kHz and above cannot fill 10 ms in one batch: the ABI
                 // refuses it before any board sees it.
@@ -1006,7 +1015,11 @@ fn mf3_the_manifest_agrees_with_the_sensor_routes() {
                     assert!(rate >= 32_000 && mode == AudioMode::Pcm);
                     continue;
                 };
-                assert_eq!(mic.accepts(&cfg), MicRoute::new(cfg, 0).is_ok(), "{rate} Hz {mode:?}");
+                assert_eq!(
+                    mic.accepts(&cfg),
+                    MicRoute::new(cfg, 0).is_ok(),
+                    "{rate} Hz {mode:?}"
+                );
                 assert!(mic.accepts(&cfg));
             }
         }

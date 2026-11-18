@@ -46,6 +46,7 @@
 #![forbid(unsafe_code)]
 
 pub mod air;
+pub mod bindspec;
 pub mod bridge;
 pub mod cli;
 pub mod device;

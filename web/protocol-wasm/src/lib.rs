@@ -46,6 +46,7 @@
 //! JS. They are unit tested natively with `cargo test -p protocol-wasm`.
 #![forbid(unsafe_code)]
 
+pub mod binding;
 pub mod bindings;
 pub mod decoder;
 pub mod encode;

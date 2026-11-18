@@ -342,11 +342,25 @@ impl Controller {
         let bound = limits.heap_needed(&image);
         let needed = check_heap_holding(heap::free(), image.capacity(), bound)
             .map_err(StartError::NoHeap)?;
+        // The stored binding, if it is for this image (BD4).
+        let mut record = [0u8; middleware::loader::binding::BINDING_MAX];
+        let binding = match self.svc.binding_record(&mut record) {
+            Some(n) => match esp_base::binding_store::for_image(&record[..n], &image) {
+                Ok(b) => Some(b),
+                Err(why) => {
+                    self.bus
+                        .log(format_args!("payload: stored binding ignored ({why:?})"));
+                    None
+                }
+            },
+            None => None,
+        };
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
         let device =
             RtDevice::new(self.bus, &RT1050, self.svc.node()).ok_or(StartError::NoHardware)?;
-        let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
+        let payload = Payload::instantiate_bound(compiled, device, binding.as_ref())
+            .map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
             header.len,

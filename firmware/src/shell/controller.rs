@@ -108,6 +108,7 @@
 //! Status changes are published on `sys/payload/status`, notable events as
 //! `sys/log` lines.
 
+use crate::binding_store::{self, BindingStore};
 use crate::board::Autostart;
 use crate::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use crate::ota::{self, Admission, Facts, Mac, Origin};
@@ -159,6 +160,9 @@ pub struct Controller {
     store: Option<Store>,
     /// The trust partition; `None` when the partition table has none.
     trust: Option<TrustStore>,
+    /// The binding partition (BD3); `None` when the partition table has
+    /// none (binds are `Unavailable`).
+    binding: Option<BindingStore>,
     /// Who started the loader transfer in progress.
     owner: Option<Origin>,
     /// This device's ESP-NOW (station) MAC: signed control requests must
@@ -202,6 +206,7 @@ impl Controller {
         ctx: Context<'static>,
         store: Option<Store>,
         trust: Option<TrustStore>,
+        binding: Option<BindingStore>,
         own: Mac,
         bus: &'static Bus,
         #[cfg(feature = "wasm")] board: &'static Board,
@@ -211,6 +216,7 @@ impl Controller {
             ctx,
             store,
             trust,
+            binding,
             owner: None,
             own,
             bus,
@@ -290,7 +296,10 @@ impl Controller {
                 })
             }
             Action::Claim { trust } => self.save_trust(&Persisted { trust, control }),
-            Action::None | Action::Start | Action::Stop => Ok(()),
+            // Performed by `binding_store::perform` in `dispatch`.
+            Action::None | Action::Start | Action::Stop | Action::Bind { .. } | Action::Binding => {
+                Ok(())
+            }
         }
     }
 
@@ -478,6 +487,26 @@ impl Controller {
         };
         let req = Request::new(key, body).with_meta(meta);
         let outcome = handle_request(self.state, &ctx, &req, &mut out);
+        if matches!(outcome.action, Action::Bind { .. } | Action::Binding) {
+            let done = match self.store.as_mut() {
+                Some(st) => {
+                    binding_store::perform(self.binding.as_mut(), st.flash(), &outcome, &mut out)
+                }
+                None => Some((outcome.state, Err(HandlerError::Unavailable))),
+            };
+            if let Some((next, reply)) = done {
+                self.set_state(next);
+                let result = reply.and_then(|n| {
+                    out.get(..n)
+                        .and_then(|b| Vec::from_slice(b).ok())
+                        .ok_or(HandlerError::BufferTooSmall)
+                });
+                return Handled {
+                    reply: Some(Reply { id, result }),
+                    stop: false,
+                };
+            }
+        }
         if outcome.action == Action::Start {
             return Handled {
                 reply: None,
@@ -584,12 +613,30 @@ impl Controller {
         let bound = limits.heap_needed(&image);
         let needed = check_heap_holding(esp_alloc::HEAP.free(), image.capacity(), bound)
             .map_err(StartError::NoHeap)?;
+        // The stored binding, if it is for this image (BD4).
+        let mut record = [0u8; middleware::loader::binding::BINDING_MAX];
+        let n = match (self.binding.as_ref(), self.store.as_mut()) {
+            (Some(b), Some(st)) => b.load(st.flash(), &mut record).ok().flatten(),
+            _ => None,
+        };
+        let binding = match n {
+            Some(n) => match binding_store::for_image(&record[..n], &image) {
+                Ok(b) => Some(b),
+                Err(why) => {
+                    self.bus
+                        .log(format_args!("payload: stored binding ignored ({why:?})"));
+                    None
+                }
+            },
+            None => None,
+        };
         let compiled = Compiled::new(&image, limits).map_err(StartError::Load)?;
         drop(image);
         let node = self.ctx.node.unwrap_or(SenderId([0; 8]));
         let device =
             EspDevice::new(self.board.profile(), self.bus, node).ok_or(StartError::NoPins)?;
-        let payload = Payload::instantiate(compiled, device).map_err(StartError::Load)?;
+        let payload = Payload::instantiate_bound(compiled, device, binding.as_ref())
+            .map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
             header.len,

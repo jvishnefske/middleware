@@ -509,6 +509,11 @@ impl JsDeviceLoader {
                 Action::Info => "info",
                 Action::Board => "board",
                 Action::Manifest => "manifest",
+                Action::Bind(record) => {
+                    set(&o, "body", bytes(&record));
+                    "bind"
+                }
+                Action::Binding => "binding",
                 Action::Start => "start",
                 Action::Stop => "stop",
                 Action::Erase(len) => {
@@ -555,6 +560,8 @@ pub fn protocol() -> Object {
         ("info", keys::INFO),
         ("board", keys::BOARD),
         ("manifest", keys::MANIFEST),
+        ("bind", keys::BIND),
+        ("binding", keys::BINDING),
         ("begin", keys::BEGIN),
         ("chunk", keys::CHUNK),
         ("commit", keys::COMMIT),
@@ -2009,14 +2016,17 @@ mod sim {
     #[wasm_bindgen(js_class = Simulator)]
     impl JsSimulator {
         /// Loads `wasm`, running its `init`, on a device with node id
-        /// `node` (16 hex digits; the default when omitted). Events raised
-        /// by `init` are delivered before this returns. Throws on
-        /// rejection, trap or a malformed node id.
+        /// `node` (16 hex digits; the default when omitted), its channels
+        /// (ABI 8) resolved against the encoded `binding` when given.
+        /// Events raised by `init` are delivered before this returns.
+        /// Throws on rejection, trap, a binding that does not resolve, or a
+        /// malformed node id.
         #[wasm_bindgen(constructor)]
         pub fn new(
             module_bytes: &[u8],
             on_event: Function,
             node: Option<String>,
+            binding: Option<Vec<u8>>,
         ) -> Result<JsSimulator, JsError> {
             let mut device = SimDevice::new();
             if let Some(hex) = node {
@@ -2024,7 +2034,7 @@ mod sim {
                     parse_node(&hex).ok_or_else(|| JsError::new("a node id is 16 hex digits"))?;
                 device = device.with_node(id);
             }
-            let sim = Simulator::load_on(module_bytes, None, device)
+            let sim = Simulator::load_bound(module_bytes, None, device, binding.as_deref())
                 .map_err(|e| JsError::new(&e.describe()))?;
             let mut s = JsSimulator { sim, on_event };
             s.flush();
@@ -2271,4 +2281,447 @@ mod sim {
             self.sim.trapped()
         }
     }
+}
+
+// ---- ABI 8 channels and bindings (CH1, BD1, BD5) ----------------------
+
+fn channel_object(c: &middleware::wasm_abi::channels::Channel<'_>) -> Object {
+    use middleware::wasm_abi::channels::{DataKind, Direction};
+    let o = Object::new();
+    set(&o, "name", c.name);
+    set(&o, "dir", if c.dir == Direction::In { "in" } else { "out" });
+    set(
+        &o,
+        "kind",
+        match c.kind {
+            DataKind::Bytes => "bytes",
+            DataKind::Samples => "samples",
+            DataKind::Frames => "frames",
+        },
+    );
+    let sensor = match c.sensor {
+        Some(middleware::stream::samples::SensorKind::Imu) => JsValue::from_str("imu"),
+        Some(middleware::stream::samples::SensorKind::Microphone) => JsValue::from_str("mic"),
+        None => JsValue::NULL,
+    };
+    set(&o, "sensor", sensor);
+    set(&o, "formats", c.formats);
+    set(&o, "channels", c.channels);
+    set(&o, "rateMin", c.rate_min);
+    set(&o, "rateMax", c.rate_max);
+    set(&o, "required", c.required);
+    o
+}
+
+/// The channels a payload declares (its `mw.channels` section, ABI 8):
+/// `[{name, dir: "in"|"out", kind: "bytes"|"samples"|"frames", sensor:
+/// "imu"|"mic"|null, formats (mask over sample or pixel format codes, 0 =
+/// any), channels (0 = any), rateMin, rateMax, required}]`; empty without
+/// the section. Throws for a malformed one.
+#[wasm_bindgen(js_name = readChannels)]
+pub fn read_channels(module_bytes: &[u8]) -> Result<Array, JsError> {
+    let c = middleware::wasm_abi::channels::Channels::from_module(module_bytes)
+        .map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
+    Ok(c.iter().map(|c| JsValue::from(channel_object(c))).collect())
+}
+
+/// Encodes channel declarations (the objects [`read_channels`] returns)
+/// as a `mw.channels` section body. Throws for an invalid declaration.
+#[wasm_bindgen(js_name = encodeChannels)]
+pub fn encode_channels(list: Array) -> Result<Vec<u8>, JsError> {
+    use middleware::wasm_abi::channels::{ANY, ENTRY_FIXED, VERSION, valid_name};
+    let mut out = vec![
+        VERSION,
+        u8::try_from(list.length()).map_err(|_| js_err("too many channels"))?,
+    ];
+    for v in list.iter() {
+        let name = text(&v, "name");
+        if !valid_name(name.as_bytes()) {
+            return Err(js_err(&format!("bad channel name {name:?}")));
+        }
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+        let mut f = [0u8; ENTRY_FIXED];
+        f[0] = u8::from(text(&v, "dir") == "out");
+        f[1] = match text(&v, "kind").as_str() {
+            "bytes" => 0,
+            "samples" => 1,
+            "frames" => 2,
+            k => return Err(js_err(&format!("bad channel kind {k:?}"))),
+        };
+        f[2] = match text(&v, "sensor").as_str() {
+            "imu" => 0,
+            "mic" => 1,
+            _ => ANY,
+        };
+        f[3] = whole(&get(&v, "formats")).unwrap_or(0) as u8;
+        f[4] = whole(&get(&v, "channels")).unwrap_or(0) as u8;
+        let lo = whole(&get(&v, "rateMin")).unwrap_or(0) as u32;
+        let hi = whole(&get(&v, "rateMax")).map_or(u32::MAX, |h| h as u32);
+        f[5..9].copy_from_slice(&lo.to_le_bytes());
+        f[9..13].copy_from_slice(&hi.to_le_bytes());
+        f[13] = u8::from(get(&v, "required").as_bool().unwrap_or(true));
+        out.extend_from_slice(&f);
+    }
+    middleware::wasm_abi::channels::Channels::parse(&out).map_err(|e| js_err(&format!("{e:?}")))?;
+    Ok(out)
+}
+
+/// `wasm` with a `mw.channels` custom section `section` appended (for
+/// payloads built without the SDK's `channels!`, such as WAT).
+#[wasm_bindgen(js_name = withChannels)]
+pub fn with_channels(module_bytes: &[u8], section: &[u8]) -> Vec<u8> {
+    let name = middleware::wasm_abi::channels::SECTION.as_bytes();
+    let mut body = vec![name.len() as u8];
+    body.extend_from_slice(name);
+    body.extend_from_slice(section);
+    let mut out = module_bytes.to_vec();
+    out.push(0);
+    let mut n = body.len();
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            break;
+        }
+        out.push(b | 0x80);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+fn mode_name(m: middleware::wasm_abi::route::AudioMode) -> &'static str {
+    use middleware::wasm_abi::route::AudioMode;
+    match m {
+        AudioMode::Levels => "levels",
+        AudioMode::MuLaw => "mulaw",
+        AudioMode::Pcm => "pcm",
+    }
+}
+
+fn source_object(s: &middleware::wasm_abi::route::RouteSource) -> Object {
+    use middleware::wasm_abi::route::{RouteSource, SampleSource};
+    let o = Object::new();
+    set(&o, "kind", "local");
+    match s {
+        RouteSource::Samples(SampleSource::Microphone(c)) => {
+            set(&o, "source", "mic");
+            set(&o, "rateHz", c.rate_hz);
+            set(&o, "gainDb", c.gain_db);
+            set(&o, "mode", mode_name(c.mode));
+            set(&o, "units", c.samples);
+            set(&o, "block", c.block);
+        }
+        RouteSource::Samples(SampleSource::Imu(c)) => {
+            set(&o, "source", "imu");
+            set(&o, "rateHz", c.rate_hz);
+            set(&o, "rangeG", c.range_g);
+            set(&o, "mag", c.mag);
+            set(&o, "units", c.samples);
+        }
+        RouteSource::Frames(src, cfg) => {
+            let (buf, n) = src.encode(cfg);
+            let camera = matches!(src, middleware::wasm_abi::route::Source::Camera(_));
+            set(&o, "source", if camera { "camera" } else { "testPattern" });
+            set(&o, "cfg", bytes(&buf[..n]));
+        }
+    }
+    o
+}
+
+fn source_in(v: &JsValue) -> Result<middleware::wasm_abi::route::RouteSource, JsError> {
+    use middleware::wasm_abi::route::{
+        AudioMode, ImuConfig, MicConfig, RouteSource, SampleSource, SourceKind, parse_route_source,
+    };
+    let n = |k: &str| whole(&get(v, k)).unwrap_or(0);
+    let bad = |e| js_err(&format!("source config refused ({e:?})"));
+    Ok(match text(v, "source").as_str() {
+        "mic" => {
+            let mode = match text(v, "mode").as_str() {
+                "mulaw" => AudioMode::MuLaw,
+                "pcm" => AudioMode::Pcm,
+                _ => AudioMode::Levels,
+            };
+            RouteSource::Samples(SampleSource::Microphone(
+                MicConfig::new(
+                    n("rateHz") as u16,
+                    n("gainDb") as u8,
+                    mode,
+                    n("units") as u16,
+                    n("block") as u16,
+                )
+                .map_err(bad)?,
+            ))
+        }
+        "imu" => RouteSource::Samples(SampleSource::Imu(
+            ImuConfig::new(
+                n("rateHz") as u16,
+                n("rangeG") as u8,
+                get(v, "mag").as_bool().unwrap_or(false),
+                n("units") as u16,
+            )
+            .map_err(bad)?,
+        )),
+        s @ ("testPattern" | "camera") => {
+            let kind = if s == "camera" {
+                SourceKind::Camera
+            } else {
+                SourceKind::TestPattern
+            };
+            let cfg = Uint8Array::new(&get(v, "cfg")).to_vec();
+            parse_route_source(kind, &cfg).map_err(bad)?
+        }
+        s => return Err(js_err(&format!("unknown local source {s:?}"))),
+    })
+}
+
+fn endpoint_object(e: &middleware::loader::binding::Endpoint<'_>) -> Object {
+    use middleware::loader::binding::Endpoint;
+    match e {
+        Endpoint::Local(s) => source_object(s),
+        Endpoint::Key(k) => {
+            let o = Object::new();
+            set(&o, "kind", "key");
+            set(&o, "key", k.as_str());
+            o
+        }
+        Endpoint::Remote { node, key } => {
+            let o = Object::new();
+            set(&o, "kind", "remote");
+            set(&o, "node", node_hex(*node));
+            set(&o, "key", key.as_str());
+            o
+        }
+    }
+}
+
+fn target_object(t: &middleware::loader::binding::Target<'_>) -> Object {
+    use middleware::loader::binding::{Adapter, Target};
+    match t {
+        Target::Adapted { inner, adapter } => {
+            let o = Object::new();
+            set(&o, "kind", "adapted");
+            let a = Object::new();
+            match adapter {
+                Adapter::PcmToLevels { block } => {
+                    set(&a, "kind", "pcmToLevels");
+                    set(&a, "block", *block);
+                }
+                Adapter::PcmToMuLaw => set(&a, "kind", "pcmToMuLaw"),
+                Adapter::Decimate { factor } => {
+                    set(&a, "kind", "decimate");
+                    set(&a, "factor", *factor);
+                }
+                Adapter::ImuToMagnitude => set(&a, "kind", "imuToMagnitude"),
+            }
+            set(&o, "adapter", a);
+            set(&o, "inner", endpoint_object(inner));
+            o
+        }
+        other => endpoint_object(&other.parts().0),
+    }
+}
+
+/// A JS target into its kind, source, key text and node, owned (a
+/// [`middleware::loader::binding::Target`] borrows its key).
+enum TargetIn {
+    Local(middleware::wasm_abi::route::RouteSource),
+    Key(String),
+    Remote(middleware::SenderId, String),
+}
+
+fn endpoint_in(v: &JsValue) -> Result<TargetIn, JsError> {
+    Ok(match text(v, "kind").as_str() {
+        "local" => TargetIn::Local(source_in(v)?),
+        "key" => TargetIn::Key(text(v, "key")),
+        "remote" => TargetIn::Remote(
+            parse_node(&text(v, "node")).ok_or_else(|| js_err("a node id is 16 hex digits"))?,
+            text(v, "key"),
+        ),
+        k => return Err(js_err(&format!("unknown target kind {k:?}"))),
+    })
+}
+
+fn adapter_in(v: &JsValue) -> Result<middleware::loader::binding::Adapter, JsError> {
+    use middleware::loader::binding::Adapter;
+    let n = |k: &str| whole(&get(v, k)).unwrap_or(0) as u16;
+    let (code, param) = match text(v, "kind").as_str() {
+        "pcmToLevels" => (1, n("block")),
+        "pcmToMuLaw" => (2, 0),
+        "decimate" => (3, n("factor")),
+        "imuToMagnitude" => (4, 0),
+        k => return Err(js_err(&format!("unknown adapter {k:?}"))),
+    };
+    Adapter::decode(code, param).ok_or_else(|| js_err("adapter parameter out of range"))
+}
+
+fn key_in(s: &str) -> Result<middleware::Key<'_>, JsError> {
+    middleware::Key::new(s).map_err(|_| js_err(&format!("bad key {s:?}")))
+}
+
+/// Encodes `{imageSha256 (32 bytes), version, entries: [{name, target}]}`
+/// as a binding record (`middleware::loader::binding`). A target is
+/// `{kind: "local", source: "mic", rateHz, gainDb, mode, units, block}`,
+/// `{kind: "local", source: "imu", rateHz, rangeG, mag, units}`,
+/// `{kind: "local", source: "testPattern"|"camera", cfg}`, `{kind: "key",
+/// key}`, `{kind: "remote", node, key}` or `{kind: "adapted", adapter:
+/// {kind: "pcmToLevels", block}|{kind: "pcmToMuLaw"}|{kind: "decimate",
+/// factor}|{kind: "imuToMagnitude"}, inner}`. Throws for anything the
+/// device would refuse.
+#[wasm_bindgen(js_name = encodeBinding)]
+pub fn encode_binding(b: JsValue) -> Result<Vec<u8>, JsError> {
+    use middleware::loader::binding::{BINDING_MAX, Binding, Endpoint, Target};
+    let sha = <[u8; 32]>::try_from(Uint8Array::new(&get(&b, "imageSha256")).to_vec().as_slice())
+        .map_err(|_| js_err("imageSha256 must be 32 bytes"))?;
+    let version = whole(&get(&b, "version")).unwrap_or(0) as u32;
+    let entries = array(&b, "entries");
+    let owned: Vec<(
+        String,
+        TargetIn,
+        Option<middleware::loader::binding::Adapter>,
+    )> = entries
+        .iter()
+        .map(|e| {
+            let t = get(&e, "target");
+            let (inner, adapter) = if text(&t, "kind") == "adapted" {
+                (
+                    endpoint_in(&get(&t, "inner"))?,
+                    Some(adapter_in(&get(&t, "adapter"))?),
+                )
+            } else {
+                (endpoint_in(&t)?, None)
+            };
+            Ok((text(&e, "name"), inner, adapter))
+        })
+        .collect::<Result<_, JsError>>()?;
+    let mut binding = Binding::new(sha, middleware::loader::trust::Version(version));
+    for (name, t, adapter) in &owned {
+        let ep = match t {
+            TargetIn::Local(s) => Endpoint::Local(*s),
+            TargetIn::Key(k) => Endpoint::Key(key_in(k)?),
+            TargetIn::Remote(node, k) => Endpoint::Remote {
+                node: *node,
+                key: key_in(k)?,
+            },
+        };
+        let target = match (adapter, ep) {
+            (Some(a), inner) => Target::Adapted { inner, adapter: *a },
+            (None, Endpoint::Local(s)) => Target::Local(s),
+            (None, Endpoint::Key(k)) => Target::Key(k),
+            (None, Endpoint::Remote { node, key }) => Target::Remote { node, key },
+        };
+        binding
+            .bind(name, target)
+            .map_err(|e| js_err(&format!("{name}: {e:?}")))?;
+    }
+    let mut out = vec![0u8; BINDING_MAX];
+    let n = binding
+        .encode(&mut out)
+        .ok_or_else(|| js_err("binding too large"))?;
+    out.truncate(n);
+    // Round trip: what the device would refuse is refused here.
+    Binding::decode(&out).map_err(|e| js_err(&format!("{e:?}")))?;
+    Ok(out)
+}
+
+/// Decodes a binding record into the object [`encode_binding`] takes;
+/// `undefined` when malformed.
+#[wasm_bindgen(js_name = decodeBinding)]
+pub fn decode_binding(record: &[u8]) -> Option<Object> {
+    let b = middleware::loader::binding::Binding::decode(record).ok()?;
+    let o = Object::new();
+    set(&o, "imageSha256", bytes(&b.image_sha256));
+    set(&o, "version", b.version.0);
+    let entries: Array = b
+        .entries()
+        .map(|(name, t)| {
+            let e = Object::new();
+            set(&e, "name", name);
+            set(&e, "target", target_object(&t));
+            JsValue::from(e)
+        })
+        .collect();
+    set(&o, "entries", entries);
+    Some(o)
+}
+
+/// The message a binding signature covers ([`binding_message`]): the
+/// record's image and version and its SHA-256.
+///
+/// [`binding_message`]: middleware::loader::binding::binding_message
+#[wasm_bindgen(js_name = bindingMessage)]
+pub fn binding_message(record: &[u8]) -> Result<Vec<u8>, JsError> {
+    let b = middleware::loader::binding::Binding::decode(record)
+        .map_err(|e| js_err(&format!("{e:?}")))?;
+    let sha = middleware::loader::sha256::ImageHash::digest(record);
+    Ok(middleware::loader::binding::binding_message(&b.image_sha256, b.version, &sha).to_vec())
+}
+
+/// A `sys/payload/bind` body: `record`, then with a 64-byte `signature`
+/// the trailer `[version][signature]` (the record's version).
+#[wasm_bindgen(js_name = encodeBindBody)]
+pub fn encode_bind_body(record: &[u8], signature: Option<Vec<u8>>) -> Result<Vec<u8>, JsError> {
+    use middleware::loader::binding::{Binding, SignedBinding};
+    let b = Binding::decode(record).map_err(|e| js_err(&format!("{e:?}")))?;
+    let mut out = record.to_vec();
+    if let Some(sig) = signature {
+        let signature = trust::Signature(
+            sig.try_into()
+                .map_err(|_| js_err("a signature is 64 bytes"))?,
+        );
+        out.extend_from_slice(
+            &SignedBinding {
+                version: b.version,
+                signature,
+            }
+            .encode(),
+        );
+    }
+    Ok(out)
+}
+
+/// Checks `record` for the payload `wasm` on the node whose `sys/manifest`
+/// is `manifest` (BD5): `[{channel, message, fix?}]` where `fix` is a
+/// target ([`encode_binding`]'s form), `{kind: "keyNamed"}` (bind to a key
+/// named after the channel) or `{kind: "remove"}`. Throws when an input
+/// does not decode.
+#[wasm_bindgen(js_name = checkBinding)]
+pub fn check_binding(
+    manifest: &[u8],
+    module_bytes: &[u8],
+    record: &[u8],
+) -> Result<Array, JsError> {
+    use crate::binding::{Fix, check};
+    let m = middleware::loader::manifest::Manifest::decode(manifest)
+        .map_err(|e| js_err(&format!("manifest: {e:?}")))?;
+    let c = middleware::wasm_abi::channels::Channels::from_module(module_bytes)
+        .map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
+    let b = middleware::loader::binding::Binding::decode(record)
+        .map_err(|e| js_err(&format!("binding: {e:?}")))?;
+    Ok(check(&m, &c, &b)
+        .into_iter()
+        .map(|i| {
+            let o = Object::new();
+            set(&o, "channel", i.channel);
+            set(&o, "message", i.message);
+            if let Some(f) = i.fix {
+                let fix = match f {
+                    Fix::Local(s) => source_object(&s),
+                    Fix::KeyNamed => {
+                        let x = Object::new();
+                        set(&x, "kind", "keyNamed");
+                        x
+                    }
+                    Fix::Remove => {
+                        let x = Object::new();
+                        set(&x, "kind", "remove");
+                        x
+                    }
+                };
+                set(&o, "fix", fix);
+            }
+            JsValue::from(o)
+        })
+        .collect())
 }

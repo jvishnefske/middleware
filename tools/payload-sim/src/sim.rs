@@ -125,6 +125,10 @@ pub struct Options {
     /// The first board's node id (`--node`, 16 hex digits); a `--peer`
     /// board's is the same with the last byte plus one.
     pub node: SenderId,
+    /// A channel binding record (`--bind`, `middleware::loader::binding`)
+    /// the first payload's channels are resolved against (ABI 8); applied
+    /// whatever image it names.
+    pub bind: Option<String>,
 }
 
 /// The first board's node id when `--node` is not given.
@@ -148,14 +152,16 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
     use middleware::wasm_abi::route::{MAX_DIM, MAX_MIC_GAIN_DB, PixelFormat, SourceKind};
     Manifest::new(middleware::wasm_abi::ABI_VERSION)
         .with_groups(Groups(
-            Groups::BRIDGE.0 | (Groups::BRIDGE.0 - 1), // gpio .. bridge
+            Groups::CHANNELS.0 | (Groups::CHANNELS.0 - 1), // gpio .. channels
         ))
         .with_i2c(I2cBuses {
             buses: I2C_BUSES as u8,
             min_hz: *I2C_FREQ_HZ.start() as u32,
             max_hz: *I2C_FREQ_HZ.end() as u32,
         })
-        .with_spi(SpiBuses { buses: SPI_BUSES as u8 })
+        .with_spi(SpiBuses {
+            buses: SPI_BUSES as u8,
+        })
         .with_imu(ImuSource::ALL)
         .with_mic(MicSource {
             rates: 0b1111,
@@ -171,8 +177,14 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
         .with_sink_spi(SpiSink {
             max_frame: middleware::stream::MAX_FRAME_BYTES,
         })
-        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
-        .with_link(Link { id: 1, kind: LinkKind::SERIAL })
+        .with_link(Link {
+            id: 0,
+            kind: LinkKind::SERIAL,
+        })
+        .with_link(Link {
+            id: 1,
+            kind: LinkKind::SERIAL,
+        })
         .with_limits(Limits::ABI)
 };
 
@@ -209,7 +221,7 @@ pub fn render_reply(key: &str, outcome: Result<&[u8], HandlerError>) -> String {
 /// Usage text printed on argument errors.
 pub const USAGE: &str = "usage: payload-sim <file.wasm> [--ticks N] [--fuel F] [--pages P | --memory-bytes B] [--virtual]\n\
                          [--until-ms T] [--spi-pattern HEX] [--peer <other.wasm>] [--loss PERMILLE]\n\
-                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>] [--node HEX16]\n\
+                         [--seed S] [--dump-panel <file.ppm>] [--panel-dc <pin>] [--node HEX16] [--bind <binding.bin>]\n\
 stdin lines `<key> <text>` are delivered to the payload;\n\
 `!gpio <pin> <0|1>` sets an input level, `!uart <text>` types at the UART1 terminal,\n\
 `!adc <pin> <0..4095>` sets an analog input,\n\
@@ -236,6 +248,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
         dump_panel: None,
         panel_dc: None,
         node: DEFAULT_NODE,
+        bind: None,
     };
     let mut it = args.iter().map(AsRef::as_ref);
     while let Some(arg) = it.next() {
@@ -252,6 +265,7 @@ pub fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Options, String> {
             "--until-ms" => opts.until_ms = Some(number(value("--until-ms")?)?),
             "--spi-pattern" => opts.spi_pattern = Some(hex(value("--spi-pattern")?)?),
             "--peer" => opts.peer = Some(value("--peer")?.to_string()),
+            "--bind" => opts.bind = Some(value("--bind")?.to_string()),
             "--loss" => {
                 opts.loss = number(value("--loss")?)?;
                 if opts.loss > bus::MAX_LOSS {
@@ -1349,27 +1363,49 @@ mod tests {
     #[test]
     fn mf3_the_manifest_agrees_with_the_simulated_board() {
         use middleware::wasm_abi::bridge::Bridge;
-        use middleware::wasm_abi::route::{AudioMode, IMU_RANGES_G, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig, SourceKind};
+        use middleware::wasm_abi::route::{
+            AudioMode, IMU_RANGES_G, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig, SourceKind,
+        };
         let m = MANIFEST;
         let key = Key::from_static("s");
         for rate in IMU_RATES_HZ {
             for range in IMU_RANGES_G {
                 let cfg = ImuConfig::new(rate, range, true, 10).unwrap();
                 assert!(m.imu.unwrap().accepts(&cfg));
-                assert!(SimDevice::new(None).route_samples(SampleSource::Imu(cfg), key).is_ok());
+                assert!(
+                    SimDevice::new(None)
+                        .route_samples(SampleSource::Imu(cfg), key)
+                        .is_ok()
+                );
             }
         }
         for rate in MIC_RATES_HZ {
             let cfg = MicConfig::new(rate, 30, AudioMode::Levels, 4, 1024).unwrap();
             assert!(m.mic.unwrap().accepts(&cfg));
-            assert!(SimDevice::new(None).route_samples(SampleSource::Microphone(cfg), key).is_ok());
+            assert!(
+                SimDevice::new(None)
+                    .route_samples(SampleSource::Microphone(cfg), key)
+                    .is_ok()
+            );
         }
         let mut d = SimDevice::new(None);
         let buses = m.i2c.unwrap().buses;
         for bus in 0..buses {
-            assert!(d.i2c_open(I2cConfig { bus, freq_hz: 100_000 }).is_ok());
+            assert!(
+                d.i2c_open(I2cConfig {
+                    bus,
+                    freq_hz: 100_000
+                })
+                .is_ok()
+            );
         }
-        assert!(d.i2c_open(I2cConfig { bus: buses, freq_hz: 100_000 }).is_err());
+        assert!(
+            d.i2c_open(I2cConfig {
+                bus: buses,
+                freq_hz: 100_000
+            })
+            .is_err()
+        );
         let frames = m.frames.unwrap();
         assert!(!frames.has(SourceKind::Camera));
         let cfg = SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap();
@@ -1381,8 +1417,22 @@ mod tests {
         );
         let links = m.links().len() as u8;
         let filter = middleware::Filter::Exact(key);
-        assert!(d.route_bridge(&Bridge { src: 0, dst: links - 1, filter }).is_ok());
-        assert!(d.route_bridge(&Bridge { src: 0, dst: links, filter }).is_err());
+        assert!(
+            d.route_bridge(&Bridge {
+                src: 0,
+                dst: links - 1,
+                filter
+            })
+            .is_ok()
+        );
+        assert!(
+            d.route_bridge(&Bridge {
+                src: 0,
+                dst: links,
+                filter
+            })
+            .is_err()
+        );
         assert_eq!(
             m.caps(),
             middleware::loader::Caps::SERVE

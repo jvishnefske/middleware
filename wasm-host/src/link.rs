@@ -88,6 +88,8 @@ pub struct State<D> {
     /// The I2C devices sampled routes own (SC3): the payload's
     /// `i2c_transfer` to one of them is `Busy` until its route stops.
     pub i2c_owners: route::I2cOwners,
+    /// The declared channels and what they resolved to (ABI 8).
+    pub channels: crate::channels::ChannelTable,
 }
 
 /// The first `n` bytes of the scratch buffer (`n <= MAX_DMA`), zeroed.
@@ -264,19 +266,37 @@ pub fn route_source_call<D: Device>(
     st: &mut State<D>,
     args: (i32, i32, i32, i32, i32),
 ) -> Result<i32, AbiError> {
-    match abi::route_source_any(args, mem)? {
+    let (source, key) = match abi::route_source_any(args, mem)? {
         abi::RoutePlan::Frames(plan) => {
-            let handle = st.device.route_source(plan.source, plan.key, plan.cfg)?;
+            (route::RouteSource::Frames(plan.source, plan.cfg), plan.key)
+        }
+        abi::RoutePlan::Samples(plan) => (route::RouteSource::Samples(plan.source), plan.key),
+    };
+    start_route(st, source, key)
+}
+
+/// Starts a source route on `key` through the device, with the I2C
+/// ownership rules of SC3 for sampled sources: `route_source`, and the
+/// runtime itself for a channel bound to a local source (BD4). Returns
+/// the handle code.
+pub fn start_route<D: Device>(
+    st: &mut State<D>,
+    source: route::RouteSource,
+    key: middleware::Key<'_>,
+) -> Result<i32, AbiError> {
+    match source {
+        route::RouteSource::Frames(source, cfg) => {
+            let handle = st.device.route_source(source, key, cfg)?;
             let code = abi::route_handle_code(handle)?;
             st.i2c_owners = st.i2c_owners.release(handle);
             Ok(code)
         }
-        abi::RoutePlan::Samples(plan) => {
-            let dev = st.device.sample_device(&plan.source);
+        route::RouteSource::Samples(source) => {
+            let dev = st.device.sample_device(&source);
             if let Some(dev) = dev {
                 st.i2c_owners.check_free(dev)?;
             }
-            let handle = st.device.route_samples(plan.source, plan.key)?;
+            let handle = st.device.route_samples(source, key)?;
             let code = abi::route_handle_code(handle)?;
             st.i2c_owners = match dev {
                 Some(dev) => st.i2c_owners.claim(handle, dev)?,
@@ -285,6 +305,36 @@ pub fn route_source_call<D: Device>(
             Ok(code)
         }
     }
+}
+
+/// `channel_open(name_ptr, name_len)` (ABI 8): the input's subscription
+/// slot or the output's handle ([`crate::channels::ChannelTable::open`]).
+pub fn channel_open_call<D>(
+    mem: &[u8],
+    st: &mut State<D>,
+    (np, nl): (i32, i32),
+) -> Result<i32, AbiError> {
+    let name = mem
+        .get(guest_range(np, nl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    st.channels.open(name)
+}
+
+/// `channel_publish(handle, data_ptr, data_len)` (ABI 8): publishes on the
+/// output channel's bound key; `InvalidArgument` for any other handle.
+pub fn channel_publish_call<D: Device>(
+    mem: &[u8],
+    st: &mut State<D>,
+    (h, dp, dl): (i32, i32, i32),
+) -> Result<(), AbiError> {
+    let data = mem
+        .get(guest_range(dp, dl, mem.len())?)
+        .ok_or(AbiError::OutOfBounds)?;
+    if data.len() > MAX_MESSAGE {
+        return Err(AbiError::InvalidArgument);
+    }
+    let key = st.channels.output_key(h)?;
+    st.device.publish(key, data)
 }
 
 /// `route_sink(key_ptr, key_len, bus, cfg_ptr, cfg_len)` (ABI 4): returns
@@ -566,7 +616,28 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     link_abi5(&mut l)?;
     link_abi6(&mut l)?;
     link_abi7(&mut l)?;
+    link_abi8(&mut l)?;
     Ok(l)
+}
+
+/// Registers the ABI 8 imports (channels).
+fn link_abi8<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    let m = IMPORT_MODULE;
+    l.func_wrap(
+        m,
+        "channel_open",
+        |c: Caller<'_, State<D>>, np: i32, nl: i32| {
+            with_memory(c, |mem, st| channel_open_call(mem, st, (np, nl)))
+        },
+    )?;
+    l.func_wrap(
+        m,
+        "channel_publish",
+        |c: Caller<'_, State<D>>, h: i32, dp: i32, dl: i32| {
+            with_memory(c, |mem, st| ok0(channel_publish_call(mem, st, (h, dp, dl))))
+        },
+    )?;
+    Ok(())
 }
 
 /// Registers the ABI 6 import (bridging between links).
@@ -971,6 +1042,7 @@ mod tests {
             scratch: Vec::new(),
             init_log: None,
             i2c_owners: route::I2cOwners::new(),
+            channels: crate::channels::ChannelTable::default(),
         }
     }
 

@@ -14,6 +14,8 @@
 //! | `sys/loader/commit` | empty, or `[version u32 LE][signature 64]` | empty   |
 //! | `sys/payload/start` | empty                           | empty              |
 //! | `sys/payload/stop`  | empty                           | empty              |
+//! | `sys/payload/bind`  | [`binding::Binding`], optionally `[version u32 LE][signature 64]` | empty |
+//! | `sys/payload/binding` | empty                         | the stored [`binding::Binding`] |
 //! | `sys/trust/info`    | empty                           | [`trust::TrustInfo`] |
 //! | `sys/trust/claim`   | `[public key 32]`               | empty              |
 //! | `sys/net/addr`      | `[link u8]`, or `[link u8]` + [`NetAddr`] | `[link u8]` + [`NetAddr`], or empty |
@@ -44,6 +46,7 @@
 //! signature in the commit body is parsed and passed on, never checked.
 //! [`sha256`] itself is always built (the rpc responder cache uses it).
 
+pub mod binding;
 pub mod manifest;
 pub mod sha256;
 pub mod trust;
@@ -77,6 +80,10 @@ pub mod keys {
     pub const START: Key<'static> = Key::from_static("sys/payload/start");
     /// Stops the running payload.
     pub const STOP: Key<'static> = Key::from_static("sys/payload/stop");
+    /// Installs a channel binding ([`super::binding`]).
+    pub const BIND: Key<'static> = Key::from_static("sys/payload/bind");
+    /// Reads the stored channel binding.
+    pub const BINDING: Key<'static> = Key::from_static("sys/payload/binding");
     /// Device log lines (published by the device, UTF-8).
     pub const LOG: Key<'static> = Key::from_static("sys/log");
     /// Payload state changes (published by the device).
@@ -90,6 +97,10 @@ pub mod keys {
 }
 
 /// A parsed system request.
+///
+/// `Bind` carries its parsed binding (about 400 bytes); the crate has no
+/// allocator to box it, and a command lives on the stack for one request.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command<'a> {
     /// `sys/info`.
@@ -121,6 +132,13 @@ pub enum Command<'a> {
     Start,
     /// `sys/payload/stop`.
     Stop,
+    /// `sys/payload/bind`.
+    Bind {
+        /// The parsed body.
+        request: binding::BindRequest<'a>,
+    },
+    /// `sys/payload/binding`.
+    Binding,
     /// `sys/trust/info`.
     TrustInfo,
     /// `sys/trust/claim`.
@@ -157,6 +175,10 @@ impl<'a> Command<'a> {
             })),
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
+            k if k == keys::BIND.as_str() => Ok(Some(Command::Bind {
+                request: binding::BindRequest::parse(body).ok_or(bad)?,
+            })),
+            k if k == keys::BINDING.as_str() => empty(Command::Binding),
             k if k == keys::TRUST_INFO.as_str() => empty(Command::TrustInfo),
             k if k == keys::TRUST_CLAIM.as_str() => Ok(Some(Command::TrustClaim {
                 key: PublicKey::parse_claim(body)?,
@@ -193,6 +215,8 @@ impl<'a> Command<'a> {
             Command::Commit { .. } => keys::COMMIT,
             Command::Start => keys::START,
             Command::Stop => keys::STOP,
+            Command::Bind { .. } => keys::BIND,
+            Command::Binding => keys::BINDING,
             Command::TrustInfo => keys::TRUST_INFO,
             Command::TrustClaim { .. } => keys::TRUST_CLAIM,
         }
@@ -217,6 +241,16 @@ impl<'a> Command<'a> {
                 out.get_mut(..body.len())?.copy_from_slice(&body);
                 Some(body.len())
             }
+            Command::Bind { request } => {
+                let n = request.record.len();
+                out.get_mut(..n)?.copy_from_slice(request.record);
+                let Some(auth) = request.auth else {
+                    return Some(n);
+                };
+                let t = auth.encode();
+                out.get_mut(n..n + t.len())?.copy_from_slice(&t);
+                Some(n + t.len())
+            }
             Command::TrustClaim { key } => {
                 let bytes = key.as_bytes();
                 out.get_mut(..bytes.len())?.copy_from_slice(bytes);
@@ -225,6 +259,7 @@ impl<'a> Command<'a> {
             Command::Info
             | Command::Board
             | Command::Manifest
+            | Command::Binding
             | Command::Commit { auth: None }
             | Command::Start
             | Command::Stop
@@ -392,6 +427,8 @@ impl Loader {
                 Command::Info
                 | Command::Board
                 | Command::Manifest
+                | Command::Bind { .. }
+                | Command::Binding
                 | Command::Start
                 | Command::Stop
                 | Command::TrustInfo
@@ -1048,10 +1085,30 @@ mod tests {
     #[test]
     fn commands_round_trip_through_parse() {
         let data = [1u8, 2, 3];
+        let mut b = binding::Binding::new([3; 32], trust::Version(2));
+        b.bind("cmd", binding::Target::Key(Key::from_static("a/b")))
+            .unwrap();
+        let mut rec = [0u8; 128];
+        let n = b.encode(&mut rec).unwrap();
+        let mut signed = rec[..n].to_vec();
+        signed.extend_from_slice(
+            &binding::SignedBinding {
+                version: trust::Version(2),
+                signature: trust::Signature([7; 64]),
+            }
+            .encode(),
+        );
         for cmd in [
             Command::Info,
             Command::Board,
             Command::Manifest,
+            Command::Binding,
+            Command::Bind {
+                request: binding::BindRequest::parse(&rec[..n]).unwrap(),
+            },
+            Command::Bind {
+                request: binding::BindRequest::parse(&signed).unwrap(),
+            },
             Command::Begin {
                 len: 10,
                 crc: 0xDEAD_BEEF,
@@ -1074,7 +1131,7 @@ mod tests {
                 key: trust::PublicKey::Ed25519([3; 32]),
             },
         ] {
-            let mut body = [0u8; 80];
+            let mut body = [0u8; 256];
             let n = cmd.encode_body(&mut body).unwrap();
             assert_eq!(Command::parse(cmd.key(), &body[..n]), Ok(Some(cmd)));
         }
