@@ -8,6 +8,7 @@
 //! | `MW_POSIX_NODE_MACHINE_ID` | `/etc/machine-id` | path of the systemd machine id file the node id is derived from |
 //! | `MW_POSIX_NODE_MEMORY_BYTES` | `1048576` (1 MiB) | a payload's largest linear memory, decimal bytes, 65536..=67108864 |
 //! | `MW_POSIX_NODE_LOCAL_SERIAL` | none | path of a serial port (a USB gadget's `/dev/ttyGS0`, a PTY) served beside the gateway at 115200 baud, for `mwctl` |
+//! | `MW_POSIX_NODE_FUEL_PER_CALL` | `20000000` | instructions a payload may run per call (`init`, `tick`, a message, a request), 1000000..=1000000000; the microcontrollers' default is a twentieth of this |
 //! | `MW_POSIX_NODE_DRIVER` | `none` | the control-module driver ([`crate::driver`]): `none`, `sim` (a simulated EMCO PC Turn 50) or `kd240` (the KD240's inputs, read only) |
 //! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
 //!
@@ -48,6 +49,10 @@ pub const ENV_MACHINE_ID: &str = "MW_POSIX_NODE_MACHINE_ID";
 pub const ENV_MEMORY_BYTES: &str = "MW_POSIX_NODE_MEMORY_BYTES";
 /// `MW_POSIX_NODE_LOCAL_SERIAL`.
 pub const ENV_LOCAL_SERIAL: &str = "MW_POSIX_NODE_LOCAL_SERIAL";
+/// `MW_POSIX_NODE_FUEL_PER_CALL`.
+pub const ENV_FUEL_PER_CALL: &str = "MW_POSIX_NODE_FUEL_PER_CALL";
+/// Default fuel per call: twenty times the ABI's (a microcontroller's).
+pub const DEFAULT_FUEL_PER_CALL: u64 = 20 * middleware::wasm_abi::FUEL_PER_CALL;
 /// `MW_POSIX_NODE_DRIVER`.
 pub const ENV_DRIVER: &str = "MW_POSIX_NODE_DRIVER";
 /// `MW_POSIX_NODE_KD240_INPUTS`.
@@ -118,6 +123,8 @@ pub struct PosixNodeConfig {
     pub memory_bytes: u32,
     /// A local serial port served beside the gateway.
     pub local_serial: Option<String>,
+    /// Fuel per payload call.
+    pub fuel_per_call: u64,
     /// The control-module driver.
     pub driver: crate::driver::DriverChoice,
     /// Old names that were used: `MW_PI_NODE_*` variables, and
@@ -132,6 +139,7 @@ impl Default for PosixNodeConfig {
             node_id: NodeIdSource::MachineId(PathBuf::from(DEFAULT_MACHINE_ID)),
             memory_bytes: DEFAULT_MEMORY_BYTES,
             local_serial: None,
+            fuel_per_call: DEFAULT_FUEL_PER_CALL,
             driver: crate::driver::DriverChoice::None,
             deprecated: Vec::new(),
         }
@@ -176,6 +184,15 @@ impl PosixNodeConfig {
             None => d.memory_bytes,
         };
         let local_serial = get(ENV_LOCAL_SERIAL).map(|v| v.trim().to_owned());
+        let fuel_per_call = match set(ENV_FUEL_PER_CALL) {
+            Some(v) => v
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|n| (1_000_000..=1_000_000_000).contains(n))
+                .ok_or_else(|| err(ENV_FUEL_PER_CALL, &v, "not 1000000..=1000000000"))?,
+            None => d.fuel_per_call,
+        };
         let inputs = set(ENV_KD240_INPUTS);
         let driver = match set(ENV_DRIVER).as_deref().map(str::trim) {
             None | Some("none") => {
@@ -206,6 +223,7 @@ impl PosixNodeConfig {
             node_id,
             memory_bytes,
             local_serial,
+            fuel_per_call,
             driver,
             deprecated: used.into_inner(),
         })
@@ -431,5 +449,26 @@ mod tests {
         ] {
             assert_eq!(PosixNodeConfig::from_env(&env(pairs)).unwrap_err().var, var);
         }
+    }
+
+    #[test]
+    fn pn1_fuel_per_call_has_a_linux_default_and_bounds() {
+        let d = PosixNodeConfig::from_env(&env(&[])).unwrap();
+        assert_eq!(d.fuel_per_call, 20 * middleware::wasm_abi::FUEL_PER_CALL);
+        let c = PosixNodeConfig::from_env(&env(&[(ENV_FUEL_PER_CALL, "5000000")])).unwrap();
+        assert_eq!(c.fuel_per_call, 5_000_000);
+        for bad in ["999999", "2000000000", "lots"] {
+            assert_eq!(
+                PosixNodeConfig::from_env(&env(&[(ENV_FUEL_PER_CALL, bad)]))
+                    .unwrap_err()
+                    .var,
+                ENV_FUEL_PER_CALL
+            );
+        }
+        assert_eq!(crate::limits(1 << 20).fuel_per_call, DEFAULT_FUEL_PER_CALL);
+        assert_eq!(
+            crate::limits(1 << 20).max_subscriptions as usize,
+            middleware::wasm_abi::SLOT_MAX
+        );
     }
 }

@@ -518,10 +518,17 @@ mod tests {
             err(&[audio, ("level", Target::Local(levels(16_000)))], true, 8),
             BindError::Direction("level".into())
         );
-        let k = Target::Key(Key::from_static("ch/audio"));
+        let shared = Target::Key(Key::from_static("lab/shared"));
         assert_eq!(
-            err(&[audio, ("cmd", k)], true, 8),
+            err(&[("audio", shared), ("cmd", shared)], true, 8),
             BindError::SharedKey("cmd".into())
+        );
+        // A key target cannot name a channel's internal key at all (the
+        // binding refuses it), so a local source's stream is never shared.
+        let mut b = Binding::new([0; 32], Version(1));
+        assert!(
+            b.bind("cmd", Target::Key(Key::from_static("ch/audio")))
+                .is_err()
         );
         assert_eq!(
             err(

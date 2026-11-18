@@ -3683,6 +3683,11 @@ network tests use 127.0.0.1 only.
   `point=chip:offset[:low]`) and `pl_present` (a UIO device named
   `emco…`, the PL check overlay); every point flows in and every write is
   refused. *(mw-posix-node `pn18_*`)* Not yet run on the board.
+- [x] PN20 A Linux node gives a payload 16 subscriptions
+  (`wasm_abi::SLOT_MAX`) and `MW_POSIX_NODE_FUEL_PER_CALL` instructions
+  per call (default 20 M, twenty times a microcontroller's): a process
+  model compiles a program in one call. *(mw-posix-node
+  `pn1_fuel_per_call_has_a_linux_default_and_bounds`)*
 - [ ] PN19 A LinuxCNC driver (segments as queued MDI moves, its pins as
   points). Not implemented.
 - [x] PN15 The rename keeps what a node had: every `MW_POSIX_NODE_*`
@@ -6925,6 +6930,20 @@ overrun). Back-pressure is that report, never a blocking call.
   and `subscribe` refuse `drv/` as `InvalidKey`): only a binding reaches
   a point. A driver target is refused inside an adapter. *(middleware
   `bd8_*`; wasm-host `tests/abi9.rs`, `keys_reject_sys_and_malformed`)*
+- [x] MC5 Room for a machine: since ABI 9 a payload declares up to 16
+  channels (`MAX_CHANNELS`, 8 before), and a host may give it more than
+  the default 8 subscriptions (`wasm_host::Limits::max_subscriptions`,
+  `with_subscriptions`), never more than `wasm_abi::SLOT_MAX` (16): an
+  input's handle is its slot, below the first output handle. Microcontroller
+  hosts keep 8; `mw-posix-node` gives 16 and says so in its manifest's
+  limits. The SDK's `Slot` takes slots up to `SLOT_MAX`. *(wasm-host
+  `subscriptions_dedupe_and_cap`, `ch1_*`, `bd1_*`; mw-payload
+  `slot_range_follows_slot_max`)*
+- [x] MC6 A key or remote target cannot name a node-internal key (`ch/`,
+  `drv/`) or a system key: only a driver target reaches a point, so its
+  kind and direction are always checked (PN16), and only a local target
+  starts a channel's source. Refused in `Binding::bind` and on decode.
+  *(middleware `bd8_a_key_target_cannot_name_a_driver_or_channel_key`)*
 - [x] CM1 `loader::control`: a point is a name (channel-name rules), a
   machine kind, a flow (in, out, both for a segment queue), a unit, a
   range and a scale (counts per mm); pages of at most 480 bytes under
