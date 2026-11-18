@@ -21,7 +21,7 @@ fn key() -> SigningKey {
 }
 
 fn claimed() -> Context {
-    let key = PublicKey(key().verifying_key().to_bytes());
+    let key = PublicKey::Ed25519(key().verifying_key().to_bytes());
     Context {
         node: NODE,
         trust: TrustState::Claimed {

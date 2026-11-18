@@ -60,13 +60,12 @@
 use crate::device::{Device, Progress};
 use crate::error::Error;
 use crate::link::Endpoint;
-use crate::sign::{Seed, image_sha256};
-use ed25519_dalek::{Signer, SigningKey};
+use crate::sign::{SignError, Signer, image_sha256};
 use middleware::fw_ota::picobin::{ImageDef, SENTINEL_FROM, find_image_def_in};
 use middleware::fw_ota::rt_image::{HEADER_LEN, RtHeader, RtImageError, is_rt_image};
 use middleware::fw_ota::wire::{Command, FwInfo, StateCode, keys, signed_message};
 use middleware::fw_ota::{CHUNK_LEN, MAX_IMAGE, Slot};
-use middleware::loader::trust::{Signature, Version};
+use middleware::loader::trust::{ControlOp, Signature, SignedControl, Version};
 use middleware::transport::HandlerError;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -390,29 +389,42 @@ pub fn load_image(file: &[u8], expected: Option<Version>) -> Result<FwImage, Ima
     })
 }
 
-/// Signs a firmware commit: Ed25519 over the device's 64-byte
-/// [`signed_message`] for this image, version, slot and node.
+/// Signs a firmware commit over the device's 64-byte [`signed_message`]
+/// for this image, version, slot and node, with the signer's algorithm.
 pub fn sign_firmware(
     image: &[u8],
-    seed: &Seed,
+    signer: &dyn Signer,
     version: Version,
     slot: Slot,
     node: &middleware::SenderId,
-) -> Option<Signature> {
-    let len = u32::try_from(image.len()).ok()?;
+) -> Result<Signature, SignError> {
+    let len = u32::try_from(image.len()).map_err(|_| SignError::TooLarge(image.len()))?;
     let m = signed_message(len, version, slot, node, &image_sha256(image));
-    Some(Signature(
-        SigningKey::from_bytes(seed.bytes()).sign(&m).to_bytes(),
-    ))
+    signer.sign(&m)
+}
+
+/// Signs a control request for `sys/fw/reboot|confirm|abort` (and
+/// payload start/stop) for one device: a path where the device needs
+/// them signed (Zenoh) sends this body instead of an empty one. Called
+/// once per request, so each gets a fresh counter.
+#[derive(Clone, Copy)]
+pub struct ControlSigner<'a>(pub &'a dyn Fn(ControlOp) -> Result<SignedControl, Error>);
+
+impl fmt::Debug for ControlSigner<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ControlSigner(..)")
+    }
 }
 
 /// Settings of [`Device::fw_update`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UpdateOptions<'a> {
     /// Sign the commit with this key (a claimed device requires it).
-    pub key: Option<&'a Seed>,
+    pub key: Option<&'a dyn Signer>,
     /// Send `sys/fw/reboot` after the commit.
     pub reboot: bool,
+    /// Sign the reboot as a control request (over Zenoh).
+    pub control: Option<ControlSigner<'a>>,
 }
 
 /// How an update ended.
@@ -543,9 +555,9 @@ impl<L: Endpoint> Device<L> {
         }
         step += 1;
         let signature = match opts.key {
-            Some(seed) => Some(
-                sign_firmware(&image.bytes, seed, image.version, slot, &info.node)
-                    .ok_or_else(|| Error::Fw("image too large".into()))?,
+            Some(signer) => Some(
+                sign_firmware(&image.bytes, signer, image.version, slot, &info.node)
+                    .map_err(|e| Error::Fw(e.to_string()))?,
             ),
             None => None,
         };
@@ -559,7 +571,7 @@ impl<L: Endpoint> Device<L> {
         };
         if opts.reboot {
             step += 1;
-            match self.fw(&Command::Reboot) {
+            match self.fw_control(&Command::Reboot, ControlOp::FwReboot, opts.control) {
                 Ok(_) => {}
                 // The reply can lose the race with the reset, and a USB
                 // CDC port goes away with the device.
@@ -573,10 +585,32 @@ impl<L: Endpoint> Device<L> {
         Ok(done)
     }
 
+    /// `cmd` (reboot, confirm or abort), with a signed control body for
+    /// `op` when `control` is given.
+    fn fw_control(
+        &mut self,
+        cmd: &Command<'_>,
+        op: ControlOp,
+        control: Option<ControlSigner<'_>>,
+    ) -> Result<Vec<u8>, Error> {
+        match control {
+            None => self.fw(cmd),
+            Some(ControlSigner(sign)) => {
+                let body = sign(op)?.encode();
+                self.link_mut().request(cmd.key(), &body)
+            }
+        }
+    }
+
     /// `sys/fw/reboot`; a port that goes away with the reset counts as
     /// done.
     pub fn fw_reboot(&mut self) -> Result<(), Error> {
-        match self.fw(&Command::Reboot) {
+        self.fw_reboot_signed(None)
+    }
+
+    /// [`Device::fw_reboot`], signed when `control` is given.
+    pub fn fw_reboot_signed(&mut self, control: Option<ControlSigner<'_>>) -> Result<(), Error> {
+        match self.fw_control(&Command::Reboot, ControlOp::FwReboot, control) {
             Err(e) if e.is_port_lost() => Ok(()),
             r => r.map(drop),
         }
@@ -585,10 +619,21 @@ impl<L: Endpoint> Device<L> {
     /// `sys/fw/confirm`, retried while the device answers `Unavailable`
     /// (its self-test has not passed yet), at most `attempts` times with
     /// `pause` between attempts.
-    pub fn fw_confirm(&mut self, attempts: u32, mut pause: impl FnMut()) -> Result<(), Error> {
+    pub fn fw_confirm(&mut self, attempts: u32, pause: impl FnMut()) -> Result<(), Error> {
+        self.fw_confirm_signed(attempts, pause, None)
+    }
+
+    /// [`Device::fw_confirm`], each attempt signed (a fresh counter) when
+    /// `control` is given.
+    pub fn fw_confirm_signed(
+        &mut self,
+        attempts: u32,
+        mut pause: impl FnMut(),
+        control: Option<ControlSigner<'_>>,
+    ) -> Result<(), Error> {
         let mut left = attempts.max(1);
         loop {
-            match self.fw(&Command::Confirm) {
+            match self.fw_control(&Command::Confirm, ControlOp::FwConfirm, control) {
                 Err(Error::Device {
                     status: HandlerError::Unavailable,
                     ..
@@ -604,7 +649,17 @@ impl<L: Endpoint> Device<L> {
     /// `sys/fw/abort`, kept alive for two RT block erases (the record
     /// save and block 0; module docs).
     pub fn fw_abort(&mut self) -> Result<(), Error> {
-        self.fw_patient(&Command::Abort, erase_wait(2)).map(drop)
+        self.fw_abort_signed(None)
+    }
+
+    /// [`Device::fw_abort`], signed when `control` is given.
+    pub fn fw_abort_signed(&mut self, control: Option<ControlSigner<'_>>) -> Result<(), Error> {
+        match control {
+            None => self.fw_patient(&Command::Abort, erase_wait(2)).map(drop),
+            Some(_) => self
+                .fw_control(&Command::Abort, ControlOp::FwAbort, control)
+                .map(drop),
+        }
     }
 }
 
@@ -742,6 +797,7 @@ mod tests {
                 UpdateOptions {
                     key: Some(&seed),
                     reboot: true,
+                    control: None,
                 },
                 |p| seen.push((p.step, p.steps, p.done)),
             )
@@ -788,13 +844,14 @@ mod tests {
             "{err}"
         );
         // Signed by another key.
-        let other = Seed::new([42; 32]);
+        let other = crate::sign::Seed::new([42; 32]);
         let err = d
             .fw_update(
                 &img,
                 UpdateOptions {
                     key: Some(&other),
                     reboot: false,
+                    control: None,
                 },
                 |_| {},
             )
@@ -819,6 +876,7 @@ mod tests {
             UpdateOptions {
                 key: Some(&seed),
                 reboot: false,
+                control: None,
             },
             |_| {},
         )
@@ -830,6 +888,7 @@ mod tests {
                 UpdateOptions {
                     key: Some(&seed),
                     reboot: false,
+                    control: None,
                 },
                 |_| {},
             )
@@ -841,6 +900,7 @@ mod tests {
             UpdateOptions {
                 key: Some(&seed),
                 reboot: false,
+                control: None,
             },
             |_| {},
         )
@@ -875,6 +935,7 @@ mod tests {
             UpdateOptions {
                 key: None,
                 reboot: true,
+                control: None,
             },
             |_| {},
         )
@@ -993,6 +1054,7 @@ mod tests {
                 UpdateOptions {
                     key: Some(&seed),
                     reboot: true,
+                    control: None,
                 },
                 |p| seen.push((p.step, p.steps, p.done, p.total)),
             )
@@ -1038,6 +1100,7 @@ mod tests {
                 UpdateOptions {
                     key: Some(&seed),
                     reboot: true,
+                    control: None,
                 },
                 |_| {},
             )
@@ -1190,6 +1253,7 @@ mod tests {
             UpdateOptions {
                 key: None,
                 reboot: true,
+                control: None,
             },
             |_| {},
         )

@@ -455,7 +455,6 @@ mod tests {
         }
 
         fn check_control(&mut self, key: Key<'_>, body: &[u8]) -> Result<(), HandlerError> {
-            use ed25519_dalek::{Verifier, VerifyingKey};
             use middleware::loader::trust::{ControlOp, SignedControl, control_message};
             let auth = SignedControl::parse_body(body)?.ok_or(HandlerError::Denied)?;
             let op = if key == keys::START {
@@ -463,10 +462,10 @@ mod tests {
             } else {
                 ControlOp::Stop
             };
-            let vk = VerifyingKey::from_bytes(&vector_seed().public_key().0).unwrap();
             let m = control_message(op, &DEV, auth.counter);
-            let sig = ed25519_dalek::Signature::from_bytes(&auth.signature.0);
-            if auth.counter.0 <= self.control || vk.verify(&m, &sig).is_err() {
+            if auth.counter.0 <= self.control
+                || !crate::sign::verify(&vector_seed().public_key(), &m, &auth.signature)
+            {
                 return Err(HandlerError::Denied);
             }
             self.control = auth.counter.0;
@@ -568,7 +567,11 @@ mod tests {
             (i.chip.as_str(), i.status),
             ("esp32s3", PayloadStatus::Empty)
         );
-        assert_eq!(i.node, Some(middleware::SenderId::from_mac(DEV)), "0.5 node id over the air");
+        assert_eq!(
+            i.node,
+            Some(middleware::SenderId::from_mac(DEV)),
+            "0.5 node id over the air"
+        );
         assert_eq!(d.link().bridge_mac(), Some(BRIDGE));
         assert_eq!(
             d.link().stats(),
@@ -602,7 +605,8 @@ mod tests {
             Fate::LoseResponse, // start runs once
         ];
         let mut d = device(FakeAir::new(&script));
-        let start = sign_control(&vector_seed(), ControlOp::Start, &DEV, ControlCounter(1));
+        let start =
+            sign_control(&vector_seed(), ControlOp::Start, &DEV, ControlCounter(1)).unwrap();
         d.upload(
             &img,
             UploadOptions {
@@ -640,13 +644,13 @@ mod tests {
     fn o9_refusals_are_device_errors_and_attempts_are_bounded() {
         let mut d = device(FakeAir::new(&[]));
         let e = d
-            .trust_claim(middleware::loader::trust::PublicKey([1; 32]))
+            .trust_claim(middleware::loader::trust::PublicKey::Ed25519([1; 32]))
             .unwrap_err();
         assert_eq!(e.status(), Some(HandlerError::Denied));
         assert!(e.to_string().contains("never"), "{e}");
         // Unsigned, replayed, for another device or the other command.
         let signed =
-            |op, target: &Mac, n| Some(sign_control(&vector_seed(), op, target, ControlCounter(n)));
+            |op, target: &Mac, n| sign_control(&vector_seed(), op, target, ControlCounter(n)).ok();
         let denied = |r: Result<(), Error>| r.unwrap_err().status() == Some(HandlerError::Denied);
         assert!(denied(d.stop()));
         assert!(denied(d.stop_signed(signed(ControlOp::Start, &DEV, 5))));

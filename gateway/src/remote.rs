@@ -379,12 +379,11 @@ pub fn execute<E: Endpoint>(
             version,
             start,
         } => {
-            let auth = sign_commit(&image, &seed, version)
-                .ok_or_else(|| Error::Fw("image too large".into()))?;
+            let auth = sign_commit(&image, &seed, version)?;
             let start_auth = match start {
                 Some(counter) => {
                     let t = target(device)?;
-                    Some(sign_control(&seed, ControlOp::Start, &t, counter))
+                    Some(sign_control(&seed, ControlOp::Start, &t, counter)?)
                 }
                 None => None,
             };
@@ -404,10 +403,12 @@ pub fn execute<E: Endpoint>(
         }
         Job::Control { op, seed, counter } => {
             let t = target(device)?;
-            let auth = Some(sign_control(&seed, op, &t, counter));
+            let auth = Some(sign_control(&seed, op, &t, counter)?);
             match op {
                 ControlOp::Start => device.start_signed(auth)?,
                 ControlOp::Stop => device.stop_signed(auth)?,
+                // Firmware controls go through the fw jobs, never here.
+                _ => return Err(Error::Fw(format!("{op:?} is not a payload control"))),
             }
             Ok(format!(
                 "{} (counter {})",
@@ -428,6 +429,7 @@ pub fn execute<E: Endpoint>(
             let opts = UpdateOptions {
                 key: Some(&seed),
                 reboot,
+                control: None,
             };
             let done = device.fw_update(&image, opts, |_| {})?;
             if reboot {

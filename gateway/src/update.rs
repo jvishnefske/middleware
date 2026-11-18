@@ -463,14 +463,11 @@ pub fn control_target(node: SenderId) -> [u8; 6] {
     [b[0], b[1], b[2], b[3], b[4], b[5]]
 }
 
-/// Verifies a signed control request (Ed25519, strict) against `key`.
+/// Verifies a signed control request against `key`, with the key's own
+/// algorithm (Ed25519 strict, or P-256).
 fn verify_control(key: &PublicKey, op: ControlOp, target: &[u8; 6], auth: &SignedControl) -> bool {
-    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key.0) else {
-        return false;
-    };
     let message = control_message(op, target, auth.counter);
-    let sig = ed25519_dalek::Signature::from_bytes(&auth.signature.0);
-    vk.verify_strict(&message, &sig).is_ok()
+    mwctl::sign::verify(key, &message, &auth.signature)
 }
 
 impl UpdateGate {
@@ -768,7 +765,7 @@ mod tests {
     }
 
     fn pinned() -> PublicKey {
-        PublicKey(seed().verifying_key().to_bytes())
+        PublicKey::Ed25519(seed().verifying_key().to_bytes())
     }
 
     fn trust_info(state: TrustState) -> Vec<u8> {

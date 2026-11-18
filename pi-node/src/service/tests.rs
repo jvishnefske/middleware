@@ -53,7 +53,7 @@ fn image(len: usize, seed: u8) -> Vec<u8> {
 
 /// Uploads `img`, signed as `version` when given; the commit's reply.
 fn upload(s: &mut Svc<'_>, img: &[u8], version: Option<u32>) -> Result<Vec<u8>, HandlerError> {
-    let auth = version.and_then(|v| sign_commit(img, &test_seed(), Version(v)));
+    let auth = version.and_then(|v| sign_commit(img, &test_seed(), Version(v)).ok());
     let steps = upload_plan(img, None, auth).expect("plan");
     let (commit, transfer) = steps.split_last().expect("steps");
     for step in transfer {
@@ -110,12 +110,12 @@ fn pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart()
         // Unclaimed: trust on first use, unsigned accepted.
         upload(&mut s, &old, None).expect("unsigned upload");
         assert_eq!(installed(&mut s), Some(old.clone()));
-        call(&mut s, keys::TRUST_CLAIM, &test_seed().public_key().0).expect("claim");
+        call(&mut s, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).expect("claim");
         let ti = TrustInfo::decode(&call(&mut s, keys::TRUST_INFO, &[]).expect("info")).expect("decode");
         assert!(matches!(ti.state, TrustState::Claimed { min_version: Version(0), .. }), "{ti:?}");
         // Claimed: unsigned and a second claim are denied.
         assert_eq!(upload(&mut s, &new, None), Err(HandlerError::Denied));
-        assert_eq!(call(&mut s, keys::TRUST_CLAIM, &Seed::new([9; 32]).public_key().0), Err(HandlerError::Denied));
+        assert_eq!(call(&mut s, keys::TRUST_CLAIM, Seed::new([9; 32]).public_key().as_bytes()), Err(HandlerError::Denied));
         assert_eq!(installed(&mut s), Some(old.clone()));
         // Signed: accepted, min_version raised; a replay is denied.
         upload(&mut s, &new, Some(100)).expect("signed upload");
@@ -139,7 +139,7 @@ fn pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart()
 /// Claims and installs a signed image on a node whose flash loses power
 /// after `cut` stores; the replies.
 fn claim_and_install(s: &mut Svc<'_>, img: &[u8]) -> (Result<Vec<u8>, HandlerError>, Result<Vec<u8>, HandlerError>) {
-    let claim = call(s, keys::TRUST_CLAIM, &test_seed().public_key().0);
+    let claim = call(s, keys::TRUST_CLAIM, test_seed().public_key().as_bytes());
     let commit = match claim {
         Ok(_) => upload(s, img, Some(7)),
         Err(e) => Err(e),
@@ -201,7 +201,7 @@ fn pn5_an_unreadable_trust_record_refuses_installs() {
     let mut disk = Disk::default();
     // A poisoned flash: the first store fails, and every read after it.
     let (mut s, _) = open(&mut disk, Some(0));
-    assert_eq!(call(&mut s, keys::TRUST_CLAIM, &test_seed().public_key().0), Err(HandlerError::Internal));
+    assert_eq!(call(&mut s, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()), Err(HandlerError::Internal));
     // Now the flash is poisoned; reopening the service on it reads no
     // trust record, so installs fail closed.
     let flash = s.store_mut().map(|st| st.flash().poisoned());

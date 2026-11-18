@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn rt3_the_trust_store_saves_and_reopens_through_its_view() {
         let mut flash = BlockFlash::erased(RT1050_EVKB.payload.end() as usize);
-        let key = PublicKey([7; 32]);
+        let key = PublicKey::Ed25519([7; 32]);
         let mut state = Persisted::default();
         for n in 1..=3u32 {
             let mut v = SectorPerBlock::new(&mut flash, RT1050_EVKB.trust).unwrap();

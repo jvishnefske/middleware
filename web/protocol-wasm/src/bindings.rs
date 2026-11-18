@@ -210,7 +210,9 @@ pub fn encode_device_info(
 ) -> Result<Vec<u8>, JsError> {
     let node = match node {
         Some(hex) => Some(
-            parse_node(&hex).map(|n| n.0).ok_or_else(|| js_err("node: 16 hex digits"))?,
+            parse_node(&hex)
+                .map(|n| n.0)
+                .ok_or_else(|| js_err("node: 16 hex digits"))?,
         ),
         None => None,
     };
@@ -228,7 +230,10 @@ pub fn encode_device_info(
 }
 
 fn pins(mask: u64) -> Array {
-    (0u32..64).filter(|n| mask >> n & 1 == 1).map(JsValue::from).collect()
+    (0u32..64)
+        .filter(|n| mask >> n & 1 == 1)
+        .map(JsValue::from)
+        .collect()
 }
 
 /// Decodes a `sys/board` body into `{abiVersion, maxImage, maxMemory, gpio,
@@ -255,7 +260,14 @@ pub fn decode_board_info(data: &[u8]) -> Option<Object> {
     set(&o, "pwmRefTick", b.flags & BOARD_PWM_REF_TICK != 0);
     set(&o, "uartTx", b.uart_tx);
     set(&o, "uartRx", b.uart_rx);
-    set(&o, "pwmPins", b.pwm_pins.iter().map(|&p| JsValue::from(p)).collect::<Array>());
+    set(
+        &o,
+        "pwmPins",
+        b.pwm_pins
+            .iter()
+            .map(|&p| JsValue::from(p))
+            .collect::<Array>(),
+    );
     Some(o)
 }
 
@@ -294,7 +306,7 @@ fn trust_info_object(info: &TrustInfo) -> Object {
         TrustState::Unclaimed => set(&o, "minVersion", 0u32),
         TrustState::Claimed { key, min_version } => {
             set(&o, "minVersion", min_version.0);
-            set(&o, "key", bytes(&key.0));
+            set(&o, "key", bytes(key.as_bytes()));
         }
     }
     o

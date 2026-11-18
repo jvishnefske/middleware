@@ -4,12 +4,15 @@
 // Contract with the device (`sys/trust/*`, `sys/loader/commit`):
 //
 // - Signed message M = "mw-payload-v1\0" (14 bytes) || len u32 LE ||
-//   version u32 LE || sha256(image) (32 bytes), 54 bytes, signed with
-//   Ed25519.
-// - `sys/trust/info` answers `[state u8][min_version u32 LE][key 32]`, the
-//   key present iff state != 0 (0 Unclaimed, 1 Claimed, 2 Claimed with the
-//   re-key window open).
-// - `sys/trust/claim` takes the 32-byte raw public key.
+//   version u32 LE || sha256(image) (32 bytes), 54 bytes, signed with the
+//   pinned key's algorithm: Ed25519 (32-byte key; the browser's own keys)
+//   or ECDSA P-256 / SHA-256 (33-byte compressed SEC1 key, prefix 02/03;
+//   keys in hardware tokens, signed with mwctl --pkcs11). Both signatures
+//   are 64 bytes (Ed25519 R||S, P-256 raw r||s).
+// - `sys/trust/info` answers `[state u8][min_version u32 LE][key 32|33]`,
+//   the key present iff state != 0 (0 Unclaimed, 1 Claimed, 2 Claimed
+//   with the re-key window open); its length gives its kind.
+// - `sys/trust/claim` takes the raw public key (32 or 33 bytes).
 // - `sys/loader/commit` takes an empty body (unsigned) or
 //   `[version u32 LE][signature 64]`.
 // - Wire status 5 is `Denied`.
@@ -23,7 +26,21 @@ export const TRUST_KEYS = {
 export const DENIED_CODE = 5;
 
 export const MESSAGE_TAG = "mw-payload-v1\0";
+/** Length of the browser's own (Ed25519) public keys. */
 export const PUBLIC_KEY_LEN = 32;
+/** Length of a P-256 public key (compressed SEC1). */
+export const P256_KEY_LEN = 33;
+
+/** The algorithm of a pinned key. */
+export type KeyKind = "ed25519" | "p256";
+
+/** The kind of a raw public key, from its length (and SEC1 prefix); null
+ * if it is neither. */
+export function keyKind(key: Uint8Array): KeyKind | null {
+  if (key.length === PUBLIC_KEY_LEN) return "ed25519";
+  if (key.length === P256_KEY_LEN && (key[0] === 2 || key[0] === 3)) return "p256";
+  return null;
+}
 export const SIGNATURE_LEN = 64;
 export const SHA256_LEN = 32;
 export const MESSAGE_LEN = MESSAGE_TAG.length + 4 + 4 + SHA256_LEN;
@@ -90,9 +107,12 @@ export function parseCommitBody(body: Uint8Array): { version: number; signature:
   return { version, signature: body.slice(4) };
 }
 
-/** `sys/trust/claim` body: the raw 32-byte Ed25519 public key. */
+/** `sys/trust/claim` body: the raw public key (32-byte Ed25519 or
+ * 33-byte compressed P-256). */
 export function claimBody(publicKey: Uint8Array): Uint8Array {
-  checkLen("public key", publicKey, PUBLIC_KEY_LEN);
+  if (!keyKind(publicKey)) {
+    throw new TrustFormatError(`public key must be 32 (Ed25519) or 33 (P-256, 02/03 prefix) bytes, got ${publicKey.length}`);
+  }
   return publicKey.slice();
 }
 
@@ -104,11 +124,15 @@ export function parseTrustInfo(body: Uint8Array): TrustInfo {
   const state = STATES[body[0]];
   if (!state) throw new TrustFormatError(`sys/trust/info: unknown state ${body[0]}`);
   const minVersion = new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(1, true);
-  const want = state === "unclaimed" ? 5 : 5 + PUBLIC_KEY_LEN;
-  if (body.length !== want) {
-    throw new TrustFormatError(`sys/trust/info: ${state} must be ${want} bytes, got ${body.length}`);
+  if (state === "unclaimed") {
+    if (body.length !== 5) throw new TrustFormatError(`sys/trust/info: unclaimed must be 5 bytes, got ${body.length}`);
+    return { state, minVersion, key: null };
   }
-  return { state, minVersion, key: state === "unclaimed" ? null : body.slice(5) };
+  const key = body.slice(5);
+  if (!keyKind(key)) {
+    throw new TrustFormatError(`sys/trust/info: ${state} must be 37 (Ed25519) or 38 (P-256) bytes, got ${body.length}`);
+  }
+  return { state, minVersion, key };
 }
 
 /** Encodes a `sys/trust/info` response (the fake device in tests). */
@@ -116,13 +140,11 @@ export function encodeTrustInfo(info: TrustInfo): Uint8Array {
   checkU32("min_version", info.minVersion);
   const claimed = info.state !== "unclaimed";
   if (claimed !== (info.key !== null)) throw new TrustFormatError("key must be present iff claimed");
-  const b = new Uint8Array(claimed ? 5 + PUBLIC_KEY_LEN : 5);
+  if (info.key && !keyKind(info.key)) throw new TrustFormatError("public key must be 32 or 33 bytes");
+  const b = new Uint8Array(5 + (info.key?.length ?? 0));
   b[0] = STATES.indexOf(info.state);
   new DataView(b.buffer).setUint32(1, info.minVersion, true);
-  if (info.key) {
-    checkLen("public key", info.key, PUBLIC_KEY_LEN);
-    b.set(info.key, 5);
-  }
+  if (info.key) b.set(info.key, 5);
   return b;
 }
 

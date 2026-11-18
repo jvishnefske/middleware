@@ -40,9 +40,10 @@ espnow = []
 # stream. no_std, no heap; the `zenoh` crates need alloc and getrandom.
 zenoh-lite = ["dep:embedded-io-async"]
 # Signed payload updates (no_std, no heap): SHA-256 of the image while it
-# streams in, Ed25519 verification of signed commits, and the pure trust
-# state transitions. The wire types are always built; this adds the crypto.
-trust = ["dep:sha2", "dep:ed25519-dalek"]
+# streams in, Ed25519 and ECDSA P-256 verification of signed commits, and
+# the pure trust state transitions. The wire types are always built; this
+# adds the crypto.
+trust = ["dep:sha2", "dep:ed25519-dalek", "dep:p256"]
 # The in-memory RP2350 bootrom and flash model (`fw_ota::sim`) for host
 # tests of A/B firmware updates (here and in mwctl's fake device). Host only.
 fw-sim = ["std", "trust"]
@@ -81,6 +82,9 @@ embedded-io-async = { version = "0.7", optional = true }
 sha2 = { version = "0.10.9", default-features = false, features = ["compress"], optional = true }
 # Verification only: no signing, no precomputed tables, no std.
 ed25519-dalek = { version = "2.2", default-features = false, optional = true }
+# ECDSA P-256 / SHA-256 for keys held in hardware tokens (TPM 2.0, PIV):
+# no std, no alloc; the linker drops the signing half the firmware never calls.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
 
 zenoh = { version = "1.10", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }

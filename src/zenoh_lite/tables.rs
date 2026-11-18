@@ -57,6 +57,9 @@ pub enum DeclKind {
     Queryable,
     /// The per-node queryable of the key.
     NodeQueryable,
+    /// One per-node queryable for every key under the key (a prefix):
+    /// `@mw/node/<id>/<prefix>/**`.
+    NodePrefix,
 }
 
 /// One declaration.
@@ -82,12 +85,14 @@ impl Decl {
                 id: self.id,
                 wire_expr,
             },
-            DeclKind::Queryable | DeclKind::NodeQueryable => DeclareBody::Queryable {
-                id: self.id,
-                wire_expr,
-                complete: false,
-                distance: 0,
-            },
+            DeclKind::Queryable | DeclKind::NodeQueryable | DeclKind::NodePrefix => {
+                DeclareBody::Queryable {
+                    id: self.id,
+                    wire_expr,
+                    complete: false,
+                    distance: 0,
+                }
+            }
         };
         Declare {
             interest_id,
@@ -212,6 +217,50 @@ impl<const D: usize> Declarations<D> {
         Ok((next, id))
     }
 
+    /// The table with a queryable on `key` only (no per-node key) added,
+    /// and its index; `None` if it exists. `self` is unchanged on error.
+    pub fn add_plain_queryable(&self, key: Key<'_>) -> Result<(Self, Option<usize>), TableError> {
+        if self
+            .entries
+            .iter()
+            .any(|d| d.kind == DeclKind::Queryable && d.key == key)
+        {
+            return Ok((self.clone(), None));
+        }
+        let mut plain = Expr::new();
+        plain
+            .push_str(key.as_str())
+            .map_err(|_| TableError::TooLong)?;
+        let index = self.entries.len();
+        let t = self.clone().push(DeclKind::Queryable, key, plain)?;
+        Ok((t, Some(index)))
+    }
+
+    /// The table with one per-node queryable for every key under `prefix`
+    /// added (`@mw/node/<sender>/<prefix>/**`, see
+    /// [`Declarations::queryable_key`]), and its index; `None` if it exists.
+    pub fn add_node_prefix_queryable(
+        &self,
+        prefix: Key<'_>,
+        sender: SenderId,
+    ) -> Result<(Self, Option<usize>), TableError> {
+        if self
+            .entries
+            .iter()
+            .any(|d| d.kind == DeclKind::NodePrefix && d.key == prefix)
+        {
+            return Ok((self.clone(), None));
+        }
+        let node = node_key_buf(sender, prefix).ok_or(TableError::TooLong)?;
+        let mut expr = Expr::new();
+        expr.push_str(node.as_str())
+            .and_then(|()| expr.push_str("/**"))
+            .map_err(|_| TableError::TooLong)?;
+        let index = self.entries.len();
+        let t = self.clone().push(DeclKind::NodePrefix, prefix, expr)?;
+        Ok((t, Some(index)))
+    }
+
     /// The table with the two queryables of `key` added (the key and its
     /// per-node key for `sender`), and the index of the first; `None` if
     /// they exist. `self` is unchanged on error.
@@ -256,11 +305,28 @@ impl<const D: usize> Declarations<D> {
             .any(|f| f.matches(key))
     }
 
-    /// The queryable entry whose declared expression is exactly `expr`.
-    pub fn queryable_for(&self, expr: &str) -> Option<&Decl> {
-        self.entries.iter().find(|d| {
+    /// The key a query on `expr` asks for: the key of the queryable
+    /// declared exactly as `expr`, else, for a per-node prefix queryable
+    /// (`@mw/node/<id>/<prefix>/**`) and a query on one concrete per-node
+    /// key under it (`@mw/node/<id>/<prefix>/a/b`), that key (`<prefix>/a/b`).
+    /// A query expression with wildcards is never a key, so it resolves
+    /// only through an exact declaration.
+    pub fn queryable_key(&self, expr: &str) -> Option<KeyBuf<MAX_KEY_LEN>> {
+        let exact = self.entries.iter().find(|d| {
             matches!(d.kind, DeclKind::Queryable | DeclKind::NodeQueryable) && d.expr == expr
-        })
+        });
+        if let Some(d) = exact {
+            return Some(d.key);
+        }
+        self.entries
+            .iter()
+            .filter(|d| d.kind == DeclKind::NodePrefix)
+            .find_map(|d| {
+                let base = d.expr.as_str().strip_suffix("/**")?;
+                expr.strip_prefix(base)?.strip_prefix('/')?;
+                let (_, key) = crate::zenoh_wire::parse_node_key(expr)?;
+                KeyBuf::from_key(key).ok()
+            })
     }
 
     /// The entries answering an interest with `options` restricted to
@@ -273,7 +339,7 @@ impl<const D: usize> Declarations<D> {
         self.entries.iter().filter(move |d| {
             let kind = match d.kind {
                 DeclKind::Subscriber { .. } => options & interest::SUBSCRIBERS != 0,
-                DeclKind::Queryable | DeclKind::NodeQueryable => {
+                DeclKind::Queryable | DeclKind::NodeQueryable | DeclKind::NodePrefix => {
                     options & interest::QUERYABLES != 0
                 }
             };
@@ -472,9 +538,9 @@ mod tests {
         );
         assert!(t.wants(Key::from_static("imu/accel/x")));
         assert!(!t.wants(Key::from_static("imu/accelx")));
-        assert!(t.queryable_for("sys/info").is_some());
+        assert!(t.queryable_key("sys/info").is_some());
         assert!(
-            t.queryable_for("@mw/node/0102030405060708/sys/info")
+            t.queryable_key("@mw/node/0102030405060708/sys/info")
                 .is_some()
         );
         let subs = t.answering(interest::SUBSCRIBERS, None).count();
@@ -489,6 +555,66 @@ mod tests {
         // Ids are distinct.
         let ids: heapless::Vec<u32, 4> = t.entries().iter().map(|d| d.id).collect();
         assert_eq!(&ids[..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn zn5_one_node_prefix_queryable_answers_every_key_under_it() {
+        let t: Declarations<4> = Declarations::new();
+        let (t, i) = t.add_plain_queryable(Key::from_static("sys/info")).unwrap();
+        assert_eq!(i, Some(0));
+        let (t, i) = t
+            .add_node_prefix_queryable(Key::from_static("sys"), ID)
+            .unwrap();
+        assert_eq!(i, Some(1));
+        assert_eq!(
+            t.add_node_prefix_queryable(Key::from_static("sys"), ID)
+                .unwrap()
+                .1,
+            None
+        );
+        assert_eq!(
+            t.add_plain_queryable(Key::from_static("sys/info"))
+                .unwrap()
+                .1,
+            None
+        );
+        assert_eq!(t.entries().len(), 2);
+        assert_eq!(
+            t.entries()[1].expr.as_str(),
+            "@mw/node/0102030405060708/sys/**"
+        );
+        let key = |e: &str| t.queryable_key(e).map(|k| k.as_str().to_owned());
+        assert_eq!(key("sys/info").as_deref(), Some("sys/info"));
+        assert_eq!(
+            key("@mw/node/0102030405060708/sys/info").as_deref(),
+            Some("sys/info")
+        );
+        assert_eq!(
+            key("@mw/node/0102030405060708/sys/loader/chunk").as_deref(),
+            Some("sys/loader/chunk")
+        );
+        assert_eq!(
+            key("@mw/node/0102030405060708/sys/fw/reboot").as_deref(),
+            Some("sys/fw/reboot")
+        );
+        for not_ours in [
+            "sys/loader/chunk",
+            "@mw/node/0102030405060709/sys/info",
+            "@mw/node/0102030405060708/sysx/info",
+            "@mw/node/0102030405060708/sys",
+            "@mw/node/0102030405060708/sys/**",
+            "@mw/node/0102030405060708/sys/*/chunk",
+            "@mw/node/0102030405060708/app/x",
+        ] {
+            assert_eq!(key(not_ours), None, "{not_ours}");
+        }
+        // One entry, answering queryable interests.
+        assert_eq!(t.answering(interest::QUERYABLES, None).count(), 2);
+        assert_eq!(
+            t.answering(interest::QUERYABLES, Some("@mw/node/*/sys/**"))
+                .count(),
+            1
+        );
     }
 
     #[test]

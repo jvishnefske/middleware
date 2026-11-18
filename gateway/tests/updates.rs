@@ -20,7 +20,7 @@ use middleware::fw_ota::sim::{self, Rp2350Sim};
 use middleware::fw_ota::{Slot, StateCode};
 use middleware::grpc::{GrpcServer, PrincipalSource, responder};
 use middleware::key::Key;
-use middleware::loader::trust::{PublicKey, TrustState, Version};
+use middleware::loader::trust::{TrustState, Version};
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, keys};
 use middleware::serial::frame::Frame;
 use middleware::serial::link::{RECV_BUF_LEN, SerialLink};
@@ -198,7 +198,7 @@ fn spawn_device(
 }
 
 fn claimed_pico2() -> FakeDevice {
-    let key = PublicKey(seed().public_key().0);
+    let key = seed().public_key();
     let mut sim = Rp2350Sim::new(256 * 1024);
     sim.program(Slot::A, &sim::image(40_000, V1_0, false, 1));
     FakeDevice {
