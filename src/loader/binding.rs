@@ -273,10 +273,18 @@ pub struct Binding<'a> {
 fn key_of(bytes: &[u8]) -> Result<Key<'_>, BindingError> {
     let s = core::str::from_utf8(bytes).map_err(|_| BindingError::Target)?;
     let k = Key::new(s).map_err(|_| BindingError::Target)?;
-    if super::is_system_key(k) {
+    if !bindable_key(k) {
         return Err(BindingError::Target);
     }
     Ok(k)
+}
+
+/// Whether a key or remote target may name `k`: not a system key, and not
+/// a node-internal one (`ch/`, `drv/`). Only a local or driver target
+/// reaches those, so a driver point is only ever bound by name, with its
+/// kind and direction checked against the channel's.
+fn bindable_key(k: Key<'_>) -> bool {
+    !super::is_system_key(k) && !is_internal_key(k)
 }
 
 fn endpoint(code: u8, body: &[u8]) -> Result<Endpoint<'_>, BindingError> {
@@ -327,9 +335,13 @@ impl<'a> Binding<'a> {
         if !valid_name(name.as_bytes()) {
             return Err(BindingError::Name);
         }
-        match target {
-            Target::Driver(p) if !valid_name(p.as_bytes()) => return Err(BindingError::Target),
-            Target::Adapted { inner: Endpoint::Driver(_), .. } => return Err(BindingError::Target),
+        let (endpoint, _) = target.parts();
+        match (target, endpoint) {
+            (Target::Driver(p), _) if !valid_name(p.as_bytes()) => return Err(BindingError::Target),
+            (Target::Adapted { .. }, Endpoint::Driver(_)) => return Err(BindingError::Target),
+            (_, Endpoint::Key(k) | Endpoint::Remote { key: k, .. }) if !bindable_key(k) => {
+                return Err(BindingError::Target);
+            }
             _ => {}
         }
         if let Some(e) = self.entries[..self.n]
@@ -664,7 +676,7 @@ pub(crate) mod tests {
         v[0] = 2;
         assert_eq!(Binding::decode(&v), Err(BindingError::Version));
         let mut v = bytes.clone();
-        v[HEADER_LEN - 1] = 9;
+        v[HEADER_LEN - 1] = MAX_CHANNELS as u8 + 1;
         assert_eq!(Binding::decode(&v), Err(BindingError::TooMany));
         // "audio" twice, then a bad name.
         let mut dup = Binding::new([0; 32], Version(1));
@@ -763,6 +775,28 @@ pub(crate) mod tests {
         assert_eq!(driver_point(Key::from_static("drv/X")), None);
         assert_eq!(driver_point(Key::from_static("app/x_pos")), None);
         assert!(!is_internal_key(Key::from_static("drive/x")));
+    }
+
+    #[test]
+    fn bd8_a_key_target_cannot_name_a_driver_or_channel_key() {
+        // Only Target::Driver reaches a point, so its kind and direction
+        // are always checked; a key spelled drv/... would skip that.
+        let mut b = Binding::new([7; 32], Version(3));
+        for k in ["drv/spindle_rpm", "ch/audio", "sys/log"] {
+            let key = Key::new(k).unwrap();
+            assert_eq!(b.bind("a", Target::Key(key)), Err(BindingError::Target), "{k}");
+            let remote = Target::Remote { node: SenderId([1; 8]), key };
+            assert_eq!(b.bind("a", remote), Err(BindingError::Target), "{k}");
+        }
+        // And on the wire.
+        let mut ok = Binding::new([7; 32], Version(3));
+        ok.bind("a", Target::Key(Key::from_static("drx/pin"))).unwrap();
+        let mut out = [0u8; BINDING_MAX];
+        let n = ok.encode(&mut out).unwrap();
+        let mut bad = out[..n].to_vec();
+        let at = bad.len() - 7;
+        bad[at..at + 3].copy_from_slice(b"drv");
+        assert_eq!(Binding::decode(&bad).err(), Some(BindingError::Target));
     }
 
     #[test]

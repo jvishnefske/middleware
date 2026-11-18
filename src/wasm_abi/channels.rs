@@ -61,8 +61,9 @@ pub const SECTION: &str = "mw.channels";
 /// The section format version.
 pub const VERSION: u8 = 1;
 
-/// Most channels a payload declares.
-pub const MAX_CHANNELS: usize = 8;
+/// Most channels a payload declares: 8 before ABI 8, 16 since (a machine
+/// payload's axes, switches, spindle, turret and queue).
+pub const MAX_CHANNELS: usize = 16;
 
 /// Longest channel name, bytes.
 pub const MAX_NAME: usize = 24;
@@ -639,7 +640,7 @@ mod tests {
         v[0] = 2;
         assert_eq!(Channels::parse(&v), Err(ChannelError::Version));
         let mut v = ok.clone();
-        v[1] = 9;
+        v[1] = MAX_CHANNELS as u8 + 1;
         assert_eq!(Channels::parse(&v), Err(ChannelError::TooMany));
         // "accel" -> "Accel".
         let mut v = ok.clone();

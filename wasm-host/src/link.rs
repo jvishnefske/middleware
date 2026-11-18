@@ -64,6 +64,8 @@ pub struct State<D> {
     pub device: D,
     /// Subscribed keys; the index is the slot passed to `on_message`.
     pub subscriptions: Vec<String>,
+    /// The most subscriptions ([`crate::Limits::max_subscriptions`]).
+    pub max_subscriptions: usize,
     /// Served keys (ABI 5); the index is the slot passed to `on_request`.
     /// Its capacity of [`wasm_abi::serve::MAX_SERVES`] is reserved at load.
     pub serves: Vec<String>,
@@ -431,7 +433,7 @@ pub fn subscribe_call<D>(mem: &[u8], st: &mut State<D>, kp: i32, kl: i32) -> Res
     if !st.exports.messages {
         return Err(AbiError::Unsupported);
     }
-    let slot = abi::subscribe_slot(&st.subscriptions, key.as_str())?;
+    let slot = abi::subscribe_slot(&st.subscriptions, key.as_str(), st.max_subscriptions)?;
     if let Slot::New(_) = slot {
         st.subscriptions.push(key.as_str().to_string());
     }
@@ -932,6 +934,7 @@ mod tests {
         State {
             device,
             subscriptions: Vec::new(),
+            max_subscriptions: wasm_abi::MAX_SUBSCRIPTIONS,
             serves: Vec::new(),
             schedule: None,
             exports,

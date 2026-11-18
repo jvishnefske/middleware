@@ -57,7 +57,7 @@ describe("node manifest", () => {
     expect(rows["IMU"]).toBe("50, 100, 200, 400, 800 Hz, ±2/4/8 g; with magnetometer 50, 100, 200, 400, 800 Hz");
     expect(rows["Microphone"]).toBe("8000, 16000, 32000, 48000 Hz; levels, mulaw, pcm; gain 0–30 dB");
     expect(rows["Links"]).toBe("0 serial");
-    expect(rows["Limits"]).toBe("4 routes, 8 subscriptions, 8 channels, 512-byte messages");
+    expect(rows["Limits"]).toBe("4 routes, 8 subscriptions, 16 channels, 512-byte messages");
     expect(rows["Board"]).toBeUndefined();
     const old = Object.fromEntries(capabilityRows(info, null, null));
     expect(old["Manifest"]).toContain("not reported");

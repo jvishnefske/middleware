@@ -245,17 +245,18 @@ pub fn publish(key: &str, data: &[u8]) -> Result<(), AbiError> {
 pub struct Slot(u8);
 
 impl Slot {
-    /// Parses a host-provided slot; `None` unless `0 <= raw < MAX_SUBSCRIPTIONS`.
+    /// Parses a host-provided slot; `None` unless `0 <= raw < SLOT_MAX`
+    /// (a host may give more than [`MAX_SUBSCRIPTIONS`] since ABI 8).
     pub fn from_raw(raw: i32) -> Option<Self> {
         let idx = usize::try_from(raw).ok()?;
-        if idx < MAX_SUBSCRIPTIONS {
+        if idx < middleware::wasm_abi::SLOT_MAX {
             u8::try_from(idx).ok().map(Slot)
         } else {
             None
         }
     }
 
-    /// The slot index, `0..MAX_SUBSCRIPTIONS`.
+    /// The slot index, `0..SLOT_MAX`.
     pub const fn index(self) -> usize {
         self.0 as usize
     }
@@ -264,7 +265,8 @@ impl Slot {
 /// Subscribes to `key` (which may contain wildcards understood by the host)
 /// and returns the slot that [`Payload::on_message`] will report.
 ///
-/// Fails with [`AbiError::NoResources`] once [`MAX_SUBSCRIPTIONS`] are active.
+/// Fails with [`AbiError::NoResources`] once the host's limit is reached
+/// ([`MAX_SUBSCRIPTIONS`] unless it gives more).
 pub fn subscribe(key: &str) -> Result<Slot, AbiError> {
     let code = sys::subscribe(ptr_i32(key.as_bytes()), len_i32(key.len())?);
     let raw = check(code)?;
@@ -349,11 +351,11 @@ mod tests {
     }
 
     #[test]
-    fn slot_range_follows_max_subscriptions() {
+    fn slot_range_follows_slot_max() {
         assert_eq!(Slot::from_raw(0).map(Slot::index), Some(0));
-        let last = MAX_SUBSCRIPTIONS as i32 - 1;
+        let last = middleware::wasm_abi::SLOT_MAX as i32 - 1;
         assert_eq!(Slot::from_raw(last).map(Slot::index), Some(last as usize));
-        assert_eq!(Slot::from_raw(MAX_SUBSCRIPTIONS as i32), None);
+        assert_eq!(Slot::from_raw(middleware::wasm_abi::SLOT_MAX as i32), None);
         assert_eq!(Slot::from_raw(-1), None);
     }
 

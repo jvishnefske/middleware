@@ -189,6 +189,13 @@ pub const IMPORT_MODULE: &str = "mw";
 /// Maximum concurrent subscriptions per payload.
 pub const MAX_SUBSCRIPTIONS: usize = 8;
 
+/// ABI 8: the most subscriptions any host offers. A host may give a
+/// payload more than [`MAX_SUBSCRIPTIONS`] (a Linux node does; a
+/// microcontroller keeps the default), never more than this: an input
+/// channel's handle is its slot, and slots must stay below the first
+/// output handle ([`channels::OUTPUT_BASE`]).
+pub const SLOT_MAX: usize = channels::OUTPUT_BASE as usize;
+
 /// Largest message delivered to `on_message` or accepted by `publish`.
 pub const MAX_MESSAGE: usize = 512;
 

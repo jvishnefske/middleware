@@ -114,8 +114,19 @@ pub fn wall_clock_ms() -> Option<u64> {
         .and_then(|d| u64::try_from(d.as_millis()).ok())
 }
 
-/// The limits payloads run under: `memory_bytes` of linear memory, the
-/// ABI's default fuel per call and interpreter stacks.
+/// The limits payloads run under: `memory_bytes` of linear memory,
+/// [`config::DEFAULT_FUEL_PER_CALL`] per call, the default interpreter
+/// stacks, and the most subscriptions an ABI 8 host gives
+/// ([`middleware::wasm_abi::SLOT_MAX`]): a Linux node has the room a
+/// machine payload's channels and command keys need, and the time a
+/// process model's preflight and compile take in one call.
 pub fn limits(memory_bytes: u32) -> Limits {
+    limits_with_fuel(memory_bytes, config::DEFAULT_FUEL_PER_CALL)
+}
+
+/// [`limits`] with `fuel` per call (`MW_POSIX_NODE_FUEL_PER_CALL`).
+pub fn limits_with_fuel(memory_bytes: u32, fuel: u64) -> Limits {
     Limits::bytes(memory_bytes)
+        .with_fuel(fuel)
+        .with_subscriptions(middleware::wasm_abi::SLOT_MAX as u8)
 }

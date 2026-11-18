@@ -451,7 +451,7 @@ mod tests {
         let state: State<Rec> = GuestCell::new(None);
         let rx: RxBuffer = GuestCell::new([0; MAX_MESSAGE]);
         deliver(&state, &rx, -1, 1);
-        deliver(&state, &rx, crate::MAX_SUBSCRIPTIONS as i32, 1);
+        deliver(&state, &rx, middleware::wasm_abi::SLOT_MAX as i32, 1);
         deliver(&state, &rx, 0, MAX_MESSAGE as i32 + 1);
         assert!(state.borrow_mut().expect("free").is_none());
     }

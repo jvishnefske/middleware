@@ -102,7 +102,11 @@ pub const CHIP: &str = if cfg!(not(target_os = "linux")) {
 pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
     .with_groups(Groups::TIMERS.with(Groups::SERVE).with(Groups::CHANNELS))
     .with_link(Link { id: 0, kind: LinkKind::SERIAL })
-    .with_limits(Limits { routes: 0, ..Limits::ABI });
+    .with_limits(Limits {
+        routes: 0,
+        subscriptions: middleware::wasm_abi::SLOT_MAX as u8,
+        ..Limits::ABI
+    });
 
 /// [`MANIFEST`] with the board named and the control modules counted, for
 /// the life of the process. A process opens its service once (the tests a

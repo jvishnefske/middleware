@@ -7,6 +7,10 @@
 - Binding target `Target::Driver(point)` / `Endpoint::Driver` (code 5), carried on the node-internal `drv/<point>` (`driver_key`, `driver_point`; `is_internal_key` now covers `drv/`). Payload keys under `drv/` are `InvalidKey`, as under `ch/`.
 - `loader::control`: control-module points and the paged `sys/manifest/cm` (`keys::CONTROL_MODULES`); manifest record `CONTROL_MODULES` (tag 12, `ControlModules`).
 - mw-posix-node: `driver::Driver` with `sim` (a simulated two-axis lathe) and `kd240` (GPIO inputs and PL presence, no outputs), chosen by `MW_POSIX_NODE_DRIVER` (`MW_POSIX_NODE_KD240_INPUTS` for the KD240's lines); new dependency `gpiocdev` (Linux). The controller routes `drv/` keys to the driver and back, serves `sys/manifest/cm`, and checks driver targets before a start.
+- `MAX_CHANNELS` 16 (was 8); `wasm_abi::SLOT_MAX` 16; `wasm_host::Limits::max_subscriptions` (default `MAX_SUBSCRIPTIONS`, 8) and `Limits::with_subscriptions`; `abi::subscribe_slot` takes the limit. mw-posix-node gives payloads 16 subscriptions and advertises them. The SDK's `Slot::from_raw` takes slots below `SLOT_MAX`. Microcontroller firmwares: their binding and channel tables are sized by `MAX_CHANNELS`, so they double (about 16 entries of name and target), and `heap::RUNTIME_FIXED` grows by eight channels' worth.
+- Breaking (security): a binding's key or remote target may no longer name a `ch/` or `drv/` key (`BindingError::Target`), so a driver point is reached only through `Target::Driver`, with its kind and direction checked.
+- mwctl `manifest` prints the board and the control modules.
+- mw-posix-node: `MW_POSIX_NODE_FUEL_PER_CALL` (default 20 M instructions per call, was the ABI's 1 M), `limits_with_fuel`.
 - SDK `channels!`: the machine kinds; `mw_payload::channel::machine`. protocol-wasm: `decodeControlPage`, `controlPageRequest`, `decodeManifest` `controlModules`, driver targets, machine kinds; `checkBinding` issues for machine channels. mwctl `bind` `driver:<point>`. web fixture `esp32s3.board.hex` regenerated (ABI byte).
 
 ### `pi-node` is now `posix-node` (PN14, PN15)

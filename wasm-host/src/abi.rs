@@ -54,7 +54,9 @@ use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
 use middleware::wasm_abi::route::{self, SampleSource, SinkConfig, Source, SourceConfig, SourceKind};
 use middleware::wasm_abi::serve;
-use middleware::wasm_abi::{self, AbiError, MAX_LOG, MAX_SUBSCRIPTIONS, MIN_TICK_MS, Pull};
+use middleware::wasm_abi::{self, AbiError, MAX_LOG, MIN_TICK_MS, Pull};
+#[cfg(test)]
+use middleware::wasm_abi::MAX_SUBSCRIPTIONS;
 
 use crate::{LoadError, Ticked};
 
@@ -377,9 +379,10 @@ impl Slot {
 }
 
 /// Decides the slot for subscribing to `key`: re-subscribing returns the
-/// existing slot, otherwise a new one unless [`MAX_SUBSCRIPTIONS`] are taken.
-pub fn subscribe_slot(subscriptions: &[String], key: &str) -> Result<Slot, AbiError> {
-    table_slot(subscriptions, key, MAX_SUBSCRIPTIONS)
+/// existing slot, otherwise a new one unless `max` (the host's limit,
+/// [`MAX_SUBSCRIPTIONS`] by default) are taken.
+pub fn subscribe_slot(subscriptions: &[String], key: &str, max: usize) -> Result<Slot, AbiError> {
+    table_slot(subscriptions, key, max.min(wasm_abi::SLOT_MAX))
 }
 
 /// Decides the slot for serving `key` (ABI 5): serving a key again returns
@@ -1161,17 +1164,22 @@ mod tests {
 
     #[test]
     fn subscriptions_dedupe_and_cap() {
+        const M: usize = MAX_SUBSCRIPTIONS;
         let mut subs: Vec<String> = Vec::new();
-        assert_eq!(subscribe_slot(&subs, "a"), Ok(Slot::New(0)));
+        assert_eq!(subscribe_slot(&subs, "a", M), Ok(Slot::New(0)));
         subs.push("a".into());
-        assert_eq!(subscribe_slot(&subs, "a"), Ok(Slot::Existing(0)));
+        assert_eq!(subscribe_slot(&subs, "a", M), Ok(Slot::Existing(0)));
         for i in 1..MAX_SUBSCRIPTIONS {
             subs.push(alloc::format!("k{i}"));
         }
-        assert_eq!(subscribe_slot(&subs, "z"), Err(AbiError::NoResources));
-        assert_eq!(subscribe_slot(&subs, "a"), Ok(Slot::Existing(0)));
+        assert_eq!(subscribe_slot(&subs, "z", M), Err(AbiError::NoResources));
+        assert_eq!(subscribe_slot(&subs, "a", M), Ok(Slot::Existing(0)));
         assert_eq!(slot_for(&subs, "k3"), Some(3));
         assert_eq!(slot_for(&subs, "k"), None);
+        // A host that gives more takes more (ABI 8), never past SLOT_MAX.
+        assert_eq!(subscribe_slot(&subs, "z", 16), Ok(Slot::New(M)));
+        let full: Vec<String> = (0..wasm_abi::SLOT_MAX).map(|i| alloc::format!("k{i}")).collect();
+        assert_eq!(subscribe_slot(&full, "z", 200), Err(AbiError::NoResources));
     }
 
     #[test]

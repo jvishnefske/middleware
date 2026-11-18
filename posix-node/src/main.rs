@@ -18,7 +18,7 @@ use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
 use mw_posix_node::config::{NodeIdSource, gateway_state_dir};
 use mw_posix_node::{
-    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, limits, node_id, open_state_flash, start,
+    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, node_id, open_state_flash, start,
     wall_clock_ms,
 };
 use mw_service::run::{USAGE, terminate_signal};
@@ -121,7 +121,7 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
     let device = DeviceParts {
         flash,
         facts: mw_posix_node::facts_with_driver(id, driver.as_ref()),
-        limits: limits(node.memory_bytes),
+        limits: mw_posix_node::limits_with_fuel(node.memory_bytes, node.fuel_per_call),
         local,
         driver,
     };
