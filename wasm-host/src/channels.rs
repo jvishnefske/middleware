@@ -14,7 +14,9 @@
 //! | in          | `Key(key)`     | subscribe to `key` |
 //! | in          | `Remote { node, key }` | subscribe to `key`, deliver only what `node` sent ([`Payload::deliver_from`](crate::Payload::deliver_from)) |
 //! | in          | `Adapted { inner, adapter }` | the inner endpoint, each message run through the adapter ([`middleware::stream::adapt`]) before `on_message`; a local source must fit the declaration after the adapter |
+//! | in          | `Driver(point)` (ABI 9) | subscribe to the point's internal key `drv/<point>`, which the node's driver publishes on |
 //! | out         | `Key(key)` or `Remote { key, .. }` | `channel_publish` publishes on `key` |
+//! | out         | `Driver(point)` (ABI 9) | `channel_publish` publishes on `drv/<point>`, which the node hands to the driver, never to a link |
 //! | out         | `Local` or `Adapted` | refused ([`BindError::Direction`]) |
 //! | required    | none           | refused ([`BindError::Unbound`]) |
 //! | optional    | none           | unbound: `channel_open` answers `Unsupported` |
@@ -235,6 +237,14 @@ fn fits(decl: &Decl, source: &RouteSource, adapter: Option<Adapter>) -> Result<(
     }
 }
 
+/// The key a driver point is carried on, `drv/<point>`
+/// ([`middleware::loader::binding::driver_key`]).
+pub fn driver_key(point: &str) -> String {
+    let mut k = String::from("drv/");
+    k.push_str(point);
+    k
+}
+
 /// The key a local channel's route publishes on, `ch/<name>`.
 pub fn internal_key(name: &str) -> String {
     let mut k = String::from("ch/");
@@ -268,6 +278,7 @@ pub fn plan(
                 Target::Key(k) | Target::Remote { key: k, .. } => Step::Output {
                     key: k.as_str().to_string(),
                 },
+                Target::Driver(p) => Step::Output { key: driver_key(p) },
                 Target::Local(_) | Target::Adapted { .. } => {
                     return Err(BindError::Direction(name()));
                 }
@@ -284,6 +295,7 @@ pub fn plan(
                     }
                     Endpoint::Key(k) => (k.as_str().to_string(), None, None),
                     Endpoint::Remote { node, key } => (key.as_str().to_string(), None, Some(node)),
+                    Endpoint::Driver(p) => (driver_key(p), None, None),
                 };
                 if inputs.contains(&key) {
                     return Err(BindError::SharedKey(name()));

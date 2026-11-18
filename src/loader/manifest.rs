@@ -26,6 +26,7 @@
 //! | 9   | [`tag::LINK`]     | link id u8, [`LinkKind`] u8 (one record per link) |
 //! | 10  | [`tag::LIMITS`]   | routes u8, subscriptions u8, channels u8, max message u16 |
 //! | 11  | [`tag::BOARD`]    | the board's model, UTF-8, 1 to [`BOARD_NAME_MAX`] bytes ([`BoardName`]) |
+//! | 12  | [`tag::CONTROL_MODULES`] | points u8, pages u8: the node's control-module points, read from `sys/manifest/cm` ([`super::control`]) |
 //!
 //! Decoding is forward compatible, unlike `sys/board`'s exact length:
 //! an unknown tag is skipped, and a known record longer than its body
@@ -82,6 +83,18 @@ pub mod tag {
     pub const LIMITS: u8 = 10;
     /// The board's model.
     pub const BOARD: u8 = 11;
+    /// The control-module points' count and pages.
+    pub const CONTROL_MODULES: u8 = 12;
+}
+
+/// How many control-module points a node has, and on how many pages of
+/// `sys/manifest/cm` ([`super::control`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlModules {
+    /// Points.
+    pub points: u8,
+    /// Pages.
+    pub pages: u8,
 }
 
 /// Which board a node runs on, as its own description names it: a Linux
@@ -497,6 +510,8 @@ pub struct Manifest {
     pub limits: Option<Limits>,
     /// The board.
     pub board: Option<BoardName>,
+    /// The control-module points.
+    pub control: Option<ControlModules>,
 }
 
 const NO_LINK: Link = Link {
@@ -521,6 +536,15 @@ impl Manifest {
             n_links: 0,
             limits: None,
             board: None,
+            control: None,
+        }
+    }
+
+    /// With control-module points.
+    pub const fn with_control(self, control: ControlModules) -> Self {
+        Manifest {
+            control: Some(control),
+            ..self
         }
     }
 
@@ -718,6 +742,9 @@ impl Manifest {
         if let Some(b) = &self.board {
             w.record(tag::BOARD, b.as_bytes())?;
         }
+        if let Some(c) = self.control {
+            w.record(tag::CONTROL_MODULES, &[c.points, c.pages])?;
+        }
         Some(w.at)
     }
 
@@ -795,6 +822,13 @@ impl Manifest {
                         subscriptions: b[1],
                         channels: b[2],
                         max_message: u16::from_le_bytes([b[3], b[4]]),
+                    });
+                }
+                tag::CONTROL_MODULES => {
+                    let b = need(2)?;
+                    m.control = Some(ControlModules {
+                        points: b[0],
+                        pages: b[1],
                     });
                 }
                 tag::BOARD => {
@@ -919,6 +953,10 @@ mod tests {
             })
             .with_limits(Limits::ABI)
             .with_board(BoardName::new("ZynqMP KD240 revA/B/1").unwrap())
+            .with_control(ControlModules {
+                points: 14,
+                pages: 1,
+            })
     }
 
     fn encode(m: &Manifest) -> ([u8; MANIFEST_MAX], usize) {

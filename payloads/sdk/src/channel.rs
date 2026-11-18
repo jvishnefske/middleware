@@ -14,7 +14,9 @@
 //! ```
 //!
 //! An entry is `name: in|out kind [optional]`, where `kind` is `bytes`,
-//! `frames`, or `samples(sensor, [format,] lo..=hi)` with `sensor` one of
+//! `frames`, one of the ABI 9 machine kinds `digital`, `position`,
+//! `setpoint`, `segments` (messages in [`machine`](crate::channel::machine)),
+//! or `samples(sensor, [format,] lo..=hi)` with `sensor` one of
 //! `imu`, `mic`, `any`, `format` one of `i16`, `mulaw`, `levels`, and the
 //! rate range in Hz. Entries are required unless marked `optional`.
 //!
@@ -40,6 +42,8 @@ pub use middleware::stream::samples::{
 pub use middleware::wasm_abi::channels::{
     Channel as Decl, DataKind, Direction, MAX_CHANNELS, OUTPUT_BASE, SECTION, encode, encoded_len,
 };
+/// The machine channels' messages (ABI 9).
+pub use middleware::wasm_abi::machine;
 
 /// An open channel: an input's subscription slot or an output's handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +176,18 @@ macro_rules! __mw_channel {
             $crate::__mw_required!($($flag)?),
         )
     };
+    ($name:ident, $dir:ident, digital, (), $($flag:ident)?) => {
+        $crate::__mw_machine!($name, $dir, Digital, $($flag)?)
+    };
+    ($name:ident, $dir:ident, position, (), $($flag:ident)?) => {
+        $crate::__mw_machine!($name, $dir, Position, $($flag)?)
+    };
+    ($name:ident, $dir:ident, setpoint, (), $($flag:ident)?) => {
+        $crate::__mw_machine!($name, $dir, Setpoint, $($flag)?)
+    };
+    ($name:ident, $dir:ident, segments, (), $($flag:ident)?) => {
+        $crate::__mw_machine!($name, $dir, Segments, $($flag)?)
+    };
     ($name:ident, $dir:ident, samples, ($sensor:ident, $lo:literal ..= $hi:literal), $($flag:ident)?) => {
         $crate::channel::Decl::samples(
             ::core::stringify!($name),
@@ -185,6 +201,19 @@ macro_rules! __mw_channel {
     ($name:ident, $dir:ident, samples, ($sensor:ident, $fmt:ident, $lo:literal ..= $hi:literal), $($flag:ident)?) => {
         $crate::__mw_channel!($name, $dir, samples, ($sensor, $lo..=$hi), $($flag)?)
             .with_formats(1 << ($crate::__mw_format!($fmt) as u8))
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __mw_machine {
+    ($name:ident, $dir:ident, $kind:ident, $($flag:ident)?) => {
+        $crate::channel::Decl::machine(
+            ::core::stringify!($name),
+            $crate::__mw_dir!($dir),
+            $crate::channel::DataKind::$kind,
+            $crate::__mw_required!($($flag)?),
+        )
     };
 }
 
@@ -323,5 +352,46 @@ mod tests {
         assert_eq!(input.deliver_samples(slot, &buf[..n], &mut rec), Ok(true));
         assert_eq!(input.deliver_samples(other, &buf[..n], &mut rec), Ok(false));
         assert_eq!(rec.0, [2]);
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+    use middleware::wasm_abi::channels::Channels;
+
+    crate::channels! {
+        x_limit: in digital,
+        x_pos: in position,
+        spindle: out setpoint optional,
+        motion: out segments,
+        queue: in segments,
+    }
+
+    #[test]
+    fn mc3_the_macro_declares_machine_channels() {
+        let kinds: std::vec::Vec<_> = CHANNELS.iter().map(|c| (c.name, c.dir, c.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("x_limit", Direction::In, DataKind::Digital),
+                ("x_pos", Direction::In, DataKind::Position),
+                ("spindle", Direction::Out, DataKind::Setpoint),
+                ("motion", Direction::Out, DataKind::Segments),
+                ("queue", Direction::In, DataKind::Segments),
+            ]
+        );
+        assert!(!CHANNELS[2].required);
+        const LEN: usize = encoded_len(CHANNELS);
+        let bytes = encode::<LEN>(CHANNELS);
+        assert!(Channels::parse(&bytes).unwrap().iter().eq(CHANNELS.iter()));
+        let s = machine::Segment {
+            seq: 1,
+            x_um: 0,
+            z_um: -100,
+            feed: 500,
+            flags: 0,
+        };
+        assert_eq!(machine::Segment::decode(&s.encode()), Some(s));
     }
 }

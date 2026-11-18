@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### ABI 9: machine channels, control modules and drivers (MC1–MC4, CM1–CM2, PN16–PN18)
+- `ABI_VERSION` 9, no new imports (`ABI8_IMPORTS`). `mw.channels` kinds `digital`, `position`, `setpoint`, `segments` (`DataKind::from_u8`, `name`, `is_machine`, `Channel::machine`); their messages in `wasm_abi::machine` (`Digital`, `Position`, `Setpoint`, `Segment`, `QueueState`). An ABI 8 host refuses a payload that declares them.
+- Binding target `Target::Driver(point)` / `Endpoint::Driver` (code 5), carried on the node-internal `drv/<point>` (`driver_key`, `driver_point`; `is_internal_key` now covers `drv/`). Payload keys under `drv/` are `InvalidKey`, as under `ch/`.
+- `loader::control`: control-module points and the paged `sys/manifest/cm` (`keys::CONTROL_MODULES`); manifest record `CONTROL_MODULES` (tag 12, `ControlModules`).
+- mw-posix-node: `driver::Driver` with `sim` (a simulated two-axis lathe) and `kd240` (GPIO inputs and PL presence, no outputs), chosen by `MW_POSIX_NODE_DRIVER` (`MW_POSIX_NODE_KD240_INPUTS` for the KD240's lines); new dependency `gpiocdev` (Linux). The controller routes `drv/` keys to the driver and back, serves `sys/manifest/cm`, and checks driver targets before a start.
+- SDK `channels!`: the machine kinds; `mw_payload::channel::machine`. protocol-wasm: `decodeControlPage`, `controlPageRequest`, `decodeManifest` `controlModules`, driver targets, machine kinds; `checkBinding` issues for machine channels. mwctl `bind` `driver:<point>`. web fixture `esp32s3.board.hex` regenerated (ABI byte).
+
 ### `pi-node` is now `posix-node` (PN14, PN15)
 - Renamed: the directory `posix-node/`, the package and binary `mw-posix-node`, the library `mw_posix_node`, `PosixNodeConfig`, the NixOS module `nix/posix-node.nix` (`services.mw-posix-node`, user and StateDirectory `mw-posix-node`), the flake's `nixosModules.posix-node` (and `robot-posix-node`; `robot-pi-node` stays as an alias) and `nix/binaries.nix` entry. It hosts payloads on Linux boards beyond the Pi (the Kria KD240).
 - Kept: `MW_PI_NODE_*` still work when the new `MW_POSIX_NODE_*` name is unset, with a warning; `/var/lib/mw-pi-node` is used when `/var/lib/mw-posix-node` does not exist, and the NixOS module moves it into the new directory once; the node id's hash domain is unchanged, so every node keeps its id.

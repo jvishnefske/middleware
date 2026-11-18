@@ -48,6 +48,7 @@
 //! [`sha256`] itself is always built (the rpc responder cache uses it).
 
 pub mod binding;
+pub mod control;
 pub mod manifest;
 pub mod peers;
 pub mod sha256;
@@ -72,6 +73,9 @@ pub mod keys {
     pub const BOARD: Key<'static> = Key::from_static("sys/board");
     /// Node manifest request ([`super::manifest`]).
     pub const MANIFEST: Key<'static> = Key::from_static("sys/manifest");
+    /// The node's control-module points, one page per request (ABI 9,
+    /// [`super::control`]).
+    pub const CONTROL_MODULES: Key<'static> = Key::from_static("sys/manifest/cm");
     /// Starts a transfer.
     pub const BEGIN: Key<'static> = Key::from_static("sys/loader/begin");
     /// Carries one chunk.

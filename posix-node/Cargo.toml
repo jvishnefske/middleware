@@ -5,7 +5,7 @@ edition = "2024"
 # `File::try_lock` (the state directory's lock) is 1.89; esp-base's core
 # declares 1.91.
 rust-version = "1.91"
-description = "Linux payload host (Raspberry Pi): runs WASM payloads with the base firmware's loader and trust rules and joins the cluster through an in-process MCU gateway"
+description = "Linux payload host (Raspberry Pi, Kria KD240): runs WASM payloads with the base firmware's loader and trust rules and joins the cluster through an in-process MCU gateway"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
@@ -32,6 +32,11 @@ embedded-storage = "0.3.2"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"
+
+# The KD240 driver's inputs (driver::kd240): GPIO lines through the
+# kernel's character device (uAPI v2). Linux only, input requests only.
+[target.'cfg(target_os = "linux")'.dependencies]
+gpiocdev = { version = "0.8", default-features = false, features = ["uapi_v2"] }
 
 [dev-dependencies]
 # Signs commits and plans uploads in the end-to-end test, as mwctl does.

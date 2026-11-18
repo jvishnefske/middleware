@@ -276,8 +276,9 @@ pub fn decode_board_info(data: &[u8]) -> Option<Object> {
 /// imu?: {ratesHz, rangesG, magRatesHz}, mic?: {ratesHz, modes, maxGainDb},
 /// frames?: {kinds, formats, maxWidth, maxHeight}, sinkSpi?: {maxFrame},
 /// links: [{id, kind, kindName}], limits?: {routes, subscriptions,
-/// channels, maxMessage}, board?, caps, capNames}`; `board` is the board's
-/// model (a string, lossy UTF-8); `modes`, `kinds` and `formats`
+/// channels, maxMessage}, board?, controlModules?: {points, pages}, caps,
+/// capNames}`; `board` is the board's model (a string, lossy UTF-8),
+/// `controlModules` says the node lists points at `sys/manifest/cm`; `modes`, `kinds` and `formats`
 /// are names (`levels`/`mulaw`/`pcm`, `testPattern`/`camera`,
 /// `rgb565`/`jpeg`). `undefined` when malformed.
 #[wasm_bindgen(js_name = decodeManifest)]
@@ -372,6 +373,12 @@ pub fn decode_manifest(data: &[u8]) -> Option<Object> {
             "board",
             String::from_utf8_lossy(b.as_bytes()).into_owned(),
         );
+    }
+    if let Some(c) = m.control {
+        let b = Object::new();
+        set(&b, "points", c.points);
+        set(&b, "pages", c.pages);
+        set(&o, "controlModules", b);
     }
     let caps = m.caps();
     set(&o, "caps", caps.0);
@@ -2307,19 +2314,11 @@ mod sim {
 // ---- ABI 8 channels and bindings (CH1, BD1, BD5) ----------------------
 
 fn channel_object(c: &middleware::wasm_abi::channels::Channel<'_>) -> Object {
-    use middleware::wasm_abi::channels::{DataKind, Direction};
+    use middleware::wasm_abi::channels::Direction;
     let o = Object::new();
     set(&o, "name", c.name);
     set(&o, "dir", if c.dir == Direction::In { "in" } else { "out" });
-    set(
-        &o,
-        "kind",
-        match c.kind {
-            DataKind::Bytes => "bytes",
-            DataKind::Samples => "samples",
-            DataKind::Frames => "frames",
-        },
-    );
+    set(&o, "kind", c.kind.name());
     let sensor = match c.sensor {
         Some(middleware::stream::samples::SensorKind::Imu) => JsValue::from_str("imu"),
         Some(middleware::stream::samples::SensorKind::Microphone) => JsValue::from_str("mic"),
@@ -2335,7 +2334,8 @@ fn channel_object(c: &middleware::wasm_abi::channels::Channel<'_>) -> Object {
 }
 
 /// The channels a payload declares (its `mw.channels` section, ABI 8):
-/// `[{name, dir: "in"|"out", kind: "bytes"|"samples"|"frames", sensor:
+/// `[{name, dir: "in"|"out", kind: "bytes"|"samples"|"frames" (ABI 9 also
+/// "digital"|"position"|"setpoint"|"segments"), sensor:
 /// "imu"|"mic"|null, formats (mask over sample or pixel format codes, 0 =
 /// any), channels (0 = any), rateMin, rateMax, required}]`; empty without
 /// the section. Throws for a malformed one.
@@ -2367,6 +2367,41 @@ pub fn peer_key(node: &str, what: &str) -> Result<String, JsError> {
         .ok_or_else(|| js_err("peer key too long"))
 }
 
+/// Decodes one page of `sys/manifest/cm` (ABI 9,
+/// `middleware::loader::control`): `{pages, page, points: [{name, kind:
+/// "digital"|"position"|"setpoint"|"segments", flow: "in"|"out"|"both",
+/// unit: "none"|"bool"|"um"|"count"|"rpm"|"station"|"um/s", min, max,
+/// scale}]}`; `undefined` when malformed.
+#[wasm_bindgen(js_name = decodeControlPage)]
+pub fn decode_control_page(data: &[u8]) -> Option<Object> {
+    let page = middleware::loader::control::Page::decode(data).ok()?;
+    let o = Object::new();
+    set(&o, "pages", page.pages);
+    set(&o, "page", page.page);
+    let points: Array = page
+        .points()
+        .map(|p| {
+            let b = Object::new();
+            set(&b, "name", p.name);
+            set(&b, "kind", p.kind.name());
+            set(&b, "flow", p.flow.name());
+            set(&b, "unit", p.unit.name());
+            set(&b, "min", p.min);
+            set(&b, "max", p.max);
+            set(&b, "scale", p.scale);
+            JsValue::from(b)
+        })
+        .collect();
+    set(&o, "points", points);
+    Some(o)
+}
+
+/// The request body for page `page` of `sys/manifest/cm`.
+#[wasm_bindgen(js_name = controlPageRequest)]
+pub fn control_page_request(page: u8) -> Vec<u8> {
+    vec![page]
+}
+
 /// Encodes channel declarations (the objects [`read_channels`] returns)
 /// as a `mw.channels` section body. Throws for an invalid declaration.
 #[wasm_bindgen(js_name = encodeChannels)]
@@ -2385,12 +2420,11 @@ pub fn encode_channels(list: Array) -> Result<Vec<u8>, JsError> {
         out.extend_from_slice(name.as_bytes());
         let mut f = [0u8; ENTRY_FIXED];
         f[0] = u8::from(text(&v, "dir") == "out");
-        f[1] = match text(&v, "kind").as_str() {
-            "bytes" => 0,
-            "samples" => 1,
-            "frames" => 2,
-            k => return Err(js_err(&format!("bad channel kind {k:?}"))),
-        };
+        let kind = text(&v, "kind");
+        f[1] = (0..=u8::MAX)
+            .map_while(middleware::wasm_abi::channels::DataKind::from_u8)
+            .find(|k| k.name() == kind)
+            .ok_or_else(|| js_err(&format!("bad channel kind {kind:?}")))? as u8;
         f[2] = match text(&v, "sensor").as_str() {
             "imu" => 0,
             "mic" => 1,
@@ -2535,6 +2569,12 @@ fn endpoint_object(e: &middleware::loader::binding::Endpoint<'_>) -> Object {
             set(&o, "key", key.as_str());
             o
         }
+        Endpoint::Driver(p) => {
+            let o = Object::new();
+            set(&o, "kind", "driver");
+            set(&o, "point", *p);
+            o
+        }
     }
 }
 
@@ -2571,6 +2611,7 @@ enum TargetIn {
     Local(middleware::wasm_abi::route::RouteSource),
     Key(String),
     Remote(middleware::SenderId, String),
+    Driver(String),
 }
 
 fn endpoint_in(v: &JsValue) -> Result<TargetIn, JsError> {
@@ -2581,6 +2622,7 @@ fn endpoint_in(v: &JsValue) -> Result<TargetIn, JsError> {
             parse_node(&text(v, "node")).ok_or_else(|| js_err("a node id is 16 hex digits"))?,
             text(v, "key"),
         ),
+        "driver" => TargetIn::Driver(text(v, "point")),
         k => return Err(js_err(&format!("unknown target kind {k:?}"))),
     })
 }
@@ -2607,7 +2649,8 @@ fn key_in(s: &str) -> Result<middleware::Key<'_>, JsError> {
 /// `{kind: "local", source: "mic", rateHz, gainDb, mode, units, block}`,
 /// `{kind: "local", source: "imu", rateHz, rangeG, mag, units}`,
 /// `{kind: "local", source: "testPattern"|"camera", cfg}`, `{kind: "key",
-/// key}`, `{kind: "remote", node, key}` or `{kind: "adapted", adapter:
+/// key}`, `{kind: "remote", node, key}`, `{kind: "driver", point}` (ABI 9)
+/// or `{kind: "adapted", adapter:
 /// {kind: "pcmToLevels", block}|{kind: "pcmToMuLaw"}|{kind: "decimate",
 /// factor}|{kind: "imuToMagnitude"}, inner}`. Throws for anything the
 /// device would refuse.
@@ -2646,12 +2689,14 @@ pub fn encode_binding(b: JsValue) -> Result<Vec<u8>, JsError> {
                 node: *node,
                 key: key_in(k)?,
             },
+            TargetIn::Driver(p) => Endpoint::Driver(p),
         };
         let target = match (adapter, ep) {
             (Some(a), inner) => Target::Adapted { inner, adapter: *a },
             (None, Endpoint::Local(s)) => Target::Local(s),
             (None, Endpoint::Key(k)) => Target::Key(k),
             (None, Endpoint::Remote { node, key }) => Target::Remote { node, key },
+            (None, Endpoint::Driver(p)) => Target::Driver(p),
         };
         binding
             .bind(name, target)

@@ -170,6 +170,7 @@ pub fn format_binding(record: &[u8]) -> Option<String> {
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let endpoint = |e: &Endpoint<'_>| match e {
         Endpoint::Key(k) => format!("key {}", k.as_str()),
+        Endpoint::Driver(p) => format!("driver point {p}"),
         Endpoint::Remote { node, key } => format!("key {} from {}", key.as_str(), hex(&node.0)),
         Endpoint::Local(RouteSource::Samples(SampleSource::Microphone(m))) => format!(
             "microphone {} Hz {:?}, gain {} dB, {} units per message{}",

@@ -68,6 +68,8 @@ export function describeTarget(t: BindingTarget | undefined): string {
       return `key ${t.key}`;
     case "remote":
       return `key ${t.key} from ${t.node}`;
+    case "driver":
+      return `driver point ${t.point}`;
     case "adapted":
       return `${describeTarget(t.inner)} → ${t.adapter.kind}`;
     case "local":
