@@ -16,6 +16,7 @@
 //! | `sys/payload/stop`  | empty                           | empty              |
 //! | `sys/payload/bind`  | [`binding::Binding`], optionally `[version u32 LE][signature 64]` | empty |
 //! | `sys/payload/binding` | empty                         | the stored [`binding::Binding`] |
+//! | `sys/peers`         | empty                           | [`peers::PeerSet`] (boards that forward, [`peers`]) |
 //! | `sys/trust/info`    | empty                           | [`trust::TrustInfo`] |
 //! | `sys/trust/claim`   | `[public key 32]`               | empty              |
 //! | `sys/net/addr`      | `[link u8]`, or `[link u8]` + [`NetAddr`] | `[link u8]` + [`NetAddr`], or empty |
@@ -47,6 +48,7 @@
 
 pub mod binding;
 pub mod manifest;
+pub mod peers;
 #[cfg(feature = "trust")]
 pub mod sha256;
 pub mod trust;
@@ -84,6 +86,8 @@ pub mod keys {
     pub const BIND: Key<'static> = Key::from_static("sys/payload/bind");
     /// Reads the stored channel binding.
     pub const BINDING: Key<'static> = Key::from_static("sys/payload/binding");
+    /// The node ids a board has heard ([`super::peers`]).
+    pub const PEERS: Key<'static> = Key::from_static("sys/peers");
     /// Device log lines (published by the device, UTF-8).
     pub const LOG: Key<'static> = Key::from_static("sys/log");
     /// Payload state changes (published by the device).

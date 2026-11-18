@@ -1,7 +1,8 @@
 // The Device page's channel binding panel (BD5): for the payload chosen
 // for upload, list the channels it declares, bind each to a key or to one
 // of the connected board's sources (as its manifest offers them), show
-// `checkBinding`'s issues with one-click fixes, and install the binding
+// `checkBinding`'s issues with one-click fixes, bind an input to a key on
+// another node the board has heard (`sys/peers`, PR4), and install the binding
 // on the board (signed when the board is claimed by this browser's key).
 // The logic is `device/binding.ts`; this file only renders it.
 
@@ -31,6 +32,7 @@ export function bindingPanel(proto: Protocol, deps: BindingPanelDeps): { el: HTM
   let manifest: Uint8Array | null = null;
   let decls: ChannelDecl[] = [];
   let record: BindingRecord | null = null;
+  let peers: string[] = [];
 
   function render() {
     rows.replaceChildren();
@@ -48,6 +50,12 @@ export function bindingPanel(proto: Protocol, deps: BindingPanelDeps): { el: HTM
       });
       const clear = h("button", {}, "Unbind");
       clear.addEventListener("click", () => update(setTarget(r, c.name, null)));
+      const peerSel = h("select", { title: "A node the board has heard" }, ...peers.map((p) => h("option", { value: p }, p)));
+      const setRemote = h("button", { disabled: !peers.length || c.dir !== "in" }, "Use key from node");
+      setRemote.addEventListener("click", () => {
+        const k = keyIn.value.trim();
+        if (k) update(setTarget(r, c.name, { kind: "remote", node: (peerSel as HTMLSelectElement).value, key: k }));
+      });
       rows.append(
         h(
           "tr",
@@ -55,7 +63,7 @@ export function bindingPanel(proto: Protocol, deps: BindingPanelDeps): { el: HTM
           h("td", {}, c.name),
           h("td", {}, describeChannel(c)),
           h("td", {}, describeTarget(target)),
-          h("td", {}, keyIn, setKey, clear),
+          h("td", {}, keyIn, setKey, clear, ...(peers.length ? [peerSel, setRemote] : [])),
         ),
       );
     }
@@ -65,7 +73,7 @@ export function bindingPanel(proto: Protocol, deps: BindingPanelDeps): { el: HTM
     }
     let issues;
     try {
-      issues = bindingIssues(proto, manifest, wasm, r);
+      issues = bindingIssues(proto, manifest, wasm, r, peers);
     } catch (e) {
       issuesEl.append(h("li", { class: "note" }, errorText(e)));
       return;
@@ -107,6 +115,7 @@ export function bindingPanel(proto: Protocol, deps: BindingPanelDeps): { el: HTM
       const digest = await sha256(p.wasm);
       const client = deps.client();
       manifest = client ? await client.manifestBody() : null;
+      peers = client ? await client.peers() : [];
       record = manifest ? suggestBinding(proto, manifest, p.wasm, digest) : emptyBinding(digest);
       msg.textContent = `${p.name}: ${decls.length} channels.`;
       render();

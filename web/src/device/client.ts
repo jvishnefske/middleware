@@ -269,6 +269,31 @@ export class DeviceClient {
     }
   }
 
+  /** The node ids the board has heard (`sys/peers`, PR2); empty from
+   * firmware that does not forward (NotFound). */
+  async peers(opts?: RequestOptions): Promise<string[]> {
+    try {
+      const body = await this.request(this.proto.constants.keys.peers, new Uint8Array(), opts);
+      const ids = this.proto.decodePeers(body);
+      if (!ids) throw new Error("malformed sys/peers response");
+      return ids;
+    } catch (e) {
+      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return [];
+      throw e;
+    }
+  }
+
+  /** `node`'s raw `sys/manifest`, asked through the board (PR1,
+   * `sys/peer/<node>/manifest`); null when it has none. */
+  async peerManifestBody(node: string, opts?: RequestOptions): Promise<Uint8Array | null> {
+    try {
+      return await this.request(this.proto.peerKey(node, "manifest"), new Uint8Array(), opts);
+    } catch (e) {
+      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
+      throw e;
+    }
+  }
+
   /** Installs a channel binding (`sys/payload/bind`, ABI 7): `body` is
    * `encodeBindBody(record, signature?)`. It applies at the payload's
    * next start. */

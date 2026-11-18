@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Peers through the connected board (PR1–PR5)
+- `loader::peers`: `sys/peer/<id16>/{info,manifest,board}` keys that a board forwards to another node (`peer_key`, `forwardable`), `PeerSet` and the `sys/peers` reply; `keys::PEERS`.
+- RT1050: serial requests on those keys are asked over Zenoh (`ZenohLite::request_with` to the node) and the reply relayed; `sys/peers` from sample senders and forwarded replies; both refused over Zenoh.
+- wasm-host: `Target::Remote` resolves (subscribe, deliver only from the node); `Payload::deliver_from(key, data, sender)`; the RT1050 controller and payload-sim pass the sender. Remote outputs publish normally.
+- mwctl `peers`, `manifest --of <id>`; protocol-wasm `decodePeers`, `peerKey`, `checkBinding(..., peers)`, simulator `deliver(key, data, sender)`; web `DeviceClient.peers`, `peerManifestBody`, the binding panel's peer picker, `MixedNet` delivers board publications to simulated units (`SimBus.inject`).
+
 ### ABI 7 channels and bindings (CH1–CH6, BD1–BD7)
 - ABI 7: payloads declare named channels in a `mw.channels` custom section (`wasm_abi::channels`, pure, `const` encoder) and open them with `channel_open` / `channel_publish`; `ABI_VERSION` 7, `ABI6_IMPORTS`. ABI 1–6 payloads load unchanged.
 - Bindings (`loader::binding`): a separately signed record maps each channel to a local source, a key, a key from one node or an adapted stream; `sys/payload/bind` (signature over `binding_message`, `TrustState::accept_binding`) and `sys/payload/binding`; `Command::Bind`, `Command::Binding`. It applies at the next start, so payloads are rebound without re-upload.

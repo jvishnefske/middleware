@@ -182,6 +182,7 @@ export interface ProtocolConstants {
     manifest: string;
     bind: string;
     binding: string;
+    peers: string;
     begin: string;
     chunk: string;
     commit: string;
@@ -299,7 +300,8 @@ export interface Simulator {
   readonly dropped: number;
   readonly pending: number;
   readonly handlesIrq: boolean;
-  deliver(key: string, data: Uint8Array): boolean;
+  /** Delivers a message from `sender` (16 hex digits; unknown when omitted). */
+  deliver(key: string, data: Uint8Array, sender?: string): boolean;
   setNow(nowMs: number): void;
   nextTick(): number | undefined;
   subscriptions(): string[];
@@ -425,7 +427,13 @@ export interface Protocol {
   /** A `sys/payload/bind` body, signed when a signature is given. */
   encodeBindBody(record: Uint8Array, signature?: Uint8Array): Uint8Array;
   /** Issues of a binding for a payload on a node (its `sys/manifest`). */
-  checkBinding(manifest: Uint8Array, wasm: Uint8Array, record: Uint8Array): BindingIssue[];
+  /** With `peers` (the board's `sys/peers`), a remote target naming
+   * another node is an issue too. */
+  checkBinding(manifest: Uint8Array, wasm: Uint8Array, record: Uint8Array, peers?: readonly string[]): BindingIssue[];
+  /** The node ids of a `sys/peers` reply; undefined when malformed. */
+  decodePeers(data: Uint8Array): string[] | undefined;
+  /** The key that reaches `node`'s `sys/<what>` through the board. */
+  peerKey(node: string, what: "info" | "manifest" | "board"): string;
   payloadStatusName(b: number): string | undefined;
   newDeviceLoader(capacity: number): DeviceLoader;
   readonly constants: ProtocolConstants;
@@ -487,7 +495,10 @@ function wrap(): Protocol {
     decodeBinding: (record) => pkg.decodeBinding(record) as BindingRecord | undefined,
     bindingMessage: (record, node) => pkg.bindingMessage(record, node),
     encodeBindBody: (record, signature) => pkg.encodeBindBody(record, signature),
-    checkBinding: (manifest, wasm, record) => pkg.checkBinding(manifest, wasm, record) as BindingIssue[],
+    checkBinding: (manifest, wasm, record, peers) =>
+      pkg.checkBinding(manifest, wasm, record, peers ? [...peers] : undefined) as BindingIssue[],
+    decodePeers: (data) => pkg.decodePeers(data) ?? undefined,
+    peerKey: (node, what) => pkg.peerKey(node, what),
     encodeDeviceInfo: (i) =>
       pkg.encodeDeviceInfo(i.abiVersion, i.capacity, i.status, i.chip, i.firmware, i.node, i.caps),
     payloadStatusName: pkg.payloadStatusName,

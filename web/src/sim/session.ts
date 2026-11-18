@@ -192,12 +192,13 @@ export class SimSession {
     this.stopTimer = null;
   }
 
-  /** Delivers a message; returns whether a subscription matched. */
-  deliver(key: string, data: Uint8Array): boolean {
+  /** Delivers a message from `sender` (16 hex digits; unknown when
+   * omitted); returns whether a subscription matched. */
+  deliver(key: string, data: Uint8Array, sender?: string): boolean {
     let hit = false;
     this.guard(() => {
       this.sim.setNowUs(this.nowUs());
-      hit = this.sim.deliver(key, data);
+      hit = this.sim.deliver(key, data, sender);
     });
     return hit;
   }

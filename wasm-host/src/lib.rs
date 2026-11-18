@@ -599,7 +599,7 @@ fn resolve<D: Device>(
         resolved.push(match step {
             Step::Unbound => Resolved::Unbound,
             Step::Output { key } => Resolved::Output { key },
-            Step::Input { key, route } => {
+            Step::Input { key, route, from } => {
                 if let Some(source) = route {
                     let k = middleware::Key::new(&key)
                         .map_err(|_| LoadError::Bind(BindError::Mismatch(d.name.clone())))?;
@@ -608,7 +608,7 @@ fn resolve<D: Device>(
                 }
                 let slot = st.subscriptions.len();
                 st.subscriptions.push(key);
-                Resolved::Input { slot }
+                Resolved::Input { slot, from }
             }
         });
     }
@@ -911,12 +911,29 @@ impl<D: Device + 'static> Payload<D> {
     /// `data` exceeds [`wasm_abi::MAX_MESSAGE`], or `mw_alloc` refused the
     /// message by returning 0 or a buffer outside linear memory.
     pub fn deliver(&mut self, key: middleware::Key<'_>, data: &[u8]) -> Result<bool, Trap> {
+        self.deliver_from(key, data, None)
+    }
+
+    /// [`Payload::deliver`] of a message from `sender` (as the link
+    /// reported it; `None` when unknown). A channel bound to a remote node
+    /// (ABI 7, `Target::Remote`) takes messages from that node only: from
+    /// anyone else, or an unknown sender, this is `Ok(false)` without
+    /// calling the payload.
+    pub fn deliver_from(
+        &mut self,
+        key: middleware::Key<'_>,
+        data: &[u8],
+        sender: Option<SenderId>,
+    ) -> Result<bool, Trap> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
         let Some(slot) = abi::slot_for(&self.store.data().subscriptions, key.as_str()) else {
             return Ok(false);
         };
+        if !self.store.data().channels.admits(slot, sender) {
+            return Ok(false);
+        }
         if data.len() > MAX_MESSAGE {
             return Ok(false);
         }

@@ -63,6 +63,9 @@ COMMANDS:
         --key <KEYFILE>            sign it (required over Zenoh on a claimed board)
         --version <N>              binding version (default: the Unix time)
     binding                    Print the stored binding (sys/payload/binding)
+    peers                      Print the node ids the board has heard (sys/peers)
+        manifest --of <ID>         a peer's manifest, asked through the board
+                                   (sys/peer/<ID>/manifest; the RT1050 over Zenoh)
     upload <FILE.wasm>         Install a payload (sys/loader begin/chunk/commit)
         --key <KEYFILE>            sign the commit (Ed25519); without it the commit is
                                    unsigned, which only an unclaimed device accepts
@@ -250,8 +253,13 @@ pub enum Cmd {
     Info,
     /// `board`.
     Board,
-    /// `manifest`.
-    Manifest,
+    /// `manifest [--of <ID>]`: this node's, or a peer's through it.
+    Manifest {
+        /// The peer (`--of`), asked through the connected board.
+        of: Option<[u8; 8]>,
+    },
+    /// `peers`.
+    Peers,
     /// `bind <FILE.wasm> [CHANNEL=TARGET ...]`.
     Bind {
         /// The payload image the binding is for (its SHA-256).
@@ -432,6 +440,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut zroute: Option<ZenohRoute> = None;
     let mut zroutes = 0;
     let mut node: Option<[u8; 8]> = None;
+    let mut of: Option<[u8; 8]> = None;
     let mut ztarget: Option<[u8; 6]> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -502,6 +511,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                         .ok_or("--zenoh-listen needs an endpoint such as tcp/0.0.0.0:7447")?,
                 ));
                 zroutes += 1;
+            }
+            "--of" => {
+                let v = args.next().ok_or("--of needs a node id (16 hex digits)")?;
+                of = Some(parse_node(&v).ok_or_else(|| format!("--of: '{v}' is not a node id (16 hex digits)"))?);
             }
             "--node" => {
                 let v = args
@@ -639,6 +652,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only("--ip", net_ip.is_some(), &["net"])?;
     only("--mac", net_mac.is_some(), &["net"])?;
     only("--peer", net_peer.is_some(), &["net"])?;
+    only("--of", of.is_some(), &["manifest"])?;
     if zenoh.is_some() {
         let signed = matches!(
             name.as_str(),
@@ -698,7 +712,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let cmd = match name.as_str() {
         "info" => Cmd::Info,
         "board" => Cmd::Board,
-        "manifest" => Cmd::Manifest,
+        "manifest" => Cmd::Manifest { of },
+        "peers" => Cmd::Peers,
         "bind" => Cmd::Bind {
             file: PathBuf::from(pos.next().ok_or("bind needs the payload's .wasm file")?),
             specs: pos.by_ref().collect(),
@@ -1112,7 +1127,12 @@ mod tests {
     fn parses_trust_key_and_signed_upload_commands() {
         assert_eq!(run("--port p trust info").cmd, Cmd::TrustInfo);
         assert_eq!(run("--port p board").cmd, Cmd::Board);
-        assert_eq!(run("--port p manifest").cmd, Cmd::Manifest);
+        assert_eq!(run("--port p manifest").cmd, Cmd::Manifest { of: None });
+        assert_eq!(
+            run("--port p manifest --of 0011223344556677").cmd,
+            Cmd::Manifest { of: Some([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]) }
+        );
+        assert_eq!(run("--port p peers").cmd, Cmd::Peers);
         assert_eq!(run("--port p binding").cmd, Cmd::Binding);
         assert_eq!(
             run("--port p bind m.wasm audio=mic:16000:levels level=key:lab/level --version 7").cmd,

@@ -194,3 +194,21 @@ fn ch2_an_abi6_host_does_not_know_the_channel_imports() {
         assert!(import_in(7, name).is_some());
     }
 }
+
+#[test]
+fn pr3_a_remote_channel_takes_its_node_only() {
+    use middleware::SenderId;
+    let node = SenderId([7; 8]);
+    let b = bound(&[
+        ("audio", Target::Remote { node, key: Key::from_static("mic/level") }),
+        ("level", Target::Remote { node, key: Key::from_static("lab/level") }),
+    ]);
+    let mut p = load(Board::default(), Some(&b)).unwrap();
+    let k = Key::from_static("mic/level");
+    assert!(!p.deliver(k, b"x").unwrap(), "an unknown sender");
+    assert!(!p.deliver_from(k, b"x", Some(SenderId([8; 8]))).unwrap(), "another node");
+    assert!(p.device().published.is_empty());
+    assert!(p.deliver_from(k, b"ok", Some(node)).unwrap());
+    // The output publishes on its key, normally.
+    assert_eq!(p.device().published, [("lab/level".to_string(), b"ok".to_vec())]);
+}

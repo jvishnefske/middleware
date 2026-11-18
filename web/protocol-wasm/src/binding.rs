@@ -12,7 +12,9 @@
 //!   not take);
 //! * a local source the node does not offer (its manifest has no such
 //!   source, or not at that rate, range, mode or gain), or outside the
-//!   channel's rate range.
+//!   channel's rate range;
+//! * a remote target naming a node the board has not heard (when its
+//!   `sys/peers` is known).
 //!
 //! Where an obvious target exists, the issue carries it as a [`Fix`]:
 //! [`suggest`] picks a local source the manifest offers and the channel
@@ -167,7 +169,12 @@ fn local_problem(manifest: &Manifest, decl: &Channel<'_>, source: &RouteSource) 
 
 /// Every issue of `binding` for a payload declaring `channels` on a node
 /// with `manifest` (see the module docs).
-pub fn check(manifest: &Manifest, channels: &Channels<'_>, binding: &Binding<'_>) -> Vec<Issue> {
+pub fn check(
+    manifest: &Manifest,
+    channels: &Channels<'_>,
+    binding: &Binding<'_>,
+    peers: Option<&[middleware::SenderId]>,
+) -> Vec<Issue> {
     let mut out = Vec::new();
     for decl in channels.iter() {
         let name = decl.name;
@@ -191,6 +198,10 @@ pub fn check(manifest: &Manifest, channels: &Channels<'_>, binding: &Binding<'_>
                     let fix = suggest(manifest, decl).filter(|s| *s != source).map(Fix::Local);
                     out.push(issue(name, format!("{name}: {problem}"), fix));
                 }
+            }
+            Some(Target::Remote { node, .. }) if peers.is_some_and(|p| !p.contains(&node)) => {
+                let hex: String = node.0.iter().map(|b| format!("{b:02x}")).collect();
+                out.push(issue(name, format!("{name}: the board has not heard node {hex}"), None));
             }
             Some(_) => {}
         }
@@ -260,12 +271,12 @@ mod tests {
         let c = Channels::parse(&SECTION).unwrap();
         let level = ("level", Target::Key(Key::from_static("lab/level")));
         let good = binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), level]);
-        assert_eq!(check(&m, &c, &good), []);
-        let issues = check(&m, &c, &binding(&[]));
+        assert_eq!(check(&m, &c, &good, None), []);
+        let issues = check(&m, &c, &binding(&[]), None);
         assert_eq!(issues.len(), 2);
         assert_eq!((issues[0].channel.as_str(), issues[0].fix), ("audio", Some(Fix::Local(mic(16_000, AudioMode::Levels)))));
         assert_eq!(issues[1].fix, Some(Fix::KeyNamed));
-        let one = |t: Target<'static>| check(&m, &c, &binding(&[("audio", t), level])).remove(0);
+        let one = |t: Target<'static>| check(&m, &c, &binding(&[("audio", t), level]), None).remove(0);
         // A rate the node lacks, a mode the channel refuses, the IMU.
         let i = one(Target::Local(mic(8_000, AudioMode::Levels)));
         assert!(i.message.contains("does not offer"), "{}", i.message);
@@ -273,12 +284,19 @@ mod tests {
         assert!(one(Target::Local(mic(16_000, AudioMode::MuLaw))).message.contains("does not take"));
         let imu = RouteSource::Samples(SampleSource::Imu(ImuConfig::new(50, 2, false, 5).unwrap()));
         assert!(one(Target::Local(imu)).message.contains("takes Microphone"));
-        let none = check(&Manifest::new(7), &c, &binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), level]));
+        let none = check(&Manifest::new(7), &c, &binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), level]), None);
         assert!(none[0].message.contains("no Microphone source") && none[0].fix.is_none(), "{none:?}");
         // An output on a source; an entry for nothing.
-        let out = check(&m, &c, &binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), ("level", Target::Local(mic(16_000, AudioMode::Levels)))]));
+        let out = check(&m, &c, &binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), ("level", Target::Local(mic(16_000, AudioMode::Levels)))]), None);
         assert_eq!((out[0].channel.as_str(), out[0].fix), ("level", Some(Fix::KeyNamed)));
-        let extra = check(&m, &c, &binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), level, ("lvl", Target::Key(Key::from_static("x")))]));
+        let extra = check(&m, &c, &binding(&[("audio", Target::Local(mic(16_000, AudioMode::Levels))), level, ("lvl", Target::Key(Key::from_static("x")))]), None);
         assert_eq!((extra[0].channel.as_str(), extra[0].fix), ("lvl", Some(Fix::Remove)));
+        // PR4: a remote node the board has not heard.
+        let node = middleware::SenderId([7; 8]);
+        let remote = binding(&[("audio", Target::Remote { node, key: Key::from_static("mic/level") }), level]);
+        assert_eq!(check(&m, &c, &remote, None), []);
+        assert_eq!(check(&m, &c, &remote, Some(&[node])), []);
+        let unheard = check(&m, &c, &remote, Some(&[]));
+        assert!(unheard[0].message.contains("has not heard node 0707070707070707"), "{unheard:?}");
     }
 }

@@ -30,10 +30,12 @@ use imxrt_base::links::LinkId;
 use imxrt_base::service::{Handled, Reply as Answer, Service};
 use imxrt_base::shell::flexspi::HyperFlash;
 use middleware::Key;
+#[cfg(feature = "wasm")]
 use middleware::loader::binding::is_internal_key;
 use middleware::transport::HandlerError;
 
-use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Reply};
+use super::bus::{Bus, Forward, Inbound, Kind, MAX_REPLY, Reply};
+use middleware::loader::{keys, peers};
 use super::reset;
 
 #[cfg(not(feature = "wasm"))]
@@ -297,12 +299,40 @@ impl Controller {
         }
     }
 
+    /// Answers `sys/peers` and hands `sys/peer/<id>/...` to the Zenoh
+    /// link (PR1, PR2); `true` when it took the request. Forwarding is for
+    /// the serial links only: from Zenoh it is `Denied`.
+    fn peer_request(&self, id: u8, msg: &Inbound) -> bool {
+        let Ok(key) = Key::new(&msg.key) else {
+            return false;
+        };
+        let answer = |result| self.bus.reply(Reply { link: msg.link, id, result });
+        if key == keys::PEERS {
+            let mut out = [0u8; peers::PEERS_MAX];
+            let n = self.bus.peers().encode(&mut out).unwrap_or(0);
+            answer(Vec::from_slice(&out[..n]).map_err(|_| HandlerError::BufferTooSmall));
+            return true;
+        }
+        let Some((node, path)) = peers::forwardable(key, self.svc.node()) else {
+            return false;
+        };
+        if msg.link == LinkId::ZENOH {
+            answer(Err(HandlerError::Denied));
+        } else if self.bus.forward(Forward { link: msg.link, id, node, key: path }).is_err() {
+            answer(Err(HandlerError::Unavailable));
+        }
+        true
+    }
+
     /// Serves requests until a payload start is requested; returns where
     /// to answer it.
     async fn idle(&mut self) -> (LinkId, u8) {
         loop {
             let msg: Inbound = self.bus.receive_inbound().await;
             if let Kind::Request { id } = msg.kind {
+                if self.peer_request(id, &msg) {
+                    continue;
+                }
                 #[cfg(feature = "wasm")]
                 let (reply, _, then_reset) = self.handle(id, &msg, None);
                 #[cfg(not(feature = "wasm"))]
@@ -468,12 +498,13 @@ impl Controller {
                         // LOCAL; `ch/...` from any real link is dropped.
                         let local = msg.link == LinkId::LOCAL && is_internal_key(key);
                         if (local || route_publication(&self.svc.state(), key, payload.subscriptions()))
-                            && let Err(trap) = payload.deliver(key, &msg.body)
+                            && let Err(trap) = payload.deliver_from(key, &msg.body, msg.peer)
                         {
                             self.trapped(&trap);
                             return;
                         }
                     }
+                    Kind::Request { id } if self.peer_request(id, &msg) => {}
                     Kind::Request { id } => {
                         let (reply, stop, then_reset) = self.handle(id, &msg, Some(&mut *payload));
                         // A start while running is answered by dispatch.

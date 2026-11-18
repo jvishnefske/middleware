@@ -688,9 +688,15 @@ impl Simulator {
 
     /// Delivers a message; `Ok(false)` when no subscription matched.
     pub fn deliver(&mut self, key: &str, data: &[u8]) -> Result<bool, SimError> {
+        self.deliver_from(key, data, None)
+    }
+
+    /// [`Simulator::deliver`] of a message from `sender` (a channel bound
+    /// to a remote node takes that node's messages only, ABI 7).
+    pub fn deliver_from(&mut self, key: &str, data: &[u8], sender: Option<SenderId>) -> Result<bool, SimError> {
         self.guard()?;
         let key = Key::new(key).map_err(|_| SimError::InvalidKey)?;
-        let r = self.payload.deliver(key, data);
+        let r = self.payload.deliver_from(key, data, sender);
         self.trap(r)
     }
 

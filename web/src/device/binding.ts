@@ -39,9 +39,16 @@ export function applyFix(record: BindingRecord, issue: BindingIssue): BindingRec
   }
 }
 
-/** The issues of `record` for `wasm` on the node with `manifest`. */
-export function bindingIssues(proto: Protocol, manifest: Uint8Array, wasm: Uint8Array, record: BindingRecord): BindingIssue[] {
-  return proto.checkBinding(manifest, wasm, proto.encodeBinding(record));
+/** The issues of `record` for `wasm` on the node with `manifest`; with
+ * `peers` (the board's `sys/peers`) remote targets must name one of them. */
+export function bindingIssues(
+  proto: Protocol,
+  manifest: Uint8Array,
+  wasm: Uint8Array,
+  record: BindingRecord,
+  peers?: readonly string[],
+): BindingIssue[] {
+  return proto.checkBinding(manifest, wasm, proto.encodeBinding(record), peers);
 }
 
 /** A first binding: every fix `checkBinding` offers applied once (the
