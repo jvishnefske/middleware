@@ -3659,6 +3659,32 @@ network tests use 127.0.0.1 only.
   (`decodeManifest` `board`) and shows it. *(mw-posix-node
   `pn14_the_manifest_names_the_board`, middleware `mf6_board_names`, web
   `nodeManifest.test.ts`)*
+- [x] PN16 Drivers (`driver::Driver`): a node runs one,
+  `MW_POSIX_NODE_DRIVER` = `none` (default), `sim` or `kd240`. The
+  controller serves its points on `sys/manifest/cm` and counts them in
+  the manifest; passes what the payload publishes on a `drv/<point>` key
+  to the driver and never to a link (a write the driver refuses is
+  logged); delivers what the driver reads on `drv/<point>` to a payload
+  subscribed there, with a snapshot of every input at the start; and
+  refuses a start whose driver targets name a missing point or one of
+  another kind or flow (`driver::check_binding`), logging why.
+  *(mw-posix-node `pn16_*`)*
+- [x] PN17 The simulator (`driver::sim`, the EMCO PC Turn 50's numbers):
+  X and Z positions in step counts, reference switches, a spindle that
+  ramps, a turret that indexes, the e-stop chain and a segment queue.
+  Without limit switches an axis driven past its mechanical stop stalls
+  and its count runs on (the real machine loses position the same way);
+  with them, the switch stops motion cleanly. Motion stops on the e-stop
+  or a limit until the chain is closed and the payload flushes. A payload
+  bound to it homes an axis onto its reference switch. *(mw-posix-node
+  `pn17_*`)*
+- [x] PN18 The KD240 driver (`driver::kd240`) is **input only**: GPIO
+  lines through `/dev/gpiochipN` (`MW_POSIX_NODE_KD240_INPUTS`,
+  `point=chip:offset[:low]`) and `pl_present` (a UIO device named
+  `emco…`, the PL check overlay); every point flows in and every write is
+  refused. *(mw-posix-node `pn18_*`)* Not yet run on the board.
+- [ ] PN19 A LinuxCNC driver (segments as queued MDI moves, its pins as
+  points). Not implemented.
 - [x] PN15 The rename keeps what a node had: every `MW_POSIX_NODE_*`
   variable is still read as `MW_PI_NODE_*` when unset (and warned about),
   the default state directory falls back to `/var/lib/mw-pi-node` when
@@ -6856,6 +6882,63 @@ the binding's adapter on each message before `on_message`.
   adapter for a levels channel".
 - [ ] AD4 On the RT1050-EVKB: `level_meter` on the local 16 kHz PCM
   through `PcmToLevels` reads as SC8's levels route does.
+
+### Machine channels and control modules (ABI 9; MC…, CM…)
+
+A payload that models a machine (axes, a spindle, switches, a turret, the
+e-stop) needs the machine's signals, and must never get its hardware: no
+registers, no step timing. ABI 9 adds no imports. It adds four channel
+kinds a payload declares like bytes (`wasm_abi::channels::DataKind`
+`Digital`, `Position`, `Setpoint`, `Segments`; their fixed-length
+messages in `wasm_abi::machine`) and a binding target that names a
+**control-module point** of the node (`loader::binding::Target::Driver`,
+code 5). A node's native drivers own the points and the hardware behind
+them (`posix-node`'s `driver`, PN16–PN19). The node lists its points on
+`sys/manifest/cm` (`loader::control`), so a tool can see what it offers
+and generate a model for it.
+
+Segments are the seam for motion: a payload sends straight X/Z moves to
+an absolute end point with a feed (or feed per spindle revolution); the
+driver runs them in its own time base (the PL, a kernel driver,
+LinuxCNC's motion controller, or the simulator's integrator) and reports
+the queue's state (free slots, the last segment done, idle, stopped,
+overrun). Back-pressure is that report, never a blocking call.
+
+- [x] MC1 The machine messages are pure fixed-length codecs, each
+  decoding only at its own length (9, 16, 4, 17 and 7 bytes, all
+  distinct): `Digital`, `Position`, `Setpoint`, `Segment` (flags rapid,
+  sync, flush; rapid and sync together refused) and `QueueState` (idle,
+  stopped, overrun). *(middleware `mc1_*`)*
+- [x] MC2 `mw.channels` takes kinds 3–6 with no sensor, formats or
+  channel count, as for bytes; an unknown kind is `ChannelError::Field`,
+  so a host of ABI 8 refuses a machine payload instead of starting it.
+  `ABI_VERSION` is 9 with the import table of 8 (`ABI8_IMPORTS`).
+  *(middleware `mc2_machine_channels_declare_like_bytes`,
+  `revisions_are_prefixes_of_the_import_table`)*
+- [x] MC3 The SDK's `channels!` takes `digital`, `position`, `setpoint`
+  and `segments` and re-exports `wasm_abi::machine`. *(mw-payload
+  `mc3_the_macro_declares_machine_channels`)*
+- [x] MC4 A driver target is carried on the node-internal key
+  `drv/<point>` (`binding::driver_key`): an input subscribes to it, an
+  output publishes on it. `is_internal_key` covers `drv/`, so no link
+  sends or delivers it, and a payload cannot name it itself (`publish`
+  and `subscribe` refuse `drv/` as `InvalidKey`): only a binding reaches
+  a point. A driver target is refused inside an adapter. *(middleware
+  `bd8_*`; wasm-host `tests/abi9.rs`, `keys_reject_sys_and_malformed`)*
+- [x] CM1 `loader::control`: a point is a name (channel-name rules), a
+  machine kind, a flow (in, out, both for a segment queue), a unit, a
+  range and a scale (counts per mm); pages of at most 480 bytes under
+  `sys/manifest/cm` (body: the page number), at most 64 points; the
+  manifest's `CONTROL_MODULES` record (tag 12) gives the count and the
+  pages. *(middleware `cm1_*`, `mf1_every_record_round_trips`)*
+- [x] CM2 Tools read them: protocol-wasm `decodeControlPage`,
+  `controlPageRequest`, `decodeManifest` `controlModules`, driver
+  targets in `encodeBinding`/`decodeBinding`, the machine kinds in
+  `readChannels`/`encodeChannels`; `checkBinding` refuses a machine
+  channel bound to a local source, a driver point bound to a channel
+  that is not a machine one, and a driver point on a node without
+  control modules; `mwctl bind` takes `driver:<point>`. *(web
+  `control.test.ts`; mwctl `bindspec`)*
 
 ### JPEG decode in WASM (J…)
 

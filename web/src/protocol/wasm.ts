@@ -110,16 +110,43 @@ export interface Manifest {
   limits?: { routes: number; subscriptions: number; channels: number; maxMessage: number };
   /** The board's model (a Linux node's device tree `model`), when sent. */
   board?: string;
+  /** ABI 9: the node lists control-module points at `sys/manifest/cm`. */
+  controlModules?: { points: number; pages: number };
   /** The `sys/info` capability bits the manifest implies, and their names. */
   caps: number;
   capNames: string[];
+}
+
+/** What a channel carries: ABI 8's kinds, and ABI 9's machine kinds. */
+export type ChannelKind = "bytes" | "samples" | "frames" | MachineKind;
+/** ABI 9: a switch, a measured position, a commanded value, a segment queue. */
+export type MachineKind = "digital" | "position" | "setpoint" | "segments";
+
+/** One control-module point a node's driver exposes (ABI 9, `sys/manifest/cm`). */
+export interface ControlPoint {
+  name: string;
+  kind: MachineKind;
+  /** Seen from the payload: it reads ("in"), writes ("out"), or both (a segment queue). */
+  flow: "in" | "out" | "both";
+  unit: "none" | "bool" | "um" | "count" | "rpm" | "station" | "um/s";
+  min: number;
+  max: number;
+  /** Counts per mm for a position point, 0 otherwise. */
+  scale: number;
+}
+
+/** One page of `sys/manifest/cm`. */
+export interface ControlPage {
+  pages: number;
+  page: number;
+  points: ControlPoint[];
 }
 
 /** A channel a payload declares in its `mw.channels` section (ABI 8). */
 export interface ChannelDecl {
   name: string;
   dir: "in" | "out";
-  kind: "bytes" | "samples" | "frames";
+  kind: ChannelKind;
   sensor: "imu" | "mic" | null;
   /** Mask over sample format codes (i16 0, mulaw 1, levels 2) or pixel
    * formats; 0 = any. */
@@ -145,7 +172,12 @@ export type Adapter =
   | { kind: "imuToMagnitude" };
 
 /** Where a channel's data comes from or goes to. */
-export type Endpoint = LocalSource | { kind: "key"; key: string } | { kind: "remote"; node: string; key: string };
+export type Endpoint =
+  | LocalSource
+  | { kind: "key"; key: string }
+  | { kind: "remote"; node: string; key: string }
+  /** ABI 9: a control-module point of the node's driver. */
+  | { kind: "driver"; point: string };
 export type BindingTarget = Endpoint | { kind: "adapted"; adapter: Adapter; inner: Endpoint };
 
 /** A binding record: which image it is for, its version, each channel's target. */
@@ -428,6 +460,10 @@ export interface Protocol {
   encodeDeviceInfo(info: Omit<DeviceInfo, "statusName" | "caps" | "capNames" | "serves"> & { caps?: number }): Uint8Array;
   decodeBoardInfo(data: Uint8Array): BoardInfo | undefined;
   decodeManifest(data: Uint8Array): Manifest | undefined;
+  /** One page of `sys/manifest/cm` (ABI 9); undefined when malformed. */
+  decodeControlPage(data: Uint8Array): ControlPage | undefined;
+  /** The request body for page `page` of `sys/manifest/cm`. */
+  controlPageRequest(page: number): Uint8Array;
   /** The browser simulator's `sys/manifest` body with `node` (16 hex digits)
    * as its node id; undefined without the simulator or for a bad node. */
   simulatorManifest(node: string): Uint8Array | undefined;
@@ -505,6 +541,8 @@ function wrap(): Protocol {
     decodeDeviceInfo: (data) => pkg.decodeDeviceInfo(data) as DeviceInfo | undefined,
     decodeBoardInfo: (data) => pkg.decodeBoardInfo(data) as BoardInfo | undefined,
     decodeManifest: (data) => pkg.decodeManifest(data) as Manifest | undefined,
+    decodeControlPage: (data) => pkg.decodeControlPage(data) as ControlPage | undefined,
+    controlPageRequest: (page) => pkg.controlPageRequest(page),
     simulatorManifest: (node) => pkg.simulatorManifest?.(node) ?? undefined,
     readChannels: (wasm) => pkg.readChannels(wasm) as ChannelDecl[],
     encodeChannels: (decls) => pkg.encodeChannels([...decls]),

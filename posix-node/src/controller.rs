@@ -27,6 +27,14 @@
 //!   and log lines, the service's notes on `sys/log` and every status
 //!   change on `sys/payload/status`, oldest first, in a bounded outbox.
 //!
+//! * ABI 9 drivers ([`crate::driver`]): what the payload publishes on a
+//!   driver point's `drv/<point>` key goes to [`Driver::write`], never to
+//!   the outbox; what [`Driver::poll`] reads is delivered on `drv/<point>`
+//!   when the payload subscribed (its binding put it there), with a
+//!   snapshot of every input right after a start; `sys/manifest/cm` lists
+//!   the points; a start whose driver targets name a missing point, or
+//!   one of another kind or direction, fails ([`crate::driver::check_binding`]).
+//!
 //! There is no heap check before a start (`esp_base::start`): the node
 //! runs on an operating system with virtual memory, and the payload's
 //! linear memory is capped by [`Limits::max_memory_bytes`].
@@ -44,6 +52,7 @@ use middleware::wasm_abi::events::MAX_EVENTS;
 use wasm_host::{Compiled, Limits, LoadError, Payload, Trap};
 
 use crate::device::{Clock, OUTBOX, Out, Outbox, PiDevice};
+use crate::driver::{Driver, NoDriver, check_binding, index_of};
 use crate::flash::Durable;
 use crate::service::{Boot, Facts, Handled, Reply, Service, StartFailure};
 
@@ -55,6 +64,7 @@ pub const CONTROL_OUTBOX: usize = OUTBOX + 16;
 enum StartError {
     Store(StoreError),
     Load(LoadError),
+    Driver(String),
 }
 
 impl core::fmt::Display for StartError {
@@ -62,6 +72,7 @@ impl core::fmt::Display for StartError {
         match self {
             StartError::Store(e) => write!(f, "{e}"),
             StartError::Load(e) => write!(f, "{e}"),
+            StartError::Driver(e) => write!(f, "driver: {e}"),
         }
     }
 }
@@ -75,12 +86,25 @@ pub struct Controller<F, C: Clock + 'static> {
     outbox: Outbox,
     published: Option<PayloadStatus>,
     events_dropped: u32,
+    driver: Box<dyn Driver>,
 }
 
 impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     /// Opens the service on `flash`; payloads run under `limits` with
     /// `clock`.
     pub fn open(flash: F, facts: Facts, limits: Limits, clock: C) -> (Self, Boot) {
+        Self::open_with_driver(flash, facts, limits, clock, Box::new(NoDriver))
+    }
+
+    /// [`Controller::open`] with `driver`'s control-module points (the
+    /// manifest names them when `facts` does: [`crate::facts_with_driver`]).
+    pub fn open_with_driver(
+        flash: F,
+        facts: Facts,
+        limits: Limits,
+        clock: C,
+        driver: Box<dyn Driver>,
+    ) -> (Self, Boot) {
         let (svc, boot) = Service::open(flash, facts);
         let ctl = Controller {
             svc,
@@ -90,6 +114,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             outbox: Outbox::with_capacity(CONTROL_OUTBOX),
             published: None,
             events_dropped: 0,
+            driver,
         };
         (ctl, boot)
     }
@@ -141,6 +166,11 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         &self.svc
     }
 
+    /// The driver.
+    pub fn driver(&mut self) -> &mut dyn Driver {
+        self.driver.as_mut()
+    }
+
     /// Handles one request: the reply body or the error.
     pub fn request(
         &mut self,
@@ -149,6 +179,11 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         meta: &RequestMeta<'_>,
     ) -> Result<Vec<u8>, HandlerError> {
         let mut out = vec![0u8; MAX_RAW_FRAME];
+        if key == keys::CONTROL_MODULES {
+            let n = crate::driver::serve_page(self.driver.points(), body, &mut out)?;
+            out.truncate(n);
+            return Ok(out);
+        }
         let running = self.payload.is_some() && self.svc.status() == PayloadStatus::Running;
         let route = match self.payload.as_ref() {
             Some(p) if running => route_request(key, PayloadStatus::Running, p.serves()),
@@ -231,8 +266,11 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.settle();
     }
 
-    /// Fires due timers, dispatches queued events and runs a due tick.
+    /// Fires due timers, dispatches queued events and runs a due tick;
+    /// first, what the driver read.
     pub fn poll(&mut self) {
+        let readings = self.driver.poll(self.clock.now_us());
+        self.deliver_driver(readings);
         let result = match self.payload.as_mut() {
             Some(p) => Self::run_due(p, &self.clock, &mut self.events_dropped, &mut self.outbox),
             None => Ok(()),
@@ -264,18 +302,66 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         p.tick(clock.now_ms()).map(|_| ())
     }
 
-    /// When to poll next, in µs on the clock: the next tick or timer.
+    /// Delivers driver readings on their points' keys, to a payload bound
+    /// to them.
+    fn deliver_driver(&mut self, readings: Vec<(usize, Vec<u8>)>) {
+        let Some(p) = self.payload.as_mut() else {
+            return;
+        };
+        let mut trap = None;
+        for (i, msg) in readings {
+            let Some(point) = self.driver.points().get(i) else {
+                continue;
+            };
+            let key = wasm_host::channels::driver_key(&point.name);
+            let Ok(k) = Key::new(&key) else { continue };
+            if !p.subscriptions().any(|s| s == key) {
+                continue;
+            }
+            if let Err(t) = p.deliver(k, &msg) {
+                trap = Some(t);
+                break;
+            }
+        }
+        if let Some(t) = trap {
+            self.trapped(&t);
+        }
+    }
+
+    /// A payload publication: to the driver on a `drv/<point>` key, to the
+    /// outbox otherwise.
+    fn forward(driver: &mut dyn Driver, outbox: &mut Outbox, now_us: u64, o: Out) {
+        if !o.key.starts_with("drv/") {
+            outbox.push_out(o);
+            return;
+        }
+        // Never to a link, even for a point this driver does not have.
+        let point = Key::new(&o.key)
+            .ok()
+            .and_then(|k| middleware::loader::binding::driver_point(k).map(str::to_owned));
+        let index = point.as_deref().and_then(|p| index_of(driver.points(), p));
+        let result = match index {
+            Some(i) => driver.write(i, &o.payload, now_us),
+            None => Err(crate::driver::DriverError::NotWritable),
+        };
+        if let Err(e) = result {
+            outbox.log(&format!("driver {}: {}: {e:?}", driver.name(), o.key));
+        }
+    }
+
+    /// When to poll next, in µs on the clock: the next tick, timer or
+    /// driver step.
     pub fn next_wake_us(&mut self) -> Option<u64> {
-        let p = self.payload.as_mut()?;
         let now_us = self.clock.now_us();
+        let driver = self.driver.next_wake_us(now_us);
+        // Without a payload nobody reads the driver: it catches up (it
+        // integrates from the clock) when one starts.
+        let p = self.payload.as_mut()?;
         let tick = p.next_tick().map(|due| {
             now_us.saturating_add(u64::from(tick_delay(self.clock.now_ms(), due)) * 1000)
         });
         let alarm = p.device().next_alarm_us();
-        match (tick, alarm) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [tick, alarm, driver].into_iter().flatten().min()
     }
 
     /// Takes what to send, oldest first.
@@ -309,13 +395,15 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
                 self.payload = Some(payload);
                 self.svc.started();
                 self.outbox.log(&format!("payload started ({len} bytes)"));
+                let snapshot = self.driver.snapshot(self.clock.now_us());
+                self.deliver_driver(snapshot);
                 Ok(())
             }
             Err(e) => {
                 self.outbox.log(&format!("payload start failed: {e}"));
                 self.svc.start_failed(match e {
                     StartError::Store(_) => StartFailure::Store,
-                    StartError::Load(_) => StartFailure::Load,
+                    StartError::Load(_) | StartError::Driver(_) => StartFailure::Load,
                 });
                 Err(HandlerError::Internal)
             }
@@ -348,6 +436,8 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         };
         let compiled = Compiled::new(&image, self.limits).map_err(StartError::Load)?;
         drop(image);
+        check_binding(compiled.channels(), binding.as_ref(), self.driver.points())
+            .map_err(StartError::Driver)?;
         let device = PiDevice::new(self.clock.clone(), node);
         let payload = Payload::instantiate_bound(compiled, device, binding.as_ref())
             .map_err(StartError::Load)?;
@@ -365,8 +455,9 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     fn end_run(&mut self) {
         if let Some(mut p) = self.payload.take() {
             self.svc.run_ended(ServedKeys::from_run(p.serves()));
+            let now = self.clock.now_us();
             for o in p.device().outbox().drain() {
-                self.outbox.push_out(o);
+                Self::forward(self.driver.as_mut(), &mut self.outbox, now, o);
             }
         }
     }
@@ -375,8 +466,9 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     /// changed status.
     fn settle(&mut self) {
         if let Some(p) = self.payload.as_mut() {
+            let now = self.clock.now_us();
             for o in p.device().outbox().drain() {
-                self.outbox.push_out(o);
+                Self::forward(self.driver.as_mut(), &mut self.outbox, now, o);
             }
         }
         let status = self.svc.status();

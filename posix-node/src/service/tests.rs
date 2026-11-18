@@ -29,6 +29,7 @@ pub fn facts() -> Facts {
         firmware: "0.6.0",
         node: NODE,
         board: None,
+        control: None,
     }
 }
 

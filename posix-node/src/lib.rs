@@ -37,6 +37,7 @@
 pub mod config;
 pub mod controller;
 pub mod device;
+pub mod driver;
 pub mod flash;
 pub mod layout;
 pub mod node_id;
@@ -71,6 +72,16 @@ pub fn facts(node: SenderId) -> service::Facts {
         firmware: env!("CARGO_PKG_VERSION"),
         node,
         board: model.as_deref().and_then(board_from_model),
+        control: None,
+    }
+}
+
+/// [`facts`] with `driver`'s control-module points counted in the
+/// manifest.
+pub fn facts_with_driver(node: SenderId, driver: &dyn driver::Driver) -> service::Facts {
+    service::Facts {
+        control: driver::control_summary(driver.points()),
+        ..facts(node)
     }
 }
 

@@ -18,13 +18,21 @@
 //! | 1     | name length, `1..=MAX_NAME`                                    |
 //! | …     | name: `a-z`, `0-9`, `_`                                        |
 //! | 1     | [`Direction`]: 0 in, 1 out                                     |
-//! | 1     | [`DataKind`]: 0 bytes, 1 samples, 2 frames                     |
+//! | 1     | [`DataKind`]: 0 bytes, 1 samples, 2 frames; ABI 9: 3 digital, 4 position, 5 setpoint, 6 segments |
 //! | 1     | sensor: a [`SensorKind`] code, or [`ANY`] (always for bytes and frames) |
 //! | 1     | formats: mask over [`SampleFormat`] codes (samples) or [`PixelFormat`](super::route::PixelFormat) codes (frames); 0 = any; 0 for bytes |
 //! | 1     | channels per unit, 0 = any                                    |
 //! | 4     | lowest rate, Hz (`u32` LE)                                     |
 //! | 4     | highest rate, Hz, `>=` the lowest; `0, u32::MAX` = any         |
 //! | 1     | flags: bit 0 required; other bits 0                           |
+//!
+//! The machine kinds of ABI 9 ([`DataKind::Digital`] to
+//! [`DataKind::Segments`], their messages in [`super::machine`]) take no
+//! sensor, formats or channel count, like bytes; they are bound to a
+//! node's control-module points ([`crate::loader::binding::Target::Driver`])
+//! or to keys. A host of ABI 8 refuses a section with them (an unknown
+//! kind is a [`ChannelError::Field`]), so a machine payload never starts on
+//! a node that cannot serve it.
 //!
 //! Names are unique and at most [`MAX_CHANNELS`] are declared. The section
 //! must end after the last entry; anything else is refused
@@ -89,6 +97,53 @@ pub enum DataKind {
     Samples = 1,
     /// [`crate::stream`] frame chunks.
     Frames = 2,
+    /// ABI 9: a switch or other two-state signal (limit and home switches,
+    /// the e-stop chain, turret in position): [`super::machine::Digital`].
+    Digital = 3,
+    /// ABI 9: a measured position, encoder or step counts with a time
+    /// stamp: [`super::machine::Position`].
+    Position = 4,
+    /// ABI 9: a commanded value (spindle speed, turret station):
+    /// [`super::machine::Setpoint`].
+    Setpoint = 5,
+    /// ABI 9: motion segments to a bounded queue (out), or the queue's
+    /// state (in): [`super::machine::Segment`],
+    /// [`super::machine::QueueState`].
+    Segments = 6,
+}
+
+impl DataKind {
+    /// The kind of a code, `None` for one this ABI does not know.
+    pub const fn from_u8(code: u8) -> Option<DataKind> {
+        Some(match code {
+            0 => DataKind::Bytes,
+            1 => DataKind::Samples,
+            2 => DataKind::Frames,
+            3 => DataKind::Digital,
+            4 => DataKind::Position,
+            5 => DataKind::Setpoint,
+            6 => DataKind::Segments,
+            _ => return None,
+        })
+    }
+
+    /// Lower-case name, as the SDK's `channels!` and the web tools write it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            DataKind::Bytes => "bytes",
+            DataKind::Samples => "samples",
+            DataKind::Frames => "frames",
+            DataKind::Digital => "digital",
+            DataKind::Position => "position",
+            DataKind::Setpoint => "setpoint",
+            DataKind::Segments => "segments",
+        }
+    }
+
+    /// One of the machine kinds of ABI 9.
+    pub const fn is_machine(self) -> bool {
+        (self as u8) >= DataKind::Digital as u8
+    }
 }
 
 /// Why a `mw.channels` section was refused.
@@ -177,6 +232,14 @@ impl<'a> Channel<'a> {
         }
     }
 
+    /// A channel of one of the machine kinds ([`DataKind::is_machine`]).
+    pub const fn machine(name: &'a str, dir: Direction, kind: DataKind, required: bool) -> Self {
+        Channel {
+            kind,
+            ..Channel::bytes(name, dir, required)
+        }
+    }
+
     /// The same channel accepting only these format codes (a mask).
     pub const fn with_formats(self, formats: u8) -> Self {
         Channel { formats, ..self }
@@ -216,7 +279,8 @@ impl<'a> Channel<'a> {
         }
         let plain = !matches!(self.kind, DataKind::Samples);
         if (plain && self.sensor.is_some())
-            || (matches!(self.kind, DataKind::Bytes) && (self.formats != 0 || self.channels != 0))
+            || ((matches!(self.kind, DataKind::Bytes) || self.kind.is_machine())
+                && (self.formats != 0 || self.channels != 0))
             || self.rate_min > self.rate_max
         {
             return Err(ChannelError::Field);
@@ -390,12 +454,7 @@ impl<'a> Channels<'a> {
                 1 => Direction::Out,
                 _ => return Err(field),
             };
-            let kind = match fixed[1] {
-                0 => DataKind::Bytes,
-                1 => DataKind::Samples,
-                2 => DataKind::Frames,
-                _ => return Err(field),
-            };
+            let kind = DataKind::from_u8(fixed[1]).ok_or(field)?;
             let sensor = match fixed[2] {
                 ANY => None,
                 s => Some(SensorKind::from_u8(s).ok_or(field)?),
@@ -629,6 +688,33 @@ mod tests {
         assert!(levels.accepts_samples(SensorKind::Microphone, SampleFormat::Levels, 1, 16_000));
         assert!(!levels.accepts_samples(SensorKind::Microphone, SampleFormat::I16, 1, 16_000));
         assert!(!DECLS[1].accepts_samples(SensorKind::Imu, SampleFormat::I16, 3, 50));
+    }
+
+    #[test]
+    fn mc2_machine_channels_declare_like_bytes() {
+        const MACHINE: [Channel<'static>; 4] = [
+            Channel::machine("x_limit", Direction::In, DataKind::Digital, true),
+            Channel::machine("x_pos", Direction::In, DataKind::Position, true),
+            Channel::machine("spindle", Direction::Out, DataKind::Setpoint, false),
+            Channel::machine("motion", Direction::Out, DataKind::Segments, true),
+        ];
+        const N: usize = encoded_len(&MACHINE);
+        const SEC: [u8; N] = encode::<N>(&MACHINE);
+        let parsed = Channels::parse(&SEC).unwrap();
+        assert!(parsed.iter().eq(MACHINE.iter()));
+        for code in 0..=6u8 {
+            let k = DataKind::from_u8(code).unwrap();
+            assert_eq!(k as u8, code);
+            assert_eq!(k.is_machine(), code >= 3, "{}", k.name());
+        }
+        assert_eq!(DataKind::from_u8(7), None);
+        // No sample constraints on a machine channel.
+        let bad = Channel::machine("a", Direction::In, DataKind::Position, false).with_channels(1);
+        assert_eq!(bad.validated(), Err(ChannelError::Field));
+        let mut v = SEC.to_vec();
+        v[2 + 1 + 7 + 1] = 7; // x_limit's kind: unknown
+        assert_eq!(Channels::parse(&v), Err(ChannelError::Field));
+        assert!(!MACHINE[0].accepts_samples(SensorKind::Imu, SampleFormat::I16, 3, 50));
     }
 
     #[test]

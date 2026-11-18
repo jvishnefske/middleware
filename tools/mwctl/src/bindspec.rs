@@ -8,6 +8,7 @@
 //! | `mic:<rate>:<mode>[:<gain>]`   | the microphone at `rate` Hz, `levels` (10 ms blocks, ten per message), `mulaw` or `pcm` (10 ms per message), gain in dB (0) |
 //! | `imu:<rate>[:<range>[:mag]]`   | the IMU at `rate` Hz, ±`range` g (2), with the magnetometer; about 100 ms per message |
 //! | `adapt:<adapter>:<target>`     | `target` through an adapter: `levels/<block>`, `mulaw`, `decimate/<factor>`, `magnitude` |
+//! | `driver:<point>`               | a control-module point of the node's drivers (ABI 9; the node lists them at `sys/manifest/cm`) |
 
 use middleware::Key;
 use middleware::SenderId;
@@ -21,6 +22,7 @@ enum Owned {
     Local(RouteSource),
     Key(String),
     Remote(SenderId, String),
+    Driver(String),
 }
 
 fn number<T: std::str::FromStr>(s: &str, what: &str) -> Result<T, String> {
@@ -36,6 +38,7 @@ fn endpoint(spec: &str) -> Result<Owned, String> {
     let bad = |e| format!("{spec}: the config is refused ({e:?})");
     Ok(match kind {
         "key" => Owned::Key(rest.to_string()),
+        "driver" => Owned::Driver(rest.to_string()),
         "remote" => {
             let (node, key) = rest.split_once(':').ok_or("remote:<node16>:<key>")?;
             let bytes = (0..node.len() / 2)
@@ -130,7 +133,7 @@ pub fn record(image_sha256: [u8; 32], version: u32, specs: &[String]) -> Result<
     for (_, o, _) in &parsed {
         match o {
             Owned::Key(k) | Owned::Remote(_, k) => key(k)?,
-            Owned::Local(_) => {}
+            Owned::Local(_) | Owned::Driver(_) => {}
         }
     }
     let mut b = Binding::new(image_sha256, Version(version));
@@ -142,6 +145,7 @@ pub fn record(image_sha256: [u8; 32], version: u32, specs: &[String]) -> Result<
                 node: *n,
                 key: Key::new(k).map_err(|e| format!("{e:?}"))?,
             },
+            Owned::Driver(p) => Endpoint::Driver(p),
         };
         let t = match (a, ep) {
             (Some(adapter), inner) => Target::Adapted {
@@ -151,6 +155,7 @@ pub fn record(image_sha256: [u8; 32], version: u32, specs: &[String]) -> Result<
             (None, Endpoint::Local(s)) => Target::Local(s),
             (None, Endpoint::Key(k)) => Target::Key(k),
             (None, Endpoint::Remote { node, key }) => Target::Remote { node, key },
+            (None, Endpoint::Driver(p)) => Target::Driver(p),
         };
         b.bind(name, t).map_err(|e| format!("{name}: {e:?}"))?;
     }

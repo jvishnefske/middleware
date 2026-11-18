@@ -319,14 +319,16 @@ fn memory_section(section: &[u8]) -> Option<MemoryDecl> {
 }
 
 /// Parses a key the payload passed to `publish` or `subscribe`: it must be
-/// UTF-8, a valid [`Key`], and not under the reserved `sys/` or `ch/`
-/// namespaces.
+/// UTF-8, a valid [`Key`], and not under the reserved `sys/`, `ch/` or
+/// `drv/` namespaces.
 pub fn payload_key(bytes: &[u8]) -> Result<Key<'_>, AbiError> {
     let text = core::str::from_utf8(bytes).map_err(|_| AbiError::InvalidKey)?;
     let key = Key::new(text).map_err(|_| AbiError::InvalidKey)?;
     // `sys/...` is the system's, `ch/...` the runtime's (a local source
-    // bound to a channel publishes there, ABI 8).
-    if matches!(key.segments().next(), Some("sys" | "ch")) {
+    // bound to a channel publishes there, ABI 8), `drv/...` the node's
+    // drivers' (ABI 9): only a binding reaches a driver point, through the
+    // channel table, never a payload naming the key itself.
+    if matches!(key.segments().next(), Some("sys" | "ch" | "drv")) {
         return Err(AbiError::InvalidKey);
     }
     Ok(key)
@@ -1164,6 +1166,9 @@ mod tests {
         // `ch/...` belongs to the runtime's channel sources (ABI 8).
         assert_eq!(payload_key(b"ch/audio"), Err(AbiError::InvalidKey));
         assert_eq!(payload_key(b"chat/x").map(|k| k.as_str()), Ok("chat/x"));
+        // `drv/...` belongs to the node's drivers (ABI 9).
+        assert_eq!(payload_key(b"drv/x_pos"), Err(AbiError::InvalidKey));
+        assert_eq!(payload_key(b"drive/x").map(|k| k.as_str()), Ok("drive/x"));
         assert_eq!(payload_key(b"a//b"), Err(AbiError::InvalidKey));
         assert_eq!(payload_key(&[0xff]), Err(AbiError::InvalidKey));
     }

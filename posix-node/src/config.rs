@@ -8,6 +8,8 @@
 //! | `MW_POSIX_NODE_MACHINE_ID` | `/etc/machine-id` | path of the systemd machine id file the node id is derived from |
 //! | `MW_POSIX_NODE_MEMORY_BYTES` | `1048576` (1 MiB) | a payload's largest linear memory, decimal bytes, 65536..=67108864 |
 //! | `MW_POSIX_NODE_LOCAL_SERIAL` | none | path of a serial port (a USB gadget's `/dev/ttyGS0`, a PTY) served beside the gateway at 115200 baud, for `mwctl` |
+//! | `MW_POSIX_NODE_DRIVER` | `none` | the control-module driver ([`crate::driver`]): `none`, `sim` (a simulated EMCO PC Turn 50) or `kd240` (the KD240's inputs, read only) |
+//! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
 //!
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
 //! (`mw_gateway::GatewayConfig`; `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD`
@@ -46,6 +48,10 @@ pub const ENV_MACHINE_ID: &str = "MW_POSIX_NODE_MACHINE_ID";
 pub const ENV_MEMORY_BYTES: &str = "MW_POSIX_NODE_MEMORY_BYTES";
 /// `MW_POSIX_NODE_LOCAL_SERIAL`.
 pub const ENV_LOCAL_SERIAL: &str = "MW_POSIX_NODE_LOCAL_SERIAL";
+/// `MW_POSIX_NODE_DRIVER`.
+pub const ENV_DRIVER: &str = "MW_POSIX_NODE_DRIVER";
+/// `MW_POSIX_NODE_KD240_INPUTS`.
+pub const ENV_KD240_INPUTS: &str = "MW_POSIX_NODE_KD240_INPUTS";
 
 /// Default state directory.
 pub const DEFAULT_STATE: &str = "/var/lib/mw-posix-node";
@@ -112,6 +118,8 @@ pub struct PosixNodeConfig {
     pub memory_bytes: u32,
     /// A local serial port served beside the gateway.
     pub local_serial: Option<String>,
+    /// The control-module driver.
+    pub driver: crate::driver::DriverChoice,
     /// Old names that were used: `MW_PI_NODE_*` variables, and
     /// [`LEGACY_STATE`] when it was chosen. The binary warns about each.
     pub deprecated: Vec<String>,
@@ -124,6 +132,7 @@ impl Default for PosixNodeConfig {
             node_id: NodeIdSource::MachineId(PathBuf::from(DEFAULT_MACHINE_ID)),
             memory_bytes: DEFAULT_MEMORY_BYTES,
             local_serial: None,
+            driver: crate::driver::DriverChoice::None,
             deprecated: Vec::new(),
         }
     }
@@ -167,11 +176,37 @@ impl PosixNodeConfig {
             None => d.memory_bytes,
         };
         let local_serial = get(ENV_LOCAL_SERIAL).map(|v| v.trim().to_owned());
+        let inputs = set(ENV_KD240_INPUTS);
+        let driver = match set(ENV_DRIVER).as_deref().map(str::trim) {
+            None | Some("none") => {
+                if let Some(v) = inputs {
+                    return Err(err(
+                        ENV_KD240_INPUTS,
+                        &v,
+                        "only with MW_POSIX_NODE_DRIVER=kd240",
+                    ));
+                }
+                crate::driver::DriverChoice::None
+            }
+            Some("sim") => crate::driver::DriverChoice::Sim,
+            Some("kd240") => crate::driver::DriverChoice::Kd240(match inputs {
+                Some(v) => crate::driver::kd240::parse_inputs(&v).map_err(|_| {
+                    err(
+                        ENV_KD240_INPUTS,
+                        &v,
+                        "not point=chip:offset[:low], comma-separated",
+                    )
+                })?,
+                None => Vec::new(),
+            }),
+            Some(other) => return Err(err(ENV_DRIVER, other, "not none, sim or kd240")),
+        };
         Ok(PosixNodeConfig {
             state,
             node_id,
             memory_bytes,
             local_serial,
+            driver,
             deprecated: used.into_inner(),
         })
     }
@@ -355,5 +390,46 @@ mod tests {
             configured.with_legacy_state(only_old).state,
             PathBuf::from("/srv/x")
         );
+    }
+
+    #[test]
+    fn pn19_the_driver_is_chosen_by_name() {
+        use crate::driver::DriverChoice;
+        assert_eq!(
+            PosixNodeConfig::from_env(&env(&[])).unwrap().driver,
+            DriverChoice::None
+        );
+        assert_eq!(
+            PosixNodeConfig::from_env(&env(&[(ENV_DRIVER, "sim")]))
+                .unwrap()
+                .driver,
+            DriverChoice::Sim
+        );
+        let c = PosixNodeConfig::from_env(&env(&[
+            (ENV_DRIVER, "kd240"),
+            (ENV_KD240_INPUTS, "x_home=gpiochip2:12:low"),
+        ]))
+        .unwrap();
+        let DriverChoice::Kd240(lines) = c.driver else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                lines[0].point.as_str(),
+                lines[0].offset,
+                lines[0].active_low
+            ),
+            ("x_home", 12, true)
+        );
+        for (pairs, var) in [
+            (&[(ENV_DRIVER, "linuxcnc")][..], ENV_DRIVER),
+            (
+                &[(ENV_DRIVER, "kd240"), (ENV_KD240_INPUTS, "nonsense")][..],
+                ENV_KD240_INPUTS,
+            ),
+            (&[(ENV_KD240_INPUTS, "x=c:1")][..], ENV_KD240_INPUTS),
+        ] {
+            assert_eq!(PosixNodeConfig::from_env(&env(pairs)).unwrap_err().var, var);
+        }
     }
 }
