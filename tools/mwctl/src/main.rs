@@ -45,7 +45,8 @@ use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::report::{
-    format_board, format_event, format_manifest, format_fw_info, format_info, format_net, format_trust,
+    format_binding, format_board, format_event, format_fw_info, format_info, format_manifest,
+    format_net, format_trust,
 };
 use mwctl::sign::{SEED_LEN, Seed, Signer, counter_at, hex, sign_commit, sign_control, version_at};
 use mwctl::udp::UdpLink;
@@ -601,6 +602,50 @@ fn command_with<L: Endpoint>(
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
         Cmd::Manifest => dev.manifest().map(|m| print!("{}", format_manifest(&m))),
+        Cmd::Binding => dev.binding().map(|r| match r {
+            None => println!("no binding stored"),
+            Some(r) => print!(
+                "{}",
+                format_binding(&r).unwrap_or_else(|| "a binding this mwctl cannot decode\n".into())
+            ),
+        }),
+        Cmd::Bind {
+            file,
+            specs,
+            key,
+            version,
+        } => {
+            use middleware::loader::binding::{SignedBinding, binding_message};
+            let image = std::fs::read(&file).map_err(|e| io_context(&file, e))?;
+            let v = match version {
+                Some(v) => Version(v),
+                None => version_at(SystemTime::now())?,
+            };
+            let record = mwctl::bindspec::record(mwctl::sign::image_sha256(&image), v.0, &specs)
+                .map_err(Error::Payload)?;
+            let mut body = record.clone();
+            if let Some(k) = key {
+                let signer = open_signer(&k)?;
+                let sha = mwctl::sign::image_sha256(&record);
+                let message = binding_message(&mwctl::sign::image_sha256(&image), v, &sha);
+                let signature = signer.sign(&message)?;
+                body.extend_from_slice(
+                    &SignedBinding {
+                        version: v,
+                        signature,
+                    }
+                    .encode(),
+                );
+                eprintln!("signing binding version {} with {k}", v.0);
+            }
+            print!("{}", format_binding(&record).unwrap_or_default());
+            dev.bind(&body).map(|()| {
+                println!(
+                    "bound {}: applies at the payload's next start",
+                    file.display()
+                )
+            })
+        }
         Cmd::Request { key, body } => {
             let key = middleware::Key::new(&key).map_err(|_| {
                 Error::Io(std::io::Error::new(

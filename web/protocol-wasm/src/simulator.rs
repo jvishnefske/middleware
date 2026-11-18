@@ -112,16 +112,22 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
                 .with(Groups::PWM)
                 .with(Groups::ADC)
                 .with(Groups::ROUTES)
-                .with(Groups::SERVE),
+                .with(Groups::SERVE)
+                .with(Groups::CHANNELS),
         )
-        .with_spi(SpiBuses { buses: middleware::wasm_abi::periph::SPI_BUSES as u8 })
+        .with_spi(SpiBuses {
+            buses: middleware::wasm_abi::periph::SPI_BUSES as u8,
+        })
         .with_imu(ImuSource::ALL)
         .with_mic(MicSource {
             rates: 0b1111,
             modes: 0b111,
             max_gain_db: middleware::wasm_abi::route::MAX_MIC_GAIN_DB,
         })
-        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+        .with_link(Link {
+            id: 0,
+            kind: LinkKind::SERIAL,
+        })
         .with_limits(Limits::ABI)
 };
 
@@ -671,7 +677,25 @@ impl Simulator {
         limits: Option<Limits>,
         device: SimDevice,
     ) -> Result<Self, SimError> {
-        let payload = Payload::load(wasm, device, limits.unwrap_or_default())
+        Self::load_bound(wasm, limits, device, None)
+    }
+
+    /// [`Simulator::load_on`] with the payload's channels resolved against
+    /// the encoded binding `binding` (ABI 8; `middleware::loader::binding`).
+    /// The image it names is not checked: the page binds what it runs.
+    pub fn load_bound(
+        wasm: &[u8],
+        limits: Option<Limits>,
+        device: SimDevice,
+        binding: Option<&[u8]>,
+    ) -> Result<Self, SimError> {
+        let binding = binding
+            .map(middleware::loader::binding::Binding::decode)
+            .transpose()
+            .map_err(|e| SimError::Load(format!("binding: {e:?}")))?;
+        let compiled = wasm_host::Compiled::new(wasm, limits.unwrap_or_default())
+            .map_err(|e| SimError::Load(e.to_string()))?;
+        let payload = Payload::instantiate_bound(compiled, device, binding.as_ref())
             .map_err(|e| SimError::Load(e.to_string()))?;
         Ok(Self {
             payload,
@@ -719,7 +743,27 @@ impl Simulator {
         dev.set_time_us(now_us);
         dev.periph().complete_dma(now_us);
         dev.periph().advance(now_us);
+        let before = dev.events.len();
         dev.advance_sensors(now_us);
+        // Batches of a local source bound to a channel (`ch/...`) go back
+        // to this payload, as on a board.
+        let internal: Vec<(String, Vec<u8>)> = dev.events[before..]
+            .iter()
+            .filter_map(|e| match e {
+                SimEvent::Publish { key, data }
+                    if Key::new(key).is_ok_and(middleware::loader::binding::is_internal_key) =>
+                {
+                    Some((key.clone(), data.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (key, data) in internal {
+            if let Ok(k) = Key::new(&key) {
+                let r = self.payload.deliver(k, &data);
+                self.trap(r)?;
+            }
+        }
         let r = self.payload.tick((now_us / 1000) as u32);
         self.trap(r)?;
         let mut popped = 0;
@@ -884,16 +928,30 @@ mod tests {
         for rate in IMU_RATES_HZ {
             let cfg = ImuConfig::new(rate, 4, true, 10).unwrap();
             assert!(MANIFEST.imu.unwrap().accepts(&cfg));
-            assert!(SimDevice::new().route_samples(SampleSource::Imu(cfg), key).is_ok());
+            assert!(
+                SimDevice::new()
+                    .route_samples(SampleSource::Imu(cfg), key)
+                    .is_ok()
+            );
         }
         for rate in MIC_RATES_HZ {
             let cfg = MicConfig::new(rate, 0, AudioMode::Levels, 4, 1024).unwrap();
             assert!(MANIFEST.mic.unwrap().accepts(&cfg));
-            assert!(SimDevice::new().route_samples(SampleSource::Microphone(cfg), key).is_ok());
+            assert!(
+                SimDevice::new()
+                    .route_samples(SampleSource::Microphone(cfg), key)
+                    .is_ok()
+            );
         }
         let mut d = SimDevice::new();
         assert!(MANIFEST.i2c.is_none());
-        assert!(d.i2c_open(I2cConfig { bus: 0, freq_hz: 100_000 }).is_err());
+        assert!(
+            d.i2c_open(I2cConfig {
+                bus: 0,
+                freq_hz: 100_000
+            })
+            .is_err()
+        );
         assert!(MANIFEST.frames.is_none());
         let cfg = SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap();
         assert!(d.route_source(Source::TestPattern, key, cfg).is_err());

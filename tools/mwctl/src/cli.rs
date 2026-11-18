@@ -54,6 +54,15 @@ COMMANDS:
     manifest                   Print what the node offers payloads (sys/manifest):
                                import groups, buses, sources and their rates, links,
                                limits
+    bind <FILE.wasm> [CHANNEL=TARGET ...]
+                               Bind the payload's channels (ABI 8, sys/payload/bind);
+                               TARGET is key:<key>, remote:<node16>:<key>,
+                               mic:<rate>:<levels|mulaw|pcm>[:<gain>],
+                               imu:<rate>[:<range>[:mag]] or adapt:<adapter>:<TARGET>;
+                               applies at the payload's next start
+        --key <KEYFILE>            sign it (required over Zenoh on a claimed board)
+        --version <N>              binding version (default: the Unix time)
+    binding                    Print the stored binding (sys/payload/binding)
     upload <FILE.wasm>         Install a payload (sys/loader begin/chunk/commit)
         --key <KEYFILE>            sign the commit (Ed25519); without it the commit is
                                    unsigned, which only an unclaimed device accepts
@@ -243,6 +252,19 @@ pub enum Cmd {
     Board,
     /// `manifest`.
     Manifest,
+    /// `bind <FILE.wasm> [CHANNEL=TARGET ...]`.
+    Bind {
+        /// The payload image the binding is for (its SHA-256).
+        file: PathBuf,
+        /// `CHANNEL=TARGET` specs ([`crate::bindspec`]).
+        specs: Vec<String>,
+        /// Signing key; `None` sends an unsigned binding.
+        key: Option<KeySpec>,
+        /// Binding version; `None` uses the current Unix time.
+        version: Option<u32>,
+    },
+    /// `binding`.
+    Binding,
     /// `upload`.
     Upload {
         /// Payload image.
@@ -584,6 +606,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let key_cmds: &[&str] = if zenoh.is_some() {
         &[
             "upload",
+            "bind",
             "start",
             "stop",
             "fw update",
@@ -592,7 +615,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "fw abort",
         ]
     } else {
-        &["upload", "trust claim", "start", "stop", "fw update"]
+        &[
+            "upload",
+            "bind",
+            "trust claim",
+            "start",
+            "stop",
+            "fw update",
+        ]
     };
     match &key {
         Some(KeySpec::File(_)) => only("--key", true, key_cmds)?,
@@ -603,7 +633,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         )?,
         None => {}
     }
-    only("--version", version.is_some(), &["upload", "fw update"])?;
+    only(
+        "--version",
+        version.is_some(),
+        &["upload", "bind", "fw update"],
+    )?;
     only("--no-reboot", no_reboot, &["fw update"])?;
     let fw_version = match (&version, name.as_str()) {
         (Some(v), "fw update") => Some(
@@ -613,7 +647,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         _ => None,
     };
     let version: Option<u32> = match (version, name.as_str()) {
-        (Some(v), "upload") => Some(number("--version", Some(v))?),
+        (Some(v), "upload" | "bind") => Some(number("--version", Some(v))?),
         _ => None,
     };
     if name.starts_with("fw ") && espnow.is_some() {
@@ -637,7 +671,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             ));
         }
     }
-    if version.is_some() && key.is_none() {
+    if version.is_some() && key.is_none() && name != "bind" {
         return Err("--version needs --key (only signed commits carry a version)".into());
     }
     if counter.is_some() && key.is_none() {
@@ -686,6 +720,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         "info" => Cmd::Info,
         "board" => Cmd::Board,
         "manifest" => Cmd::Manifest,
+        "bind" => Cmd::Bind {
+            file: PathBuf::from(pos.next().ok_or("bind needs the payload's .wasm file")?),
+            specs: pos.by_ref().collect(),
+            key,
+            version,
+        },
+        "binding" => Cmd::Binding,
         "upload" => Cmd::Upload {
             file: PathBuf::from(pos.next().ok_or("upload needs a .wasm file")?),
             start,
@@ -1119,6 +1160,19 @@ mod tests {
         assert_eq!(run("--port p trust info").cmd, Cmd::TrustInfo);
         assert_eq!(run("--port p board").cmd, Cmd::Board);
         assert_eq!(run("--port p manifest").cmd, Cmd::Manifest);
+        assert_eq!(run("--port p binding").cmd, Cmd::Binding);
+        assert_eq!(
+            run("--port p bind m.wasm audio=mic:16000:levels level=key:lab/level --version 7").cmd,
+            Cmd::Bind {
+                file: "m.wasm".into(),
+                specs: vec![
+                    "audio=mic:16000:levels".into(),
+                    "level=key:lab/level".into()
+                ],
+                key: None,
+                version: Some(7),
+            }
+        );
         assert_eq!(
             run("trust claim --key k.key --port p").cmd,
             Cmd::TrustClaim {
@@ -1180,7 +1234,10 @@ mod tests {
                 "--port p upload a.wasm --key k --version 4294967296",
                 "not a valid number",
             ),
-            ("--port p info --key k", "only to 'upload' or 'trust claim'"),
+            (
+                "--port p info --key k",
+                "only to 'upload' or 'bind' or 'trust claim'",
+            ),
             ("--port p trust info --key k", "only to"),
             (
                 "--port p trust claim --key k --version 1",

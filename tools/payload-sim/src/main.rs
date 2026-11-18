@@ -127,6 +127,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use middleware::loader::binding::is_internal_key;
 use middleware::wasm_abi::events::MAX_EVENTS;
 use middleware::{HandlerError, Key, RequestMeta, SenderId};
 use wasm_host::{LoadError, Payload, Trap};
@@ -237,6 +238,20 @@ impl Bench {
                     continue;
                 };
                 let outbox = sender.device().take_outbox();
+                // Node-internal channel keys (`ch/...`, a local source
+                // bound to a channel) go back to the same board only.
+                let (local, outbox): (Vec<_>, Vec<_>) = outbox
+                    .into_iter()
+                    .partition(|(k, _)| Key::new(k).is_ok_and(is_internal_key));
+                for (key, data) in &local {
+                    moved = true;
+                    let Ok(key) = Key::new(key) else { continue };
+                    let r = offer(&mut sender.payload, key, data);
+                    sender.fault(r)?;
+                }
+                if !local.is_empty() {
+                    flush(&mut sender.payload);
+                }
                 let to = (from + 1) % self.nodes.len();
                 if to == from {
                     continue;
@@ -619,10 +634,31 @@ fn load(
         Some(pin) => device.with_panel_dc(pin),
         None => device,
     };
-    let mut payload = Payload::load(&wasm, device, opts.limits).map_err(|e| {
-        report_load_error(&e);
-        ExitCode::from(1)
-    })?;
+    // The first board's payload is resolved against `--bind` (ABI 8).
+    let record = match (&opts.bind, node == opts.node) {
+        (Some(file), true) => Some(std::fs::read(file).map_err(|e| {
+            eprintln!("{file}: {e}");
+            ExitCode::from(1)
+        })?),
+        _ => None,
+    };
+    let binding = match record
+        .as_deref()
+        .map(middleware::loader::binding::Binding::decode)
+    {
+        Some(Ok(b)) => Some(b),
+        Some(Err(e)) => {
+            eprintln!("--bind: not a binding record ({e:?})");
+            return Err(ExitCode::from(1));
+        }
+        None => None,
+    };
+    let mut payload = wasm_host::Compiled::new(&wasm, opts.limits)
+        .and_then(|c| Payload::instantiate_bound(c, device, binding.as_ref()))
+        .map_err(|e| {
+            report_load_error(&e);
+            ExitCode::from(1)
+        })?;
     flush(&mut payload);
     let subs: Vec<&str> = payload.subscriptions().collect();
     println!(

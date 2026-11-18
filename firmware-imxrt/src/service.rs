@@ -139,6 +139,7 @@ pub mod fw;
 use core::fmt;
 
 use embedded_storage::nor_flash::NorFlash;
+use esp_base::binding_store::{self, BindingStore, REGION_LEN as BINDING_LEN};
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::image::Header;
 pub use esp_base::ota::Origin;
@@ -147,8 +148,10 @@ use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{PARTITION_LEN, Persisted, RECORD_LEN, TrustStore};
 use heapless::Vec;
 use middleware::fw_ota::BootInfo;
+use middleware::loader::manifest::{
+    Groups, I2cBuses, ImuSource, Limits, Link, LinkKind, Manifest, MicSource,
+};
 use middleware::loader::trust::TrustState;
-use middleware::loader::manifest::{Groups, I2cBuses, ImuSource, Limits, Link, LinkKind, Manifest, MicSource};
 use middleware::loader::{Loader, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
@@ -197,7 +200,8 @@ pub const MANIFEST: Manifest = {
                 .with(Groups::ADC)
                 .with(Groups::I2C)
                 .with(Groups::ROUTES)
-                .with(Groups::SERVE),
+                .with(Groups::SERVE)
+                .with(Groups::CHANNELS),
         )
         .with_i2c(I2cBuses {
             buses: 1,
@@ -214,10 +218,30 @@ pub const MANIFEST: Manifest = {
             modes: 0b111,
             max_gain_db: middleware::wasm_abi::route::MAX_MIC_GAIN_DB,
         })
-        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
-        .with_limits(Limits { routes: 2, ..Limits::ABI });
-    let m = if cfg!(feature = "usb") { m.with_link(Link { id: 1, kind: LinkKind::USB }) } else { m };
-    if cfg!(feature = "eth") { m.with_link(Link { id: 2, kind: LinkKind::ZENOH }) } else { m }
+        .with_link(Link {
+            id: 0,
+            kind: LinkKind::SERIAL,
+        })
+        .with_limits(Limits {
+            routes: 2,
+            ..Limits::ABI
+        });
+    let m = if cfg!(feature = "usb") {
+        m.with_link(Link {
+            id: 1,
+            kind: LinkKind::USB,
+        })
+    } else {
+        m
+    };
+    if cfg!(feature = "eth") {
+        m.with_link(Link {
+            id: 2,
+            kind: LinkKind::ZENOH,
+        })
+    } else {
+        m
+    }
 };
 
 /// [`MANIFEST`] for a build without the runtime.
@@ -394,6 +418,9 @@ pub struct Service<F> {
     ctx: Context<'static>,
     store: PayloadStore<RtFlash<F>>,
     trust: Option<TrustStore>,
+    /// The payload's channel binding (BD3); `None` when its region could
+    /// not be read (binds are then `Unavailable`).
+    binding: Option<BindingStore>,
     fw: Updater,
     link_ready: bool,
     /// The served keys of the payload run that ended.
@@ -442,6 +469,7 @@ impl<F: NorFlash> Service<F> {
             Ok(c) => (Some(c), Ok(c.endpoint())),
             Err(e) => (None, Err(e)),
         };
+        let binding = BindingStore::open(&mut flash, map.binding.offset, BINDING_LEN).ok();
         let limit = facts.max_image.min(PAYLOAD_CAPACITY);
         let mut store = PayloadStore::new(flash, map.payload.offset, map.payload.size, limit)
             .map_err(OpenError::Store)?;
@@ -449,7 +477,8 @@ impl<F: NorFlash> Service<F> {
         let p = persisted.unwrap_or_default();
         let state = State::boot(installed.is_ok())
             .with_trust(p.trust)
-            .with_control(p.control);
+            .with_control(p.control)
+            .bound(binding.and_then(|b| b.mark()));
         let ctx = Context {
             chip: facts.chip,
             firmware: facts.firmware,
@@ -460,13 +489,18 @@ impl<F: NorFlash> Service<F> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
-            manifest: Some(if facts.runtime { &MANIFEST } else { &MANIFEST_NO_RUNTIME }),
+            manifest: Some(if facts.runtime {
+                &MANIFEST
+            } else {
+                &MANIFEST_NO_RUNTIME
+            }),
         };
         let svc = Service {
             state,
             ctx,
             store,
             trust,
+            binding,
             fw,
             link_ready: false,
             served: ServedKeys::new(),
@@ -529,6 +563,14 @@ impl<F: NorFlash> Service<F> {
     /// The payload store, to read the installed image for a start.
     pub fn store_mut(&mut self) -> &mut PayloadStore<RtFlash<F>> {
         &mut self.store
+    }
+
+    /// Copies the stored binding record into `out` (at least
+    /// `middleware::loader::binding::BINDING_MAX` bytes) for a start;
+    /// its length, `None` without one or when it cannot be read.
+    pub fn binding_record(&mut self, out: &mut [u8]) -> Option<usize> {
+        let store = self.binding.as_ref()?;
+        store.load(self.store.flash(), out).ok().flatten()
     }
 
     /// The A/B updater.
@@ -666,6 +708,12 @@ impl<F: NorFlash> Service<F> {
             ..self.ctx
         };
         let outcome = handle_request(self.state, &ctx, &Request::new(key, body), out);
+        if let Some((next, reply)) =
+            binding_store::perform(self.binding.as_mut(), self.store.flash(), &outcome, out)
+        {
+            self.state = next;
+            return Handled::now(reply);
+        }
         let h = self.perform(key, outcome);
         let receiving = matches!(self.state.loader(), Loader::Receiving { .. });
         self.owner = esp_base::ota::owner_after(self.owner, self.origin, key, receiving);
@@ -820,7 +868,10 @@ impl<F: NorFlash> Service<F> {
                 let ts = self.trust.as_mut().ok_or(StoreError::Flash)?;
                 ts.save(self.store.flash(), &Persisted { trust, control })
             }
-            Action::None | Action::Start | Action::Stop => Ok(()),
+            // Performed by `binding_store::perform` before this.
+            Action::None | Action::Start | Action::Stop | Action::Bind { .. } | Action::Binding => {
+                Ok(())
+            }
         }
     }
 

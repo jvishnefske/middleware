@@ -24,6 +24,7 @@ import type { PlantModel } from "../model/plant";
 import { indexedDbStorage } from "../trust/keyStore";
 import type { BoardInfo, DeviceInfo, Manifest } from "../protocol/wasm";
 import { capabilityRows } from "../device/manifest";
+import { bindingPanel } from "./bindingPanel";
 import { describePort } from "../serial/ports";
 import type { App, PayloadHandoff } from "./app";
 import { errorText, formatBytes, h, parseHex, progressBar } from "./dom";
@@ -224,6 +225,9 @@ export function devicePage(app: App): HTMLElement {
       await trust.refresh();
     }
   });
+  // ---- channel binding of the chosen payload (ABI 8)
+  const binding = bindingPanel(proto, { client: () => client, key: () => trust.key(), payload: payloadBytes });
+
   // ---- plant units bound to this board
   const unitsNote = h("p", { class: "muted", id: "device-units-note" });
   const unitsList = h("ul", { class: "device-units" });
@@ -403,6 +407,8 @@ export function devicePage(app: App): HTMLElement {
       upBar.el,
       upMsg,
     ),
+    h("h3", {}, "Channel binding"),
+    binding.el,
     h("h3", {}, "Plant units on this board"),
     h("div", { class: "upload" }, unitsNote, unitsList, unitsMsg),
     h("h3", {}, "Recent publications"),

@@ -84,6 +84,7 @@
     holding buffers for the duration of a data transfer."
 )]
 
+pub mod binding_store;
 #[cfg(all(
     feature = "shell",
     not(any(feature = "esp32", feature = "esp32s3", feature = "esp32c3"))

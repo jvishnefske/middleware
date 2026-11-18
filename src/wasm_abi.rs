@@ -99,6 +99,14 @@
 //! the latch gap); the host encodes the pulse train, so the payload never
 //! times a pulse. The data pin passes the same checks as `gpio_output`.
 //!
+//! Added in ABI 8 (logical channels declared in the image's `mw.channels`
+//! custom section and bound by the host; rules in [`channels`]):
+//!
+//! | name              | params                        | result            |
+//! |-------------------|-------------------------------|-------------------|
+//! | `channel_open`    | `name_ptr, name_len`          | handle ≥ 0 or error (an input's subscription slot, an output's `OUTPUT_BASE + index`) |
+//! | `channel_publish` | `handle, data_ptr, data_len`  | 0 or error        |
+//!
 //! A route moves frames without copying them through guest memory: a
 //! source route publishes host-captured frames on a key as chunks, a sink
 //! route DMAs a key's chunks to an SPI bus with a per-frame preamble.
@@ -165,6 +173,7 @@
 //! offsets either way.
 
 pub mod bridge;
+pub mod channels;
 pub mod events;
 pub mod ledstrip;
 pub mod periph;
@@ -179,8 +188,10 @@ pub mod serve;
 /// and I2C; revision 4 added DMA routes; revision 5 added serving requests
 /// (`serve`, `node_id`, the `on_request` export); revision 6 added
 /// bridging between links (`route_bridge`); revision 7 added LED strips
-/// (`ledstrip_open`, `ledstrip_write`, `ledstrip_close`).
-pub const ABI_VERSION: u16 = 7;
+/// (`ledstrip_open`, `ledstrip_write`, `ledstrip_close`); revision 8 added
+/// logical channels (`channel_open`, `channel_publish`, the `mw.channels`
+/// section).
+pub const ABI_VERSION: u16 = 8;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -401,6 +412,17 @@ pub const IMPORTS: &[Import] = &[
         params: 1,
         returns: true,
     },
+    // ABI 8
+    Import {
+        name: "channel_open",
+        params: 2,
+        returns: true,
+    },
+    Import {
+        name: "channel_publish",
+        params: 3,
+        returns: true,
+    },
 ];
 
 /// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
@@ -426,6 +448,9 @@ pub const ABI5_IMPORTS: usize = 32;
 /// `route_bridge`).
 pub const ABI6_IMPORTS: usize = 33;
 
+/// Number of imports in ABI 7 (the prefix of [`IMPORTS`] up to
+/// `ledstrip_close`).
+pub const ABI7_IMPORTS: usize = 36;
 /// The number of imports a host implementing ABI `version` provides (the
 /// prefix of [`IMPORTS`]); `None` for a revision that does not exist.
 pub const fn imports_in(version: u16) -> Option<usize> {
@@ -436,7 +461,8 @@ pub const fn imports_in(version: u16) -> Option<usize> {
         4 => Some(ABI4_IMPORTS),
         5 => Some(ABI5_IMPORTS),
         6 => Some(ABI6_IMPORTS),
-        7 => Some(IMPORTS.len()),
+        7 => Some(ABI7_IMPORTS),
+        8 => Some(IMPORTS.len()),
         _ => None,
     }
 }
@@ -617,20 +643,30 @@ mod tests {
             ("ledstrip_close", 1),
         ];
         assert!(
-            IMPORTS[ABI6_IMPORTS..]
+            IMPORTS[ABI6_IMPORTS..ABI7_IMPORTS]
                 .iter()
                 .map(|i| (i.name, i.params))
                 .eq(abi7)
         );
+        assert!(
+            IMPORTS[ABI7_IMPORTS..]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq([("channel_open", 2), ("channel_publish", 3)])
+        );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI_VERSION, 7);
+        assert_eq!(ABI_VERSION, 8);
     }
 
     #[test]
     fn an_abi4_host_does_not_know_the_abi5_imports() {
         assert_eq!(imports_in(ABI_VERSION), Some(IMPORTS.len()));
         assert_eq!(imports_in(0), None);
-        assert_eq!(imports_in(8), None);
+        assert_eq!(imports_in(9), None);
+        for name in ["channel_open", "channel_publish"] {
+            assert_eq!(import_in(7, name), None, "{name}");
+            assert_eq!(import_in(8, name), import(name));
+        }
         for name in ["serve", "node_id"] {
             assert_eq!(import_in(4, name), None, "{name}");
             assert_eq!(import_in(5, name), import(name));
@@ -644,7 +680,7 @@ mod tests {
             assert_eq!(import_in(7, name), import(name));
         }
         assert_eq!(import_in(1, "gpio_irq"), None);
-        assert_eq!(import_in(9, "log"), None);
+        assert_eq!(import_in(10, "log"), None);
     }
 
     #[test]

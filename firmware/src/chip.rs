@@ -184,7 +184,9 @@
 //! at 0x100000 (checked by a unit test).
 
 use board_pins::{PinError, PinMap, bit, boards};
-use middleware::loader::manifest::{FrameSources, Groups, I2cBuses, Limits, Link, LinkKind, Manifest, SpiBuses, SpiSink};
+use middleware::loader::manifest::{
+    FrameSources, Groups, I2cBuses, Limits, Link, LinkKind, Manifest, SpiBuses, SpiSink,
+};
 use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
 use middleware::wasm_abi::AbiError;
 
@@ -438,6 +440,7 @@ impl Profile {
             .with(Groups::DMA)
             .with(Groups::ROUTES)
             .with(Groups::SERVE)
+            .with(Groups::CHANNELS)
             .with(pick(!self.pwm_pins.is_empty(), Groups::PWM))
             .with(pick(self.pins.adc_mask() != 0, Groups::ADC))
             .with(pick(i2c > 0, Groups::I2C));
@@ -447,7 +450,10 @@ impl Profile {
             .with_sink_spi(SpiSink {
                 max_frame: middleware::stream::MAX_FRAME_BYTES,
             })
-            .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+            .with_link(Link {
+                id: 0,
+                kind: LinkKind::SERIAL,
+            })
             .with_limits(Limits::ABI);
         if i2c > 0 {
             m = m.with_i2c(I2cBuses {
@@ -457,21 +463,40 @@ impl Profile {
             });
         }
         if self.usb_serial_jtag {
-            m = m.with_link(Link { id: 1, kind: LinkKind::USB });
+            m = m.with_link(Link {
+                id: 1,
+                kind: LinkKind::USB,
+            });
         }
         if radio {
             let camera = self.camera;
             m = m
                 .with_frames(FrameSources {
-                    kinds: 1 << SourceKind::TestPattern as u8 | if camera { 1 << SourceKind::Camera as u8 } else { 0 },
+                    kinds: 1 << SourceKind::TestPattern as u8
+                        | if camera {
+                            1 << SourceKind::Camera as u8
+                        } else {
+                            0
+                        },
                     formats: 1 << PixelFormat::Rgb565Be as u8
-                        | if camera || jpeg_fixtures { 1 << PixelFormat::Jpeg as u8 } else { 0 },
+                        | if camera || jpeg_fixtures {
+                            1 << PixelFormat::Jpeg as u8
+                        } else {
+                            0
+                        },
                     max_width: MAX_DIM,
                     max_height: MAX_DIM,
                 })
-                .with_link(Link { id: 2, kind: LinkKind::ESPNOW });
+                .with_link(Link {
+                    id: 2,
+                    kind: LinkKind::ESPNOW,
+                });
         }
-        if runtime && self.runtime { m } else { m.without_runtime() }
+        if runtime && self.runtime {
+            m
+        } else {
+            m.without_runtime()
+        }
     }
 
     /// The `sys/board` description of this profile (S8), for a firmware
@@ -919,12 +944,18 @@ mod tests {
             assert!(p.i2c_pins(buses).is_err(), "{}", p.name);
             if p.runtime {
                 assert_eq!(m.groups.contains(Groups::PWM), !p.pwm_pins.is_empty());
-                assert_eq!(m.groups.contains(Groups::ADC), p.payload_pins().any(|q| p.has_adc(q)));
+                assert_eq!(
+                    m.groups.contains(Groups::ADC),
+                    p.payload_pins().any(|q| p.has_adc(q))
+                );
                 assert_eq!(m.frames.unwrap().has(SourceKind::Camera), p.camera());
             } else {
                 assert_eq!((m.groups, m.frames), (Groups::NONE, None), "{}", p.name);
             }
-            assert_eq!(m.links().iter().any(|l| l.kind == LinkKind::USB), p.usb_serial_jtag);
+            assert_eq!(
+                m.links().iter().any(|l| l.kind == LinkKind::USB),
+                p.usb_serial_jtag
+            );
             // EspDevice keeps the default route_samples (InvalidArgument):
             // no sampled source is listed.
             let imu = SampleSource::Imu(ImuConfig::new(100, 2, false, 10).unwrap());
@@ -938,8 +969,14 @@ mod tests {
             assert!(quiet.links().iter().all(|l| l.kind != LinkKind::ESPNOW));
         }
         let jpeg = 1 << middleware::wasm_abi::route::PixelFormat::Jpeg as u8;
-        assert_eq!(ESP32S3.manifest(true, true, false).frames.unwrap().formats & jpeg, 0);
-        assert_ne!(ESP32S3.manifest(true, true, true).frames.unwrap().formats & jpeg, 0);
+        assert_eq!(
+            ESP32S3.manifest(true, true, false).frames.unwrap().formats & jpeg,
+            0
+        );
+        assert_ne!(
+            ESP32S3.manifest(true, true, true).frames.unwrap().formats & jpeg,
+            0
+        );
     }
 
     #[test]

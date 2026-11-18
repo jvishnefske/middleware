@@ -73,7 +73,10 @@ fn s11_the_default_node_is_one() {
 #[test]
 fn mf3_the_board_answers_sys_manifest() {
     use middleware::loader::manifest::Manifest;
-    let out = run(&["--virtual", "--node", "246f28aa01fe0000"], "!req sys/manifest\n");
+    let out = run(
+        &["--virtual", "--node", "246f28aa01fe0000"],
+        "!req sys/manifest\n",
+    );
     let hex = out
         .lines()
         .find_map(|l| l.split("reply sys/manifest ").nth(1))
@@ -82,6 +85,9 @@ fn mf3_the_board_answers_sys_manifest() {
         .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("hex"))
         .collect();
     let m = Manifest::decode(&bytes).expect("manifest");
-    assert_eq!(m.node.map(|n| n.0), Some([0x24, 0x6f, 0x28, 0xaa, 0x01, 0xfe, 0, 0]));
+    assert_eq!(
+        m.node.map(|n| n.0),
+        Some([0x24, 0x6f, 0x28, 0xaa, 0x01, 0xfe, 0, 0])
+    );
     assert!(m.imu.is_some() && m.mic.is_some());
 }
