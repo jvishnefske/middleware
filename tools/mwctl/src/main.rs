@@ -176,9 +176,6 @@ fn key(cmd: KeyCmd) -> Result<(), Error> {
     Ok(())
 }
 
-/// Linear memory of the Colorlight 5A-75B gateware's WASM core.
-const ECP5_MEMORY: u64 = 16 * 1024;
-
 fn run(cli: cli::Cli) -> Result<(), Error> {
     if let Some(z) = &cli.zenoh {
         return run_zenoh(&cli, z);
@@ -203,20 +200,25 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         let socket = std::net::UdpSocket::bind(local)?;
         socket.connect(peer).map_err(ctx)?;
         let mut dev = Device::new(UdpLink::new(socket, timeouts));
-        // Over UDP (the Colorlight 5A-75B) a module whose memory cannot fit
-        // is refused here, with the reason, before anything is sent.
+        // Over UDP, the Colorlight 5A-75B (chip `ecp5`) takes the module
+        // compiled on the host (design.md CL6): a module it cannot run is
+        // refused here, with the reason, before anything is sent. A file
+        // that is not a module is uploaded as it is (an image already).
+        let mut compiled = None;
         if let Cmd::Upload { file, .. } = &cli.cmd {
-            let image = std::fs::read(file).map_err(|e| io_context(file, e))?;
-            if mwctl::plan::initial_memory_bytes(&image).is_some_and(|m| m > ECP5_MEMORY) {
-                let info = dev.info()?;
-                if info.chip == "ecp5"
-                    && let Some(why) = mwctl::plan::memory_misfit(&image, ECP5_MEMORY)
-                {
-                    return Err(Error::Payload(format!("{}: {why}", file.display())));
-                }
+            let wasm = std::fs::read(file).map_err(|e| io_context(file, e))?;
+            if mwctl::ecp5::is_wasm(&wasm) && dev.info()?.chip == mwctl::ecp5::CHIP {
+                let image = mwctl::ecp5::image_for_ecp5(&wasm)
+                    .map_err(|why| Error::Payload(format!("{}: {why}", file.display())))?;
+                eprintln!(
+                    "compiled {} for the 5A-75B: {} byte image",
+                    file.display(),
+                    image.len()
+                );
+                compiled = Some(image);
             }
         }
-        let result = command(&mut dev, cli.cmd, None);
+        let result = command_with(&mut dev, cli.cmd, None, compiled);
         print_events(&dev.take_events());
         return result;
     }
@@ -584,6 +586,17 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
 /// Runs one device command over any endpoint; `target` is the device's
 /// MAC over ESP-NOW (signed control requests name it).
 fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> Result<(), Error> {
+    command_with(dev, cmd, target, None)
+}
+
+/// [`command`], with `upload` sending `image` (the 5A-75B's compiled
+/// image) in place of the file's bytes when it is given.
+fn command_with<L: Endpoint>(
+    dev: &mut Device<L>,
+    cmd: Cmd,
+    target: Option<Mac>,
+    image: Option<Vec<u8>>,
+) -> Result<(), Error> {
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
@@ -644,7 +657,10 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
             key,
             version,
         } => {
-            let image = std::fs::read(&file).map_err(|e| io_context(&file, e))?;
+            let image = match image {
+                Some(i) => i,
+                None => std::fs::read(&file).map_err(|e| io_context(&file, e))?,
+            };
             if let Some(i) = corrupt_chunk {
                 eprintln!("test hook: corrupting chunk {i}; the device must reject the commit");
             }

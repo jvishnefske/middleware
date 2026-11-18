@@ -1,6 +1,6 @@
 """cocotb: the WasmCore interpreter replays tests/vectors/wasm/*.json.
 
-The vector's image (what the loader must build) is written through the
+The vector's image (what the installer must build) is written through the
 `ld_*` ports; the event script runs with `call_start`; `host_req` is
 answered by `ImportUnit`, a Python transcription of
 `wasm-hdl-ref/src/abi.rs` (the gateware import unit follows the same

@@ -1,6 +1,6 @@
 """The WebAssembly interpreter (CL7): executes the internal code that the
-loader compiles (`wasm-hdl-ref/src/isa.rs`), one instruction per several
-cycles, with the semantics of `wasm-hdl-ref/src/exec.rs`.
+model compiles on the host (`wasm-hdl-ref/src/isa.rs`), one instruction
+per several cycles, with the semantics of `wasm-hdl-ref/src/exec.rs`.
 
 RAMs (synchronous read):
 
@@ -25,16 +25,19 @@ import index) and `host_args`; the import unit may then use linear memory
 through the `ext_mem_*` port and answers `host_ack` with `host_result`,
 which is pushed when the import returns a value.
 
-The loader (or a testbench) fills the RAMs through the `ld_*` ports while
+The installer (or a testbench) fills the RAMs through the `ld_*` ports while
 the core is idle, sets `code_len`, `nfuncs`, `table_len`, `mem_max` and
 `page_log2`, and loads the initial memory length with `ld_mem_len`
 (`mem_len` itself follows `memory.grow`).
 """
 
 from migen import (
-    Array, Case, Cat, ClockSignal, Constant, FSM, If, Instance, Memory, Module, Mux, NextState,
+    Array, Case, Cat, ClockSignal, Constant, If, Instance, Memory, Module, Mux, NextState,
     NextValue, Replicate, Signal,
 )
+
+from .gotofsm import GotoFSM
+from .narrow import ge, sum_gt
 
 # Build the linear memory from ECP5 DP16KD primitives instead of a Migen
 # Memory (soc.py sets this; simulation keeps the Memory). Yosys merges the
@@ -194,8 +197,8 @@ class WasmCore(Module):
         self.ld_glob_we = Signal()
         self.glob_rd_adr = Signal(4)
         self.glob_rd_dat = Signal(32)
-        # Reads of code, funcs and table while idle (the loader patches
-        # branches through it; tests read the image back). Synchronous.
+        # Reads of code, funcs and table while idle (tests read the image
+        # back). Synchronous.
         self.dbg_code_adr = Signal(12)
         self.dbg_code_dat = Signal(32)
         self.dbg_func_adr = Signal(7)
@@ -301,10 +304,16 @@ class WasmCore(Module):
         pidx = Signal(4)          # where the next popped one goes
         pidx_m1 = Signal(3)
         self.comb += pidx_m1.eq(pidx - 1)
-        cnt = Signal(32)          # loop counter (locals, bytes)
-        ea = Signal(33)
-        src_a = Signal(33)
-        dst_a = Signal(33)
+        # Loop counter (locals, bytes) and copy/fill addresses: the range
+        # checks use the full operands, so past them every count and
+        # address is below mem_len (aw + 2 bits).
+        cnt = Signal(aw + 2)
+        # Effective address: the low bits of x + imm, and whether either
+        # operand reaches past mem_len's width (then it is out of range).
+        ea = Signal(aw + 3)
+        ea_far = Signal()
+        src_a = Signal(aw + 2)
+        dst_a = Signal(aw + 2)
         backward = Signal()
         acc = Signal(32)
         size = Signal(4)
@@ -355,7 +364,7 @@ class WasmCore(Module):
             (top first, so opnd[0] is the deepest), then EXEC."""
             return [NextValue(npop, n), NextValue(pidx, first_idx), NextState("POP")]
 
-        fsm = FSM(reset_state="IDLE")
+        fsm = GotoFSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += self.busy.eq(~fsm.ongoing("IDLE"))
         self.comb += [
@@ -476,7 +485,7 @@ class WasmCore(Module):
             ).Elif(op == CONST, NextValue(v, sext(a, 24)), NextState("PUSH")
             ).Elif(op == CONST32, NextValue(v, imm), NextState("PUSH")
             ).Elif(op == DROP,
-                If(sp < fp + a, *trap(T_BAD)).Else(NextValue(sp, sp - a), NextState("FETCH"))
+                If(sum_gt(fp, a, sp), *trap(T_BAD)).Else(NextValue(sp, sp - a), NextState("FETCH"))
             ).Elif(op == SELECT, *pop_then(3, 3)
             ).Elif(op == LGET,
                 st_rd.adr.eq(fp + a), NextState("LGET2")
@@ -615,11 +624,13 @@ class WasmCore(Module):
                 NextValue(v, x), NextState("PUSH")
             ).Elif(op == GSET, g_adr.eq(a[:4]), g_dat.eq(x), g_we.eq(1), NextState("FETCH")
             ).Elif(op == LOAD,
-                NextValue(ea, x + imm),
+                NextValue(ea, x[:aw + 2] + imm[:aw + 2]),
+                NextValue(ea_far, (x[aw + 2:] != 0) | (imm[aw + 2:] != 0)),
                 NextValue(size, Mux(a == 0, 4, Mux((a == 1) | (a == 2), 1, 2))),
                 NextState("LD_CHECK")
             ).Elif(op == STORE,
-                NextValue(ea, x + imm),
+                NextValue(ea, x[:aw + 2] + imm[:aw + 2]),
+                NextValue(ea_far, (x[aw + 2:] != 0) | (imm[aw + 2:] != 0)),
                 NextValue(size, Mux(a == 0, 4, Mux(a == 1, 1, Mux(a == 2, 2, 8)))),
                 NextState("ST_CHECK")
             ).Elif(op == MGROW, NextState("GROW")
@@ -639,9 +650,9 @@ class WasmCore(Module):
             ).Elif(op == BRUNLESS,
                 If(x == 0, NextValue(pc, a[:16])), NextState("FETCH")
             ).Elif(op == BRTABLE,
-                code_rd.adr.eq(pc + Mux(x < a, x, a)), NextState("BRTABLE2")
+                code_rd.adr.eq(pc + Mux(~ge(x, a), x, a)), NextState("BRTABLE2")
             ).Elif(op == CALLI,
-                If(x >= self.table_len, *trap(T_TABLE)
+                If(ge(x, self.table_len), *trap(T_TABLE)
                 ).Else(table_rd.adr.eq(x[:6]), NextState("CALLI2"))
             ).Elif(op == RET, NextState("RET")
             ).Else(*trap(T_BAD)),
@@ -649,18 +660,20 @@ class WasmCore(Module):
 
         # Loads and stores, one byte per cycle (little-endian).
         fsm.act("LD_CHECK",
-            If(ea + size > self.mem_len, *trap(T_MEM)).Else(
+            If(ea_far | (ea + size > self.mem_len), *trap(T_MEM)).Else(
                 NextValue(cnt, 0), NextValue(acc, 0), NextState("LD_BYTE")),
         )
         fsm.act("LD_BYTE",
             # mem_a.adr = ea (comb); the byte arrives next cycle.
             NextState("LD_LATCH"),
         )
+        ea_inc = Signal(aw + 2)            # ea + 1 once ea is in range
+        self.comb += ea_inc.eq(ea[:aw + 2] + 1)
         fsm.act("LD_LATCH",
             Case(cnt[:2], {i: NextValue(acc, Cat(*[mem_a.dat_r if j == i else acc[8 * j:8 * j + 8]
                                                    for j in range(4)]))
                            for i in range(4)}),
-            NextValue(ea, ea + 1),
+            NextValue(ea, ea_inc),
             NextValue(cnt, cnt + 1),
             If(cnt + 1 == size, NextState("LD_DONE")).Else(NextState("LD_BYTE")),
         )
@@ -674,33 +687,43 @@ class WasmCore(Module):
         self.comb += Case(cnt[:3], {i: st_byte.eq((y if i < 4 else z)[8 * (i % 4):8 * (i % 4) + 8])
                                     for i in range(8)})
         fsm.act("ST_CHECK",
-            If(ea + size > self.mem_len, *trap(T_MEM)).Else(
+            If(ea_far | (ea + size > self.mem_len), *trap(T_MEM)).Else(
                 NextValue(cnt, 0), NextState("ST_BYTE")),
         )
         fsm.act("ST_BYTE",
             mem_a.dat_w.eq(st_byte), mem_a.we.eq(1),
-            NextValue(ea, ea + 1),
+            NextValue(ea, ea_inc),
             NextValue(cnt, cnt + 1),
             If(cnt + 1 == size, NextState("FETCH")),
         )
 
         # memory.grow: pages of 2**page_log2 bytes.
-        add_bytes = Signal(48)
-        self.comb += add_bytes.eq(Mux(big, Cat(Constant(0, 16), x), x))
+        # The bytes added: x pages of 64 KiB (x == 0 or out of range) or x
+        # bytes; `grow_far` when they cannot fit in mem_max's width.
+        grow_add = Signal(len(self.mem_len))
+        grow_far = Signal()
+        self.comb += [
+            grow_add.eq(Mux(big, 0, x)),
+            grow_far.eq(Mux(big, x != 0, x[len(self.mem_len):] != 0)),
+        ]
         fsm.act("GROW",
-            If(self.mem_len + add_bytes <= self.mem_max,
+            If(~grow_far & (Cat(self.mem_len, Constant(0, 1)) + grow_add <= self.mem_max),
                 NextValue(v, Mux(big, pages64, self.mem_len)),
-                NextValue(self.mem_len, self.mem_len + add_bytes),
+                NextValue(self.mem_len, self.mem_len + grow_add),
             ).Else(
                 NextValue(v, 0xFFFF_FFFF),
             ),
             NextState("PUSH"),
         )
 
-        # memory.copy (memmove) and memory.fill.
+        # memory.copy (memmove) and memory.fill. The checks read the operands
+        # (x dst, y src or value, z count), unchanged since EXEC.
+        def in_mem(p, n):
+            return ~sum_gt(p, n, self.mem_len)
+
         fsm.act("COPY_CHECK",
-            If((src_a + cnt > self.mem_len) | (dst_a + cnt > self.mem_len), *trap(T_MEM)
-            ).Elif(cnt == 0, NextState("FETCH")
+            If(~in_mem(y, z) | ~in_mem(x, z), *trap(T_MEM)
+            ).Elif(z == 0, NextState("FETCH")
             ).Else(
                 NextValue(backward, dst_a > src_a),
                 If(dst_a > src_a,
@@ -725,21 +748,19 @@ class WasmCore(Module):
         fsm.act("COPY_WR2",
             mem_a.dat_w.eq(acc[:8]), mem_a.we.eq(1),
             NextValue(cnt, cnt - 1),
-            If(backward,
-                NextValue(src_a, src_a - 1), NextValue(dst_a, dst_a - 1),
-            ).Else(
-                NextValue(src_a, src_a + 1), NextValue(dst_a, dst_a + 1),
-            ),
+            # One adder each: +1, or -1 (all ones) going backward.
+            NextValue(src_a, src_a + Cat(1, Replicate(backward, aw + 1))),
+            NextValue(dst_a, dst_a + Cat(1, Replicate(backward, aw + 1))),
             If(cnt == 1, NextState("FETCH")).Else(NextState("COPY_RD")),
         )
         fsm.act("FILL_CHECK",
-            If(dst_a + cnt > self.mem_len, *trap(T_MEM)
-            ).Elif(cnt == 0, NextState("FETCH")
+            If(~in_mem(x, z), *trap(T_MEM)
+            ).Elif(z == 0, NextState("FETCH")
             ).Else(NextValue(ea, dst_a), NextState("FILL")),
         )
         fsm.act("FILL",
             mem_a.dat_w.eq(acc[:8]), mem_a.we.eq(1),
-            NextValue(ea, ea + 1),
+            NextValue(ea, ea_inc),
             NextValue(cnt, cnt - 1),
             If(cnt == 1, NextState("FETCH")),
         )

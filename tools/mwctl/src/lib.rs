@@ -25,6 +25,8 @@
 //! * [`air`] — [`air::AirLink`], an [`link::Endpoint`] that reaches a device
 //!   over ESP-NOW through the bridge with `middleware::rpc` requests:
 //!   unicast, retransmitted with the same id, small chunks.
+//! * [`ecp5`] — the Colorlight 5A-75B's upload: the module compiled on
+//!   the host into the image its gateware installs (`wasm-hdl-ref`).
 //! * [`device`] — the protocol operations (`info`, `upload` signed or not,
 //!   `trust info`, `trust claim`, `start`, `stop`, monitor events) over any
 //!   transport.
@@ -47,6 +49,7 @@ pub mod air;
 pub mod bridge;
 pub mod cli;
 pub mod device;
+pub mod ecp5;
 pub mod error;
 pub mod fw;
 pub mod link;

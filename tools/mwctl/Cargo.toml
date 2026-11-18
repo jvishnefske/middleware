@@ -7,6 +7,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 middleware = { path = "../.." }
+# The Colorlight 5A-75B takes a compiled image: mwctl compiles the module
+# with the gateware's reference model (no_std, no other dependencies).
+wasm-hdl-ref = { path = "../../wasm-hdl-ref" }
 # No `libudev`: mwctl opens the one port it is given and never enumerates.
 serialport = { version = "4.10", default-features = false }
 # Payload signing (host only): the image SHA-256, Ed25519 signatures, and

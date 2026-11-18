@@ -1,7 +1,8 @@
 """cocotb: the whole node end to end, through its links and the flash
 model only (CL6, CL8):
 
-* `bridge.wat` uploaded over link 0 (begin/chunk/commit), started:
+* `bridge.wat`, as the image the host compiles, uploaded over link 0
+  (begin/chunk/commit), started:
   status Loading -> Stopped -> Running on `sys/payload/status`, its
   `bridge: up` log;
 * its rules forward `demo/**` from link 0 to link 1 (byte for byte;
@@ -62,11 +63,11 @@ def net_record(ipa, mac, peer, port):
 @cocotb.test()
 async def cl8_node_end_to_end(dut):
     host, flash = await boot(dut)
-    bridge_wasm = bytes.fromhex(vectors("wasm/bridge.json")["module"])
-    blink_wasm = bytes.fromhex(vectors("wasm/blink.json")["module"])
+    bridge_img = bytes.fromhex(vectors("wasm/bridge.json")["blob"])
+    blink_img = bytes.fromhex(vectors("wasm/blink.json")["blob"])
 
     assert await host.status() == EMPTY
-    await upload(host, bridge_wasm)
+    await upload(host, bridge_img)
     code, _ = await host.request(0, "sys/payload/start", b"", *H0)
     assert code == 0
     assert await host.status() == RUNNING
@@ -133,7 +134,7 @@ async def cl8_node_end_to_end(dut):
     assert [(a, p) for a, p, _ in got] == [(ip("10.0.1.9"), 7000)], got
 
     # A second payload in the other slot boots after a reset.
-    await upload(host, blink_wasm, chunk=300)
+    await upload(host, blink_img, chunk=300)
     code, _ = await host.request(0, "sys/payload/start", b"", *H0)
     assert code == 0
     assert await forwarded(host, 0, 1, b"demo/x", b"f", H0) == [], "rules gone with bridge.wat"

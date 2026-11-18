@@ -1,6 +1,7 @@
-"""cocotb: the loader builds every vector's image from the module bytes
-alone (compared with the model's image), then the vector's script runs on
-it; every refused module fails with the model's error kind."""
+"""cocotb: the installer builds every vector's image from its blob (the
+image the host compiled, `wasm-hdl-ref/src/image.rs`), compared with the
+model's, then the vector's script runs on it; every refused image
+(`imgerr.json`) fails with the model's error kind."""
 
 import os
 import zlib
@@ -9,7 +10,7 @@ import cocotb
 from cocotb.triggers import ReadOnly, RisingEdge
 
 from mw5a75b.imports import R_DISABLED, R_FALSE, R_NOTDUE, R_NOTICK, R_OK
-from mw5a75b.loader import ERRORS
+from mw5a75b.installer import ERRORS
 from tb_common import reset, start, vectors
 from tb_runtime import VISIBLE, Board, event, name_of, sub_slot
 from tb_wasm import NODE, i32
@@ -128,7 +129,7 @@ async def run_script(dut, name, vec, board):
 
 
 @cocotb.test()
-async def cl6_loader_builds_every_image_and_it_runs(dut):
+async def cl6_installer_builds_every_image_and_it_runs(dut):
     await start(dut, ZERO)
     dut.peer_ok.value = 1
     dut.node_id.value = int.from_bytes(NODE, "little")
@@ -138,7 +139,7 @@ async def cl6_loader_builds_every_image_and_it_runs(dut):
         if only and name != only:
             continue
         vec = vectors(f"wasm/{name}.json")
-        err = await load(dut, bytes.fromhex(vec["module"]))
+        err = await load(dut, bytes.fromhex(vec["blob"]))
         assert err == "Ok", f"{name}: {err}"
         await check_image(dut, name, vec["image"])
         await run_script(dut, name, vec, board)
@@ -146,8 +147,8 @@ async def cl6_loader_builds_every_image_and_it_runs(dut):
 
 
 @cocotb.test()
-async def cl6_refused_modules_fail_like_the_model(dut):
+async def cl6_refused_images_fail_like_the_model(dut):
     await start(dut, ZERO)
-    for case in vectors("loaderr.json")["cases"]:
-        err = await load(dut, bytes.fromhex(case["module"]))
+    for case in vectors("imgerr.json")["cases"]:
+        err = await load(dut, bytes.fromhex(case["image"]))
         assert err == case["error"], f"{case['name']}: {err} != {case['error']}"

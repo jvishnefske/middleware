@@ -2078,6 +2078,7 @@ dependencies = [
  "serialport",
  "sha2",
  "tokio",
+ "wasm-hdl-ref",
 ]
 
 [[package]]

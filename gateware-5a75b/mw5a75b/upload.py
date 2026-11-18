@@ -19,6 +19,8 @@ byte per cycle as XOR taps, the technique of `frame.crc16_byte`.
 
 from migen import Cat, If, Module, Mux, Signal
 
+from .narrow import gt
+
 POLY = 0xEDB88320
 
 # HandlerError codes (src/transport/reqrep.rs).
@@ -110,16 +112,30 @@ class UploadState(Module):
 
         # # #
 
+        # The CRC-32 engine is shared with the system's flash-image check
+        # (`ext_*`, at boot or after a refused commit: never while a
+        # transfer is open, and a begin restarts it).
+        self.ext_init = Signal()
+        self.ext_stb = Signal()
+        self.ext_din = Signal(8)
+        self.crc_value = Signal(32)
         received = Signal(15)
         self.submodules.run = run = Crc32()
-        self.comb += run.stb.eq(self.wr_stb), run.din.eq(self.wr_byte)
-        end = Signal(33)
-        self.comb += end.eq(self.offset + self.n)
+        self.comb += [
+            run.stb.eq(self.wr_stb | self.ext_stb),
+            run.din.eq(Mux(self.ext_stb, self.ext_din, self.wr_byte)),
+            self.crc_value.eq(run.value),
+        ]
+        # offset + n, unless the offset is past any length (then the chunk
+        # is neither a resend, in order, nor fits).
+        end = Signal(16)
+        far = Signal()
+        self.comb += end.eq(self.offset[:15] + self.n), far.eq(self.offset[15:] != 0)
 
-        begin_ok = (self.len_in != 0) & (self.len_in <= capacity)
-        resend = self.receiving & (end == received)
-        in_order = self.offset == received
-        fits = end <= self.length
+        begin_ok = (self.len_in != 0) & ~gt(self.len_in, capacity)
+        resend = self.receiving & ~far & (end == received)
+        in_order = ~far & (self.offset[:15] == received)
+        fits = ~far & (end <= self.length)
         commit_ok = self.receiving & (received == self.length) & (run.value == self.crc)
 
         self.comb += [
@@ -151,5 +167,5 @@ class UploadState(Module):
                 self.receiving.eq(0),
             ),
         ]
-        self.comb += run.init.eq(self.begin)
+        self.comb += run.init.eq(self.begin | self.ext_init)
 

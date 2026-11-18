@@ -4,7 +4,7 @@ own, synthesizes it with `synth_ecp5`, and prints LUT4 / FF / block RAM
 counts, so a fit problem points at a unit instead of one flat netlist.
 
     nix develop . -c python usage.py              # every unit, 4 at a time
-    nix develop . -c python usage.py wasm_core loader
+    nix develop . -c python usage.py wasm_core installer
     JOBS=2 nix develop . -c python usage.py
 
 Every public Signal anywhere in a unit's module tree becomes a port, so
@@ -31,20 +31,20 @@ def _units():
     from mw5a75b.flash import Store
     from mw5a75b.frame import CrcAppender, FrameDecoder
     from mw5a75b.imports import ImportUnit
-    from mw5a75b.loader import Loader
+    from mw5a75b.installer import Installer
     from mw5a75b.node import Node
     from mw5a75b.sha256 import Sha256
     from mw5a75b.upload import UploadState
     from mw5a75b.wasm import WasmCore
     from mw5a75b.system import CAPACITY
 
-    # A unit that drives another unit's ports (the loader and the import unit
+    # A unit that drives another unit's ports (the installer and the import unit
     # drive the core's) is built with that unit outside its tree: the core's
     # signals become ports and the core's logic is not counted twice.
     return {
         "wasm_core": lambda: WasmCore(),
         "import_unit": lambda: ImportUnit(WasmCore(), None),
-        "loader": lambda: Loader(WasmCore()),
+        "installer": lambda: Installer(WasmCore()),
         "bridge": lambda: BridgeTable(2),
         "store": lambda: Store(2),
         "upload": lambda: UploadState(CAPACITY),
@@ -52,7 +52,16 @@ def _units():
         "frame_decoder": lambda: FrameDecoder(),
         "crc_appender": lambda: CrcAppender(),
         "node": lambda: Node(),
+        "net": _net,             # one link's UDP/ARP/ICMP endpoint (mw5a75b/net.py)
     }
+
+
+def _net():
+    from mw5a75b.net import UdpCore
+    m = Module()
+    m.ip, m.mac = Signal(32), Signal(48)    # ports: the node's address registers
+    m.submodules.core = UdpCore(m.ip, m.mac)
+    return m
 
 
 def _signals(module, seen):

@@ -26,7 +26,9 @@ enable (0x06) and followed by status polling (0x05, WIP). `Store` runs
 the jobs above on it.
 """
 
-from migen import Array, Cat, Constant, FSM, If, Module, Mux, NextState, NextValue, Signal
+from migen import Array, Cat, Constant, If, Module, Mux, NextState, NextValue, Signal
+
+from .gotofsm import GotoFSM
 
 SECTOR = 4096
 PAGE = 256
@@ -107,7 +109,7 @@ class SpiFlash(Module):
         n = Signal(15)
         i = Signal(15)
         abyte = Signal(2)
-        fsm = FSM(reset_state="IDLE")
+        fsm = GotoFSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += self.busy.eq(~fsm.ongoing("IDLE") | self.go)
         cs = Signal(reset=1)
@@ -240,7 +242,7 @@ class Store(Module):
         base = Signal(24)
         self.comb += base.eq(Mux(slot, SLOT_BASE[1], SLOT_BASE[0]))
 
-        fsm = FSM(reset_state="IDLE")
+        fsm = GotoFSM(reset_state="IDLE")
         self.submodules += fsm
         self.comb += self.busy.eq(~fsm.ongoing("IDLE"))
 

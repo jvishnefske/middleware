@@ -7103,10 +7103,14 @@ A Colorlight 5A-75B v7.0 LED receiver card (Lattice LFE5U-25F, 24 288
 LUT4, 56 block RAMs; two Broadcom B50612D Gigabit PHYs over RGMII; 4 MB
 SDRAM; W25Q32 SPI flash) is a middleware node with **two independent
 links**, one per Ethernet port, each its own IPv4 address. There is **no
-soft CPU**: LiteEth's hardware MAC/ARP/ICMP/IP/UDP stack runs on each
-PHY, and the middleware is gateware — a frame core, a system request
-responder, a bridge engine, and a WebAssembly core (loader, interpreter,
-import unit) whose exact semantics are a Rust reference model.
+soft CPU**: a minimal hardware UDP/ARP/ICMP endpoint
+(`mw5a75b/net.py`) runs on each PHY (LiteEth's RGMII PHY; LiteEth's
+MAC/IP stack is the `soc.py --net liteeth` alternative, too large to fit
+next to the node), and the middleware is gateware — a frame core, a system
+request responder, a bridge engine, and a WebAssembly core (image
+installer, interpreter, import unit) whose exact semantics are a Rust
+reference model. The `.wasm` is compiled on the host, by that model: the
+board takes the compiled image (CL6).
 
 Payloads configure **channel bridging**: `route_bridge` (ABI 6) fills a
 hardware rule table and the board forwards matching publications from
@@ -7134,13 +7138,19 @@ Facts that shape the design:
   platform (`mw5a75b/platform.py`) gives each `eth` resource its data
   pins and adds a single `eth_mdio`. Autonegotiation needs no MDIO, so
   the bus is idle and the reset is not driven.
-- LiteEth's system-side IPv4 checksum and ICMP FIFO close timing at about
+- LiteEth's system-side IPv4 checksum and ICMP FIFO closed timing at about
   60 MHz on the -6 part (litex-boards' Colorlight targets run there too),
   so the system clock is **50 MHz**; the node handles one byte per cycle,
   so a link forwards up to **400 Mbit/s**, not Gigabit line rate. The
   RGMII domains run at 125 MHz; the second port's transmit path was
   routing-bound on every placement seed, so its output gets one more
   register stage (`mw5a75b/rgmii.py`).
+- The WASM compiler is **on the host**. A hardware loader (the model's
+  one-pass compiler as an FSM) worked but was the largest unit, about
+  7.5k LUTs of the 25F's 24k (2026-11-18, `soc.py --no-sha256` at 140%
+  LUTs); the model compiles on the host instead (`mwctl` does it for a
+  chip `ecp5`) and the gateware only installs the result, with bounds
+  checks. The board does not accept a plain `.wasm`.
 - Linear memory is **16 KiB** (block RAM). The WAT templates declare one
   64 KiB page and so load only with 1-byte pages (as `bridge.wat` and the
   golden vectors do); the Rust SDK examples place their data above
@@ -7196,9 +7206,11 @@ Requirements:
   thumbv6m).
 - [x] CL4 Golden vectors from the model (`wasm-hdl-ref/tests/vectors.rs`,
   checked in under `gateware-5a75b/tests/vectors/`, stale files fail the
-  test): frames with their decoding, bridge-table operations, and per
-  module the compiled image plus an event script with the expected
-  calls, results, globals, memory CRC and instruction count. The frame
+  test): frames with their decoding, bridge-table operations, images the
+  installer must refuse (`imgerr.json`), and per module its uploaded
+  image (`blob`), what installing it builds, plus an event script (run
+  on a core that installed the image) with the expected calls, results,
+  globals, memory CRC and instruction count. The frame
   core (`mw5a75b/frame.py`: CRC-16 through a two-byte delay line, kind,
   id, key checked while streaming, body into a block-RAM buffer held
   until consumed; a CRC appender) decodes every frame vector and
@@ -7210,44 +7222,67 @@ Requirements:
   installing, which also finds an identical rule); counters in RAM with
   queued accounting and back-pressure — every `bridge.json` operation
   answers as `BridgeTable` does — `tests/test_bridge.py`.
-- [x] CL6 Upload and storage. The `.wasm` is uploaded to the board and
-  compiled there. The hardware loader (`mw5a75b/loader.py`), the
-  model's loader in gateware — a bounded LEB128 reader, every section
-  with the model's checks in the model's order (import names matched
-  against the 33 ABI names and export names against the 7 the runtime
-  calls, both UTF-8 checked), and the body compiler (a 64-entry control
-  stack in LUT RAM, a 256-entry operand-type stack, resolved branch words,
-  forward branches chained and patched at `end`). From each vector's
-  module bytes alone it builds the model's image word for word (code,
+- [x] CL6 Upload and storage. The host compiles the `.wasm` with the
+  reference model and uploads the result, an **image**
+  (`wasm-hdl-ref/src/image.rs`: `Core::emit_image`, `Core::install`); the
+  board installs it. (Until 2026-11-18 the `.wasm` itself was uploaded
+  and compiled by a hardware loader, `mw5a75b/loader.py`, word for word
+  as the model compiles; it was removed to fit the 25F — about 7.5k
+  LUTs.) The image, little-endian: a 28-byte header (magic `MWI\x01`,
+  code words, functions, table entries, globals, `page_log2`, data
+  segments, initial and maximum memory bytes, the six runtime exports as
+  function indices or `0xFFFF`), then the code words, the function table
+  (7 bytes per entry, the core's 56-bit word), table 0, the globals and
+  the data segments (offset, length, bytes; the non-zero runs of the
+  initial memory), and nothing after. Validation moved with the
+  compiler: the module's checks (imports against the ABI, export
+  signatures, the subset, sizes, `LoadError` kinds) run on the host, and
+  `mwctl --udp <ip> upload x.wasm` on a chip `ecp5` compiles before
+  sending and refuses with the reason (a file that is not a module is
+  sent as it is). The installer (`mw5a75b/installer.py`) reads the image
+  once, never past its length, and refuses — as `Core::install` does,
+  same checks in the same order, same kind — counts past the core's
+  tables (`TooLarge`), memory past 16 KiB (`MemoryTooLarge`), a bad
+  magic or page size, a maximum under the initial memory, an export or
+  table 0 entry naming no function, a data segment outside the initial
+  memory, a truncated image or trailing bytes (`Malformed`): a bad image
+  cannot write outside the core's RAMs or configure the core past its
+  limits. Code words and function entries are not checked (the model's
+  compiler is trusted to produce them; the core traps a word or entry it
+  cannot run — `BadCode`, stack and memory bounds — as for a gateware
+  fault). Every vector's image installs to the model's state (code,
   function table, table 0, globals, exports, initial memory) and the
-  script then runs as the model says; all 40 refused modules
-  (`loaderr.json`: bad imports, signatures, exports, memory, floats,
-  i64, multi-value, start, passive segments, oversized tables and
-  globals, truncations, bad header) fail with the model's error kind —
-  `tests/test_system.py`. The upload path (`mw5a75b/upload.py`,
+  script then runs as the model says; all `imgerr.json` images fail with
+  the model's kind — `tests/test_system.py`;
+  `wasm-hdl-ref` `image::tests::cl6_*` (round trip, segments, refusals),
+  `tests/vectors.rs` (every vector's image round-trips); mwctl
+  `ecp5::tests::cl6_*`. The upload path (`mw5a75b/upload.py`,
   `system.py`): `sys/loader/begin|chunk|commit` as `Loader::step` with the
   16 KiB capacity (resends acknowledged, out of order abandoned, length
   and CRC-32 checked; bodies parsed as `Command::parse`), the chunks
   written into the image RAM while a streaming CRC-32 and a one round per
   cycle SHA-256 core (`mw5a75b/sha256.py`, leave it out with
-  `soc.py --no-sha256`) follow them; the commit compiles, and a refused
-  module answers `InvalidRequest`, logs `load refused: <error>` and puts
+  `soc.py --no-sha256`) follow them; the commit installs, and a refused
+  image answers `InvalidRequest`, logs `load refused: <error>` and puts
   the installed payload back from flash; `sys/payload/start|stop` and the
   status as the base firmware's dispatch has it. `upload.json` (from a
-  model shell over `Command::parse` + `Loader::step`, compiling with the
-  reference model: 13 request sequences, 11 CRC-32/SHA-256 check values)
-  — `tests/test_upload.py` (the cores), `tests/test_node.py::
-  test_cl6_upload_requests_follow_the_loader` (every case as frames on a
-  link: each response code and the status after it, the `payload
-  installed sha256 <digest>` log). Storage (`mw5a75b/flash.py`): two
-  16 KiB slots and a settings sector in the W25Q32 past 1 MiB, the
-  inactive slot erased at begin and programmed after a successful commit,
-  its header (magic last) with `seq + 1`; at reset the newest valid slot
-  (CRC-32 checked) is compiled and started — with a behavioural W25Q32
+  model shell over `Command::parse` + `Loader::step`, installing with the
+  reference model: 13 request sequences of images, 11 CRC-32/SHA-256
+  check values) — `tests/test_upload.py` (the cores),
+  `tests/test_node.py::test_cl6_upload_requests_follow_the_loader`
+  (every case as frames on a link: each response code and the status
+  after it, the `payload installed sha256 <digest>` log; the digest is
+  the image's). Storage (`mw5a75b/flash.py`): two 16 KiB slots and a
+  settings sector in the W25Q32 past 1 MiB, the inactive slot erased at
+  begin and programmed after a successful commit, its header (magic
+  last) with `seq + 1`; at reset the newest valid slot (CRC-32 checked)
+  is installed and started — with a behavioural W25Q32
   (`tests/flashmodel.py`): reboot from flash, a second payload in the
   other slot, a torn header falling back to the first, erased flash
-  booting Empty (`tests/test_node.py::test_cl8_full_node`). The real
-  flash is exercised only on the board (CL9).
+  booting Empty (`tests/test_node.py::test_cl8_full_node`). The slots,
+  their headers and the `sys/*` keys are unchanged; only what a slot
+  holds changed (an image, not a module). The real flash is exercised
+  only on the board (CL9).
 - [x] CL7 The WASM interpreter (`mw5a75b/wasm.py`) and the hardware import
   unit and runtime (`mw5a75b/imports.py`: `log`/`publish` as frames on
   every link with a peer, an 8-slot subscription table with matchers on
@@ -7267,12 +7302,25 @@ Requirements:
   link's network can become its peer and receive what is forwarded
   there, which matches an unclaimed board that accepts unsigned uploads;
   a configured, persisted peer belongs to `sys/net/addr` — simulated,
-  `tests/test_node.py`. `soc.py` builds both LiteEth stacks around the
-  node for `LFE5U-25F-6BG256C` (about a third of the LUTs, 50 MHz system
-  clock met). Open: the runtime and the loader in the SoC, `sys/net/addr`
-  (addresses persisted in flash; build-time defaults 192.168.1.50 and
-  192.168.2.50 now), `sys/log`, `sys/payload/*`, 125 MHz RGMII timing on
-  the second port, and on the board (the FT4232H-56Q MiniModule, serial FT4YW8B7, never
+  `tests/test_node.py`. Each link's endpoint (`mw5a75b/net.py`): frames
+  to the link's MAC or broadcast with a good FCS through a 2 KiB receive
+  ring; UDP to 7448 on the link's IP to the node with the sender's
+  address; ARP requests and ICMP echo answered; the node's datagrams
+  through a 2 KiB transmit ring to the MAC of the last UDP/ICMP sender or
+  the last ARP sender with that IP (broadcast and multicast IPs to the
+  broadcast MAC); a unicast IP with no known MAC drops the datagram and
+  sends a rate-limited ARP request instead (unicast never goes to the
+  broadcast MAC, nothing blocks on ARP); frames from group source MACs are
+  dropped and never learned, and the learned entries are as spoofable as
+  ARP; no receive IPv4/UDP checksum checks, IP options or fragments — `tests/test_net.py` (frames on the PHY streams,
+  and the node behind it answering `sys/info` over Ethernet). `soc.py`
+  builds both endpoints (`--net liteeth`: LiteEth's stacks) around the
+  node for `LFE5U-25F-6BG256C`: with `--no-sha256` it places at 20874/24288
+  COMB (85%), 52/56 DP16KD, and meets 50 MHz (63.8) and both 125 MHz RGMII
+  clocks (145.0 and 134.9) — gateware README "Fitting the 25F". Open:
+  `sys/net/addr` (addresses persisted in flash; build-time defaults
+  192.168.1.50 and 192.168.2.50 now), `sys/log`, `sys/payload/*`, and on
+  the board (the FT4232H-56Q MiniModule, serial FT4YW8B7, never
   the KD240 carrier's FT4232H: `openFPGALoader -c ft4232 --ftdi-serial
   FT4YW8B7`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
   both answering ARP, ping and `mwctl --udp <ip> info`, tx_delay tuned

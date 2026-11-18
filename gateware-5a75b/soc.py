@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""The 5A-75B design (CL8): two Ethernet links, each with LiteEth's
-hardware MAC/ARP/ICMP/IP/UDP stack, UDP port 7448 into the middleware
-node (frame core, system requests, upload and flash store, WASM payload
-runtime, bridge engine). No CPU.
+"""The 5A-75B design (CL8): two Ethernet links, each a LiteEth RGMII PHY
+with the minimal UDP/ARP/ICMP endpoint of `mw5a75b/net.py` (or, with
+`--net liteeth`, LiteEth's MAC/ARP/ICMP/IP/UDP stack), UDP port 7448 into
+the middleware node (frame core, system requests, upload and flash store,
+WASM payload runtime, bridge engine). No CPU.
 
     python soc.py                    # build build/mw5a75b/mw5a75b.bit
     python soc.py --ip0 192.168.1.50 --ip1 192.168.2.50
     python soc.py --only-port 0      # one PHY, for per-port bring-up
+    python soc.py --net liteeth      # LiteEth's stacks (does not fit with the node)
+    python soc.py --no-icmp          # no ping replies
 
 Load to SRAM with `openFPGALoader -c ft4232 --ftdi-serial FT4YW8B7 -m build/mw5a75b/mw5a75b.bit`.
 
@@ -39,6 +42,7 @@ from litex.soc.cores.clock import ECP5PLL
 from liteeth.core import LiteEthUDPIPCore
 from liteeth.phy.ecp5rgmii import LiteEthPHYRGMII
 
+from mw5a75b.net import UdpCore
 from mw5a75b.node import PORT, Node
 from mw5a75b.platform import Platform
 from mw5a75b import rgmii, wasm
@@ -58,7 +62,8 @@ class CRG(Module):
 
 
 class Top(Module):
-    def __init__(self, platform, ips, macs, tx_delay, ports=(0, 1), with_sha256=True):
+    def __init__(self, platform, ips, macs, tx_delay, ports=(0, 1), with_sha256=True,
+                 net="minimal", with_icmp=True):
         self.submodules.crg = CRG(platform)
         self.submodules.node = node = Node(macs=macs, ips=ips, with_sha256=with_sha256,
                                            ms_cycles=int(SYS_CLK // 1000))
@@ -74,12 +79,34 @@ class Top(Module):
             setattr(self.submodules, f"ethphy{n}", ethphy)
             ip = node.sys.net[n].ip
             mac = node.sys.net[n].mac
-            core = ClockDomainsRenamer({"eth_rx": f"eth{n}_rx", "eth_tx": f"eth{n}_tx"})(
+            link = node.links[n]
+            rename = ClockDomainsRenamer({"eth_rx": f"eth{n}_rx", "eth_tx": f"eth{n}_tx"})
+            if net == "minimal":
+                core = rename(UdpCore(ip, mac, port=PORT, with_icmp=with_icmp))
+                setattr(self.submodules, f"ethcore{n}", core)
+                rx, tx = ethphy.source, ethphy.sink
+                self.comb += [
+                    core.phy_rx_valid.eq(rx.valid),
+                    core.phy_rx_data.eq(rx.data),
+                    core.phy_rx_last.eq(rx.last),
+                    rx.ready.eq(1),
+                    tx.valid.eq(core.phy_tx_valid),
+                    tx.data.eq(core.phy_tx_data),
+                    tx.last.eq(core.phy_tx_last),
+                    tx.last_be.eq(core.phy_tx_last),
+                ]
+                self.comb += [getattr(link, s).eq(getattr(core, s)) for s in
+                              ("rx_valid", "rx_data", "rx_last", "rx_ip", "rx_port",
+                               "tx_ready")]
+                self.comb += [getattr(core, s).eq(getattr(link, s)) for s in
+                              ("rx_ready", "tx_valid", "tx_data", "tx_last", "tx_ip",
+                               "tx_port", "tx_len")]
+                continue
+            core = rename(
                 LiteEthUDPIPCore(ethphy, mac_address=mac, ip_address=ip, clk_freq=SYS_CLK,
-                                 with_icmp=True))
+                                 with_icmp=with_icmp))
             setattr(self.submodules, f"ethcore{n}", core)
             port = core.udp.crossbar.get_port(PORT, dw=8)
-            link = node.links[n]
             rx, tx = port.source, port.sink
             self.comb += [
                 link.rx_valid.eq(rx.valid),
@@ -138,6 +165,9 @@ def main():
     p.add_argument("--build-dir", default="build/mw5a75b")
     p.add_argument("--no-compile", action="store_true", help="write the Verilog only")
     p.add_argument("--seed", type=int, default=1, help="nextpnr placement seed")
+    p.add_argument("--net", choices=("minimal", "liteeth"), default="minimal",
+                   help="network stack per port: mw5a75b/net.py (default) or LiteEth's")
+    p.add_argument("--no-icmp", action="store_true", help="no ping replies")
     p.add_argument("--no-sha256", action="store_true",
                    help="leave out the SHA-256 core (the install log carries no digest)")
     a = p.parse_args()
@@ -146,7 +176,8 @@ def main():
     platform = Platform()
     ports = (0, 1) if a.only_port is None else (a.only_port,)
     top = Top(platform, ips=(a.ip0, a.ip1), macs=(mac(a.mac0), mac(a.mac1)),
-              tx_delay=(a.tx_delay0, a.tx_delay1), ports=ports, with_sha256=not a.no_sha256)
+              tx_delay=(a.tx_delay0, a.tx_delay1), ports=ports, with_sha256=not a.no_sha256,
+              net=a.net, with_icmp=not a.no_icmp)
     platform.build(top, build_name="mw5a75b", build_dir=a.build_dir,
                    run=not a.no_compile, seed=a.seed)
 

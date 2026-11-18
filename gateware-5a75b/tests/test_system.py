@@ -1,21 +1,22 @@
-"""CL6 + CL7: the loader compiles each vector's module in gateware; the
-image must equal the model's, and the script must then run as the model
-says. Refused modules fail with the model's error kind."""
+"""CL6 + CL7: the installer streams each vector's image (the host's
+compiled module) into the core; what it builds must equal the model's,
+and the script must then run as the model says. Refused images fail with
+the model's error kind."""
 
 from simtools import run
 
 
-def test_cl6_loader_and_runtime():
+def test_cl6_installer_and_runtime():
     from migen import If, Module, Mux, Signal
     from mw5a75b.bridge import BridgeTable
     from mw5a75b.imports import Runtime
-    from mw5a75b.loader import Loader
+    from mw5a75b.installer import Installer
 
     class Dut(Module):
         def __init__(self):
             self.submodules.bridge = BridgeTable(2)
             self.submodules.rt = rt = Runtime(bridge=self.bridge)
-            self.submodules.ld = ld = Loader(rt.core)
+            self.submodules.ld = ld = Installer(rt.core)
             self.tb_mem_sel = Signal()
             self.tb_mem_adr = Signal(14)
             self.comb += [
