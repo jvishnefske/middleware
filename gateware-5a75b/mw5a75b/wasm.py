@@ -32,8 +32,15 @@ the core is idle, sets `code_len`, `nfuncs`, `table_len`, `mem_max` and
 """
 
 from migen import (
-    Array, Case, Cat, Constant, FSM, If, Memory, Module, Mux, NextState, NextValue, Replicate, Signal,
+    Array, Case, Cat, ClockSignal, Constant, FSM, If, Instance, Memory, Module, Mux, NextState,
+    NextValue, Replicate, Signal,
 )
+
+# Build the linear memory from ECP5 DP16KD primitives instead of a Migen
+# Memory (soc.py sets this; simulation keeps the Memory). Yosys merges the
+# two exclusive write ports of the Memory into one and then copies the RAM
+# for the second read port: 16 block RAMs instead of 8.
+ECP5_PRIMITIVES = False
 
 CODE_WORDS = 4096
 MAX_FUNCS = 128
@@ -112,6 +119,39 @@ class Divider(Module):
         self.comb += self.r.eq(rem[:32])
 
 
+class _Port:
+    """The signals of one Migen memory port (adr, dat_w, we, dat_r)."""
+
+    def __init__(self, aw, dw):
+        self.adr = Signal(aw)
+        self.dat_w = Signal(dw)
+        self.we = Signal()
+        self.dat_r = Signal(dw)
+
+
+def ecp5_tdp_bytes(module, depth):
+    """A `depth` x 8 true dual-port RAM of DP16KD blocks in x1 mode (block i
+    holds bit i of every byte, so no address decoding): synchronous read,
+    write-first on both ports, as a Migen Memory port. Returns (a, b)."""
+    assert depth == 16 * 1024, "x1 DP16KD blocks are 16384 deep"
+    a, b = _Port(14, 8), _Port(14, 8)
+    for i in range(8):
+        pins = {}
+        for n, p in (("A", a), ("B", b)):
+            pins.update({f"i_CLK{n}": ClockSignal("sys"), f"i_CE{n}": 1, f"i_OCE{n}": 1,
+                         f"i_RST{n}": 0, f"i_WE{n}": p.we, f"i_DI{n}0": p.dat_w[i],
+                         f"o_DO{n}0": p.dat_r[i]})
+            pins.update({f"i_CS{n}{k}": 0 for k in range(3)})
+            pins.update({f"i_AD{n}{k}": p.adr[k] for k in range(14)})
+        module.specials += Instance(
+            "DP16KD",
+            p_DATA_WIDTH_A=1, p_DATA_WIDTH_B=1, p_REGMODE_A="NOREG", p_REGMODE_B="NOREG",
+            p_RESETMODE="SYNC", p_CSDECODE_A="0b000", p_CSDECODE_B="0b000",
+            p_WRITEMODE_A="WRITETHROUGH", p_WRITEMODE_B="WRITETHROUGH", p_GSR="DISABLED",
+            **pins)
+    return a, b
+
+
 class WasmCore(Module):
     def __init__(self, mem_bytes=16 * 1024):
         aw = (mem_bytes - 1).bit_length()
@@ -179,8 +219,7 @@ class WasmCore(Module):
         table = Memory(16, MAX_TABLE)
         stack = Memory(32, STACK_SLOTS)
         frames = Memory(32, CALL_DEPTH)
-        mem = Memory(8, mem_bytes)
-        self.specials += code, funcs, table, stack, frames, mem
+        self.specials += code, funcs, table, stack, frames
         code_rd = code.get_port(has_re=False)
         code_wr = code.get_port(write_capable=True)
         func_rd = funcs.get_port(has_re=False)
@@ -191,10 +230,15 @@ class WasmCore(Module):
         st_wr = stack.get_port(write_capable=True)
         fr_rd = frames.get_port(has_re=False)
         fr_wr = frames.get_port(write_capable=True)
-        mem_a = mem.get_port(write_capable=True)
-        mem_b = mem.get_port(write_capable=True)
         self.specials += (code_rd, code_wr, func_rd, func_wr, table_rd, table_wr,
-                          st_rd, st_wr, fr_rd, fr_wr, mem_a, mem_b)
+                          st_rd, st_wr, fr_rd, fr_wr)
+        if ECP5_PRIMITIVES:
+            mem_a, mem_b = ecp5_tdp_bytes(self, mem_bytes)
+        else:
+            mem = Memory(8, mem_bytes)
+            mem_a = mem.get_port(write_capable=True)
+            mem_b = mem.get_port(write_capable=True)
+            self.specials += mem, mem_a, mem_b
         glob = Memory(32, MAX_GLOBALS)
         glob_dbg = Memory(32, MAX_GLOBALS)
         self.specials += glob, glob_dbg
@@ -221,8 +265,14 @@ class WasmCore(Module):
             func_wr.we.eq(self.ld_func_we),
             table_wr.adr.eq(self.ld_table_adr), table_wr.dat_w.eq(self.ld_table_dat),
             table_wr.we.eq(self.ld_table_we),
+            # The external port writes only while the core is idle or stalled
+            # in a host call, so the two ports never write together. Saying so
+            # (`& ~mem_a.we`) lets yosys drop the write-port priority, which a
+            # DP16KD cannot express (a Memory then falls back to 131072
+            # flip-flops), and keeps the primitives' same-address write
+            # collision unreachable.
             mem_b.adr.eq(self.ext_mem_adr), mem_b.dat_w.eq(self.ext_mem_dat_w),
-            mem_b.we.eq(self.ext_mem_we), self.ext_mem_dat_r.eq(mem_b.dat_r),
+            mem_b.we.eq(self.ext_mem_we & ~mem_a.we), self.ext_mem_dat_r.eq(mem_b.dat_r),
             self.glob_rd_dat.eq(gd_rd.dat_r),
         ]
 

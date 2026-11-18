@@ -83,3 +83,19 @@ module that cannot fit before uploading it.
 mwctl --udp 192.168.1.50 upload bridge.wasm --start
 mwctl --udp 192.168.1.50 monitor          # sys/log, sys/payload/status, bridge/stats
 ```
+
+## Fitting the 25F
+
+`python usage.py` synthesizes each unit on its own and prints its LUT4 / FF /
+carry / LUT-RAM / block RAM use (`build/usage/<unit>/`). `soc.py` builds the
+WASM linear memory from eight DP16KD primitives (`wasm.ECP5_PRIMITIVES`):
+as a Migen Memory, yosys first could not map its two write ports to block
+RAM (131072 flip-flops), and once the ports were exclusive it merged them
+and copied the RAM per read port (16 blocks). `tests/test_wasm.py` runs the
+core's vectors against both forms (`tests/dp16kd_x1.v` models the block).
+
+State on 2026-11-18, `soc.py --no-sha256`, both ports: 50/56 DP16KD,
+10835/24288 FF, **34186/24288 TRELLIS_COMB (140%)**. It does not fit yet.
+Largest units (COMB, carry cells counted twice): the two LiteEth UDP/IP
+stacks with the SoC glue about 8.5k, the loader 7.5k, the WASM core 5.8k,
+the bridge 3.3k. Timing is unknown until it places.

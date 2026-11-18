@@ -21,7 +21,7 @@ def ios_of(module):
             if isinstance(v, Signal) and not k.startswith("_")}
 
 
-def run(module, name, tb, ios=None, extra_env=None, timeout_s=None):
+def run(module, name, tb, ios=None, extra_env=None, timeout_s=None, sources=()):
     from cocotb_tools.runner import get_runner
     build = HERE / "sim_build" / name
     build.mkdir(parents=True, exist_ok=True)
@@ -31,7 +31,8 @@ def run(module, name, tb, ios=None, extra_env=None, timeout_s=None):
         (build / fn).write_text(data)
     runner = get_runner("verilator")
     runner.build(
-        sources=[build / f"{name}.v"],
+        sources=[build / f"{name}.v", *sources],
+        includes=sorted({Path(s).parent for s in sources}),
         hdl_toplevel=name,
         build_dir=build,
         always=True,
@@ -51,3 +52,9 @@ def run(module, name, tb, ios=None, extra_env=None, timeout_s=None):
     total, failed = get_results(results)
     assert failed == 0, f"{failed} of {total} cocotb tests failed ({results})"
     assert total > 0
+
+
+def ecp5_sim_model():
+    """A behavioural DP16KD for a module built with `wasm.ECP5_PRIMITIVES`
+    (yosys's cells_sim_ecp5.v only declares it as a blackbox)."""
+    return HERE / "dp16kd_x1.v"

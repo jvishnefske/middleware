@@ -41,7 +41,7 @@ from liteeth.phy.ecp5rgmii import LiteEthPHYRGMII
 
 from mw5a75b.node import PORT, Node
 from mw5a75b.platform import Platform
-from mw5a75b import rgmii
+from mw5a75b import rgmii, wasm
 
 rgmii.install()
 
@@ -141,6 +141,7 @@ def main():
     p.add_argument("--no-sha256", action="store_true",
                    help="leave out the SHA-256 core (the install log carries no digest)")
     a = p.parse_args()
+    wasm.ECP5_PRIMITIVES = True     # linear memory as 8 DP16KD blocks
     mac = lambda s: int(s.replace(":", ""), 16)
     platform = Platform()
     ports = (0, 1) if a.only_port is None else (a.only_port,)
