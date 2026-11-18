@@ -6005,7 +6005,7 @@ those publications to its own payload and sends them on no link.
   declaration, an output bound to a source, two inputs on one key, too
   many keys, inputs without `on_message` and a route the device refuses
   fail the load (`LoadError::Bind`, naming the channel; the shells log
-  it). Remote targets are PR3's; adapted ones are refused until AD. Every
+  it). Remote targets are PR3's, adapted ones AD's. Every
   shell (esp-base, rp-base, RT1050, pi-node) loads the stored record and
   passes it for the image it starts. `ch/...` belongs to the runtime: a
   payload's own `publish`, `subscribe`, `serve` and routes on it are
@@ -6091,6 +6091,49 @@ takes publications only from `node`, as the link reports the sender.
 - [ ] PR5 On the RT1050-EVKB: a peer's manifest read through the board
   from the browser over Web Serial; `level_meter` bound to `mic/level` of
   a second node (`examples/zenoh_board.rs` acting as one).
+
+#### Adapters (AD…)
+
+A binding may put an adapter between a channel and its source
+(`Target::Adapted { inner, adapter }`), so a payload declared for one
+stream runs on a node that offers another. The adapters are pure,
+stateful and in middleware (`stream::adapt`): `PcmToLevels { block }`,
+`PcmToMuLaw`, `Decimate { factor }`, `ImuToMagnitude`. The runtime runs
+the binding's adapter on each message before `on_message`.
+
+- [x] AD1 `PcmToLevels` turns mono PCM batches into RMS/peak units of
+  `block` samples (2..=4096, so one PCM batch always fits one levels
+  batch), blocks aligned to multiples of `block` from sample 0 and
+  spanning input batches, numbered as a levels route numbers them; a gap
+  drops the block in progress and realigns — `middleware`
+  `stream::adapt::tests::ad1_pcm_to_levels_spans_batches_and_matches_block_levels`,
+  `ad1_a_gap_drops_the_block_in_progress_and_realigns`.
+- [x] AD2 `PcmToMuLaw` keeps every unit and index; `Decimate` keeps the
+  units whose index is a multiple of the factor (output index = input
+  index / factor, rate / factor, timestamp of the first kept unit);
+  `ImuToMagnitude` gives one channel, the magnitude of the acceleration
+  (the batch format now admits a one-channel IMU stream); input an
+  adapter does not take, or a malformed batch, is dropped and counted.
+  The runtime applies the binding's adapter: a local source must fit the
+  declaration after the adapter (else `BindError::Adapter`), a key or
+  remote target is adapted message by message, and a message that
+  completes no output reaches no `on_message` — `stream::adapt::tests::ad2_*`,
+  `ad3_shapes_say_which_adapter_takes_which_stream`; `wasm-host`
+  `channels::tests::bd4_bad_bindings_name_their_channel`, `tests/abi7.rs`
+  `ad2_an_adapted_channel_gets_the_adapters_output`; payload-sim
+  `tests/abi7.rs` `ad2_pcm_through_the_levels_adapter_reaches_a_levels_channel`.
+- [x] AD3 The arithmetic is shared: the RT1050's microphone route uses
+  middleware's levels and µ-law (the reference `g711.c` formulation, which
+  middleware adopted from the board: a negative sample rounds toward −∞
+  in the 14-bit shift), so a levels route and PCM through `PcmToLevels`
+  agree; `checkBinding` knows which adapter turns which stream into which
+  and says why one does not fit — firmware-imxrt
+  `sensors::audio::tests::sc5_*`; `stream::samples::tests::sc1_mulaw_matches_g711_and_levels_are_fixed_point`;
+  protocol-wasm `binding::tests::bd5_issues_name_the_channel_and_offer_a_fix`;
+  `web/test/binding.test.ts`: "checks and runs PCM through the levels
+  adapter for a levels channel".
+- [ ] AD4 On the RT1050-EVKB: `level_meter` on the local 16 kHz PCM
+  through `PcmToLevels` reads as SC8's levels route does.
 
 ### JPEG decode in WASM (J…)
 

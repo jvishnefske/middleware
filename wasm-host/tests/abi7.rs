@@ -212,3 +212,45 @@ fn pr3_a_remote_channel_takes_its_node_only() {
     // The output publishes on its key, normally.
     assert_eq!(p.device().published, [("lab/level".to_string(), b"ok".to_vec())]);
 }
+
+#[test]
+fn ad2_an_adapted_channel_gets_the_adapters_output() {
+    use middleware::loader::binding::{Adapter, Endpoint};
+    use middleware::stream::samples::{self, BatchHeader, SampleFormat, SensorKind};
+    let b = bound(&[
+        (
+            "audio",
+            Target::Adapted { inner: Endpoint::Key(Key::from_static("mic/pcm")), adapter: Adapter::PcmToLevels { block: 160 } },
+        ),
+        ("level", Target::Key(Key::from_static("lab/level"))),
+    ]);
+    let mut p = load(Board::default(), Some(&b)).unwrap();
+    let batch = |first: u64, n: u16| {
+        let h = BatchHeader {
+            kind: SensorKind::Microphone,
+            format: SampleFormat::I16,
+            channels: 1,
+            rate_hz: 16_000,
+            first_index: first,
+            timestamp_us: 0,
+            count: n,
+            range: 0,
+            scale: 0,
+        };
+        let mut out = [0u8; samples::MAX_BATCH];
+        let len = samples::encode_i16(&h, &vec![1000i16; usize::from(n)], &mut out).unwrap();
+        out[..len].to_vec()
+    };
+    let k = Key::from_static("mic/pcm");
+    // 120 samples: no block yet, nothing delivered.
+    assert!(!p.deliver(k, &batch(0, 120)).unwrap());
+    // 120 more complete block 0: one level unit reaches the payload.
+    assert!(p.deliver(k, &batch(120, 120)).unwrap());
+    let (key, data) = &p.device().published[0];
+    assert_eq!(key, "lab/level");
+    let got = samples::decode(data).unwrap();
+    assert_eq!((got.header.format, got.header.first_index, got.header.count), (SampleFormat::Levels, 0, 1));
+    assert_eq!(got.levels().next(), Some((1000, 1000)));
+    // Garbage is refused by the adapter, not delivered.
+    assert!(!p.deliver(k, b"junk").unwrap());
+}

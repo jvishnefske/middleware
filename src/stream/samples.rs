@@ -25,8 +25,10 @@
 //!
 //! * [`SampleFormat::I16`]: one sample, `channels` interleaved `i16` LE.
 //!   The IMU sends 3 channels (accelerometer X, Y, Z, `scale` µg per LSB)
-//!   or 6 (then magnetometer X, Y, Z at [`MAG_LSB_NT`] nT per LSB); the
-//!   microphone sends PCM (`s16le`).
+//!   or 6 (then magnetometer X, Y, Z at [`MAG_LSB_NT`] nT per LSB), or 1:
+//!   the magnitude of the acceleration, at `scale` µg per LSB (what the
+//!   runtime's `ImuToMagnitude` adapter derives, [`crate::stream::adapt`]);
+//!   the microphone sends PCM (`s16le`).
 //! * [`SampleFormat::MuLaw`]: one sample, `channels` G.711 µ-law bytes.
 //! * [`SampleFormat::Levels`]: one block of `scale` audio samples, per
 //!   channel the RMS then the peak magnitude, each `u16` LE in `i16` full
@@ -184,7 +186,9 @@ impl BatchHeader {
         }
         let ok = match (self.kind, self.format) {
             (SensorKind::Imu, SampleFormat::I16) => {
-                (self.channels == 3 || self.channels == 6) && self.range != 0 && self.scale != 0
+                (self.channels == 1 || self.channels == 3 || self.channels == 6)
+                    && self.range != 0
+                    && self.scale != 0
             }
             (SensorKind::Imu, _) => false,
             (SensorKind::Microphone, SampleFormat::Levels) => {
@@ -383,19 +387,37 @@ pub const fn gap(prev: &BatchHeader, next: &BatchHeader) -> Gap {
     }
 }
 
-/// The G.711 µ-law byte of a 16-bit linear sample (bias 0x84, clipped at
-/// 32635, bits inverted), as a codec's µ-law output carries it.
+/// The G.711 µ-law byte of a 16-bit linear sample, in the formulation of
+/// the reference `g711.c` (`linear2ulaw`): the sample is reduced to
+/// G.711's 14-bit range by an arithmetic shift by two, its magnitude
+/// clipped to 8159 and biased by 33, and the code is the sign, segment
+/// (0..=7) and four mantissa bits, all inverted. 0 encodes to 0xFF, the
+/// positive extreme to 0x80, the negative to 0x00. The RT1050's microphone
+/// route and the runtime's µ-law adapter both use this one.
 pub const fn mulaw_encode(sample: i16) -> u8 {
-    const BIAS: i32 = 0x84;
-    const CLIP: i32 = 32_635;
-    let s = sample as i32;
-    let (sign, mag) = if s < 0 { (0x80u8, -s) } else { (0u8, s) };
-    let mag = if mag > CLIP { CLIP } else { mag } + BIAS;
-    // `mag` is 0x84..=0x7fff: its top bit is bit 7..=14.
-    let top = 31 - (mag as u32).leading_zeros();
-    let exp = top.saturating_sub(7);
-    let mantissa = ((mag >> (exp + 3)) & 0x0f) as u8;
-    !(sign | ((exp as u8) << 4) | mantissa)
+    const BIAS: i16 = 0x84 >> 2;
+    const CLIP: i16 = 8159;
+    let mut v = sample >> 2; // −8192..=8191
+    let mask: u8 = if v < 0 {
+        v = -v; // ≤ 8192, no overflow
+        0x7F
+    } else {
+        0xFF
+    };
+    if v > CLIP {
+        v = CLIP;
+    }
+    let v = (v + BIAS) as u16; // 33..=8192
+    // Segment: how many times v reaches 0x40, 0x80, …, 0x2000.
+    let mut seg: u16 = 0;
+    while seg < 8 && v >= (0x40 << seg) {
+        seg += 1;
+    }
+    if seg >= 8 {
+        return 0x7F ^ mask;
+    }
+    let code = ((seg << 4) | ((v >> (seg + 1)) & 0x0F)) as u8;
+    code ^ mask
 }
 
 /// The linear value of a µ-law byte (the G.711 decoder; the inverse of
@@ -602,10 +624,12 @@ mod tests {
 
     #[test]
     fn sc1_mulaw_matches_g711_and_levels_are_fixed_point() {
-        // G.711 reference points (ITU-T table, Sun `g711.c`).
+        // G.711 reference points (Sun `g711.c`; its arithmetic shift
+        // rounds a negative sample toward −∞, so −1 is the smallest
+        // negative code, 0x7e, not "−0").
         let table = [
             (0i16, 0xffu8),
-            (-1, 0x7f),
+            (-1, 0x7e),
             (8, 0xfe),
             (100, 0xf2),
             (-100, 0x72),

@@ -50,7 +50,7 @@ function check(h: SampleHeader): void {
   const monoOrStereo = h.channels === 1 || h.channels === 2;
   const ok =
     h.kind === "imu"
-      ? h.format === "i16" && (h.channels === 3 || h.channels === 6) && h.range !== 0 && h.scale !== 0
+      ? h.format === "i16" && (h.channels === 1 || h.channels === 3 || h.channels === 6) && h.range !== 0 && h.scale !== 0
       : monoOrStereo && (h.format === "levels" ? h.scale !== 0 : h.scale === 0);
   if (!ok) fail(`${h.format} with ${h.channels} channels does not fit ${h.kind}`);
   if (h.count === 0) fail("count past the message");

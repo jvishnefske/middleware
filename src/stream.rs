@@ -42,6 +42,7 @@
 //! size of a source route. A 120×120 RGB565 frame (28 800 bytes) is then 174
 //! chunks.
 
+pub mod adapt;
 pub mod chunk;
 pub mod frames;
 pub mod pattern;

@@ -13,15 +13,17 @@
 //! | in          | `Local(source)` | start the source route on the channel's internal key `ch/<name>` and subscribe to it |
 //! | in          | `Key(key)`     | subscribe to `key` |
 //! | in          | `Remote { node, key }` | subscribe to `key`, deliver only what `node` sent ([`Payload::deliver_from`](crate::Payload::deliver_from)) |
-//! | in          | `Adapted`      | refused for now ([`BindError::Unsupported`]) |
+//! | in          | `Adapted { inner, adapter }` | the inner endpoint, each message run through the adapter ([`middleware::stream::adapt`]) before `on_message`; a local source must fit the declaration after the adapter |
 //! | out         | `Key(key)` or `Remote { key, .. }` | `channel_publish` publishes on `key` |
 //! | out         | `Local` or `Adapted` | refused ([`BindError::Direction`]) |
 //! | required    | none           | refused ([`BindError::Unbound`]) |
 //! | optional    | none           | unbound: `channel_open` answers `Unsupported` |
 //!
-//! A local source must fit the declaration: a samples channel takes a
-//! sampled source whose sensor, format, channels and rate it accepts, a
-//! frames channel a frame source, a bytes channel anything. Two input channels may not share a key, and the
+//! A local source must fit the declaration (after its adapter, if any): a
+//! samples channel takes a sampled source whose sensor, format, channels
+//! and rate it accepts, a frames channel a frame source, a bytes channel
+//! anything. Messages an adapter cannot take (another shape, malformed)
+//! are dropped and counted ([`AdapterState::refused`]). Two input channels may not share a key, and the
 //! bound keys count against the payload's subscriptions.
 //! [`Payload::instantiate_bound`](crate::Payload::instantiate_bound)
 //! carries the plan out: it starts each local route through the device
@@ -31,7 +33,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
-use middleware::loader::binding::{Binding, Target};
+use middleware::loader::binding::{Adapter, Binding, Endpoint, Target};
+use middleware::stream::adapt::{AdapterState, Shape};
 use middleware::stream::samples::{SampleFormat, SensorKind};
 use middleware::wasm_abi::channels::{Channel, DataKind, Direction};
 use middleware::wasm_abi::route::{RouteSource, SampleSource};
@@ -111,9 +114,8 @@ pub enum BindError {
     Direction(String),
     /// The local source (after its adapter) does not fit the declaration.
     Mismatch(String),
-    /// A target this runtime does not resolve yet (remote and adapted
-    /// streams).
-    Unsupported(String),
+    /// The adapter does not take the local source's stream.
+    Adapter(String),
     /// Two input channels on one key.
     SharedKey(String),
     /// More bound keys than subscription slots.
@@ -131,7 +133,7 @@ impl BindError {
             BindError::Unbound(n)
             | BindError::Direction(n)
             | BindError::Mismatch(n)
-            | BindError::Unsupported(n)
+            | BindError::Adapter(n)
             | BindError::SharedKey(n)
             | BindError::NoResources(n)
             | BindError::NoDelivery(n)
@@ -146,7 +148,7 @@ impl fmt::Display for BindError {
             BindError::Unbound(n) => write!(f, "channel {n} is required and not bound"),
             BindError::Direction(n) => write!(f, "channel {n} is an output: bind it to a key"),
             BindError::Mismatch(n) => write!(f, "channel {n} does not take the bound source"),
-            BindError::Unsupported(n) => write!(f, "channel {n}: this runtime cannot resolve its target"),
+            BindError::Adapter(n) => write!(f, "channel {n}: the adapter does not take the source"),
             BindError::SharedKey(n) => write!(f, "channel {n} shares its key with another input"),
             BindError::NoResources(n) => write!(f, "channel {n}: no subscription slot left"),
             BindError::NoDelivery(n) => {
@@ -171,6 +173,8 @@ pub enum Step {
         route: Option<RouteSource>,
         /// Only this sender's messages are delivered.
         from: Option<SenderId>,
+        /// Applied to each message before `on_message`.
+        adapter: Option<Adapter>,
     },
     /// Output: `channel_publish` publishes on `key`.
     Output {
@@ -188,14 +192,20 @@ pub const fn source_shape(s: &SampleSource) -> (SensorKind, SampleFormat, u8, u3
     }
 }
 
-/// Whether `decl` takes what `source` publishes.
-fn fits(decl: &Decl, source: &RouteSource) -> Result<(), BindError> {
+/// Whether `decl` takes what `source` publishes after `adapter`.
+fn fits(decl: &Decl, source: &RouteSource, adapter: Option<Adapter>) -> Result<(), BindError> {
     let name = || decl.name.clone();
     match (decl.kind, source) {
-        (DataKind::Bytes, _) | (DataKind::Frames, RouteSource::Frames(..)) => Ok(()),
+        (DataKind::Bytes, _) => Ok(()),
+        (DataKind::Frames, RouteSource::Frames(..)) if adapter.is_none() => Ok(()),
         (DataKind::Samples, RouteSource::Samples(s)) => {
-            let (sensor, format, channels, rate) = source_shape(s);
-            if decl.as_channel().accepts_samples(sensor, format, channels, rate) {
+            let (sensor, format, channels, rate_hz) = source_shape(s);
+            let shape = Shape { sensor, format, channels, rate_hz };
+            let shape = match adapter {
+                Some(a) => a.output(shape).ok_or_else(|| BindError::Adapter(name()))?,
+                None => shape,
+            };
+            if decl.as_channel().accepts_samples(shape.sensor, shape.format, shape.channels, shape.rate_hz) {
                 Ok(())
             } else {
                 Err(BindError::Mismatch(name()))
@@ -244,14 +254,14 @@ pub fn plan(
                 if !delivers {
                     return Err(BindError::NoDelivery(name()));
                 }
-                let (key, route, from) = match target {
-                    Target::Local(source) => {
-                        fits(d, &source)?;
+                let (endpoint, adapter) = target.parts();
+                let (key, route, from) = match endpoint {
+                    Endpoint::Local(source) => {
+                        fits(d, &source, adapter)?;
                         (internal_key(&d.name), Some(source), None)
                     }
-                    Target::Key(k) => (k.as_str().to_string(), None, None),
-                    Target::Remote { node, key } => (key.as_str().to_string(), None, Some(node)),
-                    Target::Adapted { .. } => return Err(BindError::Unsupported(name())),
+                    Endpoint::Key(k) => (k.as_str().to_string(), None, None),
+                    Endpoint::Remote { node, key } => (key.as_str().to_string(), None, Some(node)),
                 };
                 if inputs.contains(&key) {
                     return Err(BindError::SharedKey(name()));
@@ -260,7 +270,7 @@ pub fn plan(
                     return Err(BindError::NoResources(name()));
                 }
                 inputs.push(key.clone());
-                Step::Input { key, route, from }
+                Step::Input { key, route, from, adapter }
             }
         };
         steps.push(step);
@@ -279,6 +289,8 @@ pub enum Resolved {
         slot: usize,
         /// Only this sender's messages are delivered.
         from: Option<SenderId>,
+        /// The running adapter.
+        adapter: Option<AdapterState>,
     },
     /// Published on `key`.
     Output {
@@ -320,8 +332,16 @@ impl ChannelTable {
     /// node (an unknown sender included).
     pub fn admits(&self, slot: usize, sender: Option<SenderId>) -> bool {
         self.resolved.iter().all(|r| match r {
-            Resolved::Input { slot: s, from: Some(node) } if *s == slot => sender == Some(*node),
+            Resolved::Input { slot: s, from: Some(node), .. } if *s == slot => sender == Some(*node),
             _ => true,
+        })
+    }
+
+    /// The adapter of the input on `slot`, if it has one.
+    pub fn adapter_mut(&mut self, slot: usize) -> Option<&mut AdapterState> {
+        self.resolved.iter_mut().find_map(|r| match r {
+            Resolved::Input { slot: s, adapter: Some(a), .. } if *s == slot => Some(a),
+            _ => None,
         })
     }
 
@@ -394,6 +414,7 @@ mod tests {
                     key: "ch/audio".into(),
                     route: Some(levels(16_000)),
                     from: None,
+                    adapter: None,
                 },
                 Step::Unbound,
                 Step::Output { key: "lab/level".into() },
@@ -431,14 +452,18 @@ mod tests {
         let steps = plan(&d, Some(&bind(&[("audio", remote), ("level", remote)])), true, 8).unwrap();
         assert_eq!(
             steps[0],
-            Step::Input { key: "mic/level".into(), route: None, from: Some(SenderId([1; 8])) }
+            Step::Input { key: "mic/level".into(), route: None, from: Some(SenderId([1; 8])), adapter: None }
         );
         assert_eq!(steps[2], Step::Output { key: "mic/level".into() });
-        let adapted = Target::Adapted {
-            inner: middleware::loader::binding::Endpoint::Local(pcm()),
-            adapter: middleware::loader::binding::Adapter::PcmToLevels { block: 160 },
-        };
-        assert_eq!(err(&[("audio", adapted)], true, 8), BindError::Unsupported("audio".into()));
+        // AD2: an adapter that turns PCM into levels makes the PCM source
+        // fit; one that does not take the source is refused.
+        let adapted = Target::Adapted { inner: Endpoint::Local(pcm()), adapter: Adapter::PcmToLevels { block: 160 } };
+        let steps = plan(&d, Some(&bind(&[("audio", adapted)])), true, 8).unwrap();
+        assert!(matches!(&steps[0], Step::Input { adapter: Some(Adapter::PcmToLevels { block: 160 }), route: Some(_), .. }));
+        let wrong = Target::Adapted { inner: Endpoint::Local(levels(16_000)), adapter: Adapter::PcmToMuLaw };
+        assert_eq!(err(&[("audio", wrong)], true, 8), BindError::Adapter("audio".into()));
+        let on_key = Target::Adapted { inner: Endpoint::Key(Key::from_static("mic/pcm")), adapter: Adapter::PcmToMuLaw };
+        assert!(matches!(&plan(&d, Some(&bind(&[("audio", on_key)])), true, 8).unwrap()[0], Step::Input { adapter: Some(_), .. }));
         assert_eq!(BindError::Unbound("x".into()).channel(), "x");
     }
 
@@ -447,7 +472,7 @@ mod tests {
         let t = ChannelTable {
             decls: decls(),
             resolved: alloc::vec![
-                Resolved::Input { slot: 2, from: Some(SenderId([5; 8])) },
+                Resolved::Input { slot: 2, from: Some(SenderId([5; 8])), adapter: None },
                 Resolved::Unbound,
                 Resolved::Output { key: "lab/level".into() },
             ],
