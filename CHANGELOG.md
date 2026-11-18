@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Node manifests (MF1–MF5)
+- New `sys/manifest` (`middleware::loader::manifest`, pure, no alloc): what a node offers payloads as `[tag][len][body]` records an older host skips (import groups, I2C and SPI buses, IMU and microphone sources with their rate, range and mode masks, frame sources, SPI sinks, links, limits; at most 384 bytes). `Manifest::caps` derives the `sys/info` bits, `ImuSource`/`MicSource`/`FrameSources::accepts` say whether a config is offered. `loader::keys::MANIFEST`, `Command::Manifest`.
+- Breaking (esp-base): `dispatch::Context::caps` is replaced by `Context::manifest: Option<&Manifest>` (`Context::caps()` derives the bits); `sys/manifest` is answered from it with `Context::node`.
+- Every base firmware has a manifest next to its `Device` implementation, tested against what it accepts: esp-base `chip::Profile::manifest`, rp-base `service::MANIFEST`, firmware-imxrt `service::MANIFEST` (replaces `RUNTIME_CAPS`; IMU 50–800 Hz, 50–400 Hz with the magnetometer; microphone 8–48 kHz, every mode, 0–30 dB; links as built), mw-pi-node `service::MANIFEST`, payload-sim `sim::MANIFEST`, protocol-wasm `simulator::MANIFEST`. The RT1050 answers it over Zenoh read-only (claimed only).
+- `mwctl manifest` (`report::format_manifest`, `Device::manifest`); protocol-wasm `decodeManifest`, `simulatorManifest` and the device loader's `manifest` action; web `DeviceClient.manifest()` and the Device page's capability, manifest and board rows (`device/manifest.ts`).
+
 ### Signed updates with hardware-held keys (TK1-TK8, E26, ZN5)
 - Trust keys come in two kinds: Ed25519 (unchanged on the wire) and ECDSA P-256 (`loader::trust::KeyKind`, `PublicKey::{Ed25519, P256}`; a 33-byte compressed SEC1 claim, a 38-byte `sys/trust/info`), because TPMs and PIV cards sign P-256 only. Signatures stay 64 bytes (P-256 raw r‖s over SHA-256), so commit, control and firmware bodies are unchanged; a device verifies with the pinned key's algorithm (`verify_signature`), payloads and `fw_ota` firmware commits alike. Feature `trust` adds `p256` (no std, no alloc). Breaking: `PublicKey` is an enum (`PublicKey::Ed25519(bytes)` where `PublicKey(bytes)` was), `KEY_LEN` is `ED25519_KEY_LEN` / `P256_KEY_LEN` / `KEY_MAX`.
 - `ControlOp` gains `FwReboot`, `FwConfirm`, `FwAbort` (3-5) for signed firmware controls over a network.

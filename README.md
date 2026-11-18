@@ -415,3 +415,12 @@ Board support packages: each ESP firmware describes its pins on `sys/board`
 BSPs and an ESP Web Tools `manifest.json` to a release and mirror them to
 GitHub Pages under `firmware/<version>/` and `firmware/latest/`, where
 browsers (the web flasher, Skygraph) can fetch them.
+
+Every base firmware (ESP, RP, i.MX RT, the Linux node) and both simulators
+also answer `sys/manifest`: what the node offers payloads, as records an
+older host skips when it does not know them: the import groups it serves,
+its I2C and SPI buses, each source with the rates, ranges and modes it
+takes (the RT1050-EVKB's IMU at 50–800 Hz, 50–400 Hz with the
+magnetometer; its microphone at 8–48 kHz), its links and limits
+(`mwctl manifest`, the web Device page; design.md MF1–MF5). The `sys/info`
+capability bits are derived from it.

@@ -5806,6 +5806,97 @@ The contract is `wasm_abi::serve`, pure and heap-free.
   delivers publications between units and to listeners after the
   publishing call returns, and takes units off the network — `cargo test -p protocol-wasm simulator`: "q19_a_phase_unit_serves_its_phase_under_its_node_id", "adc_levels_are_set_from_js_and_clamped"; `web/test/recipe.run.test.ts`: "gives each unit a distinct node and routes requests by the key's node", "publishes each unit's state reports on the bus and delivers to other units' subscriptions".
 
+### Node manifests, payload channels and bindings (MF…, CH…, BD…, PR…, AD…)
+
+Payloads use a node's features through the ABI's flat `mw.*` imports, and
+until now chose route kinds and literal keys themselves; a browser learnt
+what a node supports only from 32 `sys/info` capability bits and, on an
+ESP32, the fixed `sys/board` layout. This section adds three parts that
+meet in `wasm-host`:
+
+1. **Manifest** (firmware → host). Every node answers `sys/manifest`
+   (`middleware::loader::manifest`): the import groups it serves, its
+   buses and their limits, each source and sink with the parameter ranges
+   it takes, its links and runtime limits. It is built from consts next to
+   the board's `Device` implementation, and `sys/info`'s `Caps` are
+   derived from it (`Manifest::caps`), so the two never disagree.
+2. **Channels** (payload → runtime). A payload declares named logical
+   channels in a `mw.channels` custom section, covered by the image
+   signature, and opens them by name (ABI 7).
+3. **Bindings** (host → node). A separately signed record maps each
+   channel to a local source, a key, a key from one other node, or an
+   adapted stream, so a payload is rebound without re-uploading it. The
+   browser reaches other nodes through the connected board, not through a
+   transport of its own.
+
+#### Manifest (MF…)
+
+`[version 1][abi u16]`, then `[tag u8][len u8][body]` records: node id,
+import groups (bitmask: gpio, timers, irq, spi, uart, dma, pwm, adc, i2c,
+routes, serve, bridge, channels; a group means the board *does* something
+with those imports, not only that the runtime links them), I2C buses with
+their clock range, SPI buses, the IMU source (rate mask over
+`IMU_RATES_HZ` for 3-channel samples, range mask, rate mask with the
+magnetometer), the microphone source (rate mask, mode mask, highest gain),
+frame sources (kinds, formats, largest frame), SPI sinks, one record per
+link (id and kind: serial, usb, zenoh, espnow), limits (routes,
+subscriptions, channels, message size). Unlike `sys/board`'s exact length,
+decoding is forward compatible: an unknown tag is skipped and a known
+record longer than its body keeps its known prefix.
+
+- [x] MF1 The manifest is a pure, no-alloc codec: every record round
+  trips; unknown tags are skipped and a longer known record keeps its
+  prefix; a short known record, a record running past the end, a cut
+  inside a record or another version is refused; at most four links are
+  kept; the largest manifest fits one reply (`MANIFEST_MAX` = 384 bytes) —
+  `middleware` `loader::manifest::tests::mf1_every_record_round_trips`,
+  `mf1_unknown_tags_are_skipped_and_longer_records_keep_their_prefix`,
+  `mf1_truncation_and_other_versions_are_refused`,
+  `mf1_the_largest_manifest_fits_a_reply`.
+- [x] MF2 `sys/info`'s capability bits are the manifest's
+  (`Manifest::caps`: `SERVE` and `BRIDGE` from the groups, `SOURCE_IMU`
+  and `SOURCE_MICROPHONE` from the sources; none without the runtime), and
+  a source accepts exactly the configs it lists (the IMU separately with
+  and without the magnetometer, since the FXOS8700CQ's hybrid mode halves
+  its output data rate) — `loader::manifest::tests::mf2_caps_follow_the_groups_and_sources`,
+  `mf2_sources_accept_exactly_what_they_list`.
+- [x] MF3 Every base firmware answers `sys/manifest` through esp-base's
+  dispatcher (`Context::manifest` replaces `Context::caps`; the reply
+  carries `Context::node`; `NotFound` without one), each from a manifest
+  next to its `Device` implementation that agrees with what that
+  implementation accepts: every listed IMU and microphone config starts
+  the board's own route (`ImuRoute::new`, `MicRoute::new`) and every
+  config left out is refused by it (RT1050: 800 Hz only without the
+  magnetometer); the buses listed are the pin map's and the next is not;
+  a device that keeps the default `route_samples` lists no sampled
+  source. The RT1050 answers it over Zenoh read-only, claimed only, like
+  `sys/board`. The Colorlight 5A-75B gateware has no manifest yet and
+  answers `NotFound`, as for `sys/board` (its `Caps::BRIDGE` stays a
+  literal) — esp-base `dispatch::tests::mf3_manifest_carries_the_node_and_agrees_with_info`,
+  `chip::tests::mf3_manifests_agree_with_the_profiles`;
+  rp-base `chip::tests::mf3_the_manifest_agrees_with_the_pin_map`;
+  firmware-imxrt `service::tests::mf3_the_manifest_agrees_with_the_sensor_routes`,
+  `zenoh_mgmt::tests::zn4_a_claimed_board_answers_read_only_requests`,
+  `zn4_an_unclaimed_board_answers_only_info_and_trust_info`;
+  mw-pi-node `device::tests::mf3_the_manifest_lists_only_what_the_device_does`;
+  payload-sim `sim::tests::mf3_the_manifest_agrees_with_the_simulated_board`,
+  `tests/abi5.rs` `mf3_the_board_answers_sys_manifest` (`!req sys/manifest`);
+  protocol-wasm `simulator::tests::mf3_the_manifest_agrees_with_the_simulated_board`.
+- [x] MF4 Hosts read it: `mwctl manifest` prints one line per record
+  (`report::format_manifest`; `Device::manifest`, `NotFound` from older
+  firmware); protocol-wasm `decodeManifest` and `simulatorManifest`, the
+  device loader's `manifest` action; the web `DeviceClient.manifest()`
+  (null for `NotFound`) and the Device page's capability, manifest and
+  board rows — mwctl `report::tests::mf4_manifest_lines_name_every_record`,
+  `device::tests::mf4_manifest_is_decoded_or_not_found`;
+  protocol-wasm `loader::tests::device_loader_passes_system_and_app_commands`;
+  `web/test/nodeManifest.test.ts`: "decodes the simulator's manifest with
+  its sources, rates and node", "reads sys/manifest, or null from firmware
+  without one", "lists capabilities, the manifest's records and the board".
+- [ ] MF5 On the RT1050-EVKB `mwctl manifest` lists the IMU at 50–800 Hz
+  (50–400 Hz with the magnetometer) and the microphone at 8–48 kHz, over
+  USB and over Zenoh.
+
 ### JPEG decode in WASM (J…)
 
 `payloads/jpeg` (`mw-jpeg`): the badge-side decoder of R14, a `no_std`,

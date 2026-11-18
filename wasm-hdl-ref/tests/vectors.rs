@@ -594,7 +594,7 @@ impl Shell {
                 return 0;
             }
             Command::Info | Command::TrustInfo => return 0,
-            Command::Board | Command::TrustClaim { .. } => return HandlerError::NotFound.code(),
+            Command::Board | Command::Manifest | Command::TrustClaim { .. } => return HandlerError::NotFound.code(),
         }
         let (next, r) = self.loader.step(&cmd, wasm_hdl_ref::COLORLIGHT_MEMORY as u32);
         self.loader = next;

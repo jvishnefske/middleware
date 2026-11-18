@@ -17,7 +17,7 @@ use embedded_storage::nor_flash::{ErrorType, NorFlashErrorKind, ReadNorFlash};
 use middleware::crc::Crc32;
 use middleware::fw_ota::wire::{Command, FwInfo};
 use middleware::fw_ota::{CHUNK_LEN, FwUpdate as FwState, Slot, keys as fw_keys};
-use middleware::loader::DeviceInfo;
+use middleware::loader::{Caps, DeviceInfo};
 use middleware::loader::sha256::ImageHash;
 use middleware::loader::trust::{
     PublicKey, SIGNED_COMMIT_LEN, Signature, SignedCommit, Version, signed_message,
@@ -968,4 +968,55 @@ fn fl7_the_endpoint_note_reads_as_a_log_line() {
     use std::string::ToString;
     let n = Note::ZenohEndpoint(Endpoint::parse(EP).unwrap());
     assert_eq!(n.to_string(), "zenoh: endpoint tcp/192.168.1.10:7447 saved");
+}
+
+/// MF3: the manifest lists exactly what the board's routes accept. Every
+/// IMU rate and range it lists starts an [`ImuRoute`], with and without the
+/// magnetometer as listed; every microphone rate and mode a [`MicRoute`];
+/// a rate it leaves out is refused by the route too.
+///
+/// [`ImuRoute`]: crate::sensors::imu_route::ImuRoute
+/// [`MicRoute`]: crate::sensors::mic_route::MicRoute
+#[test]
+fn mf3_the_manifest_agrees_with_the_sensor_routes() {
+    use crate::sensors::imu_route::ImuRoute;
+    use crate::sensors::mic_route::MicRoute;
+    use middleware::wasm_abi::route::{AudioMode, IMU_RANGES_G, IMU_RATES_HZ, ImuConfig, MIC_RATES_HZ, MicConfig};
+    let imu = MANIFEST.imu.unwrap();
+    for rate in IMU_RATES_HZ {
+        for range in IMU_RANGES_G {
+            for mag in [false, true] {
+                let cfg = ImuConfig::new(rate, range, mag, 10).unwrap();
+                assert_eq!(
+                    imu.accepts(&cfg),
+                    ImuRoute::new(cfg, 0).is_ok(),
+                    "{rate} Hz ±{range} g mag {mag}"
+                );
+            }
+        }
+    }
+    assert_eq!(imu.mag_rates_hz().collect::<StdVec<_>>(), [50, 100, 200, 400]);
+    let mic = MANIFEST.mic.unwrap();
+    for rate in MIC_RATES_HZ {
+        for (mode, units, block) in [(AudioMode::Levels, 10, 160), (AudioMode::MuLaw, 480, 0), (AudioMode::Pcm, 240, 0)] {
+            for gain in [0, mic.max_gain_db] {
+                // PCM at 32 kHz and above cannot fill 10 ms in one batch: the ABI
+                // refuses it before any board sees it.
+                let Ok(cfg) = MicConfig::new(rate, gain, mode, units, block) else {
+                    assert!(rate >= 32_000 && mode == AudioMode::Pcm);
+                    continue;
+                };
+                assert_eq!(mic.accepts(&cfg), MicRoute::new(cfg, 0).is_ok(), "{rate} Hz {mode:?}");
+                assert!(mic.accepts(&cfg));
+            }
+        }
+    }
+    // Without the runtime nothing is offered, and sys/info agrees.
+    assert_eq!(MANIFEST_NO_RUNTIME.caps(), middleware::loader::Caps::NONE);
+    assert_eq!(
+        MANIFEST.caps(),
+        middleware::loader::Caps::SERVE
+            .with(middleware::loader::Caps::SOURCE_IMU)
+            .with(middleware::loader::Caps::SOURCE_MICROPHONE)
+    );
 }

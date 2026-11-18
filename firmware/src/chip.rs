@@ -172,6 +172,7 @@
 //! at 0x100000 (checked by a unit test).
 
 use board_pins::{PinError, PinMap, bit, boards};
+use middleware::loader::manifest::{FrameSources, Groups, I2cBuses, Limits, Link, LinkKind, Manifest, SpiBuses, SpiSink};
 use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
 use middleware::wasm_abi::AbiError;
 
@@ -375,6 +376,69 @@ impl Profile {
     /// Whether `pin` has no output driver.
     pub const fn is_input_only(&self, pin: u8) -> bool {
         self.pins.is_input_only(pin)
+    }
+
+    /// I2C buses the board wires (`0..n`, the pin map's I2C table).
+    pub fn i2c_buses(&self) -> u8 {
+        (0..8u8).take_while(|b| self.i2c_pins(*b).is_ok()).count() as u8
+    }
+
+    /// The `sys/manifest` of this chip (MF3), next to what `EspDevice`
+    /// implements: GPIO with interrupts, timers, SPI bus 0 with DMA, UART1,
+    /// the PWM and ADC pins the pin map lists, its I2C buses, requests on
+    /// payload keys, SPI sink routes and, with `espnow` (`radio`), the
+    /// test-pattern source route (RGB565, and the JPEG fixtures with
+    /// `cam-fixtures`) and on a board with a camera port the camera (JPEG).
+    /// No sampled sources. Links: UART0, the USB-Serial-JTAG port where the
+    /// chip has one, ESP-NOW with `radio`. A firmware without the runtime
+    /// (`runtime` false, or a profile without it) offers payloads nothing
+    /// ([`Manifest::without_runtime`]).
+    pub fn manifest(&self, runtime: bool, radio: bool, jpeg_fixtures: bool) -> Manifest {
+        use middleware::wasm_abi::route::{MAX_DIM, PixelFormat, SourceKind};
+        let i2c = self.i2c_buses();
+        let pick = |on: bool, g: Groups| if on { g } else { Groups::NONE };
+        let groups = Groups::GPIO
+            .with(Groups::IRQ)
+            .with(Groups::TIMERS)
+            .with(Groups::SPI)
+            .with(Groups::UART)
+            .with(Groups::DMA)
+            .with(Groups::ROUTES)
+            .with(Groups::SERVE)
+            .with(pick(!self.pwm_pins.is_empty(), Groups::PWM))
+            .with(pick(self.pins.adc_mask() != 0, Groups::ADC))
+            .with(pick(i2c > 0, Groups::I2C));
+        let mut m = Manifest::new(middleware::wasm_abi::ABI_VERSION)
+            .with_groups(groups)
+            .with_spi(SpiBuses { buses: 1 })
+            .with_sink_spi(SpiSink {
+                max_frame: middleware::stream::MAX_FRAME_BYTES,
+            })
+            .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+            .with_limits(Limits::ABI);
+        if i2c > 0 {
+            m = m.with_i2c(I2cBuses {
+                buses: i2c,
+                min_hz: *middleware::wasm_abi::periph::I2C_FREQ_HZ.start() as u32,
+                max_hz: *middleware::wasm_abi::periph::I2C_FREQ_HZ.end() as u32,
+            });
+        }
+        if self.usb_serial_jtag {
+            m = m.with_link(Link { id: 1, kind: LinkKind::USB });
+        }
+        if radio {
+            let camera = self.camera;
+            m = m
+                .with_frames(FrameSources {
+                    kinds: 1 << SourceKind::TestPattern as u8 | if camera { 1 << SourceKind::Camera as u8 } else { 0 },
+                    formats: 1 << PixelFormat::Rgb565Be as u8
+                        | if camera || jpeg_fixtures { 1 << PixelFormat::Jpeg as u8 } else { 0 },
+                    max_width: MAX_DIM,
+                    max_height: MAX_DIM,
+                })
+                .with_link(Link { id: 2, kind: LinkKind::ESPNOW });
+        }
+        if runtime && self.runtime { m } else { m.without_runtime() }
     }
 
     /// The `sys/board` description of this profile (S8), for a firmware
@@ -695,6 +759,41 @@ mod tests {
             assert!((0u8..64).filter(|&n| p.has_adc(n)).all(|n| p.check_pin(n, Direction::Input).is_ok()), "{}", p.name);
         }
         assert!(!ESP32.has_adc(64) && !ESP32.has_adc(255));
+    }
+
+    #[test]
+    fn mf3_manifests_agree_with_the_profiles() {
+        use middleware::loader::Caps;
+        use middleware::wasm_abi::route::{ImuConfig, SampleSource, SourceKind};
+        for p in [ESP32, ESP32S3, ESP32C3] {
+            let m = p.manifest(true, true, false);
+            // Every listed bus has pins, the next one has none.
+            let buses = m.i2c.map_or(0, |i| i.buses);
+            assert!((0..buses).all(|b| p.i2c_pins(b).is_ok()), "{}", p.name);
+            assert!(p.i2c_pins(buses).is_err(), "{}", p.name);
+            if p.runtime {
+                assert_eq!(m.groups.contains(Groups::PWM), !p.pwm_pins.is_empty());
+                assert_eq!(m.groups.contains(Groups::ADC), p.payload_pins().any(|q| p.has_adc(q)));
+                assert_eq!(m.frames.unwrap().has(SourceKind::Camera), p.camera());
+            } else {
+                assert_eq!((m.groups, m.frames), (Groups::NONE, None), "{}", p.name);
+            }
+            assert_eq!(m.links().iter().any(|l| l.kind == LinkKind::USB), p.usb_serial_jtag);
+            // EspDevice keeps the default route_samples (InvalidArgument):
+            // no sampled source is listed.
+            let imu = SampleSource::Imu(ImuConfig::new(100, 2, false, 10).unwrap());
+            assert!(!m.accepts_samples(&imu));
+            let caps = if p.runtime { Caps::SERVE } else { Caps::NONE };
+            assert_eq!(m.caps(), caps, "{}", p.name);
+            assert_eq!(p.manifest(false, true, false).caps(), Caps::NONE);
+            // Without the radio there is no source route and no ESP-NOW.
+            let quiet = p.manifest(true, false, false);
+            assert!(quiet.frames.is_none());
+            assert!(quiet.links().iter().all(|l| l.kind != LinkKind::ESPNOW));
+        }
+        let jpeg = 1 << middleware::wasm_abi::route::PixelFormat::Jpeg as u8;
+        assert_eq!(ESP32S3.manifest(true, true, false).frames.unwrap().formats & jpeg, 0);
+        assert_ne!(ESP32S3.manifest(true, true, true).frames.unwrap().formats & jpeg, 0);
     }
 
     #[test]

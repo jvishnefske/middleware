@@ -22,7 +22,8 @@ import { SerialRequester } from "../device/requester";
 import { boardUnitsNote, unitsOnBoard, uploadUnit } from "../device/unitUpload";
 import type { PlantModel } from "../model/plant";
 import { indexedDbStorage } from "../trust/keyStore";
-import type { DeviceInfo } from "../protocol/wasm";
+import type { BoardInfo, DeviceInfo, Manifest } from "../protocol/wasm";
+import { capabilityRows } from "../device/manifest";
 import { describePort } from "../serial/ports";
 import type { App, PayloadHandoff } from "./app";
 import { errorText, formatBytes, h, parseHex, progressBar } from "./dom";
@@ -264,11 +265,30 @@ export function devicePage(app: App): HTMLElement {
 
   async function refreshInfo() {
     if (!client) return;
+    let i: DeviceInfo;
     try {
-      showInfo(await client.info());
+      i = await client.info();
+      showInfo(i);
     } catch (e) {
       note(`sys/info: ${errorText(e)}`);
+      return;
     }
+    // What the node offers payloads (MF4); older firmware answers
+    // NotFound to either key, which reads as null.
+    let manifest: Manifest | null = null;
+    let board: BoardInfo | null = null;
+    try {
+      manifest = await client.manifest();
+    } catch (e) {
+      note(`sys/manifest: ${errorText(e)}`);
+    }
+    try {
+      board = await client.board();
+    } catch (e) {
+      note(`sys/board: ${errorText(e)}`);
+    }
+    if (info !== i) return; // replaced meanwhile
+    for (const [k, v] of capabilityRows(i, manifest, board)) infoEl.append(h("dt", {}, k), h("dd", {}, v));
   }
   infoBtn.addEventListener("click", refreshInfo);
 

@@ -30,6 +30,7 @@ use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
 use middleware::{Key, SenderId};
+use middleware::loader::manifest::Manifest;
 use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, NetAddr, PayloadStatus, keys};
 use std::time::Instant;
 
@@ -157,6 +158,15 @@ impl<L: Endpoint> Device<L> {
         let body = self.link.command(&Command::Info)?;
         Info::decode(&body).ok_or_else(|| Error::Malformed {
             key: keys::INFO.as_str().to_owned(),
+        })
+    }
+
+    /// `sys/manifest` (MF4), decoded. Firmware without one answers
+    /// `NotFound`.
+    pub fn manifest(&mut self) -> Result<Manifest, Error> {
+        let body = self.link.command(&Command::Manifest)?;
+        Manifest::decode(&body).map_err(|_| Error::Malformed {
+            key: keys::MANIFEST.as_str().to_owned(),
         })
     }
 
@@ -588,6 +598,22 @@ mod tests {
         assert_eq!(device(fake).board().unwrap().info(), info);
         let err = device(FakeDevice::new("esp32", "0.5.0", 4096, true))
             .board()
+            .unwrap_err();
+        assert!(err.to_string().contains("not"), "{err}");
+    }
+
+    #[test]
+    fn mf4_manifest_is_decoded_or_not_found() {
+        use middleware::loader::manifest::{Groups, Manifest};
+        let m = Manifest::new(6).with_groups(Groups::SERVE);
+        let mut body = [0u8; 64];
+        let n = m.encode(&mut body).unwrap();
+        let fake = FakeDevice::new("rt1050", "0.6.0", 4096, true).with_manifest(body[..n].to_vec());
+        assert_eq!(device(fake).manifest().unwrap(), m);
+        let bad = FakeDevice::new("rt1050", "0.6.0", 4096, true).with_manifest(vec![9, 9, 9]);
+        assert!(matches!(device(bad).manifest(), Err(Error::Malformed { .. })));
+        let err = device(FakeDevice::new("esp32", "0.5.0", 4096, true))
+            .manifest()
             .unwrap_err();
         assert!(err.to_string().contains("not"), "{err}");
     }

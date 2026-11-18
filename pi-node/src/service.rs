@@ -48,7 +48,8 @@ use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, RECORD_LEN, TrustStore};
 use middleware::loader::trust::TrustState;
-use middleware::loader::{Caps, PayloadStatus, keys};
+use middleware::loader::manifest::{Groups, Limits, Link, LinkKind, Manifest};
+use middleware::loader::{PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
@@ -87,6 +88,15 @@ pub const CHIP: &str = if cfg!(not(target_os = "linux")) {
 } else {
     "host"
 };
+
+/// What the node offers payloads (`sys/manifest`, MF3), next to
+/// `PiDevice`: software timers and requests on payload keys; every
+/// peripheral is `Unsupported` (see `crate::device`), so no other group
+/// and no source; the serial link to the gateway.
+pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
+    .with_groups(Groups::TIMERS.with(Groups::SERVE))
+    .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+    .with_limits(Limits { routes: 0, ..Limits::ABI });
 
 /// What [`Service::open`] found on flash, for the start log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +245,7 @@ impl<F: NorFlash + Durable> Service<F> {
             rekey_window: false,
             staging: false,
             node: Some(facts.node),
-            caps: Caps::SERVE,
+            manifest: Some(&MANIFEST),
         };
         let svc = Service { state, ctx, store, trust, served: ServedKeys::new() };
         (svc, Boot { installed, trust: persisted })

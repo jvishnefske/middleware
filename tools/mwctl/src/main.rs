@@ -45,7 +45,7 @@ use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::report::{
-    format_board, format_event, format_fw_info, format_info, format_net, format_trust,
+    format_board, format_event, format_manifest, format_fw_info, format_info, format_net, format_trust,
 };
 use mwctl::sign::{SEED_LEN, Seed, Signer, counter_at, hex, sign_commit, sign_control, version_at};
 use mwctl::udp::UdpLink;
@@ -583,6 +583,7 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
     match cmd {
         Cmd::Info => dev.info().map(|i| print!("{}", format_info(&i))),
         Cmd::Board => dev.board().map(|b| print!("{}", format_board(&b.info()))),
+        Cmd::Manifest => dev.manifest().map(|m| print!("{}", format_manifest(&m))),
         Cmd::Request { key, body } => {
             let key = middleware::Key::new(&key).map_err(|_| {
                 Error::Io(std::io::Error::new(

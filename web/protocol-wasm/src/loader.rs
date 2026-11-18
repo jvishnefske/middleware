@@ -221,6 +221,9 @@ pub enum Action {
     /// `sys/board`: the device answers with its board description (the
     /// loader holds none).
     Board,
+    /// `sys/manifest`: the device answers with its manifest (the loader
+    /// holds none).
+    Manifest,
     /// `sys/payload/start`.
     Start,
     /// `sys/payload/stop`.
@@ -355,6 +358,7 @@ impl DeviceLoader {
                     Command::Start => Action::Start,
                     Command::Stop => Action::Stop,
                     Command::Board => Action::Board,
+                    Command::Manifest => Action::Manifest,
                     _ => Action::Info,
                 };
                 (next, Ok(action))
@@ -429,6 +433,7 @@ mod tests {
         let d = DeviceLoader::new(8);
         assert_eq!(d.step("sys/info", &[]).1, Ok(Action::Info));
         assert_eq!(d.step("sys/board", &[]).1, Ok(Action::Board));
+        assert_eq!(d.step("sys/manifest", &[]).1, Ok(Action::Manifest));
         assert_eq!(d.step("sys/payload/start", &[]).1, Ok(Action::Start));
         assert_eq!(d.step("sys/payload/stop", &[]).1, Ok(Action::Stop));
         assert_eq!(d.step("app/led", &[1]).1, Ok(Action::App));
