@@ -5962,7 +5962,8 @@ for (SHA-256) and a version, and maps channel names to targets: `Local`
 (a `route_source` config the runtime starts), `Key`, `Remote { node,
 key }`, or `Adapted { inner, adapter }`. It is installed with
 `sys/payload/bind` (the record, optionally `[version][signature]` over
-`"mw-binding-v1\0" || image sha256 || version || sha256(record)`) and
+`"mw-binding-v1\0" || node id || image sha256 || version ||
+sha256(record)`) and
 read back with `sys/payload/binding`. It applies at the payload's next
 start, so a payload is rebound without being uploaded again. A local
 source publishes on the node-internal key `ch/<name>`: the node delivers
@@ -5975,10 +5976,12 @@ those publications to its own payload and sends them on no link.
   refused; `ch/...` keys are internal — `loader::binding::tests::bd1_*`.
 - [x] BD2 A bind body is the record and an optional trailer of the same
   version. Unclaimed devices take any binding; a claimed one needs the
-  version above the stored binding's for the same image (another image
-  starts over), a signature by the pinned key (Ed25519 or P-256) when one
-  is sent or the request comes over a network, and accepts an unsigned
-  one over serial. The RT1050's Zenoh gate admits only signed binds
+  version above the stored binding's, whatever image either is for (so
+  no earlier binding is replayed, not even after one for another image),
+  a signature by the pinned key (Ed25519 or P-256) over a message naming
+  this device's node id (a binding signed for one device is refused by
+  every other) when one is sent or the request comes over a network, and
+  accepts an unsigned one over serial. The RT1050's Zenoh gate admits only signed binds
   (claimed) and reads `sys/payload/binding` read-only; the dispatcher
   answers `NotFound` without the runtime — `loader::binding::tests::bd2_bind_bodies_carry_an_optional_signature_of_the_same_version`;
   `loader::trust::tests::crypto::bd2_bindings_need_the_pinned_key_and_a_new_version_per_image`;
@@ -6004,10 +6007,17 @@ those publications to its own payload and sends them on no link.
   fail the load (`LoadError::Bind`, naming the channel; the shells log
   it). Remote and adapted targets are refused until PR and AD. Every
   shell (esp-base, rp-base, RT1050, pi-node) loads the stored record and
-  passes it for the image it starts; the RT1050 bus loops `ch/...`
-  publications back to its payload — `wasm-host` `channels::tests::bd4_*`,
+  passes it for the image it starts. `ch/...` belongs to the runtime: a
+  payload's own `publish`, `subscribe`, `serve` and routes on it are
+  `InvalidKey`, publications on it from any link are dropped
+  (`esp_base::dispatch::route_publication`), the RT1050 declares no Zenoh
+  subscriber for it and loops its local sources' publications back on
+  the link-less `LinkId::LOCAL` — `wasm-host` `channels::tests::bd4_*`,
   `tests/abi7.rs` `bd4_*`; esp-base `binding_store::tests::bd3_a_binding_applies_only_to_its_image`,
-  `bd3_perform_saves_reads_and_records_the_mark`.
+  `bd3_perform_saves_reads_and_records_the_mark`,
+  `dispatch::tests::publications_route_only_to_running_subscribed_payloads`;
+  wasm-host `abi::tests::keys_reject_sys_and_malformed`; firmware-imxrt
+  `zenoh_mgmt::tests::gap_payload_subscriptions_become_zenoh_declarations`.
 - [x] BD5 Hosts check and install bindings: protocol-wasm
   `checkBinding(manifest, wasm, record)` lists issues with one-click
   fixes (required channel unbound, output on a source, wrong kind or

@@ -28,12 +28,13 @@
 //! The request body is the binding, optionally followed by
 //! [`SIGNED_BINDING_LEN`] bytes `[version u32 LE][signature 64]` whose
 //! version equals the binding's. The signature is over
-//! [`binding_message`]: `"mw-binding-v1\0" || image sha256 || version LE
-//! || sha256(binding)`. A claimed device takes a binding only with a
+//! [`binding_message`]: `"mw-binding-v1\0" || node id (8) || image sha256
+//! || version LE || sha256(binding)`, so a binding signed for one device
+//! is refused by every other. A claimed device takes a binding only with a
 //! signature by its pinned key and a version above the last binding it
-//! accepted for that image ([`super::trust::TrustState::accept_binding`]);
-//! over a serial port, as for `start` and `stop`, an unsigned binding is
-//! accepted too. `sys/payload/binding` reads the current binding back.
+//! accepted, for any image, so no earlier binding can be replayed
+//! ([`super::trust::TrustState::accept_binding`]); over a serial port, as
+//! for `start` and `stop`, an unsigned binding is accepted too. `sys/payload/binding` reads the current binding back.
 
 use crate::key::Key;
 use crate::transport::SenderId;
@@ -58,7 +59,7 @@ pub const SIGNED_BINDING_LEN: usize = 4 + SIGNATURE_LEN;
 pub const MESSAGE_TAG: &[u8; 14] = b"mw-binding-v1\0";
 
 /// Length of [`binding_message`].
-pub const MESSAGE_LEN: usize = MESSAGE_TAG.len() + 32 + 4 + 32;
+pub const MESSAGE_LEN: usize = MESSAGE_TAG.len() + 8 + 32 + 4 + 32;
 
 /// Target codes.
 pub mod target {
@@ -508,9 +509,11 @@ impl<'a> BindRequest<'a> {
     }
 }
 
-/// The message a binding signature covers: [`MESSAGE_TAG`], the image's
-/// SHA-256, the binding version (LE) and the SHA-256 of the record.
+/// The message a binding signature covers: [`MESSAGE_TAG`], the target
+/// device's node id (as `sys/info` reports it), the image's SHA-256, the
+/// binding version (LE) and the SHA-256 of the record.
 pub fn binding_message(
+    node: SenderId,
     image_sha256: &[u8; 32],
     version: Version,
     record_sha256: &[u8; 32],
@@ -518,9 +521,10 @@ pub fn binding_message(
     let mut m = [0u8; MESSAGE_LEN];
     let t = MESSAGE_TAG.len();
     m[..t].copy_from_slice(MESSAGE_TAG);
-    m[t..t + 32].copy_from_slice(image_sha256);
-    m[t + 32..t + 36].copy_from_slice(&version.0.to_le_bytes());
-    m[t + 36..].copy_from_slice(record_sha256);
+    m[t..t + 8].copy_from_slice(&node.0);
+    m[t + 8..t + 40].copy_from_slice(image_sha256);
+    m[t + 40..t + 44].copy_from_slice(&version.0.to_le_bytes());
+    m[t + 44..].copy_from_slice(record_sha256);
     m
 }
 
@@ -664,11 +668,12 @@ pub(crate) mod tests {
         let mut short = bytes.clone();
         short.extend_from_slice(&[0; 10]);
         assert_eq!(BindRequest::parse(&short), None);
-        let m = binding_message(&[1; 32], Version(0x0403_0201), &[2; 32]);
+        let m = binding_message(SenderId([9; 8]), &[1; 32], Version(0x0403_0201), &[2; 32]);
         assert_eq!(&m[..14], MESSAGE_TAG);
-        assert_eq!(&m[14..46], &[1; 32]);
-        assert_eq!(&m[46..50], &[1, 2, 3, 4]);
-        assert_eq!(&m[50..], &[2; 32]);
+        assert_eq!(&m[14..22], &[9; 8]);
+        assert_eq!(&m[22..54], &[1; 32]);
+        assert_eq!(&m[54..58], &[1, 2, 3, 4]);
+        assert_eq!(&m[58..], &[2; 32]);
     }
 
     #[test]

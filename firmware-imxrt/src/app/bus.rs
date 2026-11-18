@@ -243,7 +243,7 @@ impl Bus {
         // back to this board's payload only, never on a link; dropped
         // when the inbound queue is full (the route counts it).
         if middleware::loader::binding::is_internal_key(key) {
-            let msg = Inbound::new(LinkId::UART, Kind::Publish, key, data, None).ok_or(TooLarge)?;
+            let msg = Inbound::new(LinkId::LOCAL, Kind::Publish, key, data, None).ok_or(TooLarge)?;
             return self.inbound.try_send(msg).map_err(|_| TooLarge);
         }
         let fanout = self.routing.lock(|r| {

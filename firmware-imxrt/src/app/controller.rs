@@ -30,6 +30,7 @@ use imxrt_base::links::LinkId;
 use imxrt_base::service::{Handled, Reply as Answer, Service};
 use imxrt_base::shell::flexspi::HyperFlash;
 use middleware::Key;
+use middleware::loader::binding::is_internal_key;
 use middleware::transport::HandlerError;
 
 use super::bus::{Bus, Inbound, Kind, MAX_REPLY, Reply};
@@ -463,7 +464,10 @@ impl Controller {
                         let Ok(key) = Key::new(&msg.key) else {
                             continue;
                         };
-                        if route_publication(&self.svc.state(), key, payload.subscriptions())
+                        // A local channel source's batches come back on
+                        // LOCAL; `ch/...` from any real link is dropped.
+                        let local = msg.link == LinkId::LOCAL && is_internal_key(key);
+                        if (local || route_publication(&self.svc.state(), key, payload.subscriptions()))
                             && let Err(trap) = payload.deliver(key, &msg.body)
                         {
                             self.trapped(&trap);

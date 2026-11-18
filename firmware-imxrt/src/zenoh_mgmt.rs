@@ -257,7 +257,12 @@ pub fn subscription_set<'a>(keys: impl Iterator<Item = &'a str>) -> SubSet {
     let mut set = SubSet::new();
     for k in keys {
         let Ok(key) = Key::new(k) else { continue };
-        if is_system_key(key) || set.iter().any(|s| s.as_str() == k) {
+        // `ch/...` is node-internal (BD4): never declared to the network,
+        // so no peer can publish into a locally bound channel.
+        if is_system_key(key)
+            || middleware::loader::binding::is_internal_key(key)
+            || set.iter().any(|s| s.as_str() == k)
+        {
             continue;
         }
         let Ok(s) = SubKey::try_from(k) else { continue };
@@ -518,7 +523,7 @@ mod tests {
         let record = out[..n].to_vec();
         let mut body = record.clone();
         if let Some(seed) = seed {
-            let m = binding_message(&sha, Version(version), &ImageHash::digest(&record));
+            let m = binding_message(FACTS.node, &sha, Version(version), &ImageHash::digest(&record));
             let auth = SignedBinding {
                 version: Version(version),
                 signature: Signature(signer(seed).sign(&m).to_bytes()),
@@ -1236,7 +1241,7 @@ mod tests {
     #[test]
     fn gap_payload_subscriptions_become_zenoh_declarations() {
         let set =
-            subscription_set(["app/cmd", "sys/info", "app/cmd", "bad//key", "app/led"].into_iter());
+            subscription_set(["app/cmd", "sys/info", "app/cmd", "bad//key", "ch/audio", "app/led"].into_iter());
         let keys: std::vec::Vec<&str> = set.iter().map(|k| k.as_str()).collect();
         assert_eq!(keys, ["app/cmd", "app/led"], "valid non-sys keys, once");
         let next = subscription_set(["app/led", "app/new"].into_iter());

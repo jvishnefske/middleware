@@ -605,7 +605,10 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
             if let Some(k) = key {
                 let signer = open_signer(&k)?;
                 let sha = mwctl::sign::image_sha256(&record);
-                let message = binding_message(&mwctl::sign::image_sha256(&image), v, &sha);
+                let node = dev.info()?.node.ok_or_else(|| {
+                    Error::Payload("the device reports no node id to sign the binding for".into())
+                })?;
+                let message = binding_message(node, &mwctl::sign::image_sha256(&image), v, &sha);
                 let signature = signer.sign(&message)?;
                 body.extend_from_slice(&SignedBinding { version: v, signature }.encode());
                 eprintln!("signing binding version {} with {k}", v.0);
