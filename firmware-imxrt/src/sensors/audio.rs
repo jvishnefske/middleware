@@ -1,6 +1,10 @@
 //! Microphone sample processing (SC5): fixed-point levels and the G.711
 //! µ-law codec.
 //!
+//! Both are middleware's (`stream::samples`), shared with the runtime's
+//! stream adapters (AD3); the tests below pin them against G.711 and the
+//! board's needs.
+//!
 //! Levels ([`levels`]) are integer arithmetic, no floats: the peak is the
 //! largest magnitude and the RMS the integer square root of the mean
 //! square, both `u16` in sample units, so full scale (`i16::MIN`) is
@@ -25,79 +29,22 @@ pub struct Levels {
     pub peak: u16,
 }
 
-/// The levels of a block; zero for an empty block.
+/// The levels of a block; zero for an empty block
+/// (`middleware::stream::samples::block_levels`, which the runtime's
+/// `PcmToLevels` adapter uses too, AD3).
 pub fn levels(block: &[i16]) -> Levels {
-    let mut sum: u64 = 0;
-    let mut peak: u16 = 0;
-    for &s in block {
-        let m = s.unsigned_abs();
-        peak = peak.max(m);
-        sum = sum.saturating_add(u64::from(m) * u64::from(m));
-    }
-    let n = block.len() as u64;
-    let mean = sum.checked_div(n).unwrap_or(0);
-    // mean ≤ 2³⁰, so the root is ≤ 32768 and fits u16.
-    let rms = u16::try_from(isqrt(mean)).unwrap_or(u16::MAX);
+    let (rms, peak) = middleware::stream::samples::block_levels(block);
     Levels { rms, peak }
 }
 
 /// The integer square root (rounded down).
 pub const fn isqrt(n: u64) -> u64 {
-    // Bit-by-bit: no division, no overflow.
-    let mut rem = n;
-    let mut root: u64 = 0;
-    let mut bit: u64 = 1 << 62;
-    while bit > n {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if rem >= root + bit {
-            rem -= root + bit;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root
+    n.isqrt()
 }
 
-/// µ-law bias (33 in the 14-bit domain).
-const BIAS: i16 = 0x84 >> 2;
-/// The largest 14-bit magnitude before the bias.
-const CLIP: i16 = 8159;
-
-/// Encode one 16-bit sample to G.711 µ-law.
-pub const fn mulaw_encode(sample: i16) -> u8 {
-    let mut v = sample >> 2; // −8192..=8191
-    let mask: u8 = if v < 0 {
-        v = -v; // ≤ 8192, no overflow
-        0x7F
-    } else {
-        0xFF
-    };
-    if v > CLIP {
-        v = CLIP;
-    }
-    let v = (v + BIAS) as u16; // 33..=8192
-    // Segment: how many times v reaches 0x40, 0x80, …, 0x2000.
-    let mut seg: u16 = 0;
-    while seg < 8 && v >= (0x40 << seg) {
-        seg += 1;
-    }
-    if seg >= 8 {
-        return 0x7F ^ mask;
-    }
-    let code = ((seg << 4) | ((v >> (seg + 1)) & 0x0F)) as u8;
-    code ^ mask
-}
-
-/// Decode one G.711 µ-law code to a 16-bit sample.
-pub const fn mulaw_decode(code: u8) -> i16 {
-    let u = !code;
-    let t = ((((u & 0x0F) as i16) << 3) + 0x84) << ((u & 0x70) >> 4);
-    if u & 0x80 != 0 { 0x84 - t } else { t - 0x84 }
-}
+/// G.711 µ-law, shared with middleware (`stream::samples`): the reference
+/// `g711.c` formulation the runtime's `PcmToMuLaw` adapter uses too (AD3).
+pub use middleware::stream::samples::{mulaw_decode, mulaw_encode};
 
 /// Encode a block into `out`; returns the number of codes written (the
 /// shorter of the two lengths).

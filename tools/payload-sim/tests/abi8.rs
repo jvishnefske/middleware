@@ -175,3 +175,43 @@ fn pr3_a_remote_channel_takes_the_named_node_only() {
     assert!(ok, "{out}");
     assert!(!out.contains("publish lab/level"), "{out}");
 }
+
+/// AD2: the same payload on a local PCM source through the levels adapter
+/// (16 kHz PCM, 160-sample blocks): one levels message per ten blocks, the
+/// block indices as a levels route would number them.
+#[test]
+fn ad2_pcm_through_the_levels_adapter_reaches_a_levels_channel() {
+    use middleware::loader::binding::{Adapter, Endpoint};
+    let mut b = Binding::new([0; 32], Version(1));
+    let pcm = MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 0).unwrap();
+    b.bind(
+        "audio",
+        Target::Adapted {
+            inner: Endpoint::Local(RouteSource::Samples(SampleSource::Microphone(pcm))),
+            adapter: Adapter::PcmToLevels { block: 160 },
+        },
+    )
+    .unwrap();
+    b.bind("level", Target::Key(Key::from_static("lab/level")))
+        .unwrap();
+    let mut out = [0u8; BINDING_MAX];
+    let n = b.encode(&mut out).unwrap();
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bind-adapted.bin");
+    std::fs::write(&path, &out[..n]).unwrap();
+    let (ok, out) = run(&[
+        "--virtual",
+        "--until-ms",
+        "300",
+        "--bind",
+        path.to_str().unwrap(),
+    ]);
+    assert!(ok, "{out}");
+    // Each 10 ms PCM batch completes one 160-sample block.
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("publish lab/level rms "))
+        .collect();
+    assert!(lines.len() >= 20, "{out}");
+    assert!(lines[0].contains("blocks 1 from 0"), "{}", lines[0]);
+    assert!(lines[1].contains("blocks 1 from 1"), "{}", lines[1]);
+}

@@ -14,15 +14,18 @@
 //!   source, or not at that rate, range, mode or gain), or outside the
 //!   channel's rate range;
 //! * a remote target naming a node the board has not heard (when its
-//!   `sys/peers` is known).
+//!   `sys/peers` is known);
+//! * an adapter that does not take its local source, or whose output the
+//!   channel does not take (`middleware::stream::adapt::Adapter::output`).
 //!
 //! Where an obvious target exists, the issue carries it as a [`Fix`]:
 //! [`suggest`] picks a local source the manifest offers and the channel
 //! takes (the lowest offered rate in the channel's range, 10 ms level
 //! blocks, about 100 ms per message).
 
-use middleware::loader::binding::{Binding, Target};
+use middleware::loader::binding::{Adapter, Binding, Endpoint, Target};
 use middleware::loader::manifest::Manifest;
+use middleware::stream::adapt::Shape;
 use middleware::stream::samples::{MAX_BATCH_DATA, SampleFormat, SensorKind};
 use middleware::wasm_abi::channels::{Channel, Channels, DataKind, Direction};
 use middleware::wasm_abi::route::{
@@ -145,9 +148,42 @@ pub fn suggest(manifest: &Manifest, decl: &Channel<'_>) -> Option<RouteSource> {
     None
 }
 
-/// What is wrong with binding `decl` to the local `source` on a node with
-/// `manifest`, if anything.
-fn local_problem(manifest: &Manifest, decl: &Channel<'_>, source: &RouteSource) -> Option<String> {
+/// What is wrong with binding `decl` to the local `source` (through
+/// `adapter`) on a node with `manifest`, if anything.
+fn local_problem(
+    manifest: &Manifest,
+    decl: &Channel<'_>,
+    source: &RouteSource,
+    adapter: Option<Adapter>,
+) -> Option<String> {
+    if let Some(a) = adapter {
+        let RouteSource::Samples(s) = source else {
+            return Some(format!("{a:?} takes sample batches, not frames"));
+        };
+        let (sensor, format, channels, rate_hz) = shape(s);
+        let Some(out) = a.output(Shape {
+            sensor,
+            format,
+            channels,
+            rate_hz,
+        }) else {
+            return Some(format!("{a:?} does not take {sensor:?} {format:?}"));
+        };
+        if decl.kind == DataKind::Samples
+            && !decl.accepts_samples(out.sensor, out.format, out.channels, out.rate_hz)
+        {
+            return Some(format!(
+                "the channel does not take what {a:?} makes ({:?} at {} Hz)",
+                out.format, out.rate_hz
+            ));
+        }
+        if !manifest.accepts_samples(s) {
+            return Some(format!(
+                "the node does not offer this {sensor:?} config ({rate_hz} Hz)"
+            ));
+        }
+        return None;
+    }
     match (decl.kind, source) {
         (DataKind::Bytes, _) => None,
         (DataKind::Frames, RouteSource::Frames(src, cfg)) => match manifest.frames {
@@ -219,8 +255,17 @@ pub fn check(
                     format!("{name} is an output: bind it to a key"),
                     Some(Fix::KeyNamed),
                 )),
-            Some(Target::Local(source)) => {
-                if let Some(problem) = local_problem(manifest, decl, &source) {
+            Some(
+                t @ (Target::Local(_)
+                | Target::Adapted {
+                    inner: Endpoint::Local(_),
+                    ..
+                }),
+            ) => {
+                let (Endpoint::Local(source), adapter) = t.parts() else {
+                    continue;
+                };
+                if let Some(problem) = local_problem(manifest, decl, &source, adapter) {
                     let fix = suggest(manifest, decl)
                         .filter(|s| *s != source)
                         .map(Fix::Local);
@@ -408,6 +453,45 @@ mod tests {
                 .message
                 .contains("has not heard node 0707070707070707"),
             "{unheard:?}"
+        );
+        // AD3: PCM through the levels adapter fits a levels channel; a
+        // µ-law adapter on a levels source, or µ-law into it, does not.
+        let adapted = |inner, adapter| {
+            binding(&[
+                (
+                    "audio",
+                    Target::Adapted {
+                        inner: Endpoint::Local(inner),
+                        adapter,
+                    },
+                ),
+                level,
+            ])
+        };
+        let pcm = mic(16_000, AudioMode::Pcm);
+        assert_eq!(
+            check(
+                &m,
+                &c,
+                &adapted(pcm, Adapter::PcmToLevels { block: 160 }),
+                None
+            ),
+            []
+        );
+        let i = check(
+            &m,
+            &c,
+            &adapted(mic(16_000, AudioMode::Levels), Adapter::PcmToMuLaw),
+            None,
+        );
+        assert!(
+            i[0].message.contains("does not take Microphone Levels"),
+            "{i:?}"
+        );
+        let i = check(&m, &c, &adapted(pcm, Adapter::PcmToMuLaw), None);
+        assert!(
+            i[0].message.contains("does not take what PcmToMuLaw makes"),
+            "{i:?}"
         );
     }
 }

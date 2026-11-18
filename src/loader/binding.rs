@@ -96,7 +96,8 @@ pub enum BindingError {
 pub enum Adapter {
     /// PCM microphone batches to RMS/peak levels per `block` samples.
     PcmToLevels {
-        /// Samples per level block, `1..=MAX_LEVEL_BLOCK`.
+        /// Samples per level block, `2..=MAX_LEVEL_BLOCK` (one batch of
+        /// PCM then always fits one batch of levels).
         block: u16,
     },
     /// PCM microphone batches to G.711 µ-law.
@@ -125,7 +126,7 @@ impl Adapter {
     /// parameter out of range.
     pub const fn decode(code: u8, param: u16) -> Option<Self> {
         match (code, param) {
-            (1, b) if b >= 1 && b <= route::MAX_LEVEL_BLOCK => {
+            (1, b) if b >= 2 && b <= route::MAX_LEVEL_BLOCK => {
                 Some(Adapter::PcmToLevels { block: b })
             }
             (2, 0) => Some(Adapter::PcmToMuLaw),
@@ -590,7 +591,7 @@ pub(crate) mod tests {
         c.bind("cmd", Target::Key(Key::from_static("x"))).unwrap();
         assert_eq!(c.entries().count(), 4);
         for a in [
-            Adapter::PcmToLevels { block: 1 },
+            Adapter::PcmToLevels { block: 2 },
             Adapter::PcmToMuLaw,
             Adapter::Decimate { factor: 4 },
             Adapter::ImuToMagnitude,
@@ -600,6 +601,7 @@ pub(crate) mod tests {
         }
         assert_eq!(Adapter::decode(3, 1), None);
         assert_eq!(Adapter::decode(1, 0), None);
+        assert_eq!(Adapter::decode(1, 1), None);
         assert_eq!(Adapter::decode(9, 0), None);
     }
 

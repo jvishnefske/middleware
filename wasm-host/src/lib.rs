@@ -639,7 +639,12 @@ fn resolve<D: Device>(
         resolved.push(match step {
             Step::Unbound => Resolved::Unbound,
             Step::Output { key } => Resolved::Output { key },
-            Step::Input { key, route, from } => {
+            Step::Input {
+                key,
+                route,
+                from,
+                adapter,
+            } => {
                 if let Some(source) = route {
                     let k = middleware::Key::new(&key)
                         .map_err(|_| LoadError::Bind(BindError::Mismatch(d.name.clone())))?;
@@ -648,7 +653,11 @@ fn resolve<D: Device>(
                 }
                 let slot = st.subscriptions.len();
                 st.subscriptions.push(key);
-                Resolved::Input { slot, from }
+                Resolved::Input {
+                    slot,
+                    from,
+                    adapter: adapter.map(middleware::stream::adapt::AdapterState::new),
+                }
             }
         });
     }
@@ -958,7 +967,9 @@ impl<D: Device + 'static> Payload<D> {
     /// reported it; `None` when unknown). A channel bound to a remote node
     /// (ABI 8, `Target::Remote`) takes messages from that node only: from
     /// anyone else, or an unknown sender, this is `Ok(false)` without
-    /// calling the payload.
+    /// calling the payload. The sender is what the link reports (over
+    /// Zenoh, the publisher's own attachment): this routes a channel to a
+    /// node, it does not authenticate one.
     pub fn deliver_from(
         &mut self,
         key: middleware::Key<'_>,
@@ -974,6 +985,16 @@ impl<D: Device + 'static> Payload<D> {
         if !self.store.data().channels.admits(slot, sender) {
             return Ok(false);
         }
+        // An adapted channel (ABI 8) gets the adapter's output, or nothing
+        // when this message completed none.
+        let mut adapted = [0u8; MAX_MESSAGE];
+        let data = match self.store.data_mut().channels.adapter_mut(slot) {
+            Some(a) => match a.feed(data, &mut adapted) {
+                Some(n) => &adapted[..n],
+                None => return Ok(false),
+            },
+            None => data,
+        };
         if data.len() > MAX_MESSAGE {
             return Ok(false);
         }
