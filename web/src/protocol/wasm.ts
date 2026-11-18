@@ -108,6 +108,8 @@ export interface Manifest {
   sinkSpi?: { maxFrame: number };
   links: { id: number; kind: number; kindName: string }[];
   limits?: { routes: number; subscriptions: number; channels: number; maxMessage: number };
+  /** The board's model (a Linux node's device tree `model`), when sent. */
+  board?: string;
   /** The `sys/info` capability bits the manifest implies, and their names. */
   caps: number;
   capNames: string[];

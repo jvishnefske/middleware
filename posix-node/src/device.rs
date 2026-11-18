@@ -1,7 +1,7 @@
 //! The node as a payload sees it: `wasm_host::Device` over the process's
 //! clock, four software timers and a bounded outbox of publications.
 //!
-//! | ABI call | mw-pi-node |
+//! | ABI call | mw-posix-node |
 //! |----------|------------|
 //! | `log` | a `sys/log` line in the outbox (truncated to `MAX_LOG` by wasm-host) |
 //! | `publish` | a publication in the outbox (`sys/...` keys `InvalidKey`; larger than one serial frame `InvalidArgument`; outbox full `Transport`, counted) |

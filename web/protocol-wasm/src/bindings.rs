@@ -276,7 +276,8 @@ pub fn decode_board_info(data: &[u8]) -> Option<Object> {
 /// imu?: {ratesHz, rangesG, magRatesHz}, mic?: {ratesHz, modes, maxGainDb},
 /// frames?: {kinds, formats, maxWidth, maxHeight}, sinkSpi?: {maxFrame},
 /// links: [{id, kind, kindName}], limits?: {routes, subscriptions,
-/// channels, maxMessage}, caps, capNames}`; `modes`, `kinds` and `formats`
+/// channels, maxMessage}, board?, caps, capNames}`; `board` is the board's
+/// model (a string, lossy UTF-8); `modes`, `kinds` and `formats`
 /// are names (`levels`/`mulaw`/`pcm`, `testPattern`/`camera`,
 /// `rgb565`/`jpeg`). `undefined` when malformed.
 #[wasm_bindgen(js_name = decodeManifest)]
@@ -364,6 +365,9 @@ pub fn decode_manifest(data: &[u8]) -> Option<Object> {
         set(&b, "channels", l.channels);
         set(&b, "maxMessage", l.max_message);
         set(&o, "limits", b);
+    }
+    if let Some(b) = &m.board {
+        set(&o, "board", String::from_utf8_lossy(b.as_bytes()).into_owned());
     }
     let caps = m.caps();
     set(&o, "caps", caps.0);

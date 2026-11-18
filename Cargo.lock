@@ -1857,7 +1857,7 @@ name = "mw-jpeg"
 version = "0.1.0"
 
 [[package]]
-name = "mw-pi-node"
+name = "mw-posix-node"
 version = "0.6.0"
 dependencies = [
  "embedded-storage",

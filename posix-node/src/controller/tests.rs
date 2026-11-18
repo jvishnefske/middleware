@@ -70,7 +70,7 @@ fn pn7_a_started_payload_serves_publishes_ticks_and_fires_timers() {
     c.boot(&boot);
     let outs = c.drain();
     assert_eq!(on(&outs, "sys/payload/status"), [&[PayloadStatus::Empty as u8][..]]);
-    assert!(logs(&outs)[0].starts_with("mw-pi-node "), "{:?}", logs(&outs));
+    assert!(logs(&outs)[0].starts_with("mw-posix-node "), "{:?}", logs(&outs));
     install(&mut c, &demo());
     assert_eq!(req(&mut c, "sys/payload/start", &[]), Ok(Vec::new()));
     assert!(c.running());

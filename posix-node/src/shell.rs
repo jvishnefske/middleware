@@ -5,7 +5,7 @@
 //! ```text
 //!   payload ── Controller ── device thread ══ ChannelIo pair ══ mw-gateway ── Zenoh, gw/sys
 //!                                 ║
-//!                                 ╚═══ local link (optional: MW_PI_NODE_LOCAL_SERIAL, tests)
+//!                                 ╚═══ local link (optional: MW_POSIX_NODE_LOCAL_SERIAL, tests)
 //! ```
 //!
 //! * The **device thread** runs its own current-thread tokio runtime, so a
@@ -140,7 +140,7 @@ impl Links {
         for o in outs {
             let Ok(key) = Key::new(&o.key) else { continue };
             if key == keys::LOG {
-                tracing::info!(target: "mw_pi_node::device", "{}", String::from_utf8_lossy(&o.payload));
+                tracing::info!(target: "mw_posix_node::device", "{}", String::from_utf8_lossy(&o.payload));
             }
             let frame = Frame::Publish { key, payload: &o.payload };
             let ok = send(&mut self.gateway, &frame).await;
@@ -251,12 +251,12 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
 ) -> io::Result<DeviceTask> {
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
-    let thread = std::thread::Builder::new().name("mw-pi-node-device".into()).spawn(move || {
+    let thread = std::thread::Builder::new().name("mw-posix-node-device".into()).spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build();
         let rt = match runtime {
             Ok(rt) => rt,
             Err(e) => {
-                tracing::error!("mw-pi-node: device runtime: {e}");
+                tracing::error!("mw-posix-node: device runtime: {e}");
                 let _ = report.send(DeviceReport {
                     ended: None,
                     status: None,
@@ -339,7 +339,7 @@ impl std::error::Error for StartError {}
 
 /// A running node: the device thread and the gateway in front of it.
 #[derive(Debug)]
-pub struct PiNode {
+pub struct PosixNode {
     device: DeviceTask,
     gateway: Gateway,
 }
@@ -362,7 +362,7 @@ pub struct DeviceParts<F> {
     pub facts: Facts,
     /// The limits payloads run under.
     pub limits: Limits,
-    /// A second link beside the gateway's (`MW_PI_NODE_LOCAL_SERIAL`).
+    /// A second link beside the gateway's (`MW_POSIX_NODE_LOCAL_SERIAL`).
     pub local: Option<ChannelIo>,
 }
 
@@ -389,7 +389,7 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     device: DeviceParts<F>,
     gateway: GatewayParts,
     session: ZenohTransport,
-) -> Result<(PiNode, SysForward), StartError> {
+) -> Result<(PosixNode, SysForward), StartError> {
     let DeviceParts { flash, facts, limits, local } = device;
     let GatewayParts { bridge, options, store } = gateway;
     let (device_io, gateway_io) = pair();
@@ -397,10 +397,10 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
         .await
         .map_err(StartError::Zenoh)?;
     let device = spawn_device(flash, facts, limits, device_io, local).map_err(StartError::Thread)?;
-    Ok((PiNode { device, gateway }, sys))
+    Ok((PosixNode { device, gateway }, sys))
 }
 
-impl PiNode {
+impl PosixNode {
     /// Completes when the device thread has ended by itself. Await it at
     /// most once.
     pub async fn device_ended(&mut self) {

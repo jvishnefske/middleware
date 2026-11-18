@@ -24,7 +24,7 @@ pub fn test_seed() -> Seed {
 pub const NODE: SenderId = SenderId([0x9a, 0x51, 0x0c, 0x77, 0x02, 0xe4, 0x18, 0x3b]);
 
 pub fn facts() -> Facts {
-    Facts { chip: CHIP, firmware: "0.6.0", node: NODE }
+    Facts { chip: CHIP, firmware: "0.6.0", node: NODE, board: None }
 }
 
 type Svc<'d> = Service<SectorFlash<MemSectors<'d>>>;
@@ -216,4 +216,34 @@ fn pn5_an_unreadable_trust_record_refuses_installs() {
     assert_eq!(call(&mut s, keys::BEGIN, &[0; 8]), Err(HandlerError::Unavailable));
     assert_eq!(call(&mut s, keys::TRUST_CLAIM, &[0; 32]), Err(HandlerError::Unavailable));
     assert!(call(&mut s, keys::INFO, &[]).is_ok());
+}
+
+/// `sys/manifest` names the board from the device tree; a node without one
+/// sends no board record. `sys/info`'s chip stays the architecture.
+#[test]
+fn pn14_the_manifest_names_the_board() {
+    use middleware::loader::manifest::{Manifest, tag};
+    let kd240 = crate::board_from_model(b"ZynqMP KD240 revA/B/1\0").expect("a name");
+    assert_eq!(kd240.as_str(), Some("ZynqMP KD240 revA/B/1"));
+    assert_eq!(crate::board_from_model(b"\0"), None);
+    assert_eq!(crate::board_from_model(b"  Raspberry Pi 4 Model B Rev 1.4\n\0").unwrap().as_str(),
+        Some("Raspberry Pi 4 Model B Rev 1.4"));
+
+    let mut disk = Disk::default();
+    let sectors = MemSectors::new(&mut disk);
+    let (mut s, _) = Service::open(
+        SectorFlash::open(sectors, SECTORS).expect("flash"),
+        Facts { board: Some(kd240), ..facts() },
+    );
+    let m = Manifest::decode(&call(&mut s, keys::MANIFEST, &[]).expect("manifest")).expect("decodes");
+    assert_eq!(m.board, Some(kd240));
+    assert_eq!(m.groups, MANIFEST.groups);
+    let raw = call(&mut s, keys::INFO, &[]).expect("info");
+    let info = DeviceInfo::decode(&raw).expect("info");
+    assert_eq!(info.chip, CHIP);
+
+    let mut disk = Disk::default();
+    let (mut s, _) = open(&mut disk, None);
+    let raw = call(&mut s, keys::MANIFEST, &[]).expect("manifest");
+    assert!(middleware::loader::manifest::records(&raw).unwrap().1.all(|r| r.unwrap().0 != tag::BOARD));
 }

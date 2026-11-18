@@ -158,7 +158,7 @@ robot from attestation through to an accepted request.
 
 The same robot runs on a Raspberry Pi Zero 2 W or a Pi 3, which is also
 the gateway for one Pico running the RP base firmware on its USB port and
-the host of `mw-pi-node`, the Linux payload runner (design.md MS49–MS56).
+the host of `mw-posix-node`, the Linux payload runner (design.md MS49–MS56).
 Each `robot-pi-v<version>` release carries `mw-robot-pi-<tag>.img.zst` and
 its `.sha256`, built natively on an arm runner by
 `.github/workflows/release-robot-pi.yml`. To build it yourself, `nix build
@@ -210,7 +210,7 @@ RP2350, manufacturer "middleware", product "rp-base"), names its port
 `/dev/mw-pico` and starts `mw-gateway` on exactly that port; unplugging
 it stops the gateway. Other Pico SDK boards share those ids but not the
 strings, so they are left alone. Connect one such board per Pi. The
-gateway, the robot app and `mw-pi-node` each run as their own
+gateway, the robot app and `mw-posix-node` each run as their own
 unprivileged user; only the gateway's is in the `dialout` group.
 
 The Zero 2 W has 512 MiB of RAM, so the image runs Envoy with one worker
@@ -334,28 +334,33 @@ firmware change outside this crate. Until then the gateway shows the
 device's `sys/log` lines through `gw/sys`, including the `disc: up ...`
 lines of beacons the device hears on the radio.
 
-## Linux payload host (Raspberry Pi)
+## Linux payload host (Raspberry Pi, Kria KD240)
 
-`mw-pi-node` (`pi-node/`) runs WASM payloads on a Linux host, a Pi Zero 2
-W or Pi 3 in the first place, with the base firmware's own loader, trust
+`mw-posix-node` (`posix-node/`; `mw-pi-node` before it hosted more than
+Pis) runs WASM payloads on a Linux host, a Pi Zero 2 W or Pi 3 in the
+first place and the Kria KD240 after it, with the base firmware's own loader, trust
 rules and two-slot store (esp-base's pure core, as the RP firmware uses
 it), and joins the cluster through an MCU gateway inside the same
 process. To the cluster it is a USB-attached board: its payloads'
 `app/...` publications reach Zenoh, the gateway binds its node id and
 serves `gw/sys`, and `sys/info` reports chip `linux-aarch64`, the node id
-and `Caps::SERVE`. Payloads get log, publish, subscribe, ticks, the
+and `Caps::SERVE`; its `sys/manifest` names the board from the device
+tree (`ZynqMP KD240 revA/B/1`). Payloads get log, publish, subscribe, ticks, the
 clocks, four timers, `serve` and `node_id`; GPIO, SPI, I2C, ADC, UART,
 PWM and routes answer `Unsupported` for now (design.md, "Linux payload
 host", PN12).
 
-State lives in `MW_PI_NODE_STATE` (default `/var/lib/mw-pi-node`): one
+The old `MW_PI_NODE_*` names still work, with a warning, and an existing
+`/var/lib/mw-pi-node` is kept; node ids do not change with the rename.
+
+State lives in `MW_POSIX_NODE_STATE` (default `/var/lib/mw-posix-node`): one
 file per 4 KiB flash sector under `flash/`, each replaced atomically and
 synced, so a power cut leaves the old or the new payload and trust
 record. The directory is locked while the node runs. The node id comes
-from `MW_PI_NODE_NODE_ID` (16 hex digits) or, by default, a hash of
-`/etc/machine-id` (`MW_PI_NODE_MACHINE_ID` names another file). Other
-settings: `MW_PI_NODE_MEMORY_BYTES` (a payload's memory cap, default
-1 MiB), `MW_PI_NODE_LOCAL_SERIAL` (a serial port served beside the
+from `MW_POSIX_NODE_NODE_ID` (16 hex digits) or, by default, a hash of
+`/etc/machine-id` (`MW_POSIX_NODE_MACHINE_ID` names another file). Other
+settings: `MW_POSIX_NODE_MEMORY_BYTES` (a payload's memory cap, default
+1 MiB), `MW_POSIX_NODE_LOCAL_SERIAL` (a serial port served beside the
 gateway, such as a USB gadget's `/dev/ttyGS0`, for `mwctl`), the
 gateway's `MW_GATEWAY_*` (`MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` are
 unused) and `MW_ZENOH_ROUTER` (required).
@@ -368,14 +373,14 @@ claim --key ...`); a claim never passes `gw/sys`. After that the gateway
 forwards only signed commits and signed start/stop requests (each with
 an `x-request-id`), so the cluster can deliver updates but not forge
 them. The gateway keeps its control counter floor in `MW_GATEWAY_STATE`,
-by default `<MW_PI_NODE_STATE>/gateway`. A payload's served `app/...`
+by default `<MW_POSIX_NODE_STATE>/gateway`. A payload's served `app/...`
 keys are not reachable through `gw/sys`; requests on them go over the
 local port.
 
 For a local try without a Pi, run the node on any Linux machine with a
 PTY pair as the local port (`socat -d -d pty,raw,echo=0 pty,raw,echo=0`
-prints two paths; give one to `MW_PI_NODE_LOCAL_SERIAL` and the other to
-`mwctl --port`), a writable `MW_PI_NODE_STATE` and a zenohd to connect
+prints two paths; give one to `MW_POSIX_NODE_LOCAL_SERIAL` and the other to
+`mwctl --port`), a writable `MW_POSIX_NODE_STATE` and a zenohd to connect
 to. This mode is documented, not covered by the tests, which run the
 node, the gateway and Zenoh in one process on loopback.
 

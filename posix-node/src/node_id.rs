@@ -4,7 +4,7 @@
 //! A Linux host has no base MAC or chip unique id, so the id comes from a
 //! stable per-installation source, in this order:
 //!
-//! 1. `MW_PI_NODE_NODE_ID`, 16 hex digits ([`parse_node_id`]), for a host
+//! 1. `MW_POSIX_NODE_NODE_ID`, 16 hex digits ([`parse_node_id`]), for a host
 //!    that must keep an id across reinstalls or that has no machine id;
 //! 2. the systemd machine id (`/etc/machine-id`, 32 lowercase hex digits,
 //!    generated once at first boot and stable across reboots), hashed:
@@ -22,6 +22,12 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 
 /// Hashed in front of the machine id.
+///
+/// FROZEN: this still names `mw-pi-node`, the crate's name before it became
+/// `mw-posix-node`. The node id is derived from it, and a node's id is how
+/// the cluster, its bindings (signed for one node id) and its peers know
+/// it, so changing these bytes would give every existing node a new id.
+/// `node_ids_survive_the_rename` pins one.
 pub const DOMAIN: &[u8] = b"mw-pi-node/node-id/v1\0";
 
 /// Why no node id could be had.
@@ -99,7 +105,7 @@ pub fn resolve(configured: Option<&str>, machine_id: Option<&str>) -> Result<Sen
     }
 }
 
-/// `id` as 16 lowercase hex digits (the form `MW_PI_NODE_NODE_ID` takes).
+/// `id` as 16 lowercase hex digits (the form `MW_POSIX_NODE_NODE_ID` takes).
 pub fn hex(id: SenderId) -> String {
     id.0.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -144,5 +150,23 @@ mod tests {
             assert!(matches!(parse_node_id(bad), Err(NodeIdError::Configured(_))), "{bad:?}");
         }
         assert_eq!(parse_node_id("0000000000000000"), Err(NodeIdError::Zero));
+    }
+
+    /// The id a fixed machine id gives is the one it gave before the crate
+    /// was renamed from mw-pi-node: SHA-256 over the old domain, by hand.
+    #[test]
+    fn node_ids_survive_the_rename() {
+        let machine = "0123456789abcdef0123456789abcdef";
+        let digest = Sha256::new()
+            .chain_update(b"mw-pi-node/node-id/v1\0")
+            .chain_update(machine.as_bytes())
+            .finalize();
+        let want: [u8; 8] = digest[..8].try_into().unwrap();
+        assert_eq!(from_machine_id(machine).unwrap().0, want);
+        assert_eq!(
+            from_machine_id(machine).unwrap().0,
+            [0x59, 0x40, 0xe9, 0xa5, 0xe7, 0x35, 0x3c, 0x17],
+            "the id of this machine id is fixed forever"
+        );
     }
 }

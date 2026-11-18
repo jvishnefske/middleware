@@ -19,6 +19,7 @@ export function capabilityRows(info: DeviceInfo, manifest: Manifest | null, boar
     rows.push(["Manifest", "not reported (firmware without sys/manifest)"]);
   } else {
     const m = manifest;
+    if (m.board) rows.push(["Board model", m.board]);
     rows.push(["Imports", list(m.groupNames)]);
     if (m.i2c) rows.push(["I2C", `${buses(m.i2c.buses)}, ${m.i2c.minHz}–${m.i2c.maxHz} Hz`]);
     if (m.spi) rows.push(["SPI", buses(m.spi.buses)]);
