@@ -36,7 +36,12 @@ jobs:
           # payload-sim's tests build example payloads (payloads/).
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # SoftHSM2 for mwctl's PKCS#11 signer test (pkcs11::tests::softhsm_end_to_end);
+      # MWCTL_REQUIRE_SOFTHSM makes that test fail instead of skip without it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends softhsm2
       - run: cargo test --workspace --all-features
+        env:
+          MWCTL_REQUIRE_SOFTHSM: "1"
 
   features:
     name: Feature isolation (check-features.sh)
