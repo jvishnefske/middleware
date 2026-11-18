@@ -24,7 +24,7 @@ pub fn test_seed() -> Seed {
 pub const NODE: SenderId = SenderId([0x9a, 0x51, 0x0c, 0x77, 0x02, 0xe4, 0x18, 0x3b]);
 
 pub fn facts() -> Facts {
-    Facts { chip: CHIP, firmware: "0.6.0", node: NODE, board: None }
+    Facts { chip: CHIP, firmware: "0.6.0", node: NODE, board: None, control: None }
 }
 
 type Svc<'d> = Service<SectorFlash<MemSectors<'d>>>;

@@ -19,6 +19,14 @@
 //! | 2 [`Target::Key`]    | a key (not under `sys/`)                    |
 //! | 3 [`Target::Remote`] | node id (8), then a key                     |
 //! | 4 [`Target::Adapted`] | [`Adapter`] code u8, parameter u16 LE, then an inner target byte and its body (Local, Key or Remote) |
+//! | 5 [`Target::Driver`] (ABI 8) | a control-module point's name ([`crate::loader::control`]; channel-name rules) |
+//!
+//! A driver target binds a machine channel to one of the node's native
+//! drivers: the runtime carries it on the node-internal key `drv/<point>`
+//! ([`driver_key`]), which no link sends or delivers, and the node passes
+//! what the payload publishes there to the driver and what the driver
+//! reads to the payload. The node checks the point exists and that its
+//! kind and direction fit the channel's before the payload starts.
 //!
 //! At most [`MAX_CHANNELS`] entries with distinct valid names; the record
 //! is at most [`BINDING_MAX`] bytes and ends after its last entry.
@@ -71,6 +79,8 @@ pub mod target {
     pub const REMOTE: u8 = 3;
     /// [`super::Target::Adapted`].
     pub const ADAPTED: u8 = 4;
+    /// [`super::Target::Driver`] (ABI 8).
+    pub const DRIVER: u8 = 5;
 }
 
 /// Why a binding did not decode.
@@ -152,6 +162,9 @@ pub enum Endpoint<'a> {
         /// The key.
         key: Key<'a>,
     },
+    /// A control-module point of one of this node's drivers (ABI 8),
+    /// carried on [`driver_key`].
+    Driver(&'a str),
 }
 
 /// What a channel binds to.
@@ -175,6 +188,8 @@ pub enum Target<'a> {
         /// The transformation.
         adapter: Adapter,
     },
+    /// A control-module point of one of this node's drivers (ABI 8).
+    Driver(&'a str),
 }
 
 impl<'a> Target<'a> {
@@ -185,6 +200,7 @@ impl<'a> Target<'a> {
             Target::Key(k) => (Endpoint::Key(k), None),
             Target::Remote { node, key } => (Endpoint::Remote { node, key }, None),
             Target::Adapted { inner, adapter } => (inner, Some(adapter)),
+            Target::Driver(p) => (Endpoint::Driver(p), None),
         }
     }
 }
@@ -201,11 +217,32 @@ pub fn internal_key<'b>(name: &str, buf: &'b mut [u8; INTERNAL_KEY_MAX]) -> Key<
     Key::new(s).unwrap_or(Key::from_static("ch/_"))
 }
 
-/// Whether `key` is a node-internal channel key (`ch/...`): what a local
-/// source bound to a channel publishes on. A node delivers publications
-/// on these keys to its own payload and sends them on no link.
+/// Whether `key` is a node-internal channel key: `ch/...`, what a local
+/// source bound to a channel publishes on, or `drv/...`, a driver point
+/// ([`driver_key`]). A node delivers publications on these keys to its own
+/// payload (or its drivers) and sends them on no link.
 pub fn is_internal_key(key: Key<'_>) -> bool {
-    key.segments().next() == Some("ch")
+    matches!(key.segments().next(), Some("ch" | "drv"))
+}
+
+/// Longest [`driver_key`].
+pub const DRIVER_KEY_MAX: usize = 4 + crate::wasm_abi::channels::MAX_NAME;
+
+/// The node-internal key a [`Target::Driver`] point is carried on:
+/// `drv/<point>` (written into `buf`).
+pub fn driver_key<'b>(point: &str, buf: &'b mut [u8; DRIVER_KEY_MAX]) -> Key<'b> {
+    let n = point.len().min(DRIVER_KEY_MAX - 4);
+    buf[..4].copy_from_slice(b"drv/");
+    buf[4..4 + n].copy_from_slice(&point.as_bytes()[..n]);
+    let s = core::str::from_utf8(&buf[..4 + n]).unwrap_or("drv/_");
+    Key::new(s).unwrap_or(Key::from_static("drv/_"))
+}
+
+/// The point a `drv/<point>` key names, if it is one.
+pub fn driver_point(key: Key<'_>) -> Option<&str> {
+    key.as_str()
+        .strip_prefix("drv/")
+        .filter(|p| valid_name(p.as_bytes()))
 }
 
 /// Longest [`internal_key`].
@@ -253,6 +290,13 @@ fn endpoint(code: u8, body: &[u8]) -> Result<Endpoint<'_>, BindingError> {
             ))
         }
         target::KEY => Ok(Endpoint::Key(key_of(body)?)),
+        target::DRIVER => {
+            let p = core::str::from_utf8(body).map_err(|_| BindingError::Target)?;
+            if !valid_name(p.as_bytes()) {
+                return Err(BindingError::Target);
+            }
+            Ok(Endpoint::Driver(p))
+        }
         target::REMOTE => {
             let (node, key) = body.split_at_checked(8).ok_or(bad)?;
             let mut id = [0u8; 8];
@@ -282,6 +326,11 @@ impl<'a> Binding<'a> {
     pub fn bind(&mut self, name: &'a str, target: Target<'a>) -> Result<(), BindingError> {
         if !valid_name(name.as_bytes()) {
             return Err(BindingError::Name);
+        }
+        match target {
+            Target::Driver(p) if !valid_name(p.as_bytes()) => return Err(BindingError::Target),
+            Target::Adapted { inner: Endpoint::Driver(_), .. } => return Err(BindingError::Target),
+            _ => {}
         }
         if let Some(e) = self.entries[..self.n]
             .iter_mut()
@@ -357,15 +406,18 @@ impl<'a> Binding<'a> {
                         body.split_first_chunk::<4>().ok_or(BindingError::Target)?;
                     let adapter = Adapter::decode(a, u16::from_le_bytes([p0, p1]))
                         .ok_or(BindingError::Target)?;
-                    Target::Adapted {
-                        inner: endpoint(inner, ib)?,
-                        adapter,
+                    let inner = endpoint(inner, ib)?;
+                    // Adapters take sample streams; a driver point is none.
+                    if matches!(inner, Endpoint::Driver(_)) {
+                        return Err(BindingError::Target);
                     }
+                    Target::Adapted { inner, adapter }
                 }
                 c => match endpoint(c, body)? {
                     Endpoint::Local(s) => Target::Local(s),
                     Endpoint::Key(k) => Target::Key(k),
                     Endpoint::Remote { node, key } => Target::Remote { node, key },
+                    Endpoint::Driver(p) => Target::Driver(p),
                 },
             };
             b.bind(name, t)?;
@@ -432,6 +484,7 @@ fn endpoint_body(e: &Endpoint<'_>, out: &mut [u8]) -> Option<(u8, usize)> {
             let at = put(0, &node.0)?;
             Some((target::REMOTE, put(at, key.as_bytes())?))
         }
+        Endpoint::Driver(p) => Some((target::DRIVER, put(0, p.as_bytes())?)),
     }
 }
 
@@ -686,5 +739,49 @@ pub(crate) mod tests {
         assert!(is_internal_key(k));
         assert!(!is_internal_key(Key::from_static("chat/x")));
         assert!(!is_internal_key(Key::from_static("mic/ch")));
+    }
+
+    #[test]
+    fn bd8_driver_targets_round_trip_on_their_internal_key() {
+        let mut b = Binding::new([7; 32], Version(3));
+        b.bind("x_pos", Target::Driver("x_pos")).unwrap();
+        b.bind("segments", Target::Driver("motion_queue")).unwrap();
+        let mut out = [0u8; BINDING_MAX];
+        let n = b.encode(&mut out).unwrap();
+        let back = Binding::decode(&out[..n]).unwrap();
+        assert_eq!(back.target("x_pos"), Some(Target::Driver("x_pos")));
+        assert_eq!(back.target("segments"), Some(Target::Driver("motion_queue")));
+        // The entry on the wire: target 5, the point's name.
+        let at = HEADER_LEN + 1 + 5;
+        assert_eq!(&out[at..at + 2 + 5], &[target::DRIVER, 5, b'x', b'_', b'p', b'o', b's']);
+
+        let mut buf = [0u8; DRIVER_KEY_MAX];
+        let k = driver_key("x_pos", &mut buf);
+        assert_eq!(k.as_str(), "drv/x_pos");
+        assert!(is_internal_key(k), "no link carries a driver point");
+        assert_eq!(driver_point(k), Some("x_pos"));
+        assert_eq!(driver_point(Key::from_static("drv/X")), None);
+        assert_eq!(driver_point(Key::from_static("app/x_pos")), None);
+        assert!(!is_internal_key(Key::from_static("drive/x")));
+    }
+
+    #[test]
+    fn bd8_bad_driver_targets_are_refused() {
+        let mut b = Binding::new([7; 32], Version(3));
+        assert_eq!(b.bind("a", Target::Driver("X-Pos")), Err(BindingError::Target));
+        assert_eq!(b.bind("a", Target::Driver("")), Err(BindingError::Target));
+        let adapted = Target::Adapted { inner: Endpoint::Driver("x"), adapter: Adapter::PcmToMuLaw };
+        assert_eq!(b.bind("a", adapted), Err(BindingError::Target));
+        // The same refused on the wire.
+        let mut ok = Binding::new([7; 32], Version(3));
+        ok.bind("a", Target::Driver("x")).unwrap();
+        let mut out = [0u8; BINDING_MAX];
+        let n = ok.encode(&mut out).unwrap();
+        let mut bad = out[..n].to_vec();
+        *bad.last_mut().unwrap() = b'X';
+        assert_eq!(Binding::decode(&bad).err(), Some(BindingError::Target));
+        let mut wrapped = out[..HEADER_LEN + 2].to_vec();
+        wrapped.extend_from_slice(&[target::ADAPTED, 5, 2, 0, 0, target::DRIVER, b'x']);
+        assert_eq!(Binding::decode(&wrapped).err(), Some(BindingError::Target));
     }
 }

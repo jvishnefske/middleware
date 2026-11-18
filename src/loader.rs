@@ -47,6 +47,7 @@
 //! signature in the commit body is parsed and passed on, never checked.
 
 pub mod binding;
+pub mod control;
 pub mod manifest;
 pub mod peers;
 #[cfg(feature = "trust")]
@@ -72,6 +73,9 @@ pub mod keys {
     pub const BOARD: Key<'static> = Key::from_static("sys/board");
     /// Node manifest request ([`super::manifest`]).
     pub const MANIFEST: Key<'static> = Key::from_static("sys/manifest");
+    /// The node's control-module points, one page per request (ABI 8,
+    /// [`super::control`]).
+    pub const CONTROL_MODULES: Key<'static> = Key::from_static("sys/manifest/cm");
     /// Starts a transfer.
     pub const BEGIN: Key<'static> = Key::from_static("sys/loader/begin");
     /// Carries one chunk.

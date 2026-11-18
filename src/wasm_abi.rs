@@ -162,6 +162,7 @@
 pub mod bridge;
 pub mod channels;
 pub mod events;
+pub mod machine;
 pub mod periph;
 pub mod route;
 pub mod serve;
@@ -174,8 +175,13 @@ pub mod serve;
 /// and I2C; revision 4 added DMA routes; revision 5 added serving requests
 /// (`serve`, `node_id`, the `on_request` export); revision 6 added
 /// bridging between links (`route_bridge`); revision 7 added logical
-/// channels (`channel_open`, `channel_publish`, the `mw.channels` section).
-pub const ABI_VERSION: u16 = 7;
+/// channels (`channel_open`, `channel_publish`, the `mw.channels` section);
+/// revision 8 added no imports but the machine channel kinds
+/// ([`channels::DataKind::Digital`] to `Segments`, messages in [`machine`])
+/// and bindings to a node's control-module points
+/// ([`crate::loader::binding::Target::Driver`]). A payload that declares a
+/// machine channel needs a host of 8; one that does not loads on 7.
+pub const ABI_VERSION: u16 = 8;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -416,6 +422,10 @@ pub const ABI5_IMPORTS: usize = 32;
 /// `route_bridge`).
 pub const ABI6_IMPORTS: usize = 33;
 
+/// Number of imports in ABI 7 (the prefix of [`IMPORTS`] up to
+/// `channel_publish`); ABI 8 has the same.
+pub const ABI7_IMPORTS: usize = 35;
+
 /// The number of imports a host implementing ABI `version` provides (the
 /// prefix of [`IMPORTS`]); `None` for a revision that does not exist.
 pub const fn imports_in(version: u16) -> Option<usize> {
@@ -426,7 +436,8 @@ pub const fn imports_in(version: u16) -> Option<usize> {
         4 => Some(ABI4_IMPORTS),
         5 => Some(ABI5_IMPORTS),
         6 => Some(ABI6_IMPORTS),
-        7 => Some(IMPORTS.len()),
+        7 => Some(ABI7_IMPORTS),
+        8 => Some(IMPORTS.len()),
         _ => None,
     }
 }
@@ -608,14 +619,16 @@ mod tests {
                 .eq([("channel_open", 2), ("channel_publish", 3)])
         );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI_VERSION, 7);
+        assert_eq!(ABI7_IMPORTS, IMPORTS.len(), "ABI 8 added no imports");
+        assert_eq!(ABI_VERSION, 8);
     }
 
     #[test]
     fn an_abi4_host_does_not_know_the_abi5_imports() {
         assert_eq!(imports_in(ABI_VERSION), Some(IMPORTS.len()));
         assert_eq!(imports_in(0), None);
-        assert_eq!(imports_in(8), None);
+        assert_eq!(imports_in(7), imports_in(8));
+        assert_eq!(imports_in(9), None);
         for name in ["channel_open", "channel_publish"] {
             assert_eq!(import_in(6, name), None, "{name}");
             assert_eq!(import_in(7, name), import(name));

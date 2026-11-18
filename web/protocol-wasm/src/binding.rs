@@ -16,7 +16,12 @@
 //! * a remote target naming a node the board has not heard (when its
 //!   `sys/peers` is known);
 //! * an adapter that does not take its local source, or whose output the
-//!   channel does not take (`middleware::stream::adapt::Adapter::output`).
+//!   channel does not take (`middleware::stream::adapt::Adapter::output`);
+//! * ABI 8: a machine channel bound to anything but a key or a driver
+//!   point, a driver point bound to a channel that is not a machine one,
+//!   or a driver point on a node whose manifest lists no control modules.
+//!   Whether the point exists, and fits, is the node's check (its
+//!   `sys/manifest/cm` list, [`middleware::loader::control`]).
 //!
 //! Where an obvious target exists, the issue carries it as a [`Fix`]:
 //! [`suggest`] picks a local source the manifest offers and the channel
@@ -157,6 +162,7 @@ fn local_problem(
         return None;
     }
     match (decl.kind, source) {
+        (k @ (DataKind::Digital | DataKind::Position | DataKind::Setpoint | DataKind::Segments), _) => Some(format!("a {} channel binds to a driver point or a key, not a local source", k.name())),
         (DataKind::Bytes, _) => None,
         (DataKind::Frames, RouteSource::Frames(src, cfg)) => match manifest.frames {
             Some(f) if f.accepts(src.kind(), cfg) => None,
@@ -224,6 +230,16 @@ pub fn check(
                     out.push(issue(name, format!("{name}: {problem}"), fix));
                 }
             }
+            Some(Target::Driver(_)) if !decl.kind.is_machine() => out.push(issue(
+                name,
+                format!("{name} carries {}: only machine channels bind to driver points", decl.kind.name()),
+                None,
+            )),
+            Some(Target::Driver(point)) if manifest.control.is_none() => out.push(issue(
+                name,
+                format!("{name}: the node lists no control modules, so it has no point {point}"),
+                None,
+            )),
             Some(Target::Remote { node, .. }) if peers.is_some_and(|p| !p.contains(&node)) => {
                 let hex: String = node.0.iter().map(|b| format!("{b:02x}")).collect();
                 out.push(issue(name, format!("{name}: the board has not heard node {hex}"), None));

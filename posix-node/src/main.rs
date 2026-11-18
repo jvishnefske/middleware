@@ -18,7 +18,7 @@ use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
 use mw_posix_node::config::{NodeIdSource, gateway_state_dir};
 use mw_posix_node::{
-    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, facts, limits, node_id, open_state_flash, start,
+    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, limits, node_id, open_state_flash, start,
     wall_clock_ms,
 };
 use mw_service::run::{USAGE, terminate_signal};
@@ -116,7 +116,15 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
             gateway.state_dir.display()
         );
     }
-    let device = DeviceParts { flash, facts: facts(id), limits: limits(node.memory_bytes), local };
+    let driver = node.driver.open();
+    eprintln!("mw-posix-node: driver {} ({} control-module points)", driver.name(), driver.points().len());
+    let device = DeviceParts {
+        flash,
+        facts: mw_posix_node::facts_with_driver(id, driver.as_ref()),
+        limits: limits(node.memory_bytes),
+        local,
+        driver,
+    };
     let parts = GatewayParts { bridge: gateway.bridge_with_floor(floor), options: gateway.shell_options(), store };
     let (mut pi, sys) = start(device, parts, session).await.map_err(|e| e.to_string())?;
     let svc = service(&gateway, sys).map_err(|e| e.to_string())?;

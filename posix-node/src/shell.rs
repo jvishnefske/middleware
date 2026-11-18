@@ -248,6 +248,7 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
     limits: Limits,
     gateway: ChannelIo,
     local: Option<ChannelIo>,
+    driver: Box<dyn crate::driver::Driver>,
 ) -> io::Result<DeviceTask> {
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
@@ -268,7 +269,7 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
             }
         };
         let r = rt.block_on(async move {
-            let (mut ctl, boot) = Controller::open(flash, facts, limits, SystemClock::start());
+            let (mut ctl, boot) = Controller::open_with_driver(flash, facts, limits, SystemClock::start(), driver);
             let mut links = Links {
                 gateway: SerialLink::with_inbox(gateway),
                 local: local.map(SerialLink::with_inbox),
@@ -364,6 +365,8 @@ pub struct DeviceParts<F> {
     pub limits: Limits,
     /// A second link beside the gateway's (`MW_POSIX_NODE_LOCAL_SERIAL`).
     pub local: Option<ChannelIo>,
+    /// The control-module driver (`MW_POSIX_NODE_DRIVER`, [`crate::driver`]).
+    pub driver: Box<dyn crate::driver::Driver>,
 }
 
 /// The gateway half of a node, as `mw-gateway`'s own binary builds it:
@@ -390,13 +393,13 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     gateway: GatewayParts,
     session: ZenohTransport,
 ) -> Result<(PosixNode, SysForward), StartError> {
-    let DeviceParts { flash, facts, limits, local } = device;
+    let DeviceParts { flash, facts, limits, local, driver } = device;
     let GatewayParts { bridge, options, store } = gateway;
     let (device_io, gateway_io) = pair();
     let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
         .await
         .map_err(StartError::Zenoh)?;
-    let device = spawn_device(flash, facts, limits, device_io, local).map_err(StartError::Thread)?;
+    let device = spawn_device(flash, facts, limits, device_io, local, driver).map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }
 
