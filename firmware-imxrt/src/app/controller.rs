@@ -300,9 +300,13 @@ impl Controller {
     }
 
     /// Answers `sys/peers` and hands `sys/peer/<id>/...` to the Zenoh
-    /// link (PR1, PR2); `true` when it took the request. Forwarding is for
-    /// the serial links only: from Zenoh it is `Denied`.
+    /// link (PR1, PR2); `true` when it took the request. Both are for the
+    /// serial links only: a Zenoh request goes on to `handle`, whose gate
+    /// refuses them (`zenoh_mgmt`, `NotOverZenoh`).
     fn peer_request(&self, id: u8, msg: &Inbound) -> bool {
+        if msg.link == LinkId::ZENOH {
+            return false;
+        }
         let Ok(key) = Key::new(&msg.key) else {
             return false;
         };
@@ -322,9 +326,7 @@ impl Controller {
         let Some((node, path)) = peers::forwardable(key, self.svc.node()) else {
             return false;
         };
-        if msg.link == LinkId::ZENOH {
-            answer(Err(HandlerError::Denied));
-        } else if self
+        if self
             .bus
             .forward(Forward {
                 link: msg.link,
