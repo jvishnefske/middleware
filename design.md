@@ -4320,6 +4320,19 @@ open).
   escaped (`\u{1b}`, `\r`, ...), never passed to the terminal, as
   `[pub]` lines already did by switching to hex; printable Unicode is
   kept — `report::tests::events_are_one_readable_line`.
+- [x] H4 `mwctl scout [--seconds N]` (feature `zenoh`; `just lan`) lists
+  the middleware nodes on the local network in one table: a Zenoh
+  multicast scout (`224.0.0.224:7446`) for N s [default 3], then each
+  scouted router's and peer's sessions from its admin space (`@/*/router`,
+  `@/*/peer`), which is where clients such as the RT1050 appear, then one
+  query on `@mw/node/*/sys/info` for every node's chip, firmware and
+  payload status. An answer is put on the session whose Zenoh id hashes to
+  its node id (`zenoh::sender_id_of`, the same in `zenoh_lite`). It needs
+  no `--port` and connects only to what the scout found. Not seen: ESP-NOW
+  nodes (a gateway's `peers` lists them), sessions behind no scouted
+  router, other subnets, and mw-posix-node's `sys/info`, which it does not
+  serve over Zenoh yet (only through `gw/sys`, MS6) —
+  `scout::tests::h4_node_ids_come_from_sys_info_reply_keys`, `h4_admin_sessions_are_parsed_and_junk_is_skipped`, `h4_merge_joins_by_zenoh_id_and_leaves_out_the_scanner`, `h4_answers_are_attributed_by_node_id`, `h4_the_table_is_aligned_and_says_when_nothing_was_found`, `scout::shell::tests::h4_connects_to_routers_and_peers_over_tcp_only`; `cli::tests::h4_scout_needs_no_link_and_takes_only_seconds`. Run 2026-11-19 against a zenohd on loopback: it listed the router, a mw-posix-node's two sessions (peer and client, via the router) and a stub `@mw/node/<id>/sys/info` queryable; on this LAN it found no Zenoh session.
 
 ### Web site (`web/`)
 
@@ -7772,7 +7785,12 @@ Requirements:
   the KD240 carrier's FT4232H: `openFPGALoader -c ft4232 --ftdi-serial
   FT4YW8B7`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
   both answering ARP, ping and `mwctl --udp <ip> info`, tx_delay tuned
-  per port, the bitstream booting from flash.
+  per port, the bitstream booting from flash. `gateware-5a75b/bringup.sh`
+  runs these steps (`detect`, `blinky`, `sram PORT TXDELAY`, `net-check
+  IP`, `upload IP`, `flash`) and fails unless the board answers as above;
+  the one-port builds at 0, 1 and 2 ns meet 50 MHz and 125 MHz (port 0:
+  62.9 / 129.1 MHz; port 1 with seed 2: 62.5 / 130.4 MHz, 96.4 MHz with
+  seed 1), 69% COMB — gateware README "Bring-up builds".
 - [ ] CL9 Bridging on the board: `bridge.wat` uploaded over port 0
   survives a power cycle; a publication on a bridged prefix sent to
   port 0 arrives on port 1 and an unbridged one does not, with the rule

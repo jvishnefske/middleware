@@ -2104,10 +2104,13 @@ dependencies = [
  "ed25519-dalek",
  "middleware",
  "p256",
+ "serde_json",
  "serialport",
  "sha2",
  "tokio",
  "wasm-hdl-ref",
+ "wat",
+ "zenoh",
 ]
 
 [[package]]

@@ -90,4 +90,42 @@ mod tests {
         let cut: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x09];
         assert!(image_for_ecp5(cut).unwrap_err().contains("well-formed"));
     }
+
+    /// The hex string after `"<field>": "` in a golden vector file.
+    fn field<'a>(text: &'a str, field: &str) -> &'a str {
+        let tag = format!("\"{field}\": \"");
+        let at = text.find(&tag).unwrap_or_else(|| panic!("no {field}")) + tag.len();
+        &text[at..at + text[at..].find('"').unwrap()]
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    /// The bring-up payload (`bringup.sh upload`): `bridge.wat` as mwctl
+    /// compiles it for a chip `ecp5` is byte for byte the image the
+    /// gateware simulations install — `bridge.json`'s blob, which
+    /// `tests/test_system.py` streams through the installer and runs, and
+    /// the happy-path upload of `upload.json` (length and CRC-32 in its
+    /// `sys/loader/begin`), which `tests/test_node.py` sends as frames on a
+    /// link, commits and starts.
+    #[test]
+    fn cl9_bridge_wat_compiles_to_the_image_the_gateware_installs() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let wasm = wat::parse_file(root.join("payloads/templates/bridge.wat")).unwrap();
+        assert!(is_wasm(&wasm));
+        let img = image_for_ecp5(&wasm).unwrap();
+        let vectors = root.join("gateware-5a75b/tests/vectors");
+        let golden = std::fs::read_to_string(vectors.join("wasm/bridge.json")).unwrap();
+        assert_eq!(field(&golden, "module"), hex(&wasm), "bridge.json is stale");
+        assert_eq!(field(&golden, "blob"), hex(&img));
+        let upload = std::fs::read_to_string(vectors.join("upload.json")).unwrap();
+        let begin = upload.find("\"sys/loader/begin\"").unwrap();
+        let mut body = (img.len() as u32).to_le_bytes().to_vec();
+        body.extend(middleware::crc::Crc32::checksum(&img).to_le_bytes());
+        assert_eq!(field(&upload[begin..], "body"), hex(&body));
+        let mut c = Box::new(Colorlight::new());
+        c.install(&img).unwrap();
+        assert_eq!(c.memory().len(), 4096);
+    }
 }

@@ -44,6 +44,7 @@ USAGE:
     mwctl --port <BRIDGE> --espnow <MAC> <COMMAND>    (over the air, see below)
     mwctl --udp <HOST[:PORT]> [--timeout <MS>] <COMMAND>   (over UDP, see below)
     mwctl --zenoh <ENDPOINT> | --zenoh-listen <ENDPOINT> --node <ID> <COMMAND>  (network)
+    mwctl scout [--seconds <N>]                     (Zenoh nodes on the LAN, see below)
     mwctl key new <KEYFILE> | key pub <KEYFILE>
     mwctl key new --pkcs11 <LABEL> | key pub --pkcs11 <LABEL> | key init-token <TOKEN>
 
@@ -116,6 +117,13 @@ COMMANDS:
     fw confirm                 Keep the image on trial (explicit buy)
     fw abort                   Abandon a transfer or a committed update, or
                                reject the image on trial (reboot into the previous one)
+    scout [--seconds <N>]      List the middleware nodes on the local network (mwctl built
+                               with --features zenoh): Zenoh multicast scouting for N s
+                               [default 3], each router's and peer's sessions from its
+                               admin space (clients such as the RT1050 appear there), and
+                               every node's sys/info. Not seen: ESP-NOW nodes (ask a
+                               gateway's `peers`), sessions behind no scouted router, and
+                               other subnets. Needs no --port
     key new <KEYFILE>          Create a signing key: 32 random bytes (the Ed25519 seed),
                                mode 0600, never overwriting; prints the public key
     key pub <KEYFILE>          Print a key file's public key (hex)
@@ -393,6 +401,11 @@ pub enum Parsed {
     Run(Cli),
     /// Run a local key command.
     Key(KeyCmd),
+    /// `scout [--seconds N]`: list the nodes on the local network.
+    Scout {
+        /// How long to scout.
+        seconds: u64,
+    },
     /// Print [`HELP`] and exit successfully.
     Help,
 }
@@ -595,6 +608,36 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         }
         _ => first,
     };
+    if name == "scout" {
+        if port.is_some() || udp.is_some() || espnow.is_some() || zenoh.is_some() || baud_given {
+            return Err(
+                "scout finds the nodes itself: drop --port, --udp, --espnow and --zenoh".into(),
+            );
+        }
+        let other = start
+            || corrupt_chunk.is_some()
+            || key.is_some()
+            || version.is_some()
+            || counter.is_some()
+            || no_reboot
+            || samples
+            || link.is_some()
+            || net_ip.is_some()
+            || net_mac.is_some()
+            || net_peer.is_some()
+            || of.is_some();
+        if other {
+            return Err("scout takes only --seconds <N>".into());
+        }
+        if let Some(extra) = pos.next() {
+            return Err(format!("unexpected argument '{extra}'"));
+        }
+        let seconds = seconds.unwrap_or(crate::scout::DEFAULT_SECONDS);
+        if seconds == 0 {
+            return Err("--seconds must be positive".into());
+        }
+        return Ok(Parsed::Scout { seconds });
+    }
     let only = |flag: &str, set: bool, cmds: &[&str]| {
         if set && !cmds.contains(&name.as_str()) {
             Err(format!("{flag} applies only to '{}'", cmds.join("' or '")))
@@ -904,6 +947,28 @@ mod tests {
                 .contains("applies only to 'net'")
         );
         assert!(p("--udp h net --link x").unwrap_err().contains("--link"));
+    }
+
+    #[test]
+    fn h4_scout_needs_no_link_and_takes_only_seconds() {
+        assert_eq!(p("scout"), Ok(Parsed::Scout { seconds: 3 }));
+        assert_eq!(p("scout --seconds 10"), Ok(Parsed::Scout { seconds: 10 }));
+        assert_eq!(p("--seconds 1 scout"), Ok(Parsed::Scout { seconds: 1 }));
+        assert!(p("scout --seconds 0").unwrap_err().contains("positive"));
+        assert!(p("--port p scout").unwrap_err().contains("drop --port"));
+        assert!(p("--udp h scout").unwrap_err().contains("drop --port"));
+        assert!(p("scout --key k").unwrap_err().contains("only --seconds"));
+        assert!(
+            p("scout extra")
+                .unwrap_err()
+                .contains("unexpected argument")
+        );
+        // --seconds still belongs to monitor elsewhere.
+        assert!(
+            p("--port p info --seconds 2")
+                .unwrap_err()
+                .contains("applies only to 'monitor'")
+        );
     }
 
     fn p(s: &str) -> Result<Parsed, String> {

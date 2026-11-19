@@ -33,6 +33,8 @@
 //! * [`fw`] — RP2350 A/B firmware updates (`fw info|update|confirm|abort|reboot`):
 //!   the image file (UF2 or raw binary, checked as the device checks it),
 //!   firmware commit signatures, and the `sys/fw/*` requests.
+//! * [`scout`] — `mwctl scout`: Zenoh scouting, router admin spaces and
+//!   `sys/info` merged into one table of the nodes on the local network.
 //! * [`report`] — human-readable formatting of device info, firmware
 //!   update state and publications.
 //! * [`error`] — [`error::Error`], with context-specific explanations of
@@ -57,6 +59,7 @@ pub mod link;
 pub mod pkcs11;
 pub mod plan;
 pub mod report;
+pub mod scout;
 pub mod sign;
 pub mod udp;
 #[cfg(feature = "zenoh")]
