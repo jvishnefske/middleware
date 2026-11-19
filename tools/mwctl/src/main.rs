@@ -782,6 +782,22 @@ fn monitor<L: Endpoint>(
     }
 }
 
+/// `scout`: the nodes on the local network ([`mwctl::scout`]).
+#[cfg(feature = "zenoh")]
+fn scout(seconds: u64) -> Result<(), Error> {
+    eprintln!("scouting Zenoh on the local network for {seconds} s ...");
+    let rows = mwctl::scout::run(seconds)?;
+    print!("{}", mwctl::scout::format(&rows));
+    Ok(())
+}
+
+#[cfg(not(feature = "zenoh"))]
+fn scout(_seconds: u64) -> Result<(), Error> {
+    Err(Error::Io(std::io::Error::other(
+        "this mwctl was built without Zenoh: cargo build -p mwctl --features zenoh",
+    )))
+}
+
 fn main() -> ExitCode {
     let parsed = cli::parse(std::env::args().skip(1));
     match parsed {
@@ -794,6 +810,13 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         Ok(Parsed::Key(k)) => match key(k) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mwctl: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Ok(Parsed::Scout { seconds }) => match scout(seconds) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("mwctl: {e}");

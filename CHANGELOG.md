@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### mwctl scout (H4)
+- `mwctl scout [--seconds N]` (feature `zenoh`; `just lan` in the new root `justfile`): Zenoh multicast scouting, the scouted routers' and peers' admin-space sessions, and `@mw/node/*/sys/info`, merged into one table of the nodes on the local network (`mwctl::scout`). mwctl's `zenoh` feature now also pulls in `zenoh` and `serde_json` directly; the default build is unchanged.
+
 ### ABI 8: machine channels, control modules and drivers (MC1–MC4, CM1–CM2, PN16–PN18)
 - `ABI_VERSION` 8, no new imports (`ABI7_IMPORTS`). `mw.channels` kinds `digital`, `position`, `setpoint`, `segments` (`DataKind::from_u8`, `name`, `is_machine`, `Channel::machine`); their messages in `wasm_abi::machine` (`Digital`, `Position`, `Setpoint`, `Segment`, `QueueState`). An ABI 7 host refuses a payload that declares them.
 - Binding target `Target::Driver(point)` / `Endpoint::Driver` (code 5), carried on the node-internal `drv/<point>` (`driver_key`, `driver_point`; `is_internal_key` now covers `drv/`). Payload keys under `drv/` are `InvalidKey`, as under `ch/`.
