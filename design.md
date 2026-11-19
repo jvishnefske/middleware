@@ -7324,7 +7324,12 @@ Requirements:
   the KD240 carrier's FT4232H: `openFPGALoader -c ft4232 --ftdi-serial
   FT4YW8B7`): IDCODE 0x41111043, the blinky in SRAM, each port alone then
   both answering ARP, ping and `mwctl --udp <ip> info`, tx_delay tuned
-  per port, the bitstream booting from flash.
+  per port, the bitstream booting from flash. `gateware-5a75b/bringup.sh`
+  runs these steps (`detect`, `blinky`, `sram PORT TXDELAY`, `net-check
+  IP`, `upload IP`, `flash`) and fails unless the board answers as above;
+  the one-port builds at 0, 1 and 2 ns meet 50 MHz and 125 MHz (port 0:
+  62.9 / 129.1 MHz; port 1 with seed 2: 62.5 / 130.4 MHz, 96.4 MHz with
+  seed 1), 69% COMB — gateware README "Bring-up builds".
 - [ ] CL9 Bridging on the board: `bridge.wat` uploaded over port 0
   survives a power cycle; a publication on a bridged prefix sent to
   port 0 arrives on port 1 and an unbridged one does not, with the rule

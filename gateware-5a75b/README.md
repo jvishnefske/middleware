@@ -47,6 +47,64 @@ Bring-up goes one port at a time (`python soc.py --only-port 0`), with
 `--tx-delay0` / `--tx-delay1` (0 to 2 ns) to tune RGMII per port, then both:
 ARP and ping at `--ip0` / `--ip1`, then `mwctl --udp <ip> info`.
 
+## Bring-up (`bringup.sh`)
+
+`bringup.sh` runs each step and fails unless the board answers as the
+design says. It re-runs itself under `nix develop` (this flake, which also
+brings `wasm-tools`), and every `openFPGALoader` call goes through one
+function that passes `-c ft4232 --ftdi-serial FT4YW8B7 --ftdi-channel 0`
+(the MiniModule's channel A, ADBUS0-3) and refuses the KD240's serial.
+mwctl is `$MWCTL`, or the workspace's release build.
+
+```
+./bringup.sh detect               # --detect; fails unless IDCODE 0x41111043
+./bringup.sh blinky               # build/blinky/blinky.bit (built if missing) to SRAM
+./bringup.sh sram PORT TXDELAY    # build/p<PORT>-<TXDELAY>/ (built if missing) to SRAM
+./bringup.sh net-check IP         # ping -c 5, then mwctl --udp IP info: chip ecp5,
+                                  # firmware 0.1.0, ABI v6, capacity 16384, bridged
+./bringup.sh upload IP [SECONDS]  # bridge.wat -> .wasm (wasm-tools), mwctl upload
+                                  # --start (compiled to the image), monitor [15 s]
+./bringup.sh flash [BIT]          # BIT [build/all/mw5a75b.bit] to flash (-f)
+./bringup.sh build PORT TXDELAY   # the build alone (no board)
+./bringup.sh report               # Fmax and utilisation of every build/p*-*/
+```
+
+TXDELAY is in ns (`--tx-delay<PORT> <TXDELAY>e-9`, 25 ps DELAYG taps, below
+3.2). A one-port build answers at that port's default address: port 0 at
+192.168.1.50, port 1 at 192.168.2.50. `build` waits until `free -g` shows
+8 GB available before it starts, and `sram` refuses a build whose routed
+Fmax misses a clock (`ALLOW_TIMING_FAIL=1` loads it anyway). mwctl's own
+ABI is 7 on this tree, so `info` prints `ABI: v6 (mwctl expects v7)`; the
+check is on the board's 6.
+
+The payload `upload` sends is checked in simulation: `cargo test -p mwctl
+cl9_` compiles `payloads/templates/bridge.wat` through mwctl's ecp5 path
+and requires the image to be `tests/vectors/wasm/bridge.json`'s blob
+(installed and run by `tests/test_system.py`) and the happy-path upload of
+`tests/vectors/upload.json` (sent as frames, committed and started by
+`tests/test_node.py`).
+
+### Bring-up builds
+
+`soc.py --no-sha256 --only-port N --tx-delayN d`, nextpnr after routing
+(2026-11-18). The delay changes only DELAYG values, so the three builds of
+a port place alike. Port 1 alone misses its RGMII clock with seed 1 (96.4
+MHz: the endpoint's FSM is spread across the die, 8.6 ns of routing), so
+its builds use seed 2 (`bringup.sh` picks the seed per port; `SEED=`
+overrides).
+
+| build | seed | sys (`crg_clkout`) | RGMII (`eth_clocksN_rx`) | TRELLIS_COMB | TRELLIS_FF | DP16KD |
+|-------|-----:|-----:|-----:|-----:|-----:|-----:|
+| `p0-0`, `p0-1`, `p0-2` | 1 | 62.92 MHz | 129.05 MHz | 16964 (69%) | 6130 (25%) | 43 (76%) |
+| `p1-0`, `p1-1`, `p1-2` | 2 | 62.45 MHz | 130.43 MHz | 16589 (68%) | 6131 (25%) | 43 (76%) |
+| `p1-*` with seed 1 | 1 | 61.18 MHz | 96.36 MHz (fails 125) | 16589 (68%) | 6131 (25%) | 43 (76%) |
+| both ports (`build/all`, "Fitting the 25F") | 1 | 63.8 MHz | 145.0 / 134.9 MHz | 20874 (85%) | 8168 (33%) | 52 (92%) |
+
+Targets: 50 MHz system, 125 MHz RGMII. `build/all` has both ports at the
+default 2 ns transmit delay; once each port's delay is known, build both
+with `python soc.py --no-sha256 --tx-delay0 ... --tx-delay1 ...
+--build-dir build/tuned` and `./bringup.sh flash build/tuned/mw5a75b.bit`.
+
 ## Flash layout
 
 The bitstream sits at 0 in the W25Q32 (`openFPGALoader ... -f` writes it
