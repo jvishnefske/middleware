@@ -196,7 +196,11 @@ pub struct QueryEvent<'b> {
     reply_to: Expr,
 }
 
-/// What [`ZenohLite::next_event`] received.
+/// What [`ZenohLite::next_event`] received. A query carries its reply
+/// key expression inline; the crate has no heap to box it in, and an event
+/// is returned by value and consumed at once, so the size difference is
+/// accepted.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event<'b> {
     /// A sample for a declared subscription.
@@ -384,7 +388,9 @@ enum Want {
     Both,
 }
 
-/// What [`ZenohLite::next_inner`] copied to the front of the buffer.
+/// What [`ZenohLite::next_inner`] copied to the front of the buffer
+/// (a stack value; no heap to box the query's reply key in).
+#[allow(clippy::large_enum_variant)]
 enum Got {
     Sample {
         key_len: usize,

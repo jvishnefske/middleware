@@ -143,3 +143,17 @@ required-features = ["zenoh", "trust"]
 name = "discover_and_call"
 required-features = ["zenoh", "grpc", "istio", "dns-sd", "mdns"]
 test = true
+
+# The wasm interpreter, optimised in debug and test builds too: the
+# payload-sim tests (`heap`, `bench`) run real example payloads for tens of
+# thousands of virtual-time steps, and unoptimised wasmi takes them from
+# seconds to over half an hour (`cam_jpeg_view` decodes about 550 000 frame
+# chunks). Only codegen changes; behaviour and fuel accounting do not.
+[profile.dev.package.wasmi]
+opt-level = 3
+[profile.dev.package.wasmi_core]
+opt-level = 3
+[profile.dev.package.wasmi_ir]
+opt-level = 3
+[profile.dev.package.wasmi_collections]
+opt-level = 3

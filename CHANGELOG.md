@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Payload ABI numbers after merging main
+- Main shipped ABI 7 as LED strips (LS1–LS8), so this stack's revisions move up one: channels and bindings are ABI 8 (`ABI8_IMPORTS` = 38, after the three LED-strip imports; `ABI7_IMPORTS` = 36 now ends at `ledstrip_close`), machine channels and driver bindings are ABI 9 (`ABI_VERSION` 9, no new imports). Every revision stays a superset of the previous one. Tests: `wasm-host/tests/abi7.rs` is LED strips, `abi8.rs` channels, `abi9.rs` machine channels; payload-sim `tests/abi8.rs` channels.
+
 ### ABI 9: machine channels, control modules and drivers (MC1–MC4, CM1–CM2, PN16–PN18)
 - `ABI_VERSION` 9, no new imports (`ABI8_IMPORTS`). `mw.channels` kinds `digital`, `position`, `setpoint`, `segments` (`DataKind::from_u8`, `name`, `is_machine`, `Channel::machine`); their messages in `wasm_abi::machine` (`Digital`, `Position`, `Setpoint`, `Segment`, `QueueState`). An ABI 8 host refuses a payload that declares them.
 - Binding target `Target::Driver(point)` / `Endpoint::Driver` (code 5), carried on the node-internal `drv/<point>` (`driver_key`, `driver_point`; `is_internal_key` now covers `drv/`). Payload keys under `drv/` are `InvalidKey`, as under `ch/`.
