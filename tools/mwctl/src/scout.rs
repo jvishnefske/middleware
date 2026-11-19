@@ -244,6 +244,35 @@ fn short(zid: &str) -> &str {
     zid.get(..8).unwrap_or(zid)
 }
 
+/// Longest cell printed, in characters; longer ones end in `…`.
+pub const MAX_CELL: usize = 64;
+
+/// One cell as it is safe to print. Every field but the node id comes from
+/// the network (a scout reply, a router's admin space, a `sys/info`), so
+/// control characters, bidi overrides and zero-width characters are shown
+/// escaped (`\u{1b}`), never sent to the terminal, and the cell is cut at
+/// [`MAX_CELL`] characters.
+fn clean(s: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    };
+    let mut out = String::new();
+    for (n, c) in s.chars().enumerate() {
+        if n == MAX_CELL {
+            out.push('…');
+            break;
+        }
+        if hidden(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The table: one line per row, columns aligned, then a count line. An
 /// empty scan prints only the count line, which says nothing was found.
 pub fn format(rows: &[Row]) -> String {
@@ -292,6 +321,7 @@ pub fn format(rows: &[Row]) -> String {
                 fw,
             ]
         })
+        .map(|c: [String; 7]| c.map(|s| clean(&s)))
         .collect();
     let mut out = String::new();
     if !cells.is_empty() {
@@ -654,6 +684,29 @@ mod tests {
         );
         assert_eq!(answers[0].zid.as_deref(), Some("c9"));
         assert_eq!(answers[1].zid, None);
+    }
+
+    #[test]
+    fn h4_network_text_is_escaped_and_cut_before_it_reaches_the_terminal() {
+        let row = Row {
+            zid: Some("ab\u{1b}[2Jcd".into()),
+            whatami: "router\u{202e}x".into(),
+            addrs: vec!["x".repeat(MAX_CELL + 10)],
+            via: Vec::new(),
+            node: None,
+        };
+        let out = format(&[row]);
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{202e}'),
+            "{out:?}"
+        );
+        assert!(out.contains("ab\\u{1b}[2Jcd"), "{out:?}");
+        assert!(out.contains("router\\u{202e}x"), "{out:?}");
+        assert!(
+            out.contains(&format!("{}…", "x".repeat(MAX_CELL))),
+            "{out:?}"
+        );
+        assert!(!out.contains(&"x".repeat(MAX_CELL + 1)), "{out:?}");
     }
 
     #[test]
