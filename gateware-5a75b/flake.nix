@@ -1,6 +1,6 @@
 {
   # Toolchain for the Colorlight 5A-75B gateware: yosys, nextpnr-ecp5,
-  # Project Trellis (ecppack), openFPGALoader, Verilator, and a Python
+  # Project Trellis (ecppack), openFPGALoader, Verilator, wasm-tools, and a Python
   # with Migen, LiteX, LiteEth, litex-boards, cocotb and pytest.
   #
   #   nix develop ./gateware-5a75b      # from the repository root
@@ -90,6 +90,7 @@
           pkgs.openfpgaloader
           pkgs.verilator
           pkgs.gnumake
+          pkgs.wasm-tools   # bringup.sh: bridge.wat (1-byte pages) to .wasm
         ];
       };
     };

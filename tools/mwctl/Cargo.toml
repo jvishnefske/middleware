@@ -26,14 +26,26 @@ cryptoki = "0.10"
 # base firmware's Ethernet link). Off by default: it pulls in zenoh and
 # tokio, and the default mwctl stays free of cloud crates
 # (scripts/check-features.sh).
-zenoh = ["middleware/zenoh", "dep:tokio"]
+zenoh = ["middleware/zenoh", "dep:tokio", "dep:zenoh", "dep:serde_json"]
 
 [dependencies.tokio]
 version = "1"
-features = ["rt-multi-thread"]
+features = ["rt-multi-thread", "time"]
+optional = true
+
+# `scout` (feature `zenoh`): multicast scouting and the routers' admin
+# space need the zenoh session itself, and the admin space answers JSON.
+[dependencies.zenoh]
+version = "1.10"
+optional = true
+
+[dependencies.serde_json]
+version = "1"
 optional = true
 
 [dev-dependencies]
 # The fake device runs the real firmware updater on the in-memory RP2350
 # bootrom model. Tests only: the shipped mwctl uses no middleware feature.
 middleware = { path = "../..", features = ["fw-sim"] }
+# ecp5::tests compiles payloads/templates/bridge.wat (1-byte pages).
+wat = "1"

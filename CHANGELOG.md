@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### mwctl scout (H4)
+- `mwctl scout [--seconds N]` (feature `zenoh`; `just lan` in the new root `justfile`): Zenoh multicast scouting, the scouted routers' and peers' admin-space sessions, and `@mw/node/*/sys/info`, merged into one table of the nodes on the local network (`mwctl::scout`). mwctl's `zenoh` feature now also pulls in `zenoh` and `serde_json` directly; the default build is unchanged.
+
 ### Payload ABI numbers after merging main
 - Main shipped ABI 7 as LED strips (LS1–LS8), so this stack's revisions move up one: channels and bindings are ABI 8 (`ABI8_IMPORTS` = 38, after the three LED-strip imports; `ABI7_IMPORTS` = 36 now ends at `ledstrip_close`), machine channels and driver bindings are ABI 9 (`ABI_VERSION` 9, no new imports). Every revision stays a superset of the previous one. Tests: `wasm-host/tests/abi7.rs` is LED strips, `abi8.rs` channels, `abi9.rs` machine channels; payload-sim `tests/abi8.rs` channels.
 
