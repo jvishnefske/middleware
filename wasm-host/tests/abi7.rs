@@ -3,7 +3,7 @@
 //! its parsed arguments and the frame bytes it received.
 
 use middleware::Key;
-use middleware::wasm_abi::{ABI6_IMPORTS, IMPORTS, Import};
+use middleware::wasm_abi::{ABI6_IMPORTS, ABI7_IMPORTS, IMPORTS, Import};
 use wasm_host::{AbiError, Device, LedStripSpec, Limits, Payload, Pull};
 
 #[derive(Default)]
@@ -142,8 +142,14 @@ fn importing(imports: &[Import]) -> Vec<u8> {
 
 #[test]
 fn ls1_every_import_links_and_abi6_payloads_still_load() {
-    assert_eq!(IMPORTS.len(), ABI6_IMPORTS + 3);
-    for (what, imports) in [("ABI 7", IMPORTS), ("ABI 6", &IMPORTS[..ABI6_IMPORTS])] {
+    // ABI 7 adds the three LED-strip imports; the full table (later
+    // revisions included) and ABI 6's prefix both still load.
+    assert_eq!(ABI7_IMPORTS, ABI6_IMPORTS + 3);
+    for (what, imports) in [
+        ("every ABI", IMPORTS),
+        ("ABI 7", &IMPORTS[..ABI7_IMPORTS]),
+        ("ABI 6", &IMPORTS[..ABI6_IMPORTS]),
+    ] {
         let p = Payload::load(&importing(imports), Fake::default(), Limits::default());
         assert!(p.is_ok(), "{what}: {:?}", p.err());
         let p = Payload::load(

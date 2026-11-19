@@ -22,7 +22,13 @@ const SERVE_ECHO: &str = r#"
 "#;
 
 fn run(args: &[&str], stdin: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("serve_echo.wasm");
+    // One file per test: the tests run in parallel, and rewriting a shared
+    // file truncates it under another test's simulator.
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("main")
+        .replace("::", "-");
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("serve_echo-{test}.wasm"));
     std::fs::write(&path, wat::parse_str(SERVE_ECHO).expect("WAT")).expect("write");
     let mut child = Command::new(env!("CARGO_BIN_EXE_payload-sim"))
         .arg(&path)
