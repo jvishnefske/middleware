@@ -16,13 +16,33 @@
 //! | [`READ_ANY`]: `sys/info`, `sys/trust/info`, `sys/manifest`, `sys/manifest/cm` | answered | answered |
 //! | `sys/payload/binding` | `Denied` | answered |
 //! | `sys/loader/begin`, `chunk` | `Denied` | staged beside the running payload; a `chunk` from a requester that does not own the transfer is `InvalidRequest` ([`Refusal::NotOwner`]) |
-//! | `sys/loader/commit` | `Denied` | the owner's, signed; the owner's unsigned commit is `Denied` and ends the transfer ([`Refusal::abandons_transfer`]) |
+//! | `sys/loader/commit` | `Denied` | the owner's, signed; an unsigned commit is `Denied` and leaves the transfer as it was (unlike the RT1050, which ends it) |
 //! | `sys/payload/start`, `stop` | `Denied` | a signed control body naming [`address`] with a counter above the last: [`Admission::Control`] |
 //! | `sys/payload/bind` | `Denied` | signed only (the dispatcher checks the signature and version) |
 //! | anything else (`sys/trust/claim` among them) | `Denied` | `Denied` |
 //!
-//! All Zenoh requesters are one requester ([`origin`]), distinct from the
-//! serial links (the gateway's `gw/sys` and the local link).
+//! # Requesters
+//!
+//! Each Zenoh requester is its own requester for the transfer owner rule
+//! ([`requester`]): `Origin::Air` and six bytes of the sender id its query
+//! attachment names (`middleware::zenoh_wire::decode_query`, what every
+//! middleware requester and mwctl send), distinct from the serial links
+//! (`Origin::Serial`: the gateway's `gw/sys` and the local link) and from
+//! one another. So one peer's `chunk` or `commit` cannot continue, spoil
+//! or end another's upload, and an unsigned commit ends nothing.
+//!
+//! **The sender id is not authenticated.** It is what the query says;
+//! neither Zenoh nor the router's ACL checks it (Zenoh 1.10's source
+//! info, which names the querier's session, is behind its `unstable`
+//! feature and would not be authenticated either). It keeps honest
+//! requesters from interfering by accident or casually; a peer that forges
+//! another's id can still spoil that upload. What runs is never at stake:
+//! activating needs the signed commit. A query without an attachment is
+//! the anonymous requester ([`ANONYMOUS`]), shared by all such queries.
+//!
+//! The device thread learns the requester from the Zenoh task through an
+//! envelope around each request body on the mesh link ([`wrap`],
+//! [`unwrap`]); nothing else writes to that link.
 //!
 //! A node whose trust record could not be read reports Unclaimed, so it
 //! answers only [`READ_ANY`] (fail closed).
@@ -50,10 +70,52 @@ pub const fn address(node: SenderId) -> Mac {
     [n[0], n[1], n[2], n[3], n[4], n[5]]
 }
 
-/// The origin the service gives Zenoh requests: every Zenoh peer is one
-/// requester, named by the node's own [`address`].
-pub const fn origin(own: Mac) -> Origin {
-    Origin::Air(own)
+/// The address of the anonymous requester: Zenoh queries that name no
+/// sender (no query attachment).
+pub const ANONYMOUS: Mac = [0; 6];
+
+/// The origin the service gives a Zenoh request whose attachment names
+/// `sender` (module docs: not authenticated): `Air` and the sender id's
+/// first six bytes, [`ANONYMOUS`] for none, never the node's own address
+/// `own` and never [`ANONYMOUS`] for a named sender (a low bit flipped
+/// when it would be either).
+pub fn requester(sender: Option<SenderId>, own: Mac) -> Origin {
+    let Some(id) = sender else { return Origin::Air(ANONYMOUS) };
+    let mut a = address(id);
+    for bit in [1, 2] {
+        if a == own || a == ANONYMOUS {
+            a[5] ^= bit;
+        }
+    }
+    Origin::Air(a)
+}
+
+/// A request body on the mesh link with the requester in front: `0` for
+/// none, or `1` and the sender id's 8 bytes.
+pub fn wrap(sender: Option<SenderId>, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 9);
+    match sender {
+        None => out.push(0),
+        Some(id) => {
+            out.push(1);
+            out.extend_from_slice(&id.0);
+        }
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// The requester and the request body of a [`wrap`]ped mesh link body;
+/// `None` when malformed.
+pub fn unwrap(raw: &[u8]) -> Option<(Option<SenderId>, &[u8])> {
+    match raw.split_first()? {
+        (0, body) => Some((None, body)),
+        (1, rest) => {
+            let (id, body) = rest.split_first_chunk::<8>()?;
+            Some((Some(SenderId(*id)), body))
+        }
+        _ => None,
+    }
 }
 
 /// Why a request over Zenoh is refused.
@@ -68,8 +130,8 @@ pub enum Refusal {
     /// A signed start or stop that does not verify: another key, another
     /// node, another command, or a counter not above the last.
     ControlRefused,
-    /// The transfer owner's commit is unsigned (or malformed); it ends the
-    /// transfer.
+    /// The transfer owner's commit is unsigned (or malformed), or one with
+    /// no transfer in progress. The transfer is left as it was.
     UnsignedCommit,
     /// A `chunk` or `commit` while another requester owns the transfer.
     NotOwner,
@@ -87,12 +149,6 @@ impl Refusal {
         }
     }
 
-    /// Whether the transfer in progress must end
-    /// ([`Service::abandon_transfer`](crate::service::Service::abandon_transfer)).
-    pub const fn abandons_transfer(self) -> bool {
-        matches!(self, Refusal::UnsignedCommit)
-    }
-
     /// A short reason for the log.
     pub const fn reason(self) -> &'static str {
         match self {
@@ -102,18 +158,24 @@ impl Refusal {
             Refusal::ControlRefused => {
                 "control signature invalid (pinned key, this node, this command) or counter not above the last"
             }
-            Refusal::UnsignedCommit => "payload commit over Zenoh must be signed; transfer ended",
+            Refusal::UnsignedCommit => "payload commit over Zenoh must be signed",
             Refusal::NotOwner => "another requester owns the transfer",
             Refusal::UnsignedBinding => "a payload binding over Zenoh must be signed by the pinned key",
         }
     }
 }
 
-/// Decides a request on `key` with `body` over Zenoh; `owner` is the
-/// payload transfer's owner
+/// Decides a request on `key` with `body` over Zenoh from requester `from`
+/// ([`requester`]); `owner` is the payload transfer's owner
 /// ([`Service::loader_owner`](crate::service::Service::loader_owner)) and
 /// `facts.own` the node's [`address`]. See the module docs.
-pub fn admit(facts: &Facts, owner: Option<Origin>, key: Key<'_>, body: &[u8]) -> Result<Admission, Refusal> {
+pub fn admit(
+    facts: &Facts,
+    owner: Option<Origin>,
+    from: Origin,
+    key: Key<'_>,
+    body: &[u8],
+) -> Result<Admission, Refusal> {
     if READ_ANY.contains(&key) {
         return Ok(Admission::Dispatch);
     }
@@ -135,7 +197,7 @@ pub fn admit(facts: &Facts, owner: Option<Origin>, key: Key<'_>, body: &[u8]) ->
     }
     // The radio gate's own checks: transfer ownership, a signed commit, a
     // verified signed start/stop.
-    match ota::admit(facts, owner, origin(facts.own), key, body) {
+    match ota::admit(facts, owner, from, key, body) {
         Ok(admission) => Ok(admission),
         Err(ota::Refusal::UnsignedControl) => Err(Refusal::UnsignedControl),
         Err(ota::Refusal::ControlRefused) => Err(Refusal::ControlRefused),
@@ -209,19 +271,61 @@ mod tests {
         "app/pi/echo",
     ];
 
+    const A: SenderId = SenderId([0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8]);
+    const B: SenderId = SenderId([0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8]);
+
+    fn from(id: SenderId) -> Origin {
+        requester(Some(id), OWN)
+    }
+
     #[test]
     fn pn24_the_control_address_is_the_first_six_bytes_of_the_node_id() {
         assert_eq!(address(NODE), OWN);
-        assert_eq!(origin(OWN), Origin::Air(OWN));
-        assert_ne!(origin(OWN), Origin::Serial);
+    }
+
+    #[test]
+    fn pn25_each_zenoh_requester_is_its_own_origin() {
+        assert_eq!(from(A), Origin::Air([0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6]));
+        assert_ne!(from(A), from(B));
+        assert_eq!(from(A), from(A));
+        assert_eq!(requester(None, OWN), Origin::Air(ANONYMOUS));
+        // Never the serial links' origin, the node's own address or the
+        // anonymous requester's, whatever the attachment says.
+        let own_like = SenderId([OWN[0], OWN[1], OWN[2], OWN[3], OWN[4], OWN[5], 0, 0]);
+        let mut anon_like = [0u8; 8];
+        anon_like[..6].copy_from_slice(&ANONYMOUS);
+        for id in [A, B, NODE, own_like, SenderId(anon_like)] {
+            let o = from(id);
+            assert_ne!(o, Origin::Serial, "{id:?}");
+            assert_ne!(o, Origin::Air(OWN), "{id:?}");
+            assert_ne!(o, Origin::Air(ANONYMOUS), "{id:?}");
+        }
+        assert_ne!(requester(None, OWN), Origin::Air(OWN));
+        // A node whose address is the anonymous one still keeps them apart.
+        let o = requester(Some(SenderId([0; 8])), ANONYMOUS);
+        assert_ne!(o, Origin::Air(ANONYMOUS));
+    }
+
+    #[test]
+    fn pn25_the_requester_crosses_the_mesh_link_in_an_envelope() {
+        for sender in [None, Some(A)] {
+            for body in [&b""[..], b"x", &[7u8; 520][..]] {
+                let w = wrap(sender, body);
+                assert_eq!(w.len(), body.len() + if sender.is_some() { 9 } else { 1 });
+                assert_eq!(unwrap(&w), Some((sender, body)));
+            }
+        }
+        for bad in [&[][..], &[2][..], &[1, 0, 0, 0][..]] {
+            assert_eq!(unwrap(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
     fn pn23_description_keys_answer_in_any_trust_state() {
         for f in [unclaimed(), claimed(0)] {
             for key in READ_ANY {
-                assert_eq!(admit(&f, None, key, &[]), Ok(Admission::Dispatch), "{key:?}");
-                assert_eq!(admit(&f, Some(Origin::Serial), key, &[]), Ok(Admission::Dispatch), "{key:?}");
+                assert_eq!(admit(&f, None, from(A), key, &[]), Ok(Admission::Dispatch), "{key:?}");
+                assert_eq!(admit(&f, Some(Origin::Serial), from(A), key, &[]), Ok(Admission::Dispatch), "{key:?}");
             }
         }
     }
@@ -241,7 +345,7 @@ mod tests {
             (keys::TRUST_CLAIM, seed(1).public_key().as_bytes().to_vec()),
         ];
         for (key, body) in &cases {
-            let r = admit(&f, None, *key, body);
+            let r = admit(&f, None, from(A), *key, body);
             assert_eq!(r, Err(Refusal::Unclaimed), "{key:?}");
             assert_eq!(r.unwrap_err().error(), HandlerError::Denied);
         }
@@ -251,82 +355,88 @@ mod tests {
     fn pn22_keys_outside_the_table_never_pass() {
         for f in [unclaimed(), claimed(0)] {
             for key in NEVER {
-                let r = admit(&f, None, k(key), &[]).expect_err(key);
+                let r = admit(&f, None, from(A), k(key), &[]).expect_err(key);
                 assert_eq!(r.error(), HandlerError::Denied, "{key}");
-                assert!(!r.abandons_transfer());
             }
         }
-        assert_eq!(admit(&claimed(0), None, keys::TRUST_CLAIM, &[0; 33]), Err(Refusal::NotOverMesh));
+        assert_eq!(admit(&claimed(0), None, from(A), keys::TRUST_CLAIM, &[0; 33]), Err(Refusal::NotOverMesh));
     }
 
     #[test]
     fn pn23_a_claimed_node_stages_transfers_and_reads_its_binding() {
         let f = claimed(0);
-        assert_eq!(admit(&f, None, keys::BINDING, &[]), Ok(Admission::Dispatch));
-        assert_eq!(admit(&f, None, keys::BEGIN, &[0; 8]), Ok(Admission::Dispatch));
-        let mine = Some(origin(OWN));
-        assert_eq!(admit(&f, mine, keys::CHUNK, &[0; 8]), Ok(Admission::Dispatch));
-        assert_eq!(admit(&f, mine, keys::COMMIT, &commit(1)), Ok(Admission::Dispatch));
+        assert_eq!(admit(&f, None, from(A), keys::BINDING, &[]), Ok(Admission::Dispatch));
+        assert_eq!(admit(&f, None, from(A), keys::BEGIN, &[0; 8]), Ok(Admission::Dispatch));
+        let mine = Some(from(A));
+        assert_eq!(admit(&f, mine, from(A), keys::CHUNK, &[0; 8]), Ok(Admission::Dispatch));
+        assert_eq!(admit(&f, mine, from(A), keys::COMMIT, &commit(1)), Ok(Admission::Dispatch));
         // The dispatcher checks the commit's key and version; the gate only
         // that it is signed.
-        assert_eq!(admit(&f, mine, keys::COMMIT, &commit(2)), Ok(Admission::Dispatch));
+        assert_eq!(admit(&f, mine, from(A), keys::COMMIT, &commit(2)), Ok(Admission::Dispatch));
     }
 
     #[test]
-    fn pn23_the_owners_unsigned_commit_ends_the_transfer() {
+    fn pn23_an_unsigned_commit_is_denied() {
         let f = claimed(0);
-        let mine = Some(origin(OWN));
-        for body in [vec![], vec![1, 2, 3]] {
-            let r = admit(&f, mine, keys::COMMIT, &body);
-            assert_eq!(r, Err(Refusal::UnsignedCommit));
-            assert!(r.unwrap_err().abandons_transfer());
-            assert_eq!(r.unwrap_err().error(), HandlerError::Denied);
+        // The owner's or another requester's: Denied (the controller leaves
+        // the transfer as it is).
+        for who in [from(A), from(B)] {
+            for body in [vec![], vec![1, 2, 3]] {
+                let r = admit(&f, Some(from(A)), who, keys::COMMIT, &body);
+                let want = if who == from(A) { Refusal::UnsignedCommit } else { Refusal::NotOwner };
+                assert_eq!(r, Err(want));
+            }
         }
+        assert_eq!(Refusal::UnsignedCommit.error(), HandlerError::Denied);
         // With no transfer in progress too.
-        assert_eq!(admit(&f, None, keys::COMMIT, &[]), Err(Refusal::UnsignedCommit));
+        assert_eq!(admit(&f, None, from(A), keys::COMMIT, &[]), Err(Refusal::UnsignedCommit));
     }
 
     #[test]
     fn pn25_another_requesters_transfer_is_not_continued() {
         let f = claimed(0);
-        for key in [keys::CHUNK, keys::COMMIT] {
-            let r = admit(&f, Some(Origin::Serial), key, &commit(1));
-            assert_eq!(r, Err(Refusal::NotOwner), "{key:?}");
-            assert_eq!(r.unwrap_err().error(), HandlerError::InvalidRequest);
-            assert!(!r.unwrap_err().abandons_transfer());
+        for owner in [Origin::Serial, from(B)] {
+            for key in [keys::CHUNK, keys::COMMIT] {
+                let r = admit(&f, Some(owner), from(A), key, &commit(1));
+                assert_eq!(r, Err(Refusal::NotOwner), "{key:?}");
+                assert_eq!(r.unwrap_err().error(), HandlerError::InvalidRequest);
+            }
         }
         // A begin takes it over (the service then names the new owner).
-        assert_eq!(admit(&f, Some(Origin::Serial), keys::BEGIN, &[0; 8]), Ok(Admission::Dispatch));
+        assert_eq!(admit(&f, Some(Origin::Serial), from(A), keys::BEGIN, &[0; 8]), Ok(Admission::Dispatch));
     }
 
     #[test]
     fn pn24_start_and_stop_are_signed_for_this_node_with_a_fresh_counter() {
         let f = claimed(100);
         for (key, op) in [(keys::START, ControlOp::Start), (keys::STOP, ControlOp::Stop)] {
-            assert_eq!(admit(&f, None, key, &[]), Err(Refusal::UnsignedControl), "{key:?}");
-            assert_eq!(admit(&f, None, key, &[0; 7]), Err(Refusal::UnsignedControl), "{key:?}");
+            assert_eq!(admit(&f, None, from(A), key, &[]), Err(Refusal::UnsignedControl), "{key:?}");
+            assert_eq!(admit(&f, None, from(A), key, &[0; 7]), Err(Refusal::UnsignedControl), "{key:?}");
             assert_eq!(
-                admit(&f, None, key, &control(1, op, &OWN, 101)),
+                admit(&f, None, from(A), key, &control(1, op, &OWN, 101)),
                 Ok(Admission::Control { counter: ControlCounter(101) }),
                 "{key:?}"
             );
             // Not above the last.
-            assert_eq!(admit(&f, None, key, &control(1, op, &OWN, 100)), Err(Refusal::ControlRefused));
+            assert_eq!(admit(&f, None, from(A), key, &control(1, op, &OWN, 100)), Err(Refusal::ControlRefused));
             // Another key.
-            assert_eq!(admit(&f, None, key, &control(2, op, &OWN, 101)), Err(Refusal::ControlRefused));
+            assert_eq!(admit(&f, None, from(A), key, &control(2, op, &OWN, 101)), Err(Refusal::ControlRefused));
             // The RT1050 rule's address: 02 and the node id's last five.
             let rt = [0x02, NODE.0[3], NODE.0[4], NODE.0[5], NODE.0[6], NODE.0[7]];
-            assert_eq!(admit(&f, None, key, &control(1, op, &rt, 101)), Err(Refusal::ControlRefused));
+            assert_eq!(admit(&f, None, from(A), key, &control(1, op, &rt, 101)), Err(Refusal::ControlRefused));
         }
         // Another command.
-        assert_eq!(admit(&f, None, keys::START, &control(1, ControlOp::Stop, &OWN, 101)), Err(Refusal::ControlRefused));
+        assert_eq!(
+            admit(&f, None, from(A), keys::START, &control(1, ControlOp::Stop, &OWN, 101)),
+            Err(Refusal::ControlRefused)
+        );
     }
 
     #[test]
     fn pn23_a_binding_must_be_signed() {
         let f = claimed(0);
-        assert_eq!(admit(&f, None, keys::BIND, &bind_record()), Err(Refusal::UnsignedBinding));
-        assert_eq!(admit(&f, None, keys::BIND, &[1, 2]), Err(Refusal::UnsignedBinding));
-        assert_eq!(admit(&f, None, keys::BIND, &signed_bind()), Ok(Admission::Dispatch));
+        assert_eq!(admit(&f, None, from(A), keys::BIND, &bind_record()), Err(Refusal::UnsignedBinding));
+        assert_eq!(admit(&f, None, from(A), keys::BIND, &[1, 2]), Err(Refusal::UnsignedBinding));
+        assert_eq!(admit(&f, None, from(A), keys::BIND, &signed_bind()), Ok(Admission::Dispatch));
     }
 }
