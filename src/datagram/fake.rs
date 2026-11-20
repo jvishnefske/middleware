@@ -158,6 +158,18 @@ pub(crate) fn poll_once<F: Future>(f: F) -> Poll<F::Output> {
     ))
 }
 
+/// Runs `f` to completion on the fake seam, where nothing ever waits for
+/// a wakeup: the clock is ready at once, so `f` is ready on its first
+/// poll unless it waits for a datagram that is not queued, which panics
+/// instead of hanging the test.
+#[track_caller]
+pub(crate) fn run<F: Future>(f: F) -> F::Output {
+    match poll_once(f) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("stuck: waiting for a datagram that is not queued"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

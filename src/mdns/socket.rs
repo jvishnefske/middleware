@@ -580,10 +580,9 @@ mod tests {
     //! The shell over the in-memory seam (no sockets, no runtime).
     extern crate std;
     use super::*;
-    use crate::datagram::fake::{FakeErr, FakeNet, FakeUdp, poll_once};
+    use crate::datagram::fake::{FakeErr, FakeNet, FakeUdp, poll_once, run};
     use crate::key::Key;
     use crate::mdns::wire::fixture;
-    use futures::executor::block_on;
 
     /// Small enough that a test can build an oversized datagram.
     const SMALL: usize = 512;
@@ -612,7 +611,7 @@ mod tests {
     fn fake_seam_delivers_a_response_and_sends_the_query() {
         let net = FakeNet::new();
         let mut q = querier(&net);
-        block_on(q.query(http())).unwrap();
+        run(q.query(http())).unwrap();
         let sent = net.take_sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].to, responder());
@@ -620,7 +619,7 @@ mod tests {
 
         net.deliver(&fixture::printer(7, 120), responder());
         let mut buf = [0u8; SMALL];
-        let r = block_on(q.recv_response(&mut buf)).unwrap();
+        let r = run(q.recv_response(&mut buf)).unwrap();
         assert_eq!(r.message().id(), 7);
         assert_eq!(q.last_source(), Some(responder()));
     }
@@ -636,7 +635,7 @@ mod tests {
         net.deliver(&big, responder());
         net.deliver(&fixture::printer(2, 120), responder());
         let mut buf = [0u8; SMALL];
-        let r = block_on(q.recv_response(&mut buf)).unwrap();
+        let r = run(q.recv_response(&mut buf)).unwrap();
         assert_eq!(r.message().id(), 2);
         // One byte under N is not oversized.
         let mut fits = fixture::printer(3, 120);
@@ -659,7 +658,7 @@ mod tests {
         let packet = fixture::printer(4, 120);
         net.deliver(&packet, responder());
         let mut small = [0u8; 16];
-        let err = block_on(q.recv_response(&mut small)).unwrap_err();
+        let err = run(q.recv_response(&mut small)).unwrap_err();
         assert!(
             matches!(err, MdnsError::BufferTooSmall { needed, capacity: 16 } if needed == packet.len())
         );
@@ -682,22 +681,19 @@ mod tests {
         let mut buf = [0u8; SMALL];
         assert!(poll_once(q.recv_response(&mut buf)).is_pending());
         net.deliver(&fixture::printer(5, 120), responder());
-        assert_eq!(
-            block_on(q.recv_response(&mut buf)).unwrap().message().id(),
-            5
-        );
+        assert_eq!(run(q.recv_response(&mut buf)).unwrap().message().id(), 5);
     }
 
     #[test]
     fn fake_seam_browses_a_kind_to_an_event() {
         let net = FakeNet::new();
         let mut q = querier(&net);
-        block_on(q.browse(KeyFilter::Exact(Key::from_static("http")))).unwrap();
+        run(q.browse(KeyFilter::Exact(Key::from_static("http")))).unwrap();
         assert_eq!(net.take_sent().len(), 1);
         let mut buf = [0u8; 256];
         assert!(q.try_next(&mut buf).unwrap().is_none());
         net.deliver(&fixture::printer(1, 120), responder());
-        let Event::Up(s) = block_on(q.next(&mut buf)).unwrap() else {
+        let Event::Up(s) = run(q.next(&mut buf)).unwrap() else {
             panic!()
         };
         assert_eq!(s.instance, "My.Printer");
@@ -708,9 +704,6 @@ mod tests {
         let net = FakeNet::new();
         let mut q = querier(&net);
         net.fail_sends(true);
-        assert!(matches!(
-            block_on(q.query(http())),
-            Err(MdnsError::Io(FakeErr))
-        ));
+        assert!(matches!(run(q.query(http())), Err(MdnsError::Io(FakeErr))));
     }
 }

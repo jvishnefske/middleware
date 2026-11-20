@@ -47,6 +47,8 @@ pub mod host;
 #[cfg(feature = "mdns")]
 pub mod origin;
 #[cfg(feature = "mdns")]
+mod race;
+#[cfg(feature = "mdns")]
 pub mod socket;
 pub use crate::dns::wire;
 
@@ -64,6 +66,11 @@ pub(crate) type DefaultIo = core::convert::Infallible;
 pub(crate) type DefaultSocket = host::TokioUdp;
 #[cfg(not(feature = "mdns"))]
 pub(crate) type DefaultSocket = ();
+/// The clock of the bare `MdnsAnnouncer`, as for [`DefaultSocket`].
+#[cfg(feature = "mdns")]
+pub(crate) type DefaultClock = host::TokioClock;
+#[cfg(not(feature = "mdns"))]
+pub(crate) type DefaultClock = ();
 
 /// UDP port of mDNS.
 pub const MDNS_PORT: u16 = 5353;
