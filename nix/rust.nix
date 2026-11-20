@@ -120,6 +120,14 @@ in
       pname = "zenohd";
       version = zenohVersion;
       cargoExtraArgs = "--locked -p zenohd";
+      # zenoh's own .cargo/config.toml sets `rustflags =
+      # "-Ctarget-feature=-crt-static"` under [target.<musl triple>] for
+      # both musl triples. Cargo uses a target's rustflags in preference
+      # to build.rustflags, so `common`'s CARGO_BUILD_RUSTFLAGS is
+      # ignored, rustc links dynamically and asks for -lgcc_s, which the
+      # static musl toolchain lacks. The same key set from the
+      # environment overrides the config file.
+      "CARGO_TARGET_${targetUpper}_RUSTFLAGS" = "-C target-feature=+crt-static";
     };
   in
     assert lib.assertMsg (locked != null && locked.version == zenohVersion)
