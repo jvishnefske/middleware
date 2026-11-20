@@ -69,7 +69,7 @@
 //! |------------|-------------|-------------------|---------------------------|
 //! | `ble`      | `ble`       | `no_std`, no heap | a radio binding (traits)  |
 //! | `serial`   | `serial::link` | `no_std`, no heap | `embedded-io-async`    |
-//! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
+//! | `espnow`   | `espnow`, `espnow::bridge` | `no_std`, no heap | a radio binding (trait); the USB bridge over `embedded-io-async` |
 //! | `trust`    | `loader::sha256`, `loader::trust` checks, `fw_ota::service` | `no_std`, no heap | sha2, ed25519-dalek (verify only) |
 //! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |

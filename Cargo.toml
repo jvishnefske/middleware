@@ -34,7 +34,8 @@ prost = ["dep:prost"]
 # Embedded transports (no_std, no heap)
 ble = []
 serial = ["dep:embedded-io-async"]
-espnow = []
+# `espnow::bridge` drives the USB bridge over an `embedded-io-async` stream.
+espnow = ["dep:embedded-io-async"]
 # The board's Zenoh 1.x client (`zenoh_lite`): a pure codec and session
 # state machine and an async adapter over one `embedded-io-async` TCP
 # stream. no_std, no heap; the `zenoh` crates need alloc and getrandom.
