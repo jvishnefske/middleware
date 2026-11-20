@@ -365,30 +365,57 @@ impl<IO: Read + Write, D: Delay, const Q: usize> BridgeRadio<IO, D, Q> {
     }
 
     /// Writes one `Send` to `dst` and waits for its `Sent` (module docs).
-    async fn send(&mut self, dst: Mac, frame: &[u8]) -> Result<(), BridgeIoError<IO::Error>> {
+    /// Starts a send without waiting: writes one `Send` to `dst` and
+    /// records that its `Sent` is awaited. The caller keeps reading
+    /// ([`Self::pump_one`], [`EspNowRadio::try_receive`]) so frames heard
+    /// meanwhile flow on rather than fill the ring, and ends the send with
+    /// [`Self::sent_outcome`] or [`Self::abandon_send`]. Replaces a send in
+    /// progress.
+    pub async fn begin_send(
+        &mut self,
+        dst: Mac,
+        frame: &[u8],
+    ) -> Result<(), BridgeIoError<IO::Error>> {
         if frame.is_empty() || frame.len() > MAX_DATA {
             return Err(BridgeIoError::FrameTooLarge);
         }
         self.st.awaiting = Some(dst);
         self.st.outcome = None;
-        let result = self.send_and_wait(dst, frame).await;
-        self.st.awaiting = None;
-        self.st.outcome = None;
-        let counters = &mut self.st.counters;
-        match result {
-            Err(BridgeIoError::SentTimeout) => bump(&mut counters.sent_timeouts),
-            Err(BridgeIoError::NotAcked) => bump(&mut counters.sent_failed),
-            _ => {}
+        let written = self.write_msg(&Msg::Send { dst, data: frame }).await;
+        if written.is_err() {
+            self.st.awaiting = None;
         }
-        result
+        written
     }
 
-    async fn send_and_wait(
-        &mut self,
-        dst: Mac,
-        frame: &[u8],
-    ) -> Result<(), BridgeIoError<IO::Error>> {
-        self.write_msg(&Msg::Send { dst, data: frame }).await?;
+    /// The destination of the send in progress, if any.
+    pub fn sending(&self) -> Option<Mac> {
+        self.st.awaiting
+    }
+
+    /// The bridge's `Sent` for the send in progress, once read
+    /// (`Some(acknowledged)`), which ends it; `None` while it is awaited.
+    pub fn sent_outcome(&mut self) -> Option<bool> {
+        let ok = self.st.outcome.take()?;
+        self.st.awaiting = None;
+        if !ok {
+            bump(&mut self.st.counters.sent_failed);
+        }
+        Some(ok)
+    }
+
+    /// Gives up on the send in progress (no `Sent` in time): counted, and
+    /// a late `Sent` for it is ignored.
+    pub fn abandon_send(&mut self) {
+        if self.st.awaiting.take().is_some() {
+            bump(&mut self.st.counters.sent_timeouts);
+        }
+        self.st.outcome = None;
+    }
+
+    /// Writes one `Send` to `dst` and waits for its `Sent` (module docs).
+    async fn send(&mut self, dst: Mac, frame: &[u8]) -> Result<(), BridgeIoError<IO::Error>> {
+        self.begin_send(dst, frame).await?;
         let BridgeRadio {
             io,
             delay,
@@ -398,17 +425,26 @@ impl<IO: Read + Write, D: Delay, const Q: usize> BridgeRadio<IO, D, Q> {
         let wait = async {
             // Bounded by the stream and the timeout racing it.
             loop {
-                if let Some(ok) = st.outcome.take() {
-                    break Ok(ok);
+                if st.outcome.is_some() {
+                    break Ok(());
                 }
                 pump(io, st).await?;
             }
         };
-        match first(wait, delay.delay_ms(*sent_timeout_ms)).await {
-            First::Left(Ok(true)) => Ok(()),
-            First::Left(Ok(false)) => Err(BridgeIoError::NotAcked),
-            First::Left(Err(e)) => Err(e),
-            First::Right(()) => Err(BridgeIoError::SentTimeout),
+        let raced = first(wait, delay.delay_ms(*sent_timeout_ms)).await;
+        match raced {
+            First::Left(Ok(())) => match self.sent_outcome() {
+                Some(true) => Ok(()),
+                _ => Err(BridgeIoError::NotAcked),
+            },
+            First::Left(Err(e)) => {
+                self.st.awaiting = None;
+                Err(e)
+            }
+            First::Right(()) => {
+                self.abandon_send();
+                Err(BridgeIoError::SentTimeout)
+            }
         }
     }
 }
@@ -843,6 +879,40 @@ mod tests {
         let written = req.radio_mut().io.written();
         assert_eq!(written.len(), 2);
         assert_eq!(written[0], written[1], "the resend carries the same id");
+    }
+
+    #[test]
+    fn eg4_a_split_send_lets_frames_through_while_it_waits() {
+        let mut r = radio::<2>(FakeIo::new());
+        block_on(r.begin_send(DEV, b"req")).unwrap();
+        assert_eq!(r.sending(), Some(DEV));
+        assert_eq!(r.sent_outcome(), None);
+        // More frames than the ring holds arrive while the Sent is pending;
+        // the caller takes each as it comes.
+        let mut buf = [0u8; 250];
+        for d in [&b"one"[..], b"two", b"three", b"four"] {
+            r.io.queue(Msg::Recv { src: DEV, data: d });
+            block_on(r.pump_one()).unwrap();
+            let (f, _) = r.try_receive(&mut buf).unwrap().unwrap();
+            assert_eq!(f, d);
+            assert_eq!(r.sent_outcome(), None);
+        }
+        assert_eq!(r.counters().ring_dropped, 0);
+        r.io.inbox.extend(sent(false, DEV));
+        block_on(r.pump_one()).unwrap();
+        assert_eq!(r.sent_outcome(), Some(false));
+        assert_eq!((r.sending(), r.counters().sent_failed), (None, 1));
+        // A send given up on: the late Sent is ignored.
+        block_on(r.begin_send(DEV, b"req")).unwrap();
+        r.abandon_send();
+        assert_eq!((r.sending(), r.counters().sent_timeouts), (None, 1));
+        r.io.inbox.extend(sent(true, DEV));
+        block_on(r.pump_one()).unwrap();
+        assert_eq!(r.sent_outcome(), None);
+        assert_eq!(
+            block_on(r.begin_send(DEV, &[])),
+            Err(BridgeIoError::FrameTooLarge)
+        );
     }
 
     #[test]

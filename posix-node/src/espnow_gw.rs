@@ -30,8 +30,8 @@
 //! One future runs three loops: the **pump** owns the [`BridgeRadio`] and
 //! serves send commands, routing every frame heard to the bus (`MW`
 //! frames) or to the requests (`MR` frames) through bounded queues (full:
-//! dropped and counted); while a send waits for its `Sent` the radio keeps
-//! reading into its ring, so no uplink is lost. The **bus** runs the
+//! dropped and counted); while a send waits for its `Sent` the pump goes
+//! on reading and routing, so a lost `Sent` does not stall the uplink. The **bus** runs the
 //! uplink, beacons, downlink and heard list; the **requests** loop serves
 //! queries one at a time, so a slow device stalls only other requests.
 
@@ -297,49 +297,67 @@ impl EspNowUnicast for MrHandle<'_> {
 
 /// The pump: serves send commands, routes heard frames. Returns why it
 /// stopped.
+///
+/// A send is started ([`BridgeRadio::begin_send`]) and its `Sent` awaited
+/// here, between reads, so frames heard meanwhile are routed as they come
+/// instead of piling up in the radio's ring; at most one send is in
+/// flight (the bridge queues four).
 async fn pump<IO: Read + Write>(
     mut radio: BridgeRadio<IO, TokioDelay>,
     mut cmds: mpsc::Receiver<Cmd>,
     mw: mpsc::Sender<Frame>,
     mr: mpsc::Sender<Frame>,
+    sent_timeout: Duration,
     counters: &Counters,
 ) -> GwError {
     enum Ev {
         Cmd(Option<Cmd>),
-        Frame(Result<(usize, Mac), String>),
+        Read(Result<(), String>),
+        SentTimeout,
         Tick,
     }
     let mut raw = [0u8; MAX_FRAME];
     let mut stats = tokio::time::interval(Duration::from_secs(60));
+    let mut inflight: Option<(oneshot::Sender<Result<(), LinkError>>, tokio::time::Instant)> = None;
     loop {
-        // `receive` is cancel-safe: a command arriving drops it, losing no
-        // frame.
+        let deadline = inflight.as_ref().map_or_else(tokio::time::Instant::now, |(_, d)| *d);
+        // `pump_one` is cancel-safe: whatever it read is handled before it
+        // returns, so another branch winning loses no frame.
         let ev = tokio::select! {
-            c = cmds.recv() => Ev::Cmd(c),
-            r = radio.receive(&mut raw) => Ev::Frame(r.map(|(b, src)| (b.len(), src)).map_err(|e| e.to_string())),
+            c = cmds.recv(), if inflight.is_none() => Ev::Cmd(c),
+            r = radio.pump_one() => Ev::Read(r.map_err(|e| e.to_string())),
+            _ = tokio::time::sleep_until(deadline), if inflight.is_some() => Ev::SentTimeout,
             _ = stats.tick() => Ev::Tick,
         };
         match ev {
             Ev::Cmd(None) => return GwError::Bridge("gateway stopped".into()),
-            Ev::Cmd(Some(cmd)) => {
-                let r = if cmd.dst == BROADCAST {
-                    radio.broadcast(&cmd.frame).await
-                } else {
-                    radio.send_to(cmd.dst, &cmd.frame).await
-                };
-                let r = match r {
-                    Ok(()) => Ok(()),
-                    Err(e @ (BridgeIoError::Io(_) | BridgeIoError::Closed)) => return GwError::Bridge(e.to_string()),
-                    Err(e) => Err(LinkError::from(e)),
-                };
-                let _ = cmd.done.send(r);
+            Ev::Cmd(Some(cmd)) => match radio.begin_send(cmd.dst, &cmd.frame).await {
+                Ok(()) => inflight = Some((cmd.done, tokio::time::Instant::now() + sent_timeout)),
+                Err(e @ (BridgeIoError::Io(_) | BridgeIoError::Closed)) => return GwError::Bridge(e.to_string()),
+                Err(e) => {
+                    let _ = cmd.done.send(Err(LinkError::from(e)));
+                }
+            },
+            Ev::Read(Err(e)) => return GwError::Bridge(e),
+            Ev::Read(Ok(())) => {
+                // Bounded by the radio's ring.
+                while let Ok(Some((bytes, src))) = radio.try_receive(&mut raw) {
+                    let frame = bytes.to_vec();
+                    let q = if middleware::rpc::is_rpc(&frame) { &mr } else { &mw };
+                    if q.try_send((src, frame)).is_err() {
+                        bump(&counters.dropped);
+                    }
+                }
+                if let Some(ok) = radio.sent_outcome()
+                    && let Some((done, _)) = inflight.take()
+                {
+                    let _ = done.send(if ok { Ok(()) } else { Err(LinkError::NotAcked) });
+                }
             }
-            Ev::Frame(Err(e)) => return GwError::Bridge(e),
-            Ev::Frame(Ok((n, src))) => {
-                let frame = raw.get(..n).unwrap_or_default().to_vec();
-                let q = if middleware::rpc::is_rpc(&frame) { &mr } else { &mw };
-                if q.try_send((src, frame)).is_err() {
-                    bump(&counters.dropped);
+            Ev::SentTimeout => {
+                radio.abandon_send();
+                if let Some((done, _)) = inflight.take() {
+                    let _ = done.send(Err(LinkError::SentTimeout));
                 }
             }
             Ev::Tick => {
@@ -662,7 +680,8 @@ where
     };
 
     let pump_loop = async {
-        let e = pump(radio, cmd_rx, mw_tx, mr_tx, &counters).await;
+        let sent_timeout = Duration::from_millis(u64::from(cfg.sent_timeout_ms));
+        let e = pump(radio, cmd_rx, mw_tx, mr_tx, sent_timeout, &counters).await;
         let _ = failed_tx.send(e);
         std::future::pending::<()>().await;
     };

@@ -495,31 +495,40 @@ async fn eg10_heard_list() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn eg3_uplink_survives_a_request() {
-    let r = Running::start(fast()).await;
+    // The lost Sent stalls the request for 1.5 s, longer than the burst.
+    let r = Running::start(GwConfig { sent_timeout_ms: 1_500, ..fast() }).await;
     let mut o = r.observer.clone();
     let mut sub = o.subscribe(KeyFilter::Prefix(Key::from_static("app"))).await.unwrap();
     first_sample(&r, &mut sub, DEV, "app/warm", b"up").await;
     assert_eq!(r.info_when_heard(DEV).await.unwrap(), b"INFO");
-    // A request stalls on a lost Sent while the device keeps publishing.
     r.bridge.script(&[Fate::LoseSent, Fate::Ack]);
-    let request = {
-        let r = &r;
-        async move { r.info(DEV, Duration::from_secs(5)).await }
+    let sends = r.bridge.air.lock().unwrap().sends.len();
+    let request = async {
+        let answer = r.info(DEV, Duration::from_secs(8)).await;
+        (answer, tokio::time::Instant::now())
     };
+    // Once the request's Send is out (and its Sent lost), the device
+    // publishes more frames than the bridge radio's ring holds.
     let publishing = async {
-        for i in 0..10u8 {
+        while r.bridge.air.lock().unwrap().sends.len() == sends {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        for i in 0..20u8 {
             r.bridge.publish(DEV, 100 + i, "app/during", &[i]).await;
         }
-    };
-    let (answer, ()) = tokio::join!(request, publishing);
-    assert_eq!(answer.unwrap(), b"INFO");
-    let mut seen = Vec::new();
-    while seen.len() < 10 {
-        let (k, p, _) = next(&mut sub).await;
-        if k == "app/during" {
-            seen.push(p[0]);
+        let mut seen = Vec::new();
+        while seen.len() < 20 {
+            let (k, p, _) = next(&mut sub).await;
+            if k == "app/during" {
+                seen.push(p[0]);
+            }
         }
-    }
-    assert_eq!(seen, (0..10).collect::<Vec<u8>>());
+        (seen, tokio::time::Instant::now())
+    };
+    let ((answer, answered), (seen, all_up)) = tokio::join!(request, publishing);
+    assert_eq!(answer.unwrap(), b"INFO");
+    assert_eq!(seen, (0..20).collect::<Vec<u8>>());
+    // They were published while the request still waited, not after.
+    assert!(all_up < answered, "uplink waited for the request");
     r.finish().await;
 }
