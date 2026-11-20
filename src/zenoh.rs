@@ -149,6 +149,7 @@ pub use responder::ZenohResponder;
 pub use subscriber::ZenohSubscriber;
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -226,8 +227,13 @@ pub enum ZenohError {
     /// declaration undeclared).
     Closed,
     /// An endpoint string given to [`SessionConfig`] contains a character
-    /// that cannot be embedded in the configuration (`"` or `\`).
+    /// that cannot be embedded in the configuration (`"`, `\` or a control
+    /// character).
     InvalidEndpoint,
+    /// A [`TlsFiles`] path given to [`SessionConfig::tls`] is not valid
+    /// UTF-8 or contains a character that cannot be embedded in the
+    /// configuration (`"`, `\` or a control character).
+    InvalidTlsPath,
     /// A service instance name is not a single plain Zenoh key chunk
     /// (empty, contains `/`, `*`, `$`, `?` or `#`, or starts with `@`).
     InvalidInstance,
@@ -254,6 +260,9 @@ impl core::fmt::Display for ZenohError {
             ZenohError::NoReply => f.write_str("no reply received"),
             ZenohError::Closed => f.write_str("zenoh channel closed"),
             ZenohError::InvalidEndpoint => f.write_str("invalid endpoint string"),
+            ZenohError::InvalidTlsPath => {
+                f.write_str("TLS file path is not valid UTF-8 or needs escaping")
+            }
             ZenohError::InvalidInstance => f.write_str("instance is not a plain key chunk"),
             ZenohError::Record(e) => write!(f, "service record: {e:?}"),
             ZenohError::NotBrowsing => f.write_str("browse was not called"),
@@ -279,16 +288,79 @@ impl From<::zenoh::Error> for ZenohError {
     }
 }
 
+/// Zenoh session mode chosen by [`SessionConfig`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Mode {
+    #[default]
+    Peer,
+    Client,
+}
+
+impl Mode {
+    fn json(self) -> &'static str {
+        match self {
+            Mode::Peer => r#""peer""#,
+            Mode::Client => r#""client""#,
+        }
+    }
+}
+
+/// PEM files of one mTLS client identity, given to [`SessionConfig::tls`].
+///
+/// The files are referenced by path: [`SessionConfig::build`] does not read
+/// them, Zenoh reads them when it opens a TLS link (so a rotated certificate
+/// is picked up on the next connect), and no key material is held in the
+/// built configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsFiles {
+    /// CA certificate(s) the server's certificate must chain to.
+    pub root_ca: PathBuf,
+    /// This client's certificate (chain), presented to the server.
+    pub cert: PathBuf,
+    /// This client's private key (PKCS#8, PKCS#1 or SEC1 PEM).
+    pub key: PathBuf,
+}
+
+impl TlsFiles {
+    /// `<dir>/ca`, `<dir>/cert` and `<dir>/key`: the layout of a mounted
+    /// edge-ca TLS Secret (keys `ca`, `cert`, `key`).
+    pub fn from_dir(dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref();
+        Self {
+            root_ca: dir.join("ca"),
+            cert: dir.join("cert"),
+            key: dir.join("key"),
+        }
+    }
+}
+
 /// Builder for a discovery-free [`::zenoh::Config`].
 ///
-/// The built config is in `peer` mode with multicast scouting and gossip
-/// disabled, listening and connecting only on the endpoints added here
-/// (for example `tcp/127.0.0.1:7447`). With none added the session neither
-/// listens nor connects.
+/// The built config is in `peer` mode (or `client` mode after
+/// [`client`](Self::client)) with multicast scouting and gossip disabled,
+/// listening and connecting only on the endpoints added here (for example
+/// `tcp/127.0.0.1:7447`). With none added the session neither listens nor
+/// connects.
+///
+/// # mTLS
+///
+/// [`tls`](Self::tls) makes `tls/` connections present a client certificate
+/// and verify the server against a CA. It sets
+/// `transport/link/tls/{root_ca_certificate, connect_certificate,
+/// connect_private_key}` to the file paths and `enable_mtls` to `true`
+/// (Zenoh then uses TLS 1.3 only). Server-name verification stays on: the
+/// host in the `tls/<host>:<port>` locator must be a SAN of the server's
+/// certificate. Zenoh adds the given CA to the public web roots rather than
+/// replacing them, so a publicly trusted certificate for that name is also
+/// accepted; this is acceptable where the router in turn authenticates
+/// clients by their certificates. The listener side (`listen_*`) is not
+/// configured, and `tcp/` endpoints ignore these settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionConfig {
     listen: Vec<String>,
     connect: Vec<String>,
+    mode: Mode,
+    tls: Option<TlsFiles>,
 }
 
 impl SessionConfig {
@@ -309,25 +381,62 @@ impl SessionConfig {
         self
     }
 
-    /// Produces the Zenoh configuration.
+    /// Selects Zenoh `client` mode: the session talks only through the
+    /// router it connects to (the mode a router's per-link access control
+    /// expects).
+    pub fn client(mut self) -> Self {
+        self.mode = Mode::Client;
+        self
+    }
+
+    /// Presents the client identity in `files` on `tls/` connections and
+    /// verifies the server against its CA (see [mTLS](Self#mtls)).
+    pub fn tls(mut self, files: TlsFiles) -> Self {
+        self.tls = Some(files);
+        self
+    }
+
+    /// Produces the Zenoh configuration. It reads no files.
     pub fn build(&self) -> Result<::zenoh::Config, ZenohError> {
         let mut config = ::zenoh::Config::default();
-        config.insert_json5("mode", r#""peer""#)?;
+        config.insert_json5("mode", self.mode.json())?;
         config.insert_json5("scouting/multicast/enabled", "false")?;
         config.insert_json5("scouting/gossip/enabled", "false")?;
         config.insert_json5("listen/endpoints", &json_array(&self.listen)?)?;
         config.insert_json5("connect/endpoints", &json_array(&self.connect)?)?;
+        if let Some(files) = &self.tls {
+            let tls = "transport/link/tls";
+            for (item, path) in [
+                ("root_ca_certificate", &files.root_ca),
+                ("connect_certificate", &files.cert),
+                ("connect_private_key", &files.key),
+            ] {
+                let path = path.to_str().ok_or(ZenohError::InvalidTlsPath)?;
+                let value = json_string(path).ok_or(ZenohError::InvalidTlsPath)?;
+                config.insert_json5(&format!("{tls}/{item}"), &value)?;
+            }
+            config.insert_json5(&format!("{tls}/enable_mtls"), "true")?;
+        }
         Ok(config)
     }
+}
+
+/// JSON5 string literal of `s`, or `None` if `s` holds a character that
+/// would need escaping (`"`, `\` or a control character).
+fn json_string(s: &str) -> Option<String> {
+    if s.contains(['"', '\\']) || s.chars().any(char::is_control) {
+        return None;
+    }
+    Some(format!("\"{s}\""))
 }
 
 /// Renders endpoint strings as a JSON5 array, refusing characters that would
 /// need escaping.
 fn json_array(items: &[String]) -> Result<String, ZenohError> {
-    if items.iter().any(|s| s.contains(['"', '\\'])) {
-        return Err(ZenohError::InvalidEndpoint);
-    }
-    let quoted: Vec<String> = items.iter().map(|s| format!("\"{s}\"")).collect();
+    let quoted = items
+        .iter()
+        .map(|s| json_string(s).ok_or(ZenohError::InvalidEndpoint))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("[{}]", quoted.join(",")))
 }
 
@@ -685,6 +794,137 @@ mod tests {
                 .build()
                 .is_ok()
         );
+    }
+
+    fn json(config: &::zenoh::Config, key: &str) -> String {
+        config.get_json(key).expect(key)
+    }
+
+    #[test]
+    fn zt1_default_is_peer_without_tls() {
+        let config = SessionConfig::new().build().unwrap();
+        assert_eq!(json(&config, "mode"), r#""peer""#);
+        assert_eq!(
+            json(&config, "transport/link/tls/root_ca_certificate"),
+            "null"
+        );
+        assert_eq!(
+            json(&config, "transport/link/tls/connect_certificate"),
+            "null"
+        );
+        assert_eq!(
+            json(&config, "transport/link/tls/connect_private_key"),
+            "null"
+        );
+        assert_eq!(json(&config, "transport/link/tls/enable_mtls"), "null");
+    }
+
+    #[test]
+    fn zt1_client_selects_client_mode() {
+        let config = SessionConfig::new().client().build().unwrap();
+        assert_eq!(json(&config, "mode"), r#""client""#);
+        assert_eq!(json(&config, "transport/link/tls/enable_mtls"), "null");
+    }
+
+    #[test]
+    fn zt1_tls_sets_file_paths_and_mtls() {
+        let config = SessionConfig::new()
+            .client()
+            .connect("tls/127.0.0.1:7447")
+            .tls(TlsFiles::from_dir("/run/zenoh-tls"))
+            .build()
+            .unwrap();
+        assert_eq!(json(&config, "mode"), r#""client""#);
+        assert_eq!(
+            json(&config, "transport/link/tls/root_ca_certificate"),
+            r#""/run/zenoh-tls/ca""#
+        );
+        assert_eq!(
+            json(&config, "transport/link/tls/connect_certificate"),
+            r#""/run/zenoh-tls/cert""#
+        );
+        assert_eq!(
+            json(&config, "transport/link/tls/connect_private_key"),
+            r#""/run/zenoh-tls/key""#
+        );
+        assert_eq!(json(&config, "transport/link/tls/enable_mtls"), "true");
+        // Server-name verification and the listener identity are untouched.
+        assert_eq!(
+            json(&config, "transport/link/tls/verify_name_on_connect"),
+            "null"
+        );
+        assert_eq!(
+            json(&config, "transport/link/tls/listen_certificate"),
+            "null"
+        );
+        assert_eq!(
+            json(&config, "transport/link/tls/listen_private_key"),
+            "null"
+        );
+    }
+
+    #[test]
+    fn zt1_tls_is_independent_of_mode() {
+        let config = SessionConfig::new()
+            .tls(TlsFiles::from_dir("/x"))
+            .build()
+            .unwrap();
+        assert_eq!(json(&config, "mode"), r#""peer""#);
+        assert_eq!(json(&config, "transport/link/tls/enable_mtls"), "true");
+    }
+
+    #[test]
+    fn zt1_tls_refuses_paths_that_need_escaping() {
+        for bad in ["/x/\"ca", "/x\\ca", "/x/c\na", "/x/c\u{7f}a"] {
+            let files = TlsFiles {
+                root_ca: bad.into(),
+                cert: "/x/cert".into(),
+                key: "/x/key".into(),
+            };
+            let err = SessionConfig::new().tls(files).build().unwrap_err();
+            assert!(matches!(err, ZenohError::InvalidTlsPath), "{bad:?}: {err}");
+        }
+        let files = TlsFiles {
+            root_ca: "/x/ca".into(),
+            cert: "/x/ce\nrt".into(),
+            key: "/x/key".into(),
+        };
+        assert!(matches!(
+            SessionConfig::new().tls(files).build(),
+            Err(ZenohError::InvalidTlsPath)
+        ));
+        let files = TlsFiles {
+            root_ca: "/x/ca".into(),
+            cert: "/x/cert".into(),
+            key: "/x/\"key".into(),
+        };
+        assert!(matches!(
+            SessionConfig::new().tls(files).build(),
+            Err(ZenohError::InvalidTlsPath)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zt1_tls_refuses_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        let files = TlsFiles {
+            root_ca: std::ffi::OsStr::from_bytes(b"/x/\xffca").into(),
+            cert: "/x/cert".into(),
+            key: "/x/key".into(),
+        };
+        assert!(matches!(
+            SessionConfig::new().tls(files).build(),
+            Err(ZenohError::InvalidTlsPath)
+        ));
+    }
+
+    #[test]
+    fn zt1_tls_files_from_dir() {
+        let files = TlsFiles::from_dir("/x");
+        assert_eq!(files.root_ca, std::path::Path::new("/x/ca"));
+        assert_eq!(files.cert, std::path::Path::new("/x/cert"));
+        assert_eq!(files.key, std::path::Path::new("/x/key"));
     }
 
     #[test]
