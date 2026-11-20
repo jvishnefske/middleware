@@ -405,6 +405,48 @@ with scouting off. All run under `--features zenoh`.
   `zenoh::discovery::tests::differing_records_conflict_and_equal_ones_agree`,
   `zenoh::discovery::tests::records_must_name_the_token_kind_and_instance`.
 
+Zenoh over mutual TLS (ZT1–ZT5): a client of a `tls/` router presents a
+certificate and verifies the router's, with the PEM files referenced by
+path (edge-ca's `zenohd-tls` Secret keys `ca`, `cert`, `key`). The
+integration tests (`tests/zenoh_tls.rs`) run an in-process router on
+`tls/127.0.0.1:<port>` with throwaway rcgen certificates; every refusal
+test first connects a correct client to the same router.
+
+- [x] ZT1 `SessionConfig::client()` selects Zenoh client mode, and
+  `.tls(TlsFiles { root_ca, cert, key })` (or `TlsFiles::from_dir`, its
+  `ca`, `cert`, `key`) sets `transport/link/tls/{root_ca_certificate,
+  connect_certificate, connect_private_key}` to the file paths and
+  `enable_mtls` to true, independent of the mode. `build()` reads no
+  files, never sets `verify_name_on_connect` (server-name verification
+  stays on) or the `listen_*` keys, and refuses a path that is not UTF-8
+  or holds `"`, `\` or a control character (`InvalidTlsPath`); endpoints
+  now also refuse control characters (`InvalidEndpoint`) —
+  `zenoh::tests::zt1_default_is_peer_without_tls`,
+  `zt1_client_selects_client_mode`, `zt1_tls_sets_file_paths_and_mtls`,
+  `zt1_tls_is_independent_of_mode`,
+  `zt1_tls_refuses_paths_that_need_escaping`,
+  `zt1_tls_refuses_non_utf8_paths`, `zt1_tls_files_from_dir`.
+- [x] ZT2 A client whose certificate the router's client CA signed
+  connects to an mTLS `tls/` listener and exchanges a put and a get with
+  it — `zt2_mtls_client_publishes_and_gets`.
+- [x] ZT3 A client that presents no certificate is refused: `open` fails
+  (client mode does not retry), without the error echoing key material —
+  `zt3_client_without_certificate_is_refused`.
+- [x] ZT4 A client whose certificate another CA signed is refused —
+  `zt4_client_certificate_from_another_ca_is_refused`.
+- [x] ZT5 A client pinning the real CA refuses a router certificate that
+  another CA signed — `zt5_server_not_signed_by_the_pinned_ca_is_refused`.
+  Trust model: zenoh-link-tls 1.10 adds `root_ca_certificate` to the
+  public web roots instead of replacing them, with no option to turn
+  them off, so any publicly trusted certificate for the locator host
+  also passes. Hard requirement: the host in `tls/<host>:<port>` must be
+  a name public CAs are forbidden to issue for — a DNS name with a CAA
+  record `0 issue ";"` on that exact name, or an IP address matched
+  against an IP SAN. Server-name verification stays on, so the host must
+  also be a SAN of the router's certificate. Each refusal test was seen
+  failing against a broken fixture (router mTLS off for ZT3/ZT4, the
+  rogue client or router certificate signed by the real CA for ZT4/ZT5).
+
 ### gRPC (`grpc`)
 
 - [x] G1 Unary request to key `Service/Method` is a gRPC call on
@@ -3762,6 +3804,27 @@ open).
   router, other subnets, and mw-posix-node's `sys/info`, which it does not
   serve over Zenoh yet (only through `gw/sys`, MS6) —
   `scout::tests::h4_node_ids_come_from_sys_info_reply_keys`, `h4_admin_sessions_are_parsed_and_junk_is_skipped`, `h4_merge_joins_by_zenoh_id_and_leaves_out_the_scanner`, `h4_answers_are_attributed_by_node_id`, `h4_the_table_is_aligned_and_says_when_nothing_was_found`, `scout::shell::tests::h4_connects_to_routers_and_peers_over_tcp_only`; `cli::tests::h4_scout_needs_no_link_and_takes_only_seconds`. Run 2026-11-19 against a zenohd on loopback: it listed the router, a mw-posix-node's two sessions (peer and client, via the router) and a stub `@mw/node/<id>/sys/info` queryable; on this LAN it found no Zenoh session.
+- [x] H5 `mwctl --zenoh tls/<HOST>:<PORT> --node <ID> ...` (feature
+  `zenoh`) connects as a Zenoh client with a client certificate (ZT1):
+  `--zenoh-ca`, `--zenoh-cert`, `--zenoh-key` (all three), or
+  `--zenoh-tls-dir <DIR>`, or else `MW_ZENOH_TLS_DIR` (environment, else
+  `~/.env`), the last two meaning files `ca`, `cert`, `key` as in
+  edge-ca's `zenohd-tls` Secret. A `tls/` endpoint without any of them, a
+  partial triple, both forms, the flags with a non-`tls/` endpoint, with
+  `--zenoh-listen` or without `--zenoh` are usage errors (exit 2). Each
+  file is checked readable first and an unreadable one is reported by
+  path and error kind, never its contents; the `zenoh:` line names the
+  three paths. Plain `tcp/` use is unchanged (peer mode, environment not
+  read) — `cli::tests::h5_zenoh_tls_files_parse_into_the_target`,
+  `h5_zenoh_tls_dir_means_ca_cert_and_key_in_it`,
+  `h5_zenoh_without_tls_flags_has_no_tls`, `h5_zenoh_tls_usage_errors`,
+  `h5_tls_endpoint_takes_mw_zenoh_tls_dir_when_no_flag_gives_files`,
+  `h5_plain_tcp_ignores_mw_zenoh_tls_dir`,
+  `h5_tls_endpoint_without_an_identity_is_a_usage_error`,
+  `h5_tls_flags_need_a_tls_endpoint`,
+  `h5_unreadable_identity_file_is_named_by_path_and_kind`,
+  `h5_readable_identity_files_pass`. The library path is ZT2–ZT5; mwctl
+  against a real mTLS router is not run in the tests.
 
 ### Web site (`web/`)
 

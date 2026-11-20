@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Zenoh over mTLS (ZT1–ZT5, H5)
+- `middleware::zenoh::SessionConfig::client()` and `.tls(TlsFiles { root_ca, cert, key })` (PEM file paths, read by Zenoh at connect; `TlsFiles::from_dir` takes `ca`, `cert`, `key`), `ZenohError::InvalidTlsPath`. Endpoint strings with control characters are now `InvalidEndpoint`. No new feature or dependency: zenoh's default TLS link was already built. `rcgen` is a new dev-dependency only (already in Cargo.lock).
+- The pinned CA adds to the public web roots (zenoh-link-tls), so the locator host must be a name public CAs may not issue for: a CAA record `0 issue ";"` on that exact name, or an IP SAN.
+- `tests/zenoh_tls.rs`: an in-process mTLS router with throwaway rcgen certificates; a correct client exchanges put/get, and a client without a certificate, one from another CA, and a router from another CA are refused.
+- mwctl `--zenoh tls/...` with `--zenoh-ca/--zenoh-cert/--zenoh-key`, `--zenoh-tls-dir` or `MW_ZENOH_TLS_DIR` connects as a Zenoh client over mTLS; `ZenohLink::open` takes an `Option<TlsFiles>`.
+- Follow-up: mw-service's `run::zenoh::client_config` (and the gateway, posix-node) still build their own client config; they can move to `SessionConfig::client().tls(..)`.
+
 ### mwctl scout (H4)
 - `mwctl scout [--seconds N]` (feature `zenoh`; `just lan` in the new root `justfile`): Zenoh multicast scouting, the scouted routers' and peers' admin-space sessions, and `@mw/node/*/sys/info`, merged into one table of the nodes on the local network (`mwctl::scout`). mwctl's `zenoh` feature now also pulls in `zenoh` and `serde_json` directly; the default build is unchanged.
 
