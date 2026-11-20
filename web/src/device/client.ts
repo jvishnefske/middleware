@@ -1,11 +1,18 @@
-// Host side of the serial protocol over a pair of byte streams.
+// The host side of a device: `DeviceClient`, what the pages and the upload,
+// binding and trust flows use, whatever carries the requests.
 //
-// `DeviceClient` owns a reader loop that feeds the protocol-wasm decoder,
-// matches responses to requests by correlation id, and reports console text,
-// publications and rejected segments through callbacks. It knows nothing
-// about Web Serial or the DOM: it takes a ReadableStream/WritableStream pair,
-// which is a SerialPort's `readable`/`writable` in the browser and an
-// in-memory pipe in the tests.
+// * `RequestClient` is the shared base: every typed helper (`info`,
+//   `manifest`, `controlPage`, `bind`, `trustInfo`, ...) over one abstract
+//   `request(key, body, opts)`.
+// * `SerialClient` speaks the serial protocol over a pair of byte streams.
+//   It owns a reader loop that feeds the protocol-wasm decoder, matches
+//   responses to requests by correlation id, and reports console text,
+//   publications and rejected segments through callbacks. It knows nothing
+//   about Web Serial or the DOM: it takes a ReadableStream/WritableStream
+//   pair, which is a SerialPort's `readable`/`writable` in the browser and
+//   an in-memory pipe in the tests.
+// * `MeshClient` (mesh.ts) asks one node over Zenoh through the cloud
+//   router; it is `remote`.
 //
 // Trust (U13): `trustInfo` and `trustClaim` speak `sys/trust/*`; a response
 // with wire status 5 rejects with `DeniedError`, whose message says how to
@@ -87,7 +94,151 @@ interface Pending {
 
 export const DEFAULT_TIMEOUT_MS = 1000;
 
-export class DeviceClient {
+/** A device the page talks to, over whichever link. */
+export interface DeviceClient {
+  /** What carries the requests. */
+  readonly transport: "serial" | "mesh";
+  /** True when the device is reached through the cloud, not a cable. */
+  readonly remote: boolean;
+  /** Sends a request and resolves with the response body; a non-zero status
+   * rejects with `RequestError` (`DeniedError` for Denied), no answer with
+   * `RequestTimeout`. */
+  request(key: string, body?: Uint8Array, opts?: RequestOptions): Promise<Uint8Array>;
+  info(opts?: RequestOptions): Promise<DeviceInfo>;
+  board(opts?: RequestOptions): Promise<BoardInfo | null>;
+  manifest(opts?: RequestOptions): Promise<Manifest | null>;
+  manifestBody(opts?: RequestOptions): Promise<Uint8Array | null>;
+  /** Page `page` of `sys/manifest/cm` (ABI 8), raw; null for NotFound. */
+  controlPage(page: number, opts?: RequestOptions): Promise<Uint8Array | null>;
+  peers(opts?: RequestOptions): Promise<string[]>;
+  peerManifestBody(node: string, opts?: RequestOptions): Promise<Uint8Array | null>;
+  bind(body: Uint8Array, opts?: RequestOptions): Promise<void>;
+  binding(opts?: RequestOptions): Promise<Uint8Array | null>;
+  trustInfo(opts?: RequestOptions): Promise<TrustInfo | null>;
+  trustClaim(publicKey: Uint8Array, opts?: RequestOptions): Promise<void>;
+  startPayload(opts?: RequestOptions): Promise<void>;
+  stopPayload(opts?: RequestOptions): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** `null` for a NotFound answer, the error otherwise. */
+async function orNull<T>(p: Promise<T>): Promise<T | null> {
+  try {
+    return await p;
+  } catch (e) {
+    if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
+    throw e;
+  }
+}
+
+/** The typed helpers of a `DeviceClient`, over an abstract `request`. */
+export abstract class RequestClient implements DeviceClient {
+  abstract readonly transport: "serial" | "mesh";
+  abstract readonly remote: boolean;
+
+  constructor(protected readonly proto: Protocol) {}
+
+  abstract request(key: string, body?: Uint8Array, opts?: RequestOptions): Promise<Uint8Array>;
+  abstract close(): Promise<void>;
+
+  /** Requests and decodes `sys/info`. */
+  async info(opts?: RequestOptions): Promise<DeviceInfo> {
+    const body = await this.request(this.proto.constants.keys.info, new Uint8Array(), opts);
+    const info = this.proto.decodeDeviceInfo(body);
+    if (!info) throw new Error("malformed sys/info response");
+    return info;
+  }
+
+  /** Reads `sys/board`; null when the firmware predates 0.6 and answers
+   * NotFound. */
+  async board(opts?: RequestOptions): Promise<BoardInfo | null> {
+    const body = await orNull(this.request(this.proto.constants.keys.board, new Uint8Array(), opts));
+    if (!body) return null;
+    const board = this.proto.decodeBoardInfo(body);
+    if (!board) throw new Error("malformed sys/board response");
+    return board;
+  }
+
+  /** Reads `sys/manifest` (MF4); null when the firmware has none and
+   * answers NotFound. */
+  async manifest(opts?: RequestOptions): Promise<Manifest | null> {
+    const body = await this.manifestBody(opts);
+    if (!body) return null;
+    const m = this.proto.decodeManifest(body);
+    if (!m) throw new Error("malformed sys/manifest response");
+    return m;
+  }
+
+  /** The raw `sys/manifest` body (what `checkBinding` takes); null for
+   * NotFound. */
+  manifestBody(opts?: RequestOptions): Promise<Uint8Array | null> {
+    return orNull(this.request(this.proto.constants.keys.manifest, new Uint8Array(), opts));
+  }
+
+  /** The raw page `page` of `sys/manifest/cm` (decode it with
+   * `decodeControlPage`); null for NotFound (no such page, or a node
+   * without control points). */
+  controlPage(page: number, opts?: RequestOptions): Promise<Uint8Array | null> {
+    return orNull(this.request(this.proto.constants.keys.controlModules, this.proto.controlPageRequest(page), opts));
+  }
+
+  /** The node ids the board has heard (`sys/peers`, PR2); empty from
+   * firmware that does not forward (NotFound). */
+  async peers(opts?: RequestOptions): Promise<string[]> {
+    const body = await orNull(this.request(this.proto.constants.keys.peers, new Uint8Array(), opts));
+    if (!body) return [];
+    const ids = this.proto.decodePeers(body);
+    if (!ids) throw new Error("malformed sys/peers response");
+    return ids;
+  }
+
+  /** `node`'s raw `sys/manifest`, asked through the board (PR1,
+   * `sys/peer/<node>/manifest`); null when it has none. */
+  peerManifestBody(node: string, opts?: RequestOptions): Promise<Uint8Array | null> {
+    return orNull(this.request(this.proto.peerKey(node, "manifest"), new Uint8Array(), opts));
+  }
+
+  /** Installs a channel binding (`sys/payload/bind`, ABI 7): `body` is
+   * `encodeBindBody(record, signature?)`. It applies at the payload's
+   * next start. */
+  async bind(body: Uint8Array, opts?: RequestOptions): Promise<void> {
+    await this.request(this.proto.constants.keys.bind, body, opts);
+  }
+
+  /** Reads the stored binding record; null without one (NotFound). */
+  binding(opts?: RequestOptions): Promise<Uint8Array | null> {
+    return orNull(this.request(this.proto.constants.keys.binding, new Uint8Array(), opts));
+  }
+
+  /** Reads `sys/trust/info`; null when the firmware predates trust and
+   * answers NotFound (it accepts unsigned payloads only). */
+  async trustInfo(opts?: RequestOptions): Promise<TrustInfo | null> {
+    const body = await orNull(this.request(TRUST_KEYS.info, new Uint8Array(), opts));
+    return body ? parseTrustInfo(body) : null;
+  }
+
+  /** `sys/trust/claim`: pins `publicKey` (raw 32 bytes). Rejects with
+   * `DeniedError` unless the device is unclaimed or its re-key window is
+   * open. */
+  async trustClaim(publicKey: Uint8Array, opts?: RequestOptions): Promise<void> {
+    await this.request(TRUST_KEYS.claim, claimBody(publicKey), opts);
+  }
+
+  /** `sys/payload/start`. */
+  async startPayload(opts?: RequestOptions): Promise<void> {
+    await this.request(this.proto.constants.keys.start, new Uint8Array(), opts);
+  }
+
+  /** `sys/payload/stop`. */
+  async stopPayload(opts?: RequestOptions): Promise<void> {
+    await this.request(this.proto.constants.keys.stop, new Uint8Array(), opts);
+  }
+}
+
+/** A device on a serial line (Web Serial, or an in-memory pipe in tests). */
+export class SerialClient extends RequestClient {
+  readonly transport = "serial" as const;
+  readonly remote = false;
   private readonly decoder;
   private readonly pending = new Map<number, Pending>();
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -99,9 +250,10 @@ export class DeviceClient {
 
   constructor(
     private readonly streams: ByteStreams,
-    private readonly proto: Protocol,
+    proto: Protocol,
     private readonly events: ClientEvents = {},
   ) {
+    super(proto);
     this.decoder = proto.newDecoder();
   }
 
@@ -223,120 +375,6 @@ export class DeviceClient {
   /** Publishes on `key` (fire and forget). */
   publish(key: string, payload: Uint8Array): Promise<void> {
     return this.write(this.proto.encodePublish(key, payload));
-  }
-
-  /** Requests and decodes `sys/info`. */
-  async info(opts?: RequestOptions): Promise<DeviceInfo> {
-    const body = await this.request(this.proto.constants.keys.info, new Uint8Array(), opts);
-    const info = this.proto.decodeDeviceInfo(body);
-    if (!info) throw new Error("malformed sys/info response");
-    return info;
-  }
-
-  /** Reads `sys/board`; null when the firmware predates 0.6 and answers
-   * NotFound. */
-  async board(opts?: RequestOptions): Promise<BoardInfo | null> {
-    let body: Uint8Array;
-    try {
-      body = await this.request(this.proto.constants.keys.board, new Uint8Array(), opts);
-    } catch (e) {
-      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
-      throw e;
-    }
-    const board = this.proto.decodeBoardInfo(body);
-    if (!board) throw new Error("malformed sys/board response");
-    return board;
-  }
-
-  /** Reads `sys/manifest` (MF4); null when the firmware has none and
-   * answers NotFound. */
-  async manifest(opts?: RequestOptions): Promise<Manifest | null> {
-    const body = await this.manifestBody(opts);
-    if (!body) return null;
-    const m = this.proto.decodeManifest(body);
-    if (!m) throw new Error("malformed sys/manifest response");
-    return m;
-  }
-
-  /** The raw `sys/manifest` body (what `checkBinding` takes); null for
-   * NotFound. */
-  async manifestBody(opts?: RequestOptions): Promise<Uint8Array | null> {
-    try {
-      return await this.request(this.proto.constants.keys.manifest, new Uint8Array(), opts);
-    } catch (e) {
-      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
-      throw e;
-    }
-  }
-
-  /** The node ids the board has heard (`sys/peers`, PR2); empty from
-   * firmware that does not forward (NotFound). */
-  async peers(opts?: RequestOptions): Promise<string[]> {
-    try {
-      const body = await this.request(this.proto.constants.keys.peers, new Uint8Array(), opts);
-      const ids = this.proto.decodePeers(body);
-      if (!ids) throw new Error("malformed sys/peers response");
-      return ids;
-    } catch (e) {
-      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return [];
-      throw e;
-    }
-  }
-
-  /** `node`'s raw `sys/manifest`, asked through the board (PR1,
-   * `sys/peer/<node>/manifest`); null when it has none. */
-  async peerManifestBody(node: string, opts?: RequestOptions): Promise<Uint8Array | null> {
-    try {
-      return await this.request(this.proto.peerKey(node, "manifest"), new Uint8Array(), opts);
-    } catch (e) {
-      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
-      throw e;
-    }
-  }
-
-  /** Installs a channel binding (`sys/payload/bind`, ABI 7): `body` is
-   * `encodeBindBody(record, signature?)`. It applies at the payload's
-   * next start. */
-  async bind(body: Uint8Array, opts?: RequestOptions): Promise<void> {
-    await this.request(this.proto.constants.keys.bind, body, opts);
-  }
-
-  /** Reads the stored binding record; null without one (NotFound). */
-  async binding(opts?: RequestOptions): Promise<Uint8Array | null> {
-    try {
-      return await this.request(this.proto.constants.keys.binding, new Uint8Array(), opts);
-    } catch (e) {
-      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
-      throw e;
-    }
-  }
-
-  /** Reads `sys/trust/info`; null when the firmware predates trust and
-   * answers NotFound (it accepts unsigned payloads only). */
-  async trustInfo(opts?: RequestOptions): Promise<TrustInfo | null> {
-    try {
-      return parseTrustInfo(await this.request(TRUST_KEYS.info, new Uint8Array(), opts));
-    } catch (e) {
-      if (e instanceof RequestError && e.statusCode === NOT_FOUND_CODE) return null;
-      throw e;
-    }
-  }
-
-  /** `sys/trust/claim`: pins `publicKey` (raw 32 bytes). Rejects with
-   * `DeniedError` unless the device is unclaimed or its re-key window is
-   * open. */
-  async trustClaim(publicKey: Uint8Array, opts?: RequestOptions): Promise<void> {
-    await this.request(TRUST_KEYS.claim, claimBody(publicKey), opts);
-  }
-
-  /** `sys/payload/start`. */
-  async startPayload(opts?: RequestOptions): Promise<void> {
-    await this.request(this.proto.constants.keys.start, new Uint8Array(), opts);
-  }
-
-  /** `sys/payload/stop`. */
-  async stopPayload(opts?: RequestOptions): Promise<void> {
-    await this.request(this.proto.constants.keys.stop, new Uint8Array(), opts);
   }
 
   /** Stops reading, fails pending requests and releases both stream locks,

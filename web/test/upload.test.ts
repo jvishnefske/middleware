@@ -2,7 +2,7 @@
 // against a scripted fake device that runs the Rust loader state machine.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { DeviceClient, RequestError, RequestTimeout } from "../src/device/client";
+import { RequestError, RequestTimeout, SerialClient } from "../src/device/client";
 import { UploadError, firmwareRunsPayloads, uploadPayload } from "../src/device/upload";
 import { FakeDevice, type FakeDeviceScript, protocol, serialPair } from "./fakeDevice";
 
@@ -10,7 +10,7 @@ const proto = protocol();
 const image = Uint8Array.from({ length: 1500 }, (_, i) => (i * 31 + 7) & 0xff);
 
 interface Rig {
-  client: DeviceClient;
+  client: SerialClient;
   device: FakeDevice;
   texts: string[];
   pubs: { key: string; payload: Uint8Array }[];
@@ -22,7 +22,7 @@ function rig(script: FakeDeviceScript = {}): Rig {
   const { host, device: devSide } = serialPair();
   const texts: string[] = [];
   const pubs: { key: string; payload: Uint8Array }[] = [];
-  const client = new DeviceClient(host, proto, {
+  const client = new SerialClient(host, proto, {
     onText: (t) => texts.push(t),
     onPublish: (key, payload) => pubs.push({ key, payload }),
   });
@@ -86,7 +86,7 @@ describe("device client", () => {
   it("releases both stream locks on close", async () => {
     const { host, device: devSide } = serialPair();
     const device = new FakeDevice(proto, devSide);
-    const client = new DeviceClient(host, proto);
+    const client = new SerialClient(host, proto);
     client.start();
     await client.info();
     await client.close();

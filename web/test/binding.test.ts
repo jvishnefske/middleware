@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { compileWat } from "../src/editor/compile";
-import { DeviceClient } from "../src/device/client";
+import { SerialClient } from "../src/device/client";
 import { applyFix, bindingIssues, describeTarget, installBinding, setTarget, suggestBinding } from "../src/device/binding";
 import type { ChannelDecl, SimEvent } from "../src/protocol/wasm";
 import { FakeDevice, protocol, serialPair } from "./fakeDevice";
@@ -26,7 +26,7 @@ async function payload(): Promise<Uint8Array> {
   return proto.withChannels(r.wasm, proto.encodeChannels(DECLS));
 }
 
-const open: { client: DeviceClient; device: FakeDevice }[] = [];
+const open: { client: SerialClient; device: FakeDevice }[] = [];
 afterEach(async () => {
   for (const r of open.splice(0)) {
     await r.client.close();
@@ -71,7 +71,7 @@ describe("channel bindings", () => {
 
   it("installs a binding on an unclaimed board and reads it back", async () => {
     const { host, device: devSide } = serialPair();
-    const client = new DeviceClient(host, proto, {});
+    const client = new SerialClient(host, proto, {});
     const device = new FakeDevice(proto, devSide, {});
     client.start();
     open.push({ client, device });
@@ -104,7 +104,7 @@ describe("remote channels through the board (PR4)", () => {
   it("lists the board's peers, reads a peer's manifest and flags an unheard node", async () => {
     const PEER = "00000000000000aa";
     const { host, device: devSide } = serialPair();
-    const client = new DeviceClient(host, proto, {});
+    const client = new SerialClient(host, proto, {});
     const device = new FakeDevice(proto, devSide, { peers: [{ node: PEER, manifest: proto.simulatorManifest(PEER)! }] });
     client.start();
     open.push({ client, device });

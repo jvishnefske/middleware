@@ -2,17 +2,17 @@
 // over the fake device, and the Device page's capability rows.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { DeviceClient } from "../src/device/client";
+import { SerialClient } from "../src/device/client";
 import { capabilityRows } from "../src/device/manifest";
 import { FakeDevice, protocol, serialPair } from "./fakeDevice";
 
 const proto = protocol();
 const NODE = "0011223344556677";
-const open: { client: DeviceClient; device: FakeDevice }[] = [];
+const open: { client: SerialClient; device: FakeDevice }[] = [];
 
 function rig(manifest?: Uint8Array) {
   const { host, device: devSide } = serialPair();
-  const client = new DeviceClient(host, proto, {});
+  const client = new SerialClient(host, proto, {});
   const device = new FakeDevice(proto, devSide, manifest ? { manifest } : {});
   client.start();
   open.push({ client, device });
