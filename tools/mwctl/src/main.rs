@@ -37,7 +37,7 @@ use middleware::fw_ota::StateCode;
 use middleware::loader::trust::KeyKind;
 use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, Version};
 use mwctl::air::{AirLink, AirTiming};
-use mwctl::bridge::{Mac, Msg, format_mac};
+use mwctl::bridge::{Mac, Owned, format_mac};
 use mwctl::cli::{self, Cmd, KeyCmd, KeySpec, Parsed};
 use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
@@ -242,7 +242,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         .map_or(1, |d| (d.as_millis() & 0xFFFF) as u16);
     let mut link = AirLink::new(transport, target, AirTiming::default(), first_id);
     if let (
-        Msg::Hello {
+        Owned::Hello {
             mac,
             channel,
             version,
