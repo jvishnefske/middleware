@@ -484,15 +484,21 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
     link.wait_for_board(Duration::from_secs(ZENOH_WAIT_SECONDS))?;
     let mut dev = Device::new(link);
     // The control target: --target, else by what the board reports (an
-    // RT1050's MAC, a posix-node's node id).
-    let target = match z.target {
-        Some(t) => t,
+    // RT1050's MAC; a posix-node's node id, if it is the node at --node).
+    let (target, from) = match z.target {
+        Some(t) => (t, "--target".to_owned()),
         None => {
             let info = dev.info()?;
-            mwctl::zlink::target_for(&info.chip, node, info.node)
+            let t = mwctl::zlink::target_for(&info.chip, node, info.node)
+                .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+            let reported = info.node.map_or_else(
+                || "no node id".to_owned(),
+                |n| format!("node {}", hex(&n.0)),
+            );
+            (t, format!("sys/info: {}, {reported}", info.chip))
         }
     };
-    eprintln!("zenoh: control target {}", format_mac(&target));
+    eprintln!("zenoh: control target {} ({from})", format_mac(&target));
     let key = match &cli.cmd {
         Cmd::FwUpdate { key, .. }
         | Cmd::FwReboot { key }

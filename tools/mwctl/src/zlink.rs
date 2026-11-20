@@ -48,16 +48,70 @@ pub fn target(node: SenderId) -> [u8; 6] {
     [0x02, n[3], n[4], n[5], n[6], n[7]]
 }
 
+/// A board reported a node id it cannot have: a posix-node with node id
+/// `reported` answers at `expected`, not at the id it was addressed at, so
+/// signing for `target` (that node's address) could let whoever answered
+/// replay the request to that node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetMismatch {
+    /// The node id `sys/info` reported.
+    pub reported: SenderId,
+    /// The sender id a posix-node with that node id answers at.
+    pub expected: SenderId,
+    /// The address that node id would give.
+    pub target: [u8; 6],
+}
+
+impl std::fmt::Display for TargetMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let mac = self
+            .target
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<Vec<_>>()
+            .join(":");
+        write!(
+            f,
+            "the board reports node {}, whose session would answer at {}, not at the --node given; \
+             refusing to sign for its control target {mac} (sys/info is not authenticated). \
+             If this board really is that node, pass --target {mac}",
+            hex(&self.reported.0),
+            hex(&self.expected.0),
+        )
+    }
+}
+
+impl std::error::Error for TargetMismatch {}
+
 /// The 6-byte address a signed control request names on the board whose
 /// per-node key is `addressed` and whose `sys/info` reported `chip` and
 /// node id `reported` (design.md PN27): the RT1050's Ethernet MAC
 /// ([`target`] of `addressed`) on chip `rt1050` or when no node id was
-/// reported, else the reported node id's first six bytes (a posix-node,
-/// whose key carries its Zenoh session's id, not its node id).
-pub fn target_for(chip: &str, addressed: SenderId, reported: Option<SenderId>) -> [u8; 6] {
-    match reported {
-        Some(n) if chip != "rt1050" => [n.0[0], n.0[1], n.0[2], n.0[3], n.0[4], n.0[5]],
-        _ => target(addressed),
+/// reported; else the reported node id's first six bytes (a posix-node,
+/// whose key carries its Zenoh session's id), but only when that node's
+/// session id is `addressed`
+/// (`middleware::zenoh::wire::posix_sender_id`): `sys/info` is not
+/// authenticated, and a responder claiming another machine's node id is
+/// [`TargetMismatch`].
+pub fn target_for(
+    chip: &str,
+    addressed: SenderId,
+    reported: Option<SenderId>,
+) -> Result<[u8; 6], TargetMismatch> {
+    let Some(n) = reported.filter(|_| chip != "rt1050") else {
+        return Ok(target(addressed));
+    };
+    let first6 = [n.0[0], n.0[1], n.0[2], n.0[3], n.0[4], n.0[5]];
+    let expected = middleware::zenoh::wire::posix_sender_id(n);
+    if expected == addressed {
+        Ok(first6)
+    } else {
+        Err(TargetMismatch {
+            reported: n,
+            expected,
+            target: first6,
+        })
     }
 }
 
@@ -188,28 +242,55 @@ mod tests {
 
     #[test]
     fn pn27_the_control_target_comes_from_sys_info() {
-        // The key's id (the Zenoh session's) and the node id sys/info reports.
-        let addressed = parse_node("7e729ac3f058a2e9").unwrap();
+        use middleware::zenoh::wire::posix_sender_id;
+        // A posix-node: its key carries its session id, derived from the
+        // node id sys/info reports.
         let reported = parse_node("5e110de02a9c4107").unwrap();
-        // An RT1050: its Ethernet MAC, 02 and the last five of its id.
-        assert_eq!(
-            target_for("rt1050", addressed, Some(reported)),
-            target(addressed)
-        );
-        // A posix-node (or any other board): the reported node id's first six.
+        let addressed = posix_sender_id(reported);
         let first6 = [0x5e, 0x11, 0x0d, 0xe0, 0x2a, 0x9c];
         assert_eq!(
             target_for("linux-aarch64", addressed, Some(reported)),
-            first6
+            Ok(first6)
         );
         assert_eq!(
             target_for("linux-x86_64", addressed, Some(reported)),
-            first6
+            Ok(first6)
         );
+        // An RT1050: its Ethernet MAC, 02 and the last five of its id,
+        // whatever it reports.
+        let rt = parse_node("310441d265f82484").unwrap();
+        assert_eq!(target_for("rt1050", rt, Some(rt)), Ok(target(rt)));
+        assert_eq!(target_for("rt1050", rt, Some(reported)), Ok(target(rt)));
         // No node id in the reply (older firmware): the RT1050 rule.
         assert_eq!(
             target_for("linux-aarch64", addressed, None),
-            target(addressed)
+            Ok(target(addressed))
+        );
+    }
+
+    #[test]
+    fn pn27_a_node_id_the_board_cannot_have_is_refused() {
+        use middleware::zenoh::wire::posix_sender_id;
+        // A responder at some id claiming another machine's node id: signing
+        // for that machine would let it replay the request there.
+        let victim = parse_node("5e110de02a9c4107").unwrap();
+        let rogue = parse_node("7e729ac3f058a2e8").unwrap();
+        assert_ne!(rogue, posix_sender_id(victim));
+        let e = target_for("linux-aarch64", rogue, Some(victim)).expect_err("refused");
+        assert_eq!(
+            e,
+            TargetMismatch {
+                reported: victim,
+                expected: posix_sender_id(victim),
+                target: [0x5e, 0x11, 0x0d, 0xe0, 0x2a, 0x9c]
+            }
+        );
+        let text = e.to_string();
+        assert!(
+            text.contains("5e110de02a9c4107")
+                && text.contains("5e:11:0d:e0:2a:9c")
+                && text.contains("--target"),
+            "{text}"
         );
     }
 
