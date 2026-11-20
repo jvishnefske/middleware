@@ -23,8 +23,9 @@ esp-base = { path = "../firmware", default-features = false, features = ["trust"
 wasm-host = { path = "../wasm-host" }
 # `serial`: the device side of the link (the wire the gateway speaks);
 # `trust`: signed commits; `zenoh`: the session the gateway publishes on;
-# `espnow`: the ESP-NOW gateway's radio over the USB bridge (`espnow_gw`).
-middleware = { path = "..", features = ["serial", "trust", "zenoh", "espnow"] }
+# `espnow`: the ESP-NOW gateway's radio over the USB bridge (`espnow_gw`);
+# `mdns`: the node's announcement on the LAN (`mdns_node`).
+middleware = { path = "..", features = ["serial", "trust", "zenoh", "espnow", "mdns"] }
 mw-gateway = { path = "../gateway" }
 mw-service = { path = "../service" }
 embedded-storage = "0.3.2"

@@ -32,6 +32,9 @@
 //!   `@mw/node/<sender id>/sys/**`, forwarded to the device thread over a
 //!   third link; [`mesh_gate`] — what a Zenoh peer may ask (the signed
 //!   rules of the RT1050's Zenoh gate, each requester its own origin).
+//! * [`mdns_node`] — the node's `_mw-node._tcp` record on the LAN
+//!   (`MW_POSIX_NODE_MDNS`, off by default), the shared `mw/node` record
+//!   of `middleware::mdns::node`.
 //! * [`session_config`] — the node's Zenoh session: a client of its
 //!   router, its id derived from the node id ([`node_id::zenoh_id`]).
 //!
@@ -47,6 +50,7 @@ pub mod driver;
 pub mod espnow_gw;
 pub mod flash;
 pub mod layout;
+pub mod mdns_node;
 pub mod mesh_gate;
 pub mod node_id;
 pub mod service;
