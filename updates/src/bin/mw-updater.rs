@@ -55,6 +55,11 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The router lets an updater report only under its own username.
+    let node = match (&creds, env("MW_UPDATER_NODE")) {
+        (Some((user, _)), None) => user.clone(),
+        _ => cfg.node.clone(),
+    };
     let mut devices: Vec<(String, Serial)> = cfg
         .devices
         .iter()
@@ -97,7 +102,7 @@ async fn main() -> ExitCode {
                 &cfg.channel,
                 &cfg.root,
                 &mut devices,
-                &cfg.node,
+                &node,
                 FW_COME_BACK,
             )
             .await

@@ -190,6 +190,8 @@
       nixosModules.robot = ./nix/robot.nix;
       nixosModules.robot-pi-gateway = ./nix/gateway.nix;
       nixosModules.posix-node = ./nix/posix-node.nix;
+      # The updates channel client (design.md UP6/UP7).
+      nixosModules.updater = ./nix/updater.nix;
       nixosModules.robot-posix-node = ./nix/posix-node.nix;
       # The module's name before posix-node hosted more than Pis.
       nixosModules.robot-pi-node = ./nix/posix-node.nix;

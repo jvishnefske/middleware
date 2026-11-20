@@ -72,7 +72,7 @@ pub async fn pass<O: Opener>(
         };
         for kind in [CertKind::Firmware, CertKind::Payload] {
             let mut r = report(name, Some(&facts), kind.name());
-            let release = match decide(&facts, kind, &latest, root) {
+            let release = match decide(&facts, kind, channel, &latest, root) {
                 Decision::Skip(why) => {
                     r.result = format!("skipped: {why}");
                     reports.push(r);

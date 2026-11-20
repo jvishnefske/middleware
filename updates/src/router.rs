@@ -12,7 +12,7 @@
 //! |------|---------|
 //! | server | answer (`declare_queryable`, `reply`) `latest/**`, `img/**`; subscribe `publish/**`, `status/**`; put `latest/**` |
 //! | publisher | put `publish/**`; query `latest/**` (to see its release land) |
-//! | updater | query `latest/**`, `img/**`; subscribe `latest/**`; put `status/**` |
+//! | updater | query `latest/**`, `img/**`; subscribe `latest/**`; put `status/<its own username>` |
 //!
 //! (all under `@mw/updates/`). Zenoh 1.10 checks each message on ingress
 //! (client to router) and egress (router to client), and a rule allows a
@@ -50,14 +50,14 @@ struct Rule {
 
 #[derive(Serialize)]
 struct Subject {
-    id: &'static str,
+    id: String,
     usernames: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct Policy {
     rules: Vec<String>,
-    subjects: Vec<&'static str>,
+    subjects: Vec<String>,
 }
 
 fn under(paths: &[&str]) -> Vec<String> {
@@ -125,7 +125,6 @@ fn rules_of(role: &str) -> Vec<Rule> {
                 &["put"],
                 &["latest"],
             ),
-            grant(role, "status", &["put"], &[], &["status"]),
         ]
         .concat(),
     }
@@ -153,11 +152,34 @@ pub fn render(users: &Users, dictionary_file: &str) -> String {
         let r = rules_of(role);
         policies.push(Policy {
             rules: r.iter().map(|r| r.id.clone()).collect(),
-            subjects: vec![role],
+            subjects: vec![role.to_owned()],
         });
         rules.extend(r);
+        if role == "updater" {
+            // Each updater reports under its own name only: one subject
+            // and one rule per user, so no updater can speak for another.
+            for user in &names {
+                let id = format!("updater-{user}");
+                let rule = Rule {
+                    id: format!("{id}/status-in"),
+                    messages: vec!["put"],
+                    flows: vec!["ingress"],
+                    permission: "allow",
+                    key_exprs: vec![format!("{ROOT}/status/{user}")],
+                };
+                policies.push(Policy {
+                    rules: vec![rule.id.clone()],
+                    subjects: vec![id.clone()],
+                });
+                rules.push(rule);
+                subjects.push(Subject {
+                    id,
+                    usernames: vec![user.clone()],
+                });
+            }
+        }
         subjects.push(Subject {
-            id: role,
+            id: role.to_owned(),
             usernames: names,
         });
     }
@@ -215,9 +237,42 @@ mod tests {
         // Sorted usernames; every policy names rules that exist.
         let v: serde_json::Value = serde_json::from_str(a.split_once('\n').unwrap().1).unwrap();
         let acl = &v["access_control"];
+        let subject = |id: &str| {
+            acl["subjects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == id)
+                .unwrap()["usernames"]
+                .clone()
+        };
+        assert_eq!(subject("updater"), serde_json::json!(["pi-a", "pi-b"]));
+        assert_eq!(subject("updater-pi-a"), serde_json::json!(["pi-a"]));
+        // Each updater's status rule names its own key only.
+        let status: Vec<(String, String)> = acl["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["id"].as_str().unwrap().ends_with("/status-in"))
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_owned(),
+                    r["key_exprs"][0].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
         assert_eq!(
-            acl["subjects"][2]["usernames"],
-            serde_json::json!(["pi-a", "pi-b"])
+            status,
+            [
+                (
+                    "updater-pi-a/status-in".into(),
+                    "@mw/updates/status/pi-a".into()
+                ),
+                (
+                    "updater-pi-b/status-in".into(),
+                    "@mw/updates/status/pi-b".into()
+                ),
+            ]
         );
         let ids: Vec<&str> = acl["rules"]
             .as_array()

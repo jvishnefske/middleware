@@ -11,6 +11,7 @@
 //!    state, and `sys/fw/info` when it has a firmware updater.
 //! 2. Ask the channel for the chip's `latest` (the shell, [`crate::client`]).
 //! 3. Install a release only when the device is **claimed by the root key**
+//!    and the cert is for the updater's own channel,
 //!    (an unclaimed device would take anything; provisioning is a
 //!    deliberate `mwctl trust claim`), the cert verifies against the root
 //!    and is for this chip, and its version is above the device's floor:
@@ -32,6 +33,7 @@ use std::time::{Duration, Instant};
 use middleware::fw_ota::wire::{FwInfo, StateCode};
 use middleware::loader::release::{CertKind, verify_cert};
 use middleware::loader::trust::{PublicKey, TrustInfo, TrustState, Version};
+use middleware::transport::HandlerError;
 use mwctl::device::{Device, Info, UploadOptions};
 use mwctl::error::Error;
 use mwctl::fw::{UpdateOptions, load_image};
@@ -68,9 +70,18 @@ pub fn fw_floor(fw: &FwInfo) -> Version {
     fw.min_version.max(running)
 }
 
-/// The decision for `kind` on a device with `facts`, given the channel's
-/// `latest` for its chip and the `root` key (module docs). Pure.
-pub fn decide(facts: &Facts, kind: CertKind, latest: &[Release], root: &PublicKey) -> Decision {
+/// The decision for `kind` on a device with `facts`, given `channel`'s
+/// `latest` for its chip and the `root` key (module docs). A cert for
+/// another channel is skipped: the server is not trusted to keep
+/// channels apart (a `test` release must never reach a `stable` device).
+/// Pure.
+pub fn decide(
+    facts: &Facts,
+    kind: CertKind,
+    channel: &str,
+    latest: &[Release],
+    root: &PublicKey,
+) -> Decision {
     let skip = |s: &str| Decision::Skip(s.to_owned());
     let Some(release) = latest.iter().find(|r| r.kind() == kind) else {
         return skip("no release");
@@ -78,6 +89,9 @@ pub fn decide(facts: &Facts, kind: CertKind, latest: &[Release], root: &PublicKe
     let signed = release.signed();
     if !verify_cert(root, &signed) || !signed.cert.is_for(&facts.info.chip) {
         return skip("the release is not the root's for this chip");
+    }
+    if signed.cert.channel != channel {
+        return skip("the release is for another channel");
     }
     let min_version = match facts.trust.state {
         TrustState::Unclaimed => return skip("unclaimed (claim it with the root key)"),
@@ -120,12 +134,19 @@ pub fn read_facts<L: Endpoint>(dev: &mut Device<L>) -> Result<Facts, Error> {
 }
 
 /// Installs and starts the payload `image` of `release`.
+///
+/// A commit that outlives the link's timeout is resent, and the resend
+/// meets an idle loader (`InvalidRequest`) although the first copy took (a
+/// slow SD card); so after a commit refused as `InvalidRequest` the trust
+/// floor is read back, and when it is exactly this release's version the
+/// commit took and the payload is started. Any other failure (a `Denied`
+/// replay included) is returned.
 pub fn install_payload<L: Endpoint>(
     dev: &mut Device<L>,
     release: &Release,
     image: &[u8],
 ) -> Result<(), Error> {
-    dev.upload_release(
+    let upload = dev.upload_release(
         image,
         release.signed(),
         UploadOptions {
@@ -133,7 +154,25 @@ pub fn install_payload<L: Endpoint>(
             ..UploadOptions::default()
         },
         |_| {},
-    )
+    );
+    let Err(e) = upload else {
+        return Ok(());
+    };
+    let resent_commit = matches!(
+        &e,
+        Error::Upload { key, cause, .. }
+            if key == middleware::loader::keys::COMMIT.as_str()
+                && matches!(**cause, Error::Device { status: HandlerError::InvalidRequest, .. })
+    );
+    if !resent_commit {
+        return Err(e);
+    }
+    match dev.trust_info().map(|t| t.state) {
+        Ok(TrustState::Claimed { min_version, .. }) if min_version == release.version() => {
+            dev.start()
+        }
+        _ => Err(e),
+    }
 }
 
 /// Opens a device; called again after a firmware reboot (a USB port goes
@@ -306,6 +345,7 @@ mod tests {
             decide(
                 &facts("linux-x86_64", t, None),
                 CertKind::Payload,
+                "test",
                 &latest,
                 &root,
             )
@@ -322,7 +362,7 @@ mod tests {
         // Wrong chip, a release not signed by the root, nothing published.
         let f = facts("rp2350", claimed(0), None);
         assert!(matches!(
-            decide(&f, CertKind::Payload, &latest, &root),
+            decide(&f, CertKind::Payload, "test", &latest, &root),
             Decision::Skip(_)
         ));
         let forged = [Release::sign(
@@ -332,11 +372,11 @@ mod tests {
         .unwrap()];
         let f = facts("linux-x86_64", claimed(0), None);
         assert!(matches!(
-            decide(&f, CertKind::Payload, &forged, &root),
+            decide(&f, CertKind::Payload, "test", &forged, &root),
             Decision::Skip(_)
         ));
         assert!(matches!(
-            decide(&f, CertKind::Payload, &[], &root),
+            decide(&f, CertKind::Payload, "test", &[], &root),
             Decision::Skip(_)
         ));
         // `any` matches every chip.
@@ -345,16 +385,23 @@ mod tests {
             decide(
                 &facts("esp32s3", claimed(0), None),
                 CertKind::Payload,
+                "test",
                 &any,
                 &root
             ),
             Decision::Install(_)
         ));
+        // A release for another channel, even signed by the root.
+        let f = facts("linux-x86_64", claimed(0), None);
+        assert!(matches!(
+            decide(&f, CertKind::Payload, "stable", &latest, &root),
+            Decision::Skip(_)
+        ));
         // A no-wasm firmware.
         let mut f = facts("linux-x86_64", claimed(0), None);
         f.info.firmware = "0.1.0+no-wasm".into();
         assert!(matches!(
-            decide(&f, CertKind::Payload, &latest, &root),
+            decide(&f, CertKind::Payload, "test", &latest, &root),
             Decision::Skip(_)
         ));
     }
@@ -367,6 +414,7 @@ mod tests {
             decide(
                 &facts("rp2350", claimed(0), fw),
                 CertKind::Firmware,
+                "test",
                 &latest,
                 &root,
             )

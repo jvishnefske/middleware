@@ -499,6 +499,41 @@ runs in process (zenoh 1.10, router mode, the rendered config on a
   skips ConfigMap, Gateway and VirtualService; `MW_SCHEMAS=online`
   (Kubernetes 1.33 and the datreeio CRD catalog) checks all seven.
 
+#### Zenoh over WebSocket (`zenoh-ws`, WS…)
+
+Zenoh 1.10 builds the `ws/` link by default, but its client dials plain
+`ws://` to a resolved IP (`zenoh-link-ws` 1.10.1: no TLS, no path, the IP
+in the `Host` header), so a session cannot reach a `ws/` listener behind a
+TLS-terminating proxy that routes by host name (Traefik in the homelab).
+The listener side works as is. `zenoh::wsbridge::WsBridge` (feature
+`zenoh-ws`, host only, never implied by `zenoh`) closes the gap inside the
+client process.
+
+- [x] WS1 Framing: Zenoh's TCP link carries `[len u16 LE][batch]`, its WS
+  link one binary message per batch with no prefix (`is_streamed() ==
+  false`); the bridge turns each TCP batch into one binary message and back,
+  refuses a message longer than 65535 bytes, and survives split reads and a
+  clean close between frames —
+  `zenoh::wsbridge::tests::ws1_framing_survives_split_reads_max_batches_and_close`.
+- [x] WS2 The bridge listens on `tcp/127.0.0.1:<ephemeral>` (the session's
+  locator) and dials `wss://host[:port]/path` per connection with rustls
+  (webpki roots, or given roots), the host's SNI and `Host` header, and the
+  path; `ws://` works without TLS; `connect_addr` dials an address instead
+  of resolving the host (a LAN without hairpin NAT) while keeping the TLS
+  name. A wrong root fails the TLS handshake and closes the session's link
+  — `zenoh::wsbridge::tests::ws2_urls_parse`,
+  `tests/zenoh_ws.rs`: `ws2_a_wrong_root_never_connects`.
+- [x] WS3 End to end: a session listening on `ws/127.0.0.1:N` behind a
+  local TLS-terminating proxy (self-signed for `updates.test`), and a
+  client through the bridge: put (200 kB, several batches), subscribe both
+  ways and get with a reply. The bridge sends no WebSocket pings (Zenoh's
+  WS reader fails the link on any non-binary message); Zenoh's keep-alive
+  keeps the link busy —
+  `tests/zenoh_ws.rs`: `ws3_put_get_and_subscribe_through_wss_and_a_tls_proxy`.
+- [ ] WS4 `zenoh_lite` over WebSocket on the boards (the same framing rule:
+  one batch per binary message). Not built: boards talk to a LAN zenohd
+  over TCP.
+
 ### Zenoh telemetry (`zenoh-otel`, OT…)
 
 Debug channel trace, logs and metrics for running middleware, exported to a
@@ -5915,6 +5950,141 @@ unbootable on silicon as in the model.
   reset boots the new image, a trial left unconfirmed reverts, and power
   cuts during the transfer, after the commit and during the trial leave a
   device that boots and finishes the update on a retry.
+
+### Updates channel (`updates/`, UP…)
+
+Every signed update used to be pushed by hand (`mwctl`, `mw-update`) to one
+node, signed for that node. The updates channel stores releases that
+devices pull themselves. A release is signed **once** by the root key,
+whose private half stays in its HSM (the TPM's `mw-release` P-256 key);
+devices are provisioned once with the root public key through the existing
+`sys/trust/claim`, and check every release themselves, so the server holds
+no key and cannot forge one.
+
+```
+mw-release ──put publish──▶ zenohd (updates) ◀── mw-updates (store, PVC)
+ (root, HSM)                  ▲  ws/ 7448 via Traefik (TLS)
+                              │
+             mw-updater ──wss://updates.<site>/zenoh── (Linux host)
+                │ serial
+                ├── MCU boards: sys/fw/* (A/B) and sys/loader/*
+                └── posix-node (PTY): sys/loader/*
+```
+
+Keys, one prefix per ACL grant: `@mw/updates/latest/<channel>/<target>`
+(newest `[cert][sig]` of each kind), `@mw/updates/img/<sha256>/<offset>`
+(64 KiB chunks), `@mw/updates/publish/<channel>/<target>` (publisher puts
+`[cert][sig]` and the image) and `@mw/updates/status/<node>` (updater
+reports, JSON). The router's ACL is not `mw-service`'s mesh router: the
+updates zenohd runs in its own cluster with a config `mw-updates
+router-config` renders.
+
+- [x] UP1 A software cert `kind (payload 1 | firmware 2) ‖ target ‖ channel
+  ‖ version u32 ‖ len u32 ‖ sha256`, names as `[len u8][1..=32 bytes
+  UTF-8]`; the target is the chip `sys/info` reports, or `any` for a
+  payload. The root signs `"mw-release-v1\0" ‖ cert` with the claimed key's
+  algorithm (Ed25519 or P-256, 64-byte signature) —
+  `loader::release::tests::up1_cert_round_trips_and_rejects_bad_bytes`,
+  `up1_release_message_is_tag_then_cert`, `up1_targets`.
+- [x] UP2 `sys/loader/commit` and `sys/fw/commit` accept `[cert][sig]`
+  (at least 109 bytes) beside the per-device forms (68 and 64 bytes);
+  anything else, a truncated cert or a trailing byte, is `InvalidRequest` —
+  `loader::release::tests::up2_commit_bodies_of_both_forms`,
+  `fw_ota::machine::tests::up3_firmware_release_cert_for_this_chip_needs_no_node_or_slot`.
+- [x] UP3 A claimed device accepts a cert only when the pinned key signed
+  it, its kind is the one of the key it came on, its target is the device's
+  chip (`any` for payloads only), its length and sha256 are the transferred
+  image's, and its version is above the floor (payload: the trust state's
+  `min_version`, which it then raises; firmware: the larger of the record's
+  floor and the running image, and equal to the version `begin` declared).
+  A firmware cert names no node or slot: the device picks its inactive
+  slot. Library code, so every firmware and the posix-node get it —
+  `loader::release::tests::signed::up3_payload_cert_accepted_and_raises_the_floor`,
+  `up3_payload_cert_denials` (wrong target, sha, length, downgrade, replay,
+  firmware kind, other key, a field changed after signing),
+  `up3_p256_root_signs_certs`,
+  `fw_ota::machine::tests::up3_firmware_release_cert_for_this_chip_needs_no_node_or_slot`;
+  esp-base, rp-base and imxrt-base host tests pass with the cert path.
+  Not yet on hardware: a board installing a cert commit.
+- [x] UP4 Publisher: `mw-release publish --channel C --target T --kind
+  fw|payload [--version V] (--key FILE | --pkcs11 LABEL) FILE` builds the
+  cert (firmware: the image as the device receives it, a UF2 converted,
+  with its own IMAGE_DEF or RT header version), signs it with the root
+  (seed file or PKCS#11 token, as `mwctl`), puts it, and waits until
+  `latest` lists it — `keys::tests::up4_keys_render_and_parse`,
+  `wire::tests::up4_latest_and_publish_round_trip`, `tests/e2e.rs`,
+  `tests/softhsm.rs`: `softhsm_root` (a P-256 root generated in SoftHSM
+  signs; the store and a P-256-claimed posix-node accept) *(mw-updates)*.
+  `mw-release` lives in the updates crate rather than mwctl (the updates
+  crate depends on mwctl).
+- [x] UP5 Server `mw-updates`: a Zenoh client of the updates router with a
+  store on its volume (`images/<sha256>`, `certs/<channel>/<target>/<kind>.cert`,
+  written to a temporary name and renamed, image first). A publish is
+  stored only when the cert verifies against the root public key, its
+  channel/target are the key's, the image matches, a firmware cert names
+  one chip, and the version is above the stored one; then the new `latest`
+  is put. A stored cert that no longer verifies is not served —
+  `store::tests::up5_publish_stores_and_serves_the_latest_of_each_kind`,
+  `up5_publish_refusals`, `up5_a_cert_file_that_no_longer_verifies_is_ignored`
+  *(mw-updates)*.
+- [x] UP6 Updater `mw-updater` (Linux, `nix/updater.nix`): env
+  `MW_UPDATES_HOST` (the channel is `wss://<host>/zenoh` through
+  `WsBridge`), `MW_UPDATES_ADDR`, `MW_UPDATES_ENDPOINT`,
+  `MW_UPDATES_CHANNEL`, `MW_UPDATES_ROOT_KEY`, `MW_ZENOH_CREDENTIALS`,
+  `MW_UPDATER_DEVICES` (serial ports), `MW_UPDATES_POLL` (3600 s). A pass
+  at start, every poll and on every `latest` put: per device, firmware then
+  payload, installing only on devices claimed by the root, a root-signed
+  cert for the chip **and the updater's own channel** (the server is not
+  trusted to keep channels apart), above the device's floor, never
+  mid-update; the image hash is checked before anything is sent.
+  Payloads: begin, chunks, cert commit, start; a commit resent after it
+  took (the link timed out on a slow store) is refused `InvalidRequest`,
+  so the updater then reads the trust floor back and starts the payload
+  when it equals the release's version. Reports to
+  `@mw/updates/status/<node>`, the node being the credentials' user —
+  `updater::tests::up6_payloads_install_above_the_trust_floor_only_on_root_claimed_devices`,
+  `config::tests::up6_updater_config_parses_with_defaults`,
+  `up6_updater_config_errors_name_the_variable`,
+  `tests/install.rs`: `up6_a_commit_resent_after_it_took_still_installs_and_starts`,
+  `tests/e2e.rs`:
+  `up4_up8_publish_pull_install_refuse_downgrades_and_forgeries` (into a
+  real posix-node over its local link; installed and running, then up to
+  date, then v11) *(mw-updates)*.
+- [x] UP7 Firmware: `sys/fw/begin`, chunks, cert commit, `reboot`; the port
+  is reopened until the board answers, then `confirm` when it runs the new
+  slot on trial, or `rolled-back` —
+  `updater::tests::up7_firmware_installs_above_running_and_floor_and_never_mid_update`
+  *(mw-updates)*. Not yet run against a board (the install path is
+  `mwctl`'s `fw_update` with `UpdateOptions::release`).
+- [x] UP8 The updates router: `router` mode, `tcp/0.0.0.0:7447` (the
+  server) and `ws/0.0.0.0:7448` (clients via Traefik), `usrpwd`, default
+  deny, and grants per role: server answers `latest/**`, `img/**`,
+  subscribes `publish/**`, `status/**`, puts `latest/**`; publisher puts
+  `publish/**`, queries `latest/**`; updater queries `latest/**`,
+  `img/**`, subscribes `latest/**`, and puts only `status/<its own
+  username>` (one subject and rule per updater). The server logs status
+  text escaped. Enforced end to end: an updater's put on `publish` (of a
+  root-signed release) changes nothing, its report under another name is
+  dropped; no or wrong credentials, no session —
+  `router::tests::up8_router_config_parses_and_is_deterministic`,
+  `tests/e2e.rs`: `up4_up8_publish_pull_install_refuse_downgrades_and_forgeries`,
+  `up8_no_credentials_no_session` *(mw-updates)*.
+- [x] UP9 Host only: no embedded set depends on `mw-updates`; it enables
+  `trust` and no other embedded feature; `zenoh` never implies `zenoh-ws`
+  — `scripts/check-features.sh` (UP9).
+- [ ] UP10 Homelab: `homelab-flux/apps/vishnefske/updates.yaml` (zenohd
+  with the rendered config from a Secret, `mw-updates` with a 2 Gi PVC,
+  a Traefik Ingress for `updates.${SITE_HOST}` path `/zenoh` to the ws
+  port with a `letsencrypt` certificate, a NetworkPolicy admitting only
+  Traefik to it); images `localhost/mw/zenohd` and `localhost/mw/mw-updates`
+  preloaded by the `vishnefske.com` NixOS config. Evidence pending: the
+  WS upgrade answering on `https://updates.<site>/zenoh`, a payload
+  published from the workstation with the TPM root and installed by
+  `mw-updater` on a Linux host, then a firmware release confirmed on a
+  board.
+
+Not in scope now: `zenoh_lite` over WebSocket (WS4), pulls from the
+browser, and self-update of the Linux host's own OS.
 
 ### DMA routes (ABI 4)
 

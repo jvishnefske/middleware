@@ -212,6 +212,15 @@ async fn up4_up8_publish_pull_install_refuse_downgrades_and_forgeries() {
         .expect("a status report")
         .unwrap();
     assert!(s.key_expr().as_str().ends_with("/status/pi-a"));
+    // ... and only under its own name: a report as another node is dropped.
+    updater.status("pi-b", "{}".into()).await.ok();
+    let until = tokio::time::Instant::now() + Duration::from_secs(1);
+    while let Ok(Ok(s)) = tokio::time::timeout_at(until, status.recv_async()).await {
+        assert!(
+            !s.key_expr().as_str().ends_with("/status/pi-b"),
+            "a report as pi-b reached the server"
+        );
+    }
 
     // Again: up to date.
     let r = pass(
