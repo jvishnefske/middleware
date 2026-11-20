@@ -45,6 +45,7 @@ pub mod mesh_gate;
 pub mod node_id;
 pub mod service;
 pub mod shell;
+pub mod zenoh_sys;
 
 use std::io;
 use std::path::Path;
