@@ -125,10 +125,10 @@ pub fn open_serial(path: &str, baud: u32) -> io::Result<ChannelIo> {
         .timeout(PORT_READ_TIMEOUT)
         .open()
         .map_err(|e| io::Error::other(format!("{path}: {e}")))?;
-    port.write_request_to_send(false)
-        .map_err(io::Error::other)?;
-    port.write_data_terminal_ready(false)
-        .map_err(io::Error::other)?;
+    // Best effort: a PTY (the updater's link to mw-posix-node) or a USB
+    // gadget's port has no modem lines and refuses the ioctl (ENOTTY).
+    let _ = port.write_request_to_send(false);
+    let _ = port.write_data_terminal_ready(false);
     let mut writer = port.try_clone().map_err(io::Error::other)?;
     let (to_gateway, gateway_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CHUNKS);
     let (gateway_tx, mut to_port) = mpsc::channel::<Vec<u8>>(CHANNEL_CHUNKS);

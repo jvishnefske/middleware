@@ -59,6 +59,40 @@ pub fn prepare(
     }
 }
 
+/// Settles the version of a `kind` release against what the channel has
+/// (`current`, the version of its latest release of that kind): a payload
+/// published without `--version` (`requested` `None`) takes the larger of
+/// `prepared.version` (the clock) and `current + 1`, so two publishes in
+/// one second still rise; any other version must exceed `current`, or the
+/// server would refuse it, so the publisher says so first. Pure.
+pub fn settle_version(
+    kind: CertKind,
+    requested: Option<Version>,
+    prepared: &mut Prepared,
+    current: Option<Version>,
+) -> Result<(), String> {
+    let Some(cur) = current else {
+        return Ok(());
+    };
+    if kind == CertKind::Payload && requested.is_none() {
+        prepared.version = prepared.version.max(Version(cur.0.saturating_add(1)));
+        return Ok(());
+    }
+    if prepared.version <= cur {
+        let show = |v: Version| match kind {
+            CertKind::Firmware => mwctl::fw::format_version(v),
+            CertKind::Payload => v.0.to_string(),
+        };
+        return Err(format!(
+            "the channel already has {} {}; this release ({}) must be newer",
+            kind.name(),
+            show(cur),
+            show(prepared.version)
+        ));
+    }
+    Ok(())
+}
+
 /// Signs the release of `prepared` for `target` on `channel`.
 pub fn sign(
     kind: CertKind,
@@ -112,5 +146,43 @@ pub async fn publish(
             ));
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(v: u32) -> Prepared {
+        Prepared {
+            image: vec![1],
+            version: Version(v),
+        }
+    }
+
+    #[test]
+    fn up4_versions_rise_past_what_the_channel_has() {
+        let mut a = p(100);
+        settle_version(CertKind::Payload, None, &mut a, Some(Version(100))).unwrap();
+        assert_eq!(a.version, Version(101), "same second: one above");
+        let mut b = p(200);
+        settle_version(CertKind::Payload, None, &mut b, Some(Version(100))).unwrap();
+        assert_eq!(b.version, Version(200), "the clock when it is newer");
+        let mut c = p(5);
+        settle_version(CertKind::Payload, None, &mut c, None).unwrap();
+        assert_eq!(c.version, Version(5));
+        let mut d = p(7);
+        let e = settle_version(
+            CertKind::Payload,
+            Some(Version(7)),
+            &mut d,
+            Some(Version(7)),
+        )
+        .unwrap_err();
+        assert!(e.contains("already has payload 7"), "{e}");
+        let mut f = p(0x0001_0002);
+        let e = settle_version(CertKind::Firmware, None, &mut f, Some(Version(0x0001_0002)))
+            .unwrap_err();
+        assert!(e.contains("already has fw 1.2"), "{e}");
     }
 }
