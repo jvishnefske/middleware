@@ -19,7 +19,11 @@
 //! `flush` (the client flushes after every batch) or before the next
 //! batch's first bytes are taken.
 
-use embedded_io_async::{ErrorType, Read, Write};
+use embedded_io_async::{Read, Write};
+
+/// The error type a [`MessageLink`] names (`embedded_io_async`'s), so a
+/// link can be written without that crate.
+pub use embedded_io_async::ErrorType;
 
 use super::codec::transport::LEN_PREFIX;
 
