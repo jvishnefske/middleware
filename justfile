@@ -18,4 +18,4 @@ default:
 #   - other subnets (multicast stays on the link) and firewalled UDP 7446.
 [doc("List the middleware nodes on the local network (Zenoh scouting)")]
 lan seconds="3":
-    cargo run --quiet --release -p mwctl --features zenoh -- scout --seconds {{seconds}}
+    cargo run --quiet --release -p mwctl --features zenoh,mdns -- scout --seconds {{seconds}}

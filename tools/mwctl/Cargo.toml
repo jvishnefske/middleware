@@ -24,6 +24,10 @@ cryptoki = "0.10"
 # tokio, and the default mwctl stays free of cloud crates
 # (scripts/check-features.sh).
 zenoh = ["middleware/zenoh", "dep:tokio", "dep:zenoh", "dep:serde_json"]
+# With `zenoh`: `scout` also browses mDNS for `_mw-node._tcp` (a one-shot
+# querier on an ephemeral port). Off by default for the same reason; adds
+# no crate the `zenoh` build lacks.
+mdns = ["middleware/mdns", "dep:tokio", "tokio/net"]
 
 [dependencies.tokio]
 version = "1"

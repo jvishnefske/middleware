@@ -473,10 +473,305 @@ pub fn run(seconds: u64) -> Result<Vec<Row>, crate::error::Error> {
     shell::run(seconds)
 }
 
+/// The mDNS browse of `scout` (features `zenoh` and `mdns`): a one-shot
+/// querier for `_mw-node._tcp` beside the Zenoh scouting. It only reads:
+/// nothing it learns is connected to.
+#[cfg(all(feature = "zenoh", feature = "mdns"))]
+mod mdns_shell {
+    use super::{MAX_MDNS, MdnsNode};
+    use middleware::discovery::{Browse, Endpoint, Event, Service};
+    use middleware::key::KeyFilter;
+    use middleware::mdns::node::{self, NodeTxt, NodeTxtError};
+    use middleware::mdns::socket::{MAX_EVENT_LEN, MdnsSocket, MdnsSocketBuilder};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// How often the query is repeated (a one-shot querier sees only the
+    /// answers to its own queries).
+    const REQUERY: Duration = Duration::from_secs(1);
+    /// Receive errors in a row after which the browse gives up.
+    const MAX_ERRORS: u32 = 16;
+
+    /// What a browse found, and what went wrong (for stderr).
+    #[derive(Debug, Default)]
+    pub(super) struct Browsed {
+        pub nodes: Vec<MdnsNode>,
+        /// Instances whose record is not a node's.
+        pub skipped: usize,
+        pub notes: Vec<String>,
+    }
+
+    /// Browses with a socket from `builder` for `within`.
+    pub(super) async fn browse_with(builder: MdnsSocketBuilder, within: Duration) -> Browsed {
+        let mut sock = match builder.build().await {
+            Ok(s) => s,
+            Err(e) => {
+                return Browsed {
+                    notes: vec![format!("mdns: {e} (no mDNS browse)")],
+                    ..Browsed::default()
+                };
+            }
+        };
+        let mut found = browse_on(&mut sock, within).await;
+        if !cfg!(target_os = "linux") {
+            found.notes.push(
+                "mdns: answers are accepted from loopback and link-local sources only here \
+                 (the LAN's subnets are read on Linux)"
+                    .into(),
+            );
+        }
+        found
+    }
+
+    /// [`browse_with`] the default socket: an ephemeral port on `0.0.0.0`,
+    /// queries to `224.0.0.251:5353`, on-link answers only.
+    pub(super) async fn browse(within: Duration) -> Browsed {
+        browse_with(MdnsSocket::builder(), within).await
+    }
+
+    /// Queries at once and every second until `within` passes, collecting
+    /// node records by instance (a goodbye removes one).
+    pub(super) async fn browse_on<B: Browse>(sock: &mut B, within: Duration) -> Browsed
+    where
+        B::Error: std::fmt::Display,
+    {
+        let end = Instant::now() + within;
+        let mut found = Browsed::default();
+        let mut next_query = Instant::now();
+        let mut errors = 0u32;
+        // Instances that are not node records, each counted once.
+        let mut skipped: Vec<String> = Vec::new();
+        while Instant::now() < end {
+            if Instant::now() >= next_query {
+                if let Err(e) = sock.browse(KeyFilter::Exact(node::KIND.key())).await {
+                    found.notes.push(format!("mdns: query: {e}"));
+                    break;
+                }
+                next_query += REQUERY;
+            }
+            let mut buf = [0u8; MAX_EVENT_LEN];
+            let event =
+                match tokio::time::timeout_at(next_query.min(end), sock.next(&mut buf)).await {
+                    Err(_) => continue,
+                    Ok(Err(e)) => {
+                        errors += 1;
+                        if errors == MAX_ERRORS {
+                            found.notes.push(format!("mdns: receive: {e}"));
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(Ok(event)) => event,
+                };
+            errors = 0;
+            match event {
+                Event::Up(s) if s.kind == node::KIND && !s.is_goodbye() => match to_node(&s) {
+                    Ok(n) => match found.nodes.iter().position(|m| m.instance == n.instance) {
+                        Some(i) => found.nodes[i] = n,
+                        None if found.nodes.len() < MAX_MDNS => found.nodes.push(n),
+                        None => {}
+                    },
+                    Err(_) => {
+                        if skipped.len() < MAX_MDNS && !skipped.iter().any(|i| i == s.instance) {
+                            skipped.push(s.instance.to_owned());
+                        }
+                    }
+                },
+                Event::Down { instance, .. } => found.nodes.retain(|m| m.instance != instance),
+                Event::Up(_) => {}
+            }
+        }
+        found.skipped = skipped.len();
+        found
+    }
+
+    /// A resolved instance as a node record.
+    pub(super) fn to_node(s: &Service<'_>) -> Result<MdnsNode, NodeTxtError> {
+        let t = NodeTxt::parse(s.txt().map_err(|_| NodeTxtError::Malformed("txt"))?)?;
+        let addr = match s.endpoint {
+            Endpoint::Socket(a) if a.port() == node::NO_PORT => Some(a.ip().to_string()),
+            Endpoint::Socket(a) => Some(a.to_string()),
+            Endpoint::Host { name, port } => Some(format!("{name}:{port}")),
+            Endpoint::Locator(l) => Some(l.to_owned()),
+            Endpoint::Local => None,
+        };
+        Ok(MdnsNode {
+            instance: s.instance.to_owned(),
+            addr,
+            id: t.id,
+            sender: t.sender,
+            chip: t.chip.to_owned(),
+            board: t.board.to_owned(),
+            fw: t.fw.map(str::to_owned),
+            zenoh: t.zenoh.map(str::to_owned),
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use middleware::SenderId;
+        use middleware::discovery::{Announce, Endpoint, Service};
+        use middleware::dns::wire::TxtWriter;
+        use middleware::mdns::announce::MdnsAnnouncer;
+        use middleware::mdns::node::{self, NodeTxt};
+        use middleware::mdns::socket::MdnsSocket;
+        use std::net::SocketAddr;
+
+        const ID: SenderId = SenderId([1, 2, 3, 4, 5, 6, 7, 8]);
+        const SENDER: SenderId = SenderId([0x28, 0x0b, 0x4b, 0x25, 0x02, 0x17, 0x64, 0xe2]);
+
+        fn at(ip: &str) -> Endpoint<'static> {
+            Endpoint::Socket(format!("{ip}:0").parse().unwrap())
+        }
+
+        /// A browser and an announcer aimed at each other on loopback (no
+        /// multicast); the announcer answers in the background.
+        async fn pair(
+            services: Vec<(String, Vec<u8>)>,
+        ) -> (MdnsSocket, tokio::task::JoinHandle<()>) {
+            let announcer_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let browser = MdnsSocket::builder()
+                .bind("127.0.0.1:0".parse().unwrap())
+                .destination(announcer_socket.local_addr().unwrap())
+                .build()
+                .await
+                .unwrap();
+            let mut a = MdnsAnnouncer::builder()
+                .destination(browser.local_addr().unwrap())
+                .host("posix-0102030405060708.local")
+                .build_on(announcer_socket)
+                .unwrap();
+            let task = tokio::spawn(async move {
+                for (label, txt) in &services {
+                    let s = node::service(label, at("127.0.0.1"), txt, ID);
+                    a.announce(&s).await.unwrap();
+                }
+                loop {
+                    if a.step().await.is_err() {
+                        return;
+                    }
+                }
+            });
+            (browser, task)
+        }
+
+        fn record(chip: &str) -> Vec<u8> {
+            let mut out = [0u8; 192];
+            NodeTxt {
+                id: ID,
+                chip,
+                board: "unknown",
+                fw: Some("0.6.0"),
+                sender: Some(SENDER),
+                zenoh: None,
+            }
+            .encode(&mut out)
+            .unwrap()
+            .to_vec()
+        }
+
+        #[tokio::test]
+        async fn d35_browse_collects_nodes_from_a_loopback_announcer() {
+            let (mut b, task) = pair(vec![(
+                "posix-0102030405060708".into(),
+                record("linux-x86_64"),
+            )])
+            .await;
+            let found = browse_on(&mut b, Duration::from_millis(2500)).await;
+            task.abort();
+            assert_eq!(
+                found.nodes,
+                [MdnsNode {
+                    instance: "posix-0102030405060708".into(),
+                    addr: Some("127.0.0.1".into()),
+                    id: ID,
+                    sender: Some(SENDER),
+                    chip: "linux-x86_64".into(),
+                    board: "unknown".into(),
+                    fw: Some("0.6.0".into()),
+                    zenoh: None,
+                }]
+            );
+            assert_eq!(found.skipped, 0);
+            assert!(found.notes.is_empty(), "{:?}", found.notes);
+        }
+
+        #[tokio::test]
+        async fn d38_a_hostile_announcer_is_parsed_or_skipped() {
+            let mut bad = [0u8; 64];
+            let bad = TxtWriter::new(&mut bad)
+                .entry(b"txtvers", b"1")
+                .unwrap()
+                .entry(b"id", b"NOT-HEX")
+                .unwrap()
+                .entry(b"chip", b"x")
+                .unwrap()
+                .entry(b"board", b"y")
+                .unwrap()
+                .finish()
+                .as_bytes()
+                .to_vec();
+            let (mut b, task) = pair(vec![
+                ("posix-bad".into(), bad),
+                ("posix-hostile".into(), record("\u{1b}[2J\u{202e}evil")),
+            ])
+            .await;
+            let found = browse_on(&mut b, Duration::from_millis(2500)).await;
+            task.abort();
+            assert_eq!(found.nodes.len(), 1, "{:?}", found.nodes);
+            assert_eq!(found.nodes[0].instance, "posix-hostile");
+            assert!(found.skipped >= 1);
+            let out =
+                super::super::format(&super::super::merge_mdns(Vec::new(), &found.nodes, &[]));
+            assert!(
+                !out.contains('\u{1b}') && !out.contains('\u{202e}'),
+                "{out:?}"
+            );
+            assert!(out.contains("\\u{1b}[2J\\u{202e}evil"), "{out:?}");
+        }
+
+        #[tokio::test]
+        async fn d35_a_bind_error_is_a_note_not_an_error() {
+            // TEST-NET-3: on no interface of this host.
+            let builder =
+                MdnsSocket::builder().bind("203.0.113.1:0".parse::<SocketAddr>().unwrap());
+            let found = browse_with(builder, Duration::from_millis(200)).await;
+            assert!(found.nodes.is_empty());
+            assert_eq!(found.notes.len(), 1, "{:?}", found.notes);
+            assert!(found.notes[0].starts_with("mdns: "), "{:?}", found.notes);
+        }
+
+        #[test]
+        fn d38_a_goodbye_or_a_non_node_record_is_not_a_node() {
+            let txt = record("linux-aarch64");
+            let s = node::service("posix-0102030405060708", at("10.0.0.2"), &txt, ID);
+            assert_eq!(to_node(&s).unwrap().addr.as_deref(), Some("10.0.0.2"));
+            let host = Service {
+                endpoint: Endpoint::Host {
+                    name: "posix-x.local",
+                    port: 0,
+                },
+                ..s
+            };
+            assert_eq!(
+                to_node(&host).unwrap().addr.as_deref(),
+                Some("posix-x.local:0")
+            );
+            let junk = Service {
+                txt: b"\x05ver=5",
+                ..s
+            };
+            assert!(to_node(&junk).is_err());
+        }
+    }
+}
+
 #[cfg(feature = "zenoh")]
 mod shell {
     use super::{
-        Answer, Heard, Linked, Row, attribute, merge, node_of_key, parse_admin, zid_of_admin_key,
+        Answer, Heard, Linked, MdnsNode, Row, attribute, merge, merge_mdns, node_of_key,
+        parse_admin, zid_of_admin_key,
     };
     use crate::device::Info;
     use crate::error::Error;
@@ -516,7 +811,63 @@ mod shell {
         e
     }
 
+    /// The mDNS browse running beside the Zenoh scan (feature `mdns`).
+    struct MdnsTask(#[cfg(feature = "mdns")] tokio::task::JoinHandle<super::mdns_shell::Browsed>);
+
+    impl MdnsTask {
+        fn start(within: Duration) -> Self {
+            #[cfg(feature = "mdns")]
+            return MdnsTask(tokio::spawn(super::mdns_shell::browse(within)));
+            #[cfg(not(feature = "mdns"))]
+            {
+                let _ = within;
+                MdnsTask()
+            }
+        }
+
+        /// What it found; its notes go to stderr, never an error.
+        async fn finish(self) -> Vec<MdnsNode> {
+            #[cfg(feature = "mdns")]
+            {
+                let found = match self.0.await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("mdns: {e}");
+                        return Vec::new();
+                    }
+                };
+                for note in &found.notes {
+                    eprintln!("{note}");
+                }
+                if found.skipped > 0 {
+                    eprintln!(
+                        "mdns: skipped {} _mw-node._tcp record(s) that are not node records",
+                        found.skipped
+                    );
+                }
+                found.nodes
+            }
+            #[cfg(not(feature = "mdns"))]
+            Vec::new()
+        }
+    }
+
+    /// The node id of every session seen, from its Zenoh id.
+    fn session_ids(heard: &[Heard], linked: &[Linked]) -> Vec<(String, middleware::SenderId)> {
+        heard
+            .iter()
+            .map(|h| h.zid.as_str())
+            .chain(linked.iter().map(|l| l.zid.as_str()))
+            .filter_map(|z| {
+                let id: zenoh::session::ZenohId = z.parse().ok()?;
+                Some((z.to_owned(), middleware::zenoh::sender_id_of(id)))
+            })
+            .collect()
+    }
+
     async fn scan(within: Duration) -> Result<Vec<Row>, Error> {
+        // 0. The mDNS browse, for as long as the scouting (feature `mdns`).
+        let mdns = MdnsTask::start(within);
         // 1. Multicast scouting.
         let mut heard: Vec<Heard> = Vec::new();
         {
@@ -545,7 +896,9 @@ mod shell {
         }
         let connect = endpoints(&heard);
         if connect.is_empty() {
-            return Ok(merge(&heard, &[], &[], ""));
+            let rows = merge(&heard, &[], &[], "");
+            let ids = session_ids(&heard, &[]);
+            return Ok(merge_mdns(rows, &mdns.finish().await, &ids));
         }
         // 2. A peer session on what the scout found; no scouting of its
         // own, no listener, and an unreachable locator is not fatal.
@@ -608,17 +961,10 @@ mod shell {
             });
         }
         session.close().await.map_err(zerr)?;
-        let ids: Vec<(String, middleware::SenderId)> = heard
-            .iter()
-            .map(|h| h.zid.as_str())
-            .chain(linked.iter().map(|l| l.zid.as_str()))
-            .filter_map(|z| {
-                let id: zenoh::session::ZenohId = z.parse().ok()?;
-                Some((z.to_owned(), middleware::zenoh::sender_id_of(id)))
-            })
-            .collect();
+        let ids = session_ids(&heard, &linked);
         attribute(&mut answers, &ids);
-        Ok(merge(&heard, &linked, &answers, &own))
+        let rows = merge(&heard, &linked, &answers, &own);
+        Ok(merge_mdns(rows, &mdns.finish().await, &ids))
     }
 
     #[cfg(test)]

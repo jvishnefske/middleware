@@ -166,6 +166,13 @@ if [ -n "$extra" ]; then
     fail "mwctl enables middleware features: $extra"
 fi
 
+echo "== D39: mwctl's optional mdns browse (with zenoh) enables host features only"
+mwctl_mdns="$(features_of_self -p mwctl --features zenoh,mdns | sort -u)"
+grep -qx mdns <<<"$mwctl_mdns" || fail "mwctl --features mdns does not enable middleware/mdns"
+if grep -Eqx "$EMBEDDED_FEATURES" <<<"$mwctl_mdns"; then
+    fail "mwctl --features zenoh,mdns enables an embedded feature ($EMBEDDED_FEATURES)"
+fi
+
 echo "== MS5: mw-service enables host features only"
 cargo build --quiet -p mw-service
 svc_features="$(features_of_self -p mw-service | sort -u)"
