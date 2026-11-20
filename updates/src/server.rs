@@ -92,11 +92,9 @@ pub async fn serve(session: zenoh::Session, store: Arc<Store>) -> Result<(), Ser
             }
             s = status.recv_async() => {
                 let s = s?;
-                log(&format!(
-                    "{}: {}",
-                    s.key_expr().as_str(),
-                    String::from_utf8_lossy(&s.payload().to_bytes())
-                ));
+                // Escaped: a report is the updater's text, never log syntax.
+                let text = String::from_utf8_lossy(&s.payload().to_bytes()).escape_debug().to_string();
+                log(&format!("{}: {text}", s.key_expr().as_str()));
             }
         }
     }

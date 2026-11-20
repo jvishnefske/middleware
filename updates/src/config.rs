@@ -13,7 +13,7 @@
 //! | `MW_UPDATER_DEVICES` | — (required) | serial ports, comma-separated |
 //! | `MW_UPDATER_BAUD` | `115200` | their baud rate |
 //! | `MW_UPDATES_POLL` | `3600` | seconds between passes (a publish starts one at once) |
-//! | `MW_UPDATER_NODE` | `/etc/hostname` | the name it reports status under |
+//! | `MW_UPDATER_NODE` | the credentials' user, else `/etc/hostname` | the name it reports status under (the router admits only the user's own) |
 //!
 //! `mw-updates` (the server): `MW_UPDATES_DATA` (default `/data`),
 //! `MW_UPDATES_ROOT_KEY`, `MW_ZENOH_ROUTER` (default

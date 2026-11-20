@@ -20,4 +20,9 @@
   mw-robot = { package = "mw-robot"; dir = "robot"; bin = "mw-robot"; };
   mw-gateway = { package = "mw-gateway"; dir = "gateway"; bin = "mw-gateway"; };
   mw-posix-node = { package = "mw-posix-node"; dir = "posix-node"; bin = "mw-posix-node"; };
+  # The updates channel (design.md UP): the server (its image runs in the
+  # cluster beside the updates zenohd), the host client and the publisher.
+  mw-updates = { package = "mw-updates"; dir = "updates"; bin = "mw-updates"; };
+  mw-updater = { package = "mw-updates"; dir = "updates"; bin = "mw-updater"; };
+  mw-release = { package = "mw-updates"; dir = "updates"; bin = "mw-release"; };
 }

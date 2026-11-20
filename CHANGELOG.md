@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Updates channel (UP1–UP9) and Zenoh over WebSocket (WS1–WS3)
+- `loader::release`: a `SoftwareCert` (kind, target chip or `any`, channel, version, len, sha256) signed once by the root over `"mw-release-v1\0" || cert`. `sys/loader/commit` and `sys/fw/commit` accept `[cert][sig]` beside their per-device forms; a claimed device checks the kind, its chip, the image and the version floor. A firmware cert names no node or slot.
+- Breaking (API): the loader's `Command::Commit` and `Effect::Activate` carry `Option<CommitAuth>` (`Signed` or `Cert`), `sys/fw`'s `Command::Commit` an `Option<FwAuth>`; `fw_ota::service::Context` and `machine::Env` gain `chip`; `TrustState::accept_commit_auth` and `accept_cert` (feature `trust`). The wire bodies of the old forms are unchanged.
+- Feature `zenoh-ws`: `zenoh::wsbridge::WsBridge`, a loopback bridge from a session's TCP link to `wss://host/path` (rustls, SNI, Host, path), converting Zenoh's TCP batches to binary WebSocket messages.
+- New crate `updates/` (`mw-updates`): the server `mw-updates` (and `mw-updates router-config`), the Linux client `mw-updater`, and the publisher `mw-release`. NixOS module `nix/updater.nix` (`nixosModules.updater`); `nix/binaries.nix` gains `mw-updates`, `mw-updater`, `mw-release` (so `image-mw-updates`).
+- mwctl: `Device::upload_release`, `fw::UpdateOptions::release`; the serial port is in the library (`mwctl::port`).
+
 ### mwctl scout (H4)
 - `mwctl scout [--seconds N]` (feature `zenoh`; `just lan` in the new root `justfile`): Zenoh multicast scouting, the scouted routers' and peers' admin-space sessions, and `@mw/node/*/sys/info`, merged into one table of the nodes on the local network (`mwctl::scout`). mwctl's `zenoh` feature now also pulls in `zenoh` and `serde_json` directly; the default build is unchanged.
 
