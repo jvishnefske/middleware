@@ -38,6 +38,7 @@ pub mod config;
 pub mod controller;
 pub mod device;
 pub mod driver;
+pub mod espnow_gw;
 pub mod flash;
 pub mod layout;
 pub mod node_id;
