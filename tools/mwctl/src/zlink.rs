@@ -15,7 +15,9 @@
 //! (`firmware-imxrt/src/zenoh_mgmt.rs`, ZN5): uploads and firmware
 //! updates with signed commits, and start/stop and firmware
 //! reboot/confirm/abort only as signed control requests addressed to the
-//! board's [`target`] address. Monitoring is not offered here
+//! board's [`target`] address. A posix-node over Zenoh (PN21–PN27) answers
+//! at the id of its Zenoh session, which is not its node id; its control
+//! requests name its reported node id's first six bytes ([`target_for`]). Monitoring is not offered here
 //! ([`Endpoint::next_event`] only waits).
 
 use crate::error::Error;
@@ -44,6 +46,19 @@ pub enum Route {
 pub fn target(node: SenderId) -> [u8; 6] {
     let n = node.0;
     [0x02, n[3], n[4], n[5], n[6], n[7]]
+}
+
+/// The 6-byte address a signed control request names on the board whose
+/// per-node key is `addressed` and whose `sys/info` reported `chip` and
+/// node id `reported` (design.md PN27): the RT1050's Ethernet MAC
+/// ([`target`] of `addressed`) on chip `rt1050` or when no node id was
+/// reported, else the reported node id's first six bytes (a posix-node,
+/// whose key carries its Zenoh session's id, not its node id).
+pub fn target_for(chip: &str, addressed: SenderId, reported: Option<SenderId>) -> [u8; 6] {
+    match reported {
+        Some(n) if chip != "rt1050" => [n.0[0], n.0[1], n.0[2], n.0[3], n.0[4], n.0[5]],
+        _ => target(addressed),
+    }
 }
 
 /// Parses a node id: 16 hex digits.
@@ -170,6 +185,33 @@ impl Endpoint for ZenohLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pn27_the_control_target_comes_from_sys_info() {
+        // The key's id (the Zenoh session's) and the node id sys/info reports.
+        let addressed = parse_node("7e729ac3f058a2e9").unwrap();
+        let reported = parse_node("5e110de02a9c4107").unwrap();
+        // An RT1050: its Ethernet MAC, 02 and the last five of its id.
+        assert_eq!(
+            target_for("rt1050", addressed, Some(reported)),
+            target(addressed)
+        );
+        // A posix-node (or any other board): the reported node id's first six.
+        let first6 = [0x5e, 0x11, 0x0d, 0xe0, 0x2a, 0x9c];
+        assert_eq!(
+            target_for("linux-aarch64", addressed, Some(reported)),
+            first6
+        );
+        assert_eq!(
+            target_for("linux-x86_64", addressed, Some(reported)),
+            first6
+        );
+        // No node id in the reply (older firmware): the RT1050 rule.
+        assert_eq!(
+            target_for("linux-aarch64", addressed, None),
+            target(addressed)
+        );
+    }
 
     #[test]
     fn node_ids_and_rt_targets() {

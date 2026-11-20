@@ -169,9 +169,13 @@ OPTIONS:
     --zenoh-listen <ENDPOINT>
                        The same as --zenoh, but listen on ENDPOINT for boards that
                        connect (the RT1050 is a Zenoh client of its sys/zenoh/endpoint)
-    --node <ID>        The board's node id (16 hex digits, as `info` prints it)
-    --target <MAC>     Address signed control requests name [default: the RT1050's
-                       Ethernet MAC, 02 and the node id's last five bytes]. Over Zenoh
+    --node <ID>        The id in the board's keys, @mw/node/<ID>/... (16 hex digits,
+                       as `scout` prints it): an RT1050's node id; a posix-node's
+                       Zenoh session id, which its start log names and is not the
+                       node id `info` prints
+    --target <MAC>     Address signed control requests name [default: from the board's
+                       sys/info: an RT1050's Ethernet MAC, 02 and the node id's last
+                       five bytes; any other board's node id, first six bytes]. Over Zenoh
                        upload, start, stop and fw update/reboot/confirm/abort need a key
                        (signed commits and signed control requests); trust claim,
                        monitor and reset do not go over Zenoh.

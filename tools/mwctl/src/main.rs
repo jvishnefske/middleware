@@ -451,12 +451,11 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
         cli::ZenohRoute::Connect(e) => Route::Connect(e.clone()),
         cli::ZenohRoute::Listen(e) => Route::Listen(e.clone()),
     };
-    let target = z.target.unwrap_or_else(|| mwctl::zlink::target(node));
     if let Some(tls) = &z.tls {
         cli::check_tls_readable(tls).map_err(|e| Error::File(std::io::Error::other(e)))?;
     }
     eprintln!(
-        "zenoh: {} {}, board {}, control target {}{}",
+        "zenoh: {} {}, board {}{}",
         match &route {
             Route::Connect(_) if z.tls.is_some() => "connecting (client, mTLS) to",
             Route::Connect(_) => "connecting to",
@@ -466,7 +465,6 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
             Route::Connect(e) | Route::Listen(e) => e,
         },
         hex(&z.node),
-        format_mac(&target),
         match &z.tls {
             Some(t) => format!(
                 ", CA {}, certificate {}, key {}",
@@ -485,6 +483,16 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
     let mut link = ZenohLink::open(&route, node, tls)?;
     link.wait_for_board(Duration::from_secs(ZENOH_WAIT_SECONDS))?;
     let mut dev = Device::new(link);
+    // The control target: --target, else by what the board reports (an
+    // RT1050's MAC, a posix-node's node id).
+    let target = match z.target {
+        Some(t) => t,
+        None => {
+            let info = dev.info()?;
+            mwctl::zlink::target_for(&info.chip, node, info.node)
+        }
+    };
+    eprintln!("zenoh: control target {}", format_mac(&target));
     let key = match &cli.cmd {
         Cmd::FwUpdate { key, .. }
         | Cmd::FwReboot { key }
