@@ -11,6 +11,8 @@
 //! | `MW_POSIX_NODE_FUEL_PER_CALL` | `20000000` | instructions a payload may run per call (`init`, `tick`, a message, a request), 1000000..=1000000000; the microcontrollers' default is a twentieth of this |
 //! | `MW_POSIX_NODE_DRIVER` | `none` | the control-module driver ([`crate::driver`]): `none`, `sim` (a simulated EMCO PC Turn 50) or `kd240` (the KD240's inputs, read only) |
 //! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
+//! | `MW_POSIX_NODE_ESPNOW_BRIDGE` | none (gateway off) | path of the USB↔ESP-NOW bridge's serial port (`tools/espnow-bridge`, 460800 baud): the node gateways ESP-NOW devices onto Zenoh ([`crate::espnow_gw`]) |
+//! | `MW_POSIX_NODE_ESPNOW_DOWNLINK` | none | with the bridge: `app` keys broadcast to the devices, comma-separated, at most 8; `app/cmd/**` is the key and everything below it, otherwise one key |
 //!
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
 //! (`mw_gateway::GatewayConfig`; `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD`
@@ -57,6 +59,15 @@ pub const DEFAULT_FUEL_PER_CALL: u64 = 20 * middleware::wasm_abi::FUEL_PER_CALL;
 pub const ENV_DRIVER: &str = "MW_POSIX_NODE_DRIVER";
 /// `MW_POSIX_NODE_KD240_INPUTS`.
 pub const ENV_KD240_INPUTS: &str = "MW_POSIX_NODE_KD240_INPUTS";
+
+/// `MW_POSIX_NODE_ESPNOW_BRIDGE`.
+pub const ENV_ESPNOW_BRIDGE: &str = "MW_POSIX_NODE_ESPNOW_BRIDGE";
+/// `MW_POSIX_NODE_ESPNOW_DOWNLINK`.
+pub const ENV_ESPNOW_DOWNLINK: &str = "MW_POSIX_NODE_ESPNOW_DOWNLINK";
+/// Most downlink filters.
+pub const MAX_ESPNOW_DOWNLINK: usize = 8;
+/// A downlink filter: its key fits an ESP-NOW frame's key.
+pub type DownlinkFilter = middleware::key::KeyFilterBuf<{ middleware::espnow::MAX_KEY }>;
 
 /// Default state directory.
 pub const DEFAULT_STATE: &str = "/var/lib/mw-posix-node";
@@ -127,6 +138,10 @@ pub struct PosixNodeConfig {
     pub fuel_per_call: u64,
     /// The control-module driver.
     pub driver: crate::driver::DriverChoice,
+    /// The USB↔ESP-NOW bridge's serial port; `None`: no ESP-NOW gateway.
+    pub espnow_bridge: Option<String>,
+    /// `app` filters broadcast to the ESP-NOW devices.
+    pub espnow_downlink: Vec<DownlinkFilter>,
     /// Old names that were used: `MW_PI_NODE_*` variables, and
     /// [`LEGACY_STATE`] when it was chosen. The binary warns about each.
     pub deprecated: Vec<String>,
@@ -141,6 +156,8 @@ impl Default for PosixNodeConfig {
             local_serial: None,
             fuel_per_call: DEFAULT_FUEL_PER_CALL,
             driver: crate::driver::DriverChoice::None,
+            espnow_bridge: None,
+            espnow_downlink: Vec::new(),
             deprecated: Vec::new(),
         }
     }
@@ -209,6 +226,11 @@ impl PosixNodeConfig {
             }),
             Some(other) => return Err(err(ENV_DRIVER, other, "not none, sim or kd240")),
         };
+        let espnow_bridge = get(ENV_ESPNOW_BRIDGE).map(|v| v.trim().to_owned());
+        let espnow_downlink = match get(ENV_ESPNOW_DOWNLINK) {
+            Some(v) => parse_downlink(&v).map_err(|reason| err(ENV_ESPNOW_DOWNLINK, &v, reason))?,
+            None => Vec::new(),
+        };
         Ok(PosixNodeConfig {
             state,
             node_id,
@@ -216,6 +238,8 @@ impl PosixNodeConfig {
             local_serial,
             fuel_per_call,
             driver,
+            espnow_bridge,
+            espnow_downlink,
             deprecated: used.into_inner(),
         })
     }
@@ -237,6 +261,29 @@ impl PosixNodeConfig {
     pub fn from_process_env() -> Result<Self, PosixNodeConfigError> {
         Ok(Self::from_env(&|k| std::env::var(k).ok())?.with_legacy_state(|p| p.exists()))
     }
+}
+
+/// Parses `MW_POSIX_NODE_ESPNOW_DOWNLINK`: comma-separated `app` keys, a
+/// trailing `/**` meaning the key and everything below it, at most
+/// [`MAX_ESPNOW_DOWNLINK`]. Pure.
+pub fn parse_downlink(v: &str) -> Result<Vec<DownlinkFilter>, &'static str> {
+    use middleware::key::{Filter, KeyBuf};
+    let mut out = Vec::new();
+    for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (key, prefix) = match item.strip_suffix("/**") {
+            Some(k) => (k, true),
+            None => (item, false),
+        };
+        let key = KeyBuf::new(key).map_err(|_| "not a key, or longer than 64 bytes")?;
+        if key.as_str() != "app" && !key.as_str().starts_with("app/") {
+            return Err("only keys under app are broadcast");
+        }
+        out.push(if prefix { Filter::Prefix(key) } else { Filter::Exact(key) });
+    }
+    if out.len() > MAX_ESPNOW_DOWNLINK {
+        return Err("more than 8 filters");
+    }
+    Ok(out)
 }
 
 /// The subdirectory of the node's state the gateway's state defaults to.
@@ -371,6 +418,44 @@ mod tests {
             (&[(ENV_KD240_INPUTS, "x=c:1")][..], ENV_KD240_INPUTS),
         ] {
             assert_eq!(PosixNodeConfig::from_env(&env(pairs)).unwrap_err().var, var);
+        }
+    }
+
+    #[test]
+    fn eg11_espnow_defaults_off() {
+        let c = PosixNodeConfig::from_env(&env(&[])).unwrap();
+        assert_eq!((c.espnow_bridge, c.espnow_downlink), (None, Vec::new()));
+        let c = PosixNodeConfig::from_env(&env(&[(ENV_ESPNOW_BRIDGE, " "), (ENV_ESPNOW_DOWNLINK, "")])).unwrap();
+        assert_eq!(c, PosixNodeConfig::default());
+    }
+
+    #[test]
+    fn eg11_parses() {
+        use middleware::key::{Filter, KeyBuf};
+        let c = PosixNodeConfig::from_env(&env(&[
+            (ENV_ESPNOW_BRIDGE, "/dev/ttyUSB0"),
+            (ENV_ESPNOW_DOWNLINK, "app/cmd/**, app/time"),
+        ]))
+        .unwrap();
+        assert_eq!(c.espnow_bridge.as_deref(), Some("/dev/ttyUSB0"));
+        assert_eq!(
+            c.espnow_downlink,
+            [Filter::Prefix(KeyBuf::new("app/cmd").unwrap()), Filter::Exact(KeyBuf::new("app/time").unwrap())]
+        );
+        assert_eq!(parse_downlink("app/**").unwrap(), [Filter::Prefix(KeyBuf::new("app").unwrap())]);
+        // The old prefix is read too.
+        let c = PosixNodeConfig::from_env(&env(&[("MW_PI_NODE_ESPNOW_BRIDGE", "/dev/ttyUSB1")])).unwrap();
+        assert_eq!(c.espnow_bridge.as_deref(), Some("/dev/ttyUSB1"));
+        assert_eq!(c.deprecated, ["MW_PI_NODE_ESPNOW_BRIDGE"]);
+    }
+
+    #[test]
+    fn eg11_bad_downlink_names_the_variable() {
+        let nine = ["app/a"; 9].join(",");
+        for bad in ["sys/info", "disc/**", "apple", "app//x", "app/*", nine.as_str()] {
+            let e = PosixNodeConfig::from_env(&env(&[(ENV_ESPNOW_DOWNLINK, bad)])).expect_err(bad);
+            assert_eq!(e.var, ENV_ESPNOW_DOWNLINK, "{bad}");
+            assert_eq!(e.value, bad);
         }
     }
 
