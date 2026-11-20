@@ -18,6 +18,15 @@
 //!   trap (in a request too, answered `Internal`), `sys/payload/stop`, a
 //!   `begin` or an activated commit ends the run; the service keeps the
 //!   keys it served.
+//! * [`Controller::mesh_request`] handles a request that came over Zenoh:
+//!   [`crate::mesh_gate`] decides it first (a refusal changes nothing and
+//!   is logged on the process's log only, never on `sys/log`, so an
+//!   unauthenticated peer cannot fill the outbox); an admitted one is
+//!   handled as [`Controller::request`] does, with the requester's
+//!   `Air` origin, and a verified signed start or stop has its counter
+//!   persisted ([`Service::accept_control`]) before it acts, with an
+//!   empty body. [`Controller::request`] is a serial request
+//!   (`Origin::Serial`).
 //! * [`Controller::publication`] delivers a publication when the payload
 //!   subscribed to the key (`esp_base::dispatch::route_publication`).
 //! * [`Controller::poll`] fires due timers, hands at most `MAX_EVENTS`
@@ -41,19 +50,21 @@
 
 use embedded_storage::nor_flash::NorFlash;
 use esp_base::dispatch::{route_publication, tick_delay};
+use esp_base::ota::Origin;
 use esp_base::periph::overflow_report;
 use esp_base::serve::{REPLY_CAPACITY, Route, ServedKeys, payload_reply, route_request};
 use esp_base::store::StoreError;
-use middleware::Key;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::MAX_RAW_FRAME;
 use middleware::transport::{HandlerError, RequestMeta};
 use middleware::wasm_abi::events::MAX_EVENTS;
+use middleware::{Key, SenderId};
 use wasm_host::{Compiled, Limits, LoadError, Payload, Trap};
 
 use crate::device::{Clock, OUTBOX, Out, Outbox, PiDevice};
 use crate::driver::{Driver, NoDriver, check_binding, index_of};
 use crate::flash::Durable;
+use crate::mesh_gate::{self, Admission};
 use crate::service::{Boot, Facts, Handled, Reply, Service, StartFailure};
 
 /// Room for the controller's own lines beside a payload call's outbox.
@@ -163,8 +174,50 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.driver.as_mut()
     }
 
-    /// Handles one request: the reply body or the error.
+    /// Handles one request from a serial link: the reply body or the
+    /// error.
     pub fn request(&mut self, key: Key<'_>, body: &[u8], meta: &RequestMeta<'_>) -> Result<Vec<u8>, HandlerError> {
+        self.request_as(Origin::Serial, key, body, meta)
+    }
+
+    /// Handles one request that came over Zenoh from the requester whose
+    /// query named `sender` (module docs, [`crate::mesh_gate`]).
+    pub fn mesh_request(
+        &mut self,
+        key: Key<'_>,
+        sender: Option<SenderId>,
+        body: &[u8],
+    ) -> Result<Vec<u8>, HandlerError> {
+        let state = self.svc.state();
+        let own = mesh_gate::address(self.svc.node());
+        let facts = mesh_gate::Facts { trust: state.trust(), control: state.control(), own };
+        let from = mesh_gate::requester(sender, own);
+        match mesh_gate::admit(&facts, self.svc.loader_owner(), from, key, body) {
+            Err(r) => {
+                tracing::info!(target: "mw_posix_node::mesh", key = key.as_str(), "refused: {}", r.reason());
+                Err(r.error())
+            }
+            Ok(Admission::Dispatch) => self.request_as(from, key, body, &RequestMeta::NONE),
+            Ok(Admission::Control { counter }) => match self.svc.accept_control(counter) {
+                Ok(()) => self.request_as(from, key, &[], &RequestMeta::NONE),
+                Err(e) => {
+                    self.outbox.log(&format!("trust: control counter not saved: {e}"));
+                    self.settle();
+                    Err(HandlerError::Internal)
+                }
+            },
+        }
+    }
+
+    /// Handles one request as `origin`.
+    fn request_as(
+        &mut self,
+        origin: Origin,
+        key: Key<'_>,
+        body: &[u8],
+        meta: &RequestMeta<'_>,
+    ) -> Result<Vec<u8>, HandlerError> {
+        self.svc.set_origin(origin);
         let mut out = vec![0u8; MAX_RAW_FRAME];
         if key == keys::CONTROL_MODULES {
             let n = crate::driver::serve_page(self.driver.points(), body, &mut out)?;
