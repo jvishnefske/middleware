@@ -781,6 +781,18 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   `thumbv7em-none-eabihf` and `thumbv8m.main-none-eabihf` with no cloud
   dependency and no host feature — `mdns::embassy_seam::tests::*`,
   `scripts/check-features.sh`.
+- [x] D41 Every middleware node announces itself with one shared record,
+  `mdns::node` (feature `mdns-core`, `no_std`, no heap): kind `mw/node`
+  (`_mw-node._tcp.local`), instance `<prefix>-<id as 16 lower-case hex
+  digits>` (at most 63 bytes; the prefix lower-case letters, digits and
+  hyphens), host `<instance>.local`, TTL 120 s, SRV port 0 when the node
+  names no port; TXT `txtvers=1` first, then `id`, `chip`, `board` and,
+  when known, `fw`, `sender` (the `@mw/node/<sender>` id) and `zenoh` (a
+  locator), in that order. Parsing refuses another `txtvers`, a missing
+  `id`, `chip` or `board` and ids that are not 16 lower-case hex digits,
+  and ignores unknown keys; a record over the table's 192 TXT bytes is
+  an encoding error, the RT1050's worst case fits —
+  `mdns::node::tests::d41_*`, `scripts/check-features.sh`.
 
 ### Transport contract 0.5 (K…)
 

@@ -25,8 +25,10 @@
 //! * `host` (feature `mdns`, `std`) — the tokio seams `TokioUdp` and
 //!   `TokioClock`. The bare names `MdnsSocket` and `MdnsAnnouncer` are the
 //!   tokio instantiation, and their `builder()`s bind it.
-//! * `embassy_seam` (feature `mdns-embassy`) — `EmbassyUdp`, `join_group`
-//!   and `EmbassyClock` for boards on embassy-net.
+//! * `embassy_seam` (feature `mdns-embassy`) — `EmbassyUdp`, `join_group`,
+//!   `EmbassyClock` and `subnet` for boards on embassy-net.
+//! * `node` (feature `mdns-core`) — the `mw/node` record every middleware
+//!   node announces itself with: kind, instance and host names, TXT keys.
 //!
 //! The 0.4 `ServiceDiscovery` trait is gone: browsing is
 //! [`crate::discovery::Browse`] for every discovery backend.
@@ -54,6 +56,8 @@ pub mod embassy_seam;
 mod error;
 #[cfg(feature = "mdns")]
 pub mod host;
+#[cfg(feature = "mdns-core")]
+pub mod node;
 #[cfg(feature = "mdns-core")]
 pub mod origin;
 #[cfg(feature = "mdns-core")]

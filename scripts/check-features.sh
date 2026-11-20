@@ -14,7 +14,8 @@
 #     dependency;
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
 #     in no cloud dependency and enable no host feature;
-#   * the mDNS core `mdns-core` (D19) builds for thumbv6m and thumbv7em, is
+#   * the mDNS core `mdns-core` (D19), with the shared `mw/node` record
+#     (D41), builds for thumbv6m and thumbv7em, is
 #     gated on `mdns-core` rather than the std feature `mdns`, and is
 #     neither embedded nor host (`mdns` enables it); its embassy seam
 #     `mdns-embassy` (D26, embedded) builds for thumbv7em and thumbv8m
@@ -94,7 +95,7 @@ done
 # `mdns` (which only adds the tokio seam and builders: the `host` modules).
 echo "== D19: the mDNS core is gated on mdns-core"
 for f in src/mdns/origin.rs src/mdns/announce/table.rs src/mdns/error.rs src/mdns/race.rs \
-         src/mdns/announce.rs src/mdns/socket.rs; do
+         src/mdns/announce.rs src/mdns/socket.rs src/mdns/node.rs; do
     # Every mention of the feature is `#[cfg(feature = "mdns")]` on the
     # line before `mod host;` or `pub use host::...`.
     odd="$(grep -n 'feature = "mdns"' "$f" | grep -vF '#[cfg(feature = "mdns")]' || true)"
@@ -103,7 +104,7 @@ for f in src/mdns/origin.rs src/mdns/announce/table.rs src/mdns/error.rs src/mdn
         | grep -v -e '^--$' -e '^[0-9]*-mod host;$' -e '^[0-9]*-pub use host::' || true)"
     [ -z "$bad" ] || fail "$f gates more than its host module on the std feature mdns: $bad"
 done
-for m in announce origin socket error race; do
+for m in announce origin socket error race node; do
     grep -B1 -E "^(pub )?mod $m;" src/mdns.rs | head -1 | grep -qx '#\[cfg(feature = "mdns-core")\]' \
         || fail "mod $m in src/mdns.rs is not gated on mdns-core"
 done
