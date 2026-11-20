@@ -9,6 +9,7 @@
 //! | [`ESP8266`]| ESP8266 modules           | 1, 3 UART0 console, 6–11 flash                         | —          | —                      | — / —                    | —                           | matrix  |
 //! | [`COLORLIGHT_5A75B`] | Colorlight 5A-75B v7.0 (ECP5) | —                                    | 1 (button) | —                      | — / —                    | —                           | none    |
 //! | [`RT1050_EVKB`] | NXP MIMXRT1050-EVKB  | 23, 24 LPUART1 console                                 | 2, 3, 5, 22 | ADC1: 16–21 (A0–A5)   | 20, 21 (LPI2C1) / —      | —                           | fixed LPSPI1 (13, 11, 12) |
+//! | [`KD240`]  | AMD Kria KD240 (NixOS)    | — (no gpio group)                                     | —          | —                      | — / —                    | —                           | none    |
 //!
 //! The RP2040 and the RP2350A share the Pico pinout, so both chips use
 //! [`PICO`]. The ESP32 build is the ESP32-CAM's: its I2C bus 0 is the
@@ -25,6 +26,10 @@
 //! lines: D`n` is pin `n`, A`n` is pin `16 + n`, the USER button SW8 is 22
 //! and the LPUART1 console pins are 23 and 24 ([`crate::imxrt::evkb`] maps
 //! each to its pad, with the table and its sources).
+//!
+//! A Linux board's chip name (`linux-aarch64`) does not say which board it
+//! is, so [`by_board`] picks its map from the board name as well; the KD240
+//! runs posix-node, which serves no `gpio` group, so [`KD240`] has no pins.
 
 use crate::{FixedSpi, PinMap, Reason, SpiRouting, bit, span};
 
@@ -258,6 +263,33 @@ pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
     }
 }
 
+/// AMD Kria KD240 (Zynq UltraScale+ MPSoC, NixOS): no payload pins. The
+/// board runs posix-node, which serves no `gpio` group; its payloads reach
+/// the drive through the node's control points instead. Selected by
+/// [`by_board`], since its chip name (`linux-aarch64`) names no board.
+pub const KD240: PinMap = PinMap {
+    gpio: 0,
+    reserved: 0,
+    input_only: 0,
+    adc: &[],
+    i2c: [None, None],
+    pwm: &[],
+    spi: SpiRouting::None,
+    reasons: &[],
+};
+
+/// The map for a board that its chip name does not identify: `chip` as
+/// `sys/info` reports it and `board` the board's own name (the manifest's
+/// BOARD record, from the device tree's `model` on Linux). Only the KD240
+/// (`linux-aarch64`, a model naming `KD240`) so far; `None` otherwise, and
+/// callers fall back to [`by_chip`].
+pub fn by_board(chip: &str, board: &str) -> Option<&'static PinMap> {
+    match chip {
+        "linux-aarch64" if board.contains("KD240") => Some(&KD240),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +304,26 @@ mod tests {
         assert_eq!(by_chip("esp8266"), Some(&ESP8266));
         assert_eq!(by_chip("ecp5"), Some(&COLORLIGHT_5A75B));
         assert_eq!(by_chip("badge"), None);
+    }
+
+    #[test]
+    fn u47_board_names_select_a_map_where_the_chip_has_none() {
+        use crate::Direction;
+        assert_eq!(
+            by_board("linux-aarch64", "ZynqMP KD240 revA/B/1"),
+            Some(&KD240)
+        );
+        assert_eq!(by_board("linux-aarch64", "Raspberry Pi 4"), None);
+        assert_eq!(by_board("linux-x86_64", "ZynqMP KD240 revA/B/1"), None);
+        assert_eq!(by_board("rp2350", "ZynqMP KD240"), None);
+        assert_eq!(by_chip("linux-aarch64"), None);
+        // The KD240's posix-node serves no gpio group: no pin is a payload
+        // pin, so every pin is refused.
+        assert_eq!(KD240.gpios().count(), 0);
+        assert_eq!(KD240.payload_pins().count(), 0);
+        assert!(KD240.check(0, Direction::Output).is_err());
+        assert_eq!(KD240.i2c_pins(0), None);
+        assert_eq!(KD240.pwm_pins().count(), 0);
     }
 
     #[test]
