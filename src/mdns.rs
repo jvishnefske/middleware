@@ -7,18 +7,26 @@
 //!   and [`Response::instances`](wire::Response::instances), which joins the
 //!   PTR, SRV, TXT and A/AAAA records of one response into
 //!   [`Instance`]s.
-//! * `socket` (feature `mdns`, `std`) — `MdnsSocket`, a querier over a
-//!   tokio UDP socket. It implements [`crate::discovery::Browse`]: browsing
+//! * `socket` (feature `mdns-core`, `no_std`) — `MdnsSocket<S, N>`, a
+//!   querier over any [`Datagram`](crate::datagram::Datagram) socket `S`
+//!   with an `N`-byte buffer ([`STD_BUF`], [`MCU_BUF`]). It implements [`crate::discovery::Browse`]: browsing
 //!   a [`ServiceKind`](crate::discovery::ServiceKind) queries its DNS-SD
 //!   type ([`dns_sd_type`](crate::discovery::record::dns_sd_type) in
 //!   [`DOMAIN`]) and turns answers into discovery events. Its raw
 //!   `query` / `recv_response` methods hand back whole [`Response`]s.
-//! * `announce` (feature `mdns`, `std`) — `MdnsAnnouncer`, a responder
+//! * `announce` (feature `mdns-core`) — `MdnsAnnouncer<S, C, N>`, a
+//!   responder over a socket and a [`Clock`](crate::clock::Clock) `C`
 //!   implementing [`crate::discovery::Announce`]: RFC 6762 probing with
 //!   conflict renames, announcements, answers to PTR/SRV/TXT/A/AAAA
 //!   queries and goodbyes, decided by the pure `announce::table` core.
-//! * `origin` (feature `mdns`) — which sources both accept (on-link only
-//!   unless a destination was set explicitly), a pure policy.
+//! * `origin` (feature `mdns-core`) — which sources both accept (on-link
+//!   only unless a destination was set explicitly), a pure policy; reading
+//!   the host's routes (`system_on_link`) needs `std`.
+//! * `host` (feature `mdns`, `std`) — the tokio seams `TokioUdp` and
+//!   `TokioClock`. The bare names `MdnsSocket` and `MdnsAnnouncer` are the
+//!   tokio instantiation, and their `builder()`s bind it.
+//! * `embassy_seam` (feature `mdns-embassy`) — `EmbassyUdp`, `join_group`
+//!   and `EmbassyClock` for boards on embassy-net.
 //!
 //! The 0.4 `ServiceDiscovery` trait is gone: browsing is
 //! [`crate::discovery::Browse`] for every discovery backend.

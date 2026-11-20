@@ -57,9 +57,14 @@
 //!   shared by the host backend (as `zenoh::wire`) and the board client
 //!   `zenoh_lite`, so both write the same bytes.
 //! * [`crc`] — CRC-16 for frames, CRC-32 for payload images.
+//! * [`clock`] — the [`clock::Clock`] seam (milliseconds and waiting) and
+//!   [`datagram`] — the [`datagram::Datagram`] UDP seam (always built,
+//!   `no_std`): the board Zenoh client and the mDNS shells take time and
+//!   sockets from them.
 //! * [`mdns`] — mDNS constants and the DNS-SD message format (re-exported
-//!   from [`dns`]); its tokio socket (a [`discovery::Browse`]) and
-//!   announcer (a [`discovery::Announce`]) need `mdns`.
+//!   from [`dns`]); its querier (a [`discovery::Browse`]) and announcer (a
+//!   [`discovery::Announce`]) are generic over the seams with `mdns-core`,
+//!   bound to tokio with `mdns` and to embassy-net with `mdns-embassy`.
 //! * Backends, each behind a cargo feature:
 //!
 //! | feature    | module      | target            | needs                     |
@@ -74,7 +79,9 @@
 //! | `zenoh-lite` | `zenoh_lite` | `no_std`, no heap | `embedded-io-async`; Zenoh 1.x client over one TCP stream |
 //! | `grpc`     | `grpc`      | `std`             | tokio, tonic              |
 //! | `istio`    | `grpc::istio`, `grpc::mesh` | `std` | `grpc`                |
-//! | `mdns`     | `mdns::socket`, `mdns::announce`, `mdns::origin` | `std` | tokio, socket2 |
+//! | `mdns-core` | `mdns::socket`, `mdns::announce`, `mdns::origin` (generic shells) | `no_std`, no heap | the `Datagram` and `Clock` seams |
+//! | `mdns`     | `mdns::host`, the builders | `std` | `mdns-core`, tokio, socket2 |
+//! | `mdns-embassy` | `mdns::embassy_seam` | `no_std`, no heap | `mdns-core`, embassy-net, embassy-time |
 //! | `dns-sd`   | `dns::unicast` | `std`          | tokio, getrandom          |
 //! | `memory`   | `transport::memory` | `std`     | tokio (timers); for tests and examples |
 //! | `kv-file`  | `kv::file`  | `std`             | the filesystem; no extra crates |

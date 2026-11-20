@@ -6,7 +6,8 @@
 //!   of kinds to DNS-SD types ([`record::dns_sd_type`]).
 //! * [`Announce`] / [`Browse`] — the traits every discovery backend
 //!   implements: mDNS (`mdns::socket::MdnsSocket` browses,
-//!   `mdns::announce::MdnsAnnouncer` announces; feature `mdns`), unicast
+//!   `mdns::announce::MdnsAnnouncer` announces; generic with `mdns-core`,
+//!   over tokio with `mdns`, over embassy-net with `mdns-embassy`), unicast
 //!   DNS-SD (feature `dns-sd`), pub/sub beacons over any transport
 //!   ([`beacon::PubSubDiscovery`]), the in-process bus (feature `memory`).
 //! * [`directory`] — [`Directory`], the pure fixed-capacity cache a browser

@@ -564,6 +564,14 @@ probes, conflict renames, announcements, answers and goodbyes, and a thin
 tokio shell sends them. Both sockets apply the origin policy of
 `mdns::origin` (D11).
 
+Since W1a the shells are generic over two seams, `datagram::Datagram`
+(one bound UDP socket) and `clock::Clock`: `MdnsSocket<S, N>` and
+`MdnsAnnouncer<S, C, N>` with an `N`-byte buffer, built with feature
+`mdns-core` (no_std, no heap). `mdns` adds the tokio instantiation
+(`mdns::host::{TokioUdp, TokioClock}`) and the builders, and the bare
+names default to it; `mdns-embassy` adds `mdns::embassy_seam`
+(`EmbassyUdp`, `join_group`, `EmbassyClock`) for boards on embassy-net.
+
 - [x] D1 Service types are validated (`_`-prefixed first label, `_tcp` or
   `_udp` second, ≥ 3 labels, labels ≤ 63 bytes, name ≤ 255 bytes) —
   `dns::wire::tests::service_types_are_validated`.
@@ -583,27 +591,29 @@ tokio shell sends them. Both sockets apply the origin policy of
   `dns::wire::tests::write_text_refuses_to_truncate`.
 - [x] D6 `MdnsSocket` sends the query to its destination with a fresh id per
   browse, skips queries and returns responses —
-  `mdns::socket::tests::browse_sends_a_ptr_query_and_recv_resolves_the_answer`,
-  `mdns::socket::tests::queries_are_skipped_and_ids_advance`.
+  `mdns::socket::host::tests::browse_sends_a_ptr_query_and_recv_resolves_the_answer`,
+  `mdns::socket::host::tests::queries_are_skipped_and_ids_advance`.
 - [x] D7 A response that does not fit the caller's buffer is an error and is
   kept for one more call (`MAX_SHORT_BUFFER_RETRIES`); if that call's
   buffer is too small too, the error is reported again and the response is
   dropped, so an oversized datagram never blocks the socket;
   `discard_kept` drops it at once; `try_recv` is `None` when nothing has
   arrived; a malformed datagram is an error and is dropped —
-  `mdns::socket::tests::try_recv_is_none_when_empty_and_keeps_an_oversized_response`,
-  `mdns::socket::tests::an_oversized_response_is_dropped_after_one_retry`,
-  `mdns::socket::tests::malformed_datagrams_are_errors_then_dropped`.
+  `mdns::socket::host::tests::try_recv_is_none_when_empty_and_keeps_an_oversized_response`,
+  `mdns::socket::host::tests::an_oversized_response_is_dropped_after_one_retry`,
+  `mdns::socket::host::tests::malformed_datagrams_are_errors_then_dropped`.
 - [x] D8 Every receive call is bounded in datagrams (`MAX_IGNORED_DATAGRAMS`)
   and a cancelled `recv` loses no response —
-  `mdns::socket::tests::ignored_limit_bounds_try_recv`,
-  `mdns::socket::tests::cancelled_recv_loses_no_response`.
+  `mdns::socket::host::tests::ignored_limit_bounds_try_recv`,
+  `mdns::socket::host::tests::cancelled_recv_loses_no_response`.
 - [x] D9 The pure core builds for `thumbv6m-none-eabi`; `mdns` enables `std`
   and no embedded feature — `scripts/check-features.sh`.
 - [x] D10 Tests put no multicast traffic on the network: the socket is
   aimed at a loopback responder, and the announcer at a loopback browser or
   rival with an explicit destination (which also skips the group join) —
-  `mdns::socket::tests::*`, `mdns::announce::tests::*`, `tests/mdns.rs`.
+  `mdns::socket::host::tests::*`, `mdns::announce::host::tests::*`,
+  `tests/mdns.rs` (the seam tests, `mdns::socket::tests::*` and
+  `mdns::announce::tests::*`, use no socket at all).
 - [x] D11 Origin validation (RFC 6762 §11): unless a destination was set
   explicitly, a datagram is accepted only from an on-link source (IPv4
   loopback, link-local, or a connected subnet read from `/proc/net/route`;
@@ -617,13 +627,13 @@ tokio shell sends them. Both sockets apply the origin policy of
   `mdns::origin::tests::on_link_sources_are_loopback_link_local_or_connected`,
   `mdns::origin::tests::responses_need_port_5353_and_an_outstanding_id_when_on_link`,
   `mdns::origin::tests::outstanding_keeps_the_last_ids`,
-  `mdns::socket::tests::on_link_policy_refuses_wrong_port_and_unknown_ids`.
+  `mdns::socket::host::tests::on_link_policy_refuses_wrong_port_and_unknown_ids`.
 - [x] D12 No datagram wedges `Browse::next`: one that does not parse is
   skipped, an instance whose event cannot be built (label not UTF-8, host
   name too long) or needs more than `MAX_EVENT_LEN` (1024) bytes is
   skipped, and an event too large for the caller's buffer is kept for one
   retry and then skipped —
-  `mdns::socket::tests::poison_datagrams_do_not_wedge_browse`.
+  `mdns::socket::host::tests::poison_datagrams_do_not_wedge_browse`.
 - [x] D13 The announcer probes an instance name three times 250 ms apart
   (query type ANY, QU bit, proposed SRV and TXT in the authority section),
   then announces it twice 1 s apart (PTR, SRV, TXT, A/AAAA in the answer
@@ -632,7 +642,7 @@ tokio shell sends them. Both sockets apply the origin policy of
   instance re-announces without probing —
   `mdns::announce::table::tests::probes_three_times_then_announces_twice`,
   `mdns::announce::table::tests::re_registering_an_announced_instance_announces_without_probing`,
-  `mdns::announce::tests::announces_after_probing_and_answers_a_browse`.
+  `mdns::announce::host::tests::announces_after_probing_and_answers_a_browse`.
 - [x] D14 A response carrying a record of the probed name with other data
   is a conflict: the instance is renamed `name (2)` … `name (9)` and probed
   again, and after 8 renames `announce` fails with
@@ -640,7 +650,7 @@ tokio shell sends them. Both sockets apply the origin policy of
   conflicts —
   `mdns::announce::table::tests::a_conflict_while_probing_renames_and_probes_again`,
   `mdns::announce::table::tests::renames_fit_a_label`,
-  `mdns::announce::tests::a_rival_answer_while_probing_renames_the_instance`.
+  `mdns::announce::host::tests::a_rival_answer_while_probing_renames_the_instance`.
 - [x] D15 Announced instances answer PTR, SRV, TXT, A/AAAA (and ANY)
   queries: multicast by default, unicast to the source for QU questions,
   legacy unicast (id and question echoed, TTL ≤ 10 s, no cache-flush) for
@@ -668,7 +678,67 @@ tokio shell sends them. Both sockets apply the origin policy of
   a reply is never unicast to port 0 or to an unspecified, multicast or
   broadcast source (limited or a known subnet's) —
   `mdns::origin::tests::replies_are_never_unicast_to_broadcast_multicast_or_port_0`,
-  `mdns::announce::tests::replies_that_cannot_go_out_are_dropped_not_fatal`.
+  `mdns::announce::host::tests::replies_that_cannot_go_out_are_dropped_not_fatal`.
+- [x] D19 The mDNS core (`mdns::origin` apart from the std-only
+  `system_on_link`, `announce::table`, `MdnsError`, `MAX_TYPE_TEXT`) and
+  the generic shells `MdnsSocket<S, N>` / `MdnsAnnouncer<S, C, N>` build
+  with feature `mdns-core` for `thumbv6m-none-eabi`: no std, no heap, no
+  tokio, no host feature. `mdns` enables `mdns-core`; `mdns-core` is
+  neither an embedded nor a host feature and may appear in host sets. The
+  core's modules are gated on `mdns-core`, never on `mdns` (only their
+  `host` submodules are) — `scripts/check-features.sh`;
+  `mdns::announce::table::tests::*`, `mdns::origin::tests::*`,
+  `mdns::socket::tests::*` and `mdns::announce::tests::*` run under
+  `--no-default-features --features mdns-core`.
+- [x] D20 `datagram::Datagram` is the UDP seam: `send_to`, a cancel-safe
+  `recv_from` returning `(n, SocketAddr)`, and `try_recv_from` returning
+  `Ok(None)` when nothing is queued; a datagram longer than the buffer is
+  truncated, never an error, so the shells pass a spare byte —
+  `datagram::fake::tests::*`.
+- [x] D21 `clock::Clock` is the crate's one clock trait; `zenoh_lite::Clock`
+  re-exports it — `clock::tests::zenoh_lite_clock_is_the_shared_trait`.
+- [x] D22 The tokio and socket2 instantiation is source compatible: the
+  bare names `MdnsAnnouncer`, `MdnsSocket` and `MdnsError`, the builders
+  (`MdnsAnnouncer::builder`, `MdnsSocket::builder`, every setter, the
+  defaults and `build_on`) and `local_addr` keep their signatures and
+  behaviour — `tests/mdns.rs` and `examples/discover_and_call.rs`
+  unchanged, `mdns::announce::host::tests::*`, `mdns::socket::host::tests::*`.
+- [x] D23 A shell buffer is `N` bytes; a datagram of `N` or more bytes is
+  oversized and skipped by both shells (std `STD_BUF` = 9001, one over
+  `MAX_MESSAGE_LEN`; boards `MCU_BUF` = 1500); a message of the
+  announcer's own that does not fit is an error, never sent truncated —
+  `mdns::socket::tests::fake_seam_skips_oversized_datagrams`,
+  `mdns::announce::tests::fake_seam_ignores_oversized_datagrams`.
+- [x] D24 The seam's error is carried, not flattened: `MdnsError::Io(S::Error)`
+  for the shells' own receives, queries, probes, announcements and
+  goodbyes (same text and `source()` as before for `io::Error`), while a
+  reply to a received datagram that cannot be sent is dropped and counted
+  (D18 through the seam) —
+  `mdns::error::tests::io_carries_the_seam_error_with_its_text_and_source`,
+  `mdns::socket::tests::fake_seam_carries_the_socket_error`,
+  `mdns::announce::tests::fake_seam_send_errors_of_own_messages_are_io`,
+  `mdns::announce::tests::fake_seam_send_errors_of_replies_are_counted_not_fatal`,
+  `mdns::announce::tests::fake_seam_drops_and_counts_a_reply_to_port_zero`.
+- [x] D25 The announcer's wait for the next datagram or timer is cancel
+  safe and its time comes only from the `Clock`: the datagram is polled
+  first, a dropped `step` loses no datagram, and on a virtual clock it
+  probes at 0, 250 and 500 ms, announces at 750 ms and again at 1750 ms;
+  it answers a legacy query by unicast and renames on a rival's answer
+  through the seam —
+  `mdns::announce::tests::fake_seam_probes_then_announces_on_the_clock`,
+  `mdns::announce::tests::fake_seam_cancelled_step_loses_no_datagram`,
+  `mdns::announce::tests::fake_seam_takes_a_ready_datagram_before_a_due_timer`,
+  `mdns::announce::tests::fake_seam_answers_a_legacy_query_by_unicast`,
+  `mdns::announce::tests::fake_seam_a_rival_answer_while_probing_renames_the_instance`,
+  `mdns::race::tests::*`.
+- [x] D26 The embassy seam (`mdns-embassy`, an embedded feature):
+  `EmbassyUdp` binds with hop limit 255, is IPv4 only (a V6 destination is
+  `EmbassyError::Ipv6Unsupported`), receives with truncation like UDP
+  (through `recv_from_with`, never smoltcp's dropping `Truncated`), and the
+  group is joined on the stack with `join_group`; it builds for
+  `thumbv7em-none-eabihf` and `thumbv8m.main-none-eabihf` with no cloud
+  dependency and no host feature — `mdns::embassy_seam::tests::*`,
+  `scripts/check-features.sh`.
 
 ### Transport contract 0.5 (K…)
 
