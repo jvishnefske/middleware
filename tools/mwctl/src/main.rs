@@ -452,9 +452,13 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
         cli::ZenohRoute::Listen(e) => Route::Listen(e.clone()),
     };
     let target = z.target.unwrap_or_else(|| mwctl::zlink::target(node));
+    if let Some(tls) = &z.tls {
+        cli::check_tls_readable(tls).map_err(|e| Error::File(std::io::Error::other(e)))?;
+    }
     eprintln!(
-        "zenoh: {} {}, board {}, control target {}",
+        "zenoh: {} {}, board {}, control target {}{}",
         match &route {
+            Route::Connect(_) if z.tls.is_some() => "connecting (client, mTLS) to",
             Route::Connect(_) => "connecting to",
             Route::Listen(_) => "listening on",
         },
@@ -462,9 +466,23 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
             Route::Connect(e) | Route::Listen(e) => e,
         },
         hex(&z.node),
-        format_mac(&target)
+        format_mac(&target),
+        match &z.tls {
+            Some(t) => format!(
+                ", CA {}, certificate {}, key {}",
+                t.ca.display(),
+                t.cert.display(),
+                t.key.display()
+            ),
+            None => String::new(),
+        }
     );
-    let mut link = ZenohLink::open(&route, node)?;
+    let tls = z.tls.as_ref().map(|t| middleware::zenoh::TlsFiles {
+        root_ca: t.ca.clone(),
+        cert: t.cert.clone(),
+        key: t.key.clone(),
+    });
+    let mut link = ZenohLink::open(&route, node, tls)?;
     link.wait_for_board(Duration::from_secs(ZENOH_WAIT_SECONDS))?;
     let mut dev = Device::new(link);
     let key = match &cli.cmd {
@@ -823,12 +841,19 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Ok(Parsed::Run(c)) => match run(c) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("mwctl: {e}");
-                ExitCode::from(1)
+        Ok(Parsed::Run(mut c)) => {
+            let env_dir = || mwctl::pkcs11::setting("MW_ZENOH_TLS_DIR");
+            if let Err(e) = cli::resolve_zenoh_tls(&mut c, env_dir) {
+                eprintln!("mwctl: {e}\n\n{}", cli::HELP);
+                return ExitCode::from(2);
             }
-        },
+            match run(c) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("mwctl: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
     }
 }

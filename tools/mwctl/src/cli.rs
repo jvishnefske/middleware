@@ -238,6 +238,51 @@ impl ZenohTls {
     }
 }
 
+/// Whether `--zenoh` names a TLS endpoint.
+fn is_tls_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("tls/")
+}
+
+/// Completes `cli`'s Zenoh mTLS identity: a `--zenoh tls/...` endpoint
+/// without a flag-given identity takes the directory `env_dir` returns
+/// (`MW_ZENOH_TLS_DIR`: its `ca`, `cert` and `key`; asked only then), and
+/// is a usage error with neither. Other routes and endpoints are left as
+/// they are.
+pub fn resolve_zenoh_tls(
+    cli: &mut Cli,
+    env_dir: impl FnOnce() -> Option<String>,
+) -> Result<(), String> {
+    let Some(z) = cli.zenoh.as_mut() else {
+        return Ok(());
+    };
+    let ZenohRoute::Connect(endpoint) = &z.route else {
+        return Ok(());
+    };
+    if !is_tls_endpoint(endpoint) || z.tls.is_some() {
+        return Ok(());
+    }
+    match env_dir() {
+        Some(dir) => {
+            z.tls = Some(Box::new(ZenohTls::from_dir(std::path::Path::new(&dir))));
+            Ok(())
+        }
+        None => Err(
+            "a tls/ endpoint needs --zenoh-ca/--zenoh-cert/--zenoh-key, --zenoh-tls-dir or MW_ZENOH_TLS_DIR"
+                .into(),
+        ),
+    }
+}
+
+/// Checks that each identity file can be opened for reading. The error
+/// names the path and the error kind, never the contents.
+pub fn check_tls_readable(tls: &ZenohTls) -> Result<(), String> {
+    for path in [&tls.ca, &tls.cert, &tls.key] {
+        std::fs::File::open(path)
+            .map_err(|e| format!("cannot read {}: {}", path.display(), e.kind()))?;
+    }
+    Ok(())
+}
+
 /// Default baud rate of the base firmware's console UART.
 pub const DEFAULT_BAUD: u32 = 115_200;
 /// Default per-attempt timeout.
@@ -627,11 +672,19 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         (Some(ca), Some(cert), Some(key), None) => Some(Box::new(ZenohTls { ca, cert, key })),
         _ => return Err("--zenoh-ca, --zenoh-cert and --zenoh-key go together".into()),
     };
-    if tls.is_some() && !matches!(zroute, Some(ZenohRoute::Connect(_))) {
-        return Err(
-            "--zenoh-ca, --zenoh-cert, --zenoh-key and --zenoh-tls-dir apply only with --zenoh (a client connection)"
-                .into(),
-        );
+    if tls.is_some() {
+        match &zroute {
+            Some(ZenohRoute::Connect(e)) if is_tls_endpoint(e) => {}
+            Some(ZenohRoute::Connect(_)) => {
+                return Err("--zenoh-ca, --zenoh-cert, --zenoh-key and --zenoh-tls-dir need a tls/<HOST>:<PORT> endpoint".into());
+            }
+            _ => {
+                return Err(
+                    "--zenoh-ca, --zenoh-cert, --zenoh-key and --zenoh-tls-dir apply only with --zenoh (a client connection)"
+                        .into(),
+                );
+            }
+        }
     }
     let zenoh = match (zroute, node) {
         (Some(route), Some(node)) => Some(ZenohTarget {
@@ -1135,6 +1188,99 @@ mod tests {
             let e = p(args).unwrap_err();
             assert!(e.contains(want), "{args}: {e}");
         }
+    }
+
+    fn resolved(args: &str, env_dir: Option<&str>) -> Result<Cli, String> {
+        let mut c = run(args);
+        resolve_zenoh_tls(&mut c, || env_dir.map(str::to_owned))?;
+        Ok(c)
+    }
+
+    #[test]
+    fn h5_tls_endpoint_takes_mw_zenoh_tls_dir_when_no_flag_gives_files() {
+        let c = resolved(
+            "--zenoh tls/h:7447 --node 310441d265f82484 info",
+            Some("/env/zt"),
+        )
+        .unwrap();
+        assert_eq!(
+            c.zenoh.unwrap().tls,
+            Some(Box::new(ZenohTls::from_dir(std::path::Path::new(
+                "/env/zt"
+            ))))
+        );
+        // Flags win over the environment.
+        let c = resolved(
+            "--zenoh tls/h:7447 --node 310441d265f82484 --zenoh-tls-dir /flag info",
+            Some("/env/zt"),
+        )
+        .unwrap();
+        assert_eq!(
+            c.zenoh.unwrap().tls,
+            Some(Box::new(ZenohTls::from_dir(std::path::Path::new("/flag"))))
+        );
+    }
+
+    #[test]
+    fn h5_plain_tcp_ignores_mw_zenoh_tls_dir() {
+        let c = resolved(
+            "--zenoh tcp/h:7447 --node 310441d265f82484 info",
+            Some("/env/zt"),
+        )
+        .unwrap();
+        assert_eq!(c.zenoh.unwrap().tls, None);
+        let c = resolved(
+            "--zenoh-listen tls/0.0.0.0:7447 --node 310441d265f82484 info",
+            Some("/e"),
+        )
+        .unwrap();
+        assert_eq!(c.zenoh.unwrap().tls, None);
+        let mut c = run("--port p info");
+        resolve_zenoh_tls(&mut c, || panic!("not a tls/ endpoint: env not read")).unwrap();
+        assert_eq!(c.zenoh, None);
+    }
+
+    #[test]
+    fn h5_tls_endpoint_without_an_identity_is_a_usage_error() {
+        let e = resolved("--zenoh tls/h:7447 --node 310441d265f82484 info", None).unwrap_err();
+        assert!(e.contains("MW_ZENOH_TLS_DIR"), "{e}");
+        assert!(e.contains("--zenoh-tls-dir"), "{e}");
+    }
+
+    #[test]
+    fn h5_tls_flags_need_a_tls_endpoint() {
+        let e =
+            p("--zenoh tcp/h:7447 --node 310441d265f82484 --zenoh-tls-dir /t info").unwrap_err();
+        assert!(e.contains("tls/"), "{e}");
+    }
+
+    #[test]
+    fn h5_unreadable_identity_file_is_named_by_path_and_kind() {
+        let dir = std::env::temp_dir().join(format!("mwctl-h5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ca"), "SECRET-CA-CONTENTS").unwrap();
+        std::fs::write(dir.join("cert"), "SECRET-CERT-CONTENTS").unwrap();
+        let tls = ZenohTls::from_dir(&dir);
+        let e = check_tls_readable(&tls).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            e.contains(&format!("cannot read {}", dir.join("key").display())),
+            "{e}"
+        );
+        assert!(e.contains("not found"), "{e}");
+        assert!(!e.contains("SECRET"), "{e}");
+    }
+
+    #[test]
+    fn h5_readable_identity_files_pass() {
+        let dir = std::env::temp_dir().join(format!("mwctl-h5-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["ca", "cert", "key"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let r = check_tls_readable(&ZenohTls::from_dir(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        r.unwrap();
     }
 
     #[test]

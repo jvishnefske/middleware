@@ -7,7 +7,9 @@
 //! Zenoh peer that either connects to an endpoint (a router, or a board's
 //! peer listener) or listens for boards that connect to it (the RT1050
 //! base firmware is a Zenoh client of its `sys/zenoh/endpoint`, often the
-//! host itself).
+//! host itself). With an mTLS identity ([`TlsFiles`]) it is instead a
+//! Zenoh client of the `tls/` router it connects to, presenting that
+//! certificate (design.md H5).
 //!
 //! A board on the network accepts only what its Zenoh gate allows
 //! (`firmware-imxrt/src/zenoh_mgmt.rs`, ZN5): uploads and firmware
@@ -20,7 +22,7 @@ use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use middleware::Key;
 use middleware::transport::{HandlerError, RequestOptions, Requester, SenderId, Target};
-use middleware::zenoh::{SessionConfig, ZenohError, ZenohTransport};
+use middleware::zenoh::{SessionConfig, TlsFiles, ZenohError, ZenohTransport};
 use std::time::{Duration, Instant};
 
 /// How long one query may take: an RT1050 erases a 256 KiB HyperFlash
@@ -65,16 +67,25 @@ pub struct ZenohLink {
 }
 
 impl ZenohLink {
-    /// Opens the host session on `route` for the board `node`.
-    pub fn open(route: &Route, node: SenderId) -> Result<Self, Error> {
+    /// Opens the host session on `route` for the board `node`; with `tls`
+    /// it connects as a Zenoh client over mTLS (only on [`Route::Connect`]).
+    pub fn open(route: &Route, node: SenderId, tls: Option<TlsFiles>) -> Result<Self, Error> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .map_err(Error::Io)?;
-        let config = match route {
-            Route::Connect(e) => SessionConfig::new().connect(e.clone()),
-            Route::Listen(e) => SessionConfig::new().listen(e.clone()),
+        let config = match (route, tls) {
+            (Route::Connect(e), None) => SessionConfig::new().connect(e.clone()),
+            (Route::Connect(e), Some(files)) => {
+                SessionConfig::new().client().connect(e.clone()).tls(files)
+            }
+            (Route::Listen(e), None) => SessionConfig::new().listen(e.clone()),
+            (Route::Listen(_), Some(_)) => {
+                return Err(Error::Io(std::io::Error::other(
+                    "a Zenoh mTLS identity applies only to a connection (--zenoh)",
+                )));
+            }
         }
         .build()
         .map_err(zerr)?;
