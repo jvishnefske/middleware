@@ -4894,7 +4894,10 @@ shell `mw_posix_node::espnow_gw`.
   inline ring (full: newest dropped and counted), and a dropped `receive`
   loses no frame (given a cancel-safe `read`, as `ChannelIo`'s); in the
   gateway, uplink publications keep flowing while a request waits for a
-  lost `Sent` — `espnow::bridge::tests::eg3_receive_yields_recv_and_skips_noise`,
+  lost `Sent`: the pump starts a send and goes on reading and routing
+  until its `Sent` or deadline, so a burst larger than the ring is
+  published before the request completes —
+  `espnow::bridge::tests::eg3_receive_yields_recv_and_skips_noise`,
   `eg3_hello_and_stats_are_internal`,
   `eg3_frames_heard_during_a_send_are_queued_and_full_ring_drops_newest`,
   `eg3_dropped_receive_loses_no_frame`,
@@ -4905,7 +4908,10 @@ shell `mw_posix_node::espnow_gw`.
   queues four): acknowledged is `Ok`, a failed `Sent` is `NotAcked`, a
   `Sent` for another destination is ignored, and none within the timeout
   (default 300 ms) is `SentTimeout`, which `RpcRequester` retries with the
-  same id — `eg4_send_to_ok`, `eg4_send_to_nack`, `eg4_lost_sent_times_out`,
+  same id; the same steps are offered split (`begin_send`, `sent_outcome`,
+  `abandon_send`) for a caller that keeps reading meanwhile —
+  `eg4_a_split_send_lets_frames_through_while_it_waits`,
+  `eg4_send_to_ok`, `eg4_send_to_nack`, `eg4_lost_sent_times_out`,
   `eg4_stale_sent_ignored`, `eg4_broadcast_addresses_ff_and_waits_for_sent`,
   `eg4_rpc_requester_resends_with_the_same_id_after_a_lost_sent`.
 - [x] EG5 `connect` asks `Query` (twice within its timeout) and learns the
@@ -4917,7 +4923,9 @@ shell `mw_posix_node::espnow_gw`.
   with the device's MAC-derived sender id (`SenderId::from_mac`,
   `@mw/node/<mac>0000/...`), per-(MAC, key) sequence and a stream whose
   origin is the MAC; a repeated frame is dropped; `sys/**` and `disc/**`
-  never appear under `app` — `espnow_gw::core::tests::eg6_ids_are_mac_derived`;
+  are never put on Zenoh at all (checked on `**`); two devices on one key
+  get their own id, stream and sequence —
+  `espnow_gw::core::tests::eg6_ids_are_mac_derived`;
   `tests/espnow_gw.rs` `eg6_publish_up`.
 - [x] EG7 `disc/<kind>` beacons are announced through `ZenohDiscovery` with
   node = the frame's MAC (E21 rules: a declared node other than the sender
@@ -4935,13 +4943,19 @@ shell `mw_posix_node::espnow_gw`.
   `eg7_a_huge_ttl_is_clamped_and_expires`,
   `eg7_a_forgotten_device_loses_its_records`; `tests/espnow_gw.rs`
   `eg7_beacon_becomes_discovery`,
-  `eg7_beacons_are_withdrawn_when_the_gateway_stops`.
+  `eg7_beacons_are_withdrawn_when_the_gateway_stops`,
+  `eg10_a_forgotten_device_loses_its_queryables_and_beacon`. A MAC the
+  heard table refuses (EG10) is not heard, so its beacons are not
+  announced at all.
 - [x] EG8 Configured downlink filters (`MW_POSIX_NODE_ESPNOW_DOWNLINK`,
   under `app` only) are broadcast over ESP-NOW for samples from other
-  sessions; samples published under a heard MAC-derived id are not
-  rebroadcast; keys and payloads that do not fit a frame are dropped and
-  counted — `core::tests::eg8_loop_guard`; `tests/espnow_gw.rs`
-  `eg8_downlink_broadcasts`.
+  sessions; samples published under a heard MAC-derived id, or under
+  this gateway's own bridge MAC (another gateway in range republishing
+  what this one broadcast, which this gateway never hears), are not
+  rebroadcast, so two gateways cannot loop; other MAC-derived senders
+  (devices behind other gateways) are; keys and payloads that do not fit
+  a frame are dropped and counted — `core::tests::eg8_loop_guard`;
+  `tests/espnow_gw.rs` `eg8_downlink_broadcasts`.
 - [x] EG9 For every heard device (at most 32) the node serves concrete
   queryables on `@mw/node/<mac id>/sys/info`, `sys/board`, `sys/manifest`,
   `sys/manifest/cm`, `sys/trust/info` and the signed loader and payload
@@ -4953,10 +4967,19 @@ shell `mw_posix_node::espnow_gw`.
   `eg9_nack_and_timeout_errors`.
 - [x] EG10 The node publishes the heard devices (`loader::peers::PeerSet`)
   on `gw/espnow/<bridge id>/heard` (every 10 s and on change) and serves
-  them at `@mw/node/<bridge id>/sys/peers`; devices unheard for 60 s drop
-  out, and at most 64 are remembered (the stalest goes) —
-  `core::tests::eg10_heard_expiry_and_peerset`, `eg10_heard_is_bounded`;
-  `tests/espnow_gw.rs` `eg10_heard_list`.
+  them at `@mw/node/<bridge id>/sys/peers`; devices unheard for 60 s
+  (`GwConfig::heard_ttl_ms`) drop out, their records withdrawn and their
+  queryables undeclared. At most 64 are remembered: a new MAC finding the
+  table full takes the stalest device's place only if that one is at
+  least 10 s stale (`MIN_EVICT_AGE_MS`), otherwise it is refused, counted
+  (`Report::refused_macs`) and nothing it sends is republished, so a
+  flood of forged source MACs cannot push out the devices that are
+  talking. Queryables and the heard list are updated on the 1 s tick,
+  coalesced, not per frame — `core::tests::eg10_heard_expiry_and_peerset`,
+  `eg10_heard_is_bounded`, `eg10_a_flood_of_fresh_macs_does_not_evict_heard_devices`,
+  `eg10_the_heard_ttl_is_configurable`; `tests/espnow_gw.rs`
+  `eg10_heard_list`, `eg10_a_mac_flood_leaves_heard_devices_and_their_queryables`,
+  `eg10_a_forgotten_device_loses_its_queryables_and_beacon`.
 - [x] EG11 The gateway is off by default; `MW_POSIX_NODE_ESPNOW_BRIDGE` and
   `MW_POSIX_NODE_ESPNOW_DOWNLINK` (comma-separated, `app/cmd/**` or one
   key, at most 8) parse with the existing empty-is-unset, legacy-name and
