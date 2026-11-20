@@ -62,16 +62,25 @@ pub fn prepare(
 /// How far past the clock (seconds) an automatic payload version may go.
 pub const MAX_BUMP: u32 = 86_400;
 
-/// The version of the newest `kind` release in `latest` signed by `root`;
-/// releases that do not verify are ignored.
+/// The version of the newest `kind` release in `latest` signed by `root`
+/// for `channel` and `target`; anything else (unverified, or replayed from
+/// another channel or target) is ignored.
 pub fn current_version(
     latest: &[Release],
     kind: CertKind,
+    channel: &str,
+    target: &str,
     root: &middleware::loader::trust::PublicKey,
 ) -> Option<Version> {
     latest
         .iter()
-        .filter(|r| r.kind() == kind && middleware::loader::release::verify_cert(root, &r.signed()))
+        .filter(|r| {
+            let c = r.cert();
+            c.kind == kind
+                && c.channel == channel
+                && c.target == target
+                && middleware::loader::release::verify_cert(root, &r.signed())
+        })
         .map(Release::version)
         .max()
 }
