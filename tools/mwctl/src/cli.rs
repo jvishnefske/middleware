@@ -157,9 +157,18 @@ OPTIONS:
     --zenoh <ENDPOINT> Talk to one board over a Zenoh session that connects to ENDPOINT
                        (a router, e.g. tcp/192.168.1.10:7447) [needs mwctl built with
                        --features zenoh]
+    --zenoh-ca <FILE>, --zenoh-cert <FILE>, --zenoh-key <FILE>
+                       With --zenoh tls/<HOST>:<PORT>: connect as a Zenoh client over
+                       mutual TLS, verifying the router against the CA and presenting
+                       this certificate and key (PEM; all three together). HOST must
+                       match the router certificate's name and be one public CAs may
+                       not issue for (CAA 0 issue \";\", or an IP address)
+    --zenoh-tls-dir <DIR>
+                       The same with DIR/ca, DIR/cert and DIR/key (a mounted edge-ca
+                       Secret) [default for a tls/ endpoint: env MW_ZENOH_TLS_DIR]
     --zenoh-listen <ENDPOINT>
-                       The same, but listen on ENDPOINT for boards that connect (the
-                       RT1050 is a Zenoh client of its sys/zenoh/endpoint)
+                       The same as --zenoh, but listen on ENDPOINT for boards that
+                       connect (the RT1050 is a Zenoh client of its sys/zenoh/endpoint)
     --node <ID>        The board's node id (16 hex digits, as `info` prints it)
     --target <MAC>     Address signed control requests name [default: the RT1050's
                        Ethernet MAC, 02 and the node id's last five bytes]. Over Zenoh
@@ -200,6 +209,33 @@ pub struct ZenohTarget {
     /// The address signed control requests name (`--target`); `None`
     /// derives the RT1050's Ethernet MAC from the node id.
     pub target: Option<[u8; 6]>,
+    /// The mTLS client identity for a `tls/` endpoint (`--zenoh-ca`,
+    /// `--zenoh-cert`, `--zenoh-key` or `--zenoh-tls-dir`); `None` when no
+    /// flag gave one (`MW_ZENOH_TLS_DIR` is resolved when connecting).
+    /// Boxed: three paths would make every parsed command larger.
+    pub tls: Option<Box<ZenohTls>>,
+}
+
+/// PEM files of mwctl's Zenoh mTLS client identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZenohTls {
+    /// CA certificate the router's certificate must chain to.
+    pub ca: PathBuf,
+    /// mwctl's client certificate.
+    pub cert: PathBuf,
+    /// mwctl's private key.
+    pub key: PathBuf,
+}
+
+impl ZenohTls {
+    /// `<dir>/ca`, `<dir>/cert` and `<dir>/key` (a mounted edge-ca Secret).
+    pub fn from_dir(dir: &std::path::Path) -> Self {
+        Self {
+            ca: dir.join("ca"),
+            cert: dir.join("cert"),
+            key: dir.join("key"),
+        }
+    }
 }
 
 /// Default baud rate of the base firmware's console UART.
@@ -455,6 +491,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut node: Option<[u8; 8]> = None;
     let mut of: Option<[u8; 8]> = None;
     let mut ztarget: Option<[u8; 6]> = None;
+    let mut zca: Option<PathBuf> = None;
+    let mut zcert: Option<PathBuf> = None;
+    let mut zkey: Option<PathBuf> = None;
+    let mut ztls_dir: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -525,6 +565,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 ));
                 zroutes += 1;
             }
+            "--zenoh-ca" => zca = Some(args.next().ok_or("--zenoh-ca needs a file")?.into()),
+            "--zenoh-cert" => zcert = Some(args.next().ok_or("--zenoh-cert needs a file")?.into()),
+            "--zenoh-key" => zkey = Some(args.next().ok_or("--zenoh-key needs a file")?.into()),
+            "--zenoh-tls-dir" => {
+                ztls_dir = Some(
+                    args.next()
+                        .ok_or("--zenoh-tls-dir needs a directory")?
+                        .into(),
+                );
+            }
             "--of" => {
                 let v = args.next().ok_or("--of needs a node id (16 hex digits)")?;
                 of = Some(parse_node(&v).ok_or_else(|| format!("--of: '{v}' is not a node id (16 hex digits)"))?);
@@ -565,11 +615,30 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     if zroutes > 1 {
         return Err("give one of --zenoh <ENDPOINT> or --zenoh-listen <ENDPOINT>".into());
     }
+    let tls_flags = zca.is_some() || zcert.is_some() || zkey.is_some();
+    let tls = match (zca, zcert, zkey, ztls_dir) {
+        (None, None, None, None) => None,
+        (_, _, _, Some(_)) if tls_flags => {
+            return Err(
+                "--zenoh-ca/--zenoh-cert/--zenoh-key and --zenoh-tls-dir exclude each other".into(),
+            );
+        }
+        (None, None, None, Some(dir)) => Some(Box::new(ZenohTls::from_dir(&dir))),
+        (Some(ca), Some(cert), Some(key), None) => Some(Box::new(ZenohTls { ca, cert, key })),
+        _ => return Err("--zenoh-ca, --zenoh-cert and --zenoh-key go together".into()),
+    };
+    if tls.is_some() && !matches!(zroute, Some(ZenohRoute::Connect(_))) {
+        return Err(
+            "--zenoh-ca, --zenoh-cert, --zenoh-key and --zenoh-tls-dir apply only with --zenoh (a client connection)"
+                .into(),
+        );
+    }
     let zenoh = match (zroute, node) {
         (Some(route), Some(node)) => Some(ZenohTarget {
             route,
             node,
             target: ztarget,
+            tls,
         }),
         (Some(_), None) => {
             return Err("--zenoh needs --node <ID> (the board's node id, from `info`)".into());
@@ -986,6 +1055,85 @@ mod tests {
             "--port p --espnow e4:b0:63:81:d3:24 reset",
         ] {
             assert!(p(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn h5_zenoh_tls_files_parse_into_the_target() {
+        let c = run(
+            "--zenoh tls/updates.example:7447 --node 310441d265f82484 --zenoh-ca /t/ca --zenoh-cert /t/cert --zenoh-key /t/key info",
+        );
+        let z = c.zenoh.unwrap();
+        assert_eq!(
+            z.route,
+            ZenohRoute::Connect("tls/updates.example:7447".into())
+        );
+        assert_eq!(
+            z.tls,
+            Some(Box::new(ZenohTls {
+                ca: "/t/ca".into(),
+                cert: "/t/cert".into(),
+                key: "/t/key".into(),
+            }))
+        );
+        assert_eq!(c.cmd, Cmd::Info);
+    }
+
+    #[test]
+    fn h5_zenoh_tls_dir_means_ca_cert_and_key_in_it() {
+        let c = run("--zenoh tls/h:7447 --node 310441d265f82484 --zenoh-tls-dir /run/zt info");
+        assert_eq!(
+            c.zenoh.unwrap().tls,
+            Some(Box::new(ZenohTls {
+                ca: "/run/zt/ca".into(),
+                cert: "/run/zt/cert".into(),
+                key: "/run/zt/key".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn h5_zenoh_without_tls_flags_has_no_tls() {
+        let c = run("--zenoh tcp/h:7447 --node 310441d265f82484 info");
+        assert_eq!(c.zenoh.unwrap().tls, None);
+    }
+
+    #[test]
+    fn h5_zenoh_tls_usage_errors() {
+        for (args, want) in [
+            (
+                "--zenoh tls/h:7447 --node 310441d265f82484 --zenoh-ca /t/ca --zenoh-cert /t/cert info",
+                "go together",
+            ),
+            (
+                "--zenoh tls/h:7447 --node 310441d265f82484 --zenoh-key /t/key info",
+                "go together",
+            ),
+            (
+                "--zenoh tls/h:7447 --node 310441d265f82484 --zenoh-ca /t/ca --zenoh-cert /t/cert --zenoh-key /t/key --zenoh-tls-dir /t info",
+                "exclude each other",
+            ),
+            (
+                "--zenoh-listen tls/0.0.0.0:7447 --node 310441d265f82484 --zenoh-tls-dir /t info",
+                "only with --zenoh",
+            ),
+            ("--port p --zenoh-tls-dir /t info", "only with --zenoh"),
+            (
+                "--port p --zenoh-ca /t/ca --zenoh-cert /t/cert --zenoh-key /t/key info",
+                "only with --zenoh",
+            ),
+            ("scout --zenoh-tls-dir /t", "only with --zenoh"),
+            (
+                "--zenoh tls/h:7447 --node 310441d265f82484 info --zenoh-ca",
+                "needs a file",
+            ),
+            (
+                "--zenoh tls/h:7447 --node 310441d265f82484 info --zenoh-tls-dir",
+                "needs a directory",
+            ),
+        ] {
+            let e = p(args).unwrap_err();
+            assert!(e.contains(want), "{args}: {e}");
         }
     }
 
