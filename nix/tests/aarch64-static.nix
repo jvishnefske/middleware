@@ -1,7 +1,8 @@
-# checks.aarch64-static (design.md MS49): every nix/binaries.nix entry cross
-# compiled for aarch64-unknown-linux-musl is an AArch64 ELF executable with
-# no program interpreter and no shared-library dependencies (readelf reads
-# any ELF machine, so this runs on the x86_64 build machine).
+# checks.aarch64-static (design.md MS49): every nix/binaries.nix entry and
+# zenohd cross compiled for aarch64-unknown-linux-musl is an AArch64 ELF
+# executable with no program interpreter and no shared-library
+# dependencies (readelf reads any ELF machine, so this runs on the x86_64
+# build machine).
 { pkgs, lib, binaries }:
 pkgs.runCommand "aarch64-static" { nativeBuildInputs = [ pkgs.binutils ]; } ''
   set -euo pipefail

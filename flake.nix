@@ -92,6 +92,9 @@
       };
 
       bins = rust.binaries // { zenohd = rust.zenohd; };
+      # The aarch64 cross builds, zenohd among them (packages.zenohd-aarch64
+      # for an aarch64 host that runs its own router).
+      armCrossBins = rustArmCross.binaries // { zenohd = rustArmCross.zenohd; };
       imagePackages = lib.mapAttrs' (name: exe:
         lib.nameValuePair "image-${name}" (images.mkImage name exe)) bins;
 
@@ -171,7 +174,7 @@
     in
     {
       packages.${system} = bins // imagePackages
-        // lib.mapAttrs' (n: p: lib.nameValuePair "${n}-aarch64" p) rustArmCross.binaries
+        // lib.mapAttrs' (n: p: lib.nameValuePair "${n}-aarch64" p) armCrossBins
         // {
         robot-vm = launcher;
         inherit e2e;
@@ -179,6 +182,7 @@
         sd-image-robot-pi = sdImageOf robotPiCross;
       };
       packages.${armSystem} = rustArmNative.binaries // {
+        zenohd = rustArmNative.zenohd;
         sd-image-robot-pi = sdImageOf robotPiNative;
       };
 
@@ -228,7 +232,7 @@
 
         aarch64-static = import ./nix/tests/aarch64-static.nix {
           inherit pkgs lib;
-          binaries = rustArmCross.binaries;
+          binaries = armCrossBins;
         };
 
         # The launcher maps --tap/--bridge/--state onto QEMU and the share.
