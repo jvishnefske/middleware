@@ -59,12 +59,34 @@ pub fn prepare(
     }
 }
 
+/// How far past the clock (seconds) an automatic payload version may go.
+pub const MAX_BUMP: u32 = 86_400;
+
+/// The version of the newest `kind` release in `latest` signed by `root`;
+/// releases that do not verify are ignored.
+pub fn current_version(
+    latest: &[Release],
+    kind: CertKind,
+    root: &middleware::loader::trust::PublicKey,
+) -> Option<Version> {
+    latest
+        .iter()
+        .filter(|r| r.kind() == kind && middleware::loader::release::verify_cert(root, &r.signed()))
+        .map(Release::version)
+        .max()
+}
+
 /// Settles the version of a `kind` release against what the channel has
 /// (`current`, the version of its latest release of that kind): a payload
 /// published without `--version` (`requested` `None`) takes the larger of
 /// `prepared.version` (the clock) and `current + 1`, so two publishes in
 /// one second still rise; any other version must exceed `current`, or the
 /// server would refuse it, so the publisher says so first. Pure.
+///
+/// `current` must come from a release the caller verified against the root
+/// (the server is not trusted): see [`current_version`]. A bump more than
+/// [`MAX_BUMP`] past the clock is refused (ask for `--version`), so a
+/// stray version near `u32::MAX` cannot exhaust the counter.
 pub fn settle_version(
     kind: CertKind,
     requested: Option<Version>,
@@ -75,7 +97,17 @@ pub fn settle_version(
         return Ok(());
     };
     if kind == CertKind::Payload && requested.is_none() {
-        prepared.version = prepared.version.max(Version(cur.0.saturating_add(1)));
+        let next = cur
+            .0
+            .checked_add(1)
+            .ok_or("the channel's payload version is at its maximum")?;
+        if next > prepared.version.0.saturating_add(MAX_BUMP) {
+            return Err(format!(
+                "the channel's payload {} is far ahead of the clock ({}); pass --version",
+                cur.0, prepared.version.0
+            ));
+        }
+        prepared.version = prepared.version.max(Version(next));
         return Ok(());
     }
     if prepared.version <= cur {
@@ -184,5 +216,43 @@ mod tests {
         let e = settle_version(CertKind::Firmware, None, &mut f, Some(Version(0x0001_0002)))
             .unwrap_err();
         assert!(e.contains("already has fw 1.2"), "{e}");
+        // A channel version far past the clock, or at the maximum.
+        let mut g = p(1000);
+        assert!(settle_version(CertKind::Payload, None, &mut g, Some(Version(u32::MAX))).is_err());
+        let mut h = p(1000);
+        assert!(
+            settle_version(
+                CertKind::Payload,
+                None,
+                &mut h,
+                Some(Version(1000 + MAX_BUMP + 5))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn up4_only_root_signed_releases_count() {
+        use mwctl::sign::Seed;
+        let root = Seed::new([1; 32]);
+        let cert = |v| middleware::loader::release::SoftwareCert {
+            kind: CertKind::Payload,
+            target: "any",
+            channel: "c",
+            version: Version(v),
+            len: 1,
+            sha256: [0; 32],
+        };
+        let good = Release::sign(&cert(5), &root).unwrap();
+        let forged = Release::sign(&cert(u32::MAX), &Seed::new([2; 32])).unwrap();
+        let latest = [forged, good];
+        assert_eq!(
+            current_version(&latest, CertKind::Payload, &root.public_key()),
+            Some(Version(5))
+        );
+        assert_eq!(
+            current_version(&latest, CertKind::Firmware, &root.public_key()),
+            None
+        );
     }
 }
