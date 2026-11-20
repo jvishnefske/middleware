@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11,
-# CL3, FL4, MS5, RG19, PN9):
+# CL3, FL4, MS5, RG19, PN9, D19, D26):
 #   * the always-built pure core, including `discovery`, `dns::wire`,
 #     `zenoh_wire` and `fw_ota`, builds for thumbv6m-none-eabi with no
 #     features, and so do the `recipe-core` and `state-table` crates (Q11),
@@ -14,6 +14,11 @@
 #     dependency;
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
 #     in no cloud dependency and enable no host feature;
+#   * the mDNS core `mdns-core` (D19) builds for thumbv6m and thumbv7em, is
+#     gated on `mdns-core` rather than the std feature `mdns`, and is
+#     neither embedded nor host (`mdns` enables it); its embassy seam
+#     `mdns-embassy` (D26, embedded) builds for thumbv7em and thumbv8m
+#     (it needs atomics, so not thumbv6m);
 #   * cloud feature sets (including `dns-sd`, `memory` and `udp`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
@@ -38,7 +43,7 @@ EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-posix-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
-EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite'
+EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite|mdns-embassy'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -73,14 +78,33 @@ ungated() { # file, declaration
     grep -qx "$2" "$1"
 }
 for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.rs:pub mod wire;" \
-            "src/lib.rs:pub mod zenoh_wire;" \
+            "src/lib.rs:pub mod zenoh_wire;" "src/lib.rs:pub mod clock;" "src/lib.rs:pub mod datagram;" \
             "src/lib.rs:pub mod fw_ota;" "src/fw_ota.rs:pub mod machine;" "src/fw_ota.rs:pub mod wire;" \
             "src/fw_ota.rs:pub mod picobin;" "src/fw_ota.rs:pub mod platform;" "src/fw_ota.rs:pub mod record;" \
             "src/discovery.rs:pub mod record;" "src/discovery.rs:pub mod directory;" "src/discovery.rs:pub mod beacon;"; do
     ungated "${decl%%:*}" "${decl#*:}" || fail "${decl#*:} in ${decl%%:*} is missing or cfg-gated"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust"; do
+# The mDNS core (D19): the pure table and origin policy, MdnsError and
+# the generic shells are gated on `mdns-core`, never on the std feature
+# `mdns` (which only adds the tokio seam and builders: the `host` modules).
+echo "== D19: the mDNS core is gated on mdns-core"
+for f in src/mdns/origin.rs src/mdns/announce/table.rs src/mdns/error.rs src/mdns/race.rs \
+         src/mdns/announce.rs src/mdns/socket.rs; do
+    # Every mention of the feature is `#[cfg(feature = "mdns")]` on the
+    # line before `mod host;` or `pub use host::...`.
+    odd="$(grep -n 'feature = "mdns"' "$f" | grep -vF '#[cfg(feature = "mdns")]' || true)"
+    [ -z "$odd" ] || fail "$f uses the std feature mdns outside a host module gate: $odd"
+    bad="$(grep -n -A1 -F '#[cfg(feature = "mdns")]' "$f" | grep -vF 'feature = "mdns"' \
+        | grep -v -e '^--$' -e '^[0-9]*-mod host;$' -e '^[0-9]*-pub use host::' || true)"
+    [ -z "$bad" ] || fail "$f gates more than its host module on the std feature mdns: $bad"
+done
+for m in announce origin socket error race; do
+    grep -B1 -E "^(pub )?mod $m;" src/mdns.rs | head -1 | grep -qx '#\[cfg(feature = "mdns-core")\]' \
+        || fail "mod $m in src/mdns.rs is not gated on mdns-core"
+done
+
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "mdns-core" "mdns-core,espnow"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then
@@ -91,7 +115,7 @@ for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espno
     fi
 done
 
-for set in "" "trust" "trust,serial" "trust,serial,postcard"; do
+for set in "" "trust" "trust,serial" "trust,serial,postcard" "mdns-core,mdns-embassy"; do
     echo "== Y11: [${set:-no features}] on $RP2350_TARGET"
     cargo build --quiet --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"}
     if deps --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"} | grep -Eq "$CLOUD_CRATES"; then
@@ -105,7 +129,7 @@ done
 # The i.MX RT base firmware's set: the Zenoh client with the serial link
 # and signed updates, no heap (FL4, ZN1-ZN3: the codec and session are
 # pure and `alloc` is never linked).
-for set in "zenoh-lite" "zenoh-lite,serial,trust,postcard"; do
+for set in "zenoh-lite" "zenoh-lite,serial,trust,postcard" "mdns-core" "zenoh-lite,mdns-embassy"; do
     echo "== FL4: [$set] on $IMXRT_TARGET"
     cargo build --quiet --target "$IMXRT_TARGET" --no-default-features --features "$set"
     if deps --target "$IMXRT_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then

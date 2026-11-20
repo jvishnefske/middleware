@@ -9,6 +9,13 @@
 - mwctl `--zenoh tls/...` with `--zenoh-ca/--zenoh-cert/--zenoh-key`, `--zenoh-tls-dir` or `MW_ZENOH_TLS_DIR` connects as a Zenoh client over mTLS; `ZenohLink::open` takes an `Option<TlsFiles>`.
 - Follow-up: mw-service's `run::zenoh::client_config` (and the gateway, posix-node) still build their own client config; they can move to `SessionConfig::client().tls(..)`.
 
+### mDNS core seam (D19–D26)
+- Features `mdns-core` (no_std, no heap; `mdns` now enables it) and `mdns-embassy` (embedded: `mdns::embassy_seam`, with `EmbassyUdp`, `join_group`, `EmbassyClock`, `EmbassyError`; new optional dependencies `embassy-net` 0.9 and `embassy-time` 0.5).
+- `datagram::Datagram`, the UDP seam (always built); `clock::Clock`, the shared clock trait (always built), re-exported as `zenoh_lite::Clock`.
+- `MdnsSocket<S, N>` and `MdnsAnnouncer<S, C, N>` are generic over the seams (`MdnsSocket::new` with `SocketParams`, `MdnsAnnouncer::new` with `AnnouncerParams`; buffers `mdns::STD_BUF` = 9001, `mdns::MCU_BUF` = 1500); the bare names, the builders and `local_addr` are the tokio instantiation (`mdns::host::{TokioUdp, TokioClock}`) and unchanged.
+- `MdnsError<E = io::Error>` with `Io(E)`; the text, `source()` and `From<io::Error>` are unchanged for the default.
+- Behaviour: the announcer now skips a datagram of 9001 bytes or more (it used to read the first 9000 bytes of one); every other datagram is handled as before.
+
 ### mwctl scout (H4)
 - `mwctl scout [--seconds N]` (feature `zenoh`; `just lan` in the new root `justfile`): Zenoh multicast scouting, the scouted routers' and peers' admin-space sessions, and `@mw/node/*/sys/info`, merged into one table of the nodes on the local network (`mwctl::scout`). mwctl's `zenoh` feature now also pulls in `zenoh` and `serde_json` directly; the default build is unchanged.
 

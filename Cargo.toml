@@ -56,7 +56,17 @@ cam-fixtures = []
 zenoh = ["std", "dep:zenoh", "dep:tokio"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
-mdns = ["std", "dep:tokio", "tokio?/net", "dep:socket2"]
+# The mDNS core (no_std, no heap): the pure announce table and origin
+# policy, `MdnsError` and the shells `MdnsSocket<S, N>` and
+# `MdnsAnnouncer<S, C, N>`, generic over the `datagram::Datagram` and
+# `clock::Clock` seams. Neither embedded nor host: `mdns` enables it.
+mdns-core = []
+# The tokio and socket2 instantiation of the mDNS shells and their builders.
+mdns = ["std", "mdns-core", "dep:tokio", "tokio?/net", "dep:socket2"]
+# The embassy-net instantiation of the mDNS shells (`mdns::embassy_seam`):
+# a UDP socket seam, the group join on the stack, and an embassy-time
+# clock. no_std, no heap; embedded (the firmware brings the time driver).
+mdns-embassy = ["mdns-core", "dep:embassy-net", "dep:embassy-time"]
 # Unicast DNS-SD (RFC 6763 over ordinary DNS: SRV/TXT/A/AAAA lookups and
 # browsing through a resolver), `dns::unicast`. Host only, like `mdns`.
 dns-sd = ["std", "dep:tokio", "tokio?/net", "dep:getrandom"]
@@ -97,6 +107,12 @@ bytes = { version = "1", optional = true }
 # The mDNS announcer binds port 5353 with SO_REUSEADDR / SO_REUSEPORT so it
 # can share it with a system mDNS daemon (tokio cannot set them before bind).
 socket2 = { version = "0.6", features = ["all"], optional = true }
+# The board side of mDNS (`mdns-embassy`): UDP over IPv4 with multicast
+# membership. Not embassy-net's own `mdns` feature (smoltcp's querier).
+# `medium-ethernet` because smoltcp needs a medium; every board using it
+# is on Ethernet.
+embassy-net = { version = "0.9", default-features = false, features = ["proto-ipv4", "udp", "multicast", "medium-ethernet"], optional = true }
+embassy-time = { version = "0.5", optional = true }
 
 [dev-dependencies]
 # The crate itself with `memory`, so `tests/` (the conformance harness) can

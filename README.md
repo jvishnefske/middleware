@@ -12,6 +12,8 @@ request/response behind one set of traits, with pluggable transports.
 | `grpc`     | gRPC unary calls, a bus service, health           | `std` + tokio + tonic        |
 | `istio`    | Istio mesh helpers and `grpc::mesh` for `grpc`    | `std`                        |
 | `mdns`     | mDNS browse (`MdnsSocket`) and announce (`MdnsAnnouncer`) | `std` + tokio        |
+| `mdns-core` | the mDNS shells generic over a UDP and a clock seam (`datagram::Datagram`, `clock::Clock`); `mdns` enables it | `no_std`, no heap |
+| `mdns-embassy` | the mDNS shells over embassy-net (`mdns::embassy_seam`) for boards | `no_std`, no heap + embassy-net |
 | `dns-sd`   | unicast DNS-SD browse against cluster DNS         | `std` + tokio                |
 | `memory`   | in-process backend for tests and examples         | `std` + tokio                |
 | `kv-file`  | durable key-value store (`kv::file::FileKv`), an append-only log | `std`          |

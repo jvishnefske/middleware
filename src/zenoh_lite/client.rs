@@ -119,13 +119,9 @@ pub const DEFAULT_TIMEOUT_MS: u32 = 5_000;
 /// put header 1, attachment 18, payload length 5.
 pub const PUB_OVERHEAD: usize = 2 + 6 + 4 + MAX_KEY_LEN + 2 + 1 + 18 + 5;
 
-/// Milliseconds and waiting, from the caller's runtime.
-pub trait Clock {
-    /// Milliseconds since an arbitrary, fixed start; never decreases.
-    fn now_ms(&mut self) -> u64;
-    /// Completes at or after `deadline_ms`. Must be cancel safe.
-    async fn sleep_until_ms(&mut self, deadline_ms: u64);
-}
+/// Milliseconds and waiting, from the caller's runtime: the crate's shared
+/// [`crate::clock::Clock`].
+pub use crate::clock::Clock;
 
 /// Failure of a client operation; `E` is the stream's error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

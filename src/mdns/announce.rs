@@ -1,10 +1,17 @@
-//! mDNS announcing over a tokio UDP socket (feature `mdns`):
+//! mDNS announcing over any [`Datagram`] socket and [`Clock`]:
 //! [`MdnsAnnouncer`] implements [`Announce`].
 //!
 //! The decisions — probing, conflict renames, announcements, answers,
 //! goodbyes — are the pure [`table::AnnounceTable`]; see its docs for the
-//! RFC 6762 behaviour. This shell owns the socket and the clock (tokio's
-//! monotonic `Instant`, in milliseconds since the announcer was built).
+//! RFC 6762 behaviour. This shell owns the socket and the clock; the table
+//! sees milliseconds since the announcer was made.
+//!
+//! The shell is generic, `MdnsAnnouncer<S, C, N>`: `S` is the socket seam,
+//! `C` the clock and `N` the receive and transmit buffer (see
+//! [`STD_BUF`] and [`MCU_BUF`]). The bare name `MdnsAnnouncer` is the
+//! tokio instantiation (feature `mdns`), which [`MdnsAnnouncer::builder`]
+//! binds; any other socket and clock are wrapped with
+//! [`MdnsAnnouncer::new`] and [`AnnouncerParams`].
 //!
 //! # Driving
 //!
@@ -29,7 +36,7 @@
 //!
 //! # Sockets
 //!
-//! By default the announcer binds `0.0.0.0:5353` with `SO_REUSEADDR` and
+//! By default the tokio announcer binds `0.0.0.0:5353` with `SO_REUSEADDR` and
 //! `SO_REUSEPORT` (so it can share the port with a system mDNS daemon),
 //! joins `224.0.0.251` on the default interface, multicasts to
 //! `224.0.0.251:5353` with IP TTL 255, and accepts on-link sources only
@@ -46,25 +53,39 @@
 //! and `announce` fail only on errors of the announcer's own socket and
 //! messages (receiving, its probes, announcements and goodbyes).
 //!
+//! A datagram of `N` bytes or more is oversized (the seam truncates to the
+//! buffer) and ignored; a message of the announcer's own that does not fit
+//! `N` bytes is [`MdnsError::BufferTooSmall`] (or the table's encoding
+//! error), never sent truncated.
+//!
 //! # Cancel safety
 //!
-//! A dropped `announce` leaves the instance registered: later `step` calls
-//! finish probing and announce it, and `withdraw` removes it. A dropped
-//! `step` or `withdraw` may or may not have sent its message, never twice:
-//! the table moves on before the send is awaited.
+//! The wait for the next datagram or timer polls the socket first, then
+//! the clock, and drops whichever loses; both are cancel safe, so a
+//! dropped `step` loses no datagram. A dropped `announce` leaves the
+//! instance registered: later `step` calls finish probing and announce it,
+//! and `withdraw` removes it. A dropped `step` or `withdraw` may or may not
+//! have sent its message, never twice: the table moves on before the send
+//! is awaited.
 
 pub mod table;
 
-use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+#[cfg(feature = "mdns")]
+mod host;
+#[cfg(feature = "mdns")]
+pub use host::MdnsAnnouncerBuilder;
 
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
-use tokio::time::Instant;
+use core::net::SocketAddr;
 
+#[cfg(doc)]
+use super::MCU_BUF;
+use super::error::MdnsError;
 use super::origin::{self, Kind, OnLink, OriginPolicy};
-use super::socket::MdnsError;
-use super::wire::{MAX_MESSAGE_LEN, Message};
-use super::{MDNS_GROUP_V4, MDNS_PORT};
+use super::race::{Raced, race};
+use super::wire::Message;
+use super::{DefaultClock, DefaultSocket, STD_BUF};
+use crate::clock::Clock;
+use crate::datagram::Datagram;
 use crate::discovery::{Announce, Service, ServiceKind};
 pub use table::{AnnounceError, AnnounceTable, Destination, InstanceState, MAX_INSTANCES, Step};
 
@@ -73,162 +94,68 @@ pub const MAX_DATAGRAMS_PER_CALL: usize = 1024;
 /// Default SRV target host name.
 pub const DEFAULT_HOST: &str = "middleware.local";
 
-impl From<AnnounceError> for MdnsError {
-    fn from(e: AnnounceError) -> Self {
-        MdnsError::Announce(e)
-    }
-}
-
-/// Configures an [`MdnsAnnouncer`]; see the module docs for the defaults.
+/// Where an [`MdnsAnnouncer`] made with [`MdnsAnnouncer::new`] sends and
+/// what it accepts.
+///
+/// On a microcontroller, `on_link` must list the LAN's subnet
+/// ([`OnLink::with`]) when `policy` is [`OriginPolicy::OnLink`]: without
+/// `std` the system's routes are not read, so [`OnLink::new`] alone
+/// accepts loopback and link-local sources only and every query from a
+/// peer on a DHCP LAN would be refused.
 #[derive(Debug, Clone)]
-pub struct MdnsAnnouncerBuilder {
-    bind: SocketAddr,
-    destination: SocketAddr,
-    join: Option<Ipv4Addr>,
-    table: Result<AnnounceTable, AnnounceError>,
-    policy: OriginPolicy,
-    on_link: Option<OnLink>,
-}
-
-impl Default for MdnsAnnouncerBuilder {
-    fn default() -> Self {
-        MdnsAnnouncerBuilder {
-            bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT)),
-            destination: SocketAddr::V4(SocketAddrV4::new(MDNS_GROUP_V4, MDNS_PORT)),
-            join: Some(Ipv4Addr::UNSPECIFIED),
-            table: AnnounceTable::new(DEFAULT_HOST),
-            policy: OriginPolicy::OnLink,
-            on_link: None,
-        }
-    }
-}
-
-impl MdnsAnnouncerBuilder {
-    /// The local address to bind (ignored by [`build_on`](Self::build_on)).
-    pub fn bind(self, bind: SocketAddr) -> Self {
-        MdnsAnnouncerBuilder { bind, ..self }
-    }
-
-    /// Where probes, announcements, multicast answers and goodbyes go.
-    /// Also stops the group join and selects [`OriginPolicy::Any`].
-    pub fn destination(self, destination: SocketAddr) -> Self {
-        MdnsAnnouncerBuilder {
-            destination,
-            join: None,
-            policy: OriginPolicy::Any,
-            ..self
-        }
-    }
-
-    /// Joins the IPv4 mDNS group on `interface` (`UNSPECIFIED`: the OS
-    /// chooses) to hear queries.
-    pub fn join_multicast(self, interface: Ipv4Addr) -> Self {
-        MdnsAnnouncerBuilder {
-            join: Some(interface),
-            ..self
-        }
-    }
-
-    /// The SRV target of [`Endpoint::Socket`](crate::discovery::Endpoint)
-    /// services, which also gets their A/AAAA records. Default
-    /// [`DEFAULT_HOST`]; give each machine its own (the host name is not
-    /// probed). An invalid name (see [`AnnounceTable::new`]) fails
-    /// [`build`](Self::build).
-    pub fn host(self, host: &str) -> Self {
-        MdnsAnnouncerBuilder {
-            table: AnnounceTable::new(host),
-            ..self
-        }
-    }
-
+pub struct AnnouncerParams {
+    /// Where probes, announcements, multicast answers and goodbyes go
+    /// (`224.0.0.251:5353` on a LAN).
+    pub destination: SocketAddr,
     /// Which sources are accepted; see [`super::origin`].
-    pub fn origin_policy(self, policy: OriginPolicy) -> Self {
-        MdnsAnnouncerBuilder { policy, ..self }
-    }
-
-    /// The on-link subnets for [`OriginPolicy::OnLink`] (default: read from
-    /// the system when built, [`origin::system_on_link`]).
-    pub fn on_link(self, on_link: OnLink) -> Self {
-        MdnsAnnouncerBuilder {
-            on_link: Some(on_link),
-            ..self
-        }
-    }
-
-    /// Binds the socket (with address and port reuse) and configures it.
-    pub async fn build(self) -> Result<MdnsAnnouncer, MdnsError> {
-        let socket = Socket::new(
-            Domain::for_address(self.bind),
-            Type::DGRAM,
-            Some(Protocol::UDP),
-        )?;
-        socket.set_reuse_address(true)?;
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
-        socket.bind(&self.bind.into())?;
-        self.build_on(socket.into())
-    }
-
-    /// Uses the already-bound `socket` instead of binding one.
-    pub fn build_on(self, socket: std::net::UdpSocket) -> Result<MdnsAnnouncer, MdnsError> {
-        let table = self.table?;
-        socket.set_nonblocking(true)?;
-        let socket = UdpSocket::from_std(socket)?;
-        if self.destination.ip().is_multicast() {
-            socket.set_multicast_ttl_v4(255)?;
-        }
-        if let Some(interface) = self.join {
-            socket.join_multicast_v4(MDNS_GROUP_V4, interface)?;
-        }
-        let on_link = match (self.policy, self.on_link) {
-            (_, Some(o)) => o,
-            (OriginPolicy::OnLink, None) => origin::system_on_link(),
-            (OriginPolicy::Any, None) => OnLink::new(),
-        };
-        Ok(MdnsAnnouncer {
-            socket,
-            destination: self.destination,
-            policy: self.policy,
-            on_link,
-            table,
-            epoch: Instant::now(),
-            rx: [0; MAX_MESSAGE_LEN],
-            tx: [0; MAX_MESSAGE_LEN],
-            dropped_replies: 0,
-        })
-    }
+    pub policy: OriginPolicy,
+    /// The on-link subnets for [`OriginPolicy::OnLink`], also used to
+    /// refuse unicast replies to subnet broadcast addresses.
+    pub on_link: OnLink,
 }
 
 /// An mDNS responder announcing DNS-SD services; see the module docs.
 #[derive(Debug)]
-pub struct MdnsAnnouncer {
-    socket: UdpSocket,
+pub struct MdnsAnnouncer<S = DefaultSocket, C = DefaultClock, const N: usize = STD_BUF> {
+    socket: S,
+    clock: C,
+    /// The clock's reading when the announcer was made.
+    epoch: u64,
     destination: SocketAddr,
     policy: OriginPolicy,
     on_link: OnLink,
     table: AnnounceTable,
-    epoch: Instant,
-    rx: [u8; MAX_MESSAGE_LEN],
-    tx: [u8; MAX_MESSAGE_LEN],
+    rx: [u8; N],
+    tx: [u8; N],
     dropped_replies: u32,
 }
 
-impl MdnsAnnouncer {
+impl<S: Datagram, C: Clock, const N: usize> MdnsAnnouncer<S, C, N> {
+    /// An announcer over `socket`, which is already bound (to port 5353
+    /// and a member of the mDNS group, to hear queries), with `table`'s
+    /// host name. Time starts now on `clock`. `N` must be over 1.
+    pub fn new(socket: S, mut clock: C, table: AnnounceTable, params: AnnouncerParams) -> Self {
+        const { assert!(N > 1, "an mDNS buffer needs room for a datagram") };
+        let epoch = clock.now_ms();
+        MdnsAnnouncer {
+            socket,
+            clock,
+            epoch,
+            destination: params.destination,
+            policy: params.policy,
+            on_link: params.on_link,
+            table,
+            rx: [0; N],
+            tx: [0; N],
+            dropped_replies: 0,
+        }
+    }
+
     /// Replies to received queries that were dropped: they could not be
     /// encoded or sent, or their source was not a valid unicast target
     /// ([`origin::reply_target`]). Saturating.
     pub fn dropped_replies(&self) -> u32 {
         self.dropped_replies
-    }
-
-    /// A builder with the default responder settings.
-    pub fn builder() -> MdnsAnnouncerBuilder {
-        MdnsAnnouncerBuilder::default()
-    }
-
-    /// The bound local address.
-    pub fn local_addr(&self) -> Result<SocketAddr, MdnsError> {
-        Ok(self.socket.local_addr()?)
     }
 
     /// The table of instances (read only).
@@ -242,16 +169,16 @@ impl MdnsAnnouncer {
         self.table.label(kind, instance)
     }
 
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-
-    fn at(&self, ms: u64) -> Instant {
-        self.epoch + core::time::Duration::from_millis(ms)
+    /// Milliseconds since the announcer was made.
+    fn now_ms(&mut self) -> u64 {
+        self.clock.now_ms().saturating_sub(self.epoch)
     }
 
     /// Applies a table transition synchronously (never across an await).
-    fn transition<R>(&mut self, f: impl FnOnce(AnnounceTable, &mut [u8]) -> (AnnounceTable, R)) -> R {
+    fn transition<R>(
+        &mut self,
+        f: impl FnOnce(AnnounceTable, &mut [u8]) -> (AnnounceTable, R),
+    ) -> R {
         let table = core::mem::take(&mut self.table);
         let (table, r) = f(table, &mut self.tx);
         self.table = table;
@@ -260,7 +187,7 @@ impl MdnsAnnouncer {
 
     /// Sends every due probe and announcement; returns when the next is
     /// due. Bounded: each instance has at most one message due at a time.
-    async fn send_due(&mut self) -> Result<Option<u64>, MdnsError> {
+    async fn send_due(&mut self) -> Result<Option<u64>, MdnsError<S::Error>> {
         for _ in 0..=MAX_INSTANCES {
             let now = self.now_ms();
             match self.transition(|t, out| t.poll(now, out))? {
@@ -268,30 +195,39 @@ impl MdnsAnnouncer {
                 Step::Idle(next) => return Ok(next),
             }
         }
-        Ok(Some(self.now_ms()))
+        let now = self.now_ms();
+        Ok(Some(now))
     }
 
-    async fn send(&mut self, len: usize, to: SocketAddr) -> Result<(), MdnsError> {
+    async fn send(&mut self, len: usize, to: SocketAddr) -> Result<(), MdnsError<S::Error>> {
         let packet = self.tx.get(..len).ok_or(MdnsError::BufferTooSmall {
             needed: len,
-            capacity: MAX_MESSAGE_LEN,
+            capacity: N,
         })?;
-        self.socket.send_to(packet, to).await?;
-        Ok(())
+        self.socket.send_to(packet, to).await.map_err(MdnsError::Io)
     }
 
     /// Waits for one datagram until `deadline_ms` (forever if none) and
-    /// handles it. Returns whether a datagram was read.
-    async fn receive_until(&mut self, deadline_ms: Option<u64>) -> Result<bool, MdnsError> {
+    /// handles it. Returns whether a datagram was read. The datagram is
+    /// polled before the timer, so one that is ready is never lost to it.
+    async fn receive_until(
+        &mut self,
+        deadline_ms: Option<u64>,
+    ) -> Result<bool, MdnsError<S::Error>> {
         let received = match deadline_ms {
             Some(ms) => {
-                let at = self.at(ms);
-                match tokio::time::timeout_at(at, self.socket.recv_from(&mut self.rx)).await {
-                    Ok(r) => r?,
-                    Err(_) => return Ok(false),
+                let deadline = self.epoch.saturating_add(ms);
+                let recv = self.socket.recv_from(&mut self.rx);
+                match race(recv, self.clock.sleep_until_ms(deadline)).await {
+                    Raced::First(r) => r.map_err(MdnsError::Io)?,
+                    Raced::Second(()) => return Ok(false),
                 }
             }
-            None => self.socket.recv_from(&mut self.rx).await?,
+            None => self
+                .socket
+                .recv_from(&mut self.rx)
+                .await
+                .map_err(MdnsError::Io)?,
         };
         let (len, from) = received;
         self.handle_datagram(len, from).await;
@@ -302,6 +238,10 @@ impl MdnsAnnouncer {
     /// buffer. Infallible: whatever goes wrong with it or its reply is per
     /// datagram (see the module docs).
     async fn handle_datagram(&mut self, len: usize, from: SocketAddr) {
+        // N bytes or more: the seam may have cut it.
+        if len >= N {
+            return;
+        }
         let Some(packet) = self.rx.get(..len) else {
             return;
         };
@@ -345,18 +285,18 @@ impl MdnsAnnouncer {
     /// Sends what is due, then waits for the next datagram or timer and
     /// handles it; call in a loop to keep announcing and answering. Cancel
     /// safe (see the module docs).
-    pub async fn step(&mut self) -> Result<(), MdnsError> {
+    pub async fn step(&mut self) -> Result<(), MdnsError<S::Error>> {
         let next = self.send_due().await?;
         self.receive_until(next).await?;
         Ok(())
     }
 }
 
-impl Announce for MdnsAnnouncer {
-    type Error = MdnsError;
+impl<S: Datagram, C: Clock, const N: usize> Announce for MdnsAnnouncer<S, C, N> {
+    type Error = MdnsError<S::Error>;
 
     /// Probes and announces `service`; see the module docs.
-    async fn announce(&mut self, service: &Service<'_>) -> Result<(), MdnsError> {
+    async fn announce(&mut self, service: &Service<'_>) -> Result<(), MdnsError<S::Error>> {
         let now = self.now_ms();
         self.transition(|t, _| t.register(service, now))?;
         for _ in 0..MAX_DATAGRAMS_PER_CALL {
@@ -375,7 +315,11 @@ impl Announce for MdnsAnnouncer {
     }
 
     /// Withdraws the instance with a goodbye; see the module docs.
-    async fn withdraw(&mut self, kind: ServiceKind<'_>, instance: &str) -> Result<(), MdnsError> {
+    async fn withdraw(
+        &mut self,
+        kind: ServiceKind<'_>,
+        instance: &str,
+    ) -> Result<(), MdnsError<S::Error>> {
         if let Some(len) = self.transition(|t, out| t.withdraw(kind, instance, out))? {
             self.send(len, self.destination).await?;
         }
@@ -385,17 +329,29 @@ impl Announce for MdnsAnnouncer {
 
 #[cfg(test)]
 mod tests {
+    //! The shell over the in-memory seam and a virtual clock.
     extern crate std;
     use super::*;
-    use crate::discovery::{Browse, Endpoint, Event};
+    use crate::datagram::fake::{FakeClock, FakeErr, FakeNet, FakeUdp, Sent, poll_once, run};
+    use crate::discovery::Endpoint;
     use crate::dns::wire::{
         FLAG_AA, FLAG_QR, MessageWriter, RecordData, RecordOut, Section, ServiceType, TextName,
+        encode_query,
     };
-    use crate::key::KeyFilter;
-    use crate::mdns::socket::MdnsSocket;
-    use std::time::Duration;
+    use crate::mdns::MCU_BUF;
+    use std::vec::Vec;
+
+    type Fake = MdnsAnnouncer<FakeUdp, FakeClock, MCU_BUF>;
 
     const KIND: ServiceKind<'static> = ServiceKind::from_static("conf/svc");
+
+    fn group() -> SocketAddr {
+        "224.0.0.251:5353".parse().unwrap()
+    }
+
+    fn peer() -> SocketAddr {
+        "127.0.0.1:40000".parse().unwrap()
+    }
 
     fn service() -> Service<'static> {
         Service {
@@ -408,141 +364,209 @@ mod tests {
         }
     }
 
-    async fn within<T>(f: impl Future<Output = T>) -> T {
-        tokio::time::timeout(Duration::from_secs(5), f)
-            .await
-            .unwrap()
+    fn announcer(net: &FakeNet) -> Fake {
+        MdnsAnnouncer::new(
+            net.udp(),
+            net.clock(),
+            AnnounceTable::new("unit.local").unwrap(),
+            AnnouncerParams {
+                destination: group(),
+                policy: OriginPolicy::Any,
+                on_link: OnLink::new(),
+            },
+        )
     }
 
-    /// An announcer and a browser aimed at each other on loopback.
-    async fn pair() -> (MdnsAnnouncer, MdnsSocket) {
-        let std_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let browser = MdnsSocket::builder()
-            .bind("127.0.0.1:0".parse().unwrap())
-            .destination(std_socket.local_addr().unwrap())
-            .build()
-            .await
-            .unwrap();
-        let announcer = MdnsAnnouncer::builder()
-            .destination(browser.local_addr().unwrap())
-            .host("unit.local")
-            .build_on(std_socket)
-            .unwrap();
-        (announcer, browser)
+    /// An announcer whose instance is announced, with what it sent so far
+    /// taken.
+    fn announced(net: &FakeNet) -> Fake {
+        let mut a = announcer(net);
+        run(a.announce(&service())).unwrap();
+        net.take_sent();
+        a
     }
 
-    #[tokio::test]
-    async fn announces_after_probing_and_answers_a_browse() {
-        let (mut a, mut b) = pair().await;
-        let start = tokio::time::Instant::now();
-        within(a.announce(&service())).await.unwrap();
-        let took = start.elapsed();
-        assert!(took >= Duration::from_millis(700), "{took:?}");
-        assert_eq!(a.instance_label(KIND, "unit-1"), Some("unit-1"));
-
-        within(b.browse(KeyFilter::Exact(KIND.key()))).await.unwrap();
-        let mut buf = [0u8; 512];
-        // The announcement (after three probes the browser skips).
-        let Event::Up(s) = within(b.next(&mut buf)).await.unwrap() else {
-            panic!()
-        };
-        assert_eq!((s.instance, s.ttl_s), ("unit-1", 120));
-        assert_eq!(s.endpoint, service().endpoint);
-        // The browse query is answered by step, as a legacy unicast reply.
-        within(a.step()).await.unwrap();
-        let mut buf = [0u8; 512];
-        let Event::Up(s) = within(b.next(&mut buf)).await.unwrap() else {
-            panic!()
-        };
-        assert_eq!((s.instance, s.ttl_s), ("unit-1", 10));
-        assert_eq!(s.txt, service().txt);
-
-        // Withdraw: a goodbye.
-        within(a.withdraw(KIND, "unit-1")).await.unwrap();
-        let mut buf = [0u8; 512];
-        assert_eq!(
-            within(b.next(&mut buf)).await.unwrap(),
-            Event::Down {
-                kind: KIND,
-                instance: "unit-1"
-            }
-        );
-        assert!(a.table().is_empty());
+    /// As [`announced`], with the second announcement sent too: nothing is
+    /// due any more, so `step` waits on the socket alone.
+    fn settled(net: &FakeNet) -> Fake {
+        let mut a = announced(net);
+        // The timer to 1750 ms, then the second announcement (the step is
+        // dropped while it waits for a datagram).
+        run(a.step()).unwrap();
+        assert!(poll_once(a.step()).is_pending());
+        assert_eq!(net.take_sent().len(), 1);
+        a
     }
 
-    #[tokio::test]
-    async fn replies_that_cannot_go_out_are_dropped_not_fatal() {
-        let (mut a, mut b) = pair().await;
-        within(a.announce(&service())).await.unwrap();
-        // A legacy PTR query, as if from spoofed sources: broadcast, port
-        // 0, multicast, and an IPv6 source the IPv4 socket cannot reach
-        // (the send fails).
+    /// A legacy (one-shot) PTR query for the service's type.
+    fn query() -> Vec<u8> {
         let mut q = [0u8; 128];
         let ty = ServiceType::new("_conf-svc._tcp.local").unwrap();
-        let n = crate::dns::wire::encode_query(9, ty, &mut q).unwrap();
-        for (i, from) in [
-            "255.255.255.255:40000",
-            "127.0.0.1:0",
-            "224.0.0.251:40000",
-            "[::1]:40000",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            a.rx[..n].copy_from_slice(&q[..n]);
-            a.handle_datagram(n, from.parse().unwrap()).await;
-            assert_eq!(a.dropped_replies(), i as u32 + 1, "{from}");
-        }
-        // The announcer still works: a real browse is answered.
-        within(b.browse(KeyFilter::Exact(KIND.key()))).await.unwrap();
-        within(a.step()).await.unwrap();
-        let mut buf = [0u8; 512];
-        // The announcement first, then the answer to the browse.
-        for _ in 0..2 {
-            assert!(matches!(within(b.next(&mut buf)).await.unwrap(), Event::Up(_)));
-        }
-        assert_eq!(a.dropped_replies(), 4);
+        let n = encode_query(9, ty, &mut q).unwrap();
+        q[..n].into()
     }
 
-    #[tokio::test]
-    async fn a_rival_answer_while_probing_renames_the_instance() {
-        let std_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let rival = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut a = MdnsAnnouncer::builder()
-            .destination(rival.local_addr().unwrap())
-            .host("unit.local")
-            .build_on(std_socket)
-            .unwrap();
-        let ty = ServiceType::new("_conf-svc._tcp.local").unwrap();
-        let rival_task = async {
-            let mut rx = [0u8; 512];
-            let (_, from) = rival.recv_from(&mut rx).await.unwrap();
-            let mut out = [0u8; 512];
-            let srv = RecordOut {
-                name: TextName::instance("unit-1", ty).unwrap(),
-                ttl: 120,
-                cache_flush: true,
-                data: RecordData::Srv {
-                    priority: 0,
-                    weight: 0,
-                    port: 1,
-                    target: TextName::new("rival.local").unwrap(),
-                },
-            };
-            let len = MessageWriter::new(&mut out, 0, FLAG_QR | FLAG_AA)
-                .unwrap()
-                .record(Section::Answer, &srv)
-                .unwrap()
-                .finish();
-            rival.send_to(&out[..len], from).await.unwrap();
-        };
-        let s = service();
-        let (announced, ()) = within(async { tokio::join!(a.announce(&s), rival_task) }).await;
-        announced.unwrap();
-        assert_eq!(a.instance_label(KIND, "unit-1"), Some("unit-1 (2)"));
+    #[test]
+    fn fake_seam_probes_then_announces_on_the_clock() {
+        let net = FakeNet::new();
+        let mut a = announcer(&net);
+        run(a.announce(&service())).unwrap();
+        let sent = net.take_sent();
+        let times: Vec<u64> = sent.iter().map(|s| s.at_ms).collect();
+        assert_eq!(times, [0, 250, 500, 750]);
+        assert!(sent.iter().all(|s| s.to == group()));
+        let parsed: Vec<_> = sent
+            .iter()
+            .map(|s| Message::parse(&s.bytes).unwrap())
+            .collect();
+        assert!(
+            parsed[..3].iter().all(|m| !m.is_response()),
+            "probes are queries"
+        );
+        assert!(parsed[3].is_response(), "then the announcement");
         assert_eq!(
             a.table().state(KIND, "unit-1"),
             Some(InstanceState::Announced)
         );
+        // The second announcement, 1 s later, is sent by step: the first
+        // waits out the timer, the second sends it (then waits for a
+        // datagram that never comes, so it is polled once).
+        run(a.step()).unwrap();
+        assert!(net.take_sent().is_empty());
+        assert!(poll_once(a.step()).is_pending());
+        let sent = net.take_sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].at_ms, 1750);
+    }
+
+    #[test]
+    fn fake_seam_answers_a_legacy_query_by_unicast() {
+        let net = FakeNet::new();
+        let mut a = announced(&net);
+        net.deliver(&query(), peer());
+        run(a.step()).unwrap();
+        let sent = net.take_sent();
+        let reply = sent
+            .iter()
+            .find(|s| s.to == peer())
+            .expect("a unicast reply");
+        let m = Message::parse(&reply.bytes).unwrap();
+        assert!(m.is_response());
+        assert_eq!(m.id(), 9, "a legacy reply echoes the query id");
+        assert_eq!(a.dropped_replies(), 0);
+    }
+
+    #[test]
+    fn fake_seam_drops_and_counts_a_reply_to_port_zero() {
+        let net = FakeNet::new();
+        let mut a = announced(&net);
+        net.deliver(&query(), "127.0.0.1:0".parse().unwrap());
+        run(a.step()).unwrap();
+        assert!(net.take_sent().iter().all(|s| s.to.port() != 0));
+        assert_eq!(a.dropped_replies(), 1);
+    }
+
+    #[test]
+    fn fake_seam_ignores_oversized_datagrams() {
+        let net = FakeNet::new();
+        let mut a = announced(&net);
+        // A valid query padded to N bytes: the seam may have cut it.
+        let mut big = query();
+        big.resize(MCU_BUF, 0);
+        net.deliver(&big, peer());
+        run(a.step()).unwrap();
+        assert!(net.take_sent().iter().all(|s| s.to != peer()));
+        assert_eq!((a.dropped_replies(), net.queued()), (0, 0));
+        // One byte under N is a datagram like any other.
+        let mut fits = query();
+        fits.resize(MCU_BUF - 1, 0);
+        net.deliver(&fits, peer());
+        run(a.step()).unwrap();
+        assert!(net.take_sent().iter().any(|s| s.to == peer()));
+    }
+
+    #[test]
+    fn fake_seam_send_errors_of_own_messages_are_io() {
+        let net = FakeNet::new();
+        let mut a = announcer(&net);
+        net.fail_sends(true);
+        assert!(matches!(
+            run(a.announce(&service())),
+            Err(MdnsError::Io(FakeErr))
+        ));
+        // The instance stays registered (as for a dropped announce).
+        assert_eq!(
+            a.table().state(KIND, "unit-1"),
+            Some(InstanceState::Pending)
+        );
+        net.fail_sends(false);
+        let mut a = announced(&net);
+        net.fail_sends(true);
+        assert!(matches!(
+            run(a.withdraw(KIND, "unit-1")),
+            Err(MdnsError::Io(FakeErr))
+        ));
+    }
+
+    #[test]
+    fn fake_seam_send_errors_of_replies_are_counted_not_fatal() {
+        let net = FakeNet::new();
+        let mut a = settled(&net);
+        net.fail_sends(true);
+        net.deliver(&query(), peer());
+        run(a.step()).unwrap();
+        assert_eq!(a.dropped_replies(), 1);
+    }
+
+    #[test]
+    fn fake_seam_cancelled_step_loses_no_datagram() {
+        let net = FakeNet::new();
+        let mut a = settled(&net);
+        // Nothing is due: step waits on the socket alone. Drop it there.
+        assert!(poll_once(a.step()).is_pending());
+        net.deliver(&query(), peer());
+        run(a.step()).unwrap();
+        assert!(net.take_sent().iter().any(|s| s.to == peer()));
+    }
+
+    #[test]
+    fn fake_seam_takes_a_ready_datagram_before_a_due_timer() {
+        let net = FakeNet::new();
+        let mut a = announced(&net);
+        // The second announcement is due at 1750; the query is ready now.
+        net.deliver(&query(), peer());
+        run(a.step()).unwrap();
+        let sent = net.take_sent();
+        assert!(sent.iter().any(|s| s.to == peer()));
+        assert!(net.now_ms() < 1750, "the timer did not fire");
+    }
+
+    #[test]
+    fn fake_seam_a_rival_answer_while_probing_renames_the_instance() {
+        let net = FakeNet::new();
+        let mut a = announcer(&net);
+        let ty = ServiceType::new("_conf-svc._tcp.local").unwrap();
+        let srv = RecordOut {
+            name: TextName::instance("unit-1", ty).unwrap(),
+            ttl: 120,
+            cache_flush: true,
+            data: RecordData::Srv {
+                priority: 0,
+                weight: 0,
+                port: 1,
+                target: TextName::new("rival.local").unwrap(),
+            },
+        };
+        let mut out = [0u8; 512];
+        let len = MessageWriter::new(&mut out, 0, FLAG_QR | FLAG_AA)
+            .unwrap()
+            .record(Section::Answer, &srv)
+            .unwrap()
+            .finish();
+        net.deliver(&out[..len], "127.0.0.1:5353".parse().unwrap());
+        run(a.announce(&service())).unwrap();
+        assert_eq!(a.instance_label(KIND, "unit-1"), Some("unit-1 (2)"));
+        let last: Option<Sent> = net.take_sent().pop();
+        assert!(Message::parse(&last.unwrap().bytes).unwrap().is_response());
     }
 }
