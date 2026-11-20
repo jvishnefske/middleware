@@ -40,6 +40,8 @@ use core::net::Ipv4Addr;
 
 #[cfg(feature = "mdns-core")]
 pub mod announce;
+#[cfg(feature = "mdns-embassy")]
+pub mod embassy_seam;
 #[cfg(feature = "mdns-core")]
 mod error;
 #[cfg(feature = "mdns")]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies feature isolation (design.md C1, F1-F3, K13, L11, L15, Y11, Q11,
-# CL3, FL4, MS5, RG19, PN9):
+# CL3, FL4, MS5, RG19, PN9, D19, D26):
 #   * the always-built pure core, including `discovery`, `dns::wire`,
 #     `zenoh_wire` and `fw_ota`, builds for thumbv6m-none-eabi with no
 #     features, and so do the `recipe-core` and `state-table` crates (Q11),
@@ -14,6 +14,11 @@
 #     dependency;
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
 #     in no cloud dependency and enable no host feature;
+#   * the mDNS core `mdns-core` (D19) builds for thumbv6m and thumbv7em, is
+#     gated on `mdns-core` rather than the std feature `mdns`, and is
+#     neither embedded nor host (`mdns` enables it); its embassy seam
+#     `mdns-embassy` (D26, embedded) builds for thumbv7em and thumbv8m
+#     (it needs atomics, so not thumbv6m);
 #   * cloud feature sets (including `dns-sd`, `memory` and `udp`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
@@ -38,7 +43,7 @@ EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
 CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-posix-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
-EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite'
+EMBEDDED_FEATURES='ble|espnow|serial|trust|cam-fixtures|zenoh-lite|mdns-embassy'
 HOST_FEATURES='std|zenoh|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -110,7 +115,7 @@ for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espno
     fi
 done
 
-for set in "" "trust" "trust,serial" "trust,serial,postcard"; do
+for set in "" "trust" "trust,serial" "trust,serial,postcard" "mdns-core,mdns-embassy"; do
     echo "== Y11: [${set:-no features}] on $RP2350_TARGET"
     cargo build --quiet --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"}
     if deps --target "$RP2350_TARGET" --no-default-features ${set:+--features "$set"} | grep -Eq "$CLOUD_CRATES"; then
@@ -124,7 +129,7 @@ done
 # The i.MX RT base firmware's set: the Zenoh client with the serial link
 # and signed updates, no heap (FL4, ZN1-ZN3: the codec and session are
 # pure and `alloc` is never linked).
-for set in "zenoh-lite" "zenoh-lite,serial,trust,postcard"; do
+for set in "zenoh-lite" "zenoh-lite,serial,trust,postcard" "mdns-core" "zenoh-lite,mdns-embassy"; do
     echo "== FL4: [$set] on $IMXRT_TARGET"
     cargo build --quiet --target "$IMXRT_TARGET" --no-default-features --features "$set"
     if deps --target "$IMXRT_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then
