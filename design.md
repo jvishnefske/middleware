@@ -838,6 +838,75 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   `mdns::race::tests::*`,
   `mdns::announce::tests::fake_seam_a_datagram_queued_when_the_timer_is_due_is_handled_once`,
   `mdns::announce::tests::fake_seam_set_on_link_moves_the_accepted_subnet`.
+- [x] D27 `MW_POSIX_NODE_MDNS` is `off` (the default, also when unset or
+  empty), `on`, or a unicast IPv4 address (not unspecified, loopback,
+  multicast or broadcast); anything else is a config error naming the
+  variable; no `MW_PI_NODE_` name is read —
+  posix-node `config::tests::d27_*`.
+- [x] D28 The node's `mw/node` TXT is built from its Facts: `id` = node id,
+  `chip` = `service::CHIP`, `board` = the device-tree board or `unknown`,
+  `fw` = the crate version, `sender` = its Zenoh session's sender id,
+  `zenoh` per D30; it fits 192 bytes (the longest board and the longest
+  IPv4 and IPv6 `tcp` locators do), and when it would not, `zenoh` is
+  dropped rather than failing — posix-node `mdns_node::tests::d28_*`.
+- [x] D29 The node announces instance `posix-<node id>` on host
+  `<instance>.local`, an A record of its own address and SRV port 0, TTL
+  120; never the system host name, so it cannot clash with the system's
+  mDNS daemon or another node on the same host —
+  posix-node `mdns_node::tests::d29_*`, `tests/mdns_node.rs::d34_*`.
+- [x] D30 `zenoh=` carries the node's router locator only when it is a
+  `tcp` or `tls` locator whose host is not loopback, unspecified or
+  `localhost`, cut at its metadata (`?`) and private configuration
+  (`#...`); otherwise the key is absent. A node behind a loopback router
+  (the KD240) announces no locator — posix-node `mdns_node::tests::d30_*`.
+- [x] D31 The announced address is the one routed to 224.0.0.251 (`on`) or
+  the configured one; the group is joined on it and multicast leaves from
+  its interface (`MdnsAnnouncerBuilder::multicast_interface`,
+  `IP_MULTICAST_IF`). It is re-checked every 15 s: a change is a goodbye
+  then an announcement of the new address, and with no address nothing is
+  announced and it is retried — posix-node `mdns_node::tests::d31_*`,
+  `tests/mdns_node.rs::d31_*`, middleware
+  `mdns::announce::host::tests::multicast_interface_picks_the_egress_interface`.
+- [x] D32 The announcer runs beside the node after `start()` and its
+  failure is never the node's: errors are logged at the 1st, 2nd, 4th…
+  failure in a row and retried (2 s doubling to 60 s, 30 s after every
+  rename conflicted). On SIGTERM it multicasts its goodbye, within 2 s,
+  before the runner stops; stopped while nothing is announced it returns
+  at once — posix-node `mdns_node::tests::d32_*`, `tests/mdns_node.rs::d32_*`.
+- [ ] D33 Beside avahi and a second node on one host, all three share UDP
+  5353 (`SO_REUSEADDR`/`SO_REUSEPORT`), each answers for its own names
+  only, and `avahi-browse -rt _mw-node._tcp` lists both nodes while
+  `kd240.local` stays avahi's, with no rename or conflict in either
+  node's log. Checked beside avahi with one node on an x86_64 host
+  (listed, resolved, goodbye 1 s after SIGTERM). Owner: user (on the
+  board).
+- [x] D34 An announcer on loopback, browsed with `MdnsSocket`, gives an
+  `Up` whose TXT parses with `NodeTxt::parse` to the node's record, and a
+  `Down` after the goodbye — posix-node `tests/mdns_node.rs::d34_*`.
+- [x] D35 `mwctl scout` (features `zenoh`, `mdns`) browses `_mw-node._tcp`
+  for the scan's duration beside Zenoh scouting, with a one-shot querier
+  re-asking each second; a goodbye removes a record; an mDNS failure is a
+  note on stderr, never a failure of the scan, and nothing learned from
+  mDNS is connected to — mwctl `scout::mdns_shell::tests::d35_*`.
+- [x] D36 An mDNS node joins the Zenoh row whose sender id (its `sys/info`
+  reply key, else the id of the session's Zenoh id) equals the TXT
+  `sender`, else whose `sys/info` node id (or reply key) equals the TXT
+  `id`; one without a row is a row of its own (kind `mdns`, after the
+  others) — mwctl `scout::tests::d36_*`.
+- [x] D37 mDNS data fills the `MDNS` column (address, and `via <locator>`
+  with `zenoh=`) and the node, chip and firmware cells of a row nothing
+  else saw, and never changes a cell from Zenoh; a second claim on an
+  already-merged row is a separate row — mwctl `scout::tests::d37_*`.
+- [x] D38 Every mDNS-sourced cell is printed through the table's escaping
+  (control, bidi and zero-width characters shown as `\u{..}`, cut at 64
+  characters); a TXT that is not a node record is skipped and counted
+  once per instance; at most 256 nodes are kept — mwctl
+  `scout::tests::d38_*`, `scout::mdns_shell::tests::d38_*`.
+- [x] D39 The browse is behind mwctl's optional `mdns` feature (default
+  mwctl unchanged; `--features zenoh,mdns` enables host features only),
+  `just lan` enables it, posix-node enables `middleware/mdns` (PN9 asserts
+  it), and the docs and CHANGELOG name the firewall and non-Linux limits —
+  `scripts/check-features.sh`.
 
 ### Transport contract 0.5 (K…)
 

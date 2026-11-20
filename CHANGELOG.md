@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### posix-node announces itself on mDNS; `mwctl scout` browses it (D27–D39)
+- mw-posix-node: new `MW_POSIX_NODE_MDNS` = `off` (default) | `on` | a unicast IPv4 address (`config::MdnsMode`). When on, `mdns_node::run` announces the shared `mw/node` record (`_mw-node._tcp`) as `posix-<node id>` on host `posix-<node id>.local`: the node's address (routed to 224.0.0.251, or the pinned one), SRV port 0, TXT `id`, `chip`, `board` (`unknown` without a device tree), `fw`, `sender` and, only for a `tcp`/`tls` router that is not loopback, `zenoh` (cut at `?`/`#`). It binds UDP 5353 beside avahi (`SO_REUSEADDR`/`SO_REUSEPORT`), re-checks the address every 15 s, retries failures (2 s to 60 s, 30 s after a conflict), never fails the node, and sends its goodbye first on SIGTERM. posix-node enables `middleware/mdns` (no new crate). Deployments opt in, e.g. NixOS `services.mw-posix-node.environment.MW_POSIX_NODE_MDNS = "on"`; with avahi off, open UDP 5353.
+- middleware: `MdnsAnnouncerBuilder::multicast_interface(Ipv4Addr)` (`IP_MULTICAST_IF`); unset by default.
+- mwctl: new optional feature `mdns` (with `zenoh`): `scout` also browses `_mw-node._tcp` with a one-shot querier for the scan's duration. New `MDNS` column and `mdns` rows (`scout::MdnsNode`, `Row::mdns`, `merge_mdns`, `MAX_MDNS`); the count line gains `, N announced on mDNS` (in every build). Records join a Zenoh row by `sender`, else by `id`; never overwrite Zenoh cells; a second claim is its own row. `just lan` uses `--features zenoh,mdns`. Limits: the replies are unicast from port 5353 to an ephemeral port, which a default-deny host firewall drops; off Linux, LAN answers are refused (the on-link subnets are read from `/proc/net/route`).
+
 ### zenohd static on musl, a PTY as a local serial link (MS59, RG28)
 - nix: `packages.x86_64-linux.zenohd` builds again: zenoh 1.10.1's `.cargo/config.toml` turned `crt-static` off for both musl triples, overriding `CARGO_BUILD_RUSTFLAGS`, and the link failed on `-lgcc_s`. The zenohd build now sets `CARGO_TARGET_<TRIPLE>_RUSTFLAGS = "-C target-feature=+crt-static"`.
 - nix: new `packages.x86_64-linux.zenohd-aarch64` (static aarch64, cross compiled) and `packages.aarch64-linux.zenohd` (native); `checks.aarch64-static` covers zenohd.

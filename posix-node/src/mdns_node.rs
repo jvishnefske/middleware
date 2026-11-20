@@ -3,7 +3,7 @@
 //! LAN, so `avahi-browse -rt _mw-node._tcp` and `mwctl scout` find it.
 //!
 //! * [`Identity`] — what the record says, built purely from the node's
-//!   [`Facts`](crate::service::Facts), its Zenoh session's sender id and its
+//!   [`Facts`], its Zenoh session's sender id and its
 //!   router: TXT `txtvers=1`, `id`, `chip`, `board` (`unknown` without a
 //!   device tree), `fw`, `sender` and, when LAN peers could use it,
 //!   `zenoh` ([`advertised_locator`]).

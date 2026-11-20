@@ -15,9 +15,18 @@
 //!    (from the key, [`node_of_key`]), its `sys/info` and the Zenoh id of
 //!    the session that answered ([`Answer`]).
 //!
-//! [`merge`] joins them into [`Row`]s by Zenoh id and [`format`] prints
-//! them. These are pure and unit tested; [`run`] (feature `zenoh`) is the
-//! shell that does the network I/O.
+//! 4. **mDNS** (feature `mdns`). Beside the scouting, a one-shot querier
+//!    asks for `_mw-node._tcp` each second and collects the `mw/node`
+//!    records ([`MdnsNode`], `middleware::mdns::node`): the RT1050 and
+//!    posix-nodes that announce themselves, including those behind a
+//!    router nothing here reaches (the KD240's loopback zenohd). Nothing
+//!    learned from mDNS is connected to, its failures are notes on stderr,
+//!    and its text only fills its own cells.
+//!
+//! [`merge`] joins the first three into [`Row`]s by Zenoh id,
+//! [`merge_mdns`] adds the records, and [`format()`] prints them. These are
+//! pure and unit tested; [`run`] (feature `zenoh`) is the shell that does
+//! the network I/O.
 //!
 //! Not seen: nodes on ESP-NOW (not IP; ask a gateway's `peers`), sessions
 //! behind a router that neither answers scouts nor is reached through one
