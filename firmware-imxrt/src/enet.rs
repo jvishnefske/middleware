@@ -14,7 +14,8 @@
 //! * [`ksz8081`] — the PHY's identity check, software reset poll, 50 MHz
 //!   RMII clock mode, auto-negotiation start and link-status decode.
 //! * [`mac`] — the MAC registers: RCR and TCR for a link, ECR, the station
-//!   address, the receive buffer size, the descriptor-active triggers.
+//!   address, the multicast group hash filter (GAUR/GALR), the receive
+//!   buffer size, the descriptor-active triggers.
 //! * [`desc`] — the legacy 8-byte buffer descriptors and the receive and
 //!   transmit rings over `AtomicU32` DMA memory, with the ownership
 //!   hand-off between the CPU and the ENET DMA.
