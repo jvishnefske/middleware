@@ -542,6 +542,22 @@ mod tests {
     }
 
     #[test]
+    fn fake_seam_a_datagram_queued_when_the_timer_is_due_is_handled_once() {
+        let net = FakeNet::new();
+        let mut a = announced(&net);
+        // The second announcement is due at 1750: the query arrives then.
+        net.advance_to(1750);
+        net.deliver(&query(), peer());
+        run(a.step()).unwrap();
+        // Nothing more is due or queued: the next step waits.
+        assert!(poll_once(a.step()).is_pending());
+        let sent = net.take_sent();
+        assert_eq!(sent.iter().filter(|s| s.to == peer()).count(), 1);
+        assert_eq!(sent.iter().filter(|s| s.to == group()).count(), 1);
+        assert_eq!(net.queued(), 0);
+    }
+
+    #[test]
     fn fake_seam_a_rival_answer_while_probing_renames_the_instance() {
         let net = FakeNet::new();
         let mut a = announcer(&net);
