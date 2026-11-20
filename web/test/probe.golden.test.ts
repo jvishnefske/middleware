@@ -1,4 +1,4 @@
-// U49/U50: the probe of a KD240, from the wire fixtures posix-node records
+// U47/U48: the probe of a KD240, from the wire fixtures posix-node records
 // (posix-node controller/tests/web_fixtures.rs): the points, the drafted
 // unit and plant, the lathe's IoMap and binding draft, compared with the
 // golden kd240.plant.json (bless with MW_BLESS_FIXTURES=1 after a deliberate

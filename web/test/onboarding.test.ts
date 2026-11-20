@@ -85,7 +85,7 @@ describe("boards", () => {
     expect(gettingStarted(boardById("pico2")!)[2]?.body).toContain("GPIO 25");
   });
 
-  it("has the KD240: a NixOS image, reached over the mesh, no LED or button pins (U47)", () => {
+  it("has the KD240: a NixOS image, reached over the mesh, no LED or button pins (U45)", () => {
     const kd = boardById("kd240")!;
     expect(kd).toMatchObject({
       label: "AMD Kria KD240",

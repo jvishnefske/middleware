@@ -821,7 +821,7 @@ mod tests {
     use board_pins::boards::{ESP32, ESP32C3, ESP32S3, PICO};
 
     #[test]
-    fn u47_a_board_name_picks_the_map_before_the_chip() {
+    fn u45_a_board_name_picks_the_map_before_the_chip() {
         use board_pins::boards::KD240;
         assert_eq!(
             map_for("linux-aarch64", Some("ZynqMP KD240 revA/B/1")),

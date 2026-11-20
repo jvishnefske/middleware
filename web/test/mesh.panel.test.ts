@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// U49: the Device tab's Mesh section over a fake link serving the KD240
+// U47: the Device tab's Mesh section over a fake link serving the KD240
 // fixture: Scan lists the node, Probe shows its points, the IoMap and the
 // mwctl commands, and "Use as plant" hands the drafted plant on.
 

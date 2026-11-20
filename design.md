@@ -4391,6 +4391,118 @@ open).
   and the canvas scrolls inside its box. The view's decisions are tested
   (`web/test/flows.view.test.ts`: "places the input on top and outputs along the bottom in run order", "says what each node does", "makes new entries, actions and conditions from the pins and machines, keeping what applies", "offers as targets only nodes that keep the flow a tree, and reorders a chain", "keeps at most fifty undo steps", "maps issues to nodes, counts errors on the tab, and turns fixes into changes", "names the node each flow last ran in the simulator line"; `web/test/flows.model.test.ts`: "lists the outline in run order with each port's chain under its node, then nodes nothing leads to", "parses flow log lines and keeps each flow's latest run"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the canvas box 356 px wide scrolling 576 px on the phone, a real mouse drag moved a node and rewired a port, a duplicate flow name, a 5 ms period and an unreachable node were reported and blocked Compile at stage flows, two Undos restored them, and two BUTTON presses highlighted the Press flow's nodes), not by a DOM test, so it stays unchecked.
 
+### The mesh autoprobe (M7, U40–U48)
+
+The browser reaches nodes through the cloud Zenoh router over a WebSocket
+(`wss://updates.<site>/mesh`) and probes them: it reads what a node says it
+drives and drafts a plant unit, the lathe's IoMap and a binding from it.
+The mesh is probe-only. The cloud router lets a browser ask exactly
+`@mw/node/*/sys/{info, manifest, manifest/cm, trust/info}`; lathe nodes are
+claimed with the mwctl key, and deploys go through `mwctl`, whose commands
+the probe writes out.
+
+- [x] U40 `DeviceClient` is an interface (`transport`, `remote`, `request`
+  and the typed helpers, among them `controlPage`, a page of
+  `sys/manifest/cm` with NotFound as null); `RequestClient` holds the
+  helpers over an abstract `request`; `SerialClient` is the serial line, the
+  only one that publishes — `web/test/client.interface.test.ts`: "is what
+  SerialClient and a RequestClient subclass both are", "reads a control page
+  by number, null when the node has none", "keeps NotFound as null and other
+  errors as errors"; the existing serial suites pass on `SerialClient`.
+- [x] U41 `zenoh_lite::message::Unframed<L: MessageLink, N>` runs the
+  unchanged `ZenohLite` over a link that keeps message boundaries: on read
+  each message gets its 2-byte length in front, on write the length is taken
+  off and the batch sent as one message; empty and oversized messages are
+  skipped and counted, a closed link reads 0; `no_std`, no heap —
+  `cargo test -p middleware --features zenoh-lite --lib zenoh_lite::message`:
+  "u41_reads_put_the_length_before_each_message_in_every_split_size",
+  "u41_empty_and_oversized_messages_are_skipped_and_counted",
+  "u41_writes_in_any_pieces_send_each_batch_alone_without_its_length",
+  "u41_zenoh_lite_opens_and_requests_over_a_message_link".
+- [x] U42 Discovery: `zenoh_wire::node_key_any_buf` (`@mw/node/*/<key>`, not
+  a node key) and `ZenohLite::request_each_nodes`, a target-all query on it
+  that passes every reply on with its sender — `zenoh_wire`:
+  "u42_the_all_nodes_key_is_a_wildcard_that_names_no_node";
+  `zenoh_lite::client`:
+  "u42_request_each_nodes_asks_every_node_and_gathers_each_sender".
+- [x] U43 protocol-wasm `mesh::Pump` and its JS face `MeshSession`: the
+  middleware client over `Unframed` with no executor; the page feeds ws
+  messages and commands and polls with the time, sends `takeOutput()`, and
+  polls again at `nextWakeMs()`; while idle the session sends keep-alives;
+  requests to one node by sender id, discovery of all; a closed link fails
+  what is pending and what follows; junk never panics —
+  `cargo test -p protocol-wasm --lib mesh` (`u43_*`, 7 tests);
+  `web/test/mesh.session.test.ts`: "sends InitSyn unprefixed on open and
+  asks for a later poll", "fails a request before the session is open, and
+  survives junk".
+- [x] U44 `MeshTransport` (the WebSocket and one timer around a
+  `MeshSession`), `scan` (wildcard `sys/info`, each sender once) and
+  `MeshClient`, which is probe-only: `request` refuses any key but
+  `sys/info`, `sys/manifest`, `sys/manifest/cm` and `sys/trust/info` with
+  `ProbeOnlyError` ("the mesh is probe-only: deploy with mwctl") before
+  sending; `board`, `peers` and `binding` answer without asking; `bind`,
+  `startPayload`, `stopPayload`, `trustClaim` and the upload and binding
+  flows (`uploadPayload`, `trustedUpload`, `installBinding`, `uploadUnit`)
+  refuse a remote client at once; the trust panel shows a mesh node's state
+  and keeps Claim disabled; default URL `wss://updates.<site>/mesh` —
+  `web/test/mesh.client.test.ts` (12 tests, among them "refuses every change
+  at once, sending nothing", "only ever sends the keys the cloud lets a
+  browser ask", "answers board, peers and binding without asking");
+  `web/test/trust.remote.test.ts`: "shows the node's trust state and keeps
+  Claim disabled"; against a real zenohd 1.10.1 ws listener and
+  `mw-posix-node` on the simulator, `web/test/mesh.live.test.ts` (run with
+  `MW_MESH_URL`, skipped otherwise): "scans the posix-node simulator and
+  probes its ten points".
+- [x] U45 The KD240: board-pins `by_board` and the empty `KD240` map (its
+  chip name `linux-aarch64` names no board; posix-node serves no `gpio`
+  group); protocol-wasm `boardPins` and `checkPins` take the board name;
+  the Start-tab board `kd240` (a `nixos-image` install, reached over the
+  mesh, `blink` and `button` null) and the pin checks pass its `model` —
+  `cargo test -p board-pins`:
+  "u45_board_names_select_a_map_where_the_chip_has_none";
+  `cargo test -p protocol-wasm`:
+  "u45_a_board_name_picks_the_map_before_the_chip";
+  `web/test/onboarding.test.ts`: "has the KD240: a NixOS image, reached
+  over the mesh, no LED or button pins (U45)"; `web/test/pins.test.ts`:
+  "take their pin map from the board name: the KD240 has no payload pins".
+- [x] U46 `PointRow` (model/points.ts) and the optional `Unit.points`: the
+  device's point rules, names unique and apart from pin labels, at most 64;
+  an equipment module may own points as it owns pin labels; plants without
+  points are unchanged — `web/test/plant.test.ts` "unit points (U46)" (4
+  tests) and the existing plant tests.
+- [x] U47 The probe (device/probe.ts): `probeNode` reads only `sys/info`,
+  the manifest and each announced control page; `decodeProbe` drafts the
+  unit (board from the manifest's BOARD record), groups the points into
+  `motion`, `spindle`, `turret` and `estop`, matches the lathe's IoMap
+  channels (exact name, then prefix, kind and direction; `queue` takes
+  `motion`), writes the `channel=driver:point` specs and a binding draft
+  that `bindingForImage` completes, and lists missing or inconsistent
+  pages; `deployCommands` writes the mwctl upload, bind and start over
+  `tls/mesh.updates.<site>:443 --node <sender>`; the Device tab's Mesh
+  section shows it all, copyable, and "Use as plant" hands the plant to
+  Blocks — `web/test/probe.golden.test.ts` (8 tests, among them "drafts a
+  binding that checks clean against the node's real manifest", "reads info,
+  the manifest and every page in order, and nothing else");
+  `web/test/mesh.panel.test.ts`: "connects, scans, probes and offers the
+  plant and the mwctl commands".
+- [x] U48 The probe's golden fixtures: posix-node records
+  `web/test/fixtures/kd240.wire.json` (the simulated PC Turn 50, fixed
+  facts) and `kd240-paged.wire.json` (64 points, 6 pages) over Zenoh,
+  checked equal to the local link, and checks them on every run; the web's
+  `kd240.plant.json` is the golden probe result;
+  `MW_BLESS_FIXTURES=1` rewrites either side — `cargo test -p mw-posix-node
+  --lib web_fixtures`: "u48_the_kd240_probe_fixture_is_what_the_simulated_lathe_answers",
+  "u48_the_paged_fixture_lists_sixty_four_points_over_several_pages";
+  `web/test/probe.golden.test.ts`: "matches the golden plant and drafts".
+
+Out of scope (the browser only probes; decided 2026-11-20): signing in the
+browser for the mesh (control signing, `controlMessage`/`controlBody`
+exports, control-vector fixtures and the control target rule), the signed
+upload, bind and start flows over the mesh and a Deploy section, a
+`remote-unclaimed` upload refusal, `mwctl trust claim --pubkey`, and the
+pre-signed deploy bundle. Lathe nodes are claimed with the mwctl key
+(file or TPM P-256) and deployed with `mwctl`.
+
 ### Interrupts and DMA (ABI 2)
 
 Payloads handle GPIO edges, hardware timer alarms, DMA completion and

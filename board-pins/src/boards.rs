@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn u47_board_names_select_a_map_where_the_chip_has_none() {
+    fn u45_board_names_select_a_map_where_the_chip_has_none() {
         use crate::Direction;
         assert_eq!(
             by_board("linux-aarch64", "ZynqMP KD240 revA/B/1"),

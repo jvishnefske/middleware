@@ -161,9 +161,9 @@ describe("plant model (IR v4)", () => {
   });
 });
 
-// U48: a unit's control points (what a probed node lists at sys/manifest/cm)
+// U46: a unit's control points (what a probed node lists at sys/manifest/cm)
 // ride beside its pin table; equipment modules may own either.
-describe("unit points (U48)", () => {
+describe("unit points (U46)", () => {
   const point = (name: string, extra: Record<string, unknown> = {}) => ({
     name,
     kind: "position",

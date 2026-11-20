@@ -147,7 +147,7 @@ describe("pin table transitions", () => {
   });
 });
 
-describe("Linux boards (U47)", () => {
+describe("Linux boards (U45)", () => {
   it("take their pin map from the board name: the KD240 has no payload pins", () => {
     const kd = proto.boardPins("linux-aarch64", "ZynqMP KD240 revA/B/1");
     expect(kd.gpios).toEqual([]);

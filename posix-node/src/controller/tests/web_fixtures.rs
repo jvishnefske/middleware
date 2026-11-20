@@ -3,7 +3,7 @@
 //! recorded from the real controller. The browser's golden test decodes
 //! them, so a change to `sys/info`, the manifest or `sys/manifest/cm` fails
 //! here until the fixtures are blessed (`MW_BLESS_FIXTURES=1`), and the
-//! web's golden plant then shows what the change does to a probe. (U50)
+//! web's golden plant then shows what the change does to a probe. (U48)
 //!
 //! The facts are fixed (no device tree, `CHIP` or crate version), so the
 //! fixtures are the same on every machine.
@@ -93,7 +93,7 @@ fn pages(c: &mut Ctl<'_>) -> Vec<Vec<u8>> {
 }
 
 #[test]
-fn u50_the_kd240_probe_fixture_is_what_the_simulated_lathe_answers() {
+fn u48_the_kd240_probe_fixture_is_what_the_simulated_lathe_answers() {
     let driver = SimDriver::new(SimConfig::pc_turn_50());
     let control = control_summary(driver.points());
     assert_eq!(control.map(|c| (c.points, c.pages)), Some((10, 1)));
@@ -109,7 +109,7 @@ fn u50_the_kd240_probe_fixture_is_what_the_simulated_lathe_answers() {
 }
 
 #[test]
-fn u50_the_paged_fixture_lists_sixty_four_points_over_several_pages() {
+fn u48_the_paged_fixture_lists_sixty_four_points_over_several_pages() {
     let points: Vec<PointSpec> = (0..64)
         .map(|i| PointSpec::new(&format!("point_with_long_name_{i:02}"), DataKind::Digital, Flow::In, Unit::Bool, 0, 1))
         .collect();
