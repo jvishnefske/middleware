@@ -73,7 +73,7 @@ ungated() { # file, declaration
     grep -qx "$2" "$1"
 }
 for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.rs:pub mod wire;" \
-            "src/lib.rs:pub mod zenoh_wire;" \
+            "src/lib.rs:pub mod zenoh_wire;" "src/lib.rs:pub mod radio_bridge;" \
             "src/lib.rs:pub mod fw_ota;" "src/fw_ota.rs:pub mod machine;" "src/fw_ota.rs:pub mod wire;" \
             "src/fw_ota.rs:pub mod picobin;" "src/fw_ota.rs:pub mod platform;" "src/fw_ota.rs:pub mod record;" \
             "src/discovery.rs:pub mod record;" "src/discovery.rs:pub mod directory;" "src/discovery.rs:pub mod beacon;"; do

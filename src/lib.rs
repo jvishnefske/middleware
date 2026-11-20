@@ -52,6 +52,9 @@
 //!   the ESP-NOW request and response frames, the requester's retry rule
 //!   and the responder's duplicate suppression; `espnow::rpc` runs them
 //!   over an ESP-NOW radio.
+//! * [`radio_bridge`] — the serial framing of the USB↔ESP-NOW bridge (always
+//!   built, pure, `no_std`, no heap): shared by `mwctl` and the ESP-NOW
+//!   gateway (`espnow::bridge`).
 //! * [`zenoh_wire`] — the middleware's Zenoh attachments, reply-error
 //!   payloads and reserved key expressions (always built, pure, `no_std`):
 //!   shared by the host backend (as `zenoh::wire`) and the board client
@@ -106,6 +109,7 @@ pub mod key;
 pub mod kv;
 pub mod loader;
 pub mod mdns;
+pub mod radio_bridge;
 pub mod rpc;
 pub mod serial;
 pub mod stream;
