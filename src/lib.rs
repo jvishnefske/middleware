@@ -96,6 +96,7 @@
 #![forbid(unsafe_code)]
 #![allow(async_fn_in_trait)]
 
+pub mod clock;
 pub mod codec;
 pub mod dedup;
 pub mod discovery;
