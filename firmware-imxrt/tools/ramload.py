@@ -33,6 +33,7 @@ import os, re, select, subprocess, sys, tempfile, termios, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rsp import PROBE, Rsp  # noqa: E402
+import fusesafe  # noqa: E402
 
 VCOM = os.environ.get("IMXRT_VCOM", "/dev/serial/by-id/usb-SEGGER_J-Link_000621000000-if00")
 DHCSR, VTOR, MPU_CTRL = 0xE000EDF0, 0xE000ED08, 0xE000ED94
@@ -72,6 +73,7 @@ def section_address(elf, name):
 
 
 def probe_rs(*args):
+    fusesafe.check_probe_rs(list(args))  # never a fuse write (fusesafe.py)
     r = subprocess.run(["probe-rs", *args, *PROBE], capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
         sys.exit(f"probe-rs {' '.join(args[:3])} failed:\n{r.stderr[-800:]}")

@@ -43,6 +43,14 @@ jobs:
         env:
           MWCTL_REQUIRE_SOFTHSM: "1"
 
+  no-fuse-writes:
+    # NF1-NF3: nothing here may burn eFuses or OTP (design.md).
+    name: No fuse or OTP writes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-no-fuse-writes.sh
+
   features:
     name: Feature isolation (check-features.sh)
     runs-on: ubuntu-latest

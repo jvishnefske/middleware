@@ -31,6 +31,7 @@ import os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ramload  # noqa: E402
 from rsp import Rsp  # noqa: E402
+import fusesafe  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FLASHER = os.path.join(HERE, "..", "flasher", "target", "thumbv7em-none-eabihf", "release", "imxrt-flasher")
@@ -197,6 +198,7 @@ def reset_board():
         print("WDOG1 clock gate off or unreadable: not resetting; power-cycle the board")
         return
     # The chip resets mid-transaction, so probe-rs reports an error: expected.
+    fusesafe.check_probe_rs(["write", "b16", hex(WDOG1_WCR), "0x0020"])
     subprocess.run(["probe-rs", "write", "b16", hex(WDOG1_WCR), "0x0020", *ramload.PROBE],
                    capture_output=True, timeout=120)
     print("reset (WDOG1)")

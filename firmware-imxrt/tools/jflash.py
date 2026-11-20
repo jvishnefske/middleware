@@ -19,6 +19,7 @@ import os, re, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ramload  # noqa: E402  (symbols, section addresses, objcopy)
+import fusesafe  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FLASHER = os.path.join(HERE, "..", "flasher", "target", "thumbv7em-none-eabihf", "release", "imxrt-flasher")
@@ -33,6 +34,7 @@ def jlink(cmds, timeout=120, resume=True):
     """Runs JLinkExe on `cmds` (one string per line); returns its output.
     Connecting halts the core; `resume` lets it run again before quitting
     (the flasher must keep running between commands)."""
+    fusesafe.check_jlink(cmds)  # never a fuse write (fusesafe.py)
     tail = ["g"] if resume else []
     with tempfile.NamedTemporaryFile("w", suffix=".jlink", delete=False) as f:
         f.write("\n".join(cmds + tail + ["qc"]) + "\n")

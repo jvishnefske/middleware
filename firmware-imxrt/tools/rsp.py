@@ -18,6 +18,11 @@ The probe is $IMXRT_PROBE (default: the EVKB's onboard OpenSDA J-Link).
 """
 import os, re, socket, subprocess, time
 
+import fusesafe
+
+# GDB memory writes: M<addr>,<len>:<hex> and X<addr>,<len>:<binary>.
+_MEM_WRITE = re.compile(r"^[MX]([0-9a-fA-F]+),([0-9a-fA-F]+):")
+
 # IMXRT_GDB=jlink uses SEGGER's JLinkGDBServerCLExe instead: the EVKB's
 # OpenSDA J-Link drops off USB when probe-rs opens it after the USB
 # firmware has run (2026-11-13); SEGGER's server does not.
@@ -102,6 +107,11 @@ class Rsp:
             self.buf += chunk
 
     def cmd(self, data: str) -> str:
+        # Every packet passes here: a memory write that touches the fuse
+        # controller never leaves (fusesafe.py).
+        m = _MEM_WRITE.match(data)
+        if m:
+            fusesafe.check(int(m.group(1), 16), int(m.group(2), 16), "gdb " + data[:24])
         self._send(data)
         return self._recv()
 
