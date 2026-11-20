@@ -158,6 +158,19 @@ impl<S: Datagram, C: Clock, const N: usize> MdnsAnnouncer<S, C, N> {
         self.dropped_replies
     }
 
+    /// The on-link subnets [`OriginPolicy::OnLink`] accepts.
+    pub fn on_link(&self) -> &OnLink {
+        &self.on_link
+    }
+
+    /// Replaces the on-link subnets, when the interface's address changes
+    /// (a DHCP renumber onto another subnet): from the next datagram on,
+    /// sources are checked against `on_link` and the old subnets are no
+    /// longer accepted.
+    pub fn set_on_link(&mut self, on_link: OnLink) {
+        self.on_link = on_link;
+    }
+
     /// The table of instances (read only).
     pub fn table(&self) -> &AnnounceTable {
         &self.table
@@ -339,6 +352,7 @@ mod tests {
         encode_query,
     };
     use crate::mdns::MCU_BUF;
+    use crate::mdns::origin::Subnet;
     use std::vec::Vec;
 
     type Fake = MdnsAnnouncer<FakeUdp, FakeClock, MCU_BUF>;
@@ -539,6 +553,58 @@ mod tests {
         let sent = net.take_sent();
         assert!(sent.iter().any(|s| s.to == peer()));
         assert!(net.now_ms() < 1750, "the timer did not fire");
+    }
+
+    #[test]
+    fn fake_seam_a_datagram_queued_when_the_timer_is_due_is_handled_once() {
+        let net = FakeNet::new();
+        let mut a = announced(&net);
+        // The second announcement is due at 1750: the query arrives then.
+        net.advance_to(1750);
+        net.deliver(&query(), peer());
+        run(a.step()).unwrap();
+        // Nothing more is due or queued: the next step waits.
+        assert!(poll_once(a.step()).is_pending());
+        let sent = net.take_sent();
+        assert_eq!(sent.iter().filter(|s| s.to == peer()).count(), 1);
+        assert_eq!(sent.iter().filter(|s| s.to == group()).count(), 1);
+        assert_eq!(net.queued(), 0);
+    }
+
+    #[test]
+    fn fake_seam_set_on_link_moves_the_accepted_subnet() {
+        let net = FakeNet::new();
+        let old = Subnet::new("192.168.1.0".parse().unwrap(), 24).unwrap();
+        let new = Subnet::new("10.0.0.0".parse().unwrap(), 24).unwrap();
+        let mut a = MdnsAnnouncer::<_, _, MCU_BUF>::new(
+            net.udp(),
+            net.clock(),
+            AnnounceTable::new("unit.local").unwrap(),
+            AnnouncerParams {
+                destination: group(),
+                policy: OriginPolicy::OnLink,
+                on_link: OnLink::new().with(old),
+            },
+        );
+        run(a.announce(&service())).unwrap();
+        // Past the second announcement: only replies are sent from here.
+        run(a.step()).unwrap();
+        assert!(poll_once(a.step()).is_pending());
+        net.take_sent();
+        let old_peer: SocketAddr = "192.168.1.99:40000".parse().unwrap();
+        let new_peer: SocketAddr = "10.0.0.5:40000".parse().unwrap();
+        let answered = |a: &mut Fake, from: SocketAddr| {
+            net.deliver(&query(), from);
+            run(a.step()).unwrap();
+            net.take_sent().iter().any(|s| s.to == from)
+        };
+        assert!(answered(&mut a, old_peer));
+        assert!(!answered(&mut a, new_peer), "off-link before the move");
+        a.set_on_link(OnLink::new().with(new));
+        assert_eq!(a.on_link().subnets(), &[new]);
+        assert!(answered(&mut a, new_peer));
+        assert!(!answered(&mut a, old_peer), "the old subnet is dropped");
+        assert_eq!(a.dropped_replies(), 0, "refused sources are not replies");
     }
 
     #[test]

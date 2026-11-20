@@ -41,12 +41,13 @@ use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use imxrt_base::config::Endpoint;
 use imxrt_base::links::LinkId;
 use imxrt_base::zenoh_mgmt::{SubSet, subscription_diff};
 use middleware::key::Filter;
 use middleware::loader::keys;
+use middleware::mdns::embassy_seam::EmbassyClock;
 use middleware::transport::{HandlerError, Publisher, RequestOptions, Requester, Target};
 use middleware::zenoh_lite::{Clock, Config, Event, LiteError, ZenohLite, Zid};
 
@@ -64,19 +65,6 @@ const QUERYABLES: [middleware::Key<'static>; 6] = [
     keys::START,
     keys::STOP,
 ];
-
-/// embassy-time as the client's clock.
-pub struct EmbassyClock;
-
-impl Clock for EmbassyClock {
-    fn now_ms(&mut self) -> u64 {
-        Instant::now().as_millis()
-    }
-
-    async fn sleep_until_ms(&mut self, deadline_ms: u64) {
-        Timer::at(Instant::from_millis(deadline_ms)).await;
-    }
-}
 
 /// The board's Zenoh id.
 pub fn zid(uid: [u8; 8]) -> Option<Zid> {
@@ -96,7 +84,8 @@ pub fn set_endpoint(e: Option<Endpoint>) {
     ENDPOINT.lock(|c| c.set(e));
 }
 
-fn endpoint() -> Option<Endpoint> {
+/// The endpoint the next connect uses (also announced in the mDNS TXT).
+pub(super) fn endpoint() -> Option<Endpoint> {
     ENDPOINT.lock(Cell::get)
 }
 

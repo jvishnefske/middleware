@@ -35,9 +35,10 @@ use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
 use embassy_net::udp::{BindError, SendError, UdpMetadata, UdpSocket};
-use embassy_net::{IpEndpoint, MulticastError, Stack};
+use embassy_net::{IpEndpoint, Ipv4Cidr, MulticastError, Stack};
 
 use super::MDNS_GROUP_V4;
+use super::origin::{MIN_PREFIX_LEN, Subnet};
 use crate::clock::Clock;
 use crate::datagram::Datagram;
 
@@ -156,6 +157,18 @@ impl Datagram for EmbassyUdp<'_> {
     }
 }
 
+/// The subnet of an interface address `cidr` (embassy-net's
+/// `config_v4().address`), for [`OnLink::with`](super::origin::OnLink::with):
+/// the network of `cidr`, host bits masked. `None` for a prefix shorter
+/// than [`MIN_PREFIX_LEN`] (/8), which is no LAN.
+pub fn subnet(cidr: Ipv4Cidr) -> Option<Subnet> {
+    let prefix = cidr.prefix_len();
+    if u32::from(prefix) < MIN_PREFIX_LEN {
+        return None;
+    }
+    Subnet::new(cidr.address(), prefix)
+}
+
 /// `embassy_time`'s monotonic milliseconds since boot. Needs the
 /// firmware's time driver.
 #[derive(Debug, Clone, Copy, Default)]
@@ -168,11 +181,20 @@ impl Clock for EmbassyClock {
 
     async fn sleep_until_ms(&mut self, deadline_ms: u64) {
         // A deadline past what an Instant can hold never comes.
-        match embassy_time::Instant::try_from_millis(deadline_ms) {
-            Some(at) => embassy_time::Timer::at(at).await,
+        match ceil_ticks(deadline_ms, embassy_time::TICK_HZ) {
+            Some(t) => embassy_time::Timer::at(embassy_time::Instant::from_ticks(t)).await,
             None => core::future::pending().await,
         }
     }
+}
+
+/// The first tick of a `tick_hz` clock at or after `ms` milliseconds:
+/// rounded up, so a timer never fires before its deadline (at a tick rate
+/// that is not a multiple of 1000, rounding down fires up to a tick
+/// early). `None` when it does not fit a `u64`.
+fn ceil_ticks(ms: u64, tick_hz: u64) -> Option<u64> {
+    let ticks = (u128::from(ms) * u128::from(tick_hz)).div_ceil(1000);
+    u64::try_from(ticks).ok()
 }
 
 #[cfg(test)]
@@ -208,6 +230,35 @@ mod tests {
             EmbassyError::Ipv6Unsupported.to_string(),
             "IPv6 destinations are not supported"
         );
+    }
+
+    #[test]
+    fn deadlines_round_up_to_the_next_tick() {
+        // 32768 Hz: 1 ms is 32.768 ticks, so the timer waits 33.
+        assert_eq!(ceil_ticks(1, 32_768), Some(33));
+        assert_eq!(ceil_ticks(3, 32_768), Some(99));
+        assert_eq!(ceil_ticks(1000, 32_768), Some(32_768));
+        // Whole ticks are exact.
+        assert_eq!(ceil_ticks(7, 24_000_000), Some(168_000));
+        assert_eq!(ceil_ticks(5, 1000), Some(5));
+        assert_eq!(ceil_ticks(0, 32_768), Some(0));
+        // Past what an Instant holds: never.
+        assert_eq!(ceil_ticks(u64::MAX, 24_000_000), None);
+    }
+
+    #[test]
+    fn subnets_come_from_the_interface_cidr() {
+        let ip = |s: &str| s.parse::<core::net::Ipv4Addr>().unwrap();
+        let lan = subnet(Ipv4Cidr::new(ip("192.168.1.20"), 24)).unwrap();
+        assert_eq!(lan, Subnet::new(ip("192.168.1.0"), 24).unwrap());
+        assert!(lan.contains(ip("192.168.1.99")));
+        assert!(!lan.contains(ip("192.168.2.1")));
+        let host = subnet(Ipv4Cidr::new(ip("10.1.2.3"), 32)).unwrap();
+        assert!(host.contains(ip("10.1.2.3")));
+        assert!(!host.contains(ip("10.1.2.4")));
+        assert!(subnet(Ipv4Cidr::new(ip("10.0.0.1"), 8)).is_some());
+        assert_eq!(subnet(Ipv4Cidr::new(ip("10.0.0.1"), 7)), None);
+        assert_eq!(subnet(Ipv4Cidr::new(ip("10.0.0.1"), 0)), None);
     }
 
     #[test]

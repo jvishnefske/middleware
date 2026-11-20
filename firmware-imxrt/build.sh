@@ -4,7 +4,8 @@
 #   ./build.sh boot                      the bootloader ELF and its block-0 binary
 #   ./build.sh app [--version M.m]       the firmware ELF and its slot image (with
 #                                        the payload runtime, USB CDC and
-#                                        Ethernet/Zenoh; APP_FEATURES=wasm for
+#                                        Ethernet: Zenoh and the mDNS responder,
+#                                        rt1050-<uid>.local; APP_FEATURES=wasm for
 #                                        LPUART1 only, app for protocol only)
 #   ./build.sh image                     boot + app
 #   ./build.sh flash [boot] [a|b] [--version M.m]

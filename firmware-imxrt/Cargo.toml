@@ -56,8 +56,9 @@ app = ["shell", "dep:embassy-executor", "dep:embassy-sync", "dep:embassy-futures
 wasm = ["app", "dep:wasm-host", "dep:linked_list_allocator"]
 # USB CDC-ACM on OTG1 (FL6): a second serial link.
 usb = ["app", "dep:embassy-usb", "dep:embassy-usb-driver"]
-# Ethernet (KSZ8081 on ENET) with DHCP and the board's Zenoh session (FL7).
-eth = ["app", "dep:embassy-net", "dep:embassy-net-driver", "middleware/zenoh-lite"]
+# Ethernet (KSZ8081 on ENET) with DHCP, the board's Zenoh session (FL7) and
+# its mDNS responder (D43).
+eth = ["app", "dep:embassy-net", "dep:embassy-net-driver", "middleware/zenoh-lite", "middleware/mdns-embassy"]
 # Diagnostic: two tasks re-arming 125 µs and 250 µs timers forever (no
 # drivers), to test the PIT time driver under the polled drivers' timer load.
 timerstress = ["app"]
@@ -75,7 +76,7 @@ shell = ["dep:embassy-nxp", "dep:embassy-time", "dep:cortex-m", "dep:cortex-m-rt
 [dependencies]
 esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
 board-pins = { path = "../board-pins" }
-middleware = { path = "..", features = ["serial", "trust"] }
+middleware = { path = "..", features = ["serial", "trust", "mdns-core"] }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 # The payload runtime (feature `wasm`).
@@ -99,7 +100,7 @@ embedded-io-async = { version = "0.7", optional = true }
 static_cell = { version = "2.1.1", optional = true }
 embassy-usb = { version = "0.6.0", default-features = false, features = ["device", "class-cdc-acm"], optional = true }
 embassy-usb-driver = { version = "0.2.2", optional = true }
-embassy-net = { version = "0.9.1", features = ["medium-ethernet", "tcp", "dhcpv4", "proto-ipv4"], optional = true }
+embassy-net = { version = "0.9.1", features = ["medium-ethernet", "tcp", "udp", "dhcpv4", "proto-ipv4", "multicast"], optional = true }
 embassy-net-driver = { version = "0.2.0", optional = true }
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"], optional = true }
 cortex-m-rt = { version = "0.7.5", optional = true }

@@ -14,7 +14,8 @@
 //! * [`ksz8081`] — the PHY's identity check, software reset poll, 50 MHz
 //!   RMII clock mode, auto-negotiation start and link-status decode.
 //! * [`mac`] — the MAC registers: RCR and TCR for a link, ECR, the station
-//!   address, the receive buffer size, the descriptor-active triggers.
+//!   address, the multicast group hash filter (GAUR/GALR), the receive
+//!   buffer size, the descriptor-active triggers.
 //! * [`desc`] — the legacy 8-byte buffer descriptors and the receive and
 //!   transmit rings over `AtomicU32` DMA memory, with the ownership
 //!   hand-off between the CPU and the ENET DMA.
@@ -43,7 +44,8 @@
 //!    write [`ksz8081::AUTONEG_START`] to BMCR.
 //! 5. Rings: [`desc::RxRing::init`] and [`desc::TxRing::init`] with the
 //!    DTCM buffer addresses.
-//! 6. MAC: EIMR 0, EIR [`mac::EIR_ALL`], IAUR/IALR/GAUR/GALR 0, PALR/PAUR
+//! 6. MAC: EIMR 0, EIR [`mac::EIR_ALL`], IAUR/IALR 0, GAUR/GALR
+//!    [`mac::MULTICAST_FILTER`], PALR/PAUR
 //!    from [`mac::station_address`], RCR [`mac::rcr`], TCR [`mac::tcr`],
 //!    TFWR [`mac::TFWR_STORE_AND_FORWARD`], MRBR [`mac::MRBR`], RDSR/TDSR
 //!    the ring bases (checked by [`desc::ring_base_ok`]), ECR
