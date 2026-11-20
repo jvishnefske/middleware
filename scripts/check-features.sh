@@ -31,16 +31,21 @@
 #     embedded set depends on it, and of the embedded features it enables
 #     only what the device side needs (`serial`, the link it serves;
 #     `trust`, signed commits; `espnow`, which esp-base's pure core always
-#     builds) beside `zenoh`.
+#     builds) beside `zenoh`;
+#   * the updates channel `mw-updates` (design.md UP9) is host only: no
+#     embedded set depends on it or on the WebSocket bridge's crates, and of
+#     the embedded features it enables only `trust` (it verifies release
+#     certs) beside `zenoh` and `zenoh-ws`; `zenoh-ws` is never implied by
+#     `zenoh`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EMBEDDED_TARGET=thumbv6m-none-eabi
 RP2350_TARGET=thumbv8m.main-none-eabihf
 IMXRT_TARGET=thumbv7em-none-eabihf
-CLOUD_CRATES='^(zenoh|tonic|tokio|hyper|h2|mw-service|mw-gateway|mw-robot|mw-posix-node|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
+CLOUD_CRATES='^(zenoh|tonic|tokio|tokio-tungstenite|tokio-rustls|rustls|webpki-roots|hyper|h2|mw-service|mw-gateway|mw-robot|mw-posix-node|mw-updates|tracing|tracing-subscriber|tracing-opentelemetry|opentelemetry|opentelemetry_sdk|opentelemetry-otlp|serde_norway) '
 EMBEDDED_FEATURES='ble|espnow|serial|smbus|trust|cam-fixtures|zenoh-lite'
-HOST_FEATURES='std|zenoh|zenoh-otel|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
+HOST_FEATURES='std|zenoh|zenoh-otel|zenoh-ws|grpc|istio|mdns|dns-sd|memory|fw-sim|udp'
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -189,6 +194,23 @@ fi
 if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
         | grep -Eq '^mw-posix-node '; then
     fail "the embedded core depends on mw-posix-node"
+fi
+
+echo "== UP9: mw-updates is host only; zenoh-ws is opt-in"
+cargo build --quiet -p mw-updates
+up_features="$(features_of_self -p mw-updates | sort -u)"
+for want in zenoh zenoh-ws trust; do
+    grep -qx "$want" <<<"$up_features" || fail "mw-updates does not enable middleware/$want"
+done
+if grep -Eqx 'ble|espnow|serial|smbus|cam-fixtures|zenoh-lite' <<<"$up_features"; then
+    fail "mw-updates enables an embedded feature other than trust"
+fi
+if features_of_self -p middleware --features zenoh | grep -qx zenoh-ws; then
+    fail "zenoh implies zenoh-ws"
+fi
+if cargo tree --edges normal --prefix none --format '{p}' -p middleware --target "$EMBEDDED_TARGET" --no-default-features \
+        | grep -Eq '^mw-updates '; then
+    fail "the embedded core depends on mw-updates"
 fi
 
 echo "OK: feature isolation holds"

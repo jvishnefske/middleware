@@ -17,7 +17,7 @@
 //! [`SerialTransport::reset`] holds RTS for 100 ms with DTR deasserted:
 //! EN pulses low with GPIO0 high, so the chip reboots into the application.
 
-use mwctl::link::Transport;
+use crate::link::Transport;
 use serialport::{ClearBuffer, SerialPort};
 use std::io::{self, Read, Write};
 use std::time::Duration;

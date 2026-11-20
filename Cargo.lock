@@ -2102,6 +2102,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mw-updates"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "embedded-io-async",
+ "middleware",
+ "mw-gateway",
+ "mw-posix-node",
+ "mwctl",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "wat",
+ "zenoh",
+]
+
+[[package]]
 name = "mwctl"
 version = "0.1.0"
 dependencies = [
