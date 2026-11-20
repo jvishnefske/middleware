@@ -4445,7 +4445,7 @@ the probe writes out.
   flows (`uploadPayload`, `trustedUpload`, `installBinding`, `uploadUnit`)
   refuse a remote client at once; the trust panel shows a mesh node's state
   and keeps Claim disabled; default URL `wss://updates.<site>/mesh` —
-  `web/test/mesh.client.test.ts` (12 tests, among them "refuses every change
+  `web/test/mesh.client.test.ts` (11 tests, among them "refuses every change
   at once, sending nothing", "only ever sends the keys the cloud lets a
   browser ask", "answers board, peers and binding without asking");
   `web/test/trust.remote.test.ts`: "shows the node's trust state and keeps
