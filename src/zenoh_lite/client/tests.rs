@@ -381,3 +381,124 @@ fn k19_lite_request_meta_reads_both_query_forms() {
     assert_eq!((m.sender, m.deadline_ms, m.trace, m.request_id), (Some(id), Some(250), Some(t), None));
     assert_eq!(request_meta(None), RequestMeta::NONE);
 }
+
+fn reply_to<'a>(expr: &'a str, attachment: &'a [u8], payload: &'a [u8]) -> NetworkMessage<'a> {
+    NetworkMessage::Response(Response {
+        rid: 0,
+        wire_expr: WireExpr::plain(expr),
+        exts: NetExts::DEFAULT,
+        responder: None,
+        body: ResponseBody::Reply(Reply {
+            consolidation: 0,
+            body: PushBody::Put(Put {
+                attachment: Some(attachment),
+                payload,
+                ..Put::default()
+            }),
+        }),
+    })
+}
+
+#[test]
+fn u42_request_each_nodes_asks_every_node_and_gathers_each_sender() {
+    let a = SenderId([0xa1; 8]);
+    let b = SenderId([0xb2; 8]);
+    let reply_a = wire::encode_reply(a);
+    let reply_b = wire::encode_reply(b);
+    let err_b = wire::encode_reply_error(HandlerError::Denied, b);
+    let key_a = wire::node_key_buf(a, Key::from_static("sys/info")).expect("fits");
+    let key_b = wire::node_key_buf(b, Key::from_static("sys/info")).expect("fits");
+    let mut input = Vec::new();
+    batch(&mut input, |w| {
+        InitAck {
+            version: VERSION,
+            whatami: WhatAmI::Router,
+            zid: router(),
+            resolution: Resolution::DEFAULT,
+            batch_size: 1024,
+            cookie: COOKIE,
+            qos: false,
+            patch: 0,
+        }
+        .write(w)
+    });
+    batch(&mut input, |w| {
+        OpenAck {
+            lease_ms: 10_000,
+            initial_sn: 100,
+            qos: false,
+        }
+        .write(w)
+    });
+    batch(&mut input, |w| {
+        frame(100).write(w)?;
+        let (ka, kb) = (key_a.as_str(), key_b.as_str());
+        let (ra, rb, eb) = (&reply_a[..], &reply_b[..], &err_b[..]);
+        reply_to(ka, ra, b"info a").write(w)?;
+        reply_to(kb, rb, b"info b").write(w)?;
+        NetworkMessage::Response(Response {
+            rid: 0,
+            wire_expr: WireExpr::plain(kb),
+            exts: NetExts::DEFAULT,
+            responder: None,
+            body: ResponseBody::Err(ReplyErr {
+                payload: eb,
+                ..ReplyErr::default()
+            }),
+        })
+        .write(w)?;
+        NetworkMessage::ResponseFinal(ResponseFinal {
+            rid: 0,
+            exts: NetExts::DEFAULT,
+        })
+        .write(w)
+    });
+    let zid = Zid::from_slice(&[0x11, 0x22]).expect("zid");
+    let stream = Script {
+        input,
+        pos: 0,
+        out: Vec::new(),
+    };
+    let mut lite: ZenohLite<Script, Fake, 512, 512> =
+        ZenohLite::new(stream, Fake(0), Config::new(zid));
+    type Got = (Option<SenderId>, Result<Vec<u8>, HandlerError>);
+    let mut got: Vec<Got> = Vec::new();
+    let n = futures::executor::block_on(async {
+        lite.open().await.expect("open");
+        let before = lite.stream_mut().out.len();
+        let mut buf = [0u8; 64];
+        let n = lite
+            .request_each_nodes(
+                Key::from_static("sys/info"),
+                b"",
+                &mut buf,
+                &RequestOptions::DEFAULT.with_timeout(core::time::Duration::from_secs(3)),
+                8,
+                |r| {
+                    got.push((r.sender, r.result.map(<[u8]>::to_vec)));
+                    Flow::Continue
+                },
+            )
+            .await
+            .expect("gathered");
+        let out = lite.stream_mut().out[before..].to_vec();
+        let items = written(&out);
+        let request = items.iter().find_map(|i| match i {
+            Item::Network(NetworkMessage::Request(r)) => Some(*r),
+            _ => None,
+        });
+        let request = request.expect("a request was sent");
+        assert_eq!(request.wire_expr.suffix, "@mw/node/*/sys/info");
+        assert_eq!(request.target, QueryTarget::All);
+        n
+    });
+    assert_eq!(n, 3);
+    assert_eq!(
+        got,
+        vec![
+            (Some(a), Ok(b"info a".to_vec())),
+            (Some(b), Ok(b"info b".to_vec())),
+            (Some(b), Err(HandlerError::Denied)),
+        ]
+    );
+}

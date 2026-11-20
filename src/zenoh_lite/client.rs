@@ -369,6 +369,16 @@ enum Step {
     Deadline,
 }
 
+/// Which key expression a query selects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// The key itself for [`Target::Any`], the node's key for
+    /// [`Target::Node`].
+    Target,
+    /// `@mw/node/*/<key>`: the key on every node; any replier is accepted.
+    AllNodes,
+}
+
 /// What a receive is after.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Want {
@@ -1166,6 +1176,7 @@ where
         request: &[u8],
         options: &RequestOptions<'_>,
         target: QueryTarget,
+        scope: Scope,
         mut on_reply: F,
     ) -> Res<(), S>
     where
@@ -1177,9 +1188,16 @@ where
         let timeout_ms = options.timeout_ms().unwrap_or(self.timeout_ms);
         let (next, rid) = self.session.next_request_id().map_err(Self::session_err)?;
         self.session = next;
-        let node = match options.target {
-            Target::Any => None,
-            Target::Node(id) => Some(wire::node_key_buf(id, key).ok_or(LiteError::InvalidKey)?),
+        let node = match (scope, options.target) {
+            (Scope::AllNodes, _) => Some(wire::node_key_any_buf(key).ok_or(LiteError::InvalidKey)?),
+            (Scope::Target, Target::Any) => None,
+            (Scope::Target, Target::Node(id)) => {
+                Some(wire::node_key_buf(id, key).ok_or(LiteError::InvalidKey)?)
+            }
+        };
+        let accepted = match scope {
+            Scope::AllNodes => Target::Any,
+            Scope::Target => options.target,
         };
         let selector = node.as_deref().unwrap_or(key.as_str());
         let attachment =
@@ -1228,7 +1246,7 @@ where
                             (replier, Err(err))
                         }
                     };
-                    if !wire::accepts(options.target, replier) {
+                    if !wire::accepts(accepted, replier) {
                         continue;
                     }
                     if on_reply(replier, result) == Flow::Stop {
@@ -1248,6 +1266,82 @@ where
                 _ => {}
             }
         }
+    }
+
+    /// A query with target all: every accepted reply is copied into `buf`
+    /// and passed on, until `max_replies`, [`Flow::Stop`], the final
+    /// response or the timeout.
+    #[allow(clippy::too_many_arguments)]
+    async fn gather<F>(
+        &mut self,
+        key: Key<'_>,
+        request: &[u8],
+        buf: &mut [u8],
+        options: &RequestOptions<'_>,
+        max_replies: usize,
+        scope: Scope,
+        mut on_reply: F,
+    ) -> Res<usize, S>
+    where
+        F: FnMut(Gathered<'_>) -> Flow,
+    {
+        if max_replies == 0 {
+            return Ok(0);
+        }
+        let mut seen = 0usize;
+        self.query(
+            key,
+            request,
+            options,
+            QueryTarget::All,
+            scope,
+            |sender, result| {
+                seen += 1;
+                let result = match result {
+                    Ok(payload) => copy_into(buf, payload)
+                        .map(|r| &*r)
+                        .ok_or(HandlerError::BufferTooSmall),
+                    Err(e) => Err(e),
+                };
+                let flow = on_reply(Gathered { sender, result });
+                if flow == Flow::Stop || seen >= max_replies {
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                }
+            },
+        )
+        .await?;
+        Ok(seen)
+    }
+
+    /// Discovery: asks `key` of every node (`@mw/node/*/<key>`, target
+    /// all) and passes each reply on with its sender, like
+    /// [`Gather::request_each`]. `options.target` is ignored: any replier
+    /// is accepted, each answering on its own per-node key. Returns how
+    /// many replies were passed on.
+    pub async fn request_each_nodes<F>(
+        &mut self,
+        key: Key<'_>,
+        request: &[u8],
+        buf: &mut [u8],
+        options: &RequestOptions<'_>,
+        max_replies: usize,
+        on_reply: F,
+    ) -> Res<usize, S>
+    where
+        F: FnMut(Gathered<'_>) -> Flow,
+    {
+        self.gather(
+            key,
+            request,
+            buf,
+            options,
+            max_replies,
+            Scope::AllNodes,
+            on_reply,
+        )
+        .await
     }
 
     /// The next sequence of publication stream `stream`, advancing it.
@@ -1458,6 +1552,7 @@ where
             request,
             options,
             QueryTarget::BestMatching,
+            Scope::Target,
             |_, result| match result {
                 Ok(payload) => {
                     outcome = Some(match copy_into(response, payload) {
@@ -1504,32 +1599,21 @@ where
         buf: &mut [u8],
         options: &RequestOptions<'_>,
         max_replies: usize,
-        mut on_reply: F,
+        on_reply: F,
     ) -> Result<usize, Self::Error>
     where
         F: FnMut(Gathered<'_>) -> Flow,
     {
-        if max_replies == 0 {
-            return Ok(0);
-        }
-        let mut seen = 0usize;
-        self.query(key, request, options, QueryTarget::All, |sender, result| {
-            seen += 1;
-            let result = match result {
-                Ok(payload) => copy_into(buf, payload)
-                    .map(|r| &*r)
-                    .ok_or(HandlerError::BufferTooSmall),
-                Err(e) => Err(e),
-            };
-            let flow = on_reply(Gathered { sender, result });
-            if flow == Flow::Stop || seen >= max_replies {
-                Flow::Stop
-            } else {
-                Flow::Continue
-            }
-        })
-        .await?;
-        Ok(seen)
+        self.gather(
+            key,
+            request,
+            buf,
+            options,
+            max_replies,
+            Scope::Target,
+            on_reply,
+        )
+        .await
     }
 }
 
