@@ -12,7 +12,9 @@
 //!   is the Zenoh session's ([`ZenohTransport::sender_id`], the id
 //!   `Target::Node` requests and `mwctl scout` use). No bare `sys/...` key
 //!   is declared (a router's access control drops bare declarations), so
-//!   a query names this node or does not reach it. `sys/info` carries the
+//!   a query names this node or does not reach it. A wildcard query
+//!   ([`plan`]: `mwctl scout`'s `@mw/node/*/sys/info`) gets `sys/info` and
+//!   nothing else. Answers are on this node's concrete key ([`reply_key`]). `sys/info` carries the
 //!   node id ([`crate::node_id`]), which is not the sender id: that maps
 //!   one to the other.
 //! * **Served keys**, [`SERVED`]: the description keys, the payload
@@ -96,7 +98,20 @@ pub enum Plan {
 }
 
 /// Decides a query on `expr` for the node whose session id is `own`. Pure.
+///
+/// A query naming one of this node's keys is planned by that key. A
+/// wildcard query (`mwctl scout`'s `@mw/node/*/sys/info`, a sweep of
+/// `@mw/node/**`) is forwarded as `sys/info` when it covers this node's
+/// `sys/info`, and ignored otherwise: a wildcard never reaches a key that
+/// stages or acts.
 pub fn plan(expr: &str, own: SenderId) -> Plan {
+    if expr.contains('*') || expr.contains('$') {
+        let covers = zenoh::key_expr::KeyExpr::try_from(expr)
+            .ok()
+            .zip(zenoh::key_expr::KeyExpr::try_from(reply_key(own, keys::INFO)).ok())
+            .is_some_and(|(query, info)| query.includes(&info));
+        return if covers { Plan::Forward(keys::INFO) } else { Plan::Ignore };
+    }
     let Some((id, key)) = wire::parse_node_key(expr) else { return Plan::Ignore };
     if id != own {
         return Plan::Ignore;
@@ -105,6 +120,11 @@ pub fn plan(expr: &str, own: SenderId) -> Plan {
         Some(k) => Plan::Forward(*k),
         None => Plan::Refuse(HandlerError::Denied),
     }
+}
+
+/// The key a forwarded query is answered on: this node's concrete key.
+pub fn reply_key(own: SenderId, key: Key<'_>) -> String {
+    wire::node_key(own, key)
 }
 
 /// How long a forward may take: the query's remaining deadline (`None`:
@@ -263,7 +283,7 @@ pub async fn run(
         report.served += 1;
         // A failed reply only means this querier misses the answer.
         let _ = match answer {
-            Ok(r) => query.reply(query.key_expr().clone(), r).attachment(wire::encode_reply(own).to_vec()).await,
+            Ok(r) => query.reply(reply_key(own, key), r).attachment(wire::encode_reply(own).to_vec()).await,
             Err(e) => query.reply_err(wire::encode_reply_error(e, own).to_vec()).await,
         };
     };
@@ -318,9 +338,31 @@ mod tests {
     #[test]
     fn pn21_queries_for_another_node_or_no_node_are_ignored() {
         assert_eq!(plan(&node_key(OTHER, "sys/info"), OWN), Plan::Ignore);
-        for expr in ["sys/info", "@mw/node/zz/sys/info", "@mw/node/1020304050607080", "@mw/svc/x/sys/info"] {
+        for expr in
+            ["sys/info", "@mw/node/zz/sys/info", "@mw/node/1020304050607080", "@mw/svc/x/sys/info", "@mw/node/*/app/x"]
+        {
             assert_eq!(plan(expr, OWN), Plan::Ignore, "{expr}");
         }
+    }
+
+    #[test]
+    fn pn21_a_wildcard_query_gets_sys_info_only() {
+        // `mwctl scout` asks `@mw/node/*/sys/info`; a sweep of every node
+        // key finds the node by its sys/info.
+        for expr in ["@mw/node/*/sys/info", "@mw/node/**", "@mw/node/1020304050607080/sys/*", "@mw/**/info"] {
+            assert_eq!(plan(expr, OWN), Plan::Forward(keys::INFO), "{expr}");
+        }
+        // Never a wildcard to anything else: nothing that acts or stages.
+        for expr in [
+            "@mw/node/*/sys/loader/*",
+            "@mw/node/*/sys/payload/start",
+            "@mw/node/*/sys/manifest",
+            "@mw/node/*/sys/trust/**",
+        ] {
+            assert_eq!(plan(expr, OWN), Plan::Ignore, "{expr}");
+        }
+        // The answer is always on this node's concrete key.
+        assert_eq!(reply_key(OWN, keys::INFO), "@mw/node/1020304050607080/sys/info");
     }
 
     #[test]
