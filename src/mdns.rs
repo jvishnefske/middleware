@@ -38,17 +38,17 @@
 
 use core::net::Ipv4Addr;
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "mdns-core")]
 pub mod announce;
-#[cfg(feature = "mdns")]
+#[cfg(feature = "mdns-core")]
 mod error;
 #[cfg(feature = "mdns")]
 pub mod host;
-#[cfg(feature = "mdns")]
+#[cfg(feature = "mdns-core")]
 pub mod origin;
-#[cfg(feature = "mdns")]
+#[cfg(feature = "mdns-core")]
 mod race;
-#[cfg(feature = "mdns")]
+#[cfg(feature = "mdns-core")]
 pub mod socket;
 pub use crate::dns::wire;
 
@@ -56,20 +56,20 @@ pub use wire::{Instance, Message, Name, Response, ServiceInstance, ServiceType, 
 
 /// The socket error [`MdnsError`](socket::MdnsError) carries when none is
 /// named: `std::io::Error`, the tokio shells' (without `std`, `Infallible`).
-#[cfg(feature = "std")]
+#[cfg(all(feature = "mdns-core", feature = "std"))]
 pub(crate) type DefaultIo = std::io::Error;
-#[cfg(not(feature = "std"))]
+#[cfg(all(feature = "mdns-core", not(feature = "std")))]
 pub(crate) type DefaultIo = core::convert::Infallible;
 /// The socket of the bare `MdnsSocket` / `MdnsAnnouncer`: tokio's with
 /// `mdns`, else none (every other instantiation names its socket).
 #[cfg(feature = "mdns")]
 pub(crate) type DefaultSocket = host::TokioUdp;
-#[cfg(not(feature = "mdns"))]
+#[cfg(all(feature = "mdns-core", not(feature = "mdns")))]
 pub(crate) type DefaultSocket = ();
 /// The clock of the bare `MdnsAnnouncer`, as for [`DefaultSocket`].
 #[cfg(feature = "mdns")]
 pub(crate) type DefaultClock = host::TokioClock;
-#[cfg(not(feature = "mdns"))]
+#[cfg(all(feature = "mdns-core", not(feature = "mdns")))]
 pub(crate) type DefaultClock = ();
 
 /// UDP port of mDNS.
@@ -87,6 +87,6 @@ pub const STD_BUF: usize = wire::MAX_MESSAGE_LEN + 1;
 pub const MCU_BUF: usize = 1500;
 /// Longest DNS-SD type text of a kind in [`DOMAIN`]: the type, a dot, the
 /// domain.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "mdns-core")]
 pub(crate) const MAX_TYPE_TEXT: usize =
     crate::discovery::record::MAX_DNS_SD_TYPE_LEN + 1 + DOMAIN.len();

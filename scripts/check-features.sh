@@ -80,7 +80,26 @@ for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.r
     ungated "${decl%%:*}" "${decl#*:}" || fail "${decl#*:} in ${decl%%:*} is missing or cfg-gated"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust"; do
+# The mDNS core (D19): the pure table and origin policy, MdnsError and
+# the generic shells are gated on `mdns-core`, never on the std feature
+# `mdns` (which only adds the tokio seam and builders: the `host` modules).
+echo "== D19: the mDNS core is gated on mdns-core"
+for f in src/mdns/origin.rs src/mdns/announce/table.rs src/mdns/error.rs src/mdns/race.rs \
+         src/mdns/announce.rs src/mdns/socket.rs; do
+    # Every mention of the feature is `#[cfg(feature = "mdns")]` on the
+    # line before `mod host;` or `pub use host::...`.
+    odd="$(grep -n 'feature = "mdns"' "$f" | grep -vF '#[cfg(feature = "mdns")]' || true)"
+    [ -z "$odd" ] || fail "$f uses the std feature mdns outside a host module gate: $odd"
+    bad="$(grep -n -A1 -F '#[cfg(feature = "mdns")]' "$f" | grep -vF 'feature = "mdns"' \
+        | grep -v -e '^--$' -e '^[0-9]*-mod host;$' -e '^[0-9]*-pub use host::' || true)"
+    [ -z "$bad" ] || fail "$f gates more than its host module on the std feature mdns: $bad"
+done
+for m in announce origin socket error race; do
+    grep -B1 -E "^(pub )?mod $m;" src/mdns.rs | head -1 | grep -qx '#\[cfg(feature = "mdns-core")\]' \
+        || fail "mod $m in src/mdns.rs is not gated on mdns-core"
+done
+
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "mdns-core" "mdns-core,espnow"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then

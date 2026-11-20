@@ -314,6 +314,7 @@ pub fn reply_target(on_link: &OnLink, from: SocketAddr) -> Option<SocketAddr> {
     (!bad).then_some(from)
 }
 
+#[cfg(feature = "std")]
 /// Reads the flags of interface `name` from `/sys/class/net`; `None` for a
 /// name that is not a plain file name or an unreadable value.
 fn system_interface_flags(name: &str) -> Option<u32> {
@@ -325,6 +326,7 @@ fn system_interface_flags(name: &str) -> Option<u32> {
     parse_interface_flags(&text)
 }
 
+#[cfg(feature = "std")]
 /// The on-link subnets of this host: on Linux the connected routes of
 /// `/proc/net/route` on broadcast LAN interfaces, elsewhere none (loopback
 /// and link-local only).

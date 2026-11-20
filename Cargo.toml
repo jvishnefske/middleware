@@ -56,7 +56,13 @@ cam-fixtures = []
 zenoh = ["std", "dep:zenoh", "dep:tokio"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
-mdns = ["std", "dep:tokio", "tokio?/net", "dep:socket2"]
+# The mDNS core (no_std, no heap): the pure announce table and origin
+# policy, `MdnsError` and the shells `MdnsSocket<S, N>` and
+# `MdnsAnnouncer<S, C, N>`, generic over the `datagram::Datagram` and
+# `clock::Clock` seams. Neither embedded nor host: `mdns` enables it.
+mdns-core = []
+# The tokio and socket2 instantiation of the mDNS shells and their builders.
+mdns = ["std", "mdns-core", "dep:tokio", "tokio?/net", "dep:socket2"]
 # Unicast DNS-SD (RFC 6763 over ordinary DNS: SRV/TXT/A/AAAA lookups and
 # browsing through a resolver), `dns::unicast`. Host only, like `mdns`.
 dns-sd = ["std", "dep:tokio", "tokio?/net", "dep:getrandom"]
