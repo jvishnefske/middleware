@@ -41,6 +41,7 @@ pub mod driver;
 pub mod espnow_gw;
 pub mod flash;
 pub mod layout;
+pub mod mesh_gate;
 pub mod node_id;
 pub mod service;
 pub mod shell;
