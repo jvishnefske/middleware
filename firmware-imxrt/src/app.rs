@@ -80,6 +80,8 @@ pub const FIRMWARE: &str = concat!(env!("CARGO_PKG_VERSION"), "+no-wasm");
 static BUS_SDRAM: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 
 #[cfg(feature = "eth")]
+mod mdns;
+#[cfg(feature = "eth")]
 mod zenoh;
 
 /// Sockets: DHCP, the Zenoh TCP socket and the mDNS UDP socket, with room
@@ -106,8 +108,17 @@ async fn zenoh_task(stack: embassy_net::Stack<'static>, bus: &'static Bus, uid: 
     zenoh::run(stack, bus, uid).await
 }
 
+/// The mDNS responder; its buffers are in the future, so in the task pool
+/// in SDRAM.
+#[cfg(feature = "eth")]
+#[embassy_executor::task]
+async fn mdns_task(stack: embassy_net::Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
+    mdns::run(stack, bus, uid).await
+}
+
 /// Brings up Ethernet (the KSZ8081 reset takes about 110 ms), the
-/// embassy-net stack with DHCP and the Zenoh session task.
+/// embassy-net stack with DHCP, the Zenoh session task and the mDNS
+/// responder.
 #[cfg(feature = "eth")]
 async fn start_eth(spawner: Spawner, bus: &'static Bus, uid: [u8; 8]) {
     let mac = imxrt_base::enet::mac_from_uid(uid);
@@ -123,6 +134,7 @@ async fn start_eth(spawner: Spawner, bus: &'static Bus, uid: [u8; 8]) {
             spawner.spawn(net_task(runner).unwrap());
             spawner.spawn(enet_poll_task(poller).unwrap());
             spawner.spawn(zenoh_task(stack, bus, uid).unwrap());
+            spawner.spawn(mdns_task(stack, bus, uid).unwrap());
             bus.log(format_args!(
                 "eth: up, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
