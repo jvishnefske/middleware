@@ -5177,6 +5177,51 @@ trusts a hardware key.
   (TK4) and drives `fw update` over any endpoint, ESP-NOW included once
   the CLI's refusal is lifted for a board that has the updater.
 
+### No fuse or OTP writes (NF…)
+
+Nothing in this repository burns a microcontroller's one-time-programmable
+memory: no ESP32 eFuse (secure boot, flash encryption, JTAG disable, keys),
+no RP2350 OTP row (secure boot, boot flags, rollback counters, keys), no
+i.MX RT fuse word (boot configuration, `BT_FUSE_SEL`, `SEC_CONFIG`, keys).
+A burned fuse can never be cleared and can brick a board, and the design
+never needs one: trust is the claimed key in flash (`loader::trust`), boot
+safety is A/B with try-before-you-buy, and the firmwares only *read* their
+identities (the ESP base MAC, the RP2350 chip id, the RT1050 unique id from
+OCOTP's shadow registers).
+
+- [x] NF1 No fuse or OTP writer is called, named or scripted anywhere
+  (firmware, tools, scripts, build files): esp-idf `esp_efuse_*` writers,
+  `espefuse`/`espsecure`, secure-boot and flash-encryption switches;
+  embassy-rp `otp::write_raw_word`/`write_ecc_word`, the boot ROM's
+  `otp_access` and `explicit_buy`, `picotool otp|seal|encrypt`; OCOTP
+  register writes (PAC `.write`/`.modify`, or its address `0x401F_4xxx`),
+  `blhost`/`sdphost`/`elftosb`. Reads stay allowed —
+  `scripts/check-no-fuse-writes.sh`, CI job "No fuse or OTP writes"
+  (checked against planted violations).
+- [x] NF2 The ROM's OTP writer is `unsafe` and every firmware crate root
+  forbids `unsafe` (the two local exceptions are the RT1050 bootloader's
+  jump and an ESP ADC peripheral steal); embassy-rp's *safe* OTP writers
+  are also `clippy::disallowed_methods` in `firmware-rp/clippy.toml`.
+- [x] NF3 The i.MX RT debug tools refuse, before the probe sees it, any
+  memory write that touches the OCOTP controller (`0x401F_4000`–`0x401F_8000`):
+  every J-Link command list (`jflash.jlink`, also refusing OTP/eFuse
+  commands and writes it cannot bound), every GDB `M`/`X` packet
+  (`rsp.Rsp.cmd`) and every `probe-rs write` (`ramload.probe_rs`, `flash.py`)
+  — `firmware-imxrt/tools/fusesafe.py` (self-test run by the CI check,
+  which also requires each tool to import it).
+- [x] NF4 Firmware updates never make the RP2350 bootrom write OTP: an
+  image with an OTP rollback version (the only image field the bootrom
+  burns, and only in secure boot) is refused by the device at commit and
+  by `mwctl`/`mw-release` before sending or publishing —
+  `fw_ota::machine::acceptable`,
+  `fw_ota::machine::tests::y3_verification_failures_abandon_the_transfer`,
+  `mwctl::fw::load_image` (`ImageError::Rollback`). The explicit buy is a
+  flash rewrite of the image's first sector, never the ROM call.
+
+What this cannot cover: a release's own code. A firmware image signed by
+the root runs with full access to its chip, so the guarantee for released
+firmware is that it is built from this repository, where NF1–NF2 hold.
+
 ### Over-the-air payload update (O…)
 
 A claimed ESP base firmware device (ESP32, ESP32-S3: feature `espnow`)
