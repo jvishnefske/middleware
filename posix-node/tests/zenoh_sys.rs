@@ -175,14 +175,11 @@ fn steps(version: Option<u32>) -> Vec<mwctl::plan::Step> {
 }
 
 async fn upload(z: &ZenohTransport, node: SenderId, version: Option<u32>) -> Result<Vec<u8>, Option<HandlerError>> {
-    let mut last = Ok(Vec::new());
+    let mut last = Vec::new();
     for s in steps(version) {
-        last = ask(z, node, s.key, &s.body).await;
-        if last.is_err() {
-            return last;
-        }
+        last = ask(z, node, s.key, &s.body).await?;
     }
-    last
+    Ok(last)
 }
 
 fn own_target() -> [u8; TARGET_LEN] {
