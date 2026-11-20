@@ -28,6 +28,12 @@
 //!   synchronous state machine.
 //! * [`shell`] — the device thread over its serial links and the
 //!   in-process gateway (`mw_gateway::start` over a `ChannelIo` pair).
+//! * [`zenoh_sys`] — the node's own `sys/...` keys over Zenoh, at
+//!   `@mw/node/<sender id>/sys/**`, forwarded to the device thread over a
+//!   third link; [`mesh_gate`] — what a Zenoh peer may ask (the signed
+//!   rules of the RT1050's Zenoh gate, each requester its own origin).
+//! * [`session_config`] — the node's Zenoh session: a client of its
+//!   router, its id derived from the node id ([`node_id::zenoh_id`]).
 //!
 //! On the wire the node is a board: `sys/info` names the chip
 //! [`service::CHIP`] (`linux-aarch64`), the firmware version, the node id

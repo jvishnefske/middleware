@@ -13,7 +13,7 @@
 //! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
 //! | `MW_POSIX_NODE_ESPNOW_BRIDGE` | none (gateway off) | path of the USB↔ESP-NOW bridge's serial port (`tools/espnow-bridge`, 460800 baud): the node gateways ESP-NOW devices onto Zenoh ([`crate::espnow_gw`]) |
 //! | `MW_POSIX_NODE_ESPNOW_DOWNLINK` | none | with the bridge: `app` keys broadcast to the devices, comma-separated, at most 8; `app/cmd/**` is the key and everything below it, otherwise one key |
-//! | `MW_POSIX_NODE_ZENOH_SYS` | `on` | `on` or `off`: the node's own `sys/...` keys served over Zenoh at `@mw/node/<sender id>/sys/**` (`crate::zenoh_sys`); never read under an old name |
+//! | `MW_POSIX_NODE_ZENOH_SYS` | `on` | `on` or `off`: the node's own `sys/...` keys served over Zenoh at `@mw/node/<sender id>/sys/**` ([`crate::zenoh_sys`]); never read under an old name |
 //!
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
 //! (`mw_gateway::GatewayConfig`; `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD`
@@ -146,7 +146,7 @@ pub struct PosixNodeConfig {
     pub espnow_bridge: Option<String>,
     /// `app` filters broadcast to the ESP-NOW devices.
     pub espnow_downlink: Vec<DownlinkFilter>,
-    /// Serve the node's `sys/...` keys over Zenoh (`crate::zenoh_sys`).
+    /// Serve the node's `sys/...` keys over Zenoh ([`crate::zenoh_sys`]).
     pub zenoh_sys: bool,
     /// Old names that were used: `MW_PI_NODE_*` variables, and
     /// [`LEGACY_STATE`] when it was chosen. The binary warns about each.

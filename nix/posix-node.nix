@@ -12,6 +12,12 @@
 #            gateway: always, delays growing from 2 s to 1 min, no start
 #            limit. MemoryDenyWriteExecute is off: a wasm payload runtime
 #            may compile code at run time.
+#   zenoh    the node serves its own sys keys at @mw/node/<sender id>/sys/**
+#            (MW_POSIX_NODE_ZENOH_SYS, on by default; the signed rules of
+#            posix-node/src/mesh_gate.rs). No option: set
+#            `environment.MW_POSIX_NODE_ZENOH_SYS = "off"` to turn it off.
+#            The session is a Zenoh client of MW_ZENOH_ROUTER with an id
+#            derived from the node id, so the sender id survives restarts.
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.mw-posix-node;
