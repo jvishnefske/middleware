@@ -51,3 +51,28 @@ pub async fn zenoh_pair() -> (ZenohTransport, ZenohTransport, String) {
     let node = ZenohTransport::open(node).await.expect("open node");
     (cluster, node, endpoint)
 }
+
+/// A Zenoh router session (what `zenohd` is to the nodes) listening on a
+/// fresh loopback endpoint, and the endpoint.
+pub async fn router() -> (ZenohTransport, String) {
+    let endpoint = endpoint().await;
+    let mut config = SessionConfig::new().listen(endpoint.clone()).build().expect("config");
+    config.insert_json5("mode", "\"router\"").expect("router mode");
+    // As zenohd: gossip on, so it brokers between the peers connected to it.
+    config.insert_json5("scouting/gossip/enabled", "true").expect("gossip");
+    (ZenohTransport::open(config).await.expect("open router"), endpoint)
+}
+
+/// A peer session connected to `endpoint`.
+pub async fn peer(endpoint: &str) -> ZenohTransport {
+    let config = SessionConfig::new().connect(endpoint.to_owned()).build().expect("config");
+    ZenohTransport::open(config).await.expect("open peer")
+}
+
+/// The session the binary opens for node `node` on `endpoint`
+/// (`mw_posix_node::session_config`: a client with the id derived from
+/// the node id).
+pub async fn node_session(endpoint: &str, node: SenderId) -> ZenohTransport {
+    let config = mw_posix_node::session_config(endpoint, node).expect("config");
+    ZenohTransport::open(config).await.expect("open node session")
+}

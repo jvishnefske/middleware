@@ -45,7 +45,9 @@ tracing = "0.1"
 gpiocdev = { version = "0.8", default-features = false, features = ["uapi_v2"] }
 
 [dev-dependencies]
-# Signs commits and plans uploads in the end-to-end test, as mwctl does.
-mwctl = { path = "../tools/mwctl" }
+# Signs commits and plans uploads in the end-to-end test, as mwctl does;
+# `zenoh` for its ZenohLink (tests/zenoh_sys.rs). A dev-dependency's
+# features do not reach the shipped mwctl (scripts/check-features.sh).
+mwctl = { path = "../tools/mwctl", features = ["zenoh"] }
 wat = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"] }

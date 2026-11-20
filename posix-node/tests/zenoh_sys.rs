@@ -9,19 +9,28 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{NODE, state_dir, test_seed, zenoh_pair};
-use middleware::loader::trust::{TrustInfo, TrustState};
-use middleware::loader::{DeviceInfo, keys};
+use common::{NODE, demo, node_session, peer, router, state_dir, test_seed, zenoh_pair};
+use middleware::loader::manifest::Manifest;
+use middleware::loader::trust::{ControlCounter, ControlOp, TARGET_LEN, TrustInfo, TrustState, Version};
+use middleware::loader::{DeviceInfo, PayloadStatus, keys};
 use middleware::serial::link::{INBOX_BYTES, LinkError, RECV_BUF_LEN, SerialLink};
-use middleware::transport::{HandlerError, RequestOptions, Requester};
-use middleware::zenoh::ZenohTransport;
+use middleware::transport::{HandlerError, RequestOptions, Requester, Target};
+use middleware::zenoh::{ZenohError, ZenohTransport, wire};
 use middleware::{Key, SenderId};
 use mw_gateway::GatewayConfig;
 use mw_gateway::io::{ChannelIo, Closed, pair};
 use mw_gateway::state::ControlStore;
 use mw_posix_node::config::gateway_state_dir;
+use mw_posix_node::driver::Driver;
+use mw_posix_node::driver::sim::{SimConfig, SimDriver};
 use mw_posix_node::mesh_gate::wrap;
-use mw_posix_node::{DeviceParts, GatewayParts, PosixNode, facts, limits, open_state_flash, start};
+use mw_posix_node::service::CHIP;
+use mw_posix_node::zenoh_sys::{self, Options, Report};
+use mw_posix_node::{DeviceParts, GatewayParts, PosixNode, facts_with_driver, limits, open_state_flash, start};
+use mwctl::plan::upload_plan;
+use mwctl::sign::{sign_commit, sign_control};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 const A: SenderId = SenderId([0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8]);
@@ -36,13 +45,14 @@ async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Link, Channe
     let mut config = GatewayConfig::from_env(&|_| None).expect("config");
     config.state_dir = gateway_state_dir(None, state);
     let store = ControlStore::in_dir(&config.state_dir);
+    let driver = SimDriver::new(SimConfig::pc_turn_50());
     let device = DeviceParts {
         flash: open_state_flash(state).expect("state"),
-        facts: facts(NODE),
+        facts: facts_with_driver(NODE, &driver as &dyn Driver),
         limits: limits(1024 * 1024),
         local: Some(local_node),
         mesh: Some(mesh_node),
-        driver: Box::new(mw_posix_node::driver::NoDriver),
+        driver: Box::new(driver),
     };
     let gateway = GatewayParts { bridge: config.bridge_with_floor(None), options: config.shell_options(), store };
     let (pi, _sys) = start(device, gateway, session).await.expect("start");
@@ -98,5 +108,271 @@ async fn pn25_the_mesh_link_carries_requests_with_their_requester_and_never_publ
 
     let report = pi.stop().await;
     assert!(report.device.synced);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// A node serving its sys keys over Zenoh (what the binary runs).
+struct Served {
+    pi: PosixNode,
+    local: Link,
+    /// The node session's sender id: the id in its keys.
+    id: SenderId,
+    stop: oneshot::Sender<()>,
+    task: JoinHandle<Result<Report, zenoh_sys::SysError>>,
+}
+
+impl Served {
+    async fn start(state: &Path, session: ZenohTransport) -> Served {
+        let id = session.sender_id();
+        let (pi, local, mesh) = node(state, session.clone()).await;
+        let (stop, stopped) = oneshot::channel::<()>();
+        let task = tokio::spawn(zenoh_sys::run(mesh, session, Options::default(), async {
+            let _ = stopped.await;
+        }));
+        Served { pi, local, id, stop, task }
+    }
+
+    async fn stop(self) -> Report {
+        let _ = self.stop.send(());
+        let report = self.task.await.expect("task").expect("zenoh_sys");
+        assert!(self.pi.stop().await.device.synced);
+        report
+    }
+}
+
+/// What a query got: the body, an error reply, or no reply (`None`).
+async fn ask(z: &ZenohTransport, node: SenderId, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Option<HandlerError>> {
+    let mut z = z.clone();
+    let opts = RequestOptions::DEFAULT.with_target(Target::Node(node)).with_timeout(Duration::from_secs(8));
+    let mut out = vec![0u8; 4096];
+    match z.request_with(key, body, &mut out, &opts).await {
+        Ok(r) => Ok(r.to_vec()),
+        Err(ZenohError::Handler(e)) => Err(Some(e)),
+        Err(ZenohError::NoReply) => Err(None),
+        Err(e) => panic!("{}: {e:?}", key.as_str()),
+    }
+}
+
+/// `sys/info` over Zenoh, retried until the queryable has propagated.
+async fn info(z: &ZenohTransport, node: SenderId) -> DeviceInfo<'static> {
+    let raw = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            if let Ok(b) = ask(z, node, keys::INFO, &[]).await {
+                return b;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("sys/info over zenoh");
+    DeviceInfo::decode(Box::leak(raw.into_boxed_slice())).expect("decode")
+}
+
+fn steps(version: Option<u32>) -> Vec<mwctl::plan::Step> {
+    let image = demo();
+    let auth = version.map(|v| sign_commit(&image, &test_seed(), Version(v)).expect("sign"));
+    upload_plan(&image, None, auth).expect("plan")
+}
+
+async fn upload(z: &ZenohTransport, node: SenderId, version: Option<u32>) -> Result<Vec<u8>, Option<HandlerError>> {
+    let mut last = Ok(Vec::new());
+    for s in steps(version) {
+        last = ask(z, node, s.key, &s.body).await;
+        if last.is_err() {
+            return last;
+        }
+    }
+    last
+}
+
+fn own_target() -> [u8; TARGET_LEN] {
+    let mut t = [0u8; TARGET_LEN];
+    t.copy_from_slice(&NODE.0[..TARGET_LEN]);
+    t
+}
+
+fn control(op: ControlOp, target: [u8; TARGET_LEN], counter: u64) -> Vec<u8> {
+    sign_control(&test_seed(), op, &target, ControlCounter(counter)).expect("sign").encode().to_vec()
+}
+
+const DENIED: Result<Vec<u8>, Option<HandlerError>> = Err(Some(HandlerError::Denied));
+const NOT_OWNER: Result<Vec<u8>, Option<HandlerError>> = Err(Some(HandlerError::InvalidRequest));
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pn21_info_manifest_and_cm_over_zenoh() {
+    let state = state_dir("zsys-info");
+    let (cluster, endpoint) = router().await;
+    let mut node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    let id = node.id;
+    assert_ne!(id, NODE, "the key carries the session id, sys/info the node id");
+    let zid: zenoh::session::ZenohId = mw_posix_node::node_id::zenoh_id(NODE).parse().expect("zid");
+    assert_eq!(id, middleware::zenoh::sender_id_of(zid), "derived from the node id");
+
+    // mwctl's own Zenoh link (`mwctl --zenoh <endpoint> --node <id> info`).
+    let ep = endpoint.clone();
+    let (dev_info, dev_manifest) = tokio::task::spawn_blocking(move || {
+        use mwctl::zlink::{Route, ZenohLink};
+        let mut link = ZenohLink::open(&Route::Connect(ep), id, None).expect("open");
+        link.wait_for_board(TIMEOUT).expect("board");
+        let mut dev = mwctl::device::Device::new(link);
+        (dev.info().expect("info"), dev.manifest().expect("manifest"))
+    })
+    .await
+    .expect("mwctl");
+    assert_eq!(dev_info.chip, CHIP);
+    assert_eq!(dev_info.node, Some(NODE));
+    assert_eq!(dev_info.status, PayloadStatus::Empty);
+    // The manifest over Zenoh is the manifest over the local link, byte
+    // for byte (the browser's fixtures come from either).
+    let over_zenoh = ask(&cluster, id, keys::MANIFEST, &[]).await.expect("manifest");
+    let over_local = request(&mut node.local, keys::MANIFEST, &[]).await.expect("manifest");
+    assert_eq!(over_zenoh, over_local);
+    assert_eq!(Manifest::decode(&over_zenoh).expect("decode"), dev_manifest);
+    let cm = ask(&cluster, id, keys::CONTROL_MODULES, &[]).await.expect("cm");
+    assert!(cm.windows(5).any(|w| w == b"x_pos"), "{cm:?}");
+    assert_eq!(cm, request(&mut node.local, keys::CONTROL_MODULES, &[]).await.expect("cm"));
+    let trust = ask(&cluster, id, keys::TRUST_INFO, &[]).await.expect("trust info");
+    assert_eq!(TrustInfo::decode(&trust).expect("decode").state, TrustState::Unclaimed);
+
+    // A wildcard get finds it under its session id, and the reply says so.
+    let replies = cluster.session().get("@mw/node/*/sys/info").await.expect("get");
+    let mut found = Vec::new();
+    while let Ok(r) = replies.recv_async().await {
+        if let Ok(sample) = r.result() {
+            let att = sample.attachment().map(|a| a.to_bytes().into_owned());
+            found.push((sample.key_expr().as_str().to_owned(), att.as_deref().and_then(wire::decode_reply)));
+        }
+    }
+    assert_eq!(found, [(wire::node_key(id, keys::INFO), Some(id))]);
+    // No bare key: a query for any node's sys/info finds nobody.
+    let mut any = cluster.clone();
+    let mut out = vec![0u8; 512];
+    let opts = RequestOptions::DEFAULT.with_target(Target::Any).with_timeout(Duration::from_millis(500));
+    assert!(matches!(any.request_with(keys::INFO, &[], &mut out, &opts).await, Err(ZenohError::NoReply)));
+
+    // Twenty at once all answer, one at a time.
+    let all = futures_join(20, |_| {
+        let c = cluster.clone();
+        async move { ask(&c, id, keys::INFO, &[]).await.is_ok() }
+    })
+    .await;
+    assert!(all.iter().all(|ok| *ok), "{all:?}");
+
+    let report = node.stop().await;
+    assert!(report.served >= 25, "{report:?}");
+    assert_eq!(report.timeouts, 0);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// Runs `n` futures concurrently; their outputs in order.
+async fn futures_join<F, T>(n: usize, f: impl Fn(usize) -> F) -> Vec<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handles: Vec<_> = (0..n).map(|i| tokio::spawn(f(i))).collect();
+    let mut out = Vec::new();
+    for h in handles {
+        out.push(h.await.expect("task"));
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pn22_pn23_an_unclaimed_node_answers_its_description_and_nothing_else() {
+    let state = state_dir("zsys-unclaimed");
+    let (cluster, endpoint) = router().await;
+    let mut node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    let id = node.id;
+    info(&cluster, id).await;
+    for key in [
+        "sys/trust/claim",
+        "sys/board",
+        "sys/peers",
+        "sys/fw/begin",
+        "sys/fw/info",
+        "sys/log",
+        "sys/zenoh/endpoint",
+        "sys/payload/status",
+        "sys/link/sub",
+    ] {
+        let body = test_seed().public_key();
+        assert_eq!(ask(&cluster, id, Key::new(key).unwrap(), body.as_bytes()).await, DENIED, "{key}");
+    }
+    // Unclaimed: the gate refuses what installs, runs or binds.
+    assert_eq!(upload(&cluster, id, None).await, DENIED);
+    assert_eq!(upload(&cluster, id, Some(1)).await, DENIED);
+    assert_eq!(ask(&cluster, id, keys::START, &control(ControlOp::Start, own_target(), 5)).await, DENIED);
+    assert_eq!(ask(&cluster, id, keys::STOP, &[]).await, DENIED);
+    assert_eq!(ask(&cluster, id, keys::BINDING, &[]).await, DENIED);
+    assert_eq!(ask(&cluster, id, keys::BIND, &[1, 2, 3]).await, DENIED);
+    // Nothing changed.
+    let trust = request(&mut node.local, keys::TRUST_INFO, &[]).await.expect("trust");
+    assert_eq!(TrustInfo::decode(&trust).expect("decode").state, TrustState::Unclaimed);
+    assert_eq!(info(&cluster, id).await.status, PayloadStatus::Empty);
+    let report = node.stop().await;
+    assert!(report.refused >= 9, "{report:?}");
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pn23_pn24_pn25_signed_installs_starts_and_owned_transfers_over_zenoh() {
+    let state = state_dir("zsys-signed");
+    let (a, endpoint) = router().await;
+    let b = peer(&endpoint).await;
+    let mut node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    let id = node.id;
+    info(&a, id).await;
+    request(&mut node.local, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).await.expect("claim");
+
+    // Unsigned: refused; signed: installed; the same version again: refused.
+    assert_eq!(upload(&a, id, None).await, DENIED);
+    upload(&a, id, Some(1)).await.expect("signed upload");
+    assert_eq!(upload(&a, id, Some(1)).await, DENIED);
+    // Start: unsigned, or signed for the RT1050's address, refused.
+    assert_eq!(ask(&a, id, keys::START, &[]).await, DENIED);
+    let rt = [0x02, NODE.0[3], NODE.0[4], NODE.0[5], NODE.0[6], NODE.0[7]];
+    assert_eq!(ask(&a, id, keys::START, &control(ControlOp::Start, rt, 100)).await, DENIED);
+    let start = control(ControlOp::Start, own_target(), 100);
+    ask(&a, id, keys::START, &start).await.expect("signed start");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Running);
+    assert_eq!(ask(&b, id, keys::START, &start).await, DENIED, "a replay");
+
+    // A second upload by A, staged beside the running payload. B can
+    // neither continue nor end it; nor can A's own unsigned commit.
+    let s = steps(Some(2));
+    let (commit, transfer) = s.split_last().expect("steps");
+    for step in transfer {
+        ask(&a, id, step.key, &step.body).await.expect("staged transfer");
+        assert_eq!(info(&a, id).await.status, PayloadStatus::Running);
+        assert_eq!(ask(&b, id, transfer[1].key, &transfer[1].body).await, NOT_OWNER);
+    }
+    assert_eq!(ask(&b, id, commit.key, &commit.body).await, NOT_OWNER);
+    assert_eq!(ask(&b, id, keys::COMMIT, &[]).await, NOT_OWNER);
+    assert_eq!(ask(&a, id, keys::COMMIT, &[]).await, DENIED);
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Running);
+    ask(&a, id, commit.key, &commit.body).await.expect("A's signed commit");
+
+    // Binding: readable once claimed (none stored yet); unsigned refused.
+    assert_eq!(ask(&a, id, keys::BINDING, &[]).await, Err(Some(HandlerError::NotFound)));
+    let record = mwctl::bindspec::record(mwctl::sign::image_sha256(&demo()), 3, &[]).expect("record");
+    assert_eq!(ask(&a, id, keys::BIND, &record).await, DENIED);
+
+    // A serial begin takes a Zenoh transfer over.
+    let s = steps(Some(3));
+    ask(&a, id, s[0].key, &s[0].body).await.expect("zenoh begin");
+    request(&mut node.local, s[0].key, &s[0].body).await.expect("serial begin");
+    assert_eq!(ask(&a, id, s[1].key, &s[1].body).await, NOT_OWNER);
+
+    // Restart on the same state directory: the counter holds, and the
+    // node answers under the same id.
+    let report = node.stop().await;
+    assert_eq!(report.timeouts, 0);
+    let node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    assert_eq!(node.id, id, "the sender id survives a restart");
+    info(&a, id).await;
+    assert_eq!(ask(&a, id, keys::START, &start).await, DENIED, "a replay after a restart");
+    ask(&a, id, keys::START, &control(ControlOp::Start, own_target(), 101)).await.expect("a fresh counter");
+    node.stop().await;
     let _ = std::fs::remove_dir_all(&state);
 }
