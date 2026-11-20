@@ -43,7 +43,8 @@
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
 //!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, `checkRecipe`,
-//!   `allocateRecipe`, `simulateRecipe`, `RecipeRun`, `phaseModel`, ...). It only converts values.
+//!   `allocateRecipe`, `simulateRecipe`, `RecipeRun`, `phaseModel`, ...) and
+//!   `mesh_js` (`MeshSession`). They only convert values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
@@ -58,6 +59,7 @@ pub mod flows;
 pub mod loader;
 pub mod machines;
 pub mod mesh;
+mod mesh_js;
 pub mod pins;
 pub mod recipes;
 #[cfg(feature = "simulator")]

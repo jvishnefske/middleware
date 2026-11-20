@@ -21,12 +21,12 @@ use middleware::wasm_abi::events::{self, DmaChannel, EventKind};
 use middleware::wasm_abi::periph::{self, Edge};
 use wasm_bindgen::prelude::*;
 
-fn set(obj: &Object, key: &str, value: impl Into<JsValue>) {
+pub(crate) fn set(obj: &Object, key: &str, value: impl Into<JsValue>) {
     // `Reflect::set` on a plain, unfrozen object cannot fail.
     let _ = Reflect::set(obj, &JsValue::from_str(key), &value.into());
 }
 
-fn bytes(data: &[u8]) -> Uint8Array {
+pub(crate) fn bytes(data: &[u8]) -> Uint8Array {
     Uint8Array::from(data)
 }
 
@@ -555,8 +555,9 @@ impl JsDeviceLoader {
 
 /// Protocol constants and system keys:
 /// `{chunkMax, maxRawFrame, maxWireFrame, signedCommitLen, rekeyWindowMs,
-/// presenceHoldMs, keys: {info, board, begin, chunk, commit, start, stop, log,
-/// status, trustInfo, trustClaim}}`.
+/// presenceHoldMs, keys: {info, board, manifest, bind, binding, peers, begin,
+/// chunk, commit, start, stop, log, status, trustInfo, trustClaim,
+/// controlModules}}`.
 #[wasm_bindgen]
 pub fn protocol() -> Object {
     let o = Object::new();
@@ -583,6 +584,7 @@ pub fn protocol() -> Object {
         ("status", keys::STATUS),
         ("trustInfo", keys::TRUST_INFO),
         ("trustClaim", keys::TRUST_CLAIM),
+        ("controlModules", keys::CONTROL_MODULES),
     ] {
         set(&k, name, key.as_str());
     }
@@ -1652,7 +1654,7 @@ pub fn simulate_recipe(
 }
 
 /// 16 lower- or upper-case hex digits to a node id.
-fn parse_node(hex: &str) -> Option<middleware::SenderId> {
+pub(crate) fn parse_node(hex: &str) -> Option<middleware::SenderId> {
     let b = hex.as_bytes();
     if b.len() != 16 {
         return None;
@@ -1666,7 +1668,7 @@ fn parse_node(hex: &str) -> Option<middleware::SenderId> {
 }
 
 /// A node id as 16 lower-case hex digits.
-fn node_hex(id: middleware::SenderId) -> String {
+pub(crate) fn node_hex(id: middleware::SenderId) -> String {
     id.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 
