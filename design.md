@@ -781,6 +781,16 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   `thumbv7em-none-eabihf` and `thumbv8m.main-none-eabihf` with no cloud
   dependency and no host feature — `mdns::embassy_seam::tests::*`,
   `scripts/check-features.sh`.
+- [x] D40 The RT1050's ENET admits the mDNS group (224.0.0.251,
+  `01:00:5e:00:00:fb`) and all hosts (224.0.0.1, so IGMP general queries
+  arrive and the membership stays alive on a snooping switch) through its
+  group hash and nothing else extra: the hash is the top six bits of the
+  reflected CRC-32 of the address (initial value all ones, no final
+  inversion, as Linux `fec_main.c` and NXP `fsl_enet.c`), bit 5 choosing
+  GAUR or GALR; `MULTICAST_FILTER` = (GAUR 0x0040_0002, GALR 0), vectors
+  checked with zlib (0x84dcdefc, h 33; 0xd9b4c5fe, h 54), written once in
+  `app::enet::new` while the MAC is in reset — firmware-imxrt
+  `enet::mac::tests::d40_*`.
 - [x] D41 Every middleware node announces itself with one shared record,
   `mdns::node` (feature `mdns-core`, `no_std`, no heap): kind `mw/node`
   (`_mw-node._tcp.local`), instance `<prefix>-<id as 16 lower-case hex
@@ -793,6 +803,41 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   and ignores unknown keys; a record over the table's 192 TXT bytes is
   an encoding error, the RT1050's worst case fits —
   `mdns::node::tests::d41_*`, `scripts/check-features.sh`.
+- [x] D42 The RT1050 responder's decisions are pure: the board is
+  `rt1050-<unique id, 16 lower-case hex digits>` on host `<that>.local`,
+  TXT chip `rt1050`, board `mimxrt1050-evkb`, its firmware version, its
+  Zenoh sender id and, when set, `sys/zenoh/endpoint`, an A record of the
+  DHCP address and SRV port 0; it announces again on a new lease,
+  address, prefix or endpoint, withdraws when the lease is lost and does
+  nothing otherwise — firmware-imxrt `mdns_node::tests::d42_*`.
+- [ ] D43 On the EVKB (`eth` build), the responder task binds UDP 5353
+  (hop limit 255), joins 224.0.0.251 after the lease, keeps its on-link
+  subnet on the lease's, announces the D42 record and answers queries;
+  failures back off 2 s (30 s after every rename conflicted). Its buffers
+  are in its task future in SDRAM (`mdns_task::POOL`, 14712 bytes; the
+  announcer 7560); the stack resources grow to 6 sockets (`NET` +752
+  bytes of DTCM, absorbed by `.bss` alignment padding); the bootloader is
+  unchanged (26788 bytes). Built and linked (`./build.sh app`); on
+  hardware: `avahi-browse -rt _mw-node._tcp` lists the board with its TXT
+  and address, `avahi-resolve -n rt1050-<id>.local` resolves, it is still
+  listed after more than 6 minutes on an IGMP-snooping switch, a
+  renumber shows the new address within about 2 s, a new
+  `sys/zenoh/endpoint` shows in TXT `zenoh=`, `tcpdump` shows TTL 255
+  and an IGMP report. Owner: user.
+- [x] D44 The W1a follow-ups: `EmbassyClock` rounds a deadline up to the
+  next tick (never early at a tick rate that is not a multiple of 1000;
+  past `u64` ticks it never comes) and the RT1050's Zenoh client uses it
+  instead of its own rounding-down clock; the race consumes exactly its
+  winner (a tie the first, the second never polled; a dropped race
+  nothing) and a datagram queued as the timer falls due is answered
+  once; `MdnsAnnouncer::set_on_link` moves the accepted subnet (the old
+  one is refused), and `embassy_seam::subnet` turns a lease's CIDR into
+  it (`None` below /8) —
+  `mdns::embassy_seam::tests::deadlines_round_up_to_the_next_tick`,
+  `mdns::embassy_seam::tests::subnets_come_from_the_interface_cidr`,
+  `mdns::race::tests::*`,
+  `mdns::announce::tests::fake_seam_a_datagram_queued_when_the_timer_is_due_is_handled_once`,
+  `mdns::announce::tests::fake_seam_set_on_link_moves_the_accepted_subnet`.
 
 ### Transport contract 0.5 (K…)
 
