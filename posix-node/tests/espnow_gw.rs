@@ -498,6 +498,33 @@ async fn eg10_a_mac_flood_leaves_heard_devices_and_their_queryables() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn eg10_a_forgotten_device_loses_its_queryables_and_beacon() {
+    let r = Running::start(GwConfig { heard_ttl_ms: 1_500, ..fast() }).await;
+    let mut d = r.observer.discovery();
+    d.browse(KeyFilter::Exact(Key::from_static("mw/node"))).await.unwrap();
+    // A beacon whose own TTL (60 s) outlasts the device being heard.
+    r.bridge.beacon(DEV, 1, "dev-1", None, 60).await;
+    let mut buf = [0u8; 1024];
+    let ev = tokio::time::timeout(WAIT, d.next(&mut buf)).await.expect("up").unwrap();
+    assert!(matches!(ev, Event::Up(_)), "{ev:?}");
+    assert_eq!(r.info_when_heard(DEV).await.unwrap(), b"INFO");
+    // The device falls silent: once forgotten, its record goes down and its
+    // queryables are undeclared.
+    let ev = tokio::time::timeout(WAIT, d.next(&mut buf)).await.expect("down").unwrap();
+    assert!(matches!(ev, Event::Down { instance: "dev-1", .. }), "{ev:?}");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        match r.info(DEV, Duration::from_millis(500)).await {
+            Err(ZenohError::NoReply) => break,
+            other => assert!(tokio::time::Instant::now() < deadline, "still answered: {other:?}"),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let report = r.finish().await;
+    assert_eq!(report.heard, 0, "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn eg10_heard_list() {
     let r = Running::start(fast()).await;
     let hex = String::from_utf8(wire::zid16_hex(SenderId::from_mac(BRIDGE)).to_vec()).unwrap();
