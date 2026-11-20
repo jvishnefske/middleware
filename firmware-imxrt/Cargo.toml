@@ -75,7 +75,7 @@ shell = ["dep:embassy-nxp", "dep:embassy-time", "dep:cortex-m", "dep:cortex-m-rt
 [dependencies]
 esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
 board-pins = { path = "../board-pins" }
-middleware = { path = "..", features = ["serial", "trust"] }
+middleware = { path = "..", features = ["serial", "trust", "mdns-core"] }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 # The payload runtime (feature `wasm`).
