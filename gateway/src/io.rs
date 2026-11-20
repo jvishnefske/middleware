@@ -110,6 +110,36 @@ impl Write for ChannelIo {
     }
 }
 
+/// serialport's text for ENOTTY. It maps the errno to `ErrorKind::Unknown`
+/// with nix's `Errno::desc()` (a fixed table, whatever the libc) and drops
+/// the number, so the text is all there is to tell it by;
+/// `tests/pty.rs` breaks if a serialport or nix upgrade changes it.
+const ENOTTY_DESC: &str = "Not a typewriter";
+
+/// Whether a modem-line call failed only because the port has no modem
+/// lines: ENOTTY ("inappropriate ioctl for device"), as TIOCMBIC/TIOCMBIS
+/// give on a PTY (RG28).
+fn no_modem_lines(e: &serialport::Error) -> bool {
+    e.kind == serialport::ErrorKind::Unknown && e.description == ENOTTY_DESC
+}
+
+/// The result of deasserting one modem line: a port without modem lines
+/// (a PTY) is fine and logged at debug; any other failure is fatal.
+fn deassert(path: &str, line: &str, r: serialport::Result<()>) -> io::Result<()> {
+    match r {
+        Ok(()) => Ok(()),
+        Err(e) if no_modem_lines(&e) => {
+            tracing::debug!(
+                path,
+                line,
+                "no modem lines (not a serial port, e.g. a PTY); left as is"
+            );
+            Ok(())
+        }
+        Err(e) => Err(io::Error::other(format!("{path}: {line}: {e}"))),
+    }
+}
+
 /// How long one blocking port read waits before the reader thread checks
 /// whether the gateway is still there.
 pub const PORT_READ_TIMEOUT: Duration = Duration::from_millis(100);
@@ -117,6 +147,8 @@ pub const PORT_READ_TIMEOUT: Duration = Duration::from_millis(100);
 /// Opens `path` at `baud` and returns the stream the gateway's link runs
 /// on. DTR and RTS are left deasserted (as `mwctl` does), so opening the
 /// port does not reset a board wired to the usual auto-reset circuit.
+/// A port without modem lines, such as a PTY slave, is taken as it is
+/// (RG28).
 /// Two threads move the bytes and end when the stream is dropped or the
 /// port fails.
 pub fn open_serial(path: &str, baud: u32) -> io::Result<ChannelIo> {
@@ -125,10 +157,8 @@ pub fn open_serial(path: &str, baud: u32) -> io::Result<ChannelIo> {
         .timeout(PORT_READ_TIMEOUT)
         .open()
         .map_err(|e| io::Error::other(format!("{path}: {e}")))?;
-    port.write_request_to_send(false)
-        .map_err(io::Error::other)?;
-    port.write_data_terminal_ready(false)
-        .map_err(io::Error::other)?;
+    deassert(path, "RTS", port.write_request_to_send(false))?;
+    deassert(path, "DTR", port.write_data_terminal_ready(false))?;
     let mut writer = port.try_clone().map_err(io::Error::other)?;
     let (to_gateway, gateway_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CHUNKS);
     let (gateway_tx, mut to_port) = mpsc::channel::<Vec<u8>>(CHANNEL_CHUNKS);
@@ -195,5 +225,21 @@ mod tests {
             embedded_io_async::Error::kind(&Closed),
             ErrorKind::BrokenPipe
         );
+    }
+
+    #[test]
+    fn rg28_only_inappropriate_ioctl_is_a_missing_modem_line() {
+        let enotty = serialport::Error::new(serialport::ErrorKind::Unknown, "Not a typewriter");
+        assert!(no_modem_lines(&enotty));
+        for other in [
+            serialport::Error::new(serialport::ErrorKind::Unknown, "Input/output error"),
+            serialport::Error::new(serialport::ErrorKind::NoDevice, "Not a typewriter"),
+            serialport::Error::new(
+                serialport::ErrorKind::Io(io::ErrorKind::PermissionDenied),
+                "Permission denied",
+            ),
+        ] {
+            assert!(!no_modem_lines(&other), "{other:?}");
+        }
     }
 }

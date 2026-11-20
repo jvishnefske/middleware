@@ -2006,6 +2006,7 @@ dependencies = [
  "ed25519-dalek",
  "embedded-io-async",
  "http",
+ "libc",
  "middleware",
  "mw-service",
  "mwctl",

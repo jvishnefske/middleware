@@ -44,3 +44,6 @@ middleware = { path = "..", features = ["zenoh", "serial", "grpc", "istio", "fw-
 tonic = "0.14"
 http = "1"
 tokio-stream = { version = "0.1", features = ["net"] }
+# openpty for tests/pty.rs, `io::open_serial` on a PTY (RG28; already in
+# Cargo.lock).
+libc = "0.2"
