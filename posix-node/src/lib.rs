@@ -85,6 +85,29 @@ pub fn facts_with_driver(node: SenderId, driver: &dyn driver::Driver) -> service
     service::Facts { control: driver::control_summary(driver.points()), ..facts(node) }
 }
 
+/// Whether the node's Zenoh session takes its id from the node id
+/// ([`node_id::zenoh_id`]) instead of a random one, so its sender id (the
+/// id in `@mw/node/<id>/...`, what `mwctl --node` and a browser address)
+/// is the same across restarts. Turn it off here if the router's handling
+/// of a returning id causes trouble: a restarted node whose old session
+/// the router still holds (it vanished without closing its connection: a
+/// power cut, a partition; not a crash or a stop, whose socket the kernel
+/// closes) is refused until that session's lease (10 s by default) runs
+/// out, so its start fails and systemd starts it again.
+pub const STABLE_ZENOH_ID: bool = true;
+
+/// The node's Zenoh session: a client of `router` (the node only ever
+/// talks through its router; a router does not pass queries between two
+/// sessions that are both peers, so a peer node would be unreachable from
+/// peer tools like `mwctl --zenoh`), with the id of [`STABLE_ZENOH_ID`].
+pub fn session_config(router: &str, node: SenderId) -> Result<zenoh::Config, middleware::zenoh::ZenohError> {
+    let mut config = middleware::zenoh::SessionConfig::new().client().connect(router).build()?;
+    if STABLE_ZENOH_ID {
+        config.insert_json5("id", &format!("\"{}\"", node_id::zenoh_id(node)))?;
+    }
+    Ok(config)
+}
+
 /// Where Linux shows the device tree's `model`.
 pub const DEVICE_TREE_MODEL: &str = "/proc/device-tree/model";
 
@@ -132,4 +155,19 @@ pub fn limits_with_fuel(memory_bytes: u32, fuel: u64) -> Limits {
     Limits::bytes(memory_bytes)
         .with_fuel(fuel)
         .with_subscriptions(middleware::wasm_abi::SLOT_MAX as u8)
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn pn21_the_node_session_is_a_client_with_the_id_from_its_node_id() {
+        let node = SenderId([1, 2, 3, 4, 5, 6, 7, 8]);
+        let c = session_config("tcp/127.0.0.1:7447", node).expect("config");
+        assert_eq!(c.get_json("mode").expect("mode"), "\"client\"");
+        assert_eq!(c.get_json("connect/endpoints").expect("connect"), "[\"tcp/127.0.0.1:7447\"]");
+        let want = if STABLE_ZENOH_ID { format!("\"{}\"", node_id::zenoh_id(node)) } else { "null".to_owned() };
+        assert_eq!(c.get_json("id").expect("id"), want);
+    }
 }
