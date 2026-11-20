@@ -254,13 +254,21 @@ mod tests {
         };
         let good = Release::sign(&cert(5), &root).unwrap();
         let forged = Release::sign(&cert(u32::MAX), &Seed::new([2; 32])).unwrap();
-        let latest = [forged, good];
+        let mut other = cert(1000);
+        other.channel = "other";
+        let replayed = Release::sign(&other, &root).unwrap();
+        let latest = [forged, replayed, good];
+        let pk = root.public_key();
         assert_eq!(
-            current_version(&latest, CertKind::Payload, &root.public_key()),
+            current_version(&latest, CertKind::Payload, "c", "any", &pk),
             Some(Version(5))
         );
         assert_eq!(
-            current_version(&latest, CertKind::Firmware, &root.public_key()),
+            current_version(&latest, CertKind::Payload, "c", "rp2350", &pk),
+            None
+        );
+        assert_eq!(
+            current_version(&latest, CertKind::Firmware, "c", "any", &pk),
             None
         );
     }
