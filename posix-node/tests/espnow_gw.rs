@@ -415,6 +415,13 @@ async fn eg8_downlink_broadcasts() {
     let raw = r.observer.session().clone();
     let attachment = wire::encode_pub(SenderId::from_mac(DEV), Default::default(), 7);
     raw.put("app/cmd/loop", b"x".to_vec()).attachment(attachment.to_vec()).await.unwrap();
+    // Another gateway republishing this bridge's own broadcast carries the
+    // bridge's MAC-derived id: not broadcast again (it would loop between
+    // the two gateways). A device behind another gateway is.
+    let echo = wire::encode_pub(SenderId::from_mac(BRIDGE), Default::default(), 8);
+    raw.put("app/cmd/echo", b"x".to_vec()).attachment(echo.to_vec()).await.unwrap();
+    let far = wire::encode_pub(SenderId::from_mac(DEV2), Default::default(), 9);
+    raw.put("app/cmd/far", b"x".to_vec()).attachment(far.to_vec()).await.unwrap();
     z.publish(Key::from_static("app/cmd/end"), b"x").await.unwrap();
     while !broadcast_of("app/cmd/end") {
         assert!(tokio::time::Instant::now() < deadline, "no end broadcast");
@@ -422,6 +429,8 @@ async fn eg8_downlink_broadcasts() {
     }
     assert!(!broadcast_of("app/other"));
     assert!(!broadcast_of("app/cmd/loop"));
+    assert!(!broadcast_of("app/cmd/echo"));
+    assert!(broadcast_of("app/cmd/far"));
     let report = r.finish().await;
     assert!(report.frames_down >= 2, "{report:?}");
 }

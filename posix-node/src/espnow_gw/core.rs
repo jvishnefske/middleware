@@ -82,11 +82,14 @@ pub fn reply_error_for<E>(e: &RpcClientError<E>) -> HandlerError {
     }
 }
 
-/// True if a downlink sample from `sender` must not be broadcast: it was
-/// published under a heard device's id (another gateway republishing this
-/// radio's uplink), so broadcasting it would loop.
-pub fn skip_downlink(sender: Option<SenderId>, heard: &Heard) -> bool {
-    sender.and_then(mac_of).is_some_and(|mac| heard.contains(mac))
+/// True if a downlink sample from `sender` must not be broadcast, because
+/// it came off this radio and broadcasting it would loop: it was published
+/// under a heard device's id, or under this gateway's own `bridge` MAC
+/// (another gateway in range republishing what this one broadcast; a
+/// gateway never hears its own bridge, so `heard` alone misses it). Other
+/// MAC-derived senders, devices behind other gateways, pass.
+pub fn skip_downlink(sender: Option<SenderId>, bridge: Mac, heard: &Heard) -> bool {
+    sender.and_then(mac_of).is_some_and(|mac| mac == bridge || heard.contains(mac))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,12 +452,17 @@ mod tests {
 
     #[test]
     fn eg8_loop_guard() {
+        const BRIDGE: Mac = [0x5c, 0xcf, 0x7f, 0x72, 0xf6, 0x54];
         let mut heard = Heard::new();
         heard.hear(DEV, 0);
-        assert!(skip_downlink(Some(sender_id(DEV)), &heard));
-        assert!(!skip_downlink(Some(sender_id(OTHER)), &heard));
-        assert!(!skip_downlink(Some(SenderId([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24, 1, 2])), &heard));
-        assert!(!skip_downlink(None, &heard));
+        assert!(skip_downlink(Some(sender_id(DEV)), BRIDGE, &heard));
+        // Another gateway republishing what this bridge broadcast: its
+        // sender is this bridge's MAC, which this gateway never hears.
+        assert!(skip_downlink(Some(sender_id(BRIDGE)), BRIDGE, &heard));
+        // Other MAC-derived senders (a device behind another gateway) pass.
+        assert!(!skip_downlink(Some(sender_id(OTHER)), BRIDGE, &heard));
+        assert!(!skip_downlink(Some(SenderId([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24, 1, 2])), BRIDGE, &heard));
+        assert!(!skip_downlink(None, BRIDGE, &heard));
     }
 
     #[test]

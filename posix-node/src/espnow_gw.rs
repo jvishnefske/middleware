@@ -690,7 +690,7 @@ where
                 }
                 Ev::Down(None) => {}
                 Ev::Down(Some((key, payload, sender))) => {
-                    if skip_downlink(sender, &bus.heard) {
+                    if skip_downlink(sender, bridge, &bus.heard) {
                         continue;
                     }
                     let sent = match Key::new(&key) {
