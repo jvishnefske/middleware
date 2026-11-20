@@ -98,7 +98,6 @@ impl Identity {
 
 /// The test PKI: a real CA with a router and a client leaf, and a rogue
 /// CA with its own router and client leaves.
-#[allow(dead_code)] // the rogue identities are for the refusal tests
 struct Pki {
     _dir: TempDir,
     /// Router identity signed by the real CA (trusting the real CA for clients).
@@ -290,4 +289,68 @@ async fn zt2_mtls_client_publishes_and_gets() {
         .expect("mTLS client open")
         .with_timeout(Duration::from_millis(500));
     exchange(&server, &mut client, "zt2").await;
+}
+
+/// Asserts that opening `config` fails, and that the error says something
+/// without echoing key material.
+async fn assert_refused(pki: &Pki, config: ::zenoh::Config) {
+    let err = match open_client(config).await {
+        Ok(_) => panic!("client session opened; expected the mTLS link to be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(!err.is_empty());
+    assert!(!err.contains("PRIVATE KEY"), "{err}");
+    for pem in &pki.key_pems {
+        assert!(!err.contains(pem.as_str()), "{err}");
+    }
+}
+
+/// The positive control: a correct client does connect to the router
+/// under test, so a refusal is about the certificate, not a dead port.
+async fn assert_correct_client_connects(endpoint: &str, pki: &Pki) {
+    open_client(client_config(endpoint, &pki.client))
+        .await
+        .expect("positive control: correct client opens");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zt3_client_without_certificate_is_refused() {
+    let pki = Pki::new("zt3");
+    let endpoint = format!("tls/127.0.0.1:{}", free_loopback_port().await);
+    let _server = router(&endpoint, &pki.server).await;
+    assert_correct_client_connects(&endpoint, &pki).await;
+
+    // Same client, but mTLS off: it verifies the router and presents no
+    // certificate.
+    let mut config = client_config(&endpoint, &pki.client);
+    config
+        .insert_json5("transport/link/tls/enable_mtls", "false")
+        .expect("enable_mtls");
+    assert_refused(&pki, config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zt4_client_certificate_from_another_ca_is_refused() {
+    let pki = Pki::new("zt4");
+    let endpoint = format!("tls/127.0.0.1:{}", free_loopback_port().await);
+    let _server = router(&endpoint, &pki.server).await;
+    assert_correct_client_connects(&endpoint, &pki).await;
+
+    assert_refused(&pki, client_config(&endpoint, &pki.rogue_client)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zt5_server_not_signed_by_the_pinned_ca_is_refused() {
+    let pki = Pki::new("zt5");
+
+    // Positive control on a router with the real certificate.
+    let good = format!("tls/127.0.0.1:{}", free_loopback_port().await);
+    let _good_server = router(&good, &pki.server).await;
+    assert_correct_client_connects(&good, &pki).await;
+
+    // A router whose certificate the rogue CA signed. It still trusts the
+    // real CA for clients, so only the client's server check can refuse.
+    let rogue = format!("tls/127.0.0.1:{}", free_loopback_port().await);
+    let _rogue_server = router(&rogue, &pki.rogue_server).await;
+    assert_refused(&pki, client_config(&rogue, &pki.client)).await;
 }
