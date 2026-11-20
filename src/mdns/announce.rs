@@ -73,12 +73,6 @@ pub const MAX_DATAGRAMS_PER_CALL: usize = 1024;
 /// Default SRV target host name.
 pub const DEFAULT_HOST: &str = "middleware.local";
 
-impl From<AnnounceError> for MdnsError {
-    fn from(e: AnnounceError) -> Self {
-        MdnsError::Announce(e)
-    }
-}
-
 /// Configures an [`MdnsAnnouncer`]; see the module docs for the defaults.
 #[derive(Debug, Clone)]
 pub struct MdnsAnnouncerBuilder {

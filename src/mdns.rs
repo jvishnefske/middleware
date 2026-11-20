@@ -41,12 +41,21 @@ use core::net::Ipv4Addr;
 #[cfg(feature = "mdns")]
 pub mod announce;
 #[cfg(feature = "mdns")]
+mod error;
+#[cfg(feature = "mdns")]
 pub mod origin;
 #[cfg(feature = "mdns")]
 pub mod socket;
 pub use crate::dns::wire;
 
 pub use wire::{Instance, Message, Name, Response, ServiceInstance, ServiceType, Txt, WireError};
+
+/// The socket error [`MdnsError`](socket::MdnsError) carries when none is
+/// named: `std::io::Error`, the tokio shells' (without `std`, `Infallible`).
+#[cfg(feature = "std")]
+pub(crate) type DefaultIo = std::io::Error;
+#[cfg(not(feature = "std"))]
+pub(crate) type DefaultIo = core::convert::Infallible;
 
 /// UDP port of mDNS.
 pub const MDNS_PORT: u16 = 5353;

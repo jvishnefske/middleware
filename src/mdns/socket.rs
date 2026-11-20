@@ -75,7 +75,6 @@ use std::io;
 
 use tokio::net::UdpSocket;
 
-use super::announce::AnnounceError;
 use super::origin::{self, Kind, OnLink, OriginPolicy, Outstanding};
 use super::wire::{
     HEADER_LEN, Instance, MAX_MESSAGE_LEN, MAX_NAME_LEN, Message, Response, ServiceType, WireError,
@@ -99,73 +98,7 @@ pub const MAX_EVENT_LEN: usize = 1024;
 /// Largest query [`encode_query`] produces: header, name, type and class.
 const MAX_QUERY_LEN: usize = HEADER_LEN + MAX_NAME_LEN + 4;
 
-/// Failure of an [`MdnsSocket`] or [`MdnsAnnouncer`](super::announce::MdnsAnnouncer).
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum MdnsError {
-    /// The socket failed.
-    Io(io::Error),
-    /// A received datagram is not a valid DNS message, or a query could not
-    /// be encoded.
-    Wire(WireError),
-    /// The response needs `needed` bytes but the buffer holds only
-    /// `capacity`. The response is kept for [`MAX_SHORT_BUFFER_RETRIES`]
-    /// more call.
-    BufferTooSmall {
-        /// Bytes required.
-        needed: usize,
-        /// Bytes available.
-        capacity: usize,
-    },
-    /// [`MAX_IGNORED_DATAGRAMS`] datagrams passed without a response (or,
-    /// for [`Browse::next`], without an event; for an announcer,
-    /// [`MAX_DATAGRAMS_PER_CALL`](super::announce::MAX_DATAGRAMS_PER_CALL)).
-    IgnoredLimit,
-    /// [`Browse::browse`] with a prefix filter: DNS-SD browses one type.
-    UnsupportedFilter,
-    /// The kind has no DNS-SD type, or an event does not fit the caller's
-    /// buffer (kept as for `BufferTooSmall`).
-    Record(RecordError),
-    /// The announcer refused a service or lost every rename to conflicts.
-    Announce(AnnounceError),
-}
-
-impl core::fmt::Display for MdnsError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            MdnsError::Io(e) => write!(f, "mdns socket error: {e}"),
-            MdnsError::Wire(e) => write!(f, "malformed mdns message: {e:?}"),
-            MdnsError::BufferTooSmall { needed, capacity } => {
-                write!(f, "buffer too small: need {needed} bytes, have {capacity}")
-            }
-            MdnsError::IgnoredLimit => f.write_str("too many datagrams without a result"),
-            MdnsError::UnsupportedFilter => f.write_str("mDNS browses an exact kind, not a prefix"),
-            MdnsError::Record(e) => write!(f, "discovery record: {e:?}"),
-            MdnsError::Announce(e) => write!(f, "mdns announce: {e:?}"),
-        }
-    }
-}
-
-impl std::error::Error for MdnsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            MdnsError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for MdnsError {
-    fn from(e: io::Error) -> Self {
-        MdnsError::Io(e)
-    }
-}
-
-impl From<WireError> for MdnsError {
-    fn from(e: WireError) -> Self {
-        MdnsError::Wire(e)
-    }
-}
+pub use super::error::MdnsError;
 
 /// Configures an [`MdnsSocket`]. Defaults: bind `0.0.0.0:0`, send to
 /// `224.0.0.251:5353`, join no group, accept on-link sources only
