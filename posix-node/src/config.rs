@@ -14,6 +14,7 @@
 //! | `MW_POSIX_NODE_ESPNOW_BRIDGE` | none (gateway off) | path of the USB↔ESP-NOW bridge's serial port (`tools/espnow-bridge`, 460800 baud): the node gateways ESP-NOW devices onto Zenoh ([`crate::espnow_gw`]) |
 //! | `MW_POSIX_NODE_ESPNOW_DOWNLINK` | none | with the bridge: `app` keys broadcast to the devices, comma-separated, at most 8; `app/cmd/**` is the key and everything below it, otherwise one key |
 //! | `MW_POSIX_NODE_ZENOH_SYS` | `on` | `on` or `off`: the node's own `sys/...` keys served over Zenoh at `@mw/node/<sender id>/sys/**` ([`crate::zenoh_sys`]); never read under an old name |
+//! | `MW_POSIX_NODE_MDNS` | `off` | `off`, `on` (announce the address routed to the mDNS group) or a unicast IPv4 address (announce that one, and multicast from its interface): the node's `_mw-node._tcp` record on the LAN ([`crate::mdns_node`], [`MdnsMode`]); never read under an old name |
 //!
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
 //! (`mw_gateway::GatewayConfig`; `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD`
@@ -68,6 +69,9 @@ pub const ENV_ESPNOW_DOWNLINK: &str = "MW_POSIX_NODE_ESPNOW_DOWNLINK";
 /// `MW_POSIX_NODE_ZENOH_SYS` (no `MW_PI_NODE_` name: it is newer than the
 /// rename).
 pub const ENV_ZENOH_SYS: &str = "MW_POSIX_NODE_ZENOH_SYS";
+/// `MW_POSIX_NODE_MDNS` (no `MW_PI_NODE_` name: it is newer than the
+/// rename).
+pub const ENV_MDNS: &str = "MW_POSIX_NODE_MDNS";
 /// Most downlink filters.
 pub const MAX_ESPNOW_DOWNLINK: usize = 8;
 /// A downlink filter: its key fits an ESP-NOW frame's key.
@@ -127,6 +131,38 @@ pub enum NodeIdSource {
     MachineId(PathBuf),
 }
 
+/// Whether and on which address the node announces itself on mDNS
+/// (`MW_POSIX_NODE_MDNS`, [`crate::mdns_node`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MdnsMode {
+    /// No announcement (the default: nothing goes on the LAN unasked).
+    #[default]
+    Off,
+    /// Announce the local address the routing table picks for the mDNS
+    /// group, re-checked as it changes (`on`).
+    Auto,
+    /// Announce this address, join the group and multicast on its
+    /// interface. Unicast: never unspecified, loopback, multicast or
+    /// broadcast.
+    Pinned(std::net::Ipv4Addr),
+}
+
+impl MdnsMode {
+    /// Parses `off`, `on` or a unicast IPv4 address (surrounding space
+    /// ignored). Pure.
+    pub fn parse(v: &str) -> Option<Self> {
+        match v.trim() {
+            "off" => Some(MdnsMode::Off),
+            "on" => Some(MdnsMode::Auto),
+            other => {
+                let ip: std::net::Ipv4Addr = other.parse().ok()?;
+                let unicast = !(ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() || ip.is_broadcast());
+                unicast.then_some(MdnsMode::Pinned(ip))
+            }
+        }
+    }
+}
+
 /// The node's settings (module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PosixNodeConfig {
@@ -148,6 +184,8 @@ pub struct PosixNodeConfig {
     pub espnow_downlink: Vec<DownlinkFilter>,
     /// Serve the node's `sys/...` keys over Zenoh ([`crate::zenoh_sys`]).
     pub zenoh_sys: bool,
+    /// Announce the node on mDNS ([`crate::mdns_node`]).
+    pub mdns: MdnsMode,
     /// Old names that were used: `MW_PI_NODE_*` variables, and
     /// [`LEGACY_STATE`] when it was chosen. The binary warns about each.
     pub deprecated: Vec<String>,
@@ -165,6 +203,7 @@ impl Default for PosixNodeConfig {
             espnow_bridge: None,
             espnow_downlink: Vec::new(),
             zenoh_sys: true,
+            mdns: MdnsMode::default(),
             deprecated: Vec::new(),
         }
     }
@@ -246,6 +285,10 @@ impl PosixNodeConfig {
                 _ => return Err(err(ENV_ZENOH_SYS, &v, "not on or off")),
             },
         };
+        let mdns = match set(ENV_MDNS) {
+            None => d.mdns,
+            Some(v) => MdnsMode::parse(&v).ok_or_else(|| err(ENV_MDNS, &v, "not off, on or a unicast IPv4 address"))?,
+        };
         Ok(PosixNodeConfig {
             state,
             node_id,
@@ -256,6 +299,7 @@ impl PosixNodeConfig {
             espnow_bridge,
             espnow_downlink,
             zenoh_sys,
+            mdns,
             deprecated: used.into_inner(),
         })
     }
@@ -508,6 +552,63 @@ mod tests {
         // A new variable: never read under the pre-rename prefix.
         let c = PosixNodeConfig::from_env(&env(&[("MW_PI_NODE_ZENOH_SYS", "off")])).unwrap();
         assert!(c.zenoh_sys);
+        assert!(c.deprecated.is_empty());
+    }
+
+    fn mdns(v: &str) -> Result<MdnsMode, PosixNodeConfigError> {
+        PosixNodeConfig::from_env(&env(&[(ENV_MDNS, v)])).map(|c| c.mdns)
+    }
+
+    #[test]
+    fn d27_mdns_defaults_off() {
+        assert_eq!(MdnsMode::default(), MdnsMode::Off);
+        assert_eq!(PosixNodeConfig::default().mdns, MdnsMode::Off);
+        assert_eq!(PosixNodeConfig::from_env(&env(&[])).unwrap().mdns, MdnsMode::Off);
+        assert_eq!(mdns(""), Ok(MdnsMode::Off));
+        assert_eq!(mdns("  "), Ok(MdnsMode::Off));
+    }
+
+    #[test]
+    fn d27_mdns_parses_off_on_and_an_address() {
+        use std::net::Ipv4Addr;
+        assert_eq!(mdns("off"), Ok(MdnsMode::Off));
+        assert_eq!(mdns("on"), Ok(MdnsMode::Auto));
+        assert_eq!(mdns(" on "), Ok(MdnsMode::Auto));
+        assert_eq!(mdns("192.168.1.20"), Ok(MdnsMode::Pinned(Ipv4Addr::new(192, 168, 1, 20))));
+        assert_eq!(mdns(" 10.0.0.2 "), Ok(MdnsMode::Pinned(Ipv4Addr::new(10, 0, 0, 2))));
+        assert_eq!(mdns("169.254.3.4"), Ok(MdnsMode::Pinned(Ipv4Addr::new(169, 254, 3, 4))));
+    }
+
+    #[test]
+    fn d27_mdns_rejects_loopback_unspecified_multicast_and_words() {
+        for bad in [
+            "0.0.0.0",
+            "127.0.0.1",
+            "127.1.2.3",
+            "224.0.0.251",
+            "239.1.1.1",
+            "255.255.255.255",
+            "yes",
+            "ON",
+            "true",
+            "1",
+            "eth0",
+            "::1",
+            "fe80::1",
+            "192.168.1",
+            "192.168.1.20:5353",
+        ] {
+            let e = mdns(bad).expect_err(bad);
+            assert_eq!(e.var, ENV_MDNS, "{bad}");
+            assert_eq!(e.value, bad);
+            assert!(e.to_string().starts_with("MW_POSIX_NODE_MDNS="), "{e}");
+        }
+    }
+
+    #[test]
+    fn d27_mdns_has_no_old_name() {
+        let c = PosixNodeConfig::from_env(&env(&[("MW_PI_NODE_MDNS", "on")])).unwrap();
+        assert_eq!(c.mdns, MdnsMode::Off);
         assert!(c.deprecated.is_empty());
     }
 }
