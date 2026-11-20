@@ -1817,6 +1817,7 @@ dependencies = [
  "p256",
  "postcard",
  "prost",
+ "rcgen",
  "recipe-core",
  "serde",
  "sha2",

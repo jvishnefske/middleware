@@ -111,6 +111,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 zenoh-codec = "=1.10.1"
 zenoh-protocol = "=1.10.1"
 zenoh-buffers = "=1.10.1"
+# Throwaway CA, router and client certificates for the mTLS tests
+# (`tests/zenoh_tls.rs`); already in Cargo.lock through zenoh's QUIC link.
+rcgen = "0.14"
 
 # One service kind discovered over Zenoh, mDNS and cluster DNS (stub on
 # loopback), then called with request_with and Gather over Zenoh and the
