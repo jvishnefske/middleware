@@ -418,6 +418,7 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
         if fw_update::is_fw_key(key) {
             let ctx = FwContext {
                 node: self.ctx.node.unwrap_or(SenderId([0; 8])),
+                chip: self.ctx.chip,
                 trust: self.trust.as_ref().map(|_| self.state.trust()),
                 self_test: self.self_test(),
             };

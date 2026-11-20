@@ -95,9 +95,10 @@ use middleware::SenderId;
 use middleware::fw_ota::wire::keys as fw;
 use middleware::key::Key;
 use middleware::loader::keys;
+use middleware::loader::release::CommitAuth;
 use middleware::loader::trust::{
-    ControlCounter, ControlOp, PublicKey, SIGNATURE_LEN, SignedCommit, SignedControl, TrustInfo,
-    TrustState, control_message, verify_signature,
+    ControlCounter, ControlOp, PublicKey, SignedControl, TrustInfo, TrustState, control_message,
+    verify_signature,
 };
 use middleware::serial::frame::{FRAME_OVERHEAD, MAX_RAW_FRAME};
 use middleware::transport::HandlerError;
@@ -634,8 +635,13 @@ impl UpdateGate {
             }
             if op.is_commit() {
                 let signed = match op {
-                    UpdateOp::LoaderCommit => matches!(SignedCommit::parse_body(body), Ok(Some(_))),
-                    _ => body.len() == SIGNATURE_LEN,
+                    UpdateOp::LoaderCommit => matches!(CommitAuth::parse_body(body), Ok(Some(_))),
+                    _ => matches!(
+                        middleware::fw_ota::wire::Command::parse(fw::COMMIT, body),
+                        Ok(Some(middleware::fw_ota::wire::Command::Commit {
+                            auth: Some(_)
+                        }))
+                    ),
                 };
                 if !signed {
                     gate.transfer = None;
@@ -836,7 +842,7 @@ mod tests {
     }
 
     fn signed_commit() -> Vec<u8> {
-        SignedCommit {
+        middleware::loader::trust::SignedCommit {
             version: Version(5),
             signature: Signature([1; 64]),
         }
@@ -1086,7 +1092,7 @@ mod tests {
             (
                 UpdateOp::FwBegin,
                 UpdateOp::FwCommit,
-                vec![9u8; SIGNATURE_LEN],
+                vec![9u8; middleware::loader::trust::SIGNATURE_LEN],
             ),
         ] {
             let (g, r) = admit(claimed(), as_(UPD, "a-1"), begin, b"b");

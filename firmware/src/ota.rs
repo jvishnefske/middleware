@@ -58,9 +58,8 @@
 
 use middleware::Key;
 use middleware::loader::keys;
-use middleware::loader::trust::{
-    ControlCounter, ControlOp, SignedCommit, SignedControl, TrustState,
-};
+use middleware::loader::release::CommitAuth;
+use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, TrustState};
 use middleware::transport::HandlerError;
 
 /// A 48-bit ESP-NOW (Wi-Fi MAC) address.
@@ -242,7 +241,7 @@ pub fn admit(
     if !air {
         return Ok(Admission::Dispatch);
     }
-    if key == keys::COMMIT && !matches!(SignedCommit::parse_body(body), Ok(Some(_))) {
+    if key == keys::COMMIT && !matches!(CommitAuth::parse_body(body), Ok(Some(_))) {
         return Err(Refusal::UnsignedCommit);
     }
     match control_op(key) {
@@ -725,7 +724,7 @@ mod tests {
                 self.request(
                     origin,
                     keys::COMMIT,
-                    &SignedCommit {
+                    &middleware::loader::trust::SignedCommit {
                         version: Version(version),
                         signature,
                     }

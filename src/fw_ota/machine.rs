@@ -31,8 +31,9 @@
 use super::format::ImageInfo;
 use super::picobin::{ImageDef, SENTINEL_FROM};
 use super::record::{FwRecord, Pending};
-use super::wire::{Command, StateCode, signed_message};
+use super::wire::{Command, FwAuth, StateCode, signed_message};
 use super::{CHUNK_LEN, CHUNKS_PER_SECTOR, MAX_CHUNKS, MAX_IMAGE, SECTOR, Slot};
+use crate::loader::release::{CertKind, SignedCert};
 use crate::loader::trust::{PublicKey, Signature, TrustState, Version};
 use crate::transport::{HandlerError, SenderId};
 
@@ -222,6 +223,8 @@ pub struct Env {
     pub capacity: u32,
     /// This device's node id (bound into the signature).
     pub node: SenderId,
+    /// The chip `sys/info` reports: a release cert's target must name it.
+    pub chip: &'static str,
     /// The root of trust (the same record the payload loader uses).
     pub trust: TrustState,
     /// The running firmware's self-test passed.
@@ -356,20 +359,38 @@ pub struct BootFacts {
 type Step<'a> = (FwUpdate, Result<Effect<'a>, HandlerError>);
 
 /// Checks a commit's authorization against the root of trust: unclaimed
-/// devices accept any commit (trust on first use, as for payloads); a
-/// claimed device needs a signature by its pinned key that verifies over
-/// `message` with the pinned key's algorithm (Ed25519 or P-256). Without the `trust` feature nothing can be
-/// verified, so a claimed device refuses every commit.
+/// devices accept any commit (trust on first use, as for payloads). A
+/// claimed device needs either a signature by its pinned key over
+/// `message` (this node, this slot), or a release cert by that key for
+/// this `chip` whose kind, length, hash and version are the transfer's
+/// (`t`), each verified with the pinned key's algorithm (Ed25519 or
+/// P-256). Without the `trust` feature nothing can be verified, so a
+/// claimed device refuses every commit.
 fn authorize(
-    trust: &TrustState,
-    signature: Option<&Signature>,
+    env: &Env,
+    auth: Option<&FwAuth<'_>>,
+    t: &Transfer,
     message: &[u8],
 ) -> Result<(), HandlerError> {
-    let TrustState::Claimed { key, .. } = trust else {
+    let TrustState::Claimed { key, .. } = &env.trust else {
         return Ok(());
     };
-    let signature = signature.ok_or(HandlerError::Denied)?;
-    verify(key, signature, message)
+    match auth.ok_or(HandlerError::Denied)? {
+        FwAuth::Signed(signature) => verify(key, signature, message),
+        FwAuth::Cert(sc) => {
+            let c = &sc.cert;
+            let matches = c.kind == CertKind::Firmware
+                && c.is_for(env.chip)
+                && c.len == t.len
+                && c.version == t.version
+                && c.sha256 == t.sha256;
+            if matches {
+                verify_cert(key, sc)
+            } else {
+                Err(HandlerError::Denied)
+            }
+        }
+    }
 }
 
 #[cfg(feature = "trust")]
@@ -379,8 +400,20 @@ fn verify(key: &PublicKey, signature: &Signature, message: &[u8]) -> Result<(), 
         .ok_or(HandlerError::Denied)
 }
 
+#[cfg(feature = "trust")]
+fn verify_cert(key: &PublicKey, sc: &SignedCert<'_>) -> Result<(), HandlerError> {
+    crate::loader::release::verify_cert(key, sc)
+        .then_some(())
+        .ok_or(HandlerError::Denied)
+}
+
 #[cfg(not(feature = "trust"))]
 fn verify(_key: &PublicKey, _signature: &Signature, _message: &[u8]) -> Result<(), HandlerError> {
+    Err(HandlerError::Denied)
+}
+
+#[cfg(not(feature = "trust"))]
+fn verify_cert(_key: &PublicKey, _sc: &SignedCert<'_>) -> Result<(), HandlerError> {
     Err(HandlerError::Denied)
 }
 
@@ -476,7 +509,7 @@ impl FwUpdate {
                 sha256,
             } => self.begin(len, version, sha256, env),
             Command::Chunk { offset, data } => self.chunk(offset, data),
-            Command::Commit { signature } => self.commit(signature.as_ref(), env),
+            Command::Commit { auth } => self.commit(auth.as_ref(), env),
             Command::Reboot => match self {
                 FwUpdate::Committed(image) => {
                     let record = FwRecord {
@@ -601,7 +634,7 @@ impl FwUpdate {
         )
     }
 
-    fn commit<'a>(self, signature: Option<&Signature>, env: &Env) -> Step<'a> {
+    fn commit<'a>(self, auth: Option<&FwAuth<'_>>, env: &Env) -> Step<'a> {
         match self {
             FwUpdate::Committed(_) => (self, Ok(Effect::None)),
             FwUpdate::Verified(image) => {
@@ -626,7 +659,7 @@ impl FwUpdate {
                     return (self, Err(HandlerError::Denied));
                 }
                 let message = signed_message(t.len, t.version, t.slot, &env.node, &t.sha256);
-                if let Err(e) = authorize(&env.trust, signature, &message) {
+                if let Err(e) = authorize(env, auth, &t, &message) {
                     return (self, Err(e));
                 }
                 (
@@ -717,6 +750,7 @@ mod tests {
             record: FwRecord::EMPTY,
             capacity: 64 * 1024,
             node: NODE,
+            chip: "rp2350",
             trust: TrustState::Unclaimed,
             self_test_ok: true,
         }
@@ -807,7 +841,7 @@ mod tests {
             s.progress(),
             (Some(Slot::B), Version(0x0001_0001), len, len)
         );
-        let (s, e) = s.step(&Command::Commit { signature: None }, &env);
+        let (s, e) = s.step(&Command::Commit { auth: None }, &env);
         assert_eq!(e, Ok(Effect::Verify { slot: Slot::B, len }));
         let (s, e) = s.verified(&facts(0x0001_0001));
         let image = Image {
@@ -833,7 +867,7 @@ mod tests {
         assert_eq!(s, FwUpdate::Committed(image));
         // A resent commit is acknowledged.
         assert_eq!(
-            s.step(&Command::Commit { signature: None }, &env),
+            s.step(&Command::Commit { auth: None }, &env),
             (s, Ok(Effect::None))
         );
         let env2 = Env { record, ..env };
@@ -890,7 +924,7 @@ mod tests {
         assert_eq!(s2.progress().3, 512 + 188);
         // Commit before every chunk arrived: refused, state unchanged.
         assert_eq!(
-            s2.step(&Command::Commit { signature: None }, &env),
+            s2.step(&Command::Commit { auth: None }, &env),
             (s2, Err(HandlerError::InvalidRequest))
         );
         // Chunks outside a transfer.
@@ -1013,7 +1047,7 @@ mod tests {
         let env = env();
         let (s, _) = FwUpdate::Idle.step(&begin(600, 0x0001_0001), &env);
         let (s, ..) = fill(s, 600, &env);
-        let (s, e) = s.step(&Command::Commit { signature: None }, &env);
+        let (s, e) = s.step(&Command::Commit { auth: None }, &env);
         assert!(matches!(e, Ok(Effect::Verify { .. })));
         let wrong_hash = Facts {
             sha256: [2; 32],
@@ -1065,7 +1099,7 @@ mod tests {
             ..env
         };
         assert_eq!(
-            s.step(&Command::Commit { signature: None }, &raised),
+            s.step(&Command::Commit { auth: None }, &raised),
             (s, Err(HandlerError::Denied))
         );
     }
@@ -1087,14 +1121,14 @@ mod tests {
         let (s, _) = FwUpdate::Idle.step(&begin(600, 0x0001_0001), &env);
         let (s, ..) = fill(s, 600, &env);
         let sign = |slot, node: &SenderId, version| {
-            Some(Signature(
+            Some(FwAuth::Signed(Signature(
                 sk.sign(&signed_message(600, Version(version), slot, node, &[1; 32]))
                     .to_bytes(),
-            ))
+            )))
         };
         let good = sign(Slot::B, &NODE, 0x0001_0001);
         let other = SigningKey::from_bytes(&[8; 32]);
-        let foreign = Some(Signature(
+        let foreign = Some(FwAuth::Signed(Signature(
             other
                 .sign(&signed_message(
                     600,
@@ -1104,22 +1138,22 @@ mod tests {
                     &[1; 32],
                 ))
                 .to_bytes(),
-        ));
+        )));
         for bad in [
             None,
             sign(Slot::A, &NODE, 0x0001_0001),
             sign(Slot::B, &SenderId([0; 8]), 0x0001_0001),
             sign(Slot::B, &NODE, 0x0001_0002),
             foreign,
-            Some(Signature([0; 64])),
+            Some(FwAuth::Signed(Signature([0; 64]))),
         ] {
             assert_eq!(
-                s.step(&Command::Commit { signature: bad }, &env),
+                s.step(&Command::Commit { auth: bad }, &env),
                 (s, Err(HandlerError::Denied))
             );
         }
         assert_eq!(
-            s.step(&Command::Commit { signature: good }, &env).1,
+            s.step(&Command::Commit { auth: good }, &env).1,
             Ok(Effect::Verify {
                 slot: Slot::B,
                 len: 600
@@ -1128,7 +1162,7 @@ mod tests {
         // Unclaimed: any commit is accepted (trust on first use).
         assert!(matches!(
             s.step(
-                &Command::Commit { signature: None },
+                &Command::Commit { auth: None },
                 &Env {
                     trust: TrustState::Unclaimed,
                     ..env
@@ -1137,6 +1171,98 @@ mod tests {
             .1,
             Ok(Effect::Verify { .. })
         ));
+    }
+
+    #[cfg(feature = "trust")]
+    #[test]
+    fn up3_firmware_release_cert_for_this_chip_needs_no_node_or_slot() {
+        use crate::loader::release::{
+            RELEASE_MESSAGE_MAX, SignedCert, SoftwareCert, release_message,
+        };
+        use crate::loader::trust::PublicKey;
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7; 32]);
+        let key = PublicKey::Ed25519(sk.verifying_key().to_bytes());
+        let env = Env {
+            trust: TrustState::Claimed {
+                key,
+                min_version: Version(0),
+            },
+            ..env()
+        };
+        let (s, _) = FwUpdate::Idle.step(&begin(600, 0x0001_0001), &env);
+        let (s, ..) = fill(s, 600, &env);
+        let good = SoftwareCert {
+            kind: CertKind::Firmware,
+            target: "rp2350",
+            channel: "test",
+            version: Version(0x0001_0001),
+            len: 600,
+            sha256: [1; 32],
+        };
+        let sign_with = |k: &SigningKey, cert: SoftwareCert<'static>| {
+            let mut m = [0u8; RELEASE_MESSAGE_MAX];
+            let msg = release_message(&cert, &mut m).unwrap();
+            Some(FwAuth::Cert(SignedCert {
+                cert,
+                signature: Signature(k.sign(msg).to_bytes()),
+            }))
+        };
+        let sign = |cert| sign_with(&sk, cert);
+        assert_eq!(
+            s.step(&Command::Commit { auth: sign(good) }, &env).1,
+            Ok(Effect::Verify {
+                slot: Slot::B,
+                len: 600
+            })
+        );
+        // Through the wire: `[cert][sig]` parses as the cert form.
+        let mut body = [0u8; 256];
+        let cmd = Command::Commit { auth: sign(good) };
+        let n = cmd.encode_body(&mut body).unwrap();
+        assert_eq!(
+            Command::parse(cmd.key(), &body[..n]),
+            Ok(Some(cmd)),
+            "cert body round trip"
+        );
+        for bad in [
+            sign(SoftwareCert {
+                target: "esp32s3",
+                ..good
+            }),
+            sign(SoftwareCert {
+                target: "any",
+                ..good
+            }),
+            sign(SoftwareCert {
+                kind: CertKind::Payload,
+                ..good
+            }),
+            sign(SoftwareCert {
+                sha256: [2; 32],
+                ..good
+            }),
+            sign(SoftwareCert { len: 599, ..good }),
+            sign(SoftwareCert {
+                version: Version(0x0001_0002),
+                ..good
+            }),
+            sign_with(&SigningKey::from_bytes(&[8; 32]), good),
+        ] {
+            assert_eq!(
+                s.step(&Command::Commit { auth: bad }, &env),
+                (s, Err(HandlerError::Denied))
+            );
+        }
+        // A downgrade below the floor is refused before the cert is read.
+        let floor = Env {
+            running_version: Version(0x0001_0001),
+            ..env
+        };
+        assert_eq!(
+            s.step(&Command::Commit { auth: sign(good) }, &floor).1,
+            Err(HandlerError::Denied)
+        );
     }
 
     #[cfg(not(feature = "trust"))]
@@ -1155,7 +1281,7 @@ mod tests {
         assert_eq!(
             s.step(
                 &Command::Commit {
-                    signature: Some(Signature([0; 64]))
+                    auth: Some(FwAuth::Signed(Signature([0; 64])))
                 },
                 &env
             )

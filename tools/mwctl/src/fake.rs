@@ -52,7 +52,8 @@ use middleware::fw_ota::picobin::{
 use middleware::fw_ota::rt_image::{RtHeader, RtSlotImage};
 use middleware::fw_ota::service::{Context, FwService};
 use middleware::fw_ota::sim::Rp2350Sim;
-use middleware::loader::trust::{SignedCommit, TrustState, Version, signed_message};
+use middleware::loader::release::{CertKind, CommitAuth, RELEASE_MESSAGE_MAX, release_message};
+use middleware::loader::trust::{TrustState, Version, signed_message};
 use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, NetAddr, PayloadStatus, keys};
 use middleware::serial::frame::{self, Frame, MAX_RAW_FRAME, MAX_WIRE_FRAME, Split, Splitter};
 use middleware::transport::HandlerError;
@@ -340,27 +341,47 @@ impl FakeDevice {
         }
     }
 
-    /// The device's commit check (`TrustState::accept_commit`).
+    /// The device's commit check (`TrustState::accept_commit_auth`).
     fn accept(
         &self,
         image: &[u8],
-        auth: Option<&SignedCommit>,
+        auth: Option<&CommitAuth<'_>>,
     ) -> Result<TrustState, HandlerError> {
         let TrustState::Claimed { key, min_version } = self.trust else {
             return Ok(self.trust);
         };
-        let auth = auth.ok_or(HandlerError::Denied)?;
-        if auth.version <= min_version {
-            return Err(HandlerError::Denied);
-        }
-        let len = u32::try_from(image.len()).map_err(|_| HandlerError::Denied)?;
-        let m = signed_message(len, auth.version, &image_sha256(image));
-        if !verify(&key, &m, &auth.signature) {
-            return Err(HandlerError::Denied);
+        let denied = HandlerError::Denied;
+        let len = u32::try_from(image.len()).map_err(|_| denied)?;
+        let sha = image_sha256(image);
+        let version = match auth.ok_or(denied)? {
+            CommitAuth::Signed(a) => {
+                let m = signed_message(len, a.version, &sha);
+                if !verify(&key, &m, &a.signature) {
+                    return Err(denied);
+                }
+                a.version
+            }
+            CommitAuth::Cert(sc) => {
+                let c = &sc.cert;
+                let mut buf = [0u8; RELEASE_MESSAGE_MAX];
+                let m = release_message(c, &mut buf).ok_or(denied)?;
+                let ok = c.kind == CertKind::Payload
+                    && c.is_for(self.chip)
+                    && c.len == len
+                    && c.sha256 == sha
+                    && verify(&key, m, &sc.signature);
+                if !ok {
+                    return Err(denied);
+                }
+                c.version
+            }
+        };
+        if version <= min_version {
+            return Err(denied);
         }
         Ok(TrustState::Claimed {
             key,
-            min_version: auth.version,
+            min_version: version,
         })
     }
 
@@ -422,6 +443,7 @@ impl FakeDevice {
         if let Some(fw) = &mut self.fw {
             let ctx = Context {
                 node: NODE,
+                chip: self.chip,
                 trust: self.trust,
                 self_test_ok: fw.self_test_ok,
             };

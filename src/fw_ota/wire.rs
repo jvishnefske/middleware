@@ -8,6 +8,7 @@
 
 use super::{CHUNK_LEN, Slot};
 use crate::key::Key;
+use crate::loader::release::SignedCert;
 use crate::loader::trust::{SIGNATURE_LEN, Signature, Version};
 use crate::transport::{HandlerError, SenderId};
 
@@ -70,6 +71,18 @@ pub fn signed_message(
     m
 }
 
+/// The authorization in a `sys/fw/commit` body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FwAuth<'a> {
+    /// `[signature 64]` over [`signed_message`]: for this node and slot (a
+    /// push).
+    Signed(Signature),
+    /// `[cert][signature 64]`: a firmware release for this chip from the
+    /// updates channel ([`crate::loader::release`]); the device picks the
+    /// slot.
+    Cert(SignedCert<'a>),
+}
+
 /// A parsed `sys/fw/*` request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command<'a> {
@@ -91,10 +104,10 @@ pub enum Command<'a> {
         /// Image bytes.
         data: &'a [u8],
     },
-    /// `sys/fw/commit`: empty, or `[signature 64]`.
+    /// `sys/fw/commit`: empty, `[signature 64]`, or `[cert][signature 64]`.
     Commit {
-        /// Signature over [`signed_message`].
-        signature: Option<Signature>,
+        /// The authorization, when signed.
+        auth: Option<FwAuth<'a>>,
     },
     /// `sys/fw/reboot`: empty body.
     Reboot,
@@ -156,14 +169,19 @@ impl<'a> Command<'a> {
                 Ok(Some(Command::Chunk { offset, data }))
             }
             "commit" => match body.len() {
-                0 => Ok(Some(Command::Commit { signature: None })),
+                0 => Ok(Some(Command::Commit { auth: None })),
                 SIGNATURE_LEN => {
                     let s = <[u8; SIGNATURE_LEN]>::try_from(body).map_err(|_| bad)?;
                     Ok(Some(Command::Commit {
-                        signature: Some(Signature(s)),
+                        auth: Some(FwAuth::Signed(Signature(s))),
                     }))
                 }
-                _ => Err(bad),
+                _ => {
+                    let c = SignedCert::decode(body).ok_or(bad)?;
+                    Ok(Some(Command::Commit {
+                        auth: Some(FwAuth::Cert(c)),
+                    }))
+                }
             },
             _ => Err(HandlerError::NotFound),
         }
@@ -201,12 +219,17 @@ impl<'a> Command<'a> {
                 out.get_mut(4..4 + data.len())?.copy_from_slice(data);
                 Some(4 + data.len())
             }
-            Command::Commit { signature: Some(s) } => {
+            Command::Commit {
+                auth: Some(FwAuth::Signed(s)),
+            } => {
                 out.get_mut(..SIGNATURE_LEN)?.copy_from_slice(&s.0);
                 Some(SIGNATURE_LEN)
             }
+            Command::Commit {
+                auth: Some(FwAuth::Cert(c)),
+            } => c.encode(out),
             Command::Info
-            | Command::Commit { signature: None }
+            | Command::Commit { auth: None }
             | Command::Reboot
             | Command::Confirm
             | Command::Abort => Some(0),
@@ -386,9 +409,9 @@ mod tests {
                 offset: 0,
                 data: &data[..1],
             },
-            Command::Commit { signature: None },
+            Command::Commit { auth: None },
             Command::Commit {
-                signature: Some(Signature([0xAB; 64])),
+                auth: Some(FwAuth::Signed(Signature([0xAB; 64]))),
             },
             Command::Reboot,
             Command::Confirm,
@@ -401,7 +424,7 @@ mod tests {
         assert_eq!(Command::Info.encode_body(&mut []), Some(0));
         assert_eq!(
             Command::Commit {
-                signature: Some(Signature([0; 64]))
+                auth: Some(FwAuth::Signed(Signature([0; 64])))
             }
             .encode_body(&mut [0; 63]),
             None

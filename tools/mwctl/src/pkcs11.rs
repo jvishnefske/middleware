@@ -742,6 +742,7 @@ mod tests {
             .fw_update(
                 &img,
                 UpdateOptions {
+                    release: None,
                     key: Some(&mallory),
                     reboot: false,
                     control: None,
@@ -755,6 +756,7 @@ mod tests {
             .fw_update(
                 &img,
                 UpdateOptions {
+                    release: None,
                     key: Some(&signer),
                     reboot: true,
                     control: None,

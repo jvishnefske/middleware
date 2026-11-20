@@ -619,6 +619,7 @@ fn y12_mwctl_updates_confirms_and_rolls_back_a_pico_2() {
     // (2) Update to 1.1, signed: into B, flash-update reboot, trial.
     let img = fw_image(V1_1, 1);
     let opts = UpdateOptions {
+        release: None,
         key: Some(&seed),
         reboot: true,
         control: None,
@@ -690,6 +691,7 @@ fn y12_confirm_waits_for_the_self_test() {
     d.fw_update(
         &img,
         UpdateOptions {
+            release: None,
             key: None,
             reboot: false,
             control: None,
@@ -746,6 +748,7 @@ fn y13_the_built_update_image_installs_through_mwctl() {
         .fw_update(
             &img,
             UpdateOptions {
+                release: None,
                 key: None,
                 reboot: false,
                 control: None,
@@ -916,6 +919,7 @@ fn y16_a_trial_booted_with_the_trust_record_unreadable_is_never_bought() {
     d.fw_update(
         &fw_image(V1_1, 2),
         UpdateOptions {
+            release: None,
             key: None,
             reboot: false,
             control: None,

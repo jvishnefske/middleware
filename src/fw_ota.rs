@@ -48,7 +48,7 @@
 //! | `sys/fw/info`    | empty                                      | [`wire::FwInfo`] (36 bytes) |
 //! | `sys/fw/begin`   | `[len u32][version u32][sha256 32]`        | `[slot u8]` (0 A, 1 B) |
 //! | `sys/fw/chunk`   | `[offset u32][1..=512 bytes]`              | empty |
-//! | `sys/fw/commit`  | empty, or `[signature 64]`                 | empty |
+//! | `sys/fw/commit`  | empty, `[signature 64]`, or `[cert][signature 64]` | empty |
 //! | `sys/fw/reboot`  | empty                                      | empty; the device resets ~100 ms later |
 //! | `sys/fw/confirm` | empty                                      | empty |
 //! | `sys/fw/abort`   | empty                                      | empty |
@@ -70,7 +70,10 @@
 //!   [`wire::signed_message`]
 //!   `b"mw-firmware-v1\0" || len u32 || version u32 || slot u8 || node id 8 || sha256 32`,
 //!   so a signature is good for one image, one version, one slot of one
-//!   device. An unclaimed device accepts any commit, signed or not (trust
+//!   device. Or a release cert ([`crate::loader::release`], UP3) signed by
+//!   the same key: a firmware cert whose target is this device's chip and
+//!   whose length, version and hash are the transfer's; it names no node
+//!   or slot, so one release serves every device of the chip. An unclaimed device accepts any commit, signed or not (trust
 //!   on first use, as for payloads). The device then hashes what it
 //!   received and inspects the image through its format
 //!   ([`format`](mod@format); the RP2350's checks follow, another board's
