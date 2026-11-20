@@ -159,7 +159,7 @@ use ::zenoh::qos::CongestionControl;
 use ::zenoh::query::{ConsolidationMode, QueryTarget, Reply as ZenohReply};
 use ::zenoh::sample::Locality;
 
-use crate::dedup::{Sequence, fnv1a64};
+use crate::dedup::Sequence;
 use crate::key::{Key, KeyError, KeyFilter, MAX_KEY_LEN};
 use crate::transport::{
     Flow, Gather, HandlerError, Limits, Publisher, Reply, RequestOptions, Requester, SenderId,
@@ -185,7 +185,7 @@ pub const MAX_PAYLOAD: usize = (1 << 30) - 1024;
 /// 16-byte Zenoh id (little-endian), so distinct sessions get distinct ids
 /// with overwhelming probability.
 pub fn sender_id_of(zid: ::zenoh::session::ZenohId) -> SenderId {
-    SenderId(fnv1a64(&zid.to_le_bytes()).to_le_bytes())
+    wire::sender_id_of_zid(&zid.to_le_bytes())
 }
 
 /// The key expression of node `id`'s queryable for `key`

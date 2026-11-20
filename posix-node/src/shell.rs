@@ -5,7 +5,9 @@
 //! ```text
 //!   payload ── Controller ── device thread ══ ChannelIo pair ══ mw-gateway ── Zenoh, gw/sys
 //!                                 ║
-//!                                 ╚═══ local link (optional: MW_POSIX_NODE_LOCAL_SERIAL, tests)
+//!                                 ╠═══ local link (optional: MW_POSIX_NODE_LOCAL_SERIAL, tests)
+//!                                 ║
+//!                                 ╚═══ mesh link (optional: crate::zenoh_sys, @mw/node/<sender>/sys/**)
 //! ```
 //!
 //! * The **device thread** runs its own current-thread tokio runtime, so a
@@ -17,11 +19,17 @@
 //!   first: a frame on a link (`SerialLink::next_frame`, cancel safe), the
 //!   payload's next tick or timer, or the stop signal. A request is
 //!   answered on the link it came from; publications, `sys/log` lines and
-//!   status changes go to every link (the gateway relays `app/**` to
-//!   Zenoh and keeps `sys/log` in its tail). Each send is bounded by
-//!   [`SEND_TIMEOUT`] and a failure counted. The gateway link closing ends
-//!   the thread; a local link closing only drops that link. On stop the
-//!   payload is stopped and the flash synced.
+//!   status changes go to the gateway and local links (the gateway relays
+//!   `app/**` to Zenoh and keeps `sys/log` in its tail), never to the mesh
+//!   link, which only carries requests and their answers. Each send is
+//!   bounded by [`SEND_TIMEOUT`] and a failure counted. The gateway link
+//!   closing ends the thread; a local or mesh link closing only drops that
+//!   link. On stop the payload is stopped and the flash synced.
+//! * The gateway and local links are serial requesters (physical access:
+//!   `Controller::request`). A request on the **mesh link** came over
+//!   Zenoh: its body is a `crate::mesh_gate::wrap` envelope naming the
+//!   requester, and it is handled by `Controller::mesh_request`, through
+//!   the Zenoh gate (a malformed envelope is `InvalidRequest`).
 //! * [`start`] makes a `ChannelIo` pair (RG14), starts the gateway on one
 //!   end (`mw_gateway::start_with_store`, as `mw-gateway`'s binary does:
 //!   the update gate of RG20–RG27 with its persisted control counter
@@ -42,7 +50,7 @@ use middleware::Key;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::Frame;
 use middleware::serial::link::{RECV_BUF_LEN, SerialLink};
-use middleware::transport::RequestMeta;
+use middleware::transport::{HandlerError, RequestMeta};
 use middleware::zenoh::{ZenohError, ZenohTransport};
 use mw_gateway::bridge::Bridge;
 use mw_gateway::io::{ChannelIo, pair};
@@ -124,6 +132,8 @@ async fn send(link: &mut Link, frame: &Frame<'_>) -> bool {
 struct Links {
     gateway: Link,
     local: Option<Link>,
+    /// Requests over Zenoh; never sent publications.
+    mesh: Option<Link>,
     send_failed: u32,
 }
 
@@ -134,8 +144,8 @@ impl Links {
         }
     }
 
-    /// Sends the controller's queue to every link, logging `sys/log` lines
-    /// on the process's log too.
+    /// Sends the controller's queue to the gateway and local links (not
+    /// the mesh link), logging `sys/log` lines on the process's log too.
     async fn broadcast(&mut self, outs: Vec<Out>) {
         for o in outs {
             let Ok(key) = Key::new(&o.key) else { continue };
@@ -158,6 +168,7 @@ impl Links {
 enum Origin {
     Gateway,
     Local,
+    Mesh,
 }
 
 /// What ended one wait.
@@ -176,6 +187,7 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
 ) -> Ended {
     let mut gw_buf = vec![0u8; RECV_BUF_LEN];
     let mut local_buf = vec![0u8; RECV_BUF_LEN];
+    let mut mesh_buf = vec![0u8; RECV_BUF_LEN];
     loop {
         ctl.poll();
         links.broadcast(ctl.drain()).await;
@@ -193,6 +205,7 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
             _ = stop.changed() => Woke::Stop,
             r = recv(&mut links.gateway, &mut gw_buf) => Woke::Frame(Origin::Gateway, r),
             r = recv_opt(links.local.as_mut(), &mut local_buf) => Woke::Frame(Origin::Local, r),
+            r = recv_opt(links.mesh.as_mut(), &mut mesh_buf) => Woke::Frame(Origin::Mesh, r),
             () = timer => Woke::Timer,
         };
         let (origin, inbound) = match woke {
@@ -204,17 +217,26 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
                 links.local = None;
                 continue;
             }
+            Woke::Frame(Origin::Mesh, Err(())) => {
+                links.mesh = None;
+                continue;
+            }
         };
         match inbound {
             Inbound::Request { id, key, body } => {
-                let result = match Key::new(&key) {
-                    Ok(k) => ctl.request(k, &body, &RequestMeta::NONE),
-                    Err(_) => Err(middleware::transport::HandlerError::InvalidRequest),
+                let result = match (Key::new(&key), origin) {
+                    (Err(_), _) => Err(HandlerError::InvalidRequest),
+                    (Ok(k), Origin::Mesh) => match crate::mesh_gate::unwrap(&body) {
+                        Some((sender, body)) => ctl.mesh_request(k, sender, body),
+                        None => Err(HandlerError::InvalidRequest),
+                    },
+                    (Ok(k), Origin::Gateway | Origin::Local) => ctl.request(k, &body, &RequestMeta::NONE),
                 };
                 let frame = Frame::Response { id, result: result.as_deref().map_err(|e| *e) };
                 let link = match origin {
                     Origin::Gateway => Some(&mut links.gateway),
                     Origin::Local => links.local.as_mut(),
+                    Origin::Mesh => links.mesh.as_mut(),
                 };
                 if let Some(l) = link {
                     let ok = send(l, &frame).await;
@@ -240,16 +262,14 @@ pub struct DeviceTask {
     thread: Option<JoinHandle<()>>,
 }
 
-/// Starts the device thread on `flash` with the gateway link `gateway`
-/// and, optionally, a local link.
+/// Starts the device thread on `device` (its flash, facts, limits, driver,
+/// optional local and mesh links and shared control store) with the
+/// gateway link `gateway`.
 pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
-    flash: F,
-    facts: Facts,
-    limits: Limits,
+    device: DeviceParts<F>,
     gateway: ChannelIo,
-    local: Option<ChannelIo>,
-    driver: Box<dyn crate::driver::Driver>,
 ) -> io::Result<DeviceTask> {
+    let DeviceParts { flash, facts, limits, local, mesh, shared_control, driver } = device;
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
     let thread = std::thread::Builder::new().name("mw-posix-node-device".into()).spawn(move || {
@@ -270,9 +290,13 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
         };
         let r = rt.block_on(async move {
             let (mut ctl, boot) = Controller::open_with_driver(flash, facts, limits, SystemClock::start(), driver);
+            if let Some(store) = shared_control {
+                ctl.share_control(store);
+            }
             let mut links = Links {
                 gateway: SerialLink::with_inbox(gateway),
                 local: local.map(SerialLink::with_inbox),
+                mesh: mesh.map(SerialLink::with_inbox),
                 send_failed: 0,
             };
             ctl.boot(&boot);
@@ -365,6 +389,13 @@ pub struct DeviceParts<F> {
     pub limits: Limits,
     /// A second link beside the gateway's (`MW_POSIX_NODE_LOCAL_SERIAL`).
     pub local: Option<ChannelIo>,
+    /// The mesh link: the device end of a `ChannelIo` pair whose other end
+    /// `crate::zenoh_sys::run` serves (`MW_POSIX_NODE_ZENOH_SYS`).
+    pub mesh: Option<ChannelIo>,
+    /// The gateway's control counter store (`GatewayParts::store`'s
+    /// directory), shared with the mesh link's signed start and stop
+    /// (`Controller::share_control`).
+    pub shared_control: Option<ControlStore>,
     /// The control-module driver (`MW_POSIX_NODE_DRIVER`, [`crate::driver`]).
     pub driver: Box<dyn crate::driver::Driver>,
 }
@@ -393,13 +424,12 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     gateway: GatewayParts,
     session: ZenohTransport,
 ) -> Result<(PosixNode, SysForward), StartError> {
-    let DeviceParts { flash, facts, limits, local, driver } = device;
     let GatewayParts { bridge, options, store } = gateway;
     let (device_io, gateway_io) = pair();
     let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
         .await
         .map_err(StartError::Zenoh)?;
-    let device = spawn_device(flash, facts, limits, device_io, local, driver).map_err(StartError::Thread)?;
+    let device = spawn_device(device, device_io).map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }
 

@@ -338,3 +338,235 @@ mod machine {
         assert_eq!(req(&mut c, "sys/manifest/cm", &[]), Err(HandlerError::NotFound));
     }
 }
+
+/// Requests over Zenoh (`Controller::mesh_request`): the gate, the
+/// requester origins and the persisted control counter.
+mod mesh {
+    use super::*;
+    use crate::driver::sim::{SimConfig, SimDriver};
+    use crate::service::tests::test_seed;
+    use middleware::SenderId;
+    use middleware::loader::trust::{ControlCounter, ControlOp, TARGET_LEN, TrustInfo, TrustState, Version};
+    use mwctl::sign::{sign_commit, sign_control};
+
+    const A: Option<SenderId> = Some(SenderId([0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8]));
+    const B: Option<SenderId> = Some(SenderId([0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8]));
+
+    fn mesh(c: &mut Ctl<'_>, from: Option<SenderId>, key: &str, body: &[u8]) -> Result<Vec<u8>, HandlerError> {
+        c.mesh_request(Key::new(key).expect("key"), from, body)
+    }
+
+    fn claim(c: &mut Ctl<'_>) {
+        req(c, "sys/trust/claim", test_seed().public_key().as_bytes()).expect("claim over serial");
+    }
+
+    fn trust(c: &mut Ctl<'_>) -> TrustState {
+        TrustInfo::decode(&req(c, "sys/trust/info", &[]).expect("trust info")).expect("decode").state
+    }
+
+    /// The upload's steps, the commit signed as `version` when given.
+    fn steps(image: &[u8], version: Option<u32>) -> Vec<mwctl::plan::Step> {
+        let auth = version.map(|v| sign_commit(image, &test_seed(), Version(v)).expect("sign"));
+        upload_plan(image, None, auth).expect("plan")
+    }
+
+    fn upload(
+        c: &mut Ctl<'_>,
+        from: Option<SenderId>,
+        image: &[u8],
+        version: Option<u32>,
+    ) -> Result<Vec<u8>, HandlerError> {
+        let mut last = Ok(Vec::new());
+        for s in steps(image, version) {
+            last = c.mesh_request(s.key, from, &s.body);
+            last.as_ref().map_err(|e| *e)?;
+        }
+        last
+    }
+
+    fn control(op: ControlOp, target: [u8; TARGET_LEN], counter: u64) -> Vec<u8> {
+        sign_control(&test_seed(), op, &target, ControlCounter(counter)).expect("sign").encode().to_vec()
+    }
+
+    fn own() -> [u8; TARGET_LEN] {
+        let mut t = [0u8; TARGET_LEN];
+        t.copy_from_slice(&NODE.0[..TARGET_LEN]);
+        t
+    }
+
+    #[test]
+    fn pn23_an_unclaimed_node_answers_only_its_description_over_zenoh() {
+        let mut disk = Disk::default();
+        let flash = SectorFlash::open(MemSectors::new(&mut disk), SECTORS).expect("flash");
+        let driver = SimDriver::new(SimConfig::pc_turn_50());
+        let facts =
+            Facts { control: crate::driver::control_summary(crate::driver::Driver::points(&driver)), ..facts() };
+        let (mut c, boot) =
+            Controller::open_with_driver(flash, facts, crate::limits(1024 * 1024), Manual::default(), Box::new(driver));
+        c.boot(&boot);
+        let info = DeviceInfo::decode(&mesh(&mut c, A, "sys/info", &[]).expect("info")).map(|i| i.node);
+        assert_eq!(info, Some(Some(NODE)));
+        assert_eq!(mesh(&mut c, None, "sys/manifest", &[]), req(&mut c, "sys/manifest", &[]));
+        assert_eq!(mesh(&mut c, A, "sys/manifest/cm", &[]), req(&mut c, "sys/manifest/cm", &[]));
+        assert!(mesh(&mut c, A, "sys/trust/info", &[]).is_ok());
+        let image = demo();
+        for s in steps(&image, None) {
+            assert_eq!(c.mesh_request(s.key, A, &s.body), Err(HandlerError::Denied), "{}", s.key.as_str());
+        }
+        for key in ["sys/payload/start", "sys/payload/stop", "sys/payload/binding", "sys/payload/bind"] {
+            assert_eq!(mesh(&mut c, A, key, &[]), Err(HandlerError::Denied), "{key}");
+        }
+        let claim = test_seed().public_key();
+        assert_eq!(mesh(&mut c, A, "sys/trust/claim", claim.as_bytes()), Err(HandlerError::Denied));
+        assert_eq!(trust(&mut c), TrustState::Unclaimed);
+        assert_eq!(c.status(), PayloadStatus::Empty);
+        assert_eq!(c.service().loader_owner(), None);
+    }
+
+    #[test]
+    fn pn23_pn24_a_signed_upload_and_start_over_zenoh_and_no_replay_across_restart() {
+        let mut disk = Disk::default();
+        let image = demo();
+        let counter = 1_000;
+        {
+            let (mut c, boot) = open(&mut disk, Manual::default());
+            c.boot(&boot);
+            claim(&mut c);
+            assert_eq!(upload(&mut c, A, &image, None), Err(HandlerError::Denied));
+            upload(&mut c, A, &image, Some(1)).expect("signed upload");
+            assert_eq!(upload(&mut c, A, &image, Some(1)), Err(HandlerError::Denied), "a replayed version");
+            assert_eq!(mesh(&mut c, A, "sys/payload/start", &[]), Err(HandlerError::Denied));
+            // The RT1050's address rule is not this node's.
+            let rt = [0x02, NODE.0[3], NODE.0[4], NODE.0[5], NODE.0[6], NODE.0[7]];
+            assert_eq!(
+                mesh(&mut c, A, "sys/payload/start", &control(ControlOp::Start, rt, counter)),
+                Err(HandlerError::Denied)
+            );
+            assert!(!c.running());
+            let start = control(ControlOp::Start, own(), counter);
+            assert_eq!(mesh(&mut c, B, "sys/payload/start", &start), Ok(Vec::new()));
+            assert!(c.running());
+            assert_eq!(c.service().state().control(), ControlCounter(counter));
+            assert_eq!(mesh(&mut c, A, "sys/payload/start", &start), Err(HandlerError::Denied), "replayed");
+            let stop = control(ControlOp::Stop, own(), counter + 1);
+            assert_eq!(mesh(&mut c, A, "sys/payload/stop", &[]), Err(HandlerError::Denied));
+            assert!(c.running());
+            assert_eq!(mesh(&mut c, A, "sys/payload/stop", &stop), Ok(Vec::new()));
+            assert!(!c.running());
+            c.shutdown().expect("sync");
+        }
+        // After a restart the counter holds: the same start is refused.
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.boot(&boot);
+        assert_eq!(c.service().state().control(), ControlCounter(counter + 1));
+        let start = control(ControlOp::Start, own(), counter);
+        assert_eq!(mesh(&mut c, A, "sys/payload/start", &start), Err(HandlerError::Denied));
+    }
+
+    #[test]
+    fn pn23_pn25_a_staged_upload_belongs_to_its_requester_and_survives_unsigned_commits() {
+        let mut disk = Disk::default();
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.boot(&boot);
+        claim(&mut c);
+        let image = demo();
+        upload(&mut c, A, &image, Some(1)).expect("first");
+        mesh(&mut c, A, "sys/payload/start", &control(ControlOp::Start, own(), 10)).expect("start");
+        assert!(c.running());
+        // A second upload by A, staged beside the running payload.
+        let s = steps(&image, Some(2));
+        let (commit, transfer) = s.split_last().expect("steps");
+        let (begin, chunks) = transfer.split_first().expect("begin");
+        c.mesh_request(begin.key, A, &begin.body).expect("begin");
+        assert!(c.running(), "a staged begin leaves the payload running");
+        assert_eq!(c.status(), PayloadStatus::Running);
+        // B can neither continue it nor end it.
+        assert_eq!(c.mesh_request(chunks[0].key, B, &chunks[0].body), Err(HandlerError::InvalidRequest));
+        assert_eq!(mesh(&mut c, B, "sys/loader/commit", &[]), Err(HandlerError::InvalidRequest));
+        assert_eq!(c.mesh_request(commit.key, B, &commit.body), Err(HandlerError::InvalidRequest));
+        // Nor can the anonymous requester, nor a serial link.
+        assert_eq!(c.mesh_request(chunks[0].key, None, &chunks[0].body), Err(HandlerError::InvalidRequest));
+        assert_eq!(c.request(chunks[0].key, &chunks[0].body, &RequestMeta::NONE), Err(HandlerError::InvalidRequest));
+        for ch in chunks {
+            c.mesh_request(ch.key, A, &ch.body).expect("chunk");
+        }
+        // An unsigned commit, A's own included, is Denied and ends nothing.
+        assert_eq!(mesh(&mut c, A, "sys/loader/commit", &[]), Err(HandlerError::Denied));
+        assert_eq!(c.service().loader_owner(), Some(crate::mesh_gate::requester(A, crate::mesh_gate::address(NODE))));
+        assert!(c.running());
+        // A's signed commit still activates it (and replaces the running payload).
+        c.mesh_request(commit.key, A, &commit.body).expect("signed commit");
+        assert_eq!(c.service().loader_owner(), None);
+        assert!(!c.running());
+        assert!(matches!(trust(&mut c), TrustState::Claimed { min_version: Version(2), .. }));
+    }
+
+    /// The gateway's control counter store in a fresh directory.
+    fn shared_store(name: &str) -> mw_gateway::state::ControlStore {
+        let dir = std::env::temp_dir().join(format!("mw-posix-node-ctl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        mw_gateway::state::ControlStore::in_dir(dir)
+    }
+
+    #[test]
+    fn pn24_a_counter_gw_sys_accepted_is_refused_over_zenoh_and_the_reverse() {
+        use mw_gateway::state::Persisted;
+        let store = shared_store("shared");
+        let mut disk = Disk::default();
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.share_control(store.clone());
+        c.boot(&boot);
+        claim(&mut c);
+        upload(&mut c, A, &demo(), Some(1)).expect("signed upload");
+        // gw/sys accepted and persisted 500 (its shell saves before acting).
+        store.save(ControlCounter(500)).expect("gw/sys save");
+        for counter in [500, 400] {
+            let body = control(ControlOp::Start, own(), counter);
+            assert_eq!(mesh(&mut c, A, "sys/payload/start", &body), Err(HandlerError::Denied), "{counter}");
+        }
+        assert!(!c.running());
+        // Above both: accepted, and both counters advance.
+        mesh(&mut c, A, "sys/payload/start", &control(ControlOp::Start, own(), 501)).expect("start");
+        assert!(c.running());
+        assert_eq!(store.load(), Persisted::At(ControlCounter(501)));
+        assert_eq!(c.service().state().control(), ControlCounter(501));
+        // The reverse: gw/sys persisting 501 again (its replay) is refused
+        // by the store, so its shell does not forward it.
+        assert!(store.save(ControlCounter(501)).is_err());
+        let _ = std::fs::remove_dir_all(store.path().parent().expect("dir"));
+    }
+
+    #[test]
+    fn pn24_an_unreadable_shared_counter_refuses_control() {
+        let store = shared_store("unreadable");
+        std::fs::create_dir_all(store.path().parent().expect("dir")).expect("dir");
+        std::fs::write(store.path(), "not a number").expect("write");
+        let mut disk = Disk::default();
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.share_control(store.clone());
+        c.boot(&boot);
+        claim(&mut c);
+        upload(&mut c, A, &demo(), Some(1)).expect("signed upload");
+        let body = control(ControlOp::Start, own(), 10);
+        assert_eq!(mesh(&mut c, A, "sys/payload/start", &body), Err(HandlerError::Unavailable));
+        assert!(!c.running());
+        assert_eq!(c.service().state().control(), ControlCounter(0), "nothing consumed");
+        let _ = std::fs::remove_dir_all(store.path().parent().expect("dir"));
+    }
+
+    #[test]
+    fn pn25_a_serial_begin_takes_a_zenoh_transfer_over() {
+        let mut disk = Disk::default();
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.boot(&boot);
+        claim(&mut c);
+        let s = steps(&demo(), Some(3));
+        c.mesh_request(s[0].key, A, &s[0].body).expect("mesh begin");
+        c.request(s[0].key, &s[0].body, &RequestMeta::NONE).expect("serial begin");
+        assert_eq!(c.service().loader_owner(), Some(esp_base::ota::Origin::Serial));
+        assert_eq!(c.mesh_request(s[1].key, A, &s[1].body), Err(HandlerError::InvalidRequest));
+        for step in &s[1..] {
+            c.request(step.key, &step.body, &RequestMeta::NONE).expect("serial transfer");
+        }
+    }
+}

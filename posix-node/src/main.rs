@@ -7,20 +7,27 @@
 //! `gw/sys` service until SIGTERM/SIGINT (exit 0) or until the device
 //! thread or the runner ends (exit 1). With `MW_POSIX_NODE_ESPNOW_BRIDGE`
 //! it also runs the ESP-NOW gateway (`espnow_gw`) on that serial port; a
-//! gateway failure is logged and the node keeps running. On the way out
-//! the ESP-NOW gateway's beacons are withdrawn, the payload is stopped,
-//! the flash synced and the gateway's announcements withdrawn.
+//! gateway failure is logged and the node keeps running. With
+//! `MW_POSIX_NODE_ZENOH_SYS` on (the default) it serves its own `sys/...`
+//! keys at `@mw/node/<sender id>/sys/**` (`zenoh_sys`, over the mesh link);
+//! the start log names that id, the one `mwctl --zenoh … --node` takes.
+//! Its session is a client of the router, with an id derived from the
+//! node id (`session_config`). A failure there is logged and the node
+//! keeps running. On the way out the Zenoh sys task and the ESP-NOW
+//! gateway stop (its beacons withdrawn), the payload is stopped, the flash
+//! synced and the gateway's announcements withdrawn.
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
-use middleware::zenoh::{SessionConfig, ZenohTransport};
+use middleware::zenoh::ZenohTransport;
 use mw_gateway::config::DEFAULT_BAUD;
 use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
 use mw_posix_node::config::{NodeIdSource, gateway_state_dir};
 use mw_posix_node::espnow_gw::{self, GwConfig};
+use mw_posix_node::zenoh_sys;
 use mw_posix_node::{
     DeviceParts, GatewayParts, PosixNodeConfig, control_floor, node_id, open_state_flash, start,
     wall_clock_ms,
@@ -104,7 +111,7 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         Some(path) => Some(io::open_serial(path, DEFAULT_BAUD).map_err(|e| format!("local serial: {e}"))?),
         None => None,
     };
-    let zenoh = SessionConfig::new().connect(router).build().map_err(|e| format!("zenoh config: {e}"))?;
+    let zenoh = mw_posix_node::session_config(&router, id).map_err(|e| format!("zenoh config: {e}"))?;
     let session = ZenohTransport::open(zenoh).await.map_err(|e| format!("zenoh: {e}"))?;
     eprintln!(
         "mw-posix-node: node {} ({}), state {}",
@@ -120,6 +127,13 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
             gateway.state_dir.display()
         );
     }
+    let (mesh_node, mesh_sys) = match node.zenoh_sys {
+        true => {
+            let (node_end, sys_end) = io::pair();
+            (Some(node_end), Some(sys_end))
+        }
+        false => (None, None),
+    };
     let driver = node.driver.open();
     eprintln!("mw-posix-node: driver {} ({} control-module points)", driver.name(), driver.points().len());
     let device = DeviceParts {
@@ -127,10 +141,13 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         facts: mw_posix_node::facts_with_driver(id, driver.as_ref()),
         limits: mw_posix_node::limits_with_fuel(node.memory_bytes, node.fuel_per_call),
         local,
+        mesh: mesh_node,
+        shared_control: Some(store.clone()),
         driver,
     };
     let parts = GatewayParts { bridge: gateway.bridge_with_floor(floor), options: gateway.shell_options(), store };
     let espnow_session = session.clone();
+    let sys_session = session.clone();
     let (mut pi, sys) = start(device, parts, session).await.map_err(|e| e.to_string())?;
     // The ESP-NOW gateway, when a bridge is configured; its failure is not
     // the node's.
@@ -147,6 +164,18 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         }
         None => None,
     };
+    // The node's own sys keys over Zenoh; its failure is not the node's.
+    let (stop_zsys, zsys_stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut zsys = mesh_sys.map(|io| {
+        eprintln!(
+            "mw-posix-node: sys over zenoh on {} (node {})",
+            zenoh_sys::expression(sys_session.sender_id()),
+            node_id::hex(id)
+        );
+        tokio::spawn(zenoh_sys::run(io, sys_session, zenoh_sys::Options::default(), async {
+            let _ = zsys_stopped.await;
+        }))
+    });
     let svc = service(&gateway, sys).map_err(|e| e.to_string())?;
     let (stop_runner, runner_stopped) = tokio::sync::oneshot::channel::<()>();
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {
@@ -161,6 +190,14 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
                 Ok(Err(e)) => format!("runner: {e}"),
                 Err(e) => format!("runner: {e}"),
             }),
+            r = async { zsys.as_mut().expect("guarded").await }, if zsys.is_some() => {
+                zsys = None;
+                match r {
+                    Ok(Ok(report)) => eprintln!("mw-posix-node: sys over zenoh stopped: {report:?}"),
+                    Ok(Err(e)) => eprintln!("mw-posix-node: sys over zenoh: {e}"),
+                    Err(e) => eprintln!("mw-posix-node: sys over zenoh: {e}"),
+                }
+            }
             r = async { espnow.as_mut().expect("guarded").await }, if espnow.is_some() => {
                 espnow = None;
                 match r {
@@ -172,6 +209,14 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         }
     };
     let _ = stop_runner.send(());
+    let _ = stop_zsys.send(());
+    if let Some(task) = zsys {
+        match task.await {
+            Ok(Ok(report)) => eprintln!("mw-posix-node: sys over zenoh {report:?}"),
+            Ok(Err(e)) => eprintln!("mw-posix-node: sys over zenoh: {e}"),
+            Err(e) => eprintln!("mw-posix-node: sys over zenoh: {e}"),
+        }
+    }
     let _ = stop_espnow.send(());
     if let Some(gw) = espnow {
         match gw.await {

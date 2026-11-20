@@ -14,7 +14,8 @@
 //!   line. [`ControlStore::save`] writes a temporary file, fsyncs it,
 //!   renames it over the old one and fsyncs the directory, so after a
 //!   crash the file holds either the old or the new counter, never a torn
-//!   one. It refuses to lower the stored value.
+//!   one. It refuses to lower the stored value. Saves within one process
+//!   are serialized: mw-posix-node's Zenoh path shares the store.
 //!
 //! One counter for the port, not one per device: a counter accepted for
 //! one device only raises the bar for the next, and signed requests name
@@ -95,6 +96,12 @@ impl ControlStore {
     /// stored one is an error (`InvalidInput`), as is any I/O failure;
     /// the caller then must not act on the request.
     pub fn save(&self, counter: ControlCounter) -> io::Result<()> {
+        // One save at a time in this process: mw-posix-node's device thread
+        // saves Zenoh starts/stops into the store its gateway uses, and the
+        // check below and the rename must not interleave.
+        let _one = SAVING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.load() {
             Persisted::At(c) if c >= counter => {
                 return Err(io::Error::new(
@@ -118,6 +125,9 @@ impl ControlStore {
         sync_dir(&self.dir)
     }
 }
+
+/// Serializes [`ControlStore::save`] within the process.
+static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
@@ -205,5 +215,30 @@ mod tests {
         let store = ControlStore::in_dir(&file);
         assert!(store.save(ControlCounter(MIN_CLOCK_MS + 1)).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The gateway's task and mw-posix-node's device thread save into one
+    /// store: of two saves of the same counter at once, one succeeds.
+    #[test]
+    fn rg27_concurrent_saves_of_one_counter_accept_it_once() {
+        for round in 0..50u64 {
+            let dir = scratch(&format!("race-{round}"));
+            let store = ControlStore::in_dir(&dir);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let oks: usize = (0..4)
+                .map(|_| {
+                    let (s, b) = (store.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        b.wait();
+                        s.save(ControlCounter(7)).is_ok()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| usize::from(t.join().expect("thread")))
+                .sum();
+            assert_eq!(oks, 1, "round {round}");
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 }

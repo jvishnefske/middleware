@@ -18,6 +18,21 @@
 //!   trap (in a request too, answered `Internal`), `sys/payload/stop`, a
 //!   `begin` or an activated commit ends the run; the service keeps the
 //!   keys it served.
+//! * [`Controller::mesh_request`] handles a request that came over Zenoh:
+//!   [`crate::mesh_gate`] decides it first (a refusal changes nothing and
+//!   is logged on the process's log only, never on `sys/log`, so an
+//!   unauthenticated peer cannot fill the outbox); an admitted one is
+//!   handled as [`Controller::request`] does, with the requester's
+//!   `Air` origin, and a verified signed start or stop has its counter
+//!   persisted before it acts, with an empty body: in the gateway's
+//!   control counter store ([`Controller::share_control`], `gw/sys`'s,
+//!   which must hold a lower one) and in the trust record
+//!   ([`Service::accept_control`]). One counter for both paths, because
+//!   mwctl signs one body for either: a start or stop accepted through
+//!   `gw/sys` (whose shell saves its counter in that store before acting)
+//!   is a replay over Zenoh, and one accepted over Zenoh is refused by
+//!   `gw/sys` when its shell's save finds the stored counter not lower. [`Controller::request`] is a serial request
+//!   (`Origin::Serial`).
 //! * [`Controller::publication`] delivers a publication when the payload
 //!   subscribed to the key (`esp_base::dispatch::route_publication`).
 //! * [`Controller::poll`] fires due timers, hands at most `MAX_EVENTS`
@@ -41,19 +56,23 @@
 
 use embedded_storage::nor_flash::NorFlash;
 use esp_base::dispatch::{route_publication, tick_delay};
+use esp_base::ota::Origin;
 use esp_base::periph::overflow_report;
 use esp_base::serve::{REPLY_CAPACITY, Route, ServedKeys, payload_reply, route_request};
 use esp_base::store::StoreError;
-use middleware::Key;
+use middleware::loader::trust::ControlCounter;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::MAX_RAW_FRAME;
 use middleware::transport::{HandlerError, RequestMeta};
 use middleware::wasm_abi::events::MAX_EVENTS;
+use middleware::{Key, SenderId};
+use mw_gateway::state::{ControlStore, Persisted};
 use wasm_host::{Compiled, Limits, LoadError, Payload, Trap};
 
 use crate::device::{Clock, OUTBOX, Out, Outbox, PiDevice};
 use crate::driver::{Driver, NoDriver, check_binding, index_of};
 use crate::flash::Durable;
+use crate::mesh_gate::{self, Admission};
 use crate::service::{Boot, Facts, Handled, Reply, Service, StartFailure};
 
 /// Room for the controller's own lines beside a payload call's outbox.
@@ -87,6 +106,8 @@ pub struct Controller<F, C: Clock + 'static> {
     published: Option<PayloadStatus>,
     events_dropped: u32,
     driver: Box<dyn Driver>,
+    /// The gateway's control counter store, shared with `gw/sys`.
+    shared: Option<ControlStore>,
 }
 
 impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
@@ -109,6 +130,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             published: None,
             events_dropped: 0,
             driver,
+            shared: None,
         };
         (ctl, boot)
     }
@@ -163,8 +185,88 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.driver.as_mut()
     }
 
-    /// Handles one request: the reply body or the error.
+    /// Shares `store`, the in-process gateway's control counter store
+    /// (`gw/sys`'s), with the Zenoh path: a signed start or stop over Zenoh
+    /// must carry a counter above the one stored there as well as above the
+    /// trust record's, and advances both, so a request accepted on one path
+    /// is a replay on the other (module docs).
+    pub fn share_control(&mut self, store: ControlStore) {
+        self.shared = Some(store);
+    }
+
+    /// Claims `counter` in the shared store before a Zenoh start or stop
+    /// acts: `Denied` when it is not above the stored one, `Unavailable`
+    /// when the store cannot be read (fail closed), `Internal` when it
+    /// cannot be saved. Without a shared store, nothing to claim.
+    fn claim_shared(&self, counter: ControlCounter) -> Result<(), HandlerError> {
+        let Some(store) = self.shared.as_ref() else { return Ok(()) };
+        match store.load() {
+            Persisted::Unreadable => return Err(HandlerError::Unavailable),
+            Persisted::At(c) if c >= counter => return Err(HandlerError::Denied),
+            Persisted::At(_) | Persisted::Nothing => {}
+        }
+        store.save(counter).map_err(|e| match e.kind() {
+            std::io::ErrorKind::InvalidInput => HandlerError::Denied,
+            _ => HandlerError::Internal,
+        })
+    }
+
+    /// Handles one request from a serial link: the reply body or the
+    /// error.
     pub fn request(&mut self, key: Key<'_>, body: &[u8], meta: &RequestMeta<'_>) -> Result<Vec<u8>, HandlerError> {
+        self.request_as(Origin::Serial, key, body, meta)
+    }
+
+    /// Handles one request that came over Zenoh from the requester whose
+    /// query named `sender` (module docs, [`crate::mesh_gate`]).
+    pub fn mesh_request(
+        &mut self,
+        key: Key<'_>,
+        sender: Option<SenderId>,
+        body: &[u8],
+    ) -> Result<Vec<u8>, HandlerError> {
+        let state = self.svc.state();
+        let own = mesh_gate::address(self.svc.node());
+        let facts = mesh_gate::Facts { trust: state.trust(), control: state.control(), own };
+        let from = mesh_gate::requester(sender, own);
+        match mesh_gate::admit(&facts, self.svc.loader_owner(), from, key, body) {
+            Err(r) => {
+                tracing::info!(target: "mw_posix_node::mesh", key = key.as_str(), "refused: {}", r.reason());
+                Err(r.error())
+            }
+            Ok(Admission::Dispatch) => self.request_as(from, key, body, &RequestMeta::NONE),
+            Ok(Admission::Control { counter }) => match self.claim_shared(counter) {
+                Err(e) => {
+                    tracing::info!(target: "mw_posix_node::mesh", key = key.as_str(), "refused: control counter {e:?} against gw/sys");
+                    Err(e)
+                }
+                Ok(()) => self.accept_claimed(from, key, counter),
+            },
+        }
+    }
+
+    /// A Zenoh start or stop whose counter the shared store took: persisted
+    /// in the trust record too, then dispatched with an empty body.
+    fn accept_claimed(&mut self, from: Origin, key: Key<'_>, counter: ControlCounter) -> Result<Vec<u8>, HandlerError> {
+        match self.svc.accept_control(counter) {
+            Ok(()) => self.request_as(from, key, &[], &RequestMeta::NONE),
+            Err(e) => {
+                self.outbox.log(&format!("trust: control counter not saved: {e}"));
+                self.settle();
+                Err(HandlerError::Internal)
+            }
+        }
+    }
+
+    /// Handles one request as `origin`.
+    fn request_as(
+        &mut self,
+        origin: Origin,
+        key: Key<'_>,
+        body: &[u8],
+        meta: &RequestMeta<'_>,
+    ) -> Result<Vec<u8>, HandlerError> {
+        self.svc.set_origin(origin);
         let mut out = vec![0u8; MAX_RAW_FRAME];
         if key == keys::CONTROL_MODULES {
             let n = crate::driver::serve_page(self.driver.points(), body, &mut out)?;
@@ -210,8 +312,16 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     /// A request for the service (`sys/...`, or a key nothing serves).
     fn ask_service(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Result<usize, HandlerError> {
         let Handled { reply, stop, notes } = self.svc.handle(key, body, out);
+        // A Zenoh request's notes go to the process's log only: the gate
+        // passes anything that looks signed, so a refused junk signature
+        // must not become a sys/log publication per query.
+        let mesh = matches!(self.svc.origin(), Origin::Air(_));
         for note in &notes {
-            self.outbox.log(&note.to_string());
+            if mesh {
+                tracing::info!(target: "mw_posix_node::mesh", key = key.as_str(), "{note}");
+            } else {
+                self.outbox.log(&note.to_string());
+            }
         }
         if stop && self.payload.is_some() {
             self.end_run();

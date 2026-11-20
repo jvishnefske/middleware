@@ -3322,6 +3322,91 @@ network tests use 127.0.0.1 only.
   *(mw-posix-node `pn1_the_old_names_still_work_and_are_reported`,
   `pn1_an_existing_old_state_directory_is_kept`,
   `node_ids_survive_the_rename`)*
+- [x] PN21 With `MW_POSIX_NODE_ZENOH_SYS` on (the default) the node
+  declares exactly one queryable, `@mw/node/<sender id>/sys/**`, where
+  the sender id is its Zenoh session's `SenderId`; no bare `sys/*` key is
+  declared. A query for a served key reaches the device thread over a
+  third link (the mesh link); a query naming another node is ignored; a
+  wildcard query covering the node's `sys/info` (`mwctl scout`'s
+  `@mw/node/*/sys/info`) gets `sys/info` and nothing else; answers are
+  on the node's concrete key. `sys/info` carries the node id, which is
+  not the sender id. The session is a Zenoh client of `MW_ZENOH_ROUTER`
+  (a router does not pass queries between two peer sessions) and its
+  zid is derived from the node id (`node_id::zenoh_id`, SHA-256 over
+  `mw-posix-node/zenoh-id/v1` and the node id), so the sender id is the
+  same across restarts and distinct per node (`STABLE_ZENOH_ID` turns
+  that off). *(mw-posix-node `pn21_*`, `zenoh_sys`
+  `pn21_info_manifest_and_cm_over_zenoh`,
+  `pn23_pn24_pn25_signed_installs_starts_and_owned_transfers_over_zenoh`)*
+- [x] PN22 The served keys are `sys/info`, `sys/trust/info`,
+  `sys/manifest`, `sys/manifest/cm`, `sys/payload/binding`,
+  `sys/loader/begin|chunk|commit` and `sys/payload/start|stop|bind`.
+  Every other `sys/` key is answered `Denied` without reaching the
+  device; `sys/trust/claim` never passes (the gate refuses it too).
+  *(mw-posix-node `pn22_*`)*
+- [x] PN23 The gate (`mesh_gate`, the ZN5 rules on the node, through
+  `esp_base::ota::admit`): the description keys (`info`, `trust/info`,
+  `manifest`, `manifest/cm`) answer in any trust state, deliberately
+  more than the RT1050's two. Everything else needs a pinned key:
+  `begin` and `chunk` stage into the inactive slot beside the running
+  payload; `commit` must be signed, and an unsigned commit is `Denied`
+  and leaves the transfer as it was (unlike the RT1050, which ends it);
+  `start`, `stop` and `bind` are signed only. A refused request leaves
+  the state, the flash and the running payload unchanged. Nothing a
+  Zenoh request causes the service to note (a commit or binding whose
+  signature the dispatcher refuses, among them) goes to `sys/log`: the
+  gate passes anything that looks signed, so those notes are logged to
+  `tracing` only. A refused binding is noted as such (`BindDenied`), not
+  as a refused claim. *(mw-posix-node `pn23_*`, `zenoh_sys`
+  `pn23_refusals_over_zenoh_never_reach_sys_log`)*
+- [x] PN24 A signed control request names `node_id[0..6]` (the `gw/sys`
+  rule, not the RT1050's `02` and last five). `gw/sys` and Zenoh share one
+  counter, because mwctl signs one body for either path: a Zenoh start or
+  stop needs a counter above both the trust record's and the in-process
+  gateway's control counter store's (`gw/sys` saves its accepted counter
+  there before acting), and is saved in that store, then in the trust
+  record (synced), before it acts. So a request accepted on either path
+  is refused on the other, across restarts: over Zenoh `Denied`; through
+  `gw/sys`, whose shell's save then finds the stored counter not lower,
+  `Unavailable`. An unreadable store refuses (`Unavailable`); a counter
+  that cannot be saved is `Internal`; either way nothing runs. Saves to
+  the store are serialized within the process. *(mw-posix-node `pn24_*`,
+  `pn23_pn24_*`, `zenoh_sys`
+  `pn24_gw_sys_and_zenoh_share_one_control_counter`, mw-gateway
+  `rg27_concurrent_saves_of_one_counter_accept_it_once`)*
+- [x] PN25 Each Zenoh requester is its own requester for the transfer:
+  `Origin::Air` and six bytes of the sender id its query attachment
+  names (never the node's own address nor the anonymous requester's, for
+  queries without an attachment), distinct from the serial links (the
+  gateway's `gw/sys` and the local link, `Origin::Serial`). A `begin`
+  from anyone takes the transfer over; another requester's `chunk` or
+  `commit` is `InvalidRequest` and changes nothing. The sender id is not
+  authenticated (neither Zenoh nor the router's ACL checks it): this
+  stops accidental and casual interference, not a forger, and activation
+  still needs the signed commit. A query's body is sized before it is
+  copied: one that cannot fit a frame to the device with its envelope is
+  `InvalidRequest`, and `info`, `trust/info`, `manifest` and `binding`
+  ignore theirs; the session takes 4 KiB batches and reassembles at most
+  a frame and 4 KiB, so a larger query is dropped by Zenoh. Queries are
+  served one at a time from a queue of 32 (full: dropped and counted), bounded by the query's
+  deadline at most 10 s; a timeout is `Unavailable`, a spent deadline
+  drops the query. Publications, logs and status are never sent on the
+  mesh link. *(mw-posix-node `pn25_*`, `pn21_the_node_session_is_a_client_*`)*
+- [x] PN26 `MW_POSIX_NODE_ZENOH_SYS` is `on` (the default) or `off`;
+  anything else is a `PosixNodeConfigError` naming the variable; it has
+  no `MW_PI_NODE_` name. The mesh path shares the gateway's control
+  counter store in the gateway's state directory (`DeviceParts::shared_control`).
+  *(mw-posix-node `pn26_*`)*
+- [x] PN27 `mwctl --zenoh … --node <sender id>` takes its control target
+  from `sys/info`: `02` and the last five bytes of `--node` for chip
+  `rt1050` (or a reply without a node id), the first six bytes of the
+  reported node id otherwise, but only when that node id's posix-node
+  session id (`middleware::zenoh_wire::posix_sender_id`, the derivation
+  mw-posix-node uses) is the `--node` addressed: `sys/info` is not
+  authenticated, so a board claiming another machine's node id is refused,
+  naming the reported id and the target it would give; `--target`
+  overrides. *(mwctl `pn27_*`, middleware
+  `pn21_a_posix_nodes_session_id_is_derived_from_its_node_id`)*
 
 ### i.MX RT base firmware (`firmware-imxrt/`)
 

@@ -247,3 +247,131 @@ fn pn14_the_manifest_names_the_board() {
     let raw = call(&mut s, keys::MANIFEST, &[]).expect("manifest");
     assert!(middleware::loader::manifest::records(&raw).unwrap().1.all(|r| r.unwrap().0 != tag::BOARD));
 }
+
+const MESH: esp_base::ota::Origin = esp_base::ota::Origin::Air([0x9a, 0x51, 0x0c, 0x77, 0x02, 0xe4]);
+const SERIAL: esp_base::ota::Origin = esp_base::ota::Origin::Serial;
+
+fn claimed(disk: &mut Disk) {
+    let (mut s, _) = open(disk, None);
+    call(&mut s, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).expect("claim");
+}
+
+/// `sys/loader/begin`'s body for `img`.
+fn begin_body(img: &[u8]) -> Vec<u8> {
+    upload_plan(img, None, None).expect("plan")[0].body.clone()
+}
+
+#[test]
+fn pn24_an_accepted_control_counter_is_persisted_with_the_trust_record() {
+    use middleware::loader::trust::ControlCounter;
+    let mut disk = Disk::default();
+    claimed(&mut disk);
+    {
+        let (mut s, _) = open(&mut disk, None);
+        assert_eq!(s.state().control(), ControlCounter(0));
+        s.accept_control(ControlCounter(10)).expect("accepted");
+        assert_eq!(s.state().control(), ControlCounter(10));
+        // Not above the last: refused, nothing written.
+        assert_eq!(s.accept_control(ControlCounter(10)), Err(StoreError::Rollback));
+        assert_eq!(s.accept_control(ControlCounter(3)), Err(StoreError::Rollback));
+        assert_eq!(s.state().control(), ControlCounter(10));
+    }
+    // Durable, and the trust state is unchanged.
+    let (s, boot) = open(&mut disk, None);
+    let p = boot.trust.expect("record");
+    assert_eq!(p.control, ControlCounter(10));
+    assert!(matches!(p.trust, TrustState::Claimed { .. }));
+    assert_eq!(s.state().control(), ControlCounter(10));
+}
+
+#[test]
+fn pn24_a_counter_that_cannot_be_saved_is_refused() {
+    use middleware::loader::trust::ControlCounter;
+    let mut disk = Disk::default();
+    claimed(&mut disk);
+    {
+        let (mut s, _) = open(&mut disk, Some(0));
+        assert_eq!(s.accept_control(ControlCounter(10)), Err(StoreError::Flash));
+    }
+    let (_, boot) = open(&mut disk, None);
+    assert_eq!(boot.trust.expect("record").control, ControlCounter(0));
+    // Without a trust record there is nothing to persist it in.
+    let mut disk2 = Disk::default();
+    let mut f = SectorFlash::open(MemSectors::new(&mut disk2).cut_after(0), SECTORS).expect("flash");
+    embedded_storage::nor_flash::NorFlash::write(&mut f, 0, &[0; 4]).expect("buffered");
+    assert!(f.sync().is_err());
+    let (mut s, _) = Service::open(f, facts());
+    assert_eq!(s.accept_control(ControlCounter(10)), Err(StoreError::Flash));
+}
+
+#[test]
+fn pn23_a_mesh_begin_stages_beside_the_running_payload_and_a_serial_one_stops_it() {
+    let old = image(2000, 5);
+    let new = image(3000, 6);
+    let mut disk = Disk::default();
+    let (mut s, _) = open(&mut disk, None);
+    upload(&mut s, &old, None).expect("old");
+    s.started();
+    assert_eq!(s.origin(), SERIAL);
+    s.set_origin(MESH);
+    let mut out = [0u8; 64];
+    let h = s.handle(keys::BEGIN, &begin_body(&new), &mut out);
+    assert_eq!(h.reply, Reply::Now(Ok(0)));
+    assert!(!h.stop, "a staged begin leaves the payload running");
+    assert_eq!(s.status(), PayloadStatus::Running);
+    assert_eq!(s.loader_owner(), Some(MESH));
+    // The same begin over a serial link stops it, as on a board.
+    s.set_origin(SERIAL);
+    let h = s.handle(keys::BEGIN, &begin_body(&new), &mut out);
+    assert!(h.stop);
+    assert_eq!(s.status(), PayloadStatus::Loading);
+    assert_eq!(s.loader_owner(), Some(SERIAL));
+}
+
+#[test]
+fn pn25_the_transfer_belongs_to_the_requester_whose_begin_started_it() {
+    let img = image(1500, 7);
+    let steps = upload_plan(&img, None, None).expect("plan");
+    let (commit, transfer) = steps.split_last().expect("steps");
+    let mut disk = Disk::default();
+    let (mut s, _) = open(&mut disk, None);
+    assert_eq!(s.loader_owner(), None);
+    s.set_origin(MESH);
+    call(&mut s, transfer[0].key, &transfer[0].body).expect("mesh begin");
+    assert_eq!(s.loader_owner(), Some(MESH));
+    // A serial chunk or commit does not continue the mesh's transfer.
+    s.set_origin(SERIAL);
+    assert_eq!(call(&mut s, transfer[1].key, &transfer[1].body), Err(HandlerError::InvalidRequest));
+    assert_eq!(call(&mut s, commit.key, &commit.body), Err(HandlerError::InvalidRequest));
+    assert_eq!(s.loader_owner(), Some(MESH));
+    // A serial begin takes it over; then the mesh's chunk is refused.
+    for step in transfer {
+        call(&mut s, step.key, &step.body).expect("serial transfer");
+    }
+    assert_eq!(s.loader_owner(), Some(SERIAL));
+    s.set_origin(MESH);
+    assert_eq!(call(&mut s, transfer[1].key, &transfer[1].body), Err(HandlerError::InvalidRequest));
+    // The owner's commit ends it: nobody owns the loader any more.
+    s.set_origin(SERIAL);
+    call(&mut s, commit.key, &commit.body).expect("commit");
+    assert_eq!(s.loader_owner(), None);
+    assert_eq!(installed(&mut s), Some(img));
+}
+
+#[test]
+fn pn23_a_refused_binding_says_so_not_that_a_claim_was_refused() {
+    use middleware::loader::binding::SignedBinding;
+    use middleware::loader::trust::Signature;
+    let mut disk = Disk::default();
+    let img = image(1200, 3);
+    let (mut s, _) = open(&mut disk, None);
+    upload(&mut s, &img, None).expect("install");
+    call(&mut s, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).expect("claim");
+    let mut body = mwctl::bindspec::record(mwctl::sign::image_sha256(&img), 3, &[]).expect("record");
+    body.extend_from_slice(&SignedBinding { version: Version(3), signature: Signature([9; 64]) }.encode());
+    let mut out = [0u8; 64];
+    let h = s.handle(keys::BIND, &body, &mut out);
+    assert_eq!(h.reply, Reply::Now(Err(HandlerError::Denied)));
+    assert!(!h.notes.contains(&Note::ClaimDenied), "{:?}", h.notes);
+    assert!(h.notes.contains(&Note::BindDenied), "{:?}", h.notes);
+}

@@ -105,6 +105,23 @@ pub fn resolve(configured: Option<&str>, machine_id: Option<&str>) -> Result<Sen
     }
 }
 
+/// Hashed in front of the node id for the Zenoh session id
+/// ([`zenoh_id`]; middleware's, which mwctl shares to check a node's
+/// claimed id).
+pub use middleware::zenoh_wire::POSIX_ZENOH_ID_DOMAIN as ZENOH_ID_DOMAIN;
+
+/// The Zenoh session id (`zid`) of node `node`'s session, in the form
+/// Zenoh's `id` setting takes: `middleware::zenoh_wire::posix_zenoh_id`
+/// (the first 16 bytes of SHA-256 over [`ZENOH_ID_DOMAIN`] and the node
+/// id) read as a little-endian `u128`, in lowercase hex without leading
+/// zeros (Zenoh's own form). So the session's sender id, the id in its
+/// `@mw/node/<id>/...` keys, is the same across restarts
+/// (`middleware::zenoh_wire::posix_sender_id`), and two nodes on one host
+/// (distinct node ids) get distinct ones. Pure.
+pub fn zenoh_id(node: SenderId) -> String {
+    format!("{:x}", u128::from_le_bytes(middleware::zenoh_wire::posix_zenoh_id(node)))
+}
+
 /// `id` as 16 lowercase hex digits (the form `MW_POSIX_NODE_NODE_ID` takes).
 pub fn hex(id: SenderId) -> String {
     id.0.iter().map(|b| format!("{b:02x}")).collect()
@@ -150,6 +167,31 @@ mod tests {
             assert!(matches!(parse_node_id(bad), Err(NodeIdError::Configured(_))), "{bad:?}");
         }
         assert_eq!(parse_node_id("0000000000000000"), Err(NodeIdError::Zero));
+    }
+
+    #[test]
+    fn pn21_the_zenoh_id_is_derived_from_the_node_id() {
+        use std::str::FromStr;
+        let unit = SenderId([0x59, 0x40, 0xe9, 0xa5, 0xe7, 0x35, 0x3c, 0x17]);
+        let process = SenderId([0x59, 0x40, 0xe9, 0xa5, 0xe7, 0x35, 0x3c, 0x18]);
+        let a = zenoh_id(unit);
+        // Stable, and another node (the KD240 runs two) gets another.
+        assert_eq!(zenoh_id(unit), a);
+        assert_ne!(zenoh_id(process), a);
+        // What Zenoh's `id` setting accepts: lowercase hex, no leading
+        // zero, at most 16 bytes, not zero.
+        assert!(a.len() <= 32 && !a.is_empty(), "{a}");
+        assert!(a.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{a}");
+        assert!(!a.starts_with('0'), "{a}");
+        let zid = zenoh::session::ZenohId::from_str(&a).expect("a valid zenoh id");
+        assert_eq!(zid.to_string(), a);
+        // SHA-256 over the domain and the node id, its first 16 bytes read
+        // little-endian.
+        let digest = Sha256::new().chain_update(ZENOH_ID_DOMAIN).chain_update(unit.0).finalize();
+        let want = u128::from_le_bytes(digest[..16].try_into().unwrap());
+        assert_eq!(a, format!("{want:x}"));
+        // Its sender id, as middleware (and mwctl) derive it.
+        assert_eq!(middleware::zenoh::sender_id_of(zid), middleware::zenoh_wire::posix_sender_id(unit));
     }
 
     /// The id a fixed machine id gives is the one it gave before the crate

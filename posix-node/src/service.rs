@@ -10,8 +10,11 @@
 //!    machine, payload lifecycle and trust rules of esp-base and rp-base),
 //!    with no re-key window (a Linux host has no presence button: re-key by
 //!    stopping the node and deleting the trust sectors, `flash/sector-0128`
-//!    and `flash/sector-0129`) and no staging (requests come over the
-//!    serial protocol, never over the air);
+//!    and `flash/sector-0129`), and staging for requests over Zenoh only
+//!    (their [`Origin`] is `Air`, [`Service::set_origin`]): a Zenoh `begin`
+//!    and its chunks write the inactive slot beside the running payload,
+//!    as over the air on the ESP base firmware, while a serial `begin`
+//!    stops it first;
 //! 2. performs the storage action, as rp-base's service does: erase and
 //!    write the inactive slot, activate it (a raised `min_version` saved
 //!    inside `PayloadStore::activate_with`, after the CRC check and before
@@ -21,6 +24,15 @@
 //!    leaves the state of `esp_base::dispatch::after_storage_failure` with
 //!    the trust record on flash adopted, so memory never trusts less than
 //!    a restart would.
+//!
+//! The payload transfer belongs to the requester whose `begin` started it
+//! ([`Service::loader_owner`]): a `chunk` or `commit` from another is
+//! `InvalidRequest` and leaves the transfer as it was; a `begin` from
+//! anyone takes it over. The serial links (the gateway's `gw/sys` and the
+//! local link) are one requester, `Origin::Serial`; each Zenoh requester
+//! is another, an `Origin::Air` (`crate::mesh_gate::requester`).
+//! [`Service::accept_control`] persists the counter of a signed start or
+//! stop the Zenoh gate admitted.
 //!
 //! `sys/fw/*` reaches the dispatcher like any other `sys/` key and is
 //! `NotFound`: the node is a board without firmware OTA (rp-base's
@@ -46,11 +58,12 @@ use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure,
 use esp_base::image::Header;
 use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::binding_store::{self, BindingStore};
+use esp_base::ota::Origin;
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, RECORD_LEN, TrustStore};
-use middleware::loader::trust::TrustState;
+use middleware::loader::trust::{ControlCounter, TrustState};
 use middleware::loader::manifest::{BoardName, ControlModules, Groups, Limits, Link, LinkKind, Manifest};
-use middleware::loader::{PayloadStatus, keys};
+use middleware::loader::{Loader, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
 
@@ -175,6 +188,8 @@ pub enum Note {
     },
     /// A claim on a claimed node was refused.
     ClaimDenied,
+    /// A binding was refused by the trust rules.
+    BindDenied,
 }
 
 impl fmt::Display for Note {
@@ -194,6 +209,9 @@ impl fmt::Display for Note {
             Note::CommitDenied { min_version } => write!(
                 f,
                 "trust: commit denied (needs a valid signature and version > {min_version}); previous payload kept"
+            ),
+            Note::BindDenied => f.write_str(
+                "trust: binding denied (needs a signature by the pinned key and a version above the stored binding's)",
             ),
             Note::ClaimDenied => f.write_str(
                 "trust: claim denied; the node is claimed (no re-key window: delete the trust sectors while it is stopped)",
@@ -240,6 +258,10 @@ pub struct Service<F> {
     binding: Option<BindingStore>,
     /// The served keys of the payload run that ended.
     served: ServedKeys,
+    /// The requester of the request being handled.
+    origin: Origin,
+    /// The requester that owns the payload transfer in progress.
+    owner: Option<Origin>,
 }
 
 /// Whether both trust sectors can be read.
@@ -281,7 +303,16 @@ impl<F: NorFlash + Durable> Service<F> {
             node: Some(facts.node),
             manifest: Some(manifest_for(facts.board, facts.control)),
         };
-        let svc = Service { state, ctx, store, trust, binding, served: ServedKeys::new() };
+        let svc = Service {
+            state,
+            ctx,
+            store,
+            trust,
+            binding,
+            served: ServedKeys::new(),
+            origin: Origin::Serial,
+            owner: None,
+        };
         (svc, Boot { installed, trust: persisted })
     }
 
@@ -360,12 +391,78 @@ impl<F: NorFlash + Durable> Service<F> {
         };
     }
 
+    /// Names the requester of the requests that follow (module docs); the
+    /// controller sets it before every request. `Origin::Serial` until set.
+    pub fn set_origin(&mut self, origin: Origin) {
+        self.origin = origin;
+    }
+
+    /// The requester of the request being handled.
+    pub const fn origin(&self) -> Origin {
+        self.origin
+    }
+
+    /// The requester that owns the payload transfer in progress (`None`
+    /// when the loader is idle).
+    pub const fn loader_owner(&self) -> Option<Origin> {
+        self.owner
+    }
+
+    /// Persists `counter`, the counter of a signed control request the
+    /// Zenoh gate admitted (`crate::mesh_gate::Admission::Control`), in the
+    /// trust record (its trust state unchanged) and adopts it, so a replay
+    /// is refused from now on, across restarts. Call it before dispatching
+    /// the request; on an error do not dispatch it (reply `Internal`).
+    ///
+    /// `Rollback` for a counter not above the last accepted one (nothing
+    /// is written); `Flash` when the trust record is unavailable or its
+    /// save or sync failed (the state then keeps the record the trust
+    /// store holds).
+    pub fn accept_control(&mut self, counter: ControlCounter) -> Result<(), StoreError> {
+        if counter <= self.state.control() {
+            return Err(StoreError::Rollback);
+        }
+        let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
+            return Err(StoreError::Flash);
+        };
+        let next = Persisted { trust: self.state.trust(), control: counter };
+        let saved = ts.save(store.flash(), &next).and_then(|()| store.flash().sync().map_err(|_| StoreError::Flash));
+        match saved {
+            Ok(()) => {
+                self.state = self.state.with_control(counter);
+                Ok(())
+            }
+            Err(e) => {
+                self.state = self.adopt_persisted(self.state);
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether `key` continues a transfer another requester owns.
+    fn foreign(&self, key: Key<'_>) -> bool {
+        self.owner.is_some_and(|o| o != self.origin) && (key == keys::CHUNK || key == keys::COMMIT)
+    }
+
     /// Handles one request; a reply body is written into `out`.
     pub fn handle(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
         if self.trust.is_none() && loader_needs_trust(key) {
             return Handled::now(Err(HandlerError::Unavailable));
         }
-        let outcome = handle_request(self.state, &self.ctx, &Request::new(key, body), out);
+        if self.foreign(key) {
+            return Handled::now(Err(HandlerError::InvalidRequest));
+        }
+        let handled = self.dispatch(key, body, out);
+        let receiving = matches!(self.state.loader(), Loader::Receiving { .. });
+        self.owner = esp_base::ota::owner_after(self.owner, self.origin, key, receiving);
+        handled
+    }
+
+    /// [`Service::handle`] past the checks: the dispatcher (staging for
+    /// an `Air` origin) and the storage action.
+    fn dispatch(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
+        let ctx = Context { staging: matches!(self.origin, Origin::Air(_)), ..self.ctx };
+        let outcome = handle_request(self.state, &ctx, &Request::new(key, body), out);
         if matches!(outcome.action, Action::Bind { .. } | Action::Binding) {
             let done = match self.store.as_mut() {
                 Some(st) => binding_store::perform(self.binding.as_mut(), st.flash(), &outcome, out),
@@ -466,8 +563,10 @@ impl<F: NorFlash + Durable> Service<F> {
                     TrustState::Unclaimed => 0,
                 };
                 notes.push(Note::CommitDenied { min_version });
-            } else {
+            } else if key == keys::TRUST_CLAIM {
                 notes.push(Note::ClaimDenied);
+            } else if key == keys::BIND {
+                notes.push(Note::BindDenied);
             }
         }
     }
