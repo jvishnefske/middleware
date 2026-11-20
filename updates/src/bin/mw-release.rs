@@ -140,7 +140,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .latest(&channel, &target)
                 .await
                 .map_err(|e| format!("reading the channel: {e}"))?;
-            let current = current_version(&latest, kind, &signer.public_key());
+            let current = current_version(&latest, kind, &channel, &target, &signer.public_key());
             settle_version(kind, version, &mut prepared, current)?;
             let release = sign(kind, &channel, &target, &prepared, &*signer)?;
             publish(&client, &release, &prepared.image, Duration::from_secs(20)).await?;
