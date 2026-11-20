@@ -24,6 +24,11 @@ pub const MAX_SERVED: usize = 32;
 pub const MAX_RECORDS: usize = 16;
 /// Records one device may hold (E21).
 pub const PER_SENDER: usize = 2;
+/// Longest TTL a beacon record is kept with: the radio's MACs are not
+/// authenticated, so a beacon cannot pin a record for longer than its
+/// sender would be remembered unheard ([`HEARD_TTL_MS`]); devices re-send
+/// their beacons well within it.
+pub const MAX_BEACON_TTL_S: u32 = (HEARD_TTL_MS / 1000) as u32;
 
 /// A device's node id: its MAC and two zero bytes ([`SenderId::from_mac`]).
 pub const fn sender_id(mac: Mac) -> SenderId {
@@ -243,8 +248,10 @@ impl<const N: usize> Registry<N> {
     /// Folds a `disc/<kind>` sample from `mac` at `now_ms` in. The sender
     /// is the record's node: a beacon declaring another node is refused, a
     /// record is updated or withdrawn only by the device that created it,
-    /// one device holds at most [`PER_SENDER`] records, and a full registry
-    /// refuses new records rather than evict.
+    /// one device holds at most [`PER_SENDER`] records, a full registry
+    /// refuses new records rather than evict, and the TTL kept is at most
+    /// [`MAX_BEACON_TTL_S`]. The shell also [`Registry::forget`]s a device's
+    /// records when [`Heard`] forgets it.
     pub fn observe(&mut self, mac: Mac, key: Key<'_>, payload: &[u8], now_ms: u64) -> Action {
         let node = sender_id(mac);
         let Some(service) = kind_of(key).and_then(|kind| decode(kind, payload).ok()) else {
@@ -253,7 +260,7 @@ impl<const N: usize> Registry<N> {
         if service.node.is_some_and(|n| n != node) {
             return self.refuse(Refusal::OtherNode);
         }
-        let service = Service { node: Some(node), ..service };
+        let service = Service { node: Some(node), ttl_s: service.ttl_s.min(MAX_BEACON_TTL_S), ..service };
         match self.dir.get(service.kind, service.instance) {
             Some(known) if known.node != Some(node) => return self.refuse(Refusal::NotOwner),
             None if service.ttl_s > 0 && self.dir.iter().filter(|s| s.node == Some(node)).count() >= PER_SENDER => {
@@ -280,6 +287,21 @@ impl<const N: usize> Registry<N> {
         let gone: Vec<ServiceRecord> = self.dir.expired(now_ms).filter_map(|s| ServiceRecord::new(&s)).collect();
         let dir = std::mem::replace(&mut self.dir, Directory::new());
         self.dir = dir.expire(now_ms).0;
+        gone
+    }
+
+    /// Removes every record of `mac` (a device no longer heard, expired or
+    /// evicted from [`Heard`]); returns them to withdraw. A record never
+    /// outlives its sender being heard.
+    pub fn forget(&mut self, mac: Mac) -> Vec<ServiceRecord> {
+        let node = Some(sender_id(mac));
+        let gone: Vec<ServiceRecord> =
+            self.dir.iter().filter(|s| s.node == node).filter_map(|s| ServiceRecord::new(&s)).collect();
+        for rec in &gone {
+            let s = rec.service();
+            let dir = std::mem::replace(&mut self.dir, Directory::new());
+            self.dir = dir.observe(&Event::Down { kind: s.kind, instance: s.instance }, 0).0;
+        }
         gone
     }
 
@@ -383,6 +405,46 @@ mod tests {
         assert_eq!(gone.len(), 1);
         assert_eq!(gone[0].service().instance, "short");
         assert_eq!(r.records().len(), 1);
+    }
+
+    #[test]
+    fn eg7_a_huge_ttl_is_clamped_and_expires() {
+        let mut r: Registry = Registry::new();
+        let a = r.observe(DEV, KEY, &beacon("forever", None, u32::MAX), 0);
+        let Action::Announce(rec) = a else { panic!("{a:?}") };
+        assert_eq!(rec.ttl_s(), MAX_BEACON_TTL_S);
+        let at = u64::from(MAX_BEACON_TTL_S) * 1000;
+        assert!(r.expire(at - 1).is_empty());
+        assert_eq!(r.expire(at).len(), 1);
+        assert!(r.records().is_empty());
+    }
+
+    #[test]
+    fn eg7_a_forgotten_device_loses_its_records() {
+        let mut r: Registry = Registry::new();
+        r.observe(DEV, KEY, &beacon("a", None, 30), 0);
+        r.observe(DEV, KEY, &beacon("b", None, 30), 0);
+        r.observe(OTHER, KEY, &beacon("c", None, 30), 0);
+        let mut heard = Heard::new();
+        heard.hear(DEV, 0);
+        heard.hear(OTHER, 50_000);
+        // DEV expires from the heard list: its records go with it.
+        let gone = heard.expire(60_000);
+        assert_eq!(gone, [DEV]);
+        let withdrawn: Vec<String> =
+            gone.iter().flat_map(|m| r.forget(*m)).map(|rec| rec.service().instance.to_owned()).collect();
+        assert_eq!(withdrawn, ["a", "b"]);
+        assert_eq!(r.records().len(), 1);
+        // An evicted device too.
+        let mut full = Heard::new();
+        for i in 0..MAX_HEARD as u8 {
+            full.hear(if i == 0 { OTHER } else { [2, 0, 0, 0, 0, i] }, u64::from(i));
+        }
+        let evicted = full.hear(DEV, 1_000).evicted.unwrap();
+        assert_eq!(evicted, OTHER);
+        assert_eq!(r.forget(evicted).len(), 1);
+        assert!(r.records().is_empty());
+        assert!(r.forget(evicted).is_empty());
     }
 
     #[test]
