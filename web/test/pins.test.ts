@@ -146,3 +146,16 @@ describe("pin table transitions", () => {
     expect(labelsUsed(ws)).toEqual(["BUTTON", "LED"]);
   });
 });
+
+describe("Linux boards (U47)", () => {
+  it("take their pin map from the board name: the KD240 has no payload pins", () => {
+    const kd = proto.boardPins("linux-aarch64", "ZynqMP KD240 revA/B/1");
+    expect(kd.gpios).toEqual([]);
+    expect(kd.spiRouting).toBe("none");
+    expect(() => proto.boardPins("linux-aarch64")).toThrow(/no pin map/);
+    expect(proto.checkPins("linux-aarch64", [], [], "ZynqMP KD240")).toEqual([]);
+    expect(proto.checkPins("linux-aarch64", [row("gpio-out", "LED", 0)], [], "ZynqMP KD240").length).toBeGreaterThan(0);
+    expect(check("kd240", EMPTY_PINS)).toEqual([]);
+    expect(check("kd240", { rows: [row("gpio-out", "LED", 0)], buses: [] }).length).toBeGreaterThan(0);
+  });
+});

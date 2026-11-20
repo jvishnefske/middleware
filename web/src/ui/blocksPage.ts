@@ -106,7 +106,7 @@ import {
 } from "../model/machines";
 import { type PayloadModel, flowsOf, makeModel, profileOfModel, withBoard, withFlows, withMachines, withPins, withWorkspace } from "../model/payload";
 import { type PinFunc, type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget, withNeeds } from "../model/pins";
-import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../model/target";
+import { TARGET_IDS, type TargetId, boardOf, chipOf, isTargetId, targetLabel } from "../model/target";
 import type { BoardId } from "../onboarding/boards";
 import type { BoardPins, PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
@@ -369,7 +369,7 @@ export function blocksPage(app: App): HTMLElement {
   function checkPins() {
     const chip = chipOf(model.board);
     try {
-      boardPins = chip ? proto.boardPins(chip) : null;
+      boardPins = chip ? proto.boardPins(chip, boardOf(model.board)?.model) : null;
       pinIssues = checkTable(proto.checkPins, model.board, model.pins);
     } catch (e) {
       boardPins = null;

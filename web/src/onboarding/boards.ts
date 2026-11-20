@@ -31,12 +31,19 @@
 // * ESP32-C3, ESP8266 and the Pico (RP2040) builds are protocol only: they
 //   store uploaded payloads but have no WASM runtime, so they do not run
 //   them (the `+no-wasm` firmware suffix; `wasm: false` in the manifest).
+// * The AMD Kria KD240 runs posix-node on NixOS, installed from a NixOS
+//   image (the lathe repo's `kd240/BRINGUP.md`). It is reached over the
+//   mesh, not a cable: the Device tab's Mesh section scans and probes it,
+//   and payloads are deployed with `mwctl`. Its posix-node serves no `gpio`
+//   group, so it has no LED or button pin (`blink`, `button` null) and an
+//   empty pin table; its chip name (`linux-aarch64`) names no board, so pin
+//   checks pass its `model` (protocol-wasm `boardPins(chip, board)`).
 
 import type { Manifest, Uf2Image } from "../flash/manifest";
 import { formatSize } from "../flash/uf2";
 import type { TabId } from "../ui/app";
 
-export type BoardId = "esp32" | "esp32s3" | "esp32c3" | "esp8266" | "pico2" | "pico";
+export type BoardId = "esp32" | "esp32s3" | "esp32c3" | "esp8266" | "pico2" | "pico" | "kd240";
 
 /** How the base firmware gets onto the board. */
 export type Install =
@@ -44,7 +51,10 @@ export type Install =
   | { kind: "web-serial" }
   /** Copy the UF2 built by `firmware-rp/build.sh <target>` onto the drive
    * the board mounts while BOOTSEL is held. */
-  | { kind: "uf2"; target: "rp2040" | "rp2350"; drive: string };
+  | { kind: "uf2"; target: "rp2040" | "rp2350"; drive: string }
+  /** Write a NixOS image (built in the lathe repo) to the board's boot
+   * medium. */
+  | { kind: "nixos-image"; image: string };
 
 export interface Board {
   id: BoardId;
@@ -59,13 +69,16 @@ export interface Board {
   ledPin: number | null;
   /** The pin the Blocks pin table labels LED by default (what the Blink
    * example drives): the on-board LED, or a free header pin to wire one
-   * to, with a note saying which. Checked against the board's pin rules
-   * by the tests. */
-  blink: { pin: number; note: string };
+   * to, with a note saying which; null on a board with no payload pins.
+   * Checked against the board's pin rules by the tests. */
+  blink: { pin: number; note: string } | null;
   /** The pin suggested for a push button labelled BUTTON (input, pull-up,
-   * pressed = low), with a note saying where it is. Checked against the
-   * board's pin rules by the tests. */
-  button: { pin: number; note: string };
+   * pressed = low), with a note saying where it is; null on a board with
+   * no payload pins. Checked against the board's pin rules by the tests. */
+  button: { pin: number; note: string } | null;
+  /** What the board's `model` (its manifest's BOARD record) contains, for a
+   * board whose chip name names no board: passed to the pin checks. */
+  model?: string;
 }
 
 export const BOARDS: readonly Board[] = [
@@ -128,6 +141,17 @@ export const BOARDS: readonly Board[] = [
     ledPin: 25,
     blink: { pin: 25, note: "on-board LED" },
     button: { pin: 15, note: "no user button: wire a push button from GPIO 15 to GND" },
+  },
+  {
+    id: "kd240",
+    label: "AMD Kria KD240",
+    chip: "linux-aarch64",
+    model: "ZynqMP KD240",
+    install: { kind: "nixos-image", image: "kd240.img" },
+    runsPayloads: true,
+    ledPin: null,
+    blink: null,
+    button: null,
   },
 ];
 
@@ -192,6 +216,16 @@ function installStep(b: Board, m: Manifest | null): Step {
       { kind: "tab", tab: "flash", label: "Open Flash" },
     );
   }
+  if (b.install.kind === "nixos-image") {
+    return step(
+      INSTALL,
+      `The ${b.label} runs posix-node on NixOS. Build \`${b.install.image}\` in the lathe repository and write it ` +
+        "to the board's boot medium.",
+      null,
+      [],
+      ["The lathe repository's `kd240/BRINGUP.md` has the build, the first boot and the claim with mwctl."],
+    );
+  }
   const { target, drive } = b.install;
   const factory =
     target === "rp2350"
@@ -231,6 +265,14 @@ function installStep(b: Board, m: Manifest | null): Step {
 }
 
 function connectStep(b: Board): Step {
+  if (b.install.kind === "nixos-image") {
+    return step(
+      "Connect",
+      `The ${b.label} is reached over the mesh, not a cable. Open Device, then under Mesh press Connect and Scan, ` +
+        "and Probe the node: it lists the drive's control points and drafts a plant from them.",
+      { kind: "tab", tab: "device", label: "Open Device" },
+    );
+  }
   return step(
     "Connect",
     `Open Device and press Connect, then pick the ${b.label}'s serial port. ` +
@@ -240,10 +282,18 @@ function connectStep(b: Board): Step {
 }
 
 function payloadStep(b: Board): Step {
+  const blocks: StepAction = { kind: "tab", tab: "blocks", label: "Open Blocks" };
+  if (!b.blink) {
+    return step(
+      "Run a payload",
+      `The ${b.label} gives payloads no pins: they reach the machine through the node's control points. ` +
+        "Build and simulate in Blocks, then deploy with `mwctl` (upload, bind, start); the probe shows the commands.",
+      blocks,
+    );
+  }
   const pin =
     ` The Blink example drives the pin labelled LED, GPIO ${b.blink.pin} on the ${b.label} (${b.blink.note}); ` +
     "change it under Blocks, Pins.";
-  const blocks: StepAction = { kind: "tab", tab: "blocks", label: "Open Blocks" };
   if (b.runsPayloads) {
     return step(
       "Run a payload",
