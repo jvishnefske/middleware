@@ -8,18 +8,47 @@
 //!   device tree), `fw`, `sender` and, when LAN peers could use it,
 //!   `zenoh` ([`advertised_locator`]).
 //!
+//! * [`run`] — the announcer beside the node: it announces `posix-<node
+//!   id>` on host `posix-<node id>.local` at the node's address
+//!   ([`Net::local_ip`]), answers queries, re-checks the address every
+//!   [`RECHECK`] ([`next_action`]: a change is a goodbye, then the new
+//!   address), retries what fails (2 s doubling to 60 s, 30 s after a name
+//!   conflict; logged at the 1st, 2nd, 4th … failure in a row) and on
+//!   stop multicasts its goodbye within [`GOODBYE_WAIT`]. Nothing it does
+//!   fails the node.
+//!
 //! A Zenoh client listens on nothing, so the SRV port is
 //! `mdns::node::NO_PORT` and the A record is the node's own address.
+//!
+//! The announcer binds UDP 5353 with `SO_REUSEADDR` and `SO_REUSEPORT`
+//! beside the system's mDNS daemon (avahi) and any other node on the
+//! host: each answers for its own names only. A unicast query to port
+//! 5353 reaches one of them, so a peer browsing as a one-shot querier
+//! (`mwctl scout`, from an ephemeral port) or by multicast sees them all.
 
+use std::fmt;
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::pin::pin;
+use std::time::Duration;
 
 use middleware::SenderId;
 use middleware::discovery::directory::MAX_TXT_LEN;
+use middleware::discovery::{Announce, Endpoint};
 use middleware::dns::wire::WireError;
+use middleware::mdns::announce::{AnnounceError, MdnsAnnouncer};
 use middleware::mdns::node::{self, NodeTxt};
+use middleware::mdns::socket::MdnsError;
+use middleware::mdns::{MDNS_GROUP_V4, MDNS_PORT};
+use tokio::time::Instant;
 
+use crate::config::MdnsMode;
 use crate::service::Facts;
+
+/// How often the announced address is re-checked.
+pub const RECHECK: Duration = Duration::from_secs(15);
+/// The longest wait for the goodbye when the node stops.
+pub const GOODBYE_WAIT: Duration = Duration::from_secs(2);
 
 /// The instance label's prefix: `posix-<node id>`.
 pub const LABEL_PREFIX: &str = "posix";
@@ -117,6 +146,292 @@ pub fn next_action(current: Option<Ipv4Addr>, probed: io::Result<Ipv4Addr>) -> A
         (Some(_), Err(_)) => Action::Withdraw,
         (None, Err(_)) => Action::Keep,
     }
+}
+
+/// The announcer's timers; [`Timing::default`] is the node's (module
+/// docs). Tests shorten them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    /// How often the address is re-checked.
+    pub recheck: Duration,
+    /// The wait after a first failure, doubled after each further one…
+    pub retry_min: Duration,
+    /// … up to this.
+    pub retry_max: Duration,
+    /// The wait after every rename of the instance conflicted.
+    pub conflict: Duration,
+    /// The longest wait for the goodbye on stop.
+    pub goodbye: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            recheck: RECHECK,
+            retry_min: Duration::from_secs(2),
+            retry_max: Duration::from_secs(60),
+            conflict: Duration::from_secs(30),
+            goodbye: GOODBYE_WAIT,
+        }
+    }
+}
+
+impl Timing {
+    /// The wait after the `failures`th failure in a row (from 1); `conflict`
+    /// when it was a name conflict. Pure.
+    pub fn backoff(&self, failures: u32, conflict: bool) -> Duration {
+        if conflict {
+            return self.conflict;
+        }
+        let doublings = failures.saturating_sub(1).min(16);
+        self.retry_min.saturating_mul(1 << doublings).min(self.retry_max)
+    }
+}
+
+/// Whether the `n`th failure in a row is logged: the 1st, 2nd, 4th, 8th …
+/// Pure.
+pub fn logged(n: u32) -> bool {
+    n.is_power_of_two()
+}
+
+/// The network the announcer runs on: [`StdNet`] for the node, a loopback
+/// one in tests.
+pub trait Net {
+    /// The address to announce under `mode` (never [`MdnsMode::Off`]).
+    fn local_ip(&self, mode: MdnsMode) -> io::Result<Ipv4Addr>;
+    /// An announcer for `ip`, its services' SRV target `host`.
+    fn bind(&self, ip: Ipv4Addr, host: &str) -> impl Future<Output = Result<MdnsAnnouncer, MdnsError>> + Send;
+}
+
+/// The host's network: [`MdnsMode::Auto`] is the address the routing table
+/// picks for `224.0.0.251` (a UDP socket connected there, which sends
+/// nothing), [`MdnsMode::Pinned`] the configured one; the announcer binds
+/// `0.0.0.0:5353`, joins the group on that address and multicasts from
+/// its interface.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdNet;
+
+impl Net for StdNet {
+    fn local_ip(&self, mode: MdnsMode) -> io::Result<Ipv4Addr> {
+        match mode {
+            MdnsMode::Pinned(ip) => Ok(ip),
+            MdnsMode::Off => Err(io::Error::new(io::ErrorKind::Unsupported, "mdns is off")),
+            MdnsMode::Auto => {
+                let probe = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+                probe.connect((MDNS_GROUP_V4, MDNS_PORT))?;
+                match probe.local_addr()? {
+                    SocketAddr::V4(a) if !a.ip().is_unspecified() && !a.ip().is_loopback() => Ok(*a.ip()),
+                    other => Err(io::Error::new(
+                        io::ErrorKind::AddrNotAvailable,
+                        format!("the mDNS group is routed from {other}, not a LAN address"),
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn bind(&self, ip: Ipv4Addr, host: &str) -> Result<MdnsAnnouncer, MdnsError> {
+        MdnsAnnouncer::builder().host(host).join_multicast(ip).multicast_interface(ip).build().await
+    }
+}
+
+/// What the announcer did, when it stops.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Report {
+    /// Announcements made (one per address).
+    pub announced: u32,
+    /// Goodbyes sent.
+    pub withdrawn: u32,
+    /// Failures (binding, announcing, the socket), each retried.
+    pub failures: u32,
+    /// The last failure.
+    pub last_error: Option<String>,
+}
+
+/// [`run_with`] on the node's [`Timing`].
+pub async fn run(id: Identity, mode: MdnsMode, net: impl Net, stop: impl Future<Output = ()>) -> Report {
+    run_with(id, mode, net, Timing::default(), stop).await
+}
+
+/// What woke the announcer.
+enum Wake {
+    Stop,
+    Check,
+    Stepped,
+    Failed(MdnsError),
+}
+
+/// Failures in a row, counted into the report and logged sparsely.
+struct Failures<'r> {
+    report: &'r mut Report,
+    in_a_row: u32,
+    timing: Timing,
+}
+
+impl Failures<'_> {
+    /// Notes a failure; returns when to try again.
+    fn note(&mut self, what: &str, e: impl fmt::Display, conflict: bool) -> Instant {
+        self.in_a_row = self.in_a_row.saturating_add(1);
+        self.report.failures = self.report.failures.saturating_add(1);
+        let wait = self.timing.backoff(self.in_a_row, conflict);
+        let text = format!("{what}: {e}");
+        if logged(self.in_a_row) {
+            eprintln!("mw-posix-node: mdns: {text} (failure {} in a row, retrying in {wait:?})", self.in_a_row);
+        }
+        self.report.last_error = Some(text);
+        Instant::now() + wait
+    }
+}
+
+/// Withdraws the instance under the goodbye wait; true if it went out.
+async fn goodbye(a: &mut MdnsAnnouncer, label: &str, wait: Duration) -> bool {
+    match tokio::time::timeout(wait, a.withdraw(node::KIND, label)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            eprintln!("mw-posix-node: mdns: goodbye: {e}");
+            false
+        }
+        Err(_) => {
+            eprintln!("mw-posix-node: mdns: goodbye: timed out");
+            false
+        }
+    }
+}
+
+/// Announces `id` on the address `net` gives under `mode` until `stop`
+/// completes, then says goodbye (module docs). Never fails: what goes
+/// wrong is retried, logged and counted in the [`Report`].
+pub async fn run_with(
+    id: Identity,
+    mode: MdnsMode,
+    net: impl Net,
+    timing: Timing,
+    stop: impl Future<Output = ()>,
+) -> Report {
+    let mut report = Report::default();
+    let (label, host) = (id.label(), id.host());
+    let mut buf = [0u8; MAX_TXT_LEN];
+    let txt = match id.txt(&mut buf) {
+        Ok(t) => t.to_vec(),
+        Err(e) => {
+            eprintln!("mw-posix-node: mdns: the record does not encode: {e:?}");
+            report.last_error = Some(format!("the record does not encode: {e:?}"));
+            return report;
+        }
+    };
+    let mut stop = pin!(stop);
+    let mut fails = Failures { report: &mut report, in_a_row: 0, timing };
+    let mut held: Option<(Ipv4Addr, MdnsAnnouncer)> = None;
+    let mut waiting_for_address = false;
+    let mut next_check = Instant::now();
+    loop {
+        let woke = {
+            let step = async {
+                match held.as_mut() {
+                    Some((_, a)) => a.step().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = &mut stop => Wake::Stop,
+                () = tokio::time::sleep_until(next_check) => Wake::Check,
+                r = step => r.map_or_else(Wake::Failed, |()| Wake::Stepped),
+            }
+        };
+        let ip = match woke {
+            Wake::Stop => break,
+            Wake::Stepped => continue,
+            Wake::Failed(e) => {
+                // Its socket is what failed: no goodbye through it.
+                held = None;
+                next_check = fails.note("announcer", e, false);
+                continue;
+            }
+            Wake::Check => {
+                next_check = Instant::now() + timing.recheck;
+                let probed = net.local_ip(mode);
+                match &probed {
+                    Err(e) if !waiting_for_address => {
+                        eprintln!("mw-posix-node: mdns: no address to announce on: {e}");
+                        waiting_for_address = true;
+                    }
+                    Ok(_) => waiting_for_address = false,
+                    Err(_) => {}
+                }
+                match next_action(held.as_ref().map(|h| h.0), probed) {
+                    Action::Keep => continue,
+                    Action::Withdraw => {
+                        if let Some((old, mut a)) = held.take() {
+                            eprintln!("mw-posix-node: mdns: {old} is gone; {label} withdrawn");
+                            if goodbye(&mut a, &label, timing.goodbye).await {
+                                fails.report.withdrawn += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    Action::Reannounce(ip) => ip,
+                }
+            }
+        };
+        if let Some((old, mut a)) = held.take() {
+            eprintln!("mw-posix-node: mdns: the address moved from {old} to {ip}");
+            if goodbye(&mut a, &label, timing.goodbye).await {
+                fails.report.withdrawn += 1;
+            }
+        }
+        let bound = tokio::select! {
+            () = &mut stop => None,
+            r = net.bind(ip, &host) => Some(r),
+        };
+        let mut a = match bound {
+            None => break,
+            Some(Ok(a)) => a,
+            Some(Err(e)) => {
+                next_check = fails.note(&format!("bind on {ip}"), e, false);
+                continue;
+            }
+        };
+        let service = node::service(
+            &label,
+            Endpoint::Socket(SocketAddr::V4(SocketAddrV4::new(ip, node::NO_PORT))),
+            &txt,
+            id.node,
+        );
+        let announced = tokio::select! {
+            () = &mut stop => None,
+            r = a.announce(&service) => Some(r),
+        };
+        match announced {
+            None => {
+                // Stopped while probing: a goodbye in case it went out.
+                goodbye(&mut a, &label, timing.goodbye).await;
+                break;
+            }
+            Some(Ok(())) => {
+                fails.in_a_row = 0;
+                fails.report.announced += 1;
+                let shown = a.instance_label(node::KIND, &label).unwrap_or(&label);
+                if shown == label {
+                    eprintln!("mw-posix-node: mdns: announced {label} on {host} at {ip}");
+                } else {
+                    eprintln!(
+                        "mw-posix-node: mdns: announced {label} as {shown:?} (a name conflict) on {host} at {ip}"
+                    );
+                }
+                held = Some((ip, a));
+            }
+            Some(Err(e)) => {
+                let conflict = matches!(e, MdnsError::Announce(AnnounceError::Conflict));
+                next_check = fails.note(&format!("announce on {ip}"), e, conflict);
+            }
+        }
+    }
+    if let Some((_, mut a)) = held.take()
+        && goodbye(&mut a, &label, timing.goodbye).await
+    {
+        fails.report.withdrawn += 1;
+    }
+    report
 }
 
 /// The router locator worth announcing in `zenoh=`: a `tcp` or `tls`
@@ -258,6 +573,33 @@ mod tests {
         assert_eq!(next_action(Some(a), Ok(b)), Action::Reannounce(b));
         assert_eq!(next_action(Some(a), gone()), Action::Withdraw);
         assert_eq!(next_action(None, gone()), Action::Keep);
+    }
+
+    #[test]
+    fn d32_retries_back_off_and_are_logged_sparsely() {
+        let t = Timing::default();
+        let secs = |n| t.backoff(n, false).as_secs();
+        assert_eq!(
+            [secs(1), secs(2), secs(3), secs(4), secs(5), secs(6), secs(7), secs(100)],
+            [2, 4, 8, 16, 32, 60, 60, 60]
+        );
+        assert_eq!(t.backoff(1, true), Duration::from_secs(30));
+        assert_eq!(t.backoff(u32::MAX, false), Duration::from_secs(60));
+        let logged_at: Vec<u32> = (1..=20).filter(|&n| logged(n)).collect();
+        assert_eq!(logged_at, [1, 2, 4, 8, 16]);
+        assert_eq!((t.recheck, t.goodbye), (RECHECK, GOODBYE_WAIT));
+        assert_eq!((RECHECK.as_secs(), GOODBYE_WAIT.as_secs()), (15, 2));
+    }
+
+    #[test]
+    fn d31_a_pinned_address_is_used_as_given() {
+        let ip = Ipv4Addr::new(192, 168, 1, 20);
+        assert_eq!(StdNet.local_ip(MdnsMode::Pinned(ip)).unwrap(), ip);
+        assert!(StdNet.local_ip(MdnsMode::Off).is_err());
+        // Auto: whatever the host routes the group through, never loopback.
+        if let Ok(ip) = StdNet.local_ip(MdnsMode::Auto) {
+            assert!(!ip.is_loopback() && !ip.is_unspecified(), "{ip}");
+        }
     }
 
     #[test]
