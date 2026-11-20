@@ -501,6 +501,59 @@ mod mesh {
         assert!(matches!(trust(&mut c), TrustState::Claimed { min_version: Version(2), .. }));
     }
 
+    /// The gateway's control counter store in a fresh directory.
+    fn shared_store(name: &str) -> mw_gateway::state::ControlStore {
+        let dir = std::env::temp_dir().join(format!("mw-posix-node-ctl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        mw_gateway::state::ControlStore::in_dir(dir)
+    }
+
+    #[test]
+    fn pn24_a_counter_gw_sys_accepted_is_refused_over_zenoh_and_the_reverse() {
+        use mw_gateway::state::Persisted;
+        let store = shared_store("shared");
+        let mut disk = Disk::default();
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.share_control(store.clone());
+        c.boot(&boot);
+        claim(&mut c);
+        upload(&mut c, A, &demo(), Some(1)).expect("signed upload");
+        // gw/sys accepted and persisted 500 (its shell saves before acting).
+        store.save(ControlCounter(500)).expect("gw/sys save");
+        for counter in [500, 400] {
+            let body = control(ControlOp::Start, own(), counter);
+            assert_eq!(mesh(&mut c, A, "sys/payload/start", &body), Err(HandlerError::Denied), "{counter}");
+        }
+        assert!(!c.running());
+        // Above both: accepted, and both counters advance.
+        mesh(&mut c, A, "sys/payload/start", &control(ControlOp::Start, own(), 501)).expect("start");
+        assert!(c.running());
+        assert_eq!(store.load(), Persisted::At(ControlCounter(501)));
+        assert_eq!(c.service().state().control(), ControlCounter(501));
+        // The reverse: gw/sys persisting 501 again (its replay) is refused
+        // by the store, so its shell does not forward it.
+        assert!(store.save(ControlCounter(501)).is_err());
+        let _ = std::fs::remove_dir_all(store.path().parent().expect("dir"));
+    }
+
+    #[test]
+    fn pn24_an_unreadable_shared_counter_refuses_control() {
+        let store = shared_store("unreadable");
+        std::fs::create_dir_all(store.path().parent().expect("dir")).expect("dir");
+        std::fs::write(store.path(), "not a number").expect("write");
+        let mut disk = Disk::default();
+        let (mut c, boot) = open(&mut disk, Manual::default());
+        c.share_control(store.clone());
+        c.boot(&boot);
+        claim(&mut c);
+        upload(&mut c, A, &demo(), Some(1)).expect("signed upload");
+        let body = control(ControlOp::Start, own(), 10);
+        assert_eq!(mesh(&mut c, A, "sys/payload/start", &body), Err(HandlerError::Unavailable));
+        assert!(!c.running());
+        assert_eq!(c.service().state().control(), ControlCounter(0), "nothing consumed");
+        let _ = std::fs::remove_dir_all(store.path().parent().expect("dir"));
+    }
+
     #[test]
     fn pn25_a_serial_begin_takes_a_zenoh_transfer_over() {
         let mut disk = Disk::default();

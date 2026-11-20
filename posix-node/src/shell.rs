@@ -262,17 +262,14 @@ pub struct DeviceTask {
     thread: Option<JoinHandle<()>>,
 }
 
-/// Starts the device thread on `flash` with the gateway link `gateway`
-/// and, optionally, a local and a mesh link.
+/// Starts the device thread on `device` (its flash, facts, limits, driver,
+/// optional local and mesh links and shared control store) with the
+/// gateway link `gateway`.
 pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
-    flash: F,
-    facts: Facts,
-    limits: Limits,
+    device: DeviceParts<F>,
     gateway: ChannelIo,
-    local: Option<ChannelIo>,
-    mesh: Option<ChannelIo>,
-    driver: Box<dyn crate::driver::Driver>,
 ) -> io::Result<DeviceTask> {
+    let DeviceParts { flash, facts, limits, local, mesh, shared_control, driver } = device;
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
     let thread = std::thread::Builder::new().name("mw-posix-node-device".into()).spawn(move || {
@@ -293,6 +290,9 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
         };
         let r = rt.block_on(async move {
             let (mut ctl, boot) = Controller::open_with_driver(flash, facts, limits, SystemClock::start(), driver);
+            if let Some(store) = shared_control {
+                ctl.share_control(store);
+            }
             let mut links = Links {
                 gateway: SerialLink::with_inbox(gateway),
                 local: local.map(SerialLink::with_inbox),
@@ -392,6 +392,10 @@ pub struct DeviceParts<F> {
     /// The mesh link: the device end of a `ChannelIo` pair whose other end
     /// `crate::zenoh_sys::run` serves (`MW_POSIX_NODE_ZENOH_SYS`).
     pub mesh: Option<ChannelIo>,
+    /// The gateway's control counter store (`GatewayParts::store`'s
+    /// directory), shared with the mesh link's signed start and stop
+    /// (`Controller::share_control`).
+    pub shared_control: Option<ControlStore>,
     /// The control-module driver (`MW_POSIX_NODE_DRIVER`, [`crate::driver`]).
     pub driver: Box<dyn crate::driver::Driver>,
 }
@@ -420,13 +424,12 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     gateway: GatewayParts,
     session: ZenohTransport,
 ) -> Result<(PosixNode, SysForward), StartError> {
-    let DeviceParts { flash, facts, limits, local, mesh, driver } = device;
     let GatewayParts { bridge, options, store } = gateway;
     let (device_io, gateway_io) = pair();
     let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
         .await
         .map_err(StartError::Zenoh)?;
-    let device = spawn_device(flash, facts, limits, device_io, local, mesh, driver).map_err(StartError::Thread)?;
+    let device = spawn_device(device, device_io).map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }
 

@@ -142,6 +142,7 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         limits: mw_posix_node::limits_with_fuel(node.memory_bytes, node.fuel_per_call),
         local,
         mesh: mesh_node,
+        shared_control: Some(store.clone()),
         driver,
     };
     let parts = GatewayParts { bridge: gateway.bridge_with_floor(floor), options: gateway.shell_options(), store };

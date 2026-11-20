@@ -17,16 +17,21 @@ use middleware::serial::link::{INBOX_BYTES, LinkError, RECV_BUF_LEN, SerialLink}
 use middleware::transport::{HandlerError, RequestOptions, Requester, Target};
 use middleware::zenoh::{ZenohError, ZenohTransport, wire};
 use middleware::{Key, SenderId};
-use mw_gateway::GatewayConfig;
+use mw_gateway::bridge::encode_sys_request;
 use mw_gateway::io::{ChannelIo, Closed, pair};
 use mw_gateway::state::ControlStore;
+use mw_gateway::{GatewayConfig, service};
 use mw_posix_node::config::gateway_state_dir;
 use mw_posix_node::driver::Driver;
 use mw_posix_node::driver::sim::{SimConfig, SimDriver};
 use mw_posix_node::mesh_gate::wrap;
 use mw_posix_node::service::CHIP;
 use mw_posix_node::zenoh_sys::{self, Options, Report};
-use mw_posix_node::{DeviceParts, GatewayParts, PosixNode, facts_with_driver, limits, open_state_flash, start};
+use mw_posix_node::{
+    DeviceParts, GatewayParts, PosixNode, control_floor, facts_with_driver, limits, open_state_flash, start,
+    wall_clock_ms,
+};
+use mw_service::{Ctx, Links};
 use mwctl::plan::upload_plan;
 use mwctl::sign::{sign_commit, sign_control};
 use tokio::sync::oneshot;
@@ -37,14 +42,46 @@ const A: SenderId = SenderId([0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8]);
 
 type Link = SerialLink<ChannelIo, INBOX_BYTES>;
 
+const UPDATER: &str = "spiffe://infra.local/ns/apps/sa/updater";
+
+/// `gw/sys` as the service runner calls it, as the updater.
+struct Sys {
+    served: Vec<mw_service::Served>,
+    ids: u32,
+}
+
+impl Sys {
+    async fn call(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, HandlerError> {
+        self.ids += 1;
+        let id = format!("zsys-{}", self.ids);
+        let meta = middleware::transport::RequestMeta::NONE.with_request_id_str(&id).with_principal(UPDATER);
+        let mut req = vec![0u8; 1 + key.as_str().len() + body.len()];
+        let n = encode_sys_request(key, body, &mut req).expect("body");
+        let request = middleware::transport::Request::new(Key::from_static("gw/sys"), &req[..n]);
+        let mut links = Links::new();
+        let mut ctx = Ctx::new(meta, None, &mut links);
+        let mut out = vec![0u8; 2048];
+        let len = self.served[0].handler.call(&mut ctx, &request, &mut out).await?;
+        out.truncate(len);
+        Ok(out)
+    }
+}
+
+fn gateway_config(state: &Path) -> GatewayConfig {
+    let mut config =
+        GatewayConfig::from_env(&|k| (k == "MW_GATEWAY_UPDATERS").then(|| UPDATER.to_owned())).expect("config");
+    config.state_dir = gateway_state_dir(None, state);
+    config
+}
+
 /// The node on `state` with a local link and a mesh link; the test's ends
-/// of both.
-async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Link, ChannelIo) {
+/// of both, and `gw/sys`.
+async fn node_with_sys(state: &Path, session: ZenohTransport) -> (PosixNode, Link, ChannelIo, Sys) {
     let (local_test, local_node) = pair();
     let (mesh_test, mesh_node) = pair();
-    let mut config = GatewayConfig::from_env(&|_| None).expect("config");
-    config.state_dir = gateway_state_dir(None, state);
+    let config = gateway_config(state);
     let store = ControlStore::in_dir(&config.state_dir);
+    let floor = control_floor(&store, wall_clock_ms());
     let driver = SimDriver::new(SimConfig::pc_turn_50());
     let device = DeviceParts {
         flash: open_state_flash(state).expect("state"),
@@ -52,11 +89,19 @@ async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Link, Channe
         limits: limits(1024 * 1024),
         local: Some(local_node),
         mesh: Some(mesh_node),
+        shared_control: Some(store.clone()),
         driver: Box::new(driver),
     };
-    let gateway = GatewayParts { bridge: config.bridge_with_floor(None), options: config.shell_options(), store };
-    let (pi, _sys) = start(device, gateway, session).await.expect("start");
-    (pi, SerialLink::with_inbox(local_test), mesh_test)
+    let gateway = GatewayParts { bridge: config.bridge_with_floor(floor), options: config.shell_options(), store };
+    let (pi, sys) = start(device, gateway, session).await.expect("start");
+    let (_, served) = service(&gateway_config(state), sys).expect("service").into_parts();
+    (pi, SerialLink::with_inbox(local_test), mesh_test, Sys { served, ids: 0 })
+}
+
+/// [`node_with_sys`] without `gw/sys`.
+async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Link, ChannelIo) {
+    let (pi, local, mesh, _) = node_with_sys(state, session).await;
+    (pi, local, mesh)
 }
 
 async fn request(link: &mut Link, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, LinkError<Closed>> {
@@ -115,6 +160,7 @@ async fn pn25_the_mesh_link_carries_requests_with_their_requester_and_never_publ
 struct Served {
     pi: PosixNode,
     local: Link,
+    sys: Sys,
     /// The node session's sender id: the id in its keys.
     id: SenderId,
     stop: oneshot::Sender<()>,
@@ -124,12 +170,12 @@ struct Served {
 impl Served {
     async fn start(state: &Path, session: ZenohTransport) -> Served {
         let id = session.sender_id();
-        let (pi, local, mesh) = node(state, session.clone()).await;
+        let (pi, local, mesh, sys) = node_with_sys(state, session.clone()).await;
         let (stop, stopped) = oneshot::channel::<()>();
         let task = tokio::spawn(zenoh_sys::run(mesh, session, Options::default(), async {
             let _ = stopped.await;
         }));
-        Served { pi, local, id, stop, task }
+        Served { pi, local, sys, id, stop, task }
     }
 
     async fn stop(self) -> Report {
@@ -370,6 +416,62 @@ async fn pn23_pn24_pn25_signed_installs_starts_and_owned_transfers_over_zenoh() 
     info(&a, id).await;
     assert_eq!(ask(&a, id, keys::START, &start).await, DENIED, "a replay after a restart");
     ask(&a, id, keys::START, &control(ControlOp::Start, own_target(), 101)).await.expect("a fresh counter");
+    node.stop().await;
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// The wall clock in ms: a control counter above the gateway's floor.
+fn now_ms() -> u64 {
+    wall_clock_ms().expect("clock")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pn24_gw_sys_and_zenoh_share_one_control_counter() {
+    let state = state_dir("zsys-shared");
+    let (a, endpoint) = router().await;
+    let mut node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    let id = node.id;
+    info(&a, id).await;
+    request(&mut node.local, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).await.expect("claim");
+    node.sys.call(keys::TRUST_INFO, &[]).await.expect("the gateway learns the claim");
+    upload(&a, id, Some(1)).await.expect("signed upload");
+    let c = now_ms() + 10_000;
+
+    // Accepted on gw/sys, replayed over Zenoh (whose own counter is still
+    // 0): refused, the payload stays as it is.
+    let gw_start = control(ControlOp::Start, own_target(), c);
+    node.sys.call(keys::START, &gw_start).await.expect("gw/sys start");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Running);
+    let gw_stop = control(ControlOp::Stop, own_target(), c + 1);
+    node.sys.call(keys::STOP, &gw_stop).await.expect("gw/sys stop");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Stopped);
+    assert_eq!(ask(&a, id, keys::START, &gw_start).await, DENIED, "a gw/sys start replayed over Zenoh");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Stopped);
+    ask(&a, id, keys::START, &control(ControlOp::Start, own_target(), c + 2)).await.expect("zenoh start");
+    assert_eq!(ask(&a, id, keys::STOP, &gw_stop).await, DENIED, "a gw/sys stop replayed over Zenoh");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Running);
+
+    // Accepted over Zenoh, replayed on gw/sys: refused.
+    let z_stop = control(ControlOp::Stop, own_target(), c + 3);
+    let z_start = control(ControlOp::Start, own_target(), c + 4);
+    ask(&a, id, keys::STOP, &z_stop).await.expect("zenoh stop");
+    ask(&a, id, keys::START, &z_start).await.expect("zenoh start");
+    ask(&a, id, keys::STOP, &control(ControlOp::Stop, own_target(), c + 5)).await.expect("zenoh stop");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Stopped);
+    assert!(node.sys.call(keys::START, &z_start).await.is_err(), "a Zenoh start replayed on gw/sys");
+    assert_eq!(info(&a, id).await.status, PayloadStatus::Stopped);
+
+    // After a restart both paths still refuse both.
+    node.stop().await;
+    let mut node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    info(&a, id).await;
+    node.sys.call(keys::TRUST_INFO, &[]).await.expect("trust info");
+    let running = info(&a, id).await.status;
+    assert!(node.sys.call(keys::START, &z_start).await.is_err());
+    assert!(node.sys.call(keys::STOP, &gw_stop).await.is_err());
+    assert_eq!(ask(&a, id, keys::STOP, &gw_stop).await, DENIED);
+    assert_eq!(ask(&a, id, keys::START, &z_start).await, DENIED);
+    assert_eq!(info(&a, id).await.status, running);
     node.stop().await;
     let _ = std::fs::remove_dir_all(&state);
 }

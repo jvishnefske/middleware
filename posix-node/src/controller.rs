@@ -24,8 +24,14 @@
 //!   unauthenticated peer cannot fill the outbox); an admitted one is
 //!   handled as [`Controller::request`] does, with the requester's
 //!   `Air` origin, and a verified signed start or stop has its counter
-//!   persisted ([`Service::accept_control`]) before it acts, with an
-//!   empty body. [`Controller::request`] is a serial request
+//!   persisted before it acts, with an empty body: in the gateway's
+//!   control counter store ([`Controller::share_control`], `gw/sys`'s,
+//!   which must hold a lower one) and in the trust record
+//!   ([`Service::accept_control`]). One counter for both paths, because
+//!   mwctl signs one body for either: a start or stop accepted through
+//!   `gw/sys` (whose shell saves its counter in that store before acting)
+//!   is a replay over Zenoh, and one accepted over Zenoh is refused by
+//!   `gw/sys` when its shell's save finds the stored counter not lower. [`Controller::request`] is a serial request
 //!   (`Origin::Serial`).
 //! * [`Controller::publication`] delivers a publication when the payload
 //!   subscribed to the key (`esp_base::dispatch::route_publication`).
@@ -54,11 +60,13 @@ use esp_base::ota::Origin;
 use esp_base::periph::overflow_report;
 use esp_base::serve::{REPLY_CAPACITY, Route, ServedKeys, payload_reply, route_request};
 use esp_base::store::StoreError;
+use middleware::loader::trust::ControlCounter;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::MAX_RAW_FRAME;
 use middleware::transport::{HandlerError, RequestMeta};
 use middleware::wasm_abi::events::MAX_EVENTS;
 use middleware::{Key, SenderId};
+use mw_gateway::state::{ControlStore, Persisted};
 use wasm_host::{Compiled, Limits, LoadError, Payload, Trap};
 
 use crate::device::{Clock, OUTBOX, Out, Outbox, PiDevice};
@@ -98,6 +106,8 @@ pub struct Controller<F, C: Clock + 'static> {
     published: Option<PayloadStatus>,
     events_dropped: u32,
     driver: Box<dyn Driver>,
+    /// The gateway's control counter store, shared with `gw/sys`.
+    shared: Option<ControlStore>,
 }
 
 impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
@@ -120,6 +130,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             published: None,
             events_dropped: 0,
             driver,
+            shared: None,
         };
         (ctl, boot)
     }
@@ -174,6 +185,32 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.driver.as_mut()
     }
 
+    /// Shares `store`, the in-process gateway's control counter store
+    /// (`gw/sys`'s), with the Zenoh path: a signed start or stop over Zenoh
+    /// must carry a counter above the one stored there as well as above the
+    /// trust record's, and advances both, so a request accepted on one path
+    /// is a replay on the other (module docs).
+    pub fn share_control(&mut self, store: ControlStore) {
+        self.shared = Some(store);
+    }
+
+    /// Claims `counter` in the shared store before a Zenoh start or stop
+    /// acts: `Denied` when it is not above the stored one, `Unavailable`
+    /// when the store cannot be read (fail closed), `Internal` when it
+    /// cannot be saved. Without a shared store, nothing to claim.
+    fn claim_shared(&self, counter: ControlCounter) -> Result<(), HandlerError> {
+        let Some(store) = self.shared.as_ref() else { return Ok(()) };
+        match store.load() {
+            Persisted::Unreadable => return Err(HandlerError::Unavailable),
+            Persisted::At(c) if c >= counter => return Err(HandlerError::Denied),
+            Persisted::At(_) | Persisted::Nothing => {}
+        }
+        store.save(counter).map_err(|e| match e.kind() {
+            std::io::ErrorKind::InvalidInput => HandlerError::Denied,
+            _ => HandlerError::Internal,
+        })
+    }
+
     /// Handles one request from a serial link: the reply body or the
     /// error.
     pub fn request(&mut self, key: Key<'_>, body: &[u8], meta: &RequestMeta<'_>) -> Result<Vec<u8>, HandlerError> {
@@ -198,14 +235,26 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
                 Err(r.error())
             }
             Ok(Admission::Dispatch) => self.request_as(from, key, body, &RequestMeta::NONE),
-            Ok(Admission::Control { counter }) => match self.svc.accept_control(counter) {
-                Ok(()) => self.request_as(from, key, &[], &RequestMeta::NONE),
+            Ok(Admission::Control { counter }) => match self.claim_shared(counter) {
                 Err(e) => {
-                    self.outbox.log(&format!("trust: control counter not saved: {e}"));
-                    self.settle();
-                    Err(HandlerError::Internal)
+                    tracing::info!(target: "mw_posix_node::mesh", key = key.as_str(), "refused: control counter {e:?} against gw/sys");
+                    Err(e)
                 }
+                Ok(()) => self.accept_claimed(from, key, counter),
             },
+        }
+    }
+
+    /// A Zenoh start or stop whose counter the shared store took: persisted
+    /// in the trust record too, then dispatched with an empty body.
+    fn accept_claimed(&mut self, from: Origin, key: Key<'_>, counter: ControlCounter) -> Result<Vec<u8>, HandlerError> {
+        match self.svc.accept_control(counter) {
+            Ok(()) => self.request_as(from, key, &[], &RequestMeta::NONE),
+            Err(e) => {
+                self.outbox.log(&format!("trust: control counter not saved: {e}"));
+                self.settle();
+                Err(HandlerError::Internal)
+            }
         }
     }
 
