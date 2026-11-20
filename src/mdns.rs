@@ -43,6 +43,8 @@ pub mod announce;
 #[cfg(feature = "mdns")]
 mod error;
 #[cfg(feature = "mdns")]
+pub mod host;
+#[cfg(feature = "mdns")]
 pub mod origin;
 #[cfg(feature = "mdns")]
 pub mod socket;
@@ -56,6 +58,12 @@ pub use wire::{Instance, Message, Name, Response, ServiceInstance, ServiceType, 
 pub(crate) type DefaultIo = std::io::Error;
 #[cfg(not(feature = "std"))]
 pub(crate) type DefaultIo = core::convert::Infallible;
+/// The socket of the bare `MdnsSocket` / `MdnsAnnouncer`: tokio's with
+/// `mdns`, else none (every other instantiation names its socket).
+#[cfg(feature = "mdns")]
+pub(crate) type DefaultSocket = host::TokioUdp;
+#[cfg(not(feature = "mdns"))]
+pub(crate) type DefaultSocket = ();
 
 /// UDP port of mDNS.
 pub const MDNS_PORT: u16 = 5353;
@@ -63,6 +71,13 @@ pub const MDNS_PORT: u16 = 5353;
 pub const MDNS_GROUP_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 /// The mDNS domain, appended to a service kind's DNS-SD type.
 pub const DOMAIN: &str = "local";
+/// Receive and transmit buffer of the std shells: one byte over
+/// [`wire::MAX_MESSAGE_LEN`], so a datagram of this length or more (cut
+/// by the socket) is detected as oversized and skipped.
+pub const STD_BUF: usize = wire::MAX_MESSAGE_LEN + 1;
+/// Buffer for a microcontroller's shells: an Ethernet MTU. Datagrams of
+/// 1500 bytes or more are skipped.
+pub const MCU_BUF: usize = 1500;
 /// Longest DNS-SD type text of a kind in [`DOMAIN`]: the type, a dot, the
 /// domain.
 #[cfg(feature = "mdns")]

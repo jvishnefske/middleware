@@ -1,5 +1,11 @@
-//! mDNS browsing over a tokio UDP socket (feature `mdns`):
-//! [`MdnsSocket`] implements [`Browse`].
+//! mDNS browsing over any [`Datagram`] socket: [`MdnsSocket`] implements
+//! [`Browse`].
+//!
+//! The shell is generic, `MdnsSocket<S, N>`: `S` is the socket seam and
+//! `N` the receive buffer (see [`STD_BUF`] and [`MCU_BUF`]). The bare name
+//! `MdnsSocket` is the tokio instantiation (feature `mdns`), which
+//! [`MdnsSocket::builder`] binds; any other socket is wrapped with
+//! [`MdnsSocket::new`] and [`SocketParams`].
 //!
 //! # Behaviour
 //!
@@ -23,9 +29,10 @@
 //!   skipped like queries. The source of the last response delivered is
 //!   [`last_source`](MdnsSocket::last_source).
 //! * [`recv_response`](MdnsSocket::recv_response) waits for a datagram,
-//!   keeps it in an internal [`MAX_MESSAGE_LEN`] buffer, and copies it into
-//!   the caller's buffer. Queries, refused sources and datagrams over
-//!   [`MAX_MESSAGE_LEN`] are skipped; a datagram that does not parse is
+//!   keeps it in the internal `N`-byte buffer, and copies it into the
+//!   caller's buffer. Queries, refused sources and oversized datagrams
+//!   (`N` bytes or more: the seam truncates to the buffer, so a datagram
+//!   that fills it may have been cut) are skipped; a datagram that does not parse is
 //!   [`MdnsError::Wire`] and is dropped. After [`MAX_IGNORED_DATAGRAMS`]
 //!   skipped datagrams in one call, every receive call returns
 //!   [`MdnsError::IgnoredLimit`], so each is bounded in datagrams.
@@ -36,7 +43,7 @@
 //!   error is reported again and the response is dropped, so an oversized
 //!   datagram cannot block the socket. [`discard_kept`](MdnsSocket::discard_kept)
 //!   drops it at once.
-//! * Cancel safety: tokio's `recv_from` is cancel-safe and a received
+//! * Cancel safety: the seam's `recv_from` is cancel-safe and a received
 //!   datagram is stored in `self` before anything else can fail, so a
 //!   dropped receive loses no response.
 //!
@@ -70,17 +77,16 @@
 //! [`destination`](MdnsSocketBuilder::destination), so they put no
 //! multicast traffic on the network.
 
-use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::io;
-
-use tokio::net::UdpSocket;
+use core::net::SocketAddr;
 
 use super::origin::{self, Kind, OnLink, OriginPolicy, Outstanding};
 use super::wire::{
-    HEADER_LEN, Instance, MAX_MESSAGE_LEN, MAX_NAME_LEN, Message, Response, ServiceType, WireError,
-    encode_query,
+    HEADER_LEN, Instance, MAX_NAME_LEN, Message, Response, ServiceType, WireError, encode_query,
 };
-use super::{DOMAIN, MAX_TYPE_TEXT, MDNS_GROUP_V4, MDNS_PORT};
+use super::{DOMAIN, DefaultSocket, MAX_TYPE_TEXT, STD_BUF};
+#[cfg(doc)]
+use super::{MCU_BUF, MDNS_PORT};
+use crate::datagram::Datagram;
 use crate::discovery::record::{dns_sd_type_in, event_into};
 use crate::discovery::{Browse, Endpoint, Event, RecordError, Service, ServiceKind};
 use crate::key::{AsKey, KeyBuf, KeyFilter, MAX_KEY_LEN};
@@ -99,102 +105,30 @@ pub const MAX_EVENT_LEN: usize = 1024;
 const MAX_QUERY_LEN: usize = HEADER_LEN + MAX_NAME_LEN + 4;
 
 pub use super::error::MdnsError;
+#[cfg(feature = "mdns")]
+pub use host::MdnsSocketBuilder;
 
-/// Configures an [`MdnsSocket`]. Defaults: bind `0.0.0.0:0`, send to
-/// `224.0.0.251:5353`, join no group, accept on-link sources only
-/// ([`OriginPolicy::OnLink`] with the system's connected subnets).
+#[cfg(feature = "mdns")]
+mod host;
+
+/// How an [`MdnsSocket`] made with [`MdnsSocket::new`] sends and accepts.
+///
+/// On a microcontroller, `on_link` must list the LAN's subnet
+/// ([`OnLink::with`]) when `policy` is [`OriginPolicy::OnLink`]: without
+/// `std` the system's routes are not read, so [`OnLink::new`] alone
+/// accepts loopback and link-local sources only and every peer on a
+/// DHCP LAN would be refused.
 #[derive(Debug, Clone)]
-pub struct MdnsSocketBuilder {
-    bind: SocketAddr,
-    destination: SocketAddr,
-    join: Option<Ipv4Addr>,
-    policy: OriginPolicy,
-    on_link: Option<OnLink>,
-}
-
-impl Default for MdnsSocketBuilder {
-    fn default() -> Self {
-        MdnsSocketBuilder {
-            bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
-            destination: SocketAddr::V4(SocketAddrV4::new(MDNS_GROUP_V4, MDNS_PORT)),
-            join: None,
-            policy: OriginPolicy::OnLink,
-            on_link: None,
-        }
-    }
-}
-
-impl MdnsSocketBuilder {
-    /// The local address to bind.
-    pub fn bind(self, bind: SocketAddr) -> Self {
-        MdnsSocketBuilder { bind, ..self }
-    }
-
-    /// Where queries are sent. Also selects [`OriginPolicy::Any`] (set
-    /// [`origin_policy`](Self::origin_policy) afterwards to check anyway).
-    pub fn destination(self, destination: SocketAddr) -> Self {
-        MdnsSocketBuilder {
-            destination,
-            policy: OriginPolicy::Any,
-            ..self
-        }
-    }
-
-    /// Joins the IPv4 mDNS group on `interface` (`UNSPECIFIED` lets the OS
-    /// choose), to receive announcements sent to the group.
-    pub fn join_multicast(self, interface: Ipv4Addr) -> Self {
-        MdnsSocketBuilder {
-            join: Some(interface),
-            ..self
-        }
-    }
-
+pub struct SocketParams {
+    /// Where queries are sent (`224.0.0.251:5353` for a normal querier).
+    pub destination: SocketAddr,
     /// Which sources are accepted; see [`super::origin`].
-    pub fn origin_policy(self, policy: OriginPolicy) -> Self {
-        MdnsSocketBuilder { policy, ..self }
-    }
-
-    /// The on-link subnets for [`OriginPolicy::OnLink`] (default: read from
-    /// the system when built, [`origin::system_on_link`]).
-    pub fn on_link(self, on_link: OnLink) -> Self {
-        MdnsSocketBuilder {
-            on_link: Some(on_link),
-            ..self
-        }
-    }
-
-    /// Binds the socket.
-    pub async fn build(self) -> Result<MdnsSocket, MdnsError> {
-        let socket = UdpSocket::bind(self.bind).await?;
-        if self.destination.ip().is_multicast() {
-            socket.set_multicast_ttl_v4(255)?;
-        }
-        if let Some(interface) = self.join {
-            socket.join_multicast_v4(MDNS_GROUP_V4, interface)?;
-        }
-        let one_shot = socket.local_addr()?.port() != MDNS_PORT;
-        let on_link = match (self.policy, self.on_link) {
-            (_, Some(o)) => o,
-            (OriginPolicy::OnLink, None) => origin::system_on_link(),
-            (OriginPolicy::Any, None) => OnLink::new(),
-        };
-        Ok(MdnsSocket {
-            socket,
-            destination: self.destination,
-            policy: self.policy,
-            on_link,
-            one_shot,
-            outstanding: Outstanding::default(),
-            next_id: 1,
-            rx: [0; MAX_MESSAGE_LEN + 1],
-            kept: None,
-            kept_from: None,
-            last_source: None,
-            short: 0,
-            browsing: None,
-            cursor: 0,
-        })
-    }
+    pub policy: OriginPolicy,
+    /// The on-link subnets for [`OriginPolicy::OnLink`].
+    pub on_link: OnLink,
+    /// The socket is bound to a port other than [`MDNS_PORT`]: responses
+    /// must carry the id of an outstanding query.
+    pub one_shot: bool,
 }
 
 /// What the kept datagram turned out to be.
@@ -209,8 +143,8 @@ enum Kept {
 
 /// mDNS service discovery over UDP; see the module docs.
 #[derive(Debug)]
-pub struct MdnsSocket {
-    socket: UdpSocket,
+pub struct MdnsSocket<S = DefaultSocket, const N: usize = STD_BUF> {
+    socket: S,
     destination: SocketAddr,
     policy: OriginPolicy,
     on_link: OnLink,
@@ -218,8 +152,8 @@ pub struct MdnsSocket {
     one_shot: bool,
     outstanding: Outstanding,
     next_id: u16,
-    /// One byte over the largest message, to detect oversized datagrams.
-    rx: [u8; MAX_MESSAGE_LEN + 1],
+    /// The receive buffer; a datagram that fills it is oversized.
+    rx: [u8; N],
     /// Length of a received datagram in `rx` not yet delivered.
     kept: Option<usize>,
     /// Its source.
@@ -244,13 +178,13 @@ struct Browsing {
 }
 
 impl Browsing {
-    fn service(&self) -> Result<ServiceType<'_>, MdnsError> {
+    fn service(&self) -> Result<ServiceType<'_>, WireError> {
         let text = self
             .service
             .get(..self.service_len)
             .ok_or(WireError::InvalidServiceType)?;
         let text = core::str::from_utf8(text).map_err(|_| WireError::InvalidServiceType)?;
-        Ok(ServiceType::new(text)?)
+        ServiceType::new(text)
     }
 
     fn kind(&self) -> ServiceKind<'_> {
@@ -328,15 +262,27 @@ fn scan<'b>(packet: &[u8], browsing: &Browsing, cursor: usize, buf: &'b mut [u8]
     Scan::Done
 }
 
-impl MdnsSocket {
-    /// A builder with the default one-shot querier settings.
-    pub fn builder() -> MdnsSocketBuilder {
-        MdnsSocketBuilder::default()
-    }
-
-    /// The bound local address.
-    pub fn local_addr(&self) -> Result<SocketAddr, MdnsError> {
-        Ok(self.socket.local_addr()?)
+impl<S: Datagram, const N: usize> MdnsSocket<S, N> {
+    /// A socket over `socket`, which is already bound (and, to hear
+    /// announcements, a member of the mDNS group). `N` must be over 1.
+    pub fn new(socket: S, params: SocketParams) -> Self {
+        const { assert!(N > 1, "an mDNS receive buffer needs room for a datagram") };
+        MdnsSocket {
+            socket,
+            destination: params.destination,
+            policy: params.policy,
+            on_link: params.on_link,
+            one_shot: params.one_shot,
+            outstanding: Outstanding::default(),
+            next_id: 1,
+            rx: [0; N],
+            kept: None,
+            kept_from: None,
+            last_source: None,
+            short: 0,
+            browsing: None,
+            cursor: 0,
+        }
     }
 
     /// The source address of the last response delivered (by
@@ -356,11 +302,11 @@ impl MdnsSocket {
 
     /// Classifies the kept datagram, dropping it unless it is a response
     /// from an accepted source.
-    fn classify(&mut self) -> Result<Kept, MdnsError> {
+    fn classify(&mut self) -> Result<Kept, MdnsError<S::Error>> {
         let Some(len) = self.kept else {
             return Ok(Kept::Empty);
         };
-        let packet = self.rx.get(..len).filter(|_| len <= MAX_MESSAGE_LEN);
+        let packet = self.rx.get(..len).filter(|_| len < N);
         match packet.map(Message::parse) {
             Some(Ok(m)) if m.is_response() && self.accepts(m.id()) => Ok(Kept::Response(len)),
             Some(Err(e)) => {
@@ -396,7 +342,11 @@ impl MdnsSocket {
 
     /// Copies the kept response of `len` bytes into `buf` and releases it.
     /// A response partly reported by [`Browse::next`] is handed over whole.
-    fn deliver<'b>(&mut self, len: usize, buf: &'b mut [u8]) -> Result<Response<'b>, MdnsError> {
+    fn deliver<'b>(
+        &mut self,
+        len: usize,
+        buf: &'b mut [u8],
+    ) -> Result<Response<'b>, MdnsError<S::Error>> {
         let capacity = buf.len();
         let packet = self.rx.get(..len).ok_or(WireError::Truncated)?;
         let Some(copied) = copy_into(buf, packet) else {
@@ -414,12 +364,12 @@ impl MdnsSocket {
     }
 }
 
-impl MdnsSocket {
+impl<S: Datagram, const N: usize> MdnsSocket<S, N> {
     /// Sends one PTR query for instances of `service`; answers arrive
     /// through [`recv_response`](Self::recv_response) or, when browsing a
     /// kind, [`Browse::next`]. Dropping may or may not have sent the query;
     /// it is never sent twice.
-    pub async fn query(&mut self, service: ServiceType<'_>) -> Result<(), MdnsError> {
+    pub async fn query(&mut self, service: ServiceType<'_>) -> Result<(), MdnsError<S::Error>> {
         let id = self.next_id;
         self.next_id = match id.wrapping_add(1) {
             0 => 1,
@@ -429,8 +379,10 @@ impl MdnsSocket {
         let mut query = [0u8; MAX_QUERY_LEN];
         let len = encode_query(id, service, &mut query)?;
         let packet = query.get(..len).ok_or(WireError::BufferTooSmall)?;
-        self.socket.send_to(packet, self.destination).await?;
-        Ok(())
+        self.socket
+            .send_to(packet, self.destination)
+            .await
+            .map_err(MdnsError::Io)
     }
 
     /// Waits for the next mDNS response and copies it into `buf`; see the
@@ -438,10 +390,14 @@ impl MdnsSocket {
     pub async fn recv_response<'b>(
         &mut self,
         buf: &'b mut [u8],
-    ) -> Result<Response<'b>, MdnsError> {
+    ) -> Result<Response<'b>, MdnsError<S::Error>> {
         for _ in 0..MAX_IGNORED_DATAGRAMS {
             if self.kept.is_none() {
-                let (len, from) = self.socket.recv_from(&mut self.rx).await?;
+                let (len, from) = self
+                    .socket
+                    .recv_from(&mut self.rx)
+                    .await
+                    .map_err(MdnsError::Io)?;
                 self.keep(len, from);
             }
             if let Kept::Response(len) = self.classify()? {
@@ -456,7 +412,7 @@ impl MdnsSocket {
     pub fn try_recv_response<'b>(
         &mut self,
         buf: &'b mut [u8],
-    ) -> Result<Option<Response<'b>>, MdnsError> {
+    ) -> Result<Option<Response<'b>>, MdnsError<S::Error>> {
         for _ in 0..MAX_IGNORED_DATAGRAMS {
             if !self.try_fill()? {
                 return Ok(None);
@@ -479,24 +435,27 @@ impl MdnsSocket {
 
     /// Makes sure a datagram is kept, without waiting; false if none has
     /// arrived.
-    fn try_fill(&mut self) -> Result<bool, MdnsError> {
+    fn try_fill(&mut self) -> Result<bool, MdnsError<S::Error>> {
         if self.kept.is_some() {
             return Ok(true);
         }
         match self.socket.try_recv_from(&mut self.rx) {
-            Ok((len, from)) => {
+            Ok(Some((len, from))) => {
                 self.keep(len, from);
                 Ok(true)
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e.into()),
+            Ok(None) => Ok(false),
+            Err(e) => Err(MdnsError::Io(e)),
         }
     }
 
     /// The next event from the kept datagram, if it has one; otherwise
     /// drops it. Datagram faults never surface here (see the module docs):
     /// the only error is the caller's buffer being too small.
-    fn event_from_kept<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Event<'b>>, MdnsError> {
+    fn event_from_kept<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Option<Event<'b>>, MdnsError<S::Error>> {
         let len = match self.classify() {
             Ok(Kept::Response(len)) => len,
             // A malformed datagram was dropped by classify: skip it.
@@ -528,11 +487,11 @@ impl MdnsSocket {
     }
 }
 
-impl Browse for MdnsSocket {
-    type Error = MdnsError;
+impl<S: Datagram, const N: usize> Browse for MdnsSocket<S, N> {
+    type Error = MdnsError<S::Error>;
 
     /// Queries the kind's DNS-SD type; see the module docs.
-    async fn browse(&mut self, filter: KeyFilter<'_>) -> Result<(), MdnsError> {
+    async fn browse(&mut self, filter: KeyFilter<'_>) -> Result<(), MdnsError<S::Error>> {
         let KeyFilter::Exact(key) = filter else {
             return Err(MdnsError::UnsupportedFilter);
         };
@@ -554,10 +513,14 @@ impl Browse for MdnsSocket {
 
     /// The next instance event; bounded by [`MAX_IGNORED_DATAGRAMS`]
     /// datagrams without one. Cancel safe.
-    async fn next<'b>(&mut self, buf: &'b mut [u8]) -> Result<Event<'b>, MdnsError> {
+    async fn next<'b>(&mut self, buf: &'b mut [u8]) -> Result<Event<'b>, MdnsError<S::Error>> {
         for _ in 0..MAX_IGNORED_DATAGRAMS {
             if self.kept.is_none() {
-                let (len, from) = self.socket.recv_from(&mut self.rx).await?;
+                let (len, from) = self
+                    .socket
+                    .recv_from(&mut self.rx)
+                    .await
+                    .map_err(MdnsError::Io)?;
                 self.keep(len, from);
             }
             if self.peek_event()? {
@@ -569,7 +532,10 @@ impl Browse for MdnsSocket {
         Err(MdnsError::IgnoredLimit)
     }
 
-    fn try_next<'b>(&mut self, buf: &'b mut [u8]) -> Result<Option<Event<'b>>, MdnsError> {
+    fn try_next<'b>(
+        &mut self,
+        buf: &'b mut [u8],
+    ) -> Result<Option<Event<'b>>, MdnsError<S::Error>> {
         for _ in 0..MAX_IGNORED_DATAGRAMS {
             if !self.try_fill()? {
                 return Ok(None);
@@ -582,14 +548,14 @@ impl Browse for MdnsSocket {
     }
 }
 
-impl MdnsSocket {
+impl<S: Datagram, const N: usize> MdnsSocket<S, N> {
     /// True if the kept datagram has an event to report from the cursor
     /// on (or one too large for any buffer the caller may pass, which
     /// `event_from_kept` then reports); otherwise drops it.
     ///
     /// Separate from `event_from_kept` so the loops in `next` and
     /// `try_next` hand the caller's buffer out only on return.
-    fn peek_event(&mut self) -> Result<bool, MdnsError> {
+    fn peek_event(&mut self) -> Result<bool, MdnsError<S::Error>> {
         let mut scratch = [0u8; MAX_EVENT_LEN];
         let len = match self.classify() {
             Ok(Kept::Response(len)) => len,
@@ -611,112 +577,71 @@ impl MdnsSocket {
 
 #[cfg(test)]
 mod tests {
+    //! The shell over the in-memory seam (no sockets, no runtime).
     extern crate std;
     use super::*;
+    use crate::datagram::fake::{FakeErr, FakeNet, FakeUdp, poll_once};
     use crate::key::Key;
-    use crate::mdns::wire::{TYPE_PTR, fixture};
-    use std::time::Duration;
+    use crate::mdns::wire::fixture;
+    use futures::executor::block_on;
+
+    /// Small enough that a test can build an oversized datagram.
+    const SMALL: usize = 512;
+
+    fn responder() -> SocketAddr {
+        "127.0.0.1:5353".parse().unwrap()
+    }
+
+    fn querier(net: &FakeNet) -> MdnsSocket<FakeUdp, SMALL> {
+        MdnsSocket::new(
+            net.udp(),
+            SocketParams {
+                destination: responder(),
+                policy: OriginPolicy::Any,
+                on_link: OnLink::new(),
+                one_shot: false,
+            },
+        )
+    }
 
     fn http() -> ServiceType<'static> {
         ServiceType::new("_http._tcp.local").unwrap()
     }
 
-    /// A querier aimed at a loopback "responder" socket.
-    async fn pair() -> (MdnsSocket, UdpSocket) {
-        let responder = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let querier = MdnsSocket::builder()
-            .bind("127.0.0.1:0".parse().unwrap())
-            .destination(responder.local_addr().unwrap())
-            .build()
-            .await
-            .unwrap();
-        (querier, responder)
+    #[test]
+    fn fake_seam_delivers_a_response_and_sends_the_query() {
+        let net = FakeNet::new();
+        let mut q = querier(&net);
+        block_on(q.query(http())).unwrap();
+        let sent = net.take_sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].to, responder());
+        assert!(!Message::parse(&sent[0].bytes).unwrap().is_response());
+
+        net.deliver(&fixture::printer(7, 120), responder());
+        let mut buf = [0u8; SMALL];
+        let r = block_on(q.recv_response(&mut buf)).unwrap();
+        assert_eq!(r.message().id(), 7);
+        assert_eq!(q.last_source(), Some(responder()));
     }
 
-    async fn within<T>(f: impl Future<Output = T>) -> T {
-        tokio::time::timeout(Duration::from_secs(5), f)
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn browse_sends_a_ptr_query_and_recv_resolves_the_answer() {
-        let (mut q, responder) = pair().await;
-        within(q.query(http())).await.unwrap();
-        let mut rx = [0u8; 512];
-        let (n, from) = within(responder.recv_from(&mut rx)).await.unwrap();
-        let query = Message::parse(&rx[..n]).unwrap();
-        assert!(!query.is_response());
-        let question = query.questions().next().unwrap();
-        assert!(question.name.is_service(&http()));
-        assert_eq!(question.qtype, TYPE_PTR);
-
-        // Answer echoing the query id, as a legacy-unicast responder does.
-        responder
-            .send_to(&fixture::printer(query.id(), 120), from)
-            .await
-            .unwrap();
-        let mut buf = [0u8; MAX_MESSAGE_LEN];
-        let r = within(q.recv_response(&mut buf)).await.unwrap();
-        assert_eq!(r.message().id(), query.id());
-        let Some(Instance::Resolved(i)) = r.instances(http()).next() else {
-            panic!()
-        };
-        assert_eq!(i.label(), Ok("My.Printer"));
-        assert_eq!(
-            i.socket_addr_v4(),
-            Some("192.168.1.20:8080".parse().unwrap())
-        );
-    }
-
-    #[tokio::test]
-    async fn queries_are_skipped_and_ids_advance() {
-        let (mut q, responder) = pair().await;
-        let mut rx = [0u8; 512];
-        within(q.query(http())).await.unwrap();
-        within(q.query(http())).await.unwrap();
-        let (n, from) = within(responder.recv_from(&mut rx)).await.unwrap();
-        let first = Message::parse(&rx[..n]).unwrap().id();
-        let (n, _) = within(responder.recv_from(&mut rx)).await.unwrap();
-        assert_eq!(
-            Message::parse(&rx[..n]).unwrap().id(),
-            first.wrapping_add(1)
-        );
-
-        // Another node's query arrives first, then the answer.
-        let mut query = [0u8; 64];
-        let len = encode_query(0, http(), &mut query).unwrap();
-        responder.send_to(&query[..len], from).await.unwrap();
-        responder
-            .send_to(&fixture::printer(9, 120), from)
-            .await
-            .unwrap();
-        let mut buf = [0u8; 1024];
-        assert_eq!(
-            within(q.recv_response(&mut buf))
-                .await
-                .unwrap()
-                .message()
-                .id(),
-            9
-        );
-    }
-
-    #[tokio::test]
-    async fn try_recv_is_none_when_empty_and_keeps_an_oversized_response() {
-        let (mut q, responder) = pair().await;
-        let mut buf = [0u8; 1024];
-        assert!(q.try_recv_response(&mut buf).unwrap().is_none());
-
-        let packet = fixture::printer(3, 120);
-        let addr = q.local_addr().unwrap();
-        responder.send_to(&packet, addr).await.unwrap();
-        let mut small = [0u8; 16];
-        let err = within(q.recv_response(&mut small)).await.unwrap_err();
-        assert!(
-            matches!(err, MdnsError::BufferTooSmall { needed, capacity: 16 } if needed == packet.len())
-        );
-        // Kept: try_recv returns it without another datagram arriving.
+    #[test]
+    fn fake_seam_skips_oversized_datagrams() {
+        let net = FakeNet::new();
+        let mut q = querier(&net);
+        // Exactly N bytes: the seam may have cut it, so it is skipped
+        // even though its first bytes are a valid response.
+        let mut big = fixture::printer(1, 120);
+        big.resize(SMALL, 0);
+        net.deliver(&big, responder());
+        net.deliver(&fixture::printer(2, 120), responder());
+        let mut buf = [0u8; SMALL];
+        let r = block_on(q.recv_response(&mut buf)).unwrap();
+        assert_eq!(r.message().id(), 2);
+        // One byte under N is not oversized.
+        let mut fits = fixture::printer(3, 120);
+        fits.resize(SMALL - 1, 0);
+        net.deliver(&fits, responder());
         assert_eq!(
             q.try_recv_response(&mut buf)
                 .unwrap()
@@ -725,338 +650,67 @@ mod tests {
                 .id(),
             3
         );
-        assert!(q.try_recv_response(&mut buf).unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn malformed_datagrams_are_errors_then_dropped() {
-        let (mut q, responder) = pair().await;
-        let addr = q.local_addr().unwrap();
+    #[test]
+    fn fake_seam_keeps_a_response_for_one_retry() {
+        let net = FakeNet::new();
+        let mut q = querier(&net);
         let packet = fixture::printer(4, 120);
-        responder
-            .send_to(&packet[..packet.len() - 1], addr)
-            .await
-            .unwrap();
-        responder.send_to(&packet, addr).await.unwrap();
-        let mut buf = [0u8; 1024];
-        assert!(matches!(
-            within(q.recv_response(&mut buf)).await,
-            Err(MdnsError::Wire(WireError::Truncated))
-        ));
-        assert_eq!(
-            within(q.recv_response(&mut buf))
-                .await
-                .unwrap()
-                .message()
-                .id(),
-            4
+        net.deliver(&packet, responder());
+        let mut small = [0u8; 16];
+        let err = block_on(q.recv_response(&mut small)).unwrap_err();
+        assert!(
+            matches!(err, MdnsError::BufferTooSmall { needed, capacity: 16 } if needed == packet.len())
         );
-    }
-
-    #[tokio::test]
-    async fn ignored_limit_bounds_try_recv() {
-        let (mut q, responder) = pair().await;
-        let addr = q.local_addr().unwrap();
-        let mut query = [0u8; 64];
-        let len = encode_query(0, http(), &mut query).unwrap();
-        for _ in 0..MAX_IGNORED_DATAGRAMS {
-            responder.send_to(&query[..len], addr).await.unwrap();
-        }
-        responder
-            .send_to(&fixture::printer(5, 120), addr)
-            .await
-            .unwrap();
-        // Wait until the last datagram is queued.
-        let mut peek = [0u8; 1];
-        within(async { while q.socket.peek_from(&mut peek).await.is_err() {} }).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut buf = [0u8; 1024];
-        assert!(matches!(
-            q.try_recv_response(&mut buf),
-            Err(MdnsError::IgnoredLimit)
-        ));
+        let mut buf = [0u8; SMALL];
         assert_eq!(
             q.try_recv_response(&mut buf)
                 .unwrap()
                 .unwrap()
                 .message()
                 .id(),
+            4
+        );
+        assert!(q.try_recv_response(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn fake_seam_cancelled_recv_loses_no_response() {
+        let net = FakeNet::new();
+        let mut q = querier(&net);
+        let mut buf = [0u8; SMALL];
+        assert!(poll_once(q.recv_response(&mut buf)).is_pending());
+        net.deliver(&fixture::printer(5, 120), responder());
+        assert_eq!(
+            block_on(q.recv_response(&mut buf)).unwrap().message().id(),
             5
         );
     }
 
-    #[tokio::test]
-    async fn cancelled_recv_loses_no_response() {
-        let (mut q, responder) = pair().await;
-        let addr = q.local_addr().unwrap();
-        let mut buf = [0u8; 1024];
-        let timed_out =
-            tokio::time::timeout(Duration::from_millis(20), q.recv_response(&mut buf)).await;
-        assert!(timed_out.is_err());
-        responder
-            .send_to(&fixture::printer(6, 120), addr)
-            .await
-            .unwrap();
-        assert_eq!(
-            within(q.recv_response(&mut buf))
-                .await
-                .unwrap()
-                .message()
-                .id(),
-            6
-        );
-    }
-
-    #[tokio::test]
-    async fn browse_maps_the_kind_and_reports_up_then_down() {
-        let (mut q, responder) = pair().await;
-        let http_kind = Key::from_static("http");
-        assert!(matches!(
-            q.browse(KeyFilter::Prefix(http_kind)).await,
-            Err(MdnsError::UnsupportedFilter)
-        ));
-        assert!(matches!(
-            q.browse(KeyFilter::Exact(Key::from_static("Http"))).await,
-            Err(MdnsError::Record(RecordError::Unmappable))
-        ));
-        within(q.browse(KeyFilter::Exact(http_kind))).await.unwrap();
-        let mut rx = [0u8; 512];
-        let (n, from) = within(responder.recv_from(&mut rx)).await.unwrap();
-        let question = Message::parse(&rx[..n])
-            .unwrap()
-            .questions()
-            .next()
-            .unwrap();
-        assert!(
-            question.name.is_service(&http()),
-            "kind `http` browses _http._tcp.local"
-        );
-
+    #[test]
+    fn fake_seam_browses_a_kind_to_an_event() {
+        let net = FakeNet::new();
+        let mut q = querier(&net);
+        block_on(q.browse(KeyFilter::Exact(Key::from_static("http")))).unwrap();
+        assert_eq!(net.take_sent().len(), 1);
         let mut buf = [0u8; 256];
         assert!(q.try_next(&mut buf).unwrap().is_none());
-        responder
-            .send_to(&fixture::printer(1, 120), from)
-            .await
-            .unwrap();
-        let mut up_buf = [0u8; 256];
-        let up = within(q.next(&mut up_buf)).await.unwrap();
-        let Event::Up(s) = up else { panic!("{up:?}") };
-        assert_eq!(
-            (s.kind.as_str(), s.instance, s.ttl_s, s.node),
-            ("http", "My.Printer", 120, None)
-        );
-        assert_eq!(
-            s.endpoint,
-            Endpoint::Socket("192.168.1.20:8080".parse().unwrap())
-        );
-        assert_eq!(s.txt().unwrap().get(b"path"), Some(&b"/"[..]));
-        // The response had one instance: the next call waits for more.
-        assert!(q.try_next(&mut buf).unwrap().is_none());
-
-        // An event too big for the buffer is kept.
-        responder
-            .send_to(&fixture::printer(2, 0), from)
-            .await
-            .unwrap();
-        let mut small = [0u8; 4];
-        assert!(matches!(
-            within(q.next(&mut small)).await,
-            Err(MdnsError::Record(RecordError::BufferTooSmall))
-        ));
-        assert_eq!(
-            q.try_next(&mut buf).unwrap(),
-            Some(Event::Down {
-                kind: s.kind,
-                instance: "My.Printer"
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn browse_reports_an_unaddressed_instance_by_host() {
-        let (mut q, responder) = pair().await;
-        within(q.browse(KeyFilter::Exact(Key::from_static("http"))))
-            .await
-            .unwrap();
-        let mut rx = [0u8; 512];
-        let (_, from) = within(responder.recv_from(&mut rx)).await.unwrap();
-        // Drop the A record (the last additional record).
-        let mut p = fixture::printer(3, 60);
-        p[11] = 2;
-        responder.send_to(&p, from).await.unwrap();
-        let mut buf = [0u8; 256];
-        let Event::Up(s) = within(q.next(&mut buf)).await.unwrap() else {
+        net.deliver(&fixture::printer(1, 120), responder());
+        let Event::Up(s) = block_on(q.next(&mut buf)).unwrap() else {
             panic!()
         };
-        assert_eq!(
-            s.endpoint,
-            Endpoint::Host {
-                name: "printer.local",
-                port: 8080
-            }
-        );
+        assert_eq!(s.instance, "My.Printer");
     }
 
-    /// A response for `_http._tcp.local` instance `label` with `txt`.
-    fn http_response(id: u16, label: &str, txt: &[u8], ttl: u32) -> std::vec::Vec<u8> {
-        use crate::dns::wire::{
-            FLAG_AA, FLAG_QR, MessageWriter, RecordData, RecordOut, Section, TextName, Txt,
-        };
-        let instance = TextName::instance(label, http()).unwrap();
-        let host = TextName::new("host.local").unwrap();
-        let rec = |name, data| RecordOut {
-            name,
-            ttl,
-            cache_flush: false,
-            data,
-        };
-        let mut out = [0u8; MAX_MESSAGE_LEN];
-        let len = MessageWriter::new(&mut out, id, FLAG_QR | FLAG_AA)
-            .unwrap()
-            .record(
-                Section::Answer,
-                &rec(TextName::service(http()), RecordData::Ptr(instance)),
-            )
-            .unwrap()
-            .record(
-                Section::Additional,
-                &rec(
-                    instance,
-                    RecordData::Srv {
-                        priority: 0,
-                        weight: 0,
-                        port: 80,
-                        target: host,
-                    },
-                ),
-            )
-            .unwrap()
-            .record(
-                Section::Additional,
-                &rec(instance, RecordData::Txt(Txt::new(txt).unwrap())),
-            )
-            .unwrap()
-            .record(
-                Section::Additional,
-                &rec(host, RecordData::A("127.0.0.1".parse().unwrap())),
-            )
-            .unwrap()
-            .finish();
-        out[..len].to_vec()
-    }
-
-    #[tokio::test]
-    async fn on_link_policy_refuses_wrong_port_and_unknown_ids() {
-        // Loopback is on-link, but the responder's port is not 5353.
-        let responder = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut q = MdnsSocket::builder()
-            .bind("127.0.0.1:0".parse().unwrap())
-            .destination(responder.local_addr().unwrap())
-            .origin_policy(OriginPolicy::OnLink)
-            .on_link(OnLink::new())
-            .build()
-            .await
-            .unwrap();
-        within(q.query(http())).await.unwrap();
-        let mut rx = [0u8; 512];
-        let (n, from) = within(responder.recv_from(&mut rx)).await.unwrap();
-        let id = Message::parse(&rx[..n]).unwrap().id();
-        responder
-            .send_to(&fixture::printer(id, 120), from)
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut buf = [0u8; 1024];
-        assert!(q.try_recv_response(&mut buf).unwrap().is_none());
-        assert!(q.last_source().is_none());
-
-        // The default Any policy (explicit destination) accepts it and
-        // records the source.
-        let (mut q, responder) = pair().await;
-        let addr = q.local_addr().unwrap();
-        responder
-            .send_to(&fixture::printer(1, 120), addr)
-            .await
-            .unwrap();
-        within(q.recv_response(&mut buf)).await.unwrap();
-        assert_eq!(q.last_source(), Some(responder.local_addr().unwrap()));
-    }
-
-    #[tokio::test]
-    async fn an_oversized_response_is_dropped_after_one_retry() {
-        let (mut q, responder) = pair().await;
-        let addr = q.local_addr().unwrap();
-        for id in [3, 4, 5] {
-            responder
-                .send_to(&fixture::printer(id, 120), addr)
-                .await
-                .unwrap();
-        }
-        let mut small = [0u8; 16];
-        for _ in 0..=MAX_SHORT_BUFFER_RETRIES {
-            assert!(matches!(
-                within(q.recv_response(&mut small)).await,
-                Err(MdnsError::BufferTooSmall { capacity: 16, .. })
-            ));
-        }
-        // Response 3 was dropped; 4 is next. discard_kept drops 4 at once.
-        let mut buf = [0u8; 1024];
-        assert!(within(q.recv_response(&mut small)).await.is_err());
-        q.discard_kept();
-        assert_eq!(
-            within(q.recv_response(&mut buf))
-                .await
-                .unwrap()
-                .message()
-                .id(),
-            5
-        );
-    }
-
-    #[tokio::test]
-    async fn poison_datagrams_do_not_wedge_browse() {
-        let (mut q, responder) = pair().await;
-        within(q.browse(KeyFilter::Exact(Key::from_static("http"))))
-            .await
-            .unwrap();
-        let mut rx = [0u8; 512];
-        let (_, from) = within(responder.recv_from(&mut rx)).await.unwrap();
-
-        // A label that is not UTF-8.
-        let mut bad = http_response(1, "Xy", b"", 60);
-        let at = bad.windows(3).position(|w| w == b"\x02Xy").unwrap();
-        bad[at + 1] = 0xFF;
-        // A datagram that does not parse.
-        let truncated = &fixture::printer(2, 60)[..40];
-        // An event over MAX_EVENT_LEN: five full TXT strings.
-        let entry: std::vec::Vec<u8> = core::iter::once(255u8)
-            .chain(core::iter::repeat_n(b'a', 255))
-            .collect();
-        let huge_txt = entry.repeat(5);
-        let huge = http_response(3, "huge", &huge_txt, 60);
-        for packet in [&bad[..], truncated, &huge, &http_response(4, "good", b"", 60)] {
-            responder.send_to(packet, from).await.unwrap();
-        }
-        let mut buf = [0u8; 256];
-        let event = within(q.next(&mut buf)).await.unwrap();
-        assert_eq!(event.instance(), "good");
-
-        // An event too big for the caller's buffer: kept once, then skipped.
-        responder
-            .send_to(&http_response(5, "next", b"", 60), from)
-            .await
-            .unwrap();
-        responder
-            .send_to(&http_response(6, "after", b"", 60), from)
-            .await
-            .unwrap();
-        let mut small = [0u8; 4];
-        for _ in 0..=MAX_SHORT_BUFFER_RETRIES {
-            assert!(matches!(
-                within(q.next(&mut small)).await,
-                Err(MdnsError::Record(RecordError::BufferTooSmall))
-            ));
-        }
-        assert_eq!(within(q.next(&mut buf)).await.unwrap().instance(), "after");
+    #[test]
+    fn fake_seam_carries_the_socket_error() {
+        let net = FakeNet::new();
+        let mut q = querier(&net);
+        net.fail_sends(true);
+        assert!(matches!(
+            block_on(q.query(http())),
+            Err(MdnsError::Io(FakeErr))
+        ));
     }
 }
