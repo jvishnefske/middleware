@@ -72,6 +72,8 @@ impl SelfTest {
 pub struct FwContext {
     /// The node id `sys/info` reports (bound into firmware signatures).
     pub node: SenderId,
+    /// The chip `sys/info` reports: a firmware release cert must name it.
+    pub chip: &'static str,
     /// The root of trust; `None` when the trust record could not be read.
     pub trust: Option<TrustState>,
     /// The self-test.
@@ -218,6 +220,7 @@ impl Updater {
             Ok(mut p) => {
                 let c = Context {
                     node: ctx.node,
+                    chip: ctx.chip,
                     trust,
                     self_test_ok: ctx.self_test.ok(),
                 };

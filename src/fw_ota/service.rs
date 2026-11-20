@@ -46,6 +46,9 @@ pub struct Context {
     /// The device node id (the one `sys/info` reports), bound into the
     /// commit signature.
     pub node: SenderId,
+    /// The chip the device reports in `sys/info` (`rp2350`, `imxrt1050`):
+    /// a release cert must name it.
+    pub chip: &'static str,
     /// The root of trust from the trust store.
     pub trust: TrustState,
     /// The running firmware's self-test passed: a trial may be confirmed.
@@ -236,6 +239,7 @@ impl<F: ImageFormat> FwService<F> {
             record: self.record,
             capacity: p.slot_size(),
             node: ctx.node,
+            chip: ctx.chip,
             trust: ctx.trust,
             self_test_ok: ctx.self_test_ok,
         }

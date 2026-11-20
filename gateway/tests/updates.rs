@@ -99,6 +99,7 @@ impl FakeDevice {
         if let Some(fw) = &mut self.fw {
             let ctx = FwContext {
                 node: NODE,
+                chip: "rp2350",
                 trust: self.trust,
                 self_test_ok: true,
             };
@@ -154,7 +155,9 @@ impl FakeDevice {
                     }
                     Effect::Write { data, .. } => self.staging.extend_from_slice(data),
                     Effect::Activate { image, auth } => {
-                        self.trust = self.trust.accept_commit(&image, auth.as_ref())?;
+                        self.trust =
+                            self.trust
+                                .accept_commit_auth(&image, auth.as_ref(), "rp2350")?;
                         self.installed = Some(std::mem::take(&mut self.staging));
                         self.status = PayloadStatus::Stopped;
                     }

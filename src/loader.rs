@@ -11,7 +11,7 @@
 //! | `sys/manifest`      | empty                           | [`manifest::Manifest`] |
 //! | `sys/loader/begin`  | `[len u32 LE][crc32 u32 LE]`    | empty              |
 //! | `sys/loader/chunk`  | `[offset u32 LE][≤CHUNK_MAX bytes]` | empty          |
-//! | `sys/loader/commit` | empty, or `[version u32 LE][signature 64]` | empty   |
+//! | `sys/loader/commit` | empty, `[version u32 LE][signature 64]`, or `[cert][signature 64]` ([`release`]) | empty |
 //! | `sys/payload/start` | empty                           | empty              |
 //! | `sys/payload/stop`  | empty                           | empty              |
 //! | `sys/payload/bind`  | [`binding::Binding`], optionally `[version u32 LE][signature 64]` | empty |
@@ -41,8 +41,8 @@
 //! features ([`trust`] holds the wire types and the rules). With the
 //! `trust` feature the loader also hashes the image (SHA-256,
 //! [`sha256::ImageHash`]) while chunks arrive, and [`Effect::Activate`]
-//! carries the digest and the commit's [`trust::SignedCommit`] so the
-//! shell can decide with [`trust::TrustState::accept_commit`] before it
+//! carries the digest and the commit's [`release::CommitAuth`] so the
+//! shell can decide with [`trust::TrustState::accept_commit_auth`] before it
 //! activates anything. Without `trust` the loader behaves as in 0.3: a
 //! signature in the commit body is parsed and passed on, never checked.
 //! [`sha256`] itself is always built (the rpc responder cache uses it).
@@ -51,6 +51,7 @@ pub mod binding;
 pub mod control;
 pub mod manifest;
 pub mod peers;
+pub mod release;
 pub mod sha256;
 pub mod trust;
 
@@ -58,7 +59,8 @@ use crate::crc::Crc32;
 use crate::key::Key;
 use crate::transport::{HandlerError, SenderId};
 use crate::wasm_abi::route::SourceKind;
-use trust::{PublicKey, SignedCommit};
+use release::CommitAuth;
+use trust::PublicKey;
 
 /// Largest chunk body accepted by `sys/loader/chunk`.
 pub const CHUNK_MAX: usize = 512;
@@ -133,8 +135,8 @@ pub enum Command<'a> {
     },
     /// `sys/loader/commit`.
     Commit {
-        /// The signature, for a signed commit.
-        auth: Option<SignedCommit>,
+        /// The authorization, for a signed commit or a release.
+        auth: Option<CommitAuth<'a>>,
     },
     /// `sys/payload/start`.
     Start,
@@ -179,7 +181,7 @@ impl<'a> Command<'a> {
             k if k == keys::BOARD.as_str() => empty(Command::Board),
             k if k == keys::MANIFEST.as_str() => empty(Command::Manifest),
             k if k == keys::COMMIT.as_str() => Ok(Some(Command::Commit {
-                auth: SignedCommit::parse_body(body)?,
+                auth: CommitAuth::parse_body(body)?,
             })),
             k if k == keys::START.as_str() => empty(Command::Start),
             k if k == keys::STOP.as_str() => empty(Command::Stop),
@@ -244,11 +246,7 @@ impl<'a> Command<'a> {
                 out.get_mut(4..4 + data.len())?.copy_from_slice(data);
                 Some(4 + data.len())
             }
-            Command::Commit { auth: Some(auth) } => {
-                let body = auth.encode();
-                out.get_mut(..body.len())?.copy_from_slice(&body);
-                Some(body.len())
-            }
+            Command::Commit { auth: Some(auth) } => auth.encode(out),
             Command::Bind { request } => {
                 let n = request.record.len();
                 out.get_mut(..n)?.copy_from_slice(request.record);
@@ -299,12 +297,12 @@ pub enum Effect<'a> {
     },
     /// The image is complete and its CRC-32 matches; record it as
     /// installed. With the `trust` feature the shell must first pass
-    /// `image` and `auth` to [`trust::TrustState::accept_commit`].
+    /// `image` and `auth` to [`trust::TrustState::accept_commit_auth`].
     Activate {
         /// What was received.
         image: ImageDigest,
-        /// The commit's signature, if it was signed.
-        auth: Option<SignedCommit>,
+        /// The commit's authorization, if it was signed.
+        auth: Option<CommitAuth<'a>>,
     },
 }
 
@@ -971,10 +969,10 @@ mod tests {
     #[test]
     fn commit_passes_digest_and_signature_through() {
         let image: [u8; 1000] = core::array::from_fn(|i| (i * 7 + 3) as u8);
-        let auth = trust::SignedCommit {
+        let auth = release::CommitAuth::Signed(trust::SignedCommit {
             version: trust::Version(9),
             signature: trust::Signature([5; 64]),
-        };
+        });
         let (mut s, _) = Loader::Idle.step(
             &Command::Begin {
                 len: 1000,
@@ -1127,10 +1125,23 @@ mod tests {
             },
             COMMIT,
             Command::Commit {
-                auth: Some(trust::SignedCommit {
+                auth: Some(release::CommitAuth::Signed(trust::SignedCommit {
                     version: trust::Version(0x0102_0304),
                     signature: trust::Signature([0xAB; 64]),
-                }),
+                })),
+            },
+            Command::Commit {
+                auth: Some(release::CommitAuth::Cert(release::SignedCert {
+                    cert: release::SoftwareCert {
+                        kind: release::CertKind::Payload,
+                        target: "any",
+                        channel: "stable",
+                        version: trust::Version(3),
+                        len: 1000,
+                        sha256: [9; 32],
+                    },
+                    signature: trust::Signature([0xCD; 64]),
+                })),
             },
             Command::Start,
             Command::Stop,

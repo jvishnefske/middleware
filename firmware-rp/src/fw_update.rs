@@ -70,6 +70,8 @@ impl SelfTest {
 pub struct FwContext {
     /// The node id `sys/info` reports (bound into firmware signatures).
     pub node: SenderId,
+    /// The chip `sys/info` reports: a firmware release cert must name it.
+    pub chip: &'static str,
     /// The root of trust (the pinned payload key signs firmware too);
     /// `None` when the trust record could not be read. The backend must
     /// then refuse anything that installs firmware (fail closed): reading
@@ -142,6 +144,7 @@ mod tests {
         let mut out = [0u8; 4];
         let ctx = FwContext {
             node: SenderId([0; 8]),
+            chip: "rp2350",
             trust: Some(TrustState::Unclaimed),
             self_test: SelfTest::default(),
         };

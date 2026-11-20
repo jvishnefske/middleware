@@ -602,7 +602,7 @@ fn rt12_a_full_ab_update_via_requests_reaches_the_bootloaders_record() {
         );
     }
     assert_eq!(
-        fw_call(&mut s, &Command::Commit { signature: None }).0,
+        fw_call(&mut s, &Command::Commit { auth: None }).0,
         Ok(StdVec::new())
     );
     assert!(matches!(s.fw().state(), Some(FwState::Committed { .. })));

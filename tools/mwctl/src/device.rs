@@ -29,6 +29,7 @@ use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
 use middleware::loader::manifest::Manifest;
+use middleware::loader::release::{CommitAuth, SignedCert};
 use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
 use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, NetAddr, PayloadStatus, keys};
 use middleware::{HandlerError, Key, SenderId};
@@ -311,10 +312,33 @@ impl<L: Endpoint> Device<L> {
         &mut self,
         image: &[u8],
         opts: UploadOptions,
+        progress: impl FnMut(Progress),
+    ) -> Result<(), Error> {
+        let auth = opts.auth.map(CommitAuth::Signed);
+        self.upload_with(image, opts, auth, progress)
+    }
+
+    /// Installs `image` committed with a release cert from the updates
+    /// channel (`[cert][sig]`, [`middleware::loader::release`]) instead of
+    /// `opts.auth`.
+    pub fn upload_release(
+        &mut self,
+        image: &[u8],
+        release: SignedCert<'_>,
+        opts: UploadOptions,
+        progress: impl FnMut(Progress),
+    ) -> Result<(), Error> {
+        self.upload_with(image, opts, Some(CommitAuth::Cert(release)), progress)
+    }
+
+    fn upload_with(
+        &mut self,
+        image: &[u8],
+        opts: UploadOptions,
+        auth: Option<CommitAuth<'_>>,
         mut progress: impl FnMut(Progress),
     ) -> Result<(), Error> {
-        let plan =
-            upload_plan_chunked(image, self.link.chunk_size(), opts.corrupt_chunk, opts.auth)?;
+        let plan = upload_plan_chunked(image, self.link.chunk_size(), opts.corrupt_chunk, auth)?;
         let total = u32::try_from(image.len()).unwrap_or(u32::MAX);
         let steps = plan.len() + usize::from(opts.start);
         for (i, s) in plan.iter().enumerate() {

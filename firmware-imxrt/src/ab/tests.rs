@@ -34,6 +34,7 @@ type Service = FwService<RtImage>;
 fn ctx() -> Context {
     Context {
         node: NODE,
+        chip: "rt1050",
         trust: TrustState::Unclaimed,
         self_test_ok: true,
     }
@@ -130,7 +131,7 @@ fn send(
         let data = &image[offset as usize..end];
         call(svc, flash, state, &Command::Chunk { offset, data })?;
     }
-    call(svc, flash, state, &Command::Commit { signature: None })?;
+    call(svc, flash, state, &Command::Commit { auth: None })?;
     call(svc, flash, state, &Command::Reboot)?;
     Slot::from_byte(slot[0]).ok_or(HandlerError::Internal)
 }

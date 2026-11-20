@@ -324,6 +324,7 @@ fn fw_command(transport: SerialTransport, cli: &cli::Cli, timeouts: Timeouts) ->
             let r = dev.fw_update(
                 &image,
                 FwOptions {
+                    release: None,
                     key: signer.as_deref(),
                     reboot: *reboot,
                     control: None,
@@ -533,6 +534,7 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
             let done = dev.fw_update(
                 &image,
                 FwOptions {
+                    release: None,
                     key: Some(&*signer),
                     reboot: *reboot,
                     control,
