@@ -7,7 +7,7 @@
 // Pure except `installBinding`; `ui/bindingPanel.ts` renders it.
 
 import type { BindingIssue, BindingRecord, BindingTarget, ChannelDecl, Protocol } from "../protocol/wasm";
-import type { DeviceClient, RequestOptions } from "./client";
+import { type DeviceClient, type RequestOptions, refuseRemote } from "./client";
 import { TrustRefusal, type SigningKey } from "./upload";
 import { planUpload } from "../trust/wire";
 
@@ -99,6 +99,7 @@ export async function installBinding(
   key: SigningKey | null,
   opts: RequestOptions & { now?: () => number } = {},
 ): Promise<BindResult> {
+  refuseRemote(client, "bind");
   const now = (opts.now ?? Date.now)();
   const plan = planUpload(await client.trustInfo(opts), key?.publicKey ?? null, now);
   if (plan.kind === "refuse") throw new TrustRefusal(plan.reason);

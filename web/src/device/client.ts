@@ -86,6 +86,24 @@ export class RequestTimeout extends Error {
   }
 }
 
+/** A device reached over the mesh only answers reads: the cloud router
+ * lets a browser ask `sys/info`, the manifest and its control pages, and
+ * `sys/trust/info`, nothing else. Changes (uploads, bindings, start, stop,
+ * claims) go through `mwctl` with the lathe's key. Thrown before anything
+ * is sent. */
+export class ProbeOnlyError extends Error {
+  constructor(readonly what: string) {
+    super(`${what}: the mesh is probe-only: deploy with mwctl`);
+    this.name = "ProbeOnlyError";
+  }
+}
+
+/** Throws `ProbeOnlyError` for a remote client: a flow that changes the
+ * device calls this before its first request. */
+export function refuseRemote(client: Pick<DeviceClient, "remote">, what: string): void {
+  if (client.remote) throw new ProbeOnlyError(what);
+}
+
 interface Pending {
   resolve(payload: Uint8Array): void;
   reject(e: Error): void;
