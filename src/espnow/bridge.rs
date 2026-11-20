@@ -40,7 +40,7 @@
 
 use super::rpc::{Delay, EspNowUnicast, First, first};
 use super::{EspNowRadio, Mac};
-use crate::radio_bridge::{self, BROADCAST, MAX_DATA, MAX_WIRE, Msg, Stats};
+use crate::radio_bridge::{self, BROADCAST, MAX_DATA, MAX_WIRE, Msg, Stats, VERSION};
 use crate::serial::frame::{Split, Splitter};
 use embedded_io_async::{Read, Write};
 
@@ -303,6 +303,41 @@ impl<IO: Read + Write, D: Delay, const Q: usize> BridgeRadio<IO, D, Q> {
         self.st.counters
     }
 
+    /// Asks the bridge who it is (`Query`) and waits for its `Hello`, at
+    /// most `timeout_ms` in all; the `Query` is sent twice (halfway), as
+    /// the boot `Hello` may have been missed or the bridge still booting.
+    /// Another protocol version is [`BridgeIoError::BadVersion`].
+    pub async fn connect(&mut self, timeout_ms: u32) -> Result<Hello, BridgeIoError<IO::Error>> {
+        self.st.hello = None;
+        for _ in 0..2 {
+            self.write_msg(&Msg::Query).await?;
+            let BridgeRadio { io, delay, st, .. } = self;
+            let wait = async {
+                // Bounded by the stream and the timeout racing it.
+                loop {
+                    if let Some(h) = st.hello {
+                        break Ok(h);
+                    }
+                    pump(io, st).await?;
+                }
+            };
+            match first(wait, delay.delay_ms(timeout_ms / 2)).await {
+                First::Left(Ok(h)) if h.version != VERSION => {
+                    return Err(BridgeIoError::BadVersion(h.version));
+                }
+                First::Left(r) => return r,
+                First::Right(()) => {}
+            }
+        }
+        Err(BridgeIoError::HelloTimeout)
+    }
+
+    /// Asks the bridge for `Hello` and `Stats`; the answers are folded in
+    /// by later reads ([`Self::bridge_stats`]).
+    pub async fn request_stats(&mut self) -> Result<(), BridgeIoError<IO::Error>> {
+        self.write_msg(&Msg::Query).await
+    }
+
     /// Reads once from the bridge and handles what arrived.
     pub async fn pump_one(&mut self) -> Result<(), BridgeIoError<IO::Error>> {
         pump(&mut self.io, &mut self.st).await
@@ -412,7 +447,6 @@ mod tests {
 
     use super::*;
     use crate::key::Key;
-    use crate::radio_bridge::VERSION;
     use crate::rpc::Message;
     use crate::transport::{RequestOptions, Requester};
     use core::future::{Future, poll_fn};
@@ -833,6 +867,68 @@ mod tests {
             Some(b"two".to_vec())
         );
         assert_eq!(r.try_receive(&mut buf).unwrap(), None);
+    }
+
+    fn hello(version: u8) -> Vec<u8> {
+        wire(&Msg::Hello {
+            mac: BRIDGE,
+            channel: 1,
+            version,
+        })
+    }
+
+    #[test]
+    fn eg5_connect_queries_for_hello() {
+        let mut io = FakeIo::new();
+        // The first Query goes unanswered; the second gets Hello and Stats.
+        io.on_write.push_back(Vec::new());
+        let mut reply = hello(VERSION);
+        reply.extend(wire(&Msg::Stats(Stats {
+            tx_ok: 3,
+            ..Stats::default()
+        })));
+        io.on_write.push_back(reply);
+        let mut r = radio::<8>(io);
+        let h = block_on(r.connect(2000)).unwrap();
+        assert_eq!(
+            h,
+            Hello {
+                mac: BRIDGE,
+                channel: 1,
+                version: VERSION
+            }
+        );
+        assert_eq!(r.own_mac(), Some(BRIDGE));
+        let q = std::format!("{:?}", Some(Msg::Query));
+        assert_eq!(r.io.written(), [q.clone(), q.clone()]);
+        // Stats arrive with later reads.
+        r.io.queue(Msg::Recv {
+            src: DEV,
+            data: b"x",
+        });
+        let mut buf = [0u8; 250];
+        block_on(r.receive(&mut buf)).unwrap();
+        assert_eq!(r.bridge_stats().map(|s| s.tx_ok), Some(3));
+        block_on(r.request_stats()).unwrap();
+        assert_eq!(r.io.written().len(), 3);
+    }
+
+    #[test]
+    fn eg5_no_hello_is_a_timeout() {
+        let mut r = radio::<8>(FakeIo::new());
+        assert_eq!(block_on(r.connect(2000)), Err(BridgeIoError::HelloTimeout));
+        assert_eq!(r.io.written().len(), 2);
+    }
+
+    #[test]
+    fn eg5_bad_version_refused() {
+        let mut io = FakeIo::new();
+        io.on_write.push_back(hello(VERSION + 1));
+        let mut r = radio::<8>(io);
+        assert_eq!(
+            block_on(r.connect(2000)),
+            Err(BridgeIoError::BadVersion(VERSION + 1))
+        );
     }
 
     #[test]
