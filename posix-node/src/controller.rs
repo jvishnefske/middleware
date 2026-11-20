@@ -312,8 +312,16 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     /// A request for the service (`sys/...`, or a key nothing serves).
     fn ask_service(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Result<usize, HandlerError> {
         let Handled { reply, stop, notes } = self.svc.handle(key, body, out);
+        // A Zenoh request's notes go to the process's log only: the gate
+        // passes anything that looks signed, so a refused junk signature
+        // must not become a sys/log publication per query.
+        let mesh = matches!(self.svc.origin(), Origin::Air(_));
         for note in &notes {
-            self.outbox.log(&note.to_string());
+            if mesh {
+                tracing::info!(target: "mw_posix_node::mesh", key = key.as_str(), "{note}");
+            } else {
+                self.outbox.log(&note.to_string());
+            }
         }
         if stop && self.payload.is_some() {
             self.end_run();

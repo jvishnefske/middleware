@@ -188,6 +188,8 @@ pub enum Note {
     },
     /// A claim on a claimed node was refused.
     ClaimDenied,
+    /// A binding was refused by the trust rules.
+    BindDenied,
 }
 
 impl fmt::Display for Note {
@@ -207,6 +209,9 @@ impl fmt::Display for Note {
             Note::CommitDenied { min_version } => write!(
                 f,
                 "trust: commit denied (needs a valid signature and version > {min_version}); previous payload kept"
+            ),
+            Note::BindDenied => f.write_str(
+                "trust: binding denied (needs a signature by the pinned key and a version above the stored binding's)",
             ),
             Note::ClaimDenied => f.write_str(
                 "trust: claim denied; the node is claimed (no re-key window: delete the trust sectors while it is stopped)",
@@ -558,8 +563,10 @@ impl<F: NorFlash + Durable> Service<F> {
                     TrustState::Unclaimed => 0,
                 };
                 notes.push(Note::CommitDenied { min_version });
-            } else {
+            } else if key == keys::TRUST_CLAIM {
                 notes.push(Note::ClaimDenied);
+            } else if key == keys::BIND {
+                notes.push(Note::BindDenied);
             }
         }
     }

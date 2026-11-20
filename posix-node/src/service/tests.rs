@@ -357,3 +357,21 @@ fn pn25_the_transfer_belongs_to_the_requester_whose_begin_started_it() {
     assert_eq!(s.loader_owner(), None);
     assert_eq!(installed(&mut s), Some(img));
 }
+
+#[test]
+fn pn23_a_refused_binding_says_so_not_that_a_claim_was_refused() {
+    use middleware::loader::binding::SignedBinding;
+    use middleware::loader::trust::Signature;
+    let mut disk = Disk::default();
+    let img = image(1200, 3);
+    let (mut s, _) = open(&mut disk, None);
+    upload(&mut s, &img, None).expect("install");
+    call(&mut s, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).expect("claim");
+    let mut body = mwctl::bindspec::record(mwctl::sign::image_sha256(&img), 3, &[]).expect("record");
+    body.extend_from_slice(&SignedBinding { version: Version(3), signature: Signature([9; 64]) }.encode());
+    let mut out = [0u8; 64];
+    let h = s.handle(keys::BIND, &body, &mut out);
+    assert_eq!(h.reply, Reply::Now(Err(HandlerError::Denied)));
+    assert!(!h.notes.contains(&Note::ClaimDenied), "{:?}", h.notes);
+    assert!(h.notes.contains(&Note::BindDenied), "{:?}", h.notes);
+}

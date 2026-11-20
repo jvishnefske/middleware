@@ -475,3 +475,62 @@ async fn pn24_gw_sys_and_zenoh_share_one_control_counter() {
     node.stop().await;
     let _ = std::fs::remove_dir_all(&state);
 }
+
+/// The `sys/log` lines the local link receives within `quiet` of silence.
+async fn log_lines(local: &mut Link, quiet: Duration) -> Vec<String> {
+    use middleware::serial::frame::Frame;
+    let mut buf = vec![0u8; RECV_BUF_LEN];
+    let mut lines = Vec::new();
+    while let Ok(Ok(frame)) = tokio::time::timeout(quiet, local.next_frame(&mut buf)).await {
+        if let Frame::Publish { key, payload } = frame
+            && key == keys::LOG
+        {
+            lines.push(String::from_utf8_lossy(payload).into_owned());
+        }
+    }
+    lines
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pn23_refusals_over_zenoh_never_reach_sys_log() {
+    use middleware::loader::binding::SignedBinding;
+    use middleware::loader::trust::{Signature, SignedCommit};
+    let state = state_dir("zsys-nolog");
+    let (a, endpoint) = router().await;
+    let mut node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    let id = node.id;
+    info(&a, id).await;
+    request(&mut node.local, keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).await.expect("claim");
+    upload(&a, id, Some(1)).await.expect("signed upload");
+    log_lines(&mut node.local, Duration::from_millis(300)).await;
+
+    // A transfer, a commit with a junk signature, a bind with one: each
+    // passes the gate (it only sees that they are signed) and is refused
+    // by the dispatcher.
+    let junk_commit = SignedCommit { version: Version(2), signature: Signature([7; 64]) }.encode().to_vec();
+    let mut junk_bind = mwctl::bindspec::record(mwctl::sign::image_sha256(&demo()), 3, &[]).expect("record");
+    junk_bind.extend_from_slice(&SignedBinding { version: Version(3), signature: Signature([9; 64]) }.encode());
+    for _ in 0..5 {
+        let s = steps(None);
+        let (_, transfer) = s.split_last().expect("steps");
+        for step in transfer {
+            ask(&a, id, step.key, &step.body).await.expect("staged");
+        }
+        assert_eq!(ask(&a, id, keys::COMMIT, &junk_commit).await, DENIED);
+        assert_eq!(ask(&a, id, keys::BIND, &junk_bind).await, DENIED);
+    }
+    let lines = log_lines(&mut node.local, Duration::from_millis(500)).await;
+    assert!(lines.is_empty(), "{lines:?}");
+
+    // The same refusal from a serial link is logged (the check sees lines).
+    let s = steps(None);
+    let (_, transfer) = s.split_last().expect("steps");
+    for step in transfer {
+        request(&mut node.local, step.key, &step.body).await.expect("serial transfer");
+    }
+    assert!(request(&mut node.local, keys::COMMIT, &junk_commit).await.is_err());
+    let lines = log_lines(&mut node.local, Duration::from_millis(500)).await;
+    assert!(lines.iter().any(|l| l.contains("commit denied")), "{lines:?}");
+    node.stop().await;
+    let _ = std::fs::remove_dir_all(&state);
+}
