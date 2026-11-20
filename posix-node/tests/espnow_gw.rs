@@ -277,30 +277,63 @@ async fn first_sample(
 #[tokio::test(flavor = "multi_thread")]
 async fn eg6_publish_up() {
     let r = Running::start(fast()).await;
+    // Everything the gateway puts, whatever the key.
+    let all = r.observer.session().declare_subscriber("**").await.unwrap();
     let mut o = r.observer.clone();
     let mut sub = o.subscribe(KeyFilter::Prefix(Key::from_static("app"))).await.unwrap();
     let (key, payload, sender) = first_sample(&r, &mut sub, DEV, "app/thing/temp", b"21.5").await;
     assert_eq!((key.as_str(), payload.as_slice()), ("app/thing/temp", &b"21.5"[..]));
     assert_eq!(sender, Some(SenderId::from_mac(DEV)));
-    // A repeat (same seq) is dropped; sys and disc never appear under app.
+    // A repeat (same seq) is dropped; sys and disc are never put.
     r.bridge.publish(DEV, 200, "app/thing/temp", b"once").await;
     r.bridge.publish(DEV, 200, "app/thing/temp", b"once").await;
     r.bridge.publish(DEV, 201, "sys/log", b"hello").await;
-    r.bridge.beacon(DEV, 202, "dev-1", None, 30).await;
-    r.bridge.publish(DEV, 203, "app/thing/temp", b"last").await;
+    r.bridge.publish(DEV, 202, "sys/trust/claim", b"key").await;
+    r.bridge.beacon(DEV, 203, "dev-1", None, 30).await;
+    // A second device on the same key: its own id, stream and sequence.
+    r.bridge.publish(DEV2, 7, "app/thing/temp", b"two-a").await;
+    r.bridge.publish(DEV2, 9, "app/thing/temp", b"two-b").await;
+    r.bridge.publish(DEV, 204, "app/thing/temp", b"last").await;
     let mut got = Vec::new();
     loop {
         let (k, p, s) = next(&mut sub).await;
         assert!(k.starts_with("app/"), "{k}");
-        assert_eq!(s, Some(SenderId::from_mac(DEV)));
         if p == b"last" {
             break;
         }
-        got.push(p);
+        got.push((p, s));
     }
-    assert_eq!(got.iter().filter(|p| p.as_slice() == b"once").count(), 1, "{got:?}");
+    assert_eq!(got.iter().filter(|(p, _)| p.as_slice() == b"once").count(), 1, "{got:?}");
+    // Everything put on Zenoh up to the last sample.
+    let mut headers = Vec::new();
+    loop {
+        let sample = tokio::time::timeout(WAIT, all.recv_async()).await.expect("a sample").expect("recv");
+        let key = sample.key_expr().as_str().to_owned();
+        assert!(!key.starts_with("sys/") && !key.starts_with("disc/"), "{key} was put");
+        if key != "app/thing/temp" {
+            continue;
+        }
+        let payload = sample.payload().to_bytes().into_owned();
+        let h = wire::decode_pub(&sample.attachment().expect("attachment").to_bytes()).expect("pub header");
+        headers.push((payload.clone(), h));
+        if payload == b"last" {
+            break;
+        }
+    }
+    let of = |mac: Mac| headers.iter().filter(move |(_, h)| h.sender == SenderId::from_mac(mac)).map(|(_, h)| *h);
+    let dev: Vec<_> = of(DEV).collect();
+    let dev2: Vec<_> = of(DEV2).collect();
+    assert_eq!(dev2.len(), 2, "{headers:?}");
+    assert!(dev.len() >= 3, "{headers:?}");
+    // One stream per (device, key), each with its own sequence.
+    assert!(dev.iter().all(|h| h.stream == dev[0].stream));
+    assert!(dev2.iter().all(|h| h.stream == dev2[0].stream));
+    assert_ne!(dev[0].stream, dev2[0].stream);
+    assert_eq!(dev2.iter().map(|h| h.seq).collect::<Vec<_>>(), [0, 1]);
+    let tail: Vec<u8> = dev.iter().rev().take(2).map(|h| h.seq).collect();
+    assert_eq!(tail[0], tail[1].wrapping_add(1), "{dev:?}");
     let report = r.finish().await;
-    assert!(report.frames_up >= 3, "{report:?}");
+    assert!(report.frames_up >= 5, "{report:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
