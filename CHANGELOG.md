@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### posix-node serves its sys keys over Zenoh (PN21–PN27)
+- mw-posix-node: `zenoh_sys` (on by default; `MW_POSIX_NODE_ZENOH_SYS=off` turns it off) declares one queryable, `@mw/node/<sender id>/sys/**`, and forwards the served keys to the device thread over a new mesh link (`DeviceParts::mesh`, `shell::spawn_device` takes it); `mesh_gate` decides them first: description keys in any trust state, everything else claimed-only, commits and binds signed, start/stop as signed control requests for `node_id[0..6]` with the counter persisted in the trust record (`Service::accept_control`). Each Zenoh requester is its own transfer owner (not authenticated); an unsigned commit no longer ends a transfer over Zenoh. A wildcard `@mw/node/*/sys/info` gets `sys/info`.
+- Behaviour: the node's Zenoh session is now a **client** of `MW_ZENOH_ROUTER` (`session_config`) with its zid derived from the node id (`node_id::zenoh_id`, `STABLE_ZENOH_ID`), so its sender id survives restarts. A peer node was unreachable from peer tools through a router. A client fails to start while its router is down (systemd restarts it).
+- `Service` gained `set_origin`, `origin`, `loader_owner`, `accept_control` and staging for `Air` origins; `Controller::mesh_request`.
+- mwctl: over `--zenoh` the control target defaults from `sys/info` (`zlink::target_for`); the `--node`/`--target` help explains the ids. mw-posix-node's dev-dependency on mwctl enables `zenoh` (the shipped mwctl is unchanged).
+
 ### Zenoh over mTLS (ZT1–ZT5, H5)
 - `middleware::zenoh::SessionConfig::client()` and `.tls(TlsFiles { root_ca, cert, key })` (PEM file paths, read by Zenoh at connect; `TlsFiles::from_dir` takes `ca`, `cert`, `key`), `ZenohError::InvalidTlsPath`. Endpoint strings with control characters are now `InvalidEndpoint`. No new feature or dependency: zenoh's default TLS link was already built. `rcgen` is a new dev-dependency only (already in Cargo.lock).
 - The pinned CA adds to the public web roots (zenoh-link-tls), so the locator host must be a name public CAs may not issue for: a CAA record `0 issue ";"` on that exact name, or an IP SAN.

@@ -3239,6 +3239,66 @@ network tests use 127.0.0.1 only.
   *(mw-posix-node `pn1_the_old_names_still_work_and_are_reported`,
   `pn1_an_existing_old_state_directory_is_kept`,
   `node_ids_survive_the_rename`)*
+- [x] PN21 With `MW_POSIX_NODE_ZENOH_SYS` on (the default) the node
+  declares exactly one queryable, `@mw/node/<sender id>/sys/**`, where
+  the sender id is its Zenoh session's `SenderId`; no bare `sys/*` key is
+  declared. A query for a served key reaches the device thread over a
+  third link (the mesh link); a query naming another node is ignored; a
+  wildcard query covering the node's `sys/info` (`mwctl scout`'s
+  `@mw/node/*/sys/info`) gets `sys/info` and nothing else; answers are
+  on the node's concrete key. `sys/info` carries the node id, which is
+  not the sender id. The session is a Zenoh client of `MW_ZENOH_ROUTER`
+  (a router does not pass queries between two peer sessions) and its
+  zid is derived from the node id (`node_id::zenoh_id`, SHA-256 over
+  `mw-posix-node/zenoh-id/v1` and the node id), so the sender id is the
+  same across restarts and distinct per node (`STABLE_ZENOH_ID` turns
+  that off). *(mw-posix-node `pn21_*`, `zenoh_sys`
+  `pn21_info_manifest_and_cm_over_zenoh`,
+  `pn23_pn24_pn25_signed_installs_starts_and_owned_transfers_over_zenoh`)*
+- [x] PN22 The served keys are `sys/info`, `sys/trust/info`,
+  `sys/manifest`, `sys/manifest/cm`, `sys/payload/binding`,
+  `sys/loader/begin|chunk|commit` and `sys/payload/start|stop|bind`.
+  Every other `sys/` key is answered `Denied` without reaching the
+  device; `sys/trust/claim` never passes (the gate refuses it too).
+  *(mw-posix-node `pn22_*`)*
+- [x] PN23 The gate (`mesh_gate`, the ZN5 rules on the node, through
+  `esp_base::ota::admit`): the description keys (`info`, `trust/info`,
+  `manifest`, `manifest/cm`) answer in any trust state, deliberately
+  more than the RT1050's two. Everything else needs a pinned key:
+  `begin` and `chunk` stage into the inactive slot beside the running
+  payload; `commit` must be signed, and an unsigned commit is `Denied`
+  and leaves the transfer as it was (unlike the RT1050, which ends it);
+  `start`, `stop` and `bind` are signed only. A refused request leaves
+  the state, the flash and the running payload unchanged and is logged
+  to `tracing` only, never to `sys/log`. *(mw-posix-node `pn23_*`)*
+- [x] PN24 A signed control request names `node_id[0..6]` (the `gw/sys`
+  rule, not the RT1050's `02` and last five), carries a counter above the
+  last accepted one, and the counter is persisted (synced) in the trust
+  record before the request acts, so a replay is refused across restarts;
+  a counter that cannot be saved is `Internal` and nothing runs.
+  *(mw-posix-node `pn24_*`, `pn23_pn24_*`)*
+- [x] PN25 Each Zenoh requester is its own requester for the transfer:
+  `Origin::Air` and six bytes of the sender id its query attachment
+  names (never the node's own address nor the anonymous requester's, for
+  queries without an attachment), distinct from the serial links (the
+  gateway's `gw/sys` and the local link, `Origin::Serial`). A `begin`
+  from anyone takes the transfer over; another requester's `chunk` or
+  `commit` is `InvalidRequest` and changes nothing. The sender id is not
+  authenticated (neither Zenoh nor the router's ACL checks it): this
+  stops accidental and casual interference, not a forger, and activation
+  still needs the signed commit. Queries are served one at a time from a
+  queue of 32 (full: dropped and counted), bounded by the query's
+  deadline at most 10 s; a timeout is `Unavailable`, a spent deadline
+  drops the query. Publications, logs and status are never sent on the
+  mesh link. *(mw-posix-node `pn25_*`)*
+- [x] PN26 `MW_POSIX_NODE_ZENOH_SYS` is `on` (the default) or `off`;
+  anything else is a `PosixNodeConfigError` naming the variable; it has
+  no `MW_PI_NODE_` name. *(mw-posix-node `pn26_*`)*
+- [x] PN27 `mwctl --zenoh … --node <sender id>` takes its control target
+  from `sys/info`: `02` and the last five bytes of `--node` for chip
+  `rt1050` (or a reply without a node id), the first six bytes of the
+  reported node id otherwise; `--target` overrides. *(mwctl
+  `pn27_the_control_target_comes_from_sys_info`)*
 
 ### i.MX RT base firmware (`firmware-imxrt/`)
 
