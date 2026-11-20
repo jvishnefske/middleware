@@ -63,8 +63,9 @@ use crate::link::Endpoint;
 use crate::sign::{SignError, Signer, image_sha256};
 use middleware::fw_ota::picobin::{ImageDef, SENTINEL_FROM, find_image_def_in};
 use middleware::fw_ota::rt_image::{HEADER_LEN, RtHeader, RtImageError, is_rt_image};
-use middleware::fw_ota::wire::{Command, FwInfo, StateCode, keys, signed_message};
+use middleware::fw_ota::wire::{Command, FwAuth, FwInfo, StateCode, keys, signed_message};
 use middleware::fw_ota::{CHUNK_LEN, MAX_IMAGE, Slot};
+use middleware::loader::release::SignedCert;
 use middleware::loader::trust::{ControlOp, Signature, SignedControl, Version};
 use middleware::transport::HandlerError;
 use sha2::{Digest, Sha256};
@@ -421,6 +422,10 @@ impl fmt::Debug for ControlSigner<'_> {
 pub struct UpdateOptions<'a> {
     /// Sign the commit with this key (a claimed device requires it).
     pub key: Option<&'a dyn Signer>,
+    /// Commit with this release cert from the updates channel instead
+    /// (`[cert][sig]`, [`middleware::loader::release`]); `key` is then
+    /// unused.
+    pub release: Option<SignedCert<'a>>,
     /// Send `sys/fw/reboot` after the commit.
     pub reboot: bool,
     /// Sign the reboot as a control request (over Zenoh).
@@ -554,14 +559,15 @@ impl<L: Endpoint> Device<L> {
             report(self, step, offset + data.len() as u32);
         }
         step += 1;
-        let signature = match opts.key {
-            Some(signer) => Some(
+        let auth = match (opts.release, opts.key) {
+            (Some(cert), _) => Some(FwAuth::Cert(cert)),
+            (None, Some(signer)) => Some(FwAuth::Signed(
                 sign_firmware(&image.bytes, signer, image.version, slot, &info.node)
                     .map_err(|e| Error::Fw(e.to_string()))?,
-            ),
-            None => None,
+            )),
+            (None, None) => None,
         };
-        self.fw(&Command::Commit { signature })
+        self.fw(&Command::Commit { auth })
             .map_err(|e| wrap(step, keys::COMMIT, e))?;
         report(self, step, len);
         let mut done = Updated {
@@ -795,6 +801,7 @@ mod tests {
             .fw_update(
                 &img,
                 UpdateOptions {
+                    release: None,
                     key: Some(&seed),
                     reboot: true,
                     control: None,
@@ -849,6 +856,7 @@ mod tests {
             .fw_update(
                 &img,
                 UpdateOptions {
+                    release: None,
                     key: Some(&other),
                     reboot: false,
                     control: None,
@@ -874,6 +882,7 @@ mod tests {
         d.fw_update(
             &img,
             UpdateOptions {
+                release: None,
                 key: Some(&seed),
                 reboot: false,
                 control: None,
@@ -886,6 +895,7 @@ mod tests {
             .fw_update(
                 &newer,
                 UpdateOptions {
+                    release: None,
                     key: Some(&seed),
                     reboot: false,
                     control: None,
@@ -898,6 +908,7 @@ mod tests {
         d.fw_update(
             &newer,
             UpdateOptions {
+                release: None,
                 key: Some(&seed),
                 reboot: false,
                 control: None,
@@ -933,6 +944,7 @@ mod tests {
         d.fw_update(
             &img,
             UpdateOptions {
+                release: None,
                 key: None,
                 reboot: true,
                 control: None,
@@ -1052,6 +1064,7 @@ mod tests {
             .fw_update(
                 &img,
                 UpdateOptions {
+                    release: None,
                     key: Some(&seed),
                     reboot: true,
                     control: None,
@@ -1098,6 +1111,7 @@ mod tests {
             .fw_update(
                 &img,
                 UpdateOptions {
+                    release: None,
                     key: Some(&seed),
                     reboot: true,
                     control: None,
@@ -1251,6 +1265,7 @@ mod tests {
         d.fw_update(
             &img,
             UpdateOptions {
+                release: None,
                 key: None,
                 reboot: true,
                 control: None,

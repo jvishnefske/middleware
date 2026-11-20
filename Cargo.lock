@@ -1944,6 +1944,7 @@ dependencies = [
  "embedded-hal-async",
  "embedded-io-async",
  "futures",
+ "futures-util",
  "getrandom 0.3.4",
  "heapless",
  "http",
@@ -1953,13 +1954,17 @@ dependencies = [
  "p256",
  "postcard",
  "prost",
+ "rcgen",
  "recipe-core",
  "serde",
  "sha2",
  "socket2 0.6.5",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
+ "tokio-tungstenite",
  "tonic",
+ "webpki-roots",
  "zenoh",
  "zenoh-buffers",
  "zenoh-codec",
@@ -2093,6 +2098,24 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "zenoh",
+]
+
+[[package]]
+name = "mw-updates"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "embedded-io-async",
+ "middleware",
+ "mw-gateway",
+ "mw-posix-node",
+ "mwctl",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "wat",
  "zenoh",
 ]
 

@@ -444,6 +444,7 @@ pub fn execute<E: Endpoint>(
             // Over gw/sys the reboot travels as the serial form (unsigned):
             // the gateway is the device's serial side.
             let opts = UpdateOptions {
+                release: None,
                 key: Some(&*signer),
                 reboot,
                 control: None,

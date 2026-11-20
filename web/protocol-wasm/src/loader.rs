@@ -347,7 +347,9 @@ impl DeviceLoader {
         match effect {
             Err(e) => (next, Err(e)),
             Ok(Effect::Activate { image, auth }) => {
-                match self.trust.accept_commit(&image, auth.as_ref()) {
+                // The simulated device reports no chip of its own: a release
+                // cert is accepted here only for `any`.
+                match self.trust.accept_commit_auth(&image, auth.as_ref(), "sim") {
                     Ok(trust) => (
                         Self { trust, ..next },
                         Ok(Action::Activate(image.len, image.crc)),

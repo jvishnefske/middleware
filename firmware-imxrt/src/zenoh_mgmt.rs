@@ -1117,8 +1117,10 @@ mod tests {
             &NODE,
             &ImageHash::digest(img),
         );
-        let signature = Some(Signature(signer(seed).sign(&m).to_bytes()));
-        crate::service::tests::fw_body(&Command::Commit { signature })
+        let auth = Some(middleware::fw_ota::wire::FwAuth::Signed(Signature(
+            signer(seed).sign(&m).to_bytes(),
+        )));
+        crate::service::tests::fw_body(&Command::Commit { auth })
     }
 
     fn fw_transfer(s: &mut Svc, img: &[u8], over_zenoh: bool) -> Answer {
@@ -1175,7 +1177,7 @@ mod tests {
         // Unsigned, other key, wrong slot: Denied, nothing committed.
         for bad in [
             crate::service::tests::fw_body(&middleware::fw_ota::wire::Command::Commit {
-                signature: None,
+                auth: None,
             }),
             fw_signed_commit(2, &v2, V1_1, Slot::B),
             fw_signed_commit(1, &v2, V1_1, Slot::A),

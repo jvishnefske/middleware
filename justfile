@@ -19,3 +19,10 @@ default:
 [doc("List the middleware nodes on the local network (Zenoh scouting)")]
 lan seconds="3":
     cargo run --quiet --release -p mwctl --features zenoh -- scout --seconds {{seconds}}
+
+# The updates channel end to end on this machine (design.md UP): the
+# zenohd and mw-updates images (podman), a posix-node over a PTY, the
+# updater and the publisher; publish, install, re-publish, refuse a forgery.
+[doc("Demo the updates channel locally (podman, socat)")]
+updates-demo:
+    scripts/updates-demo.sh

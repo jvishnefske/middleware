@@ -58,6 +58,7 @@ pub mod fw;
 pub mod link;
 pub mod pkcs11;
 pub mod plan;
+pub mod port;
 pub mod report;
 pub mod scout;
 pub mod sign;

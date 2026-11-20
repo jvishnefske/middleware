@@ -1,0 +1,8 @@
+# NF2 (design.md "No fuse or OTP writes"): the RP2350's OTP is never
+# written. embassy-rp's writers are safe functions, so forbid(unsafe_code)
+# does not stop them; scripts/check-no-fuse-writes.sh is the CI gate, this
+# makes clippy say so too.
+disallowed-methods = [
+  { path = "embassy_rp::otp::write_raw_word", reason = "burns RP2350 OTP (NF2)" },
+  { path = "embassy_rp::otp::write_ecc_word", reason = "burns RP2350 OTP (NF2)" },
+]

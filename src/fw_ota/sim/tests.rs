@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::fw_ota::service::{Context, FwService};
-use crate::fw_ota::wire::{Command, FwInfo, INFO_LEN, SlotInfo, signed_message};
+use crate::fw_ota::wire::{Command, FwAuth, FwInfo, INFO_LEN, SlotInfo, signed_message};
 use crate::fw_ota::{CHUNK_LEN, FwUpdate, StateCode};
 use crate::loader::trust::{PublicKey, Signature, TrustState, Version};
 use crate::transport::{HandlerError, SenderId};
@@ -24,6 +24,7 @@ fn claimed() -> Context {
     let key = PublicKey::Ed25519(key().verifying_key().to_bytes());
     Context {
         node: NODE,
+        chip: "rp2350",
         trust: TrustState::Claimed {
             key,
             min_version: Version(0),
@@ -125,7 +126,7 @@ fn upload(
         sim,
         ctx,
         Command::Commit {
-            signature: Some(sig),
+            auth: Some(FwAuth::Signed(sig)),
         },
     )?;
     call(svc, sim, ctx, Command::Reboot)?;
@@ -404,12 +405,7 @@ fn y7_refusals_leave_the_running_image_alone() {
     // Unsigned, wrongly signed (other slot, other node): Denied, and the
     // transfer is kept for a good commit.
     assert_eq!(
-        call(
-            &mut svc,
-            &mut sim,
-            &ctx,
-            Command::Commit { signature: None }
-        ),
+        call(&mut svc, &mut sim, &ctx, Command::Commit { auth: None }),
         Err(HandlerError::Denied)
     );
     let wrong_slot = signature(&new, V1_1, Slot::A, &NODE);
@@ -419,7 +415,7 @@ fn y7_refusals_leave_the_running_image_alone() {
             &mut sim,
             &ctx,
             Command::Commit {
-                signature: Some(wrong_slot)
+                auth: Some(FwAuth::Signed(wrong_slot))
             }
         ),
         Err(HandlerError::Denied)
@@ -431,7 +427,7 @@ fn y7_refusals_leave_the_running_image_alone() {
             &mut sim,
             &ctx,
             Command::Commit {
-                signature: Some(wrong_node)
+                auth: Some(FwAuth::Signed(wrong_node))
             }
         ),
         Err(HandlerError::Denied)
@@ -447,7 +443,7 @@ fn y7_refusals_leave_the_running_image_alone() {
         &mut sim,
         &ctx,
         Command::Commit {
-            signature: Some(good),
+            auth: Some(FwAuth::Signed(good)),
         },
     )
     .unwrap();
@@ -496,7 +492,7 @@ fn y7_corrupted_flash_or_a_bad_image_fails_the_commit() {
                 &mut sim,
                 &ctx,
                 Command::Commit {
-                    signature: Some(sig)
+                    auth: Some(FwAuth::Signed(sig))
                 }
             ),
             Err(HandlerError::InvalidRequest),
@@ -542,20 +538,8 @@ fn y7_resent_requests_are_idempotent() {
     assert_eq!(sim.ops(), ops);
     assert_eq!(info(&mut svc, &mut sim, &ctx).received, 9_000);
     // Unclaimed: an unsigned commit is accepted (TOFU); resent: still Ok.
-    call(
-        &mut svc,
-        &mut sim,
-        &ctx,
-        Command::Commit { signature: None },
-    )
-    .unwrap();
-    call(
-        &mut svc,
-        &mut sim,
-        &ctx,
-        Command::Commit { signature: None },
-    )
-    .unwrap();
+    call(&mut svc, &mut sim, &ctx, Command::Commit { auth: None }).unwrap();
+    call(&mut svc, &mut sim, &ctx, Command::Commit { auth: None }).unwrap();
     call(&mut svc, &mut sim, &ctx, Command::Reboot).unwrap();
     let mut svc = reboot_and_confirm(&mut sim, &ctx).unwrap();
     call(&mut svc, &mut sim, &ctx, Command::Confirm).unwrap();

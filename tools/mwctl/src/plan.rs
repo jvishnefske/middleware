@@ -18,6 +18,7 @@
 
 use middleware::Key;
 use middleware::crc::Crc32;
+use middleware::loader::release::CommitAuth;
 use middleware::loader::trust::SignedCommit;
 use middleware::loader::{CHUNK_MAX, Command};
 use std::fmt;
@@ -96,16 +97,17 @@ pub fn upload_plan(
     corrupt: Option<usize>,
     auth: Option<SignedCommit>,
 ) -> Result<Vec<Step>, PlanError> {
-    upload_plan_chunked(image, CHUNK_MAX, corrupt, auth)
+    upload_plan_chunked(image, CHUNK_MAX, corrupt, auth.map(CommitAuth::Signed))
 }
 
 /// [`upload_plan`] with chunks of at most `chunk` bytes (clamped to
-/// 1..=[`CHUNK_MAX`]).
+/// 1..=[`CHUNK_MAX`]) and a commit of either form: signed for this image,
+/// or a release cert ([`CommitAuth::Cert`]).
 pub fn upload_plan_chunked(
     image: &[u8],
     chunk: usize,
     corrupt: Option<usize>,
-    auth: Option<SignedCommit>,
+    auth: Option<CommitAuth<'_>>,
 ) -> Result<Vec<Step>, PlanError> {
     let chunk = chunk.clamp(1, CHUNK_MAX);
     if image.is_empty() {
@@ -216,7 +218,7 @@ mod tests {
     }
 
     /// Runs a plan through the device's loader state machine.
-    fn run(steps: &[Step]) -> Result<Effect<'static>, middleware::HandlerError> {
+    fn run(steps: &[Step]) -> Result<Effect<'_>, middleware::HandlerError> {
         let mut s = Loader::Idle;
         let mut last = Ok(Effect::None);
         for st in steps {
@@ -269,7 +271,9 @@ mod tests {
         assert_eq!(commit.body.len(), SIGNED_COMMIT_LEN);
         assert_eq!(commit.body, unhex(COMMIT_BODY));
         match run(&steps) {
-            Ok(Effect::Activate { auth: Some(a), .. }) => assert_eq!(a, auth),
+            Ok(Effect::Activate { auth: Some(a), .. }) => {
+                assert_eq!(a, CommitAuth::Signed(auth))
+            }
             other => panic!("{other:?}"),
         }
     }

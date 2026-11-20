@@ -1,7 +1,7 @@
 //! `mwctl` binary: the imperative shell around the `mwctl` library.
 //!
 //! Parses arguments, opens the one serial port named by `--port`
-//! ([`port::SerialTransport`]) or the UDP socket named by `--udp`
+//! ([`mwctl::port::SerialTransport`]) or the UDP socket named by `--udp`
 //! ([`UdpLink`]), runs the command through
 //! [`mwctl::device::Device`] over the serial [`Link`] or, with `--espnow`,
 //! over [`AirLink`] through the USB↔ESP-NOW bridge on that port (printing
@@ -31,8 +31,6 @@
 //!
 //! Exit status: 0 success, 1 device or port failure, 2 usage error.
 
-mod port;
-
 use middleware::fw_ota::StateCode;
 use middleware::loader::trust::KeyKind;
 use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, Version};
@@ -44,13 +42,13 @@ use mwctl::error::Error;
 use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
+use mwctl::port::SerialTransport;
 use mwctl::report::{
     format_binding, format_board, format_event, format_fw_info, format_info, format_manifest,
     format_net, format_trust,
 };
 use mwctl::sign::{SEED_LEN, Seed, Signer, counter_at, hex, sign_commit, sign_control, version_at};
 use mwctl::udp::UdpLink;
-use port::SerialTransport;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -229,7 +227,7 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         println!(
             "reset {}: RTS pulsed {} ms with DTR deasserted",
             cli.port,
-            port::RESET_PULSE.as_millis()
+            mwctl::port::RESET_PULSE.as_millis()
         );
         return Ok(());
     }
@@ -324,6 +322,7 @@ fn fw_command(transport: SerialTransport, cli: &cli::Cli, timeouts: Timeouts) ->
             let r = dev.fw_update(
                 &image,
                 FwOptions {
+                    release: None,
                     key: signer.as_deref(),
                     reboot: *reboot,
                     control: None,
@@ -533,6 +532,7 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
             let done = dev.fw_update(
                 &image,
                 FwOptions {
+                    release: None,
                     key: Some(&*signer),
                     reboot: *reboot,
                     control,

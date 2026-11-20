@@ -813,6 +813,7 @@ impl<F: NorFlash> Service<F> {
     fn handle_fw_owned(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
         let ctx = FwContext {
             node: self.node(),
+            chip: self.ctx.chip,
             trust: self.trust.as_ref().map(|_| self.state.trust()),
             self_test: self.self_test(),
         };

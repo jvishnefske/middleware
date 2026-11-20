@@ -149,6 +149,7 @@ impl<F: NorFlash, R: Rom> FwUpdate<F> for AbUpdate<R> {
         // updater checks signatures at commit only).
         let c = Context {
             node: ctx.node,
+            chip: ctx.chip,
             trust,
             self_test_ok: ctx.self_test.ok(),
         };

@@ -1,0 +1,44 @@
+[package]
+name = "mw-updates"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "The updates channel (design.md UP4-UP8): a server that keeps root-signed releases and serves them over Zenoh, the Linux updater that pulls them into attached boards and the local posix-node, and the publisher"
+license = "MIT OR Apache-2.0"
+
+# The server (in the cluster, beside its zenohd), and its router config.
+[[bin]]
+name = "mw-updates"
+path = "src/bin/mw-updates.rs"
+
+# The client: a systemd service on a Linux host (nix/updater.nix).
+[[bin]]
+name = "mw-updater"
+path = "src/bin/mw-updater.rs"
+
+# Signs a release with the root (an Ed25519 key file or a PKCS#11 token
+# key) and publishes it.
+[[bin]]
+name = "mw-release"
+path = "src/bin/mw-release.rs"
+
+[dependencies]
+# `zenoh` and `zenoh-ws`: the session and the wss:// bridge; `trust`: the
+# server and the updater verify every cert against the root key.
+middleware = { path = "..", features = ["zenoh", "zenoh-ws", "trust"] }
+# The device operations (upload, fw update, confirm) and the signers.
+mwctl = { path = "../tools/mwctl" }
+zenoh = "1.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+ed25519-dalek = "2.2"
+# The end-to-end test installs into a real posix-node over its local link.
+mw-posix-node = { path = "../posix-node" }
+mw-gateway = { path = "../gateway" }
+embedded-io-async = "0.7"
+wat = "1"

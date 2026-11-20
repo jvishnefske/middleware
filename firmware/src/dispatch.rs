@@ -496,7 +496,7 @@ pub fn handle_request<'a>(
             _ => Outcome::reply(state, Ok(0)),
         },
         Command::Begin { .. } | Command::Chunk { .. } | Command::Commit { .. } => {
-            transfer(state, &cmd, ctx.capacity, ctx.staging)
+            transfer(state, &cmd, ctx.capacity, ctx.staging, ctx.chip)
         }
         #[cfg(feature = "trust")]
         Command::TrustInfo => {
@@ -528,9 +528,10 @@ pub fn handle_request<'a>(
 fn authorize(
     state: &State,
     image: &middleware::loader::ImageDigest,
-    auth: Option<&middleware::loader::trust::SignedCommit>,
+    auth: Option<&middleware::loader::release::CommitAuth<'_>>,
+    chip: &str,
 ) -> Result<(TrustState, Option<TrustState>), HandlerError> {
-    let next = state.trust.accept_commit(image, auth)?;
+    let next = state.trust.accept_commit_auth(image, auth, chip)?;
     Ok((next, (next != state.trust).then_some(next)))
 }
 
@@ -538,12 +539,19 @@ fn authorize(
 fn authorize(
     state: &State,
     _image: &middleware::loader::ImageDigest,
-    _auth: Option<&middleware::loader::trust::SignedCommit>,
+    _auth: Option<&middleware::loader::release::CommitAuth<'_>>,
+    _chip: &str,
 ) -> Result<(TrustState, Option<TrustState>), HandlerError> {
     Ok((state.trust(), None))
 }
 
-fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32, staging: bool) -> Outcome<'a> {
+fn transfer<'a>(
+    state: State,
+    cmd: &Command<'a>,
+    capacity: u32,
+    staging: bool,
+    chip: &str,
+) -> Outcome<'a> {
     let (loader, result) = state.loader.step(cmd, capacity);
     let abandoned = |state: State, loader: Loader| {
         // A failure mid-transfer abandons the partly written inactive
@@ -576,30 +584,32 @@ fn transfer<'a>(state: State, cmd: &Command<'a>, capacity: u32, staging: bool) -
         Ok(Effect::Write { offset, data }) => {
             Outcome::act(State { loader, ..state }, Action::Write { offset, data })
         }
-        Ok(Effect::Activate { image, auth }) => match authorize(&state, &image, auth.as_ref()) {
-            Ok((_trust, persist)) => {
-                let next = State {
-                    loader,
-                    status: PayloadStatus::Stopped,
-                    installed: true,
-                    ..state
-                };
-                #[cfg(feature = "trust")]
-                let next = State {
-                    trust: _trust,
-                    ..next
-                };
-                Outcome::act(
-                    next,
-                    Action::Activate {
-                        len: image.len,
-                        crc: image.crc,
-                        trust: persist,
-                    },
-                )
+        Ok(Effect::Activate { image, auth }) => {
+            match authorize(&state, &image, auth.as_ref(), chip) {
+                Ok((_trust, persist)) => {
+                    let next = State {
+                        loader,
+                        status: PayloadStatus::Stopped,
+                        installed: true,
+                        ..state
+                    };
+                    #[cfg(feature = "trust")]
+                    let next = State {
+                        trust: _trust,
+                        ..next
+                    };
+                    Outcome::act(
+                        next,
+                        Action::Activate {
+                            len: image.len,
+                            crc: image.crc,
+                            trust: persist,
+                        },
+                    )
+                }
+                Err(e) => Outcome::reply(abandoned(state, loader), Err(e)),
             }
-            Err(e) => Outcome::reply(abandoned(state, loader), Err(e)),
-        },
+        }
         Ok(Effect::None) => Outcome::reply(State { loader, ..state }, Ok(0)),
     }
 }

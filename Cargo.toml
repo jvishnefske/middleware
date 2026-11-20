@@ -15,7 +15,7 @@ license = "MIT OR Apache-2.0"
 # make every path under the root an explicit member and defeat `exclude`
 # for `posix-node`'s path dependency on `firmware/` (esp-base's pure core).
 [workspace]
-members = ["service", "gateway", "robot", "posix-node", "board-pins", "state-table", "recipe-core", "wasm-host", "wasm-hdl-ref", "tools/payload-sim", "tools/mwctl", "tools/mw", "tools/mw-otel", "tools/jpeg-fixtures", "web/protocol-wasm"]
+members = ["service", "gateway", "robot", "posix-node", "board-pins", "state-table", "recipe-core", "wasm-host", "wasm-hdl-ref", "tools/payload-sim", "updates", "tools/mwctl", "tools/mw", "tools/mw-otel", "tools/jpeg-fixtures", "web/protocol-wasm"]
 exclude = ["firmware", "firmware-esp8266", "firmware-rp", "payloads"]
 
 [features]
@@ -62,6 +62,11 @@ zenoh = ["std", "dep:zenoh", "dep:tokio"]
 # without it nothing of OpenTelemetry is compiled in. The application
 # installs the exporter (tools/mw-otel).
 zenoh-otel = ["zenoh", "dep:opentelemetry"]
+# Zenoh over `wss://` behind a TLS-terminating proxy (`zenoh::wsbridge`):
+# a loopback bridge from the session's TCP link to a WebSocket with TLS,
+# SNI, a path and the host name (zenoh-link-ws dials plain ws:// to an IP).
+# Host only; the crates are already in Zenoh's own tree.
+zenoh-ws = ["zenoh", "tokio?/net", "tokio?/io-util", "dep:tokio-tungstenite", "dep:tokio-rustls", "dep:webpki-roots", "dep:futures-util"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
 mdns = ["std", "dep:tokio", "tokio?/net", "dep:socket2"]
@@ -99,6 +104,10 @@ ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
 
 zenoh = { version = "1.10", optional = true }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
 opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics"], optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
 # Query ids for unicast DNS-SD (`dns-sd`), from the OS CSPRNG.
@@ -128,9 +137,18 @@ zenoh-buffers = "=1.10.1"
 # `zenoh-otel`). Test only: the library uses the API crate alone.
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "testing"] }
 
+# A TLS-terminating proxy for tests/zenoh_ws.rs (feature `zenoh-ws`):
+# a self-signed certificate and a rustls server. Test only.
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+
 [[test]]
 name = "zenoh_otel"
 required-features = ["zenoh-otel"]
+
+[[test]]
+name = "zenoh_ws"
+required-features = ["zenoh-ws"]
 
 [[example]]
 name = "zenoh_board"
