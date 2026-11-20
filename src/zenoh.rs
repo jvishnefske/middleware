@@ -157,6 +157,8 @@ pub mod otel;
 pub mod responder;
 pub mod subscriber;
 pub mod wire;
+#[cfg(feature = "zenoh-ws")]
+pub mod wsbridge;
 
 pub use discovery::ZenohDiscovery;
 pub use responder::ZenohResponder;
