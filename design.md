@@ -3762,6 +3762,12 @@ open).
   router, other subnets, and mw-posix-node's `sys/info`, which it does not
   serve over Zenoh yet (only through `gw/sys`, MS6) —
   `scout::tests::h4_node_ids_come_from_sys_info_reply_keys`, `h4_admin_sessions_are_parsed_and_junk_is_skipped`, `h4_merge_joins_by_zenoh_id_and_leaves_out_the_scanner`, `h4_answers_are_attributed_by_node_id`, `h4_the_table_is_aligned_and_says_when_nothing_was_found`, `scout::shell::tests::h4_connects_to_routers_and_peers_over_tcp_only`; `cli::tests::h4_scout_needs_no_link_and_takes_only_seconds`. Run 2026-11-19 against a zenohd on loopback: it listed the router, a mw-posix-node's two sessions (peer and client, via the router) and a stub `@mw/node/<id>/sys/info` queryable; on this LAN it found no Zenoh session.
+- [x] H6 mwctl's `bridge` module is the library's `middleware::radio_bridge`
+  re-exported, with the same wire bytes; the MAC text helpers, `wire_vec`
+  and the owned message (`bridge::Owned`) for the blocking air link stay in
+  mwctl, which still builds with no features —
+  `bridge::tests::h6_reexport_keeps_the_wire_bytes`,
+  `o5_macs_parse_and_format`; the `air::tests` (O9) unchanged.
 
 ### Web site (`web/`)
 
@@ -4715,7 +4721,10 @@ host → bridge.
   `o5_golden_frames_match_the_bridge_firmware`, `o5_bad_frames_are_rejected`,
   `o5_frames_split_out_of_a_noisy_stream`, `o5_macs_parse_and_format`;
   `tools/espnow-bridge/check.sh` (`test_bridge_frame.cpp`, then the sketch
-  compiles for `esp8266:esp8266:generic`).
+  compiles for `esp8266:esp8266:generic`). The codec has since moved to
+  the library (`middleware::radio_bridge`, EG1); the framing tests moved
+  with it (`radio_bridge::tests::o5_*`), `o5_macs_parse_and_format` stays
+  in mwctl.
 - [x] O6 Over the air an unclaimed device refuses everything; a claimed one
   allows only the update keys, never `sys/trust/claim`, and only signed
   commits, while serial keeps its rules —
@@ -4853,6 +4862,114 @@ host → bridge.
   the gated build was flashed again and the refusals, staging, signed
   stop/start, replay and a signed `upload echo.wasm --start` (3006)
   repeated with the same results.
+
+
+### ESP-NOW gateway in mw-posix-node (EG…)
+
+A Linux node with the USB↔ESP-NOW bridge (`tools/espnow-bridge`, an
+ESP8266) on a serial port gateways the ESP-NOW devices it hears onto its
+Zenoh session: their publications appear under their own MAC-derived node
+ids, their beacons as discovered services, and their system keys as
+per-node queryables forwarded over the air. The framing is the library's
+(`middleware::radio_bridge`), the radio `middleware::espnow::bridge`, the
+shell `mw_posix_node::espnow_gw`.
+
+- [x] EG1 The bridge framing is `middleware::radio_bridge`, ungated,
+  `no_std`, heap-free: `Msg` borrows its data, encoding writes into a
+  caller buffer (`BufferTooSmall` when it does not fit), the golden wire
+  frames are unchanged and equal the ESP8266 test's, and the module builds
+  with no features on `thumbv6m-none-eabi` —
+  `radio_bridge::tests::o5_golden_frames_match_the_bridge_firmware`,
+  `o5_messages_round_trip_through_the_wire`, `eg1_encode_into_exact_buffer`,
+  `eg1_small_output_buffer_is_an_error`; `tools/espnow-bridge/check.sh`;
+  `scripts/check-features.sh` (ungated declaration, no-feature build).
+- [x] EG2 `decode_run` skips leading garbage (the ESP8266 boot banner) and
+  reports undecodable runs; CRC, COBS, type and layout errors are refused —
+  `radio_bridge::tests::eg2_frames_split_out_of_a_noisy_stream`,
+  `o5_bad_frames_are_rejected`.
+- [x] EG3 `BridgeRadio` (feature `espnow`, no heap) implements
+  `EspNowRadio` and `EspNowUnicast` over any `embedded-io-async` `Read +
+  Write`: `receive` yields `Recv` frames, `Hello` and `Stats` are handled
+  internally, frames heard while a send waits are queued in a bounded
+  inline ring (full: newest dropped and counted), and a dropped `receive`
+  loses no frame (given a cancel-safe `read`, as `ChannelIo`'s); in the
+  gateway, uplink publications keep flowing while a request waits for a
+  lost `Sent` — `espnow::bridge::tests::eg3_receive_yields_recv_and_skips_noise`,
+  `eg3_hello_and_stats_are_internal`,
+  `eg3_frames_heard_during_a_send_are_queued_and_full_ring_drops_newest`,
+  `eg3_dropped_receive_loses_no_frame`,
+  `eg3_a_frame_too_large_for_the_buffer_is_an_error`; posix-node
+  `tests/espnow_gw.rs` `eg3_uplink_survives_a_request`.
+- [x] EG4 `send_to` and `broadcast` (to `FF:FF:FF:FF:FF:FF`) write one
+  `Send` and wait for its `Sent`, one outstanding at a time (the bridge
+  queues four): acknowledged is `Ok`, a failed `Sent` is `NotAcked`, a
+  `Sent` for another destination is ignored, and none within the timeout
+  (default 300 ms) is `SentTimeout`, which `RpcRequester` retries with the
+  same id — `eg4_send_to_ok`, `eg4_send_to_nack`, `eg4_lost_sent_times_out`,
+  `eg4_stale_sent_ignored`, `eg4_broadcast_addresses_ff_and_waits_for_sent`,
+  `eg4_rpc_requester_resends_with_the_same_id_after_a_lost_sent`.
+- [x] EG5 `connect` asks `Query` (twice within its timeout) and learns the
+  bridge MAC from `Hello`; another protocol version is refused, none is
+  `HelloTimeout` — `eg5_connect_queries_for_hello`, `eg5_bad_version_refused`,
+  `eg5_no_hello_is_a_timeout`.
+- [x] EG6 `mw-posix-node` with `MW_POSIX_NODE_ESPNOW_BRIDGE=<tty>`
+  republishes `app/**` heard over ESP-NOW into the node's Zenoh session
+  with the device's MAC-derived sender id (`SenderId::from_mac`,
+  `@mw/node/<mac>0000/...`), per-(MAC, key) sequence and a stream whose
+  origin is the MAC; a repeated frame is dropped; `sys/**` and `disc/**`
+  never appear under `app` — `espnow_gw::core::tests::eg6_ids_are_mac_derived`;
+  `tests/espnow_gw.rs` `eg6_publish_up`.
+- [x] EG7 `disc/<kind>` beacons are announced through `ZenohDiscovery` with
+  node = the frame's MAC (E21 rules: a declared node other than the sender
+  is refused, one MAC cannot update or withdraw another's record, at most
+  2 per MAC, a full registry of 16 refuses rather than evict); the TTL kept
+  is at most `MAX_BEACON_TTL_S` (60 s, the heard TTL), because the MAC is
+  not authenticated and records are never evicted; and a record is
+  withdrawn on a goodbye, when its TTL passes, when its device is no
+  longer heard (expired or evicted from the heard table, so a record never
+  outlives its sender being heard), or when the node is stopped —
+  `core::tests::eg7_a_beacon_is_announced_with_the_sender_as_node`,
+  `eg7_records_are_bound_to_the_frame_sender`,
+  `eg7_one_sender_cannot_fill_the_registry`,
+  `eg7_expired_records_are_withdrawn`,
+  `eg7_a_huge_ttl_is_clamped_and_expires`,
+  `eg7_a_forgotten_device_loses_its_records`; `tests/espnow_gw.rs`
+  `eg7_beacon_becomes_discovery`,
+  `eg7_beacons_are_withdrawn_when_the_gateway_stops`.
+- [x] EG8 Configured downlink filters (`MW_POSIX_NODE_ESPNOW_DOWNLINK`,
+  under `app` only) are broadcast over ESP-NOW for samples from other
+  sessions; samples published under a heard MAC-derived id are not
+  rebroadcast; keys and payloads that do not fit a frame are dropped and
+  counted — `core::tests::eg8_loop_guard`; `tests/espnow_gw.rs`
+  `eg8_downlink_broadcasts`.
+- [x] EG9 For every heard device (at most 32) the node serves concrete
+  queryables on `@mw/node/<mac id>/sys/info`, `sys/board`, `sys/manifest`,
+  `sys/manifest/cm`, `sys/trust/info` and the signed loader and payload
+  control keys, forwarded as ESP-NOW requests (`RpcRequester::request_with`,
+  retries with the same id) to that MAC, and undeclared when the device is
+  forgotten; `sys/trust/claim` is not forwarded; failures answer a Zenoh
+  reply error (no answer: `Unavailable`) — `core::tests::eg9_forward_allowlist`;
+  `tests/espnow_gw.rs` `eg9_request_response`, `eg9_lost_sent_is_retried`,
+  `eg9_nack_and_timeout_errors`.
+- [x] EG10 The node publishes the heard devices (`loader::peers::PeerSet`)
+  on `gw/espnow/<bridge id>/heard` (every 10 s and on change) and serves
+  them at `@mw/node/<bridge id>/sys/peers`; devices unheard for 60 s drop
+  out, and at most 64 are remembered (the stalest goes) —
+  `core::tests::eg10_heard_expiry_and_peerset`, `eg10_heard_is_bounded`;
+  `tests/espnow_gw.rs` `eg10_heard_list`.
+- [x] EG11 The gateway is off by default; `MW_POSIX_NODE_ESPNOW_BRIDGE` and
+  `MW_POSIX_NODE_ESPNOW_DOWNLINK` (comma-separated, `app/cmd/**` or one
+  key, at most 8) parse with the existing empty-is-unset, legacy-name and
+  error rules — `config::tests::eg11_espnow_defaults_off`, `eg11_parses`,
+  `eg11_bad_downlink_names_the_variable`.
+- [x] EG12 Feature isolation: `espnow` (now with `embedded-io-async`) still
+  builds `no_std` on `thumbv6m-none-eabi` with no cloud dependency;
+  `mw-gateway` stays serial-only (RG19); the shell lives in
+  `mw-posix-node`, which enables `espnow` itself (PN9) —
+  `scripts/check-features.sh`.
+- [ ] EG13 On hardware: an ESP32's `app/**` appears on Zenoh through the
+  ESP8266 bridge on posix-node, and `mwctl info` over Zenoh reaches it.
+  Owner: user.
 
 ### A/B firmware OTA (RP2350)
 

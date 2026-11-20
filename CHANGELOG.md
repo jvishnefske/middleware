@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### ESP-NOW gateway in mw-posix-node (EG1–EG12)
+- `middleware::radio_bridge`: the USB↔ESP-NOW bridge framing, moved from mwctl, always built, `no_std` and heap-free. `Msg` borrows its data; `encode_raw`/`encode_wire` write into a caller buffer (`BridgeError::BufferTooSmall`); `from_run` and `decode_run` decode through a caller's scratch. Wire bytes unchanged (the ESP8266 goldens). New `BROADCAST`; the `T_*` type bytes are public.
+- `middleware::espnow::bridge::BridgeRadio`: `EspNowRadio` + `EspNowUnicast` over any `embedded-io-async` stream to the bridge: an inline receive ring, `send_to`/`broadcast` wait for the bridge's `Sent` (`NotAcked`, `SentTimeout`), `connect` learns the bridge MAC.
+- The `espnow` feature now depends on `embedded-io-async` (still `no_std`, no heap).
+- mw-posix-node: `espnow_gw`, enabled by `MW_POSIX_NODE_ESPNOW_BRIDGE` (the bridge's tty, 460800 baud) with `MW_POSIX_NODE_ESPNOW_DOWNLINK` (up to 8 `app` filters broadcast to the devices): device publications on Zenoh under their MAC-derived ids, beacons through Zenoh discovery (E21 rules, TTL at most 60 s, withdrawn when the device is no longer heard), per-device `@mw/node/<id>/sys/...` queryables forwarded over ESP-NOW (not `sys/trust/claim`), the heard list on `gw/espnow/<bridge id>/heard` and `sys/peers`. posix-node now depends on `zenoh` and `embedded-io-async` directly and enables middleware's `espnow`.
+- mwctl: `bridge` re-exports `middleware::radio_bridge` (internal; `bridge::Owned` and `wire_vec` for the air link).
+- Not yet: a NixOS option for the bridge (`nix/posix-node.nix` could gain `espnowBridge`); hardware run (EG13).
+
 ### mwctl scout (H4)
 - `mwctl scout [--seconds N]` (feature `zenoh`; `just lan` in the new root `justfile`): Zenoh multicast scouting, the scouted routers' and peers' admin-space sessions, and `@mw/node/*/sys/info`, merged into one table of the nodes on the local network (`mwctl::scout`). mwctl's `zenoh` feature now also pulls in `zenoh` and `serde_json` directly; the default build is unchanged.
 
