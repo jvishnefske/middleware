@@ -1901,6 +1901,7 @@ dependencies = [
  "tracing",
  "wasm-host",
  "wat",
+ "zenoh",
 ]
 
 [[package]]
