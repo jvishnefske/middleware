@@ -86,6 +86,17 @@ export interface Discovered {
   status?: number;
 }
 
+/** What a `MeshClient` and `scan` need of a transport (a `MeshTransport`,
+ * or a test's fake). */
+export interface MeshLink {
+  readonly senderId: string;
+  readonly up: boolean;
+  request(sender: string | null, key: string, body: Uint8Array, timeoutMs: number): Promise<Uint8Array>;
+  discover(key: string, body: Uint8Array, timeoutMs: number, max?: number): Promise<Discovered[]>;
+  close(): Promise<void>;
+  onClosed(f: (e?: unknown) => void): void;
+}
+
 interface Waiter {
   key: string;
   resolve(c: MeshCompletion): void;
@@ -93,7 +104,7 @@ interface Waiter {
 }
 
 /** A Zenoh session over one WebSocket (see the module comment). */
-export class MeshTransport {
+export class MeshTransport implements MeshLink {
   private readonly waiting = new Map<number, Waiter>();
   private readonly closedListeners: ((e?: unknown) => void)[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -275,7 +286,7 @@ export interface MeshDevice {
 /** Every node that answers `sys/info` on the mesh, each sender once, in
  * reply order. Replies without a sender id cannot be addressed and are
  * left out. */
-export async function scan(t: MeshTransport, proto: Protocol, timeoutMs = SCAN_TIMEOUT_MS): Promise<MeshDevice[]> {
+export async function scan(t: MeshLink, proto: Protocol, timeoutMs = SCAN_TIMEOUT_MS): Promise<MeshDevice[]> {
   const replies = await t.discover(proto.constants.keys.info, new Uint8Array(), timeoutMs);
   const rows = new Map<string, MeshDevice>();
   for (const r of replies) {
@@ -299,7 +310,7 @@ export class MeshClient extends RequestClient implements DeviceClient {
   readonly remote = true;
 
   constructor(
-    private readonly t: MeshTransport,
+    private readonly t: MeshLink,
     readonly device: MeshDevice,
     proto: Protocol,
   ) {
@@ -369,4 +380,18 @@ export function defaultMeshUrl(where: { hostname: string; search?: string; store
   const labels = host.split(".");
   const site = labels.length > 2 ? labels.slice(1).join(".") : host;
   return `wss://updates.${site}/mesh`;
+}
+
+/** The site of a mesh URL `wss://updates.<site>/mesh`, whose mTLS router
+ * `mesh.updates.<site>` is where mwctl connects; null for any other URL
+ * (a local router). */
+export function siteOfMeshUrl(url: string): string | null {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  if (host === "localhost" || /^[0-9.]+$/.test(host) || host.includes(":")) return null;
+  return host.startsWith("updates.") ? host.slice("updates.".length) : host;
 }

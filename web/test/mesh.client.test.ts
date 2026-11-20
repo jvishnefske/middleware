@@ -13,6 +13,7 @@ import {
   type SocketLike,
   defaultMeshUrl,
   scan,
+  siteOfMeshUrl,
 } from "../src/device/mesh";
 import { installBinding } from "../src/device/binding";
 import { trustedUpload, uploadPayload } from "../src/device/upload";
@@ -321,5 +322,14 @@ describe("defaultMeshUrl", () => {
     expect(defaultMeshUrl({ hostname: "127.0.0.1" })).toBe("ws://127.0.0.1:8000");
     expect(defaultMeshUrl({ hostname: "x.example.org", search: "?mesh=ws%3A%2F%2Fh%3A1" })).toBe("ws://h:1");
     expect(defaultMeshUrl({ hostname: "x.example.org", stored: "wss://other/mesh" })).toBe("wss://other/mesh");
+  });
+});
+
+describe("siteOfMeshUrl", () => {
+  it("is the site whose mesh.updates.<site> router mwctl connects to", () => {
+    expect(siteOfMeshUrl("wss://updates.example.org/mesh")).toBe("example.org");
+    expect(siteOfMeshUrl("wss://mesh.example.org/")).toBe("mesh.example.org");
+    expect(siteOfMeshUrl("ws://127.0.0.1:8000")).toBeNull();
+    expect(siteOfMeshUrl("not a url")).toBeNull();
   });
 });

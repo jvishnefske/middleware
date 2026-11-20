@@ -734,6 +734,26 @@ export function blocksPage(app: App): HTMLElement {
     if (isTargetId(profileSel.value)) setBoard(profileSel.value);
   });
   app.onBoardChosen((id) => setBoard(id));
+  // Device -> Blocks: a probed node's drafted plant (meshPanel).
+  app.onUsePlant(async (p) => {
+    const next = parsePlant(serializePlant(p), fallbackBoard());
+    if (!next.ok) {
+      out.textContent = `The probed plant is not valid: ${next.error}`;
+      return;
+    }
+    if (
+      serializePlant(syncPlant()) !== serializePlant(next.plant) &&
+      (await confirmReplace("the probed plant")) === null
+    ) {
+      out.textContent = "Kept your plant; the probed plant was not loaded.";
+      return;
+    }
+    plant = next.plant;
+    unitId = plant.physical.units[0]?.id ?? "";
+    loadModel(unitPayload(plant, unitId) as PayloadModel);
+    renderBadge();
+    out.textContent = `Loaded the probed plant: unit ${unitId} (Units view).`;
+  });
 
   /** True when `next` can replace the payload: nothing would be lost, or
    * the user confirms replacing it with `what`. */

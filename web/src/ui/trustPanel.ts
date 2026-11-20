@@ -2,6 +2,11 @@
 // key (create, back up, restore) and the connected device's pinned key
 // (state, fingerprint, claim).
 //
+// Over the mesh (`client.remote`) the panel only reads: it shows the
+// node's trust state, and Claim stays disabled, since lathe nodes are
+// claimed with mwctl and the lathe's key and the cloud lets a browser ask
+// nothing that changes a node.
+//
 // Decisions come from the pure functions in `trust/wire.ts`
 // (`relateKeys`, `canClaim`); this file only renders them and runs the
 // dialogs. The key itself is handled by `trust/crypto.ts` and persisted by
@@ -43,6 +48,9 @@ const RELATION_TEXT: Record<KeyRelation, string> = {
   different: "different key",
   "no-local-key": "claimed (no key here)",
 };
+
+const REMOTE_CLAIM = "Over the mesh the node is read only: claim it with mwctl and the lathe's key";
+const REMOTE_UPLOAD = "Over the mesh this node is probe-only: deploy with mwctl (the probe shows the commands).";
 
 /** A modal <dialog>; resolves with the inputs' values, or null on cancel. */
 export function modal(title: string, body: (Node | string)[], ok: string, inputs: HTMLInputElement[] = []): Promise<string[] | null> {
@@ -122,8 +130,14 @@ export function trustPanel(storage: KeyStorage): TrustPanel {
       const rekey = info?.state === "rekey-window";
       verdict.textContent = rekey ? `${RELATION_TEXT[rel]} · re-key window open` : RELATION_TEXT[rel];
       verdict.dataset.state = rekey ? "rekey" : rel;
-      claimBtn.disabled = !mine || !canClaim(info) || rel === "match";
-      claimBtn.title = !mine ? "Create or restore a key first" : canClaim(info) ? "" : "Claimed: hold BOOT ≥3 s after boot to open the re-key window";
+      claimBtn.disabled = client.remote || !mine || !canClaim(info) || rel === "match";
+      claimBtn.title = client.remote
+        ? REMOTE_CLAIM
+        : !mine
+          ? "Create or restore a key first"
+          : canClaim(info)
+            ? ""
+            : "Claimed: hold BOOT ≥3 s after boot to open the re-key window";
     }
     for (const f of listeners) f();
   }
@@ -216,7 +230,7 @@ export function trustPanel(storage: KeyStorage): TrustPanel {
   });
 
   claimBtn.addEventListener("click", async () => {
-    if (!client || !mine || !canClaim(info ?? null)) return;
+    if (!client || client.remote || !mine || !canClaim(info ?? null)) return;
     const rekey = info?.state === "rekey-window";
     const r = await modal(
       rekey ? "Re-key device" : "Claim device",
@@ -285,6 +299,7 @@ export function trustPanel(storage: KeyStorage): TrustPanel {
     key: () => mine,
     onChange: (f) => listeners.push(f),
     uploadNote() {
+      if (client?.remote) return { text: REMOTE_UPLOAD, warn: true };
       if (!client || info === undefined) return { text: "", warn: false };
       switch (relateKeys(info, mine?.publicKey ?? null)) {
         case "no-trust":

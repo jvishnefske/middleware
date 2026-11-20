@@ -60,6 +60,10 @@ export interface App {
   /** Blocks -> Device: the plant being edited (its units and bindings). */
   reportPlant(p: PlantModel): void;
   onPlant(f: (p: PlantModel) => void): void;
+  /** Device -> Blocks: replace the plant with `p` (a probed node's draft),
+   * after asking if that would lose work. */
+  usePlant(p: PlantModel): void;
+  onUsePlant(f: (p: PlantModel) => void): void;
 }
 
 /** The board the Device tab is connected to, as a recipe unit. */

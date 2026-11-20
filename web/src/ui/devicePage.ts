@@ -28,6 +28,7 @@ import { bindingPanel } from "./bindingPanel";
 import { describePort } from "../serial/ports";
 import type { App, PayloadHandoff } from "./app";
 import { errorText, formatBytes, h, parseHex, progressBar } from "./dom";
+import { meshPanel } from "./meshPanel";
 import { modal, trustPanel } from "./trustPanel";
 
 const BAUD = 115200;
@@ -44,6 +45,14 @@ export function devicePage(app: App): HTMLElement {
   // each connection.
   let unsignedOk = false;
   const trust = trustPanel(indexedDbStorage());
+  // Nodes over the cloud mesh, probe-only. A probed node's trust state
+  // shows in the trust panel (read only) while no board is on the cable.
+  const mesh = meshPanel(proto, {
+    usePlant: (p) => app.usePlant(p),
+    onSelect: (c) => {
+      if (!client) trust.setClient(c);
+    },
+  });
   /** The connected board as a recipe unit (when it reports a node id). */
   let requester: SerialRequester | null = null;
   let info: DeviceInfo | null = null;
@@ -394,6 +403,8 @@ export function devicePage(app: App): HTMLElement {
       h("div", {}, h("h3", {}, "Console"), termEl),
       h("div", {}, h("h3", {}, "Device info"), infoEl),
     ),
+    h("h3", {}, "Mesh"),
+    mesh.el,
     h("h3", {}, "Trust"),
     trust.el,
     h("h3", {}, "Publish"),
