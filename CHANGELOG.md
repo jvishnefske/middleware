@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### mwctl opens a PTY (H7)
+- `mwctl --port <pty>` works: ENOTTY from the RTS/DTR calls (open and `reset`) is tolerated as in `mw_gateway::io::open_serial` (RG28); other modem-line errors stay fatal. Test-only dev-dependency `libc` (already in Cargo.lock).
+
 ### zenohd static on musl, a PTY as a local serial link (MS59, RG28)
 - nix: `packages.x86_64-linux.zenohd` builds again: zenoh 1.10.1's `.cargo/config.toml` turned `crt-static` off for both musl triples, overriding `CARGO_BUILD_RUSTFLAGS`, and the link failed on `-lgcc_s`. The zenohd build now sets `CARGO_TARGET_<TRIPLE>_RUSTFLAGS = "-C target-feature=+crt-static"`.
 - nix: new `packages.x86_64-linux.zenohd-aarch64` (static aarch64, cross compiled) and `packages.aarch64-linux.zenohd` (native); `checks.aarch64-static` covers zenohd.

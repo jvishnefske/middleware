@@ -4069,6 +4069,13 @@ open).
   mwctl, which still builds with no features —
   `bridge::tests::h6_reexport_keeps_the_wire_bytes`,
   `o5_macs_parse_and_format`; the `air::tests` (O9) unchanged.
+- [x] H7 `mwctl --port` opens a port without modem lines, such as a PTY
+  slave (the KD240's local claim link): ENOTTY from setting RTS/DTR, at
+  open and in `reset`, is not an error, since there is no auto-reset
+  circuit to drive; every other modem-line failure is fatal and names the
+  port and the line (as RG28 for the gateway) —
+  `port::tests::h7_opens_a_pty_slave_and_carries_bytes_both_ways`,
+  `h7_only_inappropriate_ioctl_is_a_missing_modem_line`.
 
 ### Web site (`web/`)
 

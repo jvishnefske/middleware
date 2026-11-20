@@ -41,6 +41,8 @@ version = "1"
 optional = true
 
 [dev-dependencies]
+# openpty for the PTY test (H7).
+libc = "0.2"
 # The fake device runs the real firmware updater on the in-memory RP2350
 # bootrom model. Tests only: the shipped mwctl uses no middleware feature.
 middleware = { path = "../..", features = ["fw-sim"] }
