@@ -93,6 +93,9 @@ pub struct GwConfig {
     pub request_retry: Retry,
     /// How often the heard list is put.
     pub heard_period: Duration,
+    /// A device unheard for this long is forgotten: its records withdrawn,
+    /// its queryables undeclared.
+    pub heard_ttl_ms: u64,
 }
 
 impl Default for GwConfig {
@@ -103,6 +106,7 @@ impl Default for GwConfig {
             connect_timeout_ms: 2000,
             request_retry: Retry { timeout_ms: 400, attempts: 4 },
             heard_period: Duration::from_secs(10),
+            heard_ttl_ms: core::HEARD_TTL_MS,
         }
     }
 }
@@ -146,6 +150,8 @@ pub struct Report {
     pub request_failures: u32,
     /// Devices heard at the end.
     pub heard: u32,
+    /// New MACs refused because the heard table was full of recent devices.
+    pub refused_macs: u32,
 }
 
 #[derive(Default)]
@@ -464,6 +470,8 @@ struct Bus {
     peers: Arc<Mutex<Vec<u8>>>,
     heard_key: String,
     start: Instant,
+    /// The heard devices changed since the last tick.
+    changed: bool,
 }
 
 impl Bus {
@@ -506,13 +514,17 @@ impl Bus {
     async fn uplink(&mut self, key: &str, payload: &[u8], mac: Mac, counters: &Counters) -> Result<(), GwError> {
         let now = self.now_ms();
         let hearing = self.heard.hear(mac, now);
+        if hearing.refused {
+            // The table is full of devices heard recently: a new MAC is not
+            // heard, so nothing it sends is republished or announced.
+            bump(&counters.dropped);
+            return Ok(());
+        }
         if let Some(evicted) = hearing.evicted {
             self.forget(&[evicted]).await;
         }
-        if hearing.new || hearing.evicted.is_some() {
-            self.served.reconcile(&self.heard).await?;
-            self.put_heard().await;
-        }
+        // Queryables and the heard list follow on the next tick, coalesced.
+        self.changed |= hearing.new || hearing.evicted.is_some();
         let Ok(k) = Key::new(key) else { return Ok(()) };
         if KeyFilter::Prefix(BEACON_PREFIX).matches(k) {
             match self.registry.observe(mac, k, payload, now) {
@@ -543,7 +555,9 @@ impl Bus {
         Ok(())
     }
 
-    /// The 1 s housekeeping: expired records and devices.
+    /// The 1 s housekeeping: expired records and devices, then, if the
+    /// heard devices changed since the last tick, the queryables and the
+    /// heard list (coalesced: at most once a tick, however many frames).
     async fn tick(&mut self) -> Result<(), GwError> {
         let now = self.now_ms();
         let expired = self.registry.expire(now);
@@ -551,6 +565,9 @@ impl Bus {
         let gone = self.heard.expire(now);
         if !gone.is_empty() {
             self.forget(&gone).await;
+            self.changed = true;
+        }
+        if std::mem::take(&mut self.changed) {
             self.served.reconcile(&self.heard).await?;
             self.put_heard().await;
         }
@@ -636,11 +653,12 @@ where
         served: Served { session: session.session().clone(), queries: query_tx, declared: HashMap::new() },
         session,
         registry: Registry::new(),
-        heard: Heard::new(),
+        heard: Heard::with_ttl_ms(cfg.heard_ttl_ms),
         streams: HashMap::new(),
         peers,
         heard_key: format!("gw/espnow/{hex}/heard"),
         start: Instant::now(),
+        changed: false,
     };
 
     let pump_loop = async {
@@ -730,5 +748,6 @@ where
         requests: load(&counters.requests),
         request_failures: load(&counters.request_failures),
         heard: u32::try_from(bus.heard.len()).unwrap_or(u32::MAX),
+        refused_macs: bus.heard.refused(),
     })
 }

@@ -14,8 +14,14 @@ use middleware::loader::keys;
 use middleware::loader::peers::{MAX_PEERS, PeerSet};
 use middleware::transport::{HandlerError, SenderId};
 
-/// A device not heard for this long is forgotten.
+/// A device not heard for this long is forgotten (the default;
+/// [`Heard::with_ttl_ms`]).
 pub const HEARD_TTL_MS: u64 = 60_000;
+/// A full heard table forgets its stalest device for a new one only if
+/// that device was last heard at least this long ago; otherwise the new
+/// MAC is refused (E21: refuse rather than evict), so a flood of forged
+/// source MACs cannot push out the devices that are talking.
+pub const MIN_EVICT_AGE_MS: u64 = 10_000;
 /// Most devices remembered; when full the stalest is forgotten.
 pub const MAX_HEARD: usize = 64;
 /// Most devices given per-node queryables (bounds Zenoh declarations).
@@ -107,22 +113,46 @@ pub struct Hearing {
     pub new: bool,
     /// The stalest device, forgotten to make room.
     pub evicted: Option<Mac>,
+    /// The table is full of recently heard devices: this new MAC is not
+    /// heard (its frame should be dropped).
+    pub refused: bool,
 }
 
 /// The devices heard, at most [`MAX_HEARD`], each forgotten
-/// [`HEARD_TTL_MS`] after its last frame.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// [`HEARD_TTL_MS`] (or the configured TTL) after its last frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heard {
     devices: Vec<Device>,
+    ttl_ms: u64,
+    refused: u32,
+}
+
+impl Default for Heard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Heard {
     /// Nobody heard.
     pub const fn new() -> Self {
-        Heard { devices: Vec::new() }
+        Self::with_ttl_ms(HEARD_TTL_MS)
     }
 
-    /// Records a frame from `mac` at `now_ms`.
+    /// Nobody heard; devices are forgotten `ttl_ms` after their last frame.
+    pub const fn with_ttl_ms(ttl_ms: u64) -> Self {
+        Heard { devices: Vec::new(), ttl_ms, refused: 0 }
+    }
+
+    /// New MACs refused because the table was full of recent devices;
+    /// saturates.
+    pub const fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    /// Records a frame from `mac` at `now_ms`. A new MAC finding the table
+    /// full takes the stalest device's place only if that one is at least
+    /// [`MIN_EVICT_AGE_MS`] old; otherwise it is refused and counted.
     pub fn hear(&mut self, mac: Mac, now_ms: u64) -> Hearing {
         if let Some(d) = self.devices.iter_mut().find(|d| d.mac == mac) {
             d.last_ms = now_ms;
@@ -130,20 +160,26 @@ impl Heard {
             return Hearing::default();
         }
         let mut evicted = None;
-        if self.devices.len() >= MAX_HEARD
-            && let Some(i) = self.devices.iter().enumerate().min_by_key(|(_, d)| d.last_ms).map(|(i, _)| i)
-        {
-            evicted = Some(self.devices.remove(i).mac);
+        if self.devices.len() >= MAX_HEARD {
+            let stalest = self.devices.iter().enumerate().min_by_key(|(_, d)| d.last_ms);
+            match stalest {
+                Some((i, d)) if now_ms.saturating_sub(d.last_ms) >= MIN_EVICT_AGE_MS => {
+                    evicted = Some(self.devices.remove(i).mac);
+                }
+                _ => {
+                    self.refused = self.refused.saturating_add(1);
+                    return Hearing { refused: true, ..Hearing::default() };
+                }
+            }
         }
         self.devices.push(Device { mac, first_ms: now_ms, last_ms: now_ms, frames: 1 });
-        Hearing { new: true, evicted }
+        Hearing { new: true, evicted, refused: false }
     }
 
-    /// Forgets the devices unheard for [`HEARD_TTL_MS`] at `now_ms`;
-    /// returns them.
+    /// Forgets the devices unheard for the TTL at `now_ms`; returns them.
     pub fn expire(&mut self, now_ms: u64) -> Vec<Mac> {
-        let (gone, kept) =
-            self.devices.drain(..).partition(|d: &Device| now_ms.saturating_sub(d.last_ms) >= HEARD_TTL_MS);
+        let ttl = self.ttl_ms;
+        let (gone, kept) = self.devices.drain(..).partition(|d: &Device| now_ms.saturating_sub(d.last_ms) >= ttl);
         self.devices = kept;
         gone.into_iter().map(|d| d.mac).collect()
     }
@@ -443,7 +479,7 @@ mod tests {
         for i in 0..MAX_HEARD as u8 {
             full.hear(if i == 0 { OTHER } else { [2, 0, 0, 0, 0, i] }, u64::from(i));
         }
-        let evicted = full.hear(DEV, 1_000).evicted.unwrap();
+        let evicted = full.hear(DEV, MIN_EVICT_AGE_MS + 100).evicted.unwrap();
         assert_eq!(evicted, OTHER);
         assert_eq!(r.forget(evicted).len(), 1);
         assert!(r.records().is_empty());
@@ -493,8 +529,8 @@ mod tests {
     #[test]
     fn eg10_heard_expiry_and_peerset() {
         let mut h = Heard::new();
-        assert_eq!(h.hear(DEV, 0), Hearing { new: true, evicted: None });
-        assert_eq!(h.hear(OTHER, 1_000), Hearing { new: true, evicted: None });
+        assert_eq!(h.hear(DEV, 0), Hearing { new: true, evicted: None, refused: false });
+        assert_eq!(h.hear(OTHER, 1_000), Hearing { new: true, evicted: None, refused: false });
         assert_eq!(h.hear(DEV, 30_000), Hearing::default());
         assert_eq!(h.frames(DEV), Some(2));
         let ids: Vec<SenderId> = h.peers().iter().collect();
@@ -508,13 +544,42 @@ mod tests {
     }
 
     #[test]
+    fn eg10_a_flood_of_fresh_macs_does_not_evict_heard_devices() {
+        let mut h = Heard::new();
+        h.hear(DEV, 0);
+        for i in 0..1000u32 {
+            let b = i.to_be_bytes();
+            let hearing = h.hear([0x02, 0xee, b[0], b[1], b[2], b[3]], 1 + u64::from(i));
+            assert_eq!(hearing.evicted, None);
+        }
+        // DEV keeps its place (and so its queryables, Heard::served).
+        h.hear(DEV, 2_000);
+        assert!(h.contains(DEV));
+        assert!(h.served().contains(&DEV));
+        assert_eq!(h.len(), MAX_HEARD);
+        assert_eq!(h.refused(), 1000 - (MAX_HEARD as u32 - 1));
+    }
+
+    #[test]
+    fn eg10_the_heard_ttl_is_configurable() {
+        let mut h = Heard::with_ttl_ms(1_500);
+        h.hear(DEV, 0);
+        assert!(h.expire(1_499).is_empty());
+        assert_eq!(h.expire(1_500), [DEV]);
+    }
+
+    #[test]
     fn eg10_heard_is_bounded() {
         let mut h = Heard::new();
         for i in 0..MAX_HEARD as u8 {
             h.hear([2, 0, 0, 0, 0, i], u64::from(i) + 10);
         }
-        // The stalest goes.
-        assert_eq!(h.hear(DEV, 1_000).evicted, Some([2, 0, 0, 0, 0, 0]));
+        // Full of devices heard within MIN_EVICT_AGE_MS: refused.
+        assert_eq!(h.hear(DEV, 1_000), Hearing { refused: true, ..Hearing::default() });
+        assert!(!h.contains(DEV));
+        assert_eq!(h.refused(), 1);
+        // Once the stalest is older than that, it goes.
+        assert_eq!(h.hear(DEV, MIN_EVICT_AGE_MS + 10).evicted, Some([2, 0, 0, 0, 0, 0]));
         assert_eq!(h.len(), MAX_HEARD);
         assert_eq!(h.served().len(), MAX_SERVED);
         assert_eq!(h.peers().iter().count(), MAX_PEERS);

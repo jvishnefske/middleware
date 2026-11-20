@@ -436,6 +436,35 @@ async fn eg8_downlink_broadcasts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn eg10_a_mac_flood_leaves_heard_devices_and_their_queryables() {
+    let r = Running::start(fast()).await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    assert_eq!(r.info_when_heard(DEV).await.unwrap(), b"INFO");
+    let mut o = r.observer.clone();
+    let mut sub = o.subscribe(KeyFilter::Exact(Key::from_static("app/flood"))).await.unwrap();
+    // 1000 forged source MACs, each new.
+    for i in 0..1000u32 {
+        let b = i.to_be_bytes();
+        r.bridge.publish([0x02, 0xee, b[0], b[1], b[2], b[3]], 0, "app/flood", b"x").await;
+    }
+    r.bridge.publish(DEV, 2, "app/flood", b"end").await;
+    let mut senders = std::collections::HashSet::new();
+    loop {
+        let (_, p, s) = next(&mut sub).await;
+        if p == b"end" {
+            break;
+        }
+        senders.insert(s);
+    }
+    // Only as many as fit beside DEV were heard (and republished).
+    assert!(senders.len() < 64, "{} flood senders republished", senders.len());
+    // DEV and its queryables are intact.
+    assert_eq!(r.info(DEV, Duration::from_secs(5)).await.unwrap(), b"INFO");
+    let report = r.finish().await;
+    assert!(report.refused_macs > 0, "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn eg10_heard_list() {
     let r = Running::start(fast()).await;
     let hex = String::from_utf8(wire::zid16_hex(SenderId::from_mac(BRIDGE)).to_vec()).unwrap();
