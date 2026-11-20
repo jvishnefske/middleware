@@ -61,16 +61,24 @@ ztag=$("$oci" images --format '{{.Repository}}:{{.Tag}}' | grep '^localhost/mw/z
 utag=$("$oci" images --format '{{.Repository}}:{{.Tag}}' | grep '^localhost/mw/mw-updates:' | head -1)
 
 say "keys and router config"
-if [ -n "${ROOT_SEED:-}" ]; then cp "$ROOT_SEED" "$w/root.seed"; else head -c 32 /dev/urandom > "$w/root.seed"; fi
-root=$($bin/mwctl key pub "$w/root.seed")
+# Keys and the clients' credentials stay private (0700); only what the
+# containers read is opened up below.
+mkdir -m 0700 "$w/keys"
+( umask 077
+  if [ -n "${ROOT_SEED:-}" ]; then cp "$ROOT_SEED" "$w/keys/root.seed"; else head -c 32 /dev/urandom > "$w/keys/root.seed"; fi )
+root=$($bin/mwctl key pub "$w/keys/root.seed")
 echo "root public key: $root"
 pw() { head -c 18 /dev/urandom | base64 | tr -d '/+='; }
 mkdir -p "$w/auth" "$w/data"
 { echo "mw-updates:$(pw)"; echo "release:$(pw)"; echo "demo-host:$(pw)"; } > "$w/auth/dictionary"
-for u in mw-updates release demo-host; do grep "^$u:" "$w/auth/dictionary" > "$w/$u.cred"; done
+grep "^mw-updates:" "$w/auth/dictionary" > "$w/mw-updates.cred"
+for u in release demo-host; do (umask 077; grep "^$u:" "$w/auth/dictionary" > "$w/keys/$u.cred"); done
 cargo run -q -p mw-updates --bin mw-updates -- router-config \
   --server mw-updates --publishers release --updaters demo-host > "$w/config.json5"
-chmod -R a+rX "$w"; chmod a+rwx "$w/data"
+# Rootless containers run as another uid: they read the config, the
+# dictionary and the server's credentials, and write the store.
+chmod a+rx "$w" "$w/auth"; chmod a+r "$w/config.json5" "$w/auth/dictionary" "$w/mw-updates.cred"
+chmod a+rwx "$w/data"
 
 say "updates router and server (containers, read-only root)"
 "$oci" network create mwdemo >/dev/null 2>&1 || true
@@ -95,12 +103,12 @@ MW_POSIX_NODE_LOCAL_SERIAL=$w/pty/node MW_ZENOH_ROUTER=tcp/127.0.0.1:17450 MW_PO
   $bin/mw-posix-node >"$w/node.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 50); do $bin/mwctl --port "$w/pty/updater" info >/dev/null 2>&1 && break; sleep 0.2; done
-$bin/mwctl --port "$w/pty/updater" trust claim --key "$w/root.seed"
+$bin/mwctl --port "$w/pty/updater" trust claim --key "$w/keys/root.seed"
 
 route=(MW_UPDATES_ENDPOINT=ws/127.0.0.1:17448)
 publish() {
-  env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/release.cred" \
-    $bin/mw-release publish --channel demo --target "$chip" --kind payload --key "$w/root.seed" "$1"
+  env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/keys/release.cred" \
+    $bin/mw-release publish --channel demo --target "$chip" --kind payload --key "$w/keys/root.seed" "$1"
 }
 chip=$($bin/mwctl --port "$w/pty/updater" info | sed -n 's/^chip: *//p')
 
@@ -109,7 +117,7 @@ publish "$payload1"
 
 say "updater"
 env "${route[@]}" MW_UPDATES_CHANNEL=demo MW_UPDATES_ROOT_KEY="$root" \
-  MW_ZENOH_CREDENTIALS="$w/demo-host.cred" MW_UPDATER_DEVICES="$w/pty/updater" MW_UPDATES_POLL=600 \
+  MW_ZENOH_CREDENTIALS="$w/keys/demo-host.cred" MW_UPDATER_DEVICES="$w/pty/updater" MW_UPDATES_POLL=600 \
   $bin/mw-updater >"$w/updater.log" 2>&1 &
 pids+=($!)
 wait_for() { for _ in $(seq 100); do grep -q "$1" "$w/updater.log" && return 0; sleep 0.2; done; cat "$w/updater.log"; return 1; }
@@ -119,14 +127,14 @@ grep "payload" "$w/updater.log" | tail -1
 say "publish payload 2: installed on the latest put, not the 10 min poll"
 start=$(date +%s.%N)
 publish "$payload2"
-v2=$(env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/release.cred" $bin/mw-release latest --channel demo --target "$chip" | awk '/^payload/{print $2}')
+v2=$(env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/keys/release.cred" $bin/mw-release latest --channel demo --target "$chip" | awk '/^payload/{print $2}')
 wait_for "payload $v2: installed"
 printf 'installed %s %.1f s after the publish\n' "$v2" "$(echo "$(date +%s.%N) - $start" | bc)"
 
 say "a forged release (another key) is refused by the server"
-head -c 32 /dev/urandom > "$w/mallory.seed"
-if env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/release.cred" \
-   $bin/mw-release publish --channel demo --target "$chip" --kind payload --key "$w/mallory.seed" "$payload1" 2>/dev/null; then
+(umask 077; head -c 32 /dev/urandom > "$w/keys/mallory.seed")
+if env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/keys/release.cred" \
+   $bin/mw-release publish --channel demo --target "$chip" --kind payload --key "$w/keys/mallory.seed" "$payload1" 2>/dev/null; then
   echo "FAIL: the forged release was stored" >&2; exit 1
 fi
 "$oci" logs mwdemo-u 2>&1 | grep refused | tail -1

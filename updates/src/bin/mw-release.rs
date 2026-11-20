@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use middleware::loader::release::CertKind;
 use mw_updates::client::Client;
 use mw_updates::config::{credentials, route};
-use mw_updates::publish::{prepare, publish, settle_version, sign};
+use mw_updates::publish::{current_version, prepare, publish, settle_version, sign};
 use mwctl::fw::{format_version, parse_version};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::sign::{Seed, Signer};
@@ -133,15 +133,15 @@ async fn run(args: &[String]) -> Result<(), String> {
             let client = Client::connect(&route, creds.as_ref())
                 .await
                 .map_err(|e| e.to_string())?;
-            let current = client
+            // Only releases the signer (the root) made count: the server
+            // is not trusted to report versions.
+            let signer = signer(&a)?;
+            let latest = client
                 .latest(&channel, &target)
                 .await
-                .map_err(|e| format!("reading the channel: {e}"))?
-                .into_iter()
-                .find(|r| r.kind() == kind)
-                .map(|r| r.version());
+                .map_err(|e| format!("reading the channel: {e}"))?;
+            let current = current_version(&latest, kind, &signer.public_key());
             settle_version(kind, version, &mut prepared, current)?;
-            let signer = signer(&a)?;
             let release = sign(kind, &channel, &target, &prepared, &*signer)?;
             publish(&client, &release, &prepared.image, Duration::from_secs(20)).await?;
             println!(
