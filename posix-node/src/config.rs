@@ -13,6 +13,7 @@
 //! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
 //! | `MW_POSIX_NODE_ESPNOW_BRIDGE` | none (gateway off) | path of the USB↔ESP-NOW bridge's serial port (`tools/espnow-bridge`, 460800 baud): the node gateways ESP-NOW devices onto Zenoh ([`crate::espnow_gw`]) |
 //! | `MW_POSIX_NODE_ESPNOW_DOWNLINK` | none | with the bridge: `app` keys broadcast to the devices, comma-separated, at most 8; `app/cmd/**` is the key and everything below it, otherwise one key |
+//! | `MW_POSIX_NODE_ZENOH_SYS` | `on` | `on` or `off`: the node's own `sys/...` keys served over Zenoh at `@mw/node/<sender id>/sys/**` (`crate::zenoh_sys`); never read under an old name |
 //!
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
 //! (`mw_gateway::GatewayConfig`; `MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD`
@@ -64,6 +65,9 @@ pub const ENV_KD240_INPUTS: &str = "MW_POSIX_NODE_KD240_INPUTS";
 pub const ENV_ESPNOW_BRIDGE: &str = "MW_POSIX_NODE_ESPNOW_BRIDGE";
 /// `MW_POSIX_NODE_ESPNOW_DOWNLINK`.
 pub const ENV_ESPNOW_DOWNLINK: &str = "MW_POSIX_NODE_ESPNOW_DOWNLINK";
+/// `MW_POSIX_NODE_ZENOH_SYS` (no `MW_PI_NODE_` name: it is newer than the
+/// rename).
+pub const ENV_ZENOH_SYS: &str = "MW_POSIX_NODE_ZENOH_SYS";
 /// Most downlink filters.
 pub const MAX_ESPNOW_DOWNLINK: usize = 8;
 /// A downlink filter: its key fits an ESP-NOW frame's key.
@@ -142,6 +146,8 @@ pub struct PosixNodeConfig {
     pub espnow_bridge: Option<String>,
     /// `app` filters broadcast to the ESP-NOW devices.
     pub espnow_downlink: Vec<DownlinkFilter>,
+    /// Serve the node's `sys/...` keys over Zenoh (`crate::zenoh_sys`).
+    pub zenoh_sys: bool,
     /// Old names that were used: `MW_PI_NODE_*` variables, and
     /// [`LEGACY_STATE`] when it was chosen. The binary warns about each.
     pub deprecated: Vec<String>,
@@ -158,6 +164,7 @@ impl Default for PosixNodeConfig {
             driver: crate::driver::DriverChoice::None,
             espnow_bridge: None,
             espnow_downlink: Vec::new(),
+            zenoh_sys: true,
             deprecated: Vec::new(),
         }
     }
@@ -231,6 +238,14 @@ impl PosixNodeConfig {
             Some(v) => parse_downlink(&v).map_err(|reason| err(ENV_ESPNOW_DOWNLINK, &v, reason))?,
             None => Vec::new(),
         };
+        let zenoh_sys = match set(ENV_ZENOH_SYS) {
+            None => d.zenoh_sys,
+            Some(v) => match v.trim() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(err(ENV_ZENOH_SYS, &v, "not on or off")),
+            },
+        };
         Ok(PosixNodeConfig {
             state,
             node_id,
@@ -240,6 +255,7 @@ impl PosixNodeConfig {
             driver,
             espnow_bridge,
             espnow_downlink,
+            zenoh_sys,
             deprecated: used.into_inner(),
         })
     }
@@ -470,5 +486,28 @@ mod tests {
         }
         assert_eq!(crate::limits(1 << 20).fuel_per_call, DEFAULT_FUEL_PER_CALL);
         assert_eq!(crate::limits(1 << 20).max_subscriptions as usize, middleware::wasm_abi::SLOT_MAX);
+    }
+
+    #[test]
+    fn pn26_zenoh_sys_defaults_on() {
+        assert!(PosixNodeConfig::default().zenoh_sys);
+        assert!(PosixNodeConfig::from_env(&env(&[])).unwrap().zenoh_sys);
+        assert!(PosixNodeConfig::from_env(&env(&[(ENV_ZENOH_SYS, " ")])).unwrap().zenoh_sys);
+        assert!(PosixNodeConfig::from_env(&env(&[(ENV_ZENOH_SYS, "on")])).unwrap().zenoh_sys);
+        assert!(!PosixNodeConfig::from_env(&env(&[(ENV_ZENOH_SYS, "off")])).unwrap().zenoh_sys);
+        assert!(!PosixNodeConfig::from_env(&env(&[(ENV_ZENOH_SYS, " off ")])).unwrap().zenoh_sys);
+    }
+
+    #[test]
+    fn pn26_zenoh_sys_rejects_anything_else_and_has_no_old_name() {
+        for bad in ["yes", "1", "true", "OFF", "of"] {
+            let e = PosixNodeConfig::from_env(&env(&[(ENV_ZENOH_SYS, bad)])).expect_err(bad);
+            assert_eq!(e.var, ENV_ZENOH_SYS, "{bad}");
+            assert_eq!(e.value, bad);
+        }
+        // A new variable: never read under the pre-rename prefix.
+        let c = PosixNodeConfig::from_env(&env(&[("MW_PI_NODE_ZENOH_SYS", "off")])).unwrap();
+        assert!(c.zenoh_sys);
+        assert!(c.deprecated.is_empty());
     }
 }
