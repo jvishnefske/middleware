@@ -34,8 +34,11 @@
 #   * the Linux payload host `mw-posix-node` (design.md PN9) is host only: no
 #     embedded set depends on it, and of the embedded features it enables
 #     only what the device side needs (`serial`, the link it serves;
-#     `trust`, signed commits; `espnow`, which esp-base's pure core always
-#     builds) beside `zenoh`.
+#     `trust`, signed commits; `espnow`, its ESP-NOW gateway's radio over the
+#     USB bridge (EG12), which esp-base's pure core also builds) beside
+#     `zenoh`;
+#   * the bridge framing `radio_bridge` is ungated (EG1), so the no-feature
+#     build below and mwctl's feature-free build both compile it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -79,6 +82,7 @@ ungated() { # file, declaration
 }
 for decl in "src/lib.rs:pub mod discovery;" "src/lib.rs:pub mod dns;" "src/dns.rs:pub mod wire;" \
             "src/lib.rs:pub mod zenoh_wire;" "src/lib.rs:pub mod clock;" "src/lib.rs:pub mod datagram;" \
+            "src/lib.rs:pub mod radio_bridge;" \
             "src/lib.rs:pub mod fw_ota;" "src/fw_ota.rs:pub mod machine;" "src/fw_ota.rs:pub mod wire;" \
             "src/fw_ota.rs:pub mod picobin;" "src/fw_ota.rs:pub mod platform;" "src/fw_ota.rs:pub mod record;" \
             "src/discovery.rs:pub mod record;" "src/discovery.rs:pub mod directory;" "src/discovery.rs:pub mod beacon;"; do
@@ -196,7 +200,7 @@ fi
 echo "== PN9: mw-posix-node is host only"
 cargo build --quiet -p mw-posix-node
 pn_features="$(features_of_self -p mw-posix-node | sort -u)"
-for want in zenoh serial trust; do
+for want in zenoh serial trust espnow; do
     grep -qx "$want" <<<"$pn_features" || fail "mw-posix-node does not enable middleware/$want"
 done
 if grep -Eqx 'ble|cam-fixtures|zenoh-lite' <<<"$pn_features"; then

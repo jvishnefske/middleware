@@ -1,8 +1,9 @@
 // Host test for bridge_frame.h: the C++ bridge codec must be byte-identical
-// to the host's Rust codec (tools/mwctl/src/bridge.rs). The golden wire
-// frames below are copied from bridge.rs `golden()` (also reproduced by an
-// independent Python COBS/CRC-16 script), so a mismatch means mwctl and the
-// bridge firmware would not understand each other.
+// to the host's Rust codec (`middleware::radio_bridge`, src/radio_bridge.rs).
+// The golden wire frames below are copied from radio_bridge.rs `golden()`
+// (also reproduced by an independent Python COBS/CRC-16 script), so a
+// mismatch means the hosts (mwctl, the posix-node gateway) and the bridge
+// firmware would not understand each other.
 //
 // Build and run: g++ -std=c++17 -Wall -Wextra -Werror test_bridge_frame.cpp && ./a.out
 // (tools/espnow-bridge/check.sh does this).

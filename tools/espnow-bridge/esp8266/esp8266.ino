@@ -1,7 +1,8 @@
 // USB-serial <-> ESP-NOW bridge for an ESP8266 (Arduino core 3.1.x).
 //
-// A dumb radio: every protocol decision lives on the host (mwctl,
-// tools/mwctl/src/bridge.rs, which is the spec for the serial frames in
+// A dumb radio: every protocol decision lives on the host (mwctl or the
+// mw-posix-node gateway;
+// src/radio_bridge.rs, which is the spec for the serial frames in
 // bridge_frame.h). The bridge only moves frames:
 //
 // - Serial at 460800 baud. After the ROM banner (74880 baud, unavoidable)

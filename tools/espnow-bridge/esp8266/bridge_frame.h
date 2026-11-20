@@ -1,5 +1,5 @@
 // Serial frames between the host (mwctl) and the USB<->ESP-NOW bridge: a
-// dependency-free C++ port of tools/mwctl/src/bridge.rs, which is the spec.
+// dependency-free C++ port of src/radio_bridge.rs, which is the spec.
 //
 // Every message is one frame: the raw bytes below, then the CRC-16
 // (CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no xorout) of
@@ -16,7 +16,7 @@
 //
 // Pure functions and one fixed-size class only (stdint/stddef, no heap, no
 // recursion, every loop bounded by its input length), so test_bridge_frame.cpp
-// checks them on the host against the golden frames in bridge.rs.
+// checks them on the host against the golden frames in radio_bridge.rs.
 #pragma once
 
 #include <stddef.h>
@@ -225,7 +225,7 @@ inline int encode_sent(bool ok, const uint8_t* dst, uint8_t* out, size_t cap) {
 }
 
 // Parses a raw frame raw[0..len) (COBS removed) into *msg. Returns the type
-// (> 0) or a negative Error. Checks in the order bridge.rs does: CRC first,
+// (> 0) or a negative Error. Checks in the order radio_bridge.rs does: CRC first,
 // then type and layout.
 inline int decode_raw(const uint8_t* raw, size_t len, Msg* msg) {
   if (len < 2) return kErrMalformed;

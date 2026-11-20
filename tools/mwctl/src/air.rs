@@ -32,7 +32,7 @@
 //! [`AirStats`] counts requests, sends, retransmissions and
 //! unacknowledged sends for the throughput report.
 
-use crate::bridge::{self, Mac, Msg};
+use crate::bridge::{self, Mac, Msg, Owned};
 use crate::error::Error;
 use crate::link::{Endpoint, Event, Transport};
 use middleware::Key;
@@ -153,9 +153,8 @@ impl<T: Transport> AirLink<T> {
         self.bridge
     }
 
-    fn write(&mut self, msg: &Msg) -> Result<(), Error> {
-        let wire = msg
-            .wire()
+    fn write(&mut self, msg: &Msg<'_>) -> Result<(), Error> {
+        let wire = bridge::wire_vec(msg)
             .map_err(|e| Error::Bridge(format!("cannot frame {msg:?}: {e:?}")))?;
         if !self.synced {
             self.io.write_all(&[0])?;
@@ -167,7 +166,7 @@ impl<T: Transport> AirLink<T> {
 
     /// Waits until `deadline` for the next bridge message; undecodable runs
     /// are queued as [`Event::Noise`]. A `Hello` updates the bridge's MAC.
-    pub fn poll(&mut self, deadline: Instant) -> Result<Option<Msg>, Error> {
+    pub fn poll(&mut self, deadline: Instant) -> Result<Option<Owned>, Error> {
         loop {
             if self.rx_pos == self.rx_len {
                 let left = deadline.saturating_duration_since(Instant::now());
@@ -190,7 +189,8 @@ impl<T: Transport> AirLink<T> {
                     Split::Overflow => self.events.push(Event::Noise(Vec::new())),
                     Split::Frame(_) => {
                         let run = self.splitter.frame();
-                        match bridge::decode_run(run) {
+                        let mut scratch = [0u8; bridge::MAX_WIRE];
+                        match bridge::decode_run(run, &mut scratch) {
                             Some((skip, msg)) => {
                                 if skip > 0 {
                                     let garbage = run.get(..skip).unwrap_or_default().to_vec();
@@ -199,7 +199,7 @@ impl<T: Transport> AirLink<T> {
                                 if let Msg::Hello { mac, .. } = msg {
                                     self.bridge = Some(mac);
                                 }
-                                return Ok(Some(msg));
+                                return Ok(Some(Owned::from(msg)));
                             }
                             None => self.events.push(Event::Noise(run.to_vec())),
                         }
@@ -211,16 +211,16 @@ impl<T: Transport> AirLink<T> {
 
     /// Asks the bridge who it is; returns its `Hello` and the `Stats` that
     /// follow (when they arrive in time).
-    pub fn query(&mut self) -> Result<(Msg, Option<bridge::Stats>), Error> {
+    pub fn query(&mut self) -> Result<(Owned, Option<bridge::Stats>), Error> {
         self.write(&Msg::Query)?;
         let deadline = Instant::now() + self.timing.hello;
         let mut hello = None;
         // Each iteration consumes a message or ends at the deadline.
         while let Some(msg) = self.poll(deadline)? {
             match msg {
-                Msg::Hello { .. } => hello = Some(msg),
-                Msg::Stats(s) if hello.is_some() => {
-                    return Ok((hello.unwrap_or(Msg::Query), Some(s)));
+                Owned::Hello { .. } => hello = Some(msg),
+                Owned::Stats(s) if hello.is_some() => {
+                    return Ok((hello.unwrap_or(Owned::Other), Some(s)));
                 }
                 _ => {}
             }
@@ -266,7 +266,7 @@ impl<T: Transport> Endpoint for AirLink<T> {
         })?;
         let send = Msg::Send {
             dst: self.target,
-            data: frame.get(..n).unwrap_or_default().to_vec(),
+            data: frame.get(..n).unwrap_or_default(),
         };
         let timeout = self.timing.for_key(key);
         let mut call = Call::first(id, self.target, self.timing.attempts);
@@ -277,7 +277,7 @@ impl<T: Transport> Endpoint for AirLink<T> {
             // Each iteration consumes a message or ends at the deadline.
             while let Some(msg) = self.poll(deadline)? {
                 match msg {
-                    Msg::Recv { src, data } => {
+                    Owned::Recv { src, data } => {
                         let answer = Message::decode(&data)
                             .ok()
                             .and_then(|m| call.answers(Some(own), src, &m));
@@ -292,7 +292,7 @@ impl<T: Transport> Endpoint for AirLink<T> {
                             None => self.stats.skipped = self.stats.skipped.saturating_add(1),
                         }
                     }
-                    Msg::Sent { ok: false, dst } if dst == self.target => {
+                    Owned::Sent { ok: false, dst } if dst == self.target => {
                         self.stats.nacks = self.stats.nacks.saturating_add(1);
                         deadline = deadline.min(Instant::now() + self.timing.nack_wait);
                     }
@@ -398,8 +398,8 @@ mod tests {
             }
         }
 
-        fn emit(&mut self, msg: Msg) {
-            self.rx.extend(msg.wire().unwrap());
+        fn emit(&mut self, msg: Msg<'_>) {
+            self.rx.extend(bridge::wire_vec(&msg).unwrap());
         }
 
         fn handle(
@@ -519,7 +519,7 @@ mod tests {
             .unwrap();
             self.emit(Msg::Recv {
                 src: DEV,
-                data: frame[..n].to_vec(),
+                data: &frame[..n],
             });
         }
     }
@@ -528,7 +528,8 @@ mod tests {
         fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
             for &b in bytes {
                 if let Split::Frame(_) = self.splitter.push(b) {
-                    match Msg::from_run(self.splitter.frame()) {
+                    let mut scratch = [0u8; bridge::MAX_WIRE];
+                    match Msg::from_run(self.splitter.frame(), &mut scratch) {
                         Ok(Msg::Query) if self.hello => {
                             self.emit(Msg::Hello {
                                 mac: BRIDGE,
@@ -537,7 +538,10 @@ mod tests {
                             });
                             self.emit(Msg::Stats(bridge::Stats::default()));
                         }
-                        Ok(Msg::Send { dst, data }) => self.air(dst, &data),
+                        Ok(Msg::Send { dst, data }) => {
+                            let data = data.to_vec();
+                            self.air(dst, &data);
+                        }
                         _ => {}
                     }
                 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks the ESP8266 USB<->ESP-NOW bridge without touching any device:
 #   1. builds and runs the host test of the C++ frame codec
-#      (esp8266/test_bridge_frame.cpp, golden frames from mwctl's bridge.rs);
+#      (esp8266/test_bridge_frame.cpp, golden frames from src/radio_bridge.rs);
 #   2. compiles the sketch with arduino-cli (skipped with a notice when
 #      arduino-cli or the esp8266 core is missing).
 # Never uploads. Usage: tools/espnow-bridge/check.sh

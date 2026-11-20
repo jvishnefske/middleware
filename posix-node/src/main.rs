@@ -5,8 +5,11 @@
 //! `MW_ZENOH_ROUTER` is required), derives the node id, opens the state
 //! directory, connects to the Zenoh router, starts the node and runs the
 //! `gw/sys` service until SIGTERM/SIGINT (exit 0) or until the device
-//! thread or the runner ends (exit 1). On the way out the payload is
-//! stopped, the flash synced and the gateway's announcements withdrawn.
+//! thread or the runner ends (exit 1). With `MW_POSIX_NODE_ESPNOW_BRIDGE`
+//! it also runs the ESP-NOW gateway (`espnow_gw`) on that serial port; a
+//! gateway failure is logged and the node keeps running. On the way out
+//! the ESP-NOW gateway's beacons are withdrawn, the payload is stopped,
+//! the flash synced and the gateway's announcements withdrawn.
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
@@ -17,6 +20,7 @@ use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
 use mw_posix_node::config::{NodeIdSource, gateway_state_dir};
+use mw_posix_node::espnow_gw::{self, GwConfig};
 use mw_posix_node::{
     DeviceParts, GatewayParts, PosixNodeConfig, control_floor, node_id, open_state_flash, start,
     wall_clock_ms,
@@ -126,22 +130,56 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         driver,
     };
     let parts = GatewayParts { bridge: gateway.bridge_with_floor(floor), options: gateway.shell_options(), store };
+    let espnow_session = session.clone();
     let (mut pi, sys) = start(device, parts, session).await.map_err(|e| e.to_string())?;
+    // The ESP-NOW gateway, when a bridge is configured; its failure is not
+    // the node's.
+    let (stop_espnow, espnow_stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut espnow = match &node.espnow_bridge {
+        Some(tty) => {
+            let io = io::open_serial(tty, middleware::radio_bridge::BAUD)
+                .map_err(|e| format!("espnow bridge {tty}: {e}"))?;
+            let cfg = GwConfig { downlink: node.espnow_downlink.clone(), ..GwConfig::default() };
+            eprintln!("mw-posix-node: espnow gateway on {tty}");
+            Some(tokio::spawn(espnow_gw::run(io, espnow_session, cfg, async {
+                let _ = espnow_stopped.await;
+            })))
+        }
+        None => None,
+    };
     let svc = service(&gateway, sys).map_err(|e| e.to_string())?;
     let (stop_runner, runner_stopped) = tokio::sync::oneshot::channel::<()>();
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {
         let _ = runner_stopped.await;
     }));
-    let outcome = tokio::select! {
-        _ = terminate_signal() => Ok(()),
-        _ = pi.device_ended() => Err("the device thread ended".to_owned()),
-        r = &mut runner => Err(match r {
-            Ok(Ok(())) => "the runner stopped".to_owned(),
-            Ok(Err(e)) => format!("runner: {e}"),
-            Err(e) => format!("runner: {e}"),
-        }),
+    let outcome = loop {
+        tokio::select! {
+            _ = terminate_signal() => break Ok(()),
+            _ = pi.device_ended() => break Err("the device thread ended".to_owned()),
+            r = &mut runner => break Err(match r {
+                Ok(Ok(())) => "the runner stopped".to_owned(),
+                Ok(Err(e)) => format!("runner: {e}"),
+                Err(e) => format!("runner: {e}"),
+            }),
+            r = async { espnow.as_mut().expect("guarded").await }, if espnow.is_some() => {
+                espnow = None;
+                match r {
+                    Ok(Ok(report)) => eprintln!("mw-posix-node: espnow gateway stopped: {report:?}"),
+                    Ok(Err(e)) => eprintln!("mw-posix-node: espnow gateway: {e}"),
+                    Err(e) => eprintln!("mw-posix-node: espnow gateway: {e}"),
+                }
+            }
+        }
     };
     let _ = stop_runner.send(());
+    let _ = stop_espnow.send(());
+    if let Some(gw) = espnow {
+        match gw.await {
+            Ok(Ok(report)) => eprintln!("mw-posix-node: espnow {report:?}"),
+            Ok(Err(e)) => eprintln!("mw-posix-node: espnow gateway: {e}"),
+            Err(e) => eprintln!("mw-posix-node: espnow gateway: {e}"),
+        }
+    }
     let report = pi.stop().await;
     eprintln!("mw-posix-node: {report:?}");
     outcome

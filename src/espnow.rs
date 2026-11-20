@@ -120,6 +120,7 @@
 //! ids, retransmission and duplicate suppression. The transport here skips
 //! them as foreign frames.
 
+pub mod bridge;
 pub mod rpc;
 
 use crate::dedup::{SeenTable, Sequence};

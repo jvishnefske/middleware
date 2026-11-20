@@ -22,11 +22,17 @@ path = "src/main.rs"
 esp-base = { path = "../firmware", default-features = false, features = ["trust"] }
 wasm-host = { path = "../wasm-host" }
 # `serial`: the device side of the link (the wire the gateway speaks);
-# `trust`: signed commits; `zenoh`: the session the gateway publishes on.
-middleware = { path = "..", features = ["serial", "trust", "zenoh"] }
+# `trust`: signed commits; `zenoh`: the session the gateway publishes on;
+# `espnow`: the ESP-NOW gateway's radio over the USB bridge (`espnow_gw`).
+middleware = { path = "..", features = ["serial", "trust", "zenoh", "espnow"] }
 mw-gateway = { path = "../gateway" }
 mw-service = { path = "../service" }
 embedded-storage = "0.3.2"
+# The ESP-NOW gateway is generic over the bridge's byte stream.
+embedded-io-async = "0.7"
+# The ESP-NOW gateway puts uplink samples under each device's id and
+# declares per-device queryables on the raw session.
+zenoh = "1.10"
 # The node id: SHA-256 of /etc/machine-id (already in the tree through
 # middleware's `trust`).
 sha2 = "0.10.9"

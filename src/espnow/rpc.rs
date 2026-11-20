@@ -64,14 +64,14 @@ pub trait Delay {
 }
 
 /// Which of two futures finished first.
-enum First<A, B> {
+pub(crate) enum First<A, B> {
     Left(A),
     Right(B),
 }
 
 /// Runs `a` and `b` together and returns the first to finish, dropping the
 /// other; `a` wins a tie.
-async fn first<A: Future, B: Future>(a: A, b: B) -> First<A::Output, B::Output> {
+pub(crate) async fn first<A: Future, B: Future>(a: A, b: B) -> First<A::Output, B::Output> {
     let mut a = pin!(a);
     let mut b = pin!(b);
     poll_fn(|cx| {
