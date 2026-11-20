@@ -39,6 +39,16 @@ use board_pins::spi::{self, SpiPins, SpiProblem, SpiRole};
 use board_pins::{AdcError, Direction, PinError, PinMap};
 use middleware::wasm_abi::periph::{self, I2cConfig, SpiConfig};
 
+/// The pin map of a board: the one its board name selects
+/// ([`board_pins::boards::by_board`], for Linux boards whose chip name names
+/// no board), else its chip's ([`board_pins::boards::by_chip`]). `board`
+/// is the board's own name, the manifest's BOARD record.
+pub fn map_for(chip: &str, board: Option<&str>) -> Option<&'static PinMap> {
+    board
+        .and_then(|b| board_pins::boards::by_board(chip, b))
+        .or_else(|| board_pins::boards::by_chip(chip))
+}
+
 /// Longest label, in bytes.
 pub const MAX_LABEL: usize = 24;
 
@@ -809,6 +819,24 @@ fn check_spi(
 mod tests {
     use super::*;
     use board_pins::boards::{ESP32, ESP32C3, ESP32S3, PICO};
+
+    #[test]
+    fn u47_a_board_name_picks_the_map_before_the_chip() {
+        use board_pins::boards::KD240;
+        assert_eq!(
+            map_for("linux-aarch64", Some("ZynqMP KD240 revA/B/1")),
+            Some(&KD240)
+        );
+        assert_eq!(map_for("linux-aarch64", None), None);
+        assert_eq!(map_for("linux-aarch64", Some("Raspberry Pi 4")), None);
+        // A board name never hides a chip's own map.
+        assert_eq!(map_for("rp2350", Some("anything")), Some(&PICO));
+        assert_eq!(map_for("esp32", None), Some(&ESP32));
+        // No pins on the KD240: a gpio row is refused.
+        let issues = check(&KD240, &[row("led", Some(0), Func::GpioOut, 0)], &[]);
+        assert!(!issues.is_empty());
+        assert!(check(&KD240, &[], &[]).is_empty());
+    }
 
     fn row(label: &str, pin: Option<i64>, func: Func, bus: i64) -> Row {
         Row {
