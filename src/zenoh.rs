@@ -307,6 +307,11 @@ impl Mode {
 
 /// PEM files of one mTLS client identity, given to [`SessionConfig::tls`].
 ///
+/// `root_ca` is added to, not substituted for, the public web roots: the
+/// locator host must be a name public CAs may not issue for (a CAA record
+/// `0 issue ";"` on that exact name, or an IP SAN; see
+/// [mTLS](SessionConfig#mtls)).
+///
 /// The files are referenced by path: [`SessionConfig::build`] does not read
 /// them, Zenoh reads them when it opens a TLS link (so a rotated certificate
 /// is picked up on the next connect), and no key material is held in the
@@ -350,11 +355,16 @@ impl TlsFiles {
 /// connect_private_key}` to the file paths and `enable_mtls` to `true`
 /// (Zenoh then uses TLS 1.3 only). Server-name verification stays on: the
 /// host in the `tls/<host>:<port>` locator must be a SAN of the server's
-/// certificate. Zenoh adds the given CA to the public web roots rather than
-/// replacing them, so a publicly trusted certificate for that name is also
-/// accepted; this is acceptable where the router in turn authenticates
-/// clients by their certificates. The listener side (`listen_*`) is not
-/// configured, and `tcp/` endpoints ignore these settings.
+/// certificate. The listener side (`listen_*`) is not configured, and
+/// `tcp/` endpoints ignore these settings.
+///
+/// **Hard requirement on the locator host.** Zenoh (zenoh-link-tls 1.10)
+/// adds [`TlsFiles::root_ca`] to the public web roots rather than replacing
+/// them, and has no option to turn them off, so any publicly trusted
+/// certificate for the locator host also passes server verification. The
+/// host must therefore be a name public CAs are forbidden to issue for:
+/// either a DNS name with a CAA record `0 issue ";"` on that exact name, or
+/// an IP address (matched against an IP SAN).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionConfig {
     listen: Vec<String>,
@@ -390,7 +400,10 @@ impl SessionConfig {
     }
 
     /// Presents the client identity in `files` on `tls/` connections and
-    /// verifies the server against its CA (see [mTLS](Self#mtls)).
+    /// verifies the server against its CA (see [mTLS](Self#mtls)). The CA
+    /// adds to the public web roots, so the locator host must be a name
+    /// public CAs may not issue for: a CAA record `0 issue ";"` on that exact
+    /// name, or an IP SAN.
     pub fn tls(mut self, files: TlsFiles) -> Self {
         self.tls = Some(files);
         self
