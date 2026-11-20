@@ -102,12 +102,26 @@ pub fn facts_with_driver(node: SenderId, driver: &dyn driver::Driver) -> service
 /// out, so its start fails and systemd starts it again.
 pub const STABLE_ZENOH_ID: bool = true;
 
+/// The node session's Zenoh batch size (`transport/link/tx/batch_size`).
+pub const SESSION_BATCH: usize = 4096;
+
+/// The largest message the node's session reassembles
+/// (`transport/link/rx/max_message_size`): a frame to the device and 4 KiB.
+pub const SESSION_MESSAGE_MAX: usize = middleware::serial::frame::MAX_RAW_FRAME + 4096;
+
 /// The node's Zenoh session: a client of `router` (the node only ever
 /// talks through its router; a router does not pass queries between two
 /// sessions that are both peers, so a peer node would be unreachable from
 /// peer tools like `mwctl --zenoh`), with the id of [`STABLE_ZENOH_ID`].
 pub fn session_config(router: &str, node: SenderId) -> Result<zenoh::Config, middleware::zenoh::ZenohError> {
     let mut config = middleware::zenoh::SessionConfig::new().client().connect(router).build()?;
+    // Nothing the node receives needs more than a frame to the device and
+    // room for Zenoh's own headers: batches of 4 KiB (the link takes the
+    // smaller of both ends'), so a larger message arrives in fragments, and
+    // those are dropped above SESSION_MESSAGE_MAX instead of reassembled
+    // (Zenoh's default would take 1 GiB).
+    config.insert_json5("transport/link/tx/batch_size", &SESSION_BATCH.to_string())?;
+    config.insert_json5("transport/link/rx/max_message_size", &SESSION_MESSAGE_MAX.to_string())?;
     if STABLE_ZENOH_ID {
         config.insert_json5("id", &format!("\"{}\"", node_id::zenoh_id(node)))?;
     }
@@ -173,6 +187,10 @@ mod session_tests {
         let c = session_config("tcp/127.0.0.1:7447", node).expect("config");
         assert_eq!(c.get_json("mode").expect("mode"), "\"client\"");
         assert_eq!(c.get_json("connect/endpoints").expect("connect"), "[\"tcp/127.0.0.1:7447\"]");
+        // A query larger than a frame never needs to arrive.
+        let room = middleware::serial::frame::MAX_RAW_FRAME + 4096;
+        assert_eq!(c.get_json("transport/link/rx/max_message_size").expect("rx"), room.to_string());
+        assert_eq!(c.get_json("transport/link/tx/batch_size").expect("batch"), "4096");
         let want = if STABLE_ZENOH_ID { format!("\"{}\"", node_id::zenoh_id(node)) } else { "null".to_owned() };
         assert_eq!(c.get_json("id").expect("id"), want);
     }

@@ -534,3 +534,25 @@ async fn pn23_refusals_over_zenoh_never_reach_sys_log() {
     node.stop().await;
     let _ = std::fs::remove_dir_all(&state);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pn25_oversized_bodies_are_refused_or_never_arrive() {
+    let state = state_dir("zsys-big");
+    let (a, endpoint) = router().await;
+    let node = Served::start(&state, node_session(&endpoint, NODE).await).await;
+    let id = node.id;
+    info(&a, id).await;
+    // More than a frame holds: refused before it is copied.
+    let over = vec![0u8; 2000];
+    assert_eq!(ask(&a, id, keys::CHUNK, &over).await, NOT_OWNER, "InvalidRequest");
+    assert_eq!(ask(&a, id, keys::BIND, &over).await, NOT_OWNER, "InvalidRequest");
+    // A description key ignores its body.
+    assert!(ask(&a, id, keys::INFO, &over).await.is_ok());
+    // Far more than the session reassembles: dropped by Zenoh, no answer,
+    // and the node answers the next query.
+    let huge = vec![0u8; 256 * 1024];
+    assert_eq!(ask(&a, id, keys::CHUNK, &huge).await, Err(None));
+    assert!(ask(&a, id, keys::TRUST_INFO, &[]).await.is_ok());
+    node.stop().await;
+    let _ = std::fs::remove_dir_all(&state);
+}

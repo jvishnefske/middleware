@@ -90,6 +90,9 @@ pub fn requester(sender: Option<SenderId>, own: Mac) -> Origin {
     Origin::Air(a)
 }
 
+/// The most bytes [`wrap`] puts in front of a body.
+pub const ENVELOPE_MAX: usize = 9;
+
 /// A request body on the mesh link with the requester in front: `0` for
 /// none, or `1` and the sender id's 8 bytes.
 pub fn wrap(sender: Option<SenderId>, body: &[u8]) -> Vec<u8> {

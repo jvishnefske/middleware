@@ -23,6 +23,10 @@
 //!   `sys/log`, `sys/payload/status`, `sys/link/*`, ...) is answered
 //!   `Denied` here, without reaching the device. What a served key may do
 //!   is then the device's [`crate::mesh_gate`] decision.
+//! * **Bounded bodies.** A body that cannot fit one frame to the device
+//!   ([`body_fits`]) is answered `InvalidRequest` before it is copied; the
+//!   description keys ignore any body ([`takes_body`]). The session itself
+//!   refuses messages much larger than a frame (`crate::session_config`).
 //! * **One at a time.** The queryable's callback queues queries
 //!   ([`QUERY_QUEUE`]; full: the query is dropped, counted, and times out
 //!   at the querier) and one worker forwards them over the mesh link, the
@@ -120,6 +124,20 @@ pub fn plan(expr: &str, own: SenderId) -> Plan {
         Some(k) => Plan::Forward(*k),
         None => Plan::Refuse(HandlerError::Denied),
     }
+}
+
+/// Whether a request on `key` takes a body: not the description keys
+/// `sys/info`, `sys/trust/info`, `sys/manifest` nor `sys/payload/binding`
+/// (a body sent with one is ignored, never copied). Pure.
+pub fn takes_body(key: Key<'_>) -> bool {
+    ![keys::INFO, keys::TRUST_INFO, keys::MANIFEST, keys::BINDING].contains(&key)
+}
+
+/// Whether a `len`-byte body for `key` fits one frame to the device with
+/// the requester's envelope ([`crate::mesh_gate::ENVELOPE_MAX`]); checked
+/// on the query's length before its body is copied. Pure.
+pub fn body_fits(key: Key<'_>, len: usize) -> bool {
+    len.checked_add(crate::mesh_gate::ENVELOPE_MAX).is_some_and(|n| crate::device::fits_frame(key, n))
 }
 
 /// The key a forwarded query is answered on: this node's concrete key.
@@ -260,7 +278,18 @@ pub async fn run(
             }
             Plan::Forward(key) => key,
         };
-        let body = query.payload().map(|p| p.to_bytes().into_owned()).unwrap_or_default();
+        // Sized before anything is copied: Zenoh would deliver up to its
+        // message limit, and 32 queries can wait.
+        let body = match (takes_body(key), query.payload()) {
+            (false, _) | (true, None) => Vec::new(),
+            (true, Some(p)) if !body_fits(key, p.len()) => {
+                report.refused += 1;
+                let error = wire::encode_reply_error(HandlerError::InvalidRequest, own);
+                let _ = query.reply_err(error.to_vec()).await;
+                continue;
+            }
+            (true, Some(p)) => p.to_bytes().into_owned(),
+        };
         let attachment = query.attachment().map(|a| a.to_bytes().into_owned());
         let waited = u64::try_from(arrived.elapsed().as_millis()).unwrap_or(u64::MAX);
         let meta = request_meta(attachment.as_deref(), waited);
@@ -363,6 +392,27 @@ mod tests {
         }
         // The answer is always on this node's concrete key.
         assert_eq!(reply_key(OWN, keys::INFO), "@mw/node/1020304050607080/sys/info");
+    }
+
+    #[test]
+    fn pn25_a_body_that_cannot_fit_one_frame_is_refused_before_it_is_copied() {
+        // What a chunk carries fits; a byte more than a frame holds with the
+        // envelope does not, nor anything near Zenoh's 1 GiB default.
+        assert!(body_fits(keys::CHUNK, 512 + 8));
+        let room = middleware::serial::frame::MAX_RAW_FRAME;
+        assert!(!body_fits(keys::CHUNK, room));
+        assert!(!body_fits(keys::COMMIT, 1 << 30));
+        assert!(!body_fits(keys::BIND, usize::MAX));
+        let edge = (0..room).rev().find(|n| body_fits(keys::BIND, *n)).expect("some body fits");
+        assert!(crate::device::fits_frame(keys::BIND, edge + mesh_gate::ENVELOPE_MAX));
+        // The keys that take no body ignore one, whatever its size.
+        for key in [keys::INFO, keys::TRUST_INFO, keys::MANIFEST, keys::BINDING] {
+            assert!(!takes_body(key), "{key:?}");
+        }
+        for key in [keys::CONTROL_MODULES, keys::BEGIN, keys::CHUNK, keys::COMMIT, keys::START, keys::STOP, keys::BIND]
+        {
+            assert!(takes_body(key), "{key:?}");
+        }
     }
 
     #[test]
