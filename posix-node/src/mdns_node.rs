@@ -11,12 +11,18 @@
 //! A Zenoh client listens on nothing, so the SRV port is
 //! `mdns::node::NO_PORT` and the A record is the node's own address.
 
+use std::io;
+use std::net::Ipv4Addr;
+
 use middleware::SenderId;
 use middleware::discovery::directory::MAX_TXT_LEN;
 use middleware::dns::wire::WireError;
-use middleware::mdns::node::NodeTxt;
+use middleware::mdns::node::{self, NodeTxt};
 
 use crate::service::Facts;
+
+/// The instance label's prefix: `posix-<node id>`.
+pub const LABEL_PREFIX: &str = "posix";
 
 /// The board named when the device tree names none.
 pub const UNKNOWN_BOARD: &str = "unknown";
@@ -52,6 +58,18 @@ impl Identity {
         }
     }
 
+    /// The instance label, `posix-<node id as 16 hex digits>`: per node,
+    /// so the unit and process nodes of one host never clash, and never
+    /// the host's name (the system's mDNS daemon owns that).
+    pub fn label(&self) -> String {
+        node::label(LABEL_PREFIX, self.node).expect("a short lower-case prefix").as_str().to_owned()
+    }
+
+    /// The SRV target and A record name, `<label>.local`.
+    pub fn host(&self) -> String {
+        node::host(&self.label()).expect("a 22-byte label").as_str().to_owned()
+    }
+
     /// The TXT attributes.
     pub fn record(&self) -> NodeTxt<'_> {
         NodeTxt {
@@ -75,6 +93,29 @@ impl Identity {
             _ => self.record(),
         };
         record.encode(out)
+    }
+}
+
+/// What to do after probing the address: keep the announcement, announce
+/// on a new address (a goodbye first if one is held), or withdraw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Nothing changes.
+    Keep,
+    /// Announce on this address.
+    Reannounce(Ipv4Addr),
+    /// Say goodbye and announce nothing until an address is back.
+    Withdraw,
+}
+
+/// The step after probing the address (`probed`) while `current` is
+/// announced (`None`: nothing is). Pure.
+pub fn next_action(current: Option<Ipv4Addr>, probed: io::Result<Ipv4Addr>) -> Action {
+    match (current, probed) {
+        (Some(held), Ok(ip)) if held == ip => Action::Keep,
+        (_, Ok(ip)) => Action::Reannounce(ip),
+        (Some(_), Err(_)) => Action::Withdraw,
+        (None, Err(_)) => Action::Keep,
     }
 }
 
@@ -191,6 +232,32 @@ mod tests {
         let mut out = [0u8; MAX_TXT_LEN];
         let parsed = NodeTxt::parse(Txt::new(id.txt(&mut out).unwrap()).unwrap()).unwrap();
         assert_eq!(parsed.zenoh, Some(worst6));
+    }
+
+    #[test]
+    fn d29_label_and_host_are_per_node() {
+        let id = Identity::new(&facts(None), SENDER, "tcp/127.0.0.1:7447");
+        assert_eq!(id.label(), "posix-0102030405060708");
+        assert_eq!(id.host(), "posix-0102030405060708.local");
+        let other = Identity::new(&Facts { node: SenderId([9; 8]), ..facts(None) }, SENDER, "");
+        assert_eq!(other.label(), "posix-0909090909090909");
+        assert_ne!(other.host(), id.host());
+        // Never the system's own name.
+        if let Ok(name) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+            assert_ne!(id.host(), format!("{}.local", name.trim()));
+        }
+    }
+
+    #[test]
+    fn d31_next_action_table() {
+        let a = Ipv4Addr::new(192, 168, 1, 20);
+        let b = Ipv4Addr::new(192, 168, 1, 21);
+        let gone = || Err(io::Error::from(io::ErrorKind::NetworkUnreachable));
+        assert_eq!(next_action(None, Ok(a)), Action::Reannounce(a));
+        assert_eq!(next_action(Some(a), Ok(a)), Action::Keep);
+        assert_eq!(next_action(Some(a), Ok(b)), Action::Reannounce(b));
+        assert_eq!(next_action(Some(a), gone()), Action::Withdraw);
+        assert_eq!(next_action(None, gone()), Action::Keep);
     }
 
     #[test]
