@@ -120,6 +120,12 @@ in
       pname = "zenohd";
       version = zenohVersion;
       cargoExtraArgs = "--locked -p zenohd";
+      # zenoh's own .cargo/config.toml sets `-crt-static` for the musl
+      # targets (for its dlopen'ed plugins), and a [target.<triple>]
+      # rustflags entry overrides build.rustflags, so zenohd linked
+      # dynamically and failed on -lgcc_s. The variable of the same key
+      # overrides the file: static, like every other binary (no plugins).
+      "CARGO_TARGET_${targetUpper}_RUSTFLAGS" = "-C target-feature=+crt-static";
     };
   in
     assert lib.assertMsg (locked != null && locked.version == zenohVersion)

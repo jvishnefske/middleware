@@ -107,13 +107,8 @@ async fn main() -> ExitCode {
             )
             .await
             {
-                log(&format!(
-                    "{} {} {}: {}",
-                    r.device,
-                    r.kind,
-                    r.version.map(|v| v.to_string()).unwrap_or_default(),
-                    r.result
-                ));
+                let version = r.version.map(|v| format!(" {v}")).unwrap_or_default();
+                log(&format!("{} {}{version}: {}", r.device, r.kind, r.result));
             }
             tokio::select! {
                 _ = tokio::time::sleep(cfg.poll) => {}

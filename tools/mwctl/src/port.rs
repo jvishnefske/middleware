@@ -42,8 +42,10 @@ impl SerialTransport {
             .timeout(Duration::from_millis(100))
             .open()
             .map_err(|e| io::Error::other(format!("{path}: {e}")))?;
-        port.write_request_to_send(false).map_err(to_io)?;
-        port.write_data_terminal_ready(false).map_err(to_io)?;
+        // Best effort: a PTY (or a USB gadget's port) has no modem lines and
+        // refuses the ioctl (ENOTTY); there is nothing to deassert then.
+        let _ = port.write_request_to_send(false);
+        let _ = port.write_data_terminal_ready(false);
         // Drop anything buffered before we were listening.
         port.clear(ClearBuffer::Input).map_err(to_io)?;
         Ok(SerialTransport { port })

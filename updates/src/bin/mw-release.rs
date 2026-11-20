@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use middleware::loader::release::CertKind;
 use mw_updates::client::Client;
 use mw_updates::config::{credentials, route};
-use mw_updates::publish::{prepare, publish, sign};
+use mw_updates::publish::{prepare, publish, settle_version, sign};
 use mwctl::fw::{format_version, parse_version};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::sign::{Seed, Signer};
@@ -129,12 +129,20 @@ async fn run(args: &[String]) -> Result<(), String> {
                         .ok_or("--version: n or major.minor")?,
                 ),
             };
-            let prepared = prepare(kind, &file, version, SystemTime::now())?;
-            let signer = signer(&a)?;
-            let release = sign(kind, &channel, &target, &prepared, &*signer)?;
+            let mut prepared = prepare(kind, &file, version, SystemTime::now())?;
             let client = Client::connect(&route, creds.as_ref())
                 .await
                 .map_err(|e| e.to_string())?;
+            let current = client
+                .latest(&channel, &target)
+                .await
+                .map_err(|e| format!("reading the channel: {e}"))?
+                .into_iter()
+                .find(|r| r.kind() == kind)
+                .map(|r| r.version());
+            settle_version(kind, version, &mut prepared, current)?;
+            let signer = signer(&a)?;
+            let release = sign(kind, &channel, &target, &prepared, &*signer)?;
             publish(&client, &release, &prepared.image, Duration::from_secs(20)).await?;
             println!(
                 "published {} {} for {channel}/{target} ({} bytes)",
@@ -158,7 +166,7 @@ async fn main() -> ExitCode {
     match run(&args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("mw-release: {e}\n\n{HELP}");
+            eprintln!("mw-release: {e}");
             ExitCode::FAILURE
         }
     }
