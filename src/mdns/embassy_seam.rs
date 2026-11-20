@@ -168,11 +168,20 @@ impl Clock for EmbassyClock {
 
     async fn sleep_until_ms(&mut self, deadline_ms: u64) {
         // A deadline past what an Instant can hold never comes.
-        match embassy_time::Instant::try_from_millis(deadline_ms) {
-            Some(at) => embassy_time::Timer::at(at).await,
+        match ceil_ticks(deadline_ms, embassy_time::TICK_HZ) {
+            Some(t) => embassy_time::Timer::at(embassy_time::Instant::from_ticks(t)).await,
             None => core::future::pending().await,
         }
     }
+}
+
+/// The first tick of a `tick_hz` clock at or after `ms` milliseconds:
+/// rounded up, so a timer never fires before its deadline (at a tick rate
+/// that is not a multiple of 1000, rounding down fires up to a tick
+/// early). `None` when it does not fit a `u64`.
+fn ceil_ticks(ms: u64, tick_hz: u64) -> Option<u64> {
+    let ticks = (u128::from(ms) * u128::from(tick_hz)).div_ceil(1000);
+    u64::try_from(ticks).ok()
 }
 
 #[cfg(test)]
@@ -208,6 +217,20 @@ mod tests {
             EmbassyError::Ipv6Unsupported.to_string(),
             "IPv6 destinations are not supported"
         );
+    }
+
+    #[test]
+    fn deadlines_round_up_to_the_next_tick() {
+        // 32768 Hz: 1 ms is 32.768 ticks, so the timer waits 33.
+        assert_eq!(ceil_ticks(1, 32_768), Some(33));
+        assert_eq!(ceil_ticks(3, 32_768), Some(99));
+        assert_eq!(ceil_ticks(1000, 32_768), Some(32_768));
+        // Whole ticks are exact.
+        assert_eq!(ceil_ticks(7, 24_000_000), Some(168_000));
+        assert_eq!(ceil_ticks(5, 1000), Some(5));
+        assert_eq!(ceil_ticks(0, 32_768), Some(0));
+        // Past what an Instant holds: never.
+        assert_eq!(ceil_ticks(u64::MAX, 24_000_000), None);
     }
 
     #[test]
