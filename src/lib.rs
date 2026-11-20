@@ -98,9 +98,10 @@
 
 pub mod clock;
 pub mod codec;
+pub mod crc;
+pub mod datagram;
 pub mod dedup;
 pub mod discovery;
-pub mod crc;
 pub mod dns;
 pub mod fw_ota;
 pub mod key;
