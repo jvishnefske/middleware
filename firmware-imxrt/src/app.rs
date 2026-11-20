@@ -82,8 +82,10 @@ static BUS_SDRAM: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 #[cfg(feature = "eth")]
 mod zenoh;
 
+/// Sockets: DHCP, the Zenoh TCP socket and the mDNS UDP socket, with room
+/// for a one-shot mDNS querier and two more.
 #[cfg(feature = "eth")]
-static NET: static_cell::StaticCell<embassy_net::StackResources<4>> =
+static NET: static_cell::StaticCell<embassy_net::StackResources<6>> =
     static_cell::StaticCell::new();
 
 #[cfg(feature = "eth")]

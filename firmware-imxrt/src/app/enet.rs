@@ -42,7 +42,9 @@ const BUF_WORDS: usize = desc::RX_BUFFER_BYTES / 4;
 /// Bytes per frame buffer.
 const FRAME: usize = desc::RX_BUFFER_BYTES;
 /// Receive every frame (RCR.PROM). The probe ran promiscuous; the firmware
-/// needs only its own address and broadcasts (IPv4, DHCP, ARP, TCP).
+/// needs only its own address, broadcasts (IPv4, DHCP, ARP, TCP) and the
+/// multicast groups of [`mac::MULTICAST_FILTER`] (mDNS, and all hosts for
+/// IGMP queries), which the group hash admits.
 const PROMISCUOUS: bool = false;
 
 /// How often [`poll_task`] looks at the descriptors.
@@ -340,8 +342,11 @@ pub async fn new(mac_addr: [u8; 6]) -> Result<(EnetDriver, EnetPoller), EnetErro
     e.eir().write_value(pac::enet::regs::Eir(mac::EIR_ALL));
     e.iaur().write_value(pac::enet::regs::Iaur(0));
     e.ialr().write_value(pac::enet::regs::Ialr(0));
-    e.gaur().write_value(pac::enet::regs::Gaur(0));
-    e.galr().write_value(pac::enet::regs::Galr(0));
+    // The group hash: set once, here, while the MAC is in reset; enabling
+    // and disabling the MAC on a link change keeps it.
+    let (gaur, galr) = mac::MULTICAST_FILTER;
+    e.gaur().write_value(pac::enet::regs::Gaur(gaur));
+    e.galr().write_value(pac::enet::regs::Galr(galr));
     let (palr, paur) = mac::station_address(mac_addr);
     e.palr().write_value(pac::enet::regs::Palr(palr));
     e.paur().write_value(pac::enet::regs::Paur(paur));
