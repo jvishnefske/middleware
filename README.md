@@ -363,7 +363,8 @@ from `MW_POSIX_NODE_NODE_ID` (16 hex digits) or, by default, a hash of
 `/etc/machine-id` (`MW_POSIX_NODE_MACHINE_ID` names another file). Other
 settings: `MW_POSIX_NODE_MEMORY_BYTES` (a payload's memory cap, default
 1 MiB), `MW_POSIX_NODE_LOCAL_SERIAL` (a serial port served beside the
-gateway, such as a USB gadget's `/dev/ttyGS0`, for `mwctl`), the
+gateway, such as a USB gadget's `/dev/ttyGS0` or a PTY slave, for
+`mwctl`), the
 gateway's `MW_GATEWAY_*` (`MW_GATEWAY_SERIAL` and `MW_GATEWAY_BAUD` are
 unused) and `MW_ZENOH_ROUTER` (required).
 
@@ -383,8 +384,10 @@ For a local try without a Pi, run the node on any Linux machine with a
 PTY pair as the local port (`socat -d -d pty,raw,echo=0 pty,raw,echo=0`
 prints two paths; give one to `MW_POSIX_NODE_LOCAL_SERIAL` and the other to
 `mwctl --port`), a writable `MW_POSIX_NODE_STATE` and a zenohd to connect
-to. This mode is documented, not covered by the tests, which run the
-node, the gateway and Zenoh in one process on loopback.
+to. A PTY has no modem lines; the node leaves RTS and DTR alone on one
+(`gateway/tests/pty.rs` opens a PTY slave as a link). The whole mode is
+documented, not covered by the tests, which run the node, the gateway
+and Zenoh in one process on loopback.
 
 ## Device platform
 

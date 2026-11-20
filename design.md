@@ -1552,6 +1552,18 @@ the kernel and Envoy substituted from the native aarch64 cache).
   retries its upstream connections itself — `checks.robot-pi-eval`,
   `checks.robot-pi-boots` (subtest "services up without a Pico, nothing
   failed").
+- [x] MS59 zenohd (MS43) is a static musl executable like the service
+  binaries, for x86_64 (`packages.x86_64-linux.zenohd`) and aarch64
+  (`packages.x86_64-linux.zenohd-aarch64` cross compiled,
+  `packages.aarch64-linux.zenohd` native). zenoh's own
+  `.cargo/config.toml` sets `-Ctarget-feature=-crt-static` under
+  `[target.<musl triple>]`, which cargo prefers to the
+  `CARGO_BUILD_RUSTFLAGS` the other builds use, so the zenohd build sets
+  `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` (`+crt-static`) in the environment,
+  which overrides the file — `checks.aarch64-static` (zenohd included),
+  `checks.image-zenohd-contents`. *Verified 2026-11-20: both builds print
+  `zenohd v1.10.1` and listen on loopback, the aarch64 one under
+  qemu-user.*
 
 ### Robots and MCU gateway (RG…)
 
@@ -1870,6 +1882,20 @@ runs `mwctl`'s own `upload` and `fw_update` over a `gw/sys` endpoint.
   `gateway/tests/updates.rs`:
   `rg27_a_start_whose_counter_cannot_be_persisted_is_refused_not_forwarded`,
   `rg27_an_accepted_start_is_persisted_before_it_reaches_the_device`
+  *(mw-gateway)*.
+- [x] RG28 `io::open_serial` takes a port without modem lines, such as a
+  PTY slave, as a serial link: when deasserting RTS or DTR fails with
+  ENOTTY (inappropriate ioctl for device, what TIOCMBIC gives on a PTY)
+  the line is left as it is and a debug line logged; every other failure
+  of those calls, and of opening the port, is still an error, and a real
+  serial port still has both lines deasserted (RG15's no-reset rule). So
+  a PTY can be mw-posix-node's `MW_POSIX_NODE_LOCAL_SERIAL`. serialport
+  keeps no errno for ENOTTY, only nix's text ("Not a typewriter", kind
+  `Unknown`), which is what is matched —
+  `io::tests::rg28_only_inappropriate_ioctl_is_a_missing_modem_line`;
+  `gateway/tests/pty.rs`:
+  `rg28_open_serial_takes_a_pty_slave_and_carries_bytes_both_ways`
+  (`openpty`, bytes from the master reach the `ChannelIo` and back)
   *(mw-gateway)*.
 
 ### Key-value persistence (KV…)

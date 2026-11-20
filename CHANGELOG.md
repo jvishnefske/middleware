@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### zenohd static on musl, a PTY as a local serial link (MS59, RG28)
+- nix: `packages.x86_64-linux.zenohd` builds again: zenoh 1.10.1's `.cargo/config.toml` turned `crt-static` off for both musl triples, overriding `CARGO_BUILD_RUSTFLAGS`, and the link failed on `-lgcc_s`. The zenohd build now sets `CARGO_TARGET_<TRIPLE>_RUSTFLAGS = "-C target-feature=+crt-static"`.
+- nix: new `packages.x86_64-linux.zenohd-aarch64` (static aarch64, cross compiled) and `packages.aarch64-linux.zenohd` (native); `checks.aarch64-static` covers zenohd.
+- mw-gateway: `io::open_serial` accepts a port without modem lines (a PTY slave): ENOTTY from deasserting RTS/DTR is logged at debug and ignored; other errors are still fatal, and real serial ports still get both lines deasserted. So `MW_POSIX_NODE_LOCAL_SERIAL` can be a PTY. New dev-dependency `libc` (already in Cargo.lock) for `tests/pty.rs`.
+
 ### Zenoh over mTLS (ZT1–ZT5, H5)
 - `middleware::zenoh::SessionConfig::client()` and `.tls(TlsFiles { root_ca, cert, key })` (PEM file paths, read by Zenoh at connect; `TlsFiles::from_dir` takes `ca`, `cert`, `key`), `ZenohError::InvalidTlsPath`. Endpoint strings with control characters are now `InvalidEndpoint`. No new feature or dependency: zenoh's default TLS link was already built. `rcgen` is a new dev-dependency only (already in Cargo.lock).
 - The pinned CA adds to the public web roots (zenoh-link-tls), so the locator host must be a name public CAs may not issue for: a CAA record `0 issue ";"` on that exact name, or an IP SAN.

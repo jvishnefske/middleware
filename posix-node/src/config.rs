@@ -7,7 +7,7 @@
 //! | `MW_POSIX_NODE_NODE_ID` | from the machine id | 16 hex digits ([`crate::node_id`]) |
 //! | `MW_POSIX_NODE_MACHINE_ID` | `/etc/machine-id` | path of the systemd machine id file the node id is derived from |
 //! | `MW_POSIX_NODE_MEMORY_BYTES` | `1048576` (1 MiB) | a payload's largest linear memory, decimal bytes, 65536..=67108864 |
-//! | `MW_POSIX_NODE_LOCAL_SERIAL` | none | path of a serial port (a USB gadget's `/dev/ttyGS0`, a PTY) served beside the gateway at 115200 baud, for `mwctl` |
+//! | `MW_POSIX_NODE_LOCAL_SERIAL` | none | path of a serial port (a USB gadget's `/dev/ttyGS0`, or a PTY slave such as `/dev/pts/N`: a port without modem lines is accepted, RTS/DTR left alone, mw-gateway RG28) served beside the gateway at 115200 baud, for `mwctl` |
 //! | `MW_POSIX_NODE_FUEL_PER_CALL` | `20000000` | instructions a payload may run per call (`init`, `tick`, a message, a request), 1000000..=1000000000; the microcontrollers' default is a twentieth of this |
 //! | `MW_POSIX_NODE_DRIVER` | `none` | the control-module driver ([`crate::driver`]): `none`, `sim` (a simulated EMCO PC Turn 50) or `kd240` (the KD240's inputs, read only) |
 //! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
