@@ -13,7 +13,10 @@
 //! the start log names that id, the one `mwctl --zenoh … --node` takes.
 //! Its session is a client of the router, with an id derived from the
 //! node id (`session_config`). A failure there is logged and the node
-//! keeps running. On the way out the Zenoh sys task and the ESP-NOW
+//! keeps running. With `MW_POSIX_NODE_MDNS` on or an address (off by
+//! default) it announces itself on mDNS as `posix-<node id>`
+//! (`mdns_node`); that never fails the node either. On the way out the
+//! mDNS goodbye goes first, then the Zenoh sys task and the ESP-NOW
 //! gateway stop (its beacons withdrawn), the payload is stopped, the flash
 //! synced and the gateway's announcements withdrawn.
 #![forbid(unsafe_code)]
@@ -25,9 +28,9 @@ use mw_gateway::config::DEFAULT_BAUD;
 use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
-use mw_posix_node::config::{NodeIdSource, gateway_state_dir};
+use mw_posix_node::config::{MdnsMode, NodeIdSource, gateway_state_dir};
 use mw_posix_node::espnow_gw::{self, GwConfig};
-use mw_posix_node::zenoh_sys;
+use mw_posix_node::{mdns_node, zenoh_sys};
 use mw_posix_node::{
     DeviceParts, GatewayParts, PosixNodeConfig, control_floor, node_id, open_state_flash, start,
     wall_clock_ms,
@@ -136,9 +139,10 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
     };
     let driver = node.driver.open();
     eprintln!("mw-posix-node: driver {} ({} control-module points)", driver.name(), driver.points().len());
+    let facts = mw_posix_node::facts_with_driver(id, driver.as_ref());
     let device = DeviceParts {
         flash,
-        facts: mw_posix_node::facts_with_driver(id, driver.as_ref()),
+        facts,
         limits: mw_posix_node::limits_with_fuel(node.memory_bytes, node.fuel_per_call),
         local,
         mesh: mesh_node,
@@ -148,6 +152,7 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
     let parts = GatewayParts { bridge: gateway.bridge_with_floor(floor), options: gateway.shell_options(), store };
     let espnow_session = session.clone();
     let sys_session = session.clone();
+    let sender = session.sender_id();
     let (mut pi, sys) = start(device, parts, session).await.map_err(|e| e.to_string())?;
     // The ESP-NOW gateway, when a bridge is configured; its failure is not
     // the node's.
@@ -176,6 +181,22 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
             let _ = zsys_stopped.await;
         }))
     });
+    // The node's mDNS record; its failure is not the node's.
+    let (stop_mdns, mdns_stopped) = tokio::sync::oneshot::channel::<()>();
+    let mut mdns = match node.mdns {
+        MdnsMode::Off => None,
+        mode => {
+            let ident = mdns_node::Identity::new(&facts, sender, &router);
+            eprintln!(
+                "mw-posix-node: mdns on as {} ({mode:?}, zenoh={})",
+                ident.host(),
+                ident.zenoh.as_deref().unwrap_or("none")
+            );
+            Some(tokio::spawn(mdns_node::run(ident, mode, mdns_node::StdNet, async {
+                let _ = mdns_stopped.await;
+            })))
+        }
+    };
     let svc = service(&gateway, sys).map_err(|e| e.to_string())?;
     let (stop_runner, runner_stopped) = tokio::sync::oneshot::channel::<()>();
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {
@@ -198,6 +219,13 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
                     Err(e) => eprintln!("mw-posix-node: sys over zenoh: {e}"),
                 }
             }
+            r = async { mdns.as_mut().expect("guarded").await }, if mdns.is_some() => {
+                mdns = None;
+                match r {
+                    Ok(report) => eprintln!("mw-posix-node: mdns stopped: {report:?}"),
+                    Err(e) => eprintln!("mw-posix-node: mdns: {e}"),
+                }
+            }
             r = async { espnow.as_mut().expect("guarded").await }, if espnow.is_some() => {
                 espnow = None;
                 match r {
@@ -208,6 +236,8 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
             }
         }
     };
+    // The goodbye first, while the node is still up.
+    let _ = stop_mdns.send(());
     let _ = stop_runner.send(());
     let _ = stop_zsys.send(());
     if let Some(task) = zsys {
@@ -223,6 +253,13 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
             Ok(Ok(report)) => eprintln!("mw-posix-node: espnow {report:?}"),
             Ok(Err(e)) => eprintln!("mw-posix-node: espnow gateway: {e}"),
             Err(e) => eprintln!("mw-posix-node: espnow gateway: {e}"),
+        }
+    }
+    if let Some(task) = mdns {
+        match tokio::time::timeout(mdns_node::GOODBYE_WAIT + std::time::Duration::from_secs(1), task).await {
+            Ok(Ok(report)) => eprintln!("mw-posix-node: mdns {report:?}"),
+            Ok(Err(e)) => eprintln!("mw-posix-node: mdns: {e}"),
+            Err(_) => eprintln!("mw-posix-node: mdns: no goodbye in time"),
         }
     }
     let report = pi.stop().await;

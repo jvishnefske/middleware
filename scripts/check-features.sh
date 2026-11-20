@@ -201,7 +201,7 @@ fi
 echo "== PN9: mw-posix-node is host only"
 cargo build --quiet -p mw-posix-node
 pn_features="$(features_of_self -p mw-posix-node | sort -u)"
-for want in zenoh serial trust espnow; do
+for want in zenoh serial trust espnow mdns; do
     grep -qx "$want" <<<"$pn_features" || fail "mw-posix-node does not enable middleware/$want"
 done
 if grep -Eqx 'ble|cam-fixtures|zenoh-lite' <<<"$pn_features"; then
