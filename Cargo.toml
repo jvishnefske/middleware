@@ -54,7 +54,8 @@ fw-sim = ["std", "trust"]
 cam-fixtures = []
 
 # Cloud / host transports (std, tokio)
-zenoh = ["std", "dep:zenoh", "dep:tokio"]
+# `sha2`: the posix-node session id (`zenoh_wire::posix_zenoh_id`).
+zenoh = ["std", "dep:zenoh", "dep:tokio", "dep:sha2"]
 grpc = ["std", "dep:tonic", "dep:tokio", "dep:tokio-stream", "dep:http", "dep:bytes", "tokio?/net", "tokio-stream?/sync"]
 istio = ["grpc"]
 # The mDNS core (no_std, no heap): the pure announce table and origin

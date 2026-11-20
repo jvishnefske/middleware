@@ -404,12 +404,78 @@ pub fn parse_service_key(key: &str) -> Option<(ServiceKind<'_>, &str)> {
     Key::new(kind).ok().map(|k| (ServiceKind::new(k), instance))
 }
 
+/// Hashed in front of a posix-node's node id for its Zenoh session id
+/// ([`posix_zenoh_id`]). FROZEN: changing it changes every posix-node's
+/// sender id.
+pub const POSIX_ZENOH_ID_DOMAIN: &[u8] = b"mw-posix-node/zenoh-id/v1\0";
+
+/// The sender id of a Zenoh session whose id (`zid`) has the 16
+/// little-endian bytes `zid`: FNV-1a 64 over them (what
+/// `zenoh::sender_id_of` computes from a session's `ZenohId`). Pure.
+pub const fn sender_id_of_zid(zid: &[u8; 16]) -> SenderId {
+    SenderId(crate::dedup::fnv1a64(zid).to_le_bytes())
+}
+
+/// The Zenoh session id a posix-node with node id `node` takes
+/// (mw-posix-node's `session_config`), as its 16 little-endian bytes: the
+/// first 16 bytes of SHA-256 over [`POSIX_ZENOH_ID_DOMAIN`] and the node
+/// id; `1` in the unlikely case those are all zero (Zenoh refuses a zero
+/// id). So a posix-node's sender id follows from the node id its
+/// `sys/info` reports ([`posix_sender_id`]). Pure.
+#[cfg(any(feature = "trust", feature = "zenoh"))]
+pub fn posix_zenoh_id(node: SenderId) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(POSIX_ZENOH_ID_DOMAIN)
+        .chain_update(node.0)
+        .finalize();
+    let mut zid = [0u8; 16];
+    zid.copy_from_slice(&digest[..16]);
+    if zid == [0; 16] {
+        zid[0] = 1;
+    }
+    zid
+}
+
+/// The sender id of the posix-node with node id `node`: the id in its
+/// `@mw/node/<id>/...` keys. A board that reports a posix-node chip and a
+/// node id whose sender id is not the one it answers at is not that node.
+/// Pure.
+#[cfg(any(feature = "trust", feature = "zenoh"))]
+pub fn posix_sender_id(node: SenderId) -> SenderId {
+    sender_id_of_zid(&posix_zenoh_id(node))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dedup::fnv1a32;
 
     const ID: SenderId = SenderId([0xAB, 1, 2, 3, 4, 5, 6, 0xFF]);
+
+    #[cfg(any(feature = "trust", feature = "zenoh"))]
+    #[test]
+    fn pn21_a_posix_nodes_session_id_is_derived_from_its_node_id() {
+        use crate::dedup::fnv1a64;
+        use sha2::{Digest, Sha256};
+        let unit = SenderId([0x59, 0x40, 0xe9, 0xa5, 0xe7, 0x35, 0x3c, 0x17]);
+        let process = SenderId([0x59, 0x40, 0xe9, 0xa5, 0xe7, 0x35, 0x3c, 0x18]);
+        let digest = Sha256::new()
+            .chain_update(b"mw-posix-node/zenoh-id/v1\0")
+            .chain_update(unit.0)
+            .finalize();
+        let zid = posix_zenoh_id(unit);
+        assert_eq!(zid[..], digest[..16]);
+        assert_ne!(posix_zenoh_id(process), zid);
+        // The session's sender id: FNV-1a over the zid's 16 bytes, as for
+        // any session (`zenoh::sender_id_of`).
+        assert_eq!(
+            sender_id_of_zid(&zid),
+            SenderId(fnv1a64(&zid).to_le_bytes())
+        );
+        assert_eq!(posix_sender_id(unit), sender_id_of_zid(&zid));
+        assert_ne!(posix_sender_id(unit), unit);
+    }
 
     #[test]
     fn fl4_stream_id_is_fnv1a_over_origin_then_key() {

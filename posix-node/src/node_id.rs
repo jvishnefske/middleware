@@ -106,22 +106,20 @@ pub fn resolve(configured: Option<&str>, machine_id: Option<&str>) -> Result<Sen
 }
 
 /// Hashed in front of the node id for the Zenoh session id
-/// ([`zenoh_id`]). Changing it changes every node's sender id.
-pub const ZENOH_ID_DOMAIN: &[u8] = b"mw-posix-node/zenoh-id/v1\0";
+/// ([`zenoh_id`]; middleware's, which mwctl shares to check a node's
+/// claimed id).
+pub use middleware::zenoh_wire::POSIX_ZENOH_ID_DOMAIN as ZENOH_ID_DOMAIN;
 
 /// The Zenoh session id (`zid`) of node `node`'s session, in the form
-/// Zenoh's `id` setting takes: the first 16 bytes of SHA-256 over
-/// [`ZENOH_ID_DOMAIN`] and the node id, read as a little-endian `u128`, in
-/// lowercase hex without leading zeros (Zenoh's own form). So the
-/// session's sender id, the id in its `@mw/node/<id>/...` keys, is the same
-/// across restarts, and two nodes on one host (distinct node ids) get
-/// distinct ones. Pure.
+/// Zenoh's `id` setting takes: `middleware::zenoh_wire::posix_zenoh_id`
+/// (the first 16 bytes of SHA-256 over [`ZENOH_ID_DOMAIN`] and the node
+/// id) read as a little-endian `u128`, in lowercase hex without leading
+/// zeros (Zenoh's own form). So the session's sender id, the id in its
+/// `@mw/node/<id>/...` keys, is the same across restarts
+/// (`middleware::zenoh_wire::posix_sender_id`), and two nodes on one host
+/// (distinct node ids) get distinct ones. Pure.
 pub fn zenoh_id(node: SenderId) -> String {
-    let digest = Sha256::new().chain_update(ZENOH_ID_DOMAIN).chain_update(node.0).finalize();
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(digest.get(..16).unwrap_or(&[0; 16]));
-    // Zenoh refuses a zero id; a hash is zero with probability 2^-128.
-    format!("{:x}", u128::from_le_bytes(bytes).max(1))
+    format!("{:x}", u128::from_le_bytes(middleware::zenoh_wire::posix_zenoh_id(node)))
 }
 
 /// `id` as 16 lowercase hex digits (the form `MW_POSIX_NODE_NODE_ID` takes).
@@ -192,6 +190,8 @@ mod tests {
         let digest = Sha256::new().chain_update(ZENOH_ID_DOMAIN).chain_update(unit.0).finalize();
         let want = u128::from_le_bytes(digest[..16].try_into().unwrap());
         assert_eq!(a, format!("{want:x}"));
+        // Its sender id, as middleware (and mwctl) derive it.
+        assert_eq!(middleware::zenoh::sender_id_of(zid), middleware::zenoh_wire::posix_sender_id(unit));
     }
 
     /// The id a fixed machine id gives is the one it gave before the crate
