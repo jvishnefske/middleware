@@ -814,7 +814,7 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   (hop limit 255), joins 224.0.0.251 after the lease, keeps its on-link
   subnet on the lease's, announces the D42 record and answers queries;
   failures back off 2 s (30 s after every rename conflicted). Its buffers
-  are in its task future in SDRAM (`mdns_task::POOL`, 14712 bytes; the
+  are in its task future in SDRAM (`mdns_task::POOL`, 14720 bytes; the
   announcer 7560); the stack resources grow to 6 sockets (`NET` +752
   bytes of DTCM, absorbed by `.bss` alignment padding); the bootloader is
   unchanged (26788 bytes). Built and linked (`./build.sh app`); on

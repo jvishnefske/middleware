@@ -165,7 +165,10 @@ pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
                         announced = Some(d);
                     }
                     Err(e) => {
-                        // Announced again on the next pass.
+                        // Nothing stays registered (a record left probing
+                        // would fail every step without a lease); it is
+                        // announced afresh on the next pass.
+                        let _ = announcer.withdraw(KIND, &id.label).await;
                         announced = None;
                         log_rarely(bus, &mut announce_errors, format_args!("announce: {e}"));
                         Timer::after(backoff(&e)).await;
