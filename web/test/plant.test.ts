@@ -23,6 +23,7 @@ import {
 } from "../src/model/plant";
 import { EXAMPLE_PLANT } from "../src/model/plantExample";
 import { boardDefaults, row } from "../src/model/pins";
+import { MAX_POINTS, pointFromControl } from "../src/model/points";
 import { ACTING_STATES, PHASE_COMMANDS, PHASE_STATES } from "../src/model/procedural";
 
 const blink = exampleWorkspace("blink")!.workspace;
@@ -157,5 +158,91 @@ describe("plant model (IR v4)", () => {
     const p = plantFromPayload(makeModel("esp32", {}));
     expect(plantProblem(JSON.parse(serializePlant(p)))).toBeNull();
     expect(makePlant(p.physical.units).recipes).toEqual([]);
+  });
+});
+
+// U48: a unit's control points (what a probed node lists at sys/manifest/cm)
+// ride beside its pin table; equipment modules may own either.
+describe("unit points (U48)", () => {
+  const point = (name: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    kind: "position",
+    flow: "in",
+    unit: "um",
+    min: -100000,
+    max: 100000,
+    scale: 1000,
+    note: "",
+    ...extra,
+  });
+  const withPoints = (points: unknown[], ems?: unknown[]) => {
+    const v = valid();
+    v.physical.units[0].points = points;
+    if (ems) v.physical.units[0].ems = ems;
+    return v;
+  };
+
+  it("accepts valid points and an equipment module owning point names and pin labels", () => {
+    const v = withPoints([point("x_pos"), point("estop", { kind: "digital", unit: "bool", min: 0, max: 1, scale: 0 })]);
+    expect(plantProblem(v)).toBeNull();
+    const pinLabel = v.physical.units[0].cms.rows[0].label as string;
+    v.physical.units[0].ems = [{ id: "motion", name: "", cms: ["x_pos", pinLabel] }];
+    v.procedural.phases = [];
+    expect(plantProblem(v)).toBeNull();
+    // A label that is neither a pin nor a point is still refused.
+    v.physical.units[0].ems = [{ id: "motion", name: "", cms: ["y_pos"] }];
+    expect(plantProblem(v)).toMatch(/ems\[0\]\.cms names "y_pos", which is not in the unit's pin table or points/);
+  });
+
+  it("rejects bad points, naming the place", () => {
+    const at = "physical.units[0].points";
+    expect(plantProblem(withPoints([point("x_pos", { colour: 1 })]))).toBe(`${at}[0] has an unknown field "colour"`);
+    expect(plantProblem(withPoints([point("x_pos", { kind: "bytes" })]))).toMatch(/points\[0\]\.kind/);
+    expect(plantProblem(withPoints([point("x_pos", { flow: "sideways" })]))).toMatch(/points\[0\]\.flow/);
+    expect(plantProblem(withPoints([point("x_pos", { unit: "furlong" })]))).toMatch(/points\[0\]\.unit/);
+    expect(plantProblem(withPoints([point("X_pos")]))).toMatch(/points\[0\]\.name/);
+    expect(plantProblem(withPoints([point("a".repeat(25))]))).toMatch(/points\[0\]\.name/);
+    expect(plantProblem(withPoints([point("x_pos", { min: 2, max: 1 })]))).toMatch(/points\[0\]\.min/);
+    expect(plantProblem(withPoints([point("x_pos", { max: 2 ** 31 })]))).toMatch(/points\[0\]\.min/);
+    expect(plantProblem(withPoints([point("x_pos", { scale: -1 })]))).toMatch(/points\[0\]\.scale/);
+    expect(plantProblem(withPoints([point("x_pos"), point("x_pos")]))).toBe(`${at}[1].name repeats an earlier point's`);
+    const v = valid();
+    const pinLabel = (v.physical.units[0].cms.rows[0].label as string).toLowerCase();
+    expect(plantProblem(withPoints([point(pinLabel)]))).toBe(
+      `${at}[0].name "${pinLabel}" is also a pin label (ignoring case)`,
+    );
+    const many = Array.from({ length: 65 }, (_, i) => point(`p${i}`));
+    expect(plantProblem(withPoints(many))).toBe(`${at} must be a list of at most 64 points`);
+    expect(plantProblem(withPoints(Array.from({ length: 64 }, (_, i) => point(`p${i}`))))).toBeNull();
+    // Two modules may not own the same point.
+    const two = withPoints(
+      [point("x_pos")],
+      [
+        { id: "a", name: "", cms: ["x_pos"] },
+        { id: "b", name: "", cms: ["x_pos"] },
+      ],
+    );
+    two.procedural.phases = [];
+    expect(plantProblem(two)).toMatch(/already owns/);
+  });
+
+  it("keeps old plants as they were and copies points on parse", () => {
+    expect(plantProblem(valid())).toBeNull();
+    expect(serializePlant(EXAMPLE_PLANT)).not.toContain('"points"');
+    const v = withPoints([point("x_pos")]);
+    const r = parsePlant(JSON.stringify(v), "pico2");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const pts = r.plant.physical.units[0].points!;
+    expect(pts).toEqual([point("x_pos")]);
+    expect(pts).not.toBe(v.physical.units[0].points);
+    expect(pts[0]).not.toBe(v.physical.units[0].points[0]);
+  });
+
+  it("makes a point row from a decoded control point", () => {
+    const p = { name: "z_home", kind: "digital", flow: "in", unit: "bool", min: 0, max: 1, scale: 0 } as const;
+    expect(pointFromControl(p)).toEqual({ ...p, note: "" });
+    expect(pointFromControl(p, "home switch").note).toBe("home switch");
+    expect(MAX_POINTS).toBe(64);
   });
 });
