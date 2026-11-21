@@ -190,6 +190,14 @@ pub mod net_budget {
     /// (6 188), 3 socket slots with DHCP (1 160), the driver's and the
     /// stack runner's pools, the SPI0 bus.
     pub const W5500_STATICS: usize = 23_020;
+    /// The same on the RP2040 (no heap, no payload runtime): `.data` +
+    /// `.bss` without a link, and what `usb-ncm` or `w5500` adds.
+    /// `build.sh` fails a build whose statics exceed its variant's figure.
+    pub const RP2040_BASE_STATICS: usize = 27_596;
+    /// See [`RP2040_BASE_STATICS`].
+    pub const RP2040_USB_NCM_STATICS: usize = 24_784;
+    /// See [`RP2040_BASE_STATICS`].
+    pub const RP2040_W5500_STATICS: usize = 22_976;
     /// The deepest stack of one poll, by direct calls in the disassembly:
     /// the mDNS task (36 440 bytes on thumbv8m; its poll frame is 21 944).
     /// Payload loading on the main task needs about 31 KiB (ESP32-S3) and
@@ -399,7 +407,12 @@ mod tests {
         let need = BASE_STATICS + link + STACK + MARGIN;
         assert!(RP2350.sram_outside_heap() >= need, "{need} B needed");
         // The RP2040 has no heap: all of its SRAM is outside it.
-        assert!(RP2040.sram_outside_heap() >= need);
+        let link = if RP2040_USB_NCM_STATICS > RP2040_W5500_STATICS {
+            RP2040_USB_NCM_STATICS
+        } else {
+            RP2040_W5500_STATICS
+        };
+        assert!(RP2040.sram_outside_heap() >= RP2040_BASE_STATICS + link + STACK + MARGIN);
     }
 
     /// The stack room the linker scripts assert between the end of

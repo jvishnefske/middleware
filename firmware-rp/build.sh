@@ -33,7 +33,8 @@
 # Both print the section sizes (flash = .text + .rodata + .data and the
 # boot metadata, static RAM = .data + .bss, which includes the heap arena
 # on the RP2350) and the static RAM outside the heap (what the stack
-# shares, rp_base::chip::net_budget).
+# shares), and fail when that exceeds the variant's figure in
+# rp_base::chip::net_budget (D51).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -93,4 +94,29 @@ heap_hex="$("$nm_tool" -S "$elf" | awk '$4 ~ /heap.*ARENA/ { print $2 }' | head 
 "$size_tool" -A "$elf" | awk -v heap="$((16#${heap_hex:-0}))" '
   $1 == ".data" || $1 == ".bss" || $1 == ".uninit" { ram += $2 }
   END { printf "static RAM outside the heap %d B (heap arena %d B)\n", ram - heap, heap }'
+
+# The variant's figure in rp_base::chip::net_budget (D51): the statics
+# outside the heap may not grow past it (the linker separately asserts the
+# stack's room). A larger build fails; measure again and update the figure.
+budget() { # constant name
+  sed -n "s/^ *pub const $1: usize = \([0-9_]*\);.*/\1/p" src/chip.rs | tr -d _
+}
+case "$chip" in
+  rp2040) prefix=RP2040_ ;;
+  *) prefix= ;;
+esac
+link_statics=0
+case " $* " in
+  *usb-ncm*) link_statics="$(budget "${prefix}USB_NCM_STATICS")" ;;
+  *w5500*) link_statics="$(budget "${prefix}W5500_STATICS")" ;;
+esac
+allowed=$(( $(budget "${prefix}BASE_STATICS") + link_statics ))
+outside="$("$size_tool" -A "$elf" | awk -v heap="$((16#${heap_hex:-0}))" '
+  $1 == ".data" || $1 == ".bss" || $1 == ".uninit" { ram += $2 }
+  END { print ram - heap }')"
+if (( allowed == 0 || outside > allowed )); then
+  echo "error: static RAM outside the heap is $outside B, over rp_base::chip::net_budget's $allowed B for this build" >&2
+  exit 1
+fi
+echo "within rp_base::chip::net_budget ($allowed B)"
 ls -l "$elf"
