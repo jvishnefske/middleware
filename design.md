@@ -873,6 +873,39 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   link is up and has an address (a static link-local address exists
   before any host does), so a link going down withdraws the record —
   firmware-rp `mdns_node::tests::d47_*`.
+- [ ] D48 With `usb-ncm` the RP board is a composite USB device: CDC-ACM
+  first (interfaces 0 and 1, so `/dev/serial/by-id/...-if00` and the
+  gateway's rules are unchanged), CDC-NCM after it (2 and 3), each with
+  an interface association; the configuration is 155 bytes (ACM 61, NCM
+  85, counted from embassy-usb 0.6.0) of the 256-byte buffer, and the
+  four interfaces and three handlers fit embassy-usb's defaults (a const
+  assertion in the shell) — firmware-rp
+  `usb::tests::d48_acm_and_ncm_fit_the_usb_buffers_and_limits`; built for
+  `rp2350,usb-ncm` and `rp2040,usb-ncm`. On hardware: `lsusb -v` shows
+  two IADs and `wTotalLength` 155, `cdc_acm` and `cdc_ncm` both bind, the
+  `-if00` port is unchanged and `mwctl info` works while NCM is up.
+  Owner: user.
+- [x] D51 The network links fit the RP2350's 136 KiB outside the heap,
+  measured on the release builds (`rust-size`, `rust-nm`; `build.sh`
+  prints the statics outside the heap): 43 244 bytes without a link,
+  24 800 more with `usb-ncm` (the mDNS task pool 14 784, the NCM channel
+  6 188, the NCM runner 2 912, 2 socket slots 736), the deepest poll
+  36 440 bytes (the mDNS task, by direct calls on thumbv8m), and a 16 KiB
+  margin — firmware-rp
+  `chip::tests::d51_the_network_links_fit_beside_the_heap`.
+- [ ] D52 On a Pico or Pico 2 with `usb-ncm`, the board is at
+  `169.254.a.b/16` (D45) on the NCM link and its responder announces the
+  D47 record only while the host has the link up: it joins 224.0.0.251
+  once the link is up, withdraws the record when the link goes down and
+  probes again when it returns; failures back off 2 s (30 s after every
+  rename conflicted). Built (`./build.sh rp2350 --features usb-ncm`); on
+  hardware: the interface is `enx064d…` and the NetworkManager profile
+  of `firmware-rp/docs/usb-net.md` gives it a 169.254 address, `arping`
+  reaches the board's address, `avahi-browse -rt _mw-node._tcp` lists
+  `rp-<id>` with its TXT, `avahi-resolve -n rp-<id>.local` resolves,
+  `tcpdump` shows TTL 255 and an IGMP report, a replug or NM down/up
+  withdraws and re-announces, and mwctl over the ACM port keeps working
+  under mDNS traffic. Owner: user.
 
 ### Transport contract 0.5 (K…)
 

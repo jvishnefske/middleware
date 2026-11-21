@@ -24,9 +24,16 @@
 #   rp-image (src/bin/rp-image.rs, feature image-tool) checks it as mwctl
 #   does and writes the four files. The byte layouts are rp_base::ota's.
 #
+# Network links (one at a time; both chips): `--features usb-ncm` (USB
+# CDC-NCM beside the CDC-ACM port, link-local IPv4, docs/usb-net.md) or
+# `--features w5500` (a W5500 on SPI0, DHCP). Either adds the mDNS
+# responder, `rp-<id>.local`. The output file names are the plain build's,
+# so build one variant at a time (or set CARGO_TARGET_DIR per variant).
+#
 # Both print the section sizes (flash = .text + .rodata + .data and the
 # boot metadata, static RAM = .data + .bss, which includes the heap arena
-# on the RP2350).
+# on the RP2350) and the static RAM outside the heap (what the stack
+# shares, rp_base::chip::net_budget).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -81,4 +88,9 @@ size_tool="$(command -v llvm-size || command -v rust-size || command -v size)"
   $1 == ".data" { flash += $2; ram += $2 }
   $1 == ".bss" || $1 == ".uninit" { ram += $2 }
   END { printf "flash %d B, static RAM %d B\n", flash, ram }'
+nm_tool="$(command -v llvm-nm || command -v rust-nm || command -v nm)"
+heap_hex="$("$nm_tool" -S "$elf" | awk '$4 ~ /heap.*ARENA/ { print $2 }' | head -1)"
+"$size_tool" -A "$elf" | awk -v heap="$((16#${heap_hex:-0}))" '
+  $1 == ".data" || $1 == ".bss" || $1 == ".uninit" { ram += $2 }
+  END { printf "static RAM outside the heap %d B (heap arena %d B)\n", ram - heap, heap }'
 ls -l "$elf"
