@@ -4,6 +4,10 @@
 // * `probeNode` reads `sys/info`, `sys/manifest` and every page of
 //   `sys/manifest/cm` the manifest announces (in order, from page 0), and
 //   nothing else: over the mesh those are the only keys a browser may ask.
+//   It reads at most `MAX_POINTS` pages and stops once the pages hold more
+//   than `MAX_POINTS` points (a node may list no more); either is a problem
+//   and the plant is then not offered (`plantable`), nor for a chip no
+//   Start-tab board runs.
 //   `decodeProbe` is the pure part, run on what was read (the golden test
 //   feeds it posix-node's recorded fixtures).
 // * The board is the manifest's BOARD record (a Linux node's device tree
@@ -30,7 +34,7 @@ import { BOARDS, type Board } from "../onboarding/boards";
 import { makeModel } from "../model/payload";
 import { EMPTY_PINS } from "../model/pins";
 import { type EquipmentModule, type PlantModel, type Unit, makePlant, unitFromPayload } from "../model/plant";
-import { type PointRow, pointFromControl } from "../model/points";
+import { MAX_POINTS, type PointRow, pointFromControl } from "../model/points";
 import type { BindingRecord, ChannelDecl, DeviceInfo, MachineKind, Protocol } from "../protocol/wasm";
 import type { DeviceClient } from "./client";
 import { SENDER_ID, isDnsName } from "./mesh";
@@ -135,6 +139,9 @@ export interface ProbeResult {
   binding: BindingDraft;
   /** What the probe could not settle, in words. */
   problems: string[];
+  /** Whether `plant` may be offered: a known board runs the chip, and the
+   * node lists no more than `MAX_POINTS` points. */
+  plantable: boolean;
 }
 
 const EM_NAMES: Record<string, string> = { motion: "Motion", spindle: "Spindle", turret: "Turret", estop: "E-stop" };
@@ -188,8 +195,12 @@ export function decodeProbe(proto: Protocol, input: ProbeInput): ProbeResult {
   const boardName = m?.board ?? null;
   const want = m?.controlModules?.pages ?? 0;
   if (m && !m.controlModules) problems.push("the manifest lists no control points (sys/manifest/cm)");
+  // A node lists at most MAX_POINTS points, so at most that many pages.
+  const read = Math.min(want, MAX_POINTS);
+  if (want > read) problems.push(`the manifest lists ${want} pages, more than ${MAX_POINTS}; the probe read ${read}`);
+  let over = want > read;
   const points: PointRow[] = [];
-  for (let p = 0; p < want; p++) {
+  for (let p = 0; p < read; p++) {
     const raw = input.pages[p];
     if (!raw) {
       problems.push(`sys/manifest/cm page ${p} is missing (the manifest lists ${plural(want, "page")})`);
@@ -207,6 +218,12 @@ export function decodeProbe(proto: Protocol, input: ProbeInput): ProbeResult {
     if (page.pages !== want)
       problems.push(`sys/manifest/cm page ${p} says ${plural(page.pages, "page")}, the manifest ${want}`);
     points.push(...page.points.map((x) => pointFromControl(x)));
+    if (points.length > MAX_POINTS) {
+      problems.push(`sys/manifest/cm lists more than ${MAX_POINTS} points; the probe stopped at page ${p}`);
+      points.length = MAX_POINTS;
+      over = true;
+      break;
+    }
   }
   const announced = m?.controlModules?.points;
   if (announced !== undefined && problems.length === 0 && points.length !== announced) {
@@ -250,6 +267,7 @@ export function decodeProbe(proto: Protocol, input: ProbeInput): ProbeResult {
     ioSpecs,
     binding: { entries },
     problems,
+    plantable: !!board && !over,
   };
 }
 
@@ -258,9 +276,15 @@ export async function probeNode(client: DeviceClient, proto: Protocol): Promise<
   const info = await client.info();
   const manifest = await client.manifestBody();
   if (!manifest) throw new Error("the node has no sys/manifest, so it lists no control points");
-  const pages = proto.decodeManifest(manifest)?.controlModules?.pages ?? 0;
+  const pages = Math.min(proto.decodeManifest(manifest)?.controlModules?.pages ?? 0, MAX_POINTS);
   const read: (Uint8Array | null)[] = [];
-  for (let p = 0; p < pages; p++) read.push(await client.controlPage(p));
+  let points = 0;
+  // Stop once the node has listed more than a node may: decodeProbe says so.
+  for (let p = 0; p < pages && points <= MAX_POINTS; p++) {
+    const page = await client.controlPage(p);
+    read.push(page);
+    points += (page && proto.decodeControlPage(page)?.points.length) || 0;
+  }
   return decodeProbe(proto, { info, manifest, pages: read });
 }
 

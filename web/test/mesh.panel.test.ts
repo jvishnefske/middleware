@@ -184,6 +184,9 @@ describe("mesh panel and hostile text", () => {
     expect(text).toContain(evil);
     expect(text).toContain(script);
     expect(text).toContain("4b44323430000001");
+    // No board runs that chip: no plant is offered.
+    expect([...panel.el.querySelectorAll("button")].some((b) => b.textContent === "Use as plant")).toBe(false);
+    expect(text).toContain("not offered as a plant");
     panel.el.remove();
   });
 });

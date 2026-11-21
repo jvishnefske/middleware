@@ -306,6 +306,67 @@ describe("probeNode", () => {
     expect(none.points).toEqual([]);
   });
 
+  /** The fixture with the manifest announcing `pages` pages, each page
+   * the fixture's (10 points) renumbered, or with no points. */
+  function many(pages: number, empty = false): WireFixture {
+    const f = fixture("kd240.wire.json");
+    const m = f.responses["sys/manifest"];
+    expect(m.endsWith("0c020a01")).toBe(true);
+    const page0 = unhex(f.responses["sys/manifest/cm"][0]);
+    const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    const cm = Array.from({ length: pages }, (_, p) => {
+      const page = empty ? new Uint8Array([1, pages, p, 0]) : page0.slice();
+      page[1] = pages;
+      page[2] = p;
+      return hex(page);
+    });
+    const count = empty ? 0 : 64;
+    const manifest = m.slice(0, -4) + hex(new Uint8Array([count, pages]));
+    return { ...f, responses: { ...f.responses, "sys/manifest": manifest, "sys/manifest/cm": cm } };
+  }
+
+  it("stops at 64 points across pages, and offers no plant then", async () => {
+    const f = many(10);
+    const c = new FixtureClient(proto, f);
+    const r = await probeNode(c, proto);
+    // 10 points a page: the seventh page passes 64, and no page after it is asked.
+    expect(c.asked).toEqual([
+      "sys/info",
+      "sys/manifest",
+      ...Array.from({ length: 7 }, (_, p) => `sys/manifest/cm#${p}`),
+    ]);
+    expect(r.points.length).toBeLessThanOrEqual(64);
+    expect(r.problems).toContain("sys/manifest/cm lists more than 64 points; the probe stopped at page 6");
+    expect(r.problems.some((p) => p.includes("is missing"))).toBe(false);
+    expect(r.plantable).toBe(false);
+    expect(decodeProbe(proto, input(f)).plantable).toBe(false);
+  });
+
+  it("reads at most 64 pages", async () => {
+    const f = many(70, true);
+    const c = new FixtureClient(proto, f);
+    const r = await probeNode(c, proto);
+    expect(c.asked.filter((a) => a.startsWith("sys/manifest/cm"))).toHaveLength(64);
+    expect(r.problems).toContain("the manifest lists 70 pages, more than 64; the probe read 64");
+    expect(r.plantable).toBe(false);
+  });
+
+  it("offers a plant for the KD240, not for a chip no board runs", () => {
+    const f = fixture("kd240.wire.json");
+    expect(decodeProbe(proto, input(f)).plantable).toBe(true);
+    const info = proto.encodeDeviceInfo({
+      abiVersion: 8,
+      capacity: 65536,
+      status: 1,
+      chip: "linux-riscv64",
+      firmware: "0.0.0",
+      node: f.facts.node,
+    });
+    const r = decodeProbe(proto, { ...input(f), info: proto.decodeDeviceInfo(info)! });
+    expect(r.plantable).toBe(false);
+    expect(r.problems.some((p) => p.startsWith("no known board runs chip linux-riscv64"))).toBe(true);
+  });
+
   it("refuses a node without a manifest or control points", async () => {
     const f = fixture("kd240.wire.json");
     const noPoints = { ...input(f), pages: [] };

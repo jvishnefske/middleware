@@ -188,7 +188,7 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
     const io = JSON.stringify(r.io, null, 2);
     const useBtn = h("button", { class: "primary", type: "button" }, "Use as plant");
     useBtn.addEventListener("click", () => {
-      if (probed) opts.usePlant(probed.plant);
+      if (probed?.plantable) opts.usePlant(probed.plant);
     });
     const points = h(
       "table",
@@ -222,12 +222,18 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
       r.problems.length
         ? h("ul", { class: "problems" }, ...r.problems.map((p) => h("li", {}, p)))
         : h("p", {}, "No problems."),
-      h(
-        "p",
-        { class: "row" },
-        useBtn,
-        h("span", { class: "muted" }, `unit ${r.unit.id}: ${r.unit.ems.map((e) => e.id).join(", ") || "no modules"}`),
-      ),
+      r.plantable
+        ? h(
+            "p",
+            { class: "row" },
+            useBtn,
+            h(
+              "span",
+              { class: "muted" },
+              `unit ${r.unit.id}: ${r.unit.ems.map((e) => e.id).join(", ") || "no modules"}`,
+            ),
+          )
+        : h("p", { class: "warn" }, "This node is not offered as a plant (see the problems above)."),
       h(
         "h4",
         {},
