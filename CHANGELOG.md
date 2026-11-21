@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### The ESP-NOW gateway keeps heard devices' frames during a MAC flood (EG10)
+- mw-posix-node: the pump's `MW` queue (`espnow_gw::MW_QUEUE`, now 96) keeps its last `MW_RESERVED` (32) slots for frames from MACs in the heard table; a frame from a MAC not (yet) heard is dropped and counted once the queue is that full. Before, a flood of forged MACs arriving while the bus was busy (a Zenoh put, the 1 s reconcile declaring the new devices' queryables) filled the 64-deep drop-newest queue and a heard device's frames were dropped behind it. One FIFO still, so frames are not reordered. `tests/espnow_gw.rs` `eg10_a_mac_flood_leaves_heard_devices_and_their_queryables` failed this way on a loaded machine.
+
 ### mwctl opens a PTY (H7)
 - `mwctl --port <pty>` works: ENOTTY from the RTS/DTR calls (open and `reset`) is tolerated as in `mw_gateway::io::open_serial` (RG28); other modem-line errors stay fatal. Test-only dev-dependency `libc` (already in Cargo.lock).
 

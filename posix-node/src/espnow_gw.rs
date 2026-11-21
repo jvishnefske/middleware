@@ -31,7 +31,12 @@
 //! serves send commands, routing every frame heard to the bus (`MW`
 //! frames) or to the requests (`MR` frames) through bounded queues (full:
 //! dropped and counted); while a send waits for its `Sent` the pump goes
-//! on reading and routing, so a lost `Sent` does not stall the uplink. The **bus** runs the
+//! on reading and routing, so a lost `Sent` does not stall the uplink.
+//! The last [`MW_RESERVED`] slots of the `MW` queue are kept for devices
+//! already heard: a frame from a MAC not (yet) heard is dropped once the
+//! queue is that full, so a flood of forged MACs while the bus is busy
+//! cannot crowd out the devices that are talking (EG10); the queue stays
+//! one FIFO, so frames are not reordered. The **bus** runs the
 //! uplink, beacons, downlink and heard list; the **requests** loop serves
 //! queries one at a time, so a slow device stalls only other requests.
 
@@ -66,7 +71,9 @@ use self::core::{Action, Heard, Registry, forwarded, mac_of, origin_of, reply_er
 use crate::config::DownlinkFilter;
 
 /// Frames the pump queues for the bus.
-pub const MW_QUEUE: usize = 64;
+pub const MW_QUEUE: usize = 96;
+/// Of [`MW_QUEUE`], the slots only frames from heard devices may take.
+pub const MW_RESERVED: usize = 32;
 /// Frames the pump queues for the requests.
 pub const MR_QUEUE: usize = 8;
 /// Queries waiting to be forwarded.
@@ -211,6 +218,8 @@ struct Cmd {
 
 /// A frame heard, with its sender.
 type Frame = (Mac, Vec<u8>);
+/// The MACs in the bus's [`Heard`] table, as the pump sees them.
+type Known = Arc<Mutex<HashSet<Mac>>>;
 /// A downlink sample: key, payload, sender.
 type Down = (String, Vec<u8>, Option<SenderId>);
 
@@ -244,6 +253,25 @@ impl EspNowSend for TxHandle {
 
     async fn broadcast(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         send_cmd(&self.cmds, BROADCAST, frame).await
+    }
+}
+
+/// Where the pump puts `MW` frames: the bus's queue, its last
+/// [`MW_RESERVED`] slots kept for devices already heard.
+struct MwTx {
+    tx: mpsc::Sender<Frame>,
+    known: Known,
+}
+
+impl MwTx {
+    /// Queues `frame`; `false` if it was dropped.
+    fn send(&self, src: Mac, frame: Vec<u8>) -> bool {
+        // Only the pump sends, so the room seen here is not taken before
+        // the `try_send`.
+        if self.tx.capacity() <= MW_RESERVED && !self.known.lock().is_ok_and(|k| k.contains(&src)) {
+            return false;
+        }
+        self.tx.try_send((src, frame)).is_ok()
     }
 }
 
@@ -305,7 +333,7 @@ impl EspNowUnicast for MrHandle<'_> {
 async fn pump<IO: Read + Write>(
     mut radio: BridgeRadio<IO, TokioDelay>,
     mut cmds: mpsc::Receiver<Cmd>,
-    mw: mpsc::Sender<Frame>,
+    mw: MwTx,
     mr: mpsc::Sender<Frame>,
     sent_timeout: Duration,
     counters: &Counters,
@@ -343,8 +371,12 @@ async fn pump<IO: Read + Write>(
                 // Bounded by the radio's ring.
                 while let Ok(Some((bytes, src))) = radio.try_receive(&mut raw) {
                     let frame = bytes.to_vec();
-                    let q = if middleware::rpc::is_rpc(&frame) { &mr } else { &mw };
-                    if q.try_send((src, frame)).is_err() {
+                    let queued = if middleware::rpc::is_rpc(&frame) {
+                        mr.try_send((src, frame)).is_ok()
+                    } else {
+                        mw.send(src, frame)
+                    };
+                    if !queued {
                         bump(&counters.dropped);
                     }
                 }
@@ -483,6 +515,8 @@ struct Bus {
     discovery: ZenohDiscovery,
     registry: Registry,
     heard: Heard,
+    /// [`Self::heard`]'s MACs, shared with the pump.
+    known: Known,
     served: Served,
     streams: HashMap<(Mac, String), Sequence>,
     peers: Arc<Mutex<Vec<u8>>>,
@@ -512,6 +546,11 @@ impl Bus {
 
     /// Forgets `macs` (no longer heard): their records are withdrawn.
     async fn forget(&mut self, macs: &[Mac]) {
+        if let Ok(mut k) = self.known.lock() {
+            for mac in macs {
+                k.remove(mac);
+            }
+        }
         for mac in macs {
             let recs = self.registry.forget(*mac);
             self.withdraw(recs).await;
@@ -540,6 +579,11 @@ impl Bus {
         }
         if let Some(evicted) = hearing.evicted {
             self.forget(&[evicted]).await;
+        }
+        if hearing.new
+            && let Ok(mut k) = self.known.lock()
+        {
+            k.insert(mac);
         }
         // Queryables and the heard list follow on the next tick, coalesced.
         self.changed |= hearing.new || hearing.evicted.is_some();
@@ -625,6 +669,8 @@ where
     let counters = Counters::default();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(4);
     let (mw_tx, mw_rx) = mpsc::channel::<Frame>(MW_QUEUE);
+    let known = Known::default();
+    let mw_tx = MwTx { tx: mw_tx, known: known.clone() };
     let (mr_tx, mr_rx) = mpsc::channel::<Frame>(MR_QUEUE);
     let (query_tx, query_rx) = mpsc::channel::<(Instant, Query)>(QUERY_QUEUE);
     let (failed_tx, failed_rx) = oneshot::channel::<GwError>();
@@ -672,6 +718,7 @@ where
         session,
         registry: Registry::new(),
         heard: Heard::with_ttl_ms(cfg.heard_ttl_ms),
+        known,
         streams: HashMap::new(),
         peers,
         heard_key: format!("gw/espnow/{hex}/heard"),
@@ -769,4 +816,79 @@ where
         heard: u32::try_from(bus.heard.len()).unwrap_or(u32::MAX),
         refused_macs: bus.heard.refused(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use middleware::radio_bridge::{MAX_WIRE, Msg, VERSION};
+    use mw_gateway::io::pair;
+
+    const BRIDGE: Mac = [0x5c, 0xcf, 0x7f, 0x72, 0xf6, 0x54];
+    const DEV: Mac = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24];
+
+    fn recv_wire(src: Mac, seq: u8) -> Vec<u8> {
+        let mut frame = [0u8; MAX_FRAME];
+        let f = middleware::espnow::Frame { seq, key: Key::from_static("app/x"), payload: b"x" };
+        let n = f.encode(&mut frame).unwrap();
+        let mut out = [0u8; MAX_WIRE];
+        let n = Msg::Recv { src, data: &frame[..n] }.encode_wire(&mut out).unwrap();
+        out[..n].to_vec()
+    }
+
+    /// EG10: while the bus is stalled (a Zenoh put blocked, a reconcile
+    /// declaring hundreds of queryables), a flood of forged MACs fills the
+    /// `MW` queue; a frame from a device already heard still reaches the
+    /// bus, it is not dropped behind the flood.
+    #[tokio::test]
+    async fn eg10_a_flood_does_not_crowd_out_a_heard_device() {
+        let (gw_io, mut bridge_io) = pair();
+        let mut hello = [0u8; MAX_WIRE];
+        let n = Msg::Hello { mac: BRIDGE, channel: 1, version: VERSION }.encode_wire(&mut hello).unwrap();
+        bridge_io.write_all(&hello[..n]).await.unwrap();
+        let mut radio = BridgeRadio::<_, TokioDelay>::new(gw_io, TokioDelay);
+        radio.connect(2000).await.unwrap();
+        let flood = 2 * MW_QUEUE;
+        let mut air = Vec::new();
+        for i in 0..flood {
+            let b = u32::try_from(i).unwrap().to_be_bytes();
+            air.extend(recv_wire([0x02, 0xee, b[0], b[1], b[2], b[3]], 0));
+        }
+        air.extend(recv_wire(DEV, 1));
+        bridge_io.write_all(&air).await.unwrap();
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(4);
+        let (mw_tx, mw_rx) = mpsc::channel::<Frame>(MW_QUEUE);
+        let known = Known::default();
+        known.lock().unwrap().insert(DEV);
+        let mw = MwTx { tx: mw_tx, known };
+        let (mr_tx, _mr_rx) = mpsc::channel::<Frame>(MR_QUEUE);
+        let counters = Counters::default();
+        let mut rx = RxHandle { rx: mw_rx };
+        // The bus reads nothing until the pump has routed (or dropped)
+        // every frame.
+        let all_routed = async {
+            let total = u32::try_from(flood + 1).unwrap();
+            while u32::try_from(rx.rx.len()).unwrap() + counters.dropped.load(Ordering::Relaxed) < total {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        tokio::select! {
+            _ = pump(radio, cmd_rx, mw, mr_tx, Duration::from_secs(1), &counters) => panic!("pump stopped"),
+            r = tokio::time::timeout(Duration::from_secs(10), all_routed) => r.expect("every frame routed"),
+        }
+        // Only the flood was dropped, and only beyond the unreserved
+        // slots; the device's frame is queued behind what was kept, in
+        // order.
+        let kept = MW_QUEUE - MW_RESERVED;
+        assert_eq!(counters.dropped.load(Ordering::Relaxed), u32::try_from(flood - kept).unwrap());
+        // The pump is gone: `Down` once the queue is drained.
+        let mut from = Vec::new();
+        let mut buf = [0u8; MAX_FRAME];
+        while let Ok(Some((_, src))) = rx.try_receive(&mut buf) {
+            from.push(src);
+        }
+        assert_eq!(from.len(), kept + 1);
+        assert_eq!(from.last(), Some(&DEV), "the heard device's frame was dropped behind the flood");
+    }
 }

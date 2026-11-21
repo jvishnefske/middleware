@@ -5492,10 +5492,15 @@ shell `mw_posix_node::espnow_gw`.
   least 10 s stale (`MIN_EVICT_AGE_MS`), otherwise it is refused, counted
   (`Report::refused_macs`) and nothing it sends is republished, so a
   flood of forged source MACs cannot push out the devices that are
-  talking. Queryables and the heard list are updated on the 1 s tick,
+  talking. Nor can it crowd out their frames: the last 32 of the 96 slots
+  of the pump's `MW` queue (`MW_RESERVED`) take only frames from heard
+  MACs, so while the bus is busy the flood is dropped first, and the
+  queue stays one FIFO. Queryables and the heard list are updated on
+  the 1 s tick,
   coalesced, not per frame — `core::tests::eg10_heard_expiry_and_peerset`,
   `eg10_heard_is_bounded`, `eg10_a_flood_of_fresh_macs_does_not_evict_heard_devices`,
-  `eg10_the_heard_ttl_is_configurable`; `tests/espnow_gw.rs`
+  `eg10_the_heard_ttl_is_configurable`; `espnow_gw::tests::eg10_a_flood_does_not_crowd_out_a_heard_device`;
+  `tests/espnow_gw.rs`
   `eg10_heard_list`, `eg10_a_mac_flood_leaves_heard_devices_and_their_queryables`,
   `eg10_a_forgotten_device_loses_its_queryables_and_beacon`.
 - [x] EG11 The gateway is off by default; `MW_POSIX_NODE_ESPNOW_BRIDGE` and
