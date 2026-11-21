@@ -1,0 +1,248 @@
+{
+  "node": "4b44323430000001",
+  "chip": "linux-aarch64",
+  "boardName": "ZynqMP KD240 revA/B/1",
+  "io": {
+    "xPos": "x_pos",
+    "zPos": "z_pos",
+    "xHome": "x_home",
+    "zHome": "z_home",
+    "spindleRpm": "spindle_rpm",
+    "spindleActual": "spindle_actual",
+    "turretStation": "turret_station",
+    "turretReady": "turret_ready",
+    "estop": "estop",
+    "motion": "motion"
+  },
+  "ioSpecs": [
+    "x_pos=driver:x_pos",
+    "z_pos=driver:z_pos",
+    "x_home=driver:x_home",
+    "z_home=driver:z_home",
+    "spindle_rpm=driver:spindle_rpm",
+    "spindle_actual=driver:spindle_actual",
+    "turret_station=driver:turret_station",
+    "turret_ready=driver:turret_ready",
+    "estop=driver:estop",
+    "motion=driver:motion",
+    "queue=driver:motion"
+  ],
+  "binding": {
+    "entries": [
+      {
+        "name": "x_pos",
+        "point": "x_pos"
+      },
+      {
+        "name": "z_pos",
+        "point": "z_pos"
+      },
+      {
+        "name": "x_home",
+        "point": "x_home"
+      },
+      {
+        "name": "z_home",
+        "point": "z_home"
+      },
+      {
+        "name": "spindle_rpm",
+        "point": "spindle_rpm"
+      },
+      {
+        "name": "spindle_actual",
+        "point": "spindle_actual"
+      },
+      {
+        "name": "turret_station",
+        "point": "turret_station"
+      },
+      {
+        "name": "turret_ready",
+        "point": "turret_ready"
+      },
+      {
+        "name": "estop",
+        "point": "estop"
+      },
+      {
+        "name": "motion",
+        "point": "motion"
+      },
+      {
+        "name": "queue",
+        "point": "motion"
+      }
+    ]
+  },
+  "problems": [],
+  "plant": {
+    "format": "middleware-payload",
+    "version": 4,
+    "physical": {
+      "units": [
+        {
+          "id": "kd240",
+          "name": "ZynqMP KD240 revA/B/1",
+          "class": "Unit",
+          "node": "4b44323430000001",
+          "board": "kd240",
+          "cms": {
+            "rows": [],
+            "buses": []
+          },
+          "ems": [
+            {
+              "id": "motion",
+              "name": "Motion",
+              "cms": [
+                "x_pos",
+                "z_pos",
+                "x_home",
+                "z_home",
+                "motion"
+              ]
+            },
+            {
+              "id": "spindle",
+              "name": "Spindle",
+              "cms": [
+                "spindle_rpm",
+                "spindle_actual"
+              ]
+            },
+            {
+              "id": "turret",
+              "name": "Turret",
+              "cms": [
+                "turret_station",
+                "turret_ready"
+              ]
+            },
+            {
+              "id": "estop",
+              "name": "E-stop",
+              "cms": [
+                "estop"
+              ]
+            }
+          ],
+          "logic": [
+            {
+              "kind": "blocks",
+              "workspace": {}
+            }
+          ],
+          "machines": [],
+          "points": [
+            {
+              "name": "x_pos",
+              "kind": "position",
+              "flow": "in",
+              "unit": "count",
+              "min": -2500,
+              "max": 50000,
+              "scale": 1000,
+              "note": ""
+            },
+            {
+              "name": "z_pos",
+              "kind": "position",
+              "flow": "in",
+              "unit": "count",
+              "min": -230000,
+              "max": 2500,
+              "scale": 1000,
+              "note": ""
+            },
+            {
+              "name": "x_home",
+              "kind": "digital",
+              "flow": "in",
+              "unit": "bool",
+              "min": 0,
+              "max": 1,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "z_home",
+              "kind": "digital",
+              "flow": "in",
+              "unit": "bool",
+              "min": 0,
+              "max": 1,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "spindle_rpm",
+              "kind": "setpoint",
+              "flow": "out",
+              "unit": "rpm",
+              "min": -3000,
+              "max": 3000,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "spindle_actual",
+              "kind": "setpoint",
+              "flow": "in",
+              "unit": "rpm",
+              "min": -3000,
+              "max": 3000,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "turret_station",
+              "kind": "setpoint",
+              "flow": "out",
+              "unit": "station",
+              "min": 1,
+              "max": 6,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "turret_ready",
+              "kind": "digital",
+              "flow": "in",
+              "unit": "bool",
+              "min": 0,
+              "max": 1,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "estop",
+              "kind": "digital",
+              "flow": "in",
+              "unit": "bool",
+              "min": 0,
+              "max": 1,
+              "scale": 0,
+              "note": ""
+            },
+            {
+              "name": "motion",
+              "kind": "segments",
+              "flow": "both",
+              "unit": "none",
+              "min": 0,
+              "max": 32,
+              "scale": 0,
+              "note": ""
+            }
+          ]
+        }
+      ]
+    },
+    "procedural": {
+      "classes": [],
+      "phases": []
+    },
+    "recipes": []
+  }
+}

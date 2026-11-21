@@ -33,6 +33,8 @@ impl Clock for Manual {
 
 type Ctl<'d> = Controller<SectorFlash<MemSectors<'d>>, Manual>;
 
+mod web_fixtures;
+
 fn demo() -> Vec<u8> {
     wat::parse_str(include_str!("../../tests/fixtures/pi_demo.wat")).expect("WAT")
 }

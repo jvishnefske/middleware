@@ -21,12 +21,12 @@ use middleware::wasm_abi::events::{self, DmaChannel, EventKind};
 use middleware::wasm_abi::periph::{self, Edge};
 use wasm_bindgen::prelude::*;
 
-fn set(obj: &Object, key: &str, value: impl Into<JsValue>) {
+pub(crate) fn set(obj: &Object, key: &str, value: impl Into<JsValue>) {
     // `Reflect::set` on a plain, unfrozen object cannot fail.
     let _ = Reflect::set(obj, &JsValue::from_str(key), &value.into());
 }
 
-fn bytes(data: &[u8]) -> Uint8Array {
+pub(crate) fn bytes(data: &[u8]) -> Uint8Array {
     Uint8Array::from(data)
 }
 
@@ -555,8 +555,9 @@ impl JsDeviceLoader {
 
 /// Protocol constants and system keys:
 /// `{chunkMax, maxRawFrame, maxWireFrame, signedCommitLen, rekeyWindowMs,
-/// presenceHoldMs, keys: {info, board, begin, chunk, commit, start, stop, log,
-/// status, trustInfo, trustClaim}}`.
+/// presenceHoldMs, keys: {info, board, manifest, bind, binding, peers, begin,
+/// chunk, commit, start, stop, log, status, trustInfo, trustClaim,
+/// controlModules}}`.
 #[wasm_bindgen]
 pub fn protocol() -> Object {
     let o = Object::new();
@@ -583,6 +584,7 @@ pub fn protocol() -> Object {
         ("status", keys::STATUS),
         ("trustInfo", keys::TRUST_INFO),
         ("trustClaim", keys::TRUST_CLAIM),
+        ("controlModules", keys::CONTROL_MODULES),
     ] {
         set(&k, name, key.as_str());
     }
@@ -680,9 +682,11 @@ pub fn has_simulator() -> bool {
     cfg!(feature = "simulator")
 }
 
-fn pin_map(chip: &str) -> Result<&'static board_pins::PinMap, JsError> {
-    board_pins::boards::by_chip(chip)
-        .ok_or_else(|| JsError::new(&format!("no pin map for chip {chip:?}")))
+fn pin_map(chip: &str, board: Option<&str>) -> Result<&'static board_pins::PinMap, JsError> {
+    crate::pins::map_for(chip, board).ok_or_else(|| match board {
+        Some(b) => JsError::new(&format!("no pin map for chip {chip:?} on board {b:?}")),
+        None => JsError::new(&format!("no pin map for chip {chip:?}")),
+    })
 }
 
 fn get(o: &JsValue, key: &str) -> JsValue {
@@ -701,13 +705,14 @@ fn whole(v: &JsValue) -> Option<i64> {
 /// channel, pwm?: {timer, channel}, i2c?: {bus, line: "sda"|"scl"}, spi?:
 /// [{block, signal: "sck"|"mosi"|"miso"}]}], i2c: [{bus, sda, scl}], pwm:
 /// [{timer, channel, pin}], adc: [pin], i2cBuses, spiBuses, i2cHz: [min, max], maxSpiKhz,
-/// maxLabel, funcs: [name]}`. `chip` is a `sys/info` chip name; an unknown
-/// one throws.
+/// maxLabel, funcs: [name]}`. `chip` is a `sys/info` chip name and
+/// `board` (optional) the board's name from its manifest, which picks the
+/// map of a Linux board (`crate::pins::map_for`); an unknown pair throws.
 #[wasm_bindgen(js_name = boardPins)]
-pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
+pub fn board_pins_info(chip: &str, board: Option<String>) -> Result<Object, JsError> {
     use board_pins::SpiRouting;
     use board_pins::rp::{SpiBlock, SpiSignal, spi_function};
-    let map = pin_map(chip)?;
+    let map = pin_map(chip, board.as_deref())?;
     let o = Object::new();
     set(&o, "chip", chip);
     let routing = match map.spi_routing() {
@@ -829,10 +834,16 @@ pub fn board_pins_info(chip: &str) -> Result<Object, JsError> {
 /// `[{kind: "i2c", bus, hz} | {kind: "spi", bus, khz, mode}]`. Returns
 /// `[{row: number|null, field: "label"|"pin"|"func"|"bus"|"setting"|"table",
 /// message, fix?: {kind: "pin", pin} | {kind: "add", func, bus, pin?}}]`.
+/// `board` (optional) is as for `boardPins`.
 #[wasm_bindgen(js_name = checkPins)]
-pub fn check_pins(chip: &str, rows: Array, settings: Array) -> Result<Array, JsError> {
+pub fn check_pins(
+    chip: &str,
+    rows: Array,
+    settings: Array,
+    board: Option<String>,
+) -> Result<Array, JsError> {
     use crate::pins::{BusSetting, Fix, Func, Row, check};
-    let map = pin_map(chip)?;
+    let map = pin_map(chip, board.as_deref())?;
     let rows: Vec<Row> = rows
         .iter()
         .map(|r| {
@@ -1643,7 +1654,7 @@ pub fn simulate_recipe(
 }
 
 /// 16 lower- or upper-case hex digits to a node id.
-fn parse_node(hex: &str) -> Option<middleware::SenderId> {
+pub(crate) fn parse_node(hex: &str) -> Option<middleware::SenderId> {
     let b = hex.as_bytes();
     if b.len() != 16 {
         return None;
@@ -1657,7 +1668,7 @@ fn parse_node(hex: &str) -> Option<middleware::SenderId> {
 }
 
 /// A node id as 16 lower-case hex digits.
-fn node_hex(id: middleware::SenderId) -> String {
+pub(crate) fn node_hex(id: middleware::SenderId) -> String {
     id.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 

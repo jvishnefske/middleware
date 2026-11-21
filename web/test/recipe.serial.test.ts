@@ -9,7 +9,7 @@
 // batch, Restart is refused, Abort ends it Aborted.
 
 import { beforeAll, describe, expect, it } from "vitest";
-import { DeviceClient } from "../src/device/client";
+import { SerialClient } from "../src/device/client";
 import { SerialRequester, canServe, serveProblem } from "../src/device/requester";
 import { boardUnitsNote, unitsOnBoard, uploadUnit } from "../src/device/unitUpload";
 import { bindNode } from "../src/model/plantEdit";
@@ -44,7 +44,7 @@ function board(script: FakeDeviceScript) {
   const { host, device } = serialPair();
   const fake = new FakeDevice(proto, device, script);
   const hooks: { req: SerialRequester | null } = { req: null };
-  const client = new DeviceClient(host, proto, {
+  const client = new SerialClient(host, proto, {
     onPublish: (k, d) => hooks.req?.publication(k, d),
     onClosed: () => hooks.req?.closed(),
   });

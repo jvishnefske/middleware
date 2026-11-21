@@ -106,7 +106,7 @@ import {
 } from "../model/machines";
 import { type PayloadModel, flowsOf, makeModel, profileOfModel, withBoard, withFlows, withMachines, withPins, withWorkspace } from "../model/payload";
 import { type PinFunc, type PinIssue, type PinTable, boardDefaults, checkTable, labelsUsed, seedForTarget, withNeeds } from "../model/pins";
-import { TARGET_IDS, type TargetId, chipOf, isTargetId, targetLabel } from "../model/target";
+import { TARGET_IDS, type TargetId, boardOf, chipOf, isTargetId, targetLabel } from "../model/target";
 import type { BoardId } from "../onboarding/boards";
 import type { BoardPins, PinState, SimEvent } from "../protocol/wasm";
 import { SimSession } from "../sim/session";
@@ -369,7 +369,7 @@ export function blocksPage(app: App): HTMLElement {
   function checkPins() {
     const chip = chipOf(model.board);
     try {
-      boardPins = chip ? proto.boardPins(chip) : null;
+      boardPins = chip ? proto.boardPins(chip, boardOf(model.board)?.model) : null;
       pinIssues = checkTable(proto.checkPins, model.board, model.pins);
     } catch (e) {
       boardPins = null;
@@ -734,6 +734,26 @@ export function blocksPage(app: App): HTMLElement {
     if (isTargetId(profileSel.value)) setBoard(profileSel.value);
   });
   app.onBoardChosen((id) => setBoard(id));
+  // Device -> Blocks: a probed node's drafted plant (meshPanel).
+  app.onUsePlant(async (p) => {
+    const next = parsePlant(serializePlant(p), fallbackBoard());
+    if (!next.ok) {
+      out.textContent = `The probed plant is not valid: ${next.error}`;
+      return;
+    }
+    if (
+      serializePlant(syncPlant()) !== serializePlant(next.plant) &&
+      (await confirmReplace("the probed plant")) === null
+    ) {
+      out.textContent = "Kept your plant; the probed plant was not loaded.";
+      return;
+    }
+    plant = next.plant;
+    unitId = plant.physical.units[0]?.id ?? "";
+    loadModel(unitPayload(plant, unitId) as PayloadModel);
+    renderBadge();
+    out.textContent = `Loaded the probed plant: unit ${unitId} (Units view).`;
+  });
 
   /** True when `next` can replace the payload: nothing would be lost, or
    * the user confirms replacing it with `what`. */

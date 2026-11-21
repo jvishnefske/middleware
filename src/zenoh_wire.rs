@@ -356,6 +356,19 @@ pub fn node_key_buf(id: SenderId, key: Key<'_>) -> Option<heapless::String<NODE_
     Some(out)
 }
 
+/// The key expression that selects `key` on every node,
+/// `@mw/node/*/<key>` (a discovery query: each node answers on its own
+/// concrete key). Not a node key: [`parse_node_key`] refuses it. `None`
+/// only if it does not fit [`NODE_KEY_MAX`], which a valid [`Key`] never
+/// causes.
+pub fn node_key_any_buf(key: Key<'_>) -> Option<heapless::String<NODE_KEY_MAX>> {
+    let mut out = heapless::String::new();
+    out.push_str(NODE_PREFIX).ok()?;
+    out.push_str("*/").ok()?;
+    out.push_str(key.as_str()).ok()?;
+    Some(out)
+}
+
 /// Splits a per-node key expression `@mw/node/<zid16>/<key>` into the node
 /// it names and the key. `None` for anything else (wrong prefix, not 16
 /// lowercase hex digits, invalid key).
@@ -508,6 +521,19 @@ mod tests {
         ] {
             assert_eq!(parse_node_key(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn u42_the_all_nodes_key_is_a_wildcard_that_names_no_node() {
+        let expr = node_key_any_buf(Key::from_static("sys/info")).expect("fits");
+        assert_eq!(expr.as_str(), "@mw/node/*/sys/info");
+        assert_eq!(parse_node_key(&expr), None);
+        let longest = [b'k'; MAX_KEY_LEN];
+        let longest = Key::new(core::str::from_utf8(&longest).expect("ascii")).expect("key");
+        assert_eq!(
+            node_key_any_buf(longest).map(|s| s.len()),
+            Some(NODE_PREFIX.len() + 2 + MAX_KEY_LEN)
+        );
     }
 
     #[test]

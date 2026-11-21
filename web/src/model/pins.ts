@@ -61,7 +61,9 @@ export interface PinTable {
   buses: readonly BusSetting[];
 }
 
-export const EMPTY_PINS: PinTable = { rows: [], buses: [] };
+/** The table with no rows. Frozen (and its lists): it is shared by every
+ * board without pins, so a change to it would reach them all. */
+export const EMPTY_PINS: PinTable = Object.freeze({ rows: Object.freeze([]), buses: Object.freeze([]) });
 
 /** Standard-mode I2C. */
 export const DEFAULT_I2C_HZ = 100_000;
@@ -79,7 +81,12 @@ export interface PinIssue {
 export type PinFix = { kind: "pin"; pin: number } | { kind: "add"; func: PinFunc; bus: number; pin: number | null };
 
 /** protocol-wasm `checkPins`. */
-export type PinChecker = (chip: string, rows: readonly PinRow[], buses: readonly BusSetting[]) => PinIssue[];
+export type PinChecker = (
+  chip: string,
+  rows: readonly PinRow[],
+  buses: readonly BusSetting[],
+  board?: string,
+) => PinIssue[];
 
 export function busKind(func: PinFunc): "i2c" | "spi" | null {
   return func.startsWith("i2c-") ? "i2c" : func.startsWith("spi-") ? "spi" : null;
@@ -141,7 +148,7 @@ export function findRow(t: PinTable, label: string): PinRow | undefined {
  * gives payloads no pins. */
 export function boardDefaults(target: TargetId): PinTable {
   const b = boardOf(target);
-  if (!b) return EMPTY_PINS;
+  if (!b?.blink) return EMPTY_PINS;
   return { rows: [row("gpio-out", "LED", b.blink.pin, 0, b.blink.note)], buses: [] };
 }
 
@@ -169,7 +176,7 @@ export interface PinNeed {
  * `withNeeds` adds from it, and only labels an example needs. */
 export function boardSuggestions(target: TargetId): PinTable {
   const b = boardOf(target);
-  if (!b) return EMPTY_PINS;
+  if (!b?.button) return boardDefaults(target);
   return { rows: [...boardDefaults(target).rows, { ...row("gpio-in", "BUTTON", b.button.pin, 0, b.button.note), pull: "up" }], buses: [] };
 }
 
@@ -195,7 +202,8 @@ export function applyFix(t: PinTable, i: number | null, fix: PinFix): PinTable {
 }
 
 /** Checks the table for a target. The badge has no pins, so any row is an
- * issue; otherwise `checker` (protocol-wasm) decides. */
+ * issue; otherwise `checker` (protocol-wasm) decides, with the board's
+ * `model` for a board whose chip names none (the KD240). */
 export function checkTable(checker: PinChecker, target: TargetId, t: PinTable): PinIssue[] {
   const chip = chipOf(target);
   if (chip === null) {
@@ -203,7 +211,7 @@ export function checkTable(checker: PinChecker, target: TargetId, t: PinTable): 
       ? []
       : [{ row: null, field: "table", message: "The badge firmware gives payloads no pins; remove these rows or pick another board." }];
   }
-  return checker(chip, t.rows, t.buses);
+  return checker(chip, t.rows, t.buses, boardOf(target)?.model);
 }
 
 /** Labels the workspace's pin blocks name, sorted. */

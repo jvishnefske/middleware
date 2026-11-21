@@ -224,7 +224,49 @@ export interface ProtocolConstants {
     stop: string;
     log: string;
     status: string;
+    trustInfo: string;
+    trustClaim: string;
+    /** `sys/manifest/cm`: the node's control-module points, paged (ABI 8). */
+    controlModules: string;
   };
+}
+
+/** A finished `MeshSession` command (protocol-wasm `mesh`). */
+export type MeshCompletion =
+  | { id: number; kind: "opened"; sender: string }
+  | { id: number; kind: "closed" }
+  | { id: number; kind: "reply"; body: Uint8Array }
+  | { id: number; kind: "replies"; replies: { sender?: string; body?: Uint8Array; status?: number }[] }
+  | {
+      id: number;
+      kind: "error";
+      failure: "handler" | "noReply" | "down" | "tooLarge" | "other";
+      /** The `HandlerError` wire code, for "handler". */
+      status?: number;
+      message?: string;
+    };
+
+/** The browser's Zenoh session over one WebSocket (protocol-wasm
+ * `MeshSession`): the page feeds it messages and commands and polls it with
+ * the time; every method is synchronous. */
+export interface MeshSessionLike {
+  feed(msg: Uint8Array): void;
+  /** The WebSocket closed. */
+  closed(): void;
+  /** Messages to send, each one Zenoh batch with no length prefix. */
+  takeOutput(): Uint8Array[];
+  open(): number;
+  close(): number;
+  /** To the node with this sender id (16 hex), or to whoever serves `key`. */
+  request(sender: string | undefined, key: string, body: Uint8Array, timeoutMs: number): number;
+  /** `key` on every node (`@mw/node/<any>/<key>`). */
+  discover(key: string, body: Uint8Array, timeoutMs: number, max: number): number;
+  poll(nowMs: number): MeshCompletion[];
+  nextWakeMs(): number | undefined;
+  /** True once the opened session has ended (lease, the router's Close,
+   * the link); it then ignores input. */
+  isDown(): boolean;
+  readonly senderId: string;
 }
 
 export interface AbiImport {
@@ -477,11 +519,17 @@ export interface Protocol {
   readonly constants: ProtocolConstants;
   readonly abi: AbiInfo;
   readonly hasSimulator: boolean;
-  /** The pin map of a `sys/info` chip name; throws for an unknown one. */
-  boardPins(chip: string): BoardPins;
+  /** The pin map of a `sys/info` chip name, or of the board `board` names
+   * (its manifest's BOARD record, for a Linux board); throws for an unknown
+   * pair. */
+  boardPins(chip: string, board?: string): BoardPins;
   /** Checks a pin table on a chip (board-pins rules + the ABI's bus
-   * argument rules); throws for an unknown chip. */
-  checkPins(chip: string, rows: readonly PinRow[], buses: readonly BusSetting[]): PinIssue[];
+   * argument rules); `board` as for `boardPins`; throws for an unknown
+   * chip. */
+  checkPins(chip: string, rows: readonly PinRow[], buses: readonly BusSetting[], board?: string): PinIssue[];
+  /** A Zenoh session over a WebSocket with Zenoh id `zid` (1–16 bytes,
+   * not all zero); see `device/mesh.ts`. */
+  newMeshSession(zid: Uint8Array): MeshSessionLike;
   /** Checks state machines against the pin table's labels and functions
    * (the `state-table` crate's rules); a `MachineChecker`. */
   checkMachines(machines: readonly Machine[], pins: readonly { label: string; func: PinFunc }[]): MachineIssue[];
@@ -554,8 +602,9 @@ function wrap(): Protocol {
     constants,
     abi,
     hasSimulator,
-    boardPins: (chip) => pkg.boardPins(chip) as BoardPins,
-    checkPins: (chip, rows, buses) => pkg.checkPins(chip, [...rows], [...buses]) as PinIssue[],
+    boardPins: (chip, board) => pkg.boardPins(chip, board) as BoardPins,
+    checkPins: (chip, rows, buses, board) => pkg.checkPins(chip, [...rows], [...buses], board) as PinIssue[],
+    newMeshSession: (zid) => new pkg.MeshSession(zid) as unknown as MeshSessionLike,
     checkMachines: (machines, pins) => pkg.checkMachines([...machines], [...pins]) as MachineIssue[],
     checkFlows: (flows, machines, pins, phases) => pkg.checkFlows([...flows], [...machines], [...pins], phases ? [...phases] : undefined) as FlowIssue[],
     checkRecipe: (recipe, classes) => pkg.checkRecipe(recipe, [...classes]) as RecipeIssue[],

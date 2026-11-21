@@ -13,12 +13,16 @@
 //          cms: PinTable,                        control modules: the pin table
 //          ems: EquipmentModule[],               at most 8
 //          logic: [BlocksSource, ...Flow[]],     the unit's payload logic
-//          machines: Machine[] }
-//   EquipmentModule { id, name, cms: string[] }  pin labels it owns
+//          machines: Machine[],
+//          points?: PointRow[] }                 control points (points.ts),
+//                                                left out when there are none
+//   EquipmentModule { id, name, cms: string[] }  pin labels or point names it owns
 //
 // Physical model: a unit is one board; its control modules are the rows
-// of its pin table (checked by the firmwares' pin rules, pins.ts); an
-// equipment module groups control modules under a name. Procedural model:
+// of its pin table (checked by the firmwares' pin rules, pins.ts) and,
+// on a board with no payload pins (a probed KD240), the node's control
+// points (`sys/manifest/cm`, points.ts); an equipment module groups
+// control modules under a name. Procedural model:
 // phase classes and the equipment phases units implement them with, each
 // acting state's body a flow of that unit's logic. Recipes: the master
 // recipes, which name phase classes only.
@@ -37,7 +41,8 @@
 //
 // `plantProblem` is strict about shape and references: unknown keys, wrong
 // types, an equipment module owning a pin the unit's table lacks (or a
-// pin two modules own), a phase on an unknown unit, module or class, a
+// pin two modules own; points count as pins here; points.ts has their own
+// rules), a phase on an unknown unit, module or class, a
 // phase without a range for every class parameter (or with one outside the
 // class's), a body naming a flow the unit does not have, whose entry is
 // not that phase state's (`{on: "phase", phase: "<em>.<phase>", state}`;
@@ -56,6 +61,7 @@ import { type BlocksSource, MODEL_FORMAT, type PayloadModel, flowsOf, makeModel,
 import { copyFlows } from "./flows";
 import { copyMachines } from "./machines";
 import { type PinTable } from "./pins";
+import { type PointRow, copyPoints, pointsProblem } from "./points";
 import {
   EMPTY_PROCEDURAL,
   type EquipmentPhase,
@@ -104,6 +110,9 @@ export interface Unit {
   /** The Blocks workspace first, then the flows. */
   logic: readonly [BlocksSource, ...Flow[]];
   machines: readonly Machine[];
+  /** Control points the unit's node lists (`sys/manifest/cm`); absent on
+   * a unit with none. Names never repeat a pin label. */
+  points?: readonly PointRow[];
 }
 
 export interface PlantModel {
@@ -221,7 +230,7 @@ function firstDuplicate(ids: readonly string[]): number {
 
 function unitProblem(v: unknown, at: string): string | null {
   if (!isObj(v)) return `${at} must be an object`;
-  const extra = extraKey(v, ["id", "name", "class", "node", "board", "cms", "ems", "logic", "machines"]);
+  const extra = extraKey(v, ["id", "name", "class", "node", "board", "cms", "ems", "logic", "machines", "points"]);
   if (extra !== undefined) return `${at} has an unknown field "${extra}"`;
   if (!isUnitId(v.id)) return `${at}.id must start with a letter and use only letters, digits, _ or - (at most 24)`;
   if (!shortText(v.name)) return `${at}.name must be text (at most ${MAX_TEXT} characters)`;
@@ -230,8 +239,14 @@ function unitProblem(v: unknown, at: string): string | null {
   // The unit's payload part is exactly a version-3 model's.
   const payload = modelProblem({ format: MODEL_FORMAT, version: 3, board: v.board, pins: v.cms, logic: v.logic, machines: v.machines });
   if (payload) return `${at}.${payload.replace(/^pins\b/, "cms")}`;
+  const pinLabels = new Set((v.cms as PinTable).rows.map((r) => r.label));
+  if (v.points !== undefined) {
+    const p = pointsProblem(v.points, `${at}.points`, pinLabels);
+    if (p) return p;
+  }
   if (!Array.isArray(v.ems) || v.ems.length > MAX_EMS) return `${at}.ems must be a list of at most ${MAX_EMS} equipment modules`;
-  const labels = new Set((v.cms as PinTable).rows.map((r) => r.label));
+  // An equipment module owns pin labels and point names alike.
+  const labels = new Set([...pinLabels, ...((v.points as PointRow[] | undefined) ?? []).map((p) => p.name)]);
   const owner = new Map<string, string>();
   for (const [i, em] of v.ems.entries()) {
     const eat = `${at}.ems[${i}]`;
@@ -242,7 +257,9 @@ function unitProblem(v: unknown, at: string): string | null {
     if (!shortText(em.name)) return `${eat}.name must be text (at most ${MAX_TEXT} characters)`;
     if (!Array.isArray(em.cms) || em.cms.length > 64 || !em.cms.every((c) => typeof c === "string")) return `${eat}.cms must be a list of pin labels`;
     for (const label of em.cms as string[]) {
-      if (!labels.has(label)) return `${eat}.cms names "${label}", which is not in the unit's pin table`;
+      if (!labels.has(label)) {
+        return `${eat}.cms names "${label}", which is not in the unit's pin table${v.points ? " or points" : ""}`;
+      }
       const other = owner.get(label);
       if (other !== undefined) return `${eat}.cms names "${label}", which equipment module "${other}" already owns`;
       owner.set(label, em.id);
@@ -353,6 +370,7 @@ function copyUnit(u: Unit): Unit {
     ems: u.ems.map((e) => ({ ...e, cms: [...e.cms] })),
     logic: [blocks, ...copyFlows(flows)],
     machines: copyMachines(u.machines),
+    ...(u.points ? { points: copyPoints(u.points) } : {}),
   };
 }
 

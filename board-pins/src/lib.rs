@@ -18,7 +18,9 @@
 //! * [`boards`] — the maps: [`boards::PICO`] (Raspberry Pi Pico and Pico 2),
 //!   [`boards::ESP32`] (AI-Thinker ESP32-CAM), [`boards::ESP32S3`],
 //!   [`boards::ESP32C3`], [`boards::ESP8266`], [`boards::RT1050_EVKB`]
-//!   (NXP MIMXRT1050-EVKB), and [`boards::by_chip`].
+//!   (NXP MIMXRT1050-EVKB), [`boards::KD240`] (AMD Kria KD240, no payload
+//!   pins), [`boards::by_chip`] and [`boards::by_board`] (for Linux boards,
+//!   whose chip name names no board).
 //! * [`rp`] — the RP2040 / RP2350 GPIO function tables for SPI (F1) and
 //!   I2C (F3).
 //! * [`imxrt`] — i.MX RT1050 pads (IOMUXC registers, GPIO lines, ALT

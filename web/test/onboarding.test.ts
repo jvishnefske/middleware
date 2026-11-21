@@ -14,6 +14,7 @@ import {
   FIRST_EXAMPLE,
   UF2_INTEGRITY,
   boardById,
+  boardByModel,
   gettingStarted,
   textSpans,
   uf2Detail,
@@ -61,6 +62,8 @@ describe("boards", () => {
         const [install] = gettingStarted(b, m);
         if (b.install.kind === "web-serial") {
           expect(install?.action, b.id).toMatchObject({ kind: "tab", tab: "flash" });
+        } else if (b.install.kind === "nixos-image") {
+          expect(install?.action, b.id).toBeNull();
         } else {
           expect(install?.action, b.id).toBeNull();
           const text = [install?.body, ...(install?.substeps ?? [])].join(" ");
@@ -81,6 +84,38 @@ describe("boards", () => {
       expect(body).not.toContain("started");
     }
     expect(gettingStarted(boardById("pico2")!)[2]?.body).toContain("GPIO 25");
+  });
+
+  it("has the KD240: a NixOS image, reached over the mesh, no LED or button pins (U45)", () => {
+    const kd = boardById("kd240")!;
+    expect(kd).toMatchObject({
+      label: "AMD Kria KD240",
+      chip: "linux-aarch64",
+      model: "KD240",
+      runsPayloads: true,
+      ledPin: null,
+      blink: null,
+      button: null,
+    });
+    expect(kd.install).toEqual({ kind: "nixos-image", image: "kd240.img" });
+    // The same rule as board-pins by_board: the model contains "KD240".
+    expect(boardByModel("linux-aarch64", "ZynqMP KD240 revA/B/1")?.id).toBe("kd240");
+    expect(boardByModel("linux-aarch64", "AMD Kria KD240 revB")?.id).toBe("kd240");
+    expect(boardByModel("linux-aarch64", "kd240")).toBeUndefined();
+    expect(boardByModel("linux-aarch64", "Raspberry Pi 4")).toBeUndefined();
+    expect(boardByModel("linux-aarch64", null)).toBeUndefined();
+    expect(boardByModel("rp2350", null)?.id).toBe("pico2");
+    expect(protocol().boardPins("linux-aarch64", "AMD Kria KD240 revB").gpios).toEqual([]);
+    const [install, connect, run] = gettingStarted(kd);
+    expect(install?.body).toContain("kd240.img");
+    expect(install?.notes.join(" ")).toContain("kd240/BRINGUP.md");
+    expect(connect?.title).toBe("Connect");
+    expect(connect?.body).toContain("Mesh");
+    expect(connect?.action).toMatchObject({ kind: "tab", tab: "device" });
+    expect(run?.body).not.toContain("GPIO");
+    expect(run?.body).toContain("mwctl");
+    expect(boardDefaults("kd240")).toEqual({ rows: [], buses: [] });
+    expect(checkTable(protocol().checkPins, "kd240", boardDefaults("kd240"))).toEqual([]);
   });
 });
 
@@ -208,8 +243,8 @@ describe("first run", () => {
       const issues = checkTable(proto.checkPins, b.id, boardDefaults(b.id));
       expect(issues, b.id).toEqual([]);
       const run = gettingStarted(b).find((s) => s.title.startsWith("Run") || s.title.startsWith("Upload"));
-      if (b.runsPayloads) expect(run?.body, b.id).toContain(`GPIO ${b.blink.pin}`);
-      if (b.ledPin !== null) expect(b.blink.pin, b.id).toBe(b.ledPin);
+      if (b.runsPayloads && b.blink) expect(run?.body, b.id).toContain(`GPIO ${b.blink.pin}`);
+      if (b.ledPin !== null) expect(b.blink?.pin, b.id).toBe(b.ledPin);
     }
     expect(boardDefaults("pico2").rows[0]).toMatchObject({ label: "LED", pin: 25, func: "gpio-out" });
     expect(boardDefaults("esp32").rows[0]).toMatchObject({ label: "LED", pin: 4 });
@@ -219,17 +254,22 @@ describe("first run", () => {
     const proto = protocol();
     for (const b of BOARDS) {
       const t = boardSuggestions(b.id);
+      if (!b.button) {
+        expect(t.rows, b.id).toEqual([]);
+        continue;
+      }
       expect(findRow(t, "BUTTON"), b.id).toMatchObject({ pin: b.button.pin, func: "gpio-in", pull: "up", note: b.button.note });
       expect(checkTable(proto.checkPins, b.id, t), b.id).toEqual([]);
       expect(findRow(boardDefaults(b.id), "BUTTON"), b.id).toBeUndefined();
     }
-    expect(BOARDS.map((b) => [b.id, b.button.pin])).toEqual([
+    expect(BOARDS.map((b) => [b.id, b.button?.pin ?? null])).toEqual([
       ["esp32", 0],
       ["esp32s3", 0],
       ["esp32c3", 9],
       ["esp8266", 0],
       ["pico2", 15],
       ["pico", 15],
+      ["kd240", null],
     ]);
   });
 });

@@ -21,7 +21,7 @@
 import type { Protocol } from "../protocol/wasm";
 import { signImage } from "../trust/crypto";
 import { type UploadPlan, planUpload } from "../trust/wire";
-import { type DeviceClient, type RequestOptions, RequestError } from "./client";
+import { type DeviceClient, type RequestOptions, RequestError, refuseRemote } from "./client";
 
 export interface UploadOptions extends RequestOptions {
   /** Chunk size (clamped by the plan to 1..CHUNK_MAX). */
@@ -76,6 +76,7 @@ export async function uploadPayload(
   image: Uint8Array,
   opts: UploadOptions = {},
 ): Promise<void> {
+  refuseRemote(client, "upload");
   const steps = proto.uploadPlan(image, opts.chunk);
   if (opts.signing) {
     const commit = steps.findIndex((s) => s.key === proto.constants.keys.commit);
@@ -144,6 +145,7 @@ export async function trustedUpload(
   key: SigningKey | null,
   opts: TrustedUploadOptions = {},
 ): Promise<TrustedUploadResult> {
+  refuseRemote(client, "upload");
   const reqOpts: RequestOptions = { timeoutMs: opts.timeoutMs, retries: opts.retries ?? 1 };
   const info = await client.trustInfo(reqOpts);
   const plan = planUpload(info, key?.publicKey ?? null, (opts.now ?? Date.now)());

@@ -7,7 +7,7 @@
 import type { PlantModel, Unit } from "../model/plant";
 import type { DeviceInfo, Protocol } from "../protocol/wasm";
 import { buildUnit } from "../sim/recipeRun";
-import type { DeviceClient } from "./client";
+import { type DeviceClient, refuseRemote } from "./client";
 import { canServe, serveProblem } from "./requester";
 import { type SigningKey, type TrustedUploadOptions, type TrustedUploadResult, trustedUpload } from "./upload";
 
@@ -40,6 +40,7 @@ export async function uploadUnit(
   key: SigningKey | null,
   opts: TrustedUploadOptions = {},
 ): Promise<TrustedUploadResult> {
+  refuseRemote(client, "upload");
   const wasm = await buildUnit(plant, unit, proto.abi);
   return trustedUpload(client, proto, wasm, key, { ...opts, start: true });
 }

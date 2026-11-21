@@ -23,6 +23,9 @@
 //!   refused, never a panic.
 //! * [`tables`] — what the client declared and the key expression ids the
 //!   router declared, fixed capacity.
+//! * [`message`] — [`Unframed`](message::Unframed): the client's byte
+//!   stream over a link that keeps message boundaries (a WebSocket, one
+//!   batch per message, no length prefix).
 //! * [`client`] — [`ZenohLite`], the async shell: the transport traits
 //!   ([`Publisher`](crate::Publisher), [`Subscriber`](crate::Subscriber),
 //!   [`Subscribe`](crate::Subscribe), [`Requester`](crate::Requester),
@@ -57,6 +60,7 @@
 
 pub mod client;
 pub mod codec;
+pub mod message;
 pub mod session;
 pub mod tables;
 

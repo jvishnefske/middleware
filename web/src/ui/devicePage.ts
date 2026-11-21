@@ -16,7 +16,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { DeviceClient } from "../device/client";
+import { type DeviceClient, SerialClient } from "../device/client";
 import { firmwareRunsPayloads, trustedUpload } from "../device/upload";
 import { SerialRequester } from "../device/requester";
 import { boardUnitsNote, unitsOnBoard, uploadUnit } from "../device/unitUpload";
@@ -28,6 +28,7 @@ import { bindingPanel } from "./bindingPanel";
 import { describePort } from "../serial/ports";
 import type { App, PayloadHandoff } from "./app";
 import { errorText, formatBytes, h, parseHex, progressBar } from "./dom";
+import { meshPanel } from "./meshPanel";
 import { modal, trustPanel } from "./trustPanel";
 
 const BAUD = 115200;
@@ -44,6 +45,14 @@ export function devicePage(app: App): HTMLElement {
   // each connection.
   let unsignedOk = false;
   const trust = trustPanel(indexedDbStorage());
+  // Nodes over the cloud mesh, probe-only. A probed node's trust state
+  // shows in the trust panel (read only) while no board is on the cable.
+  const mesh = meshPanel(proto, {
+    usePlant: (p) => app.usePlant(p),
+    onSelect: (c) => {
+      if (!client) trust.setClient(c);
+    },
+  });
   /** The connected board as a recipe unit (when it reports a node id). */
   let requester: SerialRequester | null = null;
   let info: DeviceInfo | null = null;
@@ -130,7 +139,8 @@ export function devicePage(app: App): HTMLElement {
   );
   pubForm.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    if (!client) return;
+    // Publishing is the serial protocol's (a mesh node takes requests only).
+    if (!(client instanceof SerialClient)) return;
     try {
       const data = pubHex.checked ? parseHex(pubData.value) : new TextEncoder().encode(pubData.value);
       await client.publish(pubKey.value.trim(), data);
@@ -335,7 +345,7 @@ export function devicePage(app: App): HTMLElement {
     await p.setSignals({ dataTerminalReady: false, requestToSend: false }).catch(() => {});
     if (!p.readable || !p.writable) throw new Error("port has no streams");
     port = p;
-    client = new DeviceClient({ readable: p.readable, writable: p.writable }, proto, {
+    const serial = new SerialClient({ readable: p.readable, writable: p.writable }, proto, {
       onText: (t) => term.write(t),
       onPublish: (key, payload) => {
         requester?.publication(key, payload);
@@ -351,7 +361,8 @@ export function devicePage(app: App): HTMLElement {
         if (client) void release();
       },
     });
-    client.start();
+    client = serial;
+    serial.start();
     setConnected(true);
     note(`connected to ${describePort(p.getInfo())} at ${BAUD} baud`);
     await refreshInfo();
@@ -392,6 +403,8 @@ export function devicePage(app: App): HTMLElement {
       h("div", {}, h("h3", {}, "Console"), termEl),
       h("div", {}, h("h3", {}, "Device info"), infoEl),
     ),
+    h("h3", {}, "Mesh"),
+    mesh.el,
     h("h3", {}, "Trust"),
     trust.el,
     h("h3", {}, "Publish"),

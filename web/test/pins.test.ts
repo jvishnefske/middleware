@@ -146,3 +146,26 @@ describe("pin table transitions", () => {
     expect(labelsUsed(ws)).toEqual(["BUTTON", "LED"]);
   });
 });
+
+describe("Linux boards (U45)", () => {
+  it("take their pin map from the board name: the KD240 has no payload pins", () => {
+    const kd = proto.boardPins("linux-aarch64", "ZynqMP KD240 revA/B/1");
+    expect(kd.gpios).toEqual([]);
+    expect(kd.spiRouting).toBe("none");
+    expect(() => proto.boardPins("linux-aarch64")).toThrow(/no pin map/);
+    expect(proto.checkPins("linux-aarch64", [], [], "ZynqMP KD240")).toEqual([]);
+    expect(proto.checkPins("linux-aarch64", [row("gpio-out", "LED", 0)], [], "ZynqMP KD240").length).toBeGreaterThan(0);
+    expect(check("kd240", EMPTY_PINS)).toEqual([]);
+    expect(check("kd240", { rows: [row("gpio-out", "LED", 0)], buses: [] }).length).toBeGreaterThan(0);
+  });
+});
+
+describe("EMPTY_PINS", () => {
+  it("is frozen, so no caller can change every board's empty table", () => {
+    expect(Object.isFrozen(EMPTY_PINS)).toBe(true);
+    expect(Object.isFrozen(EMPTY_PINS.rows)).toBe(true);
+    expect(Object.isFrozen(EMPTY_PINS.buses)).toBe(true);
+    expect(() => (EMPTY_PINS.rows as PinTable["rows"][number][]).push(row("gpio-out", "LED", 1))).toThrow();
+    expect(EMPTY_PINS).toEqual({ rows: [], buses: [] });
+  });
+});

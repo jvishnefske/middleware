@@ -10,6 +10,16 @@
 - middleware: `MdnsAnnouncerBuilder::multicast_interface(Ipv4Addr)` (`IP_MULTICAST_IF`); unset by default.
 - mwctl: new optional feature `mdns` (with `zenoh`): `scout` also browses `_mw-node._tcp` with a one-shot querier for the scan's duration. New `MDNS` column and `mdns` rows (`scout::MdnsNode`, `Row::mdns`, `merge_mdns`, `MAX_MDNS`); the count line gains `, N announced on mDNS` (in every build). Records join a Zenoh row by `sender`, else by `id`, only as its sole claimant (two or more claims on one row attach none: `conflict: N records`, `Row::mdns_conflict`, each claimant its own `mdns` row); they never overwrite Zenoh cells. `just lan` uses `--features zenoh,mdns`. Limits: the replies are unicast from port 5353 to an ephemeral port, which a default-deny host firewall drops; off Linux, LAN answers are refused (the on-link subnets are read from `/proc/net/route`).
 
+### The mesh autoprobe in the browser (U40–U48)
+- web: `DeviceClient` is now an interface; `RequestClient` is the shared base and `SerialClient` the serial client (was the class `DeviceClient`); `controlPage(p)` reads `sys/manifest/cm`.
+- middleware: `zenoh_lite::message::{MessageLink, Recv, Unframed}` (the client over a WebSocket, no length prefix; re-exports `ErrorType`), `zenoh_wire::node_key_any_buf`, `ZenohLite::request_each_nodes`.
+- protocol-wasm: enables middleware `zenoh-lite`; `mesh::Pump` and the `MeshSession` export; `protocol().keys.controlModules`; `boardPins(chip, board?)` and `checkPins(..., board?)`.
+- board-pins: `boards::by_board` and the empty `KD240` map.
+- web: `device/mesh.ts` (`MeshTransport`, `scan`, `MeshClient`, probe-only: `ProbeOnlyError`, `MESH_PROBE_KEYS`, `defaultMeshUrl` = `wss://updates.<site>/mesh`), `device/probe.ts` (`decodeProbe`, `probeNode`, `bindingForImage`, `deployCommands`), `model/points.ts` and the optional `Unit.points`; the Start-tab board `kd240` (`Board.blink`/`button` may be null, `Install` kind `nixos-image`); the Device tab's Mesh section; `App.usePlant`.
+- Behaviour: the upload and binding flows refuse a remote client before sending anything; the trust panel shows a mesh node's state and never claims it.
+- posix-node tests: `controller/tests/web_fixtures.rs` records `web/test/fixtures/kd240.wire.json` and `kd240-paged.wire.json` (`MW_BLESS_FIXTURES=1` rewrites them).
+- Not done (the browser only probes): browser signing for the mesh, the Deploy section, the pre-signed bundle.
+
 ### zenohd static on musl, a PTY as a local serial link (MS59, RG28)
 - nix: `packages.x86_64-linux.zenohd` builds again: zenoh 1.10.1's `.cargo/config.toml` turned `crt-static` off for both musl triples, overriding `CARGO_BUILD_RUSTFLAGS`, and the link failed on `-lgcc_s`. The zenohd build now sets `CARGO_TARGET_<TRIPLE>_RUSTFLAGS = "-C target-feature=+crt-static"`.
 - nix: new `packages.x86_64-linux.zenohd-aarch64` (static aarch64, cross compiled) and `packages.aarch64-linux.zenohd` (native); `checks.aarch64-static` covers zenohd.

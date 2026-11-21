@@ -30,6 +30,10 @@
 //!   simulated units, a control recipe run (`recipes::run`) whose
 //!   commands are keyed request bodies for payloads the page drives, and
 //!   the phase state model for the page.
+//! * [`mesh`] — the browser's Zenoh session (the middleware's `zenoh_lite`
+//!   client) over a WebSocket the page owns: a pump the page feeds
+//!   messages and commands and polls with the time, one batch per message
+//!   with no length prefix, requests to one node and discovery of all.
 //! * [`simulator`] (`simulator` feature, default) — runs a payload in
 //!   `wasm-host` against a virtual device: GPIO with edge interrupts, ABI 2
 //!   hardware timers on a JS-supplied clock, an SPI device (loopback or a
@@ -39,7 +43,8 @@
 //! * `bindings` — the `wasm-bindgen` exports (`Decoder`, `encodeRequest`,
 //!   `uploadPlan`, `signedMessage`, `decodeTrustInfo`, `Simulator`,
 //!   `abi()`, `boardPins`, `checkPins`, `checkMachines`, `checkFlows`, `checkRecipe`,
-//!   `allocateRecipe`, `simulateRecipe`, `RecipeRun`, `phaseModel`, ...). It only converts values.
+//!   `allocateRecipe`, `simulateRecipe`, `RecipeRun`, `phaseModel`, ...) and
+//!   `mesh_js` (`MeshSession`). They only convert values.
 //!
 //! The pure modules use owned `Vec`/`String` results: this crate runs in a
 //! browser, not on a microcontroller, and owned values are what cross into
@@ -53,6 +58,8 @@ pub mod encode;
 pub mod flows;
 pub mod loader;
 pub mod machines;
+pub mod mesh;
+mod mesh_js;
 pub mod pins;
 pub mod recipes;
 #[cfg(feature = "simulator")]

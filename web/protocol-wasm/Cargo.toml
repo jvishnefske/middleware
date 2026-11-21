@@ -15,7 +15,8 @@ simulator = ["dep:wasm-host"]
 
 [dependencies]
 # `trust`: the device-side loader checks signed commits like the firmware.
-middleware = { path = "../..", features = ["trust"] }
+# `zenoh-lite`: the browser's Zenoh session over a WebSocket (`mesh`).
+middleware = { path = "../..", features = ["trust", "zenoh-lite"] }
 wasm-host = { path = "../../wasm-host", optional = true }
 # The board pin rules both firmwares build their profiles on (`pins`).
 board-pins = { path = "../../board-pins" }

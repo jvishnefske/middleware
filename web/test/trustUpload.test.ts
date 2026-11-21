@@ -3,7 +3,7 @@
 // trust contract (`FakeTrust`).
 
 import { afterEach, describe, expect, it } from "vitest";
-import { DeniedError, DeviceClient } from "../src/device/client";
+import { DeniedError, SerialClient } from "../src/device/client";
 import { type SigningKey, TrustRefusal, UploadError, trustedUpload, uploadPayload } from "../src/device/upload";
 import { exportPublicKey, generateKeyPair } from "../src/trust/crypto";
 import { parseCommitBody } from "../src/trust/wire";
@@ -15,11 +15,11 @@ const image2 = Uint8Array.from({ length: 700 }, (_, i) => (i * 13 + 1) & 0xff);
 const NOW_MS = 1_761_500_000_000;
 const NOW_S = NOW_MS / 1000;
 
-let open: { client: DeviceClient; device: FakeDevice }[] = [];
+let open: { client: SerialClient; device: FakeDevice }[] = [];
 
 function rig(trust?: FakeTrust) {
   const { host, device: devSide } = serialPair();
-  const client = new DeviceClient(host, proto);
+  const client = new SerialClient(host, proto);
   const device = new FakeDevice(proto, devSide, { trust });
   client.start();
   open.push({ client, device });
