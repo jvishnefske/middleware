@@ -402,6 +402,22 @@ mod tests {
         assert!(RP2040.sram_outside_heap() >= need);
     }
 
+    /// The stack room the linker scripts assert between the end of
+    /// `.bss`/`.uninit` (the heap arena included) and the stack top.
+    fn asserted_stack_room(script: &str) -> Option<usize> {
+        let rest = script.split("ASSERT(_stack_start - __euninit >= ").nth(1)?;
+        let n = rest.split(',').next()?.trim();
+        n.parse().ok()
+    }
+
+    #[test]
+    fn d51_the_link_fails_without_the_stack_room() {
+        use net_budget::{MARGIN, STACK};
+        for script in [include_str!("../memory-rp2040.x"), include_str!("../memory-rp2350.x")] {
+            assert_eq!(asserted_stack_room(script), Some(STACK + MARGIN));
+        }
+    }
+
     #[test]
     fn v7_heap_plans_fit_and_images_fit_a_slot() {
         for p in [RP2040, RP2350] {
