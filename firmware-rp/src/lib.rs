@@ -18,6 +18,9 @@
 //!   and image caps, the Pico board's pin policy and ADC pins.
 //! * [`node`] — the node id and USB serial number from the chip unique id
 //!   (`sys/info`'s node and the payload's `node_id`).
+//! * [`netid`] — the network identity from the node id: the Ethernet
+//!   addresses of a USB CDC-NCM link or a W5500, the NCM link's
+//!   link-local IPv4 address and embassy-net's seed.
 //! * [`pins`] — the payload's GPIO modes under the board policy (the
 //!   esp-base pin bank's rules), as a value the device shell applies.
 //! * [`periph`] — the payload SPI and I2C buses: the chips' GPIO function
@@ -64,6 +67,7 @@ pub mod chip;
 pub mod flash;
 pub mod fw_update;
 pub mod layout;
+pub mod netid;
 pub mod node;
 pub mod ota;
 pub mod periph;

@@ -851,6 +851,16 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   `mdns::responder::tests::d46_*`, firmware-imxrt
   `mdns_node::tests::d46_golden_txt_and_service`,
   `scripts/check-features.sh`.
+- [x] D45 An RP board's network identity follows from its node id and
+  needs no configuration: Ethernet addresses `02:4d:` (the board) and
+  `06:4d:` (the host's end of a USB NCM link, so its interface is
+  `enx064d…`) followed by the first four bytes of the FNV-1a-64 hash of
+  the id, both locally administered unicast and different; the NCM link's
+  IPv4 address `169.254.a.b`, /16, with `a` and `b` in 1..=254 from the
+  same hash (never 169.254.0/24, 169.254.255/24 or a `.0`/`.255` host
+  byte; no RFC 3927 probing by the board); embassy-net's seed is the hash
+  — firmware-rp `netid::tests::d45_*` (100 000 ids, a golden id checked
+  with Python).
 
 ### Transport contract 0.5 (K…)
 
