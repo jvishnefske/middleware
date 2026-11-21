@@ -838,6 +838,19 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   `mdns::race::tests::*`,
   `mdns::announce::tests::fake_seam_a_datagram_queued_when_the_timer_is_due_is_handled_once`,
   `mdns::announce::tests::fake_seam_set_on_link_moves_the_accepted_subnet`.
+- [x] D46 The responder's pure decisions are shared by every board,
+  `mdns::responder` (feature `mdns-core`, `no_std`, no heap): a `Board`
+  (instance prefix, TXT `chip` and `board`), an `Identity` (the node id,
+  `<prefix>-<id>`, `<that>.local`; `None` when `node::label` or
+  `node::host` refuses, so a prefix over 41 bytes), a `Locator`
+  (`tcp/A.B.C.D:P`, at most 25 bytes), `Desired`, `plan` (announce on a
+  new address, prefix or endpoint, withdraw when the address is gone,
+  nothing otherwise), `txt` and `service`. The RT1050 uses it through a
+  shim, and its record is byte for byte what it was (a golden TXT, with
+  and without endpoint and sender, and the whole `Service`) —
+  `mdns::responder::tests::d46_*`, firmware-imxrt
+  `mdns_node::tests::d46_golden_txt_and_service`,
+  `scripts/check-features.sh`.
 
 ### Transport contract 0.5 (K…)
 

@@ -29,6 +29,9 @@
 //!   `EmbassyClock` and `subnet` for boards on embassy-net.
 //! * `node` (feature `mdns-core`) — the `mw/node` record every middleware
 //!   node announces itself with: kind, instance and host names, TXT keys.
+//! * `responder` (feature `mdns-core`) — a board responder's pure
+//!   decisions over that record: its identity, what it wants announced,
+//!   when to announce again or withdraw, the TXT and service it sends.
 //!
 //! The 0.4 `ServiceDiscovery` trait is gone: browsing is
 //! [`crate::discovery::Browse`] for every discovery backend.
@@ -62,6 +65,8 @@ pub mod node;
 pub mod origin;
 #[cfg(feature = "mdns-core")]
 mod race;
+#[cfg(feature = "mdns-core")]
+pub mod responder;
 #[cfg(feature = "mdns-core")]
 pub mod socket;
 pub use crate::dns::wire;
