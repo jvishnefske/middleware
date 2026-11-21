@@ -23,16 +23,20 @@ class FakeLink implements MeshLink {
   readonly senderId = "00000000000000aa";
   up = true;
   readonly asked: string[] = [];
+  constructor(
+    private readonly info: Uint8Array = unhex(f.responses["sys/info"]),
+    private readonly manifest: Uint8Array = unhex(f.responses["sys/manifest"]),
+  ) {}
   async request(sender: string | null, key: string, body: Uint8Array): Promise<Uint8Array> {
     this.asked.push(`${sender} ${key}`);
-    if (key === "sys/info") return unhex(f.responses["sys/info"]);
-    if (key === "sys/manifest") return unhex(f.responses["sys/manifest"]);
+    if (key === "sys/info") return this.info;
+    if (key === "sys/manifest") return this.manifest;
     const page = f.responses["sys/manifest/cm"][body[0] ?? 0];
     if (key === "sys/manifest/cm" && page) return unhex(page);
     throw new RequestError(key, "NotFound", NOT_FOUND_CODE);
   }
   async discover(): Promise<Discovered[]> {
-    return [{ sender: SENDER, body: unhex(f.responses["sys/info"]) }];
+    return [{ sender: SENDER, body: this.info }];
   }
   async close(): Promise<void> {
     this.up = false;
@@ -137,6 +141,49 @@ describe("mesh panel URL", () => {
     const text = panel.el.textContent ?? "";
     expect(text).not.toContain("mwctl '--zenoh'");
     expect(text).toMatch(/refused: untrusted value: the site/);
+    panel.el.remove();
+  });
+});
+
+describe("mesh panel and hostile text", () => {
+  it("shows a node's chip, firmware and board as text, never as markup", async () => {
+    const evil = "<img src=x onerror=alert(1)>";
+    const script = "<script>alert(2)</script>";
+    const info = proto.encodeDeviceInfo({
+      abiVersion: 8,
+      capacity: 65536,
+      status: 1,
+      chip: evil,
+      firmware: script,
+      node: "4b44323430000001",
+    });
+    // The fixture manifest with its BOARD record (tag 11) replaced.
+    const m = unhex(f.responses["sys/manifest"]);
+    const name = new TextEncoder().encode(evil);
+    const at = [...m].findIndex((b, i) => b === 0x0b && m[i + 1] === 21 && m[i + 2] === 0x5a);
+    expect(at).toBeGreaterThan(0);
+    const manifest = new Uint8Array([...m.slice(0, at), 0x0b, name.length, ...name, ...m.slice(at + 2 + 21)]);
+    expect(proto.decodeManifest(manifest)?.board).toBe(evil);
+    const link = new FakeLink(info, manifest);
+    const panel = meshPanel(proto, {
+      connect: async () => link,
+      defaultUrl: "wss://updates.example.org/mesh",
+      usePlant: () => {},
+    });
+    document.body.append(panel.el);
+    button(panel.el, "Connect").click();
+    await settle();
+    button(panel.el, "Scan").click();
+    await settle();
+    expect(panel.el.querySelector(".mesh-nodes tbody")?.textContent).toContain(evil);
+    button(panel.el, "Probe").click();
+    await settle();
+    expect(panel.el.querySelectorAll("img, script")).toHaveLength(0);
+    expect(document.querySelectorAll("img, script")).toHaveLength(0);
+    const text = panel.el.textContent ?? "";
+    expect(text).toContain(evil);
+    expect(text).toContain(script);
+    expect(text).toContain("4b44323430000001");
     panel.el.remove();
   });
 });
