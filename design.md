@@ -4418,7 +4418,8 @@ the probe writes out.
   "u41_reads_put_the_length_before_each_message_in_every_split_size",
   "u41_empty_and_oversized_messages_are_skipped_and_counted",
   "u41_writes_in_any_pieces_send_each_batch_alone_without_its_length",
-  "u41_zenoh_lite_opens_and_requests_over_a_message_link".
+  "u41_zenoh_lite_opens_and_requests_over_a_message_link",
+  "u41_a_length_written_alone_too_large_for_the_buffer_writes_nothing".
 - [x] U42 Discovery: `zenoh_wire::node_key_any_buf` (`@mw/node/*/<key>`, not
   a node key) and `ZenohLite::request_each_nodes`, a target-all query on it
   that passes every reply on with its sender — `zenoh_wire`:
@@ -4430,8 +4431,11 @@ the probe writes out.
   messages and commands and polls with the time, sends `takeOutput()`, and
   polls again at `nextWakeMs()`; while idle the session sends keep-alives;
   requests to one node by sender id, discovery of all; a closed link fails
-  what is pending and what follows; junk never panics —
-  `cargo test -p protocol-wasm --lib mesh` (`u43_*`, 7 tests);
+  what is pending and what follows; a session that ends while idle (lease,
+  the router's Close, the link) sets `isDown`, after which input is
+  ignored and `MeshTransport` fails what waits and calls `onClosed`; junk
+  never panics — `cargo test -p protocol-wasm --lib mesh` (`u43_*`, 8
+  tests);
   `web/test/mesh.session.test.ts`: "sends InitSyn unprefixed on open and
   asks for a later poll", "fails a request before the session is open, and
   survives junk".
@@ -4486,7 +4490,10 @@ the probe writes out.
   lists only hex sender ids); a `?mesh=` URL only pre-fills the field, is
   flagged, and is used on Connect, and the panel shows the active URL; the Device tab's Mesh
   section shows it all, copyable, and "Use as plant" hands the plant to
-  Blocks — `web/test/probe.golden.test.ts` (10 tests, among them "drafts a
+  Blocks; at most 64 pages and 64 points are read (over that, or for a
+  chip no board runs, no plant is offered: `plantable`); a node's text is
+  shown as text, never markup —
+  `web/test/probe.golden.test.ts` (16 tests, among them "drafts a
   binding that checks clean against the node's real manifest", "reads info,
   the manifest and every page in order, and nothing else",
   "writes no command when a value came from the mesh in a shape it may not
@@ -4494,7 +4501,8 @@ the probe writes out.
   quote"); `web/test/mesh.panel.test.ts`: "connects, scans, probes and
   offers the plant and the mwctl commands", "only pre-fills a ?mesh= URL
   from the link, says so, and connects on Connect", "shows no command, with
-  the reason, when the URL gives no site".
+  the reason, when the URL gives no site", "shows a node's chip, firmware
+  and board as text, never as markup".
 - [x] U48 The probe's golden fixtures: posix-node records
   `web/test/fixtures/kd240.wire.json` (the simulated PC Turn 50, fixed
   facts) and `kd240-paged.wire.json` (64 points, 6 pages) over Zenoh,
