@@ -378,3 +378,43 @@ fn u43_malformed_and_oversized_input_never_panics() {
         "{done:?}"
     );
 }
+
+#[test]
+fn u43_a_session_that_dies_while_idle_says_so_and_takes_no_more_input() {
+    // The router goes silent: its 10 s lease runs out while nothing runs.
+    let mut p = opened();
+    assert!(!p.is_down());
+    let mut now = 0;
+    while !p.is_down() && now < 30_000 {
+        now = p.next_wake_ms().expect("a deadline while up").max(now + 1);
+        assert!(p.poll(now).is_empty());
+    }
+    assert!(p.is_down(), "the lease ended the session");
+    assert!(now <= 10_000 + 2_500, "{now}");
+    // Input is ignored now, and commands fail at once.
+    p.feed(&init_ack());
+    let id = p.submit(request(None, "sys/info", 1000));
+    assert_eq!(
+        p.poll(now + 1),
+        vec![Done {
+            id,
+            outcome: Outcome::Failed(Failure::Down)
+        }]
+    );
+    // The router closes the session while it is idle.
+    let mut q = opened();
+    q.feed(&batch(|w| {
+        middleware::zenoh_lite::codec::transport::Close {
+            reason: middleware::zenoh_lite::codec::transport::reason::GENERIC,
+            session: true,
+        }
+        .write(w)
+    }));
+    assert!(q.poll(1).is_empty());
+    assert!(q.is_down());
+    // A link that closes while idle is down too.
+    let mut c = opened();
+    c.close();
+    c.poll(1);
+    assert!(c.is_down());
+}

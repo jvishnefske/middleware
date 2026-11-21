@@ -263,6 +263,9 @@ export interface MeshSessionLike {
   discover(key: string, body: Uint8Array, timeoutMs: number, max: number): number;
   poll(nowMs: number): MeshCompletion[];
   nextWakeMs(): number | undefined;
+  /** True once the opened session has ended (lease, the router's Close,
+   * the link); it then ignores input. */
+  isDown(): boolean;
   readonly senderId: string;
 }
 

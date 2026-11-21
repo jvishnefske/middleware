@@ -163,6 +163,13 @@ impl MeshSession {
         self.0.poll(now).into_iter().map(completion).collect()
     }
 
+    /// True once the opened session has ended (lease, the router's Close,
+    /// the link): input is ignored from then on. Check it after `poll`.
+    #[wasm_bindgen(js_name = isDown)]
+    pub fn is_down(&self) -> bool {
+        self.0.is_down()
+    }
+
     /// When to poll next if nothing arrives, in the same time as `poll`'s.
     #[wasm_bindgen(js_name = nextWakeMs)]
     pub fn next_wake_ms(&self) -> Option<f64> {

@@ -37,6 +37,7 @@ class FakeSession implements MeshSessionLike {
   output: Uint8Array[] = [];
   wake: number | undefined = undefined;
   linkClosed = false;
+  down = false;
   private next = 1;
   private done: MeshCompletion[] = [];
   feed(msg: Uint8Array) {
@@ -70,6 +71,9 @@ class FakeSession implements MeshSessionLike {
   }
   nextWakeMs() {
     return this.wake;
+  }
+  isDown() {
+    return this.down;
   }
   finish(c: MeshCompletion) {
     this.done.push(c);
@@ -209,6 +213,27 @@ describe("MeshTransport", () => {
     expect(closed).toHaveBeenCalledTimes(1);
     expect(t.up).toBe(false);
     await expect(t.request(SENDER, keys.info, new Uint8Array(), 10)).rejects.toBeInstanceOf(MeshDownError);
+  });
+
+  it("notices a session that died while idle: fails what waits, tells the page, feeds nothing more", async () => {
+    const { t, sock } = await connected();
+    const closed = vi.fn();
+    t.onClosed(closed);
+    const a = t.request(SENDER, keys.info, new Uint8Array(), 8000);
+    // The lease runs out at the next timer: the session reports it is down.
+    session.wake = 10_000;
+    sock.message([0x04]);
+    session.down = true;
+    now = 10_000;
+    vi.advanceTimersByTime(10_000);
+    await expect(a).rejects.toBeInstanceOf(MeshDownError);
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(t.up).toBe(false);
+    expect(sock.closedByUs).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    const fed = session.fed.length;
+    sock.message([0x05]);
+    expect(session.fed.length).toBe(fed);
   });
 
   it("refuses to connect when the handshake fails", async () => {

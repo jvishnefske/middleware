@@ -7,9 +7,10 @@
 //   session is polled; what it wrote is sent; finished commands settle
 //   their promises; the timer is re-armed for the session's next deadline
 //   (keep-alives, timeouts). The session runs commands one at a time in
-//   order. The link going down fails everything pending with
-//   `MeshDownError` and calls `onClosed`; a new connection is a new
-//   transport.
+//   order. The link going down, or the session ending while idle (its
+//   `isDown()` after a poll: the lease, the router's Close), fails
+//   everything pending with `MeshDownError`, calls `onClosed` and stops
+//   feeding the session; a new connection is a new transport.
 // * `scan` asks every node for `sys/info` (`@mw/node/*/sys/info`) and lists
 //   each replier once, by its sender id (the key the node answers at; a
 //   reply whose sender is not 16 lowercase hex digits is left out).
@@ -192,6 +193,7 @@ export class MeshTransport implements MeshLink {
   }
 
   private message(data: unknown): void {
+    if (!this.isUp) return;
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data instanceof Uint8Array ? data : null;
     if (!bytes) return;
     this.session.feed(bytes);
@@ -236,9 +238,13 @@ export class MeshTransport implements MeshLink {
     }
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    // The session can also end while nothing waits (the lease, the
+    // router's Close): it says so after the poll.
+    if (this.session.isDown()) lost = true;
     if (lost) {
+      const wasUp = this.isUp;
       this.down();
-      this.ws.close();
+      if (wasUp) this.ws.close();
       return;
     }
     const wake = this.session.nextWakeMs();

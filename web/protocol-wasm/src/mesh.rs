@@ -20,8 +20,9 @@
 //!   polling on [`Pump::next_wake_ms`] for the session to stay up.
 //! * Commands run one at a time, in order.
 //! * One pump is one connection: after the link closes or the session goes
-//!   down, every command fails with [`Failure::Down`]; the page makes a
-//!   new pump for a new WebSocket.
+//!   down (also while idle: the lease, the router's Close),
+//!   [`Pump::is_down`] says so, input is ignored and every command fails
+//!   with [`Failure::Down`]; the page makes a new pump for a new WebSocket.
 //!
 //! Pure Rust with owned values (no `js_sys`), so it is tested natively;
 //! `mesh_js` wraps it for JS.
@@ -131,6 +132,8 @@ struct Shared {
     wake: Option<u64>,
     cmds: VecDeque<(u32, Cmd)>,
     done: Vec<Done>,
+    /// The session was opened (or its open tried) and is not up now.
+    down: bool,
 }
 
 type Cell = Rc<RefCell<Shared>>;
@@ -248,7 +251,10 @@ async fn next_cmd(cell: &Cell, client: &mut Client, buf: &mut [u8], up: &mut boo
         match race(queued(cell), client.next_event(buf)).await {
             Either::Left(c) => return c,
             Either::Right(Ok(_)) => {}
-            Either::Right(Err(_)) => *up = false,
+            Either::Right(Err(_)) => {
+                *up = false;
+                cell.borrow_mut().down = true;
+            }
         }
     }
     queued(cell).await
@@ -257,8 +263,10 @@ async fn next_cmd(cell: &Cell, client: &mut Client, buf: &mut [u8], up: &mut boo
 async fn run(cell: Cell, mut client: Box<Client>) {
     let mut buf = vec![0u8; BATCH];
     let mut up = false;
+    let mut tried = false;
     loop {
         let (id, cmd) = next_cmd(&cell, &mut client, &mut buf, &mut up).await;
+        tried |= cmd == Cmd::Open;
         let outcome = match cmd {
             Cmd::Open => match client.open().await {
                 Ok(()) => {
@@ -317,7 +325,11 @@ async fn run(cell: Cell, mut client: Box<Client>) {
         if matches!(outcome, Outcome::Failed(Failure::Down)) {
             up = false;
         }
-        cell.borrow_mut().done.push(Done { id, outcome });
+        let mut s = cell.borrow_mut();
+        if tried && !up {
+            s.down = true;
+        }
+        s.done.push(Done { id, outcome });
     }
 }
 
@@ -349,9 +361,21 @@ impl Pump {
         }
     }
 
-    /// One WebSocket message (a batch) from the router.
+    /// One WebSocket message (a batch) from the router; ignored once the
+    /// session is down.
     pub fn feed(&mut self, msg: &[u8]) {
-        self.cell.borrow_mut().inbox.push_back(msg.to_vec());
+        let mut s = self.cell.borrow_mut();
+        if !s.down {
+            s.inbox.push_back(msg.to_vec());
+        }
+    }
+
+    /// True once the session, opened before, has ended: the lease ran out,
+    /// the router closed it, the link closed, or a command found it gone.
+    /// It does not come back; the page closes the WebSocket and fails what
+    /// it waits for. Checked after every [`Pump::poll`].
+    pub fn is_down(&self) -> bool {
+        self.cell.borrow().down
     }
 
     /// The WebSocket closed: once the messages fed before are read, the

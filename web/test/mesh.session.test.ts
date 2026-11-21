@@ -21,6 +21,7 @@ describe("MeshSession", () => {
     // The first byte is the InitSyn header itself, not a length.
     expect(out[0][0] & 0x1f).toBe(INIT);
     expect(s.nextWakeMs()).toBeGreaterThan(0);
+    expect(s.isDown()).toBe(false);
     expect(id).toBeGreaterThan(0);
     // No more output until the router answers.
     expect(s.takeOutput()).toEqual([]);
@@ -38,9 +39,11 @@ describe("MeshSession", () => {
     }
     s.closed();
     done.push(...s.poll(3));
-    // The handshake failed (on the junk or the closed link), exactly once.
+    // The handshake failed (on the junk or the closed link), exactly once,
+    // and the session says it is down.
     expect(done).toHaveLength(1);
     expect(done[0]).toMatchObject({ id: open, kind: "error" });
+    expect(s.isDown()).toBe(true);
     expect(() => s.request("not hex", "sys/info", new Uint8Array(), 1000)).toThrow(/16 hex/);
     expect(() => proto.newMeshSession(new Uint8Array(16))).toThrow(/not all zero/);
   });
