@@ -85,7 +85,9 @@ esp-base = { path = "../firmware", default-features = false, features = ["trust"
 # The board pin rules (Pico pin map, RP function tables, SPI routing),
 # shared with esp-base and the web editor.
 board-pins = { path = "../board-pins" }
-middleware = { path = "..", features = ["serial", "trust"] }
+# `mdns-core` (no dependencies): the mw/node record and the responder's
+# decisions (`rp_base::mdns_node`); the embassy seam comes with `net`.
+middleware = { path = "..", features = ["serial", "trust", "mdns-core"] }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 

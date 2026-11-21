@@ -864,6 +864,15 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   bit) with the id's hash through the splitmix64 finalizer, so for one
   node every entropy value gives another seed — firmware-rp
   `netid::tests::d45_*` (100 000 ids, a golden id checked with Python).
+- [x] D47 An RP board on a network link announces the D41 record over the
+  D46 core: instance `rp-<node id>`, equal to its serial beacons'
+  instance, host `<that>.local`; TXT chip `rp2040`/`rp2350` (`sys/info`'s)
+  and board `pico-usb`, `pico2-usb`, `pico-w5500` or `pico2-w5500`, its
+  firmware version, no `sender` or `zenoh` (no Zenoh client yet); the
+  longest TXT fits 192 bytes. It wants an announcement only while the
+  link is up and has an address (a static link-local address exists
+  before any host does), so a link going down withdraws the record —
+  firmware-rp `mdns_node::tests::d47_*`.
 
 ### Transport contract 0.5 (K…)
 
