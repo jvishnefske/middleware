@@ -19,7 +19,8 @@
 #     thumbv6m and thumbv7em, is gated on `mdns-core` rather than the std
 #     feature `mdns`, and is neither embedded nor host (`mdns` enables
 #     it); its embassy seam `mdns-embassy` (D26, embedded) builds for
-#     thumbv7em and thumbv8m (it needs atomics, so not thumbv6m);
+#     thumbv6m, thumbv7em and thumbv8m (the RP2040's `rp2040,usb-ncm`
+#     links it: nothing in it needs CAS);
 #   * cloud feature sets (including `dns-sd`, `memory` and `udp`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
@@ -109,7 +110,7 @@ for m in announce origin socket error race node responder; do
         || fail "mod $m in src/mdns.rs is not gated on mdns-core"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "mdns-core" "mdns-core,espnow"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "mdns-core" "mdns-core,espnow" "mdns-core,mdns-embassy"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then

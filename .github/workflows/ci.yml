@@ -68,6 +68,8 @@ jobs:
           # The network links (one per build) with the mDNS responder.
           - features: rp2350,usb-ncm
             target: thumbv8m.main-none-eabihf
+          - features: rp2040,usb-ncm
+            target: thumbv6m-none-eabi
     steps:
       - uses: actions/checkout@v4
       - id: present
