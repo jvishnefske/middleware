@@ -272,3 +272,31 @@ fn u41_zenoh_lite_opens_and_requests_over_a_message_link() {
     });
     assert_eq!(request, Some(key.as_str()));
 }
+
+#[test]
+fn u41_a_length_written_alone_too_large_for_the_buffer_writes_nothing() {
+    // N = 64 holds a batch of at most 62 bytes; 63 does not fit.
+    for head in [&[63u8, 0][..], &[0xff, 0xff][..]] {
+        let mut s: Unframed<Link, 64> = Unframed::new(Link::default());
+        // The 2-byte length alone, then each byte alone.
+        assert_eq!(run(s.write(head)).expect("write"), 0, "{head:?}");
+        let mut s1: Unframed<Link, 64> = Unframed::new(Link::default());
+        assert_eq!(run(s1.write(&head[..1])).expect("write"), 1);
+        assert_eq!(
+            run(s1.write(&head[1..])).expect("write"),
+            0,
+            "{head:?} one byte at a time"
+        );
+        // Nothing is left half-taken: a batch that fits goes out, in pieces of 2.
+        for s in [&mut s, &mut s1] {
+            let ok = prefixed(&[&[9u8; 10]]);
+            run(async {
+                for piece in ok.chunks(2) {
+                    assert_eq!(s.write(piece).await.expect("write"), piece.len());
+                }
+                s.flush().await.expect("flush");
+            });
+            assert_eq!(s.link_mut().sent, vec![vec![9u8; 10]]);
+        }
+    }
+}

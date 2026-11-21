@@ -179,7 +179,9 @@ impl<L: MessageLink, const N: usize> Write for Unframed<L, N> {
         if self.wlen >= LEN_PREFIX {
             let len = usize::from(u16::from_le_bytes([self.wr[0], self.wr[1]]));
             n = n.min(LEN_PREFIX + len - self.wlen);
-        } else if self.wlen + n > LEN_PREFIX {
+        } else if self.wlen + n >= LEN_PREFIX {
+            // The length is complete with these bytes (perhaps exactly):
+            // check that its batch fits before taking any of it.
             let mut head = [0u8; LEN_PREFIX];
             head[..self.wlen].copy_from_slice(&self.wr[..self.wlen]);
             let rest = LEN_PREFIX - self.wlen;
