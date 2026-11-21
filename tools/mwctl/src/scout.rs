@@ -94,6 +94,10 @@ pub struct Row {
     pub node: Option<Answer>,
     /// Its mDNS `mw/node` record, if one was matched to it ([`merge_mdns`]).
     pub mdns: Option<MdnsNode>,
+    /// How many mDNS records claimed this row when more than one did (then
+    /// none is attached, and each is an `mdns` row carrying the same
+    /// count); 0 otherwise.
+    pub mdns_conflict: usize,
 }
 
 /// A node's `_mw-node._tcp` record on mDNS (`middleware::mdns::node`):
@@ -236,6 +240,7 @@ pub fn merge(heard: &[Heard], linked: &[Linked], answers: &[Answer], own: &str) 
                 via: Vec::new(),
                 node: None,
                 mdns: None,
+                mdns_conflict: 0,
             });
             rows.len() - 1
         });
@@ -254,6 +259,7 @@ pub fn merge(heard: &[Heard], linked: &[Linked], answers: &[Answer], own: &str) 
                 via: Vec::new(),
                 node: None,
                 mdns: None,
+                mdns_conflict: 0,
             });
             rows.len() - 1
         });
@@ -281,6 +287,7 @@ pub fn merge(heard: &[Heard], linked: &[Linked], answers: &[Answer], own: &str) 
                 via: Vec::new(),
                 node: Some(a.clone()),
                 mdns: None,
+                mdns_conflict: 0,
             }),
         }
     }
@@ -288,44 +295,62 @@ pub fn merge(heard: &[Heard], linked: &[Linked], answers: &[Answer], own: &str) 
     rows
 }
 
-/// Joins the mDNS records `found` (at most [`MAX_MDNS`]) to `rows`: a
-/// record goes to the row whose sender id (its `sys/info` reply key, else
+/// Joins the mDNS records `found` (at most [`MAX_MDNS`]) to `rows`. A
+/// record claims the row whose sender id (its `sys/info` reply key, else
 /// the id of its session's Zenoh id in `ids`) is the record's `sender`,
-/// else to the row whose `sys/info` reports the record's `id`, and only to
-/// a row no record has joined yet; a record without one is a row of its
+/// else the row whose `sys/info` reports the record's `id`. A row claimed
+/// by exactly one record gets it; a row claimed by more gets none (TXT is
+/// unauthenticated: the first to answer may be the spoof), and every
+/// claimant becomes a row of its own, all marked with the count
+/// ([`Row::mdns_conflict`]). A record that claims nothing is a row of its
 /// own, kind `mdns`, after the others. Nothing else in a row changes.
 pub fn merge_mdns(mut rows: Vec<Row>, found: &[MdnsNode], ids: &[(String, SenderId)]) -> Vec<Row> {
     let sender_of_session = |zid: &Option<String>| {
         zid.as_ref()
             .and_then(|z| ids.iter().find(|(i, _)| i == z).map(|(_, s)| *s))
     };
-    for f in found.iter().take(MAX_MDNS) {
-        let by_sender = f.sender.and_then(|s| {
-            rows.iter().position(|r| {
-                r.mdns.is_none()
-                    && (r.node.as_ref().is_some_and(|n| n.node == s)
-                        || sender_of_session(&r.zid) == Some(s))
-            })
-        });
-        let by_id = || {
-            rows.iter().position(|r| {
-                r.mdns.is_none()
-                    && r.node.as_ref().is_some_and(|n| {
+    let found = &found[..found.len().min(MAX_MDNS)];
+    // Each record's claim, against the rows as Zenoh saw them.
+    let claims: Vec<Option<usize>> = found
+        .iter()
+        .map(|f| {
+            let by_sender = f.sender.and_then(|s| {
+                rows.iter().position(|r| {
+                    r.node.as_ref().is_some_and(|n| n.node == s)
+                        || sender_of_session(&r.zid) == Some(s)
+                })
+            });
+            by_sender.or_else(|| {
+                rows.iter().position(|r| {
+                    r.node.as_ref().is_some_and(|n| {
                         n.node == f.id || n.info.as_ref().and_then(|i| i.node) == Some(f.id)
                     })
+                })
             })
-        };
-        match by_sender.or_else(by_id) {
-            Some(i) => rows[i].mdns = Some(f.clone()),
-            None => rows.push(Row {
-                zid: None,
-                whatami: "mdns".into(),
-                addrs: Vec::new(),
-                via: Vec::new(),
-                node: None,
-                mdns: Some(f.clone()),
-            }),
+        })
+        .collect();
+    let claimants = |i: usize| claims.iter().filter(|c| **c == Some(i)).count();
+    let mut lone = Vec::new();
+    for (f, claim) in found.iter().zip(&claims) {
+        match claim.map(|i| (i, claimants(i))) {
+            Some((i, 1)) => rows[i].mdns = Some(f.clone()),
+            Some((i, n)) => {
+                rows[i].mdns_conflict = n;
+                lone.push((f, n));
+            }
+            None => lone.push((f, 0)),
         }
+    }
+    for (f, n) in lone {
+        rows.push(Row {
+            zid: None,
+            whatami: "mdns".into(),
+            addrs: Vec::new(),
+            via: Vec::new(),
+            node: None,
+            mdns: Some(f.clone()),
+            mdns_conflict: n,
+        });
     }
     sort_rows(&mut rows);
     rows
@@ -414,11 +439,18 @@ pub fn format(rows: &[Row]) -> String {
             let mdns = match &r.mdns {
                 Some(m) => {
                     let addr = m.addr.as_deref().unwrap_or("?");
-                    match &m.zenoh {
+                    let cell = match &m.zenoh {
                         Some(z) => format!("{addr} via {z}"),
                         None => addr.to_owned(),
+                    };
+                    // First, so the cut at MAX_CELL never hides it.
+                    if r.mdns_conflict > 0 {
+                        format!("(conflict) {cell}")
+                    } else {
+                        cell
                     }
                 }
+                None if r.mdns_conflict > 0 => format!("conflict: {} records", r.mdns_conflict),
                 None => "-".into(),
             };
             [
@@ -1161,6 +1193,7 @@ mod tests {
             via: Vec::new(),
             node: None,
             mdns: None,
+            mdns_conflict: 0,
         };
         let out = format(&[row]);
         assert!(
@@ -1321,18 +1354,55 @@ client  c9        tcp/10.0.0.9:50123  -     r1   310441d265f82484  imxrt1052  0.
     }
 
     #[test]
-    fn d37_a_duplicate_claim_is_not_merged() {
+    fn d37_rival_claims_attach_neither_in_either_order() {
         let real = found("posix-0102030405060708", POSIX, Some(POSIX_SENDER));
         let spoof = MdnsNode {
             instance: "posix-evil".into(),
             chip: "spoofed".into(),
             ..real.clone()
         };
-        let rows = merge_mdns(zenoh_rows(), &[real.clone(), spoof.clone()], &[]);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(row(&rows, "c7").mdns.as_ref(), Some(&real));
-        assert_eq!(rows[4].whatami, "mdns");
-        assert_eq!(rows[4].mdns.as_ref(), Some(&spoof));
+        for order in [[real.clone(), spoof.clone()], [spoof.clone(), real.clone()]] {
+            let rows = merge_mdns(zenoh_rows(), &order, &[]);
+            assert_eq!(rows.len(), 6);
+            let c7 = row(&rows, "c7");
+            assert_eq!((c7.mdns.as_ref(), c7.mdns_conflict), (None, 2));
+            let lone: Vec<_> = rows[4..]
+                .iter()
+                .map(|r| (r.whatami.as_str(), r.mdns.as_ref(), r.mdns_conflict))
+                .collect();
+            assert_eq!(lone, [("mdns", Some(&real), 2), ("mdns", Some(&spoof), 2)]);
+            let out = format(&rows);
+            let line = out.lines().find(|l| l.starts_with("client  c7")).unwrap();
+            assert!(line.contains("conflict: 2 records"), "{line}");
+            assert_eq!(
+                out.lines()
+                    .filter(|l| l.starts_with("mdns") && l.contains("(conflict) 192.168.1.20"))
+                    .count(),
+                2,
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn d37_a_sender_claim_and_an_id_claim_on_one_row_conflict() {
+        let by_sender = found("posix-a", SenderId([0xaa; 8]), Some(POSIX_SENDER));
+        let by_id = found("posix-b", POSIX, None);
+        for order in [
+            [by_sender.clone(), by_id.clone()],
+            [by_id.clone(), by_sender.clone()],
+        ] {
+            let rows = merge_mdns(zenoh_rows(), &order, &[]);
+            let c7 = row(&rows, "c7");
+            assert_eq!((c7.mdns.as_ref(), c7.mdns_conflict), (None, 2));
+            assert_eq!(rows.iter().filter(|r| r.whatami == "mdns").count(), 2);
+        }
+        // One claim on each of two rows is no conflict.
+        let rt = found("rt1050-310441d265f82484", NODE, Some(NODE));
+        let rows = merge_mdns(zenoh_rows(), &[by_id.clone(), rt.clone()], &[]);
+        assert_eq!(row(&rows, "c7").mdns.as_ref(), Some(&by_id));
+        assert_eq!(row(&rows, "c9").mdns.as_ref(), Some(&rt));
+        assert!(rows.iter().all(|r| r.mdns_conflict == 0));
     }
 
     #[test]

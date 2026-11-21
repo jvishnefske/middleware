@@ -892,15 +892,19 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   re-asking each second; a goodbye removes a record; an mDNS failure is a
   note on stderr, never a failure of the scan, and nothing learned from
   mDNS is connected to — mwctl `scout::mdns_shell::tests::d35_*`.
-- [x] D36 An mDNS node joins the Zenoh row whose sender id (its `sys/info`
-  reply key, else the id of the session's Zenoh id) equals the TXT
-  `sender`, else whose `sys/info` node id (or reply key) equals the TXT
-  `id`; one without a row is a row of its own (kind `mdns`, after the
-  others) — mwctl `scout::tests::d36_*`.
+- [x] D36 An mDNS record claims the Zenoh row whose sender id (its
+  `sys/info` reply key, else the id of the session's Zenoh id) equals the
+  TXT `sender`, else whose `sys/info` node id (or reply key) equals the
+  TXT `id`, and joins it when it is the row's only claimant; one without a
+  row is a row of its own (kind `mdns`, after the others) — mwctl
+  `scout::tests::d36_*`.
 - [x] D37 mDNS data fills the `MDNS` column (address, and `via <locator>`
   with `zenoh=`) and the node, chip and firmware cells of a row nothing
-  else saw, and never changes a cell from Zenoh; a second claim on an
-  already-merged row is a separate row — mwctl `scout::tests::d37_*`.
+  else saw, and never changes a cell from Zenoh. When two or more records
+  claim one row (by sender, by id, or one of each), in whatever order they
+  arrived, none joins it: the row's `MDNS` cell reads `conflict: N
+  records` and each claimant is its own `mdns` row whose cell starts
+  `(conflict)` — mwctl `scout::tests::d37_*`.
 - [x] D38 Every mDNS-sourced cell is printed through the table's escaping
   (control, bidi including U+061C, zero-width, U+2028, U+2029 and U+00AD
   characters shown as `\u{..}`, cut at 64
