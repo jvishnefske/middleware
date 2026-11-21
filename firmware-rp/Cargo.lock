@@ -1549,6 +1549,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "ed25519-dalek",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
