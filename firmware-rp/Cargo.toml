@@ -67,6 +67,8 @@ image-tool = ["dep:mwctl"]
 # feature. `usb-ncm`: USB CDC-NCM beside the CDC-ACM port, the board at a
 # link-local IPv4 address derived from its node id (`docs/usb-net.md`).
 usb-ncm = ["net"]
+# `w5500`: a WIZnet W5500 on SPI0 (the W5500-EVB-Pico's pins), DHCP.
+w5500 = ["dep:embedded-hal-async"]
 # Internal: embassy-net (UDP over IPv4 with multicast) and middleware's
 # embassy mDNS seam, pulled in by a link feature.
 net = ["shell", "dep:embassy-net", "middleware/mdns-embassy"]
@@ -117,6 +119,9 @@ embedded-io-async = { version = "0.7", optional = true }
 # The network stack of a link feature: IPv4, Ethernet framing, UDP and
 # multicast membership only (default features off: no TCP, DNS or DHCP).
 embassy-net = { version = "0.9.1", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"], optional = true }
+# `w5500`: the SPI device trait the W5500 driver takes (`rp_base::wiznet`
+# wraps it).
+embedded-hal-async = { version = "1.0", optional = true }
 # `rp-image` only (feature `image-tool`, host): mwctl's image loading and
 # checks, so the build refuses what `mwctl fw update` would.
 mwctl = { path = "../tools/mwctl", optional = true }
@@ -139,6 +144,8 @@ wat = "1"
 # in-memory cable) to completion on the host.
 embassy-futures = "0.1.2"
 embedded-io-async = "0.7"
+# The W5500 SPI wrapper's tests drive it with a recording fake device.
+embedded-hal-async = "1.0"
 
 [profile.dev]
 opt-level = "s"

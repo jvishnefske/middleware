@@ -54,6 +54,9 @@
 //!   again after a `sys/info` reply, withdrawn when the run ends; and the
 //!   rule that a payload publishes neither `sys/...` nor `disc/...`.
 //! * [`usb`] — the CDC-ACM zero-length-packet rule and the USB identity.
+//! * `wiznet` (with `w5500`, and in tests) — the W5500's pins and SPI
+//!   clock, and `NoMacFilter`, the SPI wrapper that turns the driver's MAC
+//!   filter off so multicast (mDNS) arrives.
 //! * `budget` (with the `wasm` runtime, and in tests) — the limits
 //!   payloads run under and the largest image a heap admits.
 //!
@@ -83,3 +86,5 @@ mod ram_flash;
 pub mod requests;
 pub mod service;
 pub mod usb;
+#[cfg(any(test, feature = "w5500"))]
+pub mod wiznet;
