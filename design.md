@@ -918,6 +918,117 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   `just lan` enables it, posix-node enables `middleware/mdns` (PN9 asserts
   it), and the docs and CHANGELOG name the firewall and non-Linux limits —
   `scripts/check-features.sh`.
+- [x] D46 The responder's pure decisions are shared by every board,
+  `mdns::responder` (feature `mdns-core`, `no_std`, no heap): a `Board`
+  (instance prefix, TXT `chip` and `board`), an `Identity` (the node id,
+  `<prefix>-<id>`, `<that>.local`; `None` when `node::label` or
+  `node::host` refuses, so a prefix over 41 bytes), a `Locator`
+  (`tcp/A.B.C.D:P`, at most 25 bytes), `Desired`, `plan` (announce on a
+  new address, prefix or endpoint, withdraw when the address is gone,
+  nothing otherwise), `txt` and `service`. The RT1050 uses it through a
+  shim, and its record is byte for byte what it was (a golden TXT, with
+  and without endpoint and sender, and the whole `Service`) —
+  `mdns::responder::tests::d46_*`, firmware-imxrt
+  `mdns_node::tests::d46_golden_txt_and_service`,
+  `scripts/check-features.sh`.
+- [x] D45 An RP board's network identity follows from its node id and
+  needs no configuration: Ethernet addresses `02:4d:` (the board) and
+  `06:4d:` (the host's end of a USB NCM link, so its interface is
+  `enx064d…`) followed by the first four bytes of the FNV-1a-64 hash of
+  the id, both locally administered unicast and different; the NCM link's
+  IPv4 address `169.254.a.b`, /16, with `a` and `b` in 1..=254 from the
+  same hash (never 169.254.0/24, 169.254.255/24 or a `.0`/`.255` host
+  byte; no RFC 3927 probing by the board). embassy-net's seed is never
+  the node id alone (the id is public, in the mDNS TXT): `seed(entropy,
+  node)` mixes 8 bytes of boot entropy (RP2350: the TRNG, read async
+  with a 20 ms bound so a fault never panics, XOR the ROSC random bit,
+  which alone remains if the TRNG does not deliver; RP2040: the ROSC)
+  with the id's hash through the splitmix64 finalizer, so for one
+  node every entropy value gives another seed — firmware-rp
+  `netid::tests::d45_*` (100 000 ids, a golden id checked with Python).
+- [x] D47 An RP board on a network link announces the D41 record over the
+  D46 core: instance `rp-<node id>`, equal to its serial beacons'
+  instance, host `<that>.local`; TXT chip `rp2040`/`rp2350` (`sys/info`'s)
+  and board `pico-usb`, `pico2-usb`, `pico-w5500` or `pico2-w5500`, its
+  firmware version, no `sender` or `zenoh` (no Zenoh client yet); the
+  longest TXT fits 192 bytes. It wants an announcement only while the
+  link is up and has an address (a static link-local address exists
+  before any host does), so a link going down withdraws the record —
+  firmware-rp `mdns_node::tests::d47_*`.
+- [ ] D48 With `usb-ncm` the RP board is a composite USB device: CDC-ACM
+  first (interfaces 0 and 1, so `/dev/serial/by-id/...-if00` and the
+  gateway's rules are unchanged), CDC-NCM after it (2 and 3), each with
+  an interface association; the configuration is 155 bytes (ACM 61, NCM
+  85, counted from embassy-usb 0.6.0) of the 256-byte buffer, and the
+  four interfaces and three handlers fit embassy-usb's defaults (a const
+  assertion in the shell) — firmware-rp
+  `usb::tests::d48_acm_and_ncm_fit_the_usb_buffers_and_limits`; built for
+  `rp2350,usb-ncm` and `rp2040,usb-ncm`. On hardware: `lsusb -v` shows
+  two IADs and `wTotalLength` 155, `cdc_acm` and `cdc_ncm` both bind, the
+  `-if00` port is unchanged and `mwctl info` works while NCM is up.
+  Owner: user.
+- [x] D51 The network links fit the RP2350's 136 KiB outside the heap,
+  measured on the release builds (`rust-size`, `rust-nm`; `build.sh`
+  prints the statics outside the heap): 43 244 bytes without a link,
+  24 824 more with `usb-ncm` (the mDNS task pool 14 784, the NCM channel
+  6 188, the NCM runner 2 912, 2 socket slots 736) or 23 036 with `w5500`
+  (the same pool, the driver's channel 6 188, 3 socket slots 1 160),
+  the deepest poll
+  36 440 bytes (the mDNS task, by direct calls on thumbv8m), and a 16 KiB
+  margin. It is enforced: both linker scripts assert `_stack_start -
+  __euninit >= 52824` (STACK + MARGIN; the link fails, checked at the
+  exact boundary), and `build.sh` fails a build whose statics outside the
+  heap exceed its variant's figure (RP2040 figures too: 27 596, +24 784,
+  +22 976) — firmware-rp
+  `chip::tests::d51_the_network_links_fit_beside_the_heap`,
+  `chip::tests::d51_the_link_fails_without_the_stack_room`.
+- [x] D49 With `w5500` multicast reaches the board: embassy-net-wiznet
+  0.3.0 opens socket 0 in MACRAW with `Sn_MR` = `0x84` (MFEN, the MAC
+  filter, on: only its own address and broadcast arrive, so no mDNS), a
+  sealed constant; `wiznet::NoMacFilter` wraps the SPI device and writes
+  that one register (socket 0 `Sn_MR`: address `00 00`, control `0C`, one
+  data byte) with MFEN clear, `0x04`, and passes every other transaction
+  through. A contract test runs the real driver's initialisation over a
+  recording fake: bare it writes `Sn_MR` `0x84` exactly once (so an
+  upstream change fails it), wrapped `0x04`, all else identical —
+  firmware-rp `wiznet::tests::d49_*`.
+- [x] D50 With `w5500` the W5500's pins and controller are the
+  firmware's: `board_pins::boards::PICO_W5500` is the Pico map with GPIO
+  16–21 reserved ("the W5500's SPI0, chip select, reset and interrupt"),
+  every other pin as on the Pico; the profiles `RP2040_W5500` and
+  `RP2350_W5500` use it and reserve SPI0, so a payload gets `Unsupported`
+  for those pins and for any SPI route onto SPI0 (GPIO 0–7 too), while
+  SPI1 stays the payload's; the W5500's bus pins are SPI0's RX, CSn, SCK
+  and TX in the function table. `by_chip` still names the plain Pico map
+  — board-pins `boards::tests::d50_*`, firmware-rp
+  `chip::tests::d50_the_w5500_profiles_keep_its_pins_and_spi0`,
+  `periph::func::tests::d50_no_payload_route_reaches_a_reserved_spi_block`.
+- [ ] D53 On a W5500-EVB-Pico (or a Pico wired alike) with `w5500`, the
+  board initialises the W5500 (a missing module is logged and mwctl
+  still works), takes a DHCP lease as `rp-<id>`, and its responder
+  announces the D47 record (board `pico-w5500`/`pico2-w5500`) while the
+  PHY link is up and a lease is held, withdrawing when either goes.
+  Built (`./build.sh rp2350 --features w5500`, `rp2040` too); on
+  hardware: the lease and host name show in the router, `avahi-browse`
+  from another LAN host lists the board (multicast arrives: the D49
+  rewrite works), it answers queries and sends an IGMP report, a cable
+  pull withdraws and a replug re-announces, the SPI clock is about
+  18.75 MHz (RP2350) / 15.6 MHz (RP2040), RX drops and CPU stay sane on
+  a busy LAN, and an RP2350 payload cannot use GPIO 16–21 or SPI0.
+  Owner: user.
+- [ ] D52 On a Pico or Pico 2 with `usb-ncm`, the board is at
+  `169.254.a.b/16` (D45) on the NCM link and its responder announces the
+  D47 record only while the host has the link up: it joins 224.0.0.251
+  once the link is up, withdraws the record when the link goes down and
+  probes again when it returns; failures back off 2 s (30 s after every
+  rename conflicted). Built (`./build.sh rp2350 --features usb-ncm`); on
+  hardware: the interface is `enx064d…` and the NetworkManager profile
+  of `firmware-rp/docs/usb-net.md` gives it a 169.254 address, `arping`
+  reaches the board's address, `avahi-browse -rt _mw-node._tcp` lists
+  `rp-<id>` with its TXT, `avahi-resolve -n rp-<id>.local` resolves,
+  `tcpdump` shows TTL 255 and an IGMP report, a replug or NM down/up
+  withdraws and re-announces, and mwctl over the ACM port keeps working
+  under mDNS traffic. Owner: user.
 
 ### Transport contract 0.5 (K…)
 

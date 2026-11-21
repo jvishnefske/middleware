@@ -20,6 +20,9 @@ compile_error!("enable exactly one chip feature: rp2040 or rp2350");
 #[cfg(all(feature = "rp2040", feature = "rp2350"))]
 compile_error!("enable exactly one chip feature: rp2040 or rp2350");
 
+#[cfg(all(feature = "usb-ncm", feature = "w5500"))]
+compile_error!("enable at most one network link: usb-ncm or w5500");
+
 #[cfg(feature = "wasm")]
 extern crate alloc;
 

@@ -18,6 +18,13 @@
 //!   and image caps, the Pico board's pin policy and ADC pins.
 //! * [`node`] — the node id and USB serial number from the chip unique id
 //!   (`sys/info`'s node and the payload's `node_id`).
+//! * [`mdns_node`] — the board's `mw/node` mDNS record on a network link:
+//!   `rp-<id>`, the board name per chip and link, and what to announce
+//!   (only while the link is up), over `middleware::mdns::responder`.
+//! * [`netid`] — the network identity from the node id: the Ethernet
+//!   addresses of a USB CDC-NCM link or a W5500, the NCM link's
+//!   link-local IPv4 address, and embassy-net's seed from boot entropy
+//!   mixed with it.
 //! * [`pins`] — the payload's GPIO modes under the board policy (the
 //!   esp-base pin bank's rules), as a value the device shell applies.
 //! * [`periph`] — the payload SPI and I2C buses: the chips' GPIO function
@@ -47,6 +54,9 @@
 //!   again after a `sys/info` reply, withdrawn when the run ends; and the
 //!   rule that a payload publishes neither `sys/...` nor `disc/...`.
 //! * [`usb`] — the CDC-ACM zero-length-packet rule and the USB identity.
+//! * `wiznet` (with `w5500`, and in tests) — the W5500's pins and SPI
+//!   clock, and `NoMacFilter`, the SPI wrapper that turns the driver's MAC
+//!   filter off so multicast (mDNS) arrives.
 //! * `budget` (with the `wasm` runtime, and in tests) — the limits
 //!   payloads run under and the largest image a heap admits.
 //!
@@ -64,6 +74,8 @@ pub mod chip;
 pub mod flash;
 pub mod fw_update;
 pub mod layout;
+pub mod mdns_node;
+pub mod netid;
 pub mod node;
 pub mod ota;
 pub mod periph;
@@ -74,3 +86,5 @@ mod ram_flash;
 pub mod requests;
 pub mod service;
 pub mod usb;
+#[cfg(any(test, feature = "w5500"))]
+pub mod wiznet;

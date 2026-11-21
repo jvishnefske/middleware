@@ -7,11 +7,17 @@ use rp_base::chip::Profile;
 use rp_base::flash::Sectored;
 
 /// The chip's profile.
-#[cfg(feature = "rp2040")]
+#[cfg(all(feature = "rp2040", not(feature = "w5500")))]
 pub const PROFILE: Profile = rp_base::chip::RP2040;
 /// The chip's profile.
-#[cfg(feature = "rp2350")]
+#[cfg(all(feature = "rp2350", not(feature = "w5500")))]
 pub const PROFILE: Profile = rp_base::chip::RP2350;
+/// The chip's profile: the W5500 keeps GPIO 16-21 and SPI0.
+#[cfg(all(feature = "rp2040", feature = "w5500"))]
+pub const PROFILE: Profile = rp_base::chip::RP2040_W5500;
+/// The chip's profile: the W5500 keeps GPIO 16-21 and SPI0.
+#[cfg(all(feature = "rp2350", feature = "w5500"))]
+pub const PROFILE: Profile = rp_base::chip::RP2350_W5500;
 
 /// The static profile the tasks borrow.
 pub static PROFILE_REF: Profile = PROFILE;
@@ -80,4 +86,41 @@ pub fn unique_id(flash: &mut FlashDriver) -> [u8; 8] {
 #[cfg(feature = "rp2350")]
 pub fn unique_id(_flash: &mut FlashDriver) -> [u8; 8] {
     embassy_rp::otp::get_chipid().map(u64::to_be_bytes).unwrap_or([0; 8])
+}
+
+#[cfg(all(feature = "net", feature = "rp2350"))]
+embassy_rp::bind_interrupts!(struct TrngIrqs {
+    TRNG_IRQ => embassy_rp::trng::InterruptHandler<embassy_rp::peripherals::TRNG>;
+});
+
+/// How long the TRNG may take to deliver eight bytes (it takes
+/// microseconds when healthy).
+#[cfg(all(feature = "net", feature = "rp2350"))]
+const TRNG_WAIT: embassy_time::Duration = embassy_time::Duration::from_millis(20);
+
+/// Eight bytes of boot entropy for the network stack's seed
+/// ([`rp_base::netid::seed`]): the RP2350's TRNG mixed with the ROSC random
+/// bit ([`rp_base::netid::boot_entropy`]). The TRNG is read with its async
+/// `fill_bytes`, which re-initialises it on a fault instead of panicking
+/// (the blocking reads panic, and a panic resets the board), and only for
+/// [`TRNG_WAIT`]: a TRNG that never delivers leaves the ROSC's bytes.
+#[cfg(all(feature = "net", feature = "rp2350"))]
+pub async fn entropy(trng: embassy_rp::Peri<'static, embassy_rp::peripherals::TRNG>) -> [u8; 8] {
+    let mut rosc = [0u8; 8];
+    embassy_rp::clocks::RoscRng.fill_bytes(&mut rosc);
+    let mut rng = embassy_rp::trng::Trng::new(trng, TrngIrqs, embassy_rp::trng::Config::default());
+    let mut hw = [0u8; 8];
+    let delivered = embassy_time::with_timeout(TRNG_WAIT, rng.fill_bytes(&mut hw))
+        .await
+        .is_ok();
+    rp_base::netid::boot_entropy(delivered.then_some(hw), rosc)
+}
+
+/// Eight bytes of boot entropy for the network stack's seed
+/// ([`rp_base::netid::seed`]): the RP2040's ROSC random bit.
+#[cfg(all(feature = "net", feature = "rp2040"))]
+pub fn entropy() -> [u8; 8] {
+    let mut out = [0u8; 8];
+    embassy_rp::clocks::RoscRng.fill_bytes(&mut out);
+    out
 }

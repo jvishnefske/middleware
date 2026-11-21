@@ -55,16 +55,25 @@ jobs:
       - run: bash scripts/check-features.sh
 
   firmware-rp:
-    name: RP base firmware (${{ matrix.chip }})
+    name: RP base firmware (${{ matrix.features }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - chip: rp2040
+          - features: rp2040
             target: thumbv6m-none-eabi
-          - chip: rp2350
+          - features: rp2350
             target: thumbv8m.main-none-eabihf
+          # The network links (one per build) with the mDNS responder.
+          - features: rp2350,usb-ncm
+            target: thumbv8m.main-none-eabihf
+          - features: rp2040,usb-ncm
+            target: thumbv6m-none-eabi
+          - features: rp2350,w5500
+            target: thumbv8m.main-none-eabihf
+          - features: rp2040,w5500
+            target: thumbv6m-none-eabi
     steps:
       - uses: actions/checkout@v4
       - id: present
@@ -81,7 +90,7 @@ jobs:
       # The ELF build only: UF2 conversion (build.sh) needs picotool.
       - if: steps.present.outputs.rp == 'true'
         working-directory: firmware-rp
-        run: cargo build --release --target ${{ matrix.target }} --features ${{ matrix.chip }}
+        run: cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }}
 
   web:
     name: Web (vitest, tsc, vite build)

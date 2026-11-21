@@ -15,11 +15,12 @@
 #   * embedded feature sets build for thumbv6m-none-eabi without std, pull
 #     in no cloud dependency and enable no host feature;
 #   * the mDNS core `mdns-core` (D19), with the shared `mw/node` record
-#     (D41), builds for thumbv6m and thumbv7em, is
-#     gated on `mdns-core` rather than the std feature `mdns`, and is
-#     neither embedded nor host (`mdns` enables it); its embassy seam
-#     `mdns-embassy` (D26, embedded) builds for thumbv7em and thumbv8m
-#     (it needs atomics, so not thumbv6m);
+#     (D41) and the boards' responder decisions (D46), builds for
+#     thumbv6m and thumbv7em, is gated on `mdns-core` rather than the std
+#     feature `mdns`, and is neither embedded nor host (`mdns` enables
+#     it); its embassy seam `mdns-embassy` (D26, embedded) builds for
+#     thumbv6m, thumbv7em and thumbv8m (the RP2040's `rp2040,usb-ncm`
+#     links it: nothing in it needs CAS);
 #   * cloud feature sets (including `dns-sd`, `memory` and `udp`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
@@ -96,7 +97,7 @@ done
 # `mdns` (which only adds the tokio seam and builders: the `host` modules).
 echo "== D19: the mDNS core is gated on mdns-core"
 for f in src/mdns/origin.rs src/mdns/announce/table.rs src/mdns/error.rs src/mdns/race.rs \
-         src/mdns/announce.rs src/mdns/socket.rs src/mdns/node.rs; do
+         src/mdns/announce.rs src/mdns/socket.rs src/mdns/node.rs src/mdns/responder.rs; do
     # Every mention of the feature is `#[cfg(feature = "mdns")]` on the
     # line before `mod host;` or `pub use host::...`.
     odd="$(grep -n 'feature = "mdns"' "$f" | grep -vF '#[cfg(feature = "mdns")]' || true)"
@@ -105,12 +106,12 @@ for f in src/mdns/origin.rs src/mdns/announce/table.rs src/mdns/error.rs src/mdn
         | grep -v -e '^--$' -e '^[0-9]*-mod host;$' -e '^[0-9]*-pub use host::' || true)"
     [ -z "$bad" ] || fail "$f gates more than its host module on the std feature mdns: $bad"
 done
-for m in announce origin socket error race node; do
+for m in announce origin socket error race node responder; do
     grep -B1 -E "^(pub )?mod $m;" src/mdns.rs | head -1 | grep -qx '#\[cfg(feature = "mdns-core")\]' \
         || fail "mod $m in src/mdns.rs is not gated on mdns-core"
 done
 
-for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "mdns-core" "mdns-core,espnow"; do
+for set in "ble" "ble,postcard" "postcard" "serial" "serial,ble,postcard" "espnow" "espnow,postcard" "espnow,cam-fixtures" "trust" "trust,serial" "zenoh-lite" "zenoh-lite,serial,trust" "mdns-core" "mdns-core,espnow" "mdns-core,mdns-embassy"; do
     echo "== F1: [$set] on $EMBEDDED_TARGET"
     cargo build --quiet --target "$EMBEDDED_TARGET" --no-default-features --features "$set"
     if deps --target "$EMBEDDED_TARGET" --no-default-features --features "$set" | grep -Eq "$CLOUD_CRATES"; then

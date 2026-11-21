@@ -75,6 +75,7 @@
 //! `crate::budget` (built with the runtime).
 
 use crate::layout::{self, FlashMap};
+use board_pins::rp::SpiBlock;
 use board_pins::{AdcError, PinError, PinMap, boards};
 use middleware::wasm_abi::AbiError;
 
@@ -121,6 +122,9 @@ pub struct Profile {
     /// The board's pins: reserved and input-only pins, the ADC and I2C
     /// maps, SPI routing (`board_pins::boards::PICO`).
     pins: PinMap,
+    /// The SPI controller the firmware keeps for itself (the W5500's
+    /// SPI0), which no payload route may select.
+    reserved_spi: Option<SpiBlock>,
 }
 
 /// Raspberry Pi Pico.
@@ -135,6 +139,7 @@ pub const RP2040: Profile = Profile {
     max_image: 124 * 1024,
     gpio_count: 30,
     pins: boards::PICO,
+    reserved_spi: None,
 };
 
 /// Raspberry Pi Pico 2.
@@ -149,12 +154,70 @@ pub const RP2350: Profile = Profile {
     max_image: 64 * 1024,
     gpio_count: 30,
     pins: boards::PICO,
+    reserved_spi: None,
 };
+
+/// A Pico wired as a W5500-EVB-Pico (`w5500`): GPIO 16–21 and SPI0 are
+/// the W5500's (`board_pins::boards::PICO_W5500`, [`crate::wiznet`]).
+pub const RP2040_W5500: Profile = Profile {
+    pins: boards::PICO_W5500,
+    reserved_spi: Some(SpiBlock::Spi0),
+    ..RP2040
+};
+
+/// A Pico 2 wired as a W5500-EVB-Pico (`w5500`): GPIO 16–21 and SPI0 are
+/// the W5500's, so a payload gets `Unsupported` for those pins and for any
+/// route onto SPI0 (GPIO 0–7 included).
+pub const RP2350_W5500: Profile = Profile {
+    pins: boards::PICO_W5500,
+    reserved_spi: Some(SpiBlock::Spi0),
+    ..RP2350
+};
+
+/// The RP2350 RAM plan of the network links (D51), measured with
+/// `rust-size -A` and `rust-nm -S` on the release builds (`build.sh`
+/// prints the statics outside the heap): what the 136 KiB outside the
+/// heap must hold.
+pub mod net_budget {
+    /// `.data` + `.bss` outside the heap arena, `rp2350` (no link).
+    pub const BASE_STATICS: usize = 43_244;
+    /// What `usb-ncm` adds: the mDNS task pool (14 784, the announcer and
+    /// the socket's 4 KiB + 2 KiB buffers), the NCM channel's four packets
+    /// (6 188), the NCM runner's pool (2 912), 2 socket slots (736), the
+    /// stack runner's pool, the NCM control state, and the TRNG read the
+    /// main task's future holds across its timeout (24).
+    pub const USB_NCM_STATICS: usize = 24_824;
+    /// What `w5500` adds: the same mDNS task pool, the driver's channel
+    /// (6 188), 3 socket slots with DHCP (1 160), the driver's and the
+    /// stack runner's pools, the SPI0 bus and the TRNG read (16).
+    pub const W5500_STATICS: usize = 23_036;
+    /// The same on the RP2040 (no heap, no payload runtime): `.data` +
+    /// `.bss` without a link, and what `usb-ncm` or `w5500` adds.
+    /// `build.sh` fails a build whose statics exceed its variant's figure.
+    pub const RP2040_BASE_STATICS: usize = 27_596;
+    /// See [`RP2040_BASE_STATICS`].
+    pub const RP2040_USB_NCM_STATICS: usize = 24_784;
+    /// See [`RP2040_BASE_STATICS`].
+    pub const RP2040_W5500_STATICS: usize = 22_976;
+    /// The deepest stack of one poll, by direct calls in the disassembly:
+    /// the mDNS task (36 440 bytes on thumbv8m; its poll frame is 21 944).
+    /// Payload loading on the main task needs about 31 KiB (ESP32-S3) and
+    /// 33 416 bytes by the same count (36 088 with `w5500`, whose
+    /// initialisation runs there); polls never nest.
+    pub const STACK: usize = 36_440;
+    /// What is kept free beyond that for interrupt frames and error.
+    pub const MARGIN: usize = 16 * 1024;
+}
 
 impl Profile {
     /// The board's pin map.
     pub const fn pins(&self) -> &PinMap {
         &self.pins
+    }
+
+    /// The SPI controller no payload may open, if any.
+    pub const fn reserved_spi(&self) -> Option<SpiBlock> {
+        self.reserved_spi
     }
 
     /// Whether a payload may use `pin` as `dir`: `InvalidArgument` if the
@@ -278,6 +341,97 @@ mod tests {
                 assert_eq!(p.check_pin(sda, Direction::Output), Ok(()));
                 assert_eq!(p.check_pin(scl, Direction::Output), Ok(()));
             }
+        }
+    }
+
+    #[test]
+    fn d50_the_w5500_profiles_keep_its_pins_and_spi0() {
+        use crate::periph::func::{SpiSignal, spi_function};
+        use crate::wiznet;
+        for (w, plain) in [(RP2040_W5500, RP2040), (RP2350_W5500, RP2350)] {
+            for pin in wiznet::PINS {
+                assert_eq!(
+                    w.check_pin(pin, Direction::Input),
+                    Err(AbiError::Unsupported),
+                    "GPIO {pin}"
+                );
+                assert_eq!(
+                    w.check_pin(pin, Direction::Output),
+                    Err(AbiError::Unsupported),
+                    "GPIO {pin}"
+                );
+            }
+            for pin in plain.payload_pins().filter(|p| !wiznet::PINS.contains(p)) {
+                for dir in [Direction::Input, Direction::Output] {
+                    assert_eq!(
+                        w.check_pin(pin, dir),
+                        plain.check_pin(pin, dir),
+                        "GPIO {pin}"
+                    );
+                }
+            }
+            assert_eq!(w.payload_pins().count(), 25 - 6);
+            assert_eq!(w.reserved_spi(), Some(SpiBlock::Spi0));
+            assert_eq!(plain.reserved_spi(), None);
+            assert_eq!(
+                (w.name, w.heap, w.flash),
+                (plain.name, plain.heap, plain.flash)
+            );
+        }
+        // The W5500's bus pins are SPI0's in the function table.
+        assert_eq!(
+            spi_function(wiznet::MISO),
+            Some((SpiBlock::Spi0, SpiSignal::Rx))
+        );
+        assert_eq!(
+            spi_function(wiznet::CS),
+            Some((SpiBlock::Spi0, SpiSignal::Csn))
+        );
+        assert_eq!(
+            spi_function(wiznet::SCK),
+            Some((SpiBlock::Spi0, SpiSignal::Sck))
+        );
+        assert_eq!(
+            spi_function(wiznet::MOSI),
+            Some((SpiBlock::Spi0, SpiSignal::Tx))
+        );
+    }
+
+    #[test]
+    fn d51_the_network_links_fit_beside_the_heap() {
+        use net_budget::*;
+        let link = if USB_NCM_STATICS > W5500_STATICS {
+            USB_NCM_STATICS
+        } else {
+            W5500_STATICS
+        };
+        let need = BASE_STATICS + link + STACK + MARGIN;
+        assert!(RP2350.sram_outside_heap() >= need, "{need} B needed");
+        // The RP2040 has no heap: all of its SRAM is outside it.
+        let link = if RP2040_USB_NCM_STATICS > RP2040_W5500_STATICS {
+            RP2040_USB_NCM_STATICS
+        } else {
+            RP2040_W5500_STATICS
+        };
+        assert!(RP2040.sram_outside_heap() >= RP2040_BASE_STATICS + link + STACK + MARGIN);
+    }
+
+    /// The stack room the linker scripts assert between the end of
+    /// `.bss`/`.uninit` (the heap arena included) and the stack top.
+    fn asserted_stack_room(script: &str) -> Option<usize> {
+        let rest = script.split("ASSERT(_stack_start - __euninit >= ").nth(1)?;
+        let n = rest.split(',').next()?.trim();
+        n.parse().ok()
+    }
+
+    #[test]
+    fn d51_the_link_fails_without_the_stack_room() {
+        use net_budget::{MARGIN, STACK};
+        for script in [
+            include_str!("../memory-rp2040.x"),
+            include_str!("../memory-rp2350.x"),
+        ] {
+            assert_eq!(asserted_stack_room(script), Some(STACK + MARGIN));
         }
     }
 

@@ -21,8 +21,9 @@
 //! * `shell` (feature `shell`, target only) — the imperative shell the
 //!   binaries share: the FlexSPI HyperFlash driver and the LPUART1
 //!   console, through embassy-nxp's PAC.
-//! * [`mdns_node`] — the mDNS responder's decisions: the board's `mw/node`
-//!   record and when to announce it again or withdraw it.
+//! * [`mdns_node`] — the board's `mw/node` record names over the shared
+//!   responder decisions (`middleware::mdns::responder`: when to announce
+//!   it again or withdraw it).
 //! * [`service`] — the request service over the HyperFlash: `sys/fw/*` to
 //!   the A/B updater, everything else through `esp_base::dispatch`, with
 //!   the storage effects on the flash map's regions.
