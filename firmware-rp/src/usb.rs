@@ -1,4 +1,5 @@
-//! USB CDC-ACM framing rules and identity.
+//! USB CDC-ACM framing rules and identity, and the descriptor budget of
+//! the composite device with CDC-NCM (`usb-ncm`).
 //!
 //! The protocol runs over one CDC-ACM interface with 64-byte bulk packets
 //! (full speed). A bulk IN transfer ends at a short packet: when a frame's
@@ -22,6 +23,52 @@
 
 /// Bulk packet size (USB full speed).
 pub const MAX_PACKET: u16 = 64;
+
+/// The configuration descriptor buffer the shell gives embassy-usb.
+pub const CONFIG_BUF: usize = 256;
+/// The configuration descriptor's own header.
+pub const CONFIG_HEADER: usize = 9;
+/// An interface association descriptor (embassy-usb writes one per
+/// function: `composite_with_iads` is on by default).
+pub const IAD: usize = 8;
+/// An interface (or alternate setting) descriptor.
+pub const INTERFACE: usize = 9;
+/// An endpoint descriptor.
+pub const ENDPOINT: usize = 7;
+/// embassy-usb 0.6's CDC-ACM function: IAD, the communication interface
+/// with header (5), ACM (4) and union (5) descriptors and its interrupt
+/// endpoint, the data interface and two bulk endpoints.
+pub const ACM_BYTES: usize = IAD + 2 * INTERFACE + (5 + 4 + 5) + 3 * ENDPOINT;
+/// embassy-usb 0.6's CDC-NCM function: IAD, the communication interface
+/// with header (5), union (5), Ethernet networking (13) and NCM (6)
+/// descriptors and its interrupt endpoint, the data interface's two
+/// alternate settings (none, then the NTB pair) and two bulk endpoints.
+pub const NCM_BYTES: usize = IAD + 3 * INTERFACE + (5 + 5 + 13 + 6) + 3 * ENDPOINT;
+/// Interfaces of CDC-ACM and of CDC-NCM (communication and data each).
+pub const FUNCTION_INTERFACES: usize = 2;
+/// embassy-usb's default `MAX_INTERFACE_COUNT` and `MAX_HANDLER_COUNT`
+/// (a third function would need its `max-interface-count-*` feature).
+pub const MAX_INTERFACES: usize = 4;
+/// See [`MAX_INTERFACES`].
+pub const MAX_HANDLERS: usize = 4;
+
+/// The configuration descriptor's length (`wTotalLength`): CDC-ACM, and
+/// CDC-NCM after it when `ncm`. ACM comes first, so its interfaces are 0
+/// and 1 and the port stays `...-if00`.
+pub const fn config_total(ncm: bool) -> usize {
+    CONFIG_HEADER + ACM_BYTES + if ncm { NCM_BYTES } else { 0 }
+}
+
+/// Interfaces the device has.
+pub const fn interfaces(ncm: bool) -> usize {
+    FUNCTION_INTERFACES * if ncm { 2 } else { 1 }
+}
+
+/// Handlers registered: the configured-state handler, ACM's control and,
+/// with `ncm`, NCM's.
+pub const fn handlers(ncm: bool) -> usize {
+    2 + ncm as usize
+}
 
 /// USB vendor id (Raspberry Pi).
 pub const VID: u16 = 0x2E8A;
@@ -83,6 +130,19 @@ mod tests {
         assert!(!needs_zlp(0, MAX_PACKET), "nothing written since the last flush");
         assert_eq!(pid(crate::chip::Chip::Rp2040), 0x000A);
         assert_eq!(pid(crate::chip::Chip::Rp2350), 0x0009);
+    }
+
+    #[test]
+    fn d48_acm_and_ncm_fit_the_usb_buffers_and_limits() {
+        // Counted from embassy-usb 0.6.0's class sources.
+        assert_eq!((ACM_BYTES, NCM_BYTES), (61, 85));
+        assert_eq!(config_total(false), 9 + 61);
+        assert_eq!(config_total(true), 155);
+        assert!(config_total(true) <= CONFIG_BUF);
+        assert_eq!((interfaces(false), interfaces(true)), (2, 4));
+        assert!(interfaces(true) <= MAX_INTERFACES, "no room for a third function");
+        assert_eq!((handlers(false), handlers(true)), (2, 3));
+        assert!(handlers(true) <= MAX_HANDLERS);
     }
 
     #[test]
