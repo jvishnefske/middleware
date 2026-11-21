@@ -56,11 +56,10 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use esp_base::chip::{Direction, Profile};
 use esp_base::periph::gpio_event;
-use esp_hal::gpio::{
-    AnyPin, Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal,
-    Pull as HalPull,
-};
 use esp_hal::gpio::DriveMode;
+use esp_hal::gpio::{
+    AnyPin, Event as HalEvent, Flex, InputConfig, InputSignal, Io, Level, OutputConfig, OutputSignal, Pull as HalPull,
+};
 use esp_hal::handler;
 use esp_hal::peripherals::IO_MUX;
 use wasm_host::{AbiError, Edge, Pull};
@@ -329,9 +328,8 @@ impl PinBank {
         let slot = self.slot(n, Direction::Output)?;
         slot.drop_irq(n);
         slot.pin.set_level(Level::High);
-        slot.pin.apply_output_config(
-            &OutputConfig::default().with_drive_mode(DriveMode::OpenDrain).with_pull(HalPull::Up),
-        );
+        slot.pin
+            .apply_output_config(&OutputConfig::default().with_drive_mode(DriveMode::OpenDrain).with_pull(HalPull::Up));
         slot.pin.set_output_enable(true);
         slot.pin.set_input_enable(true);
         input.connect_to(&slot.pin);

@@ -368,7 +368,11 @@ pub fn decode_manifest(data: &[u8]) -> Option<Object> {
         set(&o, "limits", b);
     }
     if let Some(b) = &m.board {
-        set(&o, "board", String::from_utf8_lossy(b.as_bytes()).into_owned());
+        set(
+            &o,
+            "board",
+            String::from_utf8_lossy(b.as_bytes()).into_owned(),
+        );
     }
     if let Some(c) = m.control {
         let b = Object::new();
@@ -2155,9 +2159,16 @@ mod sim {
 
         /// Delivers a message from `sender` (16 hex digits; unknown when
         /// omitted); returns whether a subscription matched.
-        pub fn deliver(&mut self, key: &str, data: &[u8], sender: Option<String>) -> Result<bool, JsError> {
+        pub fn deliver(
+            &mut self,
+            key: &str,
+            data: &[u8],
+            sender: Option<String>,
+        ) -> Result<bool, JsError> {
             let sender = match sender {
-                Some(h) => Some(parse_node(&h).ok_or_else(|| JsError::new("a node id is 16 hex digits"))?),
+                Some(h) => {
+                    Some(parse_node(&h).ok_or_else(|| JsError::new("a node id is 16 hex digits"))?)
+                }
                 None => None,
             };
             let r = self.sim.deliver_from(key, data, sender);
@@ -2276,11 +2287,7 @@ fn channel_object(c: &middleware::wasm_abi::channels::Channel<'_>) -> Object {
     let o = Object::new();
     set(&o, "name", c.name);
     set(&o, "dir", if c.dir == Direction::In { "in" } else { "out" });
-    set(
-        &o,
-        "kind",
-        c.kind.name(),
-    );
+    set(&o, "kind", c.kind.name());
     let sensor = match c.sensor {
         Some(middleware::stream::samples::SensorKind::Imu) => JsValue::from_str("imu"),
         Some(middleware::stream::samples::SensorKind::Microphone) => JsValue::from_str("mic"),
@@ -2312,7 +2319,11 @@ pub fn read_channels(module_bytes: &[u8]) -> Result<Array, JsError> {
 /// `undefined` when malformed.
 #[wasm_bindgen(js_name = decodePeers)]
 pub fn decode_peers(data: &[u8]) -> Option<Vec<String>> {
-    Some(middleware::loader::peers::decode(data)?.map(node_hex).collect())
+    Some(
+        middleware::loader::peers::decode(data)?
+            .map(node_hex)
+            .collect(),
+    )
 }
 
 /// The key that reaches `node`'s `sys/<what>` (`info`, `manifest`,
@@ -2365,7 +2376,10 @@ pub fn control_page_request(page: u8) -> Vec<u8> {
 #[wasm_bindgen(js_name = encodeChannels)]
 pub fn encode_channels(list: Array) -> Result<Vec<u8>, JsError> {
     use middleware::wasm_abi::channels::{ANY, ENTRY_FIXED, VERSION, valid_name};
-    let mut out = vec![VERSION, u8::try_from(list.length()).map_err(|_| js_err("too many channels"))?];
+    let mut out = vec![
+        VERSION,
+        u8::try_from(list.length()).map_err(|_| js_err("too many channels"))?,
+    ];
     for v in list.iter() {
         let name = text(&v, "name");
         if !valid_name(name.as_bytes()) {
@@ -2475,8 +2489,14 @@ fn source_in(v: &JsValue) -> Result<middleware::wasm_abi::route::RouteSource, Js
                 _ => AudioMode::Levels,
             };
             RouteSource::Samples(SampleSource::Microphone(
-                MicConfig::new(n("rateHz") as u16, n("gainDb") as u8, mode, n("units") as u16, n("block") as u16)
-                    .map_err(bad)?,
+                MicConfig::new(
+                    n("rateHz") as u16,
+                    n("gainDb") as u8,
+                    mode,
+                    n("units") as u16,
+                    n("block") as u16,
+                )
+                .map_err(bad)?,
             ))
         }
         "imu" => RouteSource::Samples(SampleSource::Imu(
@@ -2489,7 +2509,11 @@ fn source_in(v: &JsValue) -> Result<middleware::wasm_abi::route::RouteSource, Js
             .map_err(bad)?,
         )),
         s @ ("testPattern" | "camera") => {
-            let kind = if s == "camera" { SourceKind::Camera } else { SourceKind::TestPattern };
+            let kind = if s == "camera" {
+                SourceKind::Camera
+            } else {
+                SourceKind::TestPattern
+            };
             let cfg = Uint8Array::new(&get(v, "cfg")).to_vec();
             parse_route_source(kind, &cfg).map_err(bad)?
         }
@@ -2606,12 +2630,19 @@ pub fn encode_binding(b: JsValue) -> Result<Vec<u8>, JsError> {
         .map_err(|_| js_err("imageSha256 must be 32 bytes"))?;
     let version = whole(&get(&b, "version")).unwrap_or(0) as u32;
     let entries = array(&b, "entries");
-    let owned: Vec<(String, TargetIn, Option<middleware::loader::binding::Adapter>)> = entries
+    let owned: Vec<(
+        String,
+        TargetIn,
+        Option<middleware::loader::binding::Adapter>,
+    )> = entries
         .iter()
         .map(|e| {
             let t = get(&e, "target");
             let (inner, adapter) = if text(&t, "kind") == "adapted" {
-                (endpoint_in(&get(&t, "inner"))?, Some(adapter_in(&get(&t, "adapter"))?))
+                (
+                    endpoint_in(&get(&t, "inner"))?,
+                    Some(adapter_in(&get(&t, "adapter"))?),
+                )
             } else {
                 (endpoint_in(&t)?, None)
             };
@@ -2623,7 +2654,10 @@ pub fn encode_binding(b: JsValue) -> Result<Vec<u8>, JsError> {
         let ep = match t {
             TargetIn::Local(s) => Endpoint::Local(*s),
             TargetIn::Key(k) => Endpoint::Key(key_in(k)?),
-            TargetIn::Remote(node, k) => Endpoint::Remote { node: *node, key: key_in(k)? },
+            TargetIn::Remote(node, k) => Endpoint::Remote {
+                node: *node,
+                key: key_in(k)?,
+            },
             TargetIn::Driver(p) => Endpoint::Driver(p),
         };
         let target = match (adapter, ep) {
@@ -2633,10 +2667,14 @@ pub fn encode_binding(b: JsValue) -> Result<Vec<u8>, JsError> {
             (None, Endpoint::Remote { node, key }) => Target::Remote { node, key },
             (None, Endpoint::Driver(p)) => Target::Driver(p),
         };
-        binding.bind(name, target).map_err(|e| js_err(&format!("{name}: {e:?}")))?;
+        binding
+            .bind(name, target)
+            .map_err(|e| js_err(&format!("{name}: {e:?}")))?;
     }
     let mut out = vec![0u8; BINDING_MAX];
-    let n = binding.encode(&mut out).ok_or_else(|| js_err("binding too large"))?;
+    let n = binding
+        .encode(&mut out)
+        .ok_or_else(|| js_err("binding too large"))?;
     out.truncate(n);
     // Round trip: what the device would refuse is refused here.
     Binding::decode(&out).map_err(|e| js_err(&format!("{e:?}")))?;
@@ -2671,10 +2709,14 @@ pub fn decode_binding(record: &[u8]) -> Option<Object> {
 /// [`binding_message`]: middleware::loader::binding::binding_message
 #[wasm_bindgen(js_name = bindingMessage)]
 pub fn binding_message(record: &[u8], node: &str) -> Result<Vec<u8>, JsError> {
-    let b = middleware::loader::binding::Binding::decode(record).map_err(|e| js_err(&format!("{e:?}")))?;
+    let b = middleware::loader::binding::Binding::decode(record)
+        .map_err(|e| js_err(&format!("{e:?}")))?;
     let node = parse_node(node).ok_or_else(|| js_err("a node id is 16 hex digits"))?;
     let sha = middleware::loader::sha256::ImageHash::digest(record);
-    Ok(middleware::loader::binding::binding_message(node, &b.image_sha256, b.version, &sha).to_vec())
+    Ok(
+        middleware::loader::binding::binding_message(node, &b.image_sha256, b.version, &sha)
+            .to_vec(),
+    )
 }
 
 /// A `sys/payload/bind` body: `record`, then with a 64-byte `signature`
@@ -2685,8 +2727,17 @@ pub fn encode_bind_body(record: &[u8], signature: Option<Vec<u8>>) -> Result<Vec
     let b = Binding::decode(record).map_err(|e| js_err(&format!("{e:?}")))?;
     let mut out = record.to_vec();
     if let Some(sig) = signature {
-        let signature = trust::Signature(sig.try_into().map_err(|_| js_err("a signature is 64 bytes"))?);
-        out.extend_from_slice(&SignedBinding { version: b.version, signature }.encode());
+        let signature = trust::Signature(
+            sig.try_into()
+                .map_err(|_| js_err("a signature is 64 bytes"))?,
+        );
+        out.extend_from_slice(
+            &SignedBinding {
+                version: b.version,
+                signature,
+            }
+            .encode(),
+        );
     }
     Ok(out)
 }
@@ -2705,11 +2756,18 @@ pub fn check_binding(
     peers: Option<Vec<String>>,
 ) -> Result<Array, JsError> {
     use crate::binding::{Fix, check};
-    let m = middleware::loader::manifest::Manifest::decode(manifest).map_err(|e| js_err(&format!("manifest: {e:?}")))?;
-    let c = middleware::wasm_abi::channels::Channels::from_module(module_bytes).map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
-    let b = middleware::loader::binding::Binding::decode(record).map_err(|e| js_err(&format!("binding: {e:?}")))?;
+    let m = middleware::loader::manifest::Manifest::decode(manifest)
+        .map_err(|e| js_err(&format!("manifest: {e:?}")))?;
+    let c = middleware::wasm_abi::channels::Channels::from_module(module_bytes)
+        .map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
+    let b = middleware::loader::binding::Binding::decode(record)
+        .map_err(|e| js_err(&format!("binding: {e:?}")))?;
     let peers: Option<Vec<middleware::SenderId>> = peers
-        .map(|p| p.iter().map(|h| parse_node(h).ok_or_else(|| js_err("a node id is 16 hex digits"))).collect())
+        .map(|p| {
+            p.iter()
+                .map(|h| parse_node(h).ok_or_else(|| js_err("a node id is 16 hex digits")))
+                .collect()
+        })
         .transpose()?;
     Ok(check(&m, &c, &b, peers.as_deref())
         .into_iter()

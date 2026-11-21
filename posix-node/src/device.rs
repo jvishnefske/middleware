@@ -338,10 +338,7 @@ mod tests {
         assert_eq!(d.gpio_write(4, true), u);
         assert_eq!(d.gpio_read(4), Err(AbiError::Unsupported));
         assert_eq!(d.adc_read(26), Err(AbiError::Unsupported));
-        assert_eq!(
-            d.i2c_open(I2cConfig { bus: 0, freq_hz: 100_000 }),
-            u
-        );
+        assert_eq!(d.i2c_open(I2cConfig { bus: 0, freq_hz: 100_000 }), u);
         assert_eq!(d.spi_open(SpiConfig::parse(0, 2, 3, 4, 5, 1000, 0).expect("spi")), u);
         assert_eq!(d.uart_open(UartConfig::parse(1, 4, 5, 115_200).expect("uart")), u);
     }

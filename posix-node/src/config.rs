@@ -469,7 +469,9 @@ mod tests {
         use crate::driver::DriverChoice;
         assert_eq!(PosixNodeConfig::from_env(&env(&[])).unwrap().driver, DriverChoice::None);
         assert_eq!(PosixNodeConfig::from_env(&env(&[(ENV_DRIVER, "sim")])).unwrap().driver, DriverChoice::Sim);
-        let c = PosixNodeConfig::from_env(&env(&[(ENV_DRIVER, "kd240"), (ENV_KD240_INPUTS, "x_home=gpiochip2:12:low")])).unwrap();
+        let c =
+            PosixNodeConfig::from_env(&env(&[(ENV_DRIVER, "kd240"), (ENV_KD240_INPUTS, "x_home=gpiochip2:12:low")]))
+                .unwrap();
         let DriverChoice::Kd240(lines) = c.driver else { panic!() };
         assert_eq!((lines[0].point.as_str(), lines[0].offset, lines[0].active_low), ("x_home", 12, true));
         for (pairs, var) in [
@@ -526,7 +528,10 @@ mod tests {
         let c = PosixNodeConfig::from_env(&env(&[(ENV_FUEL_PER_CALL, "5000000")])).unwrap();
         assert_eq!(c.fuel_per_call, 5_000_000);
         for bad in ["999999", "2000000000", "lots"] {
-            assert_eq!(PosixNodeConfig::from_env(&env(&[(ENV_FUEL_PER_CALL, bad)])).unwrap_err().var, ENV_FUEL_PER_CALL);
+            assert_eq!(
+                PosixNodeConfig::from_env(&env(&[(ENV_FUEL_PER_CALL, bad)])).unwrap_err().var,
+                ENV_FUEL_PER_CALL
+            );
         }
         assert_eq!(crate::limits(1 << 20).fuel_per_call, DEFAULT_FUEL_PER_CALL);
         assert_eq!(crate::limits(1 << 20).max_subscriptions as usize, middleware::wasm_abi::SLOT_MAX);

@@ -112,10 +112,8 @@ impl Timers {
             let id = id as u8;
             let period = u64::from(s.period.max(1));
             let periods = if s.periodic { 1 + (now - s.deadline) / period } else { 1 };
-            let rearmed = s.periodic.then(|| Slot {
-                deadline: s.deadline.saturating_add(periods.saturating_mul(period)),
-                ..*s
-            });
+            let rearmed =
+                s.periodic.then(|| Slot { deadline: s.deadline.saturating_add(periods.saturating_mul(period)), ..*s });
             next = next.with(id, rearmed);
             let fired = Fired { id, periods: u32::try_from(periods).unwrap_or(u32::MAX) };
             // At most MAX_TIMERS entries: the push cannot fail.

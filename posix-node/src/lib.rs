@@ -176,9 +176,7 @@ pub fn limits(memory_bytes: u32) -> Limits {
 
 /// [`limits`] with `fuel` per call (`MW_POSIX_NODE_FUEL_PER_CALL`).
 pub fn limits_with_fuel(memory_bytes: u32, fuel: u64) -> Limits {
-    Limits::bytes(memory_bytes)
-        .with_fuel(fuel)
-        .with_subscriptions(middleware::wasm_abi::SLOT_MAX as u8)
+    Limits::bytes(memory_bytes).with_fuel(fuel).with_subscriptions(middleware::wasm_abi::SLOT_MAX as u8)
 }
 
 #[cfg(test)]

@@ -54,15 +54,15 @@
 use core::fmt;
 
 use embedded_storage::nor_flash::NorFlash;
+use esp_base::binding_store::{self, BindingStore};
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::image::Header;
-use esp_base::serve::{Route, ServedKeys, route_request, served_after};
-use esp_base::binding_store::{self, BindingStore};
 use esp_base::ota::Origin;
+use esp_base::serve::{Route, ServedKeys, route_request, served_after};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, RECORD_LEN, TrustStore};
-use middleware::loader::trust::{ControlCounter, TrustState};
 use middleware::loader::manifest::{BoardName, ControlModules, Groups, Limits, Link, LinkKind, Manifest};
+use middleware::loader::trust::{ControlCounter, TrustState};
 use middleware::loader::{Loader, PayloadStatus, keys};
 use middleware::transport::{HandlerError, Request};
 use middleware::{Key, SenderId};
@@ -115,11 +115,7 @@ pub const CHIP: &str = if cfg!(not(target_os = "linux")) {
 pub const MANIFEST: Manifest = Manifest::new(middleware::wasm_abi::ABI_VERSION)
     .with_groups(Groups::TIMERS.with(Groups::SERVE).with(Groups::CHANNELS))
     .with_link(Link { id: 0, kind: LinkKind::SERIAL })
-    .with_limits(Limits {
-        routes: 0,
-        subscriptions: middleware::wasm_abi::SLOT_MAX as u8,
-        ..Limits::ABI
-    });
+    .with_limits(Limits { routes: 0, subscriptions: middleware::wasm_abi::SLOT_MAX as u8, ..Limits::ABI });
 
 /// [`MANIFEST`] with the board named and the control modules counted, for
 /// the life of the process. A process opens its service once (the tests a
@@ -552,7 +548,9 @@ impl<F: NorFlash + Durable> Service<F> {
                 }
             }
             Action::Claim { trust: TrustState::Claimed { key, .. } } => {
-                notes.push(Note::Pinned { prefix: [key.as_bytes()[0], key.as_bytes()[1], key.as_bytes()[2], key.as_bytes()[3]] });
+                notes.push(Note::Pinned {
+                    prefix: [key.as_bytes()[0], key.as_bytes()[1], key.as_bytes()[2], key.as_bytes()[3]],
+                });
             }
             _ => {}
         }

@@ -138,7 +138,12 @@ impl Output for Channel {
         if self.handle < OUTPUT_BASE {
             return Err(AbiError::InvalidArgument);
         }
-        check(sys::channel_publish(self.handle, ptr_i32(data), len_i32(data.len())?)).map(drop)
+        check(sys::channel_publish(
+            self.handle,
+            ptr_i32(data),
+            len_i32(data.len())?,
+        ))
+        .map(drop)
     }
 }
 
@@ -292,15 +297,24 @@ mod tests {
     fn ch6_the_macro_declares_and_encodes_the_section() {
         assert_eq!(CHANNELS.len(), 5);
         let a = CHANNELS[0];
-        assert_eq!((a.name, a.dir, a.sensor), ("audio", Direction::In, Some(SensorKind::Microphone)));
-        assert_eq!((a.formats, a.rate_min, a.rate_max, a.required), (1 << 2, 8000, 48000, true));
+        assert_eq!(
+            (a.name, a.dir, a.sensor),
+            ("audio", Direction::In, Some(SensorKind::Microphone))
+        );
+        assert_eq!(
+            (a.formats, a.rate_min, a.rate_max, a.required),
+            (1 << 2, 8000, 48000, true)
+        );
         assert!(!CHANNELS[2].required);
         assert_eq!(CHANNELS[3].dir, Direction::Out);
         assert_eq!(CHANNELS[4].kind, DataKind::Frames);
         const LEN: usize = encoded_len(CHANNELS);
         let bytes = encode::<LEN>(CHANNELS);
         let parsed = Channels::parse(&bytes).unwrap();
-        assert_eq!(parsed.iter().copied().collect::<std::vec::Vec<_>>(), CHANNELS);
+        assert_eq!(
+            parsed.iter().copied().collect::<std::vec::Vec<_>>(),
+            CHANNELS
+        );
     }
 
     #[test]
@@ -371,7 +385,13 @@ mod machine_tests {
         const LEN: usize = encoded_len(CHANNELS);
         let bytes = encode::<LEN>(CHANNELS);
         assert!(Channels::parse(&bytes).unwrap().iter().eq(CHANNELS.iter()));
-        let s = machine::Segment { seq: 1, x_um: 0, z_um: -100, feed: 500, flags: 0 };
+        let s = machine::Segment {
+            seq: 1,
+            x_um: 0,
+            z_um: -100,
+            feed: 500,
+            flags: 0,
+        };
         assert_eq!(machine::Segment::decode(&s.encode()), Some(s));
     }
 }

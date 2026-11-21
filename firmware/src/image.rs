@@ -353,10 +353,7 @@ mod tests {
         assert_eq!(newest(Some(header(5)), Some(header(4))), Some((Slot::A, header(5))));
         assert_eq!(newest(Some(header(0)), Some(header(u32::MAX))), Some((Slot::A, header(0))));
         assert_eq!(newest(Some(header(9)), Some(header(9))), Some((Slot::A, header(9))));
-        assert_eq!(
-            newest(Some(header(0)), Some(header(0x8000_0000))),
-            Some((Slot::A, header(0)))
-        );
+        assert_eq!(newest(Some(header(0)), Some(header(0x8000_0000))), Some((Slot::A, header(0))));
     }
 
     /// Replays chunks through the writer onto a simulated flash and checks

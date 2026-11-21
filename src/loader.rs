@@ -700,7 +700,12 @@ impl NetAddr {
     /// Parses exactly [`NetAddr::LEN`] bytes.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let b: &[u8; Self::LEN] = bytes.try_into().ok()?;
-        let mut r = NetAddr { ip: [0; 4], mac: [0; 6], peer_ip: [0; 4], peer_port: 0 };
+        let mut r = NetAddr {
+            ip: [0; 4],
+            mac: [0; 6],
+            peer_ip: [0; 4],
+            peer_port: 0,
+        };
         r.ip.copy_from_slice(&b[..4]);
         r.mac.copy_from_slice(&b[4..10]);
         r.peer_ip.copy_from_slice(&b[10..14]);
@@ -875,16 +880,27 @@ mod tests {
         // gateware-5a75b/tests/tb_node_full.py `net_record`.
         assert_eq!(
             wire,
-            [192, 168, 2, 51, 0x02, 0x5A, 0x75, 0xB0, 0x00, 0x11, 10, 0, 1, 9, 0x58, 0x1B]
+            [
+                192, 168, 2, 51, 0x02, 0x5A, 0x75, 0xB0, 0x00, 0x11, 10, 0, 1, 9, 0x58, 0x1B
+            ]
         );
         assert_eq!(NetAddr::decode(&wire), Some(a));
         assert_eq!(NetAddr::decode(&wire[..15]), None);
         assert_eq!(NetAddr::decode_reply(&a.set_body(1)), Some((1, a)));
         assert_eq!(NetAddr::decode_reply(&[]), None);
         assert!(a.pinned());
-        assert!(!NetAddr { peer_ip: [0; 4], ..a }.pinned());
+        assert!(
+            !NetAddr {
+                peer_ip: [0; 4],
+                ..a
+            }
+            .pinned()
+        );
         // Not a loader command: boards without links answer NotFound.
-        assert_eq!(Command::parse(keys::NET_ADDR, &[1]), Err(HandlerError::NotFound));
+        assert_eq!(
+            Command::parse(keys::NET_ADDR, &[1]),
+            Err(HandlerError::NotFound)
+        );
         assert!(is_system_key(keys::NET_ADDR));
     }
 
@@ -1078,18 +1094,29 @@ mod tests {
     fn commands_round_trip_through_parse() {
         let data = [1u8, 2, 3];
         let mut b = binding::Binding::new([3; 32], trust::Version(2));
-        b.bind("cmd", binding::Target::Key(Key::from_static("a/b"))).unwrap();
+        b.bind("cmd", binding::Target::Key(Key::from_static("a/b")))
+            .unwrap();
         let mut rec = [0u8; 128];
         let n = b.encode(&mut rec).unwrap();
         let mut signed = rec[..n].to_vec();
-        signed.extend_from_slice(&binding::SignedBinding { version: trust::Version(2), signature: trust::Signature([7; 64]) }.encode());
+        signed.extend_from_slice(
+            &binding::SignedBinding {
+                version: trust::Version(2),
+                signature: trust::Signature([7; 64]),
+            }
+            .encode(),
+        );
         for cmd in [
             Command::Info,
             Command::Board,
             Command::Manifest,
             Command::Binding,
-            Command::Bind { request: binding::BindRequest::parse(&rec[..n]).unwrap() },
-            Command::Bind { request: binding::BindRequest::parse(&signed).unwrap() },
+            Command::Bind {
+                request: binding::BindRequest::parse(&rec[..n]).unwrap(),
+            },
+            Command::Bind {
+                request: binding::BindRequest::parse(&signed).unwrap(),
+            },
             Command::Begin {
                 len: 10,
                 crc: 0xDEAD_BEEF,
@@ -1359,7 +1386,11 @@ mod tests {
     #[test]
     fn sc2_source_capability_bits() {
         assert_eq!(Caps::SERVE.0, 1, "existing bits keep their numbers");
-        assert_eq!(Caps::BRIDGE.0, 2, "the Colorlight gateware hard-codes bit 1");
+        assert_eq!(
+            Caps::BRIDGE.0,
+            2,
+            "the Colorlight gateware hard-codes bit 1"
+        );
         assert_eq!((Caps::SOURCE_IMU.0, Caps::SOURCE_MICROPHONE.0), (4, 8));
         assert_eq!(Caps::source(SourceKind::Imu), Some(Caps::SOURCE_IMU));
         assert_eq!(

@@ -263,7 +263,10 @@ impl FakeDevice {
             peer_ip: [0; 4],
             peer_port: 0,
         };
-        FakeDevice { net: vec![link(0), link(1)], ..self }
+        FakeDevice {
+            net: vec![link(0), link(1)],
+            ..self
+        }
     }
 
     /// Link `n`'s current addresses.
@@ -427,7 +430,9 @@ impl FakeDevice {
             }
         }
         let copy = |out: &mut [u8], b: &[u8]| -> Result<usize, HandlerError> {
-            out.get_mut(..b.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(b);
+            out.get_mut(..b.len())
+                .ok_or(HandlerError::BufferTooSmall)?
+                .copy_from_slice(b);
             Ok(b.len())
         };
         if key == keys::PEERS {
@@ -439,7 +444,11 @@ impl FakeDevice {
             return Ok(n);
         }
         if let Some((node, path)) = middleware::loader::peers::forwardable(key, NODE) {
-            let m = self.peers.iter().find(|(n, _)| *n == node).ok_or(HandlerError::Unavailable)?;
+            let m = self
+                .peers
+                .iter()
+                .find(|(n, _)| *n == node)
+                .ok_or(HandlerError::Unavailable)?;
             return match path {
                 p if p == keys::MANIFEST => copy(out, &m.1.clone()),
                 _ => Err(HandlerError::NotFound),
@@ -447,11 +456,16 @@ impl FakeDevice {
         }
         if key == keys::NET_ADDR && !self.net.is_empty() {
             let link = *body.first().ok_or(HandlerError::InvalidRequest)?;
-            let slot = self.net.get_mut(usize::from(link)).ok_or(HandlerError::InvalidRequest)?;
+            let slot = self
+                .net
+                .get_mut(usize::from(link))
+                .ok_or(HandlerError::InvalidRequest)?;
             return match body.len() {
                 1 => {
                     let r = slot.set_body(link);
-                    out.get_mut(..r.len()).ok_or(HandlerError::BufferTooSmall)?.copy_from_slice(&r);
+                    out.get_mut(..r.len())
+                        .ok_or(HandlerError::BufferTooSmall)?
+                        .copy_from_slice(&r);
                     Ok(r.len())
                 }
                 n if n == 1 + NetAddr::LEN => {

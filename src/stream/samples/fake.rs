@@ -82,7 +82,11 @@ const fn scaled(q15: i16, full: i32) -> i16 {
 /// magnetometer X, Y, Z at [`super::MAG_LSB_NT`].
 pub const fn imu_sample(index: u64, rate_hz: u32, range_g: u16) -> [i16; 6] {
     let phase = tilt_phase(index, rate_hz);
-    let one_g = if range_g == 0 { 0 } else { 32_768 / range_g as i32 };
+    let one_g = if range_g == 0 {
+        0
+    } else {
+        32_768 / range_g as i32
+    };
     let (s, c) = (sine_q15(phase), cosine_q15(phase));
     [
         0,
@@ -189,7 +193,11 @@ fn fake_levels(block_index: u64, block: u16, rate: u32) -> (u16, u16) {
         let m = mic_sample(start.wrapping_add(k), rate).unsigned_abs();
         (sum.saturating_add(u64::from(m) * u64::from(m)), peak.max(m))
     });
-    let rms = if block == 0 { 0 } else { (sum / u64::from(block)).isqrt() };
+    let rms = if block == 0 {
+        0
+    } else {
+        (sum / u64::from(block)).isqrt()
+    };
     (u16::try_from(rms).unwrap_or(u16::MAX), peak)
 }
 
@@ -277,11 +285,11 @@ impl FakeRoute {
         let first = batch.saturating_mul(u64::from(n));
         let ts = self.unit_time_us(first);
         self.next_batch = batch + 1;
-        Some(
-            self.source
-                .fake_batch(first, ts, n, out)
-                .map(|len| Polled { len, batch, skipped }),
-        )
+        Some(self.source.fake_batch(first, ts, n, out).map(|len| Polled {
+            len,
+            batch,
+            skipped,
+        }))
     }
 }
 
@@ -335,7 +343,11 @@ mod tests {
         let early = crossings(8_000, 800);
         let late = crossings(15_200, 800);
         assert!(late > 3 * early, "{early} {late}");
-        assert_eq!(mic_sample(16_000, rate), mic_sample(0, rate), "one-second cycle");
+        assert_eq!(
+            mic_sample(16_000, rate),
+            mic_sample(0, rate),
+            "one-second cycle"
+        );
     }
 
     #[test]
@@ -344,7 +356,10 @@ mod tests {
         let mut out = [0u8; super::super::MAX_BATCH];
         let n = imu_batch(&imu, 200, 2_000_000, 10, &mut out).unwrap();
         let b = decode(&out[..n]).unwrap();
-        assert_eq!((b.header.kind, b.header.channels, b.header.count), (SensorKind::Imu, 6, 10));
+        assert_eq!(
+            (b.header.kind, b.header.channels, b.header.count),
+            (SensorKind::Imu, 6, 10)
+        );
         let first: [i16; 6] = core::array::from_fn(|i| b.i16_values().nth(i).unwrap_or(0));
         assert_eq!(first, imu_sample(200, 100, 4));
 
@@ -390,7 +405,8 @@ mod tests {
         assert_eq!(b.timestamp_us, 5_000 + 300_000);
         assert_eq!(gap(&a, &b), Gap::Lost(20));
 
-        let mic = SampleSource::Microphone(MicConfig::new(16_000, 0, AudioMode::Levels, 2, 400).unwrap());
+        let mic =
+            SampleSource::Microphone(MicConfig::new(16_000, 0, AudioMode::Levels, 2, 400).unwrap());
         let mut m = FakeRoute::new(mic, 0);
         assert_eq!(m.next_due_us(), 50_000, "2 blocks of 400 at 16 kHz");
         assert_eq!(m.unit_time_us(1), 25_000);

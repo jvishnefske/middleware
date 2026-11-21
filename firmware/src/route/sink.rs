@@ -57,7 +57,11 @@ impl Plan<'_> {
 impl SinkRoute {
     /// A sink that has seen nothing.
     pub const fn new(cfg: SinkConfig) -> Self {
-        SinkRoute { cfg, sink: Sink::new(), stats: RouteStats { frames: 0, frames_dropped: 0, chunks: 0, chunks_dropped: 0 } }
+        SinkRoute {
+            cfg,
+            sink: Sink::new(),
+            stats: RouteStats { frames: 0, frames_dropped: 0, chunks: 0, chunks_dropped: 0 },
+        }
     }
 
     /// The route's config.
@@ -83,12 +87,7 @@ impl SinkRoute {
 pub fn transfers<'a>(preamble: &'a Preamble, plan: &Plan<'a>) -> impl Iterator<Item = Segment<'a>> {
     let start = plan.starts_frame();
     let data = plan.step.forwards().then_some(Segment { dc: true, bytes: plan.data });
-    preamble
-        .segments()
-        .filter(move |_| start)
-        .chain(data)
-        .filter(|s| !s.bytes.is_empty())
-        .take(MAX_TRANSFERS)
+    preamble.segments().filter(move |_| start).chain(data).filter(|s| !s.bytes.is_empty()).take(MAX_TRANSFERS)
 }
 
 #[cfg(test)]
@@ -100,9 +99,7 @@ mod tests {
     use std::vec::Vec;
 
     fn cfg() -> SinkConfig {
-        SinkConfig::new(13, 6)
-            .expect("valid")
-            .with_preamble(Preamble::mipi_window(60, 60, 179, 179).expect("fits"))
+        SinkConfig::new(13, 6).expect("valid").with_preamble(Preamble::mipi_window(60, 60, 179, 179).expect("fits"))
     }
 
     fn msg(seq: u16, offset: u32, data: &[u8]) -> Vec<u8> {
@@ -162,10 +159,7 @@ mod tests {
         // Garbage is malformed and dropped.
         let (r, p) = r.receive(&[1, 2, 3]);
         assert!(matches!(p.step.action, Action::Drop(DropReason::Malformed(_))));
-        assert_eq!(
-            r.stats(),
-            RouteStats { frames: 0, frames_dropped: 1, chunks: 1, chunks_dropped: 3 }
-        );
+        assert_eq!(r.stats(), RouteStats { frames: 0, frames_dropped: 1, chunks: 1, chunks_dropped: 3 });
     }
 
     #[test]

@@ -35,9 +35,7 @@
 //! aligned prefix is read directly and a trailing partial word through a
 //! small buffer.
 
-use crate::image::{
-    Generation, HEADER_LEN, Header, OutOfOrder, Region, SECTOR, Slot, WORD, WordWriter, newest,
-};
+use crate::image::{Generation, HEADER_LEN, Header, OutOfOrder, Region, SECTOR, Slot, WORD, WordWriter, newest};
 use embedded_storage::nor_flash::NorFlash;
 use middleware::crc::Crc32;
 

@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use middleware::loader::trust::{ControlCounter, ControlOp, TARGET_LEN, Version};
 use middleware::loader::{Caps, DeviceInfo, PayloadStatus, keys};
 use middleware::serial::link::{INBOX_BYTES, LinkError, SerialLink};
 use middleware::transport::{
@@ -32,19 +33,18 @@ use middleware::transport::{
 use middleware::zenoh::{SessionConfig, ZenohSubscriber, ZenohTransport};
 use middleware::{Key, KeyFilter, SenderId};
 use mw_gateway::bridge::encode_sys_request;
-use mw_gateway::state::{ControlStore, Persisted};
 use mw_gateway::io::{ChannelIo, pair};
+use mw_gateway::state::{ControlStore, Persisted};
 use mw_gateway::{GatewayConfig, SysForward, service};
+use mw_posix_node::config::gateway_state_dir;
 use mw_posix_node::service::CHIP;
 use mw_posix_node::shell::Ended;
-use mw_posix_node::config::gateway_state_dir;
 use mw_posix_node::{
     DeviceParts, GatewayParts, PosixNode, control_floor, facts, limits, open_state_flash, start, wall_clock_ms,
 };
 use mw_service::{Ctx, Links, Served};
 use mwctl::plan::upload_plan;
 use mwctl::sign::{Seed, sign_commit, sign_control};
-use middleware::loader::trust::{ControlCounter, ControlOp, TARGET_LEN, Version};
 
 const NODE: SenderId = SenderId([0x5e, 0x11, 0x0d, 0xe0, 0x2a, 0x9c, 0x41, 0x07]);
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -72,12 +72,7 @@ fn state_dir(name: &str) -> PathBuf {
 /// The cluster session (listening on a fresh loopback port) and a session
 /// for the node connected to it.
 async fn zenoh_pair() -> (ZenohTransport, ZenohTransport) {
-    let port = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port();
+    let port = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind").local_addr().expect("addr").port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     let cluster = SessionConfig::new().listen(endpoint.clone()).build().expect("config");
     let node = SessionConfig::new().connect(endpoint).build().expect("config");
@@ -186,7 +181,11 @@ async fn next(sub: &mut ZenohSubscriber) -> Vec<u8> {
 
 type Local = SerialLink<ChannelIo, INBOX_BYTES>;
 
-async fn local_request(link: &mut Local, key: &'static str, body: &[u8]) -> Result<Vec<u8>, LinkError<mw_gateway::io::Closed>> {
+async fn local_request(
+    link: &mut Local,
+    key: &'static str,
+    body: &[u8],
+) -> Result<Vec<u8>, LinkError<mw_gateway::io::Closed>> {
     let mut out = vec![0u8; 1024];
     let r = tokio::time::timeout(
         TIMEOUT,
@@ -240,10 +239,7 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
 
     // Claim over the local link: physical access. Through gw/sys a claim
     // is always refused, even for an updater.
-    assert_eq!(
-        sys.call(keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).await,
-        Err(HandlerError::Denied)
-    );
+    assert_eq!(sys.call(keys::TRUST_CLAIM, test_seed().public_key().as_bytes()).await, Err(HandlerError::Denied));
     local_request(&mut local, "sys/trust/claim", test_seed().public_key().as_bytes()).await.expect("claim");
     // The gateway learns the claim from a forwarded sys/trust/info.
     sys.call(keys::TRUST_INFO, &[]).await.expect("trust info");
@@ -301,10 +297,7 @@ async fn pn8_a_signed_payload_through_gw_sys_publishes_to_zenoh_and_serves() {
     assert_eq!(report.gateway.device, Some(NODE));
     // The accepted start's counter is persisted in the gateway's state,
     // under the node's state directory.
-    assert_eq!(
-        ControlStore::in_dir(gateway_state_dir(None, &state)).load(),
-        Persisted::At(ControlCounter(counter))
-    );
+    assert_eq!(ControlStore::in_dir(gateway_state_dir(None, &state)).load(), Persisted::At(ControlCounter(counter)));
 
     // Restart on the same state directory: the payload starts by itself,
     // the pinned key and min_version hold.

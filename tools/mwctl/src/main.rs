@@ -45,7 +45,8 @@ use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::report::{
-    format_binding, format_board, format_event, format_manifest, format_fw_info, format_info, format_net, format_trust,
+    format_binding, format_board, format_event, format_fw_info, format_info, format_manifest,
+    format_net, format_trust,
 };
 use mwctl::sign::{SEED_LEN, Seed, Signer, counter_at, hex, sign_commit, sign_control, version_at};
 use mwctl::udp::UdpLink;
@@ -195,7 +196,11 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
             .map_err(ctx)?
             .next()
             .ok_or_else(|| ctx(std::io::ErrorKind::NotFound.into()))?;
-        let local = if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let local = if peer.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         let socket = std::net::UdpSocket::bind(local)?;
         socket.connect(peer).map_err(ctx)?;
         let mut dev = Device::new(UdpLink::new(socket, timeouts));
@@ -624,12 +629,18 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 println!("no peers heard");
             }
             for id in p {
-                println!("{}", id.0.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                println!(
+                    "{}",
+                    id.0.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                );
             }
         }),
         Cmd::Binding => dev.binding().map(|r| match r {
             None => println!("no binding stored"),
-            Some(r) => print!("{}", format_binding(&r).unwrap_or_else(|| "a binding this mwctl cannot decode\n".into())),
+            Some(r) => print!(
+                "{}",
+                format_binding(&r).unwrap_or_else(|| "a binding this mwctl cannot decode\n".into())
+            ),
         }),
         Cmd::Bind {
             file,
@@ -643,7 +654,8 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 Some(v) => Version(v),
                 None => version_at(SystemTime::now())?,
             };
-            let record = mwctl::bindspec::record(mwctl::sign::image_sha256(&image), v.0, &specs).map_err(Error::Payload)?;
+            let record = mwctl::bindspec::record(mwctl::sign::image_sha256(&image), v.0, &specs)
+                .map_err(Error::Payload)?;
             let mut body = record.clone();
             if let Some(k) = key {
                 let signer = open_signer(&k)?;
@@ -653,11 +665,22 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 })?;
                 let message = binding_message(node, &mwctl::sign::image_sha256(&image), v, &sha);
                 let signature = signer.sign(&message)?;
-                body.extend_from_slice(&SignedBinding { version: v, signature }.encode());
+                body.extend_from_slice(
+                    &SignedBinding {
+                        version: v,
+                        signature,
+                    }
+                    .encode(),
+                );
                 eprintln!("signing binding version {} with {k}", v.0);
             }
             print!("{}", format_binding(&record).unwrap_or_default());
-            dev.bind(&body).map(|()| println!("bound {}: applies at the payload's next start", file.display()))
+            dev.bind(&body).map(|()| {
+                println!(
+                    "bound {}: applies at the payload's next start",
+                    file.display()
+                )
+            })
         }
         Cmd::Request { key, body } => {
             let key = middleware::Key::new(&key).map_err(|_| {
@@ -761,12 +784,19 @@ fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> R
                 );
             })
         }
-        Cmd::Net { link, ip, mac, peer } => {
+        Cmd::Net {
+            link,
+            ip,
+            mac,
+            peer,
+        } => {
             let changed = ip.is_some() || mac.is_some() || peer.is_some();
             dev.net(link, ip, mac, peer).map(|a| {
                 print!("{}", format_net(link, &a));
                 if changed {
-                    println!("(applied after the reply; an IP change takes effect for the next request)");
+                    println!(
+                        "(applied after the reply; an IP change takes effect for the next request)"
+                    );
                 }
             })
         }

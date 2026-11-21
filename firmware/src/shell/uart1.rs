@@ -39,9 +39,9 @@ use embassy_futures::select::{Either, select};
 use esp_base::periph::dma::DmaState;
 use esp_base::periph::ring::RxRing;
 use esp_base::periph::{dma_done_event, uart_rx_event};
-use esp_hal::{Async, Blocking};
 use esp_hal::gpio::{InputSignal, Level, OutputSignal};
 use esp_hal::uart::{Config, Uart};
+use esp_hal::{Async, Blocking};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{MAX_DMA, UART_PORT, UART_RX_BUFFER, UartConfig};
@@ -104,9 +104,7 @@ impl Uart1Port {
         if self.busy() {
             return Err(AbiError::Busy);
         }
-        self.uart
-            .apply_config(&Config::default().with_baudrate(cfg.baud))
-            .map_err(|_| AbiError::InvalidArgument)?;
+        self.uart.apply_config(&Config::default().with_baudrate(cfg.baud)).map_err(|_| AbiError::InvalidArgument)?;
         if cfg.rx.is_none() {
             RXD.connect_to(&Level::High);
         }

@@ -105,10 +105,10 @@
 //! Status changes are published on `sys/payload/status`, notable events as
 //! `sys/log` lines.
 
+use esp_base::binding_store::{self, BindingStore};
 use esp_base::dispatch::{Action, Context, Outcome, State, after_storage_failure, handle_request};
 use esp_base::ota::{self, Admission, Facts, Mac, Origin};
 use esp_base::serve::{Route, ServedKeys, route_request, served_after};
-use esp_base::binding_store::{self, BindingStore};
 use esp_base::store::{PayloadStore, StoreError};
 use esp_base::trust_store::{Persisted, TrustStore};
 use esp_storage::FlashStorage;
@@ -237,13 +237,7 @@ impl Controller {
                 start = Some(Some((port, id)));
             }
             #[cfg(not(feature = "wasm"))]
-            self.bus.reply(
-                port,
-                Reply {
-                    id,
-                    result: Err(HandlerError::NotFound),
-                },
-            );
+            self.bus.reply(port, Reply { id, result: Err(HandlerError::NotFound) });
         }
     }
 
@@ -264,28 +258,12 @@ impl Controller {
         match outcome.action {
             Action::Erase { len, .. } => self.store()?.erase(len),
             Action::Write { offset, data } => self.store()?.write(offset, data),
-            Action::Activate {
-                len,
-                crc,
-                trust: None,
-            } => self.store()?.activate(len, crc),
-            Action::Activate {
-                len,
-                crc,
-                trust: Some(next),
-            } => {
+            Action::Activate { len, crc, trust: None } => self.store()?.activate(len, crc),
+            Action::Activate { len, crc, trust: Some(next) } => {
                 let (Some(store), Some(ts)) = (self.store.as_mut(), self.trust.as_mut()) else {
                     return Err(StoreError::Flash);
                 };
-                store.activate_with(len, crc, |flash| {
-                    ts.save(
-                        flash,
-                        &Persisted {
-                            trust: next,
-                            control,
-                        },
-                    )
-                })
+                store.activate_with(len, crc, |flash| ts.save(flash, &Persisted { trust: next, control }))
             }
             Action::Claim { trust } => self.save_trust(&Persisted { trust, control }),
             // Performed by `binding_store::perform` in `dispatch`.
@@ -315,10 +293,7 @@ impl Controller {
 
     /// Logs what a trust-related request did.
     fn log_trust(&self, key: &str, outcome: &Outcome<'_>) {
-        if let Action::Claim {
-            trust: TrustState::Claimed { key, .. },
-        } = outcome.action
-        {
+        if let Action::Claim { trust: TrustState::Claimed { key, .. } } = outcome.action {
             let k = key.as_bytes();
             self.bus.log(format_args!(
                 "trust: {} key {:02x}{:02x}{:02x}{:02x}... pinned, min_version 0; re-key window closed",
@@ -329,22 +304,13 @@ impl Controller {
                 k[3]
             ));
         }
-        if let Action::Activate {
-            trust: Some(TrustState::Claimed { min_version, .. }),
-            ..
-        } = outcome.action
-        {
-            self.bus.log(format_args!(
-                "trust: signed payload accepted, min_version {}",
-                min_version.0
-            ));
+        if let Action::Activate { trust: Some(TrustState::Claimed { min_version, .. }), .. } = outcome.action {
+            self.bus.log(format_args!("trust: signed payload accepted, min_version {}", min_version.0));
         }
         if let Action::Activate { .. } = outcome.action
             && self.state.status() == PayloadStatus::Running
         {
-            self.bus.log(format_args!(
-                "ota: new image active; stopping the payload that ran the old one"
-            ));
+            self.bus.log(format_args!("ota: new image active; stopping the payload that ran the old one"));
         }
         if outcome.reply == Err(HandlerError::Denied) {
             if key == keys::COMMIT.as_str() {
@@ -356,9 +322,7 @@ impl Controller {
                     "trust: commit denied (needs a valid signature and version > {min}); previous payload kept"
                 ));
             } else {
-                self.bus.log(format_args!(
-                    "trust: claim denied; hold BOOT 3 s to open the re-key window"
-                ));
+                self.bus.log(format_args!("trust: claim denied; hold BOOT 3 s to open the re-key window"));
             }
         }
     }
@@ -378,11 +342,9 @@ impl Controller {
                 m[5],
                 r.reason()
             )),
-            (Origin::Serial, Some(r)) => self.bus.log(format_args!(
-                "loader: {} from serial refused: {}",
-                key.as_str(),
-                r.reason()
-            )),
+            (Origin::Serial, Some(r)) => {
+                self.bus.log(format_args!("loader: {} from serial refused: {}", key.as_str(), r.reason()))
+            }
             (Origin::Air(m), None) if notable => self.bus.log(format_args!(
                 "ota: {} from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 key.as_str(),
@@ -400,21 +362,11 @@ impl Controller {
     /// Admits, dispatches one request and performs its storage action.
     /// `None` reply means a start was requested.
     fn handle(&mut self, id: u8, origin: Origin, key: &str, body: &[u8]) -> Handled {
-        let refuse = |result: HandlerError| Handled {
-            reply: Some(Reply {
-                id,
-                result: Err(result),
-            }),
-            stop: false,
-        };
+        let refuse = |result: HandlerError| Handled { reply: Some(Reply { id, result: Err(result) }), stop: false };
         let Ok(key) = Key::new(key) else {
             return refuse(HandlerError::InvalidRequest);
         };
-        let facts = Facts {
-            trust: self.state.trust(),
-            control: self.state.control(),
-            own: self.own,
-        };
+        let facts = Facts { trust: self.state.trust(), control: self.state.control(), own: self.own };
         let body = match ota::admit(&facts, self.owner, origin, key, body) {
             Err(refusal) => {
                 self.log_origin(origin, key, Some(refusal));
@@ -427,24 +379,15 @@ impl Controller {
             Ok(Admission::Control { counter }) => {
                 // Persist before acting: a captured request can never act
                 // twice, even across a power cut.
-                let next = Persisted {
-                    trust: self.state.trust(),
-                    control: counter,
-                };
+                let next = Persisted { trust: self.state.trust(), control: counter };
                 if let Err(e) = self.save_trust(&next) {
-                    self.bus.log(format_args!(
-                        "trust: control counter not saved ({e}); request ignored"
-                    ));
+                    self.bus.log(format_args!("trust: control counter not saved ({e}); request ignored"));
                     self.set_state(self.adopt_persisted(self.state));
                     return refuse(HandlerError::Internal);
                 }
                 self.set_state(self.state.with_control(counter));
                 self.log_origin(origin, key, None);
-                self.bus.log(format_args!(
-                    "trust: signed {} accepted, counter {}",
-                    key.as_str(),
-                    counter.0
-                ));
+                self.bus.log(format_args!("trust: signed {} accepted, counter {}", key.as_str(), counter.0));
                 &[][..]
             }
             Ok(Admission::Dispatch) => {
@@ -463,11 +406,7 @@ impl Controller {
     fn dispatch(&mut self, id: u8, origin: Origin, key: Key<'_>, body: &[u8]) -> Handled {
         let staging = matches!(origin, Origin::Air(_));
         let mut out = [0u8; MAX_REPLY];
-        let ctx = Context {
-            rekey_window: presence::window_open(),
-            staging,
-            ..self.ctx
-        };
+        let ctx = Context { rekey_window: presence::window_open(), staging, ..self.ctx };
         // A serial port names no caller; an ESP-NOW request names its
         // sender's MAC (unauthenticated: the over-the-air policy, not the
         // sender, is what admitted it). No principal, no deadline.
@@ -485,35 +424,24 @@ impl Controller {
             if let Some((next, reply)) = done {
                 self.set_state(next);
                 let result = reply.and_then(|n| {
-                    out.get(..n)
-                        .and_then(|b| Vec::from_slice(b).ok())
-                        .ok_or(HandlerError::BufferTooSmall)
+                    out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall)
                 });
-                return Handled {
-                    reply: Some(Reply { id, result }),
-                    stop: false,
-                };
+                return Handled { reply: Some(Reply { id, result }), stop: false };
             }
         }
         if outcome.action == Action::Start {
-            return Handled {
-                reply: None,
-                stop: false,
-            };
+            return Handled { reply: None, stop: false };
         }
         if let Action::Erase { stop: false, .. } = outcome.action
             && self.state.status() == PayloadStatus::Running
         {
-            self.bus.log(format_args!(
-                "ota: staging into the inactive slot; the payload keeps running"
-            ));
+            self.bus.log(format_args!("ota: staging into the inactive slot; the payload keeps running"));
         }
         let mut stop = outcome.action.stops_payload();
         let result = match self.storage(&outcome) {
             Ok(()) => {
                 if let Action::Activate { len, .. } = outcome.action {
-                    self.bus
-                        .log(format_args!("payload installed ({len} bytes)"));
+                    self.bus.log(format_args!("payload installed ({len} bytes)"));
                 }
                 if let Action::Claim { .. } = outcome.action {
                     presence::close();
@@ -534,15 +462,9 @@ impl Controller {
                 Err(HandlerError::Internal)
             }
         };
-        let result = result.and_then(|n| {
-            out.get(..n)
-                .and_then(|b| Vec::from_slice(b).ok())
-                .ok_or(HandlerError::BufferTooSmall)
-        });
-        Handled {
-            reply: Some(Reply { id, result }),
-            stop,
-        }
+        let result =
+            result.and_then(|n| out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall));
+        Handled { reply: Some(Reply { id, result }), stop }
     }
 
     /// Where a serial request on `key` goes, given the keys a payload
@@ -584,23 +506,17 @@ impl Controller {
     /// that was free here.
     #[cfg(feature = "wasm")]
     fn load(&mut self) -> Result<Payload<EspDevice>, StartError> {
-        let limits = Limits::bytes(self.profile.max_memory_bytes)
-            .with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
+        let limits = Limits::bytes(self.profile.max_memory_bytes).with_fuel(middleware::wasm_abi::FUEL_PER_CALL);
         let store = self.store().map_err(StartError::Store)?;
-        let header = store
-            .header()
-            .ok_or(StartError::Store(StoreError::NoImage))?;
+        let header = store.header().ok_or(StartError::Store(StoreError::NoImage))?;
         check_heap(esp_alloc::HEAP.free(), header.len).map_err(StartError::NoHeap)?;
         let len = header.len as usize;
         let mut image = AllocVec::new();
-        image
-            .try_reserve_exact(len)
-            .map_err(|_| StartError::NoMemory)?;
+        image.try_reserve_exact(len).map_err(|_| StartError::NoMemory)?;
         image.resize(len, 0u8);
         store.load(header, &mut image).map_err(StartError::Store)?;
         let bound = limits.heap_needed(&image);
-        let needed = check_heap_holding(esp_alloc::HEAP.free(), image.capacity(), bound)
-            .map_err(StartError::NoHeap)?;
+        let needed = check_heap_holding(esp_alloc::HEAP.free(), image.capacity(), bound).map_err(StartError::NoHeap)?;
         // The stored binding, if it is for this image (BD4).
         let mut record = [0u8; middleware::loader::binding::BINDING_MAX];
         let n = match (self.binding.as_ref(), self.store.as_mut()) {
@@ -621,8 +537,7 @@ impl Controller {
         drop(image);
         let node = self.ctx.node.unwrap_or(SenderId([0; 8]));
         let device = EspDevice::new(self.profile, self.bus, node).ok_or(StartError::NoPins)?;
-        let payload =
-            Payload::instantiate_bound(compiled, device, binding.as_ref()).map_err(StartError::Load)?;
+        let payload = Payload::instantiate_bound(compiled, device, binding.as_ref()).map_err(StartError::Load)?;
         self.bus.log(format_args!(
             "payload loaded ({} bytes): heap {} B free, needed at most {needed} B",
             header.len,
@@ -635,12 +550,7 @@ impl Controller {
     /// payload if subscribed. Returns what the delivery cost the payload
     /// ([`Cost::ZERO`] when it was not delivered).
     #[cfg(feature = "wasm")]
-    async fn publication(
-        &mut self,
-        payload: &mut Payload<EspDevice>,
-        key: &str,
-        body: &[u8],
-    ) -> Result<Cost, Trap> {
+    async fn publication(&mut self, payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Result<Cost, Trap> {
         let Ok(key) = Key::new(key) else {
             return Ok(Cost::ZERO);
         };
@@ -681,13 +591,7 @@ impl Controller {
     async fn running(&mut self, pending: Option<(Port, u8)>) {
         let answer = |bus: &Bus, result: Result<(), HandlerError>| {
             if let Some((port, id)) = pending {
-                bus.reply(
-                    port,
-                    Reply {
-                        id,
-                        result: result.map(|()| Vec::new()),
-                    },
-                );
+                bus.reply(port, Reply { id, result: result.map(|()| Vec::new()) });
             }
         };
         let mut payload = match self.load() {
@@ -738,8 +642,7 @@ impl Controller {
                 }
             }
             if let Some(n) = irq::overflow_report() {
-                self.bus
-                    .log(format_args!("irq queue full: {n} events dropped"));
+                self.bus.log(format_args!("irq queue full: {n} events dropped"));
             }
             let delay = payload.next_tick().map(|due| tick_delay(now_ms(), due));
             let tick = async move {
@@ -762,15 +665,13 @@ impl Controller {
                         return;
                     }
                 }
-                Either4::First(Either::Second((key, body))) => {
-                    match self.publication(payload, &key, &body).await {
-                        Ok(cost) => window = window.op(CallKind::Message, cost),
-                        Err(trap) => {
-                            self.trapped(&trap);
-                            return;
-                        }
+                Either4::First(Either::Second((key, body))) => match self.publication(payload, &key, &body).await {
+                    Ok(cost) => window = window.op(CallKind::Message, cost),
+                    Err(trap) => {
+                        self.trapped(&trap);
+                        return;
                     }
-                }
+                },
                 Either4::First(Either::First(msg)) => match msg.kind {
                     Kind::Publish => match self.publication(payload, &msg.key, &msg.body).await {
                         Ok(cost) => window = window.op(CallKind::Message, cost),
@@ -782,16 +683,9 @@ impl Controller {
                     Kind::Request { id } => {
                         match self.route(msg.origin, &msg.key, payload.serves()) {
                             Route::Payload => {
-                                let (reply, cost) =
-                                    timed(payload, |p| request(p, &msg.key, &msg.body));
+                                let (reply, cost) = timed(payload, |p| request(p, &msg.key, &msg.body));
                                 window = window.op(CallKind::Message, cost);
-                                self.bus.reply(
-                                    msg.port,
-                                    Reply {
-                                        id,
-                                        result: reply.result,
-                                    },
-                                );
+                                self.bus.reply(msg.port, Reply { id, result: reply.result });
                                 if let Some(trap) = reply.trap {
                                     self.trapped(&trap);
                                     return;
@@ -807,10 +701,7 @@ impl Controller {
                         let handled = self.handle(id, msg.origin, &msg.key, &msg.body);
                         // A start while running is answered by dispatch, so
                         // a reply is always present here.
-                        let reply = handled.reply.unwrap_or(Reply {
-                            id,
-                            result: Ok(Vec::new()),
-                        });
+                        let reply = handled.reply.unwrap_or(Reply { id, result: Ok(Vec::new()) });
                         self.bus.reply(msg.port, reply);
                         if handled.stop {
                             self.bus.log(format_args!("payload stopped"));
@@ -837,20 +728,15 @@ struct Served {
 #[cfg(feature = "wasm")]
 fn request(payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Served {
     let Ok(key) = Key::new(key) else {
-        return Served {
-            result: Err(HandlerError::InvalidRequest),
-            trap: None,
-        };
+        return Served { result: Err(HandlerError::InvalidRequest), trap: None };
     };
     let mut out = [0u8; MAX_REPLY];
     let result = payload.request(key, body, &RequestMeta::NONE, &mut out);
     let trap = result.as_ref().err().cloned();
     let answer = esp_base::serve::payload_reply(result);
-    let result = answer.reply.and_then(|n| {
-        out.get(..n)
-            .and_then(|b| Vec::from_slice(b).ok())
-            .ok_or(HandlerError::BufferTooSmall)
-    });
+    let result = answer
+        .reply
+        .and_then(|n| out.get(..n).and_then(|b| Vec::from_slice(b).ok()).ok_or(HandlerError::BufferTooSmall));
     Served { result, trap }
 }
 
@@ -858,21 +744,13 @@ fn request(payload: &mut Payload<EspDevice>, key: &str, body: &[u8]) -> Served {
 /// calls and fuel from [`Payload::fuel_stats`], wall time from the
 /// microsecond clock).
 #[cfg(feature = "wasm")]
-fn timed<R>(
-    payload: &mut Payload<EspDevice>,
-    op: impl FnOnce(&mut Payload<EspDevice>) -> R,
-) -> (R, Cost) {
+fn timed<R>(payload: &mut Payload<EspDevice>, op: impl FnOnce(&mut Payload<EspDevice>) -> R) -> (R, Cost) {
     let before = payload.fuel_stats();
     let start = irq::now_us();
     let result = op(payload);
     let end = irq::now_us();
     let after = payload.fuel_stats();
-    let cost = Cost::between(
-        (before.calls, before.total),
-        (after.calls, after.total),
-        start,
-        end,
-    );
+    let cost = Cost::between((before.calls, before.total), (after.calls, after.total), start, end);
     (result, cost)
 }
 
@@ -890,10 +768,8 @@ fn radio_time() -> RadioTime {
 
 /// The next sample received over ESP-NOW, as key and body.
 #[cfg(feature = "espnow")]
-async fn radio_sample() -> (
-    heapless::String<{ esp_base::radio::KEY_CAPACITY }>,
-    Vec<u8, { esp_base::radio::RX_PAYLOAD }>,
-) {
+async fn radio_sample()
+-> (heapless::String<{ esp_base::radio::KEY_CAPACITY }>, Vec<u8, { esp_base::radio::RX_PAYLOAD }>) {
     let r = super::radio::receive().await;
     (r.key, r.payload)
 }

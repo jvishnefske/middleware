@@ -74,10 +74,10 @@ mod timer;
 mod uart1;
 
 use embassy_executor::Spawner;
+use esp_base::binding_store::BindingStore;
 use esp_base::chip::FlashSettings;
 use esp_base::dispatch::{Context, State};
 use esp_base::store::PayloadStore;
-use esp_base::binding_store::BindingStore;
 use esp_base::trust_store::{Persisted, TrustStore};
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 use esp_hal::Async;
@@ -107,10 +107,7 @@ const BINDING_PARTITION: &str = "binding";
 /// The chip's eFuse base MAC (the Wi-Fi station address).
 pub(crate) fn base_mac() -> [u8; 6] {
     let mut mac = [0u8; 6];
-    for (dst, src) in mac
-        .iter_mut()
-        .zip(esp_hal::efuse::base_mac_address().as_bytes())
-    {
+    for (dst, src) in mac.iter_mut().zip(esp_hal::efuse::base_mac_address().as_bytes()) {
         *dst = *src;
     }
     mac
@@ -164,23 +161,13 @@ struct Storage {
 /// flash moves into the payload store, which then lends it back for trust
 /// saves ([`PayloadStore::flash`]).
 fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
-    let none = Storage {
-        store: None,
-        trust: None,
-        state: Persisted::default(),
-        binding: None,
-    };
+    let none = Storage { store: None, trust: None, state: Persisted::default(), binding: None };
     let mut table = [0u8; PARTITION_TABLE_MAX_LEN];
     let (payload, trust, binding) = {
         let Ok(parts) = read_partition_table(&mut flash, &mut table) else {
             return none;
         };
-        let find = |label: &str| {
-            parts
-                .iter()
-                .find(|e| e.label_as_str() == label)
-                .map(|e| (e.offset(), e.len()))
-        };
+        let find = |label: &str| parts.iter().find(|e| e.label_as_str() == label).map(|e| (e.offset(), e.len()));
         (find(PAYLOAD_PARTITION), find(TRUST_PARTITION), find(BINDING_PARTITION))
     };
     let (trust, state) = match trust.map(|(at, len)| TrustStore::open(&mut flash, at, len)) {
@@ -189,12 +176,7 @@ fn open_storage(mut flash: FlashStorage<'static>, limit: u32) -> Storage {
     };
     let binding = binding.and_then(|(at, len)| BindingStore::open(&mut flash, at, len).ok());
     let store = payload.and_then(|(at, len)| PayloadStore::new(flash, at, len, limit).ok());
-    Storage {
-        store,
-        trust,
-        state,
-        binding,
-    }
+    Storage { store, trust, state, binding }
 }
 
 /// This device's ESP-NOW station MAC (the eFuse base MAC), which signed
@@ -233,16 +215,8 @@ pub async fn run(spawner: Spawner) -> ! {
     // The bootloader's image header: the flash mode and clock code runs
     // from (read before the flash moves into the payload store).
     let mut header = [0u8; 4];
-    let flash_settings = flash
-        .read(0, &mut header)
-        .ok()
-        .and_then(|()| FlashSettings::from_header(header));
-    let Storage {
-        mut store,
-        trust,
-        state: persisted,
-        binding,
-    } = open_storage(flash, profile.max_image);
+    let flash_settings = flash.read(0, &mut header).ok().and_then(|()| FlashSettings::from_header(header));
+    let Storage { mut store, trust, state: persisted, binding } = open_storage(flash, profile.max_image);
     let trust_state = persisted.trust;
     let installed = store.as_mut().map(|s| s.verify());
     let capacity = store.as_ref().map_or(0, |s| s.capacity());
@@ -281,25 +255,24 @@ pub async fn run(spawner: Spawner) -> ! {
         None => bus.log(format_args!("flash: mode unknown (header {header:02x?})")),
     }
     match installed {
-        None => bus.log(format_args!(
-            "no '{PAYLOAD_PARTITION}' partition; loader disabled"
-        )),
-        Some(Ok(h)) => bus.log(format_args!(
-            "stored payload: {} bytes, crc {:08x}",
-            h.len, h.crc
-        )),
+        None => bus.log(format_args!("no '{PAYLOAD_PARTITION}' partition; loader disabled")),
+        Some(Ok(h)) => bus.log(format_args!("stored payload: {} bytes, crc {:08x}", h.len, h.crc)),
         Some(Err(e)) => bus.log(format_args!("no valid stored payload: {e}")),
     }
     match (&trust, trust_state) {
-        (None, _) => bus.log(format_args!(
-            "no '{TRUST_PARTITION}' partition; unsigned payloads only (TOFU)"
-        )),
-        (Some(_), TrustState::Unclaimed) => bus.log(format_args!(
-            "trust: unclaimed; any payload accepted until sys/trust/claim"
-        )),
+        (None, _) => bus.log(format_args!("no '{TRUST_PARTITION}' partition; unsigned payloads only (TOFU)")),
+        (Some(_), TrustState::Unclaimed) => {
+            bus.log(format_args!("trust: unclaimed; any payload accepted until sys/trust/claim"))
+        }
         (Some(_), TrustState::Claimed { key, min_version }) => bus.log(format_args!(
             "trust: claimed by {} key {:02x}{:02x}{:02x}{:02x}..., min_version {}, control counter {}",
-            key.kind().name(), key.as_bytes()[0], key.as_bytes()[1], key.as_bytes()[2], key.as_bytes()[3], min_version.0, persisted.control.0
+            key.kind().name(),
+            key.as_bytes()[0],
+            key.as_bytes()[1],
+            key.as_bytes()[2],
+            key.as_bytes()[3],
+            min_version.0,
+            persisted.control.0
         )),
     }
     spawner.spawn(presence::watch(board.boot, bus).unwrap());
@@ -340,10 +313,7 @@ pub async fn run(spawner: Spawner) -> ! {
             Ok(transport) => spawner.spawn(radio::radio_task(transport, bus).unwrap()),
             Err(e) => bus.log(format_args!("espnow: radio start failed: {e:?}")),
         }
-        bus.log(format_args!(
-            "heap: {} B free after boot",
-            esp_alloc::HEAP.free()
-        ));
+        bus.log(format_args!("heap: {} B free after boot", esp_alloc::HEAP.free()));
         Controller::new(state, ctx, store, trust, binding, own_mac(), bus, profile)
     };
     #[cfg(not(feature = "wasm"))]

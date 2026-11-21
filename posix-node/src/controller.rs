@@ -425,9 +425,8 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         // Without a payload nobody reads the driver: it catches up (it
         // integrates from the clock) when one starts.
         let p = self.payload.as_mut()?;
-        let tick = p
-            .next_tick()
-            .map(|due| now_us.saturating_add(u64::from(tick_delay(self.clock.now_ms(), due)) * 1000));
+        let tick =
+            p.next_tick().map(|due| now_us.saturating_add(u64::from(tick_delay(self.clock.now_ms(), due)) * 1000));
         let alarm = p.device().next_alarm_us();
         [tick, alarm, driver].into_iter().flatten().min()
     }

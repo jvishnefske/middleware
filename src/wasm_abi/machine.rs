@@ -175,7 +175,9 @@ impl Segment {
     pub fn decode(b: &[u8]) -> Option<Self> {
         let b: &[u8; Self::LEN] = b.try_into().ok()?;
         let flags = b[16];
-        if flags & !Self::KNOWN != 0 || flags & (Self::RAPID | Self::SYNC) == Self::RAPID | Self::SYNC {
+        if flags & !Self::KNOWN != 0
+            || flags & (Self::RAPID | Self::SYNC) == Self::RAPID | Self::SYNC
+        {
             return None;
         }
         Some(Segment {
@@ -259,18 +261,40 @@ mod tests {
 
     #[test]
     fn mc1_every_message_round_trips_at_its_one_length() {
-        let d = Digital { on: true, at_us: 0x0102_0304_0506_0708 };
+        let d = Digital {
+            on: true,
+            at_us: 0x0102_0304_0506_0708,
+        };
         assert_eq!(Digital::decode(&d.encode()), Some(d));
-        let p = Position { counts: -123_456_789_012, at_us: 77 };
+        let p = Position {
+            counts: -123_456_789_012,
+            at_us: 77,
+        };
         assert_eq!(Position::decode(&p.encode()), Some(p));
         let s = Setpoint { value: -2500 };
         assert_eq!(Setpoint::decode(&s.encode()), Some(s));
-        let g = Segment { seq: 9, x_um: -15_000, z_um: -42_500, feed: 1500, flags: Segment::SYNC };
+        let g = Segment {
+            seq: 9,
+            x_um: -15_000,
+            z_um: -42_500,
+            feed: 1500,
+            flags: Segment::SYNC,
+        };
         assert_eq!(Segment::decode(&g.encode()), Some(g));
-        let q = QueueState { free: 31, done: 8, flags: QueueState::IDLE | QueueState::OVERRUN };
+        let q = QueueState {
+            free: 31,
+            done: 8,
+            flags: QueueState::IDLE | QueueState::OVERRUN,
+        };
         assert_eq!(QueueState::decode(&q.encode()), Some(q));
         // Lengths are distinct, so no message decodes as another kind.
-        let lens = [Digital::LEN, Position::LEN, Setpoint::LEN, Segment::LEN, QueueState::LEN];
+        let lens = [
+            Digital::LEN,
+            Position::LEN,
+            Setpoint::LEN,
+            Segment::LEN,
+            QueueState::LEN,
+        ];
         for (i, a) in lens.iter().enumerate() {
             for b in &lens[i + 1..] {
                 assert_ne!(a, b);

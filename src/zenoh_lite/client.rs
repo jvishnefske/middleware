@@ -193,6 +193,9 @@ pub struct QueryEvent<'b> {
 }
 
 /// What [`ZenohLite::next_event`] received.
+// A query carries its reply route, a sample does not; both live only until
+// the caller handles them, and this no_std, heap-free client cannot box one.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event<'b> {
     /// A sample for a declared subscription.
@@ -391,6 +394,8 @@ enum Want {
 }
 
 /// What [`ZenohLite::next_inner`] copied to the front of the buffer.
+// Returned by value and consumed at once; no heap to box the query into.
+#[allow(clippy::large_enum_variant)]
 enum Got {
     Sample {
         key_len: usize,

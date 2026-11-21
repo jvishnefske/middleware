@@ -40,8 +40,8 @@
 use crate::irq::Event;
 use crate::spi::Spi;
 use crate::{AbiError, check, len_i32, ptr_i32, sys};
-pub use middleware::stream::{ESPNOW_CHUNK_DATA, MAX_CHUNK_DATA, MAX_FRAME_BYTES};
 pub use middleware::stream::samples;
+pub use middleware::stream::{ESPNOW_CHUNK_DATA, MAX_CHUNK_DATA, MAX_FRAME_BYTES};
 pub use middleware::wasm_abi::route::{
     AudioMode, CAMERA_CFG_LEN, CAMERA_PINS_LEN, CameraPins, IMU_CFG_LEN, ImuConfig, MAX_DIM,
     MAX_PREAMBLE, MAX_ROUTES, MAX_SEGMENTS, MAX_SINK_CFG_LEN, MIC_CFG_LEN, MIN_PERIOD_MS,
@@ -230,9 +230,16 @@ mod tests {
     #[test]
     fn sc2_sampled_sources_validate_before_the_host() {
         let ok = ImuConfig::new(100, 2, false, 10).expect("valid");
-        assert_eq!(Route::samples(SampleSource::Imu(ok), "app/imu"), Err(AbiError::Unsupported), "host stub");
+        assert_eq!(
+            Route::samples(SampleSource::Imu(ok), "app/imu"),
+            Err(AbiError::Unsupported),
+            "host stub"
+        );
         let bad = ImuConfig { range_g: 3, ..ok };
-        assert_eq!(Route::samples(SampleSource::Imu(bad), "app/imu"), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            Route::samples(SampleSource::Imu(bad), "app/imu"),
+            Err(AbiError::InvalidArgument)
+        );
         let mic = MicConfig::new(16_000, 0, AudioMode::Pcm, 160, 0).expect("valid");
         let bad = MicConfig { block: 3, ..mic };
         assert_eq!(
@@ -240,7 +247,10 @@ mod tests {
             Err(AbiError::InvalidArgument)
         );
         let frames = SourceConfig::new(120, 120, 100).expect("valid");
-        assert_eq!(Route::source(SourceKind::Imu, "app/imu", &frames), Err(AbiError::InvalidArgument));
+        assert_eq!(
+            Route::source(SourceKind::Imu, "app/imu", &frames),
+            Err(AbiError::InvalidArgument)
+        );
     }
 
     #[test]

@@ -193,12 +193,7 @@ pub fn check_binding(decls: &[Decl], binding: Option<&Binding<'_>>, points: &[Po
             ));
         }
         if !p.flow.admits(d.dir) {
-            return Err(format!(
-                "channel {}: point {name} is {}, the channel {:?}",
-                d.name,
-                p.flow.name(),
-                d.dir
-            ));
+            return Err(format!("channel {}: point {name} is {}, the channel {:?}", d.name, p.flow.name(), d.dir));
         }
     }
     Ok(())

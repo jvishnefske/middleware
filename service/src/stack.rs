@@ -56,8 +56,8 @@ mod tests {
     fn ms57_the_future_runs_on_a_spawned_thread_and_returns_its_output() {
         let main = thread::current().id();
         let rt = runtime();
-        let (output, ran_on) = block_on_thread(&rt, async { (41 + 1, thread::current().id()) })
-            .expect("spawned");
+        let (output, ran_on) =
+            block_on_thread(&rt, async { (41 + 1, thread::current().id()) }).expect("spawned");
         assert_eq!(output, 42);
         assert_ne!(ran_on, main);
     }

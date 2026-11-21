@@ -1008,15 +1008,28 @@ mod tests {
         const NODE: SenderId = SenderId([4; 8]);
 
         /// BD2: a binding request with `auth` signed by `s` (or unsigned).
-        fn bind_body(s: Option<&SigningKey>, image: [u8; 32], version: u32, key: &'static str) -> Vec<u8> {
-            use crate::loader::binding::{BINDING_MAX, Binding, SignedBinding, Target, binding_message};
+        fn bind_body(
+            s: Option<&SigningKey>,
+            image: [u8; 32],
+            version: u32,
+            key: &'static str,
+        ) -> Vec<u8> {
+            use crate::loader::binding::{
+                BINDING_MAX, Binding, SignedBinding, Target, binding_message,
+            };
             let mut b = Binding::new(image, Version(version));
-            b.bind("cmd", Target::Key(crate::key::Key::from_static(key))).unwrap();
+            b.bind("cmd", Target::Key(crate::key::Key::from_static(key)))
+                .unwrap();
             let mut out = [0u8; BINDING_MAX];
             let n = b.encode(&mut out).unwrap();
             let mut body = out[..n].to_vec();
             if let Some(s) = s {
-                let m = binding_message(NODE, &image, Version(version), &ImageHash::digest(&out[..n]));
+                let m = binding_message(
+                    NODE,
+                    &image,
+                    Version(version),
+                    &ImageHash::digest(&out[..n]),
+                );
                 let auth = SignedBinding {
                     version: Version(version),
                     signature: Signature(s.sign(&m).to_bytes()),
@@ -1036,18 +1049,31 @@ mod tests {
             let signed = bind_body(Some(&signer()), [1; 32], 5, "a/b");
             assert_eq!(accept(&signed, None, true), Ok(()));
             // Replay or an older version for the same image.
-            let mark = |v: u32| Some(BindingMark { image_sha256: [1; 32], version: Version(v) });
+            let mark = |v: u32| {
+                Some(BindingMark {
+                    image_sha256: [1; 32],
+                    version: Version(v),
+                })
+            };
             assert_eq!(accept(&signed, mark(5), false), Err(HandlerError::Denied));
             assert_eq!(accept(&signed, mark(6), true), Err(HandlerError::Denied));
             assert_eq!(accept(&signed, mark(4), true), Ok(()));
             // Versions rise across images: no replay after another
             // image's binding either.
-            let other = |v: u32| Some(BindingMark { image_sha256: [2; 32], version: Version(v) });
+            let other = |v: u32| {
+                Some(BindingMark {
+                    image_sha256: [2; 32],
+                    version: Version(v),
+                })
+            };
             assert_eq!(accept(&signed, other(9), true), Err(HandlerError::Denied));
             assert_eq!(accept(&signed, other(4), true), Ok(()));
             // Signed for another device.
             let r = BindRequest::parse(&signed).unwrap();
-            assert_eq!(t.accept_binding(&r, None, SenderId([9; 8]), true), Err(HandlerError::Denied));
+            assert_eq!(
+                t.accept_binding(&r, None, SenderId([9; 8]), true),
+                Err(HandlerError::Denied)
+            );
             // Another key, a tampered record, unsigned over a network.
             let mallory = bind_body(Some(&SigningKey::from_bytes(&[42; 32])), [1; 32], 5, "a/b");
             assert_eq!(accept(&mallory, None, false), Err(HandlerError::Denied));
@@ -1061,7 +1087,10 @@ mod tests {
             assert_eq!(accept(&unsigned, mark(5), false), Err(HandlerError::Denied));
             // Unclaimed takes anything.
             let open = TrustState::Unclaimed;
-            assert_eq!(open.accept_binding(&BindRequest::parse(&mallory).unwrap(), mark(9), NODE, true), Ok(()));
+            assert_eq!(
+                open.accept_binding(&BindRequest::parse(&mallory).unwrap(), mark(9), NODE, true),
+                Ok(())
+            );
         }
 
         #[test]

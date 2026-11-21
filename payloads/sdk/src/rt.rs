@@ -164,7 +164,9 @@ pub fn request_parts(base: usize, n: usize, args: [i32; 6]) -> Option<RequestPar
         let at = (ptr as u32 as usize).checked_sub(base)?;
         (at.checked_add(len)? <= n).then_some(at)
     };
-    let req_len = usize::try_from(req_len).ok().filter(|&l| l <= MAX_REQUEST)?;
+    let req_len = usize::try_from(req_len)
+        .ok()
+        .filter(|&l| l <= MAX_REQUEST)?;
     let reply_cap = usize::try_from(reply_cap)
         .ok()
         .filter(|&l| l <= MAX_REPLY)?;
@@ -209,8 +211,16 @@ pub fn on_request<P: Payload>(state: &State<P>, rx: &ServeBuffer, args: [i32; 6]
     let mut body = [0u8; MAX_REQUEST];
     match rx.borrow_mut() {
         Some(buf) => {
-            copy(&mut meta, buf.get(parts.meta..).unwrap_or(&[]), REQUEST_META_LEN);
-            copy(&mut body, buf.get(parts.req..).unwrap_or(&[]), parts.req_len);
+            copy(
+                &mut meta,
+                buf.get(parts.meta..).unwrap_or(&[]),
+                REQUEST_META_LEN,
+            );
+            copy(
+                &mut body,
+                buf.get(parts.req..).unwrap_or(&[]),
+                parts.req_len,
+            );
         }
         None => return serve::reply_code(Err(HandlerError::Unavailable)),
     }
@@ -225,9 +235,13 @@ pub fn on_request<P: Payload>(state: &State<P>, rx: &ServeBuffer, args: [i32; 6]
     let mut result = Err(HandlerError::Unavailable);
     with_state(state, |app| {
         let out = reply.get_mut(..parts.reply_cap).unwrap_or(&mut []);
-        result = app
-            .on_request(parts.slot, &req, out)
-            .and_then(|n| if n <= parts.reply_cap { Ok(n) } else { Err(HandlerError::Internal) });
+        result = app.on_request(parts.slot, &req, out).and_then(|n| {
+            if n <= parts.reply_cap {
+                Ok(n)
+            } else {
+                Err(HandlerError::Internal)
+            }
+        });
     });
     if let Ok(n) = result {
         match rx.borrow_mut() {
@@ -360,7 +374,10 @@ mod tests {
             b[16..19].copy_from_slice(b"abc");
         }
         assert_eq!(on_request(&state, &rx, serve_args(&rx, 3, 8)), 4);
-        assert_eq!(&rx.borrow_mut().expect("free")[19..23], &[9, b'a', b'b', b'c']);
+        assert_eq!(
+            &rx.borrow_mut().expect("free")[19..23],
+            &[9, b'a', b'b', b'c']
+        );
         // Too small a reply: the payload's BufferTooSmall.
         assert_eq!(
             on_request(&state, &rx, serve_args(&rx, 3, 2)),

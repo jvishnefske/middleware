@@ -41,20 +41,20 @@
 
 use core::future::pending;
 
+use embassy_time::{Duration, with_timeout};
 use esp_base::periph::dma::DmaState;
-use esp_base::periph::dma_hw::{self, DmaHw, HwSlot};
 use esp_base::periph::dma_done_event;
-use esp_hal::{Async, Blocking};
+use esp_base::periph::dma_hw::{self, DmaHw, HwSlot};
 use esp_hal::dma::aligned::InternalMemory;
 use esp_hal::dma::{DmaDescriptor, DmaRxBuf, DmaTxBuf};
 use esp_hal::gpio::{InputSignal, OutputSignal};
 use esp_hal::spi::Mode;
 use esp_hal::spi::master::{Config, SpiDma, SpiDmaTransfer};
 use esp_hal::time::Rate;
+use esp_hal::{Async, Blocking};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::events::DmaChannel;
 use middleware::wasm_abi::periph::{MAX_DMA, SpiConfig};
-use embassy_time::{Duration, with_timeout};
 use static_cell::ConstStaticCell;
 
 use super::irq;
@@ -87,10 +87,8 @@ pub const CS: OutputSignal = OutputSignal::FSPICS0;
 
 const DESCRIPTORS: usize = MAX_DMA.div_ceil(esp_hal::dma::CHUNK_SIZE);
 
-static RX_BUF: ConstStaticCell<InternalMemory<[u8; MAX_DMA]>> =
-    ConstStaticCell::new(InternalMemory::new([0; MAX_DMA]));
-static TX_BUF: ConstStaticCell<InternalMemory<[u8; MAX_DMA]>> =
-    ConstStaticCell::new(InternalMemory::new([0; MAX_DMA]));
+static RX_BUF: ConstStaticCell<InternalMemory<[u8; MAX_DMA]>> = ConstStaticCell::new(InternalMemory::new([0; MAX_DMA]));
+static TX_BUF: ConstStaticCell<InternalMemory<[u8; MAX_DMA]>> = ConstStaticCell::new(InternalMemory::new([0; MAX_DMA]));
 static RX_DESC: ConstStaticCell<InternalMemory<[DmaDescriptor; DESCRIPTORS]>> =
     ConstStaticCell::new(InternalMemory::new([DmaDescriptor::EMPTY; DESCRIPTORS]));
 static TX_DESC: ConstStaticCell<InternalMemory<[DmaDescriptor; DESCRIPTORS]>> =

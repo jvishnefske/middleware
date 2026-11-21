@@ -589,13 +589,20 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--counter" => counter = Some(number("--counter", args.next())?),
             "--link" => link = Some(number("--link", args.next())?),
             "--ip" => {
-                let v = args.next().ok_or("--ip needs an address such as 192.168.1.50")?;
-                net_ip = Some(parse_ipv4(&v).ok_or_else(|| format!("--ip: '{v}' is not an IPv4 address"))?);
+                let v = args
+                    .next()
+                    .ok_or("--ip needs an address such as 192.168.1.50")?;
+                net_ip = Some(
+                    parse_ipv4(&v).ok_or_else(|| format!("--ip: '{v}' is not an IPv4 address"))?,
+                );
             }
             "--mac" => {
-                let v = args.next().ok_or("--mac needs a MAC such as 02:5a:75:b0:00:00")?;
+                let v = args
+                    .next()
+                    .ok_or("--mac needs a MAC such as 02:5a:75:b0:00:00")?;
                 net_mac = Some(
-                    crate::bridge::parse_mac(&v).ok_or_else(|| format!("--mac: '{v}' is not a MAC"))?,
+                    crate::bridge::parse_mac(&v)
+                        .ok_or_else(|| format!("--mac: '{v}' is not a MAC"))?,
                 );
             }
             "--peer" => {
@@ -630,7 +637,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             }
             "--of" => {
                 let v = args.next().ok_or("--of needs a node id (16 hex digits)")?;
-                of = Some(parse_node(&v).ok_or_else(|| format!("--of: '{v}' is not a node id (16 hex digits)"))?);
+                of = Some(
+                    parse_node(&v)
+                        .ok_or_else(|| format!("--of: '{v}' is not a node id (16 hex digits)"))?,
+                );
             }
             "--node" => {
                 let v = args
@@ -791,7 +801,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "fw abort",
         ]
     } else {
-        &["upload", "bind", "trust claim", "start", "stop", "fw update"]
+        &[
+            "upload",
+            "bind",
+            "trust claim",
+            "start",
+            "stop",
+            "fw update",
+        ]
     };
     match &key {
         Some(KeySpec::File(_)) => only("--key", true, key_cmds)?,
@@ -802,7 +819,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         )?,
         None => {}
     }
-    only("--version", version.is_some(), &["upload", "bind", "fw update"])?;
+    only(
+        "--version",
+        version.is_some(),
+        &["upload", "bind", "fw update"],
+    )?;
     only("--no-reboot", no_reboot, &["fw update"])?;
     let fw_version = match (&version, name.as_str()) {
         (Some(v), "fw update") => Some(
@@ -1007,7 +1028,12 @@ mod tests {
     fn cl8_net_reads_or_sets_a_link() {
         assert_eq!(
             run("--udp 192.168.1.50 net").cmd,
-            Cmd::Net { link: 0, ip: None, mac: None, peer: None }
+            Cmd::Net {
+                link: 0,
+                ip: None,
+                mac: None,
+                peer: None
+            }
         );
         assert_eq!(
             run("--udp 192.168.1.50 net --link 1 --ip 192.168.2.51 --mac 02:5a:75:b0:00:11 --peer 10.0.1.9:7000").cmd,
@@ -1020,12 +1046,33 @@ mod tests {
         );
         assert_eq!(
             run("--udp h net --peer learn").cmd,
-            Cmd::Net { link: 0, ip: None, mac: None, peer: Some(([0; 4], 0)) }
+            Cmd::Net {
+                link: 0,
+                ip: None,
+                mac: None,
+                peer: Some(([0; 4], 0))
+            }
         );
-        assert!(p("--udp h net --peer 10.0.0.1").unwrap_err().contains("--peer"));
-        assert!(p("--udp h net --peer 0.0.0.0:5").unwrap_err().contains("--peer"));
-        assert!(p("--udp h net --ip 300.1.1.1").unwrap_err().contains("--ip"));
-        assert!(p("--udp h info --link 1").unwrap_err().contains("applies only to 'net'"));
+        assert!(
+            p("--udp h net --peer 10.0.0.1")
+                .unwrap_err()
+                .contains("--peer")
+        );
+        assert!(
+            p("--udp h net --peer 0.0.0.0:5")
+                .unwrap_err()
+                .contains("--peer")
+        );
+        assert!(
+            p("--udp h net --ip 300.1.1.1")
+                .unwrap_err()
+                .contains("--ip")
+        );
+        assert!(
+            p("--udp h info --link 1")
+                .unwrap_err()
+                .contains("applies only to 'net'")
+        );
         assert!(p("--udp h net --link x").unwrap_err().contains("--link"));
     }
 
@@ -1497,7 +1544,9 @@ mod tests {
         assert_eq!(run("--port p manifest").cmd, Cmd::Manifest { of: None });
         assert_eq!(
             run("--port p manifest --of 0011223344556677").cmd,
-            Cmd::Manifest { of: Some([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]) }
+            Cmd::Manifest {
+                of: Some([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77])
+            }
         );
         assert_eq!(run("--port p peers").cmd, Cmd::Peers);
         assert_eq!(run("--port p binding").cmd, Cmd::Binding);
@@ -1505,7 +1554,10 @@ mod tests {
             run("--port p bind m.wasm audio=mic:16000:levels level=key:lab/level --version 7").cmd,
             Cmd::Bind {
                 file: "m.wasm".into(),
-                specs: vec!["audio=mic:16000:levels".into(), "level=key:lab/level".into()],
+                specs: vec![
+                    "audio=mic:16000:levels".into(),
+                    "level=key:lab/level".into()
+                ],
                 key: None,
                 version: Some(7),
             }
@@ -1571,7 +1623,10 @@ mod tests {
                 "--port p upload a.wasm --key k --version 4294967296",
                 "not a valid number",
             ),
-            ("--port p info --key k", "only to 'upload' or 'bind' or 'trust claim'"),
+            (
+                "--port p info --key k",
+                "only to 'upload' or 'bind' or 'trust claim'",
+            ),
             ("--port p trust info --key k", "only to"),
             (
                 "--port p trust claim --key k --version 1",
@@ -1677,7 +1732,10 @@ mod tests {
         let c = run("--udp 192.168.1.50 info");
         assert_eq!(c.udp.as_deref(), Some("192.168.1.50:7448"));
         assert!(c.port.is_empty());
-        assert_eq!(run("upload a.wasm --start --udp b:9").udp.as_deref(), Some("b:9"));
+        assert_eq!(
+            run("upload a.wasm --start --udp b:9").udp.as_deref(),
+            Some("b:9")
+        );
         for bad in [
             "--udp h --port p info",
             "--udp h --baud 9600 info",

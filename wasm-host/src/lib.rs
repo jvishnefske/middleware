@@ -476,8 +476,15 @@ impl Limits {
     /// The same limits with up to `n` subscriptions (at most
     /// [`wasm_abi::SLOT_MAX`]).
     pub const fn with_subscriptions(self, n: u8) -> Self {
-        let n = if (n as usize) > wasm_abi::SLOT_MAX { wasm_abi::SLOT_MAX as u8 } else { n };
-        Limits { max_subscriptions: n, ..self }
+        let n = if (n as usize) > wasm_abi::SLOT_MAX {
+            wasm_abi::SLOT_MAX as u8
+        } else {
+            n
+        };
+        Limits {
+            max_subscriptions: n,
+            ..self
+        }
     }
 
     /// The same limits with `fuel` per call.
@@ -603,7 +610,8 @@ fn resolve<D: Device>(
         return Ok(());
     }
     let free = st.max_subscriptions.saturating_sub(st.subscriptions.len());
-    let steps = channels::plan(&decls, binding, st.exports.messages, free).map_err(LoadError::Bind)?;
+    let steps =
+        channels::plan(&decls, binding, st.exports.messages, free).map_err(LoadError::Bind)?;
     let mut resolved = Vec::new();
     resolved
         .try_reserve_exact(steps.len())
@@ -612,7 +620,12 @@ fn resolve<D: Device>(
         resolved.push(match step {
             Step::Unbound => Resolved::Unbound,
             Step::Output { key } => Resolved::Output { key },
-            Step::Input { key, route, from, adapter } => {
+            Step::Input {
+                key,
+                route,
+                from,
+                adapter,
+            } => {
                 if let Some(source) = route {
                     let k = middleware::Key::new(&key)
                         .map_err(|_| LoadError::Bind(BindError::Mismatch(d.name.clone())))?;

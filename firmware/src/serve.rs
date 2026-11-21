@@ -203,7 +203,11 @@ mod tests {
     fn m7_a_stopped_trapped_or_loading_payload_is_unavailable_on_its_keys() {
         let last = ServedKeys::from_run([PHASE].into_iter());
         for status in [PayloadStatus::Stopped, PayloadStatus::Trapped, PayloadStatus::Loading, PayloadStatus::Empty] {
-            assert_eq!(route_request(k(PHASE), status, last.iter()), Route::Refuse(HandlerError::Unavailable), "{status:?}");
+            assert_eq!(
+                route_request(k(PHASE), status, last.iter()),
+                Route::Refuse(HandlerError::Unavailable),
+                "{status:?}"
+            );
             assert_eq!(route_request(k("app/other"), status, last.iter()), Route::System);
         }
     }
@@ -216,7 +220,10 @@ mod tests {
             payload_reply::<Trap>(Ok(Err(HandlerError::InvalidRequest))),
             PayloadReply { reply: Err(HandlerError::InvalidRequest), trapped: false }
         );
-        assert_eq!(payload_reply::<Trap>(Err(Trap)), PayloadReply { reply: Err(HandlerError::Internal), trapped: true });
+        assert_eq!(
+            payload_reply::<Trap>(Err(Trap)),
+            PayloadReply { reply: Err(HandlerError::Internal), trapped: true }
+        );
         assert_eq!(REPLY_CAPACITY, 512);
     }
 
@@ -231,7 +238,13 @@ mod tests {
         // Upload clears; a staged begin, writes, start and stop keep them.
         assert!(served_after(&Action::Erase { len: 4, stop: true }, t2.clone()).is_empty());
         assert!(served_after(&Action::Activate { len: 4, crc: 0, trust: None }, t2.clone()).is_empty());
-        for keep in [Action::Erase { len: 4, stop: false }, Action::Write { offset: 0, data: &[1] }, Action::Stop, Action::Start, Action::None] {
+        for keep in [
+            Action::Erase { len: 4, stop: false },
+            Action::Write { offset: 0, data: &[1] },
+            Action::Stop,
+            Action::Start,
+            Action::None,
+        ] {
             assert_eq!(served_after(&keep, t2.clone()), t2, "{keep:?}");
         }
     }

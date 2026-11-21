@@ -632,7 +632,10 @@ fn load(
         })?),
         _ => None,
     };
-    let binding = match record.as_deref().map(middleware::loader::binding::Binding::decode) {
+    let binding = match record
+        .as_deref()
+        .map(middleware::loader::binding::Binding::decode)
+    {
         Some(Ok(b)) => Some(b),
         Some(Err(e)) => {
             eprintln!("--bind: not a binding record ({e:?})");

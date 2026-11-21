@@ -164,12 +164,7 @@ impl Claims {
 
     /// Checks `wanted` (pin, direction) pairs for `owner`, ignoring pins the
     /// owner already holds; returns the new mask.
-    fn check(
-        &self,
-        profile: &Profile,
-        owner: Owner,
-        wanted: &[(Option<u8>, Direction)],
-    ) -> Result<u64, AbiError> {
+    fn check(&self, profile: &Profile, owner: Owner, wanted: &[(Option<u8>, Direction)]) -> Result<u64, AbiError> {
         let mut mask = 0u64;
         for &(pin, dir) in wanted {
             let Some(pin) = pin else { continue };
@@ -201,11 +196,7 @@ impl Claims {
     /// Claims the pins of a UART configuration, replacing the port's previous
     /// pins.
     pub fn claim_uart(self, profile: &Profile, cfg: &UartConfig) -> Result<Self, AbiError> {
-        let uart = self.check(
-            profile,
-            Owner::Uart,
-            &[(cfg.tx, Direction::Output), (cfg.rx, Direction::Input)],
-        )?;
+        let uart = self.check(profile, Owner::Uart, &[(cfg.tx, Direction::Output), (cfg.rx, Direction::Input)])?;
         Ok(Claims { uart, ..self })
     }
 
@@ -216,11 +207,7 @@ impl Claims {
         if sda == scl {
             return Err(AbiError::InvalidArgument);
         }
-        let i2c = self.check(
-            profile,
-            Owner::I2c,
-            &[(Some(sda), Direction::Output), (Some(scl), Direction::Output)],
-        )?;
+        let i2c = self.check(profile, Owner::I2c, &[(Some(sda), Direction::Output), (Some(scl), Direction::Output)])?;
         Ok(Claims { i2c, ..self })
     }
 
@@ -445,8 +432,16 @@ mod tests {
         assert_eq!(Claims::new().claim_pwm(&ESP32, 36), Err(AbiError::Unsupported), "input-only");
         assert_eq!(Claims::new().claim_i2c(&ESP32, 26, 34), Err(AbiError::Unsupported));
         assert_eq!(Claims::new().claim_i2c(&ESP32, 26, 26), Err(AbiError::InvalidArgument));
-        assert_eq!(Claims::new().claim_camera(&ESP32, &CameraPins { pclk: 1, ..cam }), Err(AbiError::Unsupported), "console");
-        assert_eq!(Claims::new().claim_camera(&ESP32, &CameraPins { pclk: 5, ..cam }), Err(AbiError::InvalidArgument), "repeat");
+        assert_eq!(
+            Claims::new().claim_camera(&ESP32, &CameraPins { pclk: 1, ..cam }),
+            Err(AbiError::Unsupported),
+            "console"
+        );
+        assert_eq!(
+            Claims::new().claim_camera(&ESP32, &CameraPins { pclk: 5, ..cam }),
+            Err(AbiError::InvalidArgument),
+            "repeat"
+        );
         // A second PWM pin adds; re-claiming I2C or the camera replaces.
         let c = c.claim_pwm(&ESP32, 4).unwrap();
         assert_eq!(pins(c.pins_of(Owner::Pwm)).collect::<heapless::Vec<u8, 2>>(), [0, 4]);
@@ -482,7 +477,8 @@ mod tests {
         let s = Claims::new().claim_spi(&ESP32S3, &spi(6, 11, -1, -1)).unwrap();
         assert_eq!(s.claim_i2c(&ESP32S3, sda, scl), Err(AbiError::InvalidArgument), "SCK on SCL");
         // Beside an SPI bus on other pins both hold.
-        let both = Claims::new().claim_spi(&ESP32S3, &spi(12, 11, 13, 10)).unwrap().claim_i2c(&ESP32S3, sda, scl).unwrap();
+        let both =
+            Claims::new().claim_spi(&ESP32S3, &spi(12, 11, 13, 10)).unwrap().claim_i2c(&ESP32S3, sda, scl).unwrap();
         assert_eq!((both.owner(12), both.owner(5)), (Some(Owner::Spi), Some(Owner::I2c)));
         // Release (payload stop) gives the pins back to plain GPIO.
         let r = c.release(Owner::I2c);

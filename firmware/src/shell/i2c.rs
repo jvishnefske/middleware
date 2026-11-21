@@ -32,9 +32,9 @@
 //! stop) after a timeout. On the ESP32 the hardware SCL timeout (esp-hal's
 //! default maximum, about 13 ms of an unchanging SCL) also stays armed.
 
+use esp_base::periph::i2c::open_plan;
 use esp_hal::Blocking;
 use esp_hal::gpio::{InputSignal, OutputSignal};
-use esp_base::periph::i2c::open_plan;
 use esp_hal::i2c::master::{Config, I2c, SoftwareTimeout};
 use esp_hal::time::{Duration, Rate};
 use wasm_host::{AbiError, I2cConfig};

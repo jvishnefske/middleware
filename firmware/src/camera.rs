@@ -149,7 +149,12 @@ impl Assembler {
                             None => return (Assembler::new(), i + 1, Status::Overflow),
                         }
                         // The FF was counted as skipped; it is the frame's.
-                        st = Assembler { phase: Phase::Frame, len: 2, after_ff: false, skipped: st.skipped.saturating_sub(1) };
+                        st = Assembler {
+                            phase: Phase::Frame,
+                            len: 2,
+                            after_ff: false,
+                            skipped: st.skipped.saturating_sub(1),
+                        };
                     } else {
                         st.after_ff = b == 0xFF;
                         st.skipped = st.skipped.saturating_add(1);
@@ -185,10 +190,8 @@ mod tests {
 
     /// A small JPEG-shaped frame with stuffed `FF 00`, fill `FF FF` and a
     /// restart marker inside.
-    const FRAME: &[u8] = &[
-        0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x04, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD0, 0x33, 0xFF, 0xFF,
-        0xD9,
-    ];
+    const FRAME: &[u8] =
+        &[0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x04, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD0, 0x33, 0xFF, 0xFF, 0xD9];
 
     /// The camera stream: noise, then the frame, then the next frame's
     /// start.
@@ -203,10 +206,9 @@ mod tests {
     fn dma(mode: SampleMode, bytes: &[u8]) -> Vec<u8> {
         match mode {
             SampleMode::Word => bytes.iter().flat_map(|&b| [0xEE, 0xEE, b, 0xEE]).collect(),
-            SampleMode::HalfWord => bytes
-                .chunks(2)
-                .flat_map(|p| [p.get(1).copied().unwrap_or(0), 0xEE, p[0], 0xEE])
-                .collect(),
+            SampleMode::HalfWord => {
+                bytes.chunks(2).flat_map(|p| [p.get(1).copied().unwrap_or(0), 0xEE, p[0], 0xEE]).collect()
+            }
         }
     }
 

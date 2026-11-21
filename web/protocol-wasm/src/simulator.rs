@@ -104,14 +104,19 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
                 .with(Groups::SERVE)
                 .with(Groups::CHANNELS),
         )
-        .with_spi(SpiBuses { buses: middleware::wasm_abi::periph::SPI_BUSES as u8 })
+        .with_spi(SpiBuses {
+            buses: middleware::wasm_abi::periph::SPI_BUSES as u8,
+        })
         .with_imu(ImuSource::ALL)
         .with_mic(MicSource {
             rates: 0b1111,
             modes: 0b111,
             max_gain_db: middleware::wasm_abi::route::MAX_MIC_GAIN_DB,
         })
-        .with_link(Link { id: 0, kind: LinkKind::SERIAL })
+        .with_link(Link {
+            id: 0,
+            kind: LinkKind::SERIAL,
+        })
         .with_limits(Limits::ABI)
 };
 
@@ -520,7 +525,11 @@ impl Device for SimDevice {
             .get_mut(usize::from(handle))
             .and_then(Option::take)
             .ok_or(AbiError::Busy)?;
-        for kind in [EventKind::RouteFrames, EventKind::RouteDropped, EventKind::RouteStopped] {
+        for kind in [
+            EventKind::RouteFrames,
+            EventKind::RouteDropped,
+            EventKind::RouteStopped,
+        ] {
             self.periph.purge(kind, i32::from(handle));
         }
         Ok(())
@@ -693,7 +702,12 @@ impl Simulator {
 
     /// [`Simulator::deliver`] of a message from `sender` (a channel bound
     /// to a remote node takes that node's messages only, ABI 7).
-    pub fn deliver_from(&mut self, key: &str, data: &[u8], sender: Option<SenderId>) -> Result<bool, SimError> {
+    pub fn deliver_from(
+        &mut self,
+        key: &str,
+        data: &[u8],
+        sender: Option<SenderId>,
+    ) -> Result<bool, SimError> {
         self.guard()?;
         let key = Key::new(key).map_err(|_| SimError::InvalidKey)?;
         let r = self.payload.deliver_from(key, data, sender);
@@ -833,16 +847,30 @@ mod tests {
         for rate in IMU_RATES_HZ {
             let cfg = ImuConfig::new(rate, 4, true, 10).unwrap();
             assert!(MANIFEST.imu.unwrap().accepts(&cfg));
-            assert!(SimDevice::new().route_samples(SampleSource::Imu(cfg), key).is_ok());
+            assert!(
+                SimDevice::new()
+                    .route_samples(SampleSource::Imu(cfg), key)
+                    .is_ok()
+            );
         }
         for rate in MIC_RATES_HZ {
             let cfg = MicConfig::new(rate, 0, AudioMode::Levels, 4, 1024).unwrap();
             assert!(MANIFEST.mic.unwrap().accepts(&cfg));
-            assert!(SimDevice::new().route_samples(SampleSource::Microphone(cfg), key).is_ok());
+            assert!(
+                SimDevice::new()
+                    .route_samples(SampleSource::Microphone(cfg), key)
+                    .is_ok()
+            );
         }
         let mut d = SimDevice::new();
         assert!(MANIFEST.i2c.is_none());
-        assert!(d.i2c_open(I2cConfig { bus: 0, freq_hz: 100_000 }).is_err());
+        assert!(
+            d.i2c_open(I2cConfig {
+                bus: 0,
+                freq_hz: 100_000
+            })
+            .is_err()
+        );
         assert!(MANIFEST.frames.is_none());
         let cfg = SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap();
         assert!(d.route_source(Source::TestPattern, key, cfg).is_err());
@@ -1012,10 +1040,21 @@ mod tests {
             sim.step(ms * 1000).unwrap();
             events.extend(sim.drain());
         }
-        assert_eq!(publishes(&events, "app/started"), [[0, 0, 0, 0, 1, 0, 0, 0]]);
-        assert_eq!(last_i32(&events, "app/stopped"), Some(0), "route_stop(0) succeeded");
+        assert_eq!(
+            publishes(&events, "app/started"),
+            [[0, 0, 0, 0, 1, 0, 0, 0]]
+        );
+        assert_eq!(
+            last_i32(&events, "app/stopped"),
+            Some(0),
+            "route_stop(0) succeeded"
+        );
         let imu = publishes(&events, "app/imu");
-        assert_eq!(imu.len(), 3, "the sixth RouteFrames (300 ms) stopped the IMU");
+        assert_eq!(
+            imu.len(),
+            3,
+            "the sixth RouteFrames (300 ms) stopped the IMU"
+        );
         // Byte for byte what payload-sim publishes: the shared fake.
         let src = SampleSource::Imu(ImuConfig::new(50, 2, false, 5).unwrap());
         let mut want = [0u8; MAX_BATCH];
@@ -1030,7 +1069,8 @@ mod tests {
         assert_eq!((a.kind, samples::gap(&a, &b)), (SensorKind::Imu, Gap::None));
         let mic = publishes(&events, "app/mic");
         assert_eq!(mic.len(), 10);
-        let src = SampleSource::Microphone(MicConfig::new(8_000, 0, AudioMode::Levels, 2, 400).unwrap());
+        let src =
+            SampleSource::Microphone(MicConfig::new(8_000, 0, AudioMode::Levels, 2, 400).unwrap());
         let len = src.fake_batch(18, 900_000, 2, &mut want).unwrap();
         assert_eq!(mic.last().map(Vec::as_slice), Some(&want[..len]));
         let irqs = events

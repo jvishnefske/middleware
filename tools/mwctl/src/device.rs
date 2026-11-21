@@ -28,10 +28,10 @@
 use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use crate::plan::upload_plan_chunked;
-use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
-use middleware::{HandlerError, Key, SenderId};
 use middleware::loader::manifest::Manifest;
+use middleware::loader::trust::{PublicKey, SignedCommit, SignedControl, TrustInfo};
 use middleware::loader::{BoardInfo, Caps, Command, DeviceInfo, NetAddr, PayloadStatus, keys};
+use middleware::{HandlerError, Key, SenderId};
 use std::time::Instant;
 
 /// Suffix of the firmware version of builds without the WASM runtime.
@@ -166,7 +166,9 @@ impl<L: Endpoint> Device<L> {
         let body = self.request(keys::PEERS, &[])?;
         middleware::loader::peers::decode(&body)
             .map(Iterator::collect)
-            .ok_or_else(|| Error::Malformed { key: keys::PEERS.as_str().to_owned() })
+            .ok_or_else(|| Error::Malformed {
+                key: keys::PEERS.as_str().to_owned(),
+            })
     }
 
     /// `node`'s manifest, asked through the connected board (PR1,
@@ -174,8 +176,13 @@ impl<L: Endpoint> Device<L> {
     pub fn peer_manifest(&mut self, node: SenderId) -> Result<Manifest, Error> {
         let key = middleware::loader::peers::peer_key(node, "manifest")
             .ok_or_else(|| Error::Payload("peer key too long".into()))?;
-        let body = self.request(Key::new(&key).map_err(|_| Error::Payload("bad peer key".into()))?, &[])?;
-        Manifest::decode(&body).map_err(|_| Error::Malformed { key: key.as_str().to_owned() })
+        let body = self.request(
+            Key::new(&key).map_err(|_| Error::Payload("bad peer key".into()))?,
+            &[],
+        )?;
+        Manifest::decode(&body).map_err(|_| Error::Malformed {
+            key: key.as_str().to_owned(),
+        })
     }
 
     /// `sys/manifest` (MF4), decoded. Firmware without one answers
@@ -233,13 +240,17 @@ impl<L: Endpoint> Device<L> {
         let body = self.link.request(keys::NET_ADDR, &[link])?;
         match NetAddr::decode_reply(&body) {
             Some((l, a)) if l == link => Ok(a),
-            _ => Err(Error::Malformed { key: keys::NET_ADDR.as_str().to_owned() }),
+            _ => Err(Error::Malformed {
+                key: keys::NET_ADDR.as_str().to_owned(),
+            }),
         }
     }
 
     /// `sys/net/addr` set.
     pub fn set_net_addr(&mut self, link: u8, addr: &NetAddr) -> Result<(), Error> {
-        self.link.request(keys::NET_ADDR, &addr.set_body(link)).map(drop)
+        self.link
+            .request(keys::NET_ADDR, &addr.set_body(link))
+            .map(drop)
     }
 
     /// `mwctl net`: reads link `link`, then, when anything is given, sets
@@ -596,14 +607,29 @@ mod tests {
         let a = d.net(1, None, None, None).unwrap();
         assert_eq!(a.ip, [192, 168, 2, 50]);
         assert!(!a.pinned());
-        let b = d.net(1, Some([192, 168, 2, 51]), None, Some(([10, 0, 1, 9], 7000))).unwrap();
-        assert_eq!((b.ip, b.mac, b.peer_ip, b.peer_port), ([192, 168, 2, 51], a.mac, [10, 0, 1, 9], 7000));
+        let b = d
+            .net(
+                1,
+                Some([192, 168, 2, 51]),
+                None,
+                Some(([10, 0, 1, 9], 7000)),
+            )
+            .unwrap();
+        assert_eq!(
+            (b.ip, b.mac, b.peer_ip, b.peer_port),
+            ([192, 168, 2, 51], a.mac, [10, 0, 1, 9], 7000)
+        );
         assert_eq!(d.link().transport().net(1), b);
         assert_eq!(d.net(0, None, None, None).unwrap().ip, [192, 168, 1, 50]);
         let e = d.net(2, None, None, None).unwrap_err();
         assert!(e.to_string().contains("no such link"), "{e}");
-        let e = device(FakeDevice::new("esp32", "0.6.0", 4096, true)).net(0, None, None, None).unwrap_err();
-        assert!(e.to_string().contains("no configurable network links"), "{e}");
+        let e = device(FakeDevice::new("esp32", "0.6.0", 4096, true))
+            .net(0, None, None, None)
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("no configurable network links"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -653,10 +679,13 @@ mod tests {
     fn pr2_peers_and_a_peer_manifest_come_through_the_board() {
         use middleware::loader::manifest::{Groups, Manifest};
         let peer = SenderId([0xab; 8]);
-        let m = Manifest::new(7).with_groups(Groups::CHANNELS).with_node(peer);
+        let m = Manifest::new(7)
+            .with_groups(Groups::CHANNELS)
+            .with_node(peer);
         let mut body = [0u8; 64];
         let n = m.encode(&mut body).unwrap();
-        let fake = FakeDevice::new("rt1050", "0.6.0", 4096, true).with_peer(peer, body[..n].to_vec());
+        let fake =
+            FakeDevice::new("rt1050", "0.6.0", 4096, true).with_peer(peer, body[..n].to_vec());
         let mut d = device(fake);
         assert_eq!(d.peers().unwrap(), [peer]);
         assert_eq!(d.peer_manifest(peer).unwrap(), m);
@@ -673,7 +702,10 @@ mod tests {
         let fake = FakeDevice::new("rt1050", "0.6.0", 4096, true).with_manifest(body[..n].to_vec());
         assert_eq!(device(fake).manifest().unwrap(), m);
         let bad = FakeDevice::new("rt1050", "0.6.0", 4096, true).with_manifest(vec![9, 9, 9]);
-        assert!(matches!(device(bad).manifest(), Err(Error::Malformed { .. })));
+        assert!(matches!(
+            device(bad).manifest(),
+            Err(Error::Malformed { .. })
+        ));
         let err = device(FakeDevice::new("esp32", "0.5.0", 4096, true))
             .manifest()
             .unwrap_err();

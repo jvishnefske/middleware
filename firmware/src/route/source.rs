@@ -55,11 +55,11 @@
 //! bytes copied from the flash-resident `&'static [u8]` fixture. There is
 //! no frame buffer.
 
+use middleware::Key;
 use middleware::espnow::{Frame, FrameError, MAX_FRAME};
 use middleware::stream::{ChunkError, ChunkPlan, Chunker, FrameSource, HEADER_LEN, RouteStats};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::route::SourceConfig;
-use middleware::Key;
 
 use super::{AIR_CHUNK_DATA, Report};
 use crate::dispatch::tick_delay;
@@ -508,10 +508,7 @@ mod tests {
         let r = (0..10).fold(r, |r, _| r.published(0).0);
         let (r, rep) = r.failed(20);
         assert_eq!(rep, Report { frames: 0, dropped: 1 });
-        assert_eq!(
-            r.stats(),
-            RouteStats { frames: 0, frames_dropped: 1, chunks: 10, chunks_dropped: 164 }
-        );
+        assert_eq!(r.stats(), RouteStats { frames: 0, frames_dropped: 1, chunks: 10, chunks_dropped: 164 });
         assert_eq!(r.next(20), Next::Wait(180));
         assert!(matches!(r.next(200), Next::Send(ref p) if p.header.offset == 0 && p.header.seq == 1));
     }
@@ -607,7 +604,8 @@ mod tests {
             for i in 0..r.chunks_per_frame() {
                 let Next::Send(plan) = r.next(now) else { panic!("due") };
                 assert_eq!((plan.header.total as usize, plan.header.seq), (want.len(), n as u16));
-                let len = write_frame(&mut out, i as u8, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
+                let len =
+                    write_frame(&mut out, i as u8, KEY, r.frame(), &r.source().expect("stored"), &plan).expect("fits");
                 let f = Frame::decode(&out[..len]).expect("radio frame");
                 rebuilt.extend_from_slice(chunk::decode(f.payload).expect("chunk").data);
                 r = r.published(now).0;
@@ -641,11 +639,12 @@ mod tests {
         let ch = chunk::decode(Frame::decode(&out[..n]).expect("radio frame").payload).expect("chunk");
         assert_eq!(ch.data, &F1[..ESPNOW_CHUNK_DATA]);
         // A plan for a longer frame than the stored one is refused.
-        let wrong = ChunkPlan {
-            header: middleware::stream::ChunkHeader { seq: 0, offset: 166, total: 400 },
-            range: 166..332,
-        };
-        assert_eq!(write_frame(&mut out, 0, KEY, 1, &r.source().expect("stored"), &wrong), Err(WireError::Chunk(ChunkError::Bounds)));
+        let wrong =
+            ChunkPlan { header: middleware::stream::ChunkHeader { seq: 0, offset: 166, total: 400 }, range: 166..332 };
+        assert_eq!(
+            write_frame(&mut out, 0, KEY, 1, &r.source().expect("stored"), &wrong),
+            Err(WireError::Chunk(ChunkError::Bounds))
+        );
     }
 
     #[test]

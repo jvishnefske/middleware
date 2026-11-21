@@ -105,12 +105,12 @@ enum Inbound {
 /// The next frame on `link`, copied out (cancel safe).
 async fn recv(link: &mut Link, buf: &mut [u8]) -> Result<Inbound, ()> {
     match link.next_frame(buf).await {
-        Ok(Frame::Request { id, key, payload }) => Ok(Inbound::Request {
-            id,
-            key: key.as_str().to_owned(),
-            body: payload.to_vec(),
-        }),
-        Ok(Frame::Publish { key, payload }) => Ok(Inbound::Publish { key: key.as_str().to_owned(), body: payload.to_vec() }),
+        Ok(Frame::Request { id, key, payload }) => {
+            Ok(Inbound::Request { id, key: key.as_str().to_owned(), body: payload.to_vec() })
+        }
+        Ok(Frame::Publish { key, payload }) => {
+            Ok(Inbound::Publish { key: key.as_str().to_owned(), body: payload.to_vec() })
+        }
         Ok(Frame::Response { .. }) => Ok(Inbound::Other),
         Err(_) => Err(()),
     }
@@ -278,13 +278,8 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
             Ok(rt) => rt,
             Err(e) => {
                 tracing::error!("mw-posix-node: device runtime: {e}");
-                let _ = report.send(DeviceReport {
-                    ended: None,
-                    status: None,
-                    dropped: 0,
-                    send_failed: 0,
-                    synced: false,
-                });
+                let _ =
+                    report.send(DeviceReport { ended: None, status: None, dropped: 0, send_failed: 0, synced: false });
                 return;
             }
         };
@@ -426,9 +421,8 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
 ) -> Result<(PosixNode, SysForward), StartError> {
     let GatewayParts { bridge, options, store } = gateway;
     let (device_io, gateway_io) = pair();
-    let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
-        .await
-        .map_err(StartError::Zenoh)?;
+    let (gateway, sys) =
+        mw_gateway::start_with_store(gateway_io, session, bridge, options, store).await.map_err(StartError::Zenoh)?;
     let device = spawn_device(device, device_io).map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }

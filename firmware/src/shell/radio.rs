@@ -96,16 +96,15 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
+use esp_base::perf::RadioTime;
 use esp_base::radio::disc::{BeaconStep, CAM_BEACON_LEN, CamBeacon, Neighbours, cam_beacon};
 use esp_base::radio::{
-    CHANNEL, Counters, FILTERS, KEY_CAPACITY, PeerChange, Peers, RPC_BODY, RPC_DEPTH, RPC_PEERS,
-    RPC_SEND_TIMEOUT_MS, RX_DEPTH, RX_PAYLOAD, RpcCounters, RpcReplies, SEND_TIMEOUT_MS, TX_DEPTH,
-    TX_PAYLOAD, is_beacon,
+    CHANNEL, Counters, FILTERS, KEY_CAPACITY, PeerChange, Peers, RPC_BODY, RPC_DEPTH, RPC_PEERS, RPC_SEND_TIMEOUT_MS,
+    RX_DEPTH, RX_PAYLOAD, RpcCounters, RpcReplies, SEND_TIMEOUT_MS, TX_DEPTH, TX_PAYLOAD, is_beacon,
 };
-use esp_base::perf::RadioTime;
+use esp_base::route::Report;
 use esp_base::route::source::{Feed, write_frame};
 use esp_base::route::sources::{Capture, Due, Job, SourceTable};
-use esp_base::route::Report;
 use esp_radio::esp_now::{
     BROADCAST_ADDRESS, EspNowError, EspNowManager, EspNowReceiver, EspNowSender, EspNowWifiInterface, PeerInfo,
 };
@@ -114,9 +113,9 @@ use heapless::{String, Vec};
 use middleware::espnow::rpc::EspNowUnicast;
 use middleware::espnow::{EspNowError as MwError, EspNowRadio, EspNowTransport, HEADER_LEN, MAX_FRAME, MAX_KEY, Mac};
 use middleware::rpc::{self, Admit, Message};
-use middleware::transport::HandlerError;
 #[cfg(feature = "esp32")]
 use middleware::stream::{FrameSet, FrameSource};
+use middleware::transport::HandlerError;
 use middleware::{AsKey, Key, Publisher, Sample, Subscriber};
 use static_cell::StaticCell;
 
@@ -207,8 +206,7 @@ const MIRROR_EVERY: u32 = 64;
 const MIRROR_PACE_MS: u64 = 25;
 
 /// The running source routes, shared with the controller.
-pub static SOURCES: Mutex<CriticalSectionRawMutex, RefCell<SourceTable>> =
-    Mutex::new(RefCell::new(SourceTable::new()));
+pub static SOURCES: Mutex<CriticalSectionRawMutex, RefCell<SourceTable>> = Mutex::new(RefCell::new(SourceTable::new()));
 
 /// Signalled when a source route starts, so a waiting task looks again.
 static SOURCES_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -432,12 +430,8 @@ impl Radio {
     fn received(&mut self, rx: Result<Sample<'_>, MwError<LinkError>>) {
         self.counters = match rx {
             Ok(s) if is_beacon(s.key) => {
-                let (neighbours, heard) = core::mem::take(&mut self.neighbours).hear(
-                    s.key,
-                    s.payload,
-                    s.meta.sender,
-                    uptime_ms(),
-                );
+                let (neighbours, heard) =
+                    core::mem::take(&mut self.neighbours).hear(s.key, s.payload, s.meta.sender, uptime_ms());
                 self.neighbours = neighbours;
                 if let Some(heard) = heard {
                     self.bus.log(format_args!("{heard}"));
@@ -446,8 +440,7 @@ impl Radio {
             }
             Ok(s) => {
                 let mut msg = Received { key: String::new(), payload: Vec::new() };
-                let fits = msg.key.push_str(s.key.as_str()).is_ok()
-                    && msg.payload.extend_from_slice(s.payload).is_ok();
+                let fits = msg.key.push_str(s.key.as_str()).is_ok() && msg.payload.extend_from_slice(s.payload).is_ok();
                 self.counters.received(fits && RX.try_send(msg).is_ok())
             }
             Err(MwError::IgnoredLimit) => self.counters,
@@ -558,11 +551,8 @@ impl Radio {
         let ok = match written {
             Some(n) => match frame.get(..n) {
                 Some(bytes) => matches!(
-                    with_timeout(
-                        Duration::from_millis(SEND_TIMEOUT_MS),
-                        self.transport.radio_mut().broadcast(bytes)
-                    )
-                    .await,
+                    with_timeout(Duration::from_millis(SEND_TIMEOUT_MS), self.transport.radio_mut().broadcast(bytes))
+                        .await,
                     Ok(Ok(()))
                 ),
                 None => false,
@@ -602,11 +592,7 @@ impl Radio {
             let ok = match cam_beacon(own_mac(), route, &mut key, &mut payload) {
                 Ok((key, n)) => match payload.get(..n) {
                     Some(bytes) => matches!(
-                        with_timeout(
-                            Duration::from_millis(SEND_TIMEOUT_MS),
-                            self.transport.publish(key, bytes)
-                        )
-                        .await,
+                        with_timeout(Duration::from_millis(SEND_TIMEOUT_MS), self.transport.publish(key, bytes)).await,
                         Ok(Ok(()))
                     ),
                     None => false,
@@ -781,9 +767,7 @@ fn camera_chunk(out: &mut [u8; MAX_FRAME], seq: u8, job: &Job, len: u32) -> Opti
 /// Runs the transport and the source routes forever (see the module docs).
 #[embassy_executor::task]
 pub async fn radio_task(transport: Transport, bus: &'static Bus) {
-    bus.log(format_args!(
-        "espnow: channel {CHANNEL}, keys app/... and disc/..."
-    ));
+    bus.log(format_args!("espnow: channel {CHANNEL}, keys app/... and disc/..."));
     let mut radio = Radio {
         transport,
         counters: Counters::new(),
@@ -837,11 +821,8 @@ pub async fn radio_task(transport: Transport, bus: &'static Bus) {
             }
         };
         let rpc = select(RPC_RX.receive(), bus.radio_reply());
-        let woke = select(
-            select4(radio.transport.recv(&mut sample), TX.receive(), timer, SOURCES_CHANGED.wait()),
-            rpc,
-        )
-        .await;
+        let woke =
+            select(select4(radio.transport.recv(&mut sample), TX.receive(), timer, SOURCES_CHANGED.wait()), rpc).await;
         match woke {
             Either::First(Either4::First(rx)) => {
                 let start = irq::now_us();

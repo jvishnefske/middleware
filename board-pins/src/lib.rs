@@ -263,7 +263,9 @@ impl PinMap {
         if timer >= PWM_TIMERS || channel >= PWM_OUTPUTS {
             return None;
         }
-        self.pwm.get(usize::from(timer * PWM_OUTPUTS + channel)).copied()
+        self.pwm
+            .get(usize::from(timer * PWM_OUTPUTS + channel))
+            .copied()
     }
 
     /// The PWM output pins, indexed by `2·timer + channel` (empty when the
@@ -274,7 +276,10 @@ impl PinMap {
 
     /// The ((timer, channel), pin) PWM outputs, in table order.
     pub fn pwm_pins(&self) -> impl Iterator<Item = ((u8, u8), u8)> + '_ {
-        self.pwm.iter().zip(0u8..).map(|(&p, i)| ((i / PWM_OUTPUTS, i % PWM_OUTPUTS), p))
+        self.pwm
+            .iter()
+            .zip(0u8..)
+            .map(|(&p, i)| ((i / PWM_OUTPUTS, i % PWM_OUTPUTS), p))
     }
 
     /// How SPI pins are routed.
@@ -342,7 +347,11 @@ mod tests {
         assert_eq!(PICO.adc_channel(40), Err(AdcError::NoSuchPin));
         assert_eq!(ESP32.adc_channel(36), Ok(0), "ADC1_CH0");
         assert_eq!(ESP32.adc_channel(32), Ok(4), "ADC1_CH4");
-        assert_eq!(ESP32.adc_channel(25), Err(AdcError::NotAnalog), "ADC2 is never offered");
+        assert_eq!(
+            ESP32.adc_channel(25),
+            Err(AdcError::NotAnalog),
+            "ADC2 is never offered"
+        );
         assert_eq!(ESP32S3.adc_channel(1), Ok(0));
         assert_eq!(ESP32S3.adc_mask(), span(1, 10));
         assert_eq!(ESP32.adc_mask(), span(32, 39));

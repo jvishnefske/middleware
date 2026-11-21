@@ -187,7 +187,9 @@ impl AdapterState {
                             sq += (v * v) as u64;
                         }
                     }
-                    let m = u16::try_from(sq.isqrt()).unwrap_or(u16::MAX).min(i16::MAX as u16);
+                    let m = u16::try_from(sq.isqrt())
+                        .unwrap_or(u16::MAX)
+                        .min(i16::MAX as u16);
                     o.copy_from_slice(&(m as i16).to_le_bytes());
                     n += 1;
                 }
@@ -210,7 +212,10 @@ impl AdapterState {
                 // Bounded by the batch's count, not by index arithmetic.
                 for i in (offset..u64::from(h.count)).step_by(usize::from(factor)) {
                     let i = i as usize;
-                    let src = b.data.get(i * unit..(i + 1) * unit).ok_or(BatchError::Truncated)?;
+                    let src = b
+                        .data
+                        .get(i * unit..(i + 1) * unit)
+                        .ok_or(BatchError::Truncated)?;
                     data[at..at + unit].copy_from_slice(src);
                     at += unit;
                     n += 1;
@@ -328,7 +333,12 @@ mod tests {
 
     fn levels(data: &[u8]) -> Vec<(u16, u16)> {
         data.chunks_exact(4)
-            .map(|b| (u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])))
+            .map(|b| {
+                (
+                    u16::from_le_bytes([b[0], b[1]]),
+                    u16::from_le_bytes([b[2], b[3]]),
+                )
+            })
             .collect()
     }
 
@@ -339,7 +349,10 @@ mod tests {
         // 150 + 150 + 100 samples: blocks complete in the 2nd and 3rd.
         assert_eq!(feed(&mut a, &mic(0, &pcm[..150])), None);
         let (h, d) = feed(&mut a, &mic(150, &pcm[150..300])).unwrap();
-        assert_eq!((h.format, h.first_index, h.count, h.scale), (SampleFormat::Levels, 0, 1, 160));
+        assert_eq!(
+            (h.format, h.first_index, h.count, h.scale),
+            (SampleFormat::Levels, 0, 1, 160)
+        );
         assert_eq!(h.timestamp_us, 0);
         assert_eq!(levels(&d), [samples::block_levels(&pcm[..160])]);
         let (h, d) = feed(&mut a, &mic(300, &pcm[300..400])).unwrap();
@@ -366,16 +379,25 @@ mod tests {
         let pcm: Vec<i16> = (0..10).map(|i| i * 1000).collect();
         let mut a = AdapterState::new(Adapter::PcmToMuLaw);
         let (h, d) = feed(&mut a, &mic(40, &pcm)).unwrap();
-        assert_eq!((h.format, h.first_index, h.count), (SampleFormat::MuLaw, 40, 10));
+        assert_eq!(
+            (h.format, h.first_index, h.count),
+            (SampleFormat::MuLaw, 40, 10)
+        );
         let want: Vec<u8> = pcm.iter().map(|v| samples::mulaw_encode(*v)).collect();
         assert_eq!(d, want);
         let mut a = AdapterState::new(Adapter::Decimate { factor: 4 });
         // Indices 41..51: keeps 44 and 48 -> output 11, 12.
         let (h, d) = feed(&mut a, &mic(41, &pcm)).unwrap();
         assert_eq!((h.first_index, h.count, h.rate_hz), (11, 2, 4_000));
-        assert_eq!(d, [&pcm[3].to_le_bytes()[..], &pcm[7].to_le_bytes()[..]].concat());
+        assert_eq!(
+            d,
+            [&pcm[3].to_le_bytes()[..], &pcm[7].to_le_bytes()[..]].concat()
+        );
         // The input timestamp plus the three skipped samples.
-        assert_eq!(h.timestamp_us, 41 * 1_000_000 / 16_000 + 3 * 1_000_000 / 16_000);
+        assert_eq!(
+            h.timestamp_us,
+            41 * 1_000_000 / 16_000 + 3 * 1_000_000 / 16_000
+        );
         // A batch with no multiple of the factor yields nothing.
         assert_eq!(feed(&mut a, &mic(45, &pcm[..3])), None);
     }
@@ -408,7 +430,11 @@ mod tests {
     #[test]
     fn ad2_indices_near_the_end_of_u64_are_refused_not_wrapped() {
         let pcm: Vec<i16> = (0..10).collect();
-        for a in [Adapter::Decimate { factor: 4 }, Adapter::PcmToLevels { block: 2 }, Adapter::PcmToMuLaw] {
+        for a in [
+            Adapter::Decimate { factor: 4 },
+            Adapter::PcmToLevels { block: 2 },
+            Adapter::PcmToMuLaw,
+        ] {
             let mut s = AdapterState::new(a);
             // The last index would pass u64::MAX: refused and counted.
             let mut m = mic(0, &pcm);
@@ -441,11 +467,17 @@ mod tests {
         assert_eq!(lv.output(pcm).map(|s| s.format), Some(SampleFormat::Levels));
         assert_eq!(lv.output(imu), None);
         assert_eq!(Adapter::PcmToMuLaw.output(imu), None);
-        assert_eq!(Adapter::ImuToMagnitude.output(imu).map(|s| s.channels), Some(1));
+        assert_eq!(
+            Adapter::ImuToMagnitude.output(imu).map(|s| s.channels),
+            Some(1)
+        );
         assert_eq!(Adapter::ImuToMagnitude.output(pcm), None);
         let d = Adapter::Decimate { factor: 4 };
         assert_eq!(d.output(imu).map(|s| s.rate_hz), Some(25));
-        let levels = Shape { format: SampleFormat::Levels, ..pcm };
+        let levels = Shape {
+            format: SampleFormat::Levels,
+            ..pcm
+        };
         assert_eq!(lv.output(levels), None);
     }
 }

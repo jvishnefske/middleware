@@ -89,8 +89,7 @@ impl Routes {
         if let Kind::Sink { bus, route } = &kind {
             let dc = route.config().dc_pin;
             let clash = self.entries().any(|(_, e)| {
-                matches!(e.kind, Kind::Sink { .. })
-                    && (e.bus() == Some(*bus) || e.dc_pin() == Some(dc) || e.key == key)
+                matches!(e.kind, Kind::Sink { .. }) && (e.bus() == Some(*bus) || e.dc_pin() == Some(dc) || e.key == key)
             });
             if clash {
                 return Err(AbiError::Busy);
@@ -129,9 +128,7 @@ impl Routes {
     /// `handle` is not a sink route).
     pub fn with_sink(self, handle: u8, route: SinkRoute) -> Self {
         let mut next = self;
-        if let Some(Some(Entry { kind: Kind::Sink { route: r, .. }, .. })) =
-            next.slots.get_mut(usize::from(handle))
-        {
+        if let Some(Some(Entry { kind: Kind::Sink { route: r, .. }, .. })) = next.slots.get_mut(usize::from(handle)) {
             *r = route;
         }
         next

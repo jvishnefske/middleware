@@ -57,9 +57,7 @@ fn hex_digits(s: &str, n: usize) -> Option<Vec<u8>> {
     if s.len() != n || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    (0..n / 2)
-        .map(|i| s.get(2 * i..2 * i + 2).and_then(|p| u8::from_str_radix(p, 16).ok()))
-        .collect()
+    (0..n / 2).map(|i| s.get(2 * i..2 * i + 2).and_then(|p| u8::from_str_radix(p, 16).ok())).collect()
 }
 
 fn nonzero(id: [u8; 8]) -> Result<SenderId, NodeIdError> {
@@ -86,10 +84,7 @@ pub fn from_machine_id(contents: &str) -> Result<SenderId, NodeIdError> {
     if hex_digits(t, 32).is_none() {
         return Err(NodeIdError::MachineId(t.to_owned()));
     }
-    let digest = Sha256::new()
-        .chain_update(DOMAIN)
-        .chain_update(t.to_ascii_lowercase().as_bytes())
-        .finalize();
+    let digest = Sha256::new().chain_update(DOMAIN).chain_update(t.to_ascii_lowercase().as_bytes()).finalize();
     let mut id = [0u8; 8];
     id.copy_from_slice(digest.get(..8).unwrap_or(&[0; 8]));
     nonzero(id)
@@ -141,16 +136,19 @@ mod tests {
         assert_eq!(from_machine_id(MACHINE_ID.trim()), Ok(a));
         // The id is the first 8 bytes of SHA-256(DOMAIN || id), and not
         // simply the id's own leading bytes.
-        let digest = Sha256::new()
-            .chain_update(DOMAIN)
-            .chain_update(MACHINE_ID.trim().as_bytes())
-            .finalize();
+        let digest = Sha256::new().chain_update(DOMAIN).chain_update(MACHINE_ID.trim().as_bytes()).finalize();
         assert_eq!(&a.0[..], &digest[..8]);
         assert_ne!(a.0, [0x4f, 0x6a, 0x1c, 0x0e, 0x9b, 0x2d, 0x47, 0xe8]);
         // Another machine, another node.
         let b = from_machine_id("4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c8").expect("id");
         assert_ne!(a, b);
-        for bad in ["", "uninitialized", "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c", "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c7a", "zf6a1c0e9b2d47e8a3c5d7f9e1b3a5c7"] {
+        for bad in [
+            "",
+            "uninitialized",
+            "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c",
+            "4f6a1c0e9b2d47e8a3c5d7f9e1b3a5c7a",
+            "zf6a1c0e9b2d47e8a3c5d7f9e1b3a5c7",
+        ] {
             assert!(matches!(from_machine_id(bad), Err(NodeIdError::MachineId(_))), "{bad:?}");
         }
     }
@@ -199,10 +197,7 @@ mod tests {
     #[test]
     fn node_ids_survive_the_rename() {
         let machine = "0123456789abcdef0123456789abcdef";
-        let digest = Sha256::new()
-            .chain_update(b"mw-pi-node/node-id/v1\0")
-            .chain_update(machine.as_bytes())
-            .finalize();
+        let digest = Sha256::new().chain_update(b"mw-pi-node/node-id/v1\0").chain_update(machine.as_bytes()).finalize();
         let want: [u8; 8] = digest[..8].try_into().unwrap();
         assert_eq!(from_machine_id(machine).unwrap().0, want);
         assert_eq!(

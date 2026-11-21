@@ -261,7 +261,10 @@ mod tests {
             assert_eq!(ledc_channel(t, c), Err(AbiError::Unsupported), "({t},{c})");
         }
         let pins = |p: &Profile| {
-            (0..4u8).flat_map(|t| (0..2u8).map(move |c| (t, c))).filter_map(|(t, c)| p.pwm_pin(t, c)).collect::<heapless::Vec<u8, 8>>()
+            (0..4u8)
+                .flat_map(|t| (0..2u8).map(move |c| (t, c)))
+                .filter_map(|(t, c)| p.pwm_pin(t, c))
+                .collect::<heapless::Vec<u8, 8>>()
         };
         assert_eq!(pins(&ESP32), [0, 4, 13, 14]);
         assert_eq!(pins(&ESP32S3), [11, 12, 13, 14, 15, 16, 17, 18]);
@@ -304,7 +307,9 @@ mod tests {
         assert_eq!(r(&ESP32, 1_000_000), Ok((6, false)));
         // The divider stays inside 256..=0x3FFFF across the ABI range.
         for p in [&ESP32, &ESP32S3] {
-            for f in [5, 7, 50, 999, 1000, 4883, 25_000, 333_333, 1_000_000].into_iter().chain(p.pwm_ref_tick.then_some(1)) {
+            for f in
+                [5, 7, 50, 999, 1000, 4883, 25_000, 333_333, 1_000_000].into_iter().chain(p.pwm_ref_tick.then_some(1))
+            {
                 let res = resolution(p, f).unwrap();
                 let clk = if res.ref_tick { REF_TICK_HZ } else { APB_HZ };
                 let div = divider(clk, f, res.bits);
@@ -344,7 +349,15 @@ mod tests {
     #[test]
     fn x11_open_binds_both_channels_at_zero_and_reopen_rescales_kept_duties() {
         let (t, step) = PwmTable::new().open(&ESP32S3, spec(1, 1000)).unwrap();
-        assert_eq!(step, OpenStep { timer: 1, freq_hz: 1000, res: Resolution { bits: 14, ref_tick: false }, channels: [(2, 0), (3, 0)] });
+        assert_eq!(
+            step,
+            OpenStep {
+                timer: 1,
+                freq_hz: 1000,
+                res: Resolution { bits: 14, ref_tick: false },
+                channels: [(2, 0), (3, 0)]
+            }
+        );
         let (t, set) = t.set(&ESP32S3, 1, 1, 32_768).unwrap();
         assert_eq!(set, SetStep { channel: 3, raw: 8192, route: Some(14) });
         let (t, set) = t.set(&ESP32S3, 1, 1, u16::MAX).unwrap();
@@ -353,7 +366,10 @@ mod tests {
         // 1 MHz: 6 bits, the kept duty rescaled.
         let (t, step) = t.open(&ESP32S3, spec(1, 1_000_000)).unwrap();
         assert_eq!(step.channels, [(2, 0), (3, 64)]);
-        assert_eq!((t.freq_hz(1), t.duty(1, 1), t.resolution(1).map(|r| r.bits)), (Some(1_000_000), Some(u16::MAX), Some(6)));
+        assert_eq!(
+            (t.freq_hz(1), t.duty(1, 1), t.resolution(1).map(|r| r.bits)),
+            (Some(1_000_000), Some(u16::MAX), Some(6))
+        );
         let (_, set) = t.set(&ESP32S3, 1, 1, 0).unwrap();
         assert_eq!(set.route, None, "reopening keeps the routed pin");
     }
@@ -367,7 +383,11 @@ mod tests {
         assert_eq!(t.open(&ESP32, spec(4, 1000)).map(|_| ()), Err(AbiError::Unsupported));
         assert_eq!(t.open(&ESP32, spec(5, 1000)).map(|_| ()), Err(AbiError::Unsupported));
         for timer in [2, 3] {
-            assert_eq!(t.open(&ESP32, spec(timer, 1000)).map(|_| ()), Err(AbiError::Unsupported), "ESP32-CAM timer {timer}");
+            assert_eq!(
+                t.open(&ESP32, spec(timer, 1000)).map(|_| ()),
+                Err(AbiError::Unsupported),
+                "ESP32-CAM timer {timer}"
+            );
         }
         assert_eq!(t.stop(&ESP32, 5).map(|_| ()), Err(AbiError::Unsupported));
         assert_eq!(t.open(&ESP32S3, spec(0, 3)).map(|_| ()), Err(AbiError::Unsupported), "no clock reaches 3 Hz");

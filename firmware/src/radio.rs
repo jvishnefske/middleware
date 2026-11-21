@@ -151,7 +151,8 @@ impl<const N: usize> Peers<N> {
             *slot = Some((mac, clock));
             return (next, PeerChange::Add);
         }
-        let oldest = (0..N).max_by_key(|&i| next.macs.get(i).copied().flatten().map_or(0, |(_, t)| clock.wrapping_sub(t)));
+        let oldest =
+            (0..N).max_by_key(|&i| next.macs.get(i).copied().flatten().map_or(0, |(_, t)| clock.wrapping_sub(t)));
         match oldest.and_then(|i| next.macs.get_mut(i)) {
             Some(slot) => {
                 let old = slot.map(|(m, _)| m);
@@ -239,10 +240,7 @@ impl Counters {
 
     /// Losses so far: everything dropped or failed.
     pub const fn losses(&self) -> u32 {
-        self.rx_dropped
-            .saturating_add(self.rx_bad)
-            .saturating_add(self.tx_dropped)
-            .saturating_add(self.tx_failed)
+        self.rx_dropped.saturating_add(self.rx_bad).saturating_add(self.tx_dropped).saturating_add(self.tx_failed)
     }
 
     /// Whether to log the counters now: losses rose since the last report
@@ -350,7 +348,13 @@ mod tests {
         assert!(c.report(&RpcCounters::new(), REPORT_INTERVAL_MS));
         assert!(!c.report(&RpcCounters::new(), REPORT_INTERVAL_MS - 1), "rate limited");
         assert!(!c.report(&c, u32::MAX), "nothing new");
-        let full = RpcCounters { executed: u32::MAX, replayed: u32::MAX, busy: u32::MAX, dropped: u32::MAX, tx_failed: u32::MAX };
+        let full = RpcCounters {
+            executed: u32::MAX,
+            replayed: u32::MAX,
+            busy: u32::MAX,
+            dropped: u32::MAX,
+            tx_failed: u32::MAX,
+        };
         assert_eq!(full.executed().replayed().busy().dropped(3).tx_failed(), full);
         const { assert!(RPC_BODY >= middleware::loader::MAX_INFO_LEN, "sys/info (with the 0.5 node id) fits the cache") };
     }
@@ -408,19 +412,13 @@ mod tests {
         assert!(is_beacon(k("disc/cam/jpeg")) && is_beacon(k("disc")));
         assert!(!is_beacon(k("discover/x")) && !is_beacon(k("app/disc")));
         assert!(!FILTERS.iter().any(|f| f.matches(k("discover/x"))), "segment-wise prefix");
-        assert!(
-            !FILTERS.iter().any(|f| f.matches(k("sys/info"))),
-            "sys/ never admitted"
-        );
+        assert!(!FILTERS.iter().any(|f| f.matches(k("sys/info"))), "sys/ never admitted");
     }
 
     #[test]
     fn r11_r12_counters_saturate_and_report_on_new_losses() {
         let c = Counters::new().received(true).received(false).bad().sent(true).sent(false).dropped(2);
-        assert_eq!(
-            c,
-            Counters { rx: 1, rx_dropped: 1, rx_bad: 1, tx: 1, tx_dropped: 2, tx_failed: 1 }
-        );
+        assert_eq!(c, Counters { rx: 1, rx_dropped: 1, rx_bad: 1, tx: 1, tx_dropped: 2, tx_failed: 1 });
         assert_eq!(c.losses(), 5);
         assert!(c.report(0, REPORT_INTERVAL_MS));
         assert!(!c.report(0, REPORT_INTERVAL_MS - 1), "rate limited");

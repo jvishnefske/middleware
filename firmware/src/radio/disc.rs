@@ -45,9 +45,7 @@
 
 use core::fmt;
 
-use middleware::discovery::beacon::{
-    BeaconError, beacon_key, decode, encode, kind_of, reannounce_after_ms,
-};
+use middleware::discovery::beacon::{BeaconError, beacon_key, decode, encode, kind_of, reannounce_after_ms};
 use middleware::discovery::{Change, Directory, Endpoint, Event, Service, ServiceKind};
 use middleware::espnow::{MAX_KEY, Mac};
 use middleware::{Key, SenderId};
@@ -148,18 +146,10 @@ impl CamBeacon {
     pub const fn step(self, camera: bool, now_ms: u64) -> (Self, BeaconStep) {
         let interval = reannounce_after_ms(BEACON_TTL_S);
         match (camera, self.last_ms) {
-            (true, None) => (
-                CamBeacon {
-                    last_ms: Some(now_ms),
-                },
-                BeaconStep::Announce,
-            ),
-            (true, Some(t)) if now_ms >= t.saturating_add(interval) => (
-                CamBeacon {
-                    last_ms: Some(now_ms),
-                },
-                BeaconStep::Announce,
-            ),
+            (true, None) => (CamBeacon { last_ms: Some(now_ms) }, BeaconStep::Announce),
+            (true, Some(t)) if now_ms >= t.saturating_add(interval) => {
+                (CamBeacon { last_ms: Some(now_ms) }, BeaconStep::Announce)
+            }
             (true, Some(_)) => (self, BeaconStep::Wait),
             (false, Some(_)) => (CamBeacon { last_ms: None }, BeaconStep::Goodbye),
             (false, None) => (self, BeaconStep::Wait),
@@ -170,10 +160,7 @@ impl CamBeacon {
     /// to do, or `None` while nothing is announced and no camera runs.
     pub const fn due_in(&self, camera: bool, now_ms: u64) -> Option<u64> {
         match (camera, self.last_ms) {
-            (true, Some(t)) => Some(
-                t.saturating_add(reannounce_after_ms(BEACON_TTL_S))
-                    .saturating_sub(now_ms),
-            ),
+            (true, Some(t)) => Some(t.saturating_add(reannounce_after_ms(BEACON_TTL_S)).saturating_sub(now_ms)),
             (true, None) | (false, Some(_)) => Some(0),
             (false, None) => None,
         }
@@ -215,11 +202,7 @@ impl fmt::Display for Heard<'_> {
         match self.change {
             Change::Removed => write!(f, "disc: down {kind} {instance} (goodbye, {known} known)"),
             change => {
-                let verb = if change == Change::Added {
-                    "up"
-                } else {
-                    "updated"
-                };
+                let verb = if change == Change::Added { "up" } else { "updated" };
                 write!(f, "disc: {verb} {kind} {instance}")?;
                 if let Some(node) = self.node {
                     write!(f, " node {}", Hex(node))?;
@@ -277,10 +260,7 @@ pub struct Neighbours {
 impl Neighbours {
     /// Nothing heard.
     pub const fn new() -> Self {
-        Neighbours {
-            dir: Directory::new(),
-            refused: 0,
-        }
+        Neighbours { dir: Directory::new(), refused: 0 }
     }
 
     /// Beacons refused so far (wrong node, someone else's record, the
@@ -341,8 +321,7 @@ impl Neighbours {
             return (Neighbours { dir, refused }.refuse(), None);
         }
         let known = dir.len();
-        let heard = matches!(change, Change::Added | Change::Updated | Change::Removed)
-        .then_some(Heard {
+        let heard = matches!(change, Change::Added | Change::Updated | Change::Removed).then_some(Heard {
             change,
             kind: service.kind,
             instance: service.instance,
@@ -355,25 +334,17 @@ impl Neighbours {
 
     /// The records whose TTL has run out at `now_ms`, for the log.
     pub fn expired(&self, now_ms: u64) -> impl Iterator<Item = Expired<'_>> {
-        self.dir.expired(now_ms).map(|s| Expired {
-            kind: s.kind,
-            instance: s.instance,
-        })
+        self.dir.expired(now_ms).map(|s| Expired { kind: s.kind, instance: s.instance })
     }
 
     /// The directory without the records expired at `now_ms`.
     pub fn expire(self, now_ms: u64) -> Self {
-        Neighbours {
-            dir: self.dir.expire(now_ms).0,
-            ..self
-        }
+        Neighbours { dir: self.dir.expire(now_ms).0, ..self }
     }
 
     /// Milliseconds from `now_ms` until the next record expires.
     pub fn expires_in(&self, now_ms: u64) -> Option<u64> {
-        self.dir
-            .next_expiry(now_ms)
-            .map(|t| t.saturating_sub(now_ms))
+        self.dir.next_expiry(now_ms).map(|t| t.saturating_sub(now_ms))
     }
 
     /// The services known.
@@ -459,10 +430,7 @@ mod tests {
         let (d, heard) = Neighbours::new().hear(key, &out[..n], cam, 1_000);
         let heard = heard.expect("new record");
         assert_eq!(heard.change, Change::Added);
-        assert_eq!(
-            heard.to_string(),
-            "disc: up cam/jpeg cam-aabbcc node 246f28aabbcc0000 ttl 30 s (1 known)"
-        );
+        assert_eq!(heard.to_string(), "disc: up cam/jpeg cam-aabbcc node 246f28aabbcc0000 ttl 30 s (1 known)");
         // A refresh is silent and restarts the TTL.
         let (d, heard) = d.hear(key, &out[..n], cam, 20_000);
         assert_eq!(heard, None);
@@ -477,10 +445,7 @@ mod tests {
         let (d, _) = d.hear(key, &out[..n], None, 60_000);
         let (bye_key, bye, bk, bn) = beacon(None);
         let (d, heard) = d.hear(key_of(&bye_key, bk), &bye[..bn], None, 61_000);
-        assert_eq!(
-            heard.expect("removed").to_string(),
-            "disc: down cam/jpeg cam-aabbcc (goodbye, 0 known)"
-        );
+        assert_eq!(heard.expect("removed").to_string(), "disc: down cam/jpeg cam-aabbcc (goodbye, 0 known)");
         assert_eq!(d.services().count(), 0);
     }
 
@@ -501,10 +466,7 @@ mod tests {
         let (d, heard) = Neighbours::new().hear(k, &out[..n], Some(BADGE), 0);
         let heard = heard.unwrap();
         assert_eq!(heard.node, Some(BADGE));
-        assert_eq!(
-            heard.to_string(),
-            "disc: up led/sync b1 node 0201020304050000 ttl 10 s (1 known)"
-        );
+        assert_eq!(heard.to_string(), "disc: up led/sync b1 node 0201020304050000 ttl 10 s (1 known)");
         // Not a beacon key, or a malformed beacon: nothing.
         let (d, heard) = d.hear(Key::from_static("app/x"), &out[..n], None, 0);
         assert_eq!(heard, None);

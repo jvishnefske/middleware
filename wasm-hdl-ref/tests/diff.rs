@@ -105,7 +105,13 @@ fn run_model(wasm: &[u8], steps: &[Step]) -> Result<Outcome, String> {
             Step::Req(k, d) => {
                 let mut reply = [0u8; 64];
                 results.push(
-                    match c.request(Key::new(k).unwrap(), d, &RequestMeta::NONE, &mut reply, &mut rec) {
+                    match c.request(
+                        Key::new(k).unwrap(),
+                        d,
+                        &RequestMeta::NONE,
+                        &mut reply,
+                        &mut rec,
+                    ) {
                         Ok(Ok(n)) => format!("reply {:02x?}", &reply[..n]),
                         Ok(Err(e)) => format!("error {e:?}"),
                         Err(e) => trap_name(&format!("{e:?}")),
@@ -125,9 +131,13 @@ fn run_model(wasm: &[u8], steps: &[Step]) -> Result<Outcome, String> {
 /// both, compares.
 fn differential(name: &str, wasm: &[u8]) {
     let mut probe = Box::new(Model::new());
-    probe.load(wasm).unwrap_or_else(|e| panic!("{name}: model refused: {e:?}"));
+    probe
+        .load(wasm)
+        .unwrap_or_else(|e| panic!("{name}: model refused: {e:?}"));
     let mut rec = Rec::new(Rc::new(Cell::new(0)));
-    probe.init(&mut rec).unwrap_or_else(|e| panic!("{name}: init {e:?}"));
+    probe
+        .init(&mut rec)
+        .unwrap_or_else(|e| panic!("{name}: init {e:?}"));
     let subs: Vec<String> = probe.subscriptions().map(String::from).collect();
     let serves: Vec<String> = probe.serves().map(String::from).collect();
     let steps = script(&subs, &serves);
@@ -136,7 +146,10 @@ fn differential(name: &str, wasm: &[u8]) {
     assert_eq!(a.trace, b.trace, "{name}: board calls differ");
     assert_eq!(a.results, b.results, "{name}: results differ");
     assert!(a.memory == b.memory, "{name}: final memory differs");
-    assert!(!a.trace.is_empty() || !a.results.is_empty(), "{name}: did nothing");
+    assert!(
+        !a.trace.is_empty() || !a.results.is_empty(),
+        "{name}: did nothing"
+    );
 }
 
 fn root() -> PathBuf {
@@ -199,12 +212,24 @@ fn cl3_traps_match_wasmi() {
     for (what, body) in [
         ("unreachable", "(unreachable)"),
         ("div0", "(drop (i32.div_u (i32.const 1) (i32.const 0)))"),
-        ("overflow", "(drop (i32.div_s (i32.const 0x80000000) (i32.const -1)))"),
+        (
+            "overflow",
+            "(drop (i32.div_s (i32.const 0x80000000) (i32.const -1)))",
+        ),
         ("oob load", "(drop (i32.load (i32.const 65533)))"),
-        ("oob fill", "(memory.fill (i32.const 65530) (i32.const 0) (i32.const 7))"),
-        ("null", "(drop (call_indirect (param i32) (result i32) (i32.const 1) (i32.const 2)))"),
+        (
+            "oob fill",
+            "(memory.fill (i32.const 65530) (i32.const 0) (i32.const 7))",
+        ),
+        (
+            "null",
+            "(drop (call_indirect (param i32) (result i32) (i32.const 1) (i32.const 2)))",
+        ),
         ("type", "(call_indirect (i32.const 0))"),
-        ("table", "(drop (call_indirect (param i32) (result i32) (i32.const 1) (i32.const 9)))"),
+        (
+            "table",
+            "(drop (call_indirect (param i32) (result i32) (i32.const 1) (i32.const 9)))",
+        ),
         ("fuel", "(loop $l (br $l))"),
         ("recursion", "(call $rec)"),
     ] {
@@ -251,10 +276,9 @@ fn cl3_load_errors_match_wasm_host_classes() {
             |e| *e == LoadError::BadExport,
         ),
         (r#"(module (memory 1))"#, |e| *e == LoadError::MissingMemory),
-        (
-            r#"(module (memory (export "memory") 3))"#,
-            |e| matches!(e, LoadError::MemoryTooLarge { .. }),
-        ),
+        (r#"(module (memory (export "memory") 3))"#, |e| {
+            matches!(e, LoadError::MemoryTooLarge { .. })
+        }),
     ];
     for (src, ok) in cases {
         let wasm = wat::parse_str(src).unwrap();
@@ -268,7 +292,9 @@ fn cl3_load_errors_match_wasm_host_classes() {
         r#"(module (memory (export "memory") 1) (func (drop (i64.add (i64.const 1) (i64.const 2)))))"#,
         r#"(module (memory (export "memory") 1) (func (local i64)))"#,
     ] {
-        let e = Model::new().load(&wat::parse_str(src).unwrap()).unwrap_err();
+        let e = Model::new()
+            .load(&wat::parse_str(src).unwrap())
+            .unwrap_err();
         assert!(matches!(e, LoadError::Unsupported(_)), "{src}: {e:?}");
     }
 }
@@ -287,6 +313,9 @@ fn cl3_bridge_template_fits_the_colorlight_core() {
     let echo = wat::parse_file(root().join("payloads/templates/echo.wat")).unwrap();
     assert!(matches!(
         wasm_hdl_ref::Colorlight::new().load(&echo),
-        Err(LoadError::MemoryTooLarge { bytes: 65536, max: 16384 })
+        Err(LoadError::MemoryTooLarge {
+            bytes: 65536,
+            max: 16384
+        })
     ));
 }

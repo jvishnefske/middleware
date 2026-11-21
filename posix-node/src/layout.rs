@@ -45,11 +45,9 @@ mod tests {
 
     #[test]
     fn pn5_regions_are_whole_sectors_and_do_not_overlap() {
-        for (offset, size) in [
-            (PAYLOAD_OFFSET, PAYLOAD_SIZE),
-            (TRUST_OFFSET, TRUST_SIZE),
-            (BINDING_OFFSET, BINDING_SIZE),
-        ] {
+        for (offset, size) in
+            [(PAYLOAD_OFFSET, PAYLOAD_SIZE), (TRUST_OFFSET, TRUST_SIZE), (BINDING_OFFSET, BINDING_SIZE)]
+        {
             assert!(offset.is_multiple_of(SECTOR) && size.is_multiple_of(SECTOR));
         }
         assert_eq!(SECTORS, 132);

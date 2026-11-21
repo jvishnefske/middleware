@@ -21,38 +21,22 @@ use std::process::ExitCode;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn chip(name: &str) -> Option<&'static Profile> {
-    [Chip::Esp32, Chip::Esp32s3, Chip::Esp32c3, Chip::Esp8266]
-        .into_iter()
-        .map(Chip::profile)
-        .find(|p| p.name == name)
+    [Chip::Esp32, Chip::Esp32s3, Chip::Esp32c3, Chip::Esp8266].into_iter().map(Chip::profile).find(|p| p.name == name)
 }
 
 fn pins(mask: u64) -> String {
-    let list: Vec<String> = (0..64u32)
-        .filter(|n| mask >> n & 1 == 1)
-        .map(|n| n.to_string())
-        .collect();
+    let list: Vec<String> = (0..64u32).filter(|n| mask >> n & 1 == 1).map(|n| n.to_string()).collect();
     format!("[{}]", list.join(", "))
 }
 
 fn json(p: &Profile) -> String {
     let b: BoardInfo<'_> = p.board_info(ABI_VERSION);
-    let firmware = if p.runtime {
-        VERSION.to_owned()
-    } else {
-        format!("{VERSION}+no-wasm")
-    };
+    let firmware = if p.runtime { VERSION.to_owned() } else { format!("{VERSION}+no-wasm") };
     let table: Vec<String> = b
         .pwm_pins
         .iter()
         .enumerate()
-        .map(|(i, gpio)| {
-            format!(
-                "{{ \"timer\": {}, \"channel\": {}, \"gpio\": {gpio} }}",
-                i / 2,
-                i % 2
-            )
-        })
+        .map(|(i, gpio)| format!("{{ \"timer\": {}, \"channel\": {}, \"gpio\": {gpio} }}", i / 2, i % 2))
         .collect();
     let mut s = String::new();
     let _ = writeln!(s, "{{");
@@ -81,11 +65,7 @@ fn json(p: &Profile) -> String {
     if table.is_empty() {
         let _ = writeln!(s, "    \"table\": []");
     } else {
-        let _ = writeln!(
-            s,
-            "    \"table\": [\n      {}\n    ]",
-            table.join(",\n      ")
-        );
+        let _ = writeln!(s, "    \"table\": [\n      {}\n    ]", table.join(",\n      "));
     }
     let _ = writeln!(s, "  }}");
     let _ = writeln!(s, "}}");
@@ -94,15 +74,8 @@ fn json(p: &Profile) -> String {
 
 fn wire(p: &Profile) -> String {
     let mut buf = [0u8; BOARD_INFO_MAX];
-    let n = p
-        .board_info(ABI_VERSION)
-        .encode(&mut buf)
-        .expect("fits BOARD_INFO_MAX");
-    buf[..n]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
-        + "\n"
+    let n = p.board_info(ABI_VERSION).encode(&mut buf).expect("fits BOARD_INFO_MAX");
+    buf[..n].iter().map(|b| format!("{b:02x}")).collect::<String>() + "\n"
 }
 
 fn main() -> ExitCode {

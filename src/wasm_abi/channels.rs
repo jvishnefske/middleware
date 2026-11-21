@@ -323,7 +323,10 @@ pub const fn encoded_len(decls: &[Channel<'_>]) -> usize {
 /// name or too many entries fail the build (a const panic).
 pub const fn encode<const N: usize>(decls: &[Channel<'_>]) -> [u8; N] {
     assert!(N == encoded_len(decls), "mw.channels: wrong length");
-    assert!(decls.len() <= MAX_CHANNELS, "mw.channels: too many channels");
+    assert!(
+        decls.len() <= MAX_CHANNELS,
+        "mw.channels: too many channels"
+    );
     let mut out = [0u8; N];
     out[0] = VERSION;
     out[1] = decls.len() as u8;
@@ -334,7 +337,10 @@ pub const fn encode<const N: usize>(decls: &[Channel<'_>]) -> [u8; N] {
         assert!(c.validated().is_ok(), "mw.channels: invalid channel");
         let mut j = 0;
         while j < i {
-            assert!(!eq(decls[j].name.as_bytes(), c.name.as_bytes()), "mw.channels: duplicate name");
+            assert!(
+                !eq(decls[j].name.as_bytes(), c.name.as_bytes()),
+                "mw.channels: duplicate name"
+            );
             j += 1;
         }
         let name = c.name.as_bytes();
@@ -558,7 +564,10 @@ pub fn sections(wasm: &[u8]) -> impl Iterator<Item = Result<(u8, &[u8]), Channel
 /// The body of the custom section `name` (after its name), `Ok(None)`
 /// without one, [`ChannelError::Module`] for malformed section headers or
 /// the section twice.
-pub fn read_custom_section<'w>(wasm: &'w [u8], name: &str) -> Result<Option<&'w [u8]>, ChannelError> {
+pub fn read_custom_section<'w>(
+    wasm: &'w [u8],
+    name: &str,
+) -> Result<Option<&'w [u8]>, ChannelError> {
     let bad = ChannelError::Module;
     let mut found = None;
     for s in sections(wasm) {
@@ -585,15 +594,8 @@ mod tests {
     use super::*;
 
     const DECLS: &[Channel<'static>] = &[
-        Channel::samples(
-            "accel",
-            Direction::In,
-            Some(SensorKind::Imu),
-            25,
-            100,
-            true,
-        )
-        .with_channels(3),
+        Channel::samples("accel", Direction::In, Some(SensorKind::Imu), 25, 100, true)
+            .with_channels(3),
         Channel::bytes("cmd", Direction::In, false),
         Channel::bytes("level", Direction::Out, false),
     ];
@@ -621,7 +623,10 @@ mod tests {
         assert_eq!(c.iter().copied().collect::<Vec<_>>(), DECLS);
         assert_eq!(c.get("cmd").map(|(i, _)| i), Some(1));
         assert!(c.get("nope").is_none());
-        assert_eq!(SECTION_BYTES.len(), 2 + (1 + 5 + 14) + (1 + 3 + 14) + (1 + 5 + 14));
+        assert_eq!(
+            SECTION_BYTES.len(),
+            2 + (1 + 5 + 14) + (1 + 3 + 14) + (1 + 5 + 14)
+        );
         let m = module(&[("name", b"x"), (SECTION, &SECTION_BYTES)]);
         assert_eq!(Channels::from_module(&m), Ok(c));
         assert_eq!(Channels::from_module(&module(&[])), Ok(Channels::none()));
@@ -716,7 +721,9 @@ mod tests {
     #[test]
     fn sections_walk_and_stop_on_a_malformed_header() {
         let m = module(&[("a", b"1"), ("b", b"22")]);
-        let ids: Vec<_> = sections(&m).map(|s| s.map(|(id, b)| (id, b.len()))).collect();
+        let ids: Vec<_> = sections(&m)
+            .map(|s| s.map(|(id, b)| (id, b.len())))
+            .collect();
         assert_eq!(ids, [Ok((0, 3)), Ok((0, 4))]);
         assert_eq!(read_custom_section(&m, "b"), Ok(Some(&b"22"[..])));
         assert_eq!(read_custom_section(&m, "c"), Ok(None));
@@ -725,6 +732,9 @@ mod tests {
         bad.push(0x80); // unterminated LEB
         assert_eq!(sections(&bad).last(), Some(Err(ChannelError::Module)));
         assert_eq!(read_custom_section(&bad, "c"), Err(ChannelError::Module));
-        assert_eq!(sections(b"\0asm").collect::<Vec<_>>(), [Err(ChannelError::Module)]);
+        assert_eq!(
+            sections(b"\0asm").collect::<Vec<_>>(),
+            [Err(ChannelError::Module)]
+        );
     }
 }

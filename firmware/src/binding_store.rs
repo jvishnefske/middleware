@@ -89,11 +89,7 @@ impl BindingStore {
                 newest = Some((sector, seq, len));
             }
         }
-        let mut store = BindingStore {
-            base,
-            current: newest,
-            mark: None,
-        };
+        let mut store = BindingStore { base, current: newest, mark: None };
         store.mark = store.read_mark(flash, &mut buf);
         Ok(store)
     }
@@ -155,9 +151,7 @@ impl BindingStore {
         let total = padded(HEADER_LEN + len);
         let at = self.base + sector * SECTOR;
         flash.erase(at, at + SECTOR).map_err(|_| StoreError::Flash)?;
-        flash
-            .write(at + WORD, &buf[WORD as usize..total])
-            .map_err(|_| StoreError::Flash)?;
+        flash.write(at + WORD, &buf[WORD as usize..total]).map_err(|_| StoreError::Flash)?;
         flash.write(at, &buf[..WORD as usize]).map_err(|_| StoreError::Flash)?;
         self.current = Some((sector, seq, len));
         self.mark = mark;
@@ -247,10 +241,10 @@ fn read_record<F: NorFlash>(flash: &mut F, at: u32, buf: &mut [u8]) -> Option<(u
 mod tests {
     extern crate std;
     use super::*;
-    use std::vec::Vec;
     use middleware::key::Key;
     use middleware::loader::binding::Target;
     use middleware::loader::trust::Version;
+    use std::vec::Vec;
 
     const BASE: u32 = SECTOR;
     type Flash = crate::ram_flash::RamFlash<{ (SECTOR + REGION_LEN) as usize }>;

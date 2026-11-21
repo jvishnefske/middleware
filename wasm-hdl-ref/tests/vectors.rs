@@ -27,8 +27,8 @@ use common::{Rec, Step};
 use middleware::crc::{Crc32, crc16};
 use middleware::serial::frame::{self, Frame};
 use middleware::transport::HandlerError;
-use middleware::{Key, RequestMeta};
 use middleware::wasm_abi::bridge::{self, BridgeTable};
+use middleware::{Key, RequestMeta};
 use wasm_hdl_ref::{Colorlight, Ticked};
 
 fn hex(b: &[u8]) -> String {
@@ -128,39 +128,94 @@ fn cl4_frame_vectors() {
     let k = |s: &'static str| Key::from_static(s);
     let long_key = "a/".repeat(63) + "bc";
     let mut cases: Vec<(String, Vec<u8>)> = vec![
-        ("info request".into(), raw(&Frame::Request { id: 1, key: k("sys/info"), payload: b"" })),
-        ("chunk request".into(), raw(&Frame::Request {
-            id: 200,
-            key: k("sys/loader/chunk"),
-            payload: &(0..=255u8).chain(0..=255).collect::<Vec<_>>(),
-        })),
-        ("publish".into(), raw(&Frame::Publish { key: k("demo/imu"), payload: &[1, 2, 3, 0, 0xFF] })),
-        ("publish empty".into(), raw(&Frame::Publish { key: k("a"), payload: b"" })),
-        ("publish 128-byte key".into(), raw(&Frame::Publish {
-            key: Key::new(&long_key).unwrap(),
-            payload: b"x",
-        })),
-        ("response ok".into(), raw(&Frame::Response { id: 9, result: Ok(b"ecp5") })),
-        ("response not found".into(), raw(&Frame::Response { id: 10, result: Err(HandlerError::NotFound) })),
-        ("max payload".into(), raw(&Frame::Publish {
-            key: k("big"),
-            payload: &[0x5A; frame::MAX_RAW_FRAME - 3 - 3 - 2],
-        })),
+        (
+            "info request".into(),
+            raw(&Frame::Request {
+                id: 1,
+                key: k("sys/info"),
+                payload: b"",
+            }),
+        ),
+        (
+            "chunk request".into(),
+            raw(&Frame::Request {
+                id: 200,
+                key: k("sys/loader/chunk"),
+                payload: &(0..=255u8).chain(0..=255).collect::<Vec<_>>(),
+            }),
+        ),
+        (
+            "publish".into(),
+            raw(&Frame::Publish {
+                key: k("demo/imu"),
+                payload: &[1, 2, 3, 0, 0xFF],
+            }),
+        ),
+        (
+            "publish empty".into(),
+            raw(&Frame::Publish {
+                key: k("a"),
+                payload: b"",
+            }),
+        ),
+        (
+            "publish 128-byte key".into(),
+            raw(&Frame::Publish {
+                key: Key::new(&long_key).unwrap(),
+                payload: b"x",
+            }),
+        ),
+        (
+            "response ok".into(),
+            raw(&Frame::Response {
+                id: 9,
+                result: Ok(b"ecp5"),
+            }),
+        ),
+        (
+            "response not found".into(),
+            raw(&Frame::Response {
+                id: 10,
+                result: Err(HandlerError::NotFound),
+            }),
+        ),
+        (
+            "max payload".into(),
+            raw(&Frame::Publish {
+                key: k("big"),
+                payload: &[0x5A; frame::MAX_RAW_FRAME - 3 - 3 - 2],
+            }),
+        ),
     ];
-    let mut bad = raw(&Frame::Publish { key: k("demo/x"), payload: b"hi" });
+    let mut bad = raw(&Frame::Publish {
+        key: k("demo/x"),
+        payload: b"hi",
+    });
     bad[4] ^= 1;
     cases.push(("bad crc".into(), bad));
     cases.push(("bad kind".into(), with_crc(vec![9, 0, 0])));
     cases.push(("short".into(), vec![3, 0]));
     cases.push(("key past end".into(), with_crc(vec![3, 0, 9, b'a'])));
-    cases.push(("key with space".into(), with_crc(vec![3, 0, 3, b'a', b' ', b'b'])));
-    cases.push(("key with empty segment".into(), with_crc(vec![1, 4, 3, b'a', b'/', b'/'])));
-    cases.push(("key starting with slash".into(), with_crc(vec![3, 0, 2, b'/', b'a'])));
+    cases.push((
+        "key with space".into(),
+        with_crc(vec![3, 0, 3, b'a', b' ', b'b']),
+    ));
+    cases.push((
+        "key with empty segment".into(),
+        with_crc(vec![1, 4, 3, b'a', b'/', b'/']),
+    ));
+    cases.push((
+        "key starting with slash".into(),
+        with_crc(vec![3, 0, 2, b'/', b'a']),
+    ));
     cases.push(("empty key".into(), with_crc(vec![3, 0, 0, 1, 2])));
     let mut k129 = vec![3u8, 0, 129];
     k129.extend(std::iter::repeat_n(b'k', 129));
     cases.push(("129-byte key".into(), with_crc(k129)));
-    cases.push(("oversized".into(), with_crc(vec![3; frame::MAX_RAW_FRAME - 1])));
+    cases.push((
+        "oversized".into(),
+        with_crc(vec![3; frame::MAX_RAW_FRAME - 1]),
+    ));
     let entries: Vec<String> = cases.iter().map(|(n, d)| frame_entry(n, d)).collect();
     let text = format!(
         "{{\"max_raw_frame\": {}, \"crc16_check\": {}, \"frames\": [\n{}\n]}}\n",
@@ -265,7 +320,13 @@ fn wasm_vector(name: &str, wasm: &[u8], steps: &[Step]) -> String {
                 ));
                 let mut reply = [0u8; 64];
                 results.push(
-                    match c.request(Key::new(k).unwrap(), d, &RequestMeta::NONE, &mut reply, &mut rec) {
+                    match c.request(
+                        Key::new(k).unwrap(),
+                        d,
+                        &RequestMeta::NONE,
+                        &mut reply,
+                        &mut rec,
+                    ) {
                         Ok(Ok(n)) => format!("reply {}", hex(&reply[..n])),
                         Ok(Err(e)) => format!("error {}", e.code()),
                         Err(e) => format!("trap {e:?}"),
@@ -300,7 +361,10 @@ fn ticks(ts: &[u32]) -> Vec<Step> {
 #[test]
 fn cl4_wasm_vectors() {
     let msgs = |k: &str, bodies: &[&[u8]]| -> Vec<Step> {
-        bodies.iter().map(|b| Step::Msg(k.into(), b.to_vec())).collect()
+        bodies
+            .iter()
+            .map(|b| Step::Msg(k.into(), b.to_vec()))
+            .collect()
     };
     let mut all: Vec<(String, Vec<u8>, Vec<Step>)> = Vec::new();
     let (n, w) = module("bridge");
@@ -318,14 +382,13 @@ fn cl4_wasm_vectors() {
         let (n, w) = module(name);
         all.push((n, w, ticks(&[100, 499, 500, 1000, 1500, 1501, 2600])));
     }
-    all.push((
-        "ops".into(),
-        wat::parse_str(OPS).unwrap(),
-        ticks(&[10]),
-    ));
+    all.push(("ops".into(), wat::parse_str(OPS).unwrap(), ticks(&[10])));
     let traps = [
         ("trap_unreachable", "(unreachable)"),
-        ("trap_div0", "(drop (i32.div_u (i32.const 1) (i32.const 0)))"),
+        (
+            "trap_div0",
+            "(drop (i32.div_u (i32.const 1) (i32.const 0)))",
+        ),
         ("trap_oob", "(drop (i32.load (i32.const 16382)))"),
         ("trap_fuel", "(loop $l (br $l))"),
         ("trap_recursion", "(call $rec)"),
@@ -351,10 +414,7 @@ fn cl4_wasm_vectors() {
         golden(&format!("wasm/{name}.json"), &text);
         names.push(name.clone());
     }
-    golden(
-        "wasm/index.json",
-        &format!("{}\n", list(&names, |n| q(n))),
-    );
+    golden("wasm/index.json", &format!("{}\n", list(&names, |n| q(n))));
 }
 
 #[test]
@@ -379,7 +439,11 @@ fn cl4_bridge_vectors() {
             q(key)
         ));
     };
-    let route = |t: &mut BridgeTable, ops: &mut Vec<String>, src: u8, key: &str, sent: Option<u8>| {
+    let route = |t: &mut BridgeTable,
+                 ops: &mut Vec<String>,
+                 src: u8,
+                 key: &str,
+                 sent: Option<u8>| {
         let f = t.route(src, Key::new(key).unwrap());
         let sent = sent.unwrap_or(f.links);
         t.account(f, sent);
@@ -392,7 +456,10 @@ fn cl4_bridge_vectors() {
     };
     let stat = |t: &BridgeTable, ops: &mut Vec<String>, h: u8| {
         let res = match t.get(h) {
-            Some(r) => format!(r#""forwarded": {}, "dropped": {}"#, r.stats.forwarded, r.stats.dropped),
+            Some(r) => format!(
+                r#""forwarded": {}, "dropped": {}"#,
+                r.stats.forwarded, r.stats.dropped
+            ),
             None => r#""error": -7"#.to_string(),
         };
         ops.push(format!(r#"{{"op": "stat", "handle": {h}, {res}}}"#));
@@ -402,7 +469,9 @@ fn cl4_bridge_vectors() {
             Ok(()) => "0".to_string(),
             Err(e) => e.code().to_string(),
         };
-        ops.push(format!(r#"{{"op": "remove", "handle": {h}, "result": {res}}}"#));
+        ops.push(format!(
+            r#"{{"op": "remove", "handle": {h}, "result": {res}}}"#
+        ));
     };
     add(&mut t, &mut ops, 0, "demo/**", 1);
     add(&mut t, &mut ops, 0, "demo/**", 1);
@@ -411,8 +480,16 @@ fn cl4_bridge_vectors() {
     add(&mut t, &mut ops, 0, "demo", 1);
     add(&mut t, &mut ops, 1, "demo/**", 0);
     for (src, key) in [
-        (0, "demo"), (0, "demo/x"), (0, "demo/x/y"), (0, "demox"), (0, "dem"),
-        (1, "demo/x"), (1, "back/ack"), (1, "back/ack/z"), (1, "back"), (0, "back/ack"),
+        (0, "demo"),
+        (0, "demo/x"),
+        (0, "demo/x/y"),
+        (0, "demox"),
+        (0, "dem"),
+        (1, "demo/x"),
+        (1, "back/ack"),
+        (1, "back/ack/z"),
+        (1, "back"),
+        (0, "back/ack"),
     ] {
         route(&mut t, &mut ops, src, key, None);
     }
@@ -444,39 +521,117 @@ fn cl4_bridge_vectors() {
 #[test]
 fn cl4_load_error_vectors() {
     let wat_cases: &[(&str, &str)] = &[
-        ("unknown import", r#"(module (import "mw" "nope" (func)) (memory (export "memory") 1 (pagesize 1)))"#),
-        ("other module", r#"(module (import "env" "log" (func (param i32 i32))) (memory (export "memory") 1 (pagesize 1)))"#),
-        ("bad signature", r#"(module (import "mw" "log" (func (param i32))) (memory (export "memory") 1 (pagesize 1)))"#),
-        ("bad export", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "tick")))"#),
-        ("bad export result", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "mw_alloc") (param i32)))"#),
+        (
+            "unknown import",
+            r#"(module (import "mw" "nope" (func)) (memory (export "memory") 1 (pagesize 1)))"#,
+        ),
+        (
+            "other module",
+            r#"(module (import "env" "log" (func (param i32 i32))) (memory (export "memory") 1 (pagesize 1)))"#,
+        ),
+        (
+            "bad signature",
+            r#"(module (import "mw" "log" (func (param i32))) (memory (export "memory") 1 (pagesize 1)))"#,
+        ),
+        (
+            "bad export",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "tick")))"#,
+        ),
+        (
+            "bad export result",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (export "mw_alloc") (param i32)))"#,
+        ),
         ("missing memory", r#"(module (memory 1 (pagesize 1)))"#),
         ("no memory", r#"(module (func))"#),
-        ("memory too large", r#"(module (memory (export "memory") 1))"#),
-        ("memory too large bytes", r#"(module (memory (export "memory") 16385 (pagesize 1)))"#),
-        ("float", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (f32.const 1))))"#),
-        ("i64 add", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (i64.add (i64.const 1) (i64.const 2)))))"#),
-        ("i64 local", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (local i64)))"#),
-        ("i64 param", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i64)))"#),
-        ("multi value", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (result i32 i32) (i32.const 1) (i32.const 2)))"#),
-        ("block i64", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (block (result i64) (i64.const 1)))))"#),
-        ("start", r#"(module (memory (export "memory") 1 (pagesize 1)) (func $s) (start $s))"#),
-        ("i64 global", r#"(module (memory (export "memory") 1 (pagesize 1)) (global i64 (i64.const 0)))"#),
-        ("memory.init", r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x") (func (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1))))"#),
-        ("passive data", r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x"))"#),
-        ("data past memory", r#"(module (memory (export "memory") 4 (pagesize 1)) (data (i32.const 2) "xyz"))"#),
-        ("imported memory", r#"(module (import "mw" "memory" (memory 1)))"#),
-        ("two tables", r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (table 1 funcref))"#),
-        ("table too large", r#"(module (memory (export "memory") 1 (pagesize 1)) (table 65 funcref))"#),
-        ("elem past table", r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (func $f) (elem (i32.const 1) $f))"#),
-        ("too many params", r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32)))"#),
-        ("too many globals", r#"(module (memory (export "memory") 1 (pagesize 1))
+        (
+            "memory too large",
+            r#"(module (memory (export "memory") 1))"#,
+        ),
+        (
+            "memory too large bytes",
+            r#"(module (memory (export "memory") 16385 (pagesize 1)))"#,
+        ),
+        (
+            "float",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (f32.const 1))))"#,
+        ),
+        (
+            "i64 add",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (i64.add (i64.const 1) (i64.const 2)))))"#,
+        ),
+        (
+            "i64 local",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (local i64)))"#,
+        ),
+        (
+            "i64 param",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i64)))"#,
+        ),
+        (
+            "multi value",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (result i32 i32) (i32.const 1) (i32.const 2)))"#,
+        ),
+        (
+            "block i64",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (drop (block (result i64) (i64.const 1)))))"#,
+        ),
+        (
+            "start",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func $s) (start $s))"#,
+        ),
+        (
+            "i64 global",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (global i64 (i64.const 0)))"#,
+        ),
+        (
+            "memory.init",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x") (func (memory.init 0 (i32.const 0) (i32.const 0) (i32.const 1))))"#,
+        ),
+        (
+            "passive data",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (data "x"))"#,
+        ),
+        (
+            "data past memory",
+            r#"(module (memory (export "memory") 4 (pagesize 1)) (data (i32.const 2) "xyz"))"#,
+        ),
+        (
+            "imported memory",
+            r#"(module (import "mw" "memory" (memory 1)))"#,
+        ),
+        (
+            "two tables",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (table 1 funcref))"#,
+        ),
+        (
+            "table too large",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (table 65 funcref))"#,
+        ),
+        (
+            "elem past table",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (table 1 funcref) (func $f) (elem (i32.const 1) $f))"#,
+        ),
+        (
+            "too many params",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32)))"#,
+        ),
+        (
+            "too many globals",
+            r#"(module (memory (export "memory") 1 (pagesize 1))
             (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
             (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
             (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
             (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0)) (global i32 (i32.const 0))
-            (global i32 (i32.const 0)))"#),
-        ("global from global", r#"(module (memory (export "memory") 1 (pagesize 1)) (global $a i32 (i32.const 0)) (global i32 (global.get $a)))"#),
-        ("exported table", r#"(module (memory (export "memory") 1 (pagesize 1)) (table (export "t") 1 funcref))"#),
+            (global i32 (i32.const 0)))"#,
+        ),
+        (
+            "global from global",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (global $a i32 (i32.const 0)) (global i32 (global.get $a)))"#,
+        ),
+        (
+            "exported table",
+            r#"(module (memory (export "memory") 1 (pagesize 1)) (table (export "t") 1 funcref))"#,
+        ),
     ];
     let mut entries: Vec<String> = Vec::new();
     let mut push = |name: &str, wasm: &[u8]| {
@@ -551,7 +706,11 @@ impl Shell {
 
     fn resting(&self) -> middleware::loader::PayloadStatus {
         use middleware::loader::PayloadStatus::*;
-        if self.installed.is_some() { Stopped } else { Empty }
+        if self.installed.is_some() {
+            Stopped
+        } else {
+            Empty
+        }
     }
 
     fn compiles(wasm: &[u8]) -> bool {
@@ -582,7 +741,11 @@ impl Shell {
                     Running => 0,
                     Stopped | Trapped => {
                         let img = self.installed.as_ref().unwrap();
-                        self.status = if Self::init_traps(img) { Trapped } else { Running };
+                        self.status = if Self::init_traps(img) {
+                            Trapped
+                        } else {
+                            Running
+                        };
                         0
                     }
                 };
@@ -600,7 +763,9 @@ impl Shell {
             | Command::Binding
             | Command::TrustClaim { .. } => return HandlerError::NotFound.code(),
         }
-        let (next, r) = self.loader.step(&cmd, wasm_hdl_ref::COLORLIGHT_MEMORY as u32);
+        let (next, r) = self
+            .loader
+            .step(&cmd, wasm_hdl_ref::COLORLIGHT_MEMORY as u32);
         self.loader = next;
         match r {
             Err(e) => {
@@ -651,7 +816,10 @@ type Reqs = Vec<(&'static str, Vec<u8>)>;
 
 /// The upload of `img` in chunks of `size`, as mwctl's plan sends it.
 fn upload_reqs(img: &[u8], size: usize) -> Reqs {
-    let mut v = vec![("sys/loader/begin", begin_body(img.len() as u32, Crc32::checksum(img)))];
+    let mut v = vec![(
+        "sys/loader/begin",
+        begin_body(img.len() as u32, Crc32::checksum(img)),
+    )];
     for (i, c) in img.chunks(size).enumerate() {
         v.push(("sys/loader/chunk", chunk_body((i * size) as u32, c)));
     }
@@ -701,7 +869,10 @@ fn cl6_upload_vectors() {
     let mut short = upload_reqs(&good, 512);
     short.remove(short.len() - 2);
     cases.push(("commit before the last chunk", short));
-    cases.push(("oversize begin", s("sys/loader/begin", begin_body(16385, 0))));
+    cases.push((
+        "oversize begin",
+        s("sys/loader/begin", begin_body(16385, 0)),
+    ));
     cases.push(("zero-length begin", s("sys/loader/begin", begin_body(0, 0))));
     let mut over = s("sys/loader/begin", begin_body(4, Crc32::checksum(b"abcd")));
     over.extend(s("sys/loader/chunk", chunk_body(0, b"abcde")));

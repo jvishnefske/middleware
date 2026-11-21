@@ -87,9 +87,7 @@ pub async fn watch(mut boot: BootButton, bus: &'static Bus) {
         hold = next;
         if fired {
             WINDOW.lock(|w| w.set(Window::opened_at(now)));
-            bus.log(format_args!(
-                "trust: BOOT held 3 s, re-key window open for 60 s (send sys/trust/claim)"
-            ));
+            bus.log(format_args!("trust: BOOT held 3 s, re-key window open for 60 s (send sys/trust/claim)"));
         }
         let expired = WINDOW.lock(|w| {
             let was = w.get();

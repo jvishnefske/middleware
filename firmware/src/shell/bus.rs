@@ -25,13 +25,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embassy_sync::signal::Signal;
+use esp_base::ota::Origin;
 use heapless::{String, Vec};
+use middleware::Key;
 use middleware::key::MAX_KEY_LEN;
 use middleware::loader::{CHUNK_MAX, PayloadStatus, keys};
 use middleware::transport::HandlerError;
 use middleware::wasm_abi::{MAX_LOG, MAX_MESSAGE};
-use middleware::Key;
-use esp_base::ota::Origin;
 
 /// Number of serial ports the protocol can run on (each subscribes to
 /// outbound publications).

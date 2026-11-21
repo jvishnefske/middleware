@@ -72,9 +72,7 @@ pub struct SectorFlash<S> {
 impl<S: Sectors> SectorFlash<S> {
     /// Reads the stored sectors of a `count`-sector device.
     pub fn open(mut sectors: S, count: u32) -> io::Result<Self> {
-        let size = (count as usize)
-            .checked_mul(SECTOR as usize)
-            .ok_or_else(|| io::Error::other("flash too large"))?;
+        let size = (count as usize).checked_mul(SECTOR as usize).ok_or_else(|| io::Error::other("flash too large"))?;
         let mut mem = vec![0xFF; size];
         for (index, data) in sectors.load(count)? {
             let at = index as usize * SECTOR as usize;
@@ -166,9 +164,7 @@ impl<S: Sectors> NorFlash for SectorFlash<S> {
         for index in nor::sectors_of(&r) {
             self.flush_unless(Some(index))?;
             let part = nor::within(&r, index);
-            let src = bytes
-                .get(part.start - r.start..part.end - r.start)
-                .ok_or(NorFlashErrorKind::OutOfBounds)?;
+            let src = bytes.get(part.start - r.start..part.end - r.start).ok_or(NorFlashErrorKind::OutOfBounds)?;
             let dst = self.mem.get_mut(part).ok_or(NorFlashErrorKind::OutOfBounds)?;
             nor::program(dst, src);
             self.dirty = Some(index);

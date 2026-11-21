@@ -44,11 +44,11 @@ use super::presence::BootButton;
 use {
     super::adc::{ATTENUATION, AdcUnit},
     super::gpio::PinBank,
+    esp_hal::Blocking,
     esp_hal::analog::adc::{Adc, AdcConfig},
     esp_hal::gpio::Flex,
-    esp_hal::peripherals::{IO_MUX, LEDC, TIMG1},
-    esp_hal::Blocking,
     esp_hal::i2c::master::I2c,
+    esp_hal::peripherals::{IO_MUX, LEDC, TIMG1},
     esp_hal::spi::master::{Config as SpiConfig, Spi, SpiDma},
 };
 

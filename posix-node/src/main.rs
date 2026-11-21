@@ -27,16 +27,15 @@ use std::process::ExitCode;
 
 use middleware::zenoh::ZenohTransport;
 use mw_gateway::config::DEFAULT_BAUD;
-use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_gateway::config::ENV_STATE as GW_ENV_STATE;
 use mw_gateway::state::ControlStore;
+use mw_gateway::{GatewayConfig, SysForward, io, service};
 use mw_posix_node::config::{MdnsMode, NodeIdSource, gateway_state_dir};
 use mw_posix_node::espnow_gw::{self, GwConfig};
-use mw_posix_node::{mdns_node, zenoh_sys};
 use mw_posix_node::{
-    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, node_id, open_state_flash, start,
-    wall_clock_ms,
+    DeviceParts, GatewayParts, PosixNodeConfig, control_floor, node_id, open_state_flash, start, wall_clock_ms,
 };
+use mw_posix_node::{mdns_node, zenoh_sys};
 use mw_service::run::{USAGE, terminate_signal};
 use mw_service::{Command, Config};
 
@@ -59,7 +58,9 @@ fn main() -> ExitCode {
         }
     };
     for old in &node.deprecated {
-        eprintln!("warning: {old} is the name from before mw-pi-node became mw-posix-node; it still works, but rename it");
+        eprintln!(
+            "warning: {old} is the name from before mw-pi-node became mw-posix-node; it still works, but rename it"
+        );
     }
     // The gateway's state lives under the node's unless set explicitly.
     gateway.state_dir = gateway_state_dir(std::env::var(GW_ENV_STATE).ok().as_deref(), &node.state);
@@ -85,8 +86,8 @@ fn main() -> ExitCode {
     // Off the main thread: a static musl binary cannot measure the main
     // thread's stack, and the Zenoh configuration parse refuses to run
     // there (mw_service::stack, MS57).
-    let result = mw_service::block_on_thread(&runtime, run(gateway, node))
-        .unwrap_or_else(|e| Err(format!("main thread: {e}")));
+    let result =
+        mw_service::block_on_thread(&runtime, run(gateway, node)).unwrap_or_else(|e| Err(format!("main thread: {e}")));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

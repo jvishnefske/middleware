@@ -88,6 +88,7 @@
 
 use core::cell::RefCell;
 
+use super::i2c::{self, Bus0};
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -96,23 +97,18 @@ use esp_base::chip::{Direction, Profile};
 use esp_base::periph::claims::{Claims, pins};
 use esp_base::periph::pwm::PwmTable;
 use esp_base::route::sink::{SinkRoute, transfers};
-use esp_base::route::table::{Kind, Routes};
 use esp_base::route::stopped_event;
-use middleware::{Key, SenderId};
+use esp_base::route::table::{Kind, Routes};
 use middleware::loader::is_system_key;
 use middleware::wasm_abi::events::EventKind;
+use middleware::{Key, SenderId};
+use wasm_host::I2cConfig;
 use wasm_host::{
     AbiError, Device, DmaChannel, Edge, Pull, PwmSpec, RouteStat, SinkConfig, Source, SourceConfig, SpiConfig,
     TimerSpec, UartConfig,
 };
-use super::i2c::{self, Bus0};
-use wasm_host::I2cConfig;
 #[cfg(feature = "esp32")]
-use {
-    super::camera,
-    esp_base::periph::claims::Owner,
-    wasm_host::CameraPins,
-};
+use {super::camera, esp_base::periph::claims::Owner, wasm_host::CameraPins};
 
 use super::adc::AdcUnit;
 use super::bus::Bus;
@@ -260,13 +256,14 @@ impl EspDevice {
             self.camera = None;
             let old = self.claims.pins_of(Owner::Camera);
             self.claims = self.claims.release(Owner::Camera);
-            self.pins.with(|b| {
-                for p in pins(old) {
-                    b.unroute(p);
-                }
-                Ok(())
-            })
-            .ok();
+            self.pins
+                .with(|b| {
+                    for p in pins(old) {
+                        b.unroute(p);
+                    }
+                    Ok(())
+                })
+                .ok();
         }
     }
 

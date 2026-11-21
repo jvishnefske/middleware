@@ -9,7 +9,9 @@
 use middleware::Key;
 use middleware::loader::binding::{Binding, Target, is_internal_key};
 use middleware::loader::trust::Version;
-use middleware::wasm_abi::channels::{Channel, DataKind, Direction, OUTPUT_BASE, SECTION, encode, encoded_len};
+use middleware::wasm_abi::channels::{
+    Channel, DataKind, Direction, OUTPUT_BASE, SECTION, encode, encoded_len,
+};
 use middleware::wasm_abi::machine::{Digital, Segment};
 use middleware::wasm_abi::{ABI_VERSION, imports_in};
 use wasm_host::channels::BindError;
@@ -23,7 +25,8 @@ struct Node {
 impl Device for Node {
     fn log(&mut self, _: &str) {}
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
-        self.published.push((key.as_str().to_string(), data.to_vec()));
+        self.published
+            .push((key.as_str().to_string(), data.to_vec()));
         Ok(())
     }
     fn now_ms(&mut self) -> u32 {
@@ -50,7 +53,13 @@ const DECLS: &[Channel<'static>] = &[
 const LEN: usize = encoded_len(DECLS);
 static SECTION_BYTES: [u8; LEN] = encode::<LEN>(DECLS);
 
-const SEGMENT: Segment = Segment { seq: 1, x_um: -2_000, z_um: -10_000, feed: 800, flags: 0 };
+const SEGMENT: Segment = Segment {
+    seq: 1,
+    x_um: -2_000,
+    z_um: -10_000,
+    feed: 800,
+    flags: 0,
+};
 
 fn wat_bytes(b: &[u8]) -> String {
     b.iter().map(|x| format!("\\{x:02x}")).collect()
@@ -108,11 +117,17 @@ fn mc4_driver_points_are_carried_on_their_internal_keys() {
     // The driver reads the switch; the payload answers with a segment on
     // the motion point's key.
     let made = Digital { on: true, at_us: 5 }.encode();
-    assert!(p.deliver(Key::from_static("drv/x_limit_min"), &made).unwrap());
+    assert!(
+        p.deliver(Key::from_static("drv/x_limit_min"), &made)
+            .unwrap()
+    );
     assert_eq!(i32_at(&p, 108), 0);
     let (key, data) = &p.device().published[0];
     assert_eq!(key, "drv/motion");
-    assert!(is_internal_key(Key::new(key).unwrap()), "never sent on a link");
+    assert!(
+        is_internal_key(Key::new(key).unwrap()),
+        "never sent on a link"
+    );
     assert_eq!(Segment::decode(data), Some(SEGMENT));
 }
 
@@ -120,8 +135,10 @@ fn mc4_driver_points_are_carried_on_their_internal_keys() {
 fn mc4_a_key_still_binds_a_machine_channel() {
     // For a model run against a simulator elsewhere on the bus.
     let mut b = Binding::new([0; 32], Version(1));
-    b.bind("x_limit", Target::Key(Key::from_static("sim/x_limit"))).unwrap();
-    b.bind("motion", Target::Key(Key::from_static("sim/motion"))).unwrap();
+    b.bind("x_limit", Target::Key(Key::from_static("sim/x_limit")))
+        .unwrap();
+    b.bind("motion", Target::Key(Key::from_static("sim/motion")))
+        .unwrap();
     let mut p = load(Some(&b)).unwrap();
     assert!(p.deliver(Key::from_static("sim/x_limit"), &[0; 9]).unwrap());
     assert_eq!(p.device().published[0].0, "sim/motion");

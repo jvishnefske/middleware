@@ -337,7 +337,9 @@ impl<'a> Binding<'a> {
         }
         let (endpoint, _) = target.parts();
         match (target, endpoint) {
-            (Target::Driver(p), _) if !valid_name(p.as_bytes()) => return Err(BindingError::Target),
+            (Target::Driver(p), _) if !valid_name(p.as_bytes()) => {
+                return Err(BindingError::Target);
+            }
             (Target::Adapted { .. }, Endpoint::Driver(_)) => return Err(BindingError::Target),
             (_, Endpoint::Key(k) | Endpoint::Remote { key: k, .. }) if !bindable_key(k) => {
                 return Err(BindingError::Target);
@@ -507,7 +509,10 @@ struct Writer<'o> {
 
 impl Writer<'_> {
     fn put(&mut self, bytes: &[u8]) -> Option<()> {
-        let end = self.at.checked_add(bytes.len()).filter(|e| *e <= BINDING_MAX)?;
+        let end = self
+            .at
+            .checked_add(bytes.len())
+            .filter(|e| *e <= BINDING_MAX)?;
         self.out.get_mut(self.at..end)?.copy_from_slice(bytes);
         self.at = end;
         Some(())
@@ -608,7 +613,8 @@ pub(crate) mod tests {
     pub(crate) fn sample() -> Binding<'static> {
         let mut b = Binding::new([7; 32], Version(3));
         b.bind("audio", Target::Local(mic())).unwrap();
-        b.bind("cmd", Target::Key(Key::from_static("lab/cmd"))).unwrap();
+        b.bind("cmd", Target::Key(Key::from_static("lab/cmd")))
+            .unwrap();
         b.bind(
             "peer",
             Target::Remote {
@@ -640,7 +646,10 @@ pub(crate) mod tests {
         let bytes = encoded(&b);
         assert_eq!(Binding::decode(&bytes), Ok(b));
         assert_eq!(b.entries().count(), 4);
-        assert_eq!(b.target("cmd"), Some(Target::Key(Key::from_static("lab/cmd"))));
+        assert_eq!(
+            b.target("cmd"),
+            Some(Target::Key(Key::from_static("lab/cmd")))
+        );
         let (e, a) = b.target("pcm").unwrap().parts();
         assert_eq!(e, Endpoint::Key(Key::from_static("mic/pcm")));
         assert_eq!(a, Some(Adapter::PcmToLevels { block: 160 }));
@@ -708,7 +717,10 @@ pub(crate) mod tests {
             entry(target::ADAPTED, &[3, 1, 0, target::KEY, b'k']),
             Err(BindingError::Target)
         );
-        assert_eq!(entry(target::ADAPTED, &[3, 2, 0, target::KEY, b'k']), Ok(()));
+        assert_eq!(
+            entry(target::ADAPTED, &[3, 2, 0, target::KEY, b'k']),
+            Ok(())
+        );
         // Nested adaptation is refused.
         assert_eq!(
             entry(target::ADAPTED, &[3, 2, 0, target::ADAPTED, 3, 2, 0]),
@@ -730,7 +742,13 @@ pub(crate) mod tests {
         let r = BindRequest::parse(&body).unwrap();
         assert_eq!((r.record, r.auth), (&bytes[..], Some(auth)));
         let mut other = bytes.clone();
-        other.extend_from_slice(&SignedBinding { version: Version(4), ..auth }.encode());
+        other.extend_from_slice(
+            &SignedBinding {
+                version: Version(4),
+                ..auth
+            }
+            .encode(),
+        );
         assert_eq!(BindRequest::parse(&other), None);
         let mut short = bytes.clone();
         short.extend_from_slice(&[0; 10]);
@@ -762,10 +780,16 @@ pub(crate) mod tests {
         let n = b.encode(&mut out).unwrap();
         let back = Binding::decode(&out[..n]).unwrap();
         assert_eq!(back.target("x_pos"), Some(Target::Driver("x_pos")));
-        assert_eq!(back.target("segments"), Some(Target::Driver("motion_queue")));
+        assert_eq!(
+            back.target("segments"),
+            Some(Target::Driver("motion_queue"))
+        );
         // The entry on the wire: target 5, the point's name.
         let at = HEADER_LEN + 1 + 5;
-        assert_eq!(&out[at..at + 2 + 5], &[target::DRIVER, 5, b'x', b'_', b'p', b'o', b's']);
+        assert_eq!(
+            &out[at..at + 2 + 5],
+            &[target::DRIVER, 5, b'x', b'_', b'p', b'o', b's']
+        );
 
         let mut buf = [0u8; DRIVER_KEY_MAX];
         let k = driver_key("x_pos", &mut buf);
@@ -784,13 +808,21 @@ pub(crate) mod tests {
         let mut b = Binding::new([7; 32], Version(3));
         for k in ["drv/spindle_rpm", "ch/audio", "sys/log"] {
             let key = Key::new(k).unwrap();
-            assert_eq!(b.bind("a", Target::Key(key)), Err(BindingError::Target), "{k}");
-            let remote = Target::Remote { node: SenderId([1; 8]), key };
+            assert_eq!(
+                b.bind("a", Target::Key(key)),
+                Err(BindingError::Target),
+                "{k}"
+            );
+            let remote = Target::Remote {
+                node: SenderId([1; 8]),
+                key,
+            };
             assert_eq!(b.bind("a", remote), Err(BindingError::Target), "{k}");
         }
         // And on the wire.
         let mut ok = Binding::new([7; 32], Version(3));
-        ok.bind("a", Target::Key(Key::from_static("drx/pin"))).unwrap();
+        ok.bind("a", Target::Key(Key::from_static("drx/pin")))
+            .unwrap();
         let mut out = [0u8; BINDING_MAX];
         let n = ok.encode(&mut out).unwrap();
         let mut bad = out[..n].to_vec();
@@ -802,9 +834,15 @@ pub(crate) mod tests {
     #[test]
     fn bd8_bad_driver_targets_are_refused() {
         let mut b = Binding::new([7; 32], Version(3));
-        assert_eq!(b.bind("a", Target::Driver("X-Pos")), Err(BindingError::Target));
+        assert_eq!(
+            b.bind("a", Target::Driver("X-Pos")),
+            Err(BindingError::Target)
+        );
         assert_eq!(b.bind("a", Target::Driver("")), Err(BindingError::Target));
-        let adapted = Target::Adapted { inner: Endpoint::Driver("x"), adapter: Adapter::PcmToMuLaw };
+        let adapted = Target::Adapted {
+            inner: Endpoint::Driver("x"),
+            adapter: Adapter::PcmToMuLaw,
+        };
         assert_eq!(b.bind("a", adapted), Err(BindingError::Target));
         // The same refused on the wire.
         let mut ok = Binding::new([7; 32], Version(3));

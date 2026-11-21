@@ -212,10 +212,10 @@ mod imports {
 }
 
 pub(crate) use imports::{
-    adc_read, channel_open, channel_publish, gpio_input, gpio_irq, gpio_output, gpio_read, gpio_write, i2c_open, irq_overflow,
-    log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop, route_sink, route_source,
-    route_stat, route_stop, serve, set_tick, spi_open, spi_transfer, subscribe, timer_start,
-    timer_stop, uart_open, uart_write,
+    adc_read, channel_open, channel_publish, gpio_input, gpio_irq, gpio_output, gpio_read,
+    gpio_write, i2c_open, irq_overflow, log, now_ms, now_us, publish, pwm_open, pwm_set, pwm_stop,
+    route_sink, route_source, route_stat, route_stop, serve, set_tick, spi_open, spi_transfer,
+    subscribe, timer_start, timer_stop, uart_open, uart_write,
 };
 
 /// Writes the device's node id into `out` (`node_id`, ABI 5); returns the

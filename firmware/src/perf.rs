@@ -358,10 +358,7 @@ mod tests {
     fn summary_splits_the_wall_time_and_rates_the_fuel() {
         // 5 s window: 4 s in wasm running 6 M fuel, 0.5 s waiting, 0.2 s
         // yielding, so 0.3 s of host work.
-        let w = Window::new(0)
-            .op(CallKind::Irq, cost(60, 6_000_000, 4_000_000))
-            .waited(500_000)
-            .yielded(200_000);
+        let w = Window::new(0).op(CallKind::Irq, cost(60, 6_000_000, 4_000_000)).waited(500_000).yielded(200_000);
         let s = w.summary(5_000_000, RadioTime::ZERO.add(120_000, 1_450));
         assert_eq!(s.wall_us, 5_000_000);
         assert_eq!(s.busy_permille, 800);

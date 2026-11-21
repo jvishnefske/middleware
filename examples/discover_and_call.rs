@@ -342,9 +342,7 @@ async fn stub_dns(pods: Vec<(String, u16)>) -> Result<SocketAddr, String> {
         let mut query = [0u8; 1500];
         let mut out = [0u8; 1500];
         while let Ok((len, from)) = socket.recv_from(&mut query).await {
-            let reply = query
-                .get(..len)
-                .and_then(|q| dns_reply(q, &pods, &mut out));
+            let reply = query.get(..len).and_then(|q| dns_reply(q, &pods, &mut out));
             if let Some(n) = reply {
                 let _ = socket.send_to(out.get(..n).unwrap_or_default(), from).await;
             }
@@ -382,8 +380,8 @@ pub async fn run() -> Result<Summary, String> {
     let mut zenoh_browser: ZenohDiscovery = hub.discovery();
 
     // mDNS on loopback unicast only.
-    let announcer_socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .map_err(fail("bind mDNS announcer"))?;
+    let announcer_socket =
+        std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(fail("bind mDNS announcer"))?;
     let mut mdns_browser = MdnsSocket::builder()
         .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .destination(announcer_socket.local_addr().map_err(fail("addr"))?)
@@ -423,8 +421,14 @@ pub async fn run() -> Result<Summary, String> {
 
     // Announce everywhere at once (mDNS probing alone takes ~750 ms).
     let exact = KeyFilter::Exact(KIND.key());
-    zenoh_browser.browse(exact).await.map_err(fail("zenoh browse"))?;
-    mdns_browser.browse(exact).await.map_err(fail("mDNS browse"))?;
+    zenoh_browser
+        .browse(exact)
+        .await
+        .map_err(fail("zenoh browse"))?;
+    mdns_browser
+        .browse(exact)
+        .await
+        .map_err(fail("mDNS browse"))?;
     cluster.browse(exact).await.map_err(fail("DNS-SD browse"))?;
     let records = [
         service("zenoh-a", Endpoint::Local),
@@ -462,7 +466,12 @@ pub async fn run() -> Result<Summary, String> {
         .and_then(|s| s.node)
         .ok_or("zenoh-b has no node id")?;
     let reply = hub
-        .request_with(KEY, b"hi b", &mut buf, &CALL.with_target(Target::Node(b_node)))
+        .request_with(
+            KEY,
+            b"hi b",
+            &mut buf,
+            &CALL.with_target(Target::Node(b_node)),
+        )
         .await
         .map_err(fail("zenoh request to node"))?;
     let reply = String::from_utf8_lossy(reply).into_owned();
@@ -501,7 +510,12 @@ pub async fn run() -> Result<Summary, String> {
         .await
         .map_err(fail("grpc gather"))?;
     let by_node = mesh
-        .request_with(KEY, b"hi", &mut buf, &CALL.with_target(Target::Node(b_node)))
+        .request_with(
+            KEY,
+            b"hi",
+            &mut buf,
+            &CALL.with_target(Target::Node(b_node)),
+        )
         .await;
     let grpc_node_unavailable = matches!(
         &by_node,

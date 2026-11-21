@@ -115,7 +115,10 @@ fn pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart()
         assert!(matches!(ti.state, TrustState::Claimed { min_version: Version(0), .. }), "{ti:?}");
         // Claimed: unsigned and a second claim are denied.
         assert_eq!(upload(&mut s, &new, None), Err(HandlerError::Denied));
-        assert_eq!(call(&mut s, keys::TRUST_CLAIM, Seed::new([9; 32]).public_key().as_bytes()), Err(HandlerError::Denied));
+        assert_eq!(
+            call(&mut s, keys::TRUST_CLAIM, Seed::new([9; 32]).public_key().as_bytes()),
+            Err(HandlerError::Denied)
+        );
         assert_eq!(installed(&mut s), Some(old.clone()));
         // Signed: accepted, min_version raised; a replay is denied.
         upload(&mut s, &new, Some(100)).expect("signed upload");
@@ -127,10 +130,7 @@ fn pn5_signed_uploads_follow_the_base_firmware_trust_rules_and_survive_restart()
     // Restart: the image, the key and min_version are what the disk holds.
     let (mut s, boot) = open(&mut disk, None);
     assert!(matches!(boot.installed, Some(Ok(h)) if h.len == 5000));
-    assert!(matches!(
-        boot.trust.map(|p| p.trust),
-        Some(TrustState::Claimed { min_version: Version(100), .. })
-    ));
+    assert!(matches!(boot.trust.map(|p| p.trust), Some(TrustState::Claimed { min_version: Version(100), .. })));
     assert_eq!(s.status(), PayloadStatus::Stopped);
     assert_eq!(upload(&mut s, &old, Some(100)), Err(HandlerError::Denied));
     upload(&mut s, &old, Some(101)).expect("newer version");
@@ -226,15 +226,15 @@ fn pn14_the_manifest_names_the_board() {
     let kd240 = crate::board_from_model(b"ZynqMP KD240 revA/B/1\0").expect("a name");
     assert_eq!(kd240.as_str(), Some("ZynqMP KD240 revA/B/1"));
     assert_eq!(crate::board_from_model(b"\0"), None);
-    assert_eq!(crate::board_from_model(b"  Raspberry Pi 4 Model B Rev 1.4\n\0").unwrap().as_str(),
-        Some("Raspberry Pi 4 Model B Rev 1.4"));
+    assert_eq!(
+        crate::board_from_model(b"  Raspberry Pi 4 Model B Rev 1.4\n\0").unwrap().as_str(),
+        Some("Raspberry Pi 4 Model B Rev 1.4")
+    );
 
     let mut disk = Disk::default();
     let sectors = MemSectors::new(&mut disk);
-    let (mut s, _) = Service::open(
-        SectorFlash::open(sectors, SECTORS).expect("flash"),
-        Facts { board: Some(kd240), ..facts() },
-    );
+    let (mut s, _) =
+        Service::open(SectorFlash::open(sectors, SECTORS).expect("flash"), Facts { board: Some(kd240), ..facts() });
     let m = Manifest::decode(&call(&mut s, keys::MANIFEST, &[]).expect("manifest")).expect("decodes");
     assert_eq!(m.board, Some(kd240));
     assert_eq!(m.groups, MANIFEST.groups);

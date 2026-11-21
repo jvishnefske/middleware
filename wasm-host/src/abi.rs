@@ -50,13 +50,15 @@ use alloc::string::{String, ToString};
 use core::ops::Range;
 use middleware::Key;
 
-use middleware::wasm_abi::events::DmaChannel;
-use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
-use middleware::wasm_abi::route::{self, SampleSource, SinkConfig, Source, SourceConfig, SourceKind};
-use middleware::wasm_abi::serve;
-use middleware::wasm_abi::{self, AbiError, MAX_LOG, MIN_TICK_MS, Pull};
 #[cfg(test)]
 use middleware::wasm_abi::MAX_SUBSCRIPTIONS;
+use middleware::wasm_abi::events::DmaChannel;
+use middleware::wasm_abi::periph::{self, Edge, I2cTransfer};
+use middleware::wasm_abi::route::{
+    self, SampleSource, SinkConfig, Source, SourceConfig, SourceKind,
+};
+use middleware::wasm_abi::serve;
+use middleware::wasm_abi::{self, AbiError, MAX_LOG, MIN_TICK_MS, Pull};
 
 use crate::{LoadError, Ticked};
 
@@ -651,7 +653,10 @@ pub enum RoutePlan<'m> {
 /// Plans `route_source(source, key_ptr, key_len, cfg_ptr, cfg_len)` for a
 /// frame source ([`route_source_any`]; a sampled source is
 /// `InvalidArgument` here).
-pub fn route_source(args: (i32, i32, i32, i32, i32), mem: &[u8]) -> Result<SourcePlan<'_>, AbiError> {
+pub fn route_source(
+    args: (i32, i32, i32, i32, i32),
+    mem: &[u8],
+) -> Result<SourcePlan<'_>, AbiError> {
     match route_source_any(args, mem)? {
         RoutePlan::Frames(plan) => Ok(plan),
         RoutePlan::Samples(_) => Err(AbiError::InvalidArgument),
@@ -679,7 +684,9 @@ pub fn route_source_any(
         .ok_or(AbiError::OutOfBounds)?;
     let key = payload_key(key)?;
     Ok(match route::parse_route_source(kind, cfg)? {
-        route::RouteSource::Frames(source, cfg) => RoutePlan::Frames(SourcePlan { source, key, cfg }),
+        route::RouteSource::Frames(source, cfg) => {
+            RoutePlan::Frames(SourcePlan { source, key, cfg })
+        }
         route::RouteSource::Samples(source) => RoutePlan::Samples(SamplePlan { source, key }),
     })
 }
@@ -1178,7 +1185,9 @@ mod tests {
         assert_eq!(slot_for(&subs, "k"), None);
         // A host that gives more takes more (ABI 8), never past SLOT_MAX.
         assert_eq!(subscribe_slot(&subs, "z", 16), Ok(Slot::New(M)));
-        let full: Vec<String> = (0..wasm_abi::SLOT_MAX).map(|i| alloc::format!("k{i}")).collect();
+        let full: Vec<String> = (0..wasm_abi::SLOT_MAX)
+            .map(|i| alloc::format!("k{i}"))
+            .collect();
         assert_eq!(subscribe_slot(&full, "z", 200), Err(AbiError::NoResources));
     }
 
@@ -1324,22 +1333,36 @@ mod tests {
         let RoutePlan::Samples(p) = plan else {
             panic!("{plan:?}")
         };
-        assert_eq!((p.source, p.key.as_str()), (SampleSource::Imu(imu), "app/imu"));
+        assert_eq!(
+            (p.source, p.key.as_str()),
+            (SampleSource::Imu(imu), "app/imu")
+        );
         let bad: Result<RoutePlan<'_>, AbiError> = Err(AbiError::InvalidArgument);
         assert_eq!(
             route_source((2, 0, 7, 16, 8), &mem),
             Err(AbiError::InvalidArgument),
             "frames only"
         );
-        assert_eq!(route_source_any((2, 0, 7, 16, 10), &mem), bad, "imu takes 8");
+        assert_eq!(
+            route_source_any((2, 0, 7, 16, 10), &mem),
+            bad,
+            "imu takes 8"
+        );
         assert_eq!(route_source_any((4, 0, 7, 16, 8), &mem), bad, "no kind 4");
-        assert_eq!(route_source_any((2, 0, 7, 500, 9), &mem), bad, "cfg len first");
+        assert_eq!(
+            route_source_any((2, 0, 7, 500, 9), &mem),
+            bad,
+            "cfg len first"
+        );
         mem[18] = 3; // a range the IMU lacks
         assert_eq!(route_source_any((2, 0, 7, 16, 8), &mem), bad, "range");
-        let mic = route::MicConfig::new(16_000, 0, route::AudioMode::Levels, 2, 256).expect("valid");
+        let mic =
+            route::MicConfig::new(16_000, 0, route::AudioMode::Levels, 2, 256).expect("valid");
         mem[16..24].copy_from_slice(&mic.encode());
         let plan = route_source_any((3, 0, 7, 16, 8), &mem).expect("valid");
-        assert!(matches!(plan, RoutePlan::Samples(SamplePlan { source: SampleSource::Microphone(m), .. }) if m == mic));
+        assert!(
+            matches!(plan, RoutePlan::Samples(SamplePlan { source: SampleSource::Microphone(m), .. }) if m == mic)
+        );
         mem[19] = 7; // audio mode
         assert_eq!(route_source_any((3, 0, 7, 16, 8), &mem), bad, "mode");
     }

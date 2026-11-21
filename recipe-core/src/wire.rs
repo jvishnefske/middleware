@@ -243,8 +243,9 @@ fn read_values(body: &[u8]) -> Result<([i32; MAX_PARAMS], usize), WireError> {
         return Err(WireError::BadBody);
     }
     let mut out = [0i32; MAX_PARAMS];
-    for (slot, chunk) in out.iter_mut().zip(rest.chunks_exact(4)) {
-        *slot = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    // `rest` is exactly `4 * n` bytes (checked above): no remainder.
+    for (slot, chunk) in out.iter_mut().zip(rest.as_chunks::<4>().0) {
+        *slot = i32::from_le_bytes(*chunk);
     }
     Ok((out, n))
 }

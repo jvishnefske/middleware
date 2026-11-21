@@ -99,7 +99,12 @@ pub fn format_net(link: u8, a: &middleware::loader::NetAddr) -> String {
     format!(
         "link:             {link}\nip:               {}\nmac:              {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\npeer:             {peer}\n",
         ip(a.ip),
-        m[0], m[1], m[2], m[3], m[4], m[5]
+        m[0],
+        m[1],
+        m[2],
+        m[3],
+        m[4],
+        m[5]
     )
 }
 
@@ -173,7 +178,11 @@ pub fn format_binding(record: &[u8]) -> Option<String> {
             m.mode,
             m.gain_db,
             m.samples,
-            if m.block > 0 { format!(", {}-sample blocks", m.block) } else { String::new() }
+            if m.block > 0 {
+                format!(", {}-sample blocks", m.block)
+            } else {
+                String::new()
+            }
         ),
         Endpoint::Local(RouteSource::Samples(SampleSource::Imu(c))) => format!(
             "IMU {} Hz ±{} g{}, {} samples per message",
@@ -182,12 +191,20 @@ pub fn format_binding(record: &[u8]) -> Option<String> {
             if c.mag { " with magnetometer" } else { "" },
             c.samples
         ),
-        Endpoint::Local(RouteSource::Frames(s, c)) => format!("{:?} {}x{}", s.kind(), c.width, c.height),
+        Endpoint::Local(RouteSource::Frames(s, c)) => {
+            format!("{:?} {}x{}", s.kind(), c.width, c.height)
+        }
     };
-    let mut s = format!("image:   {}\nversion: {}\n", hex(&b.image_sha256), b.version.0);
+    let mut s = format!(
+        "image:   {}\nversion: {}\n",
+        hex(&b.image_sha256),
+        b.version.0
+    );
     for (name, t) in b.entries() {
         let line = match t {
-            Target::Adapted { inner, adapter } => format!("{} through {adapter:?}", endpoint(&inner)),
+            Target::Adapted { inner, adapter } => {
+                format!("{} through {adapter:?}", endpoint(&inner))
+            }
             other => endpoint(&other.parts().0),
         };
         let _ = writeln!(s, "{name}: {line}");
@@ -199,21 +216,61 @@ pub fn format_binding(record: &[u8]) -> Option<String> {
 /// the node sent.
 pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
     use middleware::loader::manifest::Groups;
-    let join = |v: Vec<String>| if v.is_empty() { "-".to_owned() } else { v.join(" ") };
-    let named = |mask: u8, names: &[&str]| {
-        join(names.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, n)| (*n).to_owned()).collect())
+    let join = |v: Vec<String>| {
+        if v.is_empty() {
+            "-".to_owned()
+        } else {
+            v.join(" ")
+        }
     };
-    let plural = |n: u32, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}es") };
+    let named = |mask: u8, names: &[&str]| {
+        join(
+            names
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, n)| (*n).to_owned())
+                .collect(),
+        )
+    };
+    let plural = |n: u32, one: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {one}es")
+        }
+    };
     let mut s = format!("ABI:              v{}\n", m.abi);
     if let Some(node) = m.node {
-        let _ = writeln!(s, "node:             {}", node.0.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let _ = writeln!(
+            s,
+            "node:             {}",
+            node.0
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
     }
-    let groups = Groups::NAMED.iter().filter(|(g, _)| m.groups.contains(*g)).map(|(_, n)| (*n).to_owned()).collect();
+    let groups = Groups::NAMED
+        .iter()
+        .filter(|(g, _)| m.groups.contains(*g))
+        .map(|(_, n)| (*n).to_owned())
+        .collect();
     let _ = writeln!(s, "groups:           {}", join(groups));
-    let caps = Caps::NAMED.iter().filter(|(c, _)| m.caps().contains(*c)).map(|(_, n)| (*n).to_owned()).collect();
+    let caps = Caps::NAMED
+        .iter()
+        .filter(|(c, _)| m.caps().contains(*c))
+        .map(|(_, n)| (*n).to_owned())
+        .collect();
     let _ = writeln!(s, "caps:             {}", join(caps));
     if let Some(i) = m.i2c {
-        let _ = writeln!(s, "I2C:              {}, {}-{} Hz", plural(i.buses.into(), "bus"), i.min_hz, i.max_hz);
+        let _ = writeln!(
+            s,
+            "I2C:              {}, {}-{} Hz",
+            plural(i.buses.into(), "bus"),
+            i.min_hz,
+            i.max_hz
+        );
     }
     if let Some(sp) = m.spi {
         let _ = writeln!(s, "SPI:              {}", plural(sp.buses.into(), "bus"));
@@ -221,7 +278,12 @@ pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
     let hz = |v: Vec<u16>| join(v.iter().map(|r| r.to_string()).collect());
     if let Some(i) = m.imu {
         let ranges: Vec<String> = i.ranges_g().map(|g| g.to_string()).collect();
-        let _ = write!(s, "IMU:              {} Hz; ±{} g", hz(i.rates_hz().collect()), ranges.join("/"));
+        let _ = write!(
+            s,
+            "IMU:              {} Hz; ±{} g",
+            hz(i.rates_hz().collect()),
+            ranges.join("/")
+        );
         let mag: Vec<u16> = i.mag_rates_hz().collect();
         if mag.is_empty() {
             s.push_str("; no magnetometer\n");
@@ -251,7 +313,19 @@ pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
     if let Some(sk) = m.sink_spi {
         let _ = writeln!(s, "SPI sink:         frames up to {} bytes", sk.max_frame);
     }
-    let links = m.links().iter().map(|l| format!("{} {}", l.id, l.kind.name().map_or_else(|| format!("kind{}", l.kind.0), str::to_owned))).collect();
+    let links = m
+        .links()
+        .iter()
+        .map(|l| {
+            format!(
+                "{} {}",
+                l.id,
+                l.kind
+                    .name()
+                    .map_or_else(|| format!("kind{}", l.kind.0), str::to_owned)
+            )
+        })
+        .collect();
     let _ = writeln!(s, "links:            {}", join(links));
     if let Some(l) = m.limits {
         let _ = writeln!(
@@ -261,7 +335,11 @@ pub fn format_manifest(m: &middleware::loader::manifest::Manifest) -> String {
         );
     }
     if let Some(b) = &m.board {
-        let _ = writeln!(s, "board:            {}", String::from_utf8_lossy(b.as_bytes()));
+        let _ = writeln!(
+            s,
+            "board:            {}",
+            String::from_utf8_lossy(b.as_bytes())
+        );
     }
     if let Some(c) = m.control {
         let _ = writeln!(
@@ -468,18 +546,38 @@ mod tests {
         let m = Manifest::new(6)
             .with_node(SenderId([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]))
             .with_groups(Groups::GPIO.with(Groups::I2C).with(Groups::SERVE))
-            .with_i2c(I2cBuses { buses: 1, min_hz: 10_000, max_hz: 1_000_000 })
+            .with_i2c(I2cBuses {
+                buses: 1,
+                min_hz: 10_000,
+                max_hz: 1_000_000,
+            })
             .with_imu(ImuSource {
                 rates: ImuSource::rates_mask(&[50, 100, 200, 400, 800]),
                 ranges: 0b111,
                 mag_rates: ImuSource::rates_mask(&[50, 100, 200, 400]),
             })
-            .with_mic(MicSource { rates: 0b1111, modes: 0b101, max_gain_db: 30 })
-            .with_link(Link { id: 0, kind: LinkKind::SERIAL })
-            .with_link(Link { id: 2, kind: LinkKind(9) })
-            .with_limits(Limits { routes: 2, ..Limits::ABI })
+            .with_mic(MicSource {
+                rates: 0b1111,
+                modes: 0b101,
+                max_gain_db: 30,
+            })
+            .with_link(Link {
+                id: 0,
+                kind: LinkKind::SERIAL,
+            })
+            .with_link(Link {
+                id: 2,
+                kind: LinkKind(9),
+            })
+            .with_limits(Limits {
+                routes: 2,
+                ..Limits::ABI
+            })
             .with_board(BoardName::new("ZynqMP KD240 revA/B/1").unwrap())
-            .with_control(ControlModules { points: 10, pages: 1 });
+            .with_control(ControlModules {
+                points: 10,
+                pages: 1,
+            });
         let s = format_manifest(&m);
         for line in [
             "ABI:              v6\n",
@@ -498,7 +596,10 @@ mod tests {
         }
         assert!(!s.contains("SPI"));
         let bare = format_manifest(&Manifest::new(6));
-        assert_eq!(bare, "ABI:              v6\ngroups:           -\ncaps:             -\nlinks:            -\n");
+        assert_eq!(
+            bare,
+            "ABI:              v6\ngroups:           -\ncaps:             -\nlinks:            -\n"
+        );
     }
 
     #[test]
@@ -591,20 +692,47 @@ mod tests {
             s.contains("firmware:         0.1.0+no-wasm\nnode:             246f28aabbcc0000\n"),
             "{s}"
         );
-        let s = format_info(&Info { caps: Caps::SERVE, ..i.clone() });
+        let s = format_info(&Info {
+            caps: Caps::SERVE,
+            ..i.clone()
+        });
         assert!(!s.contains("bridged"));
         assert!(!s.contains("sources:"), "{s}");
-        let b = format_info(&Info { caps: Caps::BRIDGE, ..i.clone() });
-        assert!(b.contains("links:            bridged by rules (route_bridge)\n"), "{b}");
+        let b = format_info(&Info {
+            caps: Caps::BRIDGE,
+            ..i.clone()
+        });
+        assert!(
+            b.contains("links:            bridged by rules (route_bridge)\n"),
+            "{b}"
+        );
         assert!(!b.contains("sources:"), "{b}");
         // An EVKB with both sample sources: caps 13 = SERVE | IMU | MIC.
-        let rt = format_info(&Info { caps: Caps(13), ..i.clone() });
-        assert!(rt.contains("sources:          imu, microphone (route_source)\n"), "{rt}");
+        let rt = format_info(&Info {
+            caps: Caps(13),
+            ..i.clone()
+        });
+        assert!(
+            rt.contains("sources:          imu, microphone (route_source)\n"),
+            "{rt}"
+        );
         assert!(!rt.contains("bridged"), "{rt}");
-        let imu = format_info(&Info { caps: Caps::SERVE.with(Caps::SOURCE_IMU), ..i.clone() });
-        assert!(imu.contains("sources:          imu (route_source)\n"), "{imu}");
-        let mic = format_info(&Info { caps: Caps::SOURCE_MICROPHONE, ..i });
-        assert!(mic.contains("sources:          microphone (route_source)\n"), "{mic}");
+        let imu = format_info(&Info {
+            caps: Caps::SERVE.with(Caps::SOURCE_IMU),
+            ..i.clone()
+        });
+        assert!(
+            imu.contains("sources:          imu (route_source)\n"),
+            "{imu}"
+        );
+        let mic = format_info(&Info {
+            caps: Caps::SOURCE_MICROPHONE,
+            ..i
+        });
+        assert!(
+            mic.contains("sources:          microphone (route_source)\n"),
+            "{mic}"
+        );
         assert!(s.contains("runtime:          none: protocol only, payloads are stored but not run\nrequests:         routed to the payload (serve)\n"), "{s}");
     }
 

@@ -45,11 +45,7 @@ pub const fn byte_timeout_us(freq_hz: u32) -> u32 {
     let hz = if freq_hz == 0 { 1 } else { freq_hz };
     let two_bytes = 2 * CLOCKS_PER_BYTE as u64 * 1_000_000 / hz as u64;
     let us = two_bytes + BYTE_SLACK_US as u64;
-    if us > u32::MAX as u64 {
-        u32::MAX
-    } else {
-        us as u32
-    }
+    if us > u32::MAX as u64 { u32::MAX } else { us as u32 }
 }
 
 /// Checks an `i2c_open` against what bus 0 supports and returns the
@@ -57,11 +53,7 @@ pub const fn byte_timeout_us(freq_hz: u32) -> u32 {
 /// a clock above [`MAX_HZ`]. (The ABI layer has already refused buses and
 /// clocks outside the ABI's ranges as `InvalidArgument`.)
 pub const fn open_plan(bus: u8, freq_hz: u32) -> Result<u32, AbiError> {
-    if bus != 0 || freq_hz > MAX_HZ {
-        Err(AbiError::Unsupported)
-    } else {
-        Ok(byte_timeout_us(freq_hz))
-    }
+    if bus != 0 || freq_hz > MAX_HZ { Err(AbiError::Unsupported) } else { Ok(byte_timeout_us(freq_hz)) }
 }
 
 #[cfg(test)]
@@ -95,11 +87,7 @@ mod tests {
     fn e24_open_plan_accepts_bus_0_up_to_fast_mode() {
         assert_eq!(open_plan(0, 100_000), Ok(byte_timeout_us(100_000)));
         assert_eq!(open_plan(0, MAX_HZ), Ok(byte_timeout_us(MAX_HZ)));
-        assert_eq!(
-            open_plan(0, MAX_HZ + 1),
-            Err(AbiError::Unsupported),
-            "Fast-mode Plus"
-        );
+        assert_eq!(open_plan(0, MAX_HZ + 1), Err(AbiError::Unsupported), "Fast-mode Plus");
         assert_eq!(open_plan(0, 1_000_000), Err(AbiError::Unsupported));
         assert_eq!(open_plan(1, 100_000), Err(AbiError::Unsupported), "bus 1");
     }

@@ -88,10 +88,7 @@ impl<T: Transfer> DmaHw<T> {
     /// Starts a transfer with `f` on the idle parts. `f` returns the
     /// transfer, or the parts with its error (the state stays idle).
     /// `Busy`, unchanged, while a transfer runs.
-    pub fn start(
-        self,
-        f: impl FnOnce(T::Parts) -> Result<T, (AbiError, T::Parts)>,
-    ) -> (Self, Result<(), AbiError>) {
+    pub fn start(self, f: impl FnOnce(T::Parts) -> Result<T, (AbiError, T::Parts)>) -> (Self, Result<(), AbiError>) {
         match self {
             DmaHw::InFlight(t) => (DmaHw::InFlight(t), Err(AbiError::Busy)),
             DmaHw::Idle(parts) => match f(parts) {

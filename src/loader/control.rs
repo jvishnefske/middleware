@@ -235,7 +235,8 @@ pub fn encode_page(points: &[Point<'_>], page: u8, out: &mut [u8]) -> Option<usi
             n += 1;
         }
     }
-    out.get_mut(..PAGE_HEADER)?.copy_from_slice(&[VERSION, total, page, n]);
+    out.get_mut(..PAGE_HEADER)?
+        .copy_from_slice(&[VERSION, total, page, n]);
     Some(at)
 }
 
@@ -262,14 +263,21 @@ pub struct Page<'a> {
 impl<'a> Page<'a> {
     /// Decodes and checks a page.
     pub fn decode(bytes: &'a [u8]) -> Result<Self, ControlError> {
-        let (head, entries) = bytes.split_at_checked(PAGE_HEADER).ok_or(ControlError::Length)?;
+        let (head, entries) = bytes
+            .split_at_checked(PAGE_HEADER)
+            .ok_or(ControlError::Length)?;
         if head[0] != VERSION {
             return Err(ControlError::Version);
         }
         if head[2] >= head[1] {
             return Err(ControlError::Field);
         }
-        let page = Page { pages: head[1], page: head[2], n: head[3], entries };
+        let page = Page {
+            pages: head[1],
+            page: head[2],
+            n: head[3],
+            entries,
+        };
         let mut count = 0usize;
         let mut rest = entries;
         while !rest.is_empty() {
@@ -305,7 +313,9 @@ fn read_point(b: &[u8]) -> Result<(Point<'_>, &[u8]), ControlError> {
         return Err(ControlError::Field);
     }
     let (name, tail) = tail.split_at_checked(nl).ok_or(ControlError::Length)?;
-    let (f, tail) = tail.split_at_checked(ENTRY_FIXED).ok_or(ControlError::Length)?;
+    let (f, tail) = tail
+        .split_at_checked(ENTRY_FIXED)
+        .ok_or(ControlError::Length)?;
     let name = core::str::from_utf8(name).map_err(|_| ControlError::Field)?;
     let i32_at = |at: usize| i32::from_le_bytes([f[at], f[at + 1], f[at + 2], f[at + 3]]);
     let p = Point {
@@ -336,10 +346,34 @@ mod tests {
 
     fn lathe() -> [Point<'static>; 4] {
         [
-            Point { name: "x_pos", kind: DataKind::Position, flow: Flow::In, unit: Unit::Count, min: -60_000, max: 1_000, scale: 200 },
+            Point {
+                name: "x_pos",
+                kind: DataKind::Position,
+                flow: Flow::In,
+                unit: Unit::Count,
+                min: -60_000,
+                max: 1_000,
+                scale: 200,
+            },
             LIMIT,
-            Point { name: "spindle_rpm", kind: DataKind::Setpoint, flow: Flow::Out, unit: Unit::Rpm, min: 0, max: 4000, scale: 0 },
-            Point { name: "motion", kind: DataKind::Segments, flow: Flow::Both, unit: Unit::None, min: 0, max: 32, scale: 0 },
+            Point {
+                name: "spindle_rpm",
+                kind: DataKind::Setpoint,
+                flow: Flow::Out,
+                unit: Unit::Rpm,
+                min: 0,
+                max: 4000,
+                scale: 0,
+            },
+            Point {
+                name: "motion",
+                kind: DataKind::Segments,
+                flow: Flow::Both,
+                unit: Unit::None,
+                min: 0,
+                max: 32,
+                scale: 0,
+            },
         ]
     }
 
@@ -362,7 +396,9 @@ mod tests {
 
     #[test]
     fn cm1_long_lists_page_and_every_page_fits_a_reply() {
-        let names: Vec<String> = (0..MAX_POINTS).map(|i| format!("point_with_long_name_{i:02}")).collect();
+        let names: Vec<String> = (0..MAX_POINTS)
+            .map(|i| format!("point_with_long_name_{i:02}"))
+            .collect();
         let pts: Vec<Point<'_>> = names.iter().map(|n| Point { name: n, ..LIMIT }).collect();
         let total = pages(&pts);
         assert!(total > 1);
@@ -385,8 +421,15 @@ mod tests {
         let mut out = [0u8; PAGE_MAX];
         for bad in [
             Point { name: "X", ..LIMIT },
-            Point { kind: DataKind::Bytes, ..LIMIT },
-            Point { min: 2, max: 1, ..LIMIT },
+            Point {
+                kind: DataKind::Bytes,
+                ..LIMIT
+            },
+            Point {
+                min: 2,
+                max: 1,
+                ..LIMIT
+            },
         ] {
             assert_eq!(bad.check(), Err(ControlError::Field));
             assert_eq!(encode_page(&[bad], 0, &mut out), None);
@@ -399,14 +442,26 @@ mod tests {
         assert_eq!(Page::decode(&v), Err(ControlError::Version));
         let mut v = good.clone();
         v[3] = 5;
-        assert_eq!(Page::decode(&v), Err(ControlError::Length), "count disagrees");
+        assert_eq!(
+            Page::decode(&v),
+            Err(ControlError::Length),
+            "count disagrees"
+        );
         let mut v = good.clone();
         v[2] = 1;
-        assert_eq!(Page::decode(&v), Err(ControlError::Field), "page past the total");
+        assert_eq!(
+            Page::decode(&v),
+            Err(ControlError::Field),
+            "page past the total"
+        );
         let mut v = good;
         let kind_at = PAGE_HEADER + 1 + "x_pos".len();
         v[kind_at] = 1;
-        assert_eq!(Page::decode(&v), Err(ControlError::Field), "a sample kind is not a point");
+        assert_eq!(
+            Page::decode(&v),
+            Err(ControlError::Field),
+            "a sample kind is not a point"
+        );
     }
 
     #[test]

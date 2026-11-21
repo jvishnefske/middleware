@@ -154,9 +154,11 @@ impl Inputs for GpioInputs {
 
 /// Whether `uio` (`/sys/class/uio`) lists a device named `emco…`.
 pub fn pl_in(uio: &Path) -> bool {
-    std::fs::read_dir(uio).into_iter().flatten().flatten().any(|d| {
-        std::fs::read_to_string(d.path().join("name")).is_ok_and(|n| n.trim().starts_with("emco"))
-    })
+    std::fs::read_dir(uio)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|d| std::fs::read_to_string(d.path().join("name")).is_ok_and(|n| n.trim().starts_with("emco")))
 }
 
 /// The driver (module docs).
@@ -274,7 +276,16 @@ mod tests {
         );
         assert_eq!(l[0].chip_path(), PathBuf::from("/dev/gpiochip2"));
         assert_eq!(parse_inputs("").unwrap(), []);
-        for bad in ["x", "X=gpiochip0:1", "a=gpiochip0", "a=gpiochip0:x", "a=../x:1", "a=c:1,a=c:2", "a=c:1:sideways", "pl_present=c:1"] {
+        for bad in [
+            "x",
+            "X=gpiochip0:1",
+            "a=gpiochip0",
+            "a=gpiochip0:x",
+            "a=../x:1",
+            "a=c:1,a=c:2",
+            "a=c:1:sideways",
+            "pl_present=c:1",
+        ] {
             assert!(parse_inputs(bad).is_err(), "{bad}");
         }
     }

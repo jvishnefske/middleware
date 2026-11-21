@@ -249,7 +249,8 @@ mod machine {
     fn open_sim(disk: &mut Disk, clock: Manual) -> (Ctl<'_>, Boot) {
         let flash = SectorFlash::open(MemSectors::new(disk), SECTORS).expect("flash");
         let driver = SimDriver::new(SimConfig::pc_turn_50());
-        let facts = Facts { control: crate::driver::control_summary(crate::driver::Driver::points(&driver)), ..facts() };
+        let facts =
+            Facts { control: crate::driver::control_summary(crate::driver::Driver::points(&driver)), ..facts() };
         Controller::open_with_driver(flash, facts, crate::limits(1024 * 1024), clock, Box::new(driver))
     }
 
@@ -283,7 +284,11 @@ mod machine {
         c.boot(&boot);
         let image = homing();
         install(&mut c, &image);
-        bind(&mut c, &image, &["z_home=driver:z_home", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"]);
+        bind(
+            &mut c,
+            &image,
+            &["z_home=driver:z_home", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"],
+        );
         assert_eq!(req(&mut c, "sys/payload/start", &[]), Ok(Vec::new()), "{:?}", logs(&c.drain()));
         let outs = c.drain();
         assert!(outs.iter().all(|o| !o.key.starts_with("drv/")), "driver keys never leave the node");
@@ -316,8 +321,14 @@ mod machine {
         let image = homing();
         install(&mut c, &image);
         for (specs, why) in [
-            (["z_home=driver:w_home", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"], "no point w_home"),
-            (["z_home=driver:z_pos", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"], "carries position"),
+            (
+                ["z_home=driver:w_home", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"],
+                "no point w_home",
+            ),
+            (
+                ["z_home=driver:z_pos", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"],
+                "carries position",
+            ),
         ] {
             bind(&mut c, &image, &specs);
             c.drain();
@@ -335,7 +346,11 @@ mod machine {
         c.boot(&boot);
         let image = homing();
         install(&mut c, &image);
-        bind(&mut c, &image, &["z_home=driver:z_home", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"]);
+        bind(
+            &mut c,
+            &image,
+            &["z_home=driver:z_home", "z_pos=driver:z_pos", "motion=driver:motion", "queue=driver:motion"],
+        );
         assert_eq!(req(&mut c, "sys/payload/start", &[]), Err(HandlerError::Internal));
         assert_eq!(req(&mut c, "sys/manifest/cm", &[]), Err(HandlerError::NotFound));
     }

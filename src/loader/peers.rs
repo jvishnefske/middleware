@@ -44,7 +44,8 @@ pub const PEER_KEY_MAX: usize = PEER_PREFIX.len() + 16 + 1 + 8;
 pub fn peer_key(node: SenderId, what: &str) -> Option<heapless::String<PEER_KEY_MAX>> {
     let mut s = heapless::String::new();
     s.push_str(PEER_PREFIX).ok()?;
-    s.push_str(core::str::from_utf8(&crate::zenoh_wire::zid16_hex(node)).ok()?).ok()?;
+    s.push_str(core::str::from_utf8(&crate::zenoh_wire::zid16_hex(node)).ok()?)
+        .ok()?;
     s.push('/').ok()?;
     s.push_str(what).ok()?;
     Some(s)
@@ -67,7 +68,9 @@ pub fn forwardable(key: Key<'_>, own: SenderId) -> Option<(SenderId, Key<'static
         };
         *byte = (digit(pair[0])? << 4) | digit(pair[1])?;
     }
-    let path = FORWARDED.into_iter().find(|k| k.as_str().strip_prefix("sys/") == Some(what))?;
+    let path = FORWARDED
+        .into_iter()
+        .find(|k| k.as_str().strip_prefix("sys/") == Some(what))?;
     let node = SenderId(id);
     (node != own).then_some((node, path))
 }

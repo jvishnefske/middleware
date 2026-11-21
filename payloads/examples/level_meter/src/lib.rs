@@ -37,7 +37,11 @@ pub struct Meter<O: Output> {
 impl<O: Output> Meter<O> {
     /// A meter publishing on `out` (or only counting, without one).
     pub const fn new(out: Option<O>) -> Self {
-        Meter { out, batches: 0, loudest: 0 }
+        Meter {
+            out,
+            batches: 0,
+            loudest: 0,
+        }
     }
 
     /// The output, for tests.
@@ -87,7 +91,9 @@ impl<O: Output> SampleInput for Meter<O> {
         if b.header.format != SampleFormat::Levels {
             return;
         }
-        let (rms, peak) = b.levels().fold((0, 0), |(r, p), (rr, pp)| (r.max(rr), p.max(pp)));
+        let (rms, peak) = b
+            .levels()
+            .fold((0, 0), |(r, p), (rr, pp)| (r.max(rr), p.max(pp)));
         self.batches = self.batches.wrapping_add(1);
         self.loudest = self.loudest.max(rms);
         if let Some(out) = self.out.as_mut() {
@@ -109,7 +115,11 @@ fn opened(name: &str) -> Option<Channel> {
         Ok(c) => Some(c),
         Err(e) => {
             let mut l = LogLine::new();
-            l.push_str("level_meter: ").push_str(name).push_str(" not bound (").push_u32(e.code().unsigned_abs()).push_str(")");
+            l.push_str("level_meter: ")
+                .push_str(name)
+                .push_str(" not bound (")
+                .push_u32(e.code().unsigned_abs())
+                .push_str(")");
             l.log();
             None
         }
@@ -121,7 +131,10 @@ impl Payload for LevelMeter {
         let audio = opened("audio");
         let level = opened("level");
         mw_payload::log("level_meter: started");
-        LevelMeter { audio, meter: Meter::new(level) }
+        LevelMeter {
+            audio,
+            meter: Meter::new(level),
+        }
     }
 
     fn on_message(&mut self, slot: Slot, data: &[u8]) {
@@ -152,7 +165,10 @@ mod tests {
 
     fn levels(first: u64, pairs: &[(u16, u16)]) -> Vec<u8> {
         let h = middleware_header(first, pairs.len() as u16);
-        let data: Vec<u8> = pairs.iter().flat_map(|(r, p)| [r.to_le_bytes(), p.to_le_bytes()].concat()).collect();
+        let data: Vec<u8> = pairs
+            .iter()
+            .flat_map(|(r, p)| [r.to_le_bytes(), p.to_le_bytes()].concat())
+            .collect();
         let mut out = [0u8; 512];
         let n = mw_payload::channel::encode_batch(&h, &data, &mut out).unwrap();
         out[..n].to_vec()
@@ -176,7 +192,15 @@ mod tests {
     fn declares_a_levels_input_and_an_optional_output() {
         assert_eq!(CHANNELS.len(), 2);
         let a = CHANNELS[0];
-        assert_eq!((a.name, a.dir, a.kind, a.sensor), ("audio", Direction::In, DataKind::Samples, Some(SensorKind::Microphone)));
+        assert_eq!(
+            (a.name, a.dir, a.kind, a.sensor),
+            (
+                "audio",
+                Direction::In,
+                DataKind::Samples,
+                Some(SensorKind::Microphone)
+            )
+        );
         assert!(a.required && !CHANNELS[1].required);
     }
 
@@ -185,14 +209,38 @@ mod tests {
         let mut m = Meter::new(Some(Rec(Vec::new())));
         let input = Channel::from_handle(0);
         let slot = Slot::from_raw(0).unwrap();
-        assert_eq!(input.deliver_samples(slot, &levels(30, &[(100, 900), (2500, 7000), (40, 50)]), &mut m), Ok(true));
-        assert_eq!(input.deliver_samples(slot, &levels(33, &[(10, 20)]), &mut m), Ok(true));
-        let msgs: Vec<_> = m.output().unwrap().0.iter().map(|v| std::string::String::from_utf8(v.clone()).unwrap()).collect();
-        assert_eq!(msgs, ["rms 2500 peak 7000 blocks 3 from 30", "rms 10 peak 20 blocks 1 from 33"]);
+        assert_eq!(
+            input.deliver_samples(
+                slot,
+                &levels(30, &[(100, 900), (2500, 7000), (40, 50)]),
+                &mut m
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            input.deliver_samples(slot, &levels(33, &[(10, 20)]), &mut m),
+            Ok(true)
+        );
+        let msgs: Vec<_> = m
+            .output()
+            .unwrap()
+            .0
+            .iter()
+            .map(|v| std::string::String::from_utf8(v.clone()).unwrap())
+            .collect();
+        assert_eq!(
+            msgs,
+            [
+                "rms 2500 peak 7000 blocks 3 from 30",
+                "rms 10 peak 20 blocks 1 from 33"
+            ]
+        );
         assert_eq!((m.batches, m.loudest), (2, 2500));
         // Without the optional output it only counts.
         let mut quiet: Meter<Rec> = Meter::new(None);
-        input.deliver_samples(slot, &levels(0, &[(5, 6)]), &mut quiet).unwrap();
+        input
+            .deliver_samples(slot, &levels(0, &[(5, 6)]), &mut quiet)
+            .unwrap();
         assert_eq!(quiet.batches, 1);
     }
 }

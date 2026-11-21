@@ -46,16 +46,8 @@ impl core::fmt::Display for HeapShort {
 /// [`HEAP_MARGIN`], saturating) when it may.
 pub const fn check_heap(free: usize, bound: u32) -> Result<u32, HeapShort> {
     let needed = bound.saturating_add(HEAP_MARGIN);
-    let free = if free > u32::MAX as usize {
-        u32::MAX
-    } else {
-        free as u32
-    };
-    if free >= needed {
-        Ok(needed)
-    } else {
-        Err(HeapShort { free, needed })
-    }
+    let free = if free > u32::MAX as usize { u32::MAX } else { free as u32 };
+    if free >= needed { Ok(needed) } else { Err(HeapShort { free, needed }) }
 }
 
 /// [`check_heap`] with the image already read into a buffer of `held`

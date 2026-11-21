@@ -160,33 +160,21 @@ impl Record {
         let slot = b.get(KEY_AT..slot_end)?;
         let min = word(b, 12)?;
         let trust = match (b[5], b[4]) {
-            (0, _) if kind == 0 && min == 0 && control == 0 && slot.iter().all(|&x| x == 0) => {
-                TrustState::Unclaimed
-            }
+            (0, _) if kind == 0 && min == 0 && control == 0 && slot.iter().all(|&x| x == 0) => TrustState::Unclaimed,
             (1, FORMAT) => {
                 let kind = KeyKind::from_byte(kind)?;
                 let key = PublicKey::from_kind(kind, slot)?;
                 if slot[kind.key_len()..].iter().any(|&x| x != 0) {
                     return None;
                 }
-                TrustState::Claimed {
-                    key,
-                    min_version: Version(min),
-                }
+                TrustState::Claimed { key, min_version: Version(min) }
             }
-            (1, _) => TrustState::Claimed {
-                key: PublicKey::from_kind(KeyKind::Ed25519, slot)?,
-                min_version: Version(min),
-            },
+            (1, _) => {
+                TrustState::Claimed { key: PublicKey::from_kind(KeyKind::Ed25519, slot)?, min_version: Version(min) }
+            }
             _ => return None,
         };
-        Some(Record {
-            seq: word(b, 8)?,
-            state: Persisted {
-                trust,
-                control: ControlCounter(control),
-            },
-        })
+        Some(Record { seq: word(b, 8)?, state: Persisted { trust, control: ControlCounter(control) } })
     }
 }
 
@@ -205,11 +193,7 @@ impl TrustStore {
     /// least [`PARTITION_LEN`] bytes) and returns the store and the newest
     /// valid state (Unclaimed when there is none). Unreadable sectors count
     /// as invalid.
-    pub fn open<F: NorFlash>(
-        flash: &mut F,
-        base: u32,
-        size: u32,
-    ) -> Result<(Self, Persisted), StoreError> {
+    pub fn open<F: NorFlash>(flash: &mut F, base: u32, size: u32) -> Result<(Self, Persisted), StoreError> {
         if !base.is_multiple_of(SECTOR) {
             return Err(StoreError::Flash);
         }
@@ -229,11 +213,7 @@ impl TrustStore {
             }
         }
         let persisted = newest.map_or(Persisted::default(), |(_, r)| r.state);
-        let store = TrustStore {
-            base,
-            current: newest.map(|(s, r)| (s, r.seq)),
-            persisted,
-        };
+        let store = TrustStore { base, current: newest.map(|(s, r)| (s, r.seq)), persisted };
         Ok((store, persisted))
     }
 
@@ -242,11 +222,7 @@ impl TrustStore {
     /// error the previous record is still the one [`TrustStore::open`]
     /// finds. A state that would lower `min_version` or the control
     /// counter for the same key is refused with [`StoreError::Rollback`].
-    pub fn save<F: NorFlash>(
-        &mut self,
-        flash: &mut F,
-        state: &Persisted,
-    ) -> Result<(), StoreError> {
+    pub fn save<F: NorFlash>(&mut self, flash: &mut F, state: &Persisted) -> Result<(), StoreError> {
         if lowers(&self.persisted, state) {
             return Err(StoreError::Rollback);
         }
@@ -257,12 +233,8 @@ impl TrustStore {
         let at = self.base + sector * SECTOR;
         let bytes = Record { seq, state: *state }.encode();
         let (magic, fields) = bytes.split_at(WORD as usize);
-        flash
-            .erase(at, at + SECTOR)
-            .map_err(|_| StoreError::Flash)?;
-        flash
-            .write(at + WORD, fields)
-            .map_err(|_| StoreError::Flash)?;
+        flash.erase(at, at + SECTOR).map_err(|_| StoreError::Flash)?;
+        flash.write(at + WORD, fields).map_err(|_| StoreError::Flash)?;
         flash.write(at, magic).map_err(|_| StoreError::Flash)?;
         self.current = Some((sector, seq));
         self.persisted = *state;
@@ -284,16 +256,9 @@ impl TrustStore {
 /// new key (re-key) starts over at 0 and is allowed.
 pub fn lowers(current: &Persisted, next: &Persisted) -> bool {
     match (current.trust, next.trust) {
-        (
-            TrustState::Claimed {
-                key: a,
-                min_version: old,
-            },
-            TrustState::Claimed {
-                key: b,
-                min_version: new,
-            },
-        ) => a == b && (new.0 < old.0 || next.control < current.control),
+        (TrustState::Claimed { key: a, min_version: old }, TrustState::Claimed { key: b, min_version: new }) => {
+            a == b && (new.0 < old.0 || next.control < current.control)
+        }
         (TrustState::Claimed { .. }, TrustState::Unclaimed) => true,
         _ => false,
     }
@@ -312,18 +277,12 @@ mod tests {
 
     fn with_control(k: u8, min: u32, control: u64) -> Persisted {
         Persisted {
-            trust: TrustState::Claimed {
-                key: PublicKey::Ed25519([k; 32]),
-                min_version: Version(min),
-            },
+            trust: TrustState::Claimed { key: PublicKey::Ed25519([k; 32]), min_version: Version(min) },
             control: ControlCounter(control),
         }
     }
 
-    const UNCLAIMED: Persisted = Persisted {
-        trust: TrustState::Unclaimed,
-        control: ControlCounter(0),
-    };
+    const UNCLAIMED: Persisted = Persisted { trust: TrustState::Unclaimed, control: ControlCounter(0) };
 
     fn open(flash: &mut Flash) -> (TrustStore, Persisted) {
         TrustStore::open(flash, BASE, PARTITION_LEN).unwrap()
@@ -334,10 +293,7 @@ mod tests {
         let mut flash = Flash::new();
         let (mut ts, _) = open(&mut flash);
         ts.save(&mut flash, &claimed(1, 100)).unwrap();
-        assert_eq!(
-            ts.save(&mut flash, &claimed(1, 99)),
-            Err(StoreError::Rollback)
-        );
+        assert_eq!(ts.save(&mut flash, &claimed(1, 99)), Err(StoreError::Rollback));
         assert_eq!(ts.save(&mut flash, &UNCLAIMED), Err(StoreError::Rollback));
         assert_eq!(ts.persisted(), claimed(1, 100));
         // Same key upwards, and a re-key (new key at 0), are allowed.
@@ -345,19 +301,12 @@ mod tests {
         ts.save(&mut flash, &claimed(2, 0)).unwrap();
         assert_eq!(ts.persisted(), claimed(2, 0));
         let (reopened, state) = open(&mut flash);
-        assert_eq!(
-            (reopened.persisted(), state),
-            (claimed(2, 0), claimed(2, 0))
-        );
+        assert_eq!((reopened.persisted(), state), (claimed(2, 0), claimed(2, 0)));
     }
 
     #[test]
     fn records_round_trip_and_reject_damage() {
-        for state in [
-            UNCLAIMED,
-            claimed(3, 1_761_500_000),
-            with_control(3, 7, 1_761_500_000_123),
-        ] {
+        for state in [UNCLAIMED, claimed(3, 1_761_500_000), with_control(3, 7, 1_761_500_000_123)] {
             let r = Record { seq: 9, state };
             let b = r.encode();
             assert_eq!(Record::decode(&b), Some(r));
@@ -378,10 +327,7 @@ mod tests {
         flash.mem.fill(0xFF);
         assert_eq!(open(&mut flash).1, UNCLAIMED);
         assert!(TrustStore::open(&mut flash, BASE + 4, PARTITION_LEN).is_err());
-        assert_eq!(
-            TrustStore::open(&mut flash, BASE, SECTOR),
-            Err(StoreError::TooLarge)
-        );
+        assert_eq!(TrustStore::open(&mut flash, BASE, SECTOR), Err(StoreError::TooLarge));
     }
 
     #[test]
@@ -396,10 +342,7 @@ mod tests {
             assert_eq!(reopened, store);
             assert_eq!(store.current, Some(((n - 1) % 2, n)));
         }
-        assert!(
-            flash.mem[..BASE as usize].iter().all(|&b| b == 0),
-            "outside partition untouched"
-        );
+        assert!(flash.mem[..BASE as usize].iter().all(|&b| b == 0), "outside partition untouched");
     }
 
     /// Power lost at every flash operation of a save: afterwards the store
@@ -417,10 +360,7 @@ mod tests {
                     store.save(&mut flash, &claimed(p as u8, p * 100)).unwrap();
                 }
                 flash.cut_at(cut);
-                assert!(
-                    store.save(&mut flash, &new).is_err(),
-                    "prior {prior} cut {cut}"
-                );
+                assert!(store.save(&mut flash, &new).is_err(), "prior {prior} cut {cut}");
                 flash.restore();
                 let (mut store, got) = open(&mut flash);
                 match old {
@@ -461,10 +401,7 @@ mod tests {
         let mut flash = Flash::new();
         let (mut ts, _) = open(&mut flash);
         ts.save(&mut flash, &with_control(1, 5, 100)).unwrap();
-        assert_eq!(
-            ts.save(&mut flash, &with_control(1, 5, 99)),
-            Err(StoreError::Rollback)
-        );
+        assert_eq!(ts.save(&mut flash, &with_control(1, 5, 99)), Err(StoreError::Rollback));
         assert_eq!(
             ts.save(&mut flash, &with_control(1, 6, 0)),
             Err(StoreError::Rollback),
@@ -507,9 +444,7 @@ mod tests {
         let mut b = [0u8; RECORD_V2_LEN];
         let (flag, min, key, control) = match state.trust {
             TrustState::Unclaimed => (0u8, 0u32, [0u8; 32], 0),
-            TrustState::Claimed { key, min_version } => {
-                (1, min_version.0, ed(&key), state.control.0)
-            }
+            TrustState::Claimed { key, min_version } => (1, min_version.0, ed(&key), state.control.0),
         };
         b[..4].copy_from_slice(b"MWTR");
         b[4] = 2;
@@ -527,10 +462,7 @@ mod tests {
         let mut k = [seed; 33];
         k[0] = 3;
         Persisted {
-            trust: TrustState::Claimed {
-                key: PublicKey::P256(k),
-                min_version: Version(min),
-            },
+            trust: TrustState::Claimed { key: PublicKey::P256(k), min_version: Version(min) },
             control: ControlCounter(control),
         }
     }
@@ -602,22 +534,14 @@ mod tests {
         assert_eq!(Record::decode(&reseal(pad)), None, "padding must be zero");
         let mut kind = b;
         kind[6] = KeyKind::Ed25519 as u8;
-        assert_eq!(
-            Record::decode(&reseal(kind)),
-            None,
-            "Ed25519 slot with a 33rd byte"
-        );
+        assert_eq!(Record::decode(&reseal(kind)), None, "Ed25519 slot with a 33rd byte");
         let mut unknown = b;
         unknown[6] = 9;
         assert_eq!(Record::decode(&reseal(unknown)), None);
         let mut prefix = b;
         prefix[16] = 4;
         assert_eq!(Record::decode(&reseal(prefix)), None, "not compressed SEC1");
-        let e = Record {
-            seq: 4,
-            state: claimed(1, 2),
-        }
-        .encode();
+        let e = Record { seq: 4, state: claimed(1, 2) }.encode();
         assert_eq!(e[6], KeyKind::Ed25519 as u8);
         let mut ed_kind_zero = e;
         ed_kind_zero[6] = 0;
@@ -635,32 +559,17 @@ mod tests {
 
     #[test]
     fn format_1_records_load_with_counter_zero_and_migrate_on_the_next_save() {
-        let old = TrustState::Claimed {
-            key: PublicKey::Ed25519([0xAB; 32]),
-            min_version: Version(3000),
-        };
+        let old = TrustState::Claimed { key: PublicKey::Ed25519([0xAB; 32]), min_version: Version(3000) };
         // The board's history: sector 0 seq 4, sector 1 seq 5 (newest).
         let mut flash = Flash::new();
         put(
             &mut flash,
             0,
-            &v1_record(
-                4,
-                &TrustState::Claimed {
-                    key: PublicKey::Ed25519([0xAB; 32]),
-                    min_version: Version(1000),
-                },
-            ),
+            &v1_record(4, &TrustState::Claimed { key: PublicKey::Ed25519([0xAB; 32]), min_version: Version(1000) }),
         );
         put(&mut flash, 1, &v1_record(5, &old));
         let (mut ts, got) = open(&mut flash);
-        assert_eq!(
-            got,
-            Persisted {
-                trust: old,
-                control: ControlCounter(0)
-            }
-        );
+        assert_eq!(got, Persisted { trust: old, control: ControlCounter(0) });
         assert_eq!(ts.current, Some((1, 5)));
         // A damaged format-1 record is refused like any other.
         for i in 0..RECORD_V1_LEN {
@@ -671,10 +580,7 @@ mod tests {
         }
         // The first save (a control counter) writes format 3 into sector 0
         // with seq 6; the format-1 record in sector 1 stays untouched.
-        let next = Persisted {
-            trust: old,
-            control: ControlCounter(1_761_500_000_123),
-        };
+        let next = Persisted { trust: old, control: ControlCounter(1_761_500_000_123) };
         ts.save(&mut flash, &next).unwrap();
         let s0 = (BASE) as usize;
         assert_eq!(flash.mem[s0 + 4], FORMAT);
@@ -692,14 +598,7 @@ mod tests {
             assert!(ts.save(&mut flash, &next).is_err(), "cut {cut}");
             flash.restore();
             let (mut ts, got) = open(&mut flash);
-            assert_eq!(
-                got,
-                Persisted {
-                    trust: old,
-                    control: ControlCounter(0)
-                },
-                "cut {cut}"
-            );
+            assert_eq!(got, Persisted { trust: old, control: ControlCounter(0) }, "cut {cut}");
             ts.save(&mut flash, &next).unwrap();
             assert_eq!(open(&mut flash).1, next);
         }
@@ -711,33 +610,19 @@ mod tests {
 
     #[test]
     fn unknown_formats_and_an_unclaimed_record_with_a_counter_are_refused() {
-        let mut b = Record {
-            seq: 1,
-            state: with_control(1, 1, 1),
-        }
-        .encode();
+        let mut b = Record { seq: 1, state: with_control(1, 1, 1) }.encode();
         b[4] = 4;
         let crc = Crc32::checksum(&b[..CRC_AT]);
         b[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(Record::decode(&b), None, "format 4");
-        let mut u = Record {
-            seq: 1,
-            state: UNCLAIMED,
-        }
-        .encode();
+        let mut u = Record { seq: 1, state: UNCLAIMED }.encode();
         u[CONTROL_AT] = 1;
         let crc = Crc32::checksum(&u[..CRC_AT]);
         u[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(Record::decode(&u), None);
         // Encoding an unclaimed state never stores a counter.
-        let e = Record {
-            seq: 2,
-            state: Persisted {
-                trust: TrustState::Unclaimed,
-                control: ControlCounter(5),
-            },
-        }
-        .encode();
+        let e =
+            Record { seq: 2, state: Persisted { trust: TrustState::Unclaimed, control: ControlCounter(5) } }.encode();
         assert_eq!(Record::decode(&e).map(|r| r.state), Some(UNCLAIMED));
     }
 }

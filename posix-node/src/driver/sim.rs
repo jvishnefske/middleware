@@ -87,8 +87,22 @@ impl SimConfig {
     pub fn pc_turn_50() -> Self {
         let rapid = 750_000 / 60;
         SimConfig {
-            x: AxisSim { min_um: -500, max_um: 48_000, home_at_max: true, start_um: 20_000, counts_per_mm: 1000, rapid_um_s: rapid },
-            z: AxisSim { min_um: -228_000, max_um: 500, home_at_max: true, start_um: -100_000, counts_per_mm: 1000, rapid_um_s: rapid },
+            x: AxisSim {
+                min_um: -500,
+                max_um: 48_000,
+                home_at_max: true,
+                start_um: 20_000,
+                counts_per_mm: 1000,
+                rapid_um_s: rapid,
+            },
+            z: AxisSim {
+                min_um: -228_000,
+                max_um: 500,
+                home_at_max: true,
+                start_um: -100_000,
+                counts_per_mm: 1000,
+                rapid_um_s: rapid,
+            },
             limits: false,
             spindle_max_rpm: 3000,
             spindle_accel_rpm_s: 1500,
@@ -183,17 +197,45 @@ impl SimDriver {
         let pos = |name: &str, a: &AxisSim| {
             let scale = a.counts_per_mm;
             let to_counts = |um: i32| (i64::from(um - STOP_MARGIN_UM) * i64::from(scale) / 1000) as i32;
-            PointSpec::new(name, DataKind::Position, Flow::In, Unit::Count, to_counts(a.min_um), to_counts(a.max_um + 2 * STOP_MARGIN_UM))
-                .scaled(scale)
+            PointSpec::new(
+                name,
+                DataKind::Position,
+                Flow::In,
+                Unit::Count,
+                to_counts(a.min_um),
+                to_counts(a.max_um + 2 * STOP_MARGIN_UM),
+            )
+            .scaled(scale)
         };
         let mut points = vec![
             pos("x_pos", &cfg.x),
             pos("z_pos", &cfg.z),
             PointSpec::switch("x_home"),
             PointSpec::switch("z_home"),
-            PointSpec::new("spindle_rpm", DataKind::Setpoint, Flow::Out, Unit::Rpm, -cfg.spindle_max_rpm, cfg.spindle_max_rpm),
-            PointSpec::new("spindle_actual", DataKind::Setpoint, Flow::In, Unit::Rpm, -cfg.spindle_max_rpm, cfg.spindle_max_rpm),
-            PointSpec::new("turret_station", DataKind::Setpoint, Flow::Out, Unit::Station, 1, i32::from(cfg.turret_stations)),
+            PointSpec::new(
+                "spindle_rpm",
+                DataKind::Setpoint,
+                Flow::Out,
+                Unit::Rpm,
+                -cfg.spindle_max_rpm,
+                cfg.spindle_max_rpm,
+            ),
+            PointSpec::new(
+                "spindle_actual",
+                DataKind::Setpoint,
+                Flow::In,
+                Unit::Rpm,
+                -cfg.spindle_max_rpm,
+                cfg.spindle_max_rpm,
+            ),
+            PointSpec::new(
+                "turret_station",
+                DataKind::Setpoint,
+                Flow::Out,
+                Unit::Station,
+                1,
+                i32::from(cfg.turret_stations),
+            ),
             PointSpec::switch("turret_ready"),
             PointSpec::switch("estop"),
             PointSpec::new("motion", DataKind::Segments, Flow::Both, Unit::None, 0, i32::from(cfg.queue)),
@@ -364,7 +406,11 @@ impl SimDriver {
             let dt = step as f64 / 1e6;
             let target = f64::from(self.spindle_cmd);
             let dv = f64::from(self.cfg.spindle_accel_rpm_s) * dt;
-            self.spindle = if (target - self.spindle).abs() <= dv { target } else { self.spindle + dv * (target - self.spindle).signum() };
+            self.spindle = if (target - self.spindle).abs() <= dv {
+                target
+            } else {
+                self.spindle + dv * (target - self.spindle).signum()
+            };
             if !self.stopped {
                 self.run_motion(dt);
             }
@@ -387,7 +433,9 @@ impl SimDriver {
         }
         let rpm = self.spindle.round() as i32;
         let settled = rpm == self.spindle_cmd;
-        if all || (self.spindle_sent != Some(rpm) && (settled || now_us.saturating_sub(self.spindle_sent_at) >= 100_000)) {
+        if all
+            || (self.spindle_sent != Some(rpm) && (settled || now_us.saturating_sub(self.spindle_sent_at) >= 100_000))
+        {
             self.spindle_sent = Some(rpm);
             self.spindle_sent_at = now_us;
             out.push((SPINDLE_ACTUAL, Setpoint { value: rpm }.encode().to_vec()));
@@ -513,12 +561,29 @@ mod tests {
     fn pn17_points_and_snapshot() {
         let mut sim = SimDriver::new(SimConfig::pc_turn_50());
         let names: Vec<&str> = sim.points().iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["x_pos", "z_pos", "x_home", "z_home", "spindle_rpm", "spindle_actual", "turret_station", "turret_ready", "estop", "motion"]);
+        assert_eq!(
+            names,
+            [
+                "x_pos",
+                "z_pos",
+                "x_home",
+                "z_home",
+                "spindle_rpm",
+                "spindle_actual",
+                "turret_station",
+                "turret_ready",
+                "estop",
+                "motion"
+            ]
+        );
         assert!(sim.points().iter().all(|p| p.point().check().is_ok()));
         let snap = sim.snapshot(0);
         assert_eq!(last(&snap, X_POS, Position::decode).unwrap().counts, 20_000);
         assert_eq!(last(&snap, ESTOP, Digital::decode).map(|d| d.on), Some(true));
-        assert_eq!(last(&snap, MOTION, QueueState::decode), Some(QueueState { free: 32, done: 0, flags: QueueState::IDLE }));
+        assert_eq!(
+            last(&snap, MOTION, QueueState::decode),
+            Some(QueueState { free: 32, done: 0, flags: QueueState::IDLE })
+        );
         assert!(sim.poll(1000).is_empty(), "nothing changed");
         assert_eq!(sim.next_wake_us(1000), None);
         let limits = SimDriver::new(SimConfig { limits: true, ..SimConfig::pc_turn_50() });

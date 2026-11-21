@@ -114,7 +114,11 @@ impl BoardName {
     /// `None` when empty.
     pub const fn new(name: &str) -> Option<Self> {
         let b = name.as_bytes();
-        let mut len = if b.len() < BOARD_NAME_MAX { b.len() } else { BOARD_NAME_MAX };
+        let mut len = if b.len() < BOARD_NAME_MAX {
+            b.len()
+        } else {
+            BOARD_NAME_MAX
+        };
         // Back off from inside a multi-byte character.
         while len > 0 && len < b.len() && (b[len] & 0xc0) == 0x80 {
             len -= 1;
@@ -128,7 +132,10 @@ impl BoardName {
             bytes[i] = b[i];
             i += 1;
         }
-        Some(BoardName { len: len as u8, bytes })
+        Some(BoardName {
+            len: len as u8,
+            bytes,
+        })
     }
 
     /// The name's bytes.
@@ -749,7 +756,8 @@ impl Manifest {
         for r in records {
             let (t, body) = r?;
             let need = |n: usize| body.get(..n).ok_or(ManifestError::Short(t));
-            let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+            let u32_at =
+                |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
             match t {
                 tag::NODE => {
                     let b = need(8)?;
@@ -818,7 +826,10 @@ impl Manifest {
                 }
                 tag::CONTROL_MODULES => {
                     let b = need(2)?;
-                    m.control = Some(ControlModules { points: b[0], pages: b[1] });
+                    m.control = Some(ControlModules {
+                        points: b[0],
+                        pages: b[1],
+                    });
                 }
                 tag::BOARD => {
                     // Raw bytes, cut as a sender would have; a name that
@@ -827,7 +838,10 @@ impl Manifest {
                     let n = body.len().min(BOARD_NAME_MAX);
                     let mut bytes = [0u8; BOARD_NAME_MAX];
                     bytes[..n].copy_from_slice(&body[..n]);
-                    m.board = Some(BoardName { len: n as u8, bytes });
+                    m.board = Some(BoardName {
+                        len: n as u8,
+                        bytes,
+                    });
                 }
                 _ => {}
             }
@@ -939,7 +953,10 @@ mod tests {
             })
             .with_limits(Limits::ABI)
             .with_board(BoardName::new("ZynqMP KD240 revA/B/1").unwrap())
-            .with_control(ControlModules { points: 14, pages: 1 })
+            .with_control(ControlModules {
+                points: 14,
+                pages: 1,
+            })
     }
 
     fn encode(m: &Manifest) -> ([u8; MANIFEST_MAX], usize) {
@@ -971,7 +988,10 @@ mod tests {
         assert_eq!(Manifest::decode(&v), Ok(full()));
         // A SPI record with an appended field.
         let mut w = vec![1, 7, 0, tag::SPI, 3, 4, 0xAA, 0xBB];
-        assert_eq!(Manifest::decode(&w).map(|m| m.spi), Ok(Some(SpiBuses { buses: 4 })));
+        assert_eq!(
+            Manifest::decode(&w).map(|m| m.spi),
+            Ok(Some(SpiBuses { buses: 4 }))
+        );
         // ...but not a shorter one.
         w = vec![1, 7, 0, tag::I2C, 2, 1, 0];
         assert_eq!(Manifest::decode(&w), Err(ManifestError::Short(tag::I2C)));
@@ -1038,9 +1058,15 @@ mod tests {
         let (out, n) = encode(&m);
         assert_eq!(&out[n - 23..n - 21], &[tag::BOARD, 21]);
         assert_eq!(Manifest::decode(&out[..n]).unwrap().board, Some(kd));
-        assert_eq!(Manifest::decode(&[1, 8, 0, tag::BOARD, 0]), Err(ManifestError::Short(tag::BOARD)));
+        assert_eq!(
+            Manifest::decode(&[1, 8, 0, tag::BOARD, 0]),
+            Err(ManifestError::Short(tag::BOARD))
+        );
         // A peer's name that is not UTF-8 is kept as bytes.
-        let odd = Manifest::decode(&[1, 8, 0, tag::BOARD, 2, 0xff, 0xfe]).unwrap().board.unwrap();
+        let odd = Manifest::decode(&[1, 8, 0, tag::BOARD, 2, 0xff, 0xfe])
+            .unwrap()
+            .board
+            .unwrap();
         assert_eq!((odd.as_bytes(), odd.as_str()), (&[0xff, 0xfe][..], None));
     }
 
@@ -1100,8 +1126,14 @@ mod tests {
         assert_eq!(mic.rates_hz().collect::<Vec<_>>(), [16_000]);
         let levels = MicConfig::new(16_000, 20, AudioMode::Levels, 10, 160).unwrap();
         assert!(mic.accepts(&levels));
-        assert!(!mic.accepts(&MicConfig { gain_db: 21, ..levels }));
-        assert!(!mic.accepts(&MicConfig { rate_hz: 8_000, ..levels }));
+        assert!(!mic.accepts(&MicConfig {
+            gain_db: 21,
+            ..levels
+        }));
+        assert!(!mic.accepts(&MicConfig {
+            rate_hz: 8_000,
+            ..levels
+        }));
         let pcm = MicConfig::new(16_000, 0, AudioMode::Pcm, 200, 0).unwrap();
         assert!(!mic.accepts(&pcm));
         let m = Manifest::new(7).with_mic(mic);

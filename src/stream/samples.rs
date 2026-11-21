@@ -283,7 +283,8 @@ impl<'a> Batch<'a> {
         } else {
             &[]
         };
-        data.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]))
+        data.chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
     }
 
     /// The `(rms, peak)` pairs in wire order (block by block, channel by
@@ -340,7 +341,11 @@ pub fn encode(header: &BatchHeader, data: &[u8], out: &mut [u8]) -> Result<usize
 
 /// Writes `header` and `values` (`count * channels` `i16`, wire order)
 /// into `out` for an [`SampleFormat::I16`] batch; returns its length.
-pub fn encode_i16(header: &BatchHeader, values: &[i16], out: &mut [u8]) -> Result<usize, BatchError> {
+pub fn encode_i16(
+    header: &BatchHeader,
+    values: &[i16],
+    out: &mut [u8],
+) -> Result<usize, BatchError> {
     if header.format != SampleFormat::I16 {
         return Err(BatchError::Mismatch);
     }
@@ -427,7 +432,11 @@ pub const fn mulaw_decode(byte: u8) -> i16 {
     let exp = ((u >> 4) & 0x07) as i32;
     let mantissa = (u & 0x0f) as i32;
     let mag = (((mantissa << 3) + 0x84) << exp) - 0x84;
-    if u & 0x80 != 0 { -mag as i16 } else { mag as i16 }
+    if u & 0x80 != 0 {
+        -mag as i16
+    } else {
+        mag as i16
+    }
 }
 
 /// The level of one block of samples: `(rms, peak)` in `i16` full scale
@@ -580,14 +589,24 @@ mod tests {
         let cases = [
             BatchHeader { channels: 4, ..IMU },
             BatchHeader { channels: 0, ..IMU },
-            BatchHeader { format: SampleFormat::MuLaw, ..IMU },
-            BatchHeader { format: SampleFormat::Levels, ..IMU },
+            BatchHeader {
+                format: SampleFormat::MuLaw,
+                ..IMU
+            },
+            BatchHeader {
+                format: SampleFormat::Levels,
+                ..IMU
+            },
             BatchHeader { range: 0, ..IMU },
             BatchHeader { scale: 0, ..IMU },
             BatchHeader { rate_hz: 0, ..IMU },
             BatchHeader { channels: 3, ..MIC },
             BatchHeader { scale: 5, ..MIC },
-            BatchHeader { format: SampleFormat::Levels, scale: 0, ..MIC },
+            BatchHeader {
+                format: SampleFormat::Levels,
+                scale: 0,
+                ..MIC
+            },
         ];
         for h in cases {
             assert_eq!(h.check(), bad, "{h:?}");
@@ -599,7 +618,10 @@ mod tests {
         let n = encode_i16(&IMU, &[0; 6], &mut out).unwrap();
         out[2] = SampleFormat::MuLaw as u8;
         assert_eq!(decode(&out[..n]), Err(BatchError::Mismatch));
-        assert_eq!(encode_i16(&MIC, &[0; 4], &mut out), Err(BatchError::Mismatch));
+        assert_eq!(
+            encode_i16(&MIC, &[0; 4], &mut out),
+            Err(BatchError::Mismatch)
+        );
     }
 
     #[test]
@@ -616,7 +638,10 @@ mod tests {
         };
         assert_eq!(gap(&a, &later), Gap::Lost(40));
         assert_eq!(gap(&a, &a), Gap::Backwards);
-        let restarted = BatchHeader { first_index: 0, ..a };
+        let restarted = BatchHeader {
+            first_index: 0,
+            ..a
+        };
         assert_eq!(gap(&a, &restarted), Gap::Backwards);
         assert_eq!(accel_scale_ug(2), 61);
         assert_eq!(accel_scale_ug(8), 244);

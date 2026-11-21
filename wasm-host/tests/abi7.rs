@@ -11,7 +11,9 @@ use middleware::Key;
 use middleware::loader::binding::{Binding, Target};
 use middleware::loader::trust::Version;
 use middleware::stream::samples::{SampleFormat, SensorKind};
-use middleware::wasm_abi::channels::{Channel, Direction, OUTPUT_BASE, SECTION, encode, encoded_len};
+use middleware::wasm_abi::channels::{
+    Channel, Direction, OUTPUT_BASE, SECTION, encode, encoded_len,
+};
 use middleware::wasm_abi::import_in;
 use middleware::wasm_abi::route::{AudioMode, ImuConfig, MicConfig, RouteSource, SampleSource};
 use wasm_host::channels::BindError;
@@ -27,7 +29,8 @@ struct Board {
 impl Device for Board {
     fn log(&mut self, _: &str) {}
     fn publish(&mut self, key: Key<'_>, data: &[u8]) -> Result<(), AbiError> {
-        self.published.push((key.as_str().to_string(), data.to_vec()));
+        self.published
+            .push((key.as_str().to_string(), data.to_vec()));
         Ok(())
     }
     fn now_ms(&mut self) -> u32 {
@@ -55,8 +58,15 @@ impl Device for Board {
 }
 
 const DECLS: &[Channel<'static>] = &[
-    Channel::samples("audio", Direction::In, Some(SensorKind::Microphone), 8_000, 48_000, true)
-        .with_formats(1 << SampleFormat::Levels as u8),
+    Channel::samples(
+        "audio",
+        Direction::In,
+        Some(SensorKind::Microphone),
+        8_000,
+        48_000,
+        true,
+    )
+    .with_formats(1 << SampleFormat::Levels as u8),
     Channel::bytes("level", Direction::Out, false),
 ];
 const LEN: usize = encoded_len(DECLS);
@@ -127,14 +137,22 @@ fn bd4_a_local_source_starts_on_the_internal_key_before_init() {
         ("level", Target::Key(Key::from_static("lab/level"))),
     ]);
     let mut p = load(Board::default(), Some(&b)).unwrap();
-    let SampleSource::Microphone(cfg) = p.device().routes[0].0 else { panic!() };
-    assert_eq!((cfg.rate_hz, p.device().routes[0].1.as_str()), (16_000, "ch/audio"));
+    let SampleSource::Microphone(cfg) = p.device().routes[0].0 else {
+        panic!()
+    };
+    assert_eq!(
+        (cfg.rate_hz, p.device().routes[0].1.as_str()),
+        (16_000, "ch/audio")
+    );
     assert_eq!(p.subscriptions().collect::<Vec<_>>(), ["ch/audio"]);
     // `channel_open` gave the slot and the output handle.
     assert_eq!((i32_at(&p, 100), i32_at(&p, 104)), (0, OUTPUT_BASE + 1));
     assert!(p.deliver(Key::from_static("ch/audio"), b"batch").unwrap());
     assert_eq!(i32_at(&p, 108), 0);
-    assert_eq!(p.device().published, [("lab/level".to_string(), b"batch".to_vec())]);
+    assert_eq!(
+        p.device().published,
+        [("lab/level".to_string(), b"batch".to_vec())]
+    );
 }
 
 #[test]
@@ -157,19 +175,36 @@ fn bd4_bad_bindings_fail_the_load_naming_the_channel() {
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("loaded"),
     };
-    assert_eq!(bind_err(None, Board::default()), BindError::Unbound("audio".into()));
-    let imu = RouteSource::Samples(SampleSource::Imu(ImuConfig::new(100, 2, false, 10).unwrap()));
     assert_eq!(
-        bind_err(Some(&bound(&[("audio", Target::Local(imu))])), Board::default()),
+        bind_err(None, Board::default()),
+        BindError::Unbound("audio".into())
+    );
+    let imu = RouteSource::Samples(SampleSource::Imu(
+        ImuConfig::new(100, 2, false, 10).unwrap(),
+    ));
+    assert_eq!(
+        bind_err(
+            Some(&bound(&[("audio", Target::Local(imu))])),
+            Board::default()
+        ),
         BindError::Mismatch("audio".into())
     );
-    let refusing = Board { refuse: true, ..Board::default() };
+    let refusing = Board {
+        refuse: true,
+        ..Board::default()
+    };
     assert_eq!(
-        bind_err(Some(&bound(&[("audio", Target::Local(levels(16_000)))])), refusing),
+        bind_err(
+            Some(&bound(&[("audio", Target::Local(levels(16_000)))])),
+            refusing
+        ),
         BindError::Route("audio".into(), AbiError::InvalidArgument)
     );
     let e = LoadError::Bind(BindError::Unbound("audio".into()));
-    assert_eq!(e.to_string(), "binding: channel audio is required and not bound");
+    assert_eq!(
+        e.to_string(),
+        "binding: channel audio is required and not bound"
+    );
 }
 
 #[test]
@@ -200,17 +235,35 @@ fn pr3_a_remote_channel_takes_its_node_only() {
     use middleware::SenderId;
     let node = SenderId([7; 8]);
     let b = bound(&[
-        ("audio", Target::Remote { node, key: Key::from_static("mic/level") }),
-        ("level", Target::Remote { node, key: Key::from_static("lab/level") }),
+        (
+            "audio",
+            Target::Remote {
+                node,
+                key: Key::from_static("mic/level"),
+            },
+        ),
+        (
+            "level",
+            Target::Remote {
+                node,
+                key: Key::from_static("lab/level"),
+            },
+        ),
     ]);
     let mut p = load(Board::default(), Some(&b)).unwrap();
     let k = Key::from_static("mic/level");
     assert!(!p.deliver(k, b"x").unwrap(), "an unknown sender");
-    assert!(!p.deliver_from(k, b"x", Some(SenderId([8; 8]))).unwrap(), "another node");
+    assert!(
+        !p.deliver_from(k, b"x", Some(SenderId([8; 8]))).unwrap(),
+        "another node"
+    );
     assert!(p.device().published.is_empty());
     assert!(p.deliver_from(k, b"ok", Some(node)).unwrap());
     // The output publishes on its key, normally.
-    assert_eq!(p.device().published, [("lab/level".to_string(), b"ok".to_vec())]);
+    assert_eq!(
+        p.device().published,
+        [("lab/level".to_string(), b"ok".to_vec())]
+    );
 }
 
 #[test]
@@ -220,7 +273,10 @@ fn ad2_an_adapted_channel_gets_the_adapters_output() {
     let b = bound(&[
         (
             "audio",
-            Target::Adapted { inner: Endpoint::Key(Key::from_static("mic/pcm")), adapter: Adapter::PcmToLevels { block: 160 } },
+            Target::Adapted {
+                inner: Endpoint::Key(Key::from_static("mic/pcm")),
+                adapter: Adapter::PcmToLevels { block: 160 },
+            },
         ),
         ("level", Target::Key(Key::from_static("lab/level"))),
     ]);
@@ -249,7 +305,10 @@ fn ad2_an_adapted_channel_gets_the_adapters_output() {
     let (key, data) = &p.device().published[0];
     assert_eq!(key, "lab/level");
     let got = samples::decode(data).unwrap();
-    assert_eq!((got.header.format, got.header.first_index, got.header.count), (SampleFormat::Levels, 0, 1));
+    assert_eq!(
+        (got.header.format, got.header.first_index, got.header.count),
+        (SampleFormat::Levels, 0, 1)
+    );
     assert_eq!(got.levels().next(), Some((1000, 1000)));
     // Garbage is refused by the adapter, not delivered.
     assert!(!p.deliver(k, b"junk").unwrap());

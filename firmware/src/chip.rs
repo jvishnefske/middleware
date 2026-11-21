@@ -172,7 +172,9 @@
 //! at 0x100000 (checked by a unit test).
 
 use board_pins::{PinError, PinMap, bit, boards};
-use middleware::loader::manifest::{FrameSources, Groups, I2cBuses, Limits, Link, LinkKind, Manifest, SpiBuses, SpiSink};
+use middleware::loader::manifest::{
+    FrameSources, Groups, I2cBuses, Limits, Link, LinkKind, Manifest, SpiBuses, SpiSink,
+};
 use middleware::loader::{BOARD_PWM_REF_TICK, BOARD_RUNTIME, BOARD_USB_JTAG, BoardInfo};
 use middleware::wasm_abi::AbiError;
 
@@ -412,9 +414,7 @@ impl Profile {
         let mut m = Manifest::new(middleware::wasm_abi::ABI_VERSION)
             .with_groups(groups)
             .with_spi(SpiBuses { buses: 1 })
-            .with_sink_spi(SpiSink {
-                max_frame: middleware::stream::MAX_FRAME_BYTES,
-            })
+            .with_sink_spi(SpiSink { max_frame: middleware::stream::MAX_FRAME_BYTES })
             .with_link(Link { id: 0, kind: LinkKind::SERIAL })
             .with_limits(Limits::ABI);
         if i2c > 0 {
@@ -717,10 +717,7 @@ mod tests {
     #[test]
     fn heap_leaves_room_for_payload() {
         for p in ALL.into_iter().filter(|p| p.runtime) {
-            let need = p.max_memory_bytes as usize
-                + p.max_image as usize
-                + INTERPRETER_RESERVE
-                + p.radio_heap;
+            let need = p.max_memory_bytes as usize + p.max_image as usize + INTERPRETER_RESERVE + p.radio_heap;
             assert!(p.heap_total() >= need, "{}: {} < {}", p.name, p.heap_total(), need);
             assert!(p.max_memory_bytes >= WASM_PAGE, "{}", p.name);
             // Page multiples, so a 64 KiB-page payload can use all of it.
@@ -757,7 +754,11 @@ mod tests {
         assert_eq!(adc(&ESP32S3), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert!(adc(&ESP32C3).is_empty() && adc(&ESP8266).is_empty());
         for p in ALL {
-            assert!((0u8..64).filter(|&n| p.has_adc(n)).all(|n| p.check_pin(n, Direction::Input).is_ok()), "{}", p.name);
+            assert!(
+                (0u8..64).filter(|&n| p.has_adc(n)).all(|n| p.check_pin(n, Direction::Input).is_ok()),
+                "{}",
+                p.name
+            );
         }
         assert!(!ESP32.has_adc(64) && !ESP32.has_adc(255));
     }
@@ -856,8 +857,14 @@ mod tests {
         assert_eq!(std::format!("{dio40}"), "DIO 40 MHz");
         let qio80 = FlashSettings::from_header([0xE9, 5, 0, 0x2F]).expect("valid");
         assert_eq!(std::format!("{qio80}"), "QIO 80 MHz");
-        assert_eq!(FlashSettings::from_header([0xE9, 1, 1, 0x01]).map(|s| (s.mode, s.mhz)), Some((FlashMode::Qout, 26)));
-        assert_eq!(FlashSettings::from_header([0xE9, 1, 3, 0x02]).map(|s| (s.mode, s.mhz)), Some((FlashMode::Dout, 20)));
+        assert_eq!(
+            FlashSettings::from_header([0xE9, 1, 1, 0x01]).map(|s| (s.mode, s.mhz)),
+            Some((FlashMode::Qout, 26))
+        );
+        assert_eq!(
+            FlashSettings::from_header([0xE9, 1, 3, 0x02]).map(|s| (s.mode, s.mhz)),
+            Some((FlashMode::Dout, 20))
+        );
         assert_eq!(FlashSettings::from_header([0xFF; 4]), None, "erased flash");
         assert_eq!(FlashSettings::from_header([0xE9, 1, 4, 0]), None, "unknown mode");
         assert_eq!(FlashSettings::from_header([0xE9, 1, 2, 0x05]), None, "unknown frequency");

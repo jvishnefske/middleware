@@ -154,7 +154,10 @@ impl fmt::Display for BindError {
             BindError::SharedKey(n) => write!(f, "channel {n} shares its key with another input"),
             BindError::NoResources(n) => write!(f, "channel {n}: no subscription slot left"),
             BindError::NoDelivery(n) => {
-                write!(f, "channel {n} is an input but the module exports no on_message")
+                write!(
+                    f,
+                    "channel {n} is an input but the module exports no on_message"
+                )
             }
             BindError::Route(n, e) => write!(f, "channel {n}: the source route failed ({e:?})"),
         }
@@ -189,8 +192,15 @@ pub enum Step {
 /// publishes.
 pub const fn source_shape(s: &SampleSource) -> (SensorKind, SampleFormat, u8, u32) {
     match s {
-        SampleSource::Imu(c) => (SensorKind::Imu, SampleFormat::I16, c.channels(), c.rate_hz as u32),
-        SampleSource::Microphone(c) => (SensorKind::Microphone, c.mode.format(), 1, c.rate_hz as u32),
+        SampleSource::Imu(c) => (
+            SensorKind::Imu,
+            SampleFormat::I16,
+            c.channels(),
+            c.rate_hz as u32,
+        ),
+        SampleSource::Microphone(c) => {
+            (SensorKind::Microphone, c.mode.format(), 1, c.rate_hz as u32)
+        }
     }
 }
 
@@ -202,12 +212,22 @@ fn fits(decl: &Decl, source: &RouteSource, adapter: Option<Adapter>) -> Result<(
         (DataKind::Frames, RouteSource::Frames(..)) if adapter.is_none() => Ok(()),
         (DataKind::Samples, RouteSource::Samples(s)) => {
             let (sensor, format, channels, rate_hz) = source_shape(s);
-            let shape = Shape { sensor, format, channels, rate_hz };
+            let shape = Shape {
+                sensor,
+                format,
+                channels,
+                rate_hz,
+            };
             let shape = match adapter {
                 Some(a) => a.output(shape).ok_or_else(|| BindError::Adapter(name()))?,
                 None => shape,
             };
-            if decl.as_channel().accepts_samples(shape.sensor, shape.format, shape.channels, shape.rate_hz) {
+            if decl.as_channel().accepts_samples(
+                shape.sensor,
+                shape.format,
+                shape.channels,
+                shape.rate_hz,
+            ) {
                 Ok(())
             } else {
                 Err(BindError::Mismatch(name()))
@@ -259,7 +279,9 @@ pub fn plan(
                     key: k.as_str().to_string(),
                 },
                 Target::Driver(p) => Step::Output { key: driver_key(p) },
-                Target::Local(_) | Target::Adapted { .. } => return Err(BindError::Direction(name())),
+                Target::Local(_) | Target::Adapted { .. } => {
+                    return Err(BindError::Direction(name()));
+                }
             },
             Direction::In => {
                 if !delivers {
@@ -282,7 +304,12 @@ pub fn plan(
                     return Err(BindError::NoResources(name()));
                 }
                 inputs.push(key.clone());
-                Step::Input { key, route, from, adapter }
+                Step::Input {
+                    key,
+                    route,
+                    from,
+                    adapter,
+                }
             }
         };
         steps.push(step);
@@ -333,7 +360,9 @@ impl ChannelTable {
             .position(|d| d.name.as_bytes() == name)
             .ok_or(AbiError::InvalidArgument)?;
         match self.resolved.get(i) {
-            Some(Resolved::Input { slot, .. }) => i32::try_from(*slot).map_err(|_| AbiError::NoResources),
+            Some(Resolved::Input { slot, .. }) => {
+                i32::try_from(*slot).map_err(|_| AbiError::NoResources)
+            }
             Some(Resolved::Output { .. }) => Ok(OUTPUT_BASE + i as i32),
             _ => Err(AbiError::Unsupported),
         }
@@ -344,7 +373,11 @@ impl ChannelTable {
     /// node (an unknown sender included).
     pub fn admits(&self, slot: usize, sender: Option<SenderId>) -> bool {
         self.resolved.iter().all(|r| match r {
-            Resolved::Input { slot: s, from: Some(node), .. } if *s == slot => sender == Some(*node),
+            Resolved::Input {
+                slot: s,
+                from: Some(node),
+                ..
+            } if *s == slot => sender == Some(*node),
             _ => true,
         })
     }
@@ -352,7 +385,11 @@ impl ChannelTable {
     /// The adapter of the input on `slot`, if it has one.
     pub fn adapter_mut(&mut self, slot: usize) -> Option<&mut AdapterState> {
         self.resolved.iter_mut().find_map(|r| match r {
-            Resolved::Input { slot: s, adapter: Some(a), .. } if *s == slot => Some(a),
+            Resolved::Input {
+                slot: s,
+                adapter: Some(a),
+                ..
+            } if *s == slot => Some(a),
             _ => None,
         })
     }
@@ -382,8 +419,15 @@ mod tests {
 
     fn decls() -> Vec<Decl> {
         [
-            Channel::samples("audio", Direction::In, Some(SensorKind::Microphone), 8_000, 16_000, true)
-                .with_formats(1 << SampleFormat::Levels as u8),
+            Channel::samples(
+                "audio",
+                Direction::In,
+                Some(SensorKind::Microphone),
+                8_000,
+                16_000,
+                true,
+            )
+            .with_formats(1 << SampleFormat::Levels as u8),
             Channel::bytes("cmd", Direction::In, false),
             Channel::bytes("level", Direction::Out, false),
         ]
@@ -429,7 +473,9 @@ mod tests {
                     adapter: None,
                 },
                 Step::Unbound,
-                Step::Output { key: "lab/level".into() },
+                Step::Output {
+                    key: "lab/level".into()
+                },
             ]
         );
     }
@@ -437,49 +483,125 @@ mod tests {
     #[test]
     fn bd4_bad_bindings_name_their_channel() {
         let d = decls();
-        let err = |entries: &[(&str, Target<'_>)], delivers, slots| plan(&d, Some(&bind(entries)), delivers, slots).unwrap_err();
-        assert_eq!(plan(&d, None, true, 8), Err(BindError::Unbound("audio".into())));
+        let err = |entries: &[(&str, Target<'_>)], delivers, slots| {
+            plan(&d, Some(&bind(entries)), delivers, slots).unwrap_err()
+        };
+        assert_eq!(
+            plan(&d, None, true, 8),
+            Err(BindError::Unbound("audio".into()))
+        );
         let audio = ("audio", Target::Local(levels(16_000)));
-        assert_eq!(err(&[("audio", Target::Local(levels(32_000)))], true, 8), BindError::Mismatch("audio".into()));
-        assert_eq!(err(&[("audio", Target::Local(pcm()))], true, 8), BindError::Mismatch("audio".into()));
-        let imu = RouteSource::Samples(SampleSource::Imu(ImuConfig::new(100, 2, false, 10).unwrap()));
-        assert_eq!(err(&[("audio", Target::Local(imu))], true, 8), BindError::Mismatch("audio".into()));
+        assert_eq!(
+            err(&[("audio", Target::Local(levels(32_000)))], true, 8),
+            BindError::Mismatch("audio".into())
+        );
+        assert_eq!(
+            err(&[("audio", Target::Local(pcm()))], true, 8),
+            BindError::Mismatch("audio".into())
+        );
+        let imu = RouteSource::Samples(SampleSource::Imu(
+            ImuConfig::new(100, 2, false, 10).unwrap(),
+        ));
+        assert_eq!(
+            err(&[("audio", Target::Local(imu))], true, 8),
+            BindError::Mismatch("audio".into())
+        );
         let frames = RouteSource::Frames(
             middleware::wasm_abi::route::Source::TestPattern,
             SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap(),
         );
-        assert_eq!(err(&[("audio", Target::Local(frames))], true, 8), BindError::Mismatch("audio".into()));
-        assert_eq!(err(&[audio, ("level", Target::Local(levels(16_000)))], true, 8), BindError::Direction("level".into()));
+        assert_eq!(
+            err(&[("audio", Target::Local(frames))], true, 8),
+            BindError::Mismatch("audio".into())
+        );
+        assert_eq!(
+            err(&[audio, ("level", Target::Local(levels(16_000)))], true, 8),
+            BindError::Direction("level".into())
+        );
         let shared = Target::Key(Key::from_static("lab/shared"));
-        assert_eq!(err(&[("audio", shared), ("cmd", shared)], true, 8), BindError::SharedKey("cmd".into()));
+        assert_eq!(
+            err(&[("audio", shared), ("cmd", shared)], true, 8),
+            BindError::SharedKey("cmd".into())
+        );
         // A key target cannot name a channel's internal key at all (the
         // binding refuses it), so a local source's stream is never shared.
         let mut b = Binding::new([0; 32], Version(1));
-        assert!(b.bind("cmd", Target::Key(Key::from_static("ch/audio"))).is_err());
+        assert!(
+            b.bind("cmd", Target::Key(Key::from_static("ch/audio")))
+                .is_err()
+        );
         assert_eq!(
-            err(&[audio, ("cmd", Target::Key(Key::from_static("x")))], true, 1),
+            err(
+                &[audio, ("cmd", Target::Key(Key::from_static("x")))],
+                true,
+                1
+            ),
             BindError::NoResources("cmd".into())
         );
-        assert_eq!(err(&[audio], false, 8), BindError::NoDelivery("audio".into()));
+        assert_eq!(
+            err(&[audio], false, 8),
+            BindError::NoDelivery("audio".into())
+        );
         let remote = Target::Remote {
             node: SenderId([1; 8]),
             key: Key::from_static("mic/level"),
         };
-        let steps = plan(&d, Some(&bind(&[("audio", remote), ("level", remote)])), true, 8).unwrap();
+        let steps = plan(
+            &d,
+            Some(&bind(&[("audio", remote), ("level", remote)])),
+            true,
+            8,
+        )
+        .unwrap();
         assert_eq!(
             steps[0],
-            Step::Input { key: "mic/level".into(), route: None, from: Some(SenderId([1; 8])), adapter: None }
+            Step::Input {
+                key: "mic/level".into(),
+                route: None,
+                from: Some(SenderId([1; 8])),
+                adapter: None
+            }
         );
-        assert_eq!(steps[2], Step::Output { key: "mic/level".into() });
+        assert_eq!(
+            steps[2],
+            Step::Output {
+                key: "mic/level".into()
+            }
+        );
         // AD2: an adapter that turns PCM into levels makes the PCM source
         // fit; one that does not take the source is refused.
-        let adapted = Target::Adapted { inner: Endpoint::Local(pcm()), adapter: Adapter::PcmToLevels { block: 160 } };
+        let adapted = Target::Adapted {
+            inner: Endpoint::Local(pcm()),
+            adapter: Adapter::PcmToLevels { block: 160 },
+        };
         let steps = plan(&d, Some(&bind(&[("audio", adapted)])), true, 8).unwrap();
-        assert!(matches!(&steps[0], Step::Input { adapter: Some(Adapter::PcmToLevels { block: 160 }), route: Some(_), .. }));
-        let wrong = Target::Adapted { inner: Endpoint::Local(levels(16_000)), adapter: Adapter::PcmToMuLaw };
-        assert_eq!(err(&[("audio", wrong)], true, 8), BindError::Adapter("audio".into()));
-        let on_key = Target::Adapted { inner: Endpoint::Key(Key::from_static("mic/pcm")), adapter: Adapter::PcmToMuLaw };
-        assert!(matches!(&plan(&d, Some(&bind(&[("audio", on_key)])), true, 8).unwrap()[0], Step::Input { adapter: Some(_), .. }));
+        assert!(matches!(
+            &steps[0],
+            Step::Input {
+                adapter: Some(Adapter::PcmToLevels { block: 160 }),
+                route: Some(_),
+                ..
+            }
+        ));
+        let wrong = Target::Adapted {
+            inner: Endpoint::Local(levels(16_000)),
+            adapter: Adapter::PcmToMuLaw,
+        };
+        assert_eq!(
+            err(&[("audio", wrong)], true, 8),
+            BindError::Adapter("audio".into())
+        );
+        let on_key = Target::Adapted {
+            inner: Endpoint::Key(Key::from_static("mic/pcm")),
+            adapter: Adapter::PcmToMuLaw,
+        };
+        assert!(matches!(
+            &plan(&d, Some(&bind(&[("audio", on_key)])), true, 8).unwrap()[0],
+            Step::Input {
+                adapter: Some(_),
+                ..
+            }
+        ));
         assert_eq!(BindError::Unbound("x".into()).channel(), "x");
     }
 
@@ -488,9 +610,15 @@ mod tests {
         let t = ChannelTable {
             decls: decls(),
             resolved: alloc::vec![
-                Resolved::Input { slot: 2, from: Some(SenderId([5; 8])), adapter: None },
+                Resolved::Input {
+                    slot: 2,
+                    from: Some(SenderId([5; 8])),
+                    adapter: None
+                },
                 Resolved::Unbound,
-                Resolved::Output { key: "lab/level".into() },
+                Resolved::Output {
+                    key: "lab/level".into()
+                },
             ],
         };
         use middleware::wasm_abi::AbiError;
@@ -498,7 +626,10 @@ mod tests {
         assert_eq!(t.open(b"cmd"), Err(AbiError::Unsupported));
         assert_eq!(t.open(b"level"), Ok(OUTPUT_BASE + 2));
         assert_eq!(t.open(b"nope"), Err(AbiError::InvalidArgument));
-        assert_eq!(t.output_key(OUTPUT_BASE + 2).map(|k| k.as_str()), Ok("lab/level"));
+        assert_eq!(
+            t.output_key(OUTPUT_BASE + 2).map(|k| k.as_str()),
+            Ok("lab/level")
+        );
         for h in [2, OUTPUT_BASE, OUTPUT_BASE + 1, OUTPUT_BASE + 9, -1] {
             assert_eq!(t.output_key(h), Err(AbiError::InvalidArgument), "{h}");
         }

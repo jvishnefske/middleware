@@ -209,8 +209,7 @@ impl SourceTable {
         if slot.epoch != epoch {
             return (self, Report::NONE);
         }
-        let (route, report) =
-            if ok { slot.route.published(now_ms) } else { slot.route.failed(now_ms) };
+        let (route, report) = if ok { slot.route.published(now_ms) } else { slot.route.failed(now_ms) };
         slot.route = route;
         (next, report)
     }
@@ -291,9 +290,7 @@ mod tests {
 
     #[test]
     fn r11_routes_take_turns() {
-        let t = SourceTable::new()
-            .start(0, key("app/a"), route(10, 0))
-            .start(3, key("app/b"), route(10, 0));
+        let t = SourceTable::new().start(0, key("app/a"), route(10, 0)).start(3, key("app/b"), route(10, 0));
         let (t, d) = t.due(0);
         let a = job(d);
         let t = t.finish(a.handle, a.epoch, true, 0).0;

@@ -58,9 +58,7 @@
 
 use middleware::Key;
 use middleware::loader::keys;
-use middleware::loader::trust::{
-    ControlCounter, ControlOp, SignedCommit, SignedControl, TrustState,
-};
+use middleware::loader::trust::{ControlCounter, ControlOp, SignedCommit, SignedControl, TrustState};
 use middleware::transport::HandlerError;
 
 /// A 48-bit ESP-NOW (Wi-Fi MAC) address.
@@ -76,15 +74,8 @@ pub enum Origin {
 }
 
 /// The system requests a radio peer may make on a claimed device.
-pub const AIR_KEYS: [Key<'static>; 7] = [
-    keys::INFO,
-    keys::TRUST_INFO,
-    keys::BEGIN,
-    keys::CHUNK,
-    keys::COMMIT,
-    keys::START,
-    keys::STOP,
-];
+pub const AIR_KEYS: [Key<'static>; 7] =
+    [keys::INFO, keys::TRUST_INFO, keys::BEGIN, keys::CHUNK, keys::COMMIT, keys::START, keys::STOP];
 
 /// What the device knows when it decides: its root of trust, the last
 /// accepted control counter and its own station MAC (the target a signed
@@ -255,12 +246,7 @@ pub fn admit(
 /// dispatched and the loader is (`receiving`) or is not mid-transfer: the
 /// requester of a `begin` that started one, unchanged while it continues,
 /// nobody once it ends.
-pub fn owner_after(
-    owner: Option<Origin>,
-    origin: Origin,
-    key: Key<'_>,
-    receiving: bool,
-) -> Option<Origin> {
+pub fn owner_after(owner: Option<Origin>, origin: Origin, key: Key<'_>, receiving: bool) -> Option<Origin> {
     match (receiving, key == keys::BEGIN) {
         (false, _) => None,
         (true, true) => Some(origin),
@@ -278,18 +264,11 @@ mod tests {
     const ME: Mac = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24];
 
     fn facts(trust: TrustState) -> Facts {
-        Facts {
-            trust,
-            control: ControlCounter(0),
-            own: ME,
-        }
+        Facts { trust, control: ControlCounter(0), own: ME }
     }
 
     fn claimed() -> Facts {
-        facts(TrustState::Claimed {
-            key: PublicKey::Ed25519([7; 32]),
-            min_version: Version(10),
-        })
+        facts(TrustState::Claimed { key: PublicKey::Ed25519([7; 32]), min_version: Version(10) })
     }
 
     fn k(s: &str) -> Key<'_> {
@@ -302,16 +281,8 @@ mod tests {
     fn o6_an_unclaimed_device_refuses_the_air_entirely() {
         let f = facts(TrustState::Unclaimed);
         for key in AIR_KEYS.iter().chain(&[keys::TRUST_CLAIM, k("app/x")]) {
-            assert_eq!(
-                admit(&f, None, HOST, *key, &[]),
-                Err(Refusal::Unclaimed),
-                "{key:?}"
-            );
-            assert_eq!(
-                admit(&f, None, Origin::Serial, *key, &[]),
-                DISPATCH,
-                "serial: {key:?}"
-            );
+            assert_eq!(admit(&f, None, HOST, *key, &[]), Err(Refusal::Unclaimed), "{key:?}");
+            assert_eq!(admit(&f, None, Origin::Serial, *key, &[]), DISPATCH, "serial: {key:?}");
         }
         assert_eq!(Refusal::Unclaimed.error(), HandlerError::Denied);
     }
@@ -320,77 +291,33 @@ mod tests {
     fn o6_a_claimed_device_allows_only_the_update_keys_over_the_air() {
         let f = claimed();
         let signed = [0u8; SIGNED_COMMIT_LEN];
-        for key in [
-            keys::INFO,
-            keys::TRUST_INFO,
-            keys::BEGIN,
-            keys::CHUNK,
-            keys::COMMIT,
-        ] {
+        for key in [keys::INFO, keys::TRUST_INFO, keys::BEGIN, keys::CHUNK, keys::COMMIT] {
             let body: &[u8] = if key == keys::COMMIT { &signed } else { &[] };
             assert_eq!(admit(&f, None, HOST, key, body), DISPATCH, "{key:?}");
         }
         // Discovery beacons are publications (radio task only, E18), never
         // requests.
-        for key in [
-            keys::TRUST_CLAIM,
-            keys::LOG,
-            keys::STATUS,
-            k("sys/other"),
-            k("app/x"),
-            k("sys"),
-            k("disc/cam/jpeg"),
-        ] {
-            assert_eq!(
-                admit(&f, None, HOST, key, &[7; 32]),
-                Err(Refusal::NotOverAir),
-                "{key:?}"
-            );
+        for key in
+            [keys::TRUST_CLAIM, keys::LOG, keys::STATUS, k("sys/other"), k("app/x"), k("sys"), k("disc/cam/jpeg")]
+        {
+            assert_eq!(admit(&f, None, HOST, key, &[7; 32]), Err(Refusal::NotOverAir), "{key:?}");
         }
-        assert_eq!(
-            admit(&f, None, Origin::Serial, keys::TRUST_CLAIM, &[7; 32]),
-            DISPATCH,
-            "serial may claim"
-        );
+        assert_eq!(admit(&f, None, Origin::Serial, keys::TRUST_CLAIM, &[7; 32]), DISPATCH, "serial may claim");
         assert_eq!(Refusal::NotOverAir.error(), HandlerError::Denied);
     }
 
     #[test]
     fn o6_a_commit_over_the_air_must_be_signed() {
         let f = claimed();
-        assert_eq!(
-            admit(&f, Some(HOST), HOST, keys::COMMIT, &[]),
-            Err(Refusal::UnsignedCommit)
-        );
-        assert_eq!(
-            admit(&f, Some(HOST), HOST, keys::COMMIT, &[0; 3]),
-            Err(Refusal::UnsignedCommit)
-        );
-        assert_eq!(
-            admit(&f, None, HOST, keys::COMMIT, &[]),
-            Err(Refusal::UnsignedCommit)
-        );
-        assert_eq!(
-            admit(&f, Some(HOST), HOST, keys::COMMIT, &[0; SIGNED_COMMIT_LEN]),
-            DISPATCH
-        );
+        assert_eq!(admit(&f, Some(HOST), HOST, keys::COMMIT, &[]), Err(Refusal::UnsignedCommit));
+        assert_eq!(admit(&f, Some(HOST), HOST, keys::COMMIT, &[0; 3]), Err(Refusal::UnsignedCommit));
+        assert_eq!(admit(&f, None, HOST, keys::COMMIT, &[]), Err(Refusal::UnsignedCommit));
+        assert_eq!(admit(&f, Some(HOST), HOST, keys::COMMIT, &[0; SIGNED_COMMIT_LEN]), DISPATCH);
         // Serial keeps the dispatcher's rules (an unclaimed device accepts
         // an unsigned commit there).
         let unclaimed = facts(TrustState::Unclaimed);
-        assert_eq!(
-            admit(
-                &unclaimed,
-                Some(Origin::Serial),
-                Origin::Serial,
-                keys::COMMIT,
-                &[]
-            ),
-            DISPATCH
-        );
-        assert_eq!(
-            admit(&f, Some(Origin::Serial), Origin::Serial, keys::COMMIT, &[]),
-            DISPATCH
-        );
+        assert_eq!(admit(&unclaimed, Some(Origin::Serial), Origin::Serial, keys::COMMIT, &[]), DISPATCH);
+        assert_eq!(admit(&f, Some(Origin::Serial), Origin::Serial, keys::COMMIT, &[]), DISPATCH);
         assert_eq!(Refusal::UnsignedCommit.error(), HandlerError::Denied);
         assert!(Refusal::UnsignedCommit.reason().contains("signed"));
         assert!(Refusal::UnsignedCommit.abandons_transfer());
@@ -414,41 +341,20 @@ mod tests {
         let r = admit(&f, Some(HOST), OTHER, keys::COMMIT, &[]);
         assert_eq!(r, Err(Refusal::NotOwner));
         assert!(!Refusal::NotOwner.abandons_transfer());
-        assert_eq!(
-            admit(&f, Some(Origin::Serial), HOST, keys::COMMIT, &[]),
-            Err(Refusal::NotOwner)
-        );
-        assert_eq!(
-            admit(&f, Some(HOST), HOST, keys::COMMIT, &[]),
-            Err(Refusal::UnsignedCommit)
-        );
+        assert_eq!(admit(&f, Some(Origin::Serial), HOST, keys::COMMIT, &[]), Err(Refusal::NotOwner));
+        assert_eq!(admit(&f, Some(HOST), HOST, keys::COMMIT, &[]), Err(Refusal::UnsignedCommit));
     }
 
     #[test]
     fn o16_start_and_stop_over_the_air_need_a_signed_body() {
         let f = claimed();
         for key in [keys::START, keys::STOP] {
-            assert_eq!(
-                admit(&f, None, HOST, key, &[]),
-                Err(Refusal::UnsignedControl),
-                "{key:?}"
-            );
-            assert_eq!(
-                admit(&f, None, HOST, key, &[1; 5]),
-                Err(Refusal::UnsignedControl),
-                "{key:?}"
-            );
+            assert_eq!(admit(&f, None, HOST, key, &[]), Err(Refusal::UnsignedControl), "{key:?}");
+            assert_eq!(admit(&f, None, HOST, key, &[1; 5]), Err(Refusal::UnsignedControl), "{key:?}");
             // Right length, no valid signature.
-            assert_eq!(
-                admit(&f, None, HOST, key, &[0; SIGNED_CONTROL_LEN]),
-                Err(Refusal::ControlRefused)
-            );
+            assert_eq!(admit(&f, None, HOST, key, &[0; SIGNED_CONTROL_LEN]), Err(Refusal::ControlRefused));
             // Serial is unchanged: no signature needed.
-            assert_eq!(
-                admit(&f, None, Origin::Serial, key, &[]),
-                DISPATCH,
-                "{key:?}"
-            );
+            assert_eq!(admit(&f, None, Origin::Serial, key, &[]), DISPATCH, "{key:?}");
         }
         assert_eq!(Refusal::UnsignedControl.error(), HandlerError::Denied);
         assert_eq!(Refusal::ControlRefused.error(), HandlerError::Denied);
@@ -462,113 +368,46 @@ mod tests {
         let s = SigningKey::from_bytes(&[3; 32]);
         let key = PublicKey::Ed25519(s.verifying_key().to_bytes());
         let f = Facts {
-            trust: TrustState::Claimed {
-                key,
-                min_version: Version(1),
-            },
+            trust: TrustState::Claimed { key, min_version: Version(1) },
             control: ControlCounter(100),
             own: ME,
         };
         let body = |op, target: &Mac, n: u64| {
             let m = control_message(op, target, ControlCounter(n));
-            SignedControl {
-                counter: ControlCounter(n),
-                signature: Signature(s.sign(&m).to_bytes()),
-            }
-            .encode()
+            SignedControl { counter: ControlCounter(n), signature: Signature(s.sign(&m).to_bytes()) }.encode()
         };
         assert_eq!(
             admit(&f, None, HOST, keys::STOP, &body(ControlOp::Stop, &ME, 101)),
-            Ok(Admission::Control {
-                counter: ControlCounter(101)
-            })
+            Ok(Admission::Control { counter: ControlCounter(101) })
         );
         assert_eq!(
-            admit(
-                &f,
-                Some(HOST),
-                OTHER,
-                keys::START,
-                &body(ControlOp::Start, &ME, 5000)
-            ),
-            Ok(Admission::Control {
-                counter: ControlCounter(5000)
-            }),
+            admit(&f, Some(HOST), OTHER, keys::START, &body(ControlOp::Start, &ME, 5000)),
+            Ok(Admission::Control { counter: ControlCounter(5000) }),
             "any peer holding a signature may send it; the owner rule is for transfers"
         );
         let refused = Err(Refusal::ControlRefused);
-        assert_eq!(
-            admit(&f, None, HOST, keys::STOP, &body(ControlOp::Stop, &ME, 100)),
-            refused,
-            "replay"
-        );
-        assert_eq!(
-            admit(&f, None, HOST, keys::STOP, &body(ControlOp::Stop, &ME, 7)),
-            refused,
-            "older"
-        );
-        assert_eq!(
-            admit(
-                &f,
-                None,
-                HOST,
-                keys::START,
-                &body(ControlOp::Stop, &ME, 101)
-            ),
-            refused,
-            "other command"
-        );
+        assert_eq!(admit(&f, None, HOST, keys::STOP, &body(ControlOp::Stop, &ME, 100)), refused, "replay");
+        assert_eq!(admit(&f, None, HOST, keys::STOP, &body(ControlOp::Stop, &ME, 7)), refused, "older");
+        assert_eq!(admit(&f, None, HOST, keys::START, &body(ControlOp::Stop, &ME, 101)), refused, "other command");
         let elsewhere = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x25];
-        assert_eq!(
-            admit(
-                &f,
-                None,
-                HOST,
-                keys::STOP,
-                &body(ControlOp::Stop, &elsewhere, 101)
-            ),
-            refused,
-            "other device"
-        );
+        assert_eq!(admit(&f, None, HOST, keys::STOP, &body(ControlOp::Stop, &elsewhere, 101)), refused, "other device");
         let mallory = SigningKey::from_bytes(&[4; 32]);
         let m = control_message(ControlOp::Stop, &ME, ControlCounter(101));
-        let forged = SignedControl {
-            counter: ControlCounter(101),
-            signature: Signature(mallory.sign(&m).to_bytes()),
-        };
-        assert_eq!(
-            admit(&f, None, HOST, keys::STOP, &forged.encode()),
-            refused,
-            "other key"
-        );
+        let forged = SignedControl { counter: ControlCounter(101), signature: Signature(mallory.sign(&m).to_bytes()) };
+        assert_eq!(admit(&f, None, HOST, keys::STOP, &forged.encode()), refused, "other key");
     }
 
     #[test]
     fn o7_only_the_owner_continues_a_transfer() {
         let f = claimed();
         let signed = [0u8; SIGNED_COMMIT_LEN];
-        assert_eq!(
-            admit(&f, Some(HOST), OTHER, keys::CHUNK, &[0; 8]),
-            Err(Refusal::NotOwner)
-        );
-        assert_eq!(
-            admit(&f, Some(HOST), Origin::Serial, keys::CHUNK, &[0; 8]),
-            Err(Refusal::NotOwner)
-        );
-        assert_eq!(
-            admit(&f, Some(Origin::Serial), HOST, keys::COMMIT, &signed),
-            Err(Refusal::NotOwner)
-        );
+        assert_eq!(admit(&f, Some(HOST), OTHER, keys::CHUNK, &[0; 8]), Err(Refusal::NotOwner));
+        assert_eq!(admit(&f, Some(HOST), Origin::Serial, keys::CHUNK, &[0; 8]), Err(Refusal::NotOwner));
+        assert_eq!(admit(&f, Some(Origin::Serial), HOST, keys::COMMIT, &signed), Err(Refusal::NotOwner));
         assert_eq!(admit(&f, Some(HOST), HOST, keys::CHUNK, &[0; 8]), DISPATCH);
         // Anyone may begin (taking the transfer over) or ask for info.
-        assert_eq!(
-            admit(&f, Some(HOST), Origin::Serial, keys::BEGIN, &[0; 8]),
-            DISPATCH
-        );
-        assert_eq!(
-            admit(&f, Some(Origin::Serial), HOST, keys::BEGIN, &[0; 8]),
-            DISPATCH
-        );
+        assert_eq!(admit(&f, Some(HOST), Origin::Serial, keys::BEGIN, &[0; 8]), DISPATCH);
+        assert_eq!(admit(&f, Some(Origin::Serial), HOST, keys::BEGIN, &[0; 8]), DISPATCH);
         assert_eq!(admit(&f, Some(HOST), OTHER, keys::INFO, &[]), DISPATCH);
         // With no transfer in progress the loader itself refuses strays.
         assert_eq!(admit(&f, None, OTHER, keys::CHUNK, &[0; 8]), DISPATCH);
@@ -578,22 +417,11 @@ mod tests {
     #[test]
     fn o7_begin_takes_the_transfer_and_its_end_frees_it() {
         assert_eq!(owner_after(None, HOST, keys::BEGIN, true), Some(HOST));
-        assert_eq!(
-            owner_after(Some(HOST), Origin::Serial, keys::BEGIN, true),
-            Some(Origin::Serial)
-        );
+        assert_eq!(owner_after(Some(HOST), Origin::Serial, keys::BEGIN, true), Some(Origin::Serial));
         assert_eq!(owner_after(Some(HOST), HOST, keys::CHUNK, true), Some(HOST));
         assert_eq!(owner_after(Some(HOST), OTHER, keys::INFO, true), Some(HOST));
-        assert_eq!(
-            owner_after(Some(HOST), HOST, keys::COMMIT, false),
-            None,
-            "committed or failed"
-        );
-        assert_eq!(
-            owner_after(None, HOST, keys::BEGIN, false),
-            None,
-            "refused begin"
-        );
+        assert_eq!(owner_after(Some(HOST), HOST, keys::COMMIT, false), None, "committed or failed");
+        assert_eq!(owner_after(None, HOST, keys::BEGIN, false), None, "refused begin");
     }
 
     /// The controller's per-request sequence over the real dispatcher,
@@ -630,33 +458,16 @@ mod tests {
 
         impl Dev {
             fn claimed() -> Self {
-                let key =
-                    PublicKey::Ed25519(SigningKey::from_bytes(&[1; 32]).verifying_key().to_bytes());
-                let trust = TrustState::Claimed {
-                    key,
-                    min_version: Version(0),
-                };
-                Dev {
-                    state: State::boot(false).with_trust(trust),
-                    owner: None,
-                    running: false,
-                }
+                let key = PublicKey::Ed25519(SigningKey::from_bytes(&[1; 32]).verifying_key().to_bytes());
+                let trust = TrustState::Claimed { key, min_version: Version(0) };
+                Dev { state: State::boot(false).with_trust(trust), owner: None, running: false }
             }
 
             /// The controller's `handle`: admit, persist a control counter,
             /// dispatch (staging over the air), track the owner and whether
             /// the payload runs.
-            fn request(
-                &mut self,
-                origin: Origin,
-                key: Key<'_>,
-                body: &[u8],
-            ) -> Result<(), HandlerError> {
-                let facts = Facts {
-                    trust: self.state.trust(),
-                    control: self.state.control(),
-                    own: ME,
-                };
+            fn request(&mut self, origin: Origin, key: Key<'_>, body: &[u8]) -> Result<(), HandlerError> {
+                let facts = Facts { trust: self.state.trust(), control: self.state.control(), own: ME };
                 let body = match admit(&facts, self.owner, origin, key, body) {
                     Err(r) => {
                         if r.abandons_transfer() {
@@ -671,10 +482,7 @@ mod tests {
                     }
                     Ok(Admission::Dispatch) => body,
                 };
-                let ctx = Context {
-                    staging: matches!(origin, Origin::Air(_)),
-                    ..CTX
-                };
+                let ctx = Context { staging: matches!(origin, Origin::Air(_)), ..CTX };
                 let mut out = [0u8; 128];
                 let o = handle_request(self.state, &ctx, &Request::new(key, body), &mut out);
                 self.state = o.state;
@@ -697,12 +505,7 @@ mod tests {
                 self.request(origin, keys::BEGIN, &b)
             }
 
-            fn chunk(
-                &mut self,
-                origin: Origin,
-                image: &[u8],
-                i: usize,
-            ) -> Result<(), HandlerError> {
+            fn chunk(&mut self, origin: Origin, image: &[u8], i: usize) -> Result<(), HandlerError> {
                 let part = image.chunks(40).nth(i).expect("chunk");
                 let mut b = [0u8; 44];
                 b[..4].copy_from_slice(&((i * 40) as u32).to_le_bytes());
@@ -710,47 +513,17 @@ mod tests {
                 self.request(origin, keys::CHUNK, &b[..4 + part.len()])
             }
 
-            fn commit(
-                &mut self,
-                origin: Origin,
-                image: &[u8],
-                version: u32,
-            ) -> Result<(), HandlerError> {
-                let m = signed_message(
-                    image.len() as u32,
-                    Version(version),
-                    &ImageHash::digest(image),
-                );
+            fn commit(&mut self, origin: Origin, image: &[u8], version: u32) -> Result<(), HandlerError> {
+                let m = signed_message(image.len() as u32, Version(version), &ImageHash::digest(image));
                 let signature = Signature(SigningKey::from_bytes(&[1; 32]).sign(&m).to_bytes());
-                self.request(
-                    origin,
-                    keys::COMMIT,
-                    &SignedCommit {
-                        version: Version(version),
-                        signature,
-                    }
-                    .encode(),
-                )
+                self.request(origin, keys::COMMIT, &SignedCommit { version: Version(version), signature }.encode())
             }
 
-            fn control(
-                &mut self,
-                origin: Origin,
-                op: ControlOp,
-                counter: u64,
-            ) -> Result<(), HandlerError> {
+            fn control(&mut self, origin: Origin, op: ControlOp, counter: u64) -> Result<(), HandlerError> {
                 let m = control_message(op, &ME, ControlCounter(counter));
                 let signature = Signature(SigningKey::from_bytes(&[1; 32]).sign(&m).to_bytes());
-                let body = SignedControl {
-                    counter: ControlCounter(counter),
-                    signature,
-                }
-                .encode();
-                let key = if op == ControlOp::Start {
-                    keys::START
-                } else {
-                    keys::STOP
-                };
+                let body = SignedControl { counter: ControlCounter(counter), signature }.encode();
+                let key = if op == ControlOp::Start { keys::START } else { keys::STOP };
                 self.request(origin, key, &body)
             }
 
@@ -797,64 +570,32 @@ mod tests {
             d.begin(Origin::Serial, &a).unwrap();
             d.chunk(Origin::Serial, &a, 0).unwrap();
             d.begin(HOST, &b).unwrap();
-            assert_eq!(
-                d.chunk(Origin::Serial, &a, 1),
-                Err(HandlerError::InvalidRequest)
-            );
-            assert_eq!(
-                d.chunk(OTHER, &b, 0),
-                Err(HandlerError::InvalidRequest),
-                "another radio peer"
-            );
+            assert_eq!(d.chunk(Origin::Serial, &a, 1), Err(HandlerError::InvalidRequest));
+            assert_eq!(d.chunk(OTHER, &b, 0), Err(HandlerError::InvalidRequest), "another radio peer");
             for i in 0..3 {
                 d.chunk(HOST, &b, i).unwrap();
             }
-            assert_eq!(
-                d.request(HOST, keys::COMMIT, &[]),
-                Err(HandlerError::Denied),
-                "unsigned over the air"
-            );
+            assert_eq!(d.request(HOST, keys::COMMIT, &[]), Err(HandlerError::Denied), "unsigned over the air");
             // ...which ends the owner's transfer, like a refused commit on
             // serial.
             assert_eq!((d.state.status(), d.owner), (PayloadStatus::Empty, None));
-            assert_eq!(
-                d.chunk(HOST, &b, 0),
-                Err(HandlerError::InvalidRequest),
-                "no transfer any more"
-            );
+            assert_eq!(d.chunk(HOST, &b, 0), Err(HandlerError::InvalidRequest), "no transfer any more");
             d.begin(HOST, &b).unwrap();
             for i in 0..3 {
                 d.chunk(HOST, &b, i).unwrap();
             }
             d.commit(HOST, &b, 7).unwrap();
             assert_eq!(d.state.status(), PayloadStatus::Stopped);
-            assert!(matches!(
-                d.state.trust(),
-                TrustState::Claimed {
-                    min_version: Version(7),
-                    ..
-                }
-            ));
+            assert!(matches!(d.state.trust(), TrustState::Claimed { min_version: Version(7), .. }));
             // Replaying the same signed upload is a stale version: Denied.
             d.begin(HOST, &b).unwrap();
             for i in 0..3 {
                 d.chunk(HOST, &b, i).unwrap();
             }
             assert_eq!(d.commit(HOST, &b, 7), Err(HandlerError::Denied));
-            assert_eq!(
-                d.state.status(),
-                PayloadStatus::Stopped,
-                "the installed image stays"
-            );
-            assert_eq!(
-                d.request(HOST, keys::TRUST_CLAIM, &[9; 32]),
-                Err(HandlerError::Denied)
-            );
-            assert_eq!(
-                d.request(HOST, keys::START, &[]),
-                Err(HandlerError::Denied),
-                "unsigned start"
-            );
+            assert_eq!(d.state.status(), PayloadStatus::Stopped, "the installed image stays");
+            assert_eq!(d.request(HOST, keys::TRUST_CLAIM, &[9; 32]), Err(HandlerError::Denied));
+            assert_eq!(d.request(HOST, keys::START, &[]), Err(HandlerError::Denied), "unsigned start");
             d.control(HOST, ControlOp::Start, 1).unwrap();
             assert_eq!(d.state.status(), PayloadStatus::Running);
         }
@@ -872,20 +613,13 @@ mod tests {
             assert!(d.running);
             assert_eq!(d.state.status(), PayloadStatus::Running);
             // Spoofed or bad commits: still running.
-            assert_eq!(
-                d.request(OTHER, keys::COMMIT, &[]),
-                Err(HandlerError::Denied)
-            );
+            assert_eq!(d.request(OTHER, keys::COMMIT, &[]), Err(HandlerError::Denied));
             assert!(d.running && d.state.status() == PayloadStatus::Running);
             d.begin(OTHER, &b).unwrap();
             for i in 0..3 {
                 d.chunk(OTHER, &b, i).unwrap();
             }
-            assert_eq!(
-                d.commit(OTHER, &b, 3),
-                Err(HandlerError::Denied),
-                "stale version"
-            );
+            assert_eq!(d.commit(OTHER, &b, 3), Err(HandlerError::Denied), "stale version");
             assert!(d.running && d.state.status() == PayloadStatus::Running);
             // Unsigned stop and start: Denied, still running.
             assert_eq!(d.request(OTHER, keys::STOP, &[]), Err(HandlerError::Denied));
@@ -907,16 +641,9 @@ mod tests {
             let mut d = Dev::claimed();
             d.begin(HOST, &b).unwrap();
             d.chunk(HOST, &b, 0).unwrap();
-            assert_eq!(
-                d.request(OTHER, keys::COMMIT, &[]),
-                Err(HandlerError::InvalidRequest),
-                "NotOwner"
-            );
+            assert_eq!(d.request(OTHER, keys::COMMIT, &[]), Err(HandlerError::InvalidRequest), "NotOwner");
             assert_eq!(d.owner, Some(HOST));
-            assert!(matches!(
-                d.state.loader(),
-                Loader::Receiving { received: 40, .. }
-            ));
+            assert!(matches!(d.state.loader(), Loader::Receiving { received: 40, .. }));
             for i in 1..3 {
                 d.chunk(HOST, &b, i).unwrap();
             }
@@ -930,35 +657,17 @@ mod tests {
             let mut d = Dev::claimed();
             d.install_running(&a, 2);
             d.control(HOST, ControlOp::Stop, 1000).unwrap();
-            assert_eq!(
-                (d.running, d.state.control()),
-                (false, ControlCounter(1000))
-            );
-            assert_eq!(
-                d.control(HOST, ControlOp::Start, 1000),
-                Err(HandlerError::Denied),
-                "same counter"
-            );
-            assert_eq!(
-                d.control(OTHER, ControlOp::Stop, 999),
-                Err(HandlerError::Denied),
-                "older"
-            );
+            assert_eq!((d.running, d.state.control()), (false, ControlCounter(1000)));
+            assert_eq!(d.control(HOST, ControlOp::Start, 1000), Err(HandlerError::Denied), "same counter");
+            assert_eq!(d.control(OTHER, ControlOp::Stop, 999), Err(HandlerError::Denied), "older");
             assert!(!d.running);
             d.control(OTHER, ControlOp::Start, 1001).unwrap();
             assert!(d.running);
-            assert_eq!(
-                d.control(HOST, ControlOp::Stop, 1001),
-                Err(HandlerError::Denied),
-                "replayed counter"
-            );
+            assert_eq!(d.control(HOST, ControlOp::Stop, 1001), Err(HandlerError::Denied), "replayed counter");
             assert!(d.running);
             // Serial needs no signature and leaves the counter alone.
             d.request(Origin::Serial, keys::STOP, &[]).unwrap();
-            assert_eq!(
-                (d.running, d.state.control()),
-                (false, ControlCounter(1001))
-            );
+            assert_eq!((d.running, d.state.control()), (false, ControlCounter(1001)));
         }
     }
 }
