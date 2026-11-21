@@ -858,9 +858,12 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   the id, both locally administered unicast and different; the NCM link's
   IPv4 address `169.254.a.b`, /16, with `a` and `b` in 1..=254 from the
   same hash (never 169.254.0/24, 169.254.255/24 or a `.0`/`.255` host
-  byte; no RFC 3927 probing by the board); embassy-net's seed is the hash
-  — firmware-rp `netid::tests::d45_*` (100 000 ids, a golden id checked
-  with Python).
+  byte; no RFC 3927 probing by the board). embassy-net's seed is never
+  the node id alone (the id is public, in the mDNS TXT): `seed(entropy,
+  node)` mixes 8 bytes of boot entropy (RP2350 TRNG, RP2040 ROSC random
+  bit) with the id's hash through the splitmix64 finalizer, so for one
+  node every entropy value gives another seed — firmware-rp
+  `netid::tests::d45_*` (100 000 ids, a golden id checked with Python).
 
 ### Transport contract 0.5 (K…)
 

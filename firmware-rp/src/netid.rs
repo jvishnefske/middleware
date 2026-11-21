@@ -13,8 +13,11 @@
 //!   a `.0` or `.255` host byte. [`PREFIX_LEN`] is 16. The board does not
 //!   probe (RFC 3927 §2.2); a host that finds the address taken picks
 //!   another.
-//! * [`seed`] — embassy-net's random seed (TCP ports, DHCP transaction
-//!   ids), from the node id: distinct per board, not secret.
+//! * [`seed`] — embassy-net's random seed (ephemeral ports, DHCP
+//!   transaction ids, TCP initial sequence numbers if TCP is ever on): boot
+//!   entropy from the chip (the RP2350's TRNG, the RP2040's ROSC random
+//!   bit) mixed with the node id. The node id is public (it is in the mDNS
+//!   TXT), so it never seeds on its own: there is no seed without entropy.
 
 use middleware::SenderId;
 
@@ -59,13 +62,25 @@ pub const fn link_local(node: SenderId) -> [u8; 4] {
     [169, 254, (1 + n / 254) as u8, (1 + n % 254) as u8]
 }
 
-/// embassy-net's random seed for node `node`.
-pub const fn seed(node: SenderId) -> u64 {
-    hash(node)
+/// embassy-net's random seed from 8 bytes of boot `entropy` (the chip's
+/// TRNG or ROSC), mixed with node `node` so two boards with a weak source
+/// still differ. The entropy is what makes it unpredictable.
+pub const fn seed(entropy: [u8; 8], node: SenderId) -> u64 {
+    // The splitmix64 finalizer is a bijection, so for one node every
+    // entropy value gives a distinct seed.
+    mix(u64::from_le_bytes(entropy) ^ mix(hash(node)))
+}
+
+/// The splitmix64 finalizer.
+const fn mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
     /// A xorshift64 sequence of node ids.
@@ -115,12 +130,38 @@ mod tests {
         assert_eq!(mac(id, Side::Device), [0x02, 0x4D, 0x79, 0xDA, 0x7A, 0x44]);
         assert_eq!(mac(id, Side::Host), [0x06, 0x4D, 0x79, 0xDA, 0x7A, 0x44]);
         assert_eq!(link_local(id), GOLDEN_IP);
-        assert_eq!(seed(id), 0x79DA_7A44_7CE8_8D4F);
         // Neighbouring ids get other addresses.
         let other = SenderId([0xE6, 0x61, 0x38, 0x52, 0x83, 0x1F, 0x2A, 0x0C]);
         assert_ne!(link_local(other), link_local(id));
         assert_ne!(mac(other, Side::Device), mac(id, Side::Device));
-        assert_ne!(seed(other), seed(id));
+    }
+
+    #[test]
+    fn d45_the_seed_follows_the_boot_entropy_not_the_node_id() {
+        let id = SenderId([0xE6, 0x61, 0x38, 0x52, 0x83, 0x1F, 0x2A, 0x0B]);
+        let other = SenderId([0xE6, 0x61, 0x38, 0x52, 0x83, 0x1F, 0x2A, 0x0C]);
+        let e = [0x5A, 0x17, 0xC3, 0x08, 0x9E, 0x44, 0xB1, 0x6D];
+        // Deterministic in both inputs (the host can test it) ...
+        assert_eq!(seed(e, id), seed(e, id));
+        // ... the node id alone does not give it: not the public hash
+        // (or a value derived from the id only) ...
+        assert_ne!(seed(e, id), hash(id));
+        assert_ne!(seed([0; 8], id), hash(id));
+        // ... and every change of entropy gives another seed for the same
+        // node (one bit, and 100 000 xorshift values, all distinct).
+        for byte in 0..8 {
+            for bit in 0..8 {
+                let mut f = e;
+                f[byte] ^= 1 << bit;
+                assert_ne!(seed(f, id), seed(e, id), "byte {byte} bit {bit}");
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for x in ids(100_000) {
+            assert!(seen.insert(seed(x.0, id)), "a repeated seed");
+        }
+        // Two boards with the same (weak) entropy still differ.
+        assert_ne!(seed(e, other), seed(e, id));
     }
 
     /// 0x79da_7a44_7ce8_8d4f % (254 * 254) = 53731 = 211 * 254 + 137.
