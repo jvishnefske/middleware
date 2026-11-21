@@ -576,6 +576,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "embassy-net-wiznet"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "336e290ec0eedc19e9d0a948d2f715ea187de79da517a0a24e55553c1a185ab8"
+dependencies = [
+ "embassy-futures",
+ "embassy-net-driver-channel",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+]
+
+[[package]]
 name = "embassy-rp"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -637,6 +650,7 @@ dependencies = [
  "critical-section",
  "document-features",
  "embassy-time-driver",
+ "embassy-time-queue-utils",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -1538,10 +1552,12 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
+ "embassy-net-wiznet",
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embedded-hal 1.0.0",
  "embedded-hal-async",
  "embedded-io-async 0.7.0",
  "embedded-storage",

@@ -146,6 +146,12 @@ embassy-futures = "0.1.2"
 embedded-io-async = "0.7"
 # The W5500 SPI wrapper's tests drive it with a recording fake device.
 embedded-hal-async = "1.0"
+# ... and the contract test runs the real driver over it (its reset and
+# PLL waits on embassy-time's std clock; dev only, so the chip builds keep
+# embassy-rp's time driver).
+embassy-net-wiznet = "0.3.0"
+embedded-hal = "1.0"
+embassy-time = { version = "0.5.1", features = ["std", "generic-queue-8"] }
 
 [profile.dev]
 opt-level = "s"
