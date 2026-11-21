@@ -63,6 +63,7 @@ class FixtureClient extends RequestClient {
     proto: Protocol,
     private readonly f: WireFixture,
     private readonly drop: number | null = null,
+    private readonly opts: { noManifest?: boolean } = {},
   ) {
     super(proto);
   }
@@ -70,7 +71,7 @@ class FixtureClient extends RequestClient {
     this.asked.push(`${key}${body.length ? `#${[...body].join(",")}` : ""}`);
     const r = this.f.responses;
     if (key === "sys/info") return unhex(r["sys/info"]);
-    if (key === "sys/manifest") return unhex(r["sys/manifest"]);
+    if (key === "sys/manifest" && !this.opts.noManifest) return unhex(r["sys/manifest"]);
     if (key === "sys/manifest/cm") {
       const page = body[0] ?? 0;
       const hex = page === this.drop ? undefined : r["sys/manifest/cm"][page];
@@ -274,6 +275,35 @@ describe("probeNode", () => {
     const bad = input(f);
     bad.pages = [bad.pages[0], bad.pages[0]];
     expect(decodeProbe(proto, bad).problems).toContain("sys/manifest/cm page 1 came back as page 0");
+  });
+
+  it("reports a page whose page count is not the manifest's", () => {
+    const f = fixture("kd240.wire.json");
+    const bad = input(f);
+    const page = bad.pages[0]!.slice();
+    expect(page[1]).toBe(1); // the header's page count
+    page[1] = 2;
+    bad.pages = [page];
+    expect(decodeProbe(proto, bad).problems).toContain("sys/manifest/cm page 0 says 2 pages, the manifest 1");
+  });
+
+  it("rejects a node that answers sys/manifest with NotFound", async () => {
+    const f = fixture("kd240.wire.json");
+    const c = new FixtureClient(proto, f, null, { noManifest: true });
+    await expect(probeNode(c, proto)).rejects.toThrow(/no sys\/manifest/);
+    expect(c.asked).toEqual(["sys/info", "sys/manifest"]);
+  });
+
+  it("reports a malformed manifest and one without control points", () => {
+    const f = fixture("kd240.wire.json");
+    const malformed = decodeProbe(proto, { ...input(f), manifest: new Uint8Array([1, 2]), pages: [] });
+    expect(malformed.problems).toContain("sys/manifest is malformed");
+    expect(malformed.points).toEqual([]);
+    const plain = proto.simulatorManifest(f.facts.node)!;
+    expect(proto.decodeManifest(plain)?.controlModules).toBeUndefined();
+    const none = decodeProbe(proto, { ...input(f), manifest: plain, pages: input(f).pages });
+    expect(none.problems).toContain("the manifest lists no control points (sys/manifest/cm)");
+    expect(none.points).toEqual([]);
   });
 
   it("refuses a node without a manifest or control points", async () => {
