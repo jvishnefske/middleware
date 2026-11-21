@@ -40,7 +40,10 @@
 //! `SO_REUSEPORT` (so it can share the port with a system mDNS daemon),
 //! joins `224.0.0.251` on the default interface, multicasts to
 //! `224.0.0.251:5353` with IP TTL 255, and accepts on-link sources only
-//! ([`OriginPolicy::OnLink`], see [`super::origin`]). Setting a
+//! ([`OriginPolicy::OnLink`], see [`super::origin`]); multicast leaves by
+//! the interface the routing table picks for the group unless
+//! [`multicast_interface`](MdnsAnnouncerBuilder::multicast_interface) names
+//! one. Setting a
 //! [`destination`](MdnsAnnouncerBuilder::destination) explicitly (tests on
 //! loopback) also stops the group join and selects [`OriginPolicy::Any`];
 //! both can be set again afterwards. Replies to legacy and QU queries go to

@@ -817,7 +817,13 @@ fn monitor<L: Endpoint>(
 /// `scout`: the nodes on the local network ([`mwctl::scout`]).
 #[cfg(feature = "zenoh")]
 fn scout(seconds: u64) -> Result<(), Error> {
-    eprintln!("scouting Zenoh on the local network for {seconds} s ...");
+    if cfg!(feature = "mdns") {
+        eprintln!("scouting Zenoh and browsing mDNS on the local network for {seconds} s ...");
+    } else {
+        eprintln!(
+            "scouting Zenoh on the local network for {seconds} s ... (no mDNS: built without --features mdns)"
+        );
+    }
     let rows = mwctl::scout::run(seconds)?;
     print!("{}", mwctl::scout::format(&rows));
     Ok(())

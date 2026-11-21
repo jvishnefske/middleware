@@ -123,7 +123,11 @@ COMMANDS:
                                admin space (clients such as the RT1050 appear there), and
                                every node's sys/info. Not seen: ESP-NOW nodes (ask a
                                gateway's `peers`), sessions behind no scouted router, and
-                               other subnets. Needs no --port
+                               other subnets. Built with --features mdns too, it also
+                               browses mDNS for _mw-node._tcp (the MDNS column; `mdns` rows
+                               for nodes only mDNS saw); the unicast replies need UDP from
+                               port 5353 let in (a host firewall may drop them), Linux
+                               only. Needs no --port
     key new <KEYFILE>          Create a signing key: 32 random bytes (the Ed25519 seed),
                                mode 0600, never overwriting; prints the public key
     key pub <KEYFILE>          Print a key file's public key (hex)

@@ -19,6 +19,7 @@ pub struct MdnsAnnouncerBuilder {
     bind: SocketAddr,
     destination: SocketAddr,
     join: Option<Ipv4Addr>,
+    multicast_if: Option<Ipv4Addr>,
     table: Result<AnnounceTable, AnnounceError>,
     policy: OriginPolicy,
     on_link: Option<OnLink>,
@@ -30,6 +31,7 @@ impl Default for MdnsAnnouncerBuilder {
             bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT)),
             destination: SocketAddr::V4(SocketAddrV4::new(MDNS_GROUP_V4, MDNS_PORT)),
             join: Some(Ipv4Addr::UNSPECIFIED),
+            multicast_if: None,
             table: AnnounceTable::new(DEFAULT_HOST),
             policy: OriginPolicy::OnLink,
             on_link: None,
@@ -59,6 +61,17 @@ impl MdnsAnnouncerBuilder {
     pub fn join_multicast(self, interface: Ipv4Addr) -> Self {
         MdnsAnnouncerBuilder {
             join: Some(interface),
+            ..self
+        }
+    }
+
+    /// Sends multicast out of the interface with address `interface`
+    /// (`IP_MULTICAST_IF`) instead of the one the routing table picks for
+    /// `224.0.0.251`; for a host with several LANs, or none with a default
+    /// route. Default: unset.
+    pub fn multicast_interface(self, interface: Ipv4Addr) -> Self {
+        MdnsAnnouncerBuilder {
+            multicast_if: Some(interface),
             ..self
         }
     }
@@ -110,6 +123,9 @@ impl MdnsAnnouncerBuilder {
         let socket = UdpSocket::from_std(socket)?;
         if self.destination.ip().is_multicast() {
             socket.set_multicast_ttl_v4(255)?;
+        }
+        if let Some(interface) = self.multicast_if {
+            socket2::SockRef::from(&socket).set_multicast_if_v4(&interface)?;
         }
         if let Some(interface) = self.join {
             socket.join_multicast_v4(MDNS_GROUP_V4, interface)?;
@@ -236,6 +252,28 @@ mod tests {
             }
         );
         assert!(a.table().is_empty());
+    }
+
+    #[tokio::test]
+    async fn multicast_interface_picks_the_egress_interface() {
+        let build = |b: MdnsAnnouncerBuilder| {
+            b.bind("127.0.0.1:0".parse().unwrap())
+                .destination("127.0.0.1:9".parse().unwrap())
+                .host("unit.local")
+                .build()
+        };
+        let egress = |a: &MdnsAnnouncer| {
+            socket2::SockRef::from(a.socket.get_ref())
+                .multicast_if_v4()
+                .unwrap()
+        };
+        // Unset: the routing table chooses.
+        let a = build(MdnsAnnouncer::builder()).await.unwrap();
+        assert_eq!(egress(&a), Ipv4Addr::UNSPECIFIED);
+        let a = build(MdnsAnnouncer::builder().multicast_interface(Ipv4Addr::LOCALHOST))
+            .await
+            .unwrap();
+        assert_eq!(egress(&a), Ipv4Addr::LOCALHOST);
     }
 
     #[tokio::test]

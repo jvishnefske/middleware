@@ -23,7 +23,8 @@
 #   * cloud feature sets (including `dns-sd`, `memory` and `udp`) never enable an
 #     embedded feature;
 #   * the host CLI `mwctl` uses only the pure, synchronous core: no
-#     middleware feature beyond `default` and no cloud dependency;
+#     middleware feature beyond `default` and no cloud dependency; its
+#     optional `mdns` browse (D39, with `zenoh`) enables host features only;
 #   * the mesh service runner `mw-service` (design.md MS5) enables exactly
 #     the host features grpc, istio, dns-sd and zenoh of middleware, none
 #     embedded, and its runner dependencies (tracing, OpenTelemetry, YAML)
@@ -37,7 +38,7 @@
 #     only what the device side needs (`serial`, the link it serves;
 #     `trust`, signed commits; `espnow`, its ESP-NOW gateway's radio over the
 #     USB bridge (EG12), which esp-base's pure core also builds) beside
-#     `zenoh`;
+#     `zenoh` and `mdns` (its announcement, D32);
 #   * the bridge framing `radio_bridge` is ungated (EG1), so the no-feature
 #     build below and mwctl's feature-free build both compile it.
 set -euo pipefail
@@ -166,6 +167,13 @@ if [ -n "$extra" ]; then
     fail "mwctl enables middleware features: $extra"
 fi
 
+echo "== D39: mwctl's optional mdns browse (with zenoh) enables host features only"
+mwctl_mdns="$(features_of_self -p mwctl --features zenoh,mdns | sort -u)"
+grep -qx mdns <<<"$mwctl_mdns" || fail "mwctl --features mdns does not enable middleware/mdns"
+if grep -Eqx "$EMBEDDED_FEATURES" <<<"$mwctl_mdns"; then
+    fail "mwctl --features zenoh,mdns enables an embedded feature ($EMBEDDED_FEATURES)"
+fi
+
 echo "== MS5: mw-service enables host features only"
 cargo build --quiet -p mw-service
 svc_features="$(features_of_self -p mw-service | sort -u)"
@@ -201,7 +209,7 @@ fi
 echo "== PN9: mw-posix-node is host only"
 cargo build --quiet -p mw-posix-node
 pn_features="$(features_of_self -p mw-posix-node | sort -u)"
-for want in zenoh serial trust espnow; do
+for want in zenoh serial trust espnow mdns; do
     grep -qx "$want" <<<"$pn_features" || fail "mw-posix-node does not enable middleware/$want"
 done
 if grep -Eqx 'ble|cam-fixtures|zenoh-lite' <<<"$pn_features"; then

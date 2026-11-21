@@ -18,6 +18,11 @@
 #            `environment.MW_POSIX_NODE_ZENOH_SYS = "off"` to turn it off.
 #            The session is a Zenoh client of MW_ZENOH_ROUTER with an id
 #            derived from the node id, so the sender id survives restarts.
+#   mdns     off by default (MW_POSIX_NODE_MDNS); set
+#            `environment.MW_POSIX_NODE_MDNS = "on"` (or a unicast IPv4
+#            address to pin) to announce the node as posix-<node id> on
+#            _mw-node._tcp (posix-node/src/mdns_node.rs). It binds UDP 5353
+#            beside avahi; with avahi off, open UDP 5353 in the firewall.
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.mw-posix-node;
