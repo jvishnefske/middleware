@@ -890,8 +890,8 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
 - [x] D51 The network links fit the RP2350's 136 KiB outside the heap,
   measured on the release builds (`rust-size`, `rust-nm`; `build.sh`
   prints the statics outside the heap): 43 244 bytes without a link,
-  24 800 more with `usb-ncm` (the mDNS task pool 14 784, the NCM channel
-  6 188, the NCM runner 2 912, 2 socket slots 736) or 23 020 with `w5500`
+  24 824 more with `usb-ncm` (the mDNS task pool 14 784, the NCM channel
+  6 188, the NCM runner 2 912, 2 socket slots 736) or 23 036 with `w5500`
   (the same pool, the driver's channel 6 188, 3 socket slots 1 160),
   the deepest poll
   36 440 bytes (the mDNS task, by direct calls on thumbv8m), and a 16 KiB

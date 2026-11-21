@@ -184,12 +184,13 @@ pub mod net_budget {
     /// What `usb-ncm` adds: the mDNS task pool (14 784, the announcer and
     /// the socket's 4 KiB + 2 KiB buffers), the NCM channel's four packets
     /// (6 188), the NCM runner's pool (2 912), 2 socket slots (736), the
-    /// stack runner's pool and the NCM control state.
-    pub const USB_NCM_STATICS: usize = 24_800;
+    /// stack runner's pool, the NCM control state, and the TRNG read the
+    /// main task's future holds across its timeout (24).
+    pub const USB_NCM_STATICS: usize = 24_824;
     /// What `w5500` adds: the same mDNS task pool, the driver's channel
     /// (6 188), 3 socket slots with DHCP (1 160), the driver's and the
-    /// stack runner's pools, the SPI0 bus.
-    pub const W5500_STATICS: usize = 23_020;
+    /// stack runner's pools, the SPI0 bus and the TRNG read (16).
+    pub const W5500_STATICS: usize = 23_036;
     /// The same on the RP2040 (no heap, no payload runtime): `.data` +
     /// `.bss` without a link, and what `usb-ncm` or `w5500` adds.
     /// `build.sh` fails a build whose statics exceed its variant's figure.
