@@ -76,8 +76,10 @@ export interface Board {
    * pressed = low), with a note saying where it is; null on a board with
    * no payload pins. Checked against the board's pin rules by the tests. */
   button: { pin: number; note: string } | null;
-  /** What the board's `model` (its manifest's BOARD record) contains, for a
-   * board whose chip name names no board: passed to the pin checks. */
+  /** Text the board's model (its manifest's BOARD record, a Linux board's
+   * device-tree `model`) contains, for a board whose chip name names no
+   * board (`boardByModel`); passed to the pin checks, where board-pins
+   * `by_board` applies the same "contains" rule. */
   model?: string;
 }
 
@@ -146,7 +148,7 @@ export const BOARDS: readonly Board[] = [
     id: "kd240",
     label: "AMD Kria KD240",
     chip: "linux-aarch64",
-    model: "ZynqMP KD240",
+    model: "KD240",
     install: { kind: "nixos-image", image: "kd240.img" },
     runsPayloads: true,
     ledPin: null,
@@ -157,6 +159,14 @@ export const BOARDS: readonly Board[] = [
 
 export function boardById(id: string | null | undefined): Board | undefined {
   return BOARDS.find((b) => b.id === id);
+}
+
+/** The board a node with `chip` and board name `model` (its manifest's
+ * BOARD record, null without one) is: one running that chip whose `model`,
+ * if it has one, the name contains (case-sensitive, as board-pins
+ * `by_board`). */
+export function boardByModel(chip: string, model: string | null): Board | undefined {
+  return BOARDS.find((b) => b.chip === chip && (!b.model || (model ?? "").includes(b.model)));
 }
 
 /** What a step's button does. */

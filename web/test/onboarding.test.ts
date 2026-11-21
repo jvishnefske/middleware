@@ -14,6 +14,7 @@ import {
   FIRST_EXAMPLE,
   UF2_INTEGRITY,
   boardById,
+  boardByModel,
   gettingStarted,
   textSpans,
   uf2Detail,
@@ -90,13 +91,21 @@ describe("boards", () => {
     expect(kd).toMatchObject({
       label: "AMD Kria KD240",
       chip: "linux-aarch64",
-      model: "ZynqMP KD240",
+      model: "KD240",
       runsPayloads: true,
       ledPin: null,
       blink: null,
       button: null,
     });
     expect(kd.install).toEqual({ kind: "nixos-image", image: "kd240.img" });
+    // The same rule as board-pins by_board: the model contains "KD240".
+    expect(boardByModel("linux-aarch64", "ZynqMP KD240 revA/B/1")?.id).toBe("kd240");
+    expect(boardByModel("linux-aarch64", "AMD Kria KD240 revB")?.id).toBe("kd240");
+    expect(boardByModel("linux-aarch64", "kd240")).toBeUndefined();
+    expect(boardByModel("linux-aarch64", "Raspberry Pi 4")).toBeUndefined();
+    expect(boardByModel("linux-aarch64", null)).toBeUndefined();
+    expect(boardByModel("rp2350", null)?.id).toBe("pico2");
+    expect(protocol().boardPins("linux-aarch64", "AMD Kria KD240 revB").gpios).toEqual([]);
     const [install, connect, run] = gettingStarted(kd);
     expect(install?.body).toContain("kd240.img");
     expect(install?.notes.join(" ")).toContain("kd240/BRINGUP.md");

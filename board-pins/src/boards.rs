@@ -281,7 +281,8 @@ pub const KD240: PinMap = PinMap {
 /// The map for a board that its chip name does not identify: `chip` as
 /// `sys/info` reports it and `board` the board's own name (the manifest's
 /// BOARD record, from the device tree's `model` on Linux). Only the KD240
-/// (`linux-aarch64`, a model naming `KD240`) so far; `None` otherwise, and
+/// (`linux-aarch64`, a model containing `KD240`, case-sensitive: the rule
+/// the web's `boardByModel` applies too) so far; `None` otherwise, and
 /// callers fall back to [`by_chip`].
 pub fn by_board(chip: &str, board: &str) -> Option<&'static PinMap> {
     match chip {
@@ -312,6 +313,17 @@ mod tests {
         assert_eq!(
             by_board("linux-aarch64", "ZynqMP KD240 revA/B/1"),
             Some(&KD240)
+        );
+        // The rule is "the model contains KD240", as the web's
+        // `boardByModel` (onboarding/boards.ts) applies it.
+        assert_eq!(
+            by_board("linux-aarch64", "AMD Kria KD240 revB"),
+            Some(&KD240)
+        );
+        assert_eq!(
+            by_board("linux-aarch64", "kd240"),
+            None,
+            "case matters, as on the web"
         );
         assert_eq!(by_board("linux-aarch64", "Raspberry Pi 4"), None);
         assert_eq!(by_board("linux-x86_64", "ZynqMP KD240 revA/B/1"), None);

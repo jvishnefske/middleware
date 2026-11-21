@@ -30,7 +30,7 @@
 //   the upload, bind and start commands for the probed node, only from
 //   values of the shape they must have and with every argument quoted.
 
-import { BOARDS, type Board } from "../onboarding/boards";
+import { boardByModel } from "../onboarding/boards";
 import { makeModel } from "../model/payload";
 import { EMPTY_PINS } from "../model/pins";
 import { type EquipmentModule, type PlantModel, type Unit, makePlant, unitFromPayload } from "../model/plant";
@@ -180,10 +180,6 @@ function matchIo(points: readonly PointRow[]): IoMapDraft {
   return io;
 }
 
-function boardFor(chip: string, boardName: string | null): Board | undefined {
-  return BOARDS.find((b) => b.chip === chip && (!b.model || (boardName ?? "").includes(b.model)));
-}
-
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 /** Decodes what a probe read (see the module comment). */
@@ -231,7 +227,7 @@ export function decodeProbe(proto: Protocol, input: ProbeInput): ProbeResult {
   }
   const node = info.node?.toLowerCase() ?? null;
   if (!node) problems.push("sys/info reports no node id, so the unit is not bound");
-  const board = boardFor(info.chip, boardName);
+  const board = boardByModel(info.chip, boardName);
   if (!board)
     problems.push(`no known board runs chip ${info.chip} on board ${JSON.stringify(boardName)}; drafted as a KD240`);
   const boardId = board?.id ?? "kd240";

@@ -4457,7 +4457,8 @@ the probe writes out.
   chip name `linux-aarch64` names no board; posix-node serves no `gpio`
   group); protocol-wasm `boardPins` and `checkPins` take the board name;
   the Start-tab board `kd240` (a `nixos-image` install, reached over the
-  mesh, `blink` and `button` null) and the pin checks pass its `model` —
+  mesh, `blink` and `button` null) and the pin checks pass its `model`;
+  both sides take a board whose model contains `KD240` —
   `cargo test -p board-pins`:
   "u45_board_names_select_a_map_where_the_chip_has_none";
   `cargo test -p protocol-wasm`:
