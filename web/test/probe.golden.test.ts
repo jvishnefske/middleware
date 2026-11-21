@@ -20,6 +20,7 @@ import {
   decodeProbe,
   deployCommands,
   latheChannelDecls,
+  shellQuote,
   probeNode,
 } from "../src/device/probe";
 import { plantProblem, serializePlant } from "../src/model/plant";
@@ -166,15 +167,66 @@ describe("probe (KD240 fixture)", () => {
     expect(proto.checkBinding(unhex(f.responses["sys/manifest"]), wasm, proto.encodeBinding(record))).toEqual([]);
   });
 
-  it("writes the mwctl commands that deploy over the mesh", () => {
+  it("writes the mwctl commands that deploy over the mesh, every argument single-quoted", () => {
     const sender = "5e110de02a9c0102";
-    const cmds = deployCommands(r, { site: "example.org", sender, wasm: "lathe.wasm" });
-    const z = `mwctl --zenoh tls/mesh.updates.example.org:443 --node ${sender}`;
-    expect(cmds).toEqual([
-      `${z} upload lathe.wasm --key <KEYFILE>`,
-      `${z} bind lathe.wasm ${r.ioSpecs.join(" ")} --key <KEYFILE>`,
-      `${z} start --key <KEYFILE>`,
-    ]);
+    const plan = deployCommands(r, { site: "example.org", sender, wasm: "lathe.wasm" });
+    const z = `mwctl '--zenoh' 'tls/mesh.updates.example.org:443' '--node' '${sender}'`;
+    const specs = r.ioSpecs.map((x) => `'${x}'`).join(" ");
+    expect(plan).toEqual({
+      ok: true,
+      commands: [
+        `${z} 'upload' 'lathe.wasm' '--key' '<KEYFILE>'`,
+        `${z} 'bind' 'lathe.wasm' ${specs} '--key' '<KEYFILE>'`,
+        `${z} 'start' '--key' '<KEYFILE>'`,
+      ],
+    });
+    // Golden: the first command exactly.
+    expect(plan.ok && plan.commands[0]).toBe(
+      "mwctl '--zenoh' 'tls/mesh.updates.example.org:443' '--node' '5e110de02a9c0102' 'upload' 'lathe.wasm' '--key' '<KEYFILE>'",
+    );
+  });
+
+  it("writes no command when a value came from the mesh in a shape it may not have", () => {
+    const ok = { site: "example.org", sender: "5e110de02a9c0102", wasm: "lathe.wasm" };
+    const hostileSpecs = [
+      "x_pos=driver:$(rm -rf ~)",
+      "x_pos=driver:a;reboot",
+      "x_pos=driver:`id`",
+      "x_pos=driver:a b",
+      "x_pos=driver:a'b",
+      "$(id)=driver:x_pos",
+      "x_pos=key:app/x",
+      "x_pos=driver:" + "a".repeat(25),
+    ];
+    for (const spec of hostileSpecs) {
+      const plan = deployCommands({ ...r, ioSpecs: [spec] }, ok);
+      expect(plan, spec).toEqual({ ok: false, refused: expect.stringMatching(/^refused: untrusted value/) });
+    }
+    for (const sender of ["$(id)", "5e110de02a9c010", "5E110DE02A9C0102", "5e110de02a9c0102;x", ""]) {
+      expect(deployCommands(r, { ...ok, sender }).ok, sender).toBe(false);
+    }
+    for (const site of [
+      "evil.org;reboot",
+      "$(id).org",
+      "example",
+      "-x.org",
+      "a..org",
+      "ex ample.org",
+      "x.org'",
+      null,
+    ]) {
+      const plan = deployCommands(r, { ...ok, site });
+      expect(plan.ok, String(site)).toBe(false);
+    }
+    expect(deployCommands(r, { ...ok, wasm: "a'b.wasm" }).ok).toBe(false);
+    const refused = deployCommands(r, { ...ok, sender: "$(id)" });
+    expect(refused.ok === false && refused.refused).toContain("sender");
+  });
+
+  it("single-quotes for the shell, closing and reopening around a quote", () => {
+    expect(shellQuote("a")).toBe("'a'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    expect(shellQuote("$(x)")).toBe("'$(x)'");
   });
 });
 

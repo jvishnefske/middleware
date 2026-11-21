@@ -5,7 +5,8 @@
 // or `wss://updates.<site>/mesh`); Scan lists every node that answers
 // `sys/info` by sender id; Probe reads one node's manifest and control
 // points and shows them with the drafted equipment modules, the lathe's
-// IoMap, the binding specs and the mwctl commands that deploy over the mesh.
+// IoMap and the mwctl commands that deploy over the mesh (shown only when
+// every value from the mesh has the shape it must have, quoted).
 // "Use as plant" hands the drafted plant to Blocks. The mesh is probe-only:
 // nothing here changes a node, and the panel never claims one.
 //
@@ -20,7 +21,7 @@ import {
   scan,
   siteOfMeshUrl,
 } from "../device/mesh";
-import { type ProbeResult, deployCommands, emOf, probeNode } from "../device/probe";
+import { type DeployPlan, type ProbeResult, deployCommands, emOf, probeNode } from "../device/probe";
 import type { PlantModel } from "../model/plant";
 import type { Protocol } from "../protocol/wasm";
 import { errorText, h } from "./dom";
@@ -65,12 +66,21 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
   let link: MeshLink | null = null;
   let probed: ProbeResult | null = null;
 
+  // A `?mesh=` URL comes from whoever made the link: it only fills the
+  // field, says so, and is used once the user presses Connect.
+  const fromLink = opts.defaultUrl === undefined ? new URLSearchParams(location.search).get("mesh") : null;
   const urlIn = h("input", {
     type: "url",
     size: 40,
     value:
       opts.defaultUrl ?? defaultMeshUrl({ hostname: location.hostname, search: location.search, stored: storedUrl() }),
   });
+  const linkNote = fromLink
+    ? h("p", { class: "warn" }, `This mesh URL is from this link's ?mesh= (${fromLink}): check it before you connect.`)
+    : null;
+  /** The URL of the open link (the commands' site comes from it). */
+  let activeUrl: string | null = null;
+  const active = h("p", { class: "mesh-active mono" }, "not connected");
   const connBtn = h("button", { class: "primary" }, "Connect");
   const scanBtn = h("button", { disabled: true }, "Scan");
   const status = h("span", { class: "muted" }, "not connected");
@@ -81,6 +91,8 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
 
   function dropped() {
     link = null;
+    activeUrl = null;
+    active.textContent = "not connected";
     probed = null;
     connBtn.textContent = "Connect";
     scanBtn.disabled = true;
@@ -104,6 +116,8 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
       const l = await connect(url);
       remember(url);
       link = l;
+      activeUrl = url;
+      active.textContent = `connected to ${url}`;
       l.onClosed(() => {
         if (link === l) {
           dropped();
@@ -169,10 +183,9 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
   }
 
   function render(r: ProbeResult, sender: string): Node[] {
-    const site = siteOfMeshUrl(urlIn.value.trim()) ?? "<site>";
-    const commands = deployCommands(r, { site, sender, wasm: "<payload.wasm>" }).join("\n");
+    const site = activeUrl === null ? null : siteOfMeshUrl(activeUrl);
+    const plan = deployCommands(r, { site, sender, wasm: "<payload.wasm>" });
     const io = JSON.stringify(r.io, null, 2);
-    const specs = r.ioSpecs.join("\n");
     const useBtn = h("button", { class: "primary", type: "button" }, "Use as plant");
     useBtn.addEventListener("click", () => {
       if (probed) opts.usePlant(probed.plant);
@@ -222,13 +235,18 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
         copyButton(() => io),
       ),
       h("pre", { class: "mono" }, io),
-      h(
-        "h4",
-        {},
-        "Binding specs ",
-        copyButton(() => specs),
-      ),
-      h("pre", { class: "mono" }, specs),
+      ...deploySection(plan),
+    ];
+  }
+
+  /** The commands (the bind one carries the specs), or (for any value of the wrong
+   * shape) only why there are none. */
+  function deploySection(plan: DeployPlan): Node[] {
+    if (!plan.ok) {
+      return [h("h4", {}, "Deploy with mwctl"), h("p", { class: "warn" }, `${plan.refused}. No command is shown.`)];
+    }
+    const commands = plan.commands.join("\n");
+    return [
       h(
         "h4",
         {},
@@ -249,6 +267,8 @@ export function meshPanel(proto: Protocol, opts: MeshPanelOptions): { el: HTMLEl
     "div",
     { class: "mesh" },
     h("p", { class: "row" }, h("label", {}, "Mesh ", urlIn), connBtn, scanBtn, status),
+    ...(linkNote ? [linkNote] : []),
+    active,
     h(
       "table",
       { class: "mesh-nodes" },

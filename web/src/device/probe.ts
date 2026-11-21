@@ -23,7 +23,8 @@
 //   `binding` the same as a draft that `bindingForImage` turns into a
 //   binding record once a payload image is chosen.
 // * Deploying is mwctl's (the mesh is probe-only): `deployCommands` writes
-//   the upload, bind and start commands for the probed node.
+//   the upload, bind and start commands for the probed node, only from
+//   values of the shape they must have and with every argument quoted.
 
 import { BOARDS, type Board } from "../onboarding/boards";
 import { makeModel } from "../model/payload";
@@ -32,6 +33,7 @@ import { type EquipmentModule, type PlantModel, type Unit, makePlant, unitFromPa
 import { type PointRow, pointFromControl } from "../model/points";
 import type { BindingRecord, ChannelDecl, DeviceInfo, MachineKind, Protocol } from "../protocol/wasm";
 import type { DeviceClient } from "./client";
+import { SENDER_ID, isDnsName } from "./mesh";
 
 /** The IoMap's fields (cnc/model `IoMap`, camelCase, in its order). */
 export type IoKey =
@@ -272,15 +274,50 @@ export function bindingForImage(draft: BindingDraft, imageSha256: Uint8Array, ve
   };
 }
 
+/** The mwctl commands to deploy a probed node, or why there are none. */
+export type DeployPlan = { ok: true; commands: string[] } | { ok: false; refused: string };
+
+/** `s` as one POSIX shell word: single-quoted, each `'` as `'\''`. */
+export function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", "'\\''")}'`;
+}
+
+const SPEC = /^[a-z0-9_]{1,24}=driver:[a-z0-9_]{1,24}$/;
+const FILE = /^[A-Za-z0-9._<>/-]{1,200}$/;
+
 /** The mwctl commands that deploy `wasm` to the probed node over the mesh:
  * upload, bind with the drafted specs, start. `sender` is the node's
  * sender id (what the scan listed), `site` the domain whose
- * `mesh.updates.<site>` is the router; `<KEYFILE>` is the lathe's key. */
-export function deployCommands(r: ProbeResult, opts: { site: string; sender: string; wasm: string }): string[] {
-  const z = `mwctl --zenoh tls/mesh.updates.${opts.site}:443 --node ${opts.sender}`;
-  return [
-    `${z} upload ${opts.wasm} --key <KEYFILE>`,
-    `${z} bind ${opts.wasm} ${r.ioSpecs.join(" ")} --key <KEYFILE>`,
-    `${z} start --key <KEYFILE>`,
-  ];
+ * `mesh.updates.<site>` is the router (null when the mesh URL names none);
+ * `<KEYFILE>` is the lathe's key.
+ *
+ * The sender, the point names and the site come from the mesh, and the
+ * user runs these with the lathe's key, so each is checked against the
+ * shape it must have (16 lowercase hex digits; `channel=driver:point` with
+ * channel-name rules; a strict DNS name) and any other value gives no
+ * commands at all. Every argument is single-quoted besides. */
+export function deployCommands(
+  r: Pick<ProbeResult, "ioSpecs">,
+  opts: { site: string | null; sender: string; wasm: string },
+): DeployPlan {
+  const refuse = (what: string): DeployPlan => ({ ok: false, refused: `refused: untrusted value: ${what}` });
+  if (!SENDER_ID.test(opts.sender)) return refuse(`the sender id ${JSON.stringify(opts.sender)} is not 16 hex digits`);
+  if (opts.site === null || !isDnsName(opts.site)) {
+    return refuse(
+      `the site ${JSON.stringify(opts.site)} is not a DNS name (connect through wss://updates.<site>/mesh)`,
+    );
+  }
+  const bad = r.ioSpecs.find((x) => !SPEC.test(x));
+  if (bad !== undefined) return refuse(`the binding spec ${JSON.stringify(bad)} names no valid point`);
+  if (!FILE.test(opts.wasm) || opts.wasm.includes("'")) return refuse(`the file name ${JSON.stringify(opts.wasm)}`);
+  const words = (...args: string[]) => ["mwctl", ...args.map(shellQuote)].join(" ");
+  const z = ["--zenoh", `tls/mesh.updates.${opts.site.toLowerCase()}:443`, "--node", opts.sender];
+  return {
+    ok: true,
+    commands: [
+      words(...z, "upload", opts.wasm, "--key", "<KEYFILE>"),
+      words(...z, "bind", opts.wasm, ...r.ioSpecs, "--key", "<KEYFILE>"),
+      words(...z, "start", "--key", "<KEYFILE>"),
+    ],
+  };
 }

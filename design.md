@@ -4478,13 +4478,22 @@ the probe writes out.
   `motion`), writes the `channel=driver:point` specs and a binding draft
   that `bindingForImage` completes, and lists missing or inconsistent
   pages; `deployCommands` writes the mwctl upload, bind and start over
-  `tls/mesh.updates.<site>:443 --node <sender>`; the Device tab's Mesh
+  `tls/mesh.updates.<site>:443 --node <sender>`, every argument
+  single-quoted, and only when the sender is 16 hex digits, the site a
+  strict DNS name and each spec `channel=driver:point` with channel-name
+  rules (anything else: "refused: untrusted value", no commands; a scan
+  lists only hex sender ids); a `?mesh=` URL only pre-fills the field, is
+  flagged, and is used on Connect, and the panel shows the active URL; the Device tab's Mesh
   section shows it all, copyable, and "Use as plant" hands the plant to
-  Blocks — `web/test/probe.golden.test.ts` (8 tests, among them "drafts a
+  Blocks — `web/test/probe.golden.test.ts` (10 tests, among them "drafts a
   binding that checks clean against the node's real manifest", "reads info,
-  the manifest and every page in order, and nothing else");
-  `web/test/mesh.panel.test.ts`: "connects, scans, probes and offers the
-  plant and the mwctl commands".
+  the manifest and every page in order, and nothing else",
+  "writes no command when a value came from the mesh in a shape it may not
+  have", "single-quotes for the shell, closing and reopening around a
+  quote"); `web/test/mesh.panel.test.ts`: "connects, scans, probes and
+  offers the plant and the mwctl commands", "only pre-fills a ?mesh= URL
+  from the link, says so, and connects on Connect", "shows no command, with
+  the reason, when the URL gives no site".
 - [x] U48 The probe's golden fixtures: posix-node records
   `web/test/fixtures/kd240.wire.json` (the simulated PC Turn 50, fixed
   facts) and `kd240-paged.wire.json` (64 points, 6 pages) over Zenoh,

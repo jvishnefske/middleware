@@ -80,7 +80,9 @@ describe("mesh panel", () => {
     expect(panel.el.querySelectorAll(".mesh-points tbody tr")).toHaveLength(10);
     expect(text).toContain("queue=driver:motion");
     expect(text).toContain('"xPos": "x_pos"');
-    expect(text).toContain(`mwctl --zenoh tls/mesh.updates.example.org:443 --node ${SENDER} upload`);
+    expect(text).toContain(`mwctl '--zenoh' 'tls/mesh.updates.example.org:443' '--node' '${SENDER}' 'upload'`);
+    expect(text).toContain("'queue=driver:motion'");
+    expect(panel.el.querySelector(".mesh-active")?.textContent).toContain("wss://updates.example.org/mesh");
     expect(text).toContain("probe-only");
     expect(selected.at(-1)).toMatchObject({ remote: true });
     button(panel.el, "Use as plant").click();
@@ -91,6 +93,50 @@ describe("mesh panel", () => {
     await settle();
     expect(link.up).toBe(false);
     expect(selected.at(-1)).toBeNull();
+    panel.el.remove();
+  });
+});
+
+describe("mesh panel URL", () => {
+  it("only pre-fills a ?mesh= URL from the link, says so, and connects on Connect", async () => {
+    window.history.replaceState({}, "", "/?mesh=" + encodeURIComponent("wss://updates.evil.example/mesh"));
+    const link = new FakeLink();
+    const connect = vi.fn(async () => link);
+    const panel = meshPanel(proto, { connect, usePlant: () => {} });
+    document.body.append(panel.el);
+    const url = panel.el.querySelector("input") as HTMLInputElement;
+    expect(url.value).toBe("wss://updates.evil.example/mesh");
+    expect(panel.el.textContent).toMatch(/from this link's \?mesh=.*check it before you connect/);
+    await settle();
+    expect(connect).not.toHaveBeenCalled();
+    expect(panel.el.querySelector(".mesh-active")?.textContent).toContain("not connected");
+    button(panel.el, "Connect").click();
+    await settle();
+    expect(connect).toHaveBeenCalledWith("wss://updates.evil.example/mesh");
+    expect(panel.el.querySelector(".mesh-active")?.textContent).toContain(
+      "connected to wss://updates.evil.example/mesh",
+    );
+    panel.el.remove();
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("shows no command, with the reason, when the URL gives no site", async () => {
+    const link = new FakeLink();
+    const panel = meshPanel(proto, {
+      connect: async () => link,
+      defaultUrl: "ws://127.0.0.1:8000",
+      usePlant: () => {},
+    });
+    document.body.append(panel.el);
+    button(panel.el, "Connect").click();
+    await settle();
+    button(panel.el, "Scan").click();
+    await settle();
+    button(panel.el, "Probe").click();
+    await settle();
+    const text = panel.el.textContent ?? "";
+    expect(text).not.toContain("mwctl '--zenoh'");
+    expect(text).toMatch(/refused: untrusted value: the site/);
     panel.el.remove();
   });
 });
