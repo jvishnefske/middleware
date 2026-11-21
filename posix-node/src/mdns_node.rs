@@ -435,8 +435,9 @@ pub async fn run_with(
 }
 
 /// The router locator worth announcing in `zenoh=`: a `tcp` or `tls`
-/// locator whose host is neither loopback nor unspecified (nor
-/// `localhost`), cut at its metadata (`?`) and configuration (`#`, which
+/// locator whose host is neither loopback nor unspecified (also as an
+/// IPv4-mapped IPv6 address), nor `localhost`, nor a short IPv4 form made
+/// only of digits and dots, cut at its metadata (`?`) and configuration (`#`, which
 /// may name key files); `None` for anything else, so a node behind a
 /// loopback router (the KD240's) announces no locator. Pure.
 pub fn advertised_locator(router: &str) -> Option<String> {
@@ -450,13 +451,17 @@ pub fn advertised_locator(router: &str) -> Option<String> {
         return None;
     }
     let local = match addr.parse::<std::net::SocketAddr>() {
-        Ok(a) => a.ip().is_loopback() || a.ip().is_unspecified(),
+        // Canonical: `[::ffff:127.0.0.1]` is loopback too.
+        Ok(a) => a.ip().to_canonical().is_loopback() || a.ip().to_canonical().is_unspecified(),
         Err(_) => {
             let (host, port) = addr.rsplit_once(':')?;
             port.parse::<u16>().ok()?;
             let host = host.trim_end_matches('.');
             host.is_empty()
                 || host.starts_with('[')
+                // A short IPv4 form (`127.1`, `0`, `2130706433`) that a
+                // resolver may read as an address: never a host name.
+                || host.bytes().all(|b| b.is_ascii_digit() || b == b'.')
                 || host.eq_ignore_ascii_case("localhost")
                 || host.to_ascii_lowercase().ends_with(".localhost")
         }
@@ -628,6 +633,18 @@ mod tests {
             ("tcp/10.0.0.1:7447?iface=eth0#x=y", Some("tcp/10.0.0.1:7447")),
             ("tcp/10.0.0.1:7447\u{1b}[2J", None),
             ("tcp/ho st:7447", None),
+            // IPv4-mapped loopback and unspecified.
+            ("tcp/[::ffff:127.0.0.1]:7447", None),
+            ("tcp/[::ffff:0.0.0.0]:7447", None),
+            ("tls/[::ffff:127.0.0.1]:443", None),
+            // Short IPv4 forms (inet_aton reads 127.1 as 127.0.0.1): never a name.
+            ("tcp/127.1:7447", None),
+            ("tcp/0:7447", None),
+            ("tcp/2130706433:7447", None),
+            ("tcp/10.1:7447", None),
+            ("tcp/1.2.3.:7447", None),
+            ("tcp/[::ffff:10.0.0.1]:7447", Some("tcp/[::ffff:10.0.0.1]:7447")),
+            ("tcp/host1.example:7447", Some("tcp/host1.example:7447")),
         ] {
             assert_eq!(advertised_locator(router).as_deref(), want, "{router:?}");
         }

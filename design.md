@@ -855,8 +855,10 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   mDNS daemon or another node on the same host —
   posix-node `mdns_node::tests::d29_*`, `tests/mdns_node.rs::d34_*`.
 - [x] D30 `zenoh=` carries the node's router locator only when it is a
-  `tcp` or `tls` locator whose host is not loopback, unspecified or
-  `localhost`, cut at its metadata (`?`) and private configuration
+  `tcp` or `tls` locator whose host is not loopback or unspecified (also
+  IPv4-mapped, `[::ffff:127.0.0.1]`), not `localhost` and not a short
+  IPv4 form of only digits and dots (`127.1`, `0`), cut at its metadata
+  (`?`) and private configuration
   (`#...`); otherwise the key is absent. A node behind a loopback router
   (the KD240) announces no locator — posix-node `mdns_node::tests::d30_*`.
 - [x] D31 The announced address is the one routed to 224.0.0.251 (`on`) or
