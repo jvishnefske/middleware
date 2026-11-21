@@ -339,7 +339,7 @@ pub async fn run(spawner: Spawner) -> ! {
     let uid = board::unique_id(&mut flash);
     let serial: &'static Serial = SERIAL.init(Serial::new(uid));
     #[cfg(all(feature = "net", feature = "rp2350"))]
-    let entropy = board::entropy(p.TRNG);
+    let entropy = board::entropy(p.TRNG).await;
     #[cfg(all(feature = "net", feature = "rp2040"))]
     let entropy = board::entropy();
     start_usb(

@@ -93,14 +93,25 @@ embassy_rp::bind_interrupts!(struct TrngIrqs {
     TRNG_IRQ => embassy_rp::trng::InterruptHandler<embassy_rp::peripherals::TRNG>;
 });
 
-/// Eight bytes of boot entropy for the network stack's seed
-/// ([`rp_base::netid::seed`]): the RP2350's TRNG.
+/// How long the TRNG may take to deliver eight bytes (it takes
+/// microseconds when healthy).
 #[cfg(all(feature = "net", feature = "rp2350"))]
-pub fn entropy(trng: embassy_rp::Peri<'static, embassy_rp::peripherals::TRNG>) -> [u8; 8] {
+const TRNG_WAIT: embassy_time::Duration = embassy_time::Duration::from_millis(20);
+
+/// Eight bytes of boot entropy for the network stack's seed
+/// ([`rp_base::netid::seed`]): the RP2350's TRNG mixed with the ROSC random
+/// bit ([`rp_base::netid::boot_entropy`]). The TRNG is read with its async
+/// `fill_bytes`, which re-initialises it on a fault instead of panicking
+/// (the blocking reads panic, and a panic resets the board), and only for
+/// [`TRNG_WAIT`]: a TRNG that never delivers leaves the ROSC's bytes.
+#[cfg(all(feature = "net", feature = "rp2350"))]
+pub async fn entropy(trng: embassy_rp::Peri<'static, embassy_rp::peripherals::TRNG>) -> [u8; 8] {
+    let mut rosc = [0u8; 8];
+    embassy_rp::clocks::RoscRng.fill_bytes(&mut rosc);
     let mut rng = embassy_rp::trng::Trng::new(trng, TrngIrqs, embassy_rp::trng::Config::default());
-    let mut out = [0u8; 8];
-    rng.blocking_fill_bytes(&mut out);
-    out
+    let mut hw = [0u8; 8];
+    let delivered = embassy_time::with_timeout(TRNG_WAIT, rng.fill_bytes(&mut hw)).await.is_ok();
+    rp_base::netid::boot_entropy(delivered.then_some(hw), rosc)
 }
 
 /// Eight bytes of boot entropy for the network stack's seed

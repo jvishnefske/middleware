@@ -62,6 +62,23 @@ pub const fn link_local(node: SenderId) -> [u8; 4] {
     [169, 254, (1 + n / 254) as u8, (1 + n % 254) as u8]
 }
 
+/// The boot entropy [`seed`] takes: the ROSC random bit's bytes `rosc`,
+/// mixed with the TRNG's `trng` when it delivered (the RP2350's; the shell
+/// waits for it a bounded time and passes `None` if it did not finish, so a
+/// TRNG fault never stops or resets the board).
+pub const fn boot_entropy(trng: Option<[u8; 8]>, rosc: [u8; 8]) -> [u8; 8] {
+    let Some(t) = trng else {
+        return rosc;
+    };
+    let mut out = rosc;
+    let mut i = 0;
+    while i < 8 {
+        out[i] ^= t[i];
+        i += 1;
+    }
+    out
+}
+
 /// embassy-net's random seed from 8 bytes of boot `entropy` (the chip's
 /// TRNG or ROSC), mixed with node `node` so two boards with a weak source
 /// still differ. The entropy is what makes it unpredictable.
@@ -134,6 +151,29 @@ mod tests {
         let other = SenderId([0xE6, 0x61, 0x38, 0x52, 0x83, 0x1F, 0x2A, 0x0C]);
         assert_ne!(link_local(other), link_local(id));
         assert_ne!(mac(other, Side::Device), mac(id, Side::Device));
+    }
+
+    #[test]
+    fn d45_boot_entropy_mixes_both_sources_and_falls_back_to_the_rosc() {
+        let rosc = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let trng = [0xA5, 0x5A, 0xC3, 0x3C, 0x0F, 0xF0, 0x96, 0x69];
+        // Without the TRNG, the ROSC's bytes.
+        assert_eq!(boot_entropy(None, rosc), rosc);
+        // With it, both count: changing either changes the result.
+        let both = boot_entropy(Some(trng), rosc);
+        assert_ne!(both, rosc);
+        assert_ne!(both, trng);
+        for byte in 0..8 {
+            let mut t = trng;
+            t[byte] ^= 1;
+            assert_ne!(boot_entropy(Some(t), rosc), both, "trng byte {byte}");
+            let mut r = rosc;
+            r[byte] ^= 1;
+            assert_ne!(boot_entropy(Some(trng), r), both, "rosc byte {byte}");
+        }
+        // A TRNG that gave zeros (or a stuck ROSC) leaves the other source.
+        assert_eq!(boot_entropy(Some([0; 8]), rosc), rosc);
+        assert_eq!(boot_entropy(Some(trng), [0; 8]), trng);
     }
 
     #[test]
