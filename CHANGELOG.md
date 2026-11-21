@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### The RP boards on the LAN: USB CDC-NCM and W5500 (D45–D53)
-- middleware: `mdns::responder` (feature `mdns-core`): a board responder's pure decisions, moved out of firmware-imxrt so the RP boards share them: `Board`, `Identity::new(prefix, id)`, `Locator` (`write_to`, `Display`, `MAX_LOCATOR`), `Desired`, `Action`, `plan`, `txt(board, ..)` and `service`.
+- middleware: `mdns::responder` (feature `mdns-core`): a board responder's pure decisions, moved out of firmware-imxrt so the RP boards share them: `Board`, `Identity::new(prefix, id)`, `Locator` (`write_to`, `Display`, `MAX_LOCATOR`), `Desired`, `Action`, `plan`, `txt(board, ..)` and `service`. firmware-imxrt's `mdns_node` is now a shim over it (`identity(uid)`, `RT1050_EVKB`, `Locator: From<config::Endpoint>`); the RT1050's record is byte for byte unchanged (a golden test); its slot grows 148 bytes (`Locator`'s formatter), RAM unchanged.
 
 ### mwctl opens a PTY (H7)
 - `mwctl --port <pty>` works: ENOTTY from the RTS/DTR calls (open and `reset`) is tolerated as in `mw_gateway::io::open_serial` (RG28); other modem-line errors stay fatal. Test-only dev-dependency `libc` (already in Cargo.lock).

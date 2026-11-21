@@ -32,7 +32,7 @@ use embassy_futures::select::{Either, select};
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_net::{Ipv4Cidr, Stack};
 use embassy_time::{Duration, Timer};
-use imxrt_base::mdns_node::{Action, Desired, Identity, plan, service, txt};
+use imxrt_base::mdns_node::{Action, Desired, Locator, identity, plan, service, txt};
 use middleware::discovery::Announce;
 use middleware::mdns::announce::{AnnounceError, AnnounceTable, AnnouncerParams, MdnsAnnouncer};
 use middleware::mdns::embassy_seam::{EmbassyClock, EmbassyError, EmbassyUdp, join_group, subnet};
@@ -79,7 +79,7 @@ fn wanted(stack: Stack<'_>) -> Option<Desired> {
     stack.config_v4().map(|c| Desired {
         addr: c.address.address().octets(),
         prefix: c.address.prefix_len(),
-        zenoh: super::zenoh::endpoint(),
+        zenoh: super::zenoh::endpoint().map(Locator::from),
     })
 }
 
@@ -102,7 +102,7 @@ fn backoff(e: &MdnsError<EmbassyError>) -> Duration {
 
 /// Runs the responder forever (see the module docs).
 pub async fn run(stack: Stack<'static>, bus: &'static Bus, uid: [u8; 8]) -> ! {
-    let id = Identity::of(uid);
+    let id = identity(uid);
     let sender = super::zenoh::zid(uid).map(sender_id_of);
     let mut rx_meta = [PacketMetadata::EMPTY; 6];
     let mut tx_meta = [PacketMetadata::EMPTY; 4];
