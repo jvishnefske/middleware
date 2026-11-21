@@ -341,30 +341,61 @@ mod tests {
         use crate::wiznet;
         for (w, plain) in [(RP2040_W5500, RP2040), (RP2350_W5500, RP2350)] {
             for pin in wiznet::PINS {
-                assert_eq!(w.check_pin(pin, Direction::Input), Err(AbiError::Unsupported), "GPIO {pin}");
-                assert_eq!(w.check_pin(pin, Direction::Output), Err(AbiError::Unsupported), "GPIO {pin}");
+                assert_eq!(
+                    w.check_pin(pin, Direction::Input),
+                    Err(AbiError::Unsupported),
+                    "GPIO {pin}"
+                );
+                assert_eq!(
+                    w.check_pin(pin, Direction::Output),
+                    Err(AbiError::Unsupported),
+                    "GPIO {pin}"
+                );
             }
             for pin in plain.payload_pins().filter(|p| !wiznet::PINS.contains(p)) {
                 for dir in [Direction::Input, Direction::Output] {
-                    assert_eq!(w.check_pin(pin, dir), plain.check_pin(pin, dir), "GPIO {pin}");
+                    assert_eq!(
+                        w.check_pin(pin, dir),
+                        plain.check_pin(pin, dir),
+                        "GPIO {pin}"
+                    );
                 }
             }
             assert_eq!(w.payload_pins().count(), 25 - 6);
             assert_eq!(w.reserved_spi(), Some(SpiBlock::Spi0));
             assert_eq!(plain.reserved_spi(), None);
-            assert_eq!((w.name, w.heap, w.flash), (plain.name, plain.heap, plain.flash));
+            assert_eq!(
+                (w.name, w.heap, w.flash),
+                (plain.name, plain.heap, plain.flash)
+            );
         }
         // The W5500's bus pins are SPI0's in the function table.
-        assert_eq!(spi_function(wiznet::MISO), Some((SpiBlock::Spi0, SpiSignal::Rx)));
-        assert_eq!(spi_function(wiznet::CS), Some((SpiBlock::Spi0, SpiSignal::Csn)));
-        assert_eq!(spi_function(wiznet::SCK), Some((SpiBlock::Spi0, SpiSignal::Sck)));
-        assert_eq!(spi_function(wiznet::MOSI), Some((SpiBlock::Spi0, SpiSignal::Tx)));
+        assert_eq!(
+            spi_function(wiznet::MISO),
+            Some((SpiBlock::Spi0, SpiSignal::Rx))
+        );
+        assert_eq!(
+            spi_function(wiznet::CS),
+            Some((SpiBlock::Spi0, SpiSignal::Csn))
+        );
+        assert_eq!(
+            spi_function(wiznet::SCK),
+            Some((SpiBlock::Spi0, SpiSignal::Sck))
+        );
+        assert_eq!(
+            spi_function(wiznet::MOSI),
+            Some((SpiBlock::Spi0, SpiSignal::Tx))
+        );
     }
 
     #[test]
     fn d51_the_network_links_fit_beside_the_heap() {
         use net_budget::*;
-        let link = if USB_NCM_STATICS > W5500_STATICS { USB_NCM_STATICS } else { W5500_STATICS };
+        let link = if USB_NCM_STATICS > W5500_STATICS {
+            USB_NCM_STATICS
+        } else {
+            W5500_STATICS
+        };
         let need = BASE_STATICS + link + STACK + MARGIN;
         assert!(RP2350.sram_outside_heap() >= need, "{need} B needed");
         // The RP2040 has no heap: all of its SRAM is outside it.

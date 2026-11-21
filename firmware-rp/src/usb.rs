@@ -140,7 +140,10 @@ mod tests {
         assert_eq!(config_total(true), 155);
         assert!(config_total(true) <= CONFIG_BUF);
         assert_eq!((interfaces(false), interfaces(true)), (2, 4));
-        assert!(interfaces(true) <= MAX_INTERFACES, "no room for a third function");
+        assert!(
+            interfaces(true) <= MAX_INTERFACES,
+            "no room for a third function"
+        );
         assert_eq!((handlers(false), handlers(true)), (2, 3));
         assert!(handlers(true) <= MAX_HANDLERS);
     }

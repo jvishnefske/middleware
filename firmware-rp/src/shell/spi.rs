@@ -117,8 +117,19 @@ impl SpiBus {
     /// Takes the controllers (held in reset until a payload opens the
     /// bus) and the transfer buffer. Without `spi0` (the W5500's) SPI0 is
     /// never reset or opened.
-    pub fn new(spi0: Option<Peri<'static, SPI0>>, spi1: Peri<'static, SPI1>, buf: &'static mut Buffer) -> Self {
-        let bus = SpiBus { spi0, _spi1: spi1, buf, open: None, state: DmaState::Idle, xfer: None };
+    pub fn new(
+        spi0: Option<Peri<'static, SPI0>>,
+        spi1: Peri<'static, SPI1>,
+        buf: &'static mut Buffer,
+    ) -> Self {
+        let bus = SpiBus {
+            spi0,
+            _spi1: spi1,
+            buf,
+            open: None,
+            state: DmaState::Idle,
+            xfer: None,
+        };
         bus.hold_owned();
         bus
     }

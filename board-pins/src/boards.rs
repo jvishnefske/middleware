@@ -299,7 +299,10 @@ mod tests {
     fn d50_the_w5500_pico_reserves_its_six_pins() {
         use crate::Direction;
         for pin in 16..=21 {
-            assert!(PICO_W5500.check(pin, Direction::Input).is_err(), "GPIO {pin}");
+            assert!(
+                PICO_W5500.check(pin, Direction::Input).is_err(),
+                "GPIO {pin}"
+            );
             assert_eq!(
                 PICO_W5500.reason(pin),
                 Some("the W5500's SPI0, chip select, reset and interrupt"),
@@ -309,7 +312,11 @@ mod tests {
         // Everything else is the Pico's.
         for pin in (0..30).filter(|p| !(16..=21).contains(p)) {
             for dir in [Direction::Input, Direction::Output] {
-                assert_eq!(PICO_W5500.check(pin, dir), PICO.check(pin, dir), "GPIO {pin}");
+                assert_eq!(
+                    PICO_W5500.check(pin, dir),
+                    PICO.check(pin, dir),
+                    "GPIO {pin}"
+                );
             }
             assert_eq!(PICO_W5500.reason(pin), PICO.reason(pin), "GPIO {pin}");
         }

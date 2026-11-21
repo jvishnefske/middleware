@@ -105,12 +105,24 @@ mod tests {
         use crate::chip::{RP2040_W5500, RP2350_W5500};
         for p in [&RP2040_W5500, &RP2350_W5500] {
             // SPI0 on pins the W5500 does not use: still SPI0, refused.
-            assert_eq!(SpiRoute::resolve(p, &cfg(2, 3, 0, 25)), Err(AbiError::Unsupported));
-            assert_eq!(SpiRoute::resolve(p, &cfg(6, 7, 4, -1)), Err(AbiError::Unsupported));
+            assert_eq!(
+                SpiRoute::resolve(p, &cfg(2, 3, 0, 25)),
+                Err(AbiError::Unsupported)
+            );
+            assert_eq!(
+                SpiRoute::resolve(p, &cfg(6, 7, 4, -1)),
+                Err(AbiError::Unsupported)
+            );
             // The W5500's own pins.
-            assert_eq!(SpiRoute::resolve(p, &cfg(18, 19, 16, 17)), Err(AbiError::Unsupported));
+            assert_eq!(
+                SpiRoute::resolve(p, &cfg(18, 19, 16, 17)),
+                Err(AbiError::Unsupported)
+            );
             // SPI1 is the payload's.
-            assert_eq!(SpiRoute::resolve(p, &cfg(10, 11, 12, 13)).unwrap().block, SpiBlock::Spi1);
+            assert_eq!(
+                SpiRoute::resolve(p, &cfg(10, 11, 12, 13)).unwrap().block,
+                SpiBlock::Spi1
+            );
         }
     }
 
