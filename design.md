@@ -902,7 +902,8 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   else saw, and never changes a cell from Zenoh; a second claim on an
   already-merged row is a separate row — mwctl `scout::tests::d37_*`.
 - [x] D38 Every mDNS-sourced cell is printed through the table's escaping
-  (control, bidi and zero-width characters shown as `\u{..}`, cut at 64
+  (control, bidi including U+061C, zero-width, U+2028, U+2029 and U+00AD
+  characters shown as `\u{..}`, cut at 64
   characters); a TXT that is not a node record is skipped and counted
   once per instance; at most 256 nodes are kept — mwctl
   `scout::tests::d38_*`, `scout::mdns_shell::tests::d38_*`.

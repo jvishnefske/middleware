@@ -344,15 +344,18 @@ fn short(zid: &str) -> &str {
 pub const MAX_CELL: usize = 64;
 
 /// One cell as it is safe to print. Every field but the node id comes from
-/// the network (a scout reply, a router's admin space, a `sys/info`), so
-/// control characters, bidi overrides and zero-width characters are shown
+/// the network (a scout reply, a router's admin space, a `sys/info`, an
+/// mDNS record), so control characters, bidi marks and overrides
+/// (including U+061C), zero-width characters, the line and paragraph
+/// separators (U+2028, U+2029) and the soft hyphen (U+00AD) are shown
 /// escaped (`\u{1b}`), never sent to the terminal, and the cell is cut at
 /// [`MAX_CELL`] characters.
 fn clean(s: &str) -> String {
     let hidden = |c: char| {
         c.is_control()
             || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-                | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+                | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{061C}'
+                | '\u{2028}' | '\u{2029}' | '\u{00AD}')
     };
     let mut out = String::new();
     for (n, c) in s.chars().enumerate() {
@@ -1392,6 +1395,24 @@ client  c9        tcp/10.0.0.9:50123  -     r1   310441d265f82484  imxrt1052  0.
             out.contains("z…") && !out.contains(&"z".repeat(MAX_CELL)),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn d38_line_breaks_soft_hyphens_and_the_arabic_mark_are_escaped() {
+        for (c, shown) in [
+            ('\u{061c}', "\\u{61c}"),
+            ('\u{2028}', "\\u{2028}"),
+            ('\u{2029}', "\\u{2029}"),
+            ('\u{00ad}', "\\u{ad}"),
+        ] {
+            let f = MdnsNode {
+                chip: format!("a{c}b"),
+                ..found("posix-0102030405060708", POSIX, None)
+            };
+            let out = format(&merge_mdns(Vec::new(), &[f], &[]));
+            assert!(!out.contains(c), "{c:?} in {out:?}");
+            assert!(out.contains(&format!("a{shown}b")), "{shown} in {out:?}");
+        }
     }
 
     #[test]
