@@ -151,6 +151,27 @@ pub const RP2350: Profile = Profile {
     pins: boards::PICO,
 };
 
+/// The RP2350 RAM plan of the network links (D51), measured with
+/// `rust-size -A` and `rust-nm -S` on the release builds (`build.sh`
+/// prints the statics outside the heap): what the 136 KiB outside the
+/// heap must hold.
+pub mod net_budget {
+    /// `.data` + `.bss` outside the heap arena, `rp2350` (no link).
+    pub const BASE_STATICS: usize = 43_244;
+    /// What `usb-ncm` adds: the mDNS task pool (14 784, the announcer and
+    /// the socket's 4 KiB + 2 KiB buffers), the NCM channel's four packets
+    /// (6 188), the NCM runner's pool (2 912), 2 socket slots (736), the
+    /// stack runner's pool and the NCM control state.
+    pub const USB_NCM_STATICS: usize = 24_800;
+    /// The deepest stack of one poll, by direct calls in the disassembly:
+    /// the mDNS task (36 440 bytes on thumbv8m; its poll frame is 21 944).
+    /// Payload loading on the main task needs about 31 KiB (ESP32-S3) and
+    /// 33 416 bytes by the same count; polls never nest.
+    pub const STACK: usize = 36_440;
+    /// What is kept free beyond that for interrupt frames and error.
+    pub const MARGIN: usize = 16 * 1024;
+}
+
 impl Profile {
     /// The board's pin map.
     pub const fn pins(&self) -> &PinMap {
@@ -279,6 +300,15 @@ mod tests {
                 assert_eq!(p.check_pin(scl, Direction::Output), Ok(()));
             }
         }
+    }
+
+    #[test]
+    fn d51_the_network_links_fit_beside_the_heap() {
+        use net_budget::*;
+        let need = BASE_STATICS + USB_NCM_STATICS + STACK + MARGIN;
+        assert!(RP2350.sram_outside_heap() >= need, "{need} B needed");
+        // The RP2040 has no heap: all of its SRAM is outside it.
+        assert!(RP2040.sram_outside_heap() >= need);
     }
 
     #[test]
