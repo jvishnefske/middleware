@@ -53,6 +53,8 @@ mod heap;
 )]
 mod i2c;
 mod link;
+#[cfg(feature = "net")]
+mod mdns;
 #[cfg(feature = "usb-ncm")]
 mod net;
 #[cfg_attr(
@@ -195,7 +197,9 @@ fn start_usb(
 // The composite device fits embassy-usb's buffers and default limits.
 #[cfg(feature = "usb-ncm")]
 const _: () = {
-    use rp_base::usb::{CONFIG_BUF, MAX_HANDLERS, MAX_INTERFACES, config_total, handlers, interfaces};
+    use rp_base::usb::{
+        CONFIG_BUF, MAX_HANDLERS, MAX_INTERFACES, config_total, handlers, interfaces,
+    };
     assert!(config_total(true) <= CONFIG_BUF);
     assert!(interfaces(true) <= MAX_INTERFACES);
     assert!(handlers(true) <= MAX_HANDLERS);

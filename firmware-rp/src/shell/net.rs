@@ -8,7 +8,8 @@
 //! [`netid::mac`]`(Device)` and the static link-local address
 //! [`netid::link_local`]/16 (no gateway, no DNS), seeds the stack from
 //! boot entropy ([`netid::seed`]) and spawns the NCM runner and the stack
-//! runner. The link is up while the host has the NCM data interface
+//! runner, then the mDNS responder ([`super::mdns`], board `pico-usb` or
+//! `pico2-usb`). The link is up while the host has the NCM data interface
 //! enabled (`ncm::Runner` reports it), which gates the mDNS responder
 //! (`super::mdns`).
 //!
@@ -23,13 +24,16 @@ use embassy_usb::class::cdc_ncm::embassy_net::{
     Device, Runner as NcmRunner, State as ChannelState,
 };
 use embassy_usb::class::cdc_ncm::{CdcNcmClass, State as NcmState};
+use rp_base::mdns_node::{self, Link};
 use rp_base::netid::{self, Side};
 use rp_base::node::node_id;
 use rp_base::usb::MAX_PACKET;
 use static_cell::StaticCell;
 
+use super::board::PROFILE;
 use super::bus::Bus;
 use super::link::UsbDriver;
+use super::mdns::mdns_task;
 
 /// The Ethernet frame size the link carries.
 pub const MTU: usize = 1514;
@@ -62,14 +66,14 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static, MTU>>
     runner.run().await
 }
 
-/// Brings up the stack on `class` and spawns its runners; the stack, for
-/// the responder. `entropy` comes from the chip's random source.
+/// Brings up the stack on `class` and spawns its runners and the mDNS
+/// responder; the stack. `entropy` comes from the chip's random source.
 pub fn start(
     spawner: Spawner,
     class: CdcNcmClass<'static, UsbDriver>,
     uid: [u8; 8],
     entropy: [u8; 8],
-    bus: &Bus,
+    bus: &'static Bus,
 ) -> Stack<'static> {
     let node = node_id(uid);
     let (ncm, device) = class.into_embassy_net_device::<MTU, N_RX, N_TX>(
@@ -90,6 +94,8 @@ pub fn start(
     );
     spawner.spawn(ncm_task(ncm).unwrap());
     spawner.spawn(net_task(runner).unwrap());
+    let board = mdns_node::board(PROFILE.chip, Link::UsbNcm);
+    spawner.spawn(mdns_task(stack, bus, uid, board).unwrap());
     bus.log(format_args!(
         "net: usb ncm at {a}.{b}.{c}.{d}/{}, host interface enx{}",
         netid::PREFIX_LEN,
