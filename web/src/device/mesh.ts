@@ -11,7 +11,8 @@
 //   `MeshDownError` and calls `onClosed`; a new connection is a new
 //   transport.
 // * `scan` asks every node for `sys/info` (`@mw/node/*/sys/info`) and lists
-//   each replier once, by its sender id (the key the node answers at).
+//   each replier once, by its sender id (the key the node answers at; a
+//   reply whose sender is not 16 lowercase hex digits is left out).
 //   Sender ids are not stored: always rescan before probing.
 // * `MeshClient` is a `DeviceClient` for one node, by sender id. It is
 //   probe-only: the cloud router lets a browser ask `sys/info`,
@@ -290,7 +291,8 @@ export async function scan(t: MeshLink, proto: Protocol, timeoutMs = SCAN_TIMEOU
   const replies = await t.discover(proto.constants.keys.info, new Uint8Array(), timeoutMs);
   const rows = new Map<string, MeshDevice>();
   for (const r of replies) {
-    if (!r.sender || rows.has(r.sender)) continue;
+    // A sender id is addressed and shown: only the shape a node has.
+    if (!r.sender || !SENDER_ID.test(r.sender) || rows.has(r.sender)) continue;
     if (r.body) {
       const info = proto.decodeDeviceInfo(r.body) ?? null;
       rows.set(
@@ -382,16 +384,29 @@ export function defaultMeshUrl(where: { hostname: string; search?: string; store
   return `wss://updates.${site}/mesh`;
 }
 
+/** A strict DNS name: dot-separated labels of letters, digits and inner
+ * hyphens, at least two labels, at most 253 characters. */
+export const DNS_NAME = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+/** A sender id: 16 lowercase hex digits. */
+export const SENDER_ID = /^[0-9a-f]{16}$/;
+
 /** The site of a mesh URL `wss://updates.<site>/mesh`, whose mTLS router
- * `mesh.updates.<site>` is where mwctl connects; null for any other URL
- * (a local router). */
+ * `mesh.updates.<site>` is where mwctl connects, lowercased; null unless
+ * the host is a strict DNS name (`isDnsName`), so no IP address, local name
+ * or anything a shell would read. */
 export function siteOfMeshUrl(url: string): string | null {
   let host: string;
   try {
-    host = new URL(url).hostname;
+    host = new URL(url).hostname.toLowerCase();
   } catch {
     return null;
   }
-  if (host === "localhost" || /^[0-9.]+$/.test(host) || host.includes(":")) return null;
-  return host.startsWith("updates.") ? host.slice("updates.".length) : host;
+  const site = host.startsWith("updates.") ? host.slice("updates.".length) : host;
+  return isDnsName(host) && isDnsName(site) ? site : null;
+}
+
+/** `DNS_NAME`, and not an IPv4 address (its last label has a letter). */
+export function isDnsName(s: string): boolean {
+  return DNS_NAME.test(s) && /[a-z]/i.test(s.slice(s.lastIndexOf(".") + 1));
 }

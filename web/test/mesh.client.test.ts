@@ -240,6 +240,9 @@ describe("scan", () => {
         { sender: "00000000000000bb", status: 5 },
         { body: info("ffffffffffffffff") },
         { sender: "00000000000000cc", body: new Uint8Array([1]) },
+        // A sender id that is not 16 lowercase hex digits is not listed.
+        { sender: "$(id)", body: info() },
+        { sender: "5E110DE02A9C0102", body: info() },
       ],
     });
     const got = await rows;
@@ -331,5 +334,20 @@ describe("siteOfMeshUrl", () => {
     expect(siteOfMeshUrl("wss://mesh.example.org/")).toBe("mesh.example.org");
     expect(siteOfMeshUrl("ws://127.0.0.1:8000")).toBeNull();
     expect(siteOfMeshUrl("not a url")).toBeNull();
+    expect(siteOfMeshUrl("wss://UPDATES.Example.ORG/mesh")).toBe("example.org");
+    // Only a strict DNS name is a site.
+    for (const bad of [
+      "ws://localhost:8000",
+      "wss://updates/mesh",
+      "wss://[::1]:8000/",
+      "wss://xn--.-a.org/",
+      "wss://-bad.org/",
+      "wss://bad-.org/",
+      `wss://${"a".repeat(64)}.org/`,
+      "wss://a_b.org/",
+    ]) {
+      expect(siteOfMeshUrl(bad), bad).toBeNull();
+    }
+    expect(siteOfMeshUrl("wss://updates.example.org.")).toBeNull();
   });
 });
