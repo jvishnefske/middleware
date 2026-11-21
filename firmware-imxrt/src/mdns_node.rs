@@ -218,6 +218,51 @@ mod tests {
         assert_eq!(attrs.fw, Some("0.1.0+no-wasm"));
     }
 
+    /// D46: the bytes the board announces, pinned before the pure core
+    /// moved to `middleware::mdns::responder`; the move changes none.
+    #[test]
+    fn d46_golden_txt_and_service() {
+        let id = Identity::of(UID);
+        let d = Desired {
+            zenoh: Some(Endpoint {
+                addr: [10, 0, 0, 2],
+                port: 7447,
+            }),
+            ..lease([192, 168, 1, 20], 24)
+        };
+        let t = txt(&id, &d, "0.1.0", Some(SENDER)).unwrap();
+        let golden: &[u8] = b"\x09txtvers=1\
+            \x13id=e661385283121f2a\
+            \x0bchip=rt1050\
+            \x15board=mimxrt1050-evkb\
+            \x08fw=0.1.0\
+            \x17sender=a1b2c3d4e5f60718\
+            \x17zenoh=tcp/10.0.0.2:7447";
+        assert_eq!(t.as_slice(), golden);
+        let bare = txt(&id, &lease([192, 168, 1, 20], 24), "0.1.0+no-wasm", None).unwrap();
+        let golden_bare: &[u8] = b"\x09txtvers=1\
+            \x13id=e661385283121f2a\
+            \x0bchip=rt1050\
+            \x15board=mimxrt1050-evkb\
+            \x10fw=0.1.0+no-wasm";
+        assert_eq!(bare.as_slice(), golden_bare);
+        let svc = service(&id, &d, &t);
+        assert_eq!(
+            svc,
+            Service {
+                kind: KIND,
+                instance: "rt1050-e661385283121f2a",
+                node: Some(SenderId(UID)),
+                endpoint: SrvEndpoint::Socket(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 168, 1, 20),
+                    0
+                ))),
+                txt: golden,
+                ttl_s: 120,
+            }
+        );
+    }
+
     #[test]
     fn d42_the_record_probes_and_announces_the_lease_address() {
         let id = Identity::of(UID);
