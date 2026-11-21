@@ -889,7 +889,9 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   measured on the release builds (`rust-size`, `rust-nm`; `build.sh`
   prints the statics outside the heap): 43 244 bytes without a link,
   24 800 more with `usb-ncm` (the mDNS task pool 14 784, the NCM channel
-  6 188, the NCM runner 2 912, 2 socket slots 736), the deepest poll
+  6 188, the NCM runner 2 912, 2 socket slots 736) or 23 020 with `w5500`
+  (the same pool, the driver's channel 6 188, 3 socket slots 1 160),
+  the deepest poll
   36 440 bytes (the mDNS task, by direct calls on thumbv8m), and a 16 KiB
   margin — firmware-rp
   `chip::tests::d51_the_network_links_fit_beside_the_heap`.
@@ -903,7 +905,30 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   and TX in the function table. `by_chip` still names the plain Pico map
   — board-pins `boards::tests::d50_*`, firmware-rp
   `chip::tests::d50_the_w5500_profiles_keep_its_pins_and_spi0`,
+- [x] D49 With `w5500` multicast reaches the board: embassy-net-wiznet
+  0.3.0 opens socket 0 in MACRAW with `Sn_MR` = `0x84` (MFEN, the MAC
+  filter, on: only its own address and broadcast arrive, so no mDNS), a
+  sealed constant; `wiznet::NoMacFilter` wraps the SPI device and writes
+  that one register (socket 0 `Sn_MR`: address `00 00`, control `0C`, one
+  data byte) with MFEN clear, `0x04`, and passes every other transaction
+  through. A contract test runs the real driver's initialisation over a
+  recording fake: bare it writes `Sn_MR` `0x84` exactly once (so an
+  upstream change fails it), wrapped `0x04`, all else identical —
+  firmware-rp `wiznet::tests::d49_*`.
   `periph::func::tests::d50_no_payload_route_reaches_a_reserved_spi_block`.
+- [ ] D53 On a W5500-EVB-Pico (or a Pico wired alike) with `w5500`, the
+  board initialises the W5500 (a missing module is logged and mwctl
+  still works), takes a DHCP lease as `rp-<id>`, and its responder
+  announces the D47 record (board `pico-w5500`/`pico2-w5500`) while the
+  PHY link is up and a lease is held, withdrawing when either goes.
+  Built (`./build.sh rp2350 --features w5500`, `rp2040` too); on
+  hardware: the lease and host name show in the router, `avahi-browse`
+  from another LAN host lists the board (multicast arrives: the D49
+  rewrite works), it answers queries and sends an IGMP report, a cable
+  pull withdraws and a replug re-announces, the SPI clock is about
+  18.75 MHz (RP2350) / 15.6 MHz (RP2040), RX drops and CPU stay sane on
+  a busy LAN, and an RP2350 payload cannot use GPIO 16–21 or SPI0.
+  Owner: user.
 - [ ] D52 On a Pico or Pico 2 with `usb-ncm`, the board is at
   `169.254.a.b/16` (D45) on the NCM link and its responder announces the
   D47 record only while the host has the link up: it joins 224.0.0.251

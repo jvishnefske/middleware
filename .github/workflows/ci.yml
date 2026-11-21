@@ -70,6 +70,10 @@ jobs:
             target: thumbv8m.main-none-eabihf
           - features: rp2040,usb-ncm
             target: thumbv6m-none-eabi
+          - features: rp2350,w5500
+            target: thumbv8m.main-none-eabihf
+          - features: rp2040,w5500
+            target: thumbv6m-none-eabi
     steps:
       - uses: actions/checkout@v4
       - id: present
