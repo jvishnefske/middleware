@@ -53,6 +53,8 @@ mod heap;
 )]
 mod i2c;
 mod link;
+#[cfg(feature = "usb-ncm")]
+mod net;
 #[cfg_attr(
     not(feature = "wasm"),
     allow(
@@ -101,7 +103,7 @@ static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 
 /// Buffers the USB stack borrows for the life of the firmware.
 struct UsbMemory {
-    config: [u8; 256],
+    config: [u8; rp_base::usb::CONFIG_BUF],
     bos: [u8; 256],
     msos: [u8; 0],
     control: [u8; 64],
@@ -109,7 +111,7 @@ struct UsbMemory {
 }
 
 static USB_MEMORY: ConstStaticCell<UsbMemory> = ConstStaticCell::new(UsbMemory {
-    config: [0; 256],
+    config: [0; rp_base::usb::CONFIG_BUF],
     bos: [0; 256],
     msos: [0; 0],
     control: [0; 64],
@@ -148,11 +150,13 @@ async fn link_task(link: UsbLink, bus: &'static Bus) {
     link::serve(link, bus).await;
 }
 
-/// Brings up USB: the device task and the CDC link task.
+/// Brings up USB: the device task and the CDC link task and, with
+/// `usb-ncm`, the NCM function and its network stack (`entropy` seeds it).
 fn start_usb(
     spawner: Spawner,
     usb: embassy_rp::Peri<'static, USB>,
     serial: &'static str,
+    #[cfg(feature = "usb-ncm")] (uid, entropy): ([u8; 8], [u8; 8]),
     bus: &'static Bus,
 ) {
     let driver = Driver::new(usb, Irqs);
@@ -172,7 +176,10 @@ fn start_usb(
         &mut mem.control,
     );
     builder.handler(USB_STATE.init(UsbState { bus }));
+    // ACM first: its interfaces are 0 and 1 (`...-if00`), NCM's 2 and 3.
     let class = CdcAcmClass::new(&mut builder, CDC_STATE.init(CdcState::new()), MAX_PACKET);
+    #[cfg(feature = "usb-ncm")]
+    let ncm = net::add_ncm(&mut builder, uid);
     let device = builder.build();
     let (tx, rx) = class.split();
     let link = SerialLink::with_inbox(Duplex::new(
@@ -181,7 +188,18 @@ fn start_usb(
     ));
     spawner.spawn(usb_task(device).unwrap());
     spawner.spawn(link_task(link, bus).unwrap());
+    #[cfg(feature = "usb-ncm")]
+    net::start(spawner, ncm, uid, entropy, bus);
 }
+
+// The composite device fits embassy-usb's buffers and default limits.
+#[cfg(feature = "usb-ncm")]
+const _: () = {
+    use rp_base::usb::{CONFIG_BUF, MAX_HANDLERS, MAX_INTERFACES, config_total, handlers, interfaces};
+    assert!(config_total(true) <= CONFIG_BUF);
+    assert!(interfaces(true) <= MAX_INTERFACES);
+    assert!(handlers(true) <= MAX_HANDLERS);
+};
 
 /// Logs what the boot found.
 fn log_boot(bus: &Bus, uid: [u8; 8], boot: &rp_base::service::Boot, capacity: u32) {
@@ -309,7 +327,18 @@ pub async fn run(spawner: Spawner) -> ! {
     let mut flash: board::FlashDriver = Flash::new_blocking(p.FLASH);
     let uid = board::unique_id(&mut flash);
     let serial: &'static Serial = SERIAL.init(Serial::new(uid));
-    start_usb(spawner, p.USB, serial.as_str(), bus);
+    #[cfg(all(feature = "usb-ncm", feature = "rp2350"))]
+    let entropy = board::entropy(p.TRNG);
+    #[cfg(all(feature = "usb-ncm", feature = "rp2040"))]
+    let entropy = board::entropy();
+    start_usb(
+        spawner,
+        p.USB,
+        serial.as_str(),
+        #[cfg(feature = "usb-ncm")]
+        (uid, entropy),
+        bus,
+    );
 
     let facts = Facts {
         chip: PROFILE.name,

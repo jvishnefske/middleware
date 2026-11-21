@@ -81,3 +81,27 @@ pub fn unique_id(flash: &mut FlashDriver) -> [u8; 8] {
 pub fn unique_id(_flash: &mut FlashDriver) -> [u8; 8] {
     embassy_rp::otp::get_chipid().map(u64::to_be_bytes).unwrap_or([0; 8])
 }
+
+#[cfg(all(feature = "net", feature = "rp2350"))]
+embassy_rp::bind_interrupts!(struct TrngIrqs {
+    TRNG_IRQ => embassy_rp::trng::InterruptHandler<embassy_rp::peripherals::TRNG>;
+});
+
+/// Eight bytes of boot entropy for the network stack's seed
+/// ([`rp_base::netid::seed`]): the RP2350's TRNG.
+#[cfg(all(feature = "net", feature = "rp2350"))]
+pub fn entropy(trng: embassy_rp::Peri<'static, embassy_rp::peripherals::TRNG>) -> [u8; 8] {
+    let mut rng = embassy_rp::trng::Trng::new(trng, TrngIrqs, embassy_rp::trng::Config::default());
+    let mut out = [0u8; 8];
+    rng.blocking_fill_bytes(&mut out);
+    out
+}
+
+/// Eight bytes of boot entropy for the network stack's seed
+/// ([`rp_base::netid::seed`]): the RP2040's ROSC random bit.
+#[cfg(all(feature = "net", feature = "rp2040"))]
+pub fn entropy() -> [u8; 8] {
+    let mut out = [0u8; 8];
+    embassy_rp::clocks::RoscRng.fill_bytes(&mut out);
+    out
+}
