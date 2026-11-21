@@ -7,11 +7,17 @@ use rp_base::chip::Profile;
 use rp_base::flash::Sectored;
 
 /// The chip's profile.
-#[cfg(feature = "rp2040")]
+#[cfg(all(feature = "rp2040", not(feature = "w5500")))]
 pub const PROFILE: Profile = rp_base::chip::RP2040;
 /// The chip's profile.
-#[cfg(feature = "rp2350")]
+#[cfg(all(feature = "rp2350", not(feature = "w5500")))]
 pub const PROFILE: Profile = rp_base::chip::RP2350;
+/// The chip's profile: the W5500 keeps GPIO 16-21 and SPI0.
+#[cfg(all(feature = "rp2040", feature = "w5500"))]
+pub const PROFILE: Profile = rp_base::chip::RP2040_W5500;
+/// The chip's profile: the W5500 keeps GPIO 16-21 and SPI0.
+#[cfg(all(feature = "rp2350", feature = "w5500"))]
+pub const PROFILE: Profile = rp_base::chip::RP2350_W5500;
 
 /// The static profile the tasks borrow.
 pub static PROFILE_REF: Profile = PROFILE;

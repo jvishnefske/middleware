@@ -52,9 +52,10 @@ struct Xfer {
     deadline: Instant,
 }
 
-/// SPI bus 0: both controllers, the buffer and the transfer state.
+/// SPI bus 0: the controllers payloads may use (SPI0 is the firmware's
+/// with `w5500`), the buffer and the transfer state.
 pub struct SpiBus {
-    _spi0: Peri<'static, SPI0>,
+    spi0: Option<Peri<'static, SPI0>>,
     _spi1: Peri<'static, SPI1>,
     buf: &'static mut Buffer,
     open: Option<Open>,
@@ -113,12 +114,30 @@ fn configure(open: &Open) -> Result<(), AbiError> {
 }
 
 impl SpiBus {
-    /// Takes both controllers (held in reset until a payload opens the
-    /// bus) and the transfer buffer.
-    pub fn new(spi0: Peri<'static, SPI0>, spi1: Peri<'static, SPI1>, buf: &'static mut Buffer) -> Self {
-        hold_reset(SpiBlock::Spi0, true);
-        hold_reset(SpiBlock::Spi1, true);
-        SpiBus { _spi0: spi0, _spi1: spi1, buf, open: None, state: DmaState::Idle, xfer: None }
+    /// Takes the controllers (held in reset until a payload opens the
+    /// bus) and the transfer buffer. Without `spi0` (the W5500's) SPI0 is
+    /// never reset or opened.
+    pub fn new(spi0: Option<Peri<'static, SPI0>>, spi1: Peri<'static, SPI1>, buf: &'static mut Buffer) -> Self {
+        let bus = SpiBus { spi0, _spi1: spi1, buf, open: None, state: DmaState::Idle, xfer: None };
+        bus.hold_owned();
+        bus
+    }
+
+    /// Whether the bus holds `block`.
+    fn owns(&self, block: SpiBlock) -> bool {
+        match block {
+            SpiBlock::Spi0 => self.spi0.is_some(),
+            SpiBlock::Spi1 => true,
+        }
+    }
+
+    /// Holds the controllers the bus holds in reset.
+    fn hold_owned(&self) {
+        for block in [SpiBlock::Spi0, SpiBlock::Spi1] {
+            if self.owns(block) {
+                hold_reset(block, true);
+            }
+        }
     }
 
     /// Whether a transfer is running.
@@ -137,6 +156,10 @@ impl SpiBus {
     pub fn open(&mut self, route: SpiRoute, cfg: &SpiConfig) -> Result<(), AbiError> {
         if self.busy() {
             return Err(AbiError::Busy);
+        }
+        // The profile refuses such a route already (`reserved_spi`).
+        if !self.owns(route.block) {
+            return Err(AbiError::Unsupported);
         }
         let clk = embassy_rp::clocks::clk_peri_freq();
         let clock = Clock::new(clk, cfg.freq_khz.saturating_mul(1000))?;
@@ -228,11 +251,10 @@ impl SpiBus {
         Ok(n)
     }
 
-    /// Closes the bus (payload stop): any transfer abandoned, both
+    /// Closes the bus (payload stop): any transfer abandoned, its
     /// controllers held in reset.
     pub fn close(&mut self) {
-        hold_reset(SpiBlock::Spi0, true);
-        hold_reset(SpiBlock::Spi1, true);
+        self.hold_owned();
         self.open = None;
         self.xfer = None;
         self.state = self.state.abort();

@@ -28,6 +28,11 @@
 //!    reset until a payload opens them. The SPI and I2C register drivers
 //!    ([`pads`], [`spi`], [`i2c`]) are built on the RP2040 too, which runs
 //!    no payloads, so their register code is checked for both chips.
+//!    With `usb-ncm` the device is composite: the CDC-NCM function after
+//!    CDC-ACM and an embassy-net stack on it (`net`), and the mDNS
+//!    responder (`mdns`); with `w5500` the W5500 on SPI0 is initialised
+//!    after the payload hardware (`w5500`; a missing chip is logged and the
+//!    firmware carries on), with DHCP and the same responder.
 //! 6. The [`controller`] runs on the main task, announces the device on
 //!    the link (`disc/mw/node`, [`rp_base::beacons`]) and starts the
 //!    stored payload if one is valid (and the runtime is built in).
@@ -75,6 +80,8 @@ mod rom;
     )
 )]
 mod spi;
+#[cfg(feature = "w5500")]
+mod w5500;
 
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
@@ -285,10 +292,10 @@ fn open_fw(
 static SPI_BUFFER: ConstStaticCell<spi::Buffer> =
     ConstStaticCell::new([0; middleware::wasm_abi::periph::MAX_DMA]);
 
-/// The payload's bus controllers.
+/// The payload's bus controllers (SPI0 is the W5500's with `w5500`).
 #[cfg(feature = "wasm")]
 struct Buses {
-    spi0: embassy_rp::Peri<'static, embassy_rp::peripherals::SPI0>,
+    spi0: Option<embassy_rp::Peri<'static, embassy_rp::peripherals::SPI0>>,
     spi1: embassy_rp::Peri<'static, embassy_rp::peripherals::SPI1>,
     i2c0: embassy_rp::Peri<'static, embassy_rp::peripherals::I2C0>,
     i2c1: embassy_rp::Peri<'static, embassy_rp::peripherals::I2C1>,
@@ -297,8 +304,8 @@ struct Buses {
 /// Sets the payload hardware aside: the GPIO bank, the ADC and the SPI and
 /// I2C controllers.
 #[cfg(feature = "wasm")]
-fn install_payload_hw(
-    pins: [embassy_rp::Peri<'static, embassy_rp::gpio::AnyPin>; 25],
+fn install_payload_hw<const N: usize>(
+    pins: [embassy_rp::Peri<'static, embassy_rp::gpio::AnyPin>; N],
     adc: embassy_rp::Peri<'static, embassy_rp::peripherals::ADC>,
     analog: [embassy_rp::adc::Channel<'static>; 3],
     buses: Buses,
@@ -331,9 +338,9 @@ pub async fn run(spawner: Spawner) -> ! {
     let mut flash: board::FlashDriver = Flash::new_blocking(p.FLASH);
     let uid = board::unique_id(&mut flash);
     let serial: &'static Serial = SERIAL.init(Serial::new(uid));
-    #[cfg(all(feature = "usb-ncm", feature = "rp2350"))]
+    #[cfg(all(feature = "net", feature = "rp2350"))]
     let entropy = board::entropy(p.TRNG);
-    #[cfg(all(feature = "usb-ncm", feature = "rp2040"))]
+    #[cfg(all(feature = "net", feature = "rp2040"))]
     let entropy = board::entropy();
     start_usb(
         spawner,
@@ -384,24 +391,49 @@ pub async fn run(spawner: Spawner) -> ! {
             p.PIN_13.into(),
             p.PIN_14.into(),
             p.PIN_15.into(),
+            #[cfg(not(feature = "w5500"))]
             p.PIN_16.into(),
+            #[cfg(not(feature = "w5500"))]
             p.PIN_17.into(),
+            #[cfg(not(feature = "w5500"))]
             p.PIN_18.into(),
+            #[cfg(not(feature = "w5500"))]
             p.PIN_19.into(),
+            #[cfg(not(feature = "w5500"))]
             p.PIN_20.into(),
+            #[cfg(not(feature = "w5500"))]
             p.PIN_21.into(),
             p.PIN_22.into(),
             p.PIN_24.into(),
             p.PIN_25.into(),
         ];
         let buses = Buses {
-            spi0: p.SPI0,
+            #[cfg(not(feature = "w5500"))]
+            spi0: Some(p.SPI0),
+            #[cfg(feature = "w5500")]
+            spi0: None,
             spi1: p.SPI1,
             i2c0: p.I2C0,
             i2c1: p.I2C1,
         };
         install_payload_hw(pins, p.ADC, analog, buses);
         bus.log(format_args!("heap: {} B free after boot", heap::free()));
+    }
+
+    #[cfg(feature = "w5500")]
+    {
+        let parts = w5500::Parts {
+            spi: p.SPI0,
+            miso: p.PIN_16,
+            cs: p.PIN_17,
+            sck: p.PIN_18,
+            mosi: p.PIN_19,
+            rst: p.PIN_20,
+            int: p.PIN_21,
+            tx_dma: p.DMA_CH0,
+            rx_dma: p.DMA_CH1,
+        };
+        w5500::start(spawner, parts, uid, entropy, bus).await;
     }
 
     let mut controller = Controller::new(svc, bus, Identity::new(&facts));

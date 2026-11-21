@@ -186,10 +186,15 @@ pub mod net_budget {
     /// (6 188), the NCM runner's pool (2 912), 2 socket slots (736), the
     /// stack runner's pool and the NCM control state.
     pub const USB_NCM_STATICS: usize = 24_800;
+    /// What `w5500` adds: the same mDNS task pool, the driver's channel
+    /// (6 188), 3 socket slots with DHCP (1 160), the driver's and the
+    /// stack runner's pools, the SPI0 bus.
+    pub const W5500_STATICS: usize = 23_020;
     /// The deepest stack of one poll, by direct calls in the disassembly:
     /// the mDNS task (36 440 bytes on thumbv8m; its poll frame is 21 944).
     /// Payload loading on the main task needs about 31 KiB (ESP32-S3) and
-    /// 33 416 bytes by the same count; polls never nest.
+    /// 33 416 bytes by the same count (36 088 with `w5500`, whose
+    /// initialisation runs there); polls never nest.
     pub const STACK: usize = 36_440;
     /// What is kept free beyond that for interrupt frames and error.
     pub const MARGIN: usize = 16 * 1024;
@@ -359,7 +364,8 @@ mod tests {
     #[test]
     fn d51_the_network_links_fit_beside_the_heap() {
         use net_budget::*;
-        let need = BASE_STATICS + USB_NCM_STATICS + STACK + MARGIN;
+        let link = if USB_NCM_STATICS > W5500_STATICS { USB_NCM_STATICS } else { W5500_STATICS };
+        let need = BASE_STATICS + link + STACK + MARGIN;
         assert!(RP2350.sram_outside_heap() >= need, "{need} B needed");
         // The RP2040 has no heap: all of its SRAM is outside it.
         assert!(RP2040.sram_outside_heap() >= need);
