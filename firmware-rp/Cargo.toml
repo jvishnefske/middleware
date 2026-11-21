@@ -62,6 +62,14 @@ wasm = ["dep:wasm-host", "dep:linked_list_allocator"]
 fw-update = []
 # Host only: the `rp-image` tool (std, mwctl's image checks).
 image-tool = ["dep:mwctl"]
+# The board on a network link, with an mDNS responder announcing it as
+# `rp-<id>` (`_mw-node._tcp`, D47). At most one link; each needs a chip
+# feature. `usb-ncm`: USB CDC-NCM beside the CDC-ACM port, the board at a
+# link-local IPv4 address derived from its node id (`docs/usb-net.md`).
+usb-ncm = ["net"]
+# Internal: embassy-net (UDP over IPv4 with multicast) and middleware's
+# embassy mDNS seam, pulled in by a link feature.
+net = ["shell", "dep:embassy-net", "middleware/mdns-embassy"]
 # Internal: the imperative shell's dependencies, pulled in by a chip feature.
 shell = [
   "dep:embassy-rp",
@@ -106,6 +114,9 @@ static_cell = { version = "2.1.1", optional = true }
 cortex-m = { version = "0.7.7", optional = true }
 cortex-m-rt = { version = "0.7.5", optional = true }
 embedded-io-async = { version = "0.7", optional = true }
+# The network stack of a link feature: IPv4, Ethernet framing, UDP and
+# multicast membership only (default features off: no TCP, DNS or DHCP).
+embassy-net = { version = "0.9.1", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "multicast"], optional = true }
 # `rp-image` only (feature `image-tool`, host): mwctl's image loading and
 # checks, so the build refuses what `mwctl fw update` would.
 mwctl = { path = "../tools/mwctl", optional = true }
