@@ -110,7 +110,9 @@ pub async fn entropy(trng: embassy_rp::Peri<'static, embassy_rp::peripherals::TR
     embassy_rp::clocks::RoscRng.fill_bytes(&mut rosc);
     let mut rng = embassy_rp::trng::Trng::new(trng, TrngIrqs, embassy_rp::trng::Config::default());
     let mut hw = [0u8; 8];
-    let delivered = embassy_time::with_timeout(TRNG_WAIT, rng.fill_bytes(&mut hw)).await.is_ok();
+    let delivered = embassy_time::with_timeout(TRNG_WAIT, rng.fill_bytes(&mut hw))
+        .await
+        .is_ok();
     rp_base::netid::boot_entropy(delivered.then_some(hw), rosc)
 }
 

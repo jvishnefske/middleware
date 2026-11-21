@@ -860,8 +860,10 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   same hash (never 169.254.0/24, 169.254.255/24 or a `.0`/`.255` host
   byte; no RFC 3927 probing by the board). embassy-net's seed is never
   the node id alone (the id is public, in the mDNS TXT): `seed(entropy,
-  node)` mixes 8 bytes of boot entropy (RP2350 TRNG, RP2040 ROSC random
-  bit) with the id's hash through the splitmix64 finalizer, so for one
+  node)` mixes 8 bytes of boot entropy (RP2350: the TRNG, read async
+  with a 20 ms bound so a fault never panics, XOR the ROSC random bit,
+  which alone remains if the TRNG does not deliver; RP2040: the ROSC)
+  with the id's hash through the splitmix64 finalizer, so for one
   node every entropy value gives another seed — firmware-rp
   `netid::tests::d45_*` (100 000 ids, a golden id checked with Python).
 - [x] D47 An RP board on a network link announces the D41 record over the
@@ -893,8 +895,13 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   (the same pool, the driver's channel 6 188, 3 socket slots 1 160),
   the deepest poll
   36 440 bytes (the mDNS task, by direct calls on thumbv8m), and a 16 KiB
-  margin — firmware-rp
-  `chip::tests::d51_the_network_links_fit_beside_the_heap`.
+  margin. It is enforced: both linker scripts assert `_stack_start -
+  __euninit >= 52824` (STACK + MARGIN; the link fails, checked at the
+  exact boundary), and `build.sh` fails a build whose statics outside the
+  heap exceed its variant's figure (RP2040 figures too: 27 596, +24 784,
+  +22 976) — firmware-rp
+  `chip::tests::d51_the_network_links_fit_beside_the_heap`,
+  `chip::tests::d51_the_link_fails_without_the_stack_room`.
 - [x] D49 With `w5500` multicast reaches the board: embassy-net-wiznet
   0.3.0 opens socket 0 in MACRAW with `Sn_MR` = `0x84` (MFEN, the MAC
   filter, on: only its own address and broadcast arrive, so no mDNS), a

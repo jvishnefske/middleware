@@ -426,7 +426,10 @@ mod tests {
     #[test]
     fn d51_the_link_fails_without_the_stack_room() {
         use net_budget::{MARGIN, STACK};
-        for script in [include_str!("../memory-rp2040.x"), include_str!("../memory-rp2350.x")] {
+        for script in [
+            include_str!("../memory-rp2040.x"),
+            include_str!("../memory-rp2350.x"),
+        ] {
             assert_eq!(asserted_stack_room(script), Some(STACK + MARGIN));
         }
     }
