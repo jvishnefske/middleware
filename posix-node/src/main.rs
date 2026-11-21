@@ -16,9 +16,11 @@
 //! keeps running. With `MW_POSIX_NODE_MDNS` on or an address (off by
 //! default) it announces itself on mDNS as `posix-<node id>`
 //! (`mdns_node`); that never fails the node either. On the way out the
-//! mDNS goodbye goes first, then the Zenoh sys task and the ESP-NOW
-//! gateway stop (its beacons withdrawn), the payload is stopped, the flash
-//! synced and the gateway's announcements withdrawn.
+//! mDNS announcer is told to stop first (its goodbye goes out beside the
+//! rest of the shutdown), the runner, the Zenoh sys task and the ESP-NOW
+//! gateway stop (its beacons withdrawn), the announcer is awaited for at
+//! most 3 s, then the payload is stopped, the flash synced and the
+//! gateway's announcements withdrawn.
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
@@ -236,7 +238,9 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
             }
         }
     };
-    // The goodbye first, while the node is still up.
+    // The announcer is told to stop first, so its goodbye (on its own
+    // socket, needing nothing else here) starts while the rest shuts down;
+    // nothing waits for it until the payload is about to stop, below.
     let _ = stop_mdns.send(());
     let _ = stop_runner.send(());
     let _ = stop_zsys.send(());

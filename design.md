@@ -872,8 +872,10 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
 - [x] D32 The announcer runs beside the node after `start()` and its
   failure is never the node's: errors are logged at the 1st, 2nd, 4th…
   failure in a row and retried (2 s doubling to 60 s, 30 s after every
-  rename conflicted). On SIGTERM it multicasts its goodbye, within 2 s,
-  before the runner stops; stopped while nothing is announced it returns
+  rename conflicted). On SIGTERM it is told to stop first and multicasts
+  its goodbye within 2 s while the runner and the other tasks stop beside
+  it; the node awaits it (at most 3 s) before stopping the payload;
+  stopped while nothing is announced it returns
   at once — posix-node `mdns_node::tests::d32_*`, `tests/mdns_node.rs::d32_*`.
 - [ ] D33 Beside avahi and a second node on one host, all three share UDP
   5353 (`SO_REUSEADDR`/`SO_REUSEPORT`), each answers for its own names
