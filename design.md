@@ -909,7 +909,9 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   (control, bidi including U+061C, zero-width, U+2028, U+2029 and U+00AD
   characters shown as `\u{..}`, cut at 64
   characters); a TXT that is not a node record is skipped and counted
-  once per instance; at most 256 nodes are kept — mwctl
+  once per instance; at most 256 nodes are kept, and when more answer
+  the rest are dropped with one note on stderr (`mdns: more than 256
+  _mw-node._tcp instances; extra ones ignored`) — mwctl
   `scout::tests::d38_*`, `scout::mdns_shell::tests::d38_*`.
 - [x] D39 The browse is behind mwctl's optional `mdns` feature (default
   mwctl unchanged; `--features zenoh,mdns` enables host features only),

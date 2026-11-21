@@ -542,6 +542,9 @@ mod mdns_shell {
         pub nodes: Vec<MdnsNode>,
         /// Instances whose record is not a node's.
         pub skipped: usize,
+        /// More than [`MAX_MDNS`] instances answered; the later ones were
+        /// dropped ([`truncation_note`]).
+        pub truncated: bool,
         pub notes: Vec<String>,
     }
 
@@ -613,7 +616,8 @@ mod mdns_shell {
                     Ok(n) => match found.nodes.iter().position(|m| m.instance == n.instance) {
                         Some(i) => found.nodes[i] = n,
                         None if found.nodes.len() < MAX_MDNS => found.nodes.push(n),
-                        None => {}
+                        // Never silent: a flood could crowd real nodes out.
+                        None => found.truncated = true,
                     },
                     Err(_) => {
                         if skipped.len() < MAX_MDNS && !skipped.iter().any(|i| i == s.instance) {
@@ -627,6 +631,11 @@ mod mdns_shell {
         }
         found.skipped = skipped.len();
         found
+    }
+
+    /// The note when [`Browsed::truncated`].
+    pub(super) fn truncation_note() -> String {
+        format!("mdns: more than {MAX_MDNS} _mw-node._tcp instances; extra ones ignored")
     }
 
     /// A resolved instance as a node record.
@@ -657,6 +666,7 @@ mod mdns_shell {
         use middleware::SenderId;
         use middleware::discovery::{Announce, Endpoint, Service};
         use middleware::dns::wire::TxtWriter;
+        use middleware::key::KeyFilter;
         use middleware::mdns::announce::MdnsAnnouncer;
         use middleware::mdns::node::{self, NodeTxt};
         use middleware::mdns::socket::MdnsSocket;
@@ -786,6 +796,69 @@ mod mdns_shell {
             assert!(found.notes[0].starts_with("mdns: "), "{:?}", found.notes);
         }
 
+        /// A browser that hands out `count` distinct node records, one per
+        /// `next`, then waits.
+        struct Flood {
+            count: u32,
+            sent: u32,
+            txt: Vec<u8>,
+        }
+
+        impl Browse for Flood {
+            type Error = std::io::Error;
+
+            async fn browse(&mut self, _: KeyFilter<'_>) -> Result<(), std::io::Error> {
+                Ok(())
+            }
+
+            async fn next<'b>(&mut self, buf: &'b mut [u8]) -> Result<Event<'b>, std::io::Error> {
+                if self.sent == self.count {
+                    std::future::pending::<()>().await;
+                }
+                self.sent += 1;
+                let label = format!("posix-{:016x}", self.sent);
+                let (name, rest) = buf.split_at_mut(label.len());
+                name.copy_from_slice(label.as_bytes());
+                rest[..self.txt.len()].copy_from_slice(&self.txt);
+                let txt = &rest[..self.txt.len()];
+                let instance = std::str::from_utf8(name).unwrap();
+                Ok(Event::Up(node::service(instance, at("10.0.0.9"), txt, ID)))
+            }
+
+            fn try_next<'b>(
+                &mut self,
+                _: &'b mut [u8],
+            ) -> Result<Option<Event<'b>>, std::io::Error> {
+                Ok(None)
+            }
+        }
+
+        #[tokio::test]
+        async fn d38_more_than_256_instances_are_cut_with_a_note() {
+            let mut flood = Flood {
+                count: MAX_MDNS as u32 + 40,
+                sent: 0,
+                txt: record("linux-aarch64"),
+            };
+            let found = browse_on(&mut flood, Duration::from_millis(300)).await;
+            assert_eq!(flood.sent, MAX_MDNS as u32 + 40);
+            assert_eq!(found.nodes.len(), MAX_MDNS);
+            assert!(found.truncated);
+            // Exactly at the cap: nothing was cut.
+            let mut flood = Flood {
+                count: MAX_MDNS as u32,
+                sent: 0,
+                txt: record("linux-aarch64"),
+            };
+            let found = browse_on(&mut flood, Duration::from_millis(300)).await;
+            assert_eq!(found.nodes.len(), MAX_MDNS);
+            assert!(!found.truncated);
+            assert_eq!(
+                truncation_note(),
+                "mdns: more than 256 _mw-node._tcp instances; extra ones ignored"
+            );
+        }
+
         #[test]
         fn d38_a_goodbye_or_a_non_node_record_is_not_a_node() {
             let txt = record("linux-aarch64");
@@ -882,6 +955,9 @@ mod shell {
                 };
                 for note in &found.notes {
                     eprintln!("{note}");
+                }
+                if found.truncated {
+                    eprintln!("{}", super::mdns_shell::truncation_note());
                 }
                 if found.skipped > 0 {
                     eprintln!(
