@@ -3,6 +3,7 @@
 //! | map        | board                     | reserved (why)                                        | input only | ADC (channel order)    | I2C bus 0 / 1 (SDA, SCL) | PWM (t,c) = 2·t+c           | SPI     |
 //! |------------|---------------------------|-------------------------------------------------------|------------|------------------------|--------------------------|-----------------------------|---------|
 //! | [`PICO`]   | Raspberry Pi Pico, Pico 2 | 23 power save, 26–28 ADC, 29 VSYS / 3                  | 24 (VBUS)  | 26 27 28               | 4, 5 / 6, 7              | —                           | F1 table |
+//! | [`PICO_W5500`] | Pico / Pico 2 with a W5500 (W5500-EVB-Pico) | [`PICO`]'s and 16–21 the W5500 on SPI0 | 24 (VBUS) | 26 27 28 | 4, 5 / 6, 7 | — | F1 table |
 //! | [`ESP32`]  | AI-Thinker ESP32-CAM      | 1, 3 UART0 console, 6–11 flash, 16, 17 PSRAM           | 34–39      | ADC1: 36–39, 32–35     | 26, 27 (SCCB) / —        | 0, 4, 13, 14 (timers 0–1)   | matrix  |
 //! | [`ESP32S3`]| ESP32-S3 boards           | 19, 20 USB, 26–37 flash / PSRAM, 43, 44 UART0 console  | —          | ADC1: 1–10             | 5, 6 / —                 | 11–18 (timers 0–3)          | matrix  |
 //! | [`ESP32C3`]| ESP32-C3 boards           | 12–17 flash, 18, 19 USB, 20, 21 UART0 console          | —          | —                      | — / —                    | —                           | matrix  |
@@ -59,6 +60,26 @@ pub const PICO: PinMap = PinMap {
     spi: SpiRouting::RpFunctionTable,
     reasons: PICO_REASONS,
 };
+
+/// The Pico or Pico 2 wired as a W5500-EVB-Pico (the RP firmware's
+/// `w5500` build): [`PICO`] with GPIO 16–21 reserved for the W5500 on SPI0
+/// (MISO 16, CS 17, SCK 18, MOSI 19, reset 20, interrupt 21).
+pub const PICO_W5500: PinMap = PinMap {
+    reserved: PICO.reserved | span(16, 21),
+    reasons: PICO_W5500_REASONS,
+    ..PICO
+};
+
+const PICO_W5500_REASONS: &[Reason] = &[
+    Reason {
+        pins: span(16, 21),
+        why: "the W5500's SPI0, chip select, reset and interrupt",
+    },
+    PICO_REASONS[0],
+    PICO_REASONS[1],
+    PICO_REASONS[2],
+    PICO_REASONS[3],
+];
 
 /// AI-Thinker ESP32-CAM: GPIO 0–19, 21–23, 25–27, 32–39.
 pub const ESP32: PinMap = PinMap {
@@ -272,6 +293,30 @@ mod tests {
         assert_eq!(by_chip("esp8266"), Some(&ESP8266));
         assert_eq!(by_chip("ecp5"), Some(&COLORLIGHT_5A75B));
         assert_eq!(by_chip("badge"), None);
+    }
+
+    #[test]
+    fn d50_the_w5500_pico_reserves_its_six_pins() {
+        use crate::Direction;
+        for pin in 16..=21 {
+            assert!(PICO_W5500.check(pin, Direction::Input).is_err(), "GPIO {pin}");
+            assert_eq!(
+                PICO_W5500.reason(pin),
+                Some("the W5500's SPI0, chip select, reset and interrupt"),
+                "GPIO {pin}"
+            );
+        }
+        // Everything else is the Pico's.
+        for pin in (0..30).filter(|p| !(16..=21).contains(p)) {
+            for dir in [Direction::Input, Direction::Output] {
+                assert_eq!(PICO_W5500.check(pin, dir), PICO.check(pin, dir), "GPIO {pin}");
+            }
+            assert_eq!(PICO_W5500.reason(pin), PICO.reason(pin), "GPIO {pin}");
+        }
+        assert_eq!(PICO_W5500.payload_pins().count(), 25 - 6);
+        assert_eq!(PICO_W5500.i2c_pins(0), PICO.i2c_pins(0));
+        // The chip names still select the plain Pico map.
+        assert_eq!(by_chip("rp2350"), Some(&PICO));
     }
 
     #[test]

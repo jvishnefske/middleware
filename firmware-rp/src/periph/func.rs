@@ -34,7 +34,9 @@
 //! first problem decides the error: a pin the chip lacks is
 //! `InvalidArgument`, a reserved pin (or an output on an input-only pin)
 //! `Unsupported`; a pin without the needed signal, or signals on two
-//! different blocks, is `Unsupported` (the hardware cannot do it).
+//! different blocks, is `Unsupported` (the hardware cannot do it). A route
+//! onto the block the profile reserves for the firmware
+//! ([`Profile::reserved_spi`], the W5500's SPI0) is `Unsupported` too.
 
 use board_pins::PinError;
 use board_pins::spi::{SpiPins, SpiProblem, route};
@@ -71,6 +73,10 @@ impl SpiRoute {
         // The Pico map routes through the RP function table, which always
         // names SCK's block; a map without one cannot carry this route.
         let block = block.ok_or(AbiError::Unsupported)?;
+        // The firmware's own controller (the W5500's SPI0) is not offered.
+        if profile.reserved_spi() == Some(block) {
+            return Err(AbiError::Unsupported);
+        }
         Ok(SpiRoute { block, sck: cfg.sck, mosi: cfg.mosi, miso: cfg.miso, cs: cfg.cs })
     }
 
@@ -92,6 +98,20 @@ mod tests {
 
     fn cfg(sck: i32, mosi: i32, miso: i32, cs: i32) -> SpiConfig {
         SpiConfig::parse(0, sck, mosi, miso, cs, 1000, 0).unwrap()
+    }
+
+    #[test]
+    fn d50_no_payload_route_reaches_a_reserved_spi_block() {
+        use crate::chip::{RP2040_W5500, RP2350_W5500};
+        for p in [&RP2040_W5500, &RP2350_W5500] {
+            // SPI0 on pins the W5500 does not use: still SPI0, refused.
+            assert_eq!(SpiRoute::resolve(p, &cfg(2, 3, 0, 25)), Err(AbiError::Unsupported));
+            assert_eq!(SpiRoute::resolve(p, &cfg(6, 7, 4, -1)), Err(AbiError::Unsupported));
+            // The W5500's own pins.
+            assert_eq!(SpiRoute::resolve(p, &cfg(18, 19, 16, 17)), Err(AbiError::Unsupported));
+            // SPI1 is the payload's.
+            assert_eq!(SpiRoute::resolve(p, &cfg(10, 11, 12, 13)).unwrap().block, SpiBlock::Spi1);
+        }
     }
 
     #[test]

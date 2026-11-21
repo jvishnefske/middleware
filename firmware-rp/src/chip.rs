@@ -75,6 +75,7 @@
 //! `crate::budget` (built with the runtime).
 
 use crate::layout::{self, FlashMap};
+use board_pins::rp::SpiBlock;
 use board_pins::{AdcError, PinError, PinMap, boards};
 use middleware::wasm_abi::AbiError;
 
@@ -121,6 +122,9 @@ pub struct Profile {
     /// The board's pins: reserved and input-only pins, the ADC and I2C
     /// maps, SPI routing (`board_pins::boards::PICO`).
     pins: PinMap,
+    /// The SPI controller the firmware keeps for itself (the W5500's
+    /// SPI0), which no payload route may select.
+    reserved_spi: Option<SpiBlock>,
 }
 
 /// Raspberry Pi Pico.
@@ -135,6 +139,7 @@ pub const RP2040: Profile = Profile {
     max_image: 124 * 1024,
     gpio_count: 30,
     pins: boards::PICO,
+    reserved_spi: None,
 };
 
 /// Raspberry Pi Pico 2.
@@ -149,6 +154,24 @@ pub const RP2350: Profile = Profile {
     max_image: 64 * 1024,
     gpio_count: 30,
     pins: boards::PICO,
+    reserved_spi: None,
+};
+
+/// A Pico wired as a W5500-EVB-Pico (`w5500`): GPIO 16–21 and SPI0 are
+/// the W5500's (`board_pins::boards::PICO_W5500`, [`crate::wiznet`]).
+pub const RP2040_W5500: Profile = Profile {
+    pins: boards::PICO_W5500,
+    reserved_spi: Some(SpiBlock::Spi0),
+    ..RP2040
+};
+
+/// A Pico 2 wired as a W5500-EVB-Pico (`w5500`): GPIO 16–21 and SPI0 are
+/// the W5500's, so a payload gets `Unsupported` for those pins and for any
+/// route onto SPI0 (GPIO 0–7 included).
+pub const RP2350_W5500: Profile = Profile {
+    pins: boards::PICO_W5500,
+    reserved_spi: Some(SpiBlock::Spi0),
+    ..RP2350
 };
 
 /// The RP2350 RAM plan of the network links (D51), measured with
@@ -176,6 +199,11 @@ impl Profile {
     /// The board's pin map.
     pub const fn pins(&self) -> &PinMap {
         &self.pins
+    }
+
+    /// The SPI controller no payload may open, if any.
+    pub const fn reserved_spi(&self) -> Option<SpiBlock> {
+        self.reserved_spi
     }
 
     /// Whether a payload may use `pin` as `dir`: `InvalidArgument` if the
@@ -300,6 +328,32 @@ mod tests {
                 assert_eq!(p.check_pin(scl, Direction::Output), Ok(()));
             }
         }
+    }
+
+    #[test]
+    fn d50_the_w5500_profiles_keep_its_pins_and_spi0() {
+        use crate::periph::func::{SpiSignal, spi_function};
+        use crate::wiznet;
+        for (w, plain) in [(RP2040_W5500, RP2040), (RP2350_W5500, RP2350)] {
+            for pin in wiznet::PINS {
+                assert_eq!(w.check_pin(pin, Direction::Input), Err(AbiError::Unsupported), "GPIO {pin}");
+                assert_eq!(w.check_pin(pin, Direction::Output), Err(AbiError::Unsupported), "GPIO {pin}");
+            }
+            for pin in plain.payload_pins().filter(|p| !wiznet::PINS.contains(p)) {
+                for dir in [Direction::Input, Direction::Output] {
+                    assert_eq!(w.check_pin(pin, dir), plain.check_pin(pin, dir), "GPIO {pin}");
+                }
+            }
+            assert_eq!(w.payload_pins().count(), 25 - 6);
+            assert_eq!(w.reserved_spi(), Some(SpiBlock::Spi0));
+            assert_eq!(plain.reserved_spi(), None);
+            assert_eq!((w.name, w.heap, w.flash), (plain.name, plain.heap, plain.flash));
+        }
+        // The W5500's bus pins are SPI0's in the function table.
+        assert_eq!(spi_function(wiznet::MISO), Some((SpiBlock::Spi0, SpiSignal::Rx)));
+        assert_eq!(spi_function(wiznet::CS), Some((SpiBlock::Spi0, SpiSignal::Csn)));
+        assert_eq!(spi_function(wiznet::SCK), Some((SpiBlock::Spi0, SpiSignal::Sck)));
+        assert_eq!(spi_function(wiznet::MOSI), Some((SpiBlock::Spi0, SpiSignal::Tx)));
     }
 
     #[test]

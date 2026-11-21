@@ -893,6 +893,17 @@ names default to it; `mdns-embassy` adds `mdns::embassy_seam`
   36 440 bytes (the mDNS task, by direct calls on thumbv8m), and a 16 KiB
   margin — firmware-rp
   `chip::tests::d51_the_network_links_fit_beside_the_heap`.
+- [x] D50 With `w5500` the W5500's pins and controller are the
+  firmware's: `board_pins::boards::PICO_W5500` is the Pico map with GPIO
+  16–21 reserved ("the W5500's SPI0, chip select, reset and interrupt"),
+  every other pin as on the Pico; the profiles `RP2040_W5500` and
+  `RP2350_W5500` use it and reserve SPI0, so a payload gets `Unsupported`
+  for those pins and for any SPI route onto SPI0 (GPIO 0–7 too), while
+  SPI1 stays the payload's; the W5500's bus pins are SPI0's RX, CSn, SCK
+  and TX in the function table. `by_chip` still names the plain Pico map
+  — board-pins `boards::tests::d50_*`, firmware-rp
+  `chip::tests::d50_the_w5500_profiles_keep_its_pins_and_spi0`,
+  `periph::func::tests::d50_no_payload_route_reaches_a_reserved_spi_block`.
 - [ ] D52 On a Pico or Pico 2 with `usb-ncm`, the board is at
   `169.254.a.b/16` (D45) on the NCM link and its responder announces the
   D47 record only while the host has the link up: it joins 224.0.0.251
