@@ -159,3 +159,13 @@ describe("Linux boards (U45)", () => {
     expect(check("kd240", { rows: [row("gpio-out", "LED", 0)], buses: [] }).length).toBeGreaterThan(0);
   });
 });
+
+describe("EMPTY_PINS", () => {
+  it("is frozen, so no caller can change every board's empty table", () => {
+    expect(Object.isFrozen(EMPTY_PINS)).toBe(true);
+    expect(Object.isFrozen(EMPTY_PINS.rows)).toBe(true);
+    expect(Object.isFrozen(EMPTY_PINS.buses)).toBe(true);
+    expect(() => (EMPTY_PINS.rows as PinTable["rows"][number][]).push(row("gpio-out", "LED", 1))).toThrow();
+    expect(EMPTY_PINS).toEqual({ rows: [], buses: [] });
+  });
+});

@@ -61,7 +61,9 @@ export interface PinTable {
   buses: readonly BusSetting[];
 }
 
-export const EMPTY_PINS: PinTable = { rows: [], buses: [] };
+/** The table with no rows. Frozen (and its lists): it is shared by every
+ * board without pins, so a change to it would reach them all. */
+export const EMPTY_PINS: PinTable = Object.freeze({ rows: Object.freeze([]), buses: Object.freeze([]) });
 
 /** Standard-mode I2C. */
 export const DEFAULT_I2C_HZ = 100_000;
