@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "board-pins"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "bumpalo"
@@ -628,7 +628,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "esp-base"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "board-pins",
  "embedded-storage",
@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "imxrt-base"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "board-pins",
  "cortex-m",
@@ -937,7 +937,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "middleware"
-version = "0.5.0"
+version = "26.11.21"
 dependencies = [
  "ed25519-dalek",
  "embedded-io-async 0.7.0",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "mwctl"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "cryptoki",
  "ed25519-dalek",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "recipe-core"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "state-table",
 ]
@@ -1356,7 +1356,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-table"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "static_cell"
@@ -1581,14 +1581,14 @@ dependencies = [
 
 [[package]]
 name = "wasm-hdl-ref"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "middleware",
 ]
 
 [[package]]
 name = "wasm-host"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "middleware",
  "wasmi",

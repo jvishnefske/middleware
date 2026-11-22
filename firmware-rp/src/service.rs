@@ -292,7 +292,7 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             chip: facts.chip,
             firmware: facts.firmware,
             capacity: store.as_ref().map_or(0, PayloadStore::capacity),
-            // No esp-base chip profile: `sys/board` is `NotFound`.
+            // `sys/board` is answered by `Service::board_reply` instead.
             profile: None,
             runtime: facts.runtime,
             rekey_window: false,
@@ -413,6 +413,19 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
         };
     }
 
+    /// `sys/board`: the board description of this chip's profile.
+    fn board_reply(&self, out: &mut [u8]) -> Result<usize, HandlerError> {
+        let profile = match self.ctx.chip {
+            "rp2350" => &crate::chip::RP2350,
+            "rp2040" => &crate::chip::RP2040,
+            _ => return Err(HandlerError::NotFound),
+        };
+        profile
+            .board_info(middleware::wasm_abi::ABI_VERSION)
+            .encode(out)
+            .ok_or(HandlerError::BufferTooSmall)
+    }
+
     /// Handles one request; a reply body is written into `out`.
     pub fn handle(&mut self, key: Key<'_>, body: &[u8], out: &mut [u8]) -> Handled {
         if fw_update::is_fw_key(key) {
@@ -424,6 +437,11 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             };
             let flash = self.store.as_mut().map(PayloadStore::flash);
             return Handled::now(self.fw.handle(flash, &ctx, key, body, out));
+        }
+        if key.as_str() == keys::BOARD.as_str() {
+            // esp-base's dispatcher answers `sys/board` only from a chip
+            // profile of its own, so the RP base firmware answers it here.
+            return Handled::now(self.board_reply(out));
         }
         if self.trust.is_none() && loader_needs_trust(key) {
             return Handled::now(Err(HandlerError::Unavailable));

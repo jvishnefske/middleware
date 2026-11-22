@@ -253,6 +253,16 @@ mod tests {
     }
 
     #[test]
+    fn abi10_manifest_import_has_its_signature() {
+        let ok = r#"(module (import "mw" "manifest" (func (param i32 i32) (result i32)))
+            (memory (export "memory") 1))"#;
+        assert!(run(ok).is_ok());
+        let bad = r#"(module (import "mw" "manifest" (func (param i32) (result i32)))
+            (memory (export "memory") 1))"#;
+        assert!(run(bad).is_err());
+    }
+
+    #[test]
     fn abi5_serve_needs_on_request_and_mw_alloc() {
         let ok = r#"(module (import "mw" "serve" (func (param i32 i32) (result i32)))
             (import "mw" "node_id" (func (param i32) (result i32)))

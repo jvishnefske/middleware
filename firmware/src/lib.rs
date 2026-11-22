@@ -120,4 +120,5 @@ pub mod serve;
 pub mod shell;
 pub mod start;
 pub mod store;
+pub mod store_single;
 pub mod trust_store;

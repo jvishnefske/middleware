@@ -1,6 +1,6 @@
 [package]
 name = "rp-base"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.95"
 description = "RP base firmware (Raspberry Pi Pico / Pico 2): serves the middleware serial protocol over USB CDC-ACM and runs WASM payloads"

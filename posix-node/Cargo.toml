@@ -1,6 +1,6 @@
 [package]
 name = "mw-posix-node"
-version = "0.6.0"
+version = "26.11.21"
 edition = "2024"
 # `File::try_lock` (the state directory's lock) is 1.89; esp-base's core
 # declares 1.91.
@@ -23,7 +23,7 @@ esp-base = { path = "../firmware", default-features = false, features = ["trust"
 wasm-host = { path = "../wasm-host" }
 # `serial`: the device side of the link (the wire the gateway speaks);
 # `trust`: signed commits; `zenoh`: the session the gateway publishes on.
-middleware = { path = "..", features = ["serial", "trust", "zenoh"] }
+middleware = { path = "..", features = ["serial", "trust", "zenoh", "mdns"] }
 mw-gateway = { path = "../gateway" }
 mw-service = { path = "../service" }
 embedded-storage = "0.3.2"

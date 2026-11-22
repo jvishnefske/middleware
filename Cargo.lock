@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "board-pins"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "bs58"
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "esp-base"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "board-pins",
  "embedded-storage",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "jpeg-fixtures"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "js-sys"
@@ -1936,7 +1936,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "middleware"
-version = "0.5.0"
+version = "26.11.21"
 dependencies = [
  "bytes",
  "ed25519-dalek",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "mw"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "getrandom 0.3.4",
  "mw-service",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "mw-gateway"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "ed25519-dalek",
  "embedded-io-async",
@@ -2033,11 +2033,11 @@ dependencies = [
 
 [[package]]
 name = "mw-jpeg"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "mw-otel"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "clap",
  "middleware",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "mw-posix-node"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "embedded-storage",
  "esp-base",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "mw-robot"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "getrandom 0.3.4",
  "middleware",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "mw-service"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "bytes",
  "http",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "mw-updates"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "ed25519-dalek",
  "embedded-io-async",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "mwctl"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "cryptoki",
  "ed25519-dalek",
@@ -2422,7 +2422,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "payload-sim"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "middleware",
  "mw-jpeg",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "protocol-wasm"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "board-pins",
  "js-sys",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "recipe-core"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "state-table",
 ]
@@ -3691,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "state-table"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "static_assertions"
@@ -4471,7 +4471,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-hdl-ref"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "middleware",
  "wasm-host",
@@ -4480,7 +4480,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-host"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "middleware",
  "peak_alloc",

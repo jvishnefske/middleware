@@ -124,6 +124,23 @@
 //! bus error is `Transport`. Using a PWM timer or I2C bus before opening it
 //! is `Busy`.
 //!
+//! Added in ABI 10 (the node's manifest; layout in [`crate::loader::manifest`]):
+//!
+//! | name           | params                                   | result            |
+//! |----------------|------------------------------------------|-------------------|
+//! | `manifest`     | `ptr, cap` (writes the encoded manifest) | bytes written or error |
+//!
+//! `manifest` writes the same bytes `sys/manifest` replies with (the node's
+//! [`loader::manifest::Manifest`](crate::loader::manifest::Manifest), its
+//! node id included) at `ptr`, and returns their length. The manifest is at
+//! most [`loader::manifest::MANIFEST_MAX`] (384) bytes. `cap` is the size of
+//! the guest buffer: a `cap` below the manifest's length is `InvalidArgument`
+//! and nothing is written, so a payload never sees a truncated manifest; a
+//! negative `cap` is `InvalidArgument`; a window `ptr..ptr + cap` outside
+//! linear memory is `OutOfBounds`; a device without a manifest answers
+//! `Unsupported`. On an ABI 9 host a payload importing it fails to load with
+//! an unknown-import error.
+//!
 //! # Interrupt model
 //!
 //! Payload code never runs inside a hardware interrupt. The firmware's ISR
@@ -195,8 +212,9 @@ pub mod serve;
 /// ([`channels::DataKind::Digital`] to `Segments`, messages in [`machine`])
 /// and bindings to a node's control-module points
 /// ([`crate::loader::binding::Target::Driver`]). A payload that declares a
-/// machine channel needs a host of 9; one that does not loads on 8.
-pub const ABI_VERSION: u16 = 9;
+/// machine channel needs a host of 9; one that does not loads on 8. Revision
+/// 10 added the `manifest` import, so a payload reads the node's manifest.
+pub const ABI_VERSION: u16 = 10;
 
 /// Module name for every host import.
 pub const IMPORT_MODULE: &str = "mw";
@@ -435,6 +453,12 @@ pub const IMPORTS: &[Import] = &[
         params: 3,
         returns: true,
     },
+    // ABI 10
+    Import {
+        name: "manifest",
+        params: 2,
+        returns: true,
+    },
 ];
 
 /// Number of imports in ABI 1 (the prefix of [`IMPORTS`] up to `gpio_read`).
@@ -465,8 +489,16 @@ pub const ABI6_IMPORTS: usize = 33;
 pub const ABI7_IMPORTS: usize = 36;
 
 /// Number of imports in ABI 8 (the prefix of [`IMPORTS`] up to
-/// `channel_publish`); ABI 9 has the same.
+/// `channel_publish`).
 pub const ABI8_IMPORTS: usize = 38;
+
+/// Number of imports in ABI 9 (the same as ABI 8: ABI 9 added none).
+pub const ABI9_IMPORTS: usize = 38;
+
+/// Number of imports in ABI 10 (the prefix of [`IMPORTS`] up to `manifest`,
+/// which is all of them).
+pub const ABI10_IMPORTS: usize = 39;
+
 /// The number of imports a host implementing ABI `version` provides (the
 /// prefix of [`IMPORTS`]); `None` for a revision that does not exist.
 pub const fn imports_in(version: u16) -> Option<usize> {
@@ -479,7 +511,8 @@ pub const fn imports_in(version: u16) -> Option<usize> {
         6 => Some(ABI6_IMPORTS),
         7 => Some(ABI7_IMPORTS),
         8 => Some(ABI8_IMPORTS),
-        9 => Some(IMPORTS.len()),
+        9 => Some(ABI9_IMPORTS),
+        10 => Some(ABI10_IMPORTS),
         _ => None,
     }
 }
@@ -666,14 +699,22 @@ mod tests {
                 .eq(abi7)
         );
         assert!(
-            IMPORTS[ABI7_IMPORTS..]
+            IMPORTS[ABI7_IMPORTS..ABI8_IMPORTS]
                 .iter()
                 .map(|i| (i.name, i.params))
                 .eq([("channel_open", 2), ("channel_publish", 3)])
         );
+        assert!(IMPORTS[ABI8_IMPORTS..ABI9_IMPORTS].is_empty());
+        assert!(
+            IMPORTS[ABI9_IMPORTS..ABI10_IMPORTS]
+                .iter()
+                .map(|i| (i.name, i.params))
+                .eq([("manifest", 2)])
+        );
         assert!(IMPORTS[ABI2_IMPORTS..].iter().all(|i| i.returns));
-        assert_eq!(ABI8_IMPORTS, IMPORTS.len(), "ABI 9 added no imports");
-        assert_eq!(ABI_VERSION, 9);
+        assert_eq!(ABI9_IMPORTS, ABI8_IMPORTS, "ABI 9 added no imports");
+        assert_eq!(ABI10_IMPORTS, IMPORTS.len(), "ABI 10 adds manifest");
+        assert_eq!(ABI_VERSION, 10);
     }
 
     #[test]
@@ -681,7 +722,10 @@ mod tests {
         assert_eq!(imports_in(ABI_VERSION), Some(IMPORTS.len()));
         assert_eq!(imports_in(0), None);
         assert_eq!(imports_in(8), imports_in(9));
-        assert_eq!(imports_in(10), None);
+        assert_eq!(imports_in(10), Some(IMPORTS.len()));
+        assert_eq!(imports_in(11), None);
+        assert_eq!(import_in(9, "manifest"), None);
+        assert_eq!(import_in(10, "manifest"), import("manifest"));
         for name in ["channel_open", "channel_publish"] {
             assert_eq!(import_in(7, name), None, "{name}");
             assert_eq!(import_in(8, name), import(name));
@@ -699,7 +743,7 @@ mod tests {
             assert_eq!(import_in(7, name), import(name));
         }
         assert_eq!(import_in(1, "gpio_irq"), None);
-        assert_eq!(import_in(10, "log"), None);
+        assert_eq!(import_in(11, "log"), None);
     }
 
     #[test]

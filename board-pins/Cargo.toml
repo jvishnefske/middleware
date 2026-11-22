@@ -1,6 +1,6 @@
 [package]
 name = "board-pins"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "Board pin rules shared by esp-base, rp-base and the web editor: which GPIOs exist, which are reserved or input only, the ADC, I2C and PWM board maps, and the RP2040/RP2350 SPI and I2C function tables"

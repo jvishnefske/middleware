@@ -117,6 +117,14 @@ COMMANDS:
     fw confirm                 Keep the image on trial (explicit buy)
     fw abort                   Abandon a transfer or a committed update, or
                                reject the image on trial (reboot into the previous one)
+    reflash <FILE> [--version <N>]
+                               Install an application image through the nRF52 bootloader
+                               (MWFW over the VCOM port; one application slot, no A/B).
+                               First hold button A while pressing reset: the board must be
+                               in reflash mode, mwctl does not reset it. FILE is at most
+                               0x6A000 bytes; --version (default 0) is the image version
+                               and the anti-rollback floor. The image is verified by SHA-256
+                               on the device before the reply is done.
     scout [--seconds <N>]      List the middleware nodes on the local network (mwctl built
                                with --features zenoh): Zenoh multicast scouting for N s
                                [default 3], each router's and peer's sessions from its
@@ -370,6 +378,14 @@ pub enum Cmd {
     FwAbort {
         /// Signs the request (over Zenoh only).
         key: Option<KeySpec>,
+    },
+    /// `reflash <FILE> [--version N]`: an application image to the nRF52
+    /// bootloader ([`crate::reflash`]); the port only, no device protocol.
+    Reflash {
+        /// Application image (raw binary).
+        file: PathBuf,
+        /// Image version, also the anti-rollback floor (0 when not given).
+        version: u32,
     },
 }
 
@@ -695,7 +711,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only(
         "--version",
         version.is_some(),
-        &["upload", "bind", "fw update"],
+        &["upload", "bind", "fw update", "reflash"],
     )?;
     only("--no-reboot", no_reboot, &["fw update"])?;
     let fw_version = match (&version, name.as_str()) {
@@ -706,9 +722,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         _ => None,
     };
     let version: Option<u32> = match (version, name.as_str()) {
-        (Some(v), "upload" | "bind") => Some(number("--version", Some(v))?),
+        (Some(v), "upload" | "bind" | "reflash") => Some(number("--version", Some(v))?),
         _ => None,
     };
+    if name == "reflash" && (espnow.is_some() || zenoh.is_some() || udp.is_some()) {
+        return Err(
+            "'reflash' talks to the nRF52 bootloader over --port only; drop --espnow, --zenoh and --udp"
+                .into(),
+        );
+    }
     if name.starts_with("fw ") && espnow.is_some() {
         return Err(format!(
             "'{name}' goes over the serial port only; drop --espnow and use the device's own port"
@@ -731,7 +753,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             ));
         }
     }
-    if version.is_some() && key.is_none() && name != "bind" {
+    if version.is_some() && key.is_none() && name != "bind" && name != "reflash" {
         return Err("--version needs --key (only signed commits carry a version)".into());
     }
     if counter.is_some() && key.is_none() {
@@ -826,6 +848,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         },
         "fw confirm" => Cmd::FwConfirm { key },
         "fw abort" => Cmd::FwAbort { key },
+        "reflash" => Cmd::Reflash {
+            file: PathBuf::from(
+                pos.next()
+                    .ok_or("reflash needs the application image file")?,
+            ),
+            version: version.unwrap_or(0),
+        },
         other => return Err(format!("unknown command '{other}'")),
     };
     if let Some(extra) = pos.next() {
@@ -1397,6 +1426,51 @@ mod tests {
                 "serial port only",
             ),
             ("--port p fw info extra", "unexpected"),
+        ] {
+            match p(args) {
+                Err(e) => assert!(e.contains(why), "{args}: {e}"),
+                Ok(v) => panic!("{args}: accepted as {v:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_reflash_and_refuses_options_it_does_not_take() {
+        assert_eq!(
+            run("--port p reflash app.bin").cmd,
+            Cmd::Reflash {
+                file: "app.bin".into(),
+                version: 0
+            }
+        );
+        assert_eq!(
+            run("reflash app.bin --version 7 --port p").cmd,
+            Cmd::Reflash {
+                file: "app.bin".into(),
+                version: 7
+            }
+        );
+        for (args, why) in [
+            ("--port p reflash", "needs the application image"),
+            ("--port p reflash a.bin extra", "unexpected"),
+            ("--port p reflash a.bin --version x", "not a valid number"),
+            ("--port p reflash a.bin --key k", "--key applies only to"),
+            (
+                "--port p reflash a.bin --pkcs11 mw",
+                "--pkcs11 applies only to",
+            ),
+            ("--port p reflash a.bin --start", "--start applies only"),
+            ("--port p reflash a.bin --no-reboot", "only to 'fw update'"),
+            (
+                "--port p reflash a.bin --counter 5",
+                "--counter applies only",
+            ),
+            ("--port p reflash a.bin --samples", "only to 'monitor'"),
+            (
+                "--port p --espnow e4:b0:63:81:d3:24 reflash a.bin",
+                "--port only",
+            ),
+            ("--udp 192.168.1.50 reflash a.bin", "--port only"),
         ] {
             match p(args) {
                 Err(e) => assert!(e.contains(why), "{args}: {e}"),

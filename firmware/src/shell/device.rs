@@ -42,6 +42,8 @@
 //! table and the controller routes serial requests on it to
 //! `Payload::request`. `node_id` answers the node `sys/info` reports (the
 //! base MAC, zero-padded).
+//! `manifest` (ABI 10) answers the bytes `sys/manifest` replies with, from
+//! the same board manifest ([`super::board_manifest`]).
 //!
 //! The four payload timers ([`super::timer`]) and the event queue
 //! ([`super::irq`]) are firmware-wide statics shared with their ISRs.
@@ -811,6 +813,15 @@ impl Device for EspDevice {
 
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Ok(self.node)
+    }
+
+    /// The same bytes `sys/manifest` replies with: the boot-time board
+    /// manifest ([`super::board_manifest`]) carrying this node's id.
+    fn manifest(&mut self, out: &mut [u8]) -> Result<usize, AbiError> {
+        super::board_manifest(self.profile)
+            .with_node(self.node)
+            .encode(out)
+            .ok_or(AbiError::NoResources)
     }
 
     fn ledstrip_open(&mut self, spec: LedStripSpec) -> Result<u8, AbiError> {

@@ -1,6 +1,6 @@
 [package]
 name = "wasm-hdl-ref"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "Hardware-shaped reference model of the Colorlight 5A-75B gateware WASM core (no_std, no heap): load-time compiler, interpreter, ABI import unit"

@@ -1,6 +1,6 @@
 [package]
 name = "wasm-host"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 description = "WASM payload runtime implementing the middleware payload ABI (no_std + alloc)"
 

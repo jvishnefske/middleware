@@ -1,6 +1,6 @@
 [package]
 name = "mw"
-version = "0.6.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "Cluster ops CLI for mw-service: build images, load them into the lab, apply manifests, inspect, trace and enroll robots"

@@ -1,6 +1,6 @@
 [package]
 name = "protocol-wasm"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 description = "Browser bindings for the middleware serial protocol, loader and payload simulator"
 license = "MIT OR Apache-2.0"

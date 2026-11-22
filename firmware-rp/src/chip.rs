@@ -76,6 +76,7 @@
 
 use crate::layout::{self, FlashMap};
 use board_pins::{AdcError, PinError, PinMap, boards};
+use middleware::loader::{BOARD_RUNTIME, BoardInfo};
 use middleware::wasm_abi::AbiError;
 
 pub use board_pins::Direction;
@@ -157,6 +158,29 @@ impl Profile {
         &self.pins
     }
 
+    /// The `sys/board` description (ABI `abi_version`): the board's pin map
+    /// and the image limits. The RP firmware has no console UART (its console
+    /// is USB CDC) and no PWM, so `uart_tx`/`uart_rx` are 0 and `pwm_max_bits`
+    /// is 0 with no `pwm_pins`; `strapping` is empty (the RP2350 has no
+    /// strapping pins).
+    pub fn board_info(&self, abi_version: u16) -> BoardInfo<'static> {
+        BoardInfo {
+            abi_version,
+            max_image: self.max_image,
+            max_memory: self.max_memory_bytes,
+            gpio: self.pins.gpio_mask(),
+            reserved: self.pins.reserved_mask(),
+            input_only: self.pins.input_only_mask(),
+            strapping: 0,
+            adc: self.pins.adc_mask(),
+            pwm_max_bits: 0,
+            flags: if self.runtime { BOARD_RUNTIME } else { 0 },
+            uart_tx: 0,
+            uart_rx: 0,
+            pwm_pins: &[],
+        }
+    }
+
     /// Whether a payload may use `pin` as `dir`: `InvalidArgument` if the
     /// chip has no such pin, `Unsupported` if the board reserves it or it
     /// is input only and `dir` is `Output`.
@@ -209,6 +233,24 @@ impl Profile {
 mod tests {
     use super::*;
     use esp_base::image::Region as Slots;
+
+    /// `sys/board` (S8) for the Pico 2: GPIO 0–29, the Pico's reserved and
+    /// input-only pins, ADC 26–28, the runtime flag, and it round-trips.
+    #[test]
+    fn board_info_describes_the_pico_2() {
+        let b = RP2350.board_info(10);
+        assert_eq!(b.abi_version, 10);
+        assert_eq!(b.gpio, (1u64 << 30) - 1);
+        assert_eq!(b.reserved, (1 << 23) | (0b111 << 26) | (1 << 29));
+        assert_eq!(b.input_only, 1 << 24);
+        assert_eq!(b.adc, 0b111 << 26);
+        assert_eq!(b.flags, BOARD_RUNTIME);
+        assert_eq!((b.uart_tx, b.uart_rx, b.pwm_max_bits), (0, 0, 0));
+        let mut buf = [0u8; middleware::loader::BOARD_INFO_MAX];
+        let n = b.encode(&mut buf).unwrap();
+        assert_eq!(BoardInfo::decode(&buf[..n]), Some(b));
+        assert_eq!(RP2040.board_info(10).flags, 0);
+    }
 
     /// MF3: the manifest's buses are the pin map's, and it lists no
     /// source `RpDevice` lacks (it keeps the default `route_samples`).

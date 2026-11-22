@@ -166,6 +166,6 @@ fn mc4_an_unknown_kind_is_refused_at_compile() {
 
 #[test]
 fn mc4_abi9_adds_no_imports() {
-    assert_eq!(ABI_VERSION, 9);
+    assert!(ABI_VERSION >= 9);
     assert_eq!(imports_in(9), imports_in(8));
 }

@@ -259,11 +259,20 @@ impl<T: Transport> Link<T> {
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        if !self.synced {
-            self.io.write_all(&[0])?;
-            self.synced = true;
+        if self.synced {
+            self.io.write_all(bytes)?;
+            return Ok(());
         }
-        self.io.write_all(bytes)?;
+        // The first write leads with the 0x00 resync byte, in the same write as
+        // the frame. A lone 0x00 written at once followed by the frame makes the
+        // micro:bit DAPLink VCOM glitch the nRF RX (UARTE framing errors that
+        // drop the request): 46% of fresh opens replied, 100% with one write.
+        // See design.md, "micro:bit v2 base firmware".
+        self.synced = true;
+        let mut wire = Vec::with_capacity(bytes.len() + 1);
+        wire.push(0);
+        wire.extend_from_slice(bytes);
+        self.io.write_all(&wire)?;
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "imxrt-base"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.95"
 description = "i.MX RT base firmware (MIMXRT1050-EVKB): A/B bootloader and the middleware serial protocol over LPUART1, with WASM payloads"

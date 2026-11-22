@@ -174,6 +174,18 @@ static BUS: ConstStaticCell<Bus> = ConstStaticCell::new(Bus::new());
 /// The chip's `sys/manifest` (MF3), built once at boot.
 static MANIFEST: static_cell::StaticCell<Manifest> = static_cell::StaticCell::new();
 
+/// The board's manifest without a node id: the capabilities `profile` and
+/// this build offer. `sys/manifest` serves it with the node id, and a
+/// payload reads the same bytes through the `manifest` import (ABI 10), so
+/// both come from this one function.
+pub(crate) fn board_manifest(profile: &Profile) -> Manifest {
+    profile.manifest(
+        cfg!(feature = "wasm"),
+        cfg!(feature = "espnow"),
+        cfg!(feature = "cam-fixtures"),
+    )
+}
+
 #[embassy_executor::task]
 async fn uart_link(mut uart: Uart<'static, Async>, bus: &'static Bus) {
     link::prime(&mut uart).await;
@@ -352,11 +364,7 @@ pub async fn run(spawner: Spawner, board: &'static Board) -> ! {
         node: Some(node_id()),
         // With the runtime the controller routes requests on served keys
         // to the payload (`crate::serve`); `node_id` answers this node.
-        manifest: Some(MANIFEST.init(profile.manifest(
-            cfg!(feature = "wasm"),
-            cfg!(feature = "espnow"),
-            cfg!(feature = "cam-fixtures"),
-        ))),
+        manifest: Some(MANIFEST.init(board_manifest(profile))),
     };
 
     bus.log(format_args!(

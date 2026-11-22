@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### ABI 10: the node manifest to payloads (MF6)
+- `ABI_VERSION` 10, one import appended: `manifest(ptr, cap) -> i32` writes the encoded `sys/manifest` bytes (node id included) and returns their length. A `cap` below the manifest's length is `InvalidArgument` with nothing written; no manifest is `Unsupported`. `ABI9_IMPORTS` = 38 (ABI 9 added none, so the prefix is unchanged), `ABI10_IMPORTS` = 39. An ABI 9 host refuses a payload that imports `manifest`.
+- wasm-host: `Device::manifest(out)` (default `Unsupported`), `abi::manifest_target` and `manifest_len`; esp-base implements it from `shell::board_manifest`.
+- SDK: `mw_payload::manifest` with `manifest()` (decoded through `Manifest::decode`) and `manifest_bytes()`.
+
 ### Updates channel (UP1–UP9) and Zenoh over WebSocket (WS1–WS3)
 - `loader::release`: a `SoftwareCert` (kind, target chip or `any`, channel, version, len, sha256) signed once by the root over `"mw-release-v1\0" || cert`. `sys/loader/commit` and `sys/fw/commit` accept `[cert][sig]` beside their per-device forms; a claimed device checks the kind, its chip, the image and the version floor. A firmware cert names no node or slot.
 - Breaking (API): the loader's `Command::Commit` and `Effect::Activate` carry `Option<CommitAuth>` (`Signed` or `Cert`), `sys/fw`'s `Command::Commit` an `Option<FwAuth>`; `fw_ota::service::Context` and `machine::Env` gain `chip`; `TrustState::accept_commit_auth` and `accept_cert` (feature `trust`). The wire bodies of the old forms are unchanged.

@@ -395,6 +395,15 @@ pub trait Device {
     fn node_id(&mut self) -> Result<SenderId, AbiError> {
         Err(AbiError::Unsupported)
     }
+    /// The node's manifest (ABI 10), encoded into `out`, which is at least
+    /// [`middleware::loader::manifest::MANIFEST_MAX`] bytes: the bytes
+    /// `sys/manifest` replies with, node id included. Returns their length
+    /// (at most `out.len()`). `Unsupported` by default, for a device without
+    /// a manifest.
+    fn manifest(&mut self, out: &mut [u8]) -> Result<usize, AbiError> {
+        let _ = out;
+        Err(AbiError::Unsupported)
+    }
 
     /// Installs a bridge rule (ABI 6, [`wasm_abi::bridge`]): publications
     /// arriving on link `bridge.src` whose key matches `bridge.filter` are

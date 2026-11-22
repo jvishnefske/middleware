@@ -4,7 +4,7 @@ description = "Safe no_std SDK for middleware WASM payloads"
 # Spelled out instead of inherited from the payload workspace: cargo loads
 # this manifest from the parent workspace too (as mw-jpeg's dev-dependency,
 # which payload-sim's R14 test uses), where it cannot inherit.
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

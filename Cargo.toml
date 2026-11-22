@@ -1,6 +1,6 @@
 [package]
 name = "middleware"
-version = "0.5.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "Transport-agnostic pub/sub and request/response middleware over Zenoh, gRPC (Istio mesh) and BLE"
@@ -16,7 +16,7 @@ license = "MIT OR Apache-2.0"
 # for `posix-node`'s path dependency on `firmware/` (esp-base's pure core).
 [workspace]
 members = ["service", "gateway", "robot", "posix-node", "board-pins", "state-table", "recipe-core", "wasm-host", "wasm-hdl-ref", "tools/payload-sim", "updates", "tools/mwctl", "tools/mw", "tools/mw-otel", "tools/jpeg-fixtures", "web/protocol-wasm"]
-exclude = ["firmware", "firmware-esp8266", "firmware-rp", "payloads"]
+exclude = ["firmware", "firmware-esp8266", "firmware-rp", "firmware-nrf52", "payloads"]
 
 [features]
 default = []

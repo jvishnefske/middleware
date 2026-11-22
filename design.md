@@ -3734,6 +3734,40 @@ network tests use 127.0.0.1 only.
   `pn1_an_existing_old_state_directory_is_kept`,
   `node_ids_survive_the_rename`)*
 
+### micro:bit v2 base firmware (`firmware-nrf52/`)
+
+The BBC micro:bit v2 (nRF52833, 128 KB RAM) answers the protocol over the DAPLink
+VCOM. Native USB is not wired to the connector on v2, so the VCOM is the host link.
+
+- **Wiring:** nRF TX = P0.06 (to the host), nRF RX = P1.08 (from the host), 115200 8N1.
+  The DAPLink's UART pins are the schematic's `UART_INT_RX`/`UART_INT_TX`, named from the
+  interface side.
+- **Pin policy (`board-pins` `MICROBIT`):** payload pins are the ring pins P0.02–P0.04
+  (ADC 0–2) and the external I2C pair (SCL P0.26, SDA P1.00). Reserved: the console UART,
+  the LED matrix (rows P0.21 P0.22 P0.15 P0.24 P0.19; columns P0.28 P0.11 P0.31 P0.30
+  P1.05), buttons A/B (P0.14, P0.23), NFC (P0.09, P0.10), the accessibility strap (P0.12),
+  the on-board sensor bus (P0.16, P0.08), speaker, microphone and sensor interrupt.
+- **Answers:** `sys/info` (node id from FICR `DEVICEID`), `sys/board`, `sys/manifest`
+  (no payload runtime, serial link). `sys/trust` and payload storage are not implemented,
+  so `payload capacity` is 0.
+- **Finding 1, embassy-nrf:** `embassy-nrf` default feature `rt` must stay enabled; without
+  it the RTC1 vector hangs in cortex-m-rt's default handler.
+- **Finding 2, embassy-nrf:** `BufferedUarte` never transmitted on this board. RX uses
+  `split_with_idle` and `read_until_idle`.
+- **The open-time glitch and its fix:** the nRF RX sees UARTE framing errors
+  (`uarte::Error::Io`) when a host writes a lone `0x00` resync byte and then the frame
+  immediately after it, as separate writes. The failed frame is dropped. Measured with the
+  unmodified firmware: 95/200 (47.5%) and 93/200 (46.5%) fresh `mwctl info` replies; a
+  held session lost 9/20 requests. The same frames as one write (the `0x00` and the frame
+  in one `write()`) gave 200/200 in three 200-run passes and 40/40 held. The fix is in
+  `mwctl`'s serial `Link::write` (`tools/mwctl/src/link.rs`), which sends the first write
+  with the sync byte in it. The protocol bytes are unchanged. The firmware needs no change.
+  Firmware-only mitigations did not reach the metric: a pull-up on P1.08 changed nothing
+  (10/20 held); an RX that rearms after each error reached 65/100 fresh; both together
+  were 20/20 and 12/20 in two held runs.
+- **Regression:** `tests/hil/test_boards.py::test_open_reliability` runs 20 fresh
+  `mwctl info` on `nrf52833` boards and requires all to reply.
+
 ### i.MX RT base firmware (`firmware-imxrt/`)
 
 The base firmware for the NXP MIMXRT1050-EVKB (i.MX RT1052, Cortex-M7,
@@ -7186,6 +7220,22 @@ overrun). Back-pressure is that report, never a blocking call.
   that is not a machine one, and a driver point on a node without
   control modules; `mwctl bind` takes `driver:<point>`. *(web
   `control.test.ts`; mwctl `bindspec`)*
+
+### Node manifest to payloads (ABI 10, MF6)
+
+- [x] MF6 A payload reads the node's manifest through the ABI 10 import
+  `manifest(ptr, cap) -> i32`: it writes the bytes `sys/manifest` replies
+  with (node id included) at `ptr` and returns their length. `cap` is the
+  guest window; a negative `cap` or a window outside memory is
+  `InvalidArgument` / `OutOfBounds`, a manifest longer than `cap` is
+  `InvalidArgument` and nothing is written (never a partial manifest), and a
+  device without a manifest is `Unsupported`. `ABI_VERSION` 10 adds one
+  import (`ABI9_IMPORTS` = 38 is the ABI 9 prefix; `ABI10_IMPORTS` = 39). The
+  board's manifest is built once by `shell::board_manifest` on esp-base, so
+  `sys/manifest` and the import cannot disagree. SDK: `mw_payload::manifest`
+  (`manifest()`, `manifest_bytes()`). *(middleware `wasm_abi` tests;
+  wasm-host `abi::manifest_target` / `manifest_len`, `link` test
+  `manifest_checks_the_cap_and_the_device`, `tests/abi10.rs`; abi-check)*
 
 ### JPEG decode in WASM (J…)
 

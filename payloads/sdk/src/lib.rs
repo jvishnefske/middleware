@@ -110,6 +110,12 @@
 //!   [`channel::Input`], [`channel::SampleInput`] and [`channel::Output`]
 //!   so it runs the same on boards, simulators and in host tests.
 //!
+//! Added with ABI 10 (requires firmware implementing [`ABI_VERSION`] 10):
+//!
+//! * [`manifest::manifest`] decodes the node's manifest (its import groups,
+//!   SPI buses, largest sink frame, links and limits);
+//!   [`manifest::manifest_bytes`] copies the encoded bytes instead.
+//!
 //! Received messages are copied by the host into one fixed receive buffer of
 //! [`MAX_MESSAGE`] bytes that `mw_alloc` hands out; there is no heap.
 //!
@@ -129,9 +135,9 @@
 //!    imports copy the key and config out and move frames in host memory
 //!    only; the ABI 7 `ledstrip_write` copies the frame into a host buffer
 //!    before sending it).
-//! 2. Four `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
-//!    `uart_read`, the ABI 3 import `i2c_transfer` and the ABI 5 import
-//!    `node_id`, which *write* into
+//! 2. Five `unsafe { }` call sites, for the ABI 2 imports `dma_read` and
+//!    `uart_read`, the ABI 3 import `i2c_transfer`, the ABI 5 import
+//!    `node_id` and the ABI 10 import `manifest`, which *write* into
 //!    guest memory and are therefore declared without `safe`. Each sits in a
 //!    private wrapper that takes the destination as `&mut [u8]` and passes
 //!    exactly that slice's pointer and length, so the host can only write
@@ -172,6 +178,7 @@ pub mod i2c;
 pub mod irq;
 pub mod ledstrip;
 mod logline;
+pub mod manifest;
 #[cfg(all(feature = "panic-handler", target_arch = "wasm32", not(test)))]
 mod panic;
 pub mod pwm;

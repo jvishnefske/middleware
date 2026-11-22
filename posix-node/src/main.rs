@@ -120,8 +120,14 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         }
         None => None,
     };
-    let zenoh = SessionConfig::new()
-        .connect(router)
+    // The Zenoh listener (`MW_ZENOH_LISTEN`, e.g. `tcp/0.0.0.0:7447`) is the
+    // endpoint the node binds for peers; DNS-SD advertises its port.
+    let listen = std::env::var("MW_ZENOH_LISTEN").ok().filter(|s| !s.is_empty());
+    let mut zenoh_config = SessionConfig::new().connect(router);
+    if let Some(endpoint) = &listen {
+        zenoh_config = zenoh_config.listen(endpoint.clone());
+    }
+    let zenoh = zenoh_config
         .build()
         .map_err(|e| format!("zenoh config: {e}"))?;
     let session = ZenohTransport::open(zenoh)
@@ -167,6 +173,32 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
     let mut runner = tokio::spawn(svc.run_with(runner_config, async {
         let _ = runner_stopped.await;
     }));
+    // DNS-SD on the local link, for the node's Zenoh listener. A failure
+    // here does not stop the node; it is reported.
+    let announcement = match listen.as_deref().map(listen_port) {
+        Some(Ok(port)) => {
+            let host = std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|h| h.trim().to_owned())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| "mw-node".to_owned());
+            match mw_posix_node::dnssd::start(host, node_id::hex(id), port).await {
+                Ok(a) => {
+                    eprintln!("mw-posix-node: dns-sd {} on port {port}", mw_posix_node::dnssd::KIND);
+                    Some(a)
+                }
+                Err(e) => {
+                    eprintln!("mw-posix-node: dns-sd not started: {e}");
+                    None
+                }
+            }
+        }
+        Some(Err(e)) => {
+            eprintln!("mw-posix-node: dns-sd not started: {e}");
+            None
+        }
+        None => None,
+    };
     let outcome = tokio::select! {
         _ = terminate_signal() => Ok(()),
         _ = pi.device_ended() => Err("the device thread ended".to_owned()),
@@ -177,7 +209,20 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         }),
     };
     let _ = stop_runner.send(());
+    if let Some(a) = announcement {
+        a.stop().await;
+    }
     let report = pi.stop().await;
     eprintln!("mw-posix-node: {report:?}");
     outcome
+}
+
+/// The port of a Zenoh endpoint such as `tcp/0.0.0.0:7447`.
+fn listen_port(endpoint: &str) -> Result<u16, String> {
+    let (_, addr) = endpoint
+        .split_once('/')
+        .ok_or_else(|| format!("MW_ZENOH_LISTEN {endpoint:?}: expected proto/host:port"))?;
+    addr.rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .ok_or_else(|| format!("MW_ZENOH_LISTEN {endpoint:?}: no port"))
 }
