@@ -34,6 +34,7 @@
 //! and `Caps::SERVE`; `mwctl` and the web console speak to it unchanged.
 #![forbid(unsafe_code)]
 
+pub mod dnssd;
 pub mod config;
 pub mod controller;
 pub mod device;

@@ -1,6 +1,6 @@
 [package]
 name = "mwctl"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 description = "Host CLI for the ESP base firmware's serial protocol: info, payload upload, start/stop, monitor, reset"
 license = "MIT OR Apache-2.0"

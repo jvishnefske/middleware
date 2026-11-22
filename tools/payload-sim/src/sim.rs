@@ -1304,6 +1304,14 @@ impl Device for SimDevice {
         Ok(self.node)
     }
 
+    /// ABI 10: the bytes `sys/manifest` replies with, for this node.
+    fn manifest(&mut self, out: &mut [u8]) -> Result<usize, AbiError> {
+        MANIFEST
+            .with_node(self.node)
+            .encode(out)
+            .ok_or(AbiError::NoResources)
+    }
+
     /// The pin is checked like [`Device::gpio_output`], except that a sink
     /// route's D/C pin is `InvalidArgument`; reopening a strip's own pin
     /// resizes it. The pin stops being plain GPIO (its mode becomes unused
@@ -1558,6 +1566,10 @@ mod tests {
         );
         let mut d = SimDevice::default().with_node(SenderId([7; 8]));
         assert_eq!(d.node_id(), Ok(SenderId([7; 8])));
+        let mut out = [0u8; middleware::loader::manifest::MANIFEST_MAX];
+        let n = d.manifest(&mut out).expect("ABI 10 manifest");
+        let m = middleware::loader::manifest::Manifest::decode(&out[..n]).expect("decodes");
+        assert_eq!(m, MANIFEST.with_node(SenderId([7; 8])));
         assert_eq!(d.serve(Key::new("a/b").unwrap()), Ok(()));
         assert!(d.events[0].ends_with("serve a/b"));
         assert!(

@@ -1248,14 +1248,15 @@ mod tests {
         // Without a wait: one request, two attempts.
         let err = d.fw_patient(&Command::Abort, Duration::ZERO).unwrap_err();
         assert!(matches!(err, Error::Timeout { attempts: 2, .. }), "{err}");
-        assert_eq!(d.link().transport().writes, 2 + 1);
+        // The sync byte travels with the first frame: two writes, not three.
+        assert_eq!(d.link().transport().writes, 2);
         // With one: sent again until the wait has passed.
         let wait = Duration::from_millis(30);
         let began = Instant::now();
         let err = d.fw_patient(&Command::Abort, wait).unwrap_err();
         assert!(matches!(err, Error::Timeout { .. }), "{err}");
         assert!(began.elapsed() >= wait);
-        assert!(d.link().transport().writes > 2 + 1 + 2);
+        assert!(d.link().transport().writes > 2 + 2);
     }
 
     #[test]

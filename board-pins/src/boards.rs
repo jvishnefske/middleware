@@ -8,6 +8,7 @@
 //! | [`ESP32C3`]| ESP32-C3 boards           | 12–17 flash, 18, 19 USB, 20, 21 UART0 console          | —          | —                      | — / —                    | —                           | matrix  |
 //! | [`ESP8266`]| ESP8266 modules           | 1, 3 UART0 console, 6–11 flash                         | —          | —                      | — / —                    | —                           | matrix  |
 //! | [`COLORLIGHT_5A75B`] | Colorlight 5A-75B v7.0 (ECP5) | —                                    | 1 (button) | —                      | — / —                    | —                           | none    |
+//! | [`MICROBIT`] | BBC micro:bit v2 (nRF52833) | console P0.06/P1.08, LED matrix, buttons, NFC, sensor bus, speaker/mic | ring 0–2 + P19/P20 free | ADC 0–2 | ext. P20 SDA / P19 SCL | — | none |
 //! | [`RT1050_EVKB`] | NXP MIMXRT1050-EVKB  | 23, 24 LPUART1 console                                 | 2, 3, 5, 22 | ADC1: 16–21 (A0–A5)   | 20, 21 (LPI2C1) / —      | —                           | fixed LPSPI1 (13, 11, 12) |
 //!
 //! The RP2040 and the RP2350A share the Pico pinout, so both chips use
@@ -59,6 +60,57 @@ pub const PICO: PinMap = PinMap {
     spi: SpiRouting::RpFunctionTable,
     reasons: PICO_REASONS,
 };
+
+const MICROBIT_REASONS: &[Reason] = &[
+    Reason {
+        pins: bit(6) | bit(40),
+        why: "the DAPLink VCOM console (P0.06 TX, P1.08 RX)",
+    },
+    Reason {
+        pins: bit(21) | bit(22) | bit(15) | bit(24) | bit(19) | bit(28) | bit(11) | bit(31) | bit(30) | bit(37),
+        why: "the 5x5 LED matrix (rows P0.21 P0.22 P0.15 P0.24 P0.19, columns P0.28 P0.11 P0.31 P0.30 P1.05)",
+    },
+    Reason {
+        pins: bit(14) | bit(23),
+        why: "buttons A and B",
+    },
+    Reason {
+        pins: bit(9) | bit(10),
+        why: "NFC antenna pins (GPIO only when NFC is disabled, its default)",
+    },
+    Reason {
+        pins: bit(12),
+        why: "the accessibility mode strap (keep it for the on-board mode)",
+    },
+    Reason {
+        pins: bit(16) | bit(8),
+        why: "the on-board motion sensor I2C bus (P0.16 SDA, P0.08 SCL)",
+    },
+    Reason {
+        pins: bit(0) | bit(5) | bit(20) | bit(25) | bit(36),
+        why: "the speaker, the microphone and its enable, and the sensor interrupt",
+    },
+];
+
+/// BBC micro:bit v2 (nRF52833): the edge connector's ring pins P0–P2 (P0.02,
+/// P0.03, P0.04, ADC 0–2) and the external I2C pair (P19 SCL P0.26, P20 SDA
+/// P1.00) are free for payloads; everything else on the board is reserved,
+/// with the reason in [`MICROBIT_REASONS`]. The LED matrix and the console UART
+/// are driven by the firmware. The DAPLink VCOM is the host link, not a payload pin.
+pub const MICROBIT: PinMap = PinMap {
+    gpio: bit(2) | bit(3) | bit(4) | bit(26) | bit(32) | MICROBIT_RESERVED_ALL,
+    reserved: MICROBIT_RESERVED_ALL,
+    input_only: 0,
+    adc: &[2, 3, 4],
+    i2c: [Some((32, 26)), None],
+    pwm: &[],
+    spi: SpiRouting::None,
+    reasons: MICROBIT_REASONS,
+};
+
+const MICROBIT_RESERVED_ALL: u64 = bit(6) | bit(40) | bit(21) | bit(22) | bit(15) | bit(24) | bit(19)
+    | bit(28) | bit(11) | bit(31) | bit(30) | bit(37) | bit(14) | bit(23) | bit(9) | bit(10) | bit(12)
+    | bit(16) | bit(8) | bit(0) | bit(5) | bit(20) | bit(25) | bit(36);
 
 /// AI-Thinker ESP32-CAM: GPIO 0–19, 21–23, 25–27, 32–39.
 pub const ESP32: PinMap = PinMap {

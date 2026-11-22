@@ -1,6 +1,6 @@
 [package]
 name = "mw-service"
-version = "0.6.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "Mesh service runner: write a Handler, get a meshed, traced, SPIFFE-authenticated gRPC service with its Kubernetes manifests"

@@ -1,6 +1,6 @@
 [package]
 name = "mw-gateway"
-version = "0.6.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "MCU gateway: bridges a serial-attached middleware device's app/** pub/sub, disc/* beacons, allowlisted sys/* requests and signed updates from allowlisted updaters to the cluster's Zenoh fabric"

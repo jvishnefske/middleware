@@ -1,6 +1,6 @@
 [package]
 name = "mw-updates"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "The updates channel (design.md UP4-UP8): a server that keeps root-signed releases and serves them over Zenoh, the Linux updater that pulls them into attached boards and the local posix-node, and the publisher"

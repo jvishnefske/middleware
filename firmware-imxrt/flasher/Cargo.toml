@@ -1,6 +1,6 @@
 [package]
 name = "imxrt-flasher"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.95"
 description = "RAM-loaded HyperFlash programmer for the MIMXRT1050-EVKB, fed over SWD (tools/flash.py)"

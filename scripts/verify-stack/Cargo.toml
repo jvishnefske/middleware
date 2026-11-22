@@ -1,6 +1,6 @@
 [package]
 name = "verify-stack"
-version = "0.0.0"
+version = "26.11.21"
 edition = "2024"
 [lib]
 crate-type = ["staticlib"]

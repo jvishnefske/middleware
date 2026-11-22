@@ -38,6 +38,8 @@
 //!   with [`wasm_abi::ledstrip`] before the pointer;
 //!   [`ledstrip_handle_code`] checks the handle a device hands back.
 //!
+//! * ABI 10: [`manifest_target`] bounds the window `manifest` may write and
+//!   [`manifest_len`] refuses a manifest that does not fit it.
 //! * ABI 5: [`serve_slot`] places a served key in the table of at most
 //!   [`serve::MAX_SERVES`]; [`node_id_target`] bounds `node_id`'s write;
 //!   [`request_ranges`] places one request's meta block, body and reply
@@ -411,6 +413,27 @@ fn table_slot(table: &[String], key: &str, max: usize) -> Result<Slot, AbiError>
 /// bytes at `ptr`, which must lie in linear memory.
 pub fn node_id_target(ptr: i32, mem_len: usize) -> Result<Range<usize>, AbiError> {
     wasm_abi::guest_range(ptr, serve::NODE_ID_LEN as i32, mem_len)
+}
+
+/// The guest window `manifest(ptr, cap)` may write (ABI 10): `cap` bytes at
+/// `ptr`, which must lie in linear memory. A negative `cap` is
+/// `InvalidArgument`, checked before the pointer.
+pub fn manifest_target(ptr: i32, cap: i32, mem_len: usize) -> Result<Range<usize>, AbiError> {
+    if cap < 0 {
+        return Err(AbiError::InvalidArgument);
+    }
+    wasm_abi::guest_range(ptr, cap, mem_len)
+}
+
+/// The bytes `manifest` writes: the encoded manifest's `len`, provided it
+/// fits the window's `cap`. A manifest longer than `cap` is
+/// `InvalidArgument`, and nothing is written.
+pub fn manifest_len(len: usize, cap: usize) -> Result<usize, AbiError> {
+    if len <= cap {
+        Ok(len)
+    } else {
+        Err(AbiError::InvalidArgument)
+    }
 }
 
 /// Where one request goes in guest memory (ABI 5), from the buffer
@@ -851,6 +874,14 @@ mod tests {
         assert_eq!(node_id_target(8, 16), Ok(8..16));
         assert_eq!(node_id_target(9, 16), Err(AbiError::OutOfBounds));
         assert_eq!(node_id_target(-1, 16), Err(AbiError::OutOfBounds));
+        assert_eq!(manifest_target(4, 12, 16), Ok(4..16));
+        assert_eq!(manifest_target(4, 0, 16), Ok(4..4));
+        assert_eq!(manifest_target(4, -1, 16), Err(AbiError::InvalidArgument));
+        assert_eq!(manifest_target(-1, 4, 16), Err(AbiError::OutOfBounds));
+        assert_eq!(manifest_target(12, 5, 16), Err(AbiError::OutOfBounds));
+        assert_eq!(manifest_len(384, 384), Ok(384), "a cap that fits");
+        assert_eq!(manifest_len(40, 39), Err(AbiError::InvalidArgument));
+        assert_eq!(manifest_len(0, 0), Ok(0));
 
         let l = serve::layout(3, 8).unwrap();
         let r = request_ranges(100, &l, 1000).unwrap();

@@ -1,0 +1,26 @@
+[package]
+name = "firmware-nrf52"
+version = "26.11.21"
+edition = "2021"
+description = "micro:bit v2 (nRF52833) base firmware: serves the middleware serial protocol on the DAPLink VCOM UART"
+publish = false
+
+[dependencies]
+middleware = { path = "..", default-features = false, features = ["serial"] }
+board-pins = { path = "../board-pins" }
+embassy-nrf = { version = "0.11", features = ["nrf52833", "time-driver-rtc1", "gpiote", "unstable-pac"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
+embassy-futures = "0.1"
+embassy-time = "0.5"
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+embedded-io-async = "0.7"
+panic-halt = "1"
+
+[profile.release]
+debug = 2
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+[workspace]

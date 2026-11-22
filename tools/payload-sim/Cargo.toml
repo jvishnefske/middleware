@@ -1,6 +1,6 @@
 [package]
 name = "payload-sim"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 description = "Desktop simulator for WASM payloads"
 

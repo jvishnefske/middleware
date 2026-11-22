@@ -1,6 +1,6 @@
 [package]
 name = "mw-robot"
-version = "0.6.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "Linux robot application: an off-cluster mw-service client that calls cluster services and publishes telemetry through its local Envoy"

@@ -43,6 +43,7 @@ use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::port::SerialTransport;
+use mwctl::reflash;
 use mwctl::report::{
     format_binding, format_board, format_event, format_fw_info, format_info, format_manifest,
     format_net, format_trust,
@@ -69,6 +70,11 @@ const START_FAILURE_LOG_SECONDS: u64 = 2;
 
 fn print_events(events: &[Event]) {
     for e in events {
+        // Sample streams stay out of the default output (`monitor --samples`
+        // shows them decoded).
+        if mwctl::report::is_sample_stream(e) {
+            continue;
+        }
         println!("{}", format_event(e));
     }
 }
@@ -179,6 +185,9 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
     if let Some(z) = &cli.zenoh {
         return run_zenoh(&cli, z);
     }
+    if let Cmd::Reflash { file, version } = &cli.cmd {
+        return reflash_command(&cli.port, cli.baud, file, *version);
+    }
     let timeouts = Timeouts {
         request: cli.timeout,
         ..Timeouts::default()
@@ -276,6 +285,25 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         s.requests, s.sends, s.retransmissions, s.nacks, s.skipped
     );
     result
+}
+
+/// `reflash`: the application image through the nRF52 bootloader's MWFW
+/// protocol on the port. The header is checked before the port is opened.
+/// The port is opened without a reset: the board must already be in reflash
+/// mode.
+fn reflash_command(port: &str, baud: u32, file: &Path, version: u32) -> Result<(), Error> {
+    let image = std::fs::read(file).map_err(|e| io_context(file, e))?;
+    reflash::header(&image, version).map_err(Error::Fw)?;
+    let mut transport = SerialTransport::open(port, baud)?;
+    let len = image.len();
+    reflash::reflash(&mut transport, &image, version, |sent| {
+        eprint!("\rreflash: {sent}/{len} bytes");
+        let _ = std::io::stderr().flush();
+    })
+    .map_err(Error::Fw)?;
+    eprintln!();
+    println!("reflashed {len} bytes, verified");
+    Ok(())
 }
 
 fn is_fw(cmd: &Cmd) -> bool {
@@ -785,8 +813,10 @@ fn command_with<L: Endpoint>(
             })
         }
         Cmd::Monitor { seconds, samples } => monitor(dev, seconds, samples),
-        // Serial only, handled by `fw_command` (the CLI refuses --espnow).
+        // Serial only, handled by `fw_command` or `reflash_command` before
+        // any device is opened (the CLI refuses --espnow).
         Cmd::Reset
+        | Cmd::Reflash { .. }
         | Cmd::FwInfo
         | Cmd::FwUpdate { .. }
         | Cmd::FwReboot { .. }
@@ -816,10 +846,13 @@ fn monitor<L: Endpoint>(
         let deadline = end.map_or(slice, |e| e.min(slice));
         if let Some(e) = dev.next_event(deadline)? {
             let line = match samples.then(|| mwctl::report::format_samples(&e)).flatten() {
-                Some(line) => line,
-                None => format_event(&e),
+                Some(line) => Some(line),
+                None if mwctl::report::is_sample_stream(&e) => None,
+                None => Some(format_event(&e)),
             };
-            println!("{line}");
+            if let Some(line) = line {
+                println!("{line}");
+            }
             let _ = std::io::stdout().flush();
         }
         if end.is_some_and(|e| Instant::now() >= e) {

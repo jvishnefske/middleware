@@ -1,6 +1,6 @@
 [package]
 name = "recipe-core"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 rust-version = "1.88"
 description = "ISA-88 batch control for payloads: the phase state machine, master recipe checks, allocation of phase classes to units, the control-recipe engine and its wire contract, as pure functions"

@@ -24,6 +24,10 @@
 //! and `node_id` writes the device's id into guest memory after checking
 //! the range.
 //!
+//! The ABI 10 `manifest` import is registered by `link_abi10`: it writes the
+//! device's encoded manifest, and only once the manifest fits the payload's
+//! `cap`.
+//!
 //! The ABI 7 LED-strip imports are registered by `link_abi7`;
 //! `ledstrip_write` copies the frame through a stack buffer of
 //! [`ledstrip::MAX_FRAME`] bytes before the device runs.
@@ -36,6 +40,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use middleware::loader::manifest::MANIFEST_MAX;
 use middleware::wasm_abi::bridge;
 use middleware::wasm_abi::ledstrip::{self, LedStripSpec};
 use middleware::wasm_abi::periph::{
@@ -521,6 +526,28 @@ pub fn node_id_call<D: Device>(
     Ok(())
 }
 
+/// `manifest(ptr, cap)` (ABI 10): writes the device's encoded manifest at
+/// `ptr` and returns its length. The window is checked first; the device
+/// encodes into a host buffer, and guest memory is written only once the
+/// manifest is known to fit `cap`, so a short `cap` never leaves a partial
+/// manifest behind.
+pub fn manifest_call<D: Device>(
+    mem: &mut [u8],
+    st: &mut State<D>,
+    ptr: i32,
+    cap: i32,
+) -> Result<i32, AbiError> {
+    let target = abi::manifest_target(ptr, cap, mem.len())?;
+    let mut buf = [0u8; MANIFEST_MAX];
+    let len = st.device.manifest(&mut buf)?;
+    let n = abi::manifest_len(len, target.len())?;
+    let bytes = buf.get(..n).ok_or(AbiError::NoResources)?;
+    mem.get_mut(target.start..target.start + n)
+        .ok_or(AbiError::OutOfBounds)?
+        .copy_from_slice(bytes);
+    i32::try_from(n).map_err(|_| AbiError::NoResources)
+}
+
 /// `set_tick(period_ms)`.
 pub fn set_tick_call<D: Device>(st: &mut State<D>, period: i32) -> Result<(), AbiError> {
     let now = st.device.now_ms();
@@ -619,7 +646,20 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     link_abi6(&mut l)?;
     link_abi7(&mut l)?;
     link_abi8(&mut l)?;
+    link_abi10(&mut l)?;
     Ok(l)
+}
+
+/// Registers the ABI 10 import (the node's manifest).
+fn link_abi10<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
+    l.func_wrap(
+        IMPORT_MODULE,
+        "manifest",
+        |c: Caller<'_, State<D>>, ptr: i32, cap: i32| {
+            with_memory(c, |mem, st| manifest_call(mem, st, ptr, cap))
+        },
+    )?;
+    Ok(())
 }
 
 /// Registers the ABI 8 imports (channels).
@@ -872,6 +912,7 @@ mod tests {
         published: Vec<(String, Vec<u8>)>,
         served: Vec<String>,
         node: Option<middleware::SenderId>,
+        manifest: Option<Vec<u8>>,
     }
 
     /// A board with an IMU at 0x1f on I2C bus 0 and no microphone.
@@ -914,6 +955,13 @@ mod tests {
         }
         fn node_id(&mut self) -> Result<middleware::SenderId, AbiError> {
             self.node.ok_or(AbiError::Unsupported)
+        }
+        fn manifest(&mut self, out: &mut [u8]) -> Result<usize, AbiError> {
+            let m = self.manifest.as_ref().ok_or(AbiError::Unsupported)?;
+            out.get_mut(..m.len())
+                .ok_or(AbiError::NoResources)?
+                .copy_from_slice(m);
+            Ok(m.len())
         }
     }
 
@@ -1136,6 +1184,40 @@ mod tests {
         assert!(mem.iter().all(|&b| b == 0xAA));
         assert_eq!(node_id_call(&mut mem, &mut st, 8), Ok(()));
         assert_eq!(&mem[8..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn manifest_checks_the_cap_and_the_device() {
+        let mut mem = vec![0xAAu8; 64];
+        let mut st = state(Exports::default());
+        // No manifest on the device: nothing is written.
+        assert_eq!(
+            manifest_call(&mut mem, &mut st, 0, 64),
+            Err(AbiError::Unsupported)
+        );
+        assert!(mem.iter().all(|&b| b == 0xAA));
+        st.device.manifest = Some(vec![7u8; 40]);
+        // A cap below the manifest's length is refused, with no partial write.
+        assert_eq!(
+            manifest_call(&mut mem, &mut st, 0, 39),
+            Err(AbiError::InvalidArgument)
+        );
+        assert!(mem.iter().all(|&b| b == 0xAA));
+        // Negative cap and a window outside memory are refused before the device.
+        assert_eq!(
+            manifest_call(&mut mem, &mut st, 0, -1),
+            Err(AbiError::InvalidArgument)
+        );
+        assert_eq!(
+            manifest_call(&mut mem, &mut st, 40, 40),
+            Err(AbiError::OutOfBounds)
+        );
+        assert!(mem.iter().all(|&b| b == 0xAA));
+        // A cap that fits writes exactly the manifest and returns its length.
+        assert_eq!(manifest_call(&mut mem, &mut st, 8, 48), Ok(40));
+        assert!(mem[..8].iter().all(|&b| b == 0xAA));
+        assert!(mem[8..48].iter().all(|&b| b == 7));
+        assert!(mem[48..].iter().all(|&b| b == 0xAA));
     }
 
     #[test]

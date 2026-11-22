@@ -257,7 +257,7 @@ def main():
         # server did not answer a short final memory write.
         data += b"\xff" * (-len(data) % 512)
         images.append((int(off, 0), data))
-    if not images:
+    if not images and not erases:
         sys.exit(__doc__)
     if not verify_only:
         # The first J-Link session after the board has run often drops
@@ -270,7 +270,10 @@ def main():
             print(f"first attempt failed ({e!r}); retrying once")
             time.sleep(3)
             program(images, flasher, erases)
-    ok = verify_rsp(images) if rsp_jlink() else verify(images)
+    # An erase-only run (`--erase` with no image) checks that every erased
+    # range reads back as 0xFF (the erased value of the HyperFlash).
+    checks = images or [(first, b"\xff" * length) for first, length in erases]
+    ok = verify_rsp(checks) if rsp_jlink() else verify(checks)
     if not verify_only:
         if rsp_jlink():
             ok &= reset_and_check_rsp()

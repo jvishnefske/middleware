@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "board-pins"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "bytemuck"
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "esp-base"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "board-pins",
  "critical-section",
@@ -1558,7 +1558,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "middleware"
-version = "0.5.0"
+version = "26.11.21"
 dependencies = [
  "ed25519-dalek",
  "embedded-io-async 0.7.0",
@@ -2290,7 +2290,7 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
 name = "wasm-host"
-version = "0.1.0"
+version = "26.11.21"
 dependencies = [
  "middleware",
  "wasmi",

@@ -1,7 +1,7 @@
-//! The crate's only `unsafe` code: host import declarations, the four safe
+//! The crate's only `unsafe` code: host import declarations, the safe
 //! wrappers around the imports that write into guest memory (`dma_read`,
-//! `uart_read`, `i2c_transfer`, `node_id`), the single-threaded `Sync` impl for [`GuestCell`], and the
-//! [`payload!`] export macro.
+//! `uart_read`, `i2c_transfer`, `node_id`, `manifest`), the single-threaded
+//! `Sync` impl for [`GuestCell`], and the [`payload!`] export macro.
 //!
 //! Everything here is a thin, logic-free shim. The rest of the crate is
 //! `#![deny(unsafe_code)]`; see the crate documentation for the review notes.
@@ -31,7 +31,8 @@ mod imports {
     // `ledstrip_write` copies the frame into a host buffer before sending
     // it), and reports problems as negative codes. `dma_read` and
     // `uart_read` *write* `len` bytes at `ptr`, `i2c_transfer` writes
-    // `rx_len` bytes at `rx_ptr` and `node_id` writes 8 bytes at `ptr`, so
+    // `rx_len` bytes at `rx_ptr`, `node_id` writes 8 bytes at `ptr` and
+    // `manifest` writes up to `cap` bytes at `ptr`, so
     // they stay `unsafe` and are only called through the wrappers below.
     #[link(wasm_import_module = "mw")]
     unsafe extern "C" {
@@ -106,6 +107,8 @@ mod imports {
         // ABI 8: both only read guest memory (the name, the message).
         pub safe fn channel_open(name_ptr: i32, name_len: i32) -> i32;
         pub safe fn channel_publish(handle: i32, ptr: i32, len: i32) -> i32;
+        // ABI 10: `manifest` writes up to `cap` bytes at `ptr`.
+        pub fn manifest(ptr: i32, cap: i32) -> i32;
     }
 }
 
@@ -209,6 +212,9 @@ mod imports {
     pub unsafe fn node_id(_p: i32) -> i32 {
         UNSUPPORTED
     }
+    pub unsafe fn manifest(_p: i32, _c: i32) -> i32 {
+        UNSUPPORTED
+    }
     pub fn ledstrip_open(_pin: i32, _count: i32) -> i32 {
         UNSUPPORTED
     }
@@ -244,6 +250,20 @@ pub(crate) fn node_id(out: &mut [u8; 8]) -> i32 {
     // whole call and exactly the 8 bytes the host writes; the host checks
     // the range against linear memory and retains no pointer.
     unsafe { imports::node_id(ptr) }
+}
+
+/// Writes the node's encoded manifest into `out` (`manifest`, ABI 10);
+/// returns the import's result: the manifest's length, or a negated
+/// [`AbiError`](crate::AbiError) code (the host writes nothing when the
+/// manifest is longer than `out`).
+pub(crate) fn manifest(out: &mut [u8]) -> i32 {
+    let Some((ptr, cap)) = out_buffer(out) else {
+        return crate::AbiError::OutOfBounds.code();
+    };
+    // SAFETY: `ptr` is the address of `out`, exclusively borrowed for the
+    // whole call and exactly `cap` bytes; the host checks the window against
+    // linear memory, writes at most `cap` bytes and retains no pointer.
+    unsafe { imports::manifest(ptr, cap) }
 }
 
 /// `(ptr, len)` of an exclusively borrowed guest buffer, or `None` if the

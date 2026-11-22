@@ -1,6 +1,6 @@
 [package]
 name = "esp-base"
-version = "0.6.0"
+version = "26.11.21"
 edition = "2024"
 # The library (the pure core) builds with 1.91, so host crates in the
 # parent workspace (`posix-node/`, default toolchain) can depend on it. The

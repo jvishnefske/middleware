@@ -445,6 +445,19 @@ fn printable(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Whether `e` is a sample stream (a publication that decodes as a sample
+/// batch, or a `mic/` or `imu/` key). The default output leaves these out:
+/// raw sample values are for `monitor --samples` only.
+pub fn is_sample_stream(e: &Event) -> bool {
+    let Event::Publish { key, .. } = e else {
+        return false;
+    };
+    if key.starts_with("sys/") {
+        return false;
+    }
+    key.starts_with("mic/") || key.starts_with("imu/") || format_samples(e).is_some()
+}
+
 /// One line for a publication that decodes as a sample batch; `None` for
 /// anything else (then [`format_event`] applies):
 ///
@@ -657,6 +670,21 @@ mod tests {
         assert_eq!(format_samples(&publish("app/x", b"hello")), None);
         assert_eq!(format_samples(&publish("sys/log", &out[..n])), None);
         assert_eq!(format_samples(&Event::Noise(vec![1, 2])), None);
+    }
+
+    /// The default output leaves sample streams out (raw PCM is for
+    /// `monitor --samples`), but keeps status, logs and ordinary publications.
+    #[test]
+    fn sample_streams_are_left_out_of_the_default_output() {
+        let publish = |key: &str, b: &[u8]| Event::Publish {
+            key: key.into(),
+            payload: b.to_vec(),
+        };
+        assert!(is_sample_stream(&publish("mic/pcm", &[1, 0, 2, 0])));
+        assert!(is_sample_stream(&publish("imu/raw", &[9, 9])));
+        assert!(!is_sample_stream(&publish("app/t", b"21.5")));
+        assert!(!is_sample_stream(&publish("sys/log", b"hello")));
+        assert!(!is_sample_stream(&Event::Noise(vec![1, 2])));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "jpeg-fixtures"
-version = "0.1.0"
+version = "26.11.21"
 edition = "2024"
 description = "Generates the baked baseline-JPEG frames of the fake camera (fixtures/cam)"
 license = "MIT OR Apache-2.0"
