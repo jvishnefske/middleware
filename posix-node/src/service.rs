@@ -317,6 +317,11 @@ impl<F: NorFlash + Durable> Service<F> {
     }
 
     /// The dispatcher state.
+    /// The root of trust, `None` when the trust record could not be read.
+    pub fn trust_state(&self) -> Option<TrustState> {
+        self.trust.as_ref().map(|_| self.state.trust())
+    }
+
     pub const fn state(&self) -> State {
         self.state
     }

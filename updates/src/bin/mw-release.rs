@@ -3,7 +3,7 @@
 //! the channel has.
 //!
 //! ```text
-//! mw-release publish --channel <c> --target <chip|any> --kind fw|payload
+//! mw-release publish --channel <c> --target <chip|any> --kind fw|payload|os
 //!                    [--version <n | major.minor>] (--key <seed file> | --pkcs11 <label>) <file>
 //! mw-release latest --channel <c> --target <chip>
 //! ```
@@ -25,7 +25,7 @@ use mwctl::pkcs11::{self, Location, Pkcs11Signer};
 use mwctl::sign::{Seed, Signer};
 
 const HELP: &str = "usage:
-  mw-release publish --channel <c> --target <chip|any> --kind fw|payload
+  mw-release publish --channel <c> --target <chip|any> --kind fw|payload|os
                      [--version <n | major.minor>] (--key <seed file> | --pkcs11 <label>) <file>
   mw-release latest --channel <c> --target <chip>
 env: MW_UPDATES_HOST | MW_UPDATES_ENDPOINT, MW_UPDATES_ADDR, MW_ZENOH_CREDENTIALS,
@@ -102,7 +102,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 let c = r.cert();
                 let v = match c.kind {
                     CertKind::Firmware => format_version(c.version),
-                    CertKind::Payload => c.version.0.to_string(),
+                    CertKind::Payload | CertKind::Os => c.version.0.to_string(),
                 };
                 println!(
                     "{} {v} {} bytes sha256 {}",
@@ -118,7 +118,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .kind
                 .as_deref()
                 .and_then(CertKind::from_name)
-                .ok_or("--kind fw|payload")?;
+                .ok_or("--kind fw|payload|os")?;
             let path = a.file.clone().ok_or("the image file is required")?;
             let file = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
             let version = match &a.version {

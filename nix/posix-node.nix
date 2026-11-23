@@ -68,6 +68,53 @@ in
       description = "MW_ZENOH_ROUTER: the robot Envoy's Zenoh listener.";
     };
 
+    listen = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "tcp/0.0.0.0:7447";
+      example = null;
+      description = ''
+        MW_ZENOH_LISTEN: the Zenoh endpoint the node binds for peers, so
+        `mwctl` reaches it over the LAN (zenoh:<endpoint>@<node>). Its port is
+        announced by DNS-SD as _mw-node._tcp (scripts/mdns-browse.py, the HIL
+        discovery). null: no listener and no announcement. The host opens its
+        own firewall (the listen port, and UDP 5353 for DNS-SD).
+      '';
+    };
+
+    osSlots = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      example = [ "/dev/disk/by-partuuid/4b443234-02" "/dev/disk/by-partuuid/4b443234-03" ];
+      description = ''
+        The Linux A/B root's two slots, in slot order (A, B): MW_POSIX_NODE_OS_SLOTS.
+        Their block devices are opened read-write by the node (the `disk`
+        group; PrivateDevices off). null: no Linux root update (the default).
+        design.md, "Linux A/B root (OS)".
+      '';
+    };
+
+    osState = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/dev/disk/by-id/mmc-SD_card";
+      description = ''
+        The device holding the A/B boot state's two copies (the card's gap
+        sectors, bootstate.rs COPY_LBA): MW_POSIX_NODE_OS_STATE. Required with
+        osSlots.
+      '';
+    };
+
+    localSerial = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/dev/ttyPS1";
+      description = ''
+        MW_POSIX_NODE_LOCAL_SERIAL: a serial port (a UART, a gadget, a PTY)
+        the node serves mwctl on at 115200 baud, beside the Zenoh link. The
+        host must not run a getty on it.
+      '';
+    };
+
     memoryMax = lib.mkOption {
       type = lib.types.str;
       default = "128M";
@@ -76,8 +123,23 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [{
+      assertion = cfg.osSlots == null || cfg.osState != null;
+      message = "services.mw-posix-node.osSlots needs osState (the boot state's device)";
+    }];
+
     users.users.mw-posix-node = { isSystemUser = true; group = "mw-posix-node"; };
     users.groups.mw-posix-node = { };
+
+    # The Linux root update: the node writes the inactive slot and the boot
+    # state, and asks logind to reboot (the trial). Only with osSlots.
+    security.polkit.extraConfig = lib.mkIf (cfg.osSlots != null) ''
+      polkit.addRule(function (action, subject) {
+        if (action.id == "org.freedesktop.login1.reboot" && subject.user == "mw-posix-node") {
+          return polkit.Result.YES;
+        }
+      });
+    '';
 
     systemd.services.mw-posix-node = {
       description = "Linux payload host";
@@ -86,6 +148,14 @@ in
       environment = {
         MW_ZENOH_ROUTER = cfg.zenohRouter;
         MW_PORT = toString cfg.port;
+      } // lib.optionalAttrs (cfg.listen != null) {
+        MW_ZENOH_LISTEN = cfg.listen;
+      } // lib.optionalAttrs (cfg.localSerial != null) {
+        MW_POSIX_NODE_LOCAL_SERIAL = cfg.localSerial;
+      } // lib.optionalAttrs (cfg.osSlots != null) {
+        MW_POSIX_NODE_OS_SLOTS = lib.concatStringsSep "," cfg.osSlots;
+        MW_POSIX_NODE_OS_STATE = cfg.osState;
+        MW_POSIX_NODE_OS_REBOOT = "${lib.getExe' pkgs.systemd "systemctl"} --no-block reboot";
       } // cfg.environment;
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
@@ -94,7 +164,7 @@ in
         ExecStart = lib.escapeShellArgs ([ (lib.getExe cfg.package) ] ++ cfg.args);
         User = "mw-posix-node";
         Group = "mw-posix-node";
-        SupplementaryGroups = cfg.supplementaryGroups;
+        SupplementaryGroups = cfg.supplementaryGroups ++ lib.optional (cfg.osSlots != null) "disk";
         StateDirectory = "mw-posix-node";
         StateDirectoryMode = "0700";
         Restart = "always";
@@ -108,7 +178,7 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
-        PrivateDevices = cfg.supplementaryGroups == [ ];
+        PrivateDevices = cfg.supplementaryGroups == [ ] && cfg.osSlots == null;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectKernelLogs = true;

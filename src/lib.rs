@@ -109,6 +109,7 @@ pub mod fw_ota;
 pub mod key;
 pub mod kv;
 pub mod loader;
+pub mod os_ab;
 pub mod mdns;
 pub mod rpc;
 pub mod serial;

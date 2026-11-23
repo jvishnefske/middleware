@@ -70,7 +70,7 @@ pub async fn pass<O: Opener>(
                 continue;
             }
         };
-        for kind in [CertKind::Firmware, CertKind::Payload] {
+        for kind in [CertKind::Firmware, CertKind::Payload, CertKind::Os] {
             let mut r = report(name, Some(&facts), kind.name());
             let release = match decide(&facts, kind, channel, &latest, root) {
                 Decision::Skip(why) => {
@@ -86,6 +86,13 @@ pub async fn pass<O: Opener>(
                 }
                 Decision::Install(release) => release,
             };
+            if kind == CertKind::Os {
+                // A root needs a signed control request to boot and confirm,
+                // and this pass holds no signing key: `just os-update` does it.
+                r.result = "skipped: a Linux root is installed with `just os-update` (signed control)".into();
+                reports.push(r);
+                continue;
+            }
             r.version = Some(release.version().0);
             let sha = release.cert().sha256;
             let image = match images.get(&sha) {
@@ -112,10 +119,11 @@ pub async fn pass<O: Opener>(
                         FwOutcome::Confirmed => "confirmed".to_owned(),
                         FwOutcome::RolledBack => "rolled-back".to_owned(),
                     }),
+                CertKind::Os => Err(Error::Fw("a Linux root is not installed by a pass".into())),
             });
             r.result = result.unwrap_or_else(|e| format!("failed: {e}"));
             reports.push(r);
-            if kind == CertKind::Firmware {
+            if matches!(kind, CertKind::Firmware | CertKind::Os) {
                 // The board runs other firmware now: read it again.
                 match read(opener) {
                     Ok(f) => facts = f,

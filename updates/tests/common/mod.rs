@@ -81,6 +81,7 @@ pub async fn node(state: &Path, node: SenderId) -> (PosixNode, Chan) {
         limits: limits(1024 * 1024),
         local: Some(ChannelIo::new(node_rx, node_tx)),
         driver: Box::new(mw_posix_node::driver::NoDriver),
+        os: None,
     };
     let gateway = GatewayParts {
         bridge: config.bridge_with_floor(floor),

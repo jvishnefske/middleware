@@ -39,7 +39,9 @@ tracing = "0.1"
 gpiocdev = { version = "0.8", default-features = false, features = ["uapi_v2"] }
 
 [dev-dependencies]
+# Signs the Linux root's release certs in the os tests (same version as mwctl's).
+ed25519-dalek = "2.2"
 # Signs commits and plans uploads in the end-to-end test, as mwctl does.
-mwctl = { path = "../tools/mwctl" }
+mwctl = { path = "../tools/mwctl", features = ["zenoh"] }
 wat = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net"] }

@@ -219,7 +219,12 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
         match inbound {
             Inbound::Request { id, key, body } => {
                 let result = match Key::new(&key) {
-                    Ok(k) => ctl.request(k, &body, &RequestMeta::NONE),
+                    Ok(k) => ctl.request_on(
+                        k,
+                        &body,
+                        &RequestMeta::NONE,
+                        matches!(origin, Origin::Gateway),
+                    ),
                     Err(_) => Err(middleware::transport::HandlerError::InvalidRequest),
                 };
                 let frame = Frame::Response {
@@ -263,6 +268,7 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
     gateway: ChannelIo,
     local: Option<ChannelIo>,
     driver: Box<dyn crate::driver::Driver>,
+    os: Option<crate::os::OsUpdates>,
 ) -> io::Result<DeviceTask> {
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
@@ -294,6 +300,9 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
                     SystemClock::start(),
                     driver,
                 );
+                if let Some(os) = os {
+                    ctl.set_os(os);
+                }
                 let mut links = Links {
                     gateway: SerialLink::with_inbox(gateway),
                     local: local.map(SerialLink::with_inbox),
@@ -402,6 +411,8 @@ pub struct DeviceParts<F> {
     pub local: Option<ChannelIo>,
     /// The control-module driver (`MW_POSIX_NODE_DRIVER`, [`crate::driver`]).
     pub driver: Box<dyn crate::driver::Driver>,
+    /// The Linux A/B root's update state (`MW_POSIX_NODE_OS_*`, [`crate::os`]).
+    pub os: Option<crate::os::OsUpdates>,
 }
 
 /// The gateway half of a node, as `mw-gateway`'s own binary builds it:
@@ -434,6 +445,7 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
         limits,
         local,
         driver,
+        os,
     } = device;
     let GatewayParts {
         bridge,
@@ -445,7 +457,7 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
         .await
         .map_err(StartError::Zenoh)?;
     let device =
-        spawn_device(flash, facts, limits, device_io, local, driver).map_err(StartError::Thread)?;
+        spawn_device(flash, facts, limits, device_io, local, driver, os).map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }
 

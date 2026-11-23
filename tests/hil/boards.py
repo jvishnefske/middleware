@@ -18,27 +18,46 @@ Supported boards and how each is recognised:
   0403:6001
   1366:0105     J-Link OpenSDA VCOM       MIMXRT1050-EVKB       mwctl fw update (A/B)
   1fc9:0094     middleware imxrt-base     MIMXRT1050-EVKB USB   mwctl fw update (A/B)
+  0403:6011     "KD Carrier Card", if 01  Kria KD240 console    (linux-aarch64: deployed by
+                                          (ttyPS1, FT4232H ch B)  `just os-update`, not installed)
+
+  0403:6011 is also the Colorlight 5A-75B's FT4232H MiniModule (product
+  "FT4232H MiniModule"): only the KD240 carrier's interface 01 matches, by
+  product string as well as id.
 
   LAN: `mwctl scout` (Zenoh scouting) finds Zenoh nodes and the RT1050 behind
-  a scouted router; MW_HIL_LAN adds what scouting cannot see:
+  a scouted router; DNS-SD (`_mw-node._tcp`, scripts/mdns-browse.py) finds a
+  node that announces itself on the link (posix-node with MW_ZENOH_LISTEN),
+  with its address and port; MW_HIL_LAN adds what neither can see:
     udp:<host>[:port]                 Colorlight 5A-75B gateware
-    zenoh:<endpoint>@<node16>         a node behind a known router (KD240)
+    zenoh:<endpoint>@<node16>         a node behind a known router
     zenoh-listen:<endpoint>@<node16>  an RT1050 that connects to us
 
-Never probed: FT2232/FT4232 (JTAG adapters and the KD240 console), other
-CMSIS-DAP probes such as the micro:bit, and anything not in the table.
+Never probed: FT2232/FT4232 other than the KD240 console (JTAG adapters such
+as the Colorlight's MiniModule), other CMSIS-DAP probes such as the micro:bit,
+and anything not in the table.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
+from types import ModuleType
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def _load_mdns() -> ModuleType:
+    """scripts/mdns-browse.py (a hyphenated name, so loaded by path)."""
+    spec = importlib.util.spec_from_file_location("mdns_browse", REPO / "scripts" / "mdns-browse.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 # Chips each firmware reports in sys/info.
 WASM_CHIPS = {"esp32", "esp32s3", "rp2350", "rt1050", "imxrt1052"}
@@ -51,6 +70,10 @@ class UsbKind:
     family: str  # what the USB id tells us
     chips: frozenset[str]  # chips sys/info may report for it
     bootsel: bool = False  # in the ROM bootloader, no tty to talk to
+    # Optional matchers, for a VID:PID shared with a device we must not
+    # probe: the USB product string, and the interface number (the tty's).
+    product: str | None = None
+    interface: int | None = None
 
 
 USB_KINDS: dict[tuple[int, int], UsbKind] = {
@@ -68,6 +91,23 @@ USB_KINDS: dict[tuple[int, int], UsbKind] = {
     # nRF52833's UART (P0.06 TX, P1.08 RX); native USB is not wired on v2.
     (0x0D28, 0x0204): UsbKind("microbit-daplink", frozenset({"nrf52833"})),
 }
+
+# VID:PID entries that also need the product and interface (0403:6011 is
+# the Colorlight's FT4232H too). Checked before USB_KINDS.
+USB_KINDS_MATCHED: list[tuple[int, int, UsbKind]] = [
+    (0x0403, 0x6011, UsbKind("kd240-console", frozenset({"linux-aarch64"}),
+                             product="KD Carrier Card", interface=1)),
+]
+
+
+def usb_kind(vid: int, pid: int, product: str = "", interface: int | None = None) -> UsbKind | None:
+    """The kind of a USB device, or None (never probed)."""
+    for v, p, kind in USB_KINDS_MATCHED:
+        if (v, p) == (vid, pid) and product == kind.product and interface == kind.interface:
+            return kind
+    if any((v, p) == (vid, pid) for v, p, _ in USB_KINDS_MATCHED):
+        return None  # a shared id whose matcher did not match: not ours
+    return USB_KINDS.get((vid, pid))
 
 
 @dataclasses.dataclass
@@ -116,7 +156,7 @@ def _read(p: Path) -> str | None:
 
 
 def usb_ttys(sys_root: Path = Path("/sys")) -> list[dict]:
-    """Every tty with a USB parent: path, vid, pid, product, serial."""
+    """Every tty with a USB parent: path, vid, pid, product, serial, interface."""
     out = []
     for tty in sorted((sys_root / "class/tty").glob("tty*")):
         dev = tty / "device"
@@ -129,6 +169,8 @@ def usb_ttys(sys_root: Path = Path("/sys")) -> list[dict]:
         vid = _read(p / "idVendor")
         if vid is None:
             continue
+        # dev resolves to the interface (X-Y:1.N) the tty hangs off.
+        iface = _read(dev.resolve() / "bInterfaceNumber")
         out.append(
             {
                 "path": f"/dev/{tty.name}",
@@ -137,6 +179,7 @@ def usb_ttys(sys_root: Path = Path("/sys")) -> list[dict]:
                 "product": _read(p / "product") or "",
                 "serial": _read(p / "serial") or "",
                 "usb": str(p),
+                "interface": int(iface, 16) if iface else None,
             }
         )
     return out
@@ -165,13 +208,12 @@ def usb_candidates(ttys: list[dict], devices: list[dict]) -> list[Board]:
     """The USB ports and BOOTSEL devices worth asking (see the table above)."""
     boards = []
     for t in ttys:
-        kind = USB_KINDS.get((t["vid"], t["pid"]))
+        kind = usb_kind(t["vid"], t["pid"], t.get("product", ""), t.get("interface"))
         if kind is None or kind.bootsel:
             continue
-        # The OpenSDA J-Link has one VCOM; take only its first interface.
         boards.append(Board("usb", t["path"], kind, serial=t["serial"], usb_path=t["usb"]))
     for d in devices:
-        kind = USB_KINDS.get((d["vid"], d["pid"]))
+        kind = usb_kind(d["vid"], d["pid"], d.get("product", ""))
         if kind is not None and kind.bootsel:
             boards.append(Board("usb", "", kind, serial=d["serial"], usb_path=d["usb"]))
     return boards
@@ -220,6 +262,22 @@ def parse_scout(text: str) -> list[Board]:
         if ep is None:
             continue
         boards.append(Board("zenoh", ep, node=r["node"]))
+    return boards
+
+
+def boards_from_dnssd(services) -> list[Board]:
+    """DNS-SD `_mw-node._tcp` instances (scripts/mdns-browse.py) as Zenoh
+    boards: the instance label is the node id; the endpoint is the first
+    address (IPv4 first) and the announced port."""
+    boards = []
+    for s in services:
+        if not re.fullmatch(r"[0-9a-fA-F]{16}", s.label) or s.port is None:
+            continue
+        addrs = sorted(s.addresses, key=lambda a: ":" in a)  # IPv4 before IPv6
+        host = addrs[0] if addrs else s.host
+        if ":" in host:
+            host = f"[{host}]"
+        boards.append(Board("zenoh", f"tcp/{host}:{s.port}", node=s.label.lower()))
     return boards
 
 
@@ -353,6 +411,11 @@ class InstallError(Exception):
     pass
 
 
+class NotInstalled(Exception):
+    """A board this tool finds but does not install: a Linux host, deployed
+    with `just os-update` (design.md, Linux A/B root)."""
+
+
 def esp_chip_of(port: str) -> str | None:
     """The chip in ROM download mode (espflash board-info), for a silent board."""
     r = subprocess.run(
@@ -377,6 +440,8 @@ def chip_to_install(board: Board) -> str | None:
 def install_command(board: Board, chip: str) -> list[str] | None:
     """`just provision-<chip> ...` for this board, or None (not installable here)."""
     port, ser = board.address, board.serial or ""
+    if chip.startswith("linux-"):
+        return None  # the Linux root is updated by `just os-update`
     if chip in ("esp32", "esp32s3", "esp32c3"):
         return ["just", "provision-esp", chip, port]
     if chip == "esp8266":
@@ -400,7 +465,7 @@ def reattach(b: Board, mw: Mwctl, seconds: float = 45) -> None:
     while time.monotonic() < deadline:
         if b.transport == "usb" and b.serial:
             for t in usb_ttys():
-                kind = USB_KINDS.get((t["vid"], t["pid"]))
+                kind = usb_kind(t["vid"], t["pid"], t["product"], t["interface"])
                 if t["serial"].lower() == b.serial.lower() and kind and not kind.bootsel:
                     b.address, b.kind = t["path"], kind
         if b.address:
@@ -417,6 +482,8 @@ def install(b: Board, mw: Mwctl, build: bool) -> str:
     chip = chip_to_install(b)
     if chip is None:
         raise InstallError(f"cannot tell which firmware {b.address or b.usb_path} needs: {b.error}")
+    if chip.startswith("linux-"):
+        raise NotInstalled(f"{chip}: deploy with `just os-update` (the Linux root is an A/B update)")
     cmd = install_command(b, chip)
     if cmd is None:
         raise InstallError(f"{chip}: no bootloader install path")
@@ -443,7 +510,22 @@ def build_mwctl() -> Mwctl:
     return Mwctl(str(REPO / "target/release/mwctl"))
 
 
-def discover(mw: Mwctl, usb: bool = True, lan: bool = True, scout_seconds: int = 3) -> list[Board]:
+def dnssd_browse(seconds: float = 3.0) -> list[Board]:
+    """`_mw-node._tcp` announcements on the link as boards; none when the
+    multicast socket cannot be opened."""
+    try:
+        return boards_from_dnssd(_load_mdns().browse(seconds, "_mw-node._tcp"))
+    except OSError:
+        return []
+
+
+def discover(
+    mw: Mwctl,
+    usb: bool = True,
+    lan: bool = True,
+    scout_seconds: int = 3,
+    mdns: bool = True,
+) -> list[Board]:
     """Every supported board on USB and the LAN, each asked for sys/info.
     A silent board stays in the list with `error` set."""
     found: list[Board] = []
@@ -452,6 +534,8 @@ def discover(mw: Mwctl, usb: bool = True, lan: bool = True, scout_seconds: int =
         found += [b for b in usb_candidates(usb_ttys(), usb_devices()) if not only or b.address in only]
     if lan:
         found += mw.scout(scout_seconds)
+        if mdns:
+            found += dnssd_browse(scout_seconds)
         found += parse_lan_env(os.environ.get("MW_HIL_LAN", ""))
     seen, out = set(), []
     for b in found:

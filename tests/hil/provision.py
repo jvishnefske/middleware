@@ -31,12 +31,13 @@ def main() -> int:
     ap.add_argument("--all", action="store_true", help="also boards already on this ABI")
     ap.add_argument("--list", action="store_true", help="list only")
     ap.add_argument("--no-lan", action="store_true")
+    ap.add_argument("--no-mdns", action="store_true", help="LAN without DNS-SD")
     ap.add_argument("--mwctl", help="mwctl binary [default: build it]")
     a = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)  # keep our lines in order with the recipes'
 
     mw = B.Mwctl(a.mwctl) if a.mwctl else B.build_mwctl()
-    boards = B.discover(mw, lan=not a.no_lan)
+    boards = B.discover(mw, lan=not a.no_lan, mdns=not a.no_mdns)
     print(f"{len(boards)} board(s) found:")
     for b in boards:
         print(row(b))
@@ -58,6 +59,8 @@ def main() -> int:
             if B.needs_firmware(b):
                 print("  still not answering on this ABI after install")
                 failed += 1
+        except B.NotInstalled as e:
+            print(f"skipped: {e}")
         except B.InstallError as e:
             print(f"FAILED: {e}\n  (the lines marked !!! or >>> above say what to do)")
             failed += 1

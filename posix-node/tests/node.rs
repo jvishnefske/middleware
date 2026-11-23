@@ -246,6 +246,7 @@ async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Sys, Local) 
         limits: limits(1024 * 1024),
         local: Some(local_node),
         driver: Box::new(mw_posix_node::driver::NoDriver),
+        os: None,
     };
     let gateway = GatewayParts {
         bridge: config.bridge_with_floor(floor),
