@@ -1,3 +1,5 @@
+set positional-arguments
+
 # Developer shortcuts. `just` lists them.
 
 # List the recipes.
@@ -86,9 +88,13 @@ provision-esp8266 port:
 
 [doc("Flash a Pico (RP2040) through BOOTSEL (picotool; forces BOOTSEL)")]
 provision-rp2040 serial="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    serial="$1"
+    if [[ -n "$serial" && ! "$serial" =~ ^[0-9A-Za-z]{1,64}$ ]]; then echo "!!! serial $serial: expected 1-64 letters or digits" >&2; exit 1; fi
     if lsusb -d 2e8a:0003 >/dev/null 2>&1; then just _usb-writable 2e8a:0003; fi
-    picotool load -x -f {{ if serial != "" { "--ser " + serial } else { "" } }} \
-      firmware-rp/target/thumbv6m-none-eabi/release/rp-base-rp2040.uf2
+    ser=(); [[ -n "$serial" ]] && ser=(--ser "$serial")
+    picotool load -x -f "${ser[@]}" firmware-rp/target/thumbv6m-none-eabi/release/rp-base-rp2040.uf2
 
 # A Pico 2 running rp-base with A/B partitions takes the update image over
 # the protocol (`mwctl fw update`, port "-" when it sits in BOOTSEL);
@@ -98,18 +104,20 @@ provision-rp2040 serial="":
 provision-rp2350 port="-" serial="":
     #!/usr/bin/env bash
     set -euo pipefail
+    port="$1"; serial="$2"
+    if [[ -n "$serial" && ! "$serial" =~ ^[0-9A-Za-z]{1,64}$ ]]; then echo "!!! serial $serial: expected 1-64 letters or digits" >&2; exit 1; fi
     out=firmware-rp/target/thumbv8m.main-none-eabihf/release
     mwctl="${MWCTL:-target/release/mwctl}"
     sign=(); [[ -n "${MW_HIL_PKCS11:-}" ]] && sign=(--pkcs11 "$MW_HIL_PKCS11")
     [[ -z "${MW_HIL_PKCS11:-}" && -n "${MW_HIL_KEY:-}" ]] && sign=(--key "$MW_HIL_KEY")
-    ser=(); [[ -n "{{serial}}" ]] && ser=(--ser "{{serial}}")
+    ser=(); [[ -n "$serial" ]] && ser=(--ser "$serial")
     update="$(ls -t $out/rp-base-rp2350-*-update.uf2 | head -1)"
     factory="$(ls -t $out/rp-base-rp2350-*-factory.uf2 | head -1)"
-    if [[ "{{port}}" != "-" ]] && "$mwctl" --port {{port}} fw info >/dev/null 2>&1; then
-      exec "$mwctl" --port {{port}} fw update "$update" "${sign[@]}"
+    if [[ "$port" != "-" ]] && "$mwctl" --port "$port" fw info >/dev/null 2>&1; then
+      exec "$mwctl" --port "$port" fw update "$update" "${sign[@]}"
     fi
     if ! lsusb -d 2e8a:000f >/dev/null 2>&1; then
-      echo "no A/B firmware answering on {{port}}: factory image through BOOTSEL"
+      echo "no A/B firmware answering on $port: factory image through BOOTSEL"
       picotool load -x -f "${ser[@]}" "$factory" 2>/dev/null && exit 0
       # rp-base has no USB reset interface, so BOOTSEL needs the button.
       echo ">>> hold BOOTSEL on the Pico 2 and replug its USB (waiting ${BOOTSEL_WAIT:-120} s)"
@@ -130,11 +138,12 @@ provision-rp2350 port="-" serial="":
 provision-rt1050 port slot="":
     #!/usr/bin/env bash
     set -euo pipefail
+    port="$1"; slot="$2"
     mwctl="${MWCTL:-target/release/mwctl}"
     sign=(); [[ -n "${MW_HIL_PKCS11:-}" ]] && sign=(--pkcs11 "$MW_HIL_PKCS11")
     [[ -z "${MW_HIL_PKCS11:-}" && -n "${MW_HIL_KEY:-}" ]] && sign=(--key "$MW_HIL_KEY")
-    slot="{{slot}}"; slot="${slot:-${MW_HIL_RT_SLOT:-$(ls -t firmware-imxrt/target/thumbv7em-none-eabihf/release/imxrt-base-*.slot | head -1)}}"
-    "$mwctl" --port {{port}} fw update "$slot" "${sign[@]}"
+    slot="${slot:-${MW_HIL_RT_SLOT:-$(ls -t firmware-imxrt/target/thumbv7em-none-eabihf/release/imxrt-base-*.slot | head -1)}}"
+    "$mwctl" --port "$port" fw update "$slot" "${sign[@]}"
 
 # Fails, saying what to run, when the USB device VID:PID is not writable
 # by this user (picotool then reports only "unable to connect").
@@ -166,6 +175,8 @@ udev-rules:
 provision-nrf52 probe_serial:
     #!/usr/bin/env bash
     set -euo pipefail
+    probe_serial="$1"
+    if [[ ! "$probe_serial" =~ ^[0-9A-Za-z]{1,64}$ ]]; then echo "!!! probe serial $probe_serial: expected 1-64 letters or digits" >&2; exit 1; fi
     elf=firmware-nrf52/target/thumbv7em-none-eabihf/release/firmware-nrf52
     if [[ ! -f "$elf" ]]; then echo "!!! $elf not built: run just fw-build nrf52833" >&2; exit 1; fi
     # Only flash and RAM may be written. A section at 0x1000_0000 or above is
@@ -174,6 +185,6 @@ provision-nrf52 probe_serial:
     if readelf -SW "$elf" | grep -E '^ *\[' | awk "$chk"; then
       echo "!!! $elf has a section at 0x10000000 or above (UICR/FICR): refusing to flash" >&2; exit 1
     fi
-    probe=0d28:0204:{{probe_serial}}
+    probe="0d28:0204:$probe_serial"
     probe-rs download --probe "$probe" --chip nRF52833_xxAA --binary-format elf "$elf"
     probe-rs reset --probe "$probe" --chip nRF52833_xxAA

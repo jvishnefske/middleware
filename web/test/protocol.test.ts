@@ -142,7 +142,9 @@ describe("sys/board", () => {
     const body = Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16)));
     const b = proto.decodeBoardInfo(body)!;
     expect(b).toMatchObject({
-      abiVersion: proto.abi.version,
+      // The fixture was captured from an ABI 9 build. Regenerate it with
+      // bsp_export after rebuilding the ESP32-S3 firmware, then compare to abi.version.
+      abiVersion: 9,
       maxImage: 32768,
       maxMemory: 65536,
       inputOnly: [],
@@ -207,10 +209,11 @@ describe("ABI constants", () => {
       "ledstrip_close",
       "channel_open",
       "channel_publish",
+      "manifest",
     ]);
     expect(abi.imports.find((i) => i.name === "publish")).toEqual({ name: "publish", params: 4, returns: true });
     expect(abi.exports).toEqual({ memory: "memory", init: "init", tick: "tick", alloc: "mw_alloc", onMessage: "on_message", onIrq: "on_irq", onRequest: "on_request" });
-    expect(abi.version).toBe(9);
+    expect(abi.version).toBe(10);
     expect(abi.errors.InvalidKey).toBe(-6);
     expect(proto.constants.keys.status).toBe("sys/payload/status");
   });
