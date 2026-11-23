@@ -115,6 +115,14 @@ COMMANDS:
                                sys/link/sub app/**, sys/zenoh/endpoint tcp/192.168.1.10:7447)
     fw reboot                  Reboot into the committed image on trial
     fw confirm                 Keep the image on trial (explicit buy)
+    os info                    The Linux A/B root: running slot, state, version, floor
+    os update <IMAGE> [CERT] --version N
+                               Write a root (squashfs store) into the inactive slot and
+                               commit it with its root-signed Os cert (a claimed root
+                               needs CERT); then os reboot, then os confirm
+    os reboot                  Boot the committed root on trial (one try)
+    os confirm                 Make the running trial root permanent
+    os abort                   Drop an update; from a trial, reboot into the old root
     fw abort                   Abandon a transfer or a committed update, or
                                reject the image on trial (reboot into the previous one)
     reflash <FILE> [--version <N>]
@@ -374,6 +382,34 @@ pub enum Cmd {
         /// Signs the request (over Zenoh only).
         key: Option<KeySpec>,
     },
+    /// `os info`: the Linux A/B root's state (sys/os/info).
+    OsInfo,
+    /// `os update <IMAGE> [CERT] --version N`: write the root image into the
+    /// inactive slot and commit it; CERT is the `Os` release's `[cert][sig]`
+    /// (a claimed root needs it). `os reboot`, then `os confirm`, finish it.
+    OsUpdate {
+        /// The squashfs store image.
+        file: PathBuf,
+        /// The release cert file (`mw-release publish --kind os` output).
+        cert: Option<PathBuf>,
+        /// The image's version (above the root's floor).
+        version: u32,
+    },
+    /// `os reboot`: the trial boot of the committed root.
+    OsReboot {
+        /// Signs the request (over Zenoh; a claimed node requires it).
+        key: Option<KeySpec>,
+    },
+    /// `os confirm`: the trial becomes the committed root.
+    OsConfirm {
+        /// Signs the request (over Zenoh; a claimed node requires it).
+        key: Option<KeySpec>,
+    },
+    /// `os abort`: drop an update in progress (from a trial, reboot back).
+    OsAbort {
+        /// Signs the request (over Zenoh; a claimed node requires it).
+        key: Option<KeySpec>,
+    },
     /// `fw abort`.
     FwAbort {
         /// Signs the request (over Zenoh only).
@@ -616,7 +652,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let first = pos.next().ok_or("no command given")?;
     // Two-word commands are named "trust info", "key new", ...
     let name = match first.as_str() {
-        "trust" | "key" | "fw" => {
+        "trust" | "key" | "fw" | "os" => {
             let sub = pos
                 .next()
                 .ok_or_else(|| format!("'{first}' needs a subcommand"))?;
@@ -711,7 +747,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     only(
         "--version",
         version.is_some(),
-        &["upload", "bind", "fw update", "reflash"],
+        &["upload", "bind", "fw update", "reflash", "os update"],
     )?;
     only("--no-reboot", no_reboot, &["fw update"])?;
     let fw_version = match (&version, name.as_str()) {
@@ -722,9 +758,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         _ => None,
     };
     let version: Option<u32> = match (version, name.as_str()) {
-        (Some(v), "upload" | "bind" | "reflash") => Some(number("--version", Some(v))?),
+        (Some(v), "upload" | "bind" | "reflash" | "os update") => Some(number("--version", Some(v))?),
         _ => None,
     };
+    let os_version = version;
     if name == "reflash" && (espnow.is_some() || zenoh.is_some() || udp.is_some()) {
         return Err(
             "'reflash' talks to the nRF52 bootloader over --port only; drop --espnow, --zenoh and --udp"
@@ -745,7 +782,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     if zenoh.is_some() {
         let signed = matches!(
             name.as_str(),
-            "upload" | "start" | "stop" | "fw update" | "fw reboot" | "fw confirm" | "fw abort"
+            "upload"
+                | "start"
+                | "stop"
+                | "fw update"
+                | "fw reboot"
+                | "fw confirm"
+                | "fw abort"
+                | "os reboot"
+                | "os confirm"
+                | "os abort"
         );
         if signed && key.is_none() {
             return Err(format!(
@@ -753,7 +799,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             ));
         }
     }
-    if version.is_some() && key.is_none() && name != "bind" && name != "reflash" {
+    if version.is_some() && key.is_none() && !matches!(name.as_str(), "bind" | "reflash" | "os update") {
         return Err("--version needs --key (only signed commits carry a version)".into());
     }
     if counter.is_some() && key.is_none() {
@@ -847,6 +893,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             body: pos.next().unwrap_or_default(),
         },
         "fw confirm" => Cmd::FwConfirm { key },
+        "os info" => Cmd::OsInfo,
+        "os update" => Cmd::OsUpdate {
+            file: PathBuf::from(pos.next().ok_or("os update needs a root image file")?),
+            cert: pos.next().map(PathBuf::from),
+            version: os_version.ok_or("os update needs --version N (the root's version)")?,
+        },
+        "os reboot" => Cmd::OsReboot { key },
+        "os confirm" => Cmd::OsConfirm { key },
+        "os abort" => Cmd::OsAbort { key },
         "fw abort" => Cmd::FwAbort { key },
         "reflash" => Cmd::Reflash {
             file: PathBuf::from(
@@ -1394,6 +1449,29 @@ mod tests {
         assert_eq!(run("--port p fw info").cmd, Cmd::FwInfo);
         assert_eq!(run("--port p fw confirm").cmd, Cmd::FwConfirm { key: None });
         assert_eq!(run("--port p fw abort").cmd, Cmd::FwAbort { key: None });
+        assert_eq!(run("--port p os info").cmd, Cmd::OsInfo);
+        assert_eq!(run("--port p os reboot").cmd, Cmd::OsReboot { key: None });
+        assert_eq!(run("--port p os confirm").cmd, Cmd::OsConfirm { key: None });
+        assert_eq!(run("--port p os abort").cmd, Cmd::OsAbort { key: None });
+        assert_eq!(
+            run("--port p os update root.sqfs --version 12").cmd,
+            Cmd::OsUpdate {
+                file: "root.sqfs".into(),
+                cert: None,
+                version: 12
+            }
+        );
+        assert_eq!(
+            run("--zenoh tcp/h:7447 --node 77b67d8e9011adef os update root.sqfs root.cert --version 12").cmd,
+            Cmd::OsUpdate {
+                file: "root.sqfs".into(),
+                cert: Some("root.cert".into()),
+                version: 12
+            }
+        );
+        // The version is required, and a root image is a file.
+        assert!(p("--port p os update root.sqfs").is_err());
+        assert!(p("--port p os update --version 3").is_err());
         assert_eq!(run("--port p fw reboot").cmd, Cmd::FwReboot { key: None });
         assert_eq!(
             run("--port p fw update fw.uf2").cmd,

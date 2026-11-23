@@ -57,6 +57,18 @@ pub const DEFAULT_FUEL_PER_CALL: u64 = 20 * middleware::wasm_abi::FUEL_PER_CALL;
 pub const ENV_DRIVER: &str = "MW_POSIX_NODE_DRIVER";
 /// `MW_POSIX_NODE_KD240_INPUTS`.
 pub const ENV_KD240_INPUTS: &str = "MW_POSIX_NODE_KD240_INPUTS";
+/// `MW_POSIX_NODE_OS_SLOTS`: the two Linux root slots, `a,b` paths.
+pub const ENV_OS_SLOTS: &str = "MW_POSIX_NODE_OS_SLOTS";
+/// `MW_POSIX_NODE_OS_STATE`: the device holding the A/B boot state.
+pub const ENV_OS_STATE: &str = "MW_POSIX_NODE_OS_STATE";
+/// `MW_POSIX_NODE_OS_CMDLINE`: where the running slot is read from.
+pub const ENV_OS_CMDLINE: &str = "MW_POSIX_NODE_OS_CMDLINE";
+/// `MW_POSIX_NODE_OS_REBOOT`: the command that reboots, or `none`.
+pub const ENV_OS_REBOOT: &str = "MW_POSIX_NODE_OS_REBOOT";
+/// The default of [`ENV_OS_CMDLINE`].
+pub const DEFAULT_OS_CMDLINE: &str = "/proc/cmdline";
+/// The default of [`ENV_OS_REBOOT`].
+pub const DEFAULT_OS_REBOOT: &str = "systemctl --no-block reboot";
 
 /// Default state directory.
 pub const DEFAULT_STATE: &str = "/var/lib/mw-posix-node";
@@ -130,6 +142,21 @@ pub struct PosixNodeConfig {
     /// Old names that were used: `MW_PI_NODE_*` variables, and
     /// [`LEGACY_STATE`] when it was chosen. The binary warns about each.
     pub deprecated: Vec<String>,
+    /// The Linux A/B root, when its slots are configured.
+    pub os: Option<OsConfig>,
+}
+
+/// The Linux A/B root's devices (`crate::os`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsConfig {
+    /// The two root slots, in slot order (A, B).
+    pub slots: [PathBuf; 2],
+    /// The device (or file) holding the boot state's two copies.
+    pub state: PathBuf,
+    /// Where the running slot is read from (`emco.slot=`).
+    pub cmdline: PathBuf,
+    /// The reboot command; empty: no reboot (a simulation).
+    pub reboot: Vec<String>,
 }
 
 impl Default for PosixNodeConfig {
@@ -139,6 +166,7 @@ impl Default for PosixNodeConfig {
             node_id: NodeIdSource::MachineId(PathBuf::from(DEFAULT_MACHINE_ID)),
             memory_bytes: DEFAULT_MEMORY_BYTES,
             local_serial: None,
+            os: None,
             fuel_per_call: DEFAULT_FUEL_PER_CALL,
             driver: crate::driver::DriverChoice::None,
             deprecated: Vec::new(),
@@ -193,6 +221,30 @@ impl PosixNodeConfig {
                 .ok_or_else(|| err(ENV_FUEL_PER_CALL, &v, "not 1000000..=1000000000"))?,
             None => d.fuel_per_call,
         };
+        let os = match (set(ENV_OS_SLOTS), set(ENV_OS_STATE)) {
+            (None, None) => None,
+            (Some(v), Some(state)) => {
+                let parts: Vec<&str> = v.split(',').map(str::trim).collect();
+                if parts.len() != 2 || parts.iter().any(|p| p.is_empty()) {
+                    return Err(err(ENV_OS_SLOTS, &v, "not two paths, a,b"));
+                }
+                let reboot = match get(ENV_OS_REBOOT).map(|r| r.trim().to_owned()) {
+                    None => DEFAULT_OS_REBOOT.split_whitespace().map(str::to_owned).collect(),
+                    Some(r) if r == "none" => Vec::new(),
+                    Some(r) => r.split_whitespace().map(str::to_owned).collect(),
+                };
+                Some(OsConfig {
+                    slots: [PathBuf::from(parts[0]), PathBuf::from(parts[1])],
+                    state: PathBuf::from(state.trim()),
+                    cmdline: get(ENV_OS_CMDLINE).map_or(PathBuf::from(DEFAULT_OS_CMDLINE), |c| {
+                        PathBuf::from(c.trim())
+                    }),
+                    reboot,
+                })
+            }
+            (Some(v), None) => return Err(err(ENV_OS_STATE, &v, "required with MW_POSIX_NODE_OS_SLOTS")),
+            (None, Some(v)) => return Err(err(ENV_OS_SLOTS, &v, "required with MW_POSIX_NODE_OS_STATE")),
+        };
         let inputs = set(ENV_KD240_INPUTS);
         let driver = match set(ENV_DRIVER).as_deref().map(str::trim) {
             None | Some("none") => {
@@ -226,6 +278,7 @@ impl PosixNodeConfig {
             fuel_per_call,
             driver,
             deprecated: used.into_inner(),
+            os,
         })
     }
 
@@ -470,5 +523,41 @@ mod tests {
             crate::limits(1 << 20).max_subscriptions as usize,
             middleware::wasm_abi::SLOT_MAX
         );
+    }
+
+    #[test]
+    fn os_root_is_configured_by_its_slots_and_state_together() {
+        let c = PosixNodeConfig::from_env(&env(&[
+            (ENV_OS_SLOTS, "/dev/a,/dev/b"),
+            (ENV_OS_STATE, "/dev/card"),
+        ]))
+        .unwrap();
+        let os = c.os.expect("configured");
+        assert_eq!(os.slots, [PathBuf::from("/dev/a"), PathBuf::from("/dev/b")]);
+        assert_eq!(os.state, PathBuf::from("/dev/card"));
+        assert_eq!(os.cmdline, PathBuf::from(DEFAULT_OS_CMDLINE));
+        assert_eq!(os.reboot, ["systemctl", "--no-block", "reboot"]);
+        let none = PosixNodeConfig::from_env(&env(&[
+            (ENV_OS_SLOTS, "/dev/a,/dev/b"),
+            (ENV_OS_STATE, "/dev/card"),
+            (ENV_OS_REBOOT, "none"),
+        ]))
+        .unwrap();
+        assert!(none.os.unwrap().reboot.is_empty());
+        assert!(PosixNodeConfig::default().os.is_none());
+    }
+
+    #[test]
+    fn os_root_refuses_a_half_configuration_and_a_bad_slot_list() {
+        let only_slots = PosixNodeConfig::from_env(&env(&[(ENV_OS_SLOTS, "/dev/a,/dev/b")])).expect_err("state");
+        assert_eq!(only_slots.var, ENV_OS_STATE);
+        let only_state = PosixNodeConfig::from_env(&env(&[(ENV_OS_STATE, "/dev/card")])).expect_err("slots");
+        assert_eq!(only_state.var, ENV_OS_SLOTS);
+        let three = PosixNodeConfig::from_env(&env(&[
+            (ENV_OS_SLOTS, "/dev/a,/dev/b,/dev/c"),
+            (ENV_OS_STATE, "/dev/card"),
+        ]))
+        .expect_err("three");
+        assert_eq!(three.var, ENV_OS_SLOTS);
     }
 }

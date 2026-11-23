@@ -7,6 +7,7 @@ check the middleware against it (test_boards.py).
                                          # through each board's bootloader
     pytest tests/hil --mw-flash --mw-build   # build the firmware before installing
     pytest tests/hil -k rp2350           # one kind of board
+    pytest tests/hil --mw-no-mdns        # LAN without DNS-SD
     just hil [args]                      # the same
 
 Environment:
@@ -36,6 +37,7 @@ def pytest_addoption(parser):
     g.addoption("--mw-write", action="store_true", help="upload/start/stop a test payload")
     g.addoption("--mw-no-usb", action="store_true", help="skip USB discovery")
     g.addoption("--mw-no-lan", action="store_true", help="skip LAN discovery")
+    g.addoption("--mw-no-mdns", action="store_true", help="skip DNS-SD (_mw-node._tcp) on the LAN")
     g.addoption("--mw-scout-seconds", type=int, default=3, help="Zenoh scouting time")
     g.addoption("--mw-mwctl", default=None, help="mwctl binary [default: build it]")
 
@@ -51,6 +53,7 @@ def discover(config) -> list[B.Board]:
         usb=not config.getoption("--mw-no-usb"),
         lan=not config.getoption("--mw-no-lan"),
         scout_seconds=config.getoption("--mw-scout-seconds"),
+        mdns=not config.getoption("--mw-no-mdns"),
     )
 
 

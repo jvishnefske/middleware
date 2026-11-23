@@ -87,6 +87,7 @@ pub struct Controller<F, C: Clock + 'static> {
     published: Option<PayloadStatus>,
     events_dropped: u32,
     driver: Box<dyn Driver>,
+    os: Option<crate::os::OsUpdates>,
 }
 
 impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
@@ -115,6 +116,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             published: None,
             events_dropped: 0,
             driver,
+            os: None,
         };
         (ctl, boot)
     }
@@ -172,13 +174,46 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     }
 
     /// Handles one request: the reply body or the error.
+    /// The Linux A/B root's update state; without one `sys/os/*` is
+    /// `NotFound`.
+    pub fn set_os(&mut self, os: crate::os::OsUpdates) {
+        self.os = Some(os);
+    }
+
+    /// A request from the network (the gateway's Zenoh link).
     pub fn request(
         &mut self,
         key: Key<'_>,
         body: &[u8],
         meta: &RequestMeta<'_>,
     ) -> Result<Vec<u8>, HandlerError> {
+        self.request_on(key, body, meta, true)
+    }
+
+    /// A request from a link: `network` is true for the gateway's Zenoh
+    /// link, false for the local serial port (`sys/os/*` control requests
+    /// need a signature only from the network, see [`crate::os`]).
+    pub fn request_on(
+        &mut self,
+        key: Key<'_>,
+        body: &[u8],
+        meta: &RequestMeta<'_>,
+        network: bool,
+    ) -> Result<Vec<u8>, HandlerError> {
         let mut out = vec![0u8; MAX_RAW_FRAME];
+        if key.as_str().starts_with("sys/os/") {
+            let trust = self.svc.trust_state();
+            let chips = crate::os::cert_targets(crate::service::CHIP, None);
+            let r = match self.os.as_mut() {
+                Some(os) => os.handle(key, body, trust.as_ref(), &chips, network, &mut out),
+                None => Err(HandlerError::NotFound),
+            };
+            return r.and_then(|n| {
+                out.get(..n)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(HandlerError::BufferTooSmall)
+            });
+        }
         if key == keys::CONTROL_MODULES {
             let n = crate::driver::serve_page(self.driver.points(), body, &mut out)?;
             out.truncate(n);

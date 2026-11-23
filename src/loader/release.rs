@@ -10,8 +10,8 @@
 //!
 //! | field     | encoding                     | meaning |
 //! |-----------|------------------------------|---------|
-//! | `kind`    | u8 ([`CertKind`])            | payload (1) or firmware (2) |
-//! | `target`  | `[len u8][1..=32 bytes UTF-8]` | the `chip` a device reports in `sys/info` (`rp2350`, `linux-x86_64`); a payload may say [`ANY_TARGET`] |
+//! | `kind`    | u8 ([`CertKind`])            | payload (1), firmware (2) or the Linux root (3, `os`) |
+//! | `target`  | `[len u8][1..=32 bytes UTF-8]` | the `chip` a device reports in `sys/info` (`rp2350`, `linux-aarch64`); a payload may say [`ANY_TARGET`] |
 //! | `channel` | `[len u8][1..=32 bytes UTF-8]` | the updates channel (`stable`, `test`); devices do not check it |
 //! | `version` | u32 LE                       | strictly above the device's floor |
 //! | `len`     | u32 LE                       | image length |
@@ -56,6 +56,9 @@ pub enum CertKind {
     Payload = 1,
     /// A firmware image, installed through `sys/fw/*` into the inactive slot.
     Firmware = 2,
+    /// A Linux root (a squashfs store), installed through `sys/os/*` into
+    /// the inactive A/B slot of the card (design.md, "Linux A/B root").
+    Os = 3,
 }
 
 impl CertKind {
@@ -64,6 +67,7 @@ impl CertKind {
         match b {
             1 => Some(CertKind::Payload),
             2 => Some(CertKind::Firmware),
+            3 => Some(CertKind::Os),
             _ => None,
         }
     }
@@ -73,6 +77,7 @@ impl CertKind {
         match self {
             CertKind::Payload => "payload",
             CertKind::Firmware => "fw",
+            CertKind::Os => "os",
         }
     }
 
@@ -81,6 +86,7 @@ impl CertKind {
         match s {
             "payload" => Some(CertKind::Payload),
             "fw" | "firmware" => Some(CertKind::Firmware),
+            "os" => Some(CertKind::Os),
             _ => None,
         }
     }
@@ -395,6 +401,29 @@ mod tests {
             ..any
         };
         assert!(!fw_any.is_for("rp2350"), "firmware is never for any chip");
+        let os = SoftwareCert {
+            kind: CertKind::Os,
+            target: "linux-aarch64",
+            ..c
+        };
+        assert!(os.is_for("linux-aarch64"));
+        assert!(!os.is_for("linux-x86_64"));
+        let os_any = SoftwareCert { target: ANY_TARGET, ..os };
+        assert!(!os_any.is_for("linux-aarch64"), "a Linux root is never for any chip");
+    }
+
+    #[test]
+    fn up1_os_kind_round_trips_and_is_named() {
+        assert_eq!(CertKind::from_byte(3), Some(CertKind::Os));
+        assert_eq!(CertKind::from_byte(4), None);
+        assert_eq!(CertKind::Os as u8, 3);
+        assert_eq!(CertKind::Os.name(), "os");
+        assert_eq!(CertKind::from_name("os"), Some(CertKind::Os));
+        let c = SoftwareCert { kind: CertKind::Os, target: "linux-aarch64", ..cert() };
+        let mut out = [0u8; CERT_MAX];
+        let n = c.encode(&mut out).unwrap();
+        assert_eq!(out[0], 3);
+        assert_eq!(SoftwareCert::decode(&out[..n]), Some((c, n)));
     }
 
     #[test]

@@ -455,6 +455,9 @@ fn op_name(op: ControlOp) -> &'static str {
         ControlOp::FwReboot => "fw reboot",
         ControlOp::FwConfirm => "fw confirm",
         ControlOp::FwAbort => "fw abort",
+        ControlOp::OsReboot => "os reboot",
+        ControlOp::OsConfirm => "os confirm",
+        ControlOp::OsAbort => "os abort",
     }
 }
 
@@ -505,10 +508,17 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
         Cmd::FwUpdate { key, .. }
         | Cmd::FwReboot { key }
         | Cmd::FwConfirm { key }
-        | Cmd::FwAbort { key } => key.clone(),
+        | Cmd::FwAbort { key }
+        | Cmd::OsReboot { key }
+        | Cmd::OsConfirm { key }
+        | Cmd::OsAbort { key } => key.clone(),
         _ => None,
     };
-    let Some(spec) = key.filter(|_| is_fw(&cli.cmd)) else {
+    let is_os_control = matches!(
+        cli.cmd,
+        Cmd::OsReboot { .. } | Cmd::OsConfirm { .. } | Cmd::OsAbort { .. }
+    );
+    let Some(spec) = key.filter(|_| is_fw(&cli.cmd) || is_os_control) else {
         if is_fw(&cli.cmd) {
             // fw info.
             return dev.fw_info().map(|i| print!("{}", format_fw_info(&i)));
@@ -542,6 +552,13 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
             .fw_confirm_signed(attempts, || std::thread::sleep(RETRY_PAUSE), control)
             .map(|()| println!("confirmed: the new firmware is permanent")),
         Cmd::FwAbort { .. } => dev.fw_abort_signed(control).map(|()| println!("aborted")),
+        Cmd::OsReboot { .. } => dev
+            .os_reboot(control)
+            .map(|()| println!("rebooting into the committed root on trial")),
+        Cmd::OsConfirm { .. } => dev
+            .os_confirm(attempts, || std::thread::sleep(RETRY_PAUSE), control)
+            .map(|()| println!("confirmed: the root is permanent")),
+        Cmd::OsAbort { .. } => dev.os_abort(control).map(|()| println!("aborted")),
         Cmd::FwUpdate {
             file,
             version,
@@ -614,6 +631,9 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
 
 /// Runs one device command over any endpoint; `target` is the device's
 /// MAC over ESP-NOW (signed control requests name it).
+/// `os confirm` waits this long for the trial to become the running slot.
+const OS_CONFIRM_ATTEMPTS: u32 = 120;
+
 fn command<L: Endpoint>(dev: &mut Device<L>, cmd: Cmd, target: Option<Mac>) -> Result<(), Error> {
     command_with(dev, cmd, target, None)
 }
@@ -691,6 +711,45 @@ fn command_with<L: Endpoint>(
                 )
             })
         }
+        Cmd::OsInfo => dev
+            .os_info()
+            .map(|i| print!("{}", mwctl::os::format_os_info(&i))),
+        Cmd::OsUpdate {
+            file,
+            cert,
+            version,
+        } => {
+            let image = std::fs::read(&file).map_err(Error::File)?;
+            let cert_bytes = match &cert {
+                Some(p) => Some(std::fs::read(p).map_err(Error::File)?),
+                None => None,
+            };
+            let signed = match &cert_bytes {
+                Some(b) => Some(
+                    middleware::loader::release::SignedCert::decode(b)
+                        .ok_or_else(|| Error::Fw(format!("{}: not a [cert][sig] release", cert.as_ref().map_or(String::new(), |p| p.display().to_string()))))?,
+                ),
+                None => None,
+            };
+            let began = Instant::now();
+            let slot = dev.os_update(&image, Version(version), signed, |p| {
+                eprint!("\r  step {}/{}  {} of {} bytes", p.step + 1, p.steps, p.done, p.total);
+            })?;
+            eprintln!();
+            println!(
+                "root written to slot {slot} in {:.1} s; then `os reboot`, then `os confirm`",
+                began.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
+        // Over the serial port the board is in reach: no signature.
+        Cmd::OsReboot { .. } => dev
+            .os_reboot(None)
+            .map(|()| println!("rebooting into the committed root on trial")),
+        Cmd::OsConfirm { .. } => dev
+            .os_confirm(OS_CONFIRM_ATTEMPTS, || std::thread::sleep(mwctl::os::CONFIRM_PAUSE), None)
+            .map(|()| println!("confirmed: the root is permanent")),
+        Cmd::OsAbort { .. } => dev.os_abort(None).map(|()| println!("aborted")),
         Cmd::Request { key, body } => {
             let key = middleware::Key::new(&key).map_err(|_| {
                 Error::Io(std::io::Error::new(

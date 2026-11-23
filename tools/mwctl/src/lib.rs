@@ -58,6 +58,7 @@ pub mod device;
 pub mod ecp5;
 pub mod error;
 pub mod fw;
+pub mod os;
 pub mod link;
 pub mod pkcs11;
 pub mod plan;

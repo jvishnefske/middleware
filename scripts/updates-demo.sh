@@ -131,6 +131,14 @@ v2=$(env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/keys/release.cred" $bin/mw-relea
 wait_for "payload $v2: installed"
 printf 'installed %s %.1f s after the publish\n' "$v2" "$(echo "$(date +%s.%N) - $start" | bc)"
 
+say "a Linux root (os) release: published, and the updater skips it on this node (no root configured)"
+os_img="$w/root.squashfs"
+{ printf 'hsqs'; head -c 4092 /dev/urandom; } > "$os_img"
+env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/keys/release.cred" \
+  $bin/mw-release publish --channel demo --target "$chip" --kind os --key "$w/keys/root.seed" "$os_img" >/dev/null
+wait_for "os.*skipped: no Linux root updater"
+grep "skipped: no Linux root updater" "$w/updater.log" | tail -1
+
 say "a forged release (another key) is refused by the server"
 (umask 077; head -c 32 /dev/urandom > "$w/keys/mallory.seed")
 if env "${route[@]}" MW_ZENOH_CREDENTIALS="$w/keys/release.cred" \
@@ -142,4 +150,4 @@ fi
 say "server log"
 "$oci" logs mwdemo-u 2>&1 | grep -v status | tail -5
 echo
-echo "OK: published, pulled, installed, re-published and refused a forgery."
+echo "OK: published, pulled, installed, re-published, offered a root and refused a forgery."

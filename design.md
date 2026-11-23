@@ -6165,6 +6165,119 @@ router-config` renders.
 Not in scope now: `zenoh_lite` over WebSocket (WS4), pulls from the
 browser, and self-update of the Linux host's own OS.
 
+### Linux A/B root (OS, `os_ab`, `sys/os/*`)
+
+The KD240 (Kria, `linux-aarch64`) runs NixOS from an A/B card (the lathe
+repo's `kd240/nix/ab.nix`): two raw squashfs slots, a FAT boot partition with
+`boot.scr`, and two CRC-32 boot-state sectors in the gap before the first
+partition. Until now nothing updated that root. This section is the update:
+the same root key, channel and cert as the MCU payloads and firmware
+(UP1–UP3), a third `CertKind`, and a protocol that mirrors `sys/fw/*`.
+
+- [x] OS1 `CertKind::Os = 3` (`os`): a root-signed release for one target
+  (`linux-aarch64`, or the board's name). A payload or firmware cert never
+  installs a root, and an Os cert never installs anything else (the
+  `accept_cert` and `authorize` checks compare the kind). `mw-release publish
+  --kind os` takes a squashfs image (`hsqs` magic). *(middleware
+  `loader::release` tests `up1_os_kind_round_trips_and_is_named`,
+  `up1_targets`; updates `up8_linux_root_installs_above_its_floor_and_never_mid_update`)*
+- [x] OS2 The boot state, `src/os_ab/bootstate.rs`, byte for byte what the
+  lathe's `boot.scr` reads and writes: `BootState` (`active`, `try`, `tries`,
+  `seq`), CRC-32 over the text, the newest valid copy wins, a write goes to
+  the other copy with `seq + 1`. The same vectors as the lathe's
+  `fleet/proto/src/bootstate.rs`, and `boot.scr`'s decision
+  (`choose_boot`: count a try down, boot it; else boot `active`) is modelled
+  so a host test runs a trial and a rollback. *(middleware `os_ab` tests: 16)*
+- [x] OS3 **The anti-rollback floor is not in the boot-state sector.** The
+  plan asked for a `min_version` there; `boot.scr` re-exports only its five
+  keys when it writes a try (`env export -t ab_active ab_magic ab_seq
+  ab_tries ab_try`), so a sixth key would be dropped on the first try. The
+  floor, and the version of the root in each slot, live in posix-node's
+  record file (`<state>/os-record`, 32 bytes, CRC-32, written by rename,
+  refused when corrupt: a node that cannot read its floor does not update).
+- [x] OS4 The wire, `src/os_ab/wire.rs`: `sys/os/{info,begin,chunk,commit,
+  reboot,confirm,abort}` with the `sys/fw` body layout (`begin`
+  `[len][version][sha256]` → `[slot]`; `chunk` `[offset][data]`; `commit`
+  `[cert][sig]`), a 64 KiB chunk, and `sys/os/info` as 20 bytes
+  (`running`, `state`, `target`, `running_version`, `floor`,
+  `capacity`). *(middleware `os_ab::wire` tests: 5)*
+- [x] OS5 The node, `posix-node/src/os.rs`: `begin` writes only the
+  inactive slot and refuses the committed one; `chunk` writes at its offset
+  and acknowledges a resend; `commit` reads the slot back and compares its
+  SHA-256, and on a claimed device needs the root-signed `Os` cert for this
+  target with the same length, hash and a version above the floor
+  (`verify_cert`); the record (floor, versions, ready slot, control counter)
+  is saved before the reply. `reboot` writes one try of the ready slot into
+  the boot state and asks for a reboot (`systemctl --no-block reboot` through
+  polkit); `confirm` from a trial writes it as active; `abort` drops a
+  transfer or a ready slot, and from a trial writes the old slot back and
+  reboots. A trial that never confirms is booted over by `boot.scr` (the
+  count runs out), and `info` reports `rolled back`. *(posix-node `os::tests`:
+  11, including mwctl's signed `os reboot` / `os confirm` against the node
+  over a link, the file-backed card checking the boot state at LBA 4096 and
+  6144, and network control refused without the pinned key)*
+- [x] OS5a **Control requests are authenticated on the network.** `reboot`,
+  `confirm` and `abort` change what boots, so over the network on a claimed
+  node they take a `SignedControl` (`ControlOp::OsReboot|OsConfirm|OsAbort`,
+  codes 6–8) by the pinned key, with a counter above the last accepted one
+  (`TrustState::accept_control`); the counter is saved with the record. The
+  target is `control_target(node)`, the same six bytes `mwctl` signs for a
+  Zenoh node (`zlink::target`, pinned by a test). Over the local serial port
+  they take no signature: serial is physical access, and it is the path that
+  re-provisions the key (`sys/trust/claim`). An unclaimed node takes them
+  unsigned (trust on first use, as for `sys/fw`). `begin` and `chunk` need no
+  signature: they write only the inactive slot, and `commit` (the root cert)
+  is the authority for what gets installed. *(`os_ab::wire` tests, posix-node
+  `network_control_needs_the_pinned_key_and_a_new_counter`)*
+- [x] OS6 Host tools: `mwctl os info|update <IMAGE> [CERT] --version N|reboot|
+  confirm|abort`, over any link (serial, Zenoh, UDP). `os update` writes and
+  commits; `os reboot`, `os confirm` and `os abort` take `--key` or `--pkcs11`
+  and sign over Zenoh (required there, as for `fw`). The trial is separate
+  from the write, so an operator or a script waits for the trial before it
+  confirms. *(mwctl `cli` tests; posix-node `os::tests` for the signed path)*
+- [x] OS7 **A root goes over a bulk link, never the console, and is installed
+  by an operator.** The serial console is 115200 baud: a gigabyte takes about
+  70 hours, so a root goes over Zenoh (the node's `MW_ZENOH_LISTEN`) or UDP.
+  `mw-updater` does not install roots: it holds the root public key, not a
+  signing key, and a root needs signed control to boot and confirm. Its pass
+  reports an `Os` release as `skipped` (decision rules unchanged, `up8`).
+  `just os-update <image> <cert> <version>` (`tests/hil/os_update.py`) does
+  the install over the LAN with the operator's key (`MW_HIL_KEY` or
+  `MW_HIL_PKCS11`).
+- [ ] OS8 **On the board: not yet.** The first `kd240-ab` card has to boot
+  (U-Boot 2025.01's `crc32`/`cmp.l` in `boot.scr` and the initrd's squashfs
+  store mount are untested; see the lathe repo's `nix/ab.nix`). Until it
+  does, the root path is verified in the host simulation only, and the
+  NixOS side (`services.mw-posix-node.osSlots`, `osState`, the `disk`
+  group, the polkit rule) is written but not deployed.
+- [x] OS9 Options, `nix/posix-node.nix`: `osSlots` and `osState` (both or
+  neither: an assertion), `MW_POSIX_NODE_OS_*` (`OsConfig`:
+  `slots`, `state`, `cmdline` for `emco.slot=`, `reboot`, `none` to turn the
+  reboot off). With `osSlots` the node joins `disk` and loses
+  `PrivateDevices`. *(posix-node `config` tests: 2)*
+
+### KD240 detection on the LAN and USB (`tests/hil`, DNS-SD)
+
+- [x] KD1 A posix-node with `services.mw-posix-node.listen` (default
+  `tcp/0.0.0.0:7447`, `MW_ZENOH_LISTEN`) announces `_mw-node._tcp` on the link
+  (`posix-node/src/dnssd.rs`). The HIL reads it: `scripts/mdns-browse.py`
+  has `browse(seconds, type)` and `--json`, and `boards.discover` turns each
+  instance into a Zenoh board (`tcp/<ip>:<port>`, node = the instance label),
+  merged with scouting and `MW_HIL_LAN` by node id. `--mw-no-mdns` and
+  `just provision --no-mdns` leave it out. *(tests/hil `test_parsers`:
+  `dnssd_*`)*
+- [x] KD2 The KD240 console is a USB board: `0403:6011` is also the
+  Colorlight's FT4232H, so `UsbKind` matches the product string and the
+  interface (`KD Carrier Card`, interface 01 = FT4232H channel B = `ttyPS1`).
+  The Colorlight's ports are never probed. *(`test_kd240_console_*`)*
+- [x] KD3 `just devices` lists the LAN and the USB; `just kd240` asks the
+  board for `info` and `board`; `just provision` skips a `linux-*` board
+  with "deploy with `just os-update`" instead of failing.
+- [ ] KD4 The lathe repo's KD240 flake (cross-repo): `services.mw-posix-node`
+  with `localSerial = "/dev/ttyPS1"`, the `serial-getty@ttyPS1` disabled,
+  the firewall open for the listen port and UDP 5353, and the `osSlots` /
+  `osState` of the `kd240-ab` card. Not done here.
+
 ### DMA routes (ABI 4)
 
 Frame streams between devices without copying through guest memory. A

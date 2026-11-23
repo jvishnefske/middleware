@@ -166,3 +166,19 @@ def test_open_reliability(board: Board, mwctl: Mwctl):
         if r.returncode != 0 or "chip:" not in r.stdout:
             misses.append(i)
     assert not misses, f"{len(misses)}/20 fresh opens got no sys/info reply (runs {misses})"
+
+
+def test_linux_board_reports_its_payload_slot_and_root_state(board: Board, mwctl: Mwctl):
+    """A Linux board (posix-node, the KD240) reports its payload slot; with a
+    Linux A/B root (design.md, "Linux A/B root (OS)") it answers `os info`."""
+    info = need_info(board)
+    if not info["chip"].startswith("linux-"):
+        pytest.skip("not a Linux board")
+    assert info["payload status"] in ("stopped", "empty", "running"), info
+    r = mwctl.run(board, "os", "info")
+    if r.returncode != 0:
+        pytest.skip(f"no Linux root update on this board: {(r.stderr or r.stdout).strip()}")
+    fields = B.parse_fields(r.stdout)
+    assert fields.get("running") in ("a", "b"), fields
+    assert fields.get("state") in ("idle", "receiving", "committed", "trial", "confirmed", "rolled back"), fields
+    assert fields.get("state") != "trial", "a root on trial: `just os-update` confirms it, or `os abort`"

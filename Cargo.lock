@@ -2054,6 +2054,7 @@ dependencies = [
 name = "mw-posix-node"
 version = "26.11.21"
 dependencies = [
+ "ed25519-dalek",
  "embedded-storage",
  "esp-base",
  "gpiocdev",

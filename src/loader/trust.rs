@@ -287,16 +287,25 @@ pub enum ControlOp {
     /// `sys/fw/abort`: abandon a firmware transfer or update, or reject
     /// the image on trial.
     FwAbort = 5,
+    /// `sys/os/reboot`: boot the committed Linux root on trial.
+    OsReboot = 6,
+    /// `sys/os/confirm`: keep the Linux root on trial.
+    OsConfirm = 7,
+    /// `sys/os/abort`: abandon a Linux root update, or reboot back from its trial.
+    OsAbort = 8,
 }
 
 impl ControlOp {
     /// Every op, in wire order.
-    pub const ALL: [ControlOp; 5] = [
+    pub const ALL: [ControlOp; 8] = [
         ControlOp::Start,
         ControlOp::Stop,
         ControlOp::FwReboot,
         ControlOp::FwConfirm,
         ControlOp::FwAbort,
+        ControlOp::OsReboot,
+        ControlOp::OsConfirm,
+        ControlOp::OsAbort,
     ];
 
     /// The op of a request key (`sys/payload/start|stop`,
@@ -308,6 +317,9 @@ impl ControlOp {
             "sys/fw/reboot" => Some(ControlOp::FwReboot),
             "sys/fw/confirm" => Some(ControlOp::FwConfirm),
             "sys/fw/abort" => Some(ControlOp::FwAbort),
+            "sys/os/reboot" => Some(ControlOp::OsReboot),
+            "sys/os/confirm" => Some(ControlOp::OsConfirm),
+            "sys/os/abort" => Some(ControlOp::OsAbort),
             _ => None,
         }
     }
@@ -904,14 +916,17 @@ mod tests {
 
     #[test]
     fn control_ops_have_fixed_codes_and_keys() {
-        let codes: [u8; 5] = ControlOp::ALL.map(|o| o as u8);
-        assert_eq!(codes, [1, 2, 3, 4, 5]);
+        let codes: [u8; 8] = ControlOp::ALL.map(|o| o as u8);
+        assert_eq!(codes, [1, 2, 3, 4, 5, 6, 7, 8]);
         for (key, op) in [
             ("sys/payload/start", ControlOp::Start),
             ("sys/payload/stop", ControlOp::Stop),
             ("sys/fw/reboot", ControlOp::FwReboot),
             ("sys/fw/confirm", ControlOp::FwConfirm),
             ("sys/fw/abort", ControlOp::FwAbort),
+            ("sys/os/reboot", ControlOp::OsReboot),
+            ("sys/os/confirm", ControlOp::OsConfirm),
+            ("sys/os/abort", ControlOp::OsAbort),
         ] {
             assert_eq!(ControlOp::for_key(key), Some(op));
             assert_eq!(

@@ -42,6 +42,7 @@ pub mod driver;
 pub mod flash;
 pub mod layout;
 pub mod node_id;
+pub mod os;
 pub mod service;
 pub mod shell;
 

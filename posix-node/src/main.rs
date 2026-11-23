@@ -148,6 +148,29 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         );
     }
     let driver = node.driver.open();
+    // The Linux A/B root (MW_POSIX_NODE_OS_*): the slots and the boot state
+    // are opened now, the record of the floor is read from the state
+    // directory. A root that cannot be read leaves sys/os/* refused.
+    let os = match &node.os {
+        Some(c) => {
+            let dev = mw_posix_node::os::FileDevice::open(&c.slots, &c.state, &c.cmdline, c.reboot.clone())
+                .map_err(|e| format!("os: {e}"))?;
+            let updates = mw_posix_node::os::OsUpdates::open(
+                Box::new(dev),
+                node.state.join(mw_posix_node::os::RECORD_FILE),
+                id,
+            )
+            .map_err(|e| format!("os: {e}"))?;
+            eprintln!(
+                "mw-posix-node: linux root A/B on {} and {}, boot state {}",
+                c.slots[0].display(),
+                c.slots[1].display(),
+                c.state.display()
+            );
+            Some(updates)
+        }
+        None => None,
+    };
     eprintln!(
         "mw-posix-node: driver {} ({} control-module points)",
         driver.name(),
@@ -159,6 +182,7 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
         limits: mw_posix_node::limits_with_fuel(node.memory_bytes, node.fuel_per_call),
         local,
         driver,
+        os,
     };
     let parts = GatewayParts {
         bridge: gateway.bridge_with_floor(floor),

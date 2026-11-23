@@ -43,9 +43,12 @@ pub fn prepare(
                 version: img.version,
             })
         }
-        CertKind::Payload => {
+        CertKind::Payload | CertKind::Os => {
             if file.is_empty() {
                 return Err("empty payload".into());
+            }
+            if kind == CertKind::Os && !file.starts_with(b"hsqs") {
+                return Err("a Linux root must be a squashfs image (hsqs)".into());
             }
             let version = match version {
                 Some(v) => v,
@@ -105,7 +108,7 @@ pub fn settle_version(
     let Some(cur) = current else {
         return Ok(());
     };
-    if kind == CertKind::Payload && requested.is_none() {
+    if matches!(kind, CertKind::Payload | CertKind::Os) && requested.is_none() {
         let next = cur
             .0
             .checked_add(1)
@@ -122,7 +125,7 @@ pub fn settle_version(
     if prepared.version <= cur {
         let show = |v: Version| match kind {
             CertKind::Firmware => mwctl::fw::format_version(v),
-            CertKind::Payload => v.0.to_string(),
+            CertKind::Payload | CertKind::Os => v.0.to_string(),
         };
         return Err(format!(
             "the channel already has {} {}; this release ({}) must be newer",

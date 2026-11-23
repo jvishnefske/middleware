@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use middleware::fw_ota::wire::{FwInfo, StateCode};
 use middleware::loader::release::{CertKind, verify_cert};
 use middleware::loader::trust::{PublicKey, TrustInfo, TrustState, Version};
+use middleware::os_ab::wire::{OsInfo, StateCode as OsState};
 use middleware::transport::HandlerError;
 use mwctl::device::{Device, Info, UploadOptions};
 use mwctl::error::Error;
@@ -51,6 +52,8 @@ pub struct Facts {
     pub trust: TrustInfo,
     /// `sys/fw/info`, when the device has a firmware updater.
     pub fw: Option<FwInfo>,
+    /// `sys/os/info`, when the device has a Linux root updater.
+    pub os: Option<OsInfo>,
 }
 
 /// What to do for one kind on one device.
@@ -117,6 +120,15 @@ pub fn decide(
             }
             fw_floor(fw)
         }
+        CertKind::Os => {
+            let Some(os) = &facts.os else {
+                return skip("no Linux root updater");
+            };
+            if matches!(os.state, OsState::Committed | OsState::Trial) {
+                return skip("a root update is in progress");
+            }
+            Version(os.floor.max(os.running_version))
+        }
     };
     if version <= floor {
         Decision::UpToDate(floor)
@@ -130,7 +142,8 @@ pub fn read_facts<L: Endpoint>(dev: &mut Device<L>) -> Result<Facts, Error> {
     let info = dev.info()?;
     let trust = dev.trust_info()?;
     let fw = dev.fw_info().ok();
-    Ok(Facts { info, trust, fw })
+    let os = dev.os_info().ok();
+    Ok(Facts { info, trust, fw, os })
 }
 
 /// Installs and starts the payload `image` of `release`.
@@ -299,6 +312,7 @@ mod tests {
                 rekey_open: false,
             },
             fw,
+            os: None,
         }
     }
 
@@ -440,4 +454,48 @@ mod tests {
         }
         assert!(matches!(d(None), Decision::Skip(_)));
     }
+
+    /// The Linux root's decision: a root above its floor and the running
+    /// version installs; a root mid-update is left alone; a device without a
+    /// root updater is skipped.
+    #[test]
+    fn up8_linux_root_installs_above_its_floor_and_never_mid_update() {
+        use middleware::os_ab::bootstate::Slot;
+        use middleware::os_ab::wire::{OsInfo, StateCode as OsState};
+        let root = seed().public_key();
+        let latest = [rel(CertKind::Os, "linux-aarch64", 0x0001_0002)];
+        let os = |running_version: u32, floor: u32, state: OsState| OsInfo {
+            running: Slot::A,
+            state,
+            target: Some(Slot::B),
+            running_version,
+            floor,
+            capacity: 3 << 30,
+        };
+        let d = |o: Option<OsInfo>| {
+            let f = Facts {
+                os: o,
+                ..facts("linux-aarch64", claimed(0), None)
+            };
+            decide(&f, CertKind::Os, "test", &latest, &root)
+        };
+        assert_eq!(
+            d(Some(os(0x0001_0001, 0x0001_0001, OsState::Idle))),
+            Decision::Install(latest[0].clone())
+        );
+        assert_eq!(
+            d(Some(os(0x0001_0002, 0x0001_0002, OsState::Confirmed))),
+            Decision::UpToDate(Version(0x0001_0002))
+        );
+        // A floor above the running version is the floor the root must beat.
+        assert_eq!(
+            d(Some(os(0x0001_0000, 0x0001_0003, OsState::RolledBack))),
+            Decision::UpToDate(Version(0x0001_0003))
+        );
+        for s in [OsState::Committed, OsState::Trial] {
+            assert!(matches!(d(Some(os(1, 0, s))), Decision::Skip(_)));
+        }
+        assert!(matches!(d(None), Decision::Skip(_)));
+    }
+
 }

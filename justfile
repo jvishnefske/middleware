@@ -22,6 +22,14 @@ default:
 lan seconds="3":
     cargo run --quiet --release -p mwctl --features zenoh -- scout --seconds {{seconds}}
 
+# Zenoh scouting finds the nodes that speak Zenoh; DNS-SD finds the ones that
+# announce themselves on the link (posix-node: _mw-node._tcp, with its port).
+[doc("List middleware devices on the network: Zenoh scouting and DNS-SD (_mw-node._tcp)")]
+devices seconds="3":
+    just lan {{seconds}}
+    python3 -I scripts/mdns-browse.py --seconds {{seconds}}
+    just provision --list --no-lan --no-mdns
+
 # The updates channel end to end on this machine (design.md UP): the
 # zenohd and mw-updates images (podman), a posix-node over a PTY, the
 # updater and the publisher; publish, install, re-publish, refuse a forgery.
@@ -158,6 +166,18 @@ _usb-writable id:
       exit 1
     fi
 
+# A Linux root (design.md, "Linux A/B root (OS)") onto the KD240 over the
+# LAN: written into the inactive slot, committed with its Os cert, tried, confirmed.
+[doc("Install a Linux root release on the KD240 over the LAN: just os-update <image> <cert> <version>")]
+os-update image cert version:
+    python3 tests/hil/os_update.py {{image}} {{cert}} {{version}}
+
+# The KD240 (Kria, linux-aarch64) on this machine: its console over USB, then
+# the board itself over the LAN, asked for info and board.
+[doc("Ask the KD240 (USB console or LAN) for info and board; os info once the root is updatable")]
+kd240:
+    python3 tests/hil/kd240.py
+
 # udev rule for the RP boards (BOOTSEL 2e8a:0003 RP2040, 2e8a:000f RP2350,
 # and rp-base 2e8a:0009) and the ESP USB-JTAG: group plugdev, read-write.
 [doc("Install udev rules so picotool/espflash work without sudo (uses sudo)")]
@@ -167,6 +187,7 @@ udev-rules:
       'SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", ATTR{idProduct}=="000f", MODE="0660", GROUP="plugdev", TAG+="uaccess"' \
       'SUBSYSTEM=="usb", ATTR{idVendor}=="2e8a", ATTR{idProduct}=="0009", MODE="0660", GROUP="plugdev", TAG+="uaccess"' \
       'SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="1001", MODE="0660", GROUP="plugdev", TAG+="uaccess"' \
+      'SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6011", ATTR{product}=="KD Carrier Card", MODE="0660", GROUP="plugdev", TAG+="uaccess"' \
       | sudo tee /etc/udev/rules.d/60-middleware-boards.rules
     sudo udevadm control --reload-rules
     sudo udevadm trigger --subsystem-match=usb
