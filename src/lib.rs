@@ -72,6 +72,7 @@
 //! | `espnow`   | `espnow`    | `no_std`, no heap | a radio binding (trait)   |
 //! | `smbus`    | `smbus`     | `no_std`, no heap | `embedded-hal(-async)` 1.0 master, an `I2cTarget` adapter, a `Clock` |
 //! | `trust`    | `loader::trust` checks, image hashing, `fw_ota::service` | `no_std`, no heap | ed25519-dalek (verify only), p256 |
+//! | `secure-chip` | `secure_chip::SecureChip`, the key custody trait | `no_std`, no heap | none |
 //! | `fw-sim`   | `fw_ota::sim` | `std`         | `trust`; the in-memory RP2350 bootrom and flash model for tests |
 //! | `cam-fixtures` | `stream::frames::fixtures` | `no_std`, no heap | 53 KB of baked JPEG frames (`fixtures/cam`) |
 //! | `zenoh`    | `zenoh`     | `std`             | tokio, zenoh              |
@@ -112,6 +113,7 @@ pub mod loader;
 pub mod os_ab;
 pub mod mdns;
 pub mod rpc;
+pub mod secure_chip;
 pub mod serial;
 pub mod stream;
 pub mod transport;

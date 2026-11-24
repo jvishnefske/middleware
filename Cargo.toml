@@ -54,6 +54,9 @@ fw-sim = ["std", "trust"]
 # 53 KB of `include_bytes!` data from `fixtures/cam`), served by
 # `SourceKind::TestPattern` for JPEG configs. no_std, no heap.
 cam-fixtures = []
+# The key custody trait (`secure_chip`): a secure chip holds the private key and
+# signs; backends live in the hosts. No dependencies; no_std, no heap.
+secure-chip = []
 
 # Cloud / host transports (std, tokio)
 zenoh = ["std", "dep:zenoh", "dep:tokio"]
