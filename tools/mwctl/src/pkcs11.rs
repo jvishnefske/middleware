@@ -37,7 +37,8 @@ use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHan
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
-use middleware::loader::trust::{KeyKind, PublicKey, Signature};
+use middleware::loader::trust::{KeyKind, P256_KEY_LEN, PublicKey, SIGNATURE_LEN, Signature};
+use middleware::secure_chip::{SecureChip, Slot as ChipSlot};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -495,6 +496,100 @@ pub fn init_token(
     Ok(())
 }
 
+/// [`SecureChip`] on a PKCS#11 token: a TPM 2.0 through `tpm2-pkcs11`, an
+/// HSM, or SoftHSM2 in the tests. This is the one way host code reaches a
+/// TPM key: every use of the key goes through the trait.
+///
+/// The chip holds one key, at [`ChipSlot::DEVICE`]: the token key labelled
+/// `label`. [`SecureChip::generate_key`] makes it with [`generate`]
+/// (sensitive, never extractable) and refuses a label already in use, so the
+/// private key never leaves the token and is never replaced. Other slots hold
+/// nothing. Each call opens its own session; none outlives the call.
+pub struct Pkcs11Chip {
+    at: Location,
+    label: String,
+    pin: AuthPin,
+}
+
+impl fmt::Debug for Pkcs11Chip {
+    // The PIN is never printed.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Pkcs11Chip(key '{}' at {})", self.label, self.at.module.display())
+    }
+}
+
+impl Pkcs11Chip {
+    /// The key labelled `label` in the token at `at`, used with `pin`.
+    pub fn new(at: Location, label: impl Into<String>, pin: AuthPin) -> Self {
+        Pkcs11Chip { at, label: label.into(), pin }
+    }
+
+    /// The token key's label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn device(&self, slot: ChipSlot) -> Result<(), SignError> {
+        if slot == ChipSlot::DEVICE {
+            Ok(())
+        } else {
+            Err(SignError::Token(format!(
+                "slot {} holds no key: this token holds only the device key '{}'",
+                slot.0, self.label
+            )))
+        }
+    }
+
+    fn signer(&self) -> Result<Pkcs11Signer, SignError> {
+        Pkcs11Signer::open(&self.at, &self.label, &self.pin)
+    }
+}
+
+impl SecureChip for Pkcs11Chip {
+    type Error = SignError;
+
+    fn has_key(&mut self, slot: ChipSlot) -> Result<bool, SignError> {
+        if slot != ChipSlot::DEVICE {
+            return Ok(false);
+        }
+        // The public key object is readable without the PIN.
+        let ctx = self.at.context()?;
+        for s in initialised_slots(&ctx, self.at.token.as_deref())? {
+            let session = ctx
+                .open_ro_session(s)
+                .map_err(|e| token_err("C_OpenSession", e))?;
+            if find_one(&session, ObjectClass::PUBLIC_KEY, &self.label)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn generate_key(&mut self, slot: ChipSlot) -> Result<(), SignError> {
+        self.device(slot)?;
+        generate(&self.at, &self.label, KeyKind::P256, &self.pin).map(|_| ())
+    }
+
+    fn public_key(&mut self, slot: ChipSlot) -> Result<[u8; P256_KEY_LEN], SignError> {
+        self.device(slot)?;
+        match self.signer()?.public_key() {
+            PublicKey::P256(k) => Ok(k),
+            other => Err(SignError::Token(format!(
+                "the key '{}' is {}, not P-256",
+                self.label,
+                other.kind().name()
+            ))),
+        }
+    }
+
+    fn sign(&mut self, slot: ChipSlot, message: &[u8]) -> Result<[u8; SIGNATURE_LEN], SignError> {
+        self.device(slot)?;
+        // Pkcs11Signer hashes with SHA-256, normalises to low S and checks
+        // the signature against the public key before returning it.
+        Ok(self.signer()?.sign(message)?.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +653,18 @@ mod tests {
     /// in this process). Skipped, with a note, without SoftHSM2.
     #[test]
     fn softhsm_end_to_end() {
+        softhsm_child("pkcs11::tests::softhsm_token_keys_sign_what_devices_accept");
+    }
+
+    /// Runs [`softhsm_chip_keeps_its_key_on_the_token`] the same way.
+    #[test]
+    fn softhsm_chip_end_to_end() {
+        softhsm_child("pkcs11::tests::softhsm_chip_keeps_its_key_on_the_token");
+    }
+
+    /// The ignored test `name`, run in a child process on a fresh SoftHSM2
+    /// token directory. Skipped, with a note, without SoftHSM2.
+    fn softhsm_child(name: &str) {
         if softhsm_module().is_none() {
             // CI installs SoftHSM2 and sets MWCTL_REQUIRE_SOFTHSM, so the
             // token path can never silently stop being tested there.
@@ -568,7 +675,8 @@ mod tests {
             eprintln!("SKIPPED: SoftHSM2 is not installed (apt install softhsm2)");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("mwctl-softhsm-{}", std::process::id()));
+        let tag = name.rsplit("::").next().unwrap_or(name);
+        let dir = std::env::temp_dir().join(format!("mwctl-softhsm-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("tokens")).unwrap();
         let conf = dir.join("softhsm2.conf");
@@ -581,12 +689,7 @@ mod tests {
         )
         .unwrap();
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "pkcs11::tests::softhsm_token_keys_sign_what_devices_accept",
-                "--ignored",
-                "--nocapture",
-            ])
+            .args(["--exact", name, "--ignored", "--nocapture"])
             .env("SOFTHSM2_CONF", &conf)
             .output()
             .unwrap();
@@ -595,6 +698,63 @@ mod tests {
             + &String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{text}");
         assert!(text.contains("1 passed"), "the child ran the test: {text}");
+    }
+
+    #[test]
+    fn a_chip_slot_other_than_the_device_never_reaches_the_token() {
+        // No such module: any call that loaded it would fail with a load error.
+        let at = Location {
+            module: PathBuf::from("/nonexistent/no-such-pkcs11.so"),
+            token: None,
+        };
+        let mut chip = Pkcs11Chip::new(at, "kd240-dev", AuthPin::new("secret-pin-42".into()));
+        assert!(matches!(chip.has_key(ChipSlot(1)), Ok(false)));
+        let made = chip.generate_key(ChipSlot(1)).unwrap_err().to_string();
+        assert!(made.contains("holds no key"), "{made}");
+        assert!(chip.public_key(ChipSlot(2)).is_err());
+        assert!(chip.sign(ChipSlot(3), b"x").is_err());
+        assert!(!format!("{chip:?}").contains("secret-pin-42"), "the PIN is not printed");
+    }
+
+    /// [`Pkcs11Chip`] on SoftHSM2: the key is made once on the token, a
+    /// second `generate_key` is refused, and the chip's signature verifies
+    /// against the public key it reports. Run by [`softhsm_chip_end_to_end`].
+    #[test]
+    #[ignore = "run by softhsm_chip_end_to_end with SOFTHSM2_CONF set"]
+    fn softhsm_chip_keeps_its_key_on_the_token() {
+        use middleware::secure_chip::ensure_key;
+        use p256::ecdsa::signature::Verifier;
+
+        assert!(
+            std::env::var_os("SOFTHSM2_CONF").is_some(),
+            "run through softhsm_chip_end_to_end"
+        );
+        let module = softhsm_module().unwrap();
+        let so = AuthPin::new("so-test-0000".into());
+        let user = AuthPin::new("user-test-1234".into());
+        init_token(&module, "mw-chip", &so, &user).unwrap();
+        let at = Location {
+            module,
+            token: Some("mw-chip".into()),
+        };
+        let mut chip = Pkcs11Chip::new(at.clone(), "kd240-dev", AuthPin::new("user-test-1234".into()));
+
+        assert!(!chip.has_key(ChipSlot::DEVICE).unwrap(), "a new token holds no key");
+        let first = ensure_key(&mut chip, ChipSlot::DEVICE).unwrap();
+        assert!(chip.has_key(ChipSlot::DEVICE).unwrap());
+        assert_eq!(ensure_key(&mut chip, ChipSlot::DEVICE).unwrap(), first, "made once");
+        let again = chip.generate_key(ChipSlot::DEVICE).unwrap_err().to_string();
+        assert!(again.contains("already"), "{again}");
+
+        let message = b"csr-to-be-signed";
+        let raw = chip.sign(ChipSlot::DEVICE, message).unwrap();
+        let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(&first).unwrap();
+        let sig = p256::ecdsa::Signature::from_slice(&raw).unwrap();
+        vk.verify(message, &sig).expect("the chip's signature verifies against its key");
+
+        let mut wrong = Pkcs11Chip::new(at, "kd240-dev", AuthPin::new("wrong-pin-9".into()));
+        let e = wrong.sign(ChipSlot::DEVICE, message).unwrap_err().to_string();
+        assert!(e.contains("C_Login") && !e.contains("wrong-pin-9"), "{e}");
     }
 
     /// The token path end to end on SoftHSM2 (no card or TPM needed):

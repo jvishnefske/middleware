@@ -2271,6 +2271,7 @@ dependencies = [
  "p256",
  "rcgen",
  "time",
+ "x509-parser",
 ]
 
 [[package]]
