@@ -325,6 +325,20 @@ impl From<::zenoh::Error> for ZenohError {
 pub struct SessionConfig {
     listen: Vec<String>,
     connect: Vec<String>,
+    client_tls: Option<ClientTls>,
+}
+
+/// The client side of mutual TLS on a `tls/` connection: the root CA the
+/// router's certificate must chain to, and this session's own certificate
+/// and key (PEM files). The router checks the client certificate too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientTls {
+    /// The CA certificate (PEM).
+    pub ca: std::path::PathBuf,
+    /// This client's certificate chain (PEM).
+    pub cert: std::path::PathBuf,
+    /// This client's private key (PEM).
+    pub key: std::path::PathBuf,
 }
 
 impl SessionConfig {
@@ -345,6 +359,13 @@ impl SessionConfig {
         self
     }
 
+    /// Presents `tls`'s certificate on `tls/` connections and verifies the
+    /// peer against its CA (mutual TLS, name verified).
+    pub fn client_tls(mut self, tls: ClientTls) -> Self {
+        self.client_tls = Some(tls);
+        self
+    }
+
     /// Produces the Zenoh configuration.
     pub fn build(&self) -> Result<::zenoh::Config, ZenohError> {
         let mut config = ::zenoh::Config::default();
@@ -352,9 +373,53 @@ impl SessionConfig {
         config.insert_json5("scouting/multicast/enabled", "false")?;
         config.insert_json5("scouting/gossip/enabled", "false")?;
         config.insert_json5("listen/endpoints", &json_array(&self.listen)?)?;
-        config.insert_json5("connect/endpoints", &json_array(&self.connect)?)?;
+        // A tls/ client reads its certificates from the endpoint's own config
+        // (`tls/host:port#key=value;...`): the transport-level keys are not
+        // applied to a connect link, so they go on each tls/ endpoint.
+        if let Some(t) = &self.client_tls {
+            // Refused whatever the endpoints: a bad path is a bad config.
+            for p in [&t.ca, &t.cert, &t.key] {
+                tls_path(p)?;
+            }
+        }
+        let connect: Vec<String> = match &self.client_tls {
+            None => self.connect.clone(),
+            Some(t) => self
+                .connect
+                .iter()
+                .map(|e| tls_endpoint(e, t))
+                .collect::<Result<_, _>>()?,
+        };
+        config.insert_json5("connect/endpoints", &json_array(&connect)?)?;
         Ok(config)
     }
+}
+
+/// `endpoint` with `tls`'s client certificate parameters, when it is a `tls/`
+/// endpoint with none of its own (other endpoints are returned as they are).
+/// A tls/ client reads its certificates from its endpoint's config
+/// (`tls/host:port#key=value;...`), so this is how a session presents them.
+pub fn tls_endpoint(endpoint: &str, tls: &ClientTls) -> Result<String, ZenohError> {
+    if !endpoint.starts_with("tls/") || endpoint.contains('#') {
+        return Ok(endpoint.to_owned());
+    }
+    let params = format!(
+        "root_ca_certificate_file={};connect_certificate_file={};connect_private_key_file={};enable_mtls=true;verify_name_on_connect=true",
+        tls_path(&tls.ca)?,
+        tls_path(&tls.cert)?,
+        tls_path(&tls.key)?
+    );
+    Ok(format!("{endpoint}#{params}"))
+}
+
+/// A TLS file path as an endpoint parameter value: refused when it holds a
+/// character the endpoint syntax reads (`#`, `;`, `=`, `|`) or a quote.
+fn tls_path(p: &std::path::Path) -> Result<String, ZenohError> {
+    let text = p.to_str().ok_or(ZenohError::InvalidEndpoint)?;
+    if text.contains(['#', ';', '=', '|', '"', '\\']) {
+        return Err(ZenohError::InvalidEndpoint);
+    }
+    Ok(text.to_owned())
 }
 
 /// Renders endpoint strings as a JSON5 array, refusing characters that would
@@ -425,6 +490,16 @@ impl ZenohTransport {
             #[cfg(feature = "zenoh-otel")]
             trace_context: false,
         }
+    }
+
+    /// The node id this session answers and publishes as: its per-node
+    /// queryables (`@mw/node/<id>/...`) are declared under `sender`, instead of
+    /// the hash of its Zenoh id. A device whose `sys/info` names `sender` as
+    /// its node is then the one `Target::Node(sender)` reaches. Call it before
+    /// the first responder is declared.
+    pub fn with_sender(mut self, sender: SenderId) -> Self {
+        self.sender = sender;
+        self
     }
 
     /// Opens a session from `config` and wraps it.
@@ -811,5 +886,54 @@ mod tests {
             <ZenohTransport as Publisher>::LIMITS,
             Limits::new(MAX_KEY_LEN, MAX_PAYLOAD)
         );
+    }
+}
+
+#[cfg(all(test, feature = "zenoh"))]
+mod client_tls_tests {
+    use super::*;
+
+    #[test]
+    fn client_tls_sets_mutual_tls_with_the_given_files() {
+        let tls = ClientTls {
+            ca: "/etc/mesh/tls/ca".into(),
+            cert: "/etc/mesh/tls/cert".into(),
+            key: "/etc/mesh/tls/key".into(),
+        };
+        let c = SessionConfig::new()
+            .connect("tls/mesh.updates.example:443")
+            .client_tls(tls)
+            .build()
+            .unwrap();
+        // The tls/ connect endpoint carries the parameters its link reads.
+        let eps = c.get_json("connect/endpoints").unwrap();
+        assert!(eps.contains("tls/mesh.updates.example:443#"), "{eps}");
+        assert!(eps.contains("root_ca_certificate_file=/etc/mesh/tls/ca"), "{eps}");
+        assert!(eps.contains("connect_certificate_file=/etc/mesh/tls/cert"), "{eps}");
+        assert!(eps.contains("connect_private_key_file=/etc/mesh/tls/key"), "{eps}");
+        assert!(eps.contains("enable_mtls=true"), "{eps}");
+    }
+
+    #[test]
+    fn no_client_tls_leaves_the_defaults_alone() {
+        let c = SessionConfig::new().connect("tcp/127.0.0.1:7447").build().unwrap();
+        assert_ne!(c.get_json("transport/link/tls/enable_mtls").unwrap(), "true");
+    }
+
+    #[test]
+    fn tcp_endpoints_get_no_tls_parameters() {
+        let tls = ClientTls { ca: "/a".into(), cert: "/c".into(), key: "/k".into() };
+        let c = SessionConfig::new().connect("tcp/127.0.0.1:7447").client_tls(tls).build().unwrap();
+        assert_eq!(c.get_json("connect/endpoints").unwrap(), "[\"tcp/127.0.0.1:7447\"]");
+    }
+
+    #[test]
+    fn a_path_that_needs_escaping_is_refused() {
+        let tls = ClientTls {
+            ca: "/x\"y".into(),
+            cert: "/c".into(),
+            key: "/k".into(),
+        };
+        assert!(SessionConfig::new().client_tls(tls).build().is_err());
     }
 }

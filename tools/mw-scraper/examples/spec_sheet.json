@@ -1,0 +1,19 @@
+{
+  "name": "nrf52840-product-specification",
+  "sources": [
+    { "kind": "search", "query": "nRF52840 product specification pdf" }
+  ],
+  "filter": {
+    "excludes": ["forum", "/shop/", "buy-now"],
+    "extensions": []
+  },
+  "criteria": {
+    "require": ["nrf52840"],
+    "any_of": ["product specification", "datasheet"],
+    "any_min": 1,
+    "forbid": ["buy now", "add to cart"],
+    "any_links": [".pdf"],
+    "min_score": 0.66
+  },
+  "max_pages": 4
+}

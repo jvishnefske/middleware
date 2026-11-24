@@ -20,7 +20,7 @@ use crate::error::Error;
 use crate::link::{Endpoint, Event};
 use middleware::Key;
 use middleware::transport::{HandlerError, RequestOptions, Requester, SenderId, Target};
-use middleware::zenoh::{SessionConfig, ZenohError, ZenohTransport};
+use middleware::zenoh::{ClientTls, SessionConfig, ZenohError, ZenohTransport};
 use std::time::{Duration, Instant};
 
 /// How long one query may take: an RT1050 erases a 256 KiB HyperFlash
@@ -34,6 +34,27 @@ pub enum Route {
     Connect(String),
     /// Listen on this endpoint for boards that connect.
     Listen(String),
+}
+
+/// The mutual-TLS files in `dir`, named as the mesh CA writes them: `ca`
+/// (the router's CA), `cert` and `key` (this client's, PEM, no extensions).
+pub fn tls_from_dir(dir: &std::path::Path) -> Result<ClientTls, Error> {
+    let file = |name: &str| -> Result<std::path::PathBuf, Error> {
+        let p = dir.join(name);
+        if p.is_file() {
+            Ok(p)
+        } else {
+            Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{}: no {name} file (ca, cert and key are needed)", dir.display()),
+            )))
+        }
+    };
+    Ok(ClientTls {
+        ca: file("ca")?,
+        cert: file("cert")?,
+        key: file("key")?,
+    })
 }
 
 /// The 6-byte address a signed control request names on an RT1050 board:
@@ -66,18 +87,21 @@ pub struct ZenohLink {
 
 impl ZenohLink {
     /// Opens the host session on `route` for the board `node`.
-    pub fn open(route: &Route, node: SenderId) -> Result<Self, Error> {
+    /// `tls` presents the client certificate for mutual TLS (`tls/` routers).
+    pub fn open(route: &Route, node: SenderId, tls: Option<ClientTls>) -> Result<Self, Error> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .map_err(Error::Io)?;
-        let config = match route {
+        let mut session = match route {
             Route::Connect(e) => SessionConfig::new().connect(e.clone()),
             Route::Listen(e) => SessionConfig::new().listen(e.clone()),
+        };
+        if let Some(t) = tls {
+            session = session.client_tls(t);
         }
-        .build()
-        .map_err(zerr)?;
+        let config = session.build().map_err(zerr)?;
         let z = rt
             .block_on(ZenohTransport::open(config))
             .map_err(zerr)?
@@ -174,4 +198,22 @@ mod tests {
             assert_eq!(parse_node(bad), None, "{bad}");
         }
     }
+
+    #[test]
+    fn tls_dir_needs_ca_cert_and_key() {
+        let dir = std::env::temp_dir().join(format!("mwctl-tls-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["ca", "cert"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        assert!(tls_from_dir(&dir).is_err(), "no key");
+        std::fs::write(dir.join("key"), b"x").unwrap();
+        let t = tls_from_dir(&dir).unwrap();
+        assert_eq!(t.ca, dir.join("ca"));
+        assert_eq!(t.cert, dir.join("cert"));
+        assert_eq!(t.key, dir.join("key"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }
