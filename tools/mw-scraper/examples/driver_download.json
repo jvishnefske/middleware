@@ -1,0 +1,18 @@
+{
+  "name": "nrf52840-nrfutil-driver",
+  "sources": [
+    { "kind": "search", "query": "Nordic Semiconductor nRF52840 driver download" }
+  ],
+  "filter": {
+    "contains_any": ["nrf", "nordic"],
+    "excludes": ["forum"]
+  },
+  "criteria": {
+    "require": ["nrf52840"],
+    "any_of": ["driver", "download", "firmware"],
+    "any_min": 1,
+    "any_links": [".zip", ".exe", ".msi", ".hex"],
+    "min_score": 0.66
+  },
+  "max_pages": 4
+}

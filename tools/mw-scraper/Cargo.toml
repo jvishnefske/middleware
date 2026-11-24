@@ -1,0 +1,28 @@
+[package]
+name = "mw-scraper"
+version = "26.11.21"
+edition = "2024"
+rust-version = "1.88"
+description = "Selenium (WebDriver, Chromium) web scraping for finding firmware, driver downloads and specification sheets: composable URL sources and page evaluators"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Host tool. Needs a chromedriver whose major version matches the Chromium
+# it drives (see README.md). Not part of any firmware or mesh build.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mw-scraper"
+path = "src/main.rs"
+
+[dependencies]
+thirtyfour = "0.38"
+scraper = "0.29"
+base64 = "0.22"
+url = "2"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "process", "sync", "io-util"] }

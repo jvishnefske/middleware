@@ -124,15 +124,28 @@ async fn run(gateway: GatewayConfig, node: PosixNodeConfig) -> Result<(), String
     // endpoint the node binds for peers; DNS-SD advertises its port.
     let listen = std::env::var("MW_ZENOH_LISTEN").ok().filter(|s| !s.is_empty());
     let mut zenoh_config = SessionConfig::new().connect(router);
+    // MW_ZENOH_TLS_DIR: the node's mutual-TLS files (ca, cert, key) for a
+    // `tls/` router (deploy/zenoh, MESH.md). Unset: plain TCP, as before.
+    if let Some(dir) = std::env::var_os("MW_ZENOH_TLS_DIR").filter(|d| !d.is_empty()) {
+        let dir = std::path::PathBuf::from(dir);
+        zenoh_config = zenoh_config.client_tls(middleware::zenoh::ClientTls {
+            ca: dir.join("ca"),
+            cert: dir.join("cert"),
+            key: dir.join("key"),
+        });
+    }
     if let Some(endpoint) = &listen {
         zenoh_config = zenoh_config.listen(endpoint.clone());
     }
     let zenoh = zenoh_config
         .build()
         .map_err(|e| format!("zenoh config: {e}"))?;
+    // The per-node queryables are declared under the node's own id: the id
+    // `sys/info` reports and `mwctl --node` names.
     let session = ZenohTransport::open(zenoh)
         .await
-        .map_err(|e| format!("zenoh: {e}"))?;
+        .map_err(|e| format!("zenoh: {e}"))?
+        .with_sender(id);
     eprintln!(
         "mw-posix-node: node {} ({}), state {}",
         node_id::hex(id),

@@ -1,0 +1,71 @@
+// Test router for the mutual-TLS mesh (scripts/zenoh-e2e.sh and
+// scripts/zenoh-pki.sh). The rules follow the homelab mesh router
+// (homelab-flux-mesh apps/vishnefske/mesh/zenohd.json5, MESH.md): default
+// deny, a client's certificate CN maps to a role, and each role allows only
+// what it needs. The CNs are test identities (kd240-ci, tool-ci); the homelab
+// lists its own. Certificates are mounted at /etc/mesh/tls (ca, cert, key).
+{
+  mode: "router",
+  listen: { endpoints: ["tls/0.0.0.0:7447"] },
+  scouting: { multicast: { enabled: false }, gossip: { enabled: false } },
+  plugins_loading: { enabled: false },
+  transport: {
+    link: {
+      tls: {
+        root_ca_certificate: "/etc/mesh/tls/ca",
+        listen_certificate: "/etc/mesh/tls/cert",
+        listen_private_key: "/etc/mesh/tls/key",
+        enable_mtls: true,
+        close_link_on_expiration: true,
+      },
+    },
+  },
+  access_control: {
+    enabled: true,
+    default_permission: "deny",
+    rules: [
+      { id: "deny-unit-writes", permission: "deny", flows: ["ingress", "egress"],
+        messages: ["put", "delete"], key_exprs: ["app/unit/**"] },
+      { id: "deny-claim", permission: "deny", flows: ["ingress", "egress"],
+        messages: ["query", "put"], key_exprs: ["@mw/node/*/sys/trust/claim"] },
+      // ---- devices (kd240-<id>): answer queries, publish state and logs ----
+      { id: "kd-announce", permission: "allow", flows: ["ingress"], messages: ["declare_queryable"],
+        key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "kd-queries-in", permission: "allow", flows: ["egress"], messages: ["query"],
+        key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "kd-replies", permission: "allow", flows: ["ingress"], messages: ["reply"],
+        key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "kd-publish", permission: "allow", flows: ["ingress"], messages: ["put"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**", "app/log/**"] },
+      // A device links router-to-router: the router forwards a put only to
+      // subscribers it has been told about.
+      { id: "kd-subscribers", permission: "allow", flows: ["egress"], messages: ["declare_subscriber"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**", "app/log/**"] },
+      // ---- tools (tool-<id>): query the node's system space, read state and logs ----
+      { id: "tool-query", permission: "allow", flows: ["ingress"], messages: ["query"], key_exprs: [
+        "@mw/node/*/sys/info", "@mw/node/*/sys/board", "@mw/node/*/sys/manifest",
+        "@mw/node/*/sys/manifest/cm", "@mw/node/*/sys/peers", "@mw/node/*/sys/trust/info",
+        "@mw/node/*/sys/payload/status", "@mw/node/*/sys/payload/binding",
+        "@mw/node/*/sys/loader/begin", "@mw/node/*/sys/loader/chunk", "@mw/node/*/sys/loader/commit",
+        "@mw/node/*/sys/payload/start", "@mw/node/*/sys/payload/stop", "@mw/node/*/sys/payload/bind",
+        "@mw/node/*/sys/fw/**", "@mw/node/*/sys/os/**"] },
+      { id: "asker-see", permission: "allow", flows: ["egress"],
+        messages: ["declare_queryable", "reply"], key_exprs: ["@mw/node/*/sys/**"] },
+      { id: "tool-subscribe", permission: "allow", flows: ["ingress"], messages: ["declare_subscriber"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**", "app/log/**"] },
+      { id: "tool-receive", permission: "allow", flows: ["egress"], messages: ["put"],
+        key_exprs: ["app/proc/*/state", "app/telemetry/**", "app/log/**"] },
+    ],
+    subjects: [
+      { id: "kd240", link_protocols: ["tls"], cert_common_names: ["kd240-ci"] },
+      { id: "tool", link_protocols: ["tls"], cert_common_names: ["tool-ci"] },
+    ],
+    policies: [
+      { id: "p-kd240", subjects: ["kd240"],
+        rules: ["kd-announce", "kd-queries-in", "kd-replies", "kd-publish", "kd-subscribers",
+                "deny-unit-writes", "deny-claim"] },
+      { id: "p-tool", subjects: ["tool"],
+        rules: ["tool-query", "asker-see", "tool-subscribe", "tool-receive", "deny-unit-writes", "deny-claim"] },
+    ],
+  },
+}

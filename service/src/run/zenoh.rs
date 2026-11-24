@@ -129,15 +129,21 @@ fn json_string(s: &str) -> Result<String, ZenohError> {
     Ok(format!("\"{s}\""))
 }
 
-/// The client-mode configuration for `router` with `credentials`.
+/// The client-mode configuration for `router` with `credentials`, presenting
+/// `tls` on a `tls/` router.
 pub fn client_config(
     router: &str,
     credentials: Option<&Credentials>,
+    tls: Option<&middleware::zenoh::ClientTls>,
 ) -> Result<::zenoh::Config, ZenohError> {
     let mut config = ::zenoh::Config::default();
     config.insert_json5("mode", r#""client""#)?;
     config.insert_json5("scouting/multicast/enabled", "false")?;
-    config.insert_json5("connect/endpoints", &format!("[{}]", json_string(router)?))?;
+    let endpoint = match tls {
+        Some(t) => middleware::zenoh::tls_endpoint(router, t)?,
+        None => router.to_owned(),
+    };
+    config.insert_json5("connect/endpoints", &format!("[{}]", json_string(&endpoint)?))?;
     config.insert_json5("connect/timeout_ms", &CONNECT_TIMEOUT_MS.to_string())?;
     if let Some(c) = credentials {
         config.insert_json5("transport/auth/usrpwd/user", &json_string(&c.user)?)?;
@@ -162,7 +168,7 @@ pub async fn open(
         .as_deref()
         .map(read_credentials)
         .transpose()?;
-    let zenoh_config = client_config(router, credentials.as_ref())?;
+    let zenoh_config = client_config(router, credentials.as_ref(), config.zenoh_tls.as_ref())?;
     let transport = ZenohTransport::open(zenoh_config).await?;
     tracing::info!(
         router,
@@ -248,11 +254,11 @@ mod tests {
     #[test]
     fn ms10_client_config_sets_mode_router_and_credentials() {
         let c = Credentials::new("svc", "pw");
-        let config = client_config("tcp/127.0.0.1:7447", Some(&c)).unwrap();
+        let config = client_config("tcp/127.0.0.1:7447", Some(&c), None).unwrap();
         let text = format!("{config}");
         assert!(text.contains("\"client\""), "{text}");
         assert!(text.contains("tcp/127.0.0.1:7447"), "{text}");
-        assert!(client_config("tcp/\"x", None).is_err());
-        assert!(client_config("tcp/x", Some(&Credentials::new("a\\", "b"))).is_err());
+        assert!(client_config("tcp/\"x", None, None).is_err());
+        assert!(client_config("tcp/x", Some(&Credentials::new("a\\", "b")), None).is_err());
     }
 }

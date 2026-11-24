@@ -501,7 +501,11 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
         hex(&z.node),
         format_mac(&target)
     );
-    let mut link = ZenohLink::open(&route, node)?;
+    let tls = match &z.tls_dir {
+        Some(dir) => Some(mwctl::zlink::tls_from_dir(dir)?),
+        None => None,
+    };
+    let mut link = ZenohLink::open(&route, node, tls)?;
     link.wait_for_board(Duration::from_secs(ZENOH_WAIT_SECONDS))?;
     let mut dev = Device::new(link);
     let key = match &cli.cmd {

@@ -58,6 +58,9 @@ pub const ENV_POD_NAME: &str = "POD_NAME";
 pub const ENV_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 /// `MW_ZENOH_ROUTER`.
 pub const ENV_ZENOH_ROUTER: &str = "MW_ZENOH_ROUTER";
+/// `MW_ZENOH_TLS_DIR`: the directory with the mutual-TLS files (`ca`, `cert`,
+/// `key`) for a `tls/` router (deploy/zenoh, MESH.md).
+pub const ENV_ZENOH_TLS_DIR: &str = "MW_ZENOH_TLS_DIR";
 /// `MW_ZENOH_CREDENTIALS`.
 pub const ENV_ZENOH_CREDENTIALS: &str = "MW_ZENOH_CREDENTIALS";
 /// `MW_SERVICE_MAP`.
@@ -95,6 +98,8 @@ pub struct Config {
     pub zenoh_router: Option<String>,
     /// The Zenoh credentials file.
     pub zenoh_credentials: Option<PathBuf>,
+    /// Mutual TLS for a `tls/` router, from `MW_ZENOH_TLS_DIR`.
+    pub zenoh_tls: Option<middleware::zenoh::ClientTls>,
     /// Which Kubernetes Service serves each called kind.
     pub service_map: ConfigServiceMap,
     /// Drain grace override.
@@ -136,6 +141,14 @@ impl Config {
             .map(|v| checked(ENV_ZENOH_ROUTER, v, is_zenoh_locator, "not a Zenoh locator"))
             .transpose()?;
         let zenoh_credentials = get(ENV_ZENOH_CREDENTIALS).map(PathBuf::from);
+        let zenoh_tls = get(ENV_ZENOH_TLS_DIR).map(|dir| {
+            let dir = PathBuf::from(dir);
+            middleware::zenoh::ClientTls {
+                ca: dir.join("ca"),
+                cert: dir.join("cert"),
+                key: dir.join("key"),
+            }
+        });
         let service_map = match get(ENV_SERVICE_MAP) {
             Some(v) => parse_service_map(&v)?,
             None => ConfigServiceMap::new(),
@@ -160,6 +173,7 @@ impl Config {
             pod_name,
             otlp_endpoint,
             zenoh_router,
+            zenoh_tls,
             zenoh_credentials,
             service_map,
             drain_grace,

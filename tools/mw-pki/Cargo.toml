@@ -1,0 +1,18 @@
+[package]
+name = "mw-pki"
+version = "26.11.21"
+edition = "2024"
+description = "The Zenoh mesh's root of trust on a PKCS#11 token: the CA certificate and issuing client and router certificates from CSRs, signed by a key that never leaves the token (SoftHSM in CI, an HSM or TPM in production; docs/pki-ceremony.md)."
+license = "MIT"
+
+[dependencies]
+middleware = { path = "../.." }
+mwctl = { path = "../mwctl" }
+# x509-parser: read the CA certificate and the CSR from their PEM files.
+rcgen = { version = "0.14", features = ["x509-parser"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+time = "0.3"
+
+[[bin]]
+name = "mw-pki"
+path = "src/main.rs"

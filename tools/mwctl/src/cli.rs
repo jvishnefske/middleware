@@ -216,6 +216,9 @@ pub struct ZenohTarget {
     /// The address signed control requests name (`--target`); `None`
     /// derives the RT1050's Ethernet MAC from the node id.
     pub target: Option<[u8; 6]>,
+    /// `--zenoh-tls-dir`: the directory with `ca`, `cert` and `key` (PEM) for
+    /// mutual TLS to a `tls/` router (`mwctl::zlink::tls_from_dir`).
+    pub tls_dir: Option<std::path::PathBuf>,
 }
 
 /// Default baud rate of the base firmware's console UART.
@@ -507,6 +510,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut node: Option<[u8; 8]> = None;
     let mut of: Option<[u8; 8]> = None;
     let mut ztarget: Option<[u8; 6]> = None;
+    let mut ztls_dir: Option<std::path::PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -577,6 +581,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 ));
                 zroutes += 1;
             }
+            "--zenoh-tls-dir" => {
+                ztls_dir = Some(std::path::PathBuf::from(args.next().ok_or(
+                    "--zenoh-tls-dir needs a directory with ca, cert and key",
+                )?));
+            }
             "--zenoh-listen" => {
                 zroute = Some(ZenohRoute::Listen(
                     args.next()
@@ -627,11 +636,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     if zroutes > 1 {
         return Err("give one of --zenoh <ENDPOINT> or --zenoh-listen <ENDPOINT>".into());
     }
+    if ztls_dir.is_some() && !matches!(zroute, Some(ZenohRoute::Connect(_))) {
+        return Err("--zenoh-tls-dir applies only with --zenoh (a connection to a TLS router)".into());
+    }
     let zenoh = match (zroute, node) {
         (Some(route), Some(node)) => Some(ZenohTarget {
             route,
             node,
             target: ztarget,
+            tls_dir: ztls_dir,
         }),
         (Some(_), None) => {
             return Err("--zenoh needs --node <ID> (the board's node id, from `info`)".into());
@@ -1121,6 +1134,17 @@ mod tests {
         ] {
             assert!(p(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn zenoh_tls_dir_is_a_connect_option() {
+        let c = run("--zenoh tls/mesh.updates.example:443 --node 310441d265f82484 --zenoh-tls-dir /etc/mesh/tls info");
+        assert_eq!(
+            c.zenoh.as_ref().and_then(|z| z.tls_dir.clone()),
+            Some("/etc/mesh/tls".into())
+        );
+        assert!(p("--zenoh-listen tcp/0.0.0.0:7447 --node 310441d265f82484 --zenoh-tls-dir /x info").is_err());
+        assert!(p("--port p --zenoh-tls-dir /x info").is_err());
     }
 
     #[test]
