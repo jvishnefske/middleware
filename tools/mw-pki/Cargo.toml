@@ -13,6 +13,10 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
 time = "0.3"
 
+[dev-dependencies]
+# The tests read back what was issued.
+x509-parser = "0.18"
+
 [[bin]]
 name = "mw-pki"
 path = "src/main.rs"
