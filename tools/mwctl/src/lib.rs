@@ -51,6 +51,8 @@
 #![forbid(unsafe_code)]
 
 pub mod air;
+#[cfg(feature = "auth")]
+pub mod auth;
 pub mod bindspec;
 pub mod bridge;
 pub mod cli;

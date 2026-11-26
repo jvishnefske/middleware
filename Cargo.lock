@@ -2367,6 +2367,7 @@ dependencies = [
  "ed25519-dalek",
  "middleware",
  "p256",
+ "reqwest",
  "serde_json",
  "serialport",
  "sha2",

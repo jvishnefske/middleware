@@ -28,6 +28,19 @@ cryptoki = "0.10"
 # (scripts/check-features.sh).
 zenoh = ["middleware/zenoh", "dep:tokio", "dep:zenoh", "dep:serde_json"]
 
+# `auth`: sign in to an OpenID Connect provider (MW_AUTH_ISSUER) and hand out
+# bearer tokens, for the admin server's certificate enrolment. Off by
+# default for the same reason as `zenoh`: HTTPS pulls in rustls and tokio.
+auth = ["dep:reqwest", "dep:serde_json"]
+
+# HTTPS for `auth` (rustls, the platform's roots); no JSON or form features:
+# mwctl encodes the form itself and parses with serde_json.
+[dependencies.reqwest]
+version = "0.13"
+default-features = false
+features = ["blocking", "rustls"]
+optional = true
+
 [dependencies.tokio]
 version = "1"
 features = ["rt-multi-thread", "time"]

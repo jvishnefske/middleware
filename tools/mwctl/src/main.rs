@@ -940,6 +940,30 @@ fn scout(_seconds: u64) -> Result<(), Error> {
     )))
 }
 
+/// `auth login|token|logout|status` ([`mwctl::auth`]). Only `token` writes a
+/// token, to stdout; everything else goes to stderr.
+#[cfg(feature = "auth")]
+fn auth(cmd: cli::AuthCmd) -> Result<(), String> {
+    use mwctl::auth;
+    let cfg = auth::Config::from_env(|k| std::env::var(k).ok())?;
+    match cmd {
+        cli::AuthCmd::Login => {
+            let t = auth::login(&cfg, &mut |line| eprintln!("{line}"))?;
+            let renew = if t.refresh.is_some() { ", renewable" } else { "" };
+            eprintln!("signed in to {} as client {}{renew}", cfg.issuer, cfg.client_id);
+        }
+        cli::AuthCmd::Token => println!("{}", auth::access_token(&cfg)?),
+        cli::AuthCmd::Logout => eprintln!("{}", auth::logout(&cfg)?),
+        cli::AuthCmd::Status => eprintln!("{}", auth::status(&cfg)?),
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "auth"))]
+fn auth(_cmd: cli::AuthCmd) -> Result<(), String> {
+    Err("this mwctl was built without auth: cargo build -p mwctl --features auth".into())
+}
+
 fn main() -> ExitCode {
     let parsed = cli::parse(std::env::args().skip(1));
     match parsed {
@@ -952,6 +976,13 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         Ok(Parsed::Key(k)) => match key(k) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mwctl: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Ok(Parsed::Auth(a)) => match auth(a) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("mwctl: {e}");
