@@ -14,17 +14,23 @@
 //!
 //! The device's own key is never an input: `client` and `server` take only a
 //! CSR, so a certificate is always for a key its holder made (MESH.md).
-//! Token settings: `MW_PKCS11_MODULE` and `MW_PKCS11_TOKEN` (mwctl), and the
-//! PIN in `MW_PKI_PIN` (or in `~/.env`, mode 0600).
+//! Token settings: `PKCS11_MODULE` and `PKCS11_TOKEN` (read by mwctl's
+//! `Location::from_settings`; `--module` overrides the module), and the PIN
+//! in `MW_PKI_PIN` (or in `~/.env`, mode 0600).
 
 use middleware::secure_chip::{SecureChip, Slot};
 use mwctl::pkcs11::{Location, Pkcs11Chip, pin};
+use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
     DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyUsagePurpose, PublicKeyData, SanType,
-    SignatureAlgorithm, SigningKey,
+    SerialNumber, SignatureAlgorithm, SigningKey,
 };
+use x509_parser::certification_request::X509CertificationRequest;
+use x509_parser::oid_registry::{OID_EC_P256, OID_KEY_TYPE_EC_PUBLIC_KEY};
+use x509_parser::prelude::{FromDer, X509Certificate};
+use x509_parser::x509::SubjectPublicKeyInfo;
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -99,6 +105,7 @@ fn ca_cert<C: SecureChip>(key: &ChipKey<C>, cn: &str) -> Result<String, String> 
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     validity(&mut params, 730);
+    params.serial_number = Some(random_serial());
     Ok(params.self_signed(key).map_err(|e| e.to_string())?.pem())
 }
 
@@ -115,6 +122,10 @@ enum Role {
 /// SANs, key usages, EKU and the not-a-CA constraint. Nothing the CSR asks
 /// for besides its public key is carried over, so a device cannot request a
 /// CA certificate, another name, or extra extensions.
+///
+/// The CSR's key must be P-256 (what the mesh's devices make), and `ca_pem`
+/// must be the certificate of `key` itself: a certificate signed by the chip
+/// under another CA's name would not chain to anything.
 fn issue<C: SecureChip>(
     key: &ChipKey<C>,
     ca_pem: &str,
@@ -122,6 +133,8 @@ fn issue<C: SecureChip>(
     cn: &str,
     role: &Role,
 ) -> Result<String, String> {
+    ca_holds_key(ca_pem, &key.point)?;
+    csr_key_is_p256(csr_pem)?;
     let issuer = Issuer::from_ca_cert_pem(ca_pem, key).map_err(|e| e.to_string())?;
     let mut csr = CertificateSigningRequestParams::from_pem(csr_pem).map_err(|e| e.to_string())?;
     let mut params = CertificateParams::default();
@@ -142,7 +155,9 @@ fn issue<C: SecureChip>(
         }
         Role::Client => {
             if !client_cn_ok(cn) {
-                return Err(format!("CN '{cn}' is not <role>-<id> (kd240 or tool, id [a-z0-9-])"));
+                return Err(format!(
+                    "CN '{cn}' is not kd240-<16 lowercase hex digits> or tool-<id> (id [a-z0-9-], at most 63, no leading, trailing or doubled dash)"
+                ));
             }
             params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         }
@@ -151,19 +166,77 @@ fn issue<C: SecureChip>(
     params.is_ca = IsCa::ExplicitNoCa;
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     validity(&mut params, 365);
+    params.serial_number = Some(random_serial());
     // Only the CSR's public key survives; its requested subject and
     // extensions are dropped with the rest of its parameters.
     csr.params = params;
     Ok(csr.signed_by(&issuer).map_err(|e| e.to_string())?.pem())
 }
 
-/// `kd240-<id>` or `tool-<id>`, the id one or more of `[a-z0-9-]`.
+/// `kd240-<node id>`, the node id exactly 16 lowercase hex digits, or
+/// `tool-<id>`, the id 1 to 63 of `[a-z0-9-]` starting with `[a-z0-9]`,
+/// with no trailing or doubled dash.
 fn client_cn_ok(cn: &str) -> bool {
-    ["kd240-", "tool-"].iter().any(|role| {
-        cn.strip_prefix(role).is_some_and(|id| {
-            !id.is_empty() && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-    })
+    let lower_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if let Some(id) = cn.strip_prefix("kd240-") {
+        return id.len() == 16 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    }
+    if let Some(id) = cn.strip_prefix("tool-") {
+        let b = id.as_bytes();
+        return (1..=63).contains(&b.len())
+            && lower_alnum(b[0])
+            && !id.ends_with('-')
+            && !id.contains("--")
+            && b.iter().all(|&c| lower_alnum(c) || c == b'-');
+    }
+    false
+}
+
+/// A fresh random serial number: 20 bytes (RFC 5280's maximum) from the OS
+/// CSPRNG, the top bit cleared so it is positive. rcgen would otherwise
+/// derive it from the subject key, so every certificate for one CSR would
+/// share it.
+fn random_serial() -> SerialNumber {
+    let mut b = [0u8; 20];
+    OsRng.fill_bytes(&mut b);
+    b[0] &= 0x7f;
+    SerialNumber::from_slice(&b)
+}
+
+/// The P-256 public key in `spki`, if it is one.
+fn p256_key(spki: &SubjectPublicKeyInfo<'_>) -> Option<p256::PublicKey> {
+    let curve = spki.algorithm.parameters.as_ref()?.as_oid().ok()?;
+    if spki.algorithm.algorithm != OID_KEY_TYPE_EC_PUBLIC_KEY || curve != OID_EC_P256 {
+        return None;
+    }
+    p256::PublicKey::from_sec1_bytes(&spki.subject_public_key.data).ok()
+}
+
+/// The DER of the first PEM block in `pem`.
+fn pem_der(pem: &str, what: &str) -> Result<Vec<u8>, String> {
+    x509_parser::pem::parse_x509_pem(pem.as_bytes())
+        .map(|(_, p)| p.contents)
+        .map_err(|e| format!("{what}: not PEM ({e})"))
+}
+
+/// The CSR's key is a P-256 key.
+fn csr_key_is_p256(csr_pem: &str) -> Result<(), String> {
+    let der = pem_der(csr_pem, "the CSR")?;
+    let (_, req) = X509CertificationRequest::from_der(&der).map_err(|e| format!("the CSR: {e}"))?;
+    p256_key(&req.certification_request_info.subject_pki)
+        .map(|_| ())
+        .ok_or_else(|| "the CSR's key is not a P-256 key (the mesh's devices make P-256 keys)".into())
+}
+
+/// `ca_pem` is the certificate of the key whose uncompressed point is `point`.
+fn ca_holds_key(ca_pem: &str, point: &[u8]) -> Result<(), String> {
+    let der = pem_der(ca_pem, "the CA certificate")?;
+    let (_, ca) = X509Certificate::from_der(&der).map_err(|e| format!("the CA certificate: {e}"))?;
+    let chip = p256::PublicKey::from_sec1_bytes(point).map_err(|e| e.to_string())?;
+    match p256_key(ca.public_key()) {
+        Some(k) if k == chip => Ok(()),
+        _ => Err("the CA certificate is not for the token's key (wrong CA.crt or wrong --key)".into()),
+    }
 }
 
 /// Validity of a new certificate: from an hour ago (clock skew) for `days`.
@@ -310,7 +383,6 @@ mod tests {
     use super::*;
     use middleware::loader::trust::{P256_KEY_LEN, SIGNATURE_LEN};
     use rcgen::KeyPair;
-    use x509_parser::prelude::{FromDer, X509Certificate};
     use x509_parser::pem::parse_x509_pem;
 
     /// A chip whose key is in memory: the trait's contract without a token.
@@ -384,10 +456,32 @@ mod tests {
 
     #[test]
     fn client_names_are_role_dash_id() {
-        for ok in ["kd240-0a1b", "tool-laptop", "tool-a-1"] {
+        let tool63 = format!("tool-{}", "a".repeat(63));
+        for ok in ["kd240-0a1b2c3d4e5f6071", "tool-laptop", "tool-a-1", "tool-7", tool63.as_str()] {
             assert!(client_cn_ok(ok), "{ok}");
         }
-        for bad in ["kd240-", "tool-", "admin-1", "kd240-AB", "kd240-x y", "tool-a/b", "kd240-x,CN=y"] {
+        let tool64 = format!("tool-{}", "a".repeat(64));
+        for bad in [
+            "kd240-",
+            "tool-",
+            "admin-1",
+            "kd240-AB",
+            "kd240-x y",
+            "tool-a/b",
+            "kd240-x,CN=y",
+            "kd240---",
+            "kd240-0a1b",
+            "kd240-0a1b2c3d4e5f60711",
+            "kd240-0A1B2C3D4E5F6071",
+            "kd240-0a1b2c3d4e5f607g",
+            "kd240-0a1b2c3d-e5f6071",
+            "tool--",
+            "tool--a",
+            "tool-a-",
+            "tool-a--b",
+            "tool-Laptop",
+            tool64.as_str(),
+        ] {
             assert!(!client_cn_ok(bad), "{bad}");
         }
         let key = ca_key();
@@ -409,5 +503,56 @@ mod tests {
         assert_eq!(sans, 2, "exactly the SANs given, not the CSR's");
         let eku = leaf.extended_key_usage().unwrap().unwrap().value;
         assert!(eku.server_auth && !eku.client_auth);
+    }
+
+    fn serial(pem: &str) -> Vec<u8> {
+        let d = der(pem);
+        X509Certificate::from_der(&d).unwrap().1.raw_serial().to_vec()
+    }
+
+    #[test]
+    fn every_certificate_gets_its_own_random_serial() {
+        let key = ca_key();
+        let ca_pem = ca_cert(&key, "mw-test-ca").unwrap();
+        assert_ne!(serial(&ca_pem), serial(&ca_cert(&key, "mw-test-ca").unwrap()), "CA certificates too");
+        let csr = greedy_csr(&KeyPair::generate().unwrap());
+        let cn = "kd240-0a1b2c3d4e5f6071";
+        let a = serial(&issue(&key, &ca_pem, &csr, cn, &Role::Client).unwrap());
+        let b = serial(&issue(&key, &ca_pem, &csr, cn, &Role::Client).unwrap());
+        assert_ne!(a, b, "two certificates for one CSR");
+        for s in [&a, &b] {
+            assert!(s.len() <= 21 && s.len() >= 16, "about 20 random bytes: {s:?}");
+            assert_eq!(s[0] & 0x80, 0, "positive");
+        }
+    }
+
+    #[test]
+    fn only_p256_csrs_are_signed() {
+        let key = ca_key();
+        let ca_pem = ca_cert(&key, "mw-test-ca").unwrap();
+        for alg in [&rcgen::PKCS_ED25519, &rcgen::PKCS_ECDSA_P384_SHA384] {
+            let device = KeyPair::generate_for(alg).unwrap();
+            let e = issue(&key, &ca_pem, &greedy_csr(&device), "kd240-0a1b2c3d4e5f6071", &Role::Client).unwrap_err();
+            assert!(e.contains("P-256"), "{e}");
+        }
+        let e = issue(&key, &ca_pem, "not a csr", "kd240-0a1b2c3d4e5f6071", &Role::Client).unwrap_err();
+        assert!(e.contains("CSR"), "{e}");
+    }
+
+    #[test]
+    fn the_ca_certificate_must_be_the_chips_own() {
+        let key = ca_key();
+        let other = ChipKey::open(
+            SoftChip(Some(p256::ecdsa::SigningKey::from_bytes(&[0x24; 32].into()).unwrap())),
+            "other-ca",
+        )
+        .unwrap();
+        let other_ca = ca_cert(&other, "mw-test-ca").unwrap();
+        let csr = greedy_csr(&KeyPair::generate().unwrap());
+        let e = issue(&key, &other_ca, &csr, "kd240-0a1b2c3d4e5f6071", &Role::Client).unwrap_err();
+        assert!(e.contains("not for the token's key"), "{e}");
+        let e = issue(&key, "garbage", &csr, "kd240-0a1b2c3d4e5f6071", &Role::Client).unwrap_err();
+        assert!(e.contains("CA certificate"), "{e}");
+        assert!(issue(&key, &ca_cert(&key, "mw-test-ca").unwrap(), &csr, "kd240-0a1b2c3d4e5f6071", &Role::Client).is_ok());
     }
 }

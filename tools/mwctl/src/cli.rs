@@ -47,6 +47,7 @@ USAGE:
     mwctl scout [--seconds <N>]                     (Zenoh nodes on the LAN, see below)
     mwctl key new <KEYFILE> | key pub <KEYFILE>
     mwctl key new --pkcs11 <LABEL> | key pub --pkcs11 <LABEL> | key init-token <TOKEN>
+    mwctl auth login | auth token | auth logout | auth status   (sign-in, see below)
 
 COMMANDS:
     info                       Print chip, firmware, ABI, capacity and payload status
@@ -140,6 +141,14 @@ COMMANDS:
                                every node's sys/info. Not seen: ESP-NOW nodes (ask a
                                gateway's `peers`), sessions behind no scouted router, and
                                other subnets. Needs no --port
+    auth login                 Sign in to the OpenID Connect provider MW_AUTH_ISSUER (mwctl
+                               built with --features auth) as client MW_AUTH_CLIENT_ID
+                               [default mwctl]: prints a URL and a code to approve in any
+                               browser. Tokens are kept in MW_AUTH_STORE [default
+                               ~/.config/mwctl/auth.json, mode 0600]. Needs no --port
+    auth token                 Print a valid access token (renewed first when it is about
+                               to expire), for a service that takes a bearer token
+    auth logout | auth status  Forget (and revoke) the sign-in | say whether one is held
     key new <KEYFILE>          Create a signing key: 32 random bytes (the Ed25519 seed),
                                mode 0600, never overwriting; prints the public key
     key pub <KEYFILE>          Print a key file's public key (hex)
@@ -461,8 +470,40 @@ pub enum Parsed {
         /// How long to scout.
         seconds: u64,
     },
+    /// `auth <login|token|logout|status>`: the sign-in to MW_AUTH_ISSUER.
+    Auth(AuthCmd),
     /// Print [`HELP`] and exit successfully.
     Help,
+}
+
+/// `mwctl auth` subcommands (feature `auth`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthCmd {
+    /// Sign in with the device login.
+    Login,
+    /// Print a valid access token.
+    Token,
+    /// Forget the sign-in and revoke it.
+    Logout,
+    /// Say whether, and for how long, mwctl is signed in.
+    Status,
+}
+
+/// `auth <SUB>`: exactly one subcommand and nothing else. The provider comes
+/// from the environment, so no flag applies.
+fn parse_auth(rest: &[String]) -> Result<Parsed, String> {
+    let sub = match rest {
+        [s] => s.as_str(),
+        [] => return Err("auth needs a subcommand: login, token, logout or status".into()),
+        [_, extra, ..] => return Err(format!("unexpected argument '{extra}' (auth takes no flags)")),
+    };
+    Ok(Parsed::Auth(match sub {
+        "login" => AuthCmd::Login,
+        "token" => AuthCmd::Token,
+        "logout" => AuthCmd::Logout,
+        "status" => AuthCmd::Status,
+        other => return Err(format!("unknown auth subcommand '{other}': login, token, logout or status")),
+    }))
 }
 
 /// Parses a node id: 16 hex digits.
@@ -485,6 +526,14 @@ fn number<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, Stri
 
 /// Parses the arguments (without the program name).
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
+    let args: Vec<String> = args.into_iter().collect();
+    // `auth` talks to the sign-in provider, never to a device: none of the
+    // link flags below apply, so it is parsed on its own.
+    if let Some((first, rest)) = args.split_first()
+        && first == "auth"
+    {
+        return parse_auth(rest);
+    }
     let mut args = args.into_iter();
     let mut port = None;
     let mut baud = None;
@@ -1044,6 +1093,18 @@ mod tests {
                 .contains("applies only to 'net'")
         );
         assert!(p("--udp h net --link x").unwrap_err().contains("--link"));
+    }
+
+    #[test]
+    fn auth_takes_one_subcommand_and_no_flags() {
+        assert_eq!(p("auth login"), Ok(Parsed::Auth(AuthCmd::Login)));
+        assert_eq!(p("auth token"), Ok(Parsed::Auth(AuthCmd::Token)));
+        assert_eq!(p("auth logout"), Ok(Parsed::Auth(AuthCmd::Logout)));
+        assert_eq!(p("auth status"), Ok(Parsed::Auth(AuthCmd::Status)));
+        assert!(p("auth").unwrap_err().contains("needs a subcommand"));
+        assert!(p("auth sudo").unwrap_err().contains("unknown auth subcommand"));
+        assert!(p("auth login --port /dev/x").unwrap_err().contains("no flags"));
+        assert!(HELP.contains("auth login"));
     }
 
     #[test]

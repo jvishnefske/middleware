@@ -10,11 +10,11 @@ middleware = { path = "../.." }
 mwctl = { path = "../mwctl" }
 # x509-parser: read the CA certificate and the CSR from their PEM files.
 rcgen = { version = "0.14", features = ["x509-parser"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+# std: rand_core's OsRng (getrandom), for random serial numbers.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic", "std"] }
 time = "0.3"
-
-[dev-dependencies]
-# The tests read back what was issued.
+# The CSR's key type and the CA certificate's key are checked before signing
+# (rcgen already depends on it, at this version).
 x509-parser = "0.18"
 
 [[bin]]
