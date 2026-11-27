@@ -394,12 +394,19 @@ pub fn decode_manifest(data: &[u8]) -> Option<Object> {
 /// The browser simulator's `sys/manifest` body
 /// ([`crate::simulator::MANIFEST`]) with `node` (16 hex digits) as its
 /// node id, for the page's simulated device and the tests' fake device.
+/// With `mesh` it also lists the WebRTC link of a page that has joined a
+/// room ([`crate::simulator::MESH_MANIFEST`]).
 #[cfg(feature = "simulator")]
 #[wasm_bindgen(js_name = simulatorManifest)]
-pub fn simulator_manifest(node: &str) -> Option<Vec<u8>> {
+pub fn simulator_manifest(node: &str, mesh: Option<bool>) -> Option<Vec<u8>> {
     let id = parse_node(node)?;
     let mut out = vec![0u8; middleware::loader::manifest::MANIFEST_MAX];
-    let n = crate::simulator::MANIFEST.with_node(id).encode(&mut out)?;
+    let manifest = if mesh.unwrap_or(false) {
+        crate::simulator::MESH_MANIFEST
+    } else {
+        crate::simulator::MANIFEST
+    };
+    let n = manifest.with_node(id).encode(&mut out)?;
     out.truncate(n);
     Some(out)
 }
@@ -2825,4 +2832,433 @@ pub fn check_binding(
             JsValue::from(o)
         })
         .collect())
+}
+
+// ---- Browser mesh (design.md BM): `crate::mesh` for the page.
+
+fn opt_bytes(v: Option<Vec<u8>>) -> JsValue {
+    v.map_or(JsValue::UNDEFINED, |b| bytes(&b).into())
+}
+
+fn opt_text(v: Option<String>) -> JsValue {
+    v.map_or(JsValue::UNDEFINED, |s| JsValue::from_str(&s))
+}
+
+fn strs(v: &[String]) -> Vec<&str> {
+    v.iter().map(String::as_str).collect()
+}
+
+/// The mesh's limits: `{maxPeers, maxMessage, maxRoom, maxMembers,
+/// heartbeatMs, helloKeys: [..], channelsKey}`.
+#[wasm_bindgen(js_name = meshConstants)]
+pub fn mesh_constants() -> Object {
+    use crate::mesh;
+    let o = Object::new();
+    set(&o, "maxPeers", mesh::MAX_PEERS as u32);
+    set(&o, "maxMessage", mesh::MAX_MESSAGE as u32);
+    set(&o, "maxRoom", mesh::MAX_ROOM as u32);
+    set(&o, "maxMembers", mesh::MAX_MEMBERS as u32);
+    set(&o, "heartbeatMs", mesh::HEARTBEAT_MS);
+    let keys: Array = mesh::HELLO_KEYS
+        .iter()
+        .map(|k| JsValue::from_str(k))
+        .collect();
+    set(&o, "helloKeys", keys);
+    set(&o, "channelsKey", mesh::CHANNELS_KEY);
+    o
+}
+
+/// Whether `room` is a room name (`a-z0-9_`, at most `maxRoom`).
+#[wasm_bindgen(js_name = meshValidRoom)]
+pub fn mesh_valid_room(room: &str) -> bool {
+    crate::mesh::valid_room(room)
+}
+
+/// The key channel `name` is carried on in `room`, or `undefined`.
+#[wasm_bindgen(js_name = meshRoomKey)]
+pub fn mesh_room_key(room: &str, name: &str) -> JsValue {
+    opt_text(crate::mesh::room_key(room, name))
+}
+
+/// A binding record in which every channel of the module that `existing`
+/// (an encoded record) leaves unbound is bound to its room key. Throws for
+/// a bad room, section or record.
+#[wasm_bindgen(js_name = meshBinding)]
+pub fn mesh_binding(
+    module_bytes: &[u8],
+    existing: Option<Vec<u8>>,
+    room: &str,
+) -> Result<Vec<u8>, JsError> {
+    crate::mesh::auto_binding(module_bytes, existing.as_deref(), room).map_err(|e| js_err(&e))
+}
+
+/// Whether a publication on `key` may cross the room boundary.
+#[wasm_bindgen(js_name = meshOutbound)]
+pub fn mesh_outbound(key: &str) -> bool {
+    crate::mesh::outbound(key)
+}
+
+/// Whether `key` is node-internal (`ch/…`, `drv/…`): delivered to the
+/// node's own payload and sent on no link.
+#[wasm_bindgen(js_name = isInternalKey)]
+pub fn is_internal_key(key: &str) -> bool {
+    middleware::Key::new(key).is_ok_and(middleware::loader::binding::is_internal_key)
+}
+
+/// The data-channel message for a publication, `undefined` when the gate
+/// refuses it.
+#[wasm_bindgen(js_name = meshPublish)]
+pub fn mesh_publish(key: &str, data: &[u8]) -> JsValue {
+    opt_bytes(crate::mesh::publish_out(key, data))
+}
+
+/// One message from a peer: `{kind: "publish", key, data}`, `{kind:
+/// "request", id, key}`, `{kind: "reply", id, ok: true, body}` or `{…, ok:
+/// false, error}`, or `{kind: "refused", reason: "malformed"|"key"|"oversize"}`.
+#[wasm_bindgen(js_name = meshInbound)]
+pub fn mesh_inbound(message: &[u8]) -> Object {
+    use crate::mesh::Inbound;
+    let o = Object::new();
+    match crate::mesh::inbound(message) {
+        Inbound::Publish { key, data } => {
+            set(&o, "kind", "publish");
+            set(&o, "key", key);
+            set(&o, "data", bytes(data));
+        }
+        Inbound::Request { id, key } => {
+            set(&o, "kind", "request");
+            set(&o, "id", id);
+            set(&o, "key", key);
+        }
+        Inbound::Reply { id, result } => {
+            set(&o, "kind", "reply");
+            set(&o, "id", id);
+            set(&o, "ok", result.is_ok());
+            match result {
+                Ok(body) => set(&o, "body", bytes(body)),
+                Err(e) => set(&o, "error", encode::status_name(Some(e))),
+            }
+        }
+        Inbound::Refused(r) => {
+            set(&o, "kind", "refused");
+            set(&o, "reason", r.name());
+        }
+    }
+    o
+}
+
+/// The request for one of the hello keys; `undefined` for another key.
+#[wasm_bindgen(js_name = meshHelloRequest)]
+pub fn mesh_hello_request(id: u8, key: &str) -> JsValue {
+    opt_bytes(crate::mesh::hello_request(id, key))
+}
+
+/// The answer to a peer's request: the body for a hello key, `NotFound`
+/// for anything else.
+#[wasm_bindgen(js_name = meshHelloReply)]
+pub fn mesh_hello_reply(
+    id: u8,
+    key: &str,
+    info: &[u8],
+    manifest: &[u8],
+    channels: &[u8],
+) -> Vec<u8> {
+    crate::mesh::hello_reply(id, key, info, manifest, channels)
+}
+
+/// A module's `mw.channels` section bytes (empty without one).
+#[wasm_bindgen(js_name = channelsSection)]
+pub fn channels_section(module_bytes: &[u8]) -> Vec<u8> {
+    crate::mesh::channels_section(module_bytes)
+}
+
+/// The declarations of a `mw.channels` section (`readChannels`' shape);
+/// empty for no bytes. Throws for a malformed one.
+#[wasm_bindgen(js_name = decodeChannels)]
+pub fn decode_channels(section: &[u8]) -> Result<Array, JsError> {
+    if section.is_empty() {
+        return Ok(Array::new());
+    }
+    let c = middleware::wasm_abi::channels::Channels::parse(section)
+        .map_err(|e| js_err(&format!("mw.channels: {e:?}")))?;
+    Ok(c.iter().map(|c| JsValue::from(channel_object(c))).collect())
+}
+
+/// The channels two section bodies both declare: `[{name, state:
+/// "connected"|"same-direction"|"mismatch", message}]`. Throws for a
+/// malformed section.
+#[wasm_bindgen(js_name = meshCompare)]
+pub fn mesh_compare(local: &[u8], peer: &[u8]) -> Result<Array, JsError> {
+    use middleware::wasm_abi::channels::Channels;
+    let parse = |s| {
+        if <[u8]>::is_empty(s) {
+            return Ok(Channels::none());
+        }
+        Channels::parse(s).map_err(|e| js_err(&format!("mw.channels: {e:?}")))
+    };
+    let (l, p) = (parse(local)?, parse(peer)?);
+    Ok(crate::mesh::compare(&l, &p)
+        .into_iter()
+        .map(|pair| {
+            let o = Object::new();
+            set(&o, "name", pair.name);
+            set(&o, "state", pair.state.name());
+            set(&o, "message", pair.message);
+            JsValue::from(o)
+        })
+        .collect())
+}
+
+/// A node's id on the signalling server (`mw-<room>-<node16>`); throws
+/// for a bad room or node.
+#[wasm_bindgen(js_name = meshPeerId)]
+pub fn mesh_peer_id(room: &str, node: &str) -> Result<String, JsError> {
+    let id = parse_node(&node.to_ascii_lowercase())
+        .ok_or_else(|| js_err("a node id is 16 hex digits"))?;
+    crate::mesh::peer_id(room, id).ok_or_else(|| js_err("bad room name"))
+}
+
+/// The rendezvous id of a room (`mw-<room>-hub`); throws for a bad room.
+#[wasm_bindgen(js_name = meshHubId)]
+pub fn mesh_hub_id(room: &str) -> Result<String, JsError> {
+    crate::mesh::hub_id(room).ok_or_else(|| js_err("bad room name"))
+}
+
+/// The node (16 hex digits) a peer id of `room` names, or `undefined`.
+#[wasm_bindgen(js_name = meshParsePeerId)]
+pub fn mesh_parse_peer_id(room: &str, id: &str) -> JsValue {
+    opt_text(crate::mesh::parse_peer_id(room, id).map(node_hex))
+}
+
+/// The other nodes of `room` among `ids`, sorted.
+#[wasm_bindgen(js_name = meshRoomPeers)]
+pub fn mesh_room_peers(room: &str, own: &str, ids: Vec<String>) -> Vec<String> {
+    crate::mesh::room_peers(room, own, &strs(&ids))
+}
+
+/// The peers `own` dials now, given those listed and those it is linked
+/// (or linking) to.
+#[wasm_bindgen(js_name = meshDialPlan)]
+pub fn mesh_dial_plan(own: &str, listed: Vec<String>, linked: Vec<String>) -> Vec<String> {
+    crate::mesh::dial_plan(own, &strs(&listed), &strs(&linked))
+}
+
+/// Whether a node holding `linked` links takes another.
+#[wasm_bindgen(js_name = meshHasRoom)]
+pub fn mesh_has_room(linked: u32) -> bool {
+    crate::mesh::has_room(linked as usize)
+}
+
+fn server_in(v: &JsValue) -> Result<crate::mesh::Server, JsError> {
+    let port = whole(&get(v, "port"))
+        .and_then(|p| u16::try_from(p).ok())
+        .ok_or_else(|| js_err("server port: 0 to 65535"))?;
+    Ok(crate::mesh::Server {
+        host: text(v, "host"),
+        port,
+        path: text(v, "path"),
+        key: text(v, "key"),
+        secure: get(v, "secure").as_bool().unwrap_or(true),
+    })
+}
+
+/// The signalling socket's URL on `server` (`{host, port, path, key,
+/// secure}`) for `id` with `token`; throws for parts that are not URL safe.
+#[wasm_bindgen(js_name = meshSocketUrl)]
+pub fn mesh_socket_url(server: JsValue, id: &str, token: &str) -> Result<String, JsError> {
+    server_in(&server)?
+        .socket_url(id, token)
+        .ok_or_else(|| js_err("bad server address, id or token"))
+}
+
+/// The URL listing `server`'s peers; throws for a bad address.
+#[wasm_bindgen(js_name = meshPeersUrl)]
+pub fn mesh_peers_url(server: JsValue) -> Result<String, JsError> {
+    server_in(&server)?
+        .peers_url()
+        .ok_or_else(|| js_err("bad server address"))
+}
+
+/// The ids of a server's peer listing, or `undefined` when it is not one.
+#[wasm_bindgen(js_name = meshParseListing)]
+pub fn mesh_parse_listing(text: &str) -> Option<Vec<String>> {
+    crate::mesh::parse_listing(text)
+}
+
+/// A signalling message's JSON text. `{type: "heartbeat"}`, `{type:
+/// "leave", peer}`, `{type: "offer", peer, connection, label, sdp}`,
+/// `{type: "answer", peer, connection, sdp}` or `{type: "candidate", peer,
+/// connection, candidate, mid?, mline?}`; throws for another type.
+#[wasm_bindgen(js_name = meshSignalEncode)]
+pub fn mesh_signal_encode(s: JsValue) -> Result<String, JsError> {
+    use crate::mesh::Signal;
+    let peer = text(&s, "peer");
+    let connection = text(&s, "connection");
+    let signal = match text(&s, "type").as_str() {
+        "heartbeat" => Signal::Heartbeat,
+        "leave" => Signal::Leave { peer },
+        "offer" => Signal::Offer {
+            peer,
+            connection,
+            label: text(&s, "label"),
+            sdp: text(&s, "sdp"),
+        },
+        "answer" => Signal::Answer {
+            peer,
+            connection,
+            sdp: text(&s, "sdp"),
+        },
+        "candidate" => Signal::Candidate {
+            peer,
+            connection,
+            candidate: text(&s, "candidate"),
+            mid: get(&s, "mid").as_string(),
+            mline: whole(&get(&s, "mline")).and_then(|n| u32::try_from(n).ok()),
+        },
+        other => return Err(js_err(&format!("no signalling message {other:?}"))),
+    };
+    Ok(signal.encode())
+}
+
+/// A message from the signalling server, in `meshSignalEncode`'s shapes
+/// (`peer` is the sender) plus `{type: "open"}`, `{type: "idTaken"}`,
+/// `{type: "error", message}` and `{type: "expire", peer}`; `undefined`
+/// for anything else.
+#[wasm_bindgen(js_name = meshSignalDecode)]
+pub fn mesh_signal_decode(message: &str) -> Option<Object> {
+    use crate::mesh::Signal;
+    let o = Object::new();
+    match crate::mesh::Signal::decode(message)? {
+        Signal::Open => set(&o, "type", "open"),
+        Signal::IdTaken => set(&o, "type", "idTaken"),
+        Signal::Heartbeat => set(&o, "type", "heartbeat"),
+        Signal::Error(m) => {
+            set(&o, "type", "error");
+            set(&o, "message", m);
+        }
+        Signal::Leave { peer } => {
+            set(&o, "type", "leave");
+            set(&o, "peer", peer);
+        }
+        Signal::Expire { peer } => {
+            set(&o, "type", "expire");
+            set(&o, "peer", peer);
+        }
+        Signal::Offer {
+            peer,
+            connection,
+            label,
+            sdp,
+        } => {
+            set(&o, "type", "offer");
+            set(&o, "peer", peer);
+            set(&o, "connection", connection);
+            set(&o, "label", label);
+            set(&o, "sdp", sdp);
+        }
+        Signal::Answer {
+            peer,
+            connection,
+            sdp,
+        } => {
+            set(&o, "type", "answer");
+            set(&o, "peer", peer);
+            set(&o, "connection", connection);
+            set(&o, "sdp", sdp);
+        }
+        Signal::Candidate {
+            peer,
+            connection,
+            candidate,
+            mid,
+            mline,
+        } => {
+            set(&o, "type", "candidate");
+            set(&o, "peer", peer);
+            set(&o, "connection", connection);
+            set(&o, "candidate", candidate);
+            if let Some(m) = mid {
+                set(&o, "mid", m);
+            }
+            if let Some(i) = mline {
+                set(&o, "mline", i);
+            }
+        }
+    }
+    Some(o)
+}
+
+/// A member's message to a rendezvous hub: its id.
+#[wasm_bindgen(js_name = meshHubJoin)]
+pub fn mesh_hub_join(id: &str) -> String {
+    crate::mesh::HubMsg::Join(id.to_owned()).encode()
+}
+
+/// A hub's message to its members: the ids in the room.
+#[wasm_bindgen(js_name = meshHubPeers)]
+pub fn mesh_hub_peers(ids: Vec<String>) -> String {
+    crate::mesh::HubMsg::Peers(ids).encode()
+}
+
+/// A hub-channel message: `{type: "join", id}` or `{type: "peers", ids}`;
+/// `undefined` for anything else.
+#[wasm_bindgen(js_name = meshHubDecode)]
+pub fn mesh_hub_decode(message: &str) -> Option<Object> {
+    use crate::mesh::HubMsg;
+    let o = Object::new();
+    match HubMsg::decode(message)? {
+        HubMsg::Join(id) => {
+            set(&o, "type", "join");
+            set(&o, "id", id);
+        }
+        HubMsg::Peers(ids) => {
+            set(&o, "type", "peers");
+            let ids: Array = ids.iter().map(|i| JsValue::from_str(i)).collect();
+            set(&o, "ids", ids);
+        }
+    }
+    Some(o)
+}
+
+/// One raw frame as a datagram (`middleware::udp`, also one data-channel
+/// message): `{kind: "request", id, key, payload}`, `{kind: "publish",
+/// key, payload}` or `{kind: "response", id, statusCode, payload}`. Throws
+/// for an invalid key or oversize.
+#[wasm_bindgen(js_name = encodeDatagram)]
+pub fn encode_datagram(frame: JsValue) -> Result<Vec<u8>, JsError> {
+    use middleware::serial::frame::Frame;
+    let key = text(&frame, "key");
+    let payload = Uint8Array::new(&get(&frame, "payload")).to_vec();
+    let id = whole(&get(&frame, "id")).unwrap_or(0) as u8;
+    let f = match text(&frame, "kind").as_str() {
+        "request" => Frame::Request {
+            id,
+            key: key_in(&key)?,
+            payload: &payload,
+        },
+        "publish" => Frame::Publish {
+            key: key_in(&key)?,
+            payload: &payload,
+        },
+        "response" => Frame::Response {
+            id,
+            result: encode::status_from_code(whole(&get(&frame, "statusCode")).unwrap_or(0) as u8)
+                .map_or(Ok(&payload[..]), Err),
+        },
+        other => return Err(js_err(&format!("no frame kind {other:?}"))),
+    };
+    let mut out = vec![0u8; middleware::udp::MAX_DATAGRAM];
+    let n = middleware::udp::encode(&f, &mut out).map_err(|_| js_err("frame too large"))?;
+    out.truncate(n);
+    Ok(out)
+}
+
+/// The frame of a datagram, as `Decoder.push`'s frame events; `undefined`
+/// when it does not decode.
+#[wasm_bindgen(js_name = decodeDatagram)]
+pub fn decode_datagram(datagram: &[u8]) -> Option<Object> {
+    let f = middleware::udp::decode(datagram).ok()?;
+    Some(event_object(&Event::Frame(
+        crate::decoder::OwnedFrame::from_frame(&f),
+    )))
 }

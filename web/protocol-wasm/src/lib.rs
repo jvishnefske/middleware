@@ -53,6 +53,7 @@ pub mod encode;
 pub mod flows;
 pub mod loader;
 pub mod machines;
+pub mod mesh;
 pub mod pins;
 pub mod recipes;
 #[cfg(feature = "simulator")]

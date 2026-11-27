@@ -84,6 +84,14 @@ export class MixedNet implements PlantNet {
     this.links.set(unit, entry);
   }
 
+  /** Removes the link behind `unit` (a peer that left the room). */
+  detach(unit: string): boolean {
+    const l = this.links.get(unit);
+    if (!l) return false;
+    for (const off of l.off) off();
+    return this.links.delete(unit);
+  }
+
   /** The units with a board. */
   get boards(): string[] {
     return [...this.links.keys()];

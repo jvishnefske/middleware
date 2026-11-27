@@ -448,6 +448,88 @@ export interface DeviceLoader {
   step(key: string, body: Uint8Array): LoaderStepResult;
 }
 
+/** Where a PeerJS-compatible signalling server is (browser mesh, BM). */
+export interface MeshServer {
+  host: string;
+  port: number;
+  /** The path the server is mounted at ("/" by default). */
+  path: string;
+  /** The server's key ("peerjs" by default). */
+  key: string;
+  /** wss and https. */
+  secure: boolean;
+}
+
+/** One data-channel message from a peer, after the gate. */
+export type MeshInbound =
+  | { kind: "publish"; key: string; data: Uint8Array }
+  | { kind: "request"; id: number; key: string }
+  | { kind: "reply"; id: number; ok: true; body: Uint8Array }
+  | { kind: "reply"; id: number; ok: false; error: string }
+  | { kind: "refused"; reason: "malformed" | "key" | "oversize" };
+
+/** A signalling message we send; `peer` is its destination. */
+export type MeshSignalOut =
+  | { type: "heartbeat" }
+  | { type: "leave"; peer: string }
+  | { type: "offer"; peer: string; connection: string; label: string; sdp: string }
+  | { type: "answer"; peer: string; connection: string; sdp: string }
+  | { type: "candidate"; peer: string; connection: string; candidate: string; mid?: string; mline?: number };
+
+/** A message from the signalling server; `peer` is its sender. */
+export type MeshSignal =
+  | MeshSignalOut
+  | { type: "open" }
+  | { type: "idTaken" }
+  | { type: "error"; message: string }
+  | { type: "expire"; peer: string };
+
+/** What a rendezvous hub and its members say. */
+export type MeshHubMsg = { type: "join"; id: string } | { type: "peers"; ids: string[] };
+
+/** A channel both this page and a peer declare. */
+export interface MeshPairing {
+  name: string;
+  state: "connected" | "same-direction" | "mismatch";
+  message: string;
+}
+
+/** The browser mesh's formats and rules (protocol-wasm `mesh`). */
+export interface MeshApi {
+  readonly constants: { maxPeers: number; maxMessage: number; maxRoom: number; maxMembers: number; heartbeatMs: number; helloKeys: string[]; channelsKey: string };
+  validRoom(room: string): boolean;
+  /** `room/<room>/<name>`, or undefined. */
+  roomKey(room: string, name: string): string | undefined;
+  /** A binding record with every channel `existing` leaves unbound on its
+   * room key; throws for a bad room, section or record. */
+  binding(wasm: Uint8Array, existing: Uint8Array | undefined, room: string): Uint8Array;
+  /** Whether a publication on `key` may cross the room boundary. */
+  outbound(key: string): boolean;
+  /** The message for a publication; undefined when the gate refuses it. */
+  publish(key: string, data: Uint8Array): Uint8Array | undefined;
+  inbound(message: Uint8Array): MeshInbound;
+  helloRequest(id: number, key: string): Uint8Array | undefined;
+  /** The answer to a peer's request: a hello body, NotFound otherwise. */
+  helloReply(id: number, key: string, info: Uint8Array, manifest: Uint8Array, channels: Uint8Array): Uint8Array;
+  /** The channels two `mw.channels` sections both declare. */
+  compare(local: Uint8Array, peer: Uint8Array): MeshPairing[];
+  peerId(room: string, node: string): string;
+  hubId(room: string): string;
+  /** The node an id of `room` names, or undefined. */
+  parsePeerId(room: string, id: string): string | undefined;
+  roomPeers(room: string, own: string, ids: readonly string[]): string[];
+  dialPlan(own: string, listed: readonly string[], linked: readonly string[]): string[];
+  hasRoom(linked: number): boolean;
+  socketUrl(server: MeshServer, id: string, token: string): string;
+  peersUrl(server: MeshServer): string;
+  parseListing(text: string): string[] | undefined;
+  signalEncode(s: MeshSignalOut): string;
+  signalDecode(text: string): MeshSignal | undefined;
+  hubJoin(id: string): string;
+  hubPeers(ids: readonly string[]): string;
+  hubDecode(text: string): MeshHubMsg | undefined;
+}
+
 export interface Protocol {
   newDecoder(): Decoder;
   encodeRequest(id: number, key: string, payload: Uint8Array): Uint8Array;
@@ -465,8 +547,20 @@ export interface Protocol {
   /** The request body for page `page` of `sys/manifest/cm`. */
   controlPageRequest(page: number): Uint8Array;
   /** The browser simulator's `sys/manifest` body with `node` (16 hex digits)
-   * as its node id; undefined without the simulator or for a bad node. */
-  simulatorManifest(node: string): Uint8Array | undefined;
+   * as its node id, with `mesh` listing the WebRTC link too; undefined
+   * without the simulator or for a bad node. */
+  simulatorManifest(node: string, mesh?: boolean): Uint8Array | undefined;
+  /** A module's `mw.channels` section bytes (empty without one). */
+  channelsSection(wasm: Uint8Array): Uint8Array;
+  /** The declarations of a section (empty for no bytes); throws for a malformed one. */
+  decodeChannels(section: Uint8Array): ChannelDecl[];
+  /** Whether `key` is node-internal (`ch/…`, `drv/…`): sent on no link. */
+  isInternalKey(key: string): boolean;
+  /** One raw frame as a datagram (also one data-channel message). */
+  encodeDatagram(frame: { kind: "request" | "publish"; id?: number; key: string; payload: Uint8Array } | { kind: "response"; id: number; statusCode: number; payload: Uint8Array }): Uint8Array;
+  decodeDatagram(datagram: Uint8Array): FrameEvent | undefined;
+  /** The browser mesh (BM). */
+  readonly mesh: MeshApi;
   /** The channels a payload declares (empty without a section); throws for a malformed one. */
   readChannels(wasm: Uint8Array): ChannelDecl[];
   /** A `mw.channels` section body for these declarations. */
@@ -543,7 +637,38 @@ function wrap(): Protocol {
     decodeManifest: (data) => pkg.decodeManifest(data) as Manifest | undefined,
     decodeControlPage: (data) => pkg.decodeControlPage(data) as ControlPage | undefined,
     controlPageRequest: (page) => pkg.controlPageRequest(page),
-    simulatorManifest: (node) => pkg.simulatorManifest?.(node) ?? undefined,
+    simulatorManifest: (node, mesh) => pkg.simulatorManifest?.(node, mesh) ?? undefined,
+    channelsSection: (wasm) => pkg.channelsSection(wasm),
+    decodeChannels: (section) => pkg.decodeChannels(section) as ChannelDecl[],
+    isInternalKey: (key) => pkg.isInternalKey(key),
+    encodeDatagram: (frame) => pkg.encodeDatagram(frame),
+    decodeDatagram: (datagram) => pkg.decodeDatagram(datagram) as FrameEvent | undefined,
+    mesh: {
+      constants: pkg.meshConstants() as MeshApi["constants"],
+      validRoom: pkg.meshValidRoom,
+      roomKey: (room, name) => pkg.meshRoomKey(room, name) as string | undefined,
+      binding: (wasm, existing, room) => pkg.meshBinding(wasm, existing, room),
+      outbound: pkg.meshOutbound,
+      publish: (key, data) => pkg.meshPublish(key, data) as Uint8Array | undefined,
+      inbound: (message) => pkg.meshInbound(message) as MeshInbound,
+      helloRequest: (id, key) => pkg.meshHelloRequest(id, key) as Uint8Array | undefined,
+      helloReply: (id, key, info, manifest, channels) => pkg.meshHelloReply(id, key, info, manifest, channels),
+      compare: (local, peer) => pkg.meshCompare(local, peer) as MeshPairing[],
+      peerId: pkg.meshPeerId,
+      hubId: pkg.meshHubId,
+      parsePeerId: (room, id) => pkg.meshParsePeerId(room, id) as string | undefined,
+      roomPeers: (room, own, ids) => pkg.meshRoomPeers(room, own, [...ids]),
+      dialPlan: (own, listed, linked) => pkg.meshDialPlan(own, [...listed], [...linked]),
+      hasRoom: pkg.meshHasRoom,
+      socketUrl: (server, id, token) => pkg.meshSocketUrl(server, id, token),
+      peersUrl: (server) => pkg.meshPeersUrl(server),
+      parseListing: (text) => pkg.meshParseListing(text) ?? undefined,
+      signalEncode: (s) => pkg.meshSignalEncode(s),
+      signalDecode: (text) => pkg.meshSignalDecode(text) as MeshSignal | undefined,
+      hubJoin: pkg.meshHubJoin,
+      hubPeers: (ids) => pkg.meshHubPeers([...ids]),
+      hubDecode: (text) => pkg.meshHubDecode(text) as MeshHubMsg | undefined,
+    },
     readChannels: (wasm) => pkg.readChannels(wasm) as ChannelDecl[],
     encodeChannels: (decls) => pkg.encodeChannels([...decls]),
     withChannels: (wasm, section) => pkg.withChannels(wasm, section),

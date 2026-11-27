@@ -1473,3 +1473,51 @@ button.sm-add {
   width: 100%;
   box-sizing: border-box;
 }
+
+/* Room panel (roomPanel.ts): the room's name and server, this page's
+ * state in it, and one row per peer. The table scrolls inside the panel
+ * on a narrow page. */
+.room-panel {
+  margin: 12px 0;
+  padding: 4px 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  min-width: 0;
+}
+.room-panel h3 {
+  margin: 6px 0 0;
+}
+.room-panel > p {
+  margin: 4px 0 8px;
+}
+.room-panel details {
+  margin: 4px 0 8px;
+}
+.room-panel input[type="number"] {
+  width: 6em;
+}
+.room-peers {
+  overflow-x: auto;
+}
+.room-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9rem;
+}
+.room-table caption {
+  text-align: left;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.room-table th,
+.room-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 3px 10px 3px 0;
+  border-top: 1px solid var(--line);
+}
+.room-table ul {
+  margin: 0;
+  padding-left: 1.1em;
+}

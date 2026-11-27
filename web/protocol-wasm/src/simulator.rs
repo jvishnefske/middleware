@@ -131,6 +131,16 @@ pub const MANIFEST: middleware::loader::manifest::Manifest = {
         .with_limits(Limits::ABI)
 };
 
+/// [`MANIFEST`] of a page that has joined a room (design.md BM): the
+/// WebRTC data channels to the room's other pages are its link 1.
+pub const MESH_MANIFEST: middleware::loader::manifest::Manifest = {
+    use middleware::loader::manifest::{Link, LinkKind};
+    MANIFEST.with_link(Link {
+        id: 1,
+        kind: LinkKind::WEBRTC,
+    })
+};
+
 /// The reply buffer [`Simulator::request`] offers (the ABI's maximum).
 pub const REPLY_CAP: usize = middleware::wasm_abi::serve::MAX_REPLY;
 
@@ -967,6 +977,22 @@ mod tests {
         let cfg = SourceConfig::parse(&[8, 0, 8, 0, 0, 0, 100, 0, 64, 0]).unwrap();
         assert!(d.route_source(Source::TestPattern, key, cfg).is_err());
         assert_eq!(MANIFEST.limits.unwrap().routes as usize, MAX_ROUTES);
+    }
+
+    #[test]
+    fn bm11_a_page_in_a_room_lists_its_webrtc_link() {
+        use middleware::loader::manifest::{LinkKind, MANIFEST_MAX, Manifest};
+        assert_eq!(MANIFEST.links().len(), 1);
+        let kinds: Vec<_> = MESH_MANIFEST
+            .links()
+            .iter()
+            .map(|l| (l.id, l.kind))
+            .collect();
+        assert_eq!(kinds, [(0, LinkKind::SERIAL), (1, LinkKind::WEBRTC)]);
+        assert_eq!(LinkKind::WEBRTC.name(), Some("webrtc"));
+        let mut out = [0u8; MANIFEST_MAX];
+        let n = MESH_MANIFEST.encode(&mut out).unwrap();
+        assert_eq!(Manifest::decode(&out[..n]), Ok(MESH_MANIFEST));
     }
 
     #[test]
