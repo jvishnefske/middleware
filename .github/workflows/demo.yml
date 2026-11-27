@@ -69,8 +69,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      # SoftHSM2 holds the CA key; docker is already on the runner.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends softhsm2 openssl
+      # SoftHSM2 holds the CA key (made with opensc's pkcs11-tool); docker is
+      # already on the runner.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends softhsm2 opensc openssl
       - run: docker pull eclipse/zenoh:1.10.1
       - name: just demo
         run: just demo
