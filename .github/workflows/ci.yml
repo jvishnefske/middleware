@@ -101,7 +101,7 @@ jobs:
       - if: steps.present.outputs.web == 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, wasm32-wasip1
       - if: steps.present.outputs.web == 'true'
         uses: Swatinem/rust-cache@v2
       - if: steps.present.outputs.web == 'true'
@@ -111,7 +111,8 @@ jobs:
       - if: steps.present.outputs.web == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 24: the mwctl.wasm tests need JSPI (web/vite.config.ts).
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - if: steps.present.outputs.web == 'true'

@@ -7,6 +7,7 @@
   "scripts": {
     "build:wasm": "wasm-pack build protocol-wasm --target web --out-dir ../src/pkg",
     "build:wasm:nosim": "wasm-pack build protocol-wasm --target web --out-dir ../src/pkg -- --no-default-features",
+    "build:mwctl": "cargo build --release -p mwctl --target wasm32-wasip1 && cp ../target/wasm32-wasip1/release/mwctl.wasm src/pkg/mwctl.wasm",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
