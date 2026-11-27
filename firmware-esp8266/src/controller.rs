@@ -164,13 +164,16 @@ impl<F: NorFlash> Controller<F> {
             firmware: FIRMWARE,
             capacity,
             profile: Some(profile),
+            board: None,
             runtime: profile.runtime,
             rekey_window: false,
             staging: false,
             // The ESP8266 build runs no radio; it reports no node id, and
             // without a runtime nothing serves requests.
             node: None,
-            caps: middleware::loader::Caps::NONE,
+            // No manifest: no `sys/manifest`, and no capability bits in
+            // `sys/info` (dispatch derives them from the manifest).
+            manifest: None,
         };
         log(
             out,
@@ -347,6 +350,10 @@ impl<F: NorFlash> Controller<F> {
                 ts.save(store.flash(), &Persisted { trust, control })
             }
             Action::None | Action::Start | Action::Stop => Ok(()),
+            // Not reached: without the runtime (this build has none),
+            // dispatch answers sys/payload/bind and binding with NotFound
+            // before it asks for storage.
+            Action::Bind { .. } | Action::Binding => Ok(()),
         }
     }
 

@@ -47,13 +47,20 @@ bench = false
 required-features = ["image-tool"]
 
 [features]
-default = []
+default = ["wasm-host?/wasmi"]
 # The bootloader binary.
 boot = ["shell"]
 # The firmware binary.
 app = ["shell", "dep:embassy-executor", "dep:embassy-sync", "dep:embassy-futures", "dep:embedded-io-async", "dep:static_cell", "cortex-m-rt/set-vtor"]
 # The payload runtime in the firmware (wasm-host, the heap in SDRAM).
 wasm = ["app", "dep:wasm-host", "dep:linked_list_allocator"]
+# The interpreter under the runtime. wasmi is the default wherever `wasm` is
+# on (`wasm-host?/wasmi` in `default`: it only takes effect once `wasm` has
+# enabled wasm-host). For the small one build with `--no-default-features`
+# and add `wasm-micro` to the chip features; with both enabled wasmi wins.
+# `wasm-micro` runs modules in place without validating them (see the
+# wasm-micro crate docs) and builds for chips without CAS atomics.
+wasm-micro = ["wasm", "wasm-host/micro"]
 # USB CDC-ACM on OTG1 (FL6): a second serial link.
 usb = ["app", "dep:embassy-usb", "dep:embassy-usb-driver"]
 # Ethernet (KSZ8081 on ENET) with DHCP and the board's Zenoh session (FL7).
@@ -79,7 +86,7 @@ middleware = { path = "..", features = ["serial", "trust"] }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 # The payload runtime (feature `wasm`).
-wasm-host = { path = "../wasm-host", optional = true }
+wasm-host = { path = "../wasm-host", optional = true, default-features = false }
 linked_list_allocator = { version = "0.10.6", optional = true }
 
 # The shell. embassy-nxp is not on crates.io: pinned to a git revision

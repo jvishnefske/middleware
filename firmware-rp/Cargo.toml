@@ -37,7 +37,7 @@ bench = false
 required-features = ["image-tool"]
 
 [features]
-default = []
+default = ["wasm-host?/wasmi"]
 # Exactly one chip feature must be enabled to build the binary.
 #
 # RP2040 (Pico): Cortex-M0+, no CAS atomics. wasmi 2.0 needs CAS atomics
@@ -55,7 +55,14 @@ rp2040 = ["shell", "embassy-rp/rp2040", "embassy-rp/unstable-pac", "dep:portable
 # without `unsafe`).
 rp2350 = ["shell", "wasm", "fw-update", "embassy-rp/rp235xa", "embassy-rp/imagedef-none", "embassy-rp/unstable-pac"]
 # The WASM payload runtime (wasm-host / wasmi) and its bounded heap.
-wasm = ["dep:wasm-host", "dep:linked_list_allocator"]
+wasm = ["dep:wasm-host", "dep:linked_list_allocator", "dep:emballoc"]
+# The interpreter under the runtime. wasmi is the default wherever `wasm` is
+# on (`wasm-host?/wasmi` in `default`: it only takes effect once `wasm` has
+# enabled wasm-host). For the small one build with `--no-default-features`
+# and add `wasm-micro` to the chip feature; with both enabled wasmi wins.
+# `wasm-micro` runs modules in place without validating them (see the
+# wasm-micro crate docs) and builds for chips without CAS atomics.
+wasm-micro = ["wasm", "wasm-host/micro"]
 # A/B firmware OTA (RP2350 only): `sys/fw/*` served by
 # `rp_base::ota::AbUpdate` (middleware::fw_ota on the RP2350's flash and
 # boot ROM). Without it `sys/fw/*` is NotFound.
@@ -89,10 +96,10 @@ middleware = { path = "..", features = ["serial", "trust"] }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 
-wasm-host = { path = "../wasm-host", optional = true }
+wasm-host = { path = "../wasm-host", optional = true, default-features = false }
 # Global allocator for the interpreter (`wasm` only). `init_from_slice`
 # takes a `&'static mut` arena, so the heap comes up without `unsafe`.
-linked_list_allocator = { version = "0.10.6", optional = true }
+# (declared per target below: its lock needs CAS atomics)
 
 embassy-rp = { version = "0.10.0", features = ["time-driver", "critical-section-impl"], optional = true }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"], optional = true }
@@ -110,6 +117,15 @@ mwctl = { path = "../tools/mwctl", optional = true }
 # RP2040 only: CAS for static_cell's atomics through critical sections
 # (thumbv6m has no CAS instructions).
 portable-atomic = { version = "1.11", features = ["critical-section"], optional = true }
+
+# The interpreter's heap (`wasm` only). With CAS atomics (RP2350, hosts):
+# linked_list_allocator behind its spin lock. Without (RP2040, with
+# `wasm-micro`): emballoc, whose spin lock goes through portable-atomic's
+# critical sections. Both are set up without `unsafe` in this crate.
+[target.'cfg(target_has_atomic = "ptr")'.dependencies]
+linked_list_allocator = { version = "0.10.6", optional = true }
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]
+emballoc = { version = "0.3", features = ["portable_atomic"], optional = true }
 
 [dev-dependencies]
 # Host tests sign commits with a test key; the firmware only verifies.

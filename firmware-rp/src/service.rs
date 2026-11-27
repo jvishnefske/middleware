@@ -294,6 +294,7 @@ impl<F: NorFlash, U: FwUpdate<F>> Service<F, U> {
             capacity: store.as_ref().map_or(0, PayloadStore::capacity),
             // `sys/board` is answered by `Service::board_reply` instead.
             profile: None,
+            board: None,
             runtime: facts.runtime,
             rekey_window: false,
             staging: false,

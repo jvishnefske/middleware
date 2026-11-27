@@ -180,11 +180,13 @@ fn rt12_info_reports_the_rt1050_chip_firmware_runtime_and_node_id() {
         call(&mut s, keys::START, &[]).0,
         Err(HandlerError::NotFound)
     );
-    // `sys/board` has no esp-base profile here.
-    assert_eq!(
-        call(&mut s, keys::BOARD, &[]).0,
-        Err(HandlerError::NotFound)
-    );
+    // `sys/board` comes from the EVKB pin map (no esp-base profile), and a
+    // build without the runtime reports no linear memory.
+    let body = call(&mut s, keys::BOARD, &[]).0.expect("sys/board answers");
+    let b = middleware::loader::BoardInfo::decode(&body).unwrap();
+    assert_eq!(b.gpio, crate::chip::RT1050.pins().gpio_mask());
+    assert_eq!((b.max_memory, b.flags), (0, 0));
+    assert_eq!((b.uart_tx, b.uart_rx), (crate::chip::CONSOLE_TX, crate::chip::CONSOLE_RX));
 }
 
 #[test]

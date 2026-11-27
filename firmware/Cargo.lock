@@ -2292,9 +2292,15 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 name = "wasm-host"
 version = "26.11.21"
 dependencies = [
+ "heapless 0.9.3",
  "middleware",
+ "wasm-micro",
  "wasmi",
 ]
+
+[[package]]
+name = "wasm-micro"
+version = "26.11.21"
 
 [[package]]
 name = "wasmi"

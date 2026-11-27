@@ -138,6 +138,18 @@ pub const RP2040: Profile = Profile {
     pins: boards::PICO,
 };
 
+/// Raspberry Pi Pico with the payload runtime (`rp2040` with `wasm-micro`;
+/// wasmi does not build for it). Of its 264 KiB of SRAM, 160 KiB are heap:
+/// one page of linear memory, an image of up to 32 KiB (the runtime keeps
+/// a copy while the payload runs) and the interpreter reserve.
+pub const RP2040_RUNTIME: Profile = Profile {
+    runtime: true,
+    heap: 160 * 1024,
+    max_memory_bytes: WASM_PAGE,
+    max_image: 32 * 1024,
+    ..RP2040
+};
+
 /// Raspberry Pi Pico 2.
 pub const RP2350: Profile = Profile {
     chip: Chip::Rp2350,
@@ -342,7 +354,7 @@ mod tests {
 
     #[test]
     fn v7_heap_plans_fit_and_images_fit_a_slot() {
-        for p in [RP2040, RP2350] {
+        for p in [RP2040, RP2040_RUNTIME, RP2350] {
             assert!(p.plan_fits(), "{}", p.name);
             assert!(
                 p.max_image <= Slots::new(p.flash.payload.size).capacity(),
@@ -352,6 +364,8 @@ mod tests {
         }
         // The RP2040 runs no payloads and so has no heap.
         assert_eq!((RP2040.runtime, RP2040.heap), (false, 0));
+        // With the runtime it keeps 104 KiB for statics and stack.
+        assert_eq!(RP2040_RUNTIME.sram_outside_heap(), 104 * 1024);
         // The RP2350 keeps at least 128 KiB of SRAM for statics and stack.
         assert!(RP2350.sram_outside_heap() >= 128 * 1024);
         let broken = Profile {

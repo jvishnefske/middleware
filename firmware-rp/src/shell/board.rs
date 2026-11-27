@@ -7,8 +7,11 @@ use rp_base::chip::Profile;
 use rp_base::flash::Sectored;
 
 /// The chip's profile.
-#[cfg(feature = "rp2040")]
+#[cfg(all(feature = "rp2040", not(feature = "wasm")))]
 pub const PROFILE: Profile = rp_base::chip::RP2040;
+/// The chip's profile.
+#[cfg(all(feature = "rp2040", feature = "wasm"))]
+pub const PROFILE: Profile = rp_base::chip::RP2040_RUNTIME;
 /// The chip's profile.
 #[cfg(feature = "rp2350")]
 pub const PROFILE: Profile = rp_base::chip::RP2350;

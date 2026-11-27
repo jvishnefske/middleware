@@ -483,8 +483,14 @@ impl<F: NorFlash> Service<F> {
             chip: facts.chip,
             firmware: facts.firmware,
             capacity: store.capacity(),
-            // No esp-base chip profile: `sys/board` is `NotFound`.
+            // No esp-base chip profile; `sys/board` comes from the EVKB pin
+            // map (crate::chip::RT1050.board_info).
             profile: None,
+            board: Some(crate::chip::RT1050.board_info(
+                middleware::wasm_abi::ABI_VERSION,
+                facts.runtime,
+                store.capacity(),
+            )),
             runtime: facts.runtime,
             rekey_window: false,
             staging: false,

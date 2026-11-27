@@ -90,8 +90,15 @@ use board_pins::imxrt::Adc1Channel;
 use board_pins::imxrt::evkb::{self, BoardPin};
 use board_pins::spi::{SpiPins, SpiProblem, route};
 use board_pins::{AdcError, PinError, PinMap, boards};
+use middleware::loader::{BOARD_RUNTIME, BoardInfo};
 use middleware::wasm_abi::AbiError;
 use middleware::wasm_abi::periph::SpiConfig;
+
+/// LPUART1 TXD, the console and protocol link (logical pin 23; board-pins'
+/// `imxrt::evkb` table).
+pub const CONSOLE_TX: u8 = 23;
+/// LPUART1 RXD (logical pin 24).
+pub const CONSOLE_RX: u8 = 24;
 
 pub use board_pins::Direction;
 
@@ -186,6 +193,31 @@ impl Profile {
     /// The board's pin map.
     pub const fn pins(&self) -> &PinMap {
         &self.pins
+    }
+
+    /// The `sys/board` description (`dispatch::Context::board`), from the
+    /// pin map: the board's logical pins (`0..pin_count`), the reserved and
+    /// input-only ones, and those with an ADC1 channel. `max_image` is what
+    /// the store accepts. No PWM outputs are wired on the EVKB, and the
+    /// i.MX RT boot mode comes from eFuses and the BOOT_MODE switch, not a
+    /// header pin, so there are no strapping pins. The console UART is
+    /// LPUART1, logical pins 23 (TXD) and 24 (RXD).
+    pub const fn board_info(&self, abi_version: u16, runtime: bool, max_image: u32) -> BoardInfo<'static> {
+        BoardInfo {
+            abi_version,
+            max_image,
+            max_memory: if runtime { self.max_memory_bytes } else { 0 },
+            gpio: self.pins.gpio_mask(),
+            reserved: self.pins.reserved_mask(),
+            input_only: self.pins.input_only_mask(),
+            strapping: 0,
+            adc: self.pins.adc_mask(),
+            pwm_max_bits: 0,
+            flags: if runtime { BOARD_RUNTIME } else { 0 },
+            uart_tx: CONSOLE_TX,
+            uart_rx: CONSOLE_RX,
+            pwm_pins: &[],
+        }
     }
 
     /// Whether a payload may use `pin` as `dir`: `InvalidArgument` if the
@@ -295,6 +327,32 @@ mod tests {
         assert_eq!(boards::by_chip(RT1050.name), Some(RT1050.pins()));
         assert_eq!(usize::from(RT1050.pin_count), RT1050.pins().gpios().count());
         assert!(RT1050.pins().gpios().all(|g| g < RT1050.pin_count));
+    }
+
+    #[test]
+    fn rt11_board_info_is_the_evkb_pin_map() {
+        let b = RT1050.board_info(9, true, 60 * 1024);
+        let p = RT1050.pins();
+        assert_eq!((b.abi_version, b.max_image), (9, 60 * 1024));
+        assert_eq!(b.max_memory, RT1050.max_memory_bytes);
+        assert_eq!(b.gpio, p.gpio_mask());
+        assert_eq!(b.gpio.count_ones(), u32::from(RT1050.pin_count));
+        assert_eq!(b.reserved, p.reserved_mask());
+        assert_eq!(b.input_only, p.input_only_mask());
+        assert_eq!(b.adc, p.adc_mask());
+        // The console UART is reserved, and it is what the board names.
+        assert_ne!(b.reserved & (1 << CONSOLE_TX), 0);
+        assert_ne!(b.reserved & (1 << CONSOLE_RX), 0);
+        assert_eq!((b.uart_tx, b.uart_rx), (CONSOLE_TX, CONSOLE_RX));
+        assert_eq!((b.pwm_max_bits, b.pwm_pins.len(), b.strapping), (0, 0, 0));
+        assert_eq!(b.flags, BOARD_RUNTIME);
+        // A build without the runtime has no linear memory and says so.
+        let bare = RT1050.board_info(9, false, 60 * 1024);
+        assert_eq!((bare.max_memory, bare.flags), (0, 0));
+        // It encodes within the wire limit.
+        let mut out = [0u8; middleware::loader::BOARD_INFO_MAX];
+        let n = b.encode(&mut out).unwrap();
+        assert_eq!(BoardInfo::decode(&out[..n]).unwrap(), b);
     }
 
     #[test]

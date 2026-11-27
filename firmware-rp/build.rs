@@ -10,9 +10,13 @@
 //! places the IMAGE_DEF and sentinel blocks of `src/ota/image.rs`, which
 //! this script compiles on its own, with the version from the environment
 //! variable `RP_BASE_FW_VERSION` (`MAJOR.MINOR`, what `build.sh --version`
-//! sets) or else the crate's `major.minor`. The version is passed to the
-//! firmware as `RP_BASE_IMAGE_VERSION` (what `sys/info` reports on the
-//! RP2350). A malformed version stops the build.
+//! sets) or else the crate's. The IMAGE_DEF holds only MAJOR.MINOR (two
+//! 16-bit numbers), so the crate's calendar version YY.MM.DD becomes
+//! YY.(MM*100+DD), e.g. 26.11.21 -> 26.1121: keeping only YY.MM made every
+//! release in a month the same version, which the A/B rollback check
+//! refuses. The version is passed to the firmware as `RP_BASE_IMAGE_VERSION`
+//! (what `sys/info` reports on the RP2350). A malformed version stops the
+//! build.
 
 use std::env;
 use std::fs;
@@ -28,11 +32,17 @@ fn version() -> Result<image::FwVersion, String> {
         .filter(|v| !v.is_empty());
     let text = match given {
         Some(v) => v,
-        None => format!(
-            "{}.{}",
-            env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_default(),
-            env::var("CARGO_PKG_VERSION_MINOR").unwrap_or_default()
-        ),
+        None => {
+            let part = |k: &str| -> Result<u32, String> {
+                env::var(k).unwrap_or_default().parse().map_err(|_| format!("{k} is not a number"))
+            };
+            let (major, minor, patch) = (
+                part("CARGO_PKG_VERSION_MAJOR")?,
+                part("CARGO_PKG_VERSION_MINOR")?,
+                part("CARGO_PKG_VERSION_PATCH")?,
+            );
+            format!("{major}.{}", minor * 100 + patch)
+        }
     };
     image::parse_version(&text)
         .ok_or_else(|| format!("RP_BASE_FW_VERSION {text:?} is not MAJOR.MINOR (each 0..=65535)"))

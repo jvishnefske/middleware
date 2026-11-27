@@ -358,6 +358,7 @@ pub async fn run(spawner: Spawner, board: &'static Board) -> ! {
         firmware: board.firmware(),
         capacity,
         profile: Some(profile),
+        board: None,
         runtime: cfg!(feature = "wasm"),
         rekey_window: false,
         staging: false,
