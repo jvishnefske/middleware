@@ -251,6 +251,17 @@ export class Mwctl {
         view().setBigUint64(at + 32, BigInt(f ? (files.get(f.path)?.length ?? 0) : 0), true);
         return OK;
       },
+      // Newer Rust std asks for this when it opens a file or checks a tty.
+      fd_fdstat_get(fd: number, at: number) {
+        const f = open.get(fd);
+        if (!f && fd > ROOT_FD) return EBADF;
+        bytes().fill(0, at, at + 24);
+        // Regular file, directory, or character device; every right.
+        view().setUint8(at, f ? 4 : fd === ROOT_FD ? 3 : 2);
+        view().setBigUint64(at + 8, 0xffff_ffff_ffff_ffffn, true);
+        view().setBigUint64(at + 16, 0xffff_ffff_ffff_ffffn, true);
+        return OK;
+      },
       fd_read(fd: number, iov: number, n: number, nread: number) {
         const f = open.get(fd);
         if (fd !== 0 && !f) return EBADF;
@@ -362,6 +373,14 @@ export class Mwctl {
       },
     };
 
+    // A WASI call this host does not have (std's imports move between Rust
+    // releases) answers ENOSYS instead of failing the link.
+    const ENOSYS = 52;
+    for (const im of WebAssembly.Module.imports(this.module)) {
+      if (im.module === "wasi_snapshot_preview1" && im.kind === "function" && !(im.name in imports.wasi_snapshot_preview1)) {
+        imports.wasi_snapshot_preview1[im.name] = () => ENOSYS;
+      }
+    }
     const instance = await WebAssembly.instantiate(this.module, imports);
     memory = instance.exports.memory as WebAssembly.Memory;
     const start = instance.exports._start as () => unknown;
