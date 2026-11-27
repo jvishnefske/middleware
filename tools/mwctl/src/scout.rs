@@ -62,7 +62,7 @@ pub struct Answer {
     pub node: SenderId,
     /// The Zenoh id of the session that replied: the one seen elsewhere
     /// whose node id is this one ([`attribute`]); `None` when no such
-    /// session was seen.
+    /// session was seen (always so for a posix node, see [`attribute`]).
     pub zid: Option<String>,
     /// The decoded `sys/info`; `None` when the body did not decode.
     pub info: Option<Info>,
@@ -132,16 +132,22 @@ pub fn parse_admin(via: &str, json: &str) -> Vec<Linked> {
         .collect()
 }
 
-/// Names the session behind each answer. A node's id is a function of
-/// its Zenoh id (`middleware::zenoh::sender_id_of`, the same on the
-/// RT1050's `zenoh_lite`), so `ids` holds that pair for every session seen
-/// and an answer gets the Zenoh id whose node id it carries.
+/// Names the session behind each answer, in two steps:
+///
+/// 1. A node whose id is a function of its Zenoh id
+///    (`middleware::zenoh::sender_id_of`, as on the RT1050's `zenoh_lite` and
+///    a default `ZenohTransport`) is matched exactly: `ids` holds that pair
+///    for every session seen. This wins, because such a client's reply can
+///    reach us through a router, whose id would be the replier id.
+/// 2. Otherwise the answer keeps the replier id it arrived with (`a.zid`,
+///    zenoh's `Reply::replier_id`). This places a posix node, which declares
+///    its queryables under its machine-id node id (`with_sender`,
+///    `posix-node/src/node_id.rs`) that no session's hash equals.
 pub fn attribute(answers: &mut [Answer], ids: &[(String, SenderId)]) {
     for a in answers {
-        a.zid = ids
-            .iter()
-            .find(|(_, n)| *n == a.node)
-            .map(|(z, _)| z.clone());
+        if let Some((z, _)) = ids.iter().find(|(_, n)| *n == a.node) {
+            a.zid = Some(z.clone());
+        }
     }
 }
 
@@ -311,7 +317,11 @@ pub fn format(rows: &[Row]) -> String {
                 } else {
                     r.addrs.join(",")
                 },
-                if r.via.is_empty() {
+                // A session reported by no router or peer, but with an
+                // address of its own, was reached directly.
+                if r.via.is_empty() && !r.addrs.is_empty() {
+                    "direct".into()
+                } else if r.via.is_empty() {
                     "-".into()
                 } else {
                     r.via.iter().map(|v| short(v)).collect::<Vec<_>>().join(",")
@@ -495,7 +505,9 @@ mod shell {
             }
             answers.push(Answer {
                 node,
-                zid: None,
+                // The session that answered; `attribute` prefers an exact
+                // node-id match over it.
+                zid: reply.replier_id().map(|g| g.zid().to_string()),
                 info: Info::decode(&sample.payload().to_bytes()),
             });
         }
@@ -665,16 +677,25 @@ mod tests {
     }
 
     #[test]
-    fn h4_answers_are_attributed_by_node_id() {
+    fn h4_answers_are_attributed_by_node_id_before_the_replier_id() {
         let mut answers = [
+            // A zenoh_lite client's reply through a router: the replier id
+            // is the router's, the node-id match names the client.
             Answer {
                 node: NODE,
-                zid: None,
+                zid: Some("router".into()),
                 info: None,
             },
+            // No node-id match: the replier id stays.
             Answer {
                 node: SenderId([7; 8]),
-                zid: Some("stale".into()),
+                zid: Some("replier".into()),
+                info: None,
+            },
+            // Neither: unattributed.
+            Answer {
+                node: SenderId([8; 8]),
+                zid: None,
                 info: None,
             },
         ];
@@ -683,7 +704,43 @@ mod tests {
             &[("aa".into(), SenderId([1; 8])), ("c9".into(), NODE)],
         );
         assert_eq!(answers[0].zid.as_deref(), Some("c9"));
-        assert_eq!(answers[1].zid, None);
+        assert_eq!(answers[1].zid.as_deref(), Some("replier"));
+        assert_eq!(answers[2].zid, None);
+    }
+
+    #[test]
+    fn h4_a_posix_node_joins_its_session_by_replier_id() {
+        // A posix node answers under its machine-id node id, which is not
+        // the hash of any session's zid; the replier id (3fcc, the node's
+        // own listening peer session, as seen on the x86 node) places it.
+        let mut answers = [Answer {
+            node: NODE,
+            zid: Some("3fcc".into()),
+            info: Some(info("posix")),
+        }];
+        attribute(
+            &mut answers,
+            &[
+                ("3fcc".into(), SenderId([0xaa; 8])),
+                ("c9".into(), SenderId([0xbb; 8])),
+            ],
+        );
+        assert_eq!(answers[0].zid.as_deref(), Some("3fcc"));
+        let rows = merge(
+            &[heard("3fcc", "peer", &["tcp/192.168.1.123:7447"])],
+            &[],
+            &answers,
+            "me",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            format(&rows),
+            "\
+KIND  ZENOH ID  ADDRESS                 VIA     NODE              CHIP   FIRMWARE / PAYLOAD
+peer  3fcc      tcp/192.168.1.123:7447  direct  310441d265f82484  posix  0.6.0 / running
+1 Zenoh session, 1 middleware node answered sys/info
+"
+        );
     }
 
     #[test]
@@ -728,9 +785,9 @@ mod tests {
         assert_eq!(
             format(&rows),
             "\
-KIND    ZENOH ID  ADDRESS             VIA  NODE              CHIP       FIRMWARE / PAYLOAD
-router  r1        tcp/10.0.0.1:7447   -    -                 -          -
-client  c9        tcp/10.0.0.9:50123  r1   310441d265f82484  imxrt1052  0.6.0 / running
+KIND    ZENOH ID  ADDRESS             VIA     NODE              CHIP       FIRMWARE / PAYLOAD
+router  r1        tcp/10.0.0.1:7447   direct  -                 -          -
+client  c9        tcp/10.0.0.9:50123  r1      310441d265f82484  imxrt1052  0.6.0 / running
 2 Zenoh sessions, 1 middleware node answered sys/info
 "
         );

@@ -1,0 +1,83 @@
+# The end-to-end demo (docs/demo.md, `just demo`): a root of trust on a SoftHSM
+# token, an mTLS Zenoh hub in docker, an OAuth login, and the x86_64 base image
+# as a QEMU VM that is provisioned over the network and then talks to the hub
+# with its own certificate. The job fails if any check fails, the refusals
+# included. The first run builds the VM with nix (a Rust build, tens of
+# minutes); the logs are uploaded, never keys or tokens.
+name: Demo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/demo/**"
+      - "scripts/zenoh-pki.sh"
+      - "deploy/zenoh/mtls/**"
+      - "nix/**"
+      - "flake.*"
+      - "tests/hil/**"
+      - "tools/mwctl/**"
+      - "tools/mw-pki/**"
+      - "posix-node/**"
+      - "gateway/**"
+      - "src/zenoh*"
+      - ".github/workflows/demo.yml"
+  pull_request:
+    paths:
+      - "scripts/demo/**"
+      - "scripts/zenoh-pki.sh"
+      - "deploy/zenoh/mtls/**"
+      - "nix/**"
+      - "flake.*"
+      - "tests/hil/**"
+      - "tools/mwctl/**"
+      - "tools/mw-pki/**"
+      - "posix-node/**"
+      - "gateway/**"
+      - "src/zenoh*"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  demo:
+    name: Root of trust, mTLS hub, OAuth, QEMU client
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: KVM for the VM (without it QEMU falls back to slower emulation)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm || echo "no /dev/kvm"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: cachix/install-nix-action@v31
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # SoftHSM2 holds the CA key; docker is already on the runner.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends softhsm2 openssl
+      - run: docker pull eclipse/zenoh:1.10.1
+      - name: just demo
+        run: just demo
+      - name: Logs (never keys, certificates or tokens)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-logs
+          path: target/demo/log/
+          if-no-files-found: ignore
