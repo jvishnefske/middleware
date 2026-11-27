@@ -68,6 +68,25 @@ export class PortManager<P extends PortLike = SerialPort> {
     return p;
   }
 
+  /** Makes `p` the selected port without a prompt: a port the page was
+   * already granted that has just appeared. Only when none is selected. */
+  adopt(p: P): void {
+    if (this.port) return;
+    this.port = p;
+    this.changed();
+  }
+
+  /** `p` was unplugged: its owner releases it and no port is selected. */
+  forget(p: P): void {
+    if (this.port !== p) return;
+    void this.releaseCurrent().then(() => {
+      if (this.port === p) {
+        this.port = null;
+        this.changed();
+      }
+    });
+  }
+
   /** Takes the port for `owner`, releasing any other owner first. */
   async acquire(owner: string, release: Release): Promise<P> {
     const p = this.port ?? (await this.choose());

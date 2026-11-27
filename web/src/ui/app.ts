@@ -14,7 +14,7 @@ import type { BoardId } from "../onboarding/boards";
 import type { DeviceInfo, Protocol } from "../protocol/wasm";
 import type { PortManager } from "../serial/ports";
 
-export const TAB_IDS = ["start", "flash", "device", "editor", "blocks"] as const;
+export const TAB_IDS = ["start", "flash", "device", "editor", "blocks", "wire"] as const;
 export type TabId = (typeof TAB_IDS)[number];
 
 export function isTabId(s: unknown): s is TabId {

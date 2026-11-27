@@ -5,7 +5,7 @@
 #
 # src/pkg (protocol-wasm built by wasm-pack) is gitignored: it is built when
 # missing, and rebuilt when REBUILD_WASM=1 (do that after changing the Rust
-# protocol, simulator or wasm-host).
+# protocol, simulator, wasm-host, mwctl or wire-core).
 #
 # Node: uses `node`/`npm` from PATH; NODE_BIN, if set, is prepended.
 set -euo pipefail
@@ -18,6 +18,11 @@ if [[ ! -d node_modules ]]; then
 fi
 if [[ "${REBUILD_WASM:-0}" == "1" || ! -f src/pkg/protocol_wasm.js ]]; then
   npm run build:wasm
+fi
+# mwctl itself, built for WASI (the Wire tab runs it; `rustup target add
+# wasm32-wasip1`). Rebuilt under the same rule as protocol-wasm.
+if [[ "${REBUILD_WASM:-0}" == "1" || ! -f src/pkg/mwctl.wasm ]]; then
+  npm run build:mwctl
 fi
 npm test
 npm run build

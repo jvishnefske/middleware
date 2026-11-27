@@ -24,5 +24,9 @@ export default defineConfig({
     environment: "node",
     include: ["test/**/*.test.ts"],
     testTimeout: 20000,
+    // mwctl.wasm waits for its serial port through JavaScript Promise
+    // Integration (src/mwctl/host.ts), which Node 24 has behind this flag
+    // and Chrome has by default.
+    execArgv: ["--experimental-wasm-jspi"],
   },
 });

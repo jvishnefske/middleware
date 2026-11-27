@@ -1,10 +1,13 @@
-// Entry point: loads protocol-wasm, builds the five tabs (Start, Flash,
-// Device, Editor, Blocks) and the shared serial-port bar, and opens the
-// last-shown tab, or Start on a first visit.
+// Entry point: loads protocol-wasm, builds the six tabs (Start, Flash,
+// Device, Editor, Blocks, Wire) and the shared serial-port bar, and opens
+// the last-shown tab, or Start on a first visit. mwctl (the command-line
+// tool compiled for WASI) is fetched in the background for the Wire tab.
 
 import "./style.css";
 import { FIRMWARE_BASE, fetchManifest } from "./flash/manifest";
 import type { BoardId } from "./onboarding/boards";
+import { Mwctl } from "./mwctl/host";
+import mwctlUrl from "./pkg/mwctl.wasm?url";
 import { loadProtocol } from "./protocol/wasm";
 import { PortManager, describePort, webSerialProblem } from "./serial/ports";
 import { type App, type PayloadHandoff, type TabId, initialTab } from "./ui/app";
@@ -14,6 +17,7 @@ import { errorText, h } from "./ui/dom";
 import { editorPage } from "./ui/editorPage";
 import { flashPage } from "./ui/flashPage";
 import { startPage } from "./ui/startPage";
+import { wirePage } from "./ui/wirePage";
 
 async function main() {
   const root = document.getElementById("app");
@@ -83,6 +87,7 @@ async function main() {
   pages.device = devicePage(app);
   pages.editor = editorPage(app);
   pages.blocks = blocksPage(app);
+  pages.wire = wirePage(app, Mwctl.load(mwctlUrl));
 
   const nav = h("nav", { role: "tablist" });
   for (const [id, label] of [
@@ -91,6 +96,7 @@ async function main() {
     ["device", "Device"],
     ["editor", "Editor"],
     ["blocks", "Blocks"],
+    ["wire", "Wire"],
   ] as [TabId, string][]) {
     tabs[id] = h("button", { role: "tab", id: `tab-${id}`, "aria-controls": `page-${id}`, onclick: () => app.showTab(id) }, label);
     pages[id].id = `page-${id}`;
@@ -123,6 +129,7 @@ async function main() {
     pages.device,
     pages.editor,
     pages.blocks,
+    pages.wire,
   );
 
   let saved: string | null = null;
