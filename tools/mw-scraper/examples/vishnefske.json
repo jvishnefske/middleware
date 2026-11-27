@@ -1,0 +1,13 @@
+{
+  "name": "vishnefske-com-self-test",
+  "sources": [
+    { "kind": "links", "url": "https://vishnefske.com/" }
+  ],
+  "filter": {
+    "hosts": ["vishnefske.com"]
+  },
+  "criteria": {
+    "require": ["vishnefske"]
+  },
+  "max_pages": 6
+}

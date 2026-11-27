@@ -10,13 +10,22 @@ middleware = { path = "../.." }
 # The Colorlight 5A-75B takes a compiled image: mwctl compiles the module
 # with the gateware's reference model (no_std, no other dependencies).
 wasm-hdl-ref = { path = "../../wasm-hdl-ref" }
-# No `libudev`: mwctl opens the one port it is given and never enumerates.
-serialport = { version = "4.10", default-features = false }
+# `mwctl wire`: a boolean wiring checked and compiled to a payload, against
+# the firmwares' own pin maps (both no_std, no I/O).
+wire-core = { path = "../wire-core" }
+board-pins = { path = "../../board-pins" }
 # Payload signing (host only): the image SHA-256, Ed25519 signatures, and
 # P-256 (ECDSA) for keys in hardware tokens.
 sha2 = "0.10.9"
 ed25519-dalek = "2.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
+
+# Not in the browser build (`--target wasm32-wasip1`, web/src/mwctl): there
+# the serial port is the page's Web Serial port behind host imports
+# (src/webport.rs) and no PKCS#11 module can be loaded.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# No `libudev`: mwctl opens the one port it is given and never enumerates.
+serialport = { version = "4.10", default-features = false }
 # PKCS#11 tokens (TPM 2.0 via tpm2-pkcs11, smart cards via OpenSC, SoftHSM2
 # in tests): the module is dlopen()ed at run time, nothing links at build.
 cryptoki = "0.10"
@@ -27,7 +36,6 @@ cryptoki = "0.10"
 # tokio, and the default mwctl stays free of cloud crates
 # (scripts/check-features.sh).
 zenoh = ["middleware/zenoh", "dep:tokio", "dep:zenoh", "dep:serde_json"]
-
 # `auth`: sign in to an OpenID Connect provider (MW_AUTH_ISSUER) and hand out
 # bearer tokens, for the admin server's certificate enrolment. Off by
 # default for the same reason as `zenoh`: HTTPS pulls in rustls and tokio.
@@ -48,9 +56,13 @@ optional = true
 
 # `scout` (feature `zenoh`): multicast scouting and the routers' admin
 # space need the zenoh session itself, and the admin space answers JSON.
+# `unstable` for `Reply::replier_id` only: it names the session that
+# answered a node's sys/info, the one way to place a posix node (whose node
+# id is not a hash of its Zenoh id) on its own row (scout.rs, `attribute`).
 [dependencies.zenoh]
 version = "1.10"
 optional = true
+features = ["unstable"]
 
 [dependencies.serde_json]
 version = "1"

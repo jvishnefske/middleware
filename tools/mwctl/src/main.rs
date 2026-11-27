@@ -32,6 +32,7 @@
 //! Exit status: 0 success, 1 device or port failure, 2 usage error.
 
 use middleware::fw_ota::StateCode;
+#[cfg(not(target_family = "wasm"))]
 use middleware::loader::trust::KeyKind;
 use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, Version};
 use mwctl::air::{AirLink, AirTiming};
@@ -41,8 +42,12 @@ use mwctl::device::{Device, Progress, UploadOptions};
 use mwctl::error::Error;
 use mwctl::fw::{UpdateOptions as FwOptions, format_version, load_image};
 use mwctl::link::{Endpoint, Event, Link, Timeouts};
+#[cfg(not(target_family = "wasm"))]
 use mwctl::pkcs11::{self, Location, Pkcs11Signer};
-use mwctl::port::SerialTransport;
+#[cfg(not(target_family = "wasm"))]
+use mwctl::port::{RESET_PULSE, SerialTransport};
+#[cfg(target_family = "wasm")]
+use webport::{RESET_PULSE, SerialTransport};
 use mwctl::reflash;
 use mwctl::report::{
     format_binding, format_board, format_event, format_fw_info, format_info, format_manifest,
@@ -52,11 +57,17 @@ use mwctl::sign::{SEED_LEN, Seed, Signer, counter_at, hex, sign_commit, sign_con
 use mwctl::udp::UdpLink;
 use std::io::Read as _;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
+
+// The browser build's serial port: the page's Web Serial port behind host
+// imports. The only `unsafe` in mwctl is that module's import block.
+#[cfg(target_family = "wasm")]
+mod webport;
 
 /// How long `fw update` keeps trying to reopen the port and find the
 /// device on trial after the reboot.
@@ -113,6 +124,7 @@ fn read_seed(path: &Path) -> Result<Seed, Error> {
 fn open_signer(spec: &KeySpec) -> Result<Box<dyn Signer>, Error> {
     match spec {
         KeySpec::File(path) => Ok(Box::new(read_seed(path)?)),
+        #[cfg(not(target_family = "wasm"))]
         KeySpec::Pkcs11(label) => {
             let at = Location::from_settings();
             let pin = pkcs11::pin(pkcs11::ENV_PIN)?;
@@ -120,12 +132,25 @@ fn open_signer(spec: &KeySpec) -> Result<Box<dyn Signer>, Error> {
             eprintln!("signing with {signer:?} via {}", at.module.display());
             Ok(Box::new(signer))
         }
+        #[cfg(target_family = "wasm")]
+        KeySpec::Pkcs11(_) => Err(no_token()),
     }
+}
+
+/// A browser cannot load a PKCS#11 module.
+#[cfg(target_family = "wasm")]
+fn no_token() -> Error {
+    Error::Sign(mwctl::sign::SignError::Token(
+        "a browser cannot reach a PKCS#11 token; sign with mwctl on a computer".into(),
+    ))
 }
 
 /// `key new` / `key pub` / `key init-token`.
 fn key(cmd: KeyCmd) -> Result<(), Error> {
     match cmd {
+        #[cfg(target_family = "wasm")]
+        KeyCmd::New { key: KeySpec::Pkcs11(_) } | KeyCmd::InitToken { .. } => return Err(no_token()),
+        #[cfg(not(target_family = "wasm"))]
         KeyCmd::New {
             key: KeySpec::Pkcs11(label),
         } => {
@@ -144,6 +169,7 @@ fn key(cmd: KeyCmd) -> Result<(), Error> {
             let signer = open_signer(&KeySpec::Pkcs11(label))?;
             println!("{}", hex(signer.public_key().as_bytes()));
         }
+        #[cfg(not(target_family = "wasm"))]
         KeyCmd::InitToken { token } => {
             let at = Location::from_settings();
             let so = pkcs11::pin(pkcs11::ENV_SO_PIN)?;
@@ -159,10 +185,11 @@ fn key(cmd: KeyCmd) -> Result<(), Error> {
                 .and_then(|mut r| r.read_exact(&mut seed))
                 .map_err(|e| io_context(Path::new("/dev/urandom"), e))?;
             let seed = Seed::new(seed);
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut f = options
                 .open(&file)
                 .map_err(|e| io_context(&file, e))?;
             f.write_all(seed.bytes())
@@ -236,8 +263,14 @@ fn run(cli: cli::Cli) -> Result<(), Error> {
         println!(
             "reset {}: RTS pulsed {} ms with DTR deasserted",
             cli.port,
-            mwctl::port::RESET_PULSE.as_millis()
+            RESET_PULSE.as_millis()
         );
+        return Ok(());
+    }
+    if let Cmd::Probe { usb } = cli.cmd {
+        for line in mwctl::ready::probe(transport, usb, cli.timeout)?.lines() {
+            println!("{line}");
+        }
         return Ok(());
     }
     let Some(target) = cli.espnow else {
@@ -763,7 +796,11 @@ fn command_with<L: Endpoint>(
             })?;
             dev.request(key, body.as_bytes())
                 .map(|reply| match std::str::from_utf8(&reply) {
-                    Ok(t) if !t.chars().any(char::is_control) => println!("{t}"),
+                    // Text may span lines (a PEM certificate request); only other
+                    // control characters make a reply binary, printed as hex.
+                    Ok(t) if !t.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) => {
+                        println!("{}", t.trim_end_matches(['\r', '\n']))
+                    }
                     _ => println!(
                         "{}",
                         reply
@@ -880,6 +917,7 @@ fn command_with<L: Endpoint>(
         // any device is opened (the CLI refuses --espnow).
         Cmd::Reset
         | Cmd::Reflash { .. }
+        | Cmd::Probe { .. }
         | Cmd::FwInfo
         | Cmd::FwUpdate { .. }
         | Cmd::FwReboot { .. }
@@ -964,6 +1002,79 @@ fn auth(_cmd: cli::AuthCmd) -> Result<(), String> {
     Err("this mwctl was built without auth: cargo build -p mwctl --features auth".into())
 }
 
+/// `wire`: reads the wiring, prints its issues, writes what was asked for
+/// (`--emit` on stdout, `-o`), and with `--port` checks it against the
+/// board's chip, uploads it and starts it.
+fn wire(w: cli::WireCli) -> Result<(), Error> {
+    use mwctl::wire::{Emit, for_chip, issue_lines, report, resolve};
+    let json = match &w.request.json {
+        None => None,
+        Some(path) if path.as_os_str() == "-" => {
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            Some(text)
+        }
+        Some(path) => Some(std::fs::read_to_string(path).map_err(|e| io_context(path, e))?),
+    };
+    let mut built = resolve(&w.request, json.as_deref()).map_err(Error::Payload)?;
+    let mut dev = None;
+    if let Some(port) = &w.port {
+        let timeouts = Timeouts {
+            request: w.timeout,
+            ..Timeouts::default()
+        };
+        let mut d = Device::new(Link::new(SerialTransport::open(port, w.baud)?, timeouts));
+        let info = d.info()?;
+        eprintln!("board: {} running {}", info.chip, info.firmware);
+        if !info.runs_payloads() && w.start {
+            return Err(Error::Payload(format!(
+                "{} has no payload runtime: a wiring cannot run on it (--no-start only stores it)",
+                info.firmware
+            )));
+        }
+        built = for_chip(built, &info.chip);
+        dev = Some(d);
+    }
+    // A report carries the issues itself; otherwise they go to stderr.
+    if w.request.emit != Some(Emit::Report) {
+        for line in issue_lines(&built.issues) {
+            eprintln!("{line}");
+        }
+    }
+    match w.request.emit {
+        Some(Emit::Report) => println!("{}", report(&built)),
+        Some(Emit::Json) => println!("{}", built.graph.to_json()),
+        Some(Emit::Statements) => {
+            for s in wire_core::text::format(&built.graph) {
+                println!("{s}");
+            }
+        }
+        None => {}
+    }
+    let Some(image) = built.wasm else {
+        // The page asked for a report and has it; anything else failed.
+        return match (w.request.emit, &w.port, &w.request.out) {
+            (Some(Emit::Report), None, None) => Ok(()),
+            _ => Err(Error::Payload("the wiring has errors; nothing was written".into())),
+        };
+    };
+    if let Some(path) = &w.request.out {
+        std::fs::write(path, &image).map_err(|e| io_context(path, e))?;
+        eprintln!("wrote {} ({} bytes)", path.display(), image.len());
+    }
+    let Some(mut dev) = dev else { return Ok(()) };
+    let upload = Cmd::Upload {
+        file: PathBuf::from(format!("wiring {}", built.graph.name)),
+        start: w.start,
+        corrupt_chunk: None,
+        key: w.key,
+        version: w.version,
+    };
+    let result = command_with(&mut dev, upload, None, Some(image));
+    print_events(&dev.take_events());
+    result
+}
+
 fn main() -> ExitCode {
     let parsed = cli::parse(std::env::args().skip(1));
     match parsed {
@@ -983,6 +1094,13 @@ fn main() -> ExitCode {
             }
         },
         Ok(Parsed::Auth(a)) => match auth(a) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mwctl: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Ok(Parsed::Wire(w)) => match wire(w) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("mwctl: {e}");

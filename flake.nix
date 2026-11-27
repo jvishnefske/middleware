@@ -58,6 +58,26 @@
         ]);
       };
 
+      # mw-posix-node linked dynamically against glibc: a host whose node loads
+      # a PKCS#11 module (the TPM, tpm2-pkcs11) needs `dlopen`, which a static
+      # musl binary does not have. Everything else uses the static one
+      # (packages.mw-posix-node). The native toolchain, no cross compiler.
+      gnuCrane = (crane.mkLib pkgs).overrideToolchain pkgs.rust-bin.stable."1.95.0".minimal;
+      gnuCommon = {
+        inherit src;
+        pname = "mw-posix-node-gnu";
+        version = (gnuCrane.crateNameFromCargoToml { cargoToml = ./posix-node/Cargo.toml; }).version;
+        strictDeps = true;
+        doCheck = false;
+      };
+      posixNodeGnu = gnuCrane.buildPackage (gnuCommon // {
+        cargoArtifacts = gnuCrane.buildDepsOnly (gnuCommon // {
+          cargoExtraArgs = "--locked -p mw-posix-node";
+        });
+        cargoExtraArgs = "--locked -p mw-posix-node --bin mw-posix-node";
+        meta.mainProgram = "mw-posix-node";
+      });
+
       # nix/binaries.nix entries whose crate directory exists (mw-posix-node
       # joins once posix-node/ lands).
       binaryList = lib.filterAttrs
@@ -91,7 +111,7 @@
         revision = self.rev or "dirty";
       };
 
-      bins = rust.binaries // { zenohd = rust.zenohd; };
+      bins = rust.binaries // { zenohd = rust.zenohd; mw-posix-node-gnu = posixNodeGnu; };
       imagePackages = lib.mapAttrs' (name: exe:
         lib.nameValuePair "image-${name}" (images.mkImage name exe)) bins;
 
@@ -126,6 +146,18 @@
       robotPiNative = robotPi { native = true; };
       robotPiCross = robotPi { native = false; };
       sdImageOf = c: c.config.system.build.sdImage;
+
+      # The x86_64 base system (nix/x86-base-image.nix) with the TPM key on.
+      x86Base = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [ self.nixosModules.x86-base-image { mw.x86.tpm.enable = true; } ];
+      };
+
+      # The end-to-end demo's client: the base as a QEMU VM (nix/demo-vm.nix).
+      x86Demo = nixpkgs.lib.nixosSystem {
+        inherit system;
+        modules = [ self.nixosModules.x86-base-image ./nix/demo-vm.nix ];
+      };
 
       # The services the Pi must have (checks.robot-pi-eval, robot-pi-image).
       piServices = [ "mw-robot" "mw-envoy" "spire-agent" "spiffe-helper" "mw-gateway" "mw-provision" "mw-net-config" "mw-wifi" "sshd" ]
@@ -177,6 +209,8 @@
         inherit e2e;
         default = rust.binaries.hello;
         sd-image-robot-pi = sdImageOf robotPiCross;
+        x86-base-image = x86Base.config.system.build.image;
+        x86-demo-vm = x86Demo.config.virtualisation.vmVariant.system.build.vm;
       };
       packages.${armSystem} = rustArmNative.binaries // {
         sd-image-robot-pi = sdImageOf robotPiNative;
@@ -195,6 +229,26 @@
       nixosModules.robot-posix-node = ./nix/posix-node.nix;
       # The module's name before posix-node hosted more than Pis.
       nixosModules.robot-pi-node = ./nix/posix-node.nix;
+      # The x86_64 base (nix/x86-base.nix): the Linux node with its LAN side
+      # and its provisioning, TPM key optional; no orchestrator. `x86-base` is
+      # the services (a host brings its own boot and disk layout);
+      # `x86-base-image` adds a bootable UEFI disk whose every setting is a
+      # default, so a downstream system overrides it (the nixos repo builds
+      # rainier, with k3s, on this).
+      nixosModules.x86-base = { config, lib, pkgs, ... }: let
+        packages = self.packages.${pkgs.stdenv.hostPlatform.system};
+      in {
+        imports = [ ./nix/x86-base.nix ];
+        # With the TPM key the node loads tpm2-pkcs11: the dynamic glibc build.
+        services.mw-posix-node.package = lib.mkDefault
+          (if config.mw.x86.tpm.enable then packages.mw-posix-node-gnu else packages.mw-posix-node);
+        mw.x86.zenohdPackage = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.zenohd;
+      };
+      nixosModules.x86-base-image = {
+        imports = [ ./nix/x86-base-image.nix self.nixosModules.x86-base ];
+      };
+      nixosConfigurations.x86-base = x86Base;
+      nixosConfigurations.x86-demo = x86Demo;
       nixosConfigurations.robot-vm = robotVm;
       nixosConfigurations.robot-pi = robotPiNative;
       nixosConfigurations.robot-pi-cross = robotPiCross;

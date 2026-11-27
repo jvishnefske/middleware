@@ -15,7 +15,7 @@ license = "MIT OR Apache-2.0"
 # make every path under the root an explicit member and defeat `exclude`
 # for `posix-node`'s path dependency on `firmware/` (esp-base's pure core).
 [workspace]
-members = ["service", "gateway", "robot", "posix-node", "board-pins", "state-table", "recipe-core", "wasm-host", "wasm-hdl-ref", "tools/payload-sim", "updates", "tools/mwctl", "tools/mw", "tools/mw-otel", "tools/mw-scraper", "tools/jpeg-fixtures", "tools/mw-pki", "web/protocol-wasm"]
+members = ["service", "gateway", "robot", "posix-node", "board-pins", "state-table", "recipe-core", "wasm-host", "wasm-micro", "wasm-hdl-ref", "tools/payload-sim", "updates", "tools/mwctl", "tools/mw", "tools/mw-otel", "tools/mw-scraper", "tools/graph-core", "tools/graph-micro", "tools/wire-core", "tools/jpeg-fixtures", "tools/mw-pki", "web/protocol-wasm"]
 exclude = ["firmware", "firmware-esp8266", "firmware-rp", "firmware-nrf52", "payloads"]
 
 [features]
@@ -177,4 +177,7 @@ opt-level = 3
 [profile.dev.package.wasmi_ir]
 opt-level = 3
 [profile.dev.package.wasmi_collections]
+opt-level = 3
+# The same for the other interpreter (wasm-host's `micro` backend).
+[profile.dev.package.wasm-micro]
 opt-level = 3

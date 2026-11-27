@@ -2617,6 +2617,192 @@ Cortex-M0+ target lacks), so RP2040 firmware still has no heap at all.
   left as a follow-up. W10 removes the known cause (heap exhaustion after
   a start).
 
+### Small interpreter (`wasm-micro`)
+
+A second WASM interpreter, written for parts where wasmi does not fit (the
+micro:bit v2's 512 KB of flash) or does not build (no CAS atomics: RP2040,
+ESP32-C3). Safe Rust only, `no_std`, the allocator optional (feature
+`alloc`, on by default), one optional dependency (`libm`, feature `float`). `wasm-host` can run on it instead of wasmi (WM6
+to WM9); no board has run it yet.
+
+- **In place.** `Module` holds the image (borrowed or owned) and interprets
+  its bytes as they are; nothing is translated. Kept in RAM: four bytes per type, eight per
+  function, eight per `block`, `if` and `else` (the branch table, built in
+  one pass at load), the linear memory and three fixed stacks from `Limits`
+  (defaults: 1024 value slots, 64 calls, 256 open blocks, about 12 KB).
+- **No validator.** Every stack, local, global, table and memory access is
+  bounds-checked when it happens, so an ill-typed module traps
+  (`Error::Invalid`) or computes garbage in its own sandbox; it cannot reach
+  the host. It is not *rejected*, which is the difference from wasmi with
+  `validate`: a host that needs rejection validates before the device.
+- **Scope.** WebAssembly 1.0 plus what `rustc` emits for
+  `wasm32-unknown-unknown` by default (mutable globals, sign extension,
+  saturating float-to-int, multi-value, `memory.copy`, `memory.fill`), and
+  one-byte pages (custom page sizes, as `build-byte-pages.sh` links).
+  Refused at load: non-function imports, more than one memory or table,
+  `memory.init`, `table.*`, `ref.*`, SIMD, threads, tail calls, exceptions,
+  GC, 64-bit memories.
+- **Less than a page.** `Limits::memory_bytes` caps the bytes backing linear
+  memory below the declared 64 KiB pages; the rest traps on access.
+- **Size** (whole probe binary for `thumbv7em-none-eabihf`: load,
+  instantiate, one import, two calls; fat LTO, allocator and runtime
+  included). wasmi 2.0.3 with `validate`: 476 KB at `opt-level = "s"`,
+  372 KB at `"z"`. `wasm-micro`: 21.5 KB / 17.2 KB, and 29.8 KB / 25.2 KB
+  with `float`. Speed has not been measured; decoding in place is expected
+  to be slower than wasmi's translated code.
+
+- [x] WM1 Runs the specification testsuite's core files: 24163 assertions
+  pass, none fail; modules outside the scope above and
+  `assert_invalid`/`assert_malformed` are skipped. The suite is not
+  vendored: `WASM_TESTSUITE=<checkout> cargo test -p wasm-micro --features
+  float --test spec` (without the variable the test only says so).
+- [x] WM2 Host imports by index with arguments and results in place, memory
+  visible to the host; fuel, call depth and stack limits end a call with an
+  error and leave the instance usable —
+  `wasm-micro/tests/interp.rs`: `host_imports_see_arguments_memory_and_return_results`,
+  `fuel_stops_a_loop_and_the_instance_survives`,
+  `runaway_recursion_hits_the_frame_limit`.
+- [x] WM3 Memory backing below a page; growth bounded by the declared and
+  the configured maximum — `memory_backing_can_be_smaller_than_a_page`,
+  `memory_grows_to_the_smaller_of_both_maxima`.
+- [x] WM4 Features outside the scope fail at load; ill-typed and corrupted
+  modules never panic (30000 corrupted variants of one module, overflow
+  checks on) — `features_outside_the_scope_are_refused_at_load`,
+  `ill_typed_modules_trap_instead_of_misbehaving`,
+  `corrupted_modules_never_panic`.
+- [x] WM5 Builds for targets without CAS atomics (`thumbv6m-none-eabi`,
+  `riscv32imc-unknown-none-elf`); every example payload in `payloads/` loads
+  and runs `init` against a host that answers 0
+  (`cargo run -p wasm-micro --example probe -- init <files>`). Checked by
+  hand, not in CI.
+- [x] WM6 `wasm-host` runs on either interpreter, chosen by feature: `wasmi`
+  (default) or `micro` (`micro-float` adds float arithmetic); with both
+  enabled wasmi is used, and `wasm_host::BACKEND` names the one in use. The
+  ABI, `Device`, limits and channels are shared; each backend is one file
+  (`wasm-host/src/backend/`). On `micro` the module keeps a copy of its
+  image (a `wasm_micro::Module` can own or borrow it), imports dispatch
+  through one handler per import to the same `*_call` functions, and the
+  heap bound has its own model (`heap_micro.rs`): exact from
+  `wasm_micro::footprint` with the image at hand, the densest possible
+  index without. Differences a host sees on `micro`: no load-time
+  validation (see above), fuel counted per instruction, other trap and
+  load messages.
+  The whole `wasm-host` suite passes on both
+  (`cargo test -p wasm-host`, and with `--no-default-features --features
+  micro` or `micro-float`); three tests in `tests/runtime.rs` branch on
+  `BACKEND` (`w1_rejects_unknown_import`,
+  `w10_heap_bound_counts_every_limit`,
+  `w10_heap_bound_charges_the_declared_maximum_not_the_cap`);
+  `backend::tests::every_abi_import_has_a_handler_and_nothing_else_does`.
+- [x] WM7 Every example payload behaves the same on `micro` in the
+  simulator: `cargo test -p payload-sim --no-default-features --features
+  micro` (all of its tests, the JPEG decode of `r14` included;
+  `bench_fuel_constants_match_the_measured_steps` compares the payload's
+  wasmi fuel constants on wasmi only). `tests/heap.rs` measures the heap on
+  it: `cam_jpeg_view` (26.5 KB image) keeps a 30.0 KB module where wasmi
+  keeps 127 KB (64-bit host), and the bound covers every payload.
+- [x] WM8 Both backends build for every platform architecture
+  (`scripts/check-wasm-backends.sh`, `just wasm-backends`):
+
+  | target | platforms | wasmi | micro |
+  |---|---|---|---|
+  | `x86_64-unknown-linux-gnu` | posix-node, tools | yes | yes |
+  | `aarch64-unknown-linux-gnu` | KD240, Raspberry Pi | yes | yes |
+  | `wasm32-unknown-unknown` | browser simulator | yes | yes |
+  | `thumbv8m.main-none-eabihf` | RP2350 | yes | yes |
+  | `thumbv7em-none-eabihf` | i.MX RT1050, nRF52833 | yes | yes |
+  | `xtensa-esp32-none-elf`, `xtensa-esp32s3-none-elf` | ESP32, ESP32-S3 | yes | yes |
+  | `thumbv6m-none-eabi` | RP2040 | no (CAS atomics) | yes |
+  | `riscv32imc-unknown-none-elf` | ESP32-C3 | no (CAS atomics) | yes |
+
+- [x] WM9 The base firmwares that run payloads build with either: feature
+  `wasm-micro` with `--no-default-features` (wasmi stays the default
+  through `wasm-host?/wasmi`, so existing build commands are unchanged).
+  Flash (`.text`), release builds, not run on hardware:
+
+  | firmware | wasmi | `wasm-micro` |
+  |---|---|---|
+  | rp-base, RP2350 (`./build.sh rp2350 --no-default-features --features wasm-micro`) | 688 KB | 223 KB |
+  | imxrt-base (`APP_FEATURES=wasm-micro,usb,eth ./build.sh app`) | 781 KB | 316 KB |
+  | esp-base, ESP32-S3 (`./build.sh esp32s3 --no-default-features --features trust,wasm-micro`) | 1674 KB | 868 KB |
+  | esp-base, ESP32 | 1745 KB | 938 KB |
+
+- [x] WM12 `wasm-micro` needs no allocator. All of a module's storage is
+  three slices: `u32` words (the index, then the table, three per open
+  block, three per call frame), `u64` slots (globals, value stack) and the
+  linear memory. `Machine` takes them from the caller on every call
+  (`Buffers`; sized by `footprint(..).words(&limits)` and `.slots(..)`),
+  so they can be statics; `memory.grow` succeeds while the memory buffer
+  has room and a buffer shorter than the declared memory backs the start
+  of it. With feature `alloc`, `Module` and `Instance` hold the same
+  slices in `Vec`s, over the same interpreter (generic over the memory
+  only, entered through two non-generic functions so it is compiled once,
+  in this crate). A probe with no allocator in the binary is 21.3 KB of
+  flash on a Cortex-M4 and 20.9 KB on a Cortex-M0 (`opt-level = "s"`;
+  17.1 and 16.6 KB at `"z"`; about 8 KB more with `float`).
+  `wasm-micro/tests/machine.rs`:
+  `runs_in_buffers_of_exactly_the_footprint`,
+  `buffers_one_short_are_refused`,
+  `a_second_module_in_the_same_buffers_sees_nothing_of_the_first`,
+  `the_wrong_buffers_fail_without_panicking`; the specification suite and
+  every `wasm-host` and payload-sim test still pass on `Instance`;
+  `cargo build -p wasm-micro --no-default-features` for
+  `thumbv6m-none-eabi`.
+- [x] WM14 A payload's host state allocates nothing. `wasm-host/src/fixed.rs`:
+  subscribed and served keys are `heapless::Vec`s of `heapless::String`s
+  (`SLOT_MAX` and `MAX_SERVES` keys of `MAX_KEY_LEN`), the DMA copy buffer
+  a `heapless::Vec<u8, MAX_DMA>`, the channel table and the channel plan
+  `MAX_CHANNELS` entries with `MAX_NAME` names, and `init`'s log a ring
+  buffer (`fixed::Ring`) of `INIT_LOG_LINES` lines of `MAX_LOG` bytes that
+  overwrites its oldest line. All of it is inline in `link::State`:
+  12.7 KB on a 64-bit host (`tests/fixed.rs`), and 12.3 KB more static RAM
+  in the `wasm-micro` firmwares, where the state sits in a static (on
+  wasmi it sits in wasmi's store, on the heap as one block). A resident
+  `blink` on `micro` now holds 240 bytes of heap beyond its module, memory
+  and stacks (4.7 KB before). Breaking (API): the types of
+  `State::{subscriptions, serves, scratch}`, `ChannelTable::{decls,
+  resolved}`, `Decl::name`, `BindError`'s names and `Step`'s and
+  `Resolved`'s keys; `channels::plan` returns a fixed vector;
+  `channels::driver_key` returns `None` for a key that would be too long
+  (posix-node skips such a point); `LoadError::Init`'s `log` is a
+  `Box<InitLog>`. Still allocated: error values (the text of `LoadError`
+  and `Trap::Wasm`, and the log of a failed `init`, boxed after the failed
+  payload is freed so that a `LoadError` stays 48 bytes instead of 2.2 KB)
+  and the interpreter's storage (WM13).
+  `fixed::tests::ring_keeps_the_newest_in_order_and_compares_by_content`,
+  `text_cuts_at_a_character_boundary`;
+  `tests/fixed.rs::the_inline_state_stays_within_its_budget`; the
+  `wasm-host` and payload-sim suites on both backends.
+- [ ] WM13 `wasm-host`'s `micro` backend on `Machine`: the image borrowed
+  from flash or handed over instead of copied, and the interpreter's
+  buffers given by the firmware as statics. With the host state fixed
+  (WM14), what would then be left on the heap is error text and what the
+  device itself allocates, so the fragmentation and the missing free-bytes
+  query found in the RP2040 spike (WM10) stop mattering. To check on a
+  board first: the 12 KB state is moved by value while a payload loads,
+  which costs main-stack room (not measured).
+- [ ] WM10 A payload runtime on the chips wasmi kept out. `wasm-host` with
+  `micro` builds for both, but their firmwares do not yet run payloads.
+  rp-base on the RP2040, spike (not run on a board): `emballoc` 0.3 as the
+  heap where there is no CAS (`linked_list_allocator`'s lock needs it;
+  `embedded-alloc` and `talc` need `unsafe` to set up), chosen per target in
+  `firmware-rp/Cargo.toml`, and a profile `RP2040_RUNTIME` (160 KiB heap,
+  one page, images to 32 KiB).
+  `./build.sh rp2040 --no-default-features --features wasm-micro` builds:
+  209 KB of flash (138 KB without the runtime), 190 KB of the 264 KB of
+  SRAM static. Found: emballoc reports no free bytes, so the start check
+  cannot refuse beforehand (`shell/heap.rs`); it is first-fit and the hole
+  the caller's image leaves is not reused by linear memory, so on a 64-bit
+  host with a 160 KiB arena every example payload loads, runs and unloads
+  30 times except `cam_jpeg_view` (26.5 KB image, out of memory; it needs
+  168 KiB, its byte-pages build 192 KiB). Handing the image to wasm-host
+  instead of copying it would remove both the copy and the hole. esp-base's `wasm` shell code (ADC, LEDC,
+  `Hw::payload`) is written for the Xtensa chips and does not compile for
+  the ESP32-C3. The micro:bit v2 needs payload storage first.
+- [ ] WM11 Run a `wasm-micro` firmware on a board, and measure its speed
+  against wasmi there (on the host the simulator's payload tests take about
+  the same time on both).
+
 ### Payload SDK (`payloads/`)
 
 - [x] P1 A `no_std` Rust SDK wraps the ABI safely (log, publish, subscribe,
@@ -3704,7 +3890,7 @@ network tests use 127.0.0.1 only.
   refuses a start whose driver targets name a missing point or one of
   another kind or flow (`driver::check_binding`), logging why.
   *(mw-posix-node `pn16_*`)*
-- [x] PN17 The simulator (`driver::sim`, the EMCO PC Turn 50's numbers):
+- [x] PN17 The simulator (moved out of middleware to the lathe repo, `kd240/emco-posix-node/src/sim.rs`, which registers it as `emco-sim`; middleware keeps only the `Driver` trait and `app::main_with_drivers`). It models the EMCO PC Turn 50:
   X and Z positions in step counts, reference switches, a spindle that
   ramps, a turret that indexes, the e-stop chain and a segment queue.
   Without limit switches an axis driven past its mechanical stop stalls
@@ -4723,6 +4909,253 @@ open).
   in a line in the simulator panel; on a phone the outline is the default
   and the canvas scrolls inside its box. The view's decisions are tested
   (`web/test/flows.view.test.ts`: "places the input on top and outputs along the bottom in run order", "says what each node does", "makes new entries, actions and conditions from the pins and machines, keeping what applies", "offers as targets only nodes that keep the flow a tree, and reorders a chain", "keeps at most fifty undo steps", "maps issues to nodes, counts errors on the tab, and turns fixes into changes", "names the node each flow last ran in the simulator line"; `web/test/flows.model.test.ts`: "lists the outline in run order with each port's chain under its node, then nodes nothing leads to", "parses flow log lines and keeps each flow's latest run"), but the page itself was verified in headless Chrome only (1280×900 and 390×844: page `scrollWidth` equal to the viewport, the canvas box 356 px wide scrolling 576 px on the phone, a real mouse drag moved a node and rewired a port, a duplicate flow name, a 5 ms period and an unreachable node were reported and blocked Compile at stage flows, two Undos restored them, and two BUTTON presses highlighted the Press flow's nodes), not by a DOM test, so it stays unchecked.
+
+### Boolean wiring, board readiness, mwctl in the browser (WR…, RD…, WB…)
+
+A board is customised without writing a payload: a **wiring** connects
+digital inputs to named boolean channels, channels through boolean
+functions to channels, and channels to digital outputs. Those are the only
+three connections. The wiring is described on mwctl's command line or
+drawn on the web page's canvas, compiled to an ordinary payload, and
+written to the board by mwctl, which also runs inside the page. Nothing
+needs a server beyond static files.
+
+Parts: `tools/wire-core` (`no_std` + alloc, no I/O: model, check,
+reference evaluation, compiler), `mwctl wire` and `mwctl probe`
+(`tools/mwctl/src/wire.rs`, `ready.rs`), mwctl built for `wasm32-wasip1`
+(`src/webport.rs`), and the web page's host for it and its Wire tab
+(`web/src/mwctl/`, `web/src/ui/wirePage.ts`).
+
+Boards with a USB serial port, by how the base firmware gets on
+(`ready::family`, the USB ids of `tests/hil/boards.py`):
+
+| family | flash | then |
+|---|---|---|
+| Espressif USB-Serial-JTAG; UART bridges (CP210x, CH340, CH9102, FT232R) | directly over the serial port: the ROM bootloader, entered by the client through DTR/RTS (the Flash tab's esptool-js, espflash) | payloads over the same port |
+| rp-base (Pico, Pico 2) | a UF2 in BOOTSEL mode (no serial port there); afterwards the firmware's own A/B updater | payloads over USB CDC |
+| RT1050-EVKB | the firmware's A/B updater (`mwctl fw update`) | payloads |
+| micro:bit v2 (DAPLink VCOM) | the repository's nRF52 bootloader, entered by hand (`mwctl reflash`) | protocol only |
+| Arduino / Adafruit native USB | a bootloader the client starts by opening the port at 1200 baud | no base firmware yet: recognised and said so |
+
+- [x] WR1 Statements, one per argument, build the wiring:
+  `CHANNEL=gpioN[,pullup|pulldown][,invert]` (input),
+  `CHANNEL=FUNCTION(CHANNEL,...)` (`and`, `or`, `xor`, `nand`, `nor`,
+  `xnor` of 2 to 8 channels, `not` of one) and `gpioN=CHANNEL[,invert]`
+  (output), in any order. A malformed statement, a nested function, a
+  second source for a channel, a second channel for an output and a pin
+  used twice with other options are refused with the statement quoted; one
+  pin may drive several channels. `text::format` writes a graph back as
+  statements that parse to the same graph, and `text::command_line` as the
+  whole `mwctl wire` line —
+  `wire-core` `tests/wire.rs`: `wr1_statements_build_the_graph_and_format_back`, `wr1_statements_say_what_is_wrong_with_them`.
+- [x] WR2 The graph is JSON in graph-core's shape (`name`, `nodes` of
+  `id` / `kind` / `config`, `edges` of `[from, to]`) plus `period_ms`
+  (default 10) and a canvas position per node; unknown fields and kinds
+  are errors. `Graph::layout` places nodes without a position in a column
+  per stage and keeps the positions that are set —
+  `wr2_the_json_form_round_trips_and_is_strict`, `wr2_layout_puts_stages_in_columns_and_keeps_set_positions`.
+- [x] WR3 `check` reports every problem at once, each naming its node or
+  edge: only input → channel, function → channel, channel → function and
+  channel → output connect (with what to do instead); a channel and an
+  output have exactly one source; a function reads 1 (`not`) or 2 to 8
+  channels; no loops; unique ids, channel names of `a-z0-9_` (at most 24,
+  not a pin word or a function name), one node per pin, a period of 10 to
+  60000 ms, at most 128 nodes and 256 edges. An unused input, channel or
+  function and a wiring without an output are warnings and do not stop a
+  build — `wr3_connections_follow_the_three_rules`, `wr3_sources_pins_loops_and_names_are_checked`.
+- [x] WR4 Pins follow the chip when it is known: `board-pins`' map says a
+  pin does not exist, is the board's (with the reason) or is input-only;
+  without a chip only the wiring's own rules apply —
+  `wr4_pins_are_checked_against_the_chip`; mwctl `wire::tests::wr7_the_chip_decides_the_pin_rules`.
+- [x] WR5 The payload is written out byte by byte, with no compiler: ABI
+  1 imports only and only the ones it calls, `memory` (one page), `init`
+  and `tick`. `init` configures inputs with their pull and outputs, logs a
+  line per refused pin and `wire <name>: N in, M ch, K out`, sets the tick
+  to the period and runs the first scan; a scan reads every input (a read
+  error is false), evaluates the channels in dependency order and writes
+  an output only when its level changed. No loops, no allocation —
+  `wr5_the_payload_sets_up_the_pins_and_follows_the_inputs`, `wr5_a_refused_pin_is_logged_and_reads_false` (in `wasm-host` against a fake board).
+- [x] WR6 The payload computes what `Plan::eval` computes: every function
+  on every input combination, inverted outputs, chains through channels
+  stated in any order, the widest function —
+  `wr6_every_function_matches_the_reference_on_every_input`, `wr6_functions_chain_through_channels_in_any_statement_order`, `wr6_the_largest_function_and_a_wiring_without_outputs_load`.
+- [x] WR7 `mwctl wire <STATEMENT>... | --json <FILE>` (`-` is stdin) with
+  `--name`, `--period`, `--chip`: errors and warnings on stderr, status 1
+  and nothing written when an error stops the build —
+  mwctl `wire::tests::wr7_statements_build_a_payload_with_name_and_period`, `wr7_the_json_file_is_the_same_wiring_and_excludes_statements`.
+- [x] WR8 `--emit report` prints one JSON object for a page: `ok`, the
+  issues with their node or edge, the statements, the command line, the
+  wiring with every node placed, and the payload's size; `--emit
+  statements` and `--emit json` convert between the spellings —
+  `wire::tests::wr8_the_report_is_json_a_page_can_read`.
+- [x] WR9 `wire` needs somewhere to put the payload: `-o`, `--emit`, or
+  `--port`, where it reads `sys/info`, checks the wiring against that
+  chip, refuses to start on firmware without the runtime, uploads (signed
+  with `--key` / `--pkcs11` / `--version` as `upload` does) and starts
+  (`--no-start`) — `cli::tests::wr9_wire_takes_statements_or_json_and_somewhere_to_put_the_payload`; the upload itself in `web/test/mwctl.test.ts` (WB4).
+- [x] RD1 A port's USB id names its family (`ready::family`), the table
+  above; the FT4232H shared by JTAG adapters is not in it —
+  `ready::tests::rd1_usb_ids_parse_and_name_their_family`.
+- [x] RD2 A base firmware that answers `sys/info` is `ready: update`,
+  with its chip, firmware, ABI, capacity and whether it runs payloads —
+  `rd2_a_base_firmware_that_answers_is_ready_to_update`. Run 2026-11-25
+  on the MIMXRT1050-EVKB over both its ports (`1fc9:0094`, `1366:0105`):
+  `ready: update`, `chip: rt1050`, `payloads: run`.
+- [x] RD3 Otherwise, where an Espressif chip may be (its families and an
+  unknown id), one ROM `SYNC` is sent; a reply is `ready: flash`, method
+  `esp-rom`, listening now —
+  `rd3_a_rom_that_answers_sync_is_ready_to_flash_now`, `rd3_the_sync_frame_and_its_reply_are_the_rom_protocol`.
+- [x] RD4 A silent port is judged by its family (`esp-rom` through
+  DTR/RTS, `rp-bootsel`, `ab-update`, `nrf52-reflash`, `touch-1200`), an
+  unknown one is `ready: unknown`; `SYNC` is never sent to a family that
+  cannot hold an Espressif chip; the board is never reset —
+  `rd4_a_silent_port_is_judged_by_its_family`, `rd4_sync_is_sent_only_where_an_espressif_rom_may_listen`.
+- [x] RD5 `mwctl --port <PATH> probe [--usb VID:PID]` prints `name:
+  value` lines, the first `ready: update|flash|unknown`; `--timeout`
+  defaults to 500 ms — `cli::tests::rd5_probe_needs_a_port_and_takes_the_ports_usb_id`.
+- [ ] RD6 On hardware: an ESP32 held in download mode answers `SYNC` and
+  is reported `esp-rom`, listening; a Pico in BOOTSEL has no serial port
+  and so is not seen at all (a page would need WebUSB). Not run.
+- [x] WB1 mwctl builds for `wasm32-wasip1` unchanged but for its port:
+  `serialport` and `cryptoki` are native-only dependencies, `webport.rs`
+  is the port behind five `mw_port` imports (`open`, `write`, `read` with
+  a timeout, `signals`, `close`; the only `unsafe` in mwctl), token
+  commands say a browser has none. The page's host (`mwctl/host.ts`)
+  gives it arguments, stdin, an in-memory file tree, stdout and stderr
+  through the WASI calls it imports, and exit statuses 0, 1 and 2 arrive
+  as they do in a terminal —
+  `web/test/mwctl.test.ts`: "is the command-line tool: help, usage errors and exit statuses", "reads and writes the page's files and stdin", "has no port unless the page gives it one, and no tokens", "splits a typed command line like a shell".
+- [x] WB2 mwctl stays synchronous: the imports that wait (the port, the
+  sleep) are `WebAssembly.Suspending` and `_start` is
+  `WebAssembly.promising` (JavaScript Promise Integration; Node 24 behind
+  `--experimental-wasm-jspi`, set for vitest). Without it, commands that
+  never wait still run, so the wiring is checked and built in any browser
+  and written only where the port can be awaited. `mwctl/port.ts` is
+  `--port web` over a Web Serial port: a pump reads it continuously (a
+  port nobody reads overruns, and a write must not wait for a read), both
+  control lines are released on open, and the port is closed after every
+  command — "has Promise Integration here, as Chrome does", and every
+  test below that talks to the fake board.
+- [x] WB3 The page reacts to a board: for each granted port, already
+  there or plugged in later (`navigator.serial`'s `connect`), it runs
+  `mwctl --port web probe --usb <id>` and shows the verdict; a port that
+  is unplugged is forgotten (`PortManager.adopt` / `forget`); `esp-rom`
+  offers the Flash tab —
+  "is ready to update when a base firmware answers", "is ready to flash when only a ROM bootloader answers, or by its USB id", "reports a port that cannot be opened", "reads probe's lines and a port's USB id", "watches granted ports: those already there, plugged in and unplugged".
+- [x] WB4 The page holds no wiring rule: every edit is sent to `mwctl
+  wire --json ... --emit report`, a connection is added only if mwctl
+  does not report that edge as an error (its message is shown), and the
+  command line it prints is editable and replaces the graph. "Write to
+  board" is `mwctl --port web wire --json ...`: the fake board (the Rust
+  loader) receives exactly the bytes `-o` writes, starts them, and its
+  output follows its inputs; a pin the board's chip lacks stops it after
+  `sys/info` —
+  "the command line and the graph are the same wiring", "builds a wiring by editing: add, name, set pins, connect", "keeps fifty undo steps and survives storage", "the built payload follows its inputs in the simulator", "writes the wiring to the board: checked for its chip, uploaded, started, running", "refuses before sending anything when the board's chip lacks a pin", "does not start a wiring on firmware without the runtime".
+- [ ] WB5 The Wire tab: an SVG canvas where nodes are dragged, a
+  connection is dragged from a node's output port onto a node (or picked
+  from a menu, for keyboards and phones), arrow keys move the focused
+  node, Delete removes the selection; problems mark their node or edge
+  and list with "show"; Undo, an example, the pin rules of the connected
+  board or a chosen chip, Simulate (Space or a double-click flips an
+  input's pin, high pins light), Download .wasm, hand-off to the Device
+  tab, and a console that runs any mwctl command. Verified in headless
+  Chromium 158 only (real mouse and key events at 1280×900: a node moved
+  by its drag, two connections drawn, input → output refused with mwctl's
+  sentence, a channel renamed, the command line applied and undone, the
+  ESP32 input-only pin reported, the simulated output lit, the wiring
+  kept across a reload; page `scrollWidth` within the viewport at 390
+  px), not by a DOM test, so it stays unchecked.
+- [ ] WB6 On hardware from Chrome over Web Serial: a plugged-in board
+  probed without a click, and a wiring written and running on a Pico 2
+  and an ESP32-S3. Not run (headless Chromium cannot be granted a port).
+  A claimed board refuses the page's unsigned upload: sign with `mwctl
+  wire --port ... --key`, or send the payload to the Device tab.
+
+#### Multi-rate signals, topological updating and accelerated SIL (SP…, MS…, TU…, TR…, SIL…)
+
+The wiring grew from booleans to a multi-rate signal graph. A channel
+carries an `i32` (a boolean is 0 or 1; boolean functions read nonzero as
+true). One table (`wire-core` `spec.rs`) lists every kind with its class,
+how many channels it reads, whether it keeps state, and its settings with
+ranges; the check, the statement grammar, the plan, the compiler and the
+page's palette (`--emit report`'s `kinds`) all read it.
+
+| class | kinds |
+|---|---|
+| source | `input`, `analog` (`adc_read`, 0..4095), `const` |
+| function, stateless | `and or xor not nand nor xnor`, `add sub mul min max abs`, `gt lt ge le eq ne`, `select`, `scale` (mul, div), `clamp` (lo, hi) |
+| function, stateful | `delay` (z⁻¹), `lowpass` (shift), `mean` (n: integrate and dump), `diff`, `hyst` (lo, hi), `debounce` (n), `rising`, `falling`, `count`, `latch`, `ton` (ms) |
+| sink | `output`, `pwm` (timer, channel, freq_hz) |
+
+Rates: the wiring's `period_ms` is the base tick (at least 10 ms, the
+ABI's shortest `set_tick`). A source, function or sink may set its own
+`period_ms`, a multiple of the base (statement suffix `@100ms`), and
+updates on the ticks its divisor divides. A channel has no rate: it holds
+the last value written, so a slower reader samples and a faster one sees
+a held value.
+
+Updating: one dependency order over the whole graph, with the edges into
+`delay` nodes left out. On each tick the due nodes update in that order;
+a due delay emits its state at its place and captures its input at the
+end of the tick. So every node sees this tick's values of what it depends
+on, and a loop is legal exactly when a delay is in it.
+
+- [x] SP1–SP9 Every kind computes in the payload what the reference
+  (`plan::Sim`) computes, tick by tick over long pseudo-random inputs with
+  negative and extreme values; settings are checked against their ranges
+  and allowed only on their kinds; `pwm` opens each timer once and sets a
+  duty only when it changed; analog and PWM pins follow the chip's ADC and
+  PWM tables — `wire-core` `tests/signal.rs` `sp1_*` … `sp9_*`.
+- [x] MS1–MS5 A node's period must be a multiple of the base; nodes at
+  10, 100 and 1000 ms in one wiring update on their own ticks and read
+  held values across rates; `mean` decimates; statements carry `@Nms` and
+  format back — `tests/signal.rs` `ms1_*` … `ms5_*`; mwctl `ms1_*`.
+- [x] TU1–TU5 One global order with delay inputs cut; a divider and an
+  accumulator through `delay` match the reference; a loop without a delay
+  is an error on its nodes — `tests/signal.rs` `tu1_*` … `tu5_*`.
+- [x] TR1–TR3 A traced channel is published on `wire/<name>` as 4 bytes
+  LE when its driver updated and the value changed (and on the first
+  scan); `publish` is imported only then; `--trace [a,b]` —
+  `tests/signal.rs` `tr1_*` … `tr3_*`.
+- [x] MS6–MS9 From the page through the real mwctl: the kinds list; a
+  divider through a delay at 100 ms toggles every 100 ms of virtual time;
+  an ADC step through `mean`, `lowpass` and `hyst` at slower rates turns
+  its output on after the step; a loop without a delay and a period that
+  is not a multiple are mwctl's errors —
+  `web/test/mwctl.test.ts` "MS6: …" … "MS9: …".
+- [x] SIL1–SIL17 Software in the loop in the browser: the payload that
+  would be written runs in `wasm-host` compiled to WASM on a virtual
+  clock that only the engine advances (`web/src/mwctl/sil.ts`). Stimulus
+  waveforms (const, step, square, sine, ramp, pulse, seeded noise) drive
+  digital and analog inputs; loopbacks feed an output or a PWM duty back
+  to an input through a first-order lag and gain (a plant); pin writes,
+  PWM duties and `wire/*` publications are recorded on change with their
+  virtual time, decimated past a cap keeping spikes. Speed is `max` or N×
+  real time (virtual time never ahead of wall time × N); the run yields
+  between slices, can be aborted, and a trap ends it with the traces so
+  far — `web/test/sil.test.ts` "SIL1: …" … "SIL17: …". Measured in Node 24
+  on the lamp wiring: 60 s at a 10 ms step in 23 ms warm (95 ms cold), 600
+  s in 93 ms.
+- [x] SIL18–SIL22 The panel (`ui/silPanel.ts`, plots in `ui/silPlot.ts`):
+  labelled controls, a waveform's own parameters, loopbacks added and
+  removed, a run plotted on one time axis with its speed-up, and build
+  failures, traps and Stop in the status line —
+  `web/test/silPanel.test.ts` (jsdom).
+- [ ] SIL23 In the Wire tab the panel builds the current wiring with every
+  channel traced and plots it; the palette and the property editor come
+  from mwctl's `kinds`. Verified in headless Chromium 158 only (the
+  thermostat-and-divider wiring of MS7/MS8 applied from the command line:
+  60 s simulated in 0.15 s, 407× real time, nine traces; page
+  `scrollWidth` within 390 px), so it stays unchecked.
+- [ ] MS10 On hardware: a multi-rate wiring with an ADC and a PWM output
+  on a Pico 2 behaves as its simulation. Not run.
+
+Limits to know: values are integers (no fixed-point helpers beyond
+`scale`); the base tick cannot go below 10 ms; a traced channel costs one
+publication per change; the simulation's plant is a lag and a gain, not a
+model you write; function names and `adcN` cannot name a channel. Base
+firmware flashing is still the Flash tab's and the UF2 download's, not
+mwctl's.
 
 ### Interrupts and DMA (ABI 2)
 
