@@ -94,6 +94,10 @@ USB_KINDS: dict[tuple[int, int], UsbKind] = {
 
 # VID:PID entries that also need the product and interface (0403:6011 is
 # the Colorlight's FT4232H too). Checked before USB_KINDS.
+# How long the KD240 console probe waits for its Linux posix-node to answer
+# (a cold boot of the board takes about this long).
+KD240_CONSOLE_WAIT_S = 45
+
 USB_KINDS_MATCHED: list[tuple[int, int, UsbKind]] = [
     (0x0403, 0x6011, UsbKind("kd240-console", frozenset({"linux-aarch64"}),
                              product="KD Carrier Card", interface=1)),
@@ -169,8 +173,16 @@ def usb_ttys(sys_root: Path = Path("/sys")) -> list[dict]:
         vid = _read(p / "idVendor")
         if vid is None:
             continue
-        # dev resolves to the interface (X-Y:1.N) the tty hangs off.
-        iface = _read(dev.resolve() / "bInterfaceNumber")
+        # The interface (X-Y:1.N) holds bInterfaceNumber. The tty's device link
+        # points at the usb-serial port node, a child of the interface on
+        # current kernels, or at the interface itself on older ones: search up.
+        iface = None
+        q = dev.resolve()
+        for _ in range(3):
+            iface = _read(q / "bInterfaceNumber")
+            if iface is not None or q == q.parent:
+                break
+            q = q.parent
         out.append(
             {
                 "path": f"/dev/{tty.name}",
@@ -320,15 +332,27 @@ class Mwctl:
     exe: str
     timeout_ms: int = 1500
 
-    def run(self, board: Board, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    def run(self, board: Board, *args: str, timeout: float = 60, timeout_ms: int | None = None) -> subprocess.CompletedProcess:
         cmd = [self.exe, *board.link]
         if board.transport != "zenoh-listen":
-            cmd += ["--timeout", str(self.timeout_ms)]
+            cmd += ["--timeout", str(timeout_ms or self.timeout_ms)]
         cmd += list(args)
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
     def info(self, board: Board) -> dict[str, str]:
-        r = self.run(board, "info", timeout=30)
+        # A Linux console answers only if a posix-node serves it, and a board
+        # that is still booting (or stuck in U-Boot) does not: a short probe,
+        # retried until a deadline, so a slow Linux boot is waited for without
+        # lengthening the probe for every other board.
+        if board.kind is None or board.kind.family != "kd240-console":
+            r = self.run(board, "info", timeout=30)
+        else:
+            deadline = time.monotonic() + KD240_CONSOLE_WAIT_S
+            while True:
+                r = self.run(board, "info", timeout=30, timeout_ms=300)
+                if r.returncode == 0 or time.monotonic() >= deadline:
+                    break
+                time.sleep(1)
         if r.returncode != 0:
             raise RuntimeError((r.stderr or r.stdout).strip())
         return parse_fields(r.stdout)
@@ -504,7 +528,8 @@ def install(b: Board, mw: Mwctl, build: bool) -> str:
 
 def build_mwctl() -> Mwctl:
     subprocess.run(
-        ["cargo", "build", "--quiet", "--release", "-p", "mwctl", "--features", "zenoh"],
+        # auth: `mwctl auth token` for enrolment through the admin server.
+        ["cargo", "build", "--quiet", "--release", "-p", "mwctl", "--features", "zenoh,auth"],
         cwd=REPO, check=True,
     )
     return Mwctl(str(REPO / "target/release/mwctl"))
@@ -525,6 +550,7 @@ def discover(
     lan: bool = True,
     scout_seconds: int = 3,
     mdns: bool = True,
+    scout: bool = True,
 ) -> list[Board]:
     """Every supported board on USB and the LAN, each asked for sys/info.
     A silent board stays in the list with `error` set."""
@@ -533,9 +559,16 @@ def discover(
         only = {p for p in os.environ.get("MW_HIL_PORTS", "").split(",") if p}
         found += [b for b in usb_candidates(usb_ttys(), usb_devices()) if not only or b.address in only]
     if lan:
-        found += mw.scout(scout_seconds)
-        if mdns:
-            found += dnssd_browse(scout_seconds)
+        # Zenoh scouting and DNS-SD listen at the same time: one window, not two.
+        from concurrent.futures import ThreadPoolExecutor
+
+        if scout:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                scouted = pool.submit(mw.scout, scout_seconds)
+                announced = pool.submit(dnssd_browse, scout_seconds) if mdns else None
+                found += scouted.result()
+                if announced is not None:
+                    found += announced.result()
         found += parse_lan_env(os.environ.get("MW_HIL_LAN", ""))
     seen, out = set(), []
     for b in found:

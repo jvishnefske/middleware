@@ -72,7 +72,13 @@ def test_payload_capacity(board: Board):
 
 
 def test_trust_info(board: Board, mwctl: Mwctl):
-    need_info(board)
+    info = need_info(board)
+    if board.transport.startswith("zenoh") and info["chip"].startswith("linux-"):
+        # A posix node serves its sys keys over Zenoh through its gateway,
+        # whose allowlist never opens an update or trust key
+        # (gateway/src/bridge.rs, `gw/sys`): sys/trust/info is for an
+        # authenticated updater, or the node's own serial port.
+        pytest.skip(f"{info['chip']} over Zenoh: sys/trust/info is not served to anonymous LAN requests")
     r = mwctl.run(board, "trust", "info")
     if r.returncode != 0 and "built without `trust`" in r.stderr:
         # The firmware reports it was built without signed payloads.

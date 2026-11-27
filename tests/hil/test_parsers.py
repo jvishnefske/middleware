@@ -173,6 +173,24 @@ def test_kd240_console_is_matched_by_product_and_interface_only(tmp_path):
     assert B.usb_kind(0x0403, 0x6001) is not None  # the generic FT232R bridge
 
 
+def test_interface_number_is_found_on_the_port_node_too(tmp_path):
+    """Current kernels: the tty's device link is the usb-serial port node under
+    the interface (X-Y:1.N/ttyUSB1), and bInterfaceNumber sits on the interface."""
+    usb = tmp_path / "devices/usb1/1-4"
+    iface = usb / "1-4:1.1"
+    port = iface / "ttyUSB1"
+    port.mkdir(parents=True)
+    (iface / "bInterfaceNumber").write_text("01\n")
+    for k, v in (("idVendor", "0403"), ("idProduct", "6011"), ("product", "KD Carrier Card"), ("serial", "XFL1HM3KDKK1")):
+        (usb / k).write_text(v + "\n")
+    (tmp_path / "class/tty/ttyUSB1").mkdir(parents=True)
+    (tmp_path / "class/tty/ttyUSB1/device").symlink_to(port)
+    (t,) = B.usb_ttys(tmp_path)
+    assert t["interface"] == 1
+    (b,) = B.usb_candidates([t], [])
+    assert b.kind.family == "kd240-console"
+
+
 def test_kd240_console_board_is_a_linux_board_not_installed(tmp_path):
     """The KD240 console is found, and provisioning skips it (deployed by
     `just os-update`) rather than failing."""
