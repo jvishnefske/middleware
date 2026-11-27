@@ -265,6 +265,11 @@ jobs:
         run: |
           has="$(nix eval --json .#packages.x86_64-linux --apply 'p: p ? x86-base-image')"
           echo "image=$has" >> "$GITHUB_OUTPUT"
+      # systemd-repart builds the image in a user namespace, which Ubuntu's
+      # AppArmor default denies to unprivileged processes (the nix builder).
+      - if: steps.present.outputs.image == 'true'
+        name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - if: steps.present.outputs.image == 'true'
         name: Build and compress
         run: |

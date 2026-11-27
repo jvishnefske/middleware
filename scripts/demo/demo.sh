@@ -225,7 +225,7 @@ vm() {
 
 up() {
   mkdir -p "$W"
-  for c in docker openssl softhsm2-util python3 curl; do need "$c" "see docs/demo.md"; done
+  for c in docker openssl softhsm2-util pkcs11-tool python3 curl; do need "$c" "see docs/demo.md"; done
   docker info >/dev/null 2>&1 || die "docker is not usable by this user"
   build
   pki
