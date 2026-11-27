@@ -1,6 +1,6 @@
 """The Kria KD240 on this machine: its console (USB, 0403:6011 "KD Carrier
 Card" interface 01) or its posix-node on the LAN (DNS-SD _mw-node._tcp, or
-MW_HIL_LAN), asked for sys/info and sys/board.
+MW_HIL_LAN), asked for sys/info, its manifest's board and sys/os.
 
     just kd240
 """
@@ -35,16 +35,25 @@ def main() -> int:
         for k in ("chip", "firmware", "ABI", "node", "payload status"):
             if k in (b.info or {}):
                 print(f"  {k}: {b.info[k]}")
-        for args in (["board"], ["os", "info"]):
-            r = mw.run(b, *args, timeout=30)
+        # A posix-node has no chip profile, so `sys/board` is NotFound there by
+        # design (posix-node/src/service.rs): its manifest names the board.
+        r = mw.run(b, "manifest", timeout=30)
+        named = [ln.split(":", 1)[1].strip() for ln in (r.stdout or "").splitlines() if ln.startswith("board:")]
+        if r.returncode == 0 and named:
+            print(f"  board: {named[0]}")
+        else:
             text = (r.stdout or r.stderr).strip()
-            if r.returncode != 0:
-                # `os info` needs the Linux root's update service (design.md).
-                print(f"  {' '.join(args)}: {text.splitlines()[-1] if text else 'no answer'}")
-                if args == ["board"]:
-                    status = 1
-                continue
-            print(f"  {' '.join(args)}:")
+            print(f"  board: {text.splitlines()[-1] if text else 'no answer'}")
+            status = 1
+        # `os info` needs the Linux root's update service (an A/B card,
+        # design.md): on a single-root card the key is not served.
+        r = mw.run(b, "os", "info", timeout=30)
+        text = (r.stdout or r.stderr).strip()
+        if r.returncode != 0:
+            last = text.splitlines()[-1] if text else "no answer"
+            print(f"  os info: {'not an A/B root (sys/os is not served)' if 'NotFound' in last else last}")
+        else:
+            print("  os info:")
             for ln in text.splitlines():
                 print(f"    {ln}")
     return status
