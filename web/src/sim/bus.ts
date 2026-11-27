@@ -14,6 +14,9 @@
 //   node id the key names (`unit/<node>/...`), else to the online unit
 //   serving the key exactly; `null` when no online unit takes it (the
 //   request is lost, as on a network: the caller's deadline notices).
+// * Internal keys: a publication on `ch/...` or `drv/...` (a channel's
+//   local source, a driver point) belongs to the node that made it. The
+//   bus's listeners hear it; no other unit does, as no link carries it.
 // * Online: `setOnline(unit, false)` takes a unit off the network (its
 //   payload keeps running; its publications and requests to it are lost)
 //   for "lose unit" in the recipe run panel; `true` brings it back.
@@ -146,6 +149,7 @@ export class SimBus {
         // The sender's node id, so a unit's channel bound to a remote node
         // takes that node's publications only (ABI 8).
         const node = m.node ?? this.unit(m.from)?.session.nodeId;
+        if (this.proto.isInternalKey(m.key)) continue;
         for (const u of this.units) {
           if (u.id !== m.from && u.online && !u.session.trapped) u.session.deliver(m.key, m.data, node);
         }

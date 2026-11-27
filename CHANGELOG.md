@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Browser mesh: payload channels between browsers (BM1–BM12)
+- web: pages that join the same room find each other through a PeerJS-compatible signalling server and link over WebRTC data channels; their payloads' channels connect by name (`room/<room>/<name>`), with no binding made by hand and no restart when peers come and go. `web/src/mesh/` (`signal.ts`, `rtc.ts`, `discovery.ts`, `mesh.ts`, `nodeId.ts`) and the Room panel beside the Editor's simulator (`ui/roomPanel.ts`). No new npm dependency and no server in the repository (`docs/browser-mesh.md`).
+- protocol-wasm: new module `mesh` (pure, tested natively): room keys and the automatic binding, the gate (no `sys/`, `ch/`, `drv/` keys and at most 512 bytes, both ways), the three read-only hello keys (`sys/info`, `sys/manifest`, `sys/payload/channels`), peer ids, the dial rule and the 16-link limit, the PeerJS messages and URLs, the rendezvous hub's messages, and the comparison of a peer's channels with the page's. Exports `mesh*`, `encodeDatagram`, `decodeDatagram`, `channelsSection`, `decodeChannels`, `isInternalKey`; `simulatorManifest(node, mesh)`.
+- Discovery asks the server for its peer list first and falls back to a rendezvous peer (`mw-<room>-hub`) when the server does not list. A board on Web Serial publishes into the room; nothing from the room goes to a board. Peers are not authenticated: the room carries channel data only.
+- middleware: `LinkKind::WEBRTC` (manifest link kind 4, `webrtc`).
+- web: the page's node id is random and kept in `localStorage` (the Editor's simulator used `0000000000000001`). `SimBus` no longer forwards node-internal keys (`ch/`, `drv/`) between units. `MixedNet.detach`.
+- design.md: the channels section said "at most eight"; it is sixteen.
+
 ### Multi-rate signal wirings and accelerated SIL in the browser (SP1–SP9, MS1–MS9, TU1–TU5, TR1–TR3, SIL1–SIL22)
 - `wire-core`: channels carry `i32` (a boolean is 0/1). New kinds from one table (`spec.rs`) that check, text, plan and the compiler share: sources `analog` (`adc_read`) and `const`; sink `pwm`; stateless `add sub mul min max abs gt lt ge le eq ne select scale clamp`; stateful `delay lowpass mean diff hyst debounce rising falling count latch ton`. Function inputs are ordered by edge order.
 - Multi-rate: every source, function and sink may have `period_ms`, a multiple of the wiring's scan period (text `@100ms`); channels hold their last value, so rate transitions are sample and hold. `mean` is an integrate-and-dump decimator.

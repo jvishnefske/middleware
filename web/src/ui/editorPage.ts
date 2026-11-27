@@ -1,7 +1,9 @@
 // Editor tab (U5, U6, D10): CodeMirror with WAT/AssemblyScript, in-browser
 // compile, simulator with virtual GPIO (input switches raise interrupt
 // edges), ABI 2 peripherals (timers view, SPI device panel, UART terminal,
-// interrupt queue counters), and hand-off to the Device tab.
+// interrupt queue counters), and hand-off to the Device tab. The simulated
+// payload runs on the Room panel's network (roomPanel.ts, design.md BM): as
+// this page's node, with its channels in the room when one is named.
 
 import { javascript } from "@codemirror/lang-javascript";
 import { Compartment } from "@codemirror/state";
@@ -10,15 +12,19 @@ import { checkAbi } from "../editor/abiCheck";
 import { type Language, compile } from "../editor/compile";
 import { template, templateNames } from "../editor/templates";
 import type { PinState, SimEvent } from "../protocol/wasm";
-import { type PeripheralView, SimSession, ledColours } from "../sim/session";
+import { pageNodeId, pageStorage } from "../mesh/nodeId";
+import { type PeripheralView, type SimSession, ledColours } from "../sim/session";
 import type { App } from "./app";
 import { errorText, formatBytes, h, parseHex } from "./dom";
+import { roomPanel } from "./roomPanel";
 
 export function editorPage(app: App): HTMLElement {
   const { proto } = app;
   let lang: Language = "wat";
   let compiled: Uint8Array | null = null;
   let session: SimSession | null = null;
+  const room = roomPanel({ proto, node: pageNodeId(), storage: pageStorage() });
+  app.onBoard((b) => room.setBoard(b?.requester ?? null));
 
   const langMode = new Compartment();
   const view = new EditorView({
@@ -261,7 +267,7 @@ export function editorPage(app: App): HTMLElement {
   }
 
   function stopSim() {
-    session?.dispose();
+    room.stop();
     session = null;
     stopSimBtn.disabled = simSend.disabled = uartSend.disabled = true;
   }
@@ -272,7 +278,7 @@ export function editorPage(app: App): HTMLElement {
     msgLog.textContent = "";
     uartLog.textContent = "";
     try {
-      session = new SimSession(proto, compiled, {
+      session = room.run(compiled, {
         onEvent,
         onPins: renderPins,
         onPeripherals: renderPeripherals,
@@ -282,7 +288,6 @@ export function editorPage(app: App): HTMLElement {
         },
       });
       if (spiMode.value === "pattern") applySpi();
-      session.start();
       renderPeripherals(session.peripherals());
       subsEl.textContent = `Subscriptions: ${session.subscriptions.join(", ") || "none"}`;
       stopSimBtn.disabled = simSend.disabled = uartSend.disabled = false;
@@ -342,6 +347,7 @@ export function editorPage(app: App): HTMLElement {
         subsEl,
         simForm,
         msgLog,
+        room.el,
         h("h3", {}, "Timers"),
         timersEl,
         h("h3", {}, "SPI device (bus 0)"),

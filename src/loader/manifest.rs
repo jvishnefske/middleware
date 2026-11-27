@@ -437,6 +437,9 @@ impl LinkKind {
     pub const ZENOH: LinkKind = LinkKind(2);
     /// ESP-NOW.
     pub const ESPNOW: LinkKind = LinkKind(3);
+    /// WebRTC data channels between browsers (design.md BM): one raw
+    /// frame per message, as [`crate::udp`] puts one in a datagram.
+    pub const WEBRTC: LinkKind = LinkKind(4);
 
     /// The kind's name, `None` for an unnamed code.
     pub const fn name(self) -> Option<&'static str> {
@@ -445,6 +448,7 @@ impl LinkKind {
             1 => Some("usb"),
             2 => Some("zenoh"),
             3 => Some("espnow"),
+            4 => Some("webrtc"),
             _ => None,
         }
     }

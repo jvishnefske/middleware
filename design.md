@@ -7387,8 +7387,9 @@ meet in `wasm-host`:
 3. **Bindings** (host → node). A separately signed record maps each
    channel to a local source, a key, a key from one other node, or an
    adapted stream, so a payload is rebound without re-uploading it. The
-   browser reaches other nodes through the connected board, not through a
-   transport of its own.
+   browser reaches a board's network through the connected board; its
+   one transport of its own is the browser mesh (BM, below), which links
+   pages to each other and carries channel data only.
 
 #### Manifest (MF…)
 
@@ -7464,7 +7465,7 @@ A payload declares its channels in a `mw.channels` custom section
 (`middleware::wasm_abi::channels`): `[version 1][n]`, then per channel
 its name (`a-z0-9_`, at most 24 bytes), direction, data kind (bytes,
 samples, frames), the sensor, format mask, channel count and rate range a
-samples channel accepts, and whether it is required; at most eight. The
+samples channel accepts, and whether it is required; at most sixteen. The
 section is part of the image, so the signed commit covers it. ABI 8 adds
 `channel_open(name)`, which returns an input's subscription slot (the
 first argument of `on_message`) or an output's handle (`OUTPUT_BASE +
@@ -7637,7 +7638,8 @@ takes publications only from `node`, as the link reports the sender.
   authentication: the sender is what the link reports, over Zenoh the
   publisher's own attachment, which nothing verifies (as `sys/peers` is
   what was heard). A channel whose data must be trusted needs a link that
-  authenticates its peers — `wasm-host`
+  authenticates its peers. The browser mesh (BM4) is the same: a peer's
+  node id is what the peer says it is — `wasm-host`
   `channels::tests::ch5_the_table_opens_inputs_by_slot_and_outputs_by_handle`,
   `tests/abi8.rs` `pr3_a_remote_channel_takes_its_node_only`; payload-sim
   `tests/abi8.rs` `pr3_a_remote_channel_takes_the_named_node_only`.
@@ -7695,6 +7697,146 @@ the binding's adapter on each message before `on_message`.
   adapter for a levels channel".
 - [ ] AD4 On the RT1050-EVKB: `level_meter` on the local 16 kHz PCM
   through `PcmToLevels` reads as SC8's levels route does.
+
+### Browser mesh (`web/src/mesh`, protocol-wasm `mesh`; BM…)
+
+Payloads run in the browser (`protocol-wasm` builds `wasm-host` into the
+page), but a payload in one browser could not reach a payload in another.
+Two or more browsers that open the page with the same room name now find
+each other through a PeerJS-compatible signalling server, open WebRTC data
+channels, and their payloads' channels (ABI 8) connect by name with no
+binding made by hand. No signalling server is part of this repository
+(`docs/browser-mesh.md` says how to run one), and no npm dependency was
+added: the formats and rules are Rust (`web/protocol-wasm/src/mesh.rs`,
+tested natively), and a thin TypeScript layer owns the `WebSocket` and the
+`RTCPeerConnection` (`web/src/mesh/`), both injected so the tests run
+against an in-memory server and paired fake data channels.
+
+**On the wire.** One data-channel message is one raw frame, exactly as a
+UDP datagram carries one (`middleware::udp`: no COBS, CRC-16). Channels
+are ordered and reliable. Publish frames carry channel data; a frame has
+no sender field, so the sender of everything on a connection is the node
+its peer id names. A page's manifest lists the link as kind 4, `webrtc`.
+
+**By name.** At payload start every declared channel the user has not
+bound is bound to the key `room/<room>/<name>`: an output publishes there,
+an input subscribes there and takes any sender. Peers therefore only
+forward publications; nobody is rebound or restarted when a peer joins or
+leaves. A binding the user made (a remote one too) is left as it is.
+
+**The gate.** A publication leaves the page, or is taken from a peer,
+only if its key is neither `sys/...` nor node-internal (`ch/...`,
+`drv/...`) and it is at most 512 bytes. A peer may ask for `sys/info`,
+`sys/manifest` and `sys/payload/channels` (the payload's `mw.channels`
+section bytes); every other request is answered `NotFound`. Nothing from
+a peer is passed to a request handler or written to a serial port. A
+board connected on Web Serial publishes into the room under the same gate;
+nothing from the room goes to a board.
+
+**Not authenticated.** Anyone who knows a room's name can join it, and a
+node id is what the peer says it is (as PR3 says of remote channels). The
+room is therefore data only: no system keys, no control, no installs.
+WebRTC's DTLS encrypts each link; it does not say who the peer is.
+
+**Finding each other.** A node's id on the server is `mw-<room>-<node16>`
+(the page's node id is eight random bytes kept in `localStorage`). The
+page first asks the server for its peer list (`GET <path><key>/peers`, a
+server started with `allow_discovery`). If the server refuses, the room
+meets at a rendezvous: the page that registers the id `mw-<room>-hub` on a
+second socket is the hub, every other page opens a data channel to it,
+says its id, and receives the list of ids on every change. When the hub
+goes, its members each wait a random time and try to register the id; the
+first is the next hub. The lower id dials, so two offers never cross. A
+node holds at most sixteen links.
+
+- [x] BM1 A room name is 1 to 24 of `a-z`, `0-9`, `_`; a channel's room
+  key is `room/<room>/<name>` and is always a valid key within
+  `MAX_KEY_LEN` — protocol-wasm `mesh::tests::bm1_rooms_and_room_keys`.
+- [x] BM2 `auto_binding` binds every declared channel an existing record
+  leaves unbound to its room key and keeps the user's entries (image hash
+  and version too); without a record it makes one for the image at version
+  0. Two pages running payloads with a same-named output and input
+  exchange data with no binding made by hand —
+  `mesh::tests::bm2_unbound_channels_bind_to_their_room_key_and_user_entries_stay`;
+  `web/test/mesh.test.ts`: "a payload's output reaches the same-named
+  input in another browser, with the sender's node, and no binding made by
+  hand".
+- [x] BM3 The gate, both ways: `sys/...`, `ch/...` and `drv/...` keys,
+  publications over 512 bytes, text messages and bytes that are not a
+  frame are refused and counted; none of it reaches a board (no request,
+  no publish frame on its port); a board's publications reach the room,
+  its `sys/...` ones do not. `SimBus` no longer forwards node-internal keys
+  between units either —
+  `mesh::tests::bm3_the_gate_refuses_system_and_internal_keys_both_ways`,
+  `bm3_oversize_and_malformed_messages_are_refused`; `mesh.test.ts`:
+  "refuses and counts what a peer may not send, and none of it reaches a
+  board; the board's publications reach the room", "the simulator bus
+  keeps node-internal keys to the unit that published them".
+- [x] BM4 Only the three hello keys are asked and answered; any other
+  request is answered `NotFound` and counted. A peer's publications are
+  taken only once its `sys/info` has named the node of its id, and are
+  delivered with that node as sender (`deliver_from`); a peer whose
+  `sys/info` names another node is dropped. This is routing, not
+  authentication —
+  `mesh::tests::bm4_only_the_three_hello_keys_are_asked_and_answered`;
+  `mesh.test.ts`: "a peer whose sys/info names another node than its id is
+  dropped".
+- [x] BM5 The page's node id is random, kept in `localStorage`, never all
+  zero, and replaced when what is stored is not an id; a second tab with
+  the same id is told the id is in the room already. Peer ids name the
+  room and the node; ids of other rooms, the hub and strangers are not
+  peers — `mesh::tests::bm5_peer_ids_name_the_room_and_the_node`;
+  `mesh.test.ts`: "is random, kept, and replaced when what is stored is
+  not an id", "a second tab with the same node id is told so".
+- [x] BM6 The lower id dials; an offer from a higher id, from another
+  room or from a stranger is not answered —
+  `mesh::tests::bm6_the_lower_id_dials_and_a_node_holds_sixteen_links`;
+  `mesh.test.ts`: "an offer from the wrong side or from outside the room
+  is not answered".
+- [x] BM7 Signalling speaks the PeerJS server protocol in the shapes a
+  stock `peerjs-server` relays (`OPEN`, `ID-TAKEN`, `ERROR`, `HEARTBEAT`
+  every 5 s, `OFFER`, `ANSWER`, `CANDIDATE`, `LEAVE`, `EXPIRE`; a data
+  connection with `serialization: "raw"`), with its own small JSON reader
+  (strict, depth limited) and URLs built only from URL-safe parts. A
+  dropped signalling socket is reconnected with the links kept —
+  `mesh::tests::bm7_server_urls`,
+  `bm8_peerjs_messages_have_the_servers_shapes`,
+  `bm8_json_reads_and_writes_what_the_messages_need`; `mesh.test.ts`: "an
+  unreachable server is a failure to join, and a dropped socket is
+  reconnected with the links kept".
+- [x] BM8 Discovery: the server's listing first; when refused, the
+  rendezvous hub, which lists a member only under the id its offer came
+  from; a member takes over when the hub leaves, and a newcomer then
+  learns the room from the new hub — `mesh::tests::bm9_hub_messages`;
+  `mesh.test.ts`: "a server that lists nothing: the first page is the hub,
+  a newcomer learns the room, and a member takes over when the hub
+  leaves", "a hub lists a member only under the id its offer came from".
+- [x] BM9 A node links at most sixteen peers, lowest ids first; the rest
+  of the room is listed, not dialled. Up to seventeen pages a room is a
+  full mesh; beyond that some pairs are not linked (the page with the
+  highest id is linked to nobody in a room of eighteen), and nothing is
+  relayed — `mesh.test.ts`: "a node links sixteen peers; the seventeenth
+  is listed, not dialled".
+- [x] BM10 The Room panel beside the Editor's simulator: server, key and
+  room, Join and Leave, this page's node id, each peer with its channels
+  and how they pair with the page's (same name, opposite direction, kind
+  and sample constraints that fit; a mismatch is shown, not enforced), and
+  the counters. The simulated payload runs as this page's node on the
+  panel's network, and a payload without a `mw.channels` section gets the
+  declarations typed in the panel —
+  `mesh::tests::bm10_a_peers_channels_are_compared_by_name`;
+  `web/test/roomPanel.test.ts`.
+- [x] BM11 A page's manifest lists the WebRTC link (kind 4, `webrtc`;
+  readers that do not know the code keep it) — protocol-wasm
+  `simulator::tests::bm11_a_page_in_a_room_lists_its_webrtc_link`.
+- [ ] BM12 By hand, two real browsers: against a local `peerjs` server
+  with `--allow_discovery`, against the public PeerJS server (the
+  rendezvous path), and with a board on Web Serial in one of them.
+
+Not in this change: authentication or signed channel data; room data to
+boards; `sys/` over the room; TURN (browsers behind symmetric NAT do not
+connect without one; the ICE list is an option of `Mesh`); relaying
+between peers that cannot reach each other.
 
 ### Machine channels and control modules (ABI 9; MC…, CM…)
 

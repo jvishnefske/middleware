@@ -42,6 +42,7 @@ The rustdoc of each backend is the authority; this is a summary of it.
 | `serial::link` | yes | drop newest (inbox), per-sender order | no clock: caller bounds the call | ignored (one peer) | no | configured peer / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | none |
 | `smbus` | yes (broadcast, general call) | drop newest (inbox), per-sender order | honoured (node clock), default 1 s; deadline carried | yes (SMBus address) | no | node address / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | reported, per sender |
 | `espnow` | yes | drop newest, per-sender order | — (no request/response) | — | no | MAC / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | none |
+| browser mesh (`web/src/mesh`, WebRTC data channels between pages) | yes (channel data only: no `sys/`, `ch/`, `drv/` keys) | reliable, ordered per peer | three read-only hello keys, 5 s | — | no | the node the peer's id names, self-asserted / none | its id on a PeerJS-compatible server | the server's listing, or a rendezvous peer | none |
 | `ble` GATT | server notifies, client subscribes | drop newest, per-sender order | no clock: caller bounds the call | ignored (one peer) | no | server sees the link's peer / none | — | — | none |
 | `ble::advert` | yes | drop newest, no per-sender order | — | — | no | advertiser address / none | `PubSubDiscovery` beacons | `PubSubDiscovery` | none |
 | `mdns` | — | — | — | — | — | — | `MdnsAnnouncer` | `MdnsSocket` (exact kinds) | — |
@@ -446,7 +447,7 @@ the VMs are rebuilt on an isolated bridge.
 | `tools/payload-sim/` | run a payload on the desktop: `cargo run -p payload-sim -- x.wasm` |
 | `tools/jpeg-fixtures/` | regenerate (or `--check`) the fake camera's baked JPEG frames in `fixtures/cam/` (8 frames at 240×240 and 120×120, baseline 4:2:0): `cargo run -p jpeg-fixtures` |
 | `payloads/`          | Rust payload SDK, examples, WAT and AssemblyScript templates |
-| `web/`               | Start guide (try Blink in the simulator, per-board setup), flasher, device console/uploader, editor, Blocks visual editor and simulator (`npm run dev`; `web/check.sh`) |
+| `web/`               | Start guide (try Blink in the simulator, per-board setup), flasher, device console/uploader, editor, Blocks visual editor and simulator, and the browser mesh: payload channels between browsers in a room (`docs/browser-mesh.md`) (`npm run dev`; `web/check.sh`) |
 
 Flash the base firmware once from the web page (Chrome or Edge, Web Serial),
 then load payloads over the same USB port, whether it is a CP2102/CH340
