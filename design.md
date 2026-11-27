@@ -6658,10 +6658,27 @@ the same root key, channel and cert as the MCU payloads and firmware
   Zenoh node (`zlink::target`, pinned by a test). Over the local serial port
   they take no signature: serial is physical access, and it is the path that
   re-provisions the key (`sys/trust/claim`). An unclaimed node takes them
-  unsigned (trust on first use, as for `sys/fw`). `begin` and `chunk` need no
+  unsigned over the serial port (trust on first use, as for `sys/fw`); over
+  the network see OS5b. `begin` and `chunk` need no
   signature: they write only the inactive slot, and `commit` (the root cert)
   is the authority for what gets installed. *(`os_ab::wire` tests, posix-node
   `network_control_needs_the_pinned_key_and_a_new_counter`)*
+- [x] OS5b **Over the network only a claimed node changes its root.** With
+  no pinned key nothing authenticates a Zenoh request, so an unclaimed node
+  (or one whose trust record cannot be read) answers `sys/os/info` there and
+  refuses `begin`, `chunk`, `commit`, `reboot`, `confirm` and `abort`
+  (`Denied`); the serial port still takes them. Claim the node first (over
+  serial), then `mwctl os update` over the LAN. On a claimed node a network
+  `begin` for another image does not replace a transfer that moved in the
+  last 60 s (`Unavailable`; the same `begin` resumes it), so an anonymous
+  peer cannot cut an update short. The node serves the seven keys per node
+  over Zenoh when it has a root, straight to its controller (posix-node
+  `sysnode.rs`, as `sys/cert/*`): beside the gateway's allowlist, not in
+  it, because a chunk is 64 KiB and the gateway's frames are 1 KiB; the
+  wait is the caller's deadline, at most 15 min (`commit` hashes the slot).
+  *(posix-node `an_unclaimed_node_takes_only_info_over_the_network`,
+  `a_network_begin_does_not_replace_a_transfer_under_way`, `sysnode::tests`,
+  `pn20_a_root_is_written_and_committed_over_zenoh`)*
 - [x] OS6 Host tools: `mwctl os info|update <IMAGE> [CERT] --version N|reboot|
   confirm|abort`, over any link (serial, Zenoh, UDP). `os update` writes and
   commits; `os reboot`, `os confirm` and `os abort` take `--key` or `--pkcs11`

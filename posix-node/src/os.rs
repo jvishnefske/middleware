@@ -8,7 +8,8 @@
 //!
 //! * `begin` writes only the inactive slot (the one the running root is not
 //!   on). A transfer lives in memory; a restart drops it, and the host
-//!   begins again.
+//!   begins again. Over the network a `begin` for another image does not
+//!   replace a transfer that moved in the last [`TRANSFER_IDLE`].
 //! * `chunk` writes at the offset; a chunk already received is acknowledged.
 //! * `commit` reads the written slot back and compares its SHA-256 with the
 //!   declared one; on a claimed device it also needs the root-signed
@@ -23,11 +24,17 @@
 //! * `abort` drops a transfer or a ready slot; from a trial it writes the
 //!   old slot back as active and reboots into it.
 //!
+//! Over the network (Zenoh) an unclaimed node answers `info` and nothing
+//! else: without a pinned key nothing authenticates the request, so
+//! writing, committing and booting a root are left to the local serial
+//! port (physical access, trust on first use) until the node is claimed.
+//!
 //! When the trial is never confirmed, U-Boot runs out of tries and boots the
 //! committed slot again: the next start reports [`StateCode::RolledBack`].
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use middleware::Key;
 use middleware::SenderId;
@@ -46,6 +53,9 @@ pub const RECORD_MAGIC: &[u8; 4] = b"MWOS";
 pub const RECORD_FORMAT: u8 = 1;
 /// The record's file name in the state directory.
 pub const RECORD_FILE: &str = "os-record";
+/// How long a transfer must have been still before a network `begin` for
+/// another image may replace it (as the gateway frees an idle transfer).
+pub const TRANSFER_IDLE: Duration = Duration::from_secs(60);
 
 /// The two slots, the boot state and the reboot, as the root needs them.
 /// The KD240's are the card's partitions and gap sectors; a host test uses
@@ -151,6 +161,8 @@ struct Transfer {
     sha256: [u8; 32],
     got: Vec<bool>,
     count: usize,
+    /// When it began or last took a chunk.
+    moved: Instant,
 }
 
 impl Transfer {
@@ -297,7 +309,8 @@ impl OsUpdates {
     /// `chips` are the names a release cert may target (the chip, and the
     /// board when known); `network` is whether the request came over the
     /// network (a claimed node then needs control requests signed by its
-    /// pinned key) rather than the local serial port.
+    /// pinned key; an unclaimed one answers only `info`) rather than the
+    /// local serial port.
     pub fn handle(
         &mut self,
         key: Key<'_>,
@@ -307,7 +320,14 @@ impl OsUpdates {
         network: bool,
         out: &mut [u8],
     ) -> Result<usize, HandlerError> {
-        match Command::parse(key, body)? {
+        let command = Command::parse(key, body)?;
+        // Over the network only a claimed node changes its root: without a
+        // pinned key nothing authenticates the request.
+        let claimed = matches!(trust, Some(TrustState::Claimed { .. }));
+        if network && !claimed && !matches!(command, None | Some(Command::Info)) {
+            return Err(HandlerError::Denied);
+        }
+        match command {
             None => Err(HandlerError::NotFound),
             Some(Command::Info) => self
                 .info()
@@ -318,7 +338,7 @@ impl OsUpdates {
                 len,
                 version,
                 sha256,
-            }) => self.begin(len, version, sha256, out),
+            }) => self.begin(len, version, sha256, network, out),
             Some(Command::Chunk { offset, data }) => self.chunk(offset, data),
             Some(Command::Commit { cert }) => self.commit(cert, trust, chips),
             Some(Command::Reboot { control }) => {
@@ -365,12 +385,16 @@ impl OsUpdates {
         len: u32,
         version: Version,
         sha256: [u8; 32],
+        network: bool,
         out: &mut [u8],
     ) -> Result<Option<usize>, HandlerError> {
         let target = self.running().other();
         if let Some(t) = &self.transfer {
             if t.target == target && t.len == len && t.version == version && t.sha256 == sha256 {
                 return reply_slot(out, target).map(Some); // a resent begin resumes
+            }
+            if network && t.moved.elapsed() < TRANSFER_IDLE {
+                return Err(HandlerError::Unavailable); // another transfer is under way
             }
         }
         match self.state() {
@@ -402,6 +426,7 @@ impl OsUpdates {
             sha256,
             got: vec![false; chunks],
             count: 0,
+            moved: Instant::now(),
         });
         reply_slot(out, target).map(Some)
     }
@@ -428,6 +453,7 @@ impl OsUpdates {
         if let Some(t) = self.transfer.as_mut() {
             t.got[index] = true;
             t.count += 1;
+            t.moved = Instant::now();
         }
         Ok(None)
     }
@@ -786,15 +812,36 @@ mod tests {
         }
     }
 
-    /// One request, answered: the reply bytes or the error.
+    /// One request over the local serial port, answered: the reply bytes
+    /// or the error.
     fn call(
         os: &mut OsUpdates,
         key: middleware::Key<'static>,
         body: &[u8],
         trust: Option<&TrustState>,
     ) -> Result<Vec<u8>, HandlerError> {
+        call_on(os, key, body, trust, false)
+    }
+
+    /// [`call`] over the network (Zenoh).
+    fn call_net(
+        os: &mut OsUpdates,
+        key: middleware::Key<'static>,
+        body: &[u8],
+        trust: Option<&TrustState>,
+    ) -> Result<Vec<u8>, HandlerError> {
+        call_on(os, key, body, trust, true)
+    }
+
+    fn call_on(
+        os: &mut OsUpdates,
+        key: middleware::Key<'static>,
+        body: &[u8],
+        trust: Option<&TrustState>,
+        network: bool,
+    ) -> Result<Vec<u8>, HandlerError> {
         let mut out = vec![0u8; 64];
-        let n = os.handle(key, body, trust, &[CHIP], true, &mut out)?;
+        let n = os.handle(key, body, trust, &[CHIP], network, &mut out)?;
         Ok(out[..n].to_vec())
     }
 
@@ -1305,7 +1352,7 @@ mod tests {
         let denied = Err(HandlerError::Denied);
         let reboot = |os: &mut OsUpdates, c: Option<SignedControl>| {
             let body = c.map(|c| c.encode().to_vec()).unwrap_or_default();
-            call(os, keys::REBOOT, &body, Some(&trust))
+            call_net(os, keys::REBOOT, &body, Some(&trust))
         };
         // Unsigned, and signed by another key: refused, nothing rebooted.
         assert_eq!(reboot(&mut os, None), denied);
@@ -1350,6 +1397,95 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(os.record().control, 1, "serial takes no counter");
+    }
+
+    /// Over the network an unclaimed node answers `info` and refuses every
+    /// request that writes, commits or boots a root; over the serial port
+    /// the same requests are taken (trust on first use).
+    #[test]
+    fn an_unclaimed_node_takes_only_info_over_the_network() {
+        let dir = scratch("unclaimed-net");
+        let card = MemDevice::new(4 * CHUNK_LEN);
+        let mut os = restart(&card, &dir);
+        let unclaimed = Some(&TrustState::Unclaimed);
+        let img = image(300, 13);
+        let begin_body = encoded(Command::Begin {
+            len: img.len() as u32,
+            version: Version(V1),
+            sha256: sha(&img),
+        });
+        let chunk_body = encoded(Command::Chunk {
+            offset: 0,
+            data: &img,
+        });
+        assert!(call_net(&mut os, keys::INFO, &[], unclaimed).is_ok());
+        for (key, body) in [
+            (keys::BEGIN, &begin_body[..]),
+            (keys::CHUNK, &chunk_body[..]),
+            (keys::COMMIT, &[][..]),
+            (keys::REBOOT, &[][..]),
+            (keys::CONFIRM, &[][..]),
+            (keys::ABORT, &[][..]),
+        ] {
+            assert_eq!(
+                call_net(&mut os, key, body, unclaimed),
+                Err(HandlerError::Denied),
+                "{}",
+                key.as_str()
+            );
+            // An unreadable trust record is no better.
+            assert_eq!(
+                call_net(&mut os, key, body, None),
+                Err(HandlerError::Denied)
+            );
+        }
+        assert_eq!(info(&mut os).state, StateCode::Idle, "nothing began");
+        // The serial port is physical access: the same root installs.
+        call(&mut os, keys::BEGIN, &begin_body, unclaimed).unwrap();
+        call(&mut os, keys::CHUNK, &chunk_body, unclaimed).unwrap();
+        call(&mut os, keys::COMMIT, &[], unclaimed).unwrap();
+        assert_eq!(info(&mut os).state, StateCode::Committed);
+    }
+
+    /// Over the network a `begin` for another image does not replace a
+    /// transfer under way; the same `begin` resumes it, and the serial port
+    /// may start over.
+    #[test]
+    fn a_network_begin_does_not_replace_a_transfer_under_way() {
+        let dir = scratch("replace");
+        let card = MemDevice::new(4 * CHUNK_LEN);
+        let mut os = restart(&card, &dir);
+        let trust = TrustState::Claimed {
+            key: root_key(),
+            min_version: Version(0),
+        };
+        let begin_of = |img: &[u8], v: u32| {
+            encoded(Command::Begin {
+                len: img.len() as u32,
+                version: Version(v),
+                sha256: sha(img),
+            })
+        };
+        let (first, other) = (image(CHUNK_LEN + 10, 1), image(500, 2));
+        assert_eq!(
+            call_net(&mut os, keys::BEGIN, &begin_of(&first, V1), Some(&trust)),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            call_net(&mut os, keys::BEGIN, &begin_of(&other, V2), Some(&trust)),
+            Err(HandlerError::Unavailable),
+            "another image waits for the transfer"
+        );
+        assert_eq!(
+            call_net(&mut os, keys::BEGIN, &begin_of(&first, V1), Some(&trust)),
+            Ok(vec![1]),
+            "a resent begin resumes"
+        );
+        assert_eq!(
+            call(&mut os, keys::BEGIN, &begin_of(&other, V2), Some(&trust)),
+            Ok(vec![1]),
+            "the serial port starts over"
+        );
     }
 
     /// The node's control target is the one `mwctl` signs for (its zlink

@@ -642,9 +642,16 @@ async fn pn19_a_chain_larger_than_a_frame_installs_over_zenoh() {
 /// `mwctl os update` over Zenoh: a node with a Linux A/B root serves
 /// `sys/os/*` per node straight from its controller (sysnode.rs), beside the
 /// gateway's allowlist, so a full 64 KiB chunk (a serial frame is 1 KiB)
-/// arrives; the root is written into the inactive slot and committed.
+/// arrives. Unclaimed, the node answers only `info` over the network; once
+/// claimed over its local link, a root signed by the pinned key is written
+/// into the inactive slot and committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn pn20_a_root_is_written_and_committed_over_zenoh() {
+    use ed25519_dalek::Signer;
+    use middleware::loader::release::{
+        COMMIT_BODY_MAX, CertKind, RELEASE_MESSAGE_MAX, SignedCert, SoftwareCert, release_message,
+    };
+    use middleware::loader::trust::Signature;
     use middleware::os_ab::bootstate::Slot;
     use middleware::os_ab::wire::{CHUNK_LEN, Command, OsInfo, StateCode, keys as os_keys};
     use middleware::transport::Target;
@@ -654,7 +661,7 @@ async fn pn20_a_root_is_written_and_committed_over_zenoh() {
     let state = state_dir("os");
     let (mut cluster, session) = zenoh_pair().await;
     let front = ZenohTransport::new(session.session().clone()).with_sender(NODE);
-    let (_local_test, local_node) = pair();
+    let (local_test, local_node) = pair();
     let config = gateway_config(&state);
     let store = ControlStore::in_dir(&config.state_dir);
     let floor = control_floor(&store, wall_clock_ms());
@@ -676,6 +683,7 @@ async fn pn20_a_root_is_written_and_committed_over_zenoh() {
         store,
     };
     let (pi, sys) = start(device, gateway, session).await.expect("start");
+    let mut local: Local = SerialLink::with_inbox(local_test);
     // What app.rs serves on a node with a root: the allowlist and the root's
     // keys (sys/info is in both lists' reach, served once).
     let keys_served = config
@@ -729,17 +737,37 @@ async fn pn20_a_root_is_written_and_committed_over_zenoh() {
         (Slot::A, StateCode::Idle, Some(Slot::B))
     );
 
-    // Two chunks, the first a full one.
+    // Two chunks, the first a full one, signed by the key the node pins.
+    let version = Version(0x0001_0001);
     let image: Vec<u8> = (0..CHUNK_LEN + 1000)
         .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
         .collect();
-    let begin = Command::Begin {
+    let sha256: [u8; 32] = Sha256::digest(&image).into();
+    let begin = body(&Command::Begin {
         len: image.len() as u32,
-        version: Version(0x0001_0001),
-        sha256: Sha256::digest(&image).into(),
-    };
+        version,
+        sha256,
+    });
+
+    // Unclaimed: nothing authenticates a network request, so no root is
+    // written over Zenoh.
     assert_eq!(
-        ask(&mut cluster, &opts, os_keys::BEGIN, &body(&begin)).await,
+        ask(&mut cluster, &opts, os_keys::BEGIN, &begin).await,
+        Err(HandlerError::Denied),
+        "an unclaimed node takes no root over the network"
+    );
+
+    // Claimed over the local link (physical access).
+    local_request(
+        &mut local,
+        "sys/trust/claim",
+        test_seed().public_key().as_bytes(),
+    )
+    .await
+    .expect("claim");
+
+    assert_eq!(
+        ask(&mut cluster, &opts, os_keys::BEGIN, &begin).await,
         Ok(vec![1]),
         "the inactive slot B"
     );
@@ -754,8 +782,28 @@ async fn pn20_a_root_is_written_and_committed_over_zenoh() {
             .await
             .expect("chunk");
     }
-    // Unclaimed: committed without a cert (trust on first use).
-    ask(&mut cluster, &opts, os_keys::COMMIT, &[])
+    let cert = SoftwareCert {
+        kind: CertKind::Os,
+        target: CHIP,
+        channel: "stable",
+        version,
+        len: image.len() as u32,
+        sha256,
+    };
+    let mut buf = [0u8; RELEASE_MESSAGE_MAX];
+    let msg = release_message(&cert, &mut buf).expect("release message");
+    let signature = ed25519_dalek::SigningKey::from_bytes(test_seed().bytes())
+        .sign(msg)
+        .to_bytes();
+    let mut commit = vec![0u8; COMMIT_BODY_MAX];
+    let n = SignedCert {
+        cert,
+        signature: Signature(signature),
+    }
+    .encode(&mut commit)
+    .expect("encode cert");
+    commit.truncate(n);
+    ask(&mut cluster, &opts, os_keys::COMMIT, &commit)
         .await
         .expect("commit");
     let info = OsInfo::decode(
