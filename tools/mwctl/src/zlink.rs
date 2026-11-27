@@ -95,7 +95,9 @@ impl ZenohLink {
             .build()
             .map_err(Error::Io)?;
         let mut session = match route {
-            Route::Connect(e) => SessionConfig::new().connect(e.clone()),
+            // A client: through a router (Zenoh 1.10 does not relay between
+            // two peers of one router), and still fine to a node's listener.
+            Route::Connect(e) => SessionConfig::new().client().connect(e.clone()),
             Route::Listen(e) => SessionConfig::new().listen(e.clone()),
         };
         if let Some(t) = tls {
