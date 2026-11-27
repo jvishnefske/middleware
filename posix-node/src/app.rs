@@ -199,6 +199,7 @@ async fn run(
         }
         None => None,
     };
+    let os_served = os.is_some();
     eprintln!(
         "mw-posix-node: driver {} ({} control-module points)",
         driver.name(),
@@ -232,6 +233,14 @@ async fn run(
     let mut sys_keys = Vec::new();
     for k in gateway.sys_allow.keys() {
         sys_keys.push(k.as_str().to_owned());
+    }
+    // With a Linux A/B root, its keys too (`mwctl os update` over Zenoh,
+    // design.md OS7): straight to the controller, not through the
+    // gateway's allowlist (at most eight keys, forwarded in serial frames).
+    if os_served {
+        for k in crate::sysnode::OS_KEYS {
+            sys_keys.push(k.as_str().to_owned());
+        }
     }
     let sys_tasks = crate::sysnode::serve(
         &ZenohTransport::new(raw_session).with_sender(id),

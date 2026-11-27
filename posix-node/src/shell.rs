@@ -176,10 +176,25 @@ struct Direct {
 #[derive(Debug, Clone)]
 pub struct DirectHandle(mpsc::Sender<Direct>);
 
+/// How long [`DirectHandle::request`] waits for the device.
+pub const DIRECT_WAIT: Duration = Duration::from_secs(10);
+
 impl DirectHandle {
     /// One network request to the device; `Unavailable` when the device
-    /// thread is gone or too busy to take it.
+    /// thread is gone or too busy to take it. Waits [`DIRECT_WAIT`].
     pub async fn request(&self, key: &str, body: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+        self.request_within(key, body, DIRECT_WAIT).await
+    }
+
+    /// [`request`](Self::request), waiting at most `wait` for the answer
+    /// (`DeadlineExceeded` after it): a `sys/os/commit` reads a whole slot
+    /// back before it answers.
+    pub async fn request_within(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+        wait: Duration,
+    ) -> Result<Vec<u8>, HandlerError> {
         let (reply, answer) = oneshot::channel();
         self.0
             .try_send(Direct {
@@ -188,7 +203,7 @@ impl DirectHandle {
                 reply,
             })
             .map_err(|_| HandlerError::Unavailable)?;
-        tokio::time::timeout(Duration::from_secs(10), answer)
+        tokio::time::timeout(wait, answer)
             .await
             .map_err(|_| HandlerError::DeadlineExceeded)?
             .map_err(|_| HandlerError::Unavailable)?

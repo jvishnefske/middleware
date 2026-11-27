@@ -638,3 +638,142 @@ async fn pn19_a_chain_larger_than_a_frame_installs_over_zenoh() {
     let _ = pi.stop().await;
     let _ = std::fs::remove_dir_all(&state);
 }
+
+/// `mwctl os update` over Zenoh: a node with a Linux A/B root serves
+/// `sys/os/*` per node straight from its controller (sysnode.rs), beside the
+/// gateway's allowlist, so a full 64 KiB chunk (a serial frame is 1 KiB)
+/// arrives; the root is written into the inactive slot and committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn pn20_a_root_is_written_and_committed_over_zenoh() {
+    use middleware::os_ab::bootstate::Slot;
+    use middleware::os_ab::wire::{CHUNK_LEN, Command, OsInfo, StateCode, keys as os_keys};
+    use middleware::transport::Target;
+    use mw_posix_node::os::{MemDevice, OsUpdates, RECORD_FILE};
+    use sha2::{Digest, Sha256};
+
+    let state = state_dir("os");
+    let (mut cluster, session) = zenoh_pair().await;
+    let front = ZenohTransport::new(session.session().clone()).with_sender(NODE);
+    let (_local_test, local_node) = pair();
+    let config = gateway_config(&state);
+    let store = ControlStore::in_dir(&config.state_dir);
+    let floor = control_floor(&store, wall_clock_ms());
+    let flash = open_state_flash(&state).expect("state");
+    let card = MemDevice::new(2 * CHUNK_LEN);
+    let os = OsUpdates::open(Box::new(card.clone()), state.join(RECORD_FILE), NODE).expect("os");
+    let device = DeviceParts {
+        flash,
+        facts: facts(NODE),
+        limits: limits(1024 * 1024),
+        certs: None,
+        local: Some(local_node),
+        driver: Box::new(mw_posix_node::driver::NoDriver),
+        os: Some(os),
+    };
+    let gateway = GatewayParts {
+        bridge: config.bridge_with_floor(floor),
+        options: config.shell_options(),
+        store,
+    };
+    let (pi, sys) = start(device, gateway, session).await.expect("start");
+    // What app.rs serves on a node with a root: the allowlist and the root's
+    // keys (sys/info is in both lists' reach, served once).
+    let keys_served = config
+        .sys_allow
+        .keys()
+        .map(|k| k.as_str().to_owned())
+        .chain(mw_posix_node::sysnode::OS_KEYS.map(|k| k.as_str().to_owned()))
+        .chain(["sys/info".to_owned()])
+        .collect::<Vec<_>>();
+    let tasks = mw_posix_node::sysnode::serve(&front, &sys, &pi.direct(), keys_served)
+        .await
+        .expect("serve");
+    let opts = RequestOptions::DEFAULT
+        .with_target(Target::Node(NODE))
+        .with_timeout(Duration::from_secs(5));
+    async fn ask(
+        cluster: &mut ZenohTransport,
+        opts: &RequestOptions<'_>,
+        key: Key<'static>,
+        body: &[u8],
+    ) -> Result<Vec<u8>, HandlerError> {
+        let mut out = vec![0u8; 4096];
+        let n = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                match cluster.request_with(key, body, &mut out, opts).await {
+                    Ok(r) => return Ok(r.len()),
+                    Err(middleware::zenoh::ZenohError::Handler(e)) => return Err(e),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                }
+            }
+        })
+        .await
+        .expect("answered");
+        n.map(|n| out[..n].to_vec())
+    }
+    fn body(cmd: &Command<'_>) -> Vec<u8> {
+        let mut b = vec![0u8; 4 + CHUNK_LEN];
+        let n = cmd.encode_body(&mut b).expect("encode");
+        b.truncate(n);
+        b
+    }
+
+    let info = OsInfo::decode(
+        &ask(&mut cluster, &opts, os_keys::INFO, &[])
+            .await
+            .expect("info"),
+    )
+    .expect("decode");
+    assert_eq!(
+        (info.running, info.state, info.target),
+        (Slot::A, StateCode::Idle, Some(Slot::B))
+    );
+
+    // Two chunks, the first a full one.
+    let image: Vec<u8> = (0..CHUNK_LEN + 1000)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+        .collect();
+    let begin = Command::Begin {
+        len: image.len() as u32,
+        version: Version(0x0001_0001),
+        sha256: Sha256::digest(&image).into(),
+    };
+    assert_eq!(
+        ask(&mut cluster, &opts, os_keys::BEGIN, &body(&begin)).await,
+        Ok(vec![1]),
+        "the inactive slot B"
+    );
+    for (i, data) in image.chunks(CHUNK_LEN).enumerate() {
+        let chunk = Command::Chunk {
+            offset: (i * CHUNK_LEN) as u32,
+            data,
+        };
+        let b = body(&chunk);
+        assert!(i > 0 || b.len() > 1024, "larger than a serial frame");
+        ask(&mut cluster, &opts, os_keys::CHUNK, &b)
+            .await
+            .expect("chunk");
+    }
+    // Unclaimed: committed without a cert (trust on first use).
+    ask(&mut cluster, &opts, os_keys::COMMIT, &[])
+        .await
+        .expect("commit");
+    let info = OsInfo::decode(
+        &ask(&mut cluster, &opts, os_keys::INFO, &[])
+            .await
+            .expect("info"),
+    )
+    .expect("decode");
+    assert_eq!(info.state, StateCode::Committed);
+    assert_eq!(
+        &card.0.lock().unwrap().slots[1][..image.len()],
+        &image[..],
+        "slot B holds the image"
+    );
+
+    for t in tasks {
+        t.abort();
+    }
+    let _ = pi.stop().await;
+    let _ = std::fs::remove_dir_all(&state);
+}
