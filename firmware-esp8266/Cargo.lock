@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "board-pins"
-version = "0.1.0"
+version = "26.11.21"
 
 [[package]]
 name = "byteorder"
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "esp-base"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "board-pins",
  "embedded-storage",
@@ -349,7 +349,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "firmware-esp8266"
-version = "0.6.0"
+version = "26.11.21"
 dependencies = [
  "ed25519-dalek",
  "embedded-hal",
@@ -444,7 +444,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "middleware"
-version = "0.5.0"
+version = "26.11.21"
 dependencies = [
  "ed25519-dalek",
  "embedded-io-async",

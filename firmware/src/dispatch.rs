@@ -91,7 +91,9 @@ use middleware::Key;
 use middleware::loader::binding::BindingMark;
 use middleware::loader::manifest::Manifest;
 use middleware::loader::trust::{ControlCounter, TrustState};
-use middleware::loader::{Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key};
+use middleware::loader::{
+    BoardInfo, Caps, Command, DeviceInfo, Effect, Loader, PayloadStatus, is_system_key,
+};
 use middleware::transport::{HandlerError, Request, SenderId};
 use middleware::wasm_abi::ABI_VERSION;
 
@@ -108,9 +110,15 @@ pub struct Context<'a> {
     /// Largest payload image in bytes.
     pub capacity: u32,
     /// The chip profile `sys/board` describes; `None` on a firmware whose
-    /// chip has no esp-base profile (rp-base), which answers `sys/board`
-    /// with `NotFound` like firmware before 0.6.
+    /// chip has no esp-base profile (rp-base, imxrt-base), which then
+    /// answers `sys/board` from [`Context::board`].
     pub profile: Option<&'static Profile>,
+    /// `sys/board` for a firmware without an esp-base [`Profile`]: its
+    /// board description built from its own pin map (imxrt-base, from
+    /// `board_pins::boards::RT1050_EVKB`). Used only when `profile` is
+    /// `None`; with neither, `sys/board` is `NotFound` like firmware before
+    /// 0.6. Only `sys/board` reads it: pin checks stay with the firmware.
+    pub board: Option<BoardInfo<'static>>,
     /// Whether the firmware includes the WASM runtime. Without it the loader
     /// and storage work but `sys/payload/start` is refused with `NotFound`.
     pub runtime: bool,
@@ -436,9 +444,8 @@ pub fn handle_request<'a>(
             };
             Outcome::reply(state, info.encode(out).ok_or(HandlerError::BufferTooSmall))
         }
-        Command::Board => match ctx.profile {
-            Some(profile) => {
-                let board = profile.board_info(ABI_VERSION);
+        Command::Board => match ctx.profile.map(|p| p.board_info(ABI_VERSION)).or(ctx.board) {
+            Some(board) => {
                 Outcome::reply(state, board.encode(out).ok_or(HandlerError::BufferTooSmall))
             }
             None => Outcome::reply(state, Err(HandlerError::NotFound)),
@@ -650,6 +657,7 @@ mod tests {
         firmware: "0.1.0",
         capacity: 1024,
         profile: Some(&crate::chip::ESP32C3),
+        board: None,
         runtime: true,
         rekey_window: false,
         staging: false,
@@ -879,6 +887,7 @@ mod tests {
         let s = State::boot(true);
         let ctx = Context {
             profile: Some(&crate::chip::ESP32S3),
+            board: None,
             ..CTX
         };
         let o = handle_request(s, &ctx, &Request::new(keys::BOARD, &[]), &mut out);
@@ -895,14 +904,58 @@ mod tests {
             handle_request(s, &CTX, &Request::new(keys::BOARD, &[]), &mut tiny).reply,
             Err(HandlerError::BufferTooSmall)
         );
-        // Without a profile (rp-base) the key is absent, as before 0.6.
+        // Without a profile or a board (rp-base) the key is absent, as
+        // before 0.6.
         let none = Context {
             profile: None,
+            board: None,
             ..CTX
         };
         assert_eq!(
             handle_request(s, &none, &Request::new(keys::BOARD, &[]), &mut out).reply,
             Err(HandlerError::NotFound)
+        );
+    }
+
+    #[test]
+    fn s8_board_without_a_profile_comes_from_the_context() {
+        use middleware::loader::{BOARD_RUNTIME, BoardInfo};
+        // imxrt-base: no esp-base profile, a board built from its pin map.
+        const BOARD: BoardInfo<'static> = BoardInfo {
+            abi_version: ABI_VERSION,
+            max_image: 64 * 1024,
+            max_memory: 128 * 1024,
+            gpio: (1 << 25) - 1,
+            reserved: (1 << 4) | (1 << 5) | (1 << 23) | (1 << 24),
+            input_only: (1 << 2) | (1 << 3) | (1 << 22),
+            strapping: 0,
+            adc: 0x3f << 16,
+            pwm_max_bits: 0,
+            flags: BOARD_RUNTIME,
+            uart_tx: 23,
+            uart_rx: 24,
+            pwm_pins: &[],
+        };
+        let mut out = [0u8; 128];
+        let s = State::boot(true);
+        let ctx = Context {
+            profile: None,
+            board: Some(BOARD),
+            ..CTX
+        };
+        let o = handle_request(s, &ctx, &Request::new(keys::BOARD, &[]), &mut out);
+        assert_eq!((o.state, o.action), (s, Action::None));
+        assert_eq!(BoardInfo::decode(&out[..o.reply.unwrap()]).unwrap(), BOARD);
+        // A profile still wins over a board.
+        let both = Context {
+            profile: Some(&crate::chip::ESP32S3),
+            board: Some(BOARD),
+            ..CTX
+        };
+        let o = handle_request(s, &both, &Request::new(keys::BOARD, &[]), &mut out);
+        assert_eq!(
+            BoardInfo::decode(&out[..o.reply.unwrap()]).unwrap(),
+            crate::chip::ESP32S3.board_info(ABI_VERSION)
         );
     }
 

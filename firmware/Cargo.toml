@@ -34,7 +34,7 @@ required-features = ["shell"]
 [features]
 # `trust` is on by default so `cargo test --lib` covers signed payloads; the
 # ESP8266 crate depends on this one with default features off.
-default = ["trust"]
+default = ["trust", "wasm-host?/wasmi"]
 # Signed payload updates: the dispatcher keeps the pinned key and checks
 # signed commits (middleware's `trust`: SHA-256 + Ed25519 verify).
 trust = ["middleware/trust"]
@@ -86,6 +86,13 @@ esp32c3 = [
 # the firmware still serves sys/info, the loader and flash storage, reports
 # firmware version `<ver>+no-wasm`, and refuses sys/payload/start.
 wasm = ["dep:wasm-host"]
+# The interpreter under the runtime. wasmi is the default wherever `wasm` is
+# on (`wasm-host?/wasmi` in `default`: it only takes effect once `wasm` has
+# enabled wasm-host). For the small one build with `--no-default-features`
+# and add `wasm-micro` to the chip feature (and `trust`); with both enabled wasmi wins.
+# `wasm-micro` runs modules in place without validating them (see the
+# wasm-micro crate docs) and builds for chips without CAS atomics.
+wasm-micro = ["wasm", "wasm-host/micro"]
 # ESP-NOW transport (esp-radio, Wi-Fi station on a fixed channel) and the
 # ABI 4 DMA routes that stream over it. On for the Xtensa chips; it needs the
 # payload runtime, so not for esp32c3 (no `wasm` there). Costs heap for the
@@ -126,7 +133,7 @@ board-pins = { path = "../board-pins" }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3.2"
 
-wasm-host = { path = "../wasm-host", optional = true }
+wasm-host = { path = "../wasm-host", optional = true, default-features = false }
 
 esp-hal = { version = "~1.2.2", features = ["unstable"], optional = true }
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc"], optional = true }

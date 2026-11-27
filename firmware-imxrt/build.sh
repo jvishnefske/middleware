@@ -5,7 +5,9 @@
 #   ./build.sh app [--version M.m]       the firmware ELF and its slot image (with
 #                                        the payload runtime, USB CDC and
 #                                        Ethernet/Zenoh; APP_FEATURES=wasm for
-#                                        LPUART1 only, app for protocol only)
+#                                        LPUART1 only, app for protocol only,
+#                                        wasm-micro,usb,eth for the small
+#                                        interpreter instead of wasmi)
 #   ./build.sh image                     boot + app
 #   ./build.sh flash [boot] [a|b] [--version M.m]
 #                                        builds, then programs and reads back over
@@ -17,14 +19,19 @@
 #   imxrt-boot.bin            block 0 contents (FCB, IVT, DCD, bootloader)
 #   imxrt-base-V.slot         slot image (header + SDRAM image), also what
 #                             `mwctl fw update` sends
-# The version defaults to the crate's major.minor.
+# The version defaults to the crate's: a slot carries only MAJOR.MINOR (two
+# 16-bit numbers, as the RP2350's IMAGE_DEF), so the crate's calendar version
+# YY.MM.DD becomes YY.(MM*100+DD), e.g. 26.11.21 -> 26.1121. Keeping only
+# YY.MM made every release in a month the same slot version, which the A/B
+# updater's rollback check refuses as "does not exceed" (seen 2026-11-26).
 set -euo pipefail
 cd "$(dirname "$0")"
 
 target=thumbv7em-none-eabihf
 out="${CARGO_TARGET_DIR:-target}/$target/release"
 objcopy="$(command -v llvm-objcopy || command -v rust-objcopy)"
-crate_version="$(sed -n 's/^version = "\([0-9]*\)\.\([0-9]*\).*/\1.\2/p' Cargo.toml | head -1)"
+crate_version="$(sed -n 's/^version = "\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\).*/\1 \2 \3/p' Cargo.toml | head -1 \
+  | { read -r y m d; echo "$y.$((10#$m * 100 + 10#$d))"; })"
 version="$crate_version"
 
 build_boot() {
@@ -34,7 +41,10 @@ build_boot() {
 }
 
 build_app() {
-  cargo build --release -j 2 --target "$target" --features "${APP_FEATURES:-wasm,usb,eth}" --bin imxrt-base
+  local features="${APP_FEATURES:-wasm,usb,eth}" backend=()
+  # The small interpreter replaces the default one (wasmi).
+  [[ ",$features," == *,wasm-micro,* ]] && backend=(--no-default-features)
+  cargo build --release -j 2 --target "$target" "${backend[@]}" --features "$features" --bin imxrt-base
   "$objcopy" -O binary "$out/imxrt-base" "$out/imxrt-base.bin"
   cargo run --quiet --release --features image-tool --bin imxrt-image -- \
     "$out/imxrt-base.bin" "$version" "$out/imxrt-base-$version.slot"

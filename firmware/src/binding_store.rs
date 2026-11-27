@@ -331,6 +331,7 @@ mod tests {
             firmware: "0",
             capacity: 0,
             profile: None,
+            board: None,
             runtime: true,
             rekey_window: false,
             staging: false,
