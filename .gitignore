@@ -1,6 +1,6 @@
-/target
-/web/target
+target/
 /web/public/firmware/*.bin
 /web/public/firmware/*.bsp.json
 /web/public/firmware/*.uf2
 /result*
+__pycache__/
