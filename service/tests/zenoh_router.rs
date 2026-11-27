@@ -110,7 +110,7 @@ async fn client(endpoint: &str, credentials: &Credentials) -> zenoh::Result<Zeno
     // side renders: the two halves agree on the format.
     let file = mw_service::run::zenoh::parse_credentials(&credentials.render())
         .expect("runner reads the credentials file");
-    let config = client_config(endpoint, Some(&file)).expect("client config");
+    let config = client_config(endpoint, Some(&file), None).expect("client config");
     zenoh::open(config).await.map(ZenohTransport::new)
 }
 
