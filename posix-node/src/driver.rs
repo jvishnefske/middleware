@@ -30,7 +30,6 @@
 //! in the programmable logic or the kernel.
 
 pub mod kd240;
-pub mod sim;
 
 use middleware::loader::binding::{Binding, Target};
 use middleware::loader::control::{self, Flow, Point, Unit};
@@ -228,26 +227,37 @@ pub fn check_binding(
     Ok(())
 }
 
+/// A driver a binary supplies by name: `MW_POSIX_NODE_DRIVER=<name>` selects it.
+pub type NamedDrivers<'a> = &'a [(&'a str, fn() -> Box<dyn Driver>)];
+
 /// Which driver a node runs (`MW_POSIX_NODE_DRIVER`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DriverChoice {
     /// [`NoDriver`].
     #[default]
     None,
-    /// [`sim::SimDriver`] with the EMCO PC Turn 50's numbers.
-    Sim,
     /// [`kd240::Kd240Driver`], with its input lines
     /// (`MW_POSIX_NODE_KD240_INPUTS`, [`kd240::parse_inputs`]).
     Kd240(Vec<kd240::InputLine>),
+    /// A driver the embedding binary supplies under this name (see
+    /// [`NamedDrivers`]); for a lathe, its machine model.
+    Named(String),
 }
 
 impl DriverChoice {
-    /// The driver.
-    pub fn open(&self) -> Box<dyn Driver> {
+    /// The driver: `None` and `Kd240` directly; `Named` from `named`, or an
+    /// error when no driver of that name was supplied.
+    pub fn open(&self, named: NamedDrivers<'_>) -> Result<Box<dyn Driver>, String> {
         match self {
-            DriverChoice::None => Box::new(NoDriver),
-            DriverChoice::Sim => Box::new(sim::SimDriver::new(sim::SimConfig::pc_turn_50())),
-            DriverChoice::Kd240(lines) => Box::new(kd240::Kd240Driver::open(lines.clone())),
+            DriverChoice::None => Ok(Box::new(NoDriver)),
+            DriverChoice::Kd240(lines) => Ok(Box::new(kd240::Kd240Driver::open(lines.clone()))),
+            DriverChoice::Named(name) => named
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, make)| make())
+                .ok_or_else(|| {
+                    format!("MW_POSIX_NODE_DRIVER={name}: this binary has no such driver")
+                }),
         }
     }
 }

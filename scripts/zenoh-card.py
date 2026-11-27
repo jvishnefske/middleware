@@ -31,7 +31,7 @@ def dec(sector):
         return None
     text = sector[4:].split(b"\0")[0].decode()
     kv = dict(line.split("=", 1) for line in text.splitlines() if line)
-    if kv.get("ab_magic") != "emco-ab-1":
+    if kv.get("ab_magic") != "mw-ab-1":
         return None
     kv["seq"] = int(kv["ab_seq"], 16)
     return kv
@@ -59,7 +59,7 @@ def newest(card):
 
 
 def state_text(active, try_slot, tries, seq):
-    return {"ab_active": active, "ab_magic": "emco-ab-1", "ab_seq": f"{seq:x}",
+    return {"ab_active": active, "ab_magic": "mw-ab-1", "ab_seq": f"{seq:x}",
             "ab_tries": f"{tries:x}", "ab_try": try_slot}
 
 
@@ -68,7 +68,7 @@ def init(card, cmdline, slot_a, slot_b):
         f.truncate(LBA[1] * SECTOR + SECTOR)
     write_copy(card, 0, enc(state_text("a", "-", 0, 1)))
     with open(cmdline, "w") as f:
-        f.write("init=/nix/store/init quiet emco.slot=a\n")
+        f.write("init=/nix/store/init quiet mw.slot=a\n")
     for p in (slot_a, slot_b):
         with open(p, "wb") as f:
             f.truncate(1 << 20)
@@ -87,7 +87,7 @@ def boot(card, cmdline):
         nxt.pop("seq", None)
         write_copy(card, 1 - i, enc({k: v for k, v in nxt.items() if k.startswith("ab_")}))
     with open(cmdline, "w") as f:
-        f.write(f"init=/nix/store/init quiet emco.slot={slot}\n")
+        f.write(f"init=/nix/store/init quiet mw.slot={slot}\n")
     print(f"booted slot {slot}")
 
 

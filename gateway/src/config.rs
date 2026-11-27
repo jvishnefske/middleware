@@ -8,7 +8,7 @@
 //! | `MW_GATEWAY_BAUD` | `115200` | decimal, non-zero |
 //! | `MW_GATEWAY_NAMESPACE` | none | one key segment: the device's `app/<rest>` is `app/<ns>/<rest>` in the cluster |
 //! | `MW_GATEWAY_DOWNLINK` | none | `,`-separated filters (`key` or `key/**`) under the cluster prefix (`app` or `app/<ns>`), at most 8 |
-//! | `MW_GATEWAY_SYS_ALLOW` | `sys/info,sys/log` | `,`-separated exact `sys/...` keys `gw/sys` passes, at most 8 |
+//! | `MW_GATEWAY_SYS_ALLOW` | `sys/info,sys/log,sys/manifest` | `,`-separated exact `sys/...` keys `gw/sys` passes, at most 8 |
 //! | `MW_GATEWAY_DEVICE_MAC` | none | `aa:bb:cc:dd:ee:ff`: bind only to this device |
 //! | `MW_GATEWAY_SYS_TIMEOUT_MS` | `2000` | decimal milliseconds a `gw/sys` request waits, 1..=60000 |
 //! | `MW_GATEWAY_ALLOW_CALLERS` | none | `,`-separated SPIFFE IDs admitted to `gw/sys` |

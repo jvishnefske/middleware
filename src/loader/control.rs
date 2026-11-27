@@ -344,7 +344,7 @@ mod tests {
         scale: 0,
     };
 
-    fn lathe() -> [Point<'static>; 4] {
+    fn sample_points() -> [Point<'static>; 4] {
         [
             Point {
                 name: "x_pos",
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn cm1_a_page_round_trips() {
-        let pts = lathe();
+        let pts = sample_points();
         assert_eq!(pages(&pts), 1);
         let mut out = [0u8; PAGE_MAX];
         let n = encode_page(&pts, 0, &mut out).unwrap();
@@ -434,7 +434,7 @@ mod tests {
             assert_eq!(bad.check(), Err(ControlError::Field));
             assert_eq!(encode_page(&[bad], 0, &mut out), None);
         }
-        let n = encode_page(&lathe(), 0, &mut out).unwrap();
+        let n = encode_page(&sample_points(), 0, &mut out).unwrap();
         let good = out[..n].to_vec();
         assert_eq!(Page::decode(&good[..n - 1]), Err(ControlError::Length));
         let mut v = good.clone();

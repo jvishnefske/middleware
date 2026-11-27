@@ -326,6 +326,8 @@ pub struct SessionConfig {
     listen: Vec<String>,
     connect: Vec<String>,
     client_tls: Option<ClientTls>,
+    answer_scouts: bool,
+    client_mode: bool,
 }
 
 /// The client side of mutual TLS on a `tls/` connection: the root CA the
@@ -359,6 +361,26 @@ impl SessionConfig {
         self
     }
 
+    /// A `client` session instead of a `peer`: for asking through a router.
+    /// Zenoh 1.10's router does not relay between two peers connected to it
+    /// (they are one region, expected to meet directly), so a tool that asks a
+    /// node through a hub must be a client. A client does not listen, so this
+    /// is for sessions that only [`connect`](Self::connect).
+    pub fn client(mut self) -> Self {
+        self.client_mode = true;
+        self
+    }
+
+    /// Answers multicast scouts (UDP 224.0.0.224:7446), so `mwctl scout` and
+    /// other scouting peers find this session by the locators it listens on.
+    /// It only answers: the session never connects to what it hears (no
+    /// autoconnect), so the endpoints stay exactly those added here. Off by
+    /// default.
+    pub fn answer_scouts(mut self) -> Self {
+        self.answer_scouts = true;
+        self
+    }
+
     /// Presents `tls`'s certificate on `tls/` connections and verifies the
     /// peer against its CA (mutual TLS, name verified).
     pub fn client_tls(mut self, tls: ClientTls) -> Self {
@@ -369,8 +391,14 @@ impl SessionConfig {
     /// Produces the Zenoh configuration.
     pub fn build(&self) -> Result<::zenoh::Config, ZenohError> {
         let mut config = ::zenoh::Config::default();
-        config.insert_json5("mode", r#""peer""#)?;
-        config.insert_json5("scouting/multicast/enabled", "false")?;
+        config.insert_json5("mode", if self.client_mode { r#""client""# } else { r#""peer""# })?;
+        if self.answer_scouts {
+            config.insert_json5("scouting/multicast/enabled", "true")?;
+            // Answer scouts, never act on them: an empty autoconnect set.
+            config.insert_json5("scouting/multicast/autoconnect", r#"{ router: [], peer: [], client: [] }"#)?;
+        } else {
+            config.insert_json5("scouting/multicast/enabled", "false")?;
+        }
         config.insert_json5("scouting/gossip/enabled", "false")?;
         config.insert_json5("listen/endpoints", &json_array(&self.listen)?)?;
         // A tls/ client reads its certificates from the endpoint's own config
@@ -892,6 +920,26 @@ mod tests {
 #[cfg(all(test, feature = "zenoh"))]
 mod client_tls_tests {
     use super::*;
+
+    #[test]
+    fn a_client_session_is_in_client_mode_and_the_default_is_a_peer() {
+        let peer = SessionConfig::new().build().unwrap();
+        assert_eq!(peer.get_json("mode").unwrap(), r#""peer""#);
+        let client = SessionConfig::new().client().connect("tls/10.0.0.1:7447").build().unwrap();
+        assert_eq!(client.get_json("mode").unwrap(), r#""client""#);
+        assert!(client.get_json("connect/endpoints").unwrap().contains("10.0.0.1:7447"));
+    }
+
+    #[test]
+    fn answering_scouts_enables_multicast_without_autoconnect() {
+        let off = SessionConfig::new().build().unwrap();
+        assert_eq!(off.get_json("scouting/multicast/enabled").unwrap(), "false");
+        let on = SessionConfig::new().listen("tcp/0.0.0.0:7447").answer_scouts().build().unwrap();
+        assert_eq!(on.get_json("scouting/multicast/enabled").unwrap(), "true");
+        let auto = on.get_json("scouting/multicast/autoconnect").unwrap();
+        assert!(!auto.contains("router|") && !auto.contains("peer|"), "{auto}");
+        assert_eq!(on.get_json("scouting/gossip/enabled").unwrap(), "false");
+    }
 
     #[test]
     fn client_tls_sets_mutual_tls_with_the_given_files() {

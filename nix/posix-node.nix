@@ -159,12 +159,20 @@ in
       } // cfg.environment;
       unitConfig.StartLimitIntervalSec = 0;
       serviceConfig = {
-        EnvironmentFile = "-${envFile}";
+        # robot.env, then the board's own enrolment (tls/env, written by
+        # `sys/cert/install`: the router URL and the TLS directory).
+        EnvironmentFile = [ "-${envFile}" "-/var/lib/mw-posix-node/tls/env" ];
         ExecStartPre = "+${migrate}";
         ExecStart = lib.escapeShellArgs ([ (lib.getExe cfg.package) ] ++ cfg.args);
         User = "mw-posix-node";
         Group = "mw-posix-node";
-        SupplementaryGroups = cfg.supplementaryGroups ++ lib.optional (cfg.osSlots != null) "disk";
+        SupplementaryGroups = cfg.supplementaryGroups
+          ++ lib.optional (cfg.osSlots != null) "disk"
+          # The UART mwctl talks on (root:dialout 0660 on NixOS).
+          ++ lib.optional (cfg.localSerial != null) "dialout";
+        # With PrivateDevices off for localSerial, a closed policy still
+        # limits /dev to that one port.
+        DeviceAllow = lib.optional (cfg.localSerial != null) "${cfg.localSerial} rw";
         StateDirectory = "mw-posix-node";
         StateDirectoryMode = "0700";
         Restart = "always";
@@ -178,7 +186,9 @@ in
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
-        PrivateDevices = cfg.supplementaryGroups == [ ] && cfg.osSlots == null;
+        # A private /dev has no ttys, so localSerial needs the host's /dev
+        # (DeviceAllow above keeps it to the one port).
+        PrivateDevices = cfg.supplementaryGroups == [ ] && cfg.osSlots == null && cfg.localSerial == null;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectKernelLogs = true;
@@ -186,7 +196,10 @@ in
         ProtectClock = true;
         ProtectHostname = true;
         ProtectProc = "invisible";
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        # AF_NETLINK: Zenoh lists the network interfaces (getifaddrs) to join
+        # its multicast scouting group; without it a listening node is never
+        # scouted (`mwctl scout`).
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
         RestrictSUIDSGID = true;

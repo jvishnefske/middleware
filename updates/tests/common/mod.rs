@@ -82,6 +82,7 @@ pub async fn node(state: &Path, node: SenderId) -> (PosixNode, Chan) {
         local: Some(ChannelIo::new(node_rx, node_tx)),
         driver: Box::new(mw_posix_node::driver::NoDriver),
         os: None,
+        certs: None,
     };
     let gateway = GatewayParts {
         bridge: config.bridge_with_floor(floor),

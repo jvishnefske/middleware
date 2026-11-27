@@ -34,10 +34,12 @@
 //! and `Caps::SERVE`; `mwctl` and the web console speak to it unchanged.
 #![forbid(unsafe_code)]
 
-pub mod dnssd;
+pub mod app;
+pub mod cert;
 pub mod config;
 pub mod controller;
 pub mod device;
+pub mod dnssd;
 pub mod driver;
 pub mod flash;
 pub mod layout;
@@ -45,6 +47,7 @@ pub mod node_id;
 pub mod os;
 pub mod service;
 pub mod shell;
+pub mod sysnode;
 
 use std::io;
 use std::path::Path;

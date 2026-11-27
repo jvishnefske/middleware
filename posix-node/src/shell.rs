@@ -42,6 +42,7 @@ use middleware::Key;
 use middleware::loader::{PayloadStatus, keys};
 use middleware::serial::frame::Frame;
 use middleware::serial::link::{RECV_BUF_LEN, SerialLink};
+use middleware::transport::HandlerError;
 use middleware::transport::RequestMeta;
 use middleware::zenoh::{ZenohError, ZenohTransport};
 use mw_gateway::bridge::Bridge;
@@ -49,7 +50,7 @@ use mw_gateway::io::{ChannelIo, pair};
 use mw_gateway::shell::ShellOptions;
 use mw_gateway::state::ControlStore;
 use mw_gateway::{Gateway, SysForward};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use wasm_host::Limits;
 
 use crate::controller::Controller;
@@ -162,6 +163,38 @@ impl Links {
     }
 }
 
+/// A request made on the controller directly, not through a serial link and
+/// its 1 KiB frame (`MAX_RAW_FRAME`): a certificate chain does not fit one.
+/// It is a network request, under the same rules as one through the gateway.
+struct Direct {
+    key: String,
+    body: Vec<u8>,
+    reply: oneshot::Sender<Result<Vec<u8>, HandlerError>>,
+}
+
+/// The way in for [`Direct`] requests (from the node's own Zenoh responders).
+#[derive(Debug, Clone)]
+pub struct DirectHandle(mpsc::Sender<Direct>);
+
+impl DirectHandle {
+    /// One network request to the device; `Unavailable` when the device
+    /// thread is gone or too busy to take it.
+    pub async fn request(&self, key: &str, body: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+        let (reply, answer) = oneshot::channel();
+        self.0
+            .try_send(Direct {
+                key: key.to_owned(),
+                body,
+                reply,
+            })
+            .map_err(|_| HandlerError::Unavailable)?;
+        tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .map_err(|_| HandlerError::DeadlineExceeded)?
+            .map_err(|_| HandlerError::Unavailable)?
+    }
+}
+
 /// Which link a frame came from.
 #[derive(Clone, Copy)]
 enum Origin {
@@ -174,6 +207,7 @@ enum Woke {
     Stop,
     Timer,
     Frame(Origin, Result<Inbound, ()>),
+    Direct(Option<Direct>),
 }
 
 /// The device thread's loop (module docs), until stopped or the gateway
@@ -182,7 +216,9 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
     ctl: &mut Controller<F, C>,
     links: &mut Links,
     stop: &mut watch::Receiver<bool>,
+    direct: &mut mpsc::Receiver<Direct>,
 ) -> Ended {
+    let mut direct_open = true;
     let mut gw_buf = vec![0u8; RECV_BUF_LEN];
     let mut local_buf = vec![0u8; RECV_BUF_LEN];
     loop {
@@ -205,10 +241,23 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
             r = recv(&mut links.gateway, &mut gw_buf) => Woke::Frame(Origin::Gateway, r),
             r = recv_opt(links.local.as_mut(), &mut local_buf) => Woke::Frame(Origin::Local, r),
             () = timer => Woke::Timer,
+            d = direct.recv(), if direct_open => Woke::Direct(d),
         };
         let (origin, inbound) = match woke {
             Woke::Stop => return Ended::Stopped,
             Woke::Timer => continue,
+            Woke::Direct(None) => {
+                direct_open = false;
+                continue;
+            }
+            Woke::Direct(Some(d)) => {
+                let result = match Key::new(&d.key) {
+                    Ok(k) => ctl.request_on(k, &d.body, &RequestMeta::NONE, true),
+                    Err(_) => Err(HandlerError::InvalidRequest),
+                };
+                let _ = d.reply.send(result);
+                continue;
+            }
             Woke::Frame(origin, Ok(m)) => (origin, m),
             Woke::Frame(Origin::Gateway, Err(())) => return Ended::GatewayClosed,
             Woke::Frame(Origin::Local, Err(())) => {
@@ -253,6 +302,7 @@ async fn run<F: NorFlash + Durable, C: Clock + Clone + 'static>(
 /// The running device thread.
 #[derive(Debug)]
 pub struct DeviceTask {
+    direct: DirectHandle,
     stop: watch::Sender<bool>,
     done: Option<oneshot::Receiver<DeviceReport>>,
     finished: Option<DeviceReport>,
@@ -269,9 +319,11 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
     local: Option<ChannelIo>,
     driver: Box<dyn crate::driver::Driver>,
     os: Option<crate::os::OsUpdates>,
+    certs: Option<crate::cert::CertStore>,
 ) -> io::Result<DeviceTask> {
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
+    let (direct_tx, mut direct_rx) = mpsc::channel::<Direct>(8);
     let thread = std::thread::Builder::new()
         .name("mw-posix-node-device".into())
         .spawn(move || {
@@ -303,13 +355,16 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
                 if let Some(os) = os {
                     ctl.set_os(os);
                 }
+                if let Some(certs) = certs {
+                    ctl.set_certs(certs);
+                }
                 let mut links = Links {
                     gateway: SerialLink::with_inbox(gateway),
                     local: local.map(SerialLink::with_inbox),
                     send_failed: 0,
                 };
                 ctl.boot(&boot);
-                let ended = run(&mut ctl, &mut links, &mut stopped).await;
+                let ended = run(&mut ctl, &mut links, &mut stopped, &mut direct_rx).await;
                 let synced = ctl.shutdown().is_ok();
                 if ended == Ended::Stopped {
                     links.broadcast(ctl.drain()).await;
@@ -325,6 +380,7 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
             let _ = report.send(r);
         })?;
     Ok(DeviceTask {
+        direct: DirectHandle(direct_tx),
         stop,
         done: Some(done),
         finished: None,
@@ -333,6 +389,11 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
 }
 
 impl DeviceTask {
+    /// The handle for requests made on the controller directly.
+    pub fn direct(&self) -> DirectHandle {
+        self.direct.clone()
+    }
+
     /// Completes when the thread has ended by itself (the gateway link
     /// closed). Await it at most once.
     pub async fn ended(&mut self) {
@@ -413,6 +474,8 @@ pub struct DeviceParts<F> {
     pub driver: Box<dyn crate::driver::Driver>,
     /// The Linux A/B root's update state (`MW_POSIX_NODE_OS_*`, [`crate::os`]).
     pub os: Option<crate::os::OsUpdates>,
+    /// The board's own certificate store (`sys/cert/*`, [`crate::cert`]).
+    pub certs: Option<crate::cert::CertStore>,
 }
 
 /// The gateway half of a node, as `mw-gateway`'s own binary builds it:
@@ -446,6 +509,7 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
         local,
         driver,
         os,
+        certs,
     } = device;
     let GatewayParts {
         bridge,
@@ -456,12 +520,18 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
         .await
         .map_err(StartError::Zenoh)?;
-    let device =
-        spawn_device(flash, facts, limits, device_io, local, driver, os).map_err(StartError::Thread)?;
+    let device = spawn_device(flash, facts, limits, device_io, local, driver, os, certs)
+        .map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }
 
 impl PosixNode {
+    /// The handle for requests made on the device's controller directly,
+    /// without the serial link's frame size (see [`DirectHandle`]).
+    pub fn direct(&self) -> DirectHandle {
+        self.device.direct()
+    }
+
     /// Completes when the device thread has ended by itself. Await it at
     /// most once.
     pub async fn device_ended(&mut self) {
