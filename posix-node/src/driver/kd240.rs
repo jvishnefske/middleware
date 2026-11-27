@@ -15,8 +15,8 @@
 //! is sent as a [`Digital`]. A line that cannot be requested stays in the
 //! list, never sends, and is named in [`Kd240Driver::problems`].
 //!
-//! `pl_present` is on while a UIO device whose name starts with `emco` is
-//! present (`/sys/class/uio/uio*/name`): the PL check overlay the lathe's
+//! `pl_present` is on while a UIO device whose name starts with `pl-check` is
+//! present (`/sys/class/uio/uio*/name`): the PL check overlay the board's
 //! NixOS loads at boot. It is a placeholder for the PL's own status
 //! registers, which a later driver will read through that UIO device.
 
@@ -183,7 +183,7 @@ impl Inputs for GpioInputs {
     }
 }
 
-/// Whether `uio` (`/sys/class/uio`) lists a device named `emco…`.
+/// Whether `uio` (`/sys/class/uio`) lists a device named `pl-check…`.
 pub fn pl_in(uio: &Path) -> bool {
     std::fs::read_dir(uio)
         .into_iter()
@@ -191,7 +191,7 @@ pub fn pl_in(uio: &Path) -> bool {
         .flatten()
         .any(|d| {
             std::fs::read_to_string(d.path().join("name"))
-                .is_ok_and(|n| n.trim().starts_with("emco"))
+                .is_ok_and(|n| n.trim().starts_with("pl-check"))
         })
 }
 
@@ -411,7 +411,7 @@ mod tests {
         std::fs::write(dir.join("uio0/name"), "axi-other\n").unwrap();
         assert!(!pl_in(&dir));
         std::fs::create_dir_all(dir.join("uio1")).unwrap();
-        std::fs::write(dir.join("uio1/name"), "emco-pl-check\n").unwrap();
+        std::fs::write(dir.join("uio1/name"), "pl-check-overlay\n").unwrap();
         assert!(pl_in(&dir));
         assert!(!pl_in(&dir.join("missing")));
         let _ = std::fs::remove_dir_all(&dir);

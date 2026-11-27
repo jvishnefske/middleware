@@ -7,6 +7,8 @@
 //! listener at `<host>.local:<port>`. The announcer is driven by its own
 //! task; on shutdown the task sends the goodbye (TTL 0) and ends.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+
 use middleware::Key;
 use middleware::discovery::{Announce, Endpoint, Service, ServiceKind};
 use middleware::mdns::announce::MdnsAnnouncer;
@@ -35,6 +37,18 @@ impl Announcement {
     }
 }
 
+/// The IPv4 address the node reaches the local link with: the source address
+/// the kernel picks for the mDNS group (a UDP `connect` sends nothing).
+/// `None` when there is no route, or the address is loopback or unspecified.
+pub fn link_address() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(224, 0, 0, 251), 5353)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
 /// Starts announcing the node `instance` at `host.local:port` on the local
 /// link. Fails if the multicast socket cannot be opened or the first
 /// announcement cannot be sent; the node keeps running without DNS-SD then,
@@ -49,7 +63,10 @@ pub async fn start(host: String, instance: String, port: u16) -> Result<Announce
         .map_err(|e| format!("mdns socket: {e:?}"))?;
     {
         let kind = kind()?;
-        let service = service(kind, &instance, &host, port);
+        // With the link address the announcement carries the A record, so a
+        // browser needs no mDNS resolver to reach the node.
+        let addr = link_address().map(|ip| SocketAddr::new(ip.into(), port));
+        let service = service(kind, &instance, &host, port, addr);
         announcer
             .announce(&service)
             .await
@@ -78,7 +95,10 @@ pub async fn start(host: String, instance: String, port: u16) -> Result<Announce
             }
         }
     });
-    Ok(Announcement { stop: Some(stop), task })
+    Ok(Announcement {
+        stop: Some(stop),
+        task,
+    })
 }
 
 fn kind() -> Result<ServiceKind<'static>, String> {
@@ -87,13 +107,50 @@ fn kind() -> Result<ServiceKind<'static>, String> {
         .map_err(|e| format!("dns-sd kind {KIND:?}: {e:?}"))
 }
 
-fn service<'a>(kind: ServiceKind<'a>, instance: &'a str, host: &'a str, port: u16) -> Service<'a> {
+fn service<'a>(
+    kind: ServiceKind<'a>,
+    instance: &'a str,
+    host: &'a str,
+    port: u16,
+    addr: Option<SocketAddr>,
+) -> Service<'a> {
     Service {
         kind,
         instance,
         node: None,
-        endpoint: Endpoint::Host { name: host, port },
+        endpoint: match addr {
+            Some(a) => Endpoint::Socket(a),
+            None => Endpoint::Host { name: host, port },
+        },
         txt: &[],
         ttl_s: TTL_S,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_known_address_is_announced_as_a_socket_and_none_falls_back_to_the_host() {
+        let kind = kind().unwrap();
+        let addr: SocketAddr = "192.168.1.152:7447".parse().unwrap();
+        let with = service(kind, "n", "host", 7447, Some(addr));
+        assert!(matches!(with.endpoint, Endpoint::Socket(a) if a == addr));
+        let without = service(kind, "n", "host", 7447, None);
+        assert!(matches!(
+            without.endpoint,
+            Endpoint::Host {
+                name: "host",
+                port: 7447
+            }
+        ));
+    }
+
+    #[test]
+    fn the_link_address_is_never_loopback_or_unspecified() {
+        if let Some(ip) = link_address() {
+            assert!(!ip.is_loopback() && !ip.is_unspecified());
+        }
     }
 }

@@ -244,6 +244,7 @@ async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Sys, Local) 
         flash: open_state_flash(state).expect("state"),
         facts: facts(NODE),
         limits: limits(1024 * 1024),
+        certs: None,
         local: Some(local_node),
         driver: Box::new(mw_posix_node::driver::NoDriver),
         os: None,
@@ -415,5 +416,225 @@ async fn pn4_the_state_directory_is_held_by_one_node() {
     let e = open_state_flash(&state).expect_err("second");
     assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock);
     drop(held);
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// What `mwctl --zenoh --node` sends: `sys/info` addressed to the node id.
+/// The node serves its gateway's allowlisted sys keys per node (sysnode.rs),
+/// so a board-style query is answered by the device through the gateway.
+#[tokio::test(flavor = "multi_thread")]
+async fn pn18_sys_info_is_served_per_node_over_zenoh() {
+    use middleware::transport::Target;
+    let state = state_dir("sysnode");
+    let (mut cluster, session) = zenoh_pair().await;
+    let front = ZenohTransport::new(session.session().clone()).with_sender(NODE);
+    let (_local_test, local_node) = pair();
+    let config = gateway_config(&state);
+    let store = ControlStore::in_dir(&config.state_dir);
+    let floor = control_floor(&store, wall_clock_ms());
+    let device = DeviceParts {
+        flash: open_state_flash(&state).expect("state"),
+        facts: facts(NODE),
+        limits: limits(1024 * 1024),
+        certs: None,
+        local: Some(local_node),
+        driver: Box::new(mw_posix_node::driver::NoDriver),
+        os: None,
+    };
+    let gateway = GatewayParts {
+        bridge: config.bridge_with_floor(floor),
+        options: config.shell_options(),
+        store,
+    };
+    let (pi, sys) = start(device, gateway, session).await.expect("start");
+    let keys_served = config
+        .sys_allow
+        .keys()
+        .map(|k| k.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(keys_served.iter().any(|k| k == "sys/info"));
+    let tasks = mw_posix_node::sysnode::serve(&front, &sys, &pi.direct(), keys_served)
+        .await
+        .expect("serve");
+
+    let opts = RequestOptions::DEFAULT
+        .with_target(Target::Node(NODE))
+        .with_timeout(Duration::from_secs(2));
+    let raw = tokio::time::timeout(TIMEOUT, async {
+        loop {
+            let mut out = vec![0u8; 4096];
+            if let Ok(r) = cluster.request_with(keys::INFO, &[], &mut out, &opts).await {
+                return r.to_vec();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("sys/info per node");
+    let info = DeviceInfo::decode(&raw).expect("decode");
+    assert_eq!(info.chip, CHIP);
+    assert_eq!(info.node, Some(NODE));
+
+    // What `mwctl scout` asks: a wildcard over every node. The reply is under
+    // this node's concrete key, so the asker can name the node.
+    let replies = cluster
+        .session()
+        .get("@mw/node/*/sys/info")
+        .timeout(Duration::from_secs(5))
+        .await
+        .expect("get");
+    let mut keys_seen = Vec::new();
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(sample) = reply.result() {
+            keys_seen.push(sample.key_expr().as_str().to_owned());
+        }
+    }
+    let want = middleware::zenoh::node_key(NODE, keys::INFO);
+    assert_eq!(keys_seen, [want], "answered under the concrete node key");
+
+    // A key the gateway does not allow has no per-node responder at all.
+    let mut out = vec![0u8; 256];
+    assert!(
+        cluster
+            .request_with(keys::TRUST_CLAIM, &[0; 33], &mut out, &opts)
+            .await
+            .is_err(),
+        "a claim is never served over Zenoh per node"
+    );
+
+    for t in tasks {
+        t.abort();
+    }
+    let _ = pi.stop().await;
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// The enrolment over Zenoh: `sys/cert/csr`, then `sys/cert/install` with a
+/// signed chain larger than a serial frame (1 KiB), which the gateway link
+/// could not carry. The node serves both straight from its controller
+/// (sysnode.rs), as a network request.
+#[tokio::test(flavor = "multi_thread")]
+async fn pn19_a_chain_larger_than_a_frame_installs_over_zenoh() {
+    use middleware::transport::Target;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
+        DnType, IsCa, Issuer, KeyPair,
+    };
+    let state = state_dir("enrol");
+    let tls = state.join("tls");
+    let (mut cluster, session) = zenoh_pair().await;
+    let front = ZenohTransport::new(session.session().clone()).with_sender(NODE);
+    let (_local_test, local_node) = pair();
+    let config = gateway_config(&state);
+    let store = ControlStore::in_dir(&config.state_dir);
+    let floor = control_floor(&store, wall_clock_ms());
+    let device = DeviceParts {
+        flash: open_state_flash(&state).expect("state"),
+        facts: facts(NODE),
+        limits: limits(1024 * 1024),
+        certs: Some(mw_posix_node::cert::CertStore::new(&tls, NODE)),
+        local: Some(local_node),
+        driver: Box::new(mw_posix_node::driver::NoDriver),
+        os: None,
+    };
+    let gateway = GatewayParts {
+        bridge: config.bridge_with_floor(floor),
+        options: config.shell_options(),
+        store,
+    };
+    let (pi, sys) = start(device, gateway, session).await.expect("start");
+    let tasks = mw_posix_node::sysnode::serve(
+        &front,
+        &sys,
+        &pi.direct(),
+        ["sys/cert/csr".to_owned(), "sys/cert/install".to_owned()],
+    )
+    .await
+    .expect("serve");
+    let opts = RequestOptions::DEFAULT
+        .with_target(Target::Node(NODE))
+        .with_timeout(Duration::from_secs(5));
+    async fn ask(
+        cluster: &mut ZenohTransport,
+        opts: &RequestOptions<'_>,
+        key: &'static str,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, HandlerError> {
+        let mut out = vec![0u8; 4096];
+        let n = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                match cluster
+                    .request_with(Key::new(key).unwrap(), &body, &mut out, opts)
+                    .await
+                {
+                    Ok(r) => return Ok(r.len()),
+                    Err(middleware::zenoh::ZenohError::Handler(e)) => return Err(e),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                }
+            }
+        })
+        .await
+        .expect("answered");
+        n.map(|n| out[..n].to_vec())
+    }
+
+    let csr = String::from_utf8(
+        ask(&mut cluster, &opts, "sys/cert/csr", vec![])
+            .await
+            .expect("csr"),
+    )
+    .expect("pem");
+    assert!(csr.contains("BEGIN CERTIFICATE REQUEST"));
+
+    // A CA signs it as this node.
+    let ca_key = KeyPair::generate().expect("ca key");
+    let mut ca_params = CertificateParams::default();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "pn19-ca");
+    ca_params.distinguished_name = dn;
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    let ca_pem = ca_params.self_signed(&ca_key).expect("ca").pem();
+    let issuer = Issuer::new(ca_params, ca_key);
+    let mut req = CertificateSigningRequestParams::from_pem(&csr).expect("csr params");
+    let mut dn = DistinguishedName::new();
+    dn.push(
+        DnType::CommonName,
+        format!("kd240-{}", mw_posix_node::node_id::hex(NODE)),
+    );
+    req.params.distinguished_name = dn;
+    let leaf = req.signed_by(&issuer).expect("signed").pem();
+    let body = format!("router=tcp/127.0.0.1:17447\n{leaf}{ca_pem}").into_bytes();
+    assert!(
+        body.len() > 1024,
+        "the chain is larger than a serial frame ({})",
+        body.len()
+    );
+
+    ask(&mut cluster, &opts, "sys/cert/install", body)
+        .await
+        .expect("install");
+    for f in ["cert", "ca", "env"] {
+        assert!(tls.join(f).is_file(), "{f} written");
+    }
+    assert!(!tls.join("key").exists() || tls.join("key").is_file());
+    let env = std::fs::read_to_string(tls.join("env")).expect("env");
+    assert!(env.contains("MW_ZENOH_ROUTER=tcp/127.0.0.1:17447"));
+
+    // A garbage body is refused, not served as an install.
+    assert_eq!(
+        ask(
+            &mut cluster,
+            &opts,
+            "sys/cert/install",
+            b"router=x\nnot a chain".to_vec()
+        )
+        .await,
+        Err(HandlerError::InvalidRequest)
+    );
+
+    for t in tasks {
+        t.abort();
+    }
+    let _ = pi.stop().await;
     let _ = std::fs::remove_dir_all(&state);
 }

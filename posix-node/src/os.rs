@@ -29,13 +29,13 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use middleware::Key;
+use middleware::SenderId;
 use middleware::loader::release::{CertKind, SignedCert, verify_cert};
 use middleware::loader::trust::{ControlCounter, ControlOp, SignedControl, TrustState, Version};
-use middleware::SenderId;
 use middleware::os_ab::bootstate::{self, BootState, COPY_LBA, SECTOR, Slot};
 use middleware::os_ab::wire::{CHUNK_LEN, Command, OsInfo, StateCode};
 use middleware::transport::HandlerError;
-use middleware::Key;
 use sha2::{Digest, Sha256};
 
 /// Bytes of the record file.
@@ -93,7 +93,12 @@ pub struct Record {
 
 impl Default for Record {
     fn default() -> Self {
-        Record { floor: 0, versions: [0; 2], ready: None, control: 0 }
+        Record {
+            floor: 0,
+            versions: [0; 2],
+            ready: None,
+            control: 0,
+        }
     }
 }
 
@@ -128,7 +133,12 @@ impl Record {
             i => Some(Slot::from_index(i).ok_or("ready slot")?),
         };
         let control = u64::from_le_bytes(b[20..28].try_into().map_err(|_| "control")?);
-        Ok(Record { floor: u(8), versions: [u(12), u(16)], ready, control })
+        Ok(Record {
+            floor: u(8),
+            versions: [u(12), u(16)],
+            ready,
+            control,
+        })
     }
 }
 
@@ -181,7 +191,10 @@ impl OsUpdates {
     pub fn open(dev: Box<dyn OsDevice>, record_path: PathBuf, node: SenderId) -> io::Result<Self> {
         let record = match std::fs::read(&record_path) {
             Ok(b) => Record::decode(&b).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", record_path.display()))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {e}", record_path.display()),
+                )
             })?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Record::default(),
             Err(e) => return Err(e),
@@ -212,13 +225,17 @@ impl OsUpdates {
     /// The newest valid boot state, or `Unavailable` without one.
     fn boot(&mut self) -> Result<BootState, HandlerError> {
         let c = self.copies()?;
-        bootstate::newest([&c[0], &c[1]]).map(|(_, s)| s).ok_or(HandlerError::Unavailable)
+        bootstate::newest([&c[0], &c[1]])
+            .map(|(_, s)| s)
+            .ok_or(HandlerError::Unavailable)
     }
 
     fn write_boot(&mut self, next: BootState) -> Result<(), HandlerError> {
         let c = self.copies()?;
         let (index, sector) = bootstate::plan_write([&c[0], &c[1]], next);
-        self.dev.write_boot_copy(index, &sector).map_err(|_| HandlerError::Internal)
+        self.dev
+            .write_boot_copy(index, &sector)
+            .map_err(|_| HandlerError::Internal)
     }
 
     fn save_record(&mut self) -> Result<(), HandlerError> {
@@ -270,7 +287,9 @@ impl OsUpdates {
 
     /// The floor a new root's version must exceed.
     fn version_floor(&self) -> u32 {
-        self.record.floor.max(self.record.versions[self.running().index()])
+        self.record
+            .floor
+            .max(self.record.versions[self.running().index()])
     }
 
     /// Answers one `sys/os/*` request. `trust` is the node's root of trust
@@ -295,7 +314,11 @@ impl OsUpdates {
                 .encode(out)
                 .map(Some)
                 .ok_or(HandlerError::BufferTooSmall),
-            Some(Command::Begin { len, version, sha256 }) => self.begin(len, version, sha256, out),
+            Some(Command::Begin {
+                len,
+                version,
+                sha256,
+            }) => self.begin(len, version, sha256, out),
             Some(Command::Chunk { offset, data }) => self.chunk(offset, data),
             Some(Command::Commit { cert }) => self.commit(cert, trust, chips),
             Some(Command::Reboot { control }) => {
@@ -331,7 +354,8 @@ impl OsUpdates {
             return Ok(());
         }
         let auth = control.ok_or(HandlerError::Denied)?;
-        let next = trust.accept_control(ControlCounter(self.record.control), op, &self.target, &auth)?;
+        let next =
+            trust.accept_control(ControlCounter(self.record.control), op, &self.target, &auth)?;
         self.record.control = next.0;
         self.save_record()
     }
@@ -350,7 +374,10 @@ impl OsUpdates {
             }
         }
         match self.state() {
-            StateCode::Idle | StateCode::Receiving | StateCode::Confirmed | StateCode::RolledBack => {}
+            StateCode::Idle
+            | StateCode::Receiving
+            | StateCode::Confirmed
+            | StateCode::RolledBack => {}
             _ => return Err(HandlerError::Unavailable), // a ready or a trial root: not now
         }
         if let Ok(b) = self.boot() {
@@ -432,7 +459,9 @@ impl OsUpdates {
             }
         }
         // The bytes on the slot are the ones the cert names.
-        let digest = self.digest(t.target, t.len).map_err(|_| HandlerError::Internal)?;
+        let digest = self
+            .digest(t.target, t.len)
+            .map_err(|_| HandlerError::Internal)?;
         if digest != t.sha256 {
             self.transfer = None; // known wrong: abandon the transfer
             return Err(HandlerError::InvalidRequest);
@@ -491,7 +520,11 @@ impl OsUpdates {
         if self.state() == StateCode::Trial {
             // Back to the committed slot, now.
             let b = self.boot()?;
-            self.write_boot(BootState { try_slot: None, tries: 0, ..b })?;
+            self.write_boot(BootState {
+                try_slot: None,
+                tries: 0,
+                ..b
+            })?;
             self.dev.reboot().map_err(|_| HandlerError::Internal)?;
         }
         Ok(None)
@@ -506,7 +539,7 @@ fn reply_slot(out: &mut [u8], slot: Slot) -> Result<usize, HandlerError> {
 
 /// The card's two slots and boot state as files (the KD240's block
 /// devices, or regular files in the simulation). The boot state is at
-/// [`COPY_LBA`] within `state`; the running slot is `emco.slot=` on
+/// [`COPY_LBA`] within `state`; the running slot is `mw.slot=` on
 /// `cmdline`; a reboot runs `reboot` (empty: none).
 pub struct FileDevice {
     slots: [std::fs::File; 2],
@@ -516,11 +549,19 @@ pub struct FileDevice {
 }
 
 impl FileDevice {
-    pub fn open(slots: &[PathBuf; 2], state: &Path, cmdline: &Path, reboot: Vec<String>) -> io::Result<Self> {
+    pub fn open(
+        slots: &[PathBuf; 2],
+        state: &Path,
+        cmdline: &Path,
+        reboot: Vec<String>,
+    ) -> io::Result<Self> {
         let open = |p: &Path| std::fs::OpenOptions::new().read(true).write(true).open(p);
         let line = std::fs::read_to_string(cmdline)?;
         let running = Slot::from_cmdline(&line).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "no emco.slot= on the kernel command line")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no mw.slot= on the kernel command line",
+            )
         })?;
         Ok(FileDevice {
             slots: [open(&slots[0])?, open(&slots[1])?],
@@ -568,7 +609,8 @@ impl OsDevice for FileDevice {
     }
 
     fn write_boot_copy(&mut self, index: usize, sector: &[u8; SECTOR]) -> io::Result<()> {
-        self.state.seek(SeekFrom::Start(COPY_LBA[index] * SECTOR as u64))?;
+        self.state
+            .seek(SeekFrom::Start(COPY_LBA[index] * SECTOR as u64))?;
         self.state.write_all(sector)?;
         self.state.sync_data()
     }
@@ -675,7 +717,6 @@ pub fn cert_targets(chip: &'static str, board: Option<&'static str>) -> Vec<&'st
     std::iter::once(chip).chain(board).collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,12 +736,21 @@ mod tests {
     fn signed_control_by(seed: &[u8; 32], op: ControlOp, counter: u64) -> SignedControl {
         use ed25519_dalek::Signer;
         let msg = control_message(op, &control_target(NODE), ControlCounter(counter));
-        let sig = ed25519_dalek::SigningKey::from_bytes(seed).sign(&msg).to_bytes();
-        SignedControl { counter: ControlCounter(counter), signature: Signature(sig) }
+        let sig = ed25519_dalek::SigningKey::from_bytes(seed)
+            .sign(&msg)
+            .to_bytes();
+        SignedControl {
+            counter: ControlCounter(counter),
+            signature: Signature(sig),
+        }
     }
 
     fn root_key() -> PublicKey {
-        PublicKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&SEED).verifying_key().to_bytes())
+        PublicKey::Ed25519(
+            ed25519_dalek::SigningKey::from_bytes(&SEED)
+                .verifying_key()
+                .to_bytes(),
+        )
     }
 
     fn sha(data: &[u8]) -> [u8; 32] {
@@ -712,8 +762,13 @@ mod tests {
         use ed25519_dalek::Signer;
         let mut buf = [0u8; middleware::loader::release::RELEASE_MESSAGE_MAX];
         let msg = middleware::loader::release::release_message(cert, &mut buf).unwrap();
-        let sig = ed25519_dalek::SigningKey::from_bytes(seed).sign(msg).to_bytes();
-        let sc = SignedCert { cert: *cert, signature: Signature(sig) };
+        let sig = ed25519_dalek::SigningKey::from_bytes(seed)
+            .sign(msg)
+            .to_bytes();
+        let sc = SignedCert {
+            cert: *cert,
+            signature: Signature(sig),
+        };
         let mut out = vec![0u8; COMMIT_BODY_MAX];
         let n = sc.encode(&mut out).unwrap();
         out.truncate(n);
@@ -762,14 +817,19 @@ mod tests {
     /// Sends `image` in chunks of `CHUNK_LEN`.
     fn send(os: &mut OsUpdates, image: &[u8]) -> Result<(), HandlerError> {
         for (i, c) in image.chunks(CHUNK_LEN).enumerate() {
-            let body = encoded(Command::Chunk { offset: (i * CHUNK_LEN) as u32, data: c });
+            let body = encoded(Command::Chunk {
+                offset: (i * CHUNK_LEN) as u32,
+                data: c,
+            });
             call(os, keys::CHUNK, &body, None)?;
         }
         Ok(())
     }
 
     fn image(n: usize, seed: u8) -> Vec<u8> {
-        (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+        (0..n)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+            .collect()
     }
 
     fn info(os: &mut OsUpdates) -> OsInfo {
@@ -795,7 +855,10 @@ mod tests {
         let card = MemDevice::new(4 * CHUNK_LEN);
         let mut os = restart(&card, &dir);
         let i = info(&mut os);
-        assert_eq!((i.running, i.state, i.target), (Slot::A, StateCode::Idle, Some(Slot::B)));
+        assert_eq!(
+            (i.running, i.state, i.target),
+            (Slot::A, StateCode::Idle, Some(Slot::B))
+        );
 
         let img = image(CHUNK_LEN + 100, 1); // two chunks
         assert_eq!(begin(&mut os, &img, V1), Ok(1), "the inactive slot B");
@@ -819,7 +882,10 @@ mod tests {
         card.boot();
         let mut os = restart(&card, &dir);
         let i = info(&mut os);
-        assert_eq!((i.running, i.state, i.running_version), (Slot::B, StateCode::Idle, V1));
+        assert_eq!(
+            (i.running, i.state, i.running_version),
+            (Slot::B, StateCode::Idle, V1)
+        );
         // Nothing is ever written to the committed slot: the next update
         // goes to A.
         assert_eq!(begin(&mut os, &image(10, 2), V2), Ok(0));
@@ -851,8 +917,16 @@ mod tests {
         let dir = scratch("floor");
         let card = MemDevice::new(4 * CHUNK_LEN);
         let mut os = restart(&card, &dir);
-        assert_eq!(begin(&mut os, &image(10, 0), 0), Err(HandlerError::Denied), "version 0");
-        assert_eq!(begin(&mut os, &[], V1), Err(HandlerError::InvalidRequest), "empty image");
+        assert_eq!(
+            begin(&mut os, &image(10, 0), 0),
+            Err(HandlerError::Denied),
+            "version 0"
+        );
+        assert_eq!(
+            begin(&mut os, &[], V1),
+            Err(HandlerError::InvalidRequest),
+            "empty image"
+        );
         let big = vec![0u8; 4 * CHUNK_LEN + 1];
         assert_eq!(begin(&mut os, &big, V1), Err(HandlerError::BufferTooSmall));
         assert_eq!(begin(&mut os, &image(10, 0), V1), Ok(1));
@@ -883,21 +957,61 @@ mod tests {
         let img = image(777, 8);
         begin(&mut os, &img, V1).unwrap();
         send(&mut os, &img).unwrap();
-        let trust = TrustState::Claimed { key: root_key(), min_version: middleware::loader::trust::Version(0) };
+        let trust = TrustState::Claimed {
+            key: root_key(),
+            min_version: middleware::loader::trust::Version(0),
+        };
         let good = os_cert(img.len() as u32, sha(&img), V1);
         let denied = Err(HandlerError::Denied);
         // No cert, a cert of another kind, another target, another key, a
         // different hash, a version at the floor: all refused.
         assert_eq!(call(&mut os, keys::COMMIT, &[], Some(&trust)), denied);
-        let fw = SoftwareCert { kind: CertKind::Firmware, ..good };
-        assert_eq!(call(&mut os, keys::COMMIT, &signed(&SEED, &fw), Some(&trust)), denied);
-        let any = SoftwareCert { target: ANY_TARGET, ..good };
-        assert_eq!(call(&mut os, keys::COMMIT, &signed(&SEED, &any), Some(&trust)), denied);
-        let other = SoftwareCert { target: "rp2350", ..good };
-        assert_eq!(call(&mut os, keys::COMMIT, &signed(&SEED, &other), Some(&trust)), denied);
-        assert_eq!(call(&mut os, keys::COMMIT, &signed(&[9; 32], &good), Some(&trust)), denied);
-        let wrong_hash = SoftwareCert { sha256: [0; 32], ..good };
-        assert_eq!(call(&mut os, keys::COMMIT, &signed(&SEED, &wrong_hash), Some(&trust)), denied);
+        let fw = SoftwareCert {
+            kind: CertKind::Firmware,
+            ..good
+        };
+        assert_eq!(
+            call(&mut os, keys::COMMIT, &signed(&SEED, &fw), Some(&trust)),
+            denied
+        );
+        let any = SoftwareCert {
+            target: ANY_TARGET,
+            ..good
+        };
+        assert_eq!(
+            call(&mut os, keys::COMMIT, &signed(&SEED, &any), Some(&trust)),
+            denied
+        );
+        let other = SoftwareCert {
+            target: "rp2350",
+            ..good
+        };
+        assert_eq!(
+            call(&mut os, keys::COMMIT, &signed(&SEED, &other), Some(&trust)),
+            denied
+        );
+        assert_eq!(
+            call(
+                &mut os,
+                keys::COMMIT,
+                &signed(&[9; 32], &good),
+                Some(&trust)
+            ),
+            denied
+        );
+        let wrong_hash = SoftwareCert {
+            sha256: [0; 32],
+            ..good
+        };
+        assert_eq!(
+            call(
+                &mut os,
+                keys::COMMIT,
+                &signed(&SEED, &wrong_hash),
+                Some(&trust)
+            ),
+            denied
+        );
         // The good one, signed by the root.
         call(&mut os, keys::COMMIT, &signed(&SEED, &good), Some(&trust)).unwrap();
         assert_eq!(info(&mut os).state, StateCode::Committed);
@@ -909,22 +1023,50 @@ mod tests {
         let card = MemDevice::new(4 * CHUNK_LEN);
         let mut os = restart(&card, &dir);
         let c = [1u8; 100];
-        let body = encoded(Command::Chunk { offset: 0, data: &c });
-        assert_eq!(call(&mut os, keys::CHUNK, &body, None), Err(HandlerError::Unavailable), "no begin");
+        let body = encoded(Command::Chunk {
+            offset: 0,
+            data: &c,
+        });
+        assert_eq!(
+            call(&mut os, keys::CHUNK, &body, None),
+            Err(HandlerError::Unavailable),
+            "no begin"
+        );
         let img = image(CHUNK_LEN + 100, 9);
         begin(&mut os, &img, V1).unwrap();
-        let misaligned = encoded(Command::Chunk { offset: 5, data: &img[..100] });
-        assert_eq!(call(&mut os, keys::CHUNK, &misaligned, None), Err(HandlerError::InvalidRequest));
-        let short = encoded(Command::Chunk { offset: 0, data: &img[..99] });
-        assert_eq!(call(&mut os, keys::CHUNK, &short, None), Err(HandlerError::InvalidRequest));
-        let first = encoded(Command::Chunk { offset: 0, data: &img[..CHUNK_LEN] });
+        let misaligned = encoded(Command::Chunk {
+            offset: 5,
+            data: &img[..100],
+        });
+        assert_eq!(
+            call(&mut os, keys::CHUNK, &misaligned, None),
+            Err(HandlerError::InvalidRequest)
+        );
+        let short = encoded(Command::Chunk {
+            offset: 0,
+            data: &img[..99],
+        });
+        assert_eq!(
+            call(&mut os, keys::CHUNK, &short, None),
+            Err(HandlerError::InvalidRequest)
+        );
+        let first = encoded(Command::Chunk {
+            offset: 0,
+            data: &img[..CHUNK_LEN],
+        });
         call(&mut os, keys::CHUNK, &first, None).unwrap();
         call(&mut os, keys::CHUNK, &first, None).unwrap(); // resent: acknowledged
         // A resent begin resumes; a different one restarts.
         assert_eq!(begin(&mut os, &img, V1), Ok(1));
         // Commit before the last chunk: not yet.
-        assert_eq!(call(&mut os, keys::COMMIT, &[], Some(&TrustState::Unclaimed)), Err(HandlerError::InvalidRequest));
-        let last = encoded(Command::Chunk { offset: CHUNK_LEN as u32, data: &img[CHUNK_LEN..] });
+        assert_eq!(
+            call(&mut os, keys::COMMIT, &[], Some(&TrustState::Unclaimed)),
+            Err(HandlerError::InvalidRequest)
+        );
+        let last = encoded(Command::Chunk {
+            offset: CHUNK_LEN as u32,
+            data: &img[CHUNK_LEN..],
+        });
         call(&mut os, keys::CHUNK, &last, None).unwrap();
         call(&mut os, keys::COMMIT, &[], Some(&TrustState::Unclaimed)).unwrap();
     }
@@ -934,7 +1076,10 @@ mod tests {
         let dir = scratch("abort");
         let card = MemDevice::new(4 * CHUNK_LEN);
         let mut os = restart(&card, &dir);
-        assert_eq!(call(&mut os, keys::REBOOT, &[], Some(&TrustState::Unclaimed)), Err(HandlerError::Unavailable));
+        assert_eq!(
+            call(&mut os, keys::REBOOT, &[], Some(&TrustState::Unclaimed)),
+            Err(HandlerError::Unavailable)
+        );
         let img = image(300, 2);
         begin(&mut os, &img, V1).unwrap();
         send(&mut os, &img).unwrap();
@@ -944,7 +1089,11 @@ mod tests {
         let mut os = restart(&card, &dir);
         assert_eq!(info(&mut os).state, StateCode::Trial);
         call(&mut os, keys::ABORT, &[], Some(&TrustState::Unclaimed)).unwrap();
-        assert_eq!(card.0.lock().unwrap().reboots, 2, "the abort reboots into A");
+        assert_eq!(
+            card.0.lock().unwrap().reboots,
+            2,
+            "the abort reboots into A"
+        );
         card.boot();
         let mut os = restart(&card, &dir);
         let i = info(&mut os);
@@ -954,16 +1103,27 @@ mod tests {
 
     #[test]
     fn the_record_round_trips_and_a_corrupt_one_is_refused() {
-        let r = Record { floor: V2, versions: [V1, V2], ready: Some(Slot::B), control: 9 };
+        let r = Record {
+            floor: V2,
+            versions: [V1, V2],
+            ready: Some(Slot::B),
+            control: 9,
+        };
         assert_eq!(Record::decode(&r.encode()), Ok(r));
-        assert_eq!(Record::decode(&Record::default().encode()), Ok(Record::default()));
+        assert_eq!(
+            Record::decode(&Record::default().encode()),
+            Ok(Record::default())
+        );
         let mut bad = r.encode();
         bad[9] ^= 1;
         assert!(Record::decode(&bad).is_err());
         let dir = scratch("record");
         std::fs::write(dir.join(RECORD_FILE), bad).unwrap();
         let card = MemDevice::new(CHUNK_LEN);
-        assert!(OsUpdates::open(Box::new(card), dir.join(RECORD_FILE), NODE).is_err(), "never forget the floor");
+        assert!(
+            OsUpdates::open(Box::new(card), dir.join(RECORD_FILE), NODE).is_err(),
+            "never forget the floor"
+        );
     }
 
     #[test]
@@ -975,12 +1135,13 @@ mod tests {
         let slots = [dir.join("slot-a"), dir.join("slot-b")];
         let state = dir.join("card");
         let cmdline = dir.join("cmdline");
-        std::fs::write(&cmdline, "init=/x emco.slot=a quiet\n").unwrap();
+        std::fs::write(&cmdline, "init=/x mw.slot=a quiet\n").unwrap();
         for p in &slots {
             std::fs::write(p, vec![0u8; 3 * CHUNK_LEN]).unwrap();
         }
         let mut card = vec![0u8; (COPY_LBA[1] as usize + 1) * SECTOR];
-        card[(COPY_LBA[0] as usize) * SECTOR..][..SECTOR].copy_from_slice(&bootstate::encode(&BootState::initial()));
+        card[(COPY_LBA[0] as usize) * SECTOR..][..SECTOR]
+            .copy_from_slice(&bootstate::encode(&BootState::initial()));
         std::fs::write(&state, &card).unwrap();
 
         let dev = FileDevice::open(&slots, &state, &cmdline, Vec::new()).unwrap();
@@ -1015,10 +1176,17 @@ mod tests {
     }
 
     impl mwctl::link::Endpoint for NodeLink<'_> {
-        fn request(&mut self, key: middleware::Key<'_>, body: &[u8]) -> Result<Vec<u8>, mwctl::error::Error> {
+        fn request(
+            &mut self,
+            key: middleware::Key<'_>,
+            body: &[u8],
+        ) -> Result<Vec<u8>, mwctl::error::Error> {
             let mut out = vec![0u8; 4 + CHUNK_LEN];
             let trust = self.trust;
-            match self.os.handle(key, body, trust.as_ref(), &[CHIP], true, &mut out) {
+            match self
+                .os
+                .handle(key, body, trust.as_ref(), &[CHIP], true, &mut out)
+            {
                 Ok(n) => Ok(out[..n].to_vec()),
                 Err(status) => Err(mwctl::error::Error::Device {
                     key: key.as_str().to_owned(),
@@ -1068,7 +1236,10 @@ mod tests {
         };
         let signer = mwctl::fw::ControlSigner(&sign);
         {
-            let mut dev = Device::new(NodeLink { os: &mut os, trust: Some(trust) });
+            let mut dev = Device::new(NodeLink {
+                os: &mut os,
+                trust: Some(trust),
+            });
             let target = dev
                 .os_update(&img, Version(V2), Some(cert), |_| {})
                 .expect("installed");
@@ -1079,25 +1250,41 @@ mod tests {
         let mut os = restart(&card, &dir);
         assert_eq!(info(&mut os).state, StateCode::Trial);
         {
-            let mut dev = Device::new(NodeLink { os: &mut os, trust: Some(trust) });
+            let mut dev = Device::new(NodeLink {
+                os: &mut os,
+                trust: Some(trust),
+            });
             dev.os_confirm(3, || {}, Some(signer)).expect("confirmed");
             let i = dev.os_info().expect("info");
-            assert_eq!((i.running, i.state, i.running_version), (Slot::B, StateCode::Confirmed, V2));
+            assert_eq!(
+                (i.running, i.state, i.running_version),
+                (Slot::B, StateCode::Confirmed, V2)
+            );
         }
         // A root without the cert: the claimed node refuses the commit (the
         // image is sent, the commit is the step that fails).
         let mut os = restart(&card, &dir);
-        let mut dev = Device::new(NodeLink { os: &mut os, trust: Some(trust) });
-        let err = dev.os_update(&img, Version(V2 + 1), None, |_| {}).unwrap_err();
+        let mut dev = Device::new(NodeLink {
+            os: &mut os,
+            trust: Some(trust),
+        });
+        let err = dev
+            .os_update(&img, Version(V2 + 1), None, |_| {})
+            .unwrap_err();
         match err {
             mwctl::error::Error::Upload { step: 3, cause, .. } => assert!(
-                matches!(*cause, mwctl::error::Error::Device { status: HandlerError::Denied, .. }),
+                matches!(
+                    *cause,
+                    mwctl::error::Error::Device {
+                        status: HandlerError::Denied,
+                        ..
+                    }
+                ),
                 "{cause:?}"
             ),
             other => panic!("{other:?}"),
         }
     }
-
 
     /// Over the network a claimed node takes a reboot, confirm or abort only
     /// signed by its pinned key, with a counter above the last one taken
@@ -1111,7 +1298,10 @@ mod tests {
         begin(&mut os, &img, V1).unwrap();
         send(&mut os, &img).unwrap();
         call(&mut os, keys::COMMIT, &[], Some(&TrustState::Unclaimed)).unwrap();
-        let trust = TrustState::Claimed { key: root_key(), min_version: Version(0) };
+        let trust = TrustState::Claimed {
+            key: root_key(),
+            min_version: Version(0),
+        };
         let denied = Err(HandlerError::Denied);
         let reboot = |os: &mut OsUpdates, c: Option<SignedControl>| {
             let body = c.map(|c| c.encode().to_vec()).unwrap_or_default();
@@ -1119,30 +1309,59 @@ mod tests {
         };
         // Unsigned, and signed by another key: refused, nothing rebooted.
         assert_eq!(reboot(&mut os, None), denied);
-        assert_eq!(reboot(&mut os, Some(signed_control_by(&[9; 32], ControlOp::OsReboot, 1))), denied);
+        assert_eq!(
+            reboot(
+                &mut os,
+                Some(signed_control_by(&[9; 32], ControlOp::OsReboot, 1))
+            ),
+            denied
+        );
         assert_eq!(card.0.lock().unwrap().reboots, 0);
         // Signed by the pinned key for this op: taken, counter kept.
-        assert_eq!(reboot(&mut os, Some(signed_control_by(&SEED, ControlOp::OsReboot, 1))), Ok(vec![]));
+        assert_eq!(
+            reboot(
+                &mut os,
+                Some(signed_control_by(&SEED, ControlOp::OsReboot, 1))
+            ),
+            Ok(vec![])
+        );
         assert_eq!(card.0.lock().unwrap().reboots, 1);
         assert_eq!(os.record().control, 1);
         // The same request again is a replay; a signature for another op is
         // not this one either.
-        assert_eq!(reboot(&mut os, Some(signed_control_by(&SEED, ControlOp::OsReboot, 1))), denied);
-        assert_eq!(reboot(&mut os, Some(signed_control_by(&SEED, ControlOp::OsAbort, 2))), denied);
+        assert_eq!(
+            reboot(
+                &mut os,
+                Some(signed_control_by(&SEED, ControlOp::OsReboot, 1))
+            ),
+            denied
+        );
+        assert_eq!(
+            reboot(
+                &mut os,
+                Some(signed_control_by(&SEED, ControlOp::OsAbort, 2))
+            ),
+            denied
+        );
         // Over the serial port the board is in reach: no signature needed.
         let mut out = [0u8; 8];
-        assert!(os.handle(keys::ABORT, &[], Some(&trust), &[CHIP], false, &mut out).is_ok());
+        assert!(
+            os.handle(keys::ABORT, &[], Some(&trust), &[CHIP], false, &mut out)
+                .is_ok()
+        );
         assert_eq!(os.record().control, 1, "serial takes no counter");
     }
-
 
     /// The node's control target is the one `mwctl` signs for (its zlink
     /// derivation), so a request signed for the node is for this node.
     #[test]
     fn control_target_is_the_one_mwctl_signs_for() {
-        for id in [NODE, SenderId([1; 8]), SenderId([0xff, 0, 1, 2, 3, 4, 5, 6])] {
+        for id in [
+            NODE,
+            SenderId([1; 8]),
+            SenderId([0xff, 0, 1, 2, 3, 4, 5, 6]),
+        ] {
             assert_eq!(control_target(id), mwctl::zlink::target(id));
         }
     }
-
 }

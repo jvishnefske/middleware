@@ -53,9 +53,9 @@
 //! [`crate::update`]); without one every update request is
 //! [`HandlerError::Denied`]. `sys/trust/claim` is always `Denied`. Every
 //! other key passes only if it is in the [`SysAllow`] list
-//! ([`Bridge::sys_route`]); by default `sys/info` (forwarded to the
-//! device) and `sys/log` (answered from the gateway's [`LogTail`]: the
-//! device publishes its log, it does not serve it). The allowlist never
+//! ([`Bridge::sys_route`]); by default `sys/info` and `sys/manifest`
+//! (forwarded to the device) and `sys/log` (answered from the gateway's
+//! [`LogTail`]: the device publishes its log, it does not serve it). The allowlist never
 //! opens an update or trust key, whatever it lists. Everything else is
 //! [`HandlerError::Denied`].
 //!
@@ -186,10 +186,11 @@ pub enum SysRoute {
 pub struct SysAllow(Vec<OwnedKey>);
 
 impl Default for SysAllow {
-    /// `sys/info` and `sys/log`.
+    /// `sys/info`, `sys/log` and `sys/manifest`: read-only descriptions of
+    /// the node, none of them an update or trust key.
     fn default() -> Self {
         SysAllow(
-            [keys::INFO, keys::LOG]
+            [keys::INFO, keys::LOG, keys::MANIFEST]
                 .iter()
                 .filter_map(|k| KeyBuf::from_key(*k).ok())
                 .collect(),

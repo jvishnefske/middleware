@@ -9,7 +9,7 @@
 //! | `MW_POSIX_NODE_MEMORY_BYTES` | `1048576` (1 MiB) | a payload's largest linear memory, decimal bytes, 65536..=67108864 |
 //! | `MW_POSIX_NODE_LOCAL_SERIAL` | none | path of a serial port (a USB gadget's `/dev/ttyGS0`, a PTY) served beside the gateway at 115200 baud, for `mwctl` |
 //! | `MW_POSIX_NODE_FUEL_PER_CALL` | `20000000` | instructions a payload may run per call (`init`, `tick`, a message, a request), 1000000..=1000000000; the microcontrollers' default is a twentieth of this |
-//! | `MW_POSIX_NODE_DRIVER` | `none` | the control-module driver ([`crate::driver`]): `none`, `sim` (a simulated EMCO PC Turn 50) or `kd240` (the KD240's inputs, read only) |
+//! | `MW_POSIX_NODE_DRIVER` | `none` | the control-module driver ([`crate::driver`]): `none`, `kd240` (the KD240's inputs, read only), or a name the binary supplies (`app::main_with_drivers`) |
 //! | `MW_POSIX_NODE_KD240_INPUTS` | none | with `kd240`: `point=chip:offset[:low]`, comma-separated ([`crate::driver::kd240::parse_inputs`]) |
 //!
 //! The in-process gateway reads its own `MW_GATEWAY_*` variables
@@ -153,7 +153,7 @@ pub struct OsConfig {
     pub slots: [PathBuf; 2],
     /// The device (or file) holding the boot state's two copies.
     pub state: PathBuf,
-    /// Where the running slot is read from (`emco.slot=`).
+    /// Where the running slot is read from (`mw.slot=`).
     pub cmdline: PathBuf,
     /// The reboot command; empty: no reboot (a simulation).
     pub reboot: Vec<String>,
@@ -229,7 +229,10 @@ impl PosixNodeConfig {
                     return Err(err(ENV_OS_SLOTS, &v, "not two paths, a,b"));
                 }
                 let reboot = match get(ENV_OS_REBOOT).map(|r| r.trim().to_owned()) {
-                    None => DEFAULT_OS_REBOOT.split_whitespace().map(str::to_owned).collect(),
+                    None => DEFAULT_OS_REBOOT
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect(),
                     Some(r) if r == "none" => Vec::new(),
                     Some(r) => r.split_whitespace().map(str::to_owned).collect(),
                 };
@@ -242,8 +245,20 @@ impl PosixNodeConfig {
                     reboot,
                 })
             }
-            (Some(v), None) => return Err(err(ENV_OS_STATE, &v, "required with MW_POSIX_NODE_OS_SLOTS")),
-            (None, Some(v)) => return Err(err(ENV_OS_SLOTS, &v, "required with MW_POSIX_NODE_OS_STATE")),
+            (Some(v), None) => {
+                return Err(err(
+                    ENV_OS_STATE,
+                    &v,
+                    "required with MW_POSIX_NODE_OS_SLOTS",
+                ));
+            }
+            (None, Some(v)) => {
+                return Err(err(
+                    ENV_OS_SLOTS,
+                    &v,
+                    "required with MW_POSIX_NODE_OS_STATE",
+                ));
+            }
         };
         let inputs = set(ENV_KD240_INPUTS);
         let driver = match set(ENV_DRIVER).as_deref().map(str::trim) {
@@ -257,7 +272,6 @@ impl PosixNodeConfig {
                 }
                 crate::driver::DriverChoice::None
             }
-            Some("sim") => crate::driver::DriverChoice::Sim,
             Some("kd240") => crate::driver::DriverChoice::Kd240(match inputs {
                 Some(v) => crate::driver::kd240::parse_inputs(&v).map_err(|_| {
                     err(
@@ -268,7 +282,15 @@ impl PosixNodeConfig {
                 })?,
                 None => Vec::new(),
             }),
-            Some(other) => return Err(err(ENV_DRIVER, other, "not none, sim or kd240")),
+            Some(name)
+                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    && !name.is_empty() =>
+            {
+                crate::driver::DriverChoice::Named(name.to_owned())
+            }
+            Some(other) => {
+                return Err(err(ENV_DRIVER, other, "not none, kd240 or a driver's name"));
+            }
         };
         Ok(PosixNodeConfig {
             state,
@@ -471,10 +493,10 @@ mod tests {
             DriverChoice::None
         );
         assert_eq!(
-            PosixNodeConfig::from_env(&env(&[(ENV_DRIVER, "sim")]))
+            PosixNodeConfig::from_env(&env(&[(ENV_DRIVER, "emco-sim")]))
                 .unwrap()
                 .driver,
-            DriverChoice::Sim
+            DriverChoice::Named("emco-sim".into())
         );
         let c = PosixNodeConfig::from_env(&env(&[
             (ENV_DRIVER, "kd240"),
@@ -493,7 +515,7 @@ mod tests {
             ("x_home", 12, true)
         );
         for (pairs, var) in [
-            (&[(ENV_DRIVER, "linuxcnc")][..], ENV_DRIVER),
+            (&[(ENV_DRIVER, "Bad_Name")][..], ENV_DRIVER),
             (
                 &[(ENV_DRIVER, "kd240"), (ENV_KD240_INPUTS, "nonsense")][..],
                 ENV_KD240_INPUTS,
@@ -549,9 +571,11 @@ mod tests {
 
     #[test]
     fn os_root_refuses_a_half_configuration_and_a_bad_slot_list() {
-        let only_slots = PosixNodeConfig::from_env(&env(&[(ENV_OS_SLOTS, "/dev/a,/dev/b")])).expect_err("state");
+        let only_slots =
+            PosixNodeConfig::from_env(&env(&[(ENV_OS_SLOTS, "/dev/a,/dev/b")])).expect_err("state");
         assert_eq!(only_slots.var, ENV_OS_STATE);
-        let only_state = PosixNodeConfig::from_env(&env(&[(ENV_OS_STATE, "/dev/card")])).expect_err("slots");
+        let only_state =
+            PosixNodeConfig::from_env(&env(&[(ENV_OS_STATE, "/dev/card")])).expect_err("slots");
         assert_eq!(only_state.var, ENV_OS_SLOTS);
         let three = PosixNodeConfig::from_env(&env(&[
             (ENV_OS_SLOTS, "/dev/a,/dev/b,/dev/c"),

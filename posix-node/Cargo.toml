@@ -13,6 +13,9 @@ name = "mw-posix-node"
 path = "src/main.rs"
 
 [dependencies]
+# The board's own key and CSR (cert.rs), and the checks on an installed chain.
+rcgen = { version = "0.14", features = ["x509-parser"] }
+x509-parser = "0.18"
 # The base firmware's pure core, shared rather than copied, as rp-base and
 # the ESP8266 firmware use it: request dispatch, loader state machine,
 # payload lifecycle and trust rules (`dispatch`), the two-slot payload
@@ -33,10 +36,17 @@ sha2 = "0.10.9"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"
 
+# The board's key on a secure chip (cert.rs `Chip`): P-256 signing from a
+# PKCS#8 file. The chip trait itself is middleware's `secure-chip`.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+
 # The KD240 driver's inputs (driver::kd240): GPIO lines through the
 # kernel's character device (uAPI v2). Linux only, input requests only.
 [target.'cfg(target_os = "linux")'.dependencies]
 gpiocdev = { version = "0.8", default-features = false, features = ["uapi_v2"] }
+# The board's key in a PKCS#11 token, a TPM through tpm2-pkcs11 (cert.rs
+# `Chip::Pkcs11`): mwctl's token layer, the same one the release tools use.
+mwctl = { path = "../tools/mwctl" }
 
 [dev-dependencies]
 # Signs the Linux root's release certs in the os tests (same version as mwctl's).

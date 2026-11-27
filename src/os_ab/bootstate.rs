@@ -8,7 +8,7 @@
 //! bytes 0..4    CRC-32 (IEEE, as U-Boot's `crc32`), big-endian, of bytes 4..512
 //! bytes 4..     text, as U-Boot's `env export -t` writes it, NUL-padded:
 //!                 ab_active=a
-//!                 ab_magic=emco-ab-1
+//!                 ab_magic=mw-ab-1
 //!                 ab_seq=1f
 //!                 ab_tries=0
 //!                 ab_try=-
@@ -33,7 +33,7 @@
 
 use core::fmt;
 
-pub const MAGIC: &str = "emco-ab-1";
+pub const MAGIC: &str = "mw-ab-1";
 pub const SECTOR: usize = 512;
 /// The two copies' sectors: 2 MiB and 3 MiB into the card, in the gap
 /// before partition 1 (which starts at 8 MiB).
@@ -80,12 +80,12 @@ impl Slot {
             _ => None,
         }
     }
-    /// The slot this boot came from: `emco.slot=a|b` on the kernel command
+    /// The slot this boot came from: `mw.slot=a|b` on the kernel command
     /// line, as boot.scr sets it.
     pub fn from_cmdline(cmdline: &str) -> Option<Slot> {
         cmdline
             .split_whitespace()
-            .filter_map(|w| w.strip_prefix("emco.slot="))
+            .filter_map(|w| w.strip_prefix("mw.slot="))
             .next_back()
             .and_then(Slot::parse)
     }
@@ -349,24 +349,24 @@ mod tests {
         let text = core::str::from_utf8(&e[4..]).unwrap().trim_end_matches('\0');
         assert_eq!(
             text,
-            "ab_active=a\nab_magic=emco-ab-1\nab_seq=1f\nab_tries=1\nab_try=b\n"
+            "ab_active=a\nab_magic=mw-ab-1\nab_seq=1f\nab_tries=1\nab_try=b\n"
         );
         assert_eq!(&e[..4], &crc32(&e[4..]).to_be_bytes());
     }
 
     #[test]
-    fn the_initial_card_matches_the_lathe_image() {
-        // kd240/nix/ab.nix writes exactly this text as copy 0 of a fresh card.
+    fn the_initial_card_matches_the_ab_nix_text() {
+        // the KD240 card image (kd240/nix/ab.nix) writes exactly this text as copy 0 of a fresh card.
         let e = encode(&BootState::initial());
         let text = core::str::from_utf8(&e[4..]).unwrap().trim_end_matches('\0');
-        assert_eq!(text, "ab_active=a\nab_magic=emco-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n");
+        assert_eq!(text, "ab_active=a\nab_magic=mw-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n");
     }
 
     #[test]
     fn what_u_boot_writes_reads_back() {
         // `env export -t` output, in any order, with 0x numbers too.
         let mut s = [0u8; SECTOR];
-        let text = b"ab_try=b\nab_tries=0\nab_seq=0x20\nab_magic=emco-ab-1\nab_active=a\n";
+        let text = b"ab_try=b\nab_tries=0\nab_seq=0x20\nab_magic=mw-ab-1\nab_active=a\n";
         s[4..4 + text.len()].copy_from_slice(text);
         let crc = crc32(&s[4..]);
         s[..4].copy_from_slice(&crc.to_be_bytes());
@@ -392,12 +392,12 @@ mod tests {
         };
         for bad in [
             &b"ab_active=a\nab_magic=other\nab_seq=1\nab_tries=0\nab_try=-\n"[..],
-            b"ab_active=c\nab_magic=emco-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n",
-            b"ab_active=a\nab_magic=emco-ab-1\nab_seq=1\nab_tries=0\n",
-            b"ab_active=a\nab_magic=emco-ab-1\nab_seq=1\nab_tries=0\nab_try=-\nbootcmd=reset\n",
-            b"ab_active=a\nab_active=b\nab_magic=emco-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n",
-            b"ab_active=a\nab_magic=emco-ab-1\nab_seq=zz\nab_tries=0\nab_try=-\n",
-            b"ab_active=a\nab_magic=emco-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n\0junk",
+            b"ab_active=c\nab_magic=mw-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n",
+            b"ab_active=a\nab_magic=mw-ab-1\nab_seq=1\nab_tries=0\n",
+            b"ab_active=a\nab_magic=mw-ab-1\nab_seq=1\nab_tries=0\nab_try=-\nbootcmd=reset\n",
+            b"ab_active=a\nab_active=b\nab_magic=mw-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n",
+            b"ab_active=a\nab_magic=mw-ab-1\nab_seq=zz\nab_tries=0\nab_try=-\n",
+            b"ab_active=a\nab_magic=mw-ab-1\nab_seq=1\nab_tries=0\nab_try=-\n\0junk",
         ] {
             assert!(decode(&with(bad)).is_err(), "{}", core::str::from_utf8(bad).unwrap());
         }
@@ -450,9 +450,9 @@ mod tests {
 
     #[test]
     fn slots_and_the_command_line() {
-        assert_eq!(Slot::from_cmdline("init=/x emco.slot=b quiet"), Some(Slot::B));
-        assert_eq!(Slot::from_cmdline("emco.slot=a emco.slot=b"), Some(Slot::B));
-        assert_eq!(Slot::from_cmdline("emco.slot=c"), None);
+        assert_eq!(Slot::from_cmdline("init=/x mw.slot=b quiet"), Some(Slot::B));
+        assert_eq!(Slot::from_cmdline("mw.slot=a mw.slot=b"), Some(Slot::B));
+        assert_eq!(Slot::from_cmdline("mw.slot=c"), None);
         assert_eq!(Slot::from_cmdline("root=/dev/sda2"), None);
         assert_eq!(Slot::A.other(), Slot::B);
         assert_eq!(Slot::from_index(1), Some(Slot::B));

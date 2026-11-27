@@ -125,6 +125,16 @@ pub fn request_meta(attachment: Option<&[u8]>, waited_ms: u64) -> RequestMeta<'_
     }
 }
 
+/// The key a reply goes under: the per-node key when the query names the
+/// per-node space (`@mw/node/...`, possibly with wildcards), else the plain key.
+fn reply_key(asked: &str, sender: SenderId, key: Key<'_>) -> String {
+    if asked.starts_with("@mw/node/") {
+        wire::node_key(sender, key)
+    } else {
+        key.as_str().to_owned()
+    }
+}
+
 /// Runs `handler` with the request at the front of `scratch` and the rest as
 /// the response buffer. Returns the response slice or the handler error.
 fn run_handler<'s, H: Handler>(
@@ -166,10 +176,15 @@ impl Responder for ZenohResponder<'_> {
             attachment.as_deref().and_then(wire::decode_trace),
         );
         let request = query.payload().map(|p| p.to_bytes()).unwrap_or_default();
+        // Answer under the concrete key this responder serves, not the query's
+        // own expression: a wildcard query (`@mw/node/*/sys/info`, as `mwctl
+        // scout` asks) must be answered by `@mw/node/<id>/sys/info`, or the
+        // asker cannot tell which node replied.
+        let reply_key = reply_key(query.key_expr().as_str(), self.sender, self.key);
         let (sent, handled) = match run_handler(handler, self.key, &request, meta, scratch) {
             Ok(response) => (
                 query
-                    .reply(query.key_expr().clone(), response)
+                    .reply(reply_key, response)
                     .attachment(wire::encode_reply(self.sender).to_vec())
                     .await,
                 None,
@@ -222,6 +237,16 @@ mod tests {
             run_handler(&mut echo, key, b"too long for scratch", none, &mut scratch),
             Err(HandlerError::BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn a_wildcard_node_query_is_answered_under_the_concrete_node_key() {
+        let id = SenderId([3; 8]);
+        let key = Key::from_static("sys/info");
+        let node = wire::node_key(id, key);
+        assert_eq!(reply_key("@mw/node/*/sys/info", id, key), node);
+        assert_eq!(reply_key(&node, id, key), node);
+        assert_eq!(reply_key("sys/info", id, key), "sys/info");
     }
 
     #[test]

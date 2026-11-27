@@ -202,8 +202,9 @@ fn bump(n: &mut u32) {
     *n = n.saturating_add(1);
 }
 
-/// The `gw/sys` handler (module docs). Holds only a queue sender.
-#[derive(Debug)]
+/// The `gw/sys` handler (module docs). Holds only a queue sender, so a clone
+/// is another handle on the same gateway (a second front for the same rules).
+#[derive(Debug, Clone)]
 pub struct SysForward {
     commands: mpsc::Sender<Command>,
     timeout: Duration,

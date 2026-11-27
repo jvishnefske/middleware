@@ -88,6 +88,7 @@ pub struct Controller<F, C: Clock + 'static> {
     events_dropped: u32,
     driver: Box<dyn Driver>,
     os: Option<crate::os::OsUpdates>,
+    certs: Option<crate::cert::CertStore>,
 }
 
 impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
@@ -117,6 +118,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             events_dropped: 0,
             driver,
             os: None,
+            certs: None,
         };
         (ctl, boot)
     }
@@ -180,6 +182,11 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.os = Some(os);
     }
 
+    /// The board's certificate store (`sys/cert/*`).
+    pub fn set_certs(&mut self, certs: crate::cert::CertStore) {
+        self.certs = Some(certs);
+    }
+
     /// A request from the network (the gateway's Zenoh link).
     pub fn request(
         &mut self,
@@ -201,6 +208,18 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         network: bool,
     ) -> Result<Vec<u8>, HandlerError> {
         let mut out = vec![0u8; MAX_RAW_FRAME];
+        if key.as_str().starts_with("sys/cert/") {
+            let trust = self.svc.trust_state();
+            let r = match self.certs.as_ref() {
+                Some(c) => c.handle(key, body, trust.as_ref(), network, &mut out),
+                None => Err(HandlerError::NotFound),
+            };
+            return r.and_then(|n| {
+                out.get(..n)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(HandlerError::BufferTooSmall)
+            });
+        }
         if key.as_str().starts_with("sys/os/") {
             let trust = self.svc.trust_state();
             let chips = crate::os::cert_targets(crate::service::CHIP, None);
@@ -348,9 +367,12 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             let Some(point) = self.driver.points().get(i) else {
                 continue;
             };
-            let key = wasm_host::channels::driver_key(&point.name);
+            // A point whose key would be too long is carried nowhere.
+            let Some(key) = wasm_host::channels::driver_key(&point.name) else {
+                continue;
+            };
             let Ok(k) = Key::new(&key) else { continue };
-            if !p.subscriptions().any(|s| s == key) {
+            if !p.subscriptions().any(|s| s == key.as_str()) {
                 continue;
             }
             if let Err(t) = p.deliver(k, &msg) {

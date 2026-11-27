@@ -293,6 +293,7 @@ impl<F: NorFlash + Durable> Service<F> {
             capacity: store.as_ref().map_or(0, PayloadStore::capacity),
             // No esp-base chip profile: `sys/board` is NotFound, as on rp-base.
             profile: None,
+            board: None,
             runtime: true,
             rekey_window: false,
             staging: false,
