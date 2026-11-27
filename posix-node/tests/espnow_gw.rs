@@ -2,7 +2,7 @@
 //! end of a `ChannelIo` pair, a fake USB bridge with a fake ESP-NOW device
 //! behind it on the other, the gateway's Zenoh session connected to an
 //! observer session listening on a fresh loopback port. No serial port is
-//! opened. EG3, EG6–EG10.
+//! opened. EG3, EG6–EG10, EG14, EG15.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -54,6 +54,8 @@ struct Air {
     requests: Vec<u16>,
     /// Requests the device ran (repeats are answered from its cache).
     executed: Vec<u16>,
+    /// `DEV`'s `sys/info`, when not `INFO`.
+    info: Option<Vec<u8>>,
 }
 
 struct FakeBridge {
@@ -68,21 +70,28 @@ fn wire_of(msg: &Msg<'_>) -> Vec<u8> {
     out[..n].to_vec()
 }
 
-/// The device's answer to an `MR` request sent to it, if any.
-fn device(air: &Mutex<Air>, data: &[u8]) -> Option<Vec<u8>> {
+/// `DEV2`'s `sys/info`.
+const INFO2: &[u8] = b"INFO-2";
+
+/// The answer of the device at `dst` (`DEV` or `DEV2`) to an `MR` request
+/// sent to it, if any. Only `DEV`'s requests are recorded.
+fn device(air: &Mutex<Air>, dst: Mac, data: &[u8]) -> Option<Vec<u8>> {
     let Ok(Message::Request { id, to, key, .. }) = Message::decode(data) else { return None };
-    if to != DEV {
+    if to != dst || ![DEV, DEV2].contains(&dst) {
         return None;
     }
     let mut a = air.lock().unwrap();
-    a.requests.push(id);
-    if !a.executed.contains(&id) {
-        a.executed.push(id);
+    if dst == DEV {
+        a.requests.push(id);
+        if !a.executed.contains(&id) {
+            a.executed.push(id);
+        }
     }
-    let result: Result<&[u8], HandlerError> = if key == keys::INFO { Ok(b"INFO") } else { Err(HandlerError::NotFound) };
+    let info = if dst == DEV { a.info.clone().unwrap_or_else(|| b"INFO".to_vec()) } else { INFO2.to_vec() };
+    let result: Result<&[u8], HandlerError> = if key == keys::INFO { Ok(&info) } else { Err(HandlerError::NotFound) };
     let mut frame = [0u8; MAX_FRAME];
     let n = Message::Response { id, to: BRIDGE, result }.encode(&mut frame).unwrap();
-    Some(wire_of(&Msg::Recv { src: DEV, data: &frame[..n] }))
+    Some(wire_of(&Msg::Recv { src: dst, data: &frame[..n] }))
 }
 
 impl FakeBridge {
@@ -131,9 +140,7 @@ impl FakeBridge {
                                     }
                                     Fate::LoseSent => {}
                                 }
-                                if dst == DEV
-                                    && let Some(answer) = device(&a, data)
-                                {
+                                if let Some(answer) = device(&a, dst, data) {
                                     replies.extend(answer);
                                 }
                             }
@@ -237,6 +244,66 @@ impl Running {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+}
+
+/// Every reply to one get on `selector` (a scan, as `mwctl scout` asks
+/// it): key and payload, sorted, and how long the last one took.
+async fn sweep(r: &Running, selector: &str) -> (Vec<(String, Vec<u8>)>, Duration) {
+    let asked = tokio::time::Instant::now();
+    let replies = r
+        .observer
+        .session()
+        .get(selector)
+        .target(zenoh::query::QueryTarget::All)
+        .consolidation(zenoh::query::ConsolidationMode::None)
+        .timeout(Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    let mut last = Duration::ZERO;
+    while let Ok(reply) = replies.recv_async().await {
+        if let Ok(s) = reply.result() {
+            out.push((s.key_expr().as_str().to_owned(), s.payload().to_bytes().into_owned()));
+            last = asked.elapsed();
+        }
+    }
+    out.sort();
+    (out, last)
+}
+
+/// Repeats the `sys/info` scan until it gets `want` (the queryables take
+/// a tick to be declared and routed).
+async fn scan_until(r: &Running, want: &[(String, Vec<u8>)]) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let (got, _) = sweep(r, "@mw/node/*/sys/info").await;
+        if got == want {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the scan answered {got:?}, not {want:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn info_key(mac: Mac) -> String {
+    wire::node_key(SenderId::from_mac(mac), keys::INFO)
+}
+
+/// Both devices' `sys/info` replies, as a scan gives them (sorted by key).
+fn both_infos() -> Vec<(String, Vec<u8>)> {
+    vec![(info_key(DEV2), INFO2.to_vec()), (info_key(DEV), b"INFO".to_vec())]
+}
+
+/// The keys of every request the bridge was asked to send.
+fn requested_keys(r: &Running) -> Vec<String> {
+    let a = r.bridge.air.lock().unwrap();
+    a.sends
+        .iter()
+        .filter_map(|(_, data)| match Message::decode(data) {
+            Ok(Message::Request { key, .. }) => Some(key.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn fast() -> GwConfig {
@@ -590,5 +657,164 @@ async fn eg3_uplink_survives_a_request() {
     assert_eq!(seen, (0..20).collect::<Vec<u8>>());
     // They were published while the request still waited, not after.
     assert!(all_up < answered, "uplink waited for the request");
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eg14_a_wildcard_sys_info_query_lists_every_heard_device() {
+    let r = Running::start(fast()).await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    r.bridge.publish(DEV2, 1, "app/thing/temp", b"2").await;
+    // One get, as `mwctl scout` asks it: each device answers on its own
+    // concrete key, with its own sys/info.
+    scan_until(&r, &both_infos()).await;
+    // A wildcard that covers only one device reaches only that one.
+    let (got, _) = sweep(&r, "@mw/node/e4b0$*/sys/info").await;
+    assert_eq!(got, [(info_key(DEV), b"INFO".to_vec())]);
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eg14_a_wildcard_never_reaches_another_key() {
+    let r = Running::start(fast()).await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    r.bridge.publish(DEV2, 1, "app/thing/temp", b"2").await;
+    scan_until(&r, &both_infos()).await;
+    // A sweep of every sys key is answered by sys/info alone (and by the
+    // gateway's own sys/peers); a wildcard on a loader key by nothing.
+    let (got, _) = sweep(&r, "@mw/node/*/sys/**").await;
+    let peers = wire::node_key(SenderId::from_mac(BRIDGE), keys::PEERS);
+    let infos: Vec<_> = got.iter().filter(|(k, _)| *k != peers).cloned().collect();
+    assert_eq!(infos, both_infos());
+    // The gateway's heard list, on the gateway's own key.
+    let heard: Vec<_> = got.iter().filter(|(k, _)| *k == peers).collect();
+    assert_eq!((got.len(), heard.len()), (3, 1), "{got:?}");
+    let ids: Vec<SenderId> = peers::decode(&heard[0].1).expect("a peer set").collect();
+    assert!([DEV, DEV2].iter().all(|m| ids.contains(&SenderId::from_mac(*m))), "{ids:?}");
+    let any_peers = wire::node_key_any_buf(keys::PEERS).unwrap();
+    assert_eq!(sweep(&r, &any_peers).await.0, [(peers.clone(), heard[0].1.clone())]);
+    let any_begin = wire::node_key_any_buf(keys::BEGIN).unwrap();
+    assert_eq!(sweep(&r, &any_begin).await.0, []);
+    assert_eq!(sweep(&r, "@mw/node/**").await.0.iter().filter(|(k, _)| *k != peers).count(), 2);
+    // Nothing but sys/info was ever asked of a device.
+    let asked = requested_keys(&r);
+    assert!(!asked.is_empty());
+    assert!(asked.iter().all(|k| k == "sys/info"), "{asked:?}");
+    // A concrete query on such a key still goes to the device.
+    let mut z = r.observer.clone();
+    let mut resp = [0u8; 64];
+    let opts = RequestOptions::default()
+        .with_target(Target::Node(SenderId::from_mac(DEV)))
+        .with_timeout(Duration::from_secs(5));
+    match z.request_with(keys::BEGIN, b"", &mut resp, &opts).await {
+        Err(ZenohError::Handler(e)) => assert_eq!(e, HandlerError::NotFound),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(requested_keys(&r).last().map(String::as_str), Some(keys::BEGIN.as_str()));
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eg15_a_second_scan_is_answered_from_the_cache() {
+    // A lost Sent stalls a request for 1.5 s.
+    let r = Running::start(GwConfig { sent_timeout_ms: 1_500, ..fast() }).await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    r.bridge.publish(DEV2, 1, "app/thing/temp", b"2").await;
+    scan_until(&r, &both_infos()).await;
+    // Once cached, more scans ask the devices nothing.
+    let sends = r.bridge.air.lock().unwrap().sends.len();
+    for _ in 0..3 {
+        assert_eq!(sweep(&r, "@mw/node/*/sys/info").await.0, both_infos());
+    }
+    assert_eq!(r.bridge.air.lock().unwrap().sends.len(), sends);
+    // The radio is busy (a request whose Sent is lost): the scan is still
+    // answered, before that request is, with no Send of its own.
+    r.bridge.script(&[Fate::LoseSent]);
+    let busy = async {
+        let answer = r.info(DEV, Duration::from_secs(8)).await;
+        (answer, tokio::time::Instant::now())
+    };
+    let scan = async {
+        while r.bridge.air.lock().unwrap().sends.len() == sends {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let scan = sweep(&r, "@mw/node/*/sys/info").await;
+        (scan, r.bridge.air.lock().unwrap().sends.len(), tokio::time::Instant::now())
+    };
+    let ((answer, answered), ((got, took), sends_after_scan, scanned)) = tokio::join!(busy, scan);
+    assert_eq!(got, both_infos());
+    assert!(scanned < answered, "the scan waited for the radio ({took:?})");
+    assert_eq!(sends_after_scan, sends + 1, "the scan reached the radio");
+    // A concrete sys/info query is not served from the cache: it went to
+    // the device.
+    assert_eq!(answer.unwrap(), b"INFO");
+    let report = r.finish().await;
+    assert_eq!((report.requests, report.request_failures), (1, 0), "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eg15_a_concrete_answer_refreshes_the_cache() {
+    let r = Running::start(fast()).await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    scan_until(&r, &[(info_key(DEV), b"INFO".to_vec())]).await;
+    r.bridge.air.lock().unwrap().info = Some(b"NEWER".to_vec());
+    // The cache still answers the scan; a concrete query asks the device
+    // and what it said is what the next scan gives.
+    assert_eq!(sweep(&r, "@mw/node/*/sys/info").await.0, [(info_key(DEV), b"INFO".to_vec())]);
+    assert_eq!(r.info(DEV, Duration::from_secs(5)).await.unwrap(), b"NEWER");
+    assert_eq!(sweep(&r, "@mw/node/*/sys/info").await.0, [(info_key(DEV), b"NEWER".to_vec())]);
+    // A forwarded request that may change the payload (here a stop, which
+    // this device refuses) drops the entry: the next scan asks the device.
+    r.bridge.air.lock().unwrap().info = Some(b"STOPPED".to_vec());
+    let mut z = r.observer.clone();
+    let mut resp = [0u8; 64];
+    let opts = RequestOptions::default()
+        .with_target(Target::Node(SenderId::from_mac(DEV)))
+        .with_timeout(Duration::from_secs(5));
+    assert!(matches!(z.request_with(keys::STOP, b"", &mut resp, &opts).await, Err(ZenohError::Handler(_))));
+    assert_eq!(sweep(&r, "@mw/node/*/sys/info").await.0, [(info_key(DEV), b"STOPPED".to_vec())]);
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eg15_a_forgotten_device_leaves_the_cache() {
+    let r = Running::start(GwConfig { heard_ttl_ms: 1_500, ..fast() }).await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    scan_until(&r, &[(info_key(DEV), b"INFO".to_vec())]).await;
+    // The device falls silent and is forgotten: the scan no longer lists
+    // it, cached or not.
+    r.bridge.air.lock().unwrap().info = Some(b"REBOOTED".to_vec());
+    scan_until(&r, &[]).await;
+    // Heard again well inside the cache's 30 s: what it says now, not what
+    // it said before it was forgotten.
+    r.bridge.publish(DEV, 2, "app/thing/temp", b"1").await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let (got, _) = sweep(&r, "@mw/node/*/sys/info").await;
+        if !got.is_empty() {
+            assert_eq!(got, [(info_key(DEV), b"REBOOTED".to_vec())]);
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "not listed again");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    r.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eg15_a_silent_device_does_not_hold_up_the_others() {
+    let r = Running::start(fast()).await;
+    // A device that is heard but answers no request, beside one that does.
+    let mute: Mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+    r.bridge.publish(mute, 1, "app/thing/temp", b"0").await;
+    r.bridge.publish(DEV, 1, "app/thing/temp", b"1").await;
+    scan_until(&r, &[(info_key(DEV), b"INFO".to_vec())]).await;
+    // Its absence costs a scan no more than the scan's own wait, and it is
+    // asked at most once per scan, never retried.
+    let before = requested_keys(&r).len();
+    let (got, _) = sweep(&r, "@mw/node/*/sys/info").await;
+    assert_eq!(got, [(info_key(DEV), b"INFO".to_vec())]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(requested_keys(&r).len() <= before + 1, "{:?}", requested_keys(&r));
     r.finish().await;
 }

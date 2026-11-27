@@ -13,6 +13,7 @@ use middleware::key::Key;
 use middleware::loader::keys;
 use middleware::loader::peers::{MAX_PEERS, PeerSet};
 use middleware::transport::{HandlerError, SenderId};
+use middleware::zenoh::wire;
 
 /// A device not heard for this long is forgotten (the default;
 /// [`Heard::with_ttl_ms`]).
@@ -41,10 +42,10 @@ pub const fn sender_id(mac: Mac) -> SenderId {
     SenderId::from_mac(mac)
 }
 
-/// The MAC of a MAC-derived id (its last two bytes are zero), else `None`.
+/// The MAC of a MAC-derived id (its last two bytes are zero), else `None`
+/// ([`wire::mac_of_id`], the rule `mwctl scout` shares).
 pub fn mac_of(id: SenderId) -> Option<Mac> {
-    let [a, b, c, d, e, f, 0, 0] = id.0 else { return None };
-    Some([a, b, c, d, e, f])
+    wire::mac_of_id(id)
 }
 
 /// The publication stream origin of a device's uplink: its MAC's last four
@@ -75,6 +76,113 @@ pub const FORWARDED: [Key<'static>; 12] = [
 /// True if requests on `key` are forwarded to devices.
 pub fn forwarded(key: Key<'_>) -> bool {
     FORWARDED.iter().any(|k| k.as_str() == key.as_str())
+}
+
+/// What a device's queryable does with a query (EG14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Plan {
+    /// Send it to the device as an ESP-NOW request on the queryable's key.
+    Forward,
+    /// Answer the device's `sys/info`, from the cache when it is fresh.
+    Info,
+    /// Not for this queryable: leave it unanswered.
+    Ignore,
+}
+
+/// Decides a query on `expr` that reached the queryable of device `mac`
+/// for `key`. Pure.
+///
+/// A query naming exactly that queryable's key is forwarded (if the key is
+/// [`forwarded`]). A wildcard query (`mwctl scout`'s
+/// `@mw/node/*/sys/info`, a sweep of `@mw/node/**`) is answered only by
+/// the `sys/info` queryable, and only when it covers that device's
+/// `sys/info`; every other queryable ignores it, so a wildcard never
+/// reaches a key that stages or acts (the rule of
+/// `zenoh_sys::plan`).
+pub fn plan_query(expr: &str, mac: Mac, key: Key<'_>) -> Plan {
+    let id = sender_id(mac);
+    if expr.contains('*') || expr.contains('$') {
+        if key != keys::INFO {
+            return Plan::Ignore;
+        }
+        let covers = zenoh::key_expr::KeyExpr::try_from(expr)
+            .ok()
+            .zip(zenoh::key_expr::KeyExpr::try_from(wire::node_key(id, keys::INFO)).ok())
+            .is_some_and(|(query, info)| query.includes(&info));
+        return if covers { Plan::Info } else { Plan::Ignore };
+    }
+    match wire::parse_node_key(expr) {
+        Some((i, k)) if i == id && k == key && forwarded(key) => Plan::Forward,
+        _ => Plan::Ignore,
+    }
+}
+
+/// True if a request on `key` may change what the device says in
+/// `sys/info` (its payload and status): its cached answer is dropped when
+/// one is forwarded (EG15).
+pub fn changes_info(key: Key<'_>) -> bool {
+    [keys::COMMIT, keys::START, keys::STOP, keys::BIND].contains(&key)
+}
+
+/// How long a cached `sys/info` answers a scan (EG15).
+pub const INFO_TTL_MS: u64 = 30_000;
+
+/// The devices' last `sys/info` answers (EG15): at most [`MAX_SERVED`],
+/// each fresh for [`INFO_TTL_MS`], so a scan of every node is answered
+/// without a radio request per device. It holds only what a device said in
+/// `sys/info`; no other key is cached.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InfoCache {
+    entries: Vec<(Mac, u64, Vec<u8>)>,
+}
+
+impl InfoCache {
+    /// Nothing cached.
+    pub const fn new() -> Self {
+        InfoCache { entries: Vec::new() }
+    }
+
+    /// Remembers `body` as `mac`'s `sys/info` fetched at `now_ms`,
+    /// replacing its last one. A body over
+    /// [`middleware::rpc::MAX_RESPONSE_BODY`] is refused (`false`). When
+    /// full, the entry fetched longest ago makes room.
+    pub fn insert(&mut self, mac: Mac, body: &[u8], now_ms: u64) -> bool {
+        if body.len() > middleware::rpc::MAX_RESPONSE_BODY {
+            return false;
+        }
+        self.forget(mac);
+        if self.entries.len() >= MAX_SERVED
+            && let Some(oldest) = self.entries.iter().enumerate().min_by_key(|(_, e)| e.1).map(|(i, _)| i)
+        {
+            self.entries.remove(oldest);
+        }
+        self.entries.push((mac, now_ms, body.to_vec()));
+        true
+    }
+
+    /// `mac`'s `sys/info` if it was fetched less than [`INFO_TTL_MS`]
+    /// before `now_ms`.
+    pub fn get(&self, mac: Mac, now_ms: u64) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find(|(m, at, _)| *m == mac && now_ms.saturating_sub(*at) < INFO_TTL_MS)
+            .map(|(_, _, body)| body.as_slice())
+    }
+
+    /// Drops `mac`'s entry (the device is no longer heard).
+    pub fn forget(&mut self, mac: Mac) {
+        self.entries.retain(|(m, _, _)| *m != mac);
+    }
+
+    /// Entries held, fresh or not.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// The Zenoh reply error for a failed forwarded request.
@@ -499,6 +607,89 @@ mod tests {
         assert!(!skip_downlink(Some(sender_id(OTHER)), BRIDGE, &heard));
         assert!(!skip_downlink(Some(SenderId([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24, 1, 2])), BRIDGE, &heard));
         assert!(!skip_downlink(None, BRIDGE, &heard));
+    }
+
+    #[test]
+    fn eg14_a_query_is_planned_by_the_queryable_it_reached() {
+        let dev = wire::node_key(sender_id(DEV), keys::INFO);
+        let begin = wire::node_key(sender_id(DEV), keys::BEGIN);
+        let table: [(&str, Mac, Key<'_>, Plan); 14] = [
+            // Concrete: the queryable's own key, forwarded.
+            (&dev, DEV, keys::INFO, Plan::Forward),
+            (&begin, DEV, keys::BEGIN, Plan::Forward),
+            // Concrete, but not this queryable's device or key.
+            (&dev, OTHER, keys::INFO, Plan::Ignore),
+            (&dev, DEV, keys::BEGIN, Plan::Ignore),
+            (&begin, DEV, keys::INFO, Plan::Ignore),
+            // A wildcard covering this device's sys/info: its info, only
+            // from the sys/info queryable.
+            ("@mw/node/*/sys/info", DEV, keys::INFO, Plan::Info),
+            ("@mw/node/*/sys/**", DEV, keys::INFO, Plan::Info),
+            ("@mw/node/**", DEV, keys::INFO, Plan::Info),
+            ("@mw/node/e4b0$*/sys/info", DEV, keys::INFO, Plan::Info),
+            // A wildcard on any other queryable, or not covering sys/info.
+            ("@mw/node/*/sys/**", DEV, keys::BEGIN, Plan::Ignore),
+            ("@mw/node/*/sys/loader/begin", DEV, keys::BEGIN, Plan::Ignore),
+            ("@mw/node/*/sys/loader/*", DEV, keys::INFO, Plan::Ignore),
+            ("@mw/node/246f$*/sys/info", DEV, keys::INFO, Plan::Ignore),
+            // Not a key expression at all.
+            ("@mw/node/*/sys//info", DEV, keys::INFO, Plan::Ignore),
+        ];
+        for (expr, mac, key, want) in table {
+            assert_eq!(plan_query(expr, mac, key), want, "{expr} at {}", key.as_str());
+        }
+        for k in FORWARDED {
+            let acts = ["sys/loader/commit", "sys/payload/start", "sys/payload/stop", "sys/payload/bind"];
+            assert_eq!(changes_info(k), acts.contains(&k.as_str()), "{}", k.as_str());
+        }
+        // A concrete key off the allowlist is never forwarded, whatever
+        // queryable it is given to.
+        let claim = wire::node_key(sender_id(DEV), keys::TRUST_CLAIM);
+        assert_eq!(plan_query(&claim, DEV, keys::TRUST_CLAIM), Plan::Ignore);
+    }
+
+    #[test]
+    fn eg15_the_info_cache_is_fresh_for_its_ttl() {
+        let mut c = InfoCache::new();
+        assert_eq!(c.get(DEV, 0), None);
+        assert!(c.insert(DEV, b"one", 1_000));
+        assert_eq!(c.get(DEV, 1_000), Some(&b"one"[..]));
+        assert_eq!(c.get(DEV, 1_000 + INFO_TTL_MS - 1), Some(&b"one"[..]));
+        assert_eq!(c.get(DEV, 1_000 + INFO_TTL_MS), None);
+        assert_eq!(c.get(OTHER, 1_000), None);
+        // A new answer replaces the old and starts its TTL afresh.
+        assert!(c.insert(DEV, b"two", 20_000));
+        assert_eq!(c.len(), 1);
+        assert_eq!(c.get(DEV, 20_000 + INFO_TTL_MS - 1), Some(&b"two"[..]));
+        // A time before the fetch is age zero.
+        assert_eq!(c.get(DEV, 0), Some(&b"two"[..]));
+    }
+
+    #[test]
+    fn eg15_the_info_cache_is_bounded_and_forgets() {
+        let mut c = InfoCache::new();
+        let mac = |i: usize| [0x02, 0, 0, 0, 0, u8::try_from(i).unwrap()];
+        for i in 0..MAX_SERVED {
+            assert!(c.insert(mac(i), b"x", u64::try_from(i).unwrap()));
+        }
+        assert_eq!(c.len(), MAX_SERVED);
+        // Full: the entry fetched longest ago makes room.
+        assert!(c.insert(DEV, b"new", 100));
+        assert_eq!(c.len(), MAX_SERVED);
+        assert_eq!(c.get(mac(0), 100), None);
+        assert_eq!(c.get(mac(1), 100), Some(&b"x"[..]));
+        assert_eq!(c.get(DEV, 100), Some(&b"new"[..]));
+        // A body no device can have sent is refused and changes nothing.
+        let huge = vec![0u8; middleware::rpc::MAX_RESPONSE_BODY + 1];
+        assert!(!c.insert(DEV, &huge, 200));
+        assert_eq!(c.get(DEV, 200), Some(&b"new"[..]));
+        assert!(c.insert(OTHER, &huge[1..], 200));
+        // Forgotten with its device.
+        c.forget(DEV);
+        assert_eq!(c.get(DEV, 200), None);
+        assert_eq!(c.len(), MAX_SERVED - 1);
+        c.forget(DEV);
+        assert!(!c.is_empty());
     }
 
     #[test]

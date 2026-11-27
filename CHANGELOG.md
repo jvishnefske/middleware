@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### ESP-NOW devices in `mwctl scout`, through the posix-node gateway (EG14, EG15, H8)
+- mw-posix-node: the ESP-NOW gateway answers a wildcard `sys/info` query (`mwctl scout`'s `@mw/node/*/sys/info`) for every device it serves, each on the device's own key. Before, such a query was dropped (the gateway took the device from the query's key, which a wildcard does not name). A wildcard reaches `sys/info` only: every other per-device key ignores it (`espnow_gw::core::plan_query`).
+- mw-posix-node: scans are answered from a cache of each device's last `sys/info` (`core::InfoCache`, 32 entries, 30 s), filled when a device is first served and by every `sys/info` answer relayed, so a scan costs no radio request and does not wait behind one. On a miss the device is asked once (one attempt) and the scan answered if that returns within 1.5 s. A query on a device's own `sys/info` key still goes to the device. The cache's fetches run only when no forwarded query waits.
+- mw-posix-node: the gateway's `sys/peers` reply is on its own key (`@mw/node/<bridge id>/sys/peers`) also for a wildcard query; before, it echoed the query's expression.
+- mwctl `scout` (`just lan`): a device answered for by a gateway is a row of kind `espnow` (ADDRESS its MAC, NODE its `--node` id, VIA `gw <bridge MAC>` from one extra query, `@mw/node/*/sys/peers`); the count line gains `, N over ESP-NOW` (in every build). New `scout::Gateway`, `parse_peers`, `attach_gateways`, `ESPNOW`, `MAX_GATEWAYS`, `MAX_VIA`.
+- mwctl `--zenoh … --node <mac>0000`: signed requests name the device's MAC without `--target` (`zlink::target_for`), when `sys/info` reports that id or none. Before, the RT1050 rule was applied and the device refused the request.
+- middleware: `zenoh_wire::mac_of_id`.
+- Not yet checked on hardware (EG13).
+
 ### The ESP-NOW gateway keeps heard devices' frames during a MAC flood (EG10)
 - mw-posix-node: the pump's `MW` queue (`espnow_gw::MW_QUEUE`, now 96) keeps its last `MW_RESERVED` (32) slots for frames from MACs in the heard table; a frame from a MAC not (yet) heard is dropped and counted once the queue is that full. Before, a flood of forged MACs arriving while the bus was busy (a Zenoh put, the 1 s reconcile declaring the new devices' queryables) filled the 64-deep drop-newest queue and a heard device's frames were dropped behind it. One FIFO still, so frames are not reordered. `tests/espnow_gw.rs` `eg10_a_mac_flood_leaves_heard_devices_and_their_queryables` failed this way on a loaded machine.
 

@@ -28,9 +28,15 @@
 //! pure and unit tested; [`run`] (feature `zenoh`) is the shell that does
 //! the network I/O.
 //!
-//! Not seen: nodes on ESP-NOW (not IP; ask a gateway's `peers`), sessions
-//! behind a router that neither answers scouts nor is reached through one
-//! that does, and anything on another subnet (multicast stays on the link).
+//! ESP-NOW devices (H8) are not on IP, but a posix-node ESP-NOW gateway
+//! answers the `sys/info` query for each device it hears, at the device's
+//! MAC-derived id; such an answer is an `espnow` row, and one more query,
+//! `@mw/node/*/sys/peers`, asks each gateway which devices it hears
+//! ([`Gateway`], [`attach_gateways`]) for the VIA column.
+//!
+//! Not seen: ESP-NOW devices no gateway hears, sessions behind a router
+//! that neither answers scouts nor is reached through one that does, and
+//! anything on another subnet (multicast stays on the link).
 
 use crate::device::Info;
 use crate::report::status_name;
@@ -82,13 +88,15 @@ pub struct Answer {
 pub struct Row {
     /// Zenoh id; `None` for a node whose reply named no session.
     pub zid: Option<String>,
-    /// `router`, `peer`, `client`, or `?` when only `sys/info` saw it.
+    /// `router`, `peer`, `client`, [`ESPNOW`] for a device a gateway
+    /// answered for, `mdns`, or `?` when only `sys/info` saw it.
     pub whatami: String,
     /// Its addresses: its own locators, else the remote addresses its
-    /// routers see.
+    /// routers see; an ESP-NOW device's MAC.
     pub addrs: Vec<String>,
     /// The routers or peers it is connected to (only for sessions found
-    /// through an admin space).
+    /// through an admin space); for an [`ESPNOW`] row, the node ids of the
+    /// gateways that hear it ([`attach_gateways`]).
     pub via: Vec<String>,
     /// Its middleware `sys/info`, if it answered.
     pub node: Option<Answer>,
@@ -125,11 +133,19 @@ pub struct MdnsNode {
 /// Most mDNS records kept from one scan.
 pub const MAX_MDNS: usize = 256;
 
+/// The kind of a row for an ESP-NOW device answered for by a gateway.
+pub const ESPNOW: &str = "espnow";
+
 /// The node id in a reply key `@mw/node/<zid16>/sys/info`.
 pub fn node_of_key(key: &str) -> Option<SenderId> {
+    node_of(key, "sys/info")
+}
+
+/// The node id in a per-node key `@mw/node/<zid16>/<tail>`.
+fn node_of(key: &str, tail: &str) -> Option<SenderId> {
     let rest = key.strip_prefix("@mw/node/")?;
-    let (hex, tail) = rest.split_once('/')?;
-    if tail != "sys/info" {
+    let (hex, t) = rest.split_once('/')?;
+    if t != tail {
         return None;
     }
     crate::cli::parse_node(hex).map(SenderId)
@@ -172,6 +188,51 @@ pub fn parse_admin(via: &str, json: &str) -> Vec<Linked> {
         .collect()
 }
 
+/// A gateway's reply to `@mw/node/*/sys/peers`: the devices it hears.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gateway {
+    /// The gateway's id (an ESP-NOW gateway's bridge), from the reply's key.
+    pub id: SenderId,
+    /// The ids it lists, at most `middleware::loader::peers::MAX_PEERS`.
+    pub heard: Vec<SenderId>,
+}
+
+/// Most `sys/peers` replies kept from one scan.
+pub const MAX_GATEWAYS: usize = 64;
+/// Most gateways shown for one device.
+pub const MAX_VIA: usize = 4;
+
+/// The gateway behind a reply to `@mw/node/*/sys/peers`: its id from the
+/// reply key (`@mw/node/<zid16>/sys/peers`), the ids from the body
+/// (`middleware::loader::peers`). `None` for any other key or a malformed
+/// body.
+pub fn parse_peers(key: &str, body: &[u8]) -> Option<Gateway> {
+    let id = node_of(key, "sys/peers")?;
+    let heard = middleware::loader::peers::decode(body)?.collect();
+    Some(Gateway { id, heard })
+}
+
+/// Fills the VIA of every `espnow` row with the gateways (at most
+/// [`MAX_GATEWAYS`] are read, [`MAX_VIA`] kept per row) that list its node
+/// id. Nothing else changes: what a gateway lists never creates a row nor
+/// touches one seen another way.
+pub fn attach_gateways(rows: Vec<Row>, gateways: &[Gateway]) -> Vec<Row> {
+    let gateways = &gateways[..gateways.len().min(MAX_GATEWAYS)];
+    let mut rows = rows;
+    for r in rows.iter_mut().filter(|r| r.whatami == ESPNOW) {
+        let Some(node) = r.node.as_ref().map(|n| n.node) else {
+            continue;
+        };
+        for g in gateways.iter().filter(|g| g.heard.contains(&node)) {
+            let id = hex8(g.id);
+            if r.via.len() < MAX_VIA && !r.via.contains(&id) {
+                r.via.push(id);
+            }
+        }
+    }
+    rows
+}
+
 /// Names the session behind each answer. A node's id is a function of
 /// its Zenoh id (`middleware::zenoh::sender_id_of`, the same on the
 /// RT1050's `zenoh_lite`), so `ids` holds that pair for every session seen
@@ -197,13 +258,14 @@ fn kind_rank(whatami: &str) -> u8 {
         "router" => 0,
         "peer" => 1,
         "client" => 2,
-        "mdns" => 4,
-        _ => 3,
+        ESPNOW => 3,
+        "mdns" => 5,
+        _ => 4,
     }
 }
 
-/// Routers first, then peers, clients, nodes seen only by `sys/info` and
-/// those seen only on mDNS; within each, by Zenoh id, node id, then mDNS
+/// Routers first, then peers, clients, ESP-NOW devices, nodes seen only by
+/// `sys/info` and those seen only on mDNS; within each, by Zenoh id, node id, then mDNS
 /// instance.
 fn sort_rows(rows: &mut [Row]) {
     rows.sort_by(|x, y| {
@@ -226,8 +288,14 @@ fn sort_rows(rows: &mut [Row]) {
 }
 
 /// Joins the three sources by Zenoh id, leaving out `own` (the scanning
-/// session itself). Routers come first, then peers, clients and nodes seen
-/// only by `sys/info`; within each, by Zenoh id, then node id.
+/// session itself). Routers come first, then peers, clients, ESP-NOW
+/// devices and nodes seen only by `sys/info`; within each, by Zenoh id,
+/// then node id.
+///
+/// An answer no session was found for, under an id made of a MAC
+/// (`middleware::zenoh_wire::mac_of_id`: an ESP-NOW gateway answers for
+/// each device it hears at such an id), is an [`ESPNOW`] row whose address
+/// is that MAC; [`attach_gateways`] fills its VIA.
 pub fn merge(heard: &[Heard], linked: &[Linked], answers: &[Answer], own: &str) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     let find = |rows: &[Row], zid: &str| rows.iter().position(|r| r.zid.as_deref() == Some(zid));
@@ -278,12 +346,17 @@ pub fn merge(heard: &[Heard], linked: &[Linked], answers: &[Answer], own: &str) 
         }
     }
     for a in answers {
+        let mac = middleware::zenoh_wire::mac_of_id(a.node).map(|m| crate::bridge::format_mac(&m));
         match a.zid.as_deref().and_then(|z| find(&rows, z)) {
             Some(i) if rows[i].node.is_none() => rows[i].node = Some(a.clone()),
             _ => rows.push(Row {
                 zid: a.zid.clone(),
-                whatami: "?".into(),
-                addrs: Vec::new(),
+                whatami: if a.zid.is_none() && mac.is_some() {
+                    ESPNOW.into()
+                } else {
+                    "?".into()
+                },
+                addrs: mac.filter(|_| a.zid.is_none()).into_iter().collect(),
                 via: Vec::new(),
                 node: Some(a.clone()),
                 mdns: None,
@@ -464,6 +537,14 @@ pub fn format(rows: &[Row]) -> String {
                 mdns,
                 if r.via.is_empty() {
                     "-".into()
+                } else if r.whatami == ESPNOW {
+                    // A gateway's id is its bridge's MAC and two zero
+                    // bytes: the MAC's twelve digits name it.
+                    r.via
+                        .iter()
+                        .map(|v| format!("gw {}", v.get(..12).unwrap_or(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 } else {
                     r.via.iter().map(|v| short(v)).collect::<Vec<_>>().join(",")
                 },
@@ -502,8 +583,9 @@ pub fn format(rows: &[Row]) -> String {
     let sessions = rows.iter().filter(|r| r.zid.is_some()).count();
     let nodes = rows.iter().filter(|r| r.node.is_some()).count();
     let announced = rows.iter().filter(|r| r.mdns.is_some()).count();
+    let espnow = rows.iter().filter(|r| r.whatami == ESPNOW).count();
     out.push_str(&format!(
-        "{sessions} Zenoh session{}, {nodes} middleware node{} answered sys/info, {announced} announced on mDNS\n",
+        "{sessions} Zenoh session{}, {nodes} middleware node{} answered sys/info, {announced} announced on mDNS, {espnow} over ESP-NOW\n",
         if sessions == 1 { "" } else { "s" },
         if nodes == 1 { "" } else { "s" },
     ));
@@ -887,8 +969,8 @@ mod mdns_shell {
 #[cfg(feature = "zenoh")]
 mod shell {
     use super::{
-        Answer, Heard, Linked, MdnsNode, Row, attribute, merge, merge_mdns, node_of_key,
-        parse_admin, zid_of_admin_key,
+        Answer, Gateway, Heard, Linked, MAX_GATEWAYS, MdnsNode, Row, attach_gateways, attribute,
+        merge, merge_mdns, node_of_key, parse_admin, parse_peers, zid_of_admin_key,
     };
     use crate::device::Info;
     use crate::error::Error;
@@ -1080,10 +1162,35 @@ mod shell {
                 info: Info::decode(&sample.payload().to_bytes()),
             });
         }
+        // 5. Which gateway hears which ESP-NOW device: each gateway's
+        // sys/peers. Only worth asking when a device answered.
+        let mut gateways: Vec<Gateway> = Vec::new();
+        if answers
+            .iter()
+            .any(|a| middleware::zenoh_wire::mac_of_id(a.node).is_some())
+        {
+            let replies = session
+                .get("@mw/node/*/sys/peers")
+                .target(QueryTarget::All)
+                .consolidation(ConsolidationMode::None)
+                .timeout(QUERY_WAIT)
+                .await
+                .map_err(zerr)?;
+            while let Ok(reply) = replies.recv_async().await {
+                let Ok(sample) = reply.result() else { continue };
+                if gateways.len() >= MAX_GATEWAYS {
+                    continue;
+                }
+                gateways.extend(parse_peers(
+                    sample.key_expr().as_str(),
+                    &sample.payload().to_bytes(),
+                ));
+            }
+        }
         session.close().await.map_err(zerr)?;
         let ids = session_ids(&heard, &linked);
         attribute(&mut answers, &ids);
-        let rows = merge(&heard, &linked, &answers, &own);
+        let rows = attach_gateways(merge(&heard, &linked, &answers, &own), &gateways);
         Ok(merge_mdns(rows, &mdns.finish().await, &ids))
     }
 
@@ -1289,7 +1396,7 @@ mod tests {
     fn h4_the_table_is_aligned_and_says_when_nothing_was_found() {
         assert_eq!(
             format(&[]),
-            "0 Zenoh sessions, 0 middleware nodes answered sys/info, 0 announced on mDNS\n"
+            "0 Zenoh sessions, 0 middleware nodes answered sys/info, 0 announced on mDNS, 0 over ESP-NOW\n"
         );
         let rows = merge(
             &[heard("r1", "router", &["tcp/10.0.0.1:7447"])],
@@ -1307,9 +1414,201 @@ mod tests {
 KIND    ZENOH ID  ADDRESS             MDNS  VIA  NODE              CHIP       FIRMWARE / PAYLOAD
 router  r1        tcp/10.0.0.1:7447   -     -    -                 -          -
 client  c9        tcp/10.0.0.9:50123  -     r1   310441d265f82484  imxrt1052  0.6.0 / running
-2 Zenoh sessions, 1 middleware node answered sys/info, 0 announced on mDNS
+2 Zenoh sessions, 1 middleware node answered sys/info, 0 announced on mDNS, 0 over ESP-NOW
 "
         );
+    }
+
+    const ESP: SenderId = SenderId([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24, 0, 0]);
+    const ESP2: SenderId = SenderId([0x24, 0x6f, 0x28, 0xaa, 0xbb, 0xcc, 0, 0]);
+    const BRIDGE: SenderId = SenderId([0x5c, 0xcf, 0x7f, 0x72, 0xf6, 0x54, 0, 0]);
+
+    fn peers_body(ids: &[SenderId]) -> Vec<u8> {
+        let mut out = vec![u8::try_from(ids.len()).unwrap()];
+        for id in ids {
+            out.extend(id.0);
+        }
+        out
+    }
+
+    fn esp_answer(node: SenderId, chip: &str) -> Answer {
+        Answer {
+            node,
+            zid: None,
+            info: Some(Info {
+                node: None,
+                ..info(chip)
+            }),
+        }
+    }
+
+    #[test]
+    fn h8_espnow_rows() {
+        // A router with one client that answered, two ESP-NOW devices (ids
+        // made of a MAC, no session of their own: a gateway answered for
+        // them) and a node no session was found for.
+        let answers = [
+            Answer {
+                node: SenderId([9; 8]),
+                zid: None,
+                info: Some(info("linux-x86_64")),
+            },
+            esp_answer(ESP, "esp32c3\u{1b}[2J\u{202e}"),
+            esp_answer(ESP2, "esp8266"),
+            Answer {
+                node: NODE,
+                zid: Some("c9".into()),
+                info: Some(info("imxrt1052")),
+            },
+        ];
+        let rows = merge(
+            &[heard("r1", "router", &["tcp/10.0.0.1:7447"])],
+            &[linked("r1", "c9", "client", "tcp/10.0.0.9:50123")],
+            &answers,
+            "me",
+        );
+        let kinds: Vec<&str> = rows.iter().map(|r| r.whatami.as_str()).collect();
+        assert_eq!(kinds, ["router", "client", "espnow", "espnow", "?"]);
+        assert_eq!(rows[2].addrs, ["24:6f:28:aa:bb:cc"]);
+        assert_eq!(rows[3].addrs, ["e4:b0:63:81:d3:24"]);
+        assert!(rows[2].via.is_empty() && rows[2].zid.is_none());
+        let rows = attach_gateways(
+            rows,
+            &[Gateway {
+                id: BRIDGE,
+                heard: vec![ESP, SenderId([9; 8])],
+            }],
+        );
+        let out = format(&rows);
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{202e}'),
+            "{out:?}"
+        );
+        assert_eq!(
+            out,
+            "\
+KIND    ZENOH ID  ADDRESS             MDNS  VIA              NODE              CHIP                      FIRMWARE / PAYLOAD
+router  r1        tcp/10.0.0.1:7447   -     -                -                 -                         -
+client  c9        tcp/10.0.0.9:50123  -     r1               310441d265f82484  imxrt1052                 0.6.0 / running
+espnow  -         24:6f:28:aa:bb:cc   -     -                246f28aabbcc0000  esp8266                   0.6.0 / running
+espnow  -         e4:b0:63:81:d3:24   -     gw 5ccf7f72f654  e4b06381d3240000  esp32c3\\u{1b}[2J\\u{202e}  0.6.0 / running
+?       -         -                   -     -                0909090909090909  linux-x86_64              0.6.0 / running
+2 Zenoh sessions, 4 middleware nodes answered sys/info, 0 announced on mDNS, 2 over ESP-NOW
+"
+        );
+    }
+
+    #[test]
+    fn h8_a_mac_shaped_id_with_a_session_is_that_session() {
+        // An id that merely ends in two zero bytes, answered by a session
+        // that was seen: its row, not an ESP-NOW one.
+        let rows = merge(
+            &[heard("r1", "router", &[])],
+            &[linked("r1", "c9", "client", "tcp/10.0.0.9:50123")],
+            &[Answer {
+                node: ESP,
+                zid: Some("c9".into()),
+                info: Some(info("imxrt1052")),
+            }],
+            "me",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].whatami, "client");
+        assert_eq!(rows[1].addrs, ["tcp/10.0.0.9:50123"]);
+        // And what a gateway lists never touches such a row.
+        let before = rows.clone();
+        let rows = attach_gateways(
+            rows,
+            &[Gateway {
+                id: BRIDGE,
+                heard: vec![ESP],
+            }],
+        );
+        assert_eq!(rows, before);
+    }
+
+    #[test]
+    fn h8_peers_map_devices_to_their_gateway() {
+        let body = peers_body(&[ESP, ESP2]);
+        assert_eq!(
+            parse_peers("@mw/node/5ccf7f72f6540000/sys/peers", &body),
+            Some(Gateway {
+                id: BRIDGE,
+                heard: vec![ESP, ESP2]
+            })
+        );
+        // Not a gateway's own key, or not a peer set.
+        for key in [
+            "@mw/node/*/sys/peers",
+            "@mw/node/5ccf7f72f6540000/sys/info",
+            "@mw/node/5ccf7f72f654/sys/peers",
+            "sys/peers",
+        ] {
+            assert_eq!(parse_peers(key, &body), None, "{key}");
+        }
+        let key = "@mw/node/5ccf7f72f6540000/sys/peers";
+        assert_eq!(parse_peers(key, &[]), None);
+        assert_eq!(parse_peers(key, &body[..body.len() - 1]), None);
+        assert_eq!(parse_peers(key, &[200]), None);
+        assert_eq!(
+            parse_peers(key, &[0]),
+            Some(Gateway {
+                id: BRIDGE,
+                heard: Vec::new()
+            })
+        );
+
+        let rows = || {
+            merge(
+                &[],
+                &[],
+                &[esp_answer(ESP, "esp32"), esp_answer(ESP2, "esp32")],
+                "",
+            )
+        };
+        let via =
+            |rows: &[Row]| -> Vec<Vec<String>> { rows.iter().map(|r| r.via.clone()).collect() };
+        let second = SenderId([0x5c, 0xcf, 0x7f, 0x00, 0x00, 0x01, 0, 0]);
+        // Heard by two gateways: both, once each; heard by none: no VIA.
+        let gws = [
+            Gateway {
+                id: BRIDGE,
+                heard: vec![ESP],
+            },
+            Gateway {
+                id: second,
+                heard: vec![ESP, ESP],
+            },
+            Gateway {
+                id: BRIDGE,
+                heard: vec![ESP],
+            },
+        ];
+        let got = attach_gateways(rows(), &gws);
+        assert_eq!(
+            via(&got),
+            [
+                vec![],
+                vec!["5ccf7f72f6540000".to_owned(), "5ccf7f0000010000".to_owned()]
+            ]
+        );
+        let out = format(&got);
+        assert!(out.contains("gw 5ccf7f72f654,gw 5ccf7f000001"), "{out}");
+        // Bounded: at most MAX_VIA gateways per device, and only the first
+        // MAX_GATEWAYS replies are read.
+        let many: Vec<Gateway> = (0..=MAX_GATEWAYS)
+            .map(|i| Gateway {
+                id: SenderId([2, 0, 0, 0, 0, u8::try_from(i).unwrap(), 0, 0]),
+                heard: if i == MAX_GATEWAYS {
+                    vec![ESP2]
+                } else {
+                    vec![ESP]
+                },
+            })
+            .collect();
+        let got = attach_gateways(rows(), &many);
+        assert_eq!(got[0].via, Vec::<String>::new(), "read past MAX_GATEWAYS");
+        assert_eq!(got[1].via.len(), MAX_VIA);
     }
 
     const POSIX: SenderId = SenderId([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -1598,7 +1897,7 @@ client  c5        tcp/10.0.0.5:50125  -                                   r1   -
 client  c7        tcp/10.0.0.7:50124  192.168.1.20 via tcp/10.0.0.1:7447  r1   280b4b25021764e2  linux-aarch64                          0.6.0 / running
 client  c9        tcp/10.0.0.9:50123  -                                   r1   310441d265f82484  imxrt1052                              0.6.0 / running
 mdns    -         -                   192.168.1.30                        -    0a0a0a0a0a0a0a0a  linux-aarch64 (ZynqMP KD240 revA/B/1)  ? / -
-4 Zenoh sessions, 2 middleware nodes answered sys/info, 2 announced on mDNS
+4 Zenoh sessions, 2 middleware nodes answered sys/info, 2 announced on mDNS, 0 over ESP-NOW
 "
         );
     }

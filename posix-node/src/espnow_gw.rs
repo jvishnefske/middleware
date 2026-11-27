@@ -1,4 +1,4 @@
-//! The ESP-NOW gateway (EG6–EG12): ESP-NOW devices heard through the USB
+//! The ESP-NOW gateway (EG6–EG15): ESP-NOW devices heard through the USB
 //! bridge (`tools/espnow-bridge`, [`middleware::espnow::bridge`]) joined to
 //! the node's Zenoh session. Enabled by `MW_POSIX_NODE_ESPNOW_BRIDGE`.
 //!
@@ -23,6 +23,15 @@
 //!   relayed. Concrete keys, not a wildcard, so queries for other nodes
 //!   never reach the gateway. They are undeclared when the device is
 //!   forgotten.
+//! * **Scans.** A wildcard query (`mwctl scout`'s `@mw/node/*/sys/info`)
+//!   is answered by each device's `sys/info` queryable alone, on the
+//!   device's own key, and never forwarded on any other key
+//!   ([`core::plan_query`], EG14). The answer comes from a cache of what
+//!   the device last said in `sys/info` ([`core::InfoCache`], EG15),
+//!   filled when the device is first served and by every `sys/info`
+//!   answer relayed; a scan that misses waits for one fetch of that
+//!   device, at most [`SCAN_HOLD`]. A query on the device's own
+//!   `sys/info` key always goes to the device.
 //! * **Heard list.** The heard devices ([`core::Heard::peers`]) are put on
 //!   `gw/espnow/<bridge id>/heard` every [`GwConfig::heard_period`] and on
 //!   change, and served at `@mw/node/<bridge id>/sys/peers`.
@@ -38,7 +47,10 @@
 //! cannot crowd out the devices that are talking (EG10); the queue stays
 //! one FIFO, so frames are not reordered. The **bus** runs the
 //! uplink, beacons, downlink and heard list; the **requests** loop serves
-//! queries one at a time, so a slow device stalls only other requests.
+//! queries one at a time, so a slow device stalls only other requests;
+//! the cache's own fetches run when no query waits, one attempt each.
+//! Scans the cache can answer never reach that loop: the queryable
+//! replies itself.
 
 pub mod core;
 
@@ -59,7 +71,9 @@ use middleware::espnow::{EspNowRadio, EspNowReceive, EspNowSend, EspNowTransport
 use middleware::key::{Key, KeyFilter};
 use middleware::loader::keys;
 use middleware::radio_bridge::BROADCAST;
-use middleware::transport::{Publisher, RequestOptions, Requester, SenderId, Split, Subscribe, Subscriber};
+use middleware::transport::{
+    HandlerError, Publisher, RequestOptions, Requester, SenderId, Split, Subscribe, Subscriber,
+};
 use middleware::zenoh::responder::request_meta;
 use middleware::zenoh::{ZenohDiscovery, ZenohTransport, wire};
 use tokio::sync::{mpsc, oneshot};
@@ -67,7 +81,9 @@ use zenoh::Wait;
 use zenoh::qos::CongestionControl;
 use zenoh::query::{Query, Queryable};
 
-use self::core::{Action, Heard, Registry, forwarded, mac_of, origin_of, reply_error_for, sender_id, skip_downlink};
+use self::core::{
+    Action, Heard, InfoCache, Plan, Registry, mac_of, origin_of, plan_query, reply_error_for, sender_id, skip_downlink,
+};
 use crate::config::DownlinkFilter;
 
 /// Frames the pump queues for the bus.
@@ -78,6 +94,11 @@ pub const MW_RESERVED: usize = 32;
 pub const MR_QUEUE: usize = 8;
 /// Queries waiting to be forwarded.
 pub const QUERY_QUEUE: usize = 32;
+/// `sys/info` fetches waiting to be queued, and scans waiting for one.
+pub const SCAN_QUEUE: usize = 64;
+/// How long a scan that missed the cache is worth answering: a scanner
+/// (`mwctl scout`) collects replies for about 2 s.
+pub const SCAN_HOLD: Duration = Duration::from_millis(1500);
 /// (device, key) uplink streams remembered; more start the map afresh.
 pub const MAX_STREAMS: usize = 1024;
 /// `app`, the uplink and downlink key space.
@@ -412,28 +433,95 @@ async fn pump<IO: Read + Write>(
     }
 }
 
-/// Serves forwarded queries one at a time.
-async fn requests(
-    mut queries: mpsc::Receiver<(Instant, Query)>,
+/// A query for the requests loop, from the queryable of `mac` for `key`.
+struct Ask {
+    arrived: Instant,
+    mac: Mac,
+    key: Key<'static>,
+    query: Query,
+}
+
+/// A `sys/info` to fetch into the cache: for a scan the cache could not
+/// answer (`scan`: its query and how long it is worth answering), or for a
+/// device newly served (`None`).
+struct Miss {
+    mac: Mac,
+    scan: Option<(Instant, Query)>,
+}
+
+/// The devices' cached `sys/info`, shared by the queryables (which answer
+/// scans from it), the requests loop (which fills it) and the bus (which
+/// drops a forgotten device's entry).
+type Cache = Arc<Mutex<InfoCache>>;
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn cached(cache: &Cache, mac: Mac, start: Instant) -> Option<Vec<u8>> {
+    cache.lock().ok()?.get(mac, elapsed_ms(start)).map(<[u8]>::to_vec)
+}
+
+/// The requests loop (EG9, EG14, EG15): one radio request at a time.
+/// Forwarded queries come first; `sys/info` fetches for the cache run only
+/// when no query waits, each a single attempt, so a fetch delays a query
+/// by at most one [`Retry::timeout_ms`] (and the wait for the bridge's
+/// `Sent`). Fetches a scan waits for go before those nobody waits for.
+struct Requests {
+    queries: mpsc::Receiver<Ask>,
+    misses: mpsc::Receiver<Miss>,
     cmds: mpsc::Sender<Cmd>,
-    mut mr: mpsc::Receiver<Frame>,
+    mr: mpsc::Receiver<Frame>,
     bridge: Mac,
     retry: Retry,
-    counters: &Counters,
-) {
-    // A clock-derived first id, so a restarted gateway does not reuse ids
-    // the devices have cached responses for.
-    let mut next_id = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map_or(1, |d| (d.as_millis() & 0xFFFF) as u16);
-    // Bounded by the queryables: the loop ends when they are all gone.
-    while let Some((arrived, query)) = queries.recv().await {
-        let expr = query.key_expr().as_str().to_owned();
-        let Some((id, key)) = wire::parse_node_key(&expr) else { continue };
-        let Some(mac) = mac_of(id) else { continue };
-        if !forwarded(key) {
-            continue;
+    cache: Cache,
+    known: Known,
+    start: Instant,
+    next_id: u16,
+    /// Scans waiting for a fetch: device, deadline, query. Every entry has
+    /// its device in `fetches`.
+    waiting: Vec<(Mac, Instant, Query)>,
+    /// Devices to fetch, each once; `true` for a newly served device
+    /// (fetched even if no scan waits).
+    fetches: std::collections::VecDeque<(Mac, bool)>,
+}
+
+impl Requests {
+    /// One request to `mac`, resent by `retry`.
+    async fn ask(
+        &mut self,
+        mac: Mac,
+        key: Key<'_>,
+        body: &[u8],
+        options: &RequestOptions<'_>,
+        retry: Retry,
+    ) -> Result<Vec<u8>, HandlerError> {
+        let radio = MrHandle { cmds: &self.cmds, rx: &mut self.mr };
+        let mut requester =
+            RpcRequester::new(radio, TokioDelay, mac, retry, self.next_id).with_own_address(self.bridge);
+        self.next_id = middleware::rpc::next_id(self.next_id);
+        let mut resp = [0u8; middleware::rpc::MAX_RESPONSE_BODY];
+        let answer = requester.request_with(key, body, &mut resp, options).await;
+        answer.map(<[u8]>::to_vec).map_err(|e| reply_error_for(&e))
+    }
+
+    /// Remembers what `mac` answered on `sys/info`, unless it was forgotten
+    /// meanwhile. The cache is locked before the heard set is read and the
+    /// bus drops the MAC from that set before the cache, so an entry never
+    /// outlives its device being heard.
+    fn remember(&self, mac: Mac, body: &[u8]) {
+        if let Ok(mut c) = self.cache.lock()
+            && self.known.lock().is_ok_and(|k| k.contains(&mac))
+        {
+            c.insert(mac, body, elapsed_ms(self.start));
         }
+    }
+
+    /// A query on a device's own key: sent to the device, the answer
+    /// relayed on that key.
+    async fn forward(&mut self, ask: Ask, counters: &Counters) {
+        let Ask { arrived, mac, key, query } = ask;
+        let id = sender_id(mac);
         bump(&counters.requests);
         let body = query.payload().map(|p| p.to_bytes().into_owned()).unwrap_or_default();
         let attachment = query.attachment().map(|a| a.to_bytes().into_owned());
@@ -443,28 +531,146 @@ async fn requests(
         if let Some(ms) = meta.deadline_ms {
             options = options.with_timeout(Duration::from_millis(u64::from(ms)));
         }
-        let radio = MrHandle { cmds: &cmds, rx: &mut mr };
-        let mut requester = RpcRequester::new(radio, TokioDelay, mac, retry, next_id).with_own_address(bridge);
-        next_id = middleware::rpc::next_id(next_id);
-        let mut resp = [0u8; middleware::rpc::MAX_RESPONSE_BODY];
-        let sent = match requester.request_with(key, &body, &mut resp, &options).await {
+        let answer = self.ask(mac, key, &body, &options, self.retry).await;
+        // Whatever the outcome, the device's payload state may have
+        // changed: the next scan asks it again.
+        if core::changes_info(key)
+            && let Ok(mut c) = self.cache.lock()
+        {
+            c.forget(mac);
+        }
+        let sent = match answer {
             Ok(r) => {
-                query.reply(query.key_expr().clone(), r.to_vec()).attachment(wire::encode_reply(id).to_vec()).await
+                if key == keys::INFO {
+                    self.remember(mac, &r);
+                }
+                query.reply(wire::node_key(id, key), r).attachment(wire::encode_reply(id).to_vec()).await
             }
             Err(e) => {
                 bump(&counters.request_failures);
-                query.reply_err(wire::encode_reply_error(reply_error_for(&e), id).to_vec()).await
+                query.reply_err(wire::encode_reply_error(e, id).to_vec()).await
             }
         };
         // A failed reply only means this querier misses the answer.
         let _ = sent;
     }
+
+    /// Queues the fetch a [`Miss`] asks for, once per device, and keeps
+    /// its scan until the fetch returns.
+    async fn park(&mut self, miss: Miss) {
+        let Miss { mac, scan } = miss;
+        let warm = scan.is_none();
+        if let Some((deadline, query)) = scan {
+            // Fetched since the queryable looked.
+            if let Some(body) = cached(&self.cache, mac, self.start) {
+                reply_info(&query, mac, body).await;
+                return;
+            }
+            if self.waiting.len() >= SCAN_QUEUE {
+                return;
+            }
+            self.waiting.push((mac, deadline, query));
+        }
+        let queued = self.fetches.iter().position(|(m, _)| *m == mac);
+        if warm {
+            if queued.is_none() {
+                self.fetches.push_back((mac, true));
+            }
+        } else {
+            // A scan is waiting: ahead of the fetches nobody waits for.
+            let was_warm = queued.and_then(|i| self.fetches.remove(i)).is_some_and(|(_, w)| w);
+            let at = self.fetches.iter().position(|(_, w)| *w).unwrap_or(self.fetches.len());
+            self.fetches.insert(at, (mac, was_warm));
+        }
+    }
+
+    /// Fetches `mac`'s `sys/info` once (one attempt) and answers the scans
+    /// waiting for it. Skipped when the device was forgotten, when the
+    /// cache was filled meanwhile, or when nobody waits any more.
+    async fn fetch(&mut self, mac: Mac, warm: bool) {
+        let mut scans = Vec::new();
+        let mut i = 0;
+        while i < self.waiting.len() {
+            if self.waiting.get(i).is_some_and(|w| w.0 == mac) {
+                scans.push(self.waiting.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        let now = Instant::now();
+        let wanted = warm || scans.iter().any(|(_, deadline, _)| *deadline > now);
+        if !wanted || !self.known.lock().is_ok_and(|k| k.contains(&mac)) {
+            return;
+        }
+        let answer = match cached(&self.cache, mac, self.start) {
+            Some(body) => Ok(body),
+            None => {
+                let once = Retry { attempts: 1, ..self.retry };
+                let r = self.ask(mac, keys::INFO, &[], &RequestOptions::default(), once).await;
+                if let Ok(body) = &r {
+                    self.remember(mac, body);
+                }
+                r
+            }
+        };
+        for (_, _, query) in scans {
+            match &answer {
+                Ok(body) => reply_info(&query, mac, body.clone()).await,
+                Err(e) => {
+                    let _ = query.reply_err(wire::encode_reply_error(*e, sender_id(mac)).to_vec()).await;
+                }
+            }
+        }
+    }
+
+    async fn run(mut self, counters: &Counters) {
+        // Ends when the queryables are all gone.
+        loop {
+            while let Ok(miss) = self.misses.try_recv() {
+                self.park(miss).await;
+            }
+            match self.queries.try_recv() {
+                Ok(ask) => {
+                    self.forward(ask, counters).await;
+                    continue;
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => return,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+            if let Some((mac, warm)) = self.fetches.pop_front() {
+                self.fetch(mac, warm).await;
+                continue;
+            }
+            tokio::select! {
+                biased;
+                ask = self.queries.recv() => match ask {
+                    Some(ask) => self.forward(ask, counters).await,
+                    None => return,
+                },
+                miss = self.misses.recv() => match miss {
+                    Some(miss) => self.park(miss).await,
+                    None => return,
+                },
+            }
+        }
+    }
+}
+
+/// Answers a scan with `mac`'s `sys/info`, on the device's own key (never
+/// the query's expression: a scanner reads the node id from the key).
+async fn reply_info(query: &Query, mac: Mac, body: Vec<u8>) {
+    let id = sender_id(mac);
+    // A failed reply only means this querier misses the answer.
+    let _ = query.reply(wire::node_key(id, keys::INFO), body).attachment(wire::encode_reply(id).to_vec()).await;
 }
 
 /// The per-device queryables, reconciled with [`Heard::served`].
 struct Served {
     session: zenoh::Session,
-    queries: mpsc::Sender<(Instant, Query)>,
+    queries: mpsc::Sender<Ask>,
+    misses: mpsc::Sender<Miss>,
+    cache: Cache,
+    start: Instant,
     declared: HashMap<Mac, Vec<Queryable<()>>>,
 }
 
@@ -481,15 +687,41 @@ impl Served {
             if self.declared.contains_key(&mac) {
                 continue;
             }
+            // Its sys/info, for the scans to come (EG15). Full: the first
+            // scan fetches it.
+            let _ = self.misses.try_send(Miss { mac, scan: None });
+            let id = sender_id(mac);
             let mut qs = Vec::new();
             for key in core::FORWARDED {
                 let tx = self.queries.clone();
+                let misses = self.misses.clone();
+                let cache = self.cache.clone();
+                let start = self.start;
                 let q = self
                     .session
-                    .declare_queryable(wire::node_key(sender_id(mac), key))
-                    .callback(move |q| {
-                        // Full: the query goes unanswered and times out.
-                        let _ = tx.try_send((Instant::now(), q));
+                    .declare_queryable(wire::node_key(id, key))
+                    .callback(move |q| match plan_query(q.key_expr().as_str(), mac, key) {
+                        Plan::Ignore => {}
+                        Plan::Forward => {
+                            // Full: the query goes unanswered and times out.
+                            let _ = tx.try_send(Ask { arrived: Instant::now(), mac, key, query: q });
+                        }
+                        Plan::Info => match cached(&cache, mac, start) {
+                            Some(body) => {
+                                let _ = q
+                                    .reply(wire::node_key(id, keys::INFO), body)
+                                    .attachment(wire::encode_reply(id).to_vec())
+                                    .wait();
+                            }
+                            None => {
+                                let attachment = q.attachment().map(|a| a.to_bytes().into_owned());
+                                let hold = request_meta(attachment.as_deref(), 0)
+                                    .deadline_ms
+                                    .map_or(SCAN_HOLD, |ms| SCAN_HOLD.min(Duration::from_millis(u64::from(ms))));
+                                // Full: this scan misses the device.
+                                let _ = misses.try_send(Miss { mac, scan: Some((Instant::now() + hold, q)) });
+                            }
+                        },
                     })
                     .await
                     .map_err(|e| GwError::Zenoh(e.to_string()))?;
@@ -549,6 +781,12 @@ impl Bus {
         if let Ok(mut k) = self.known.lock() {
             for mac in macs {
                 k.remove(mac);
+            }
+        }
+        // After `known`: see `Requests::remember`.
+        if let Ok(mut c) = self.served.cache.lock() {
+            for mac in macs {
+                c.forget(*mac);
             }
         }
         for mac in macs {
@@ -672,17 +910,24 @@ where
     let known = Known::default();
     let mw_tx = MwTx { tx: mw_tx, known: known.clone() };
     let (mr_tx, mr_rx) = mpsc::channel::<Frame>(MR_QUEUE);
-    let (query_tx, query_rx) = mpsc::channel::<(Instant, Query)>(QUERY_QUEUE);
+    let (query_tx, query_rx) = mpsc::channel::<Ask>(QUERY_QUEUE);
+    let (miss_tx, miss_rx) = mpsc::channel::<Miss>(SCAN_QUEUE);
+    let cache = Cache::default();
+    let start = Instant::now();
     let (failed_tx, failed_rx) = oneshot::channel::<GwError>();
 
     let peers = Arc::new(Mutex::new(vec![0u8]));
     let peers_q = peers.clone();
+    let peers_key = wire::node_key(bridge_id, keys::PEERS);
     let peers_queryable = session
         .session()
-        .declare_queryable(wire::node_key(bridge_id, keys::PEERS))
+        .declare_queryable(peers_key.clone())
         .callback(move |q| {
             let bytes = peers_q.lock().map(|p| p.clone()).unwrap_or_default();
-            let _ = q.reply(q.key_expr().clone(), bytes).attachment(wire::encode_reply(bridge_id).to_vec()).wait();
+            // On the gateway's own key, also for a wildcard query (`mwctl
+            // scout` asks `@mw/node/*/sys/peers` and reads the gateway's
+            // id from the reply's key).
+            let _ = q.reply(peers_key.clone(), bytes).attachment(wire::encode_reply(bridge_id).to_vec()).wait();
         })
         .await
         .map_err(|e| GwError::Zenoh(e.to_string()))?;
@@ -714,15 +959,22 @@ where
 
     let mut bus = Bus {
         discovery: session.discovery(),
-        served: Served { session: session.session().clone(), queries: query_tx, declared: HashMap::new() },
+        served: Served {
+            session: session.session().clone(),
+            queries: query_tx,
+            misses: miss_tx,
+            cache: cache.clone(),
+            start,
+            declared: HashMap::new(),
+        },
         session,
         registry: Registry::new(),
         heard: Heard::with_ttl_ms(cfg.heard_ttl_ms),
-        known,
+        known: known.clone(),
         streams: HashMap::new(),
         peers,
         heard_key: format!("gw/espnow/{hex}/heard"),
-        start: Instant::now(),
+        start,
         changed: false,
     };
 
@@ -732,7 +984,25 @@ where
         let _ = failed_tx.send(e);
         std::future::pending::<()>().await;
     };
-    let requests_loop = requests(query_rx, cmd_tx.clone(), mr_rx, bridge, cfg.request_retry, &counters);
+    let requests = Requests {
+        queries: query_rx,
+        misses: miss_rx,
+        cmds: cmd_tx.clone(),
+        mr: mr_rx,
+        bridge,
+        retry: cfg.request_retry,
+        cache,
+        known,
+        start,
+        // A clock-derived first id, so a restarted gateway does not reuse
+        // ids the devices have cached responses for.
+        next_id: std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(1, |d| (d.as_millis() & 0xFFFF) as u16),
+        waiting: Vec::new(),
+        fetches: std::collections::VecDeque::new(),
+    };
+    let requests_loop = requests.run(&counters);
     let bus_loop = async {
         enum Ev {
             Up(Option<Down>),

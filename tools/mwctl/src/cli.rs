@@ -19,8 +19,8 @@
 //! `trust info`, `request`, `upload`, `start`, `stop` and `fw *`. There
 //! `upload`, `start`, `stop`, `fw update`, `fw reboot`, `fw confirm` and
 //! `fw abort` need a key (signed commits, signed control requests for the
-//! board's `--target` address, by default the RT1050 rule from the node
-//! id); `trust claim`, `monitor` and `reset` are refused.
+//! board's `--target` address, by default from its `sys/info`:
+//! `zlink::target_for`); `trust claim`, `monitor` and `reset` are refused.
 //!
 //! `--espnow <MAC>` makes `--port` the USB↔ESP-NOW bridge and sends the
 //! command over the air to the device with that MAC (default baud
@@ -121,9 +121,12 @@ COMMANDS:
                                with --features zenoh): Zenoh multicast scouting for N s
                                [default 3], each router's and peer's sessions from its
                                admin space (clients such as the RT1050 appear there), and
-                               every node's sys/info. Not seen: ESP-NOW nodes (ask a
-                               gateway's `peers`), sessions behind no scouted router, and
-                               other subnets. Built with --features mdns too, it also
+                               every node's sys/info. ESP-NOW devices heard by a
+                               posix-node gateway are `espnow` rows (ADDRESS their MAC,
+                               VIA `gw <the gateway bridge's MAC>`); their NODE works
+                               with --zenoh --node. Not seen: ESP-NOW devices no gateway
+                               hears, sessions behind no scouted router, and other
+                               subnets. Built with --features mdns too, it also
                                browses mDNS for _mw-node._tcp (the MDNS column; `mdns` rows
                                for nodes only mDNS saw); the unicast replies need UDP from
                                port 5353 let in (a host firewall may drop them), Linux
@@ -176,10 +179,12 @@ OPTIONS:
     --node <ID>        The id in the board's keys, @mw/node/<ID>/... (16 hex digits,
                        as `scout` prints it): an RT1050's node id; a posix-node's
                        Zenoh session id, which its start log names and is not the
-                       node id `info` prints
+                       node id `info` prints; an ESP-NOW device behind a gateway's
+                       MAC and 0000
     --target <MAC>     Address signed control requests name [default: from the board's
                        sys/info: an RT1050's Ethernet MAC, 02 and the node id's last
-                       five bytes; any other board's node id, first six bytes]. Over Zenoh
+                       five bytes; an ESP-NOW device's MAC (the first six bytes of
+                       --node); any other board's node id, first six bytes]. Over Zenoh
                        upload, start, stop and fw update/reboot/confirm/abort need a key
                        (signed commits and signed control requests); trust claim,
                        monitor and reset do not go over Zenoh.

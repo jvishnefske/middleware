@@ -343,6 +343,17 @@ pub fn zid16_hex(id: SenderId) -> [u8; 16] {
     out
 }
 
+/// The MAC of a MAC-derived node id ([`SenderId::from_mac`]: the MAC and
+/// two zero bytes), else `None`. An ESP-NOW device behind a gateway is
+/// addressed by such an id; a hashed id ends in two zero bytes once in
+/// 65 536.
+pub const fn mac_of_id(id: SenderId) -> Option<[u8; 6]> {
+    let [a, b, c, d, e, f, 0, 0] = id.0 else {
+        return None;
+    };
+    Some([a, b, c, d, e, f])
+}
+
 /// The key expression of the queryable that node `id` declares for `key`,
 /// `@mw/node/<zid16>/<key>`, in a fixed-capacity string. `None` only if
 /// it does not fit [`NODE_KEY_MAX`], which a valid [`Key`] never causes.
@@ -497,6 +508,21 @@ mod tests {
         joined[..4].copy_from_slice(&7u32.to_le_bytes());
         joined[4..].copy_from_slice(key.as_bytes());
         assert_eq!(stream_id(7, key), fnv1a32(&joined));
+    }
+
+    #[test]
+    fn h8_a_mac_derived_id_gives_its_mac_back() {
+        let mac = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24];
+        assert_eq!(mac_of_id(SenderId::from_mac(mac)), Some(mac));
+        assert_eq!(
+            mac_of_id(SenderId([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24, 0, 1])),
+            None
+        );
+        assert_eq!(
+            mac_of_id(SenderId([0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24, 1, 0])),
+            None
+        );
+        assert_eq!(mac_of_id(SenderId([0; 8])), Some([0; 6]));
     }
 
     #[test]
