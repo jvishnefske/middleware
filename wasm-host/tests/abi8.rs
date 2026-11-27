@@ -17,6 +17,7 @@ use middleware::wasm_abi::channels::{
 use middleware::wasm_abi::import_in;
 use middleware::wasm_abi::route::{AudioMode, ImuConfig, MicConfig, RouteSource, SampleSource};
 use wasm_host::channels::BindError;
+use wasm_host::fixed::text;
 use wasm_host::{AbiError, Device, Limits, LoadError, Payload, Pull};
 
 #[derive(Default)]
@@ -177,7 +178,7 @@ fn bd4_bad_bindings_fail_the_load_naming_the_channel() {
     };
     assert_eq!(
         bind_err(None, Board::default()),
-        BindError::Unbound("audio".into())
+        BindError::Unbound(text("audio"))
     );
     let imu = RouteSource::Samples(SampleSource::Imu(
         ImuConfig::new(100, 2, false, 10).unwrap(),
@@ -187,7 +188,7 @@ fn bd4_bad_bindings_fail_the_load_naming_the_channel() {
             Some(&bound(&[("audio", Target::Local(imu))])),
             Board::default()
         ),
-        BindError::Mismatch("audio".into())
+        BindError::Mismatch(text("audio"))
     );
     let refusing = Board {
         refuse: true,
@@ -198,9 +199,9 @@ fn bd4_bad_bindings_fail_the_load_naming_the_channel() {
             Some(&bound(&[("audio", Target::Local(levels(16_000)))])),
             refusing
         ),
-        BindError::Route("audio".into(), AbiError::InvalidArgument)
+        BindError::Route(text("audio"), AbiError::InvalidArgument)
     );
-    let e = LoadError::Bind(BindError::Unbound("audio".into()));
+    let e = LoadError::Bind(BindError::Unbound(text("audio")));
     assert_eq!(
         e.to_string(),
         "binding: channel audio is required and not bound"

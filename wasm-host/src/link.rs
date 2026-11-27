@@ -37,20 +37,28 @@
 //! [`periph::MAX_I2C`] bytes: transmit bytes leave guest memory before the
 //! device runs, received bytes enter it only after the device succeeds.
 
+#[cfg(test)]
 use alloc::string::{String, ToString};
+#[cfg(test)]
 use alloc::vec::Vec;
 
 use middleware::loader::manifest::MANIFEST_MAX;
+#[cfg(any(feature = "wasmi", test))]
+use middleware::wasm_abi;
+#[cfg(feature = "wasmi")]
+use middleware::wasm_abi::IMPORT_MODULE;
 use middleware::wasm_abi::bridge;
 use middleware::wasm_abi::ledstrip::{self, LedStripSpec};
 use middleware::wasm_abi::periph::{
     self, I2cConfig, MAX_I2C, PwmDuty, PwmSpec, SpiConfig, TimerSpec, UartConfig,
 };
 use middleware::wasm_abi::route::{self, RouteStat};
-use middleware::wasm_abi::{self, AbiError, IMPORT_MODULE, MAX_MESSAGE, guest_range};
+use middleware::wasm_abi::{AbiError, MAX_MESSAGE, guest_range};
+#[cfg(feature = "wasmi")]
 use wasmi::{Caller, Engine, Extern, Linker, StoreLimits};
 
 use crate::abi::{self, Schedule, Slot};
+use crate::fixed::{Scratch, Serves, Subscriptions, text};
 use crate::{Device, InitLog};
 
 /// Which optional exports the module provides.
@@ -68,27 +76,30 @@ pub struct Exports {
     pub requests: bool,
 }
 
-/// Everything the host keeps per payload, stored as the wasmi store data.
+/// Everything the host keeps per payload (on the `wasmi` backend, the
+/// store data). Its keys, copy buffer, log and channel table are fixed-size
+/// and inline ([`crate::fixed`]): the state allocates nothing.
 pub struct State<D> {
     /// The board the payload drives.
     pub device: D,
     /// Subscribed keys; the index is the slot passed to `on_message`.
-    pub subscriptions: Vec<String>,
+    pub subscriptions: Subscriptions,
     /// The most subscriptions ([`crate::Limits::max_subscriptions`]).
     pub max_subscriptions: usize,
     /// Served keys (ABI 5); the index is the slot passed to `on_request`.
-    /// Its capacity of [`wasm_abi::serve::MAX_SERVES`] is reserved at load.
-    pub serves: Vec<String>,
+    /// At most [`wasm_abi::serve::MAX_SERVES`].
+    pub serves: Serves,
     /// Active `tick` schedule, if any.
     pub schedule: Option<Schedule>,
     /// Optional exports present in the module.
     pub exports: Exports,
-    /// Memory limiter consulted by wasmi on growth.
+    /// Memory limiter consulted by wasmi on growth (the `wasmi` backend
+    /// only; `micro` takes its cap at instantiation).
+    #[cfg(feature = "wasmi")]
     pub limits: StoreLimits,
-    /// Host copy buffer for DMA and UART imports; its capacity of
-    /// [`periph::MAX_DMA`] bytes is reserved at load, so it never
-    /// reallocates.
-    pub scratch: Vec<u8>,
+    /// Host copy buffer for DMA and UART imports, [`periph::MAX_DMA`]
+    /// bytes.
+    pub scratch: Scratch,
     /// While `init` runs, a bounded copy of its log lines (see [`InitLog`]);
     /// `None` at all other times.
     pub init_log: Option<InitLog>,
@@ -99,11 +110,44 @@ pub struct State<D> {
     pub channels: crate::channels::ChannelTable,
 }
 
+impl<D> State<D> {
+    /// The state of a fresh payload: no keys, schedule, routes or channels
+    /// yet. It may hold `max_subscriptions` subscriptions and linear memory
+    /// may grow to `max_memory_bytes`.
+    pub(crate) fn new(
+        device: D,
+        exports: Exports,
+        max_subscriptions: usize,
+        max_memory_bytes: u32,
+    ) -> Self {
+        #[cfg(not(feature = "wasmi"))]
+        let _ = max_memory_bytes;
+        State {
+            device,
+            subscriptions: Subscriptions::new(),
+            max_subscriptions,
+            serves: Serves::new(),
+            schedule: None,
+            exports,
+            #[cfg(feature = "wasmi")]
+            limits: wasmi::StoreLimitsBuilder::new()
+                .memory_size(abi::memory_bytes(max_memory_bytes))
+                .memories(1)
+                .instances(1)
+                .build(),
+            scratch: Scratch::new(),
+            init_log: None,
+            i2c_owners: route::I2cOwners::new(),
+            channels: crate::channels::ChannelTable::default(),
+        }
+    }
+}
+
 /// The first `n` bytes of the scratch buffer (`n <= MAX_DMA`), zeroed.
-fn scratch(buf: &mut Vec<u8>, n: usize) -> &mut [u8] {
-    let n = n.min(periph::MAX_DMA);
+fn scratch(buf: &mut Scratch, n: usize) -> &mut [u8] {
     buf.clear();
-    buf.resize(n, 0);
+    // Cannot fail: `n` is within the capacity.
+    let _ = buf.resize(n.min(periph::MAX_DMA), 0);
     buf.as_mut_slice()
 }
 
@@ -480,7 +524,9 @@ pub fn subscribe_call<D>(mem: &[u8], st: &mut State<D>, kp: i32, kl: i32) -> Res
     }
     let slot = abi::subscribe_slot(&st.subscriptions, key.as_str(), st.max_subscriptions)?;
     if let Slot::New(_) = slot {
-        st.subscriptions.push(key.as_str().to_string());
+        st.subscriptions
+            .push(text(key.as_str()))
+            .map_err(|_| AbiError::NoResources)?;
     }
     i32::try_from(slot.index()).map_err(|_| AbiError::NoResources)
 }
@@ -504,8 +550,13 @@ pub fn serve_call<D: Device>(
     }
     let slot = abi::serve_slot(&st.serves, key.as_str())?;
     if let Slot::New(_) = slot {
+        if st.serves.is_full() {
+            return Err(AbiError::NoResources);
+        }
         st.device.serve(key)?;
-        st.serves.push(key.as_str().to_string());
+        st.serves
+            .push(text(key.as_str()))
+            .map_err(|_| AbiError::NoResources)?;
     }
     i32::try_from(slot.index()).map_err(|_| AbiError::NoResources)
 }
@@ -555,6 +606,7 @@ pub fn set_tick_call<D: Device>(st: &mut State<D>, period: i32) -> Result<(), Ab
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Fetches the payload's exported memory, or `None` if it has none.
 fn memory<D>(caller: &Caller<'_, State<D>>) -> Option<wasmi::Memory> {
     caller
@@ -562,6 +614,7 @@ fn memory<D>(caller: &Caller<'_, State<D>>) -> Option<wasmi::Memory> {
         .and_then(Extern::into_memory)
 }
 
+#[cfg(feature = "wasmi")]
 /// Runs `f` with linear memory and the state, folding errors into codes.
 fn with_memory<D, F>(mut caller: Caller<'_, State<D>>, f: F) -> i32
 where
@@ -577,10 +630,11 @@ where
 }
 
 /// Folds a unit result into `0` or an error code.
-fn ok0(r: Result<(), AbiError>) -> Result<i32, AbiError> {
+pub(crate) fn ok0(r: Result<(), AbiError>) -> Result<i32, AbiError> {
     r.map(|()| 0)
 }
 
+#[cfg(feature = "wasmi")]
 /// Builds a linker providing every import in [`wasm_abi::IMPORTS`].
 pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, wasmi::Error> {
     let mut l = Linker::<State<D>>::new(engine);
@@ -650,6 +704,7 @@ pub fn linker<D: Device + 'static>(engine: &Engine) -> Result<Linker<State<D>>, 
     Ok(l)
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 10 import (the node's manifest).
 fn link_abi10<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     l.func_wrap(
@@ -662,6 +717,7 @@ fn link_abi10<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 8 imports (channels).
 fn link_abi8<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     let m = IMPORT_MODULE;
@@ -682,6 +738,7 @@ fn link_abi8<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 6 import (bridging between links).
 fn link_abi6<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     l.func_wrap(
@@ -694,6 +751,7 @@ fn link_abi6<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 5 imports (serving requests).
 fn link_abi5<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     let m = IMPORT_MODULE;
@@ -706,6 +764,7 @@ fn link_abi5<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 2 imports (interrupts, timers, SPI and UART DMA).
 fn link_abi2<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     let m = IMPORT_MODULE;
@@ -787,6 +846,7 @@ fn link_abi2<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 3 imports (PWM, ADC, I2C).
 fn link_abi3<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     let m = IMPORT_MODULE;
@@ -834,6 +894,7 @@ fn link_abi3<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 4 imports (DMA routes).
 fn link_abi4<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     let m = IMPORT_MODULE;
@@ -870,6 +931,7 @@ fn link_abi4<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi:
     Ok(())
 }
 
+#[cfg(feature = "wasmi")]
 /// Registers the ABI 7 imports (LED strips).
 fn link_abi7<D: Device + 'static>(l: &mut Linker<State<D>>) -> Result<(), wasmi::Error> {
     let m = IMPORT_MODULE;
@@ -1082,19 +1144,7 @@ mod tests {
     }
 
     fn state_on<D>(device: D, exports: Exports) -> State<D> {
-        State {
-            device,
-            subscriptions: Vec::new(),
-            max_subscriptions: wasm_abi::MAX_SUBSCRIPTIONS,
-            serves: Vec::new(),
-            schedule: None,
-            exports,
-            limits: wasmi::StoreLimitsBuilder::new().build(),
-            scratch: Vec::new(),
-            init_log: None,
-            i2c_owners: route::I2cOwners::new(),
-            channels: crate::channels::ChannelTable::default(),
-        }
+        State::new(device, exports, wasm_abi::MAX_SUBSCRIPTIONS, u32::MAX)
     }
 
     #[test]
@@ -1137,7 +1187,7 @@ mod tests {
         });
         assert_eq!(subscribe_call(&mem, &mut st, 0, 5), Ok(0));
         assert_eq!(subscribe_call(&mem, &mut st, 0, 5), Ok(0));
-        assert_eq!(st.subscriptions, vec!["a/key".to_string()]);
+        assert_eq!(st.subscriptions, ["a/key"]);
     }
 
     #[test]
@@ -1154,7 +1204,7 @@ mod tests {
         });
         assert_eq!(serve_call(&mem, &mut st, 0, 5), Ok(0));
         assert_eq!(serve_call(&mem, &mut st, 0, 5), Ok(0), "again: same slot");
-        assert_eq!(st.serves, vec!["a/key".to_string()]);
+        assert_eq!(st.serves, ["a/key"]);
         assert_eq!(st.device.served, vec!["a/key".to_string()], "asked once");
         assert_eq!(serve_call(&mem, &mut st, 2, 9), Err(AbiError::OutOfBounds));
         mem[..4].copy_from_slice(b"sys/");

@@ -103,14 +103,18 @@ fn bench_fuel_constants_match_the_measured_steps() {
         mix.iter().min(),
         mix.iter().max()
     );
-    assert!(
-        within_5_percent(mix_avg, constant("MIX_FUEL")),
-        "MIX_FUEL: measured {mix_avg}"
-    );
-    assert!(
-        within_5_percent(frame, constant("JPEG_FRAME_FUEL")),
-        "JPEG_FRAME_FUEL: measured {frame}"
-    );
+    // The payload's constants are wasmi's fuel; the micro backend charges
+    // per instruction, which comes to a different figure for the same work.
+    if wasm_host::BACKEND == "wasmi" {
+        assert!(
+            within_5_percent(mix_avg, constant("MIX_FUEL")),
+            "MIX_FUEL: measured {mix_avg}"
+        );
+        assert!(
+            within_5_percent(frame, constant("JPEG_FRAME_FUEL")),
+            "JPEG_FRAME_FUEL: measured {frame}"
+        );
+    }
     assert!(max < FUEL_TARGET, "largest step {max}");
     // The same frame again costs the same: the frame ended exactly after
     // JPEG_STEPS_PER_FRAME steps and the next one starts over.

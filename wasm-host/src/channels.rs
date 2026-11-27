@@ -32,8 +32,6 @@
 //! (with the same I2C ownership rules as `route_source`), records the
 //! subscriptions, and only then calls `init`.
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use core::fmt;
 use middleware::loader::binding::{Adapter, Binding, Endpoint, Target};
 use middleware::stream::adapt::{AdapterState, Shape};
@@ -44,11 +42,14 @@ use middleware::{Key, SenderId};
 
 pub use middleware::wasm_abi::channels::{ChannelError, OUTPUT_BASE};
 
-/// One declared channel, owned (the image is freed after compiling).
+use crate::fixed::{KeyBuf, Name, PerChannel, text};
+
+/// One declared channel, owned (the image is freed after compiling) and
+/// held inline: its name is a fixed-capacity string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decl {
     /// The name.
-    pub name: String,
+    pub name: Name,
     /// In or out.
     pub dir: Direction,
     /// What it carries.
@@ -71,7 +72,7 @@ impl Decl {
     /// An owned copy of `c`.
     pub fn from_channel(c: &Channel<'_>) -> Self {
         Decl {
-            name: c.name.to_string(),
+            name: text(c.name),
             dir: c.dir,
             kind: c.kind,
             channel: ChannelFields {
@@ -111,21 +112,21 @@ impl Decl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindError {
     /// A required channel has no target.
-    Unbound(String),
+    Unbound(Name),
     /// A local or adapted target on an output channel.
-    Direction(String),
+    Direction(Name),
     /// The local source (after its adapter) does not fit the declaration.
-    Mismatch(String),
+    Mismatch(Name),
     /// The adapter does not take the local source's stream.
-    Adapter(String),
+    Adapter(Name),
     /// Two input channels on one key.
-    SharedKey(String),
+    SharedKey(Name),
     /// More bound keys than subscription slots.
-    NoResources(String),
+    NoResources(Name),
     /// An input channel in a module without `mw_alloc` and `on_message`.
-    NoDelivery(String),
+    NoDelivery(Name),
     /// The device refused the local route (its code).
-    Route(String, middleware::wasm_abi::AbiError),
+    Route(Name, middleware::wasm_abi::AbiError),
 }
 
 impl BindError {
@@ -173,7 +174,7 @@ pub enum Step {
     /// local source; deliver only from `from` when set.
     Input {
         /// The subscribed key.
-        key: String,
+        key: KeyBuf,
         /// The local source route to start on `key` first.
         route: Option<RouteSource>,
         /// Only this sender's messages are delivered.
@@ -184,7 +185,7 @@ pub enum Step {
     /// Output: `channel_publish` publishes on `key`.
     Output {
         /// The key.
-        key: String,
+        key: KeyBuf,
     },
 }
 
@@ -239,16 +240,21 @@ fn fits(decl: &Decl, source: &RouteSource, adapter: Option<Adapter>) -> Result<(
 
 /// The key a driver point is carried on, `drv/<point>`
 /// ([`middleware::loader::binding::driver_key`]).
-pub fn driver_key(point: &str) -> String {
-    let mut k = String::from("drv/");
-    k.push_str(point);
-    k
+/// `None` when it would be longer than a key may be.
+pub fn driver_key(point: &str) -> Option<KeyBuf> {
+    let mut k = KeyBuf::new();
+    k.push_str("drv/").ok()?;
+    k.push_str(point).ok()?;
+    Some(k)
 }
 
 /// The key a local channel's route publishes on, `ch/<name>`.
-pub fn internal_key(name: &str) -> String {
-    let mut k = String::from("ch/");
-    k.push_str(name);
+/// A declared name always fits; a longer one is cut to the key's capacity.
+pub fn internal_key(name: &str) -> KeyBuf {
+    let mut k: KeyBuf = text("ch/");
+    let name: heapless::String<{ middleware::key::MAX_KEY_LEN - 3 }> = text(name);
+    // Fits: three bytes are taken.
+    let _ = k.push_str(&name);
     k
 }
 
@@ -261,24 +267,28 @@ pub fn plan(
     binding: Option<&Binding<'_>>,
     delivers: bool,
     free_slots: usize,
-) -> Result<Vec<Step>, BindError> {
-    let mut steps = Vec::with_capacity(decls.len());
-    let mut inputs: Vec<String> = Vec::new();
+) -> Result<PerChannel<Step>, BindError> {
+    let mut steps = PerChannel::new();
+    let mut inputs: PerChannel<KeyBuf> = PerChannel::new();
     for d in decls {
         let name = || d.name.clone();
         let Some(target) = binding.and_then(|b| b.target(&d.name)) else {
             if d.required() {
                 return Err(BindError::Unbound(name()));
             }
-            steps.push(Step::Unbound);
+            steps
+                .push(Step::Unbound)
+                .map_err(|_| BindError::NoResources(name()))?;
             continue;
         };
         let step = match d.dir {
             Direction::Out => match target {
                 Target::Key(k) | Target::Remote { key: k, .. } => Step::Output {
-                    key: k.as_str().to_string(),
+                    key: text(k.as_str()),
                 },
-                Target::Driver(p) => Step::Output { key: driver_key(p) },
+                Target::Driver(p) => Step::Output {
+                    key: driver_key(p).ok_or_else(|| BindError::Mismatch(name()))?,
+                },
                 Target::Local(_) | Target::Adapted { .. } => {
                     return Err(BindError::Direction(name()));
                 }
@@ -293,9 +303,12 @@ pub fn plan(
                         fits(d, &source, adapter)?;
                         (internal_key(&d.name), Some(source), None)
                     }
-                    Endpoint::Key(k) => (k.as_str().to_string(), None, None),
-                    Endpoint::Remote { node, key } => (key.as_str().to_string(), None, Some(node)),
-                    Endpoint::Driver(p) => (driver_key(p), None, None),
+                    Endpoint::Key(k) => (text(k.as_str()), None, None),
+                    Endpoint::Remote { node, key } => (text(key.as_str()), None, Some(node)),
+                    Endpoint::Driver(p) => {
+                        let key = driver_key(p).ok_or_else(|| BindError::Mismatch(name()))?;
+                        (key, None, None)
+                    }
                 };
                 if inputs.contains(&key) {
                     return Err(BindError::SharedKey(name()));
@@ -303,7 +316,9 @@ pub fn plan(
                 if inputs.len() == free_slots {
                     return Err(BindError::NoResources(name()));
                 }
-                inputs.push(key.clone());
+                inputs
+                    .push(key.clone())
+                    .map_err(|_| BindError::NoResources(name()))?;
                 Step::Input {
                     key,
                     route,
@@ -312,7 +327,9 @@ pub fn plan(
                 }
             }
         };
-        steps.push(step);
+        steps
+            .push(step)
+            .map_err(|_| BindError::NoResources(name()))?;
     }
     Ok(steps)
 }
@@ -334,18 +351,19 @@ pub enum Resolved {
     /// Published on `key`.
     Output {
         /// The key.
-        key: String,
+        key: KeyBuf,
     },
 }
 
 /// The channels of a running payload: declarations and what they
-/// resolved to, in declaration order.
+/// resolved to, in declaration order. Fixed capacity
+/// ([`middleware::wasm_abi::channels::MAX_CHANNELS`]), held inline.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChannelTable {
     /// The declarations.
-    pub decls: Vec<Decl>,
+    pub decls: PerChannel<Decl>,
     /// What each became.
-    pub resolved: Vec<Resolved>,
+    pub resolved: PerChannel<Resolved>,
 }
 
 impl ChannelTable {
@@ -417,7 +435,7 @@ mod tests {
     use middleware::stream::samples::SampleFormat;
     use middleware::wasm_abi::route::{AudioMode, ImuConfig, MicConfig, SourceConfig};
 
-    fn decls() -> Vec<Decl> {
+    fn decls() -> PerChannel<Decl> {
         [
             Channel::samples(
                 "audio",
@@ -467,14 +485,14 @@ mod tests {
             steps,
             [
                 Step::Input {
-                    key: "ch/audio".into(),
+                    key: text("ch/audio"),
                     route: Some(levels(16_000)),
                     from: None,
                     adapter: None,
                 },
                 Step::Unbound,
                 Step::Output {
-                    key: "lab/level".into()
+                    key: text("lab/level")
                 },
             ]
         );
@@ -488,23 +506,23 @@ mod tests {
         };
         assert_eq!(
             plan(&d, None, true, 8),
-            Err(BindError::Unbound("audio".into()))
+            Err(BindError::Unbound(text("audio")))
         );
         let audio = ("audio", Target::Local(levels(16_000)));
         assert_eq!(
             err(&[("audio", Target::Local(levels(32_000)))], true, 8),
-            BindError::Mismatch("audio".into())
+            BindError::Mismatch(text("audio"))
         );
         assert_eq!(
             err(&[("audio", Target::Local(pcm()))], true, 8),
-            BindError::Mismatch("audio".into())
+            BindError::Mismatch(text("audio"))
         );
         let imu = RouteSource::Samples(SampleSource::Imu(
             ImuConfig::new(100, 2, false, 10).unwrap(),
         ));
         assert_eq!(
             err(&[("audio", Target::Local(imu))], true, 8),
-            BindError::Mismatch("audio".into())
+            BindError::Mismatch(text("audio"))
         );
         let frames = RouteSource::Frames(
             middleware::wasm_abi::route::Source::TestPattern,
@@ -512,16 +530,16 @@ mod tests {
         );
         assert_eq!(
             err(&[("audio", Target::Local(frames))], true, 8),
-            BindError::Mismatch("audio".into())
+            BindError::Mismatch(text("audio"))
         );
         assert_eq!(
             err(&[audio, ("level", Target::Local(levels(16_000)))], true, 8),
-            BindError::Direction("level".into())
+            BindError::Direction(text("level"))
         );
         let shared = Target::Key(Key::from_static("lab/shared"));
         assert_eq!(
             err(&[("audio", shared), ("cmd", shared)], true, 8),
-            BindError::SharedKey("cmd".into())
+            BindError::SharedKey(text("cmd"))
         );
         // A key target cannot name a channel's internal key at all (the
         // binding refuses it), so a local source's stream is never shared.
@@ -536,11 +554,11 @@ mod tests {
                 true,
                 1
             ),
-            BindError::NoResources("cmd".into())
+            BindError::NoResources(text("cmd"))
         );
         assert_eq!(
             err(&[audio], false, 8),
-            BindError::NoDelivery("audio".into())
+            BindError::NoDelivery(text("audio"))
         );
         let remote = Target::Remote {
             node: SenderId([1; 8]),
@@ -556,7 +574,7 @@ mod tests {
         assert_eq!(
             steps[0],
             Step::Input {
-                key: "mic/level".into(),
+                key: text("mic/level"),
                 route: None,
                 from: Some(SenderId([1; 8])),
                 adapter: None
@@ -565,7 +583,7 @@ mod tests {
         assert_eq!(
             steps[2],
             Step::Output {
-                key: "mic/level".into()
+                key: text("mic/level")
             }
         );
         // AD2: an adapter that turns PCM into levels makes the PCM source
@@ -589,7 +607,7 @@ mod tests {
         };
         assert_eq!(
             err(&[("audio", wrong)], true, 8),
-            BindError::Adapter("audio".into())
+            BindError::Adapter(text("audio"))
         );
         let on_key = Target::Adapted {
             inner: Endpoint::Key(Key::from_static("mic/pcm")),
@@ -602,24 +620,24 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(BindError::Unbound("x".into()).channel(), "x");
+        assert_eq!(BindError::Unbound(text("x")).channel(), "x");
     }
 
     #[test]
     fn ch5_the_table_opens_inputs_by_slot_and_outputs_by_handle() {
         let t = ChannelTable {
             decls: decls(),
-            resolved: alloc::vec![
+            resolved: PerChannel::from_iter([
                 Resolved::Input {
                     slot: 2,
                     from: Some(SenderId([5; 8])),
-                    adapter: None
+                    adapter: None,
                 },
                 Resolved::Unbound,
                 Resolved::Output {
-                    key: "lab/level".into()
+                    key: text("lab/level"),
                 },
-            ],
+            ]),
         };
         use middleware::wasm_abi::AbiError;
         assert_eq!(t.open(b"audio"), Ok(2));

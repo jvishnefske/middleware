@@ -10,9 +10,11 @@
 //! Host imports never produce these; they return
 //! [`AbiError`](middleware::wasm_abi::AbiError) codes to the payload instead.
 
-use alloc::collections::VecDeque;
+use alloc::boxed::Box;
 use alloc::string::String;
 use core::fmt;
+
+use crate::fixed::{Line, Ring, text};
 
 /// Number of log lines an [`InitLog`] keeps (the most recent ones).
 ///
@@ -27,11 +29,11 @@ pub const INIT_LOG_LINES: usize = 8;
 /// during `init` here (the lines still reach
 /// [`Device::log`](crate::Device::log) as usual). When `init` traps, the
 /// log is returned in [`LoadError::Init`]; when it succeeds, the log is
-/// discarded. Older lines beyond the capacity are counted in
-/// [`InitLog::dropped`] instead of being kept.
+/// discarded. It is a ring buffer held inline, never allocated: older lines
+/// beyond the capacity are overwritten and counted in [`InitLog::dropped`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitLog {
-    lines: VecDeque<String>,
+    lines: Ring<Line, INIT_LOG_LINES>,
     dropped: u32,
 }
 
@@ -39,24 +41,22 @@ impl InitLog {
     /// An empty log.
     pub const fn new() -> Self {
         InitLog {
-            lines: VecDeque::new(),
+            lines: Ring::new(),
             dropped: 0,
         }
     }
 
-    /// Appends `line`, evicting the oldest line once [`INIT_LOG_LINES`] are
-    /// held. The caller passes lines already truncated to `MAX_LOG`.
+    /// Appends `line`, overwriting the oldest line once [`INIT_LOG_LINES`]
+    /// are held. The caller passes lines already truncated to `MAX_LOG`.
     pub(crate) fn push(&mut self, line: &str) {
-        if self.lines.len() >= INIT_LOG_LINES {
-            self.lines.pop_front();
+        if self.lines.push(text(line)) {
             self.dropped = self.dropped.saturating_add(1);
         }
-        self.lines.push_back(String::from(line));
     }
 
     /// The kept lines, oldest first.
     pub fn lines(&self) -> impl Iterator<Item = &str> {
-        self.lines.iter().map(String::as_str)
+        self.lines.iter().map(|l| l.as_str())
     }
 
     /// Number of kept lines (at most [`INIT_LOG_LINES`]).
@@ -69,7 +69,7 @@ impl InitLog {
         self.lines.is_empty() && self.dropped == 0
     }
 
-    /// Lines evicted because more than [`INIT_LOG_LINES`] were logged
+    /// Lines overwritten because more than [`INIT_LOG_LINES`] were logged
     /// (saturating).
     pub fn dropped(&self) -> u32 {
         self.dropped
@@ -141,8 +141,11 @@ pub enum LoadError {
     Init {
         /// Why `init` failed.
         trap: Trap,
-        /// The log lines `init` emitted before the trap.
-        log: InitLog,
+        /// The log lines `init` emitted before the trap. While `init` runs
+        /// the log is a ring buffer inside the payload's state; only this
+        /// error, once the failed payload is freed, moves it to the heap,
+        /// so that every other `LoadError` stays a few words.
+        log: Box<InitLog>,
     },
 }
 
@@ -230,7 +233,7 @@ mod tests {
         log.push("sensor missing");
         let e = LoadError::Init {
             trap: Trap::OutOfFuel,
-            log,
+            log: Box::new(log),
         };
         assert_eq!(
             e.to_string(),
@@ -238,7 +241,7 @@ mod tests {
         );
         let quiet = LoadError::Init {
             trap: Trap::OutOfFuel,
-            log: InitLog::new(),
+            log: Box::new(InitLog::new()),
         };
         assert_eq!(quiet.to_string(), "init failed: out of fuel");
     }

@@ -105,6 +105,31 @@
 //!   translation also means the first call into a function costs the same
 //!   fuel as later ones.
 //!
+//! # Interpreter backends
+//!
+//! The interpreter under [`Payload`] is chosen at build time; everything
+//! above it (the ABI, [`Device`], limits, channels) is the same code.
+//!
+//! * `wasmi` (default): validates each module and translates it to wasmi
+//!   bytecode at load. Needs CAS atomics, so it does not build for
+//!   `thumbv6m-none-eabi` (RP2040) or `riscv32imc-unknown-none-elf`
+//!   (ESP32-C3).
+//! * `micro` (`default-features = false, features = ["micro"]`): the
+//!   `wasm-micro` crate. It keeps a copy of the image and interprets it in
+//!   place: no validator, so a module wasmi would refuse at load traps (or
+//!   computes garbage in its own memory) when the bad code runs; fuel is
+//!   one unit per instruction, a different figure from wasmi's for the same
+//!   work; float arithmetic needs `micro-float`; trap and load messages are
+//!   worded differently. A base firmware comes out 450 to 800 KB smaller
+//!   (RP2350: 688 KB with wasmi, 223 KB with `micro`), and a module's heap
+//!   is its image plus a small index ([`heap`]) instead of two to four
+//!   times its image.
+//!
+//! With both features enabled wasmi is used, so enabling `micro` somewhere
+//! in a build never changes a build that already had wasmi. [`BACKEND`]
+//! names the one in use. `scripts/check-wasm-backends.sh` builds both for
+//! every platform architecture.
+//!
 //! # Interpreter build
 //!
 //! wasmi is built with `validate` (the safe `Module::new`) and
@@ -132,17 +157,30 @@ extern crate alloc;
 pub mod abi;
 pub mod channels;
 mod error;
-pub mod heap;
+pub mod fixed;
 pub mod link;
 
-use alloc::string::ToString;
-use alloc::vec::Vec;
+// The interpreter behind `Payload`, chosen by feature: `wasmi` (the
+// default), or `micro` when `wasmi` is off. See "Interpreter backends".
+#[cfg(feature = "wasmi")]
+#[path = "backend/wasmi.rs"]
+mod backend;
+#[cfg(all(feature = "micro", not(feature = "wasmi")))]
+#[path = "backend/micro.rs"]
+mod backend;
+#[cfg(not(any(feature = "wasmi", feature = "micro")))]
+compile_error!("wasm-host needs an interpreter: enable feature `wasmi` or `micro`");
+
+#[cfg(feature = "wasmi")]
+pub mod heap;
+#[cfg(not(feature = "wasmi"))]
+#[path = "heap_micro.rs"]
+pub mod heap;
+
+/// The interpreter this build runs payloads on: `"wasmi"` or `"micro"`.
+pub const BACKEND: &str = backend::NAME;
 
 use middleware::wasm_abi::{self, MAX_MESSAGE, route};
-use wasmi::{
-    CompilationMode, Config, Engine, ExternType, FuncType, Instance, Module, Store,
-    StoreLimitsBuilder, TrapCode, ValType,
-};
 
 pub use abi::FuelStats;
 pub use error::{INIT_LOG_LINES, InitLog, LoadError, Trap};
@@ -158,7 +196,6 @@ pub use middleware::wasm_abi::route::{
 pub use middleware::wasm_abi::{AbiError, Pull};
 pub use middleware::{HandlerError, RequestMeta, SenderId};
 
-use abi::{ImportKind, Shape};
 use link::{Exports, State};
 
 /// The board a payload drives. The firmware implements it over real
@@ -594,31 +631,12 @@ impl Limits {
     /// The declared maximum is a hard limit: wasmi's `memory.grow` never
     /// passes it, whatever the cap.
     pub fn heap_needed(&self, wasm: &[u8]) -> u32 {
-        heap::needed(
-            u32::try_from(wasm.len()).unwrap_or(u32::MAX),
+        heap::needed_for(
+            wasm,
             abi::memory_reach(wasm, self.max_memory_bytes),
             self.max_stack_bytes,
             self.max_call_depth,
         )
-    }
-
-    /// The wasmi engine configuration for these limits: fuel metering,
-    /// custom page sizes, eager translation and the stack caps.
-    fn config(&self) -> Config {
-        let mut config = Config::default();
-        let stack = self.max_stack_bytes as usize;
-        // Order matters: wasmi panics if the minimum ever exceeds the
-        // maximum. Lowering the minimum first makes every step valid.
-        config
-            .consume_fuel(true)
-            .wasm_custom_page_sizes(true)
-            .compilation_mode(CompilationMode::Eager)
-            .set_max_recursion_depth(self.max_call_depth as usize)
-            .set_min_stack_height(0)
-            .set_max_stack_height(stack)
-            .set_min_stack_height(stack)
-            .set_max_cached_stacks(1);
-        config
     }
 }
 
@@ -650,7 +668,7 @@ pub enum Ticked {
 /// local routes, subscribes the bound input keys, records the outputs.
 fn resolve<D: Device>(
     st: &mut State<D>,
-    decls: Vec<channels::Decl>,
+    decls: fixed::PerChannel<channels::Decl>,
     binding: Option<&middleware::loader::binding::Binding<'_>>,
 ) -> Result<(), LoadError> {
     use channels::{BindError, Resolved, Step};
@@ -660,12 +678,10 @@ fn resolve<D: Device>(
     let free = st.max_subscriptions.saturating_sub(st.subscriptions.len());
     let steps =
         channels::plan(&decls, binding, st.exports.messages, free).map_err(LoadError::Bind)?;
-    let mut resolved = Vec::new();
-    resolved
-        .try_reserve_exact(steps.len())
-        .map_err(|_| LoadError::OutOfMemory)?;
+    let mut resolved = fixed::PerChannel::new();
+    let full = |d: &channels::Decl| LoadError::Bind(BindError::NoResources(d.name.clone()));
     for (d, step) in decls.iter().zip(steps) {
-        resolved.push(match step {
+        let step = match step {
             Step::Unbound => Resolved::Unbound,
             Step::Output { key } => Resolved::Output { key },
             Step::Input {
@@ -681,14 +697,15 @@ fn resolve<D: Device>(
                         .map_err(|e| LoadError::Bind(BindError::Route(d.name.clone(), e)))?;
                 }
                 let slot = st.subscriptions.len();
-                st.subscriptions.push(key);
+                st.subscriptions.push(key).map_err(|_| full(d))?;
                 Resolved::Input {
                     slot,
                     from,
                     adapter: adapter.map(middleware::stream::adapt::AdapterState::new),
                 }
             }
-        });
+        };
+        resolved.push(step).map_err(|_| full(d))?;
     }
     st.channels = channels::ChannelTable { decls, resolved };
     Ok(())
@@ -699,47 +716,23 @@ fn resolve<D: Device>(
 /// `D: 'static` is required because wasmi stores host closures and the
 /// store's resource limiter as `'static` values parameterised by `D`.
 pub struct Payload<D: Device + 'static> {
-    store: Store<State<D>>,
-    instance: Instance,
+    inner: backend::Instance<D>,
     fuel: u64,
     fuel_stats: FuelStats,
     poisoned: bool,
 }
 
-/// Converts a wasmi function type to an all-`i32` [`Shape`].
-fn shape(ty: &FuncType) -> Option<Shape> {
-    let all_i32 = |v: &[ValType]| v.iter().all(|t| *t == ValType::I32);
-    (all_i32(ty.params()) && all_i32(ty.results())).then(|| Shape {
-        params: ty.params().len(),
-        results: ty.results().len(),
-    })
-}
-
-/// Classifies a wasmi error as a [`Trap`].
-fn trap(e: &wasmi::Error) -> Trap {
-    match e.as_trap_code() {
-        Some(TrapCode::OutOfFuel) => Trap::OutOfFuel,
-        _ => Trap::Wasm(e.to_string()),
-    }
-}
-
 /// Checks imports and exports of a compiled module; returns the optional
 /// exports it provides.
-fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, LoadError> {
-    for import in module.imports() {
-        let kind = match import.ty() {
-            ExternType::Func(f) => ImportKind::Func(shape(f)),
-            _ => ImportKind::Other,
-        };
-        abi::check_import(import.module(), import.name(), kind)?;
-    }
+fn validate(wasm: &[u8], module: &backend::Module, limits: &Limits) -> Result<Exports, LoadError> {
+    module.imports(&mut |module, name, kind| abi::check_import(module, name, kind))?;
     let mut exports = Exports::default();
     let (mut alloc, mut on_message, mut on_request, mut memory) = (false, false, false, false);
-    for export in module.exports() {
-        match export.ty() {
-            ExternType::Func(f) => {
-                abi::check_export(export.name(), shape(f))?;
-                match export.name() {
+    module.exports(&mut |name, export| {
+        match export {
+            backend::Export::Func(shape) => {
+                abi::check_export(name, shape)?;
+                match name {
                     wasm_abi::exports::INIT => exports.init = true,
                     wasm_abi::exports::TICK => exports.tick = true,
                     wasm_abi::exports::ALLOC => alloc = true,
@@ -749,12 +742,11 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
                     _ => {}
                 }
             }
-            ExternType::Memory(_) if export.name() == wasm_abi::exports::MEMORY => {
-                memory = true;
-            }
+            backend::Export::Memory if name == wasm_abi::exports::MEMORY => memory = true,
             _ => {}
         }
-    }
+        Ok(())
+    })?;
     if !memory {
         return Err(LoadError::MissingMemory);
     }
@@ -772,11 +764,10 @@ fn validate(wasm: &[u8], module: &Module, limits: &Limits) -> Result<Exports, Lo
 /// the image and linear memory are never allocated at the same time (see
 /// [`heap`]).
 pub struct Compiled {
-    engine: Engine,
-    module: Module,
+    module: backend::Module,
     exports: Exports,
     limits: Limits,
-    channels: Vec<channels::Decl>,
+    channels: fixed::PerChannel<channels::Decl>,
 }
 
 impl Compiled {
@@ -784,18 +775,18 @@ impl Compiled {
     /// function eagerly, so no translation (and no allocation for it)
     /// happens on a later call.
     pub fn new(wasm: &[u8], limits: Limits) -> Result<Self, LoadError> {
-        let engine = Engine::new(&limits.config());
-        let module = Module::new(&engine, wasm).map_err(|e| LoadError::Invalid(e.to_string()))?;
+        let module = backend::Module::new(wasm, &limits)?;
         let exports = validate(wasm, &module, &limits)?;
         let declared =
             wasm_abi::channels::Channels::from_module(wasm).map_err(LoadError::Channels)?;
-        let mut channels = Vec::new();
-        channels
-            .try_reserve_exact(declared.len())
-            .map_err(|_| LoadError::OutOfMemory)?;
-        channels.extend(declared.iter().map(channels::Decl::from_channel));
+        let mut channels = fixed::PerChannel::new();
+        for c in declared.iter() {
+            // The section holds at most `MAX_CHANNELS`.
+            channels
+                .push(channels::Decl::from_channel(c))
+                .map_err(|_| LoadError::OutOfMemory)?;
+        }
         Ok(Compiled {
-            engine,
             module,
             exports,
             limits,
@@ -848,94 +839,54 @@ impl<D: Device + 'static> Payload<D> {
         binding: Option<&middleware::loader::binding::Binding<'_>>,
     ) -> Result<Self, LoadError> {
         let Compiled {
-            engine,
             module,
             exports,
             limits,
             channels: decls,
         } = compiled;
-        // The DMA copy buffer and the subscription list at their largest
-        // now, so the imports that use them never reallocate later.
-        let mut scratch = Vec::new();
-        scratch
-            .try_reserve_exact(wasm_abi::periph::MAX_DMA)
-            .map_err(|_| LoadError::OutOfMemory)?;
-        let mut subscriptions = Vec::new();
-        let max_subscriptions = usize::from(limits.max_subscriptions);
-        subscriptions
-            .try_reserve_exact(max_subscriptions)
-            .map_err(|_| LoadError::OutOfMemory)?;
-        let mut serves = Vec::new();
-        serves
-            .try_reserve_exact(wasm_abi::serve::MAX_SERVES)
-            .map_err(|_| LoadError::OutOfMemory)?;
-        let state = State {
+        let state = State::new(
             device,
-            subscriptions,
-            max_subscriptions,
-            serves,
-            schedule: None,
             exports,
-            limits: StoreLimitsBuilder::new()
-                .memory_size(abi::memory_bytes(limits.max_memory_bytes))
-                .memories(1)
-                .instances(1)
-                .build(),
-            scratch,
-            init_log: None,
-            i2c_owners: route::I2cOwners::new(),
-            channels: channels::ChannelTable::default(),
-        };
-        let mut store = Store::new(&engine, state);
-        store.limiter(|s| &mut s.limits);
-        let instantiate = |e: wasmi::Error| LoadError::Instantiate(e.to_string());
-        let linker = link::linker::<D>(&engine).map_err(instantiate)?;
-        store.set_fuel(limits.fuel_per_call).map_err(instantiate)?;
-        let instance = linker
-            .instantiate_and_start(&mut store, &module)
-            .map_err(instantiate)?;
-        resolve(store.data_mut(), decls, binding)?;
+            usize::from(limits.max_subscriptions),
+            limits.max_memory_bytes,
+        );
+        let mut inner = backend::Instance::new(module, state, &limits)?;
+        resolve(inner.state_mut(), decls, binding)?;
         let mut payload = Payload {
-            store,
-            instance,
+            inner,
             fuel: limits.fuel_per_call,
             fuel_stats: FuelStats::default(),
             poisoned: false,
         };
         if exports.init {
-            payload.store.data_mut().init_log = Some(InitLog::new());
-            let result = payload.call::<(), ()>(wasm_abi::exports::INIT, ());
-            let log = payload.store.data_mut().init_log.take();
-            result.map_err(|trap| LoadError::Init {
-                trap,
-                log: log.unwrap_or_default(),
-            })?;
+            payload.inner.state_mut().init_log = Some(InitLog::new());
+            let result = payload.call(wasm_abi::exports::INIT, &[], false);
+            let log = payload.inner.state_mut().init_log.take();
+            if let Err(trap) = result {
+                // The failed payload goes first, so its heap is free again
+                // before the log is boxed for the error.
+                drop(payload);
+                let log = alloc::boxed::Box::new(log.unwrap_or_default());
+                return Err(LoadError::Init { trap, log });
+            }
         }
         Ok(payload)
     }
 
-    /// Refuels and calls the export `name`, records the fuel it used in
+    /// Refuels and calls the export `name` (`i32` arguments, one `i32`
+    /// result when `returns`, else 0), records the fuel it used in
     /// [`Payload::fuel_stats`], and poisons the payload on a trap.
-    fn call<P, R>(&mut self, name: &str, params: P) -> Result<R, Trap>
-    where
-        P: wasmi::WasmParams,
-        R: wasmi::WasmResults,
-    {
+    fn call(&mut self, name: &str, args: &[i32], returns: bool) -> Result<i32, Trap> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
-        let result = self
-            .store
-            .set_fuel(self.fuel)
-            .and_then(|()| self.instance.get_typed_func::<P, R>(&self.store, name))
-            .and_then(|f| f.call(&mut self.store, params))
-            .map_err(|e| trap(&e));
-        // A call that ran dry counts as its whole budget: wasmi traps when
-        // the next instruction costs more than is left, so a few units
-        // may remain.
+        let result = self.inner.call(name, args, returns, self.fuel);
+        // A call that ran dry counts as its whole budget: an interpreter
+        // may trap when the next instruction costs more than is left, so
+        // a few units may remain.
         let remaining = match result {
             Err(Trap::OutOfFuel) => None,
-            _ => self.store.get_fuel().ok(),
+            _ => self.inner.fuel_left(),
         };
         let used = abi::fuel_used(self.fuel, remaining);
         self.fuel_stats = self.fuel_stats.record(used);
@@ -951,7 +902,7 @@ impl<D: Device + 'static> Payload<D> {
 
     /// Keys the payload subscribed to, in slot order.
     pub fn subscriptions(&self) -> impl Iterator<Item = &str> {
-        self.store.data().subscriptions.iter().map(|s| s.as_str())
+        self.inner.state().subscriptions.iter().map(|s| s.as_str())
     }
 
     /// Absolute `now_ms` at which the next `tick` is due; `None` when ticking
@@ -960,7 +911,7 @@ impl<D: Device + 'static> Payload<D> {
         if self.poisoned {
             return None;
         }
-        self.store.data().schedule.map(|s| s.due)
+        self.inner.state().schedule.map(|s| s.due)
     }
 
     /// Calls `tick(now_ms)` if a tick is due at `now_ms`, after advancing the
@@ -976,13 +927,13 @@ impl<D: Device + 'static> Payload<D> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
-        let state = self.store.data_mut();
+        let state = self.inner.state_mut();
         match abi::tick_decision(state.exports.tick, state.schedule, now_ms) {
             (Ticked::Ran, next) => state.schedule = next,
             (other, _) => return Ok(other),
         }
-        self.call::<i32, ()>(wasm_abi::exports::TICK, now_ms as i32)
-            .map(|()| Ticked::Ran)
+        self.call(wasm_abi::exports::TICK, &[now_ms as i32], false)
+            .map(|_| Ticked::Ran)
     }
 
     /// Delivers a message. Returns `Ok(true)` if `key` exactly matches a
@@ -1010,16 +961,16 @@ impl<D: Device + 'static> Payload<D> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
-        let Some(slot) = abi::slot_for(&self.store.data().subscriptions, key.as_str()) else {
+        let Some(slot) = abi::slot_for(&self.inner.state().subscriptions, key.as_str()) else {
             return Ok(false);
         };
-        if !self.store.data().channels.admits(slot, sender) {
+        if !self.inner.state().channels.admits(slot, sender) {
             return Ok(false);
         }
         // An adapted channel (ABI 8) gets the adapter's output, or nothing
         // when this message completed none.
         let mut adapted = [0u8; MAX_MESSAGE];
-        let data = match self.store.data_mut().channels.adapter_mut(slot) {
+        let data = match self.inner.state_mut().channels.adapter_mut(slot) {
             Some(a) => match a.feed(data, &mut adapted) {
                 Some(n) => &adapted[..n],
                 None => return Ok(false),
@@ -1031,35 +982,32 @@ impl<D: Device + 'static> Payload<D> {
         }
         // Both fit in i32: slot < SLOT_MAX, len <= MAX_MESSAGE.
         let (slot, len) = (slot as i32, data.len() as i32);
-        let ptr = self.call::<i32, i32>(wasm_abi::exports::ALLOC, len)?;
-        let memory = self
-            .instance
-            .get_memory(&self.store, wasm_abi::exports::MEMORY);
-        let written = memory.and_then(|m| {
-            let range = abi::alloc_range(ptr, len, m.data_size(&self.store))?;
-            m.write(&mut self.store, range.start, data).ok()
-        });
+        let ptr = self.call(wasm_abi::exports::ALLOC, &[len], true)?;
+        let mem = self.inner.memory_mut();
+        let written = abi::alloc_range(ptr, len, mem.len())
+            .and_then(|range| mem.get_mut(range.start..)?.get_mut(..data.len()))
+            .map(|dst| dst.copy_from_slice(data));
         if written.is_none() {
             // The guest refused the message (0) or returned an unusable buffer.
             return Ok(false);
         }
-        self.call::<(i32, i32, i32), ()>(wasm_abi::exports::ON_MESSAGE, (slot, ptr, len))?;
+        self.call(wasm_abi::exports::ON_MESSAGE, &[slot, ptr, len], false)?;
         Ok(true)
     }
 
     /// The channel table: declarations and what each resolved to (ABI 8).
     pub fn channels(&self) -> &channels::ChannelTable {
-        &self.store.data().channels
+        &self.inner.state().channels
     }
 
     /// Keys the payload serves (ABI 5), in slot order.
     pub fn serves(&self) -> impl Iterator<Item = &str> {
-        self.store.data().serves.iter().map(|s| s.as_str())
+        self.inner.state().serves.iter().map(|s| s.as_str())
     }
 
     /// Whether the module exports `mw_alloc` and `on_request` (ABI 5).
     pub fn handles_requests(&self) -> bool {
-        self.store.data().exports.requests
+        self.inner.state().exports.requests
     }
 
     /// Hands one request to the payload (ABI 5) and copies its reply into
@@ -1093,7 +1041,7 @@ impl<D: Device + 'static> Payload<D> {
         if self.poisoned {
             return Err(Trap::Poisoned);
         }
-        let Some(slot) = abi::slot_for(&self.store.data().serves, key.as_str()) else {
+        let Some(slot) = abi::slot_for(&self.inner.state().serves, key.as_str()) else {
             return Ok(Err(HandlerError::NotFound));
         };
         let layout = match serve::layout(body.len(), reply.len()) {
@@ -1102,63 +1050,57 @@ impl<D: Device + 'static> Payload<D> {
         };
         // Fits i32: at most MAX_REQUEST_BUFFER.
         let alloc_len = layout.alloc_len as i32;
-        let ptr = self.call::<i32, i32>(wasm_abi::exports::ALLOC, alloc_len)?;
-        let Some(memory) = self
-            .instance
-            .get_memory(&self.store, wasm_abi::exports::MEMORY)
-        else {
-            return Ok(Err(HandlerError::Unavailable));
-        };
-        let placed = abi::request_ranges(ptr, &layout, memory.data_size(&self.store))
-            .and_then(|r| Some((r.args()?, r)));
+        let ptr = self.call(wasm_abi::exports::ALLOC, &[alloc_len], true)?;
+        let mem = self.inner.memory_mut();
+        let placed =
+            abi::request_ranges(ptr, &layout, mem.len()).and_then(|r| Some((r.args()?, r)));
         let Some(((req_ptr, req_len, meta_ptr, reply_ptr, reply_cap), ranges)) = placed else {
             return Ok(Err(HandlerError::Unavailable));
         };
-        let written = memory
-            .write(
-                &mut self.store,
-                ranges.meta.start,
-                &serve::encode_meta(meta),
-            )
-            .and_then(|()| memory.write(&mut self.store, ranges.request.start, body));
-        if written.is_err() {
+        let encoded = serve::encode_meta(meta);
+        let put = |mem: &mut [u8], at: usize, src: &[u8]| {
+            let dst = mem.get_mut(at..)?.get_mut(..src.len())?;
+            dst.copy_from_slice(src);
+            Some(())
+        };
+        if put(mem, ranges.meta.start, &encoded)
+            .and_then(|()| put(mem, ranges.request.start, body))
+            .is_none()
+        {
             return Ok(Err(HandlerError::Unavailable));
         }
         // slot < MAX_SERVES.
-        let args = (
+        let args = [
             slot as i32,
             req_ptr,
             req_len,
             meta_ptr,
             reply_ptr,
             reply_cap,
-        );
-        let code =
-            self.call::<(i32, i32, i32, i32, i32, i32), i32>(wasm_abi::exports::ON_REQUEST, args)?;
+        ];
+        let code = self.call(wasm_abi::exports::ON_REQUEST, &args, true)?;
         let n = match serve::reply_result(code, layout.reply_cap) {
             Ok(n) => n,
             Err(e) => return Ok(Err(e)),
         };
-        let (Some(out), Some(src)) = (
-            reply.get_mut(..n),
-            ranges
-                .reply
-                .start
-                .checked_add(n)
-                .map(|end| ranges.reply.start..end),
-        ) else {
-            return Ok(Err(HandlerError::Internal));
-        };
         // Linear memory never shrinks, so the checked range is still valid.
-        match memory.read(&self.store, src.start, out) {
-            Ok(()) => Ok(Ok(n)),
-            Err(_) => Ok(Err(HandlerError::Internal)),
+        let src = self
+            .inner
+            .memory()
+            .get(ranges.reply.start..)
+            .and_then(|m| m.get(..n));
+        match (reply.get_mut(..n), src) {
+            (Some(out), Some(src)) => {
+                out.copy_from_slice(src);
+                Ok(Ok(n))
+            }
+            _ => Ok(Err(HandlerError::Internal)),
         }
     }
 
     /// Whether the module exports `on_irq` (ABI 2).
     pub fn handles_irq(&self) -> bool {
-        self.store.data().exports.irq
+        self.inner.state().exports.irq
     }
 
     /// Delivers one interrupt event by calling
@@ -1172,7 +1114,7 @@ impl<D: Device + 'static> Payload<D> {
         // A route the device stopped by itself gives its I2C device back,
         // whether or not the payload hears of it.
         if event.kind == EventKind::RouteStopped {
-            let st = self.store.data_mut();
+            let st = self.inner.state_mut();
             if let Ok(handle) = route::route_handle(event.source) {
                 st.i2c_owners = st.i2c_owners.release(handle);
             }
@@ -1181,9 +1123,10 @@ impl<D: Device + 'static> Payload<D> {
             return Ok(false);
         }
         let [kind, source, value, time] = event.to_args();
-        self.call::<(i32, i32, i32, i32), ()>(
+        self.call(
             wasm_abi::exports::ON_IRQ,
-            (kind, source, value, time),
+            &[kind, source, value, time],
+            false,
         )?;
         Ok(true)
     }
@@ -1196,19 +1139,16 @@ impl<D: Device + 'static> Payload<D> {
     /// The payload's linear memory, e.g. for differential tests against
     /// another runtime (`wasm-hdl-ref`).
     pub fn memory(&self) -> &[u8] {
-        self.instance
-            .get_memory(&self.store, wasm_abi::exports::MEMORY)
-            .map(|m| m.data(&self.store))
-            .unwrap_or_default()
+        self.inner.memory()
     }
 
     /// The device, e.g. to inspect a simulator's state.
     pub fn device(&mut self) -> &mut D {
-        &mut self.store.data_mut().device
+        &mut self.inner.state_mut().device
     }
 
     /// Drops the interpreter and returns the device.
     pub fn into_device(self) -> D {
-        self.store.into_data().device
+        self.inner.into_state().device
     }
 }

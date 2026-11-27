@@ -15,6 +15,7 @@ use middleware::wasm_abi::channels::{
 use middleware::wasm_abi::machine::{Digital, Segment};
 use middleware::wasm_abi::{ABI_VERSION, imports_in};
 use wasm_host::channels::BindError;
+use wasm_host::fixed::text;
 use wasm_host::{AbiError, Device, Limits, LoadError, Payload, Pull};
 
 #[derive(Default)]
@@ -147,7 +148,7 @@ fn mc4_a_key_still_binds_a_machine_channel() {
 #[test]
 fn mc4_unbound_machine_channels_fail_the_load() {
     match load(None) {
-        Err(LoadError::Bind(e)) => assert_eq!(e, BindError::Unbound("x_limit".into())),
+        Err(LoadError::Bind(e)) => assert_eq!(e, BindError::Unbound(text("x_limit"))),
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("loaded"),
     }
