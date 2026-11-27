@@ -489,7 +489,8 @@ fn run_zenoh(cli: &cli::Cli, z: &cli::ZenohTarget) -> Result<(), Error> {
     link.wait_for_board(Duration::from_secs(ZENOH_WAIT_SECONDS))?;
     let mut dev = Device::new(link);
     // The control target: --target, else by what the board reports (an
-    // RT1050's MAC; a posix-node's node id, if it is the node at --node).
+    // RT1050's MAC; a posix-node's node id, if it is the node at --node;
+    // an ESP-NOW device's MAC, the --node a gateway serves it at).
     let (target, from) = match z.target {
         Some(t) => (t, "--target".to_owned()),
         None => {

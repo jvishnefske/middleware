@@ -4229,7 +4229,7 @@ open).
   payload status. An answer is put on the session whose Zenoh id hashes to
   its node id (`zenoh::sender_id_of`, the same in `zenoh_lite`). It needs
   no `--port` and connects only to what the scout found. Not seen: ESP-NOW
-  nodes (a gateway's `peers` lists them), sessions behind no scouted
+  nodes (until H8: those a gateway hears are listed), sessions behind no scouted
   router, other subnets, and mw-posix-node's `sys/info`, which it does not
   serve over Zenoh yet (only through `gw/sys`, MS6) —
   `scout::tests::h4_node_ids_come_from_sys_info_reply_keys`, `h4_admin_sessions_are_parsed_and_junk_is_skipped`, `h4_merge_joins_by_zenoh_id_and_leaves_out_the_scanner`, `h4_answers_are_attributed_by_node_id`, `h4_the_table_is_aligned_and_says_when_nothing_was_found`, `scout::shell::tests::h4_connects_to_routers_and_peers_over_tcp_only`; `cli::tests::h4_scout_needs_no_link_and_takes_only_seconds`. Run 2026-11-19 against a zenohd on loopback: it listed the router, a mw-posix-node's two sessions (peer and client, via the router) and a stub `@mw/node/<id>/sys/info` queryable; on this LAN it found no Zenoh session.
@@ -4267,6 +4267,31 @@ open).
   port and the line (as RG28 for the gateway) —
   `port::tests::h7_opens_a_pty_slave_and_carries_bytes_both_ways`,
   `h7_only_inappropriate_ioctl_is_a_missing_modem_line`.
+- [x] H8 `mwctl scout` lists the ESP-NOW devices a posix-node gateway
+  hears (EG14), and mwctl reaches them without `--target`. A `sys/info`
+  answer no session was found for, under an id made of a MAC
+  (`middleware::zenoh_wire::mac_of_id`: six bytes and two zero bytes, the
+  rule the gateway uses), is a row of kind `espnow`, after the clients,
+  with the MAC as ADDRESS; an answer whose session was seen stays that
+  session's row whatever its id. One more query, `@mw/node/*/sys/peers`,
+  asked only when such an answer came, reads each gateway's heard list
+  (at most 64 replies, 16 ids each; the gateway's id from the reply key)
+  and fills VIA with `gw <the bridge's MAC, 12 hex digits>` for every
+  gateway listing the device (at most 4); a gateway's list never creates
+  a row nor touches another kind of row. All cells are still escaped and
+  cut (H4). The count line gains `, N over ESP-NOW`.
+  `zlink::target_for` gives a MAC-derived `--node` its MAC as the control
+  target, when `sys/info` reports that same id or none (the ESP firmware
+  verifies requests naming its MAC, as over `--espnow`); a different
+  reported id is still refused (PN27), chip `rt1050` and a posix-node's
+  session id are decided first and unchanged —
+  `scout::tests::h8_espnow_rows`,
+  `h8_a_mac_shaped_id_with_a_session_is_that_session`,
+  `h8_peers_map_devices_to_their_gateway`;
+  `zlink::tests::h8_a_mac_id_signs_for_its_mac`,
+  `h8_a_mac_id_reporting_another_node_is_refused`; middleware
+  `zenoh_wire::tests::h8_a_mac_derived_id_gives_its_mac_back`. Not run
+  against hardware (EG13).
 
 ### Web site (`web/`)
 
@@ -5625,8 +5650,52 @@ shell `mw_posix_node::espnow_gw`.
   `mw-posix-node`, which enables `espnow` itself (PN9) —
   `scripts/check-features.sh`.
 - [ ] EG13 On hardware: an ESP32's `app/**` appears on Zenoh through the
-  ESP8266 bridge on posix-node, and `mwctl info` over Zenoh reaches it.
-  Owner: user.
+  ESP8266 bridge on posix-node, and `mwctl info` over Zenoh reaches it;
+  `just lan` shows it as an `espnow` row with its MAC, `gw <bridge>`,
+  chip and firmware, and a signed `stop`/`start` with `--node <mac>0000`
+  needs no `--target` (EG14, EG15, H8). Owner: user.
+- [x] EG14 A wildcard query reaches a heard device's `sys/info` and
+  nothing else. Each per-device queryable knows its device and key
+  (`core::plan_query`): a query naming exactly that key is forwarded as
+  before; a wildcard (`@mw/node/*/sys/info`, `@mw/node/*/sys/**`,
+  `@mw/node/**`) is answered only by the `sys/info` queryable, only when
+  the expression includes that device's `sys/info` key, and always on
+  that concrete key, so a scanner reads the device's id from it; every
+  other queryable leaves a wildcard unanswered, so a sweep never reaches
+  a loader or control key (the rule of PN's `zenoh_sys::plan`). The
+  gateway's own `sys/peers` also answers on its concrete key —
+  `core::tests::eg14_a_query_is_planned_by_the_queryable_it_reached`;
+  `tests/espnow_gw.rs`
+  `eg14_a_wildcard_sys_info_query_lists_every_heard_device`,
+  `eg14_a_wildcard_never_reaches_another_key`.
+- [x] EG15 A scan is answered from a cache of each device's last
+  `sys/info` (`core::InfoCache`: at most 32 entries of at most 237 bytes,
+  fresh for 30 s, `INFO_TTL_MS`), by the queryable itself, so it needs no
+  radio request and does not wait behind one. The cache is filled by
+  every `sys/info` answer the gateway relays and by one fetch when a
+  device is first served; a scan that finds no fresh entry queues one
+  fetch for that device (one per device however many scans wait) and is
+  answered when it returns (with the fetch's error if it failed); a scan
+  whose fetch has not started within 1.5 s (`SCAN_HOLD`, or the query's
+  own deadline if shorter) is left unanswered. Fetches are one attempt,
+  never retried, those a scan waits for before those for newly served
+  devices, and run only when no forwarded query waits, so they delay a
+  query by at most one attempt (400 ms, plus the wait for the bridge's
+  `Sent`). A forwarded commit, start, stop or bind drops the device's
+  entry whatever its outcome (`core::changes_info`), so a scan right
+  after one shows the new status. A query on the
+  device's own `sys/info` key is never served from the cache: it goes to
+  the device and refreshes the entry. A forgotten device's entry is
+  dropped with its queryables (and an answer arriving after it was
+  forgotten is not kept), nothing but `sys/info` is cached, and the
+  fetches are not counted in `Report::requests`. A forged MAC costs one
+  unanswered 400 ms fetch when it is first served (at most 32 served) —
+  `core::tests::eg15_the_info_cache_is_fresh_for_its_ttl`,
+  `eg15_the_info_cache_is_bounded_and_forgets`; `tests/espnow_gw.rs`
+  `eg15_a_second_scan_is_answered_from_the_cache`,
+  `eg15_a_concrete_answer_refreshes_the_cache`,
+  `eg15_a_forgotten_device_leaves_the_cache`,
+  `eg15_a_silent_device_does_not_hold_up_the_others`.
 
 ### A/B firmware OTA (RP2350)
 

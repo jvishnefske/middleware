@@ -17,7 +17,9 @@
 //! reboot/confirm/abort only as signed control requests addressed to the
 //! board's [`target`] address. A posix-node over Zenoh (PN21–PN27) answers
 //! at the id of its Zenoh session, which is not its node id; its control
-//! requests name its reported node id's first six bytes ([`target_for`]). Monitoring is not offered here
+//! requests name its reported node id's first six bytes ([`target_for`]).
+//! An ESP-NOW device behind a posix-node gateway answers at its MAC and
+//! two zero bytes, and its requests name that MAC (H8). Monitoring is not offered here
 //! ([`Endpoint::next_event`] only waits).
 
 use crate::error::Error;
@@ -86,32 +88,41 @@ impl std::error::Error for TargetMismatch {}
 
 /// The 6-byte address a signed control request names on the board whose
 /// per-node key is `addressed` and whose `sys/info` reported `chip` and
-/// node id `reported` (design.md PN27): the RT1050's Ethernet MAC
-/// ([`target`] of `addressed`) on chip `rt1050` or when no node id was
-/// reported; else the reported node id's first six bytes (a posix-node,
-/// whose key carries its Zenoh session's id), but only when that node's
-/// session id is `addressed`
-/// (`middleware::zenoh::wire::posix_sender_id`): `sys/info` is not
-/// authenticated, and a responder claiming another machine's node id is
-/// [`TargetMismatch`].
+/// node id `reported` (design.md PN27, H8):
+///
+/// * chip `rt1050`: the RT1050's Ethernet MAC ([`target`] of `addressed`),
+///   whatever it reports;
+/// * a posix-node (its key carries its Zenoh session's id): the reported
+///   node id's first six bytes, but only when that node's session id is
+///   `addressed` (`middleware::zenoh::wire::posix_sender_id`);
+/// * an ESP-NOW device behind a gateway (`addressed` is its MAC and two
+///   zero bytes, `middleware::zenoh_wire::mac_of_id`): that MAC, which is
+///   what the device verifies, when it reports that same id or none;
+/// * no node id reported otherwise (older firmware): the RT1050 rule
+///   (before H8 this also applied to an id ending in two zero bytes).
+///
+/// Anything else is [`TargetMismatch`]: `sys/info` is not authenticated,
+/// and a responder claiming another machine's node id gets no signature.
 pub fn target_for(
     chip: &str,
     addressed: SenderId,
     reported: Option<SenderId>,
 ) -> Result<[u8; 6], TargetMismatch> {
-    let Some(n) = reported.filter(|_| chip != "rt1050") else {
+    if chip == "rt1050" {
         return Ok(target(addressed));
-    };
-    let first6 = [n.0[0], n.0[1], n.0[2], n.0[3], n.0[4], n.0[5]];
-    let expected = middleware::zenoh::wire::posix_sender_id(n);
-    if expected == addressed {
-        Ok(first6)
-    } else {
-        Err(TargetMismatch {
+    }
+    let expected = reported.map(middleware::zenoh::wire::posix_sender_id);
+    let first6 = |n: SenderId| [n.0[0], n.0[1], n.0[2], n.0[3], n.0[4], n.0[5]];
+    match (reported, middleware::zenoh_wire::mac_of_id(addressed)) {
+        (Some(n), _) if expected == Some(addressed) => Ok(first6(n)),
+        (Some(n), Some(mac)) if n == addressed => Ok(mac),
+        (None, Some(mac)) => Ok(mac),
+        (None, None) => Ok(target(addressed)),
+        (Some(n), _) => Err(TargetMismatch {
             reported: n,
-            expected,
-            target: first6,
-        })
+            expected: middleware::zenoh::wire::posix_sender_id(n),
+            target: first6(n),
+        }),
     }
 }
 
@@ -292,6 +303,48 @@ mod tests {
                 && text.contains("--target"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn h8_a_mac_id_signs_for_its_mac() {
+        // An ESP-NOW device behind a gateway: addressed by its MAC and two
+        // zero bytes, it verifies requests that name its MAC.
+        let esp = parse_node("e4b06381d3240000").unwrap();
+        let mac = [0xe4, 0xb0, 0x63, 0x81, 0xd3, 0x24];
+        assert_eq!(target_for("esp32c3", esp, None), Ok(mac));
+        assert_eq!(target_for("esp32c3", esp, Some(esp)), Ok(mac));
+        assert_eq!(target_for("esp8266", esp, None), Ok(mac));
+        // An RT1050 whose id happens to end in two zero bytes keeps its
+        // own rule.
+        assert_eq!(target_for("rt1050", esp, Some(esp)), Ok(target(esp)));
+        // So does a posix-node whose session id does.
+        let posix = (0u64..)
+            .map(|i| SenderId(i.to_be_bytes()))
+            .find(|n| {
+                let s = middleware::zenoh::wire::posix_sender_id(*n);
+                s.0[6] == 0 && s.0[7] == 0
+            })
+            .unwrap();
+        let session = middleware::zenoh::wire::posix_sender_id(posix);
+        let p = posix.0;
+        assert_eq!(
+            target_for("linux-x86_64", session, Some(posix)),
+            Ok([p[0], p[1], p[2], p[3], p[4], p[5]])
+        );
+    }
+
+    #[test]
+    fn h8_a_mac_id_reporting_another_node_is_refused() {
+        // Whoever answers at a MAC-derived id but claims another node's id
+        // gets no signature: neither for that node nor for the MAC.
+        let esp = parse_node("e4b06381d3240000").unwrap();
+        let victim = parse_node("5e110de02a9c4107").unwrap();
+        let e = target_for("esp32c3", esp, Some(victim)).expect_err("refused");
+        assert_eq!(e.reported, victim);
+        assert_eq!(e.target, [0x5e, 0x11, 0x0d, 0xe0, 0x2a, 0x9c]);
+        // Another MAC-derived id is as wrong.
+        let other = parse_node("246f28aabbcc0000").unwrap();
+        assert!(target_for("esp32c3", esp, Some(other)).is_err());
     }
 
     #[test]
