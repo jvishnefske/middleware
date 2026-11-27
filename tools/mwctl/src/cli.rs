@@ -45,6 +45,8 @@ USAGE:
     mwctl --udp <HOST[:PORT]> [--timeout <MS>] <COMMAND>   (over UDP, see below)
     mwctl --zenoh <ENDPOINT> | --zenoh-listen <ENDPOINT> --node <ID> <COMMAND>  (network)
     mwctl scout [--seconds <N>]                     (Zenoh nodes on the LAN, see below)
+    mwctl [--port <PATH>] wire <STATEMENT>... | --json <FILE>   (signal wiring, see below)
+    mwctl --port <PATH> probe [--usb <VID:PID>]     (ready to flash or to update?)
     mwctl key new <KEYFILE> | key pub <KEYFILE>
     mwctl key new --pkcs11 <LABEL> | key pub --pkcs11 <LABEL> | key init-token <TOKEN>
     mwctl auth login | auth token | auth logout | auth status   (sign-in, see below)
@@ -134,6 +136,75 @@ COMMANDS:
                                0x6A000 bytes; --version (default 0) is the image version
                                and the anti-rollback floor. The image is verified by SHA-256
                                on the device before the reply is done.
+    wire <STATEMENT>...        Build a payload from a signal wiring: pins and constants drive
+                               named channels (each an i32; a boolean is 0 or 1), functions
+                               of channels drive channels, and channels drive outputs. One
+                               statement per argument:
+                                   button=gpio15,pullup,invert   digital input (pullup |
+                                                                 pulldown, invert: 1 when low)
+                                   raw=adc26                     analog input, 0 to 4095
+                                   limit=1200                    constant
+                                   lit=and(button,armed)         function of channels
+                                   level=lowpass(raw,shift=4)    function with settings
+                                   gpio25=lit[,invert]           digital output
+                                   pwm0.1=level[,freq=1000]      PWM timer 0 output 1; the duty
+                                                                 is the channel, 0 to 65535
+                               Functions (arguments are channels, in order):
+                                   and or xor nand nor xnor (2 to 8), not (1)
+                                   add min max (2 to 8), sub mul (2), abs (1)
+                                   gt lt ge le eq ne (2), select(cond,a,b)
+                                   scale(x,mul=1,div=1) clamp(x,lo=,hi=)
+                                   delay(x)  lowpass(x,shift=1..16)  mean(x,n=2..4096)
+                                   diff(x)  hyst(x,lo=,hi=)  debounce(x,n=1..60000)
+                                   rising(x)  falling(x)  count(clock[,reset])
+                                   latch(set,reset)  ton(x,ms=)
+                               Model-based blocks compute in f64 (a channel is value*scale,
+                               scale=1000 by default), drive one channel per output, and
+                               take their models as quoted expressions separated by ';'
+                               over x0.. (state), u0.. (controls), dt (seconds), pi, with
+                               + - * / sqrt abs sin cos sq min max:
+                                   'pos,vel=ukf(z,n=2,f=\"x0+dt*x1; x1\",h=\"x0\",q=\"1e-6;1e-4\",
+                                       r=\"0.01\")@20ms'
+                                     unscented Kalman filter: x' = f(x,u,dt), z = h(x); reads
+                                     the measurements, then controls; drives the n estimates
+                                     [then n standard deviations]; also x0= p0= alpha= beta=
+                                     kappa=
+                                   'u,flag=cbf(unom,x,n=1,h=\"2-x0\",f=\"0\",g=\"1\",alpha=5)'
+                                     safety filter for xdot = f(x) + g(x) u (g by rows) and
+                                     safe set h(x) >= 0: reads 1 or 2 nominal controls, then
+                                     the n states; drives the safe controls [then a flag: 0
+                                     passed, 1 modified, 2 the control cannot act on h]; also
+                                     umin= umax=. A barrier of relative degree above 1 (h
+                                     without a state the control moves directly) gives flag 2:
+                                     write a higher-order barrier. Two cbf in a row project
+                                     in turn; that is not the joint problem
+                               A statement ending in @<N>ms updates its node every N ms, a
+                               multiple of --period (raw=adc26@100ms); a channel holds its
+                               last value. Each period the payload updates the nodes that
+                               are due, in one order from inputs to outputs; a feedback
+                               loop needs a delay in it. Without --port it needs -o or
+                               --emit; with --port the wiring is checked against the
+                               board's own chip, uploaded and started
+        --json <FILE>              the wiring as JSON (nodes and edges, what the web
+                                   page's canvas saves) instead of statements; - is stdin
+        --name <NAME>              shown in the payload's log line [default: wire]
+        --period <MS>              base period, 10 to 60000 [default: 10]
+        --trace [A,B]              publish these channels (all without a list) on
+                                   wire/<CHANNEL> when they change, 4 bytes little-endian
+        --chip <CHIP>              check the pins against this chip's board (esp32,
+                                   esp32s3, esp32c3, esp8266, rp2040, rp2350, rt1050)
+        -o, --out <FILE.wasm>      write the payload to FILE
+        --emit <WHAT>              print statements, json (the wiring with a canvas
+                                   position per node) or report (one JSON object: issues,
+                                   statements, command line, wiring, size, node kinds)
+        --no-start                 with --port: install without starting
+        --key, --pkcs11, --version with --port: sign the commit, as for upload
+    probe [--usb <VID:PID>]    Say whether the board on --port is ready to update (a base
+                               firmware answers sys/info) or ready to flash, and how: an
+                               Espressif ROM bootloader answering on this port, or what
+                               the port's USB id says about the board's bootloader. Never
+                               resets the board. First line: ready: update | flash | unknown
+                               [--timeout default 500]
     scout [--seconds <N>]      List the middleware nodes on the local network (mwctl built
                                with --features zenoh): Zenoh multicast scouting for N s
                                [default 3], each router's and peer's sessions from its
@@ -201,6 +272,10 @@ KEYS IN A TOKEN:
     environment, else from a NAME=value line of ~/.env; a PIN is never taken from the
     command line. A browser cannot reach a token: sign with mwctl.
 
+IN A BROWSER:
+    mwctl built for wasm32-wasip1 runs in the web page (web/src/mwctl): --port web is
+    the serial port the page was granted, files are the page's in-memory files, and
+    there are no tokens, UDP or Zenoh.
 The port is opened with DTR and RTS deasserted so opening it neither resets
 the board nor selects the ROM bootloader. Exit status is 0 on success, 1 when
 the device or port fails, 2 on a usage error.
@@ -427,6 +502,12 @@ pub enum Cmd {
         /// Signs the request (over Zenoh only).
         key: Option<KeySpec>,
     },
+    /// `probe [--usb VID:PID]`: ready to update or to flash
+    /// ([`crate::ready`]); the port only.
+    Probe {
+        /// The port's USB id, when the caller knows it.
+        usb: Option<crate::ready::UsbId>,
+    },
     /// `reflash <FILE> [--version N]`: an application image to the nRF52
     /// bootloader ([`crate::reflash`]); the port only, no device protocol.
     Reflash {
@@ -470,10 +551,197 @@ pub enum Parsed {
         /// How long to scout.
         seconds: u64,
     },
+    /// `wire ...`: build a signal wiring, and with `--port` write it.
+    Wire(WireCli),
     /// `auth <login|token|logout|status>`: the sign-in to MW_AUTH_ISSUER.
     Auth(AuthCmd),
     /// Print [`HELP`] and exit successfully.
     Help,
+}
+
+/// `mwctl wire`: the wiring and, with a port, where to write it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireCli {
+    /// The wiring and the local outputs.
+    pub request: crate::wire::Request,
+    /// Write the payload to the board on this port.
+    pub port: Option<String>,
+    /// Baud rate.
+    pub baud: u32,
+    /// Per-attempt timeout.
+    pub timeout: Duration,
+    /// Start the payload after installing it.
+    pub start: bool,
+    /// Signing key; `None` sends an unsigned commit.
+    pub key: Option<KeySpec>,
+    /// Signed version; `None` uses the current Unix time.
+    pub version: Option<u32>,
+}
+
+/// Probe's per-attempt timeout unless `--timeout` is given.
+pub const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The command word: the first argument that is neither an option of the
+/// link (`--port`, `--baud`, `--timeout`) nor such an option's value.
+fn command_word(args: &[String]) -> Option<&str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--port" | "--baud" | "--timeout" => {
+                it.next();
+            }
+            s if s.starts_with('-') => return None,
+            s => return Some(s),
+        }
+    }
+    None
+}
+
+/// `wire` and `probe`: commands with options of their own, parsed apart
+/// from the device commands.
+fn parse_wire_or_probe(word: &str, args: Vec<String>) -> Result<Parsed, String> {
+    let mut args = args.into_iter().peekable();
+    let mut port = None;
+    let mut baud = DEFAULT_BAUD;
+    let mut timeout = None;
+    let mut usb = None;
+    let mut key: Option<KeySpec> = None;
+    let mut key_flags = 0;
+    let mut version = None;
+    let mut start = true;
+    let mut seen_word = false;
+    let mut request = crate::wire::Request {
+        statements: Vec::new(),
+        json: None,
+        name: None,
+        period_ms: None,
+        trace: None,
+        chip: None,
+        out: None,
+        emit: None,
+    };
+    let wire = word == "wire";
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-h" | "--help" => return Ok(Parsed::Help),
+            "--port" => port = Some(args.next().ok_or("--port needs a path")?),
+            "--baud" => baud = number("--baud", args.next())?,
+            "--timeout" => {
+                timeout = Some(Duration::from_millis(number("--timeout", args.next())?));
+            }
+            "--usb" if !wire => {
+                let v = args.next().ok_or("--usb needs VID:PID such as 303a:1001")?;
+                usb = Some(crate::ready::UsbId::parse(&v).ok_or_else(|| {
+                    format!("--usb: '{v}' is not VID:PID in hex, such as 303a:1001")
+                })?);
+            }
+            "--json" if wire => {
+                request.json = Some(PathBuf::from(args.next().ok_or("--json needs a file")?));
+            }
+            "--name" if wire => request.name = Some(args.next().ok_or("--name needs a name")?),
+            "--period" if wire => request.period_ms = Some(number("--period", args.next())?),
+            "--trace" if wire => {
+                // The next argument is the channel list unless it is a
+                // statement (it has '=') or another option.
+                let list = args.next_if(|next| !next.contains('=') && !next.starts_with('-'));
+                let names: Vec<String> = list
+                    .iter()
+                    .flat_map(|l| l.split(','))
+                    .map(|name| name.trim().to_string())
+                    .collect();
+                if names.iter().any(String::is_empty) {
+                    return Err("--trace takes channel names such as a,b (or nothing: every \
+                                channel)"
+                        .into());
+                }
+                // Every channel, once asked for, stays asked for.
+                match &mut request.trace {
+                    Some(all) if all.is_empty() => {}
+                    Some(some) if !names.is_empty() => some.extend(names),
+                    trace => *trace = Some(names),
+                }
+            }
+            "--chip" if wire => request.chip = Some(args.next().ok_or("--chip needs a chip")?),
+            "-o" | "--out" if wire => {
+                request.out = Some(PathBuf::from(args.next().ok_or("--out needs a file")?));
+            }
+            "--emit" if wire => {
+                let v = args.next().ok_or("--emit needs statements, json or report")?;
+                request.emit = Some(crate::wire::Emit::parse(&v).ok_or_else(|| {
+                    format!("--emit: '{v}' is not statements, json or report")
+                })?);
+            }
+            "--no-start" if wire => start = false,
+            "--key" if wire => {
+                key = Some(KeySpec::File(PathBuf::from(
+                    args.next().ok_or("--key needs a key file")?,
+                )));
+                key_flags += 1;
+            }
+            "--pkcs11" if wire => {
+                key = Some(KeySpec::Pkcs11(
+                    args.next().ok_or("--pkcs11 needs a key label, e.g. mw-release")?,
+                ));
+                key_flags += 1;
+            }
+            "--version" if wire => version = Some(number("--version", args.next())?),
+            s if s.starts_with('-') && s != "-" => {
+                return Err(format!("unknown option '{s}' for {word}"));
+            }
+            s if !seen_word && s == word => seen_word = true,
+            _ if wire => request.statements.push(a),
+            _ => return Err(format!("unexpected argument '{a}'")),
+        }
+    }
+    if baud == 0 {
+        return Err("--baud must be positive".into());
+    }
+    if timeout.is_some_and(|t| t.is_zero()) {
+        return Err("--timeout must be positive".into());
+    }
+    if !wire {
+        return Ok(Parsed::Run(Cli {
+            port: port.ok_or("probe needs --port <PATH> (mwctl never scans for ports)")?,
+            udp: None,
+            baud,
+            timeout: timeout.unwrap_or(PROBE_TIMEOUT),
+            espnow: None,
+            zenoh: None,
+            cmd: Cmd::Probe { usb },
+        }));
+    }
+    if key_flags > 1 {
+        return Err("give one of --key <KEYFILE> and --pkcs11 <LABEL>".into());
+    }
+    if request.json.is_some() && !request.statements.is_empty() {
+        return Err("give statements or --json <FILE>, not both".into());
+    }
+    if request.json.is_none() && request.statements.is_empty() {
+        return Err("wire needs statements such as button=gpio15,pullup 'lit=not(button)' \
+                    gpio25=lit, or --json <FILE>"
+            .into());
+    }
+    if port.is_none() {
+        if request.out.is_none() && request.emit.is_none() {
+            return Err("wire needs somewhere to put the payload: --port <PATH> (write it to \
+                        the board), -o <FILE.wasm> or --emit statements|json|report"
+                .into());
+        }
+        if key.is_some() || version.is_some() || !start {
+            return Err("--key, --pkcs11, --version and --no-start apply when writing to a \
+                        board (--port)"
+                .into());
+        }
+    }
+    Ok(Parsed::Wire(WireCli {
+        request,
+        port,
+        baud,
+        timeout: timeout.unwrap_or(DEFAULT_TIMEOUT),
+        start,
+        key,
+        version,
+    }))
 }
 
 /// `mwctl auth` subcommands (feature `auth`).
@@ -533,6 +801,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         && first == "auth"
     {
         return parse_auth(rest);
+    }
+    if let Some(word @ ("wire" | "probe")) = command_word(&args) {
+        let word = word.to_owned();
+        return parse_wire_or_probe(&word, args);
     }
     let mut args = args.into_iter();
     let mut port = None;
@@ -1685,5 +1957,114 @@ mod tests {
         ] {
             assert!(p(bad).is_err(), "{bad}");
         }
+    }
+
+    fn wire(s: &str) -> WireCli {
+        match p(s) {
+            Ok(Parsed::Wire(w)) => w,
+            other => panic!("{s}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wr9_wire_takes_statements_or_json_and_somewhere_to_put_the_payload() {
+        let w = wire("wire button=gpio15,pullup lit=not(button) gpio25=lit -o lamp.wasm");
+        assert_eq!(w.request.statements, ["button=gpio15,pullup", "lit=not(button)", "gpio25=lit"]);
+        assert_eq!(w.request.out, Some(PathBuf::from("lamp.wasm")));
+        assert_eq!((w.port, w.start, w.baud), (None, true, DEFAULT_BAUD));
+
+        let w = wire("--port /dev/ttyACM0 --timeout 250 wire --json lamp.json --name lamp --period 20 --no-start");
+        assert_eq!(w.port.as_deref(), Some("/dev/ttyACM0"));
+        assert_eq!(w.timeout, Duration::from_millis(250));
+        assert_eq!(w.request.json, Some(PathBuf::from("lamp.json")));
+        assert_eq!((w.request.name.as_deref(), w.request.period_ms), (Some("lamp"), Some(20)));
+        assert!(!w.start && w.request.statements.is_empty());
+
+        let w = wire("wire --json - --chip rp2350 --emit report");
+        assert_eq!(w.request.json, Some(PathBuf::from("-")));
+        assert_eq!(w.request.chip.as_deref(), Some("rp2350"));
+        assert_eq!(w.request.emit, Some(crate::wire::Emit::Report));
+        assert_eq!(wire("wire a=gpio1 --emit statements").request.emit, Some(crate::wire::Emit::Statements));
+        assert_eq!(wire("wire a=gpio1 --emit json").request.emit, Some(crate::wire::Emit::Json));
+
+        let w = wire("--port p wire a=gpio1 gpio2=a --key k.key --version 7");
+        assert_eq!(w.key, Some(KeySpec::File(PathBuf::from("k.key"))));
+        assert_eq!(w.version, Some(7));
+
+        let err = |s: &str| p(s).unwrap_err();
+        assert!(err("wire").contains("wire needs statements"));
+        assert!(err("wire a=gpio1").contains("somewhere to put the payload"));
+        assert!(err("wire a=gpio1 --json f -o x").contains("not both"));
+        assert!(err("wire a=gpio1 --emit yaml").contains("is not statements, json or report"));
+        assert!(err("wire a=gpio1 -o x --no-start").contains("apply when writing to a board"));
+        assert!(err("wire a=gpio1 -o x --key k").contains("apply when writing to a board"));
+        assert!(err("--port p wire a=gpio1 --key k --pkcs11 l").contains("one of --key"));
+        assert!(err("wire a=gpio1 -o x --usb 1:2").contains("unknown option '--usb' for wire"));
+        assert!(err("wire a=gpio1 -o x --period soon").contains("not a valid number"));
+        assert_eq!(p("wire --help"), Ok(Parsed::Help));
+    }
+
+    #[test]
+    fn ms1_wire_takes_trace_with_or_without_a_channel_list() {
+        // Nothing asked: no trace.
+        assert_eq!(wire("wire a=gpio1 -o x").request.trace, None);
+        // Alone, before an option, before a statement, or last: every channel.
+        let all = Some(Vec::new());
+        assert_eq!(wire("wire a=gpio1 --trace -o x").request.trace, all);
+        let w = wire("wire --trace a=gpio1 gpio2=a -o x");
+        assert_eq!((w.request.trace, w.request.statements.len()), (all.clone(), 2));
+        let w = wire("wire --trace y=lowpass(x,shift=4)@100ms x=adc26 -o x");
+        assert_eq!((w.request.trace, w.request.statements.len()), (all.clone(), 2));
+        assert_eq!(wire("wire a=gpio1 -o x --trace").request.trace, all);
+        // A word without '=' is the list.
+        let w = wire("wire --trace a,lit a=gpio1 lit=not(a) -o x");
+        assert_eq!(w.request.trace, Some(vec!["a".to_string(), "lit".to_string()]));
+        assert_eq!(w.request.statements, ["a=gpio1", "lit=not(a)"]);
+        assert_eq!(wire("wire a=gpio1 -o x --trace a").request.trace, Some(vec!["a".to_string()]));
+        // Given twice, the lists add up; every channel stays every channel.
+        assert_eq!(wire("wire --trace a --trace b a=gpio1 b=gpio2 -o x").request.trace, Some(vec!["a".to_string(), "b".to_string()]));
+        assert_eq!(wire("wire --trace --trace b b=gpio2 -o x").request.trace, all);
+        assert_eq!(wire("wire --trace b --trace b=gpio2 -o x").request.trace, all);
+        let err = |s: &str| p(s).unwrap_err();
+        assert!(err("wire --trace a,,b a=gpio1 -o x").contains("--trace takes channel names"));
+        assert!(err("--port p probe --trace").contains("unknown option '--trace' for probe"));
+        // Statements with rates and settings pass through as they are.
+        let w = wire("wire raw=adc26@100ms pwm0.1=raw,freq=2000 k=-7 --emit report");
+        assert_eq!(w.request.statements, ["raw=adc26@100ms", "pwm0.1=raw,freq=2000", "k=-7"]);
+        assert!(HELP.contains("--trace [A,B]") && HELP.contains("@<N>ms") && HELP.contains("pwm0.1=level"));
+    }
+
+    #[test]
+    fn kf1_wire_takes_statements_with_quoted_expressions() {
+        // One argument each, as a shell hands them over: quotes, commas,
+        // spaces, '=' and ';' inside are the statement's own.
+        let ukf = "pos,vel=ukf(z,n=2,f=\"x0+dt*x1; x1\",h=\"x0\",q=\"1e-6;1e-4\",r=\"0.01\")@20ms";
+        let cbf = "u,flag=cbf(push,pos,n=1,h=\"2 - x0\",f=\"0\",g=\"1\",alpha=2.5)";
+        let args = ["wire", "--trace", ukf, "z=adc26", "push=500", cbf, "--emit", "statements"];
+        let Ok(Parsed::Wire(w)) = parse(args.iter().map(|a| a.to_string())) else {
+            panic!("the arguments parse");
+        };
+        assert_eq!(w.request.statements, [ukf, "z=adc26", "push=500", cbf]);
+        assert_eq!(w.request.trace, Some(Vec::new()), "a statement after --trace is not its list");
+        assert!(HELP.contains("pos,vel=ukf(z,n=2") && HELP.contains("u,flag=cbf(unom,x,n=1") && HELP.contains("relative degree"));
+    }
+
+    #[test]
+    fn rd5_probe_needs_a_port_and_takes_the_ports_usb_id() {
+        let c = run("--port /dev/ttyUSB0 probe --usb 10c4:ea60");
+        assert_eq!(
+            c.cmd,
+            Cmd::Probe { usb: Some(crate::ready::UsbId { vid: 0x10c4, pid: 0xea60 }) }
+        );
+        assert_eq!(c.timeout, PROBE_TIMEOUT);
+        let c = run("probe --port web --timeout 200");
+        assert_eq!((c.cmd, c.timeout), (Cmd::Probe { usb: None }, Duration::from_millis(200)));
+        let err = |s: &str| p(s).unwrap_err();
+        assert!(err("probe").contains("probe needs --port"));
+        assert!(err("--port p probe --usb cp2102").contains("is not VID:PID"));
+        assert!(err("--port p probe extra").contains("unexpected argument 'extra'"));
+        assert!(err("--port p probe --json f").contains("unknown option '--json' for probe"));
+        // A device command's own word is still a device command.
+        assert_eq!(run("--port p info").cmd, Cmd::Info);
     }
 }

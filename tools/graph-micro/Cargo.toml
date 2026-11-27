@@ -1,0 +1,16 @@
+[package]
+name = "graph-micro"
+version = "26.11.25"
+edition = "2024"
+rust-version = "1.88"
+description = "Micro-target adapter for graph-core: runs validated graphs of pure plugins on a no_std target, with no executor and no I/O."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# no_std + alloc. The firmware binary that links this crate provides the
+# global allocator and the panic handler. Only pure plugins are registered
+# here, so a graph that needs the network is rejected at validation, not at
+# run time.
+[dependencies]
+graph-core = { path = "../graph-core" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

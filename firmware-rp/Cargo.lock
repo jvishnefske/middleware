@@ -2291,6 +2291,7 @@ name = "wire-core"
 version = "26.11.25"
 dependencies = [
  "board-pins",
+ "libm",
  "serde",
  "serde_json",
 ]

@@ -1,0 +1,19 @@
+[package]
+name = "graph-core"
+version = "26.11.25"
+edition = "2024"
+rust-version = "1.88"
+description = "Plugin-based graph core: plugin trait, config schema, registry, graph validation and a runner. no_std with alloc, so the same graphs validate and run on hosts, edge devices and microcontrollers."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# no_std + alloc: built for thumbv7em-none-eabihf, riscv32imc and wasm32 as
+# well as the host. Graph payloads are JSON values, so a heap is required;
+# a micro target supplies a global allocator in its firmware binary.
+[features]
+default = []
+std = ["serde/std", "serde_json/std"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

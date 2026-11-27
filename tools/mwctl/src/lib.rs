@@ -38,10 +38,21 @@
 //! * [`reflash`] — `mwctl reflash`: an application image to the nRF52
 //!   bootloader over its VCOM port (the MWFW header and the ready/done
 //!   replies; one slot, no A/B).
+//! * [`wire`] — `mwctl wire`: a boolean wiring (digital inputs to channels,
+//!   functions of channels, channels to digital outputs) from statements
+//!   or JSON to a payload, checked against a chip's pin map (`wire-core`).
+//! * [`ready`] — `mwctl probe`: whether the board on the port is ready to
+//!   update (a base firmware answers) or ready to flash, and by which
+//!   bootloader, from `sys/info`, an Espressif ROM `SYNC` and the port's
+//!   USB id.
 //! * [`report`] — human-readable formatting of device info, firmware
 //!   update state and publications.
 //! * [`error`] — [`error::Error`], with context-specific explanations of
 //!   device status codes.
+//!
+//! Built for `wasm32-wasip1` the same binary runs in the web page
+//! (`web/src/mwctl`): `src/webport.rs` replaces [`port`] with the page's Web
+//! Serial port behind host imports, and there are no PKCS#11 tokens.
 //!
 //! The binary (`src/main.rs`, `src/port.rs`) is the shell: it opens the one
 //! serial port it is given with the `serialport` crate, drives the control
@@ -62,14 +73,18 @@ pub mod error;
 pub mod fw;
 pub mod os;
 pub mod link;
+#[cfg(not(target_family = "wasm"))]
 pub mod pkcs11;
 pub mod plan;
+#[cfg(not(target_family = "wasm"))]
 pub mod port;
+pub mod ready;
 pub mod reflash;
 pub mod report;
 pub mod scout;
 pub mod sign;
 pub mod udp;
+pub mod wire;
 #[cfg(feature = "zenoh")]
 pub mod zlink;
 

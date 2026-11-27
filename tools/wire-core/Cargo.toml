@@ -1,0 +1,26 @@
+[package]
+name = "wire-core"
+version = "26.11.25"
+edition = "2024"
+rust-version = "1.88"
+description = "Signal wiring for payloads: pins and constants to named i32 channels, channels through boolean, arithmetic and stateful functions at their own rates, channels to digital and PWM outputs. Checks a wiring and compiles it to a middleware WASM payload. no_std with alloc."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# no_std + alloc: the same crate checks and compiles a wiring in mwctl on a
+# host, in mwctl compiled to WASI in the browser, and (later) on a node.
+# The JSON shape is graph-core's (`name`, `nodes` of `id`/`kind`/`config`,
+# `edges` of `[from, to]`), with a canvas position per node.
+[dependencies]
+# The firmwares' own pin maps: a wiring is checked against the chip it is for.
+board-pins = { path = "../../board-pins" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+# sqrt, floor, trunc for the model-based blocks' f64 arithmetic: core has
+# none without std, and these are correctly rounded like WebAssembly's.
+libm = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+# The device runtime: the compiled payload runs in it against a fake board.
+wasm-host = { path = "../../wasm-host" }
+middleware = { path = "../.." }

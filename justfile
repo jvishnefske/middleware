@@ -62,17 +62,59 @@ provision *args:
 unprovision *target:
     python3 tests/hil/unprovision.py {{target}}
 
-[doc("Build the base firmware for one chip")]
-fw-build chip:
+[doc("Build the Linux SD image of the robot (Raspberry Pi, nix flake); prints its path")]
+linux-image:
+    nix build .#sd-image-robot-pi --print-out-paths
+
+[doc("Build the base firmware for one chip or platform; no argument lists them")]
+fw-build chip="" variant="" target="":
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{chip}}" in
+      "")
+        cat <<'EOF'
+    Chips and platforms for `just fw-build <name> [variant]`:
+      update k240 <device>    load a KD240 bundle (KRIA_BUNDLE, built by the lathe) into an A/B card
+      esp32 esp32s3 esp32c3   MCU, firmware/build.sh
+      esp8266                 MCU, firmware-esp8266/build.sh
+      rp2040 rp2350           MCU, firmware-rp/build.sh
+      rt1050 imxrt1052        MCU, firmware-imxrt/build.sh app
+      nrf52833                MCU, firmware-nrf52 (cargo)
+      pi64                    Raspberry Pi, 64-bit (aarch64): mw-posix-node
+      pi32                    Raspberry Pi, 32-bit: not supported (no armv7 target)
+    EOF
+        ;;
+      update)
+        # Loads a bundle the board's owner built (KRIA_BUNDLE: a directory with
+        # bundle.json, rootfs.squashfs, Image, initrd, dtb and cmdline) into the
+        # inactive slot of a KD240 A/B card on a USB reader (scripts/kria-update.py).
+        # Middleware builds no board image: that is the board repository's job.
+        case "{{variant}}" in
+          k240) ;;
+          *) echo "fw-build: update takes k240 (the KD240 card), not {{variant}}" >&2; exit 2 ;;
+        esac
+        if [[ -z "{{target}}" ]]; then
+          echo "fw-build: update k240 failed: no device given, so there is no card to write. Usage: just fw-build update k240 /dev/sdX" >&2; exit 2
+        fi
+        if [[ -z "${KRIA_BUNDLE:-}" ]]; then
+          echo "fw-build: update k240 failed: KRIA_BUNDLE is not set, so there is no bundle to load. The bundle is built by the board's repository (the lathe: cd kd240 && just bundle); set KRIA_BUNDLE to its directory, or run that repository's 'just update <device>'." >&2; exit 2
+        fi
+        python3 scripts/kria-update.py "{{target}}" "$KRIA_BUNDLE" --write
+        ;;
       esp32|esp32s3|esp32c3) firmware/build.sh {{chip}} ;;
       esp8266) firmware-esp8266/build.sh ;;
       rp2040|rp2350) firmware-rp/build.sh {{chip}} ;;
       rt1050|imxrt1052) firmware-imxrt/build.sh app ;;
       nrf52833) (cd firmware-nrf52 && cargo build --release) ;;
-      *) echo "fw-build: unknown chip {{chip}}" >&2; exit 2 ;;
+      pi64)
+        case "{{variant}}" in
+          "") nix build .#mw-posix-node-aarch64 --print-out-paths ;;
+          sd) nix build .#sd-image-robot-pi --print-out-paths ;;
+          *) echo "fw-build: pi64 variant must be sd or empty, not {{variant}}" >&2; exit 2 ;;
+        esac
+        ;;
+      pi32) echo "fw-build: pi32 is not supported: this repo builds only aarch64 Linux (pi64)" >&2; exit 2 ;;
+      *) echo "fw-build: unknown chip {{chip}} (run just fw-build for the list)" >&2; exit 2 ;;
     esac
 
 [doc("Flash an ESP32/ESP32-S3/ESP32-C3 through its ROM (espflash)")]
@@ -174,9 +216,54 @@ os-update image cert version:
 
 # The KD240 (Kria, linux-aarch64) on this machine: its console over USB, then
 # the board itself over the LAN, asked for info and board.
+#
+# By hand, the same two routes:
+#   mwctl --port /dev/serial/by-id/usb-Xilinx_KD_Carrier_Card_XFL1HM3KDKK1-if01-port0 info
+#   mwctl --udp <kd240.local or its address> info      (or --udp via scout)
+# The serial port is the Zynq PS UART1 (115200 8N1), served by the node
+# (services.mw-posix-node.localSerial); it answers only once Linux is up. Under
+# U-Boot it shows the U-Boot prompt instead, and `info` waits up to
+# KD240_CONSOLE_WAIT_S (tests/hil/boards.py) for the node.
 [doc("Ask the KD240 (USB console or LAN) for info and board; os info once the root is updatable")]
 kd240:
     python3 tests/hil/kd240.py
+
+# The end-to-end demo (docs/demo.md): a root of trust on a SoftHSM token, an
+# mTLS Zenoh hub, an OAuth login, and a QEMU client (the x86_64 base image)
+# provisioned over the network and then on the hub with its own certificate.
+# Needs docker, softhsm2, openssl, nix (for the VM) and, for speed, /dev/kvm.
+[doc("The full end-to-end demo: root of trust, mTLS hub, OAuth, a provisioned QEMU client (docs/demo.md)")]
+demo:
+    scripts/demo/demo.sh all
+
+[doc("Demo, step 1: build, then start the PKI, the hub, OAuth and the QEMU client, and leave them up")]
+demo-up:
+    scripts/demo/demo.sh up
+
+[doc("Demo, step 2: the operator signs in and `just provision` enrols the QEMU client")]
+demo-provision:
+    scripts/demo/demo.sh provision
+
+[doc("Demo, step 3: check what works and what is refused")]
+demo-verify:
+    scripts/demo/demo.sh verify
+
+[doc("Stop the demo (the VM, OAuth and the hub); logs stay in target/demo")]
+demo-down:
+    scripts/demo/demo.sh down
+
+# The generic x86_64 middleware node (the nixos repo's hosts/mw-x86-usb.nix:
+# mw-posix-node on the LAN, the node's own key and CSR, the TPM when there is
+# one) onto the USB stick of a machine running from it, over SSH. The machine
+# keeps its own system: the new one is a second boot entry, tried once.
+[doc("Deploy the generic x86_64 middleware system to a machine's USB stick and boot it once: just x86-deploy j@192.168.1.149 [--reboot]")]
+x86-deploy target *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    nixos="${MW_NIXOS_REPO:-$HOME/build/nixos}"
+    [[ -x "$nixos/scripts/mw-x86-deploy.sh" ]] || { echo "!!! no $nixos/scripts/mw-x86-deploy.sh: set MW_NIXOS_REPO" >&2; exit 1; }
+    snap=$(scripts/mw-snapshot.sh "${TMPDIR:-/tmp}/mw-snapshot-$USER")
+    MW_SRC="$snap" "$nixos/scripts/mw-x86-deploy.sh" {{flags}} {{target}}
 
 # udev rule for the RP boards (BOOTSEL 2e8a:0003 RP2040, 2e8a:000f RP2350,
 # and rp-base 2e8a:0009) and the ESP USB-JTAG: group plugdev, read-write.
@@ -209,3 +296,9 @@ provision-nrf52 probe_serial:
     probe="0d28:0204:$probe_serial"
     probe-rs download --probe "$probe" --chip nRF52833_xxAA --binary-format elf "$elf"
     probe-rs reset --probe "$probe" --chip nRF52833_xxAA
+
+# wasm-host with each interpreter backend (wasmi, micro, micro-float) for
+# every platform architecture; fails on any surprise. The Xtensa targets
+# need the espup toolchain: `just wasm-backends --no-xtensa` skips them.
+wasm-backends *args:
+    scripts/check-wasm-backends.sh {{args}}
