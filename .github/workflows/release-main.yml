@@ -1,0 +1,365 @@
+name: Release from main
+
+# Every push to main rebuilds the flashable firmware and the small nix
+# outputs and publishes them as one GitHub release:
+#
+#   push to main   the rolling prerelease `main-latest` (tag moved to the
+#                  commit, assets replaced), so
+#                  .../releases/download/main-latest/<file> is always main
+#   tag `v*`       a permanent release of that tag, which must be on main
+#   manual run     builds everything and keeps it as workflow artifacts;
+#                  publishes nothing
+#
+# Assets (.github/release-notes.md says how to flash each):
+#
+#   rp-base-rp2040.uf2 .elf, rp-base-rp2350-<V>-factory.uf2 -update.uf2 .elf
+#   imxrt-boot.bin, imxrt-base-<V>.slot                  (MIMXRT1050-EVKB)
+#   firmware-nrf52-microbit-v2.hex .elf                  (once firmware-nrf52/ is on main)
+#   esp-base-<chip>.bin .bsp.json                        (esp32, esp32s3, esp32c3; esp8266 best effort)
+#   mwctl-x86_64-linux                                   (glibc; the tool `fw update` needs)
+#   <name>-<arch>-linux-musl                             (static: every mw-* flake binary, zenohd)
+#   mw-x86-base-x86_64.raw.zst                           (once packages.x86-base-image is on main)
+#   mw-robot-pi-aarch64.img.zst                          (best effort)
+#   SHA256SUMS
+#
+# A part whose directory or flake output is not on the branch is skipped, as
+# in ci.yml. The ESP8266 image and the Pi SD image are best effort: when one
+# fails the release is still published and its notes say what is missing.
+# Any other failure publishes nothing and leaves the previous release.
+#
+# The tagged releases `esp-base-v*` (release.yml, with the Pages mirror the
+# web flasher reads) and `robot-pi-v*` (release-robot-pi.yml) are unchanged.
+# Nothing here is signed: boards that pin a key take updates signed by
+# `mwctl fw update --key/--pkcs11` at install time.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rp:
+    name: RP base firmware (${{ matrix.chip }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chip: rp2040
+            target: thumbv6m-none-eabi
+          - chip: rp2350
+            target: thumbv8m.main-none-eabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware-rp
+      # picotool (UF2 conversion) at the version flake.lock pins.
+      - uses: cachix/install-nix-action@v31
+      - name: Build
+        run: nix shell --inputs-from . nixpkgs#picotool -c firmware-rp/build.sh ${{ matrix.chip }}
+      - name: Collect
+        run: |
+          mkdir out
+          cd firmware-rp/target/${{ matrix.target }}/release
+          if [[ "${{ matrix.chip }}" == rp2040 ]]; then
+            cp rp-base-rp2040.uf2 rp-base-rp2040.elf "$GITHUB_WORKSPACE/out/"
+          else
+            cp rp-base-rp2350-*-factory.uf2 rp-base-rp2350-*-update.uf2 rp-base-rp2350.elf "$GITHUB_WORKSPACE/out/"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ matrix.chip }}
+          path: out/
+          if-no-files-found: error
+
+  imxrt:
+    name: i.MX RT1050 bootloader and firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: rust-src, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware-imxrt
+      - name: Build
+        run: |
+          # build.sh needs llvm-objcopy: the llvm-tools component has it, off PATH.
+          PATH="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin:$PATH"
+          firmware-imxrt/build.sh image
+      - name: Collect
+        run: |
+          mkdir out
+          cp firmware-imxrt/target/thumbv7em-none-eabihf/release/imxrt-boot.bin \
+             firmware-imxrt/target/thumbv7em-none-eabihf/release/imxrt-base-*.slot out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-imxrt
+          path: out/
+          if-no-files-found: error
+
+  nrf52:
+    name: micro:bit v2 (nRF52833) firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: present
+        run: echo "nrf=$([ -f firmware-nrf52/Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.nrf == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+          components: rust-src, llvm-tools
+      - if: steps.present.outputs.nrf == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware-nrf52
+      # The firmware is one image linked at 0 (memory.x), so its hex is the
+      # whole flash; bootloader-nrf52 is not part of it yet.
+      - if: steps.present.outputs.nrf == 'true'
+        name: Build
+        run: |
+          (cd firmware-nrf52 && cargo build --release --locked --bin firmware-nrf52)
+          elf=firmware-nrf52/target/thumbv7em-none-eabihf/release/firmware-nrf52
+          objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+          mkdir out
+          cp "$elf" out/firmware-nrf52-microbit-v2.elf
+          "$objcopy" -O ihex "$elf" out/firmware-nrf52-microbit-v2.hex
+      - if: steps.present.outputs.nrf == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-nrf52
+          path: out/
+          if-no-files-found: error
+
+  esp32:
+    name: ESP32, ESP32-S3, ESP32-C3 images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espup,espflash
+      - name: Install the ESP Rust toolchain
+        # firmware/build.sh selects `+esp-new` and sources ~/export-esp.sh.
+        run: espup install --name esp-new --targets esp32,esp32s3 --export-file "$HOME/export-esp.sh"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware
+      - name: Build images
+        run: OUT="$PWD/dist" firmware/build-images.sh esp32 esp32s3 esp32c3
+      - name: Collect
+        # The Web Tools manifest stays out: browsers cannot fetch release
+        # assets cross-origin (release.yml mirrors esp-base-v* to Pages).
+        run: |
+          mkdir out
+          for f in dist/*.bin dist/*.bsp.json; do cp "$f" "out/esp-base-$(basename "$f")"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-esp32
+          path: out/
+          if-no-files-found: error
+
+  esp8266:
+    name: ESP8266 image (best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: espup
+      - name: Install the toolchain (espup, lx106 gcc, esptool)
+        run: |
+          espup install --name esp-new --targets esp32 --export-file "$HOME/export-esp.sh"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="$HOME/.local/bin" sh
+          "$HOME/.local/bin/arduino-cli" core install esp8266:esp8266@3.1.2 \
+            --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
+          pipx install esptool
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Build image
+        run: OUT="$PWD/dist" ESPTOOL=esptool firmware/build-images.sh esp8266
+      - name: Collect
+        run: |
+          mkdir out
+          for f in dist/*.bin dist/*.bsp.json; do cp "$f" "out/esp-base-$(basename "$f")"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-esp8266
+          path: out/
+          if-no-files-found: error
+
+  mwctl:
+    name: mwctl (x86_64 Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p mwctl
+      - run: mkdir out && cp target/release/mwctl out/mwctl-x86_64-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-mwctl
+          path: out/
+          if-no-files-found: error
+
+  nix-binaries:
+    name: Static binaries (nix, x86_64 and aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build every mw-* binary and zenohd
+        # Whatever the flake lists (nix/binaries.nix), so a new binary joins
+        # the release with no change here. `<name>-aarch64` is the cross
+        # build; `-gnu` (dynamic, for a NixOS host with a TPM) is left out.
+        run: |
+          mkdir out
+          names="$(nix eval --json .#packages.x86_64-linux --apply builtins.attrNames |
+            jq -r '.[] | select((test("^mw-") and (endswith("-gnu") | not)) or . == "zenohd")')"
+          for name in $names; do
+            arch=x86_64; base="$name"
+            if [[ "$name" == *-aarch64 ]]; then arch=aarch64; base="${name%-aarch64}"; fi
+            store="$(nix build -L --no-link --print-out-paths ".#$name")"
+            cp "$store/bin/$base" "out/$base-$arch-linux-musl"
+          done
+          chmod u+w out/*
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-nix-binaries
+          path: out/
+          if-no-files-found: error
+
+  x86-image:
+    name: x86_64 base disk image (nix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - id: present
+        run: |
+          has="$(nix eval --json .#packages.x86_64-linux --apply 'p: p ? x86-base-image')"
+          echo "image=$has" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.image == 'true'
+        name: Build and compress
+        run: |
+          nix build -L --out-link img .#x86-base-image
+          raw="$(find -L img -maxdepth 1 -type f -name '*.raw' | head -n1)"
+          [[ -n "$raw" ]] || { echo "no .raw in the image output:" >&2; ls -lL img >&2; exit 1; }
+          mkdir out
+          zstd -T0 -10 "$raw" -o out/mw-x86-base-x86_64.raw.zst
+          ls -l out
+      - if: steps.present.outputs.image == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-x86-image
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+
+  pi-image:
+    name: Raspberry Pi SD image (nix, best effort)
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Build the image and check its contents
+        run: |
+          nix build -L --out-link sd .#packages.aarch64-linux.sd-image-robot-pi
+          nix build -L --no-link .#checks.aarch64-linux.robot-pi-image
+          mkdir out
+          cp sd/sd-image/*.img.zst out/mw-robot-pi-aarch64.img.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-pi-image
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish the release
+    needs: [rp, imxrt, nrf52, esp32, esp8266, mwctl, nix-binaries, x86-image, pi-image]
+    # The best-effort jobs (continue-on-error) count as success here.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: A version tag must be on main
+        if: github.ref_type == 'tag'
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
+            { echo "tag $REF_NAME ($GITHUB_SHA) is not on main: not released" >&2; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          path: dist/
+          merge-multiple: true
+      - name: Checksums, size limit and notes
+        run: |
+          cd dist
+          # GitHub refuses a release asset of 2 GiB or more.
+          big="$(find . -type f -size +2047M)"
+          [[ -z "$big" ]] || { echo "too large for a release asset: $big" >&2; exit 1; }
+          sha256sum -- * > ../SHA256SUMS && mv ../SHA256SUMS .
+          cd ..
+          {
+            echo "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%d) by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            echo
+            missing=()
+            ls dist/esp-base-esp8266.bin >/dev/null 2>&1 || missing+=("the ESP8266 image")
+            ls dist/mw-robot-pi-aarch64.img.zst >/dev/null 2>&1 || missing+=("the Raspberry Pi SD image")
+            ls dist/firmware-nrf52-microbit-v2.hex >/dev/null 2>&1 || missing+=("the micro:bit firmware")
+            ls dist/mw-x86-base-x86_64.raw.zst >/dev/null 2>&1 || missing+=("the x86_64 base image")
+            if [[ ${#missing[@]} -gt 0 ]]; then
+              printf 'Not in this build:'; printf ' %s;' "${missing[@]}" | sed 's/;$/./'; echo; echo
+            fi
+            cat .github/release-notes.md
+          } > notes.md
+          cat notes.md
+          ls -l dist
+      - name: Replace the rolling release (main)
+        if: github.ref_type == 'branch'
+        run: |
+          # Deleting and recreating moves the tag and drops assets a newer
+          # build no longer makes (a renamed versioned file).
+          gh release delete main-latest --cleanup-tag --yes 2>/dev/null || true
+          gh release create main-latest --target "$GITHUB_SHA" --prerelease \
+            --title "main (${GITHUB_SHA::7})" --notes-file notes.md dist/*
+      - name: Create or update the tagged release
+        if: github.ref_type == 'tag'
+        run: |
+          gh release view "$REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$REF_NAME" --verify-tag --title "middleware ${REF_NAME#v}" --notes-file notes.md
+          gh release upload "$REF_NAME" dist/* --clobber
