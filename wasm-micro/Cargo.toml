@@ -1,0 +1,23 @@
+[package]
+name = "wasm-micro"
+version = "26.11.21"
+edition = "2024"
+description = "A small WebAssembly interpreter for microcontrollers: safe Rust, no_std, allocator optional, runs the module image in place"
+
+[features]
+default = ["alloc"]
+# `Module` and `Instance`, which own their storage in `Vec`s. Without it
+# the crate has no allocator dependency at all: `Machine` runs a module in
+# buffers the caller provides.
+alloc = []
+# f32/f64 arithmetic, comparison and conversion. Without it those opcodes
+# trap with `Error::Unsupported`; float constants, loads, stores and
+# reinterprets still work (they only move bits).
+float = ["dep:libm"]
+
+[dependencies]
+libm = { version = "0.2", default-features = false, optional = true }
+
+[dev-dependencies]
+wat = "1"
+wast = "262"

@@ -7,7 +7,15 @@ description = "Desktop simulator for WASM payloads"
 [dependencies]
 # `cam-fixtures`: JPEG test-pattern sources serve the baked camera frames.
 middleware = { path = "../..", features = ["cam-fixtures"] }
-wasm-host = { path = "../../wasm-host" }
+wasm-host = { path = "../../wasm-host", default-features = false }
+
+[features]
+default = ["wasmi"]
+# The interpreter the simulated payloads run on (wasm-host's backends).
+# `cargo test -p payload-sim --no-default-features --features micro` runs
+# this crate's tests on the small one.
+wasmi = ["wasm-host/wasmi"]
+micro = ["wasm-host/micro-float"]
 
 [dev-dependencies]
 wat = "1"

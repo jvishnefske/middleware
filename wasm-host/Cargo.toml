@@ -4,15 +4,32 @@ version = "26.11.21"
 edition = "2024"
 description = "WASM payload runtime implementing the middleware payload ABI (no_std + alloc)"
 
+[features]
+default = ["wasmi"]
+# The interpreter behind `Payload`. `wasmi` validates and translates each
+# module; it is the default and wins when both are enabled. `micro`
+# (`wasm-micro`, with `default-features = false`) interprets the image in
+# place without validating it: about a twentieth of the flash, and it
+# builds for targets without CAS atomics (RP2040, ESP32-C3). See the crate
+# docs, "Interpreter backends".
+wasmi = ["dep:wasmi"]
+micro = ["dep:wasm-micro"]
+# `micro` with f32/f64 arithmetic (wasmi always has it).
+micro-float = ["micro", "wasm-micro/float"]
+
 [dependencies]
 middleware = { path = ".." }
+# Fixed-capacity strings and vectors for the per-payload host state (keys,
+# the channel table, the DMA copy buffer): nothing of it is allocated.
+heapless = { version = "0.9", default-features = false }
 # `validate`: the safe `Module::new`. `portable-dispatch`: the loop-based
 # dispatcher on every target and opt level. The tail-call dispatcher relies on
 # sibling-call optimisation; without it (debug builds, Xtensa) each executed
 # instruction nests a stack frame and a guest loop running down its fuel
 # overflows the native stack (seen on the conagotchi badge, xtensa). See the
 # crate docs, "Interpreter build".
-wasmi = { version = "2.0", default-features = false, features = ["validate", "portable-dispatch"] }
+wasmi = { version = "2.0", default-features = false, features = ["validate", "portable-dispatch"], optional = true }
+wasm-micro = { path = "../wasm-micro", optional = true }
 
 [dev-dependencies]
 wat = "1"

@@ -122,9 +122,15 @@ fn w1_rejects_unknown_import() {
     let err = Payload::load(&wasm, Fake::default(), Limits::default()).err();
     assert!(matches!(err, Some(LoadError::UnknownImport { .. })));
 
+    // A memory import: wasmi reports it as an unknown import; the micro
+    // backend's parser refuses any import that is not a function.
     let wasm = wat::parse_str(r#"(module (import "mw" "memory" (memory 1)))"#).unwrap();
     let err = Payload::load(&wasm, Fake::default(), Limits::default()).err();
-    assert!(matches!(err, Some(LoadError::UnknownImport { .. })));
+    if wasm_host::BACKEND == "wasmi" {
+        assert!(matches!(err, Some(LoadError::UnknownImport { .. })));
+    } else {
+        assert!(matches!(err, Some(LoadError::Invalid(_))));
+    }
 }
 
 #[test]
@@ -829,10 +835,17 @@ fn w10_heap_bound_counts_every_limit() {
         Limits::bytes(65_536 + 4096).load_heap_needed(10_000),
         need + 4096
     );
+    // wasmi's value stack is bytes. The micro backend's is 8-byte slots,
+    // with an open block (12 bytes) allowed per four slots.
+    let (more, costs) = if wasm_host::BACKEND == "wasmi" {
+        (100, 100)
+    } else {
+        (32, 32 + 12)
+    };
     assert_eq!(
-        base.with_stack(base.max_stack_bytes + 100, base.max_call_depth)
+        base.with_stack(base.max_stack_bytes + more, base.max_call_depth)
             .load_heap_needed(10_000),
-        need + 100
+        need + costs
     );
     assert!(base.load_heap_needed(20_000) > need);
     assert_eq!(Limits::bytes(u32::MAX).load_heap_needed(u32::MAX), u32::MAX);
@@ -844,22 +857,29 @@ fn w10_heap_bound_charges_the_declared_maximum_not_the_cap() {
     // 1-byte pages, initial = maximum = 12 KiB: 52 KiB less than the cap.
     let exact = module(r#"(memory (export "memory") 12288 12288 (pagesize 1))"#);
     let len = exact.len() as u32;
-    assert_eq!(
-        cap.heap_needed(&exact),
-        cap.load_heap_needed(len) - (65_536 - 12_288)
-    );
     // No maximum: may grow to the cap, which is charged.
     let open = byte_page_module(12_288, "");
-    assert_eq!(
-        cap.heap_needed(&open),
-        cap.load_heap_needed(open.len() as u32)
-    );
     // A maximum above the cap: the cap.
     let big = module(r#"(memory (export "memory") 1 4)"#);
-    assert_eq!(
-        cap.heap_needed(&big),
-        cap.load_heap_needed(big.len() as u32)
-    );
+    if wasm_host::BACKEND == "wasmi" {
+        // The module is modelled from the image length alone.
+        assert_eq!(
+            cap.heap_needed(&exact),
+            cap.load_heap_needed(len) - (65_536 - 12_288)
+        );
+        for m in [&open, &big] {
+            assert_eq!(cap.heap_needed(m), cap.load_heap_needed(m.len() as u32));
+        }
+    } else {
+        // The module is measured, so every bound is below the worst case
+        // for its length; the memory term is the same.
+        assert!(cap.heap_needed(&exact) < cap.load_heap_needed(len) - (65_536 - 12_288));
+        assert!(cap.heap_needed(&open) < cap.load_heap_needed(open.len() as u32));
+        // `open` also has an empty `init`: a few bytes more of module.
+        let extra = cap.heap_needed(&open) - cap.heap_needed(&exact) - (65_536 - 12_288);
+        assert!(extra < 64, "{extra}");
+        assert!(cap.heap_needed(&big) > 65_536);
+    }
     // The declared maximum holds at run time: growing past it fails even
     // though the cap would allow it.
     let grow = module(

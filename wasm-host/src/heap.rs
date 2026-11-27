@@ -70,6 +70,11 @@ pub const FRAME_BYTES: u32 = 3 * PTR;
 /// list (at most the depth) is still held: three frames per level.
 pub const PER_CALL_DEPTH: u32 = 3 * FRAME_BYTES;
 
+/// (Since the host state moved to fixed containers, [`crate::fixed`], the
+/// key lists, copy buffer, log and channel table are part of
+/// [`State`](crate::link::State), which wasmi keeps in its store: still on
+/// the heap here, as one block.)
+///
 /// Fixed host state while the payload runs: the linker (one entry per
 /// `mw` import), store, instance and engine, the DMA copy buffer
 /// ([`MAX_DMA`] bytes), the subscription and (ABI 5) served-key lists
@@ -119,6 +124,17 @@ pub const fn needed(image_len: u32, memory: u32, stack: u32, depth: u32) -> u32 
     } else {
         max as u32
     }
+}
+
+/// [`needed`] for this image. wasmi's module is modelled from the image
+/// length alone, so only the length is used.
+pub fn needed_for(wasm: &[u8], memory: u32, stack: u32, depth: u32) -> u32 {
+    needed(
+        u32::try_from(wasm.len()).unwrap_or(u32::MAX),
+        memory,
+        stack,
+        depth,
+    )
 }
 
 #[cfg(test)]

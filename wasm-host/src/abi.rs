@@ -50,7 +50,9 @@
 //! before the pointer: a bad port, bus, address or length is
 //! `InvalidArgument` even when the pointer is also out of range.
 
-use alloc::string::{String, ToString};
+#[cfg(test)]
+use alloc::string::String;
+use alloc::string::ToString;
 
 use core::ops::Range;
 use middleware::Key;
@@ -389,17 +391,21 @@ impl Slot {
 /// Decides the slot for subscribing to `key`: re-subscribing returns the
 /// existing slot, otherwise a new one unless `max` (the host's limit,
 /// [`MAX_SUBSCRIPTIONS`] by default) are taken.
-pub fn subscribe_slot(subscriptions: &[String], key: &str, max: usize) -> Result<Slot, AbiError> {
+pub fn subscribe_slot<S: AsRef<str>>(
+    subscriptions: &[S],
+    key: &str,
+    max: usize,
+) -> Result<Slot, AbiError> {
     table_slot(subscriptions, key, max.min(wasm_abi::SLOT_MAX))
 }
 
 /// Decides the slot for serving `key` (ABI 5): serving a key again returns
 /// its slot, otherwise a new one unless [`serve::MAX_SERVES`] are taken.
-pub fn serve_slot(serves: &[String], key: &str) -> Result<Slot, AbiError> {
+pub fn serve_slot<S: AsRef<str>>(serves: &[S], key: &str) -> Result<Slot, AbiError> {
     table_slot(serves, key, serve::MAX_SERVES)
 }
 
-fn table_slot(table: &[String], key: &str, max: usize) -> Result<Slot, AbiError> {
+fn table_slot<S: AsRef<str>>(table: &[S], key: &str, max: usize) -> Result<Slot, AbiError> {
     if let Some(i) = slot_for(table, key) {
         Ok(Slot::Existing(i))
     } else if table.len() >= max {
@@ -483,8 +489,8 @@ impl RequestRanges {
 }
 
 /// The slot whose key matches `key` exactly.
-pub fn slot_for(subscriptions: &[String], key: &str) -> Option<usize> {
-    subscriptions.iter().position(|s| s == key)
+pub fn slot_for<S: AsRef<str>>(subscriptions: &[S], key: &str) -> Option<usize> {
+    subscriptions.iter().position(|s| s.as_ref() == key)
 }
 
 /// A periodic `tick`: the period and the absolute `now_ms` it is next due.
