@@ -247,6 +247,7 @@ async fn node(state: &Path, session: ZenohTransport) -> (PosixNode, Sys, Local) 
         certs: None,
         local: Some(local_node),
         driver: Box::new(mw_posix_node::driver::NoDriver),
+        provision: None,
         os: None,
     };
     let gateway = GatewayParts {
@@ -439,6 +440,7 @@ async fn pn18_sys_info_is_served_per_node_over_zenoh() {
         certs: None,
         local: Some(local_node),
         driver: Box::new(mw_posix_node::driver::NoDriver),
+        provision: None,
         os: None,
     };
     let gateway = GatewayParts {
@@ -535,6 +537,7 @@ async fn pn19_a_chain_larger_than_a_frame_installs_over_zenoh() {
         certs: Some(mw_posix_node::cert::CertStore::new(&tls, NODE)),
         local: Some(local_node),
         driver: Box::new(mw_posix_node::driver::NoDriver),
+        provision: None,
         os: None,
     };
     let gateway = GatewayParts {
@@ -675,6 +678,7 @@ async fn pn20_a_root_is_written_and_committed_over_zenoh() {
         certs: None,
         local: Some(local_node),
         driver: Box::new(mw_posix_node::driver::NoDriver),
+        provision: None,
         os: Some(os),
     };
     let gateway = GatewayParts {
@@ -818,6 +822,106 @@ async fn pn20_a_root_is_written_and_committed_over_zenoh() {
         &image[..],
         "slot B holds the image"
     );
+
+    for t in tasks {
+        t.abort();
+    }
+    let _ = pi.stop().await;
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// The SSH claim (provision.rs): a public key proposed over Zenoh is only
+/// pending; once root on the machine accepts its fingerprint (the
+/// `mw-posix-node trust accept` CLI), the node pins it, and a later
+/// proposal is refused because the node is claimed.
+#[tokio::test(flavor = "multi_thread")]
+async fn pn21_a_key_proposed_over_zenoh_is_pinned_once_accepted_on_the_machine() {
+    use middleware::transport::Target;
+    use mw_posix_node::provision::{PROPOSE, Provision};
+
+    let state = state_dir("propose");
+    let (mut cluster, session) = zenoh_pair().await;
+    let front = ZenohTransport::new(session.session().clone()).with_sender(NODE);
+    let (local_test, local_node) = pair();
+    let config = gateway_config(&state);
+    let store = ControlStore::in_dir(&config.state_dir);
+    let floor = control_floor(&store, wall_clock_ms());
+    let flash = open_state_flash(&state).expect("state");
+    let device = DeviceParts {
+        flash,
+        facts: facts(NODE),
+        limits: limits(1024 * 1024),
+        certs: None,
+        local: Some(local_node),
+        driver: Box::new(mw_posix_node::driver::NoDriver),
+        provision: Some(Provision::new(&state)),
+        os: None,
+    };
+    let gateway = GatewayParts {
+        bridge: config.bridge_with_floor(floor),
+        options: config.shell_options(),
+        store,
+    };
+    let (pi, sys) = start(device, gateway, session).await.expect("start");
+    let mut local: Local = SerialLink::with_inbox(local_test);
+    let tasks = mw_posix_node::sysnode::serve(&front, &sys, &pi.direct(), [PROPOSE.to_owned()])
+        .await
+        .expect("serve");
+    let opts = RequestOptions::DEFAULT
+        .with_target(Target::Node(NODE))
+        .with_timeout(Duration::from_secs(5));
+    let propose = |cluster: &mut ZenohTransport, hex: String| {
+        let opts = &opts;
+        let mut cluster = cluster.clone();
+        async move {
+            let mut out = vec![0u8; 256];
+            tokio::time::timeout(TIMEOUT, async {
+                loop {
+                    match cluster
+                        .request_with(Key::from_static(PROPOSE), hex.as_bytes(), &mut out, opts)
+                        .await
+                    {
+                        Ok(r) => return Ok(String::from_utf8(r.to_vec()).expect("text")),
+                        Err(middleware::zenoh::ZenohError::Handler(e)) => return Err(e),
+                        Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                    }
+                }
+            })
+            .await
+            .expect("answered")
+        }
+    };
+    let key = test_seed().public_key();
+    let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+
+    let fp = propose(&mut cluster, hex.clone()).await.expect("proposed");
+    assert_eq!(fp, mw_posix_node::provision::fingerprint(&key));
+    // Pending only: the trust record is still unclaimed.
+    let info = local_request(&mut local, "sys/trust/info", &[])
+        .await
+        .expect("trust info");
+    assert_eq!(info.first(), Some(&0), "unclaimed while pending: {info:?}");
+
+    // Root on the machine accepts it.
+    let dir = state.clone();
+    let code = tokio::task::spawn_blocking(move || {
+        mw_posix_node::provision::cli(&dir, &["accept".to_owned(), fp])
+    })
+    .await
+    .expect("cli");
+    assert_eq!(code, std::process::ExitCode::SUCCESS);
+    let info = local_request(&mut local, "sys/trust/info", &[])
+        .await
+        .expect("trust info");
+    assert_ne!(info.first(), Some(&0), "claimed: {info:?}");
+    assert!(
+        info.windows(key.as_bytes().len())
+            .any(|w| w == key.as_bytes()),
+        "the proposed key is the pinned one"
+    );
+
+    // Claimed: no proposal is taken any more.
+    assert_eq!(propose(&mut cluster, hex).await, Err(HandlerError::Denied));
 
     for t in tasks {
         t.abort();

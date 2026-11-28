@@ -46,7 +46,7 @@ pub const OS_KEYS: [Key<'static>; 7] = os_keys::ALL;
 /// Whether `key` goes straight to the controller rather than through the
 /// gateway's serial frame.
 fn is_direct(key: &str) -> bool {
-    key.starts_with("sys/cert/") || key.starts_with("sys/os/")
+    key.starts_with("sys/cert/") || key.starts_with("sys/os/") || key == crate::provision::PROPOSE
 }
 
 /// The scratch a responder for `key` needs: the request and the answer.
@@ -178,6 +178,7 @@ mod tests {
             assert!(is_direct(k.as_str()), "{}", k.as_str());
         }
         assert!(is_direct("sys/cert/install"));
+        assert!(is_direct(crate::provision::PROPOSE));
         for k in ["sys/info", "sys/log", "sys/manifest", "sys/trust/claim"] {
             assert!(!is_direct(k), "{k}");
         }

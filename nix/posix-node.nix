@@ -141,6 +141,16 @@ in
       });
     '';
 
+    # The SSH claim's second step, as root on the machine:
+    # `sudo mw-posix-node-trust pending` / `accept <fingerprint>`
+    # (posix-node/src/provision.rs), against the node's state directory.
+    environment.systemPackages = [
+      (pkgs.writeShellScriptBin "mw-posix-node-trust" ''
+        export MW_POSIX_NODE_STATE=/var/lib/mw-posix-node
+        exec ${lib.getExe cfg.package} trust "$@"
+      '')
+    ];
+
     systemd.services.mw-posix-node = {
       description = "Linux payload host";
       wantedBy = [ "multi-user.target" ];

@@ -6683,6 +6683,23 @@ the same root key, channel and cert as the MCU payloads and firmware
   *(posix-node `an_unclaimed_node_takes_only_info_over_the_network`,
   `a_network_begin_does_not_replace_a_transfer_under_way`, `sysnode::tests`,
   `pn20_a_root_is_written_and_committed_over_zenoh`)*
+- [x] OS5c **Claiming over SSH** (posix-node `provision.rs`), for a host
+  with no local serial port (a PC on the LAN), which OS5b would otherwise
+  leave with no way to take a root. Two steps: `sys/trust/propose` over the
+  network (body: the public key as hex, what `mwctl key pub` prints; `mwctl
+  request sys/trust/propose <hex>`) keeps the key as *pending* in the state
+  directory (`trust-pending`, 0600) and answers its fingerprint (the first
+  8 bytes of SHA-256 over the key, hex); a pending key pins and authorises
+  nothing, a later proposal replaces it, a claimed node refuses (`Denied`).
+  Then root on the machine runs `mw-posix-node trust accept <fingerprint>`
+  (NixOS: `sudo mw-posix-node-trust accept ...`), which writes
+  `trust-accept`; the node, looking once a second while a key is pending,
+  pins the key through its local claim path when the fingerprints match
+  and removes both files (a mismatch is logged and claims nothing). Root
+  on the machine stands for physical access, as the serial port does.
+  Served per node over Zenoh (direct, as `sys/cert/*`); never through
+  `gw/sys` (`sys/trust/*` is `Never` there). *(posix-node `provision::tests`,
+  `pn21_a_key_proposed_over_zenoh_is_pinned_once_accepted_on_the_machine`)*
 - [x] OS6 Host tools: `mwctl os info|update <IMAGE> [CERT] --version N|reboot|
   confirm|abort`, over any link (serial, Zenoh, UDP). `os update` writes and
   commits; `os reboot`, `os confirm` and `os abort` take `--key` or `--pkcs11`
