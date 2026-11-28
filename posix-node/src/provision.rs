@@ -9,23 +9,32 @@
 //!    as hex text (what `mwctl key pub` prints), e.g.
 //!    `mwctl --zenoh <endpoint> --node <id> request sys/trust/propose <hex>`.
 //!    An unclaimed node keeps it as the *pending* key ([`PENDING_FILE`] in
-//!    its state directory, replacing an earlier one) and answers its
-//!    [`fingerprint`]. A pending key pins nothing and authorises nothing.
-//!    A claimed node refuses (`Denied`).
+//!    its state directory) and answers its [`fingerprint`]. A pending key
+//!    pins nothing and authorises nothing. While one is pending, a proposal
+//!    of another key is refused (`Unavailable`; the same key is answered
+//!    again), so the pending key cannot be swapped under the operator; root
+//!    drops it with `trust clear`. A claimed node refuses (`Denied`).
 //! 2. **Accept**, on the machine, as root (over SSH):
-//!    `mw-posix-node trust accept <fingerprint>` ([`cli`]). It writes the
-//!    fingerprint to [`ACCEPT_FILE`]; the running node, which looks for it
-//!    once a second while a key is pending, pins the pending key through
-//!    its local claim path when the fingerprints match, and removes both
-//!    files. A mismatch claims nothing (the accept file is removed and the
-//!    pending key kept).
+//!    `mw-posix-node trust accept <fingerprint>` ([`cli`]). The fingerprint
+//!    is for the operator's eyes; the accept file ([`ACCEPT_FILE`]) carries
+//!    the whole key the operator confirmed. The running node, which looks
+//!    for it once a second while a key is pending, pins the pending key
+//!    through its local claim path only when it is that same key, byte for
+//!    byte, and removes both files. Anything else claims nothing (the
+//!    accept file is removed and the pending key kept).
 //!
 //! Root on the machine stands for physical access here, as the serial port
 //! does: only someone who can write the node's state directory turns a
-//! proposed key into the pinned one, and only the key whose fingerprint
-//! they confirmed. `mw-posix-node trust pending` shows what was proposed.
+//! proposed key into the pinned one, and only the key they confirmed.
+//!
+//! The state directory belongs to the node's service user, so the root CLI
+//! never follows a link there: it reads the pending key with `O_NOFOLLOW`
+//! (a regular file of a key's size, nothing else) and writes the accept
+//! file through a new, exclusively created temporary file (`O_EXCL`), renamed
+//! into place.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -37,15 +46,18 @@ use sha2::{Digest, Sha256};
 pub const PROPOSE: &str = "sys/trust/propose";
 /// The pending key's file in the state directory: the key's wire bytes.
 pub const PENDING_FILE: &str = "trust-pending";
-/// The accept file: the fingerprint the operator confirmed.
+/// The accept file: the confirmed key's wire bytes.
 pub const ACCEPT_FILE: &str = "trust-accept";
 /// Hex digits of a fingerprint.
 pub const FINGERPRINT_LEN: usize = 16;
 /// How often a node with a pending key looks for an accept.
 pub const ACCEPT_POLL: Duration = Duration::from_secs(1);
+/// The most a key file may hold (a P-256 key, 33 bytes).
+const KEY_FILE_MAX: u64 = 33;
 
-/// The key's fingerprint: the first 8 bytes of SHA-256 over its wire bytes,
-/// as 16 lowercase hex digits.
+/// The key's fingerprint, for the operator to compare: the first 8 bytes of
+/// SHA-256 over its wire bytes, as 16 lowercase hex digits. (The accept
+/// binds the whole key, not this.)
 pub fn fingerprint(key: &PublicKey) -> String {
     hex(&Sha256::digest(key.as_bytes())[..FINGERPRINT_LEN / 2])
 }
@@ -66,19 +78,61 @@ fn unhex(text: &[u8]) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Writes `data` to `path` through a temporary file (fsynced), with `mode`.
+/// Equal bytes, compared in time that depends only on the lengths.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Writes `data` to `path` with `mode`: into a new temporary file beside it,
+/// created exclusively (`O_EXCL`: an existing name or a link there fails,
+/// nothing is followed), fsynced, then renamed over `path` (a link at `path`
+/// is replaced, not followed).
 fn write_atomic(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let tmp = path.with_extension("tmp");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let name = path
+        .file_name()
+        .map_or_else(Default::default, |n| n.to_string_lossy());
+    let tmp = path.with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// A key file's bytes: a regular file (never through a link) of at most a
+/// key's size.
+fn read_key_file(path: &Path) -> Option<Vec<u8>> {
     let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let meta = f.metadata().ok()?;
+    if !meta.is_file() || meta.len() > KEY_FILE_MAX {
+        return None;
+    }
+    let mut b = Vec::new();
+    Read::take(&mut f, KEY_FILE_MAX + 1)
+        .read_to_end(&mut b)
+        .ok()?;
+    Some(b)
+}
+
+fn read_pending(dir: &Path) -> Option<PublicKey> {
+    PublicKey::parse_claim(&read_key_file(&dir.join(PENDING_FILE))?).ok()
 }
 
 /// The node's side: the pending key and the accept, in `dir`.
@@ -111,8 +165,8 @@ impl Provision {
     }
 
     /// `sys/trust/propose`: keeps `body` (the key as hex) as the pending key
-    /// unless the node is `claimed`; answers the fingerprint (ASCII) in
-    /// `out`.
+    /// unless the node is `claimed` (`Denied`) or another key is pending
+    /// (`Unavailable`); answers the fingerprint (ASCII) in `out`.
     pub fn propose(
         &mut self,
         body: &[u8],
@@ -124,8 +178,12 @@ impl Provision {
         }
         let bytes = unhex(body).ok_or(HandlerError::InvalidRequest)?;
         let key = PublicKey::parse_claim(&bytes)?;
-        write_atomic(&self.pending_path(), key.as_bytes(), 0o600)
-            .map_err(|_| HandlerError::Internal)?;
+        match self.pending() {
+            Some(p) if same(p.as_bytes(), key.as_bytes()) => {} // proposed again
+            Some(_) => return Err(HandlerError::Unavailable),
+            None => write_atomic(&self.pending_path(), key.as_bytes(), 0o600)
+                .map_err(|_| HandlerError::Internal)?,
+        }
         self.next_look = Some(Instant::now());
         let fp = fingerprint(&key);
         let dst = out
@@ -146,9 +204,8 @@ impl Provision {
     }
 
     /// Looks for an accept when one is due: the pending key to pin when the
-    /// operator confirmed its fingerprint (both files are then removed), or
-    /// `None`. A mismatched or unreadable accept is removed and logged
-    /// through `log`.
+    /// accept names exactly that key (both files are then removed), or
+    /// `None`. Any other accept is removed and logged through `log`.
     pub fn take_accepted(&mut self, log: &mut dyn FnMut(&str)) -> Option<PublicKey> {
         let due = self.next_look?;
         let now = Instant::now();
@@ -161,15 +218,15 @@ impl Provision {
             return None;
         };
         self.next_look = Some(now + ACCEPT_POLL);
-        let accept = match std::fs::read(self.accept_path()) {
-            Ok(b) => b,
-            Err(_) => return None, // not accepted yet
-        };
+        if !self.accept_path().exists() {
+            return None; // not accepted yet
+        }
+        let accept = read_key_file(&self.accept_path());
         let _ = std::fs::remove_file(self.accept_path());
-        let want = fingerprint(&key);
-        if String::from_utf8_lossy(&accept).trim() != want {
+        if !accept.is_some_and(|a| same(&a, key.as_bytes())) {
             log(&format!(
-                "trust accept refused: the fingerprint does not match the pending key {want}"
+                "trust accept refused: it is not the pending key {}",
+                fingerprint(&key)
             ));
             return None;
         }
@@ -179,17 +236,12 @@ impl Provision {
     }
 }
 
-fn read_pending(dir: &Path) -> Option<PublicKey> {
-    let b = std::fs::read(dir.join(PENDING_FILE)).ok()?;
-    PublicKey::parse_claim(&b).ok()
-}
-
-/// `mw-posix-node trust pending|accept <fingerprint>`, run as root on the
-/// machine (over SSH), against the state directory `dir`. Returns the exit
-/// code and prints to stdout/stderr.
+/// `mw-posix-node trust pending | accept <fingerprint> | clear`, run as root
+/// on the machine (over SSH), against the state directory `dir`. Returns the
+/// exit code and prints to stdout/stderr.
 pub fn cli(dir: &Path, args: &[String]) -> std::process::ExitCode {
     use std::process::ExitCode;
-    let usage = "usage: mw-posix-node trust pending | trust accept <fingerprint>";
+    let usage = "usage: mw-posix-node trust pending | trust accept <fingerprint> | trust clear";
     match args {
         [cmd] if cmd == "pending" => match read_pending(dir) {
             Some(k) => {
@@ -202,6 +254,19 @@ pub fn cli(dir: &Path, args: &[String]) -> std::process::ExitCode {
                 ExitCode::FAILURE
             }
         },
+        [cmd] if cmd == "clear" => {
+            for f in [PENDING_FILE, ACCEPT_FILE] {
+                match std::fs::remove_file(dir.join(f)) {
+                    Ok(()) => println!("removed {f}"),
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        eprintln!("{}: {e}", dir.join(f).display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
         [cmd, fp] if cmd == "accept" => {
             let Some(k) = read_pending(dir) else {
                 eprintln!(
@@ -215,7 +280,8 @@ pub fn cli(dir: &Path, args: &[String]) -> std::process::ExitCode {
                 eprintln!("the pending key's fingerprint is {want}, not {fp}: nothing accepted");
                 return ExitCode::FAILURE;
             }
-            if let Err(e) = write_atomic(&dir.join(ACCEPT_FILE), want.as_bytes(), 0o644) {
+            // The whole key the operator confirmed: the node pins only that.
+            if let Err(e) = write_atomic(&dir.join(ACCEPT_FILE), k.as_bytes(), 0o644) {
                 eprintln!("{}: {e}", dir.join(ACCEPT_FILE).display());
                 return ExitCode::FAILURE;
             }
@@ -302,15 +368,20 @@ mod tests {
         let mut p = Provision::new(&dir);
         p.propose(KEY_HEX.as_bytes(), false, &mut [0u8; 32])
             .unwrap();
-        // A wrong fingerprint: refused, logged, the key still pending.
-        std::fs::write(dir.join(ACCEPT_FILE), "0123456789abcdef").unwrap();
+        // Another key (or a fingerprint, the old format): refused, logged,
+        // the key still pending.
+        std::fs::write(dir.join(ACCEPT_FILE), [7u8; 32]).unwrap();
         let mut logged = Vec::new();
         assert_eq!(p.take_accepted(&mut |m| logged.push(m.to_owned())), None);
         assert_eq!(logged.len(), 1);
         assert!(!dir.join(ACCEPT_FILE).exists());
         assert_eq!(p.pending(), Some(key()));
-        // The right one, once the next look is due.
         std::fs::write(dir.join(ACCEPT_FILE), fingerprint(&key())).unwrap();
+        p.next_look = Some(Instant::now());
+        assert_eq!(p.take_accepted(&mut |m| logged.push(m.to_owned())), None);
+        assert_eq!(logged.len(), 2);
+        // The whole key, once the next look is due.
+        std::fs::write(dir.join(ACCEPT_FILE), key().as_bytes()).unwrap();
         p.next_look = Some(Instant::now());
         assert_eq!(p.take_accepted(&mut |_| {}), Some(key()));
         assert!(!dir.join(ACCEPT_FILE).exists() && !dir.join(PENDING_FILE).exists());
@@ -344,5 +415,65 @@ mod tests {
             std::process::ExitCode::FAILURE
         );
         assert!(!dir.join(ACCEPT_FILE).exists(), "nothing written");
+    }
+
+    #[test]
+    fn a_pending_key_is_not_replaced_by_another_proposal() {
+        let dir = scratch("swap");
+        let mut p = Provision::new(&dir);
+        let mut out = [0u8; 32];
+        p.propose(KEY_HEX.as_bytes(), false, &mut out).unwrap();
+        let other = "11".repeat(32);
+        assert_eq!(
+            p.propose(other.as_bytes(), false, &mut out),
+            Err(HandlerError::Unavailable)
+        );
+        assert_eq!(p.pending(), Some(key()), "still the first key");
+        // The same key again is answered.
+        assert!(p.propose(KEY_HEX.as_bytes(), false, &mut out).is_ok());
+        // Root clears it; then another key may be proposed.
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            cli(&dir, &args(&["clear"])),
+            std::process::ExitCode::SUCCESS
+        );
+        assert!(p.propose(other.as_bytes(), false, &mut out).is_ok());
+    }
+
+    #[test]
+    fn key_files_are_never_read_through_a_link() {
+        let dir = scratch("link");
+        let secret = dir.join("secret");
+        std::fs::write(&secret, [9u8; 32]).unwrap(); // a key-sized file
+        std::os::unix::fs::symlink(&secret, dir.join(PENDING_FILE)).unwrap();
+        assert_eq!(read_pending(&dir), None, "not followed");
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            cli(&dir, &args(&["pending"])),
+            std::process::ExitCode::FAILURE
+        );
+        // Nor anything larger than a key.
+        std::fs::remove_file(dir.join(PENDING_FILE)).unwrap();
+        std::fs::write(dir.join(PENDING_FILE), [1u8; 64]).unwrap();
+        assert_eq!(read_pending(&dir), None);
+    }
+
+    #[test]
+    fn a_link_where_a_key_file_goes_is_replaced_not_written_through() {
+        let dir = scratch("write-link");
+        let target = dir.join("target");
+        std::fs::write(&target, b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join(ACCEPT_FILE)).unwrap();
+        write_atomic(&dir.join(ACCEPT_FILE), &[5u8; 32], 0o644).unwrap();
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"keep",
+            "the target is untouched"
+        );
+        let meta = std::fs::symlink_metadata(dir.join(ACCEPT_FILE)).unwrap();
+        assert!(
+            meta.file_type().is_file(),
+            "the link was replaced by the file"
+        );
     }
 }

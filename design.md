@@ -6690,13 +6690,20 @@ the same root key, channel and cert as the MCU payloads and firmware
   request sys/trust/propose <hex>`) keeps the key as *pending* in the state
   directory (`trust-pending`, 0600) and answers its fingerprint (the first
   8 bytes of SHA-256 over the key, hex); a pending key pins and authorises
-  nothing, a later proposal replaces it, a claimed node refuses (`Denied`).
-  Then root on the machine runs `mw-posix-node trust accept <fingerprint>`
-  (NixOS: `sudo mw-posix-node-trust accept ...`), which writes
-  `trust-accept`; the node, looking once a second while a key is pending,
-  pins the key through its local claim path when the fingerprints match
-  and removes both files (a mismatch is logged and claims nothing). Root
-  on the machine stands for physical access, as the serial port does.
+  nothing. While one is pending, a proposal of another key is refused
+  (`Unavailable`; the same key is answered again), so the pending key cannot
+  be swapped under the operator; `trust clear` (root) drops it. A claimed
+  node refuses (`Denied`). Then root on the machine runs `mw-posix-node trust
+  accept <fingerprint>` (NixOS: `sudo mw-posix-node-trust accept ...`): the
+  fingerprint is for the operator's eyes, the accept file (`trust-accept`)
+  carries the whole confirmed key, and the node, looking once a second
+  while a key is pending, pins the pending key through its local claim path
+  only when it is that key byte for byte, then removes both files (anything
+  else is logged and claims nothing). Root on the machine stands for
+  physical access, as the serial port does. The state directory belongs to
+  the node's user, so the root CLI follows no link there: the pending key
+  is read with `O_NOFOLLOW` (a regular file of a key's size), the accept is
+  written through an exclusively created temporary file renamed into place.
   Served per node over Zenoh (direct, as `sys/cert/*`); never through
   `gw/sys` (`sys/trust/*` is `Never` there). *(posix-node `provision::tests`,
   `pn21_a_key_proposed_over_zenoh_is_pinned_once_accepted_on_the_machine`)*
