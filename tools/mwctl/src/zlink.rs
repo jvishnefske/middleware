@@ -27,6 +27,20 @@ use std::time::{Duration, Instant};
 /// block (about 2 s) inside some requests.
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How long `sys/os/commit` may take: a posix-node reads the written slot
+/// back to hash it (a few GB from a USB stick) before it answers, and waits
+/// as long for its controller (posix-node `sysnode::DIRECT_WAIT_MAX`).
+pub const OS_COMMIT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// The wait for one query on `key` when the link's own is `base`.
+pub fn query_timeout(base: Duration, key: Key<'_>) -> Duration {
+    if key == middleware::os_ab::wire::keys::COMMIT {
+        base.max(OS_COMMIT_TIMEOUT)
+    } else {
+        base
+    }
+}
+
 /// How the host session reaches the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
@@ -116,6 +130,15 @@ impl ZenohLink {
         })
     }
 
+    /// Waits `timeout` for each query (`mwctl --timeout`), never less than
+    /// [`QUERY_TIMEOUT`]; `sys/os/commit` waits at least
+    /// [`OS_COMMIT_TIMEOUT`] ([`query_timeout`]).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout.max(QUERY_TIMEOUT);
+        self
+    }
+
     /// The board this link addresses.
     pub const fn node(&self) -> SenderId {
         self.node
@@ -145,7 +168,7 @@ impl Endpoint for ZenohLink {
     fn request(&mut self, key: Key<'_>, body: &[u8]) -> Result<Vec<u8>, Error> {
         let opts = RequestOptions::DEFAULT
             .with_target(Target::Node(self.node))
-            .with_timeout(self.timeout);
+            .with_timeout(query_timeout(self.timeout, key));
         let mut out = vec![0u8; 4096];
         let r = self
             .rt
@@ -184,6 +207,21 @@ impl Endpoint for ZenohLink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_os_commit_waits_for_the_slot_to_be_hashed() {
+        use super::{OS_COMMIT_TIMEOUT, QUERY_TIMEOUT, query_timeout};
+        use middleware::os_ab::wire::keys as os;
+        assert_eq!(query_timeout(QUERY_TIMEOUT, os::COMMIT), OS_COMMIT_TIMEOUT);
+        assert_eq!(query_timeout(QUERY_TIMEOUT, os::CHUNK), QUERY_TIMEOUT);
+        assert_eq!(query_timeout(QUERY_TIMEOUT, os::INFO), QUERY_TIMEOUT);
+        let long = OS_COMMIT_TIMEOUT * 2;
+        assert_eq!(
+            query_timeout(long, os::COMMIT),
+            long,
+            "--timeout above it wins"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -1058,6 +1058,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "fw reboot",
             "fw confirm",
             "fw abort",
+            "os reboot",
+            "os confirm",
+            "os abort",
         ]
     } else {
         &[
@@ -1561,6 +1564,19 @@ mod tests {
         ] {
             let e = p(args).unwrap_err();
             assert!(e.contains(want), "{args}: {e}");
+        }
+        // Signed os controls over Zenoh: a claimed node takes them only so
+        // (design.md OS5a).
+        for (cmd, want) in [
+            ("os reboot", Cmd::OsReboot { key: Some(KeySpec::File("k".into())) }),
+            ("os confirm", Cmd::OsConfirm { key: Some(KeySpec::File("k".into())) }),
+            ("os abort", Cmd::OsAbort { key: Some(KeySpec::File("k".into())) }),
+        ] {
+            assert_eq!(
+                run(&format!("--zenoh tcp/h:7447 --node 310441d265f82484 {cmd} --key k")).cmd,
+                want,
+                "{cmd}"
+            );
         }
         // Signed fw controls over Zenoh.
         assert_eq!(
