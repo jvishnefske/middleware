@@ -6,7 +6,14 @@
 //! mw-release publish --channel <c> --target <chip|any> --kind fw|payload|os
 //!                    [--version <n | major.minor>] (--key <seed file> | --pkcs11 <label>) <file>
 //! mw-release latest --channel <c> --target <chip>
+//! mw-release sign --channel <c> --target <chip|any> --kind fw|payload|os
+//!                 [--version <n | major.minor>] (--key <seed file> | --pkcs11 <label>)
+//!                 --out <cert file> <file>
 //! ```
+//!
+//! `sign` publishes nothing: it writes the signed release (`[cert][sig]`,
+//! the commit body) to `--out`, for an install without the channel, e.g.
+//! `mwctl os update <image> <cert file> --version <n>` on a claimed node.
 //!
 //! The route is the updater's (`MW_UPDATES_HOST`, `MW_UPDATES_ADDR` or
 //! `MW_UPDATES_ENDPOINT`) with `MW_ZENOH_CREDENTIALS`; the token PIN is
@@ -28,6 +35,9 @@ const HELP: &str = "usage:
   mw-release publish --channel <c> --target <chip|any> --kind fw|payload|os
                      [--version <n | major.minor>] (--key <seed file> | --pkcs11 <label>) <file>
   mw-release latest --channel <c> --target <chip>
+  mw-release sign --channel <c> --target <chip|any> --kind fw|payload|os
+                  [--version <n | major.minor>] (--key <seed file> | --pkcs11 <label>)
+                  --out <cert file> <file>
 env: MW_UPDATES_HOST | MW_UPDATES_ENDPOINT, MW_UPDATES_ADDR, MW_ZENOH_CREDENTIALS,
      PKCS11_MODULE, PKCS11_TOKEN, PKCS11_PIN
 ";
@@ -40,6 +50,7 @@ struct Args {
     version: Option<String>,
     key: Option<String>,
     pkcs11: Option<String>,
+    out: Option<String>,
     file: Option<String>,
 }
 
@@ -55,6 +66,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--version" => a.version = Some(val()?),
             "--key" => a.key = Some(val()?),
             "--pkcs11" => a.pkcs11 = Some(val()?),
+            "--out" => a.out = Some(val()?),
             f if f.starts_with("--") => return Err(format!("unknown flag {f}")),
             f => a.file = Some(f.to_owned()),
         }
@@ -81,11 +93,51 @@ fn signer(a: &Args) -> Result<Box<dyn Signer>, String> {
     }
 }
 
+/// The release's `--version`, as `n` or `major.minor`.
+fn version_arg(a: &Args) -> Result<Option<middleware::loader::trust::Version>, String> {
+    a.version
+        .as_ref()
+        .map(|v| {
+            parse_version(v)
+                .or_else(|| v.parse().ok().map(middleware::loader::trust::Version))
+                .ok_or_else(|| "--version: n or major.minor".to_owned())
+        })
+        .transpose()
+}
+
+/// `sign`: the release of `--kind` for `target` on `channel`, signed by the
+/// root key and written to `--out` (`[cert][sig]`); nothing is published.
+fn sign_to_file(a: &Args, channel: &str, target: &str) -> Result<(), String> {
+    let kind = a
+        .kind
+        .as_deref()
+        .and_then(CertKind::from_name)
+        .ok_or("--kind fw|payload|os")?;
+    let out = a.out.clone().ok_or("--out <cert file> is required")?;
+    let path = a.file.clone().ok_or("the image file is required")?;
+    let file = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    let prepared = prepare(kind, &file, version_arg(a)?, SystemTime::now())?;
+    let release = sign(kind, channel, target, &prepared, signer(a)?.as_ref())?;
+    std::fs::write(&out, release.body()).map_err(|e| format!("{out}: {e}"))?;
+    let c = release.cert();
+    eprintln!(
+        "signed {} {} for {target} on {channel}: {} bytes sha256 {} -> {out}",
+        c.kind.name(),
+        c.version.0,
+        c.len,
+        mw_updates::hex(&c.sha256)
+    );
+    Ok(())
+}
+
 async fn run(args: &[String]) -> Result<(), String> {
     let cmd = args.first().map(String::as_str).ok_or("no command")?;
     let a = parse(&args[1..])?;
     let channel = a.channel.clone().ok_or("--channel is required")?;
     let target = a.target.clone().ok_or("--target is required")?;
+    if cmd == "sign" {
+        return sign_to_file(&a, &channel, &target);
+    }
     let env = |k: &str| std::env::var(k).ok();
     let route = route(&env).map_err(|e| e.to_string())?;
     let creds = credentials(&env, &|p| std::fs::read_to_string(p)).map_err(|e| e.to_string())?;

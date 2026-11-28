@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### mw-release sign
+- `mw-release sign --channel <c> --target <chip|any> --kind fw|payload|os [--version <n>] (--key <seed> | --pkcs11 <label>) --out <cert> <file>`: signs the release with the root key, as `publish` does, and writes it (`[cert][sig]`, the commit body) to `--out` instead of publishing it; no updates channel or credentials needed. For an install without the channel, e.g. `mwctl os update <image> <cert> --version <n>` on a claimed node (`tests/sign_cli.rs`).
+
 ### posix-node: claiming over SSH (OS5c)
 - A node without a local serial port can be claimed in two steps: `sys/trust/propose` over Zenoh with the public key as hex (`mwctl --zenoh <endpoint> --node <id> request sys/trust/propose $(mwctl key pub <KEYFILE>)`) keeps it as the pending key and answers its fingerprint; then, as root on the machine (over SSH), `mw-posix-node trust accept <fingerprint>` has the running node pin it through its local claim path. A pending key authorises nothing; while one is pending another key is refused (`Unavailable`), and `trust clear` drops it; a claimed node refuses proposals. The accept binds the whole key (the fingerprint is only displayed), and the root CLI reads and writes the node's state directory without following links (`O_NOFOLLOW`, `O_EXCL`). `mw-posix-node trust pending` shows the pending key. New module `provision` (`Provision`, `PROPOSE`, `fingerprint`, `cli`); `DeviceParts` and `spawn_device` take `provision` (**breaking for struct literals**: add `provision: None`); `Controller::set_provision`. nix/posix-node.nix installs `mw-posix-node-trust` (the CLI against `/var/lib/mw-posix-node`).
 
