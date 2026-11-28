@@ -89,6 +89,7 @@ pub struct Controller<F, C: Clock + 'static> {
     driver: Box<dyn Driver>,
     os: Option<crate::os::OsUpdates>,
     certs: Option<crate::cert::CertStore>,
+    provision: Option<crate::provision::Provision>,
 }
 
 impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
@@ -119,6 +120,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
             driver,
             os: None,
             certs: None,
+            provision: None,
         };
         (ctl, boot)
     }
@@ -187,6 +189,12 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         self.certs = Some(certs);
     }
 
+    /// Claiming over SSH: `sys/trust/propose` and the accept
+    /// ([`crate::provision`]).
+    pub fn set_provision(&mut self, provision: crate::provision::Provision) {
+        self.provision = Some(provision);
+    }
+
     /// A request from the network (the gateway's Zenoh link).
     pub fn request(
         &mut self,
@@ -214,6 +222,27 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
                 Some(c) => c.handle(key, body, trust.as_ref(), network, &mut out),
                 None => Err(HandlerError::NotFound),
             };
+            return r.and_then(|n| {
+                out.get(..n)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(HandlerError::BufferTooSmall)
+            });
+        }
+        if key.as_str() == crate::provision::PROPOSE {
+            let claimed = matches!(
+                self.svc.trust_state(),
+                Some(middleware::loader::trust::TrustState::Claimed { .. })
+            );
+            let r = match self.provision.as_mut() {
+                Some(p) => p.propose(body, claimed, &mut out),
+                None => Err(HandlerError::NotFound),
+            };
+            if let Ok(n) = r {
+                let fp = String::from_utf8_lossy(&out[..n]).into_owned();
+                self.outbox.log(&format!(
+                    "trust: key {fp} proposed; accept it on the machine"
+                ));
+            }
             return r.and_then(|n| {
                 out.get(..n)
                     .map(<[u8]>::to_vec)
@@ -323,6 +352,7 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
     /// Fires due timers, dispatches queued events and runs a due tick;
     /// first, what the driver read.
     pub fn poll(&mut self) {
+        self.poll_provision();
         let readings = self.driver.poll(self.clock.now_us());
         self.deliver_driver(readings);
         let result = match self.payload.as_mut() {
@@ -406,19 +436,57 @@ impl<F: NorFlash + Durable, C: Clock + Clone + 'static> Controller<F, C> {
         }
     }
 
+    /// A pending key the operator accepted on the machine is pinned here,
+    /// through the local claim path (as over the serial port).
+    fn poll_provision(&mut self) {
+        let outbox = &mut self.outbox;
+        let Some(key) = self
+            .provision
+            .as_mut()
+            .and_then(|p| p.take_accepted(&mut |m| outbox.log(m)))
+        else {
+            return;
+        };
+        let fp = crate::provision::fingerprint(&key);
+        let claim = self.request_on(
+            middleware::loader::keys::TRUST_CLAIM,
+            key.as_bytes(),
+            &RequestMeta::NONE,
+            false,
+        );
+        match claim {
+            Ok(_) => self
+                .outbox
+                .log(&format!("trust: key {fp} accepted and pinned")),
+            Err(e) => self
+                .outbox
+                .log(&format!("trust: key {fp} accepted, claim refused: {e:?}")),
+        }
+    }
+
     /// When to poll next, in µs on the clock: the next tick, timer or
-    /// driver step.
+    /// driver step, and the next look for an accept while a key is pending.
     pub fn next_wake_us(&mut self) -> Option<u64> {
         let now_us = self.clock.now_us();
+        let provision = self
+            .provision
+            .as_mut()
+            .and_then(|p| p.next_look())
+            .map(|at| {
+                let wait = at.saturating_duration_since(std::time::Instant::now());
+                now_us.saturating_add(u64::try_from(wait.as_micros()).unwrap_or(u64::MAX))
+            });
         let driver = self.driver.next_wake_us(now_us);
         // Without a payload nobody reads the driver: it catches up (it
         // integrates from the clock) when one starts.
-        let p = self.payload.as_mut()?;
+        let Some(p) = self.payload.as_mut() else {
+            return provision;
+        };
         let tick = p.next_tick().map(|due| {
             now_us.saturating_add(u64::from(tick_delay(self.clock.now_ms(), due)) * 1000)
         });
         let alarm = p.device().next_alarm_us();
-        [tick, alarm, driver].into_iter().flatten().min()
+        [tick, alarm, driver, provision].into_iter().flatten().min()
     }
 
     /// Takes what to send, oldest first.

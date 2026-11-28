@@ -326,6 +326,7 @@ pub struct DeviceTask {
 
 /// Starts the device thread on `flash` with the gateway link `gateway`
 /// and, optionally, a local link.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
     flash: F,
     facts: Facts,
@@ -335,6 +336,7 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
     driver: Box<dyn crate::driver::Driver>,
     os: Option<crate::os::OsUpdates>,
     certs: Option<crate::cert::CertStore>,
+    provision: Option<crate::provision::Provision>,
 ) -> io::Result<DeviceTask> {
     let (stop, mut stopped) = watch::channel(false);
     let (report, done) = oneshot::channel();
@@ -372,6 +374,9 @@ pub fn spawn_device<F: NorFlash + Durable + Send + 'static>(
                 }
                 if let Some(certs) = certs {
                     ctl.set_certs(certs);
+                }
+                if let Some(p) = provision {
+                    ctl.set_provision(p);
                 }
                 let mut links = Links {
                     gateway: SerialLink::with_inbox(gateway),
@@ -491,6 +496,8 @@ pub struct DeviceParts<F> {
     pub os: Option<crate::os::OsUpdates>,
     /// The board's own certificate store (`sys/cert/*`, [`crate::cert`]).
     pub certs: Option<crate::cert::CertStore>,
+    /// Claiming over SSH (`sys/trust/propose`, [`crate::provision`]).
+    pub provision: Option<crate::provision::Provision>,
 }
 
 /// The gateway half of a node, as `mw-gateway`'s own binary builds it:
@@ -525,6 +532,7 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
         driver,
         os,
         certs,
+        provision,
     } = device;
     let GatewayParts {
         bridge,
@@ -535,8 +543,10 @@ pub async fn start<F: NorFlash + Durable + Send + 'static>(
     let (gateway, sys) = mw_gateway::start_with_store(gateway_io, session, bridge, options, store)
         .await
         .map_err(StartError::Zenoh)?;
-    let device = spawn_device(flash, facts, limits, device_io, local, driver, os, certs)
-        .map_err(StartError::Thread)?;
+    let device = spawn_device(
+        flash, facts, limits, device_io, local, driver, os, certs, provision,
+    )
+    .map_err(StartError::Thread)?;
     Ok((PosixNode { device, gateway }, sys))
 }
 

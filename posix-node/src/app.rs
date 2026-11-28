@@ -212,6 +212,7 @@ async fn run(
         local,
         driver,
         os,
+        provision: Some(crate::provision::Provision::new(&node.state)),
         certs: Some(crate::cert::CertStore::from_env(
             node.state.join("tls"),
             id,
@@ -242,6 +243,9 @@ async fn run(
             sys_keys.push(k.as_str().to_owned());
         }
     }
+    // A key proposed for the SSH claim (crate::provision): pinned only once
+    // root on the machine accepts it.
+    sys_keys.push(crate::provision::PROPOSE.to_owned());
     let sys_tasks = crate::sysnode::serve(
         &ZenohTransport::new(raw_session).with_sender(id),
         &sys,
