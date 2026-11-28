@@ -2298,6 +2298,7 @@ dependencies = [
  "embedded-storage",
  "esp-base",
  "gpiocdev",
+ "libc",
  "middleware",
  "mw-gateway",
  "mw-service",
