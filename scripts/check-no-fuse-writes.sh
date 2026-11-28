@@ -15,6 +15,11 @@
 #   i.MX RT        writes to the OCOTP controller (0x401F_4000) through the
 #                  PAC or a raw address, NXP's blhost/sdphost/elftosb, fuse
 #                  words such as BT_FUSE_SEL
+#   STM32          option byte writes (FLASH OPTR through the PAC, RDP,
+#                  OBL_LAUNCH), the OTP area and option bytes by address
+#                  (0x1FFF_7000-0x1FFF_78FF on the G0), STM32CubeProgrammer
+#                  and st-flash option byte commands, dfu-util on an
+#                  alternate setting other than 0
 #
 # Reads stay allowed: the ESP base MAC (esp_hal::efuse::base_mac_address),
 # the RP2350 chip id (embassy_rp::otp::get_chipid, read_*_word) and OCOTP's
@@ -60,6 +65,13 @@ patterns=(
   '\b(blhost|sdphost|elftosb)\b'
   'efuse-program-once'
   'BT_FUSE_SEL'
+  # STM32 (NF5)
+  '\boptr\(\)\.(write|modify|write_value)\b'
+  '\.set_(rdp|obl_launch|optstrt)\s*\('
+  '0x1[fF]{3}_?7[0-8][0-9a-fA-F]{2}\b'
+  '\bSTM32_Programmer_CLI\b'
+  'st-flash[^#]*--area=option'
+  'dfu-util[^#]*-a\s*[1-9]'
 )
 
 status=0

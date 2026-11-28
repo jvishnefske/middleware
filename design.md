@@ -2384,7 +2384,8 @@ shell. Tests marked *(smbus)* run under `--features smbus` or
 
 A base firmware is flashed once onto an ESP32, ESP32-S3, ESP32-C3 or ESP8266
 from the browser, or onto a Raspberry Pi Pico (RP2040) or Pico 2 (RP2350)
-as a UF2 file. Afterwards, application logic ships as WASM payloads loaded over the
+as a UF2 file, or onto a BigTreeTech EBB42 (STM32G0B1) over SWD or USB DFU.
+Afterwards, application logic ships as WASM payloads loaded over the
 same serial port, through a USB-serial bridge chip (CP2102, CH340, FTDI),
 the chip's native USB-Serial-JTAG, or the RP chips' USB CDC-ACM port.
 A Linux host (a Raspberry Pi) runs the same base firmware core as a
@@ -3953,6 +3954,79 @@ VCOM. Native USB is not wired to the connector on v2, so the VCOM is the host li
   were 20/20 and 12/20 in two held runs.
 - **Regression:** `tests/hil/test_boards.py::test_open_reliability` runs 20 fresh
   `mwctl info` on `nrf52833` boards and requires all to reply.
+
+### STM32 base firmware (`firmware-stm32/`, ST…)
+
+The first STM32 board is the BigTreeTech EBB42 CAN v1.2 (STM32G0B1CB,
+Cortex-M0+, 128 KB flash, 144 KB RAM; a TMC2209, a MAX31865, an ADXL345,
+CAN and USB-C). The firmware answers the protocol on the USB-C port as a
+CDC-ACM serial port; like the micro:bit firmware it has no payload runtime
+yet (`+no-wasm`, payload capacity 0).
+
+- **Crate:** `stm32-base`, a standalone workspace (`thumbv6m-none-eabi`).
+  The library `stm32_base` is the pure core (board profile, `sys/*`
+  handler, request routing, node id, USB constants), tested on the host
+  with `cargo host-test`; `src/main.rs` (feature `shell`) brings up clocks
+  and USB and runs `link::respond` on every frame. Both roots forbid
+  `unsafe`; the core also denies `unwrap`, `expect`, `panic!` and unchecked
+  indexing outside tests.
+- **Clocks:** HSI16 → PLL → 64 MHz; USB from HSI48 trimmed by the CRS to
+  the host's start-of-frame, so no crystal is assumed.
+- **USB:** pid.codes' open-source VID 0x1209 with the shared test PID
+  0x0001, product `stm32-base`, serial number the chip's UID in hex.
+  Because the PID is shared, hosts (the HIL suite) match the product string
+  and the CDC control interface as well.
+- **Node id:** the 96-bit UID folded to 8 bytes (bytes 8–11 XORed into
+  0–3), so every UID bit reaches it.
+- **Pins (`board-pins` `EBB42`, `by_chip("stm32g0b1")`):** payload pin `n`
+  is `port · 16 + line` (`board_pins::stm32`: PA0 = 0 … PD15 = 63; PF0–PF2,
+  the oscillator and NRST, are past 63). Payload pins: FAN1 PA0, FAN2 PA1
+  (low-side MOSFET outputs), TH0 PA3 (ADC channel 0), PB3–PB9 (endstop,
+  probe, filament sensor, I2C1 SCL PB6 / SDA PB7). Reserved: USB, SWD, CAN
+  (PB0/PB1), the TMC2209 (PD0–PD2, UART PA15), the heater (PB13), the
+  MAX31865 (PA4–PA7), the ADXL345 (PB2, PB10–PB12), the RGB LED (PD3) and
+  the pins on no header. The header assignments follow BigTreeTech's
+  sample configuration for the v1.2 board and have not been probed on a
+  board.
+- **Applications:** a firmware for the same board (the pickup winder) puts
+  its own keys beside the system ones with `requests::Node`: keys under
+  `sys/` always go to the base handler and never reach the application.
+- **Install:** `just fw-build stm32g0b1`, then `just provision-stm32
+  <VID:PID[:SERIAL]>` (SWD, probe-rs) or `just provision-stm32-dfu` (the
+  ROM's USB DFU: hold BOOT, press RESET). Both write internal flash only
+  (NF5).
+
+#### Requirements
+
+- [x] ST1 The EBB42 pin map: 41 GPIOs in the payload range, ten payload
+  pins, every reserved pin with a reason and the reasons covering exactly
+  the reserved mask, TH0 as ADC channel 0, I2C1 on PB7/PB6 —
+  `board-pins` `boards::tests::st1_ebb42_map`, `stm32::tests::numbers_round_trip_for_every_pin`,
+  `boards::tests::chip_names_select_maps`.
+- [x] ST2 `sys/board` is the map's pin classes, no runtime, no PWM, no UART
+  pins — `board::tests::st2_board_info_is_the_ebb42_map`.
+- [x] ST3 The node id depends on every UID byte — `board::tests::st3_node_id_uses_every_uid_byte`.
+- [x] ST4 `sys/info` reports chip `stm32g0b1`, `+no-wasm`, capacity 0, the
+  node id and no capabilities — `requests::tests::st4_sys_info_reports_the_chip_firmware_and_node`.
+- [x] ST5 `sys/board` and `sys/manifest` decode with the middleware's own
+  decoders — `requests::tests::st5_sys_board_and_manifest_decode`.
+- [x] ST6 A body on a system key is `InvalidRequest`; other keys, including
+  `sys/payload/*` and `sys/fw/*`, are `NotFound` —
+  `requests::tests::st6_bodies_on_system_keys_are_invalid_and_other_keys_not_found`.
+- [x] ST7 An undersized response buffer is `BufferTooSmall`, never a
+  truncation — `requests::tests::st7_small_buffers_are_reported_not_truncated`.
+- [x] ST8 `Node` routes `sys/…` (segment-wise, not `system/…`) to the base
+  handler and never to the application, everything else to the
+  application — `requests::tests::st8_node_routes_sys_to_the_system_and_the_rest_to_the_app`.
+- [x] ST9 Only requests are answered — `requests::tests::st9_respond_answers_requests_only`.
+- [x] ST10 End to end: a host `SerialLink` reads `sys/info`, `sys/board` and
+  an application key from the device loop over an in-memory cable with
+  USB-sized short reads — `requests::tests::st10_a_host_reads_the_board_over_the_serial_link`.
+- [x] ST11 The HIL suite recognises the board by VID:PID, product and
+  interface only, and treats it as protocol-only —
+  `tests/hil/test_parsers.py::test_stm32_base_is_matched_by_product_and_interface_only`.
+- [ ] ST12 On hardware: enumerates as CDC-ACM; `mwctl info`, `mwctl board`
+  and `mwctl manifest` answer; the HIL suite passes. Not yet run.
 
 ### i.MX RT base firmware (`firmware-imxrt/`)
 
@@ -5684,6 +5758,16 @@ OCOTP's shadow registers).
   `fw_ota::machine::tests::y3_verification_failures_abandon_the_transfer`,
   `mwctl::fw::load_image` (`ImageError::Rollback`). The explicit buy is a
   flash rewrite of the image's first sector, never the ROM call.
+
+- [x] NF5 STM32: nothing writes the option bytes (RDP level 2 is
+  permanent; `nBOOT` bits can lock out the ROM bootloader) or the OTP area.
+  The check names FLASH `OPTR` writes through the PAC, `set_rdp`,
+  `set_obl_launch` and `set_optstrt`, the OTP and option byte addresses,
+  STM32CubeProgrammer, `st-flash --area=option` and `dfu-util` on an
+  alternate setting other than 0; `just provision-stm32` refuses an image
+  with a section in 0x1FFF_0000–0x1FFF_FFFF, and `just
+  provision-stm32-dfu` writes alternate setting 0 (internal flash) only —
+  `scripts/check-no-fuse-writes.sh` (checked against planted violations).
 
 What this cannot cover: a release's own code. A firmware image signed by
 the root runs with full access to its chip, so the guarantee for released

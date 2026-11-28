@@ -18,7 +18,8 @@
 //! * [`boards`] — the maps: [`boards::PICO`] (Raspberry Pi Pico and Pico 2),
 //!   [`boards::ESP32`] (AI-Thinker ESP32-CAM), [`boards::ESP32S3`],
 //!   [`boards::ESP32C3`], [`boards::ESP8266`], [`boards::RT1050_EVKB`]
-//!   (NXP MIMXRT1050-EVKB), and [`boards::by_chip`].
+//!   (NXP MIMXRT1050-EVKB), [`boards::EBB42`] (BigTreeTech EBB42 CAN,
+//!   STM32G0B1), and [`boards::by_chip`].
 //! * [`rp`] — the RP2040 / RP2350 GPIO function tables for SPI (F1) and
 //!   I2C (F3).
 //! * [`imxrt`] — i.MX RT1050 pads (IOMUXC registers, GPIO lines, ALT
@@ -27,6 +28,7 @@
 //!   a logical board pin (an Arduino header pin, the USER button), not a
 //!   GPIO line: the chip has five GPIO banks of 32 lines, more than the
 //!   ABI's 64 pin numbers.
+//! * [`stm32`] — STM32 pin numbers (`port · 16 + line`, PA0 = 0 … PD15 = 63).
 //! * [`spi`] — resolving a payload's SPI pins on a map (one SPI block on
 //!   the RP chips; any capable pin through the ESP GPIO matrix; the fixed
 //!   LPSPI1 pins on the RT1050-EVKB).
@@ -46,6 +48,7 @@ pub mod boards;
 pub mod imxrt;
 pub mod rp;
 pub mod spi;
+pub mod stm32;
 
 /// What a payload wants to do with a pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

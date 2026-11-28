@@ -61,7 +61,7 @@ def _load_mdns() -> ModuleType:
 
 # Chips each firmware reports in sys/info.
 WASM_CHIPS = {"esp32", "esp32s3", "rp2350", "rt1050", "imxrt1052"}
-PROTOCOL_ONLY_CHIPS = {"esp32c3", "esp8266", "rp2040", "ecp5", "nrf52833"}
+PROTOCOL_ONLY_CHIPS = {"esp32c3", "esp8266", "rp2040", "ecp5", "nrf52833", "stm32g0b1"}
 A_B_CHIPS = {"rp2350", "rt1050", "imxrt1052"}
 
 
@@ -101,6 +101,10 @@ KD240_CONSOLE_WAIT_S = 45
 USB_KINDS_MATCHED: list[tuple[int, int, UsbKind]] = [
     (0x0403, 0x6011, UsbKind("kd240-console", frozenset({"linux-aarch64"}),
                              product="KD Carrier Card", interface=1)),
+    # stm32-base (BTT EBB42, STM32G0B1) on pid.codes' shared test PID: only
+    # its own product string, on the CDC-ACM control interface.
+    (0x1209, 0x0001, UsbKind("stm32-base", frozenset({"stm32g0b1"}),
+                             product="stm32-base", interface=0)),
 ]
 
 
@@ -479,6 +483,10 @@ def install_command(board: Board, chip: str) -> list[str] | None:
     if chip == "nrf52833":
         # The probe's serial (the board's identity) selects the micro:bit.
         return ["just", "provision-nrf52", ser]
+    if chip == "stm32g0b1":
+        # The EBB42 is installed over an SWD probe or its ROM's USB DFU
+        # (BOOT held at reset); neither is named by the board's own USB id.
+        return None
     return None
 
 

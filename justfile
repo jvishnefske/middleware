@@ -80,6 +80,7 @@ fw-build chip="" variant="" target="":
       rp2040 rp2350           MCU, firmware-rp/build.sh
       rt1050 imxrt1052        MCU, firmware-imxrt/build.sh app
       nrf52833                MCU, firmware-nrf52 (cargo)
+      stm32g0b1               MCU, firmware-stm32 (cargo; BTT EBB42 CAN)
       pi64                    Raspberry Pi, 64-bit (aarch64): mw-posix-node
       pi32                    Raspberry Pi, 32-bit: not supported (no armv7 target)
     EOF
@@ -106,6 +107,7 @@ fw-build chip="" variant="" target="":
       rp2040|rp2350) firmware-rp/build.sh {{chip}} ;;
       rt1050|imxrt1052) firmware-imxrt/build.sh app ;;
       nrf52833) (cd firmware-nrf52 && cargo build --release) ;;
+      stm32g0b1) (cd firmware-stm32 && cargo build --release) ;;
       pi64)
         case "{{variant}}" in
           "") nix build .#mw-posix-node-aarch64 --print-out-paths ;;
@@ -296,6 +298,37 @@ provision-nrf52 probe_serial:
     probe="0d28:0204:$probe_serial"
     probe-rs download --probe "$probe" --chip nRF52833_xxAA --binary-format elf "$elf"
     probe-rs reset --probe "$probe" --chip nRF52833_xxAA
+
+[doc("Install the current firmware on a BTT EBB42 (STM32G0B1) over an SWD probe (probe-rs selector VID:PID[:SERIAL])")]
+provision-stm32 probe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    probe="$1"
+    if [[ ! "$probe" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}(:[0-9A-Za-z]{1,64})?$ ]]; then echo "!!! probe $probe: expected VID:PID[:SERIAL]" >&2; exit 1; fi
+    elf=firmware-stm32/target/thumbv6m-none-eabi/release/stm32-base
+    if [[ ! -f "$elf" ]]; then echo "!!! $elf not built: run just fw-build stm32g0b1" >&2; exit 1; fi
+    # Only flash (0x0800_0000) and RAM may be written. A section at
+    # 0x1FFF_0000-0x1FFF_FFFF is system memory, the OTP area or the option
+    # bytes (RDP level 2 is permanent): refuse it (design.md NF1, NF5).
+    chk='{ for (i=1;i<=NF;i++) if ($i ~ /^[0-9a-fA-F]{8}$/) { if ($i ~ /^1[fF][fF][fF]/) bad=1; break } } END { exit !bad }'
+    if readelf -SW "$elf" | grep -E '^ *\[' | awk "$chk"; then
+      echo "!!! $elf has a section in 0x1FFF0000-0x1FFFFFFF (system memory, OTP, option bytes): refusing to flash" >&2; exit 1
+    fi
+    probe-rs download --probe "$probe" --chip STM32G0B1CBTx --binary-format elf "$elf"
+    probe-rs reset --probe "$probe" --chip STM32G0B1CBTx
+
+[doc("Install the current firmware on a BTT EBB42 (STM32G0B1) through the ROM's USB DFU (hold BOOT, press RESET)")]
+provision-stm32-dfu:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    elf=firmware-stm32/target/thumbv6m-none-eabi/release/stm32-base
+    if [[ ! -f "$elf" ]]; then echo "!!! $elf not built: run just fw-build stm32g0b1" >&2; exit 1; fi
+    objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+    bin="${elf}.bin"
+    "$objcopy" -O binary "$elf" "$bin"
+    # Alternate setting 0 is the internal flash. The option bytes are a
+    # separate alternate setting and are never written (design.md NF5).
+    dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D "$bin"
 
 # wasm-host with each interpreter backend (wasmi, micro, micro-float) for
 # every platform architecture; fails on any surprise. The Xtensa targets
