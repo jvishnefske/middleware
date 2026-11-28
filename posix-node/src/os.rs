@@ -9,7 +9,10 @@
 //! * `begin` writes only the inactive slot (the one the running root is not
 //!   on). A transfer lives in memory; a restart drops it, and the host
 //!   begins again. Over the network a `begin` for another image does not
-//!   replace a transfer that moved in the last [`TRANSFER_IDLE`].
+//!   replace a transfer that moved in the last [`TRANSFER_IDLE`], nor one
+//!   younger than [`TRANSFER_HOLD_MAX`] at most (a signed `abort` clears
+//!   any). Chunks are not authenticated, so a peer on the network can delay
+//!   an update but never install one: `commit` needs the root cert.
 //! * `chunk` writes at the offset; a chunk already received is acknowledged.
 //! * `commit` reads the written slot back and compares its SHA-256 with the
 //!   declared one; on a claimed device it also needs the root-signed
@@ -56,6 +59,17 @@ pub const RECORD_FILE: &str = "os-record";
 /// How long a transfer must have been still before a network `begin` for
 /// another image may replace it (as the gateway frees an idle transfer).
 pub const TRANSFER_IDLE: Duration = Duration::from_secs(60);
+/// The longest a transfer holds off a network `begin` for another image,
+/// however busy it is: an unauthenticated peer that keeps sending chunks
+/// cannot keep the slot for longer.
+pub const TRANSFER_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
+
+/// Whether a transfer that began `age` ago and last moved `still` ago holds
+/// off a network `begin` for another image: while it moves, for at most
+/// [`TRANSFER_HOLD_MAX`].
+fn holds_off(age: Duration, still: Duration) -> bool {
+    still < TRANSFER_IDLE && age < TRANSFER_HOLD_MAX
+}
 
 /// The two slots, the boot state and the reboot, as the root needs them.
 /// The KD240's are the card's partitions and gap sectors; a host test uses
@@ -161,6 +175,8 @@ struct Transfer {
     sha256: [u8; 32],
     got: Vec<bool>,
     count: usize,
+    /// When it began.
+    began: Instant,
     /// When it began or last took a chunk.
     moved: Instant,
 }
@@ -393,7 +409,7 @@ impl OsUpdates {
             if t.target == target && t.len == len && t.version == version && t.sha256 == sha256 {
                 return reply_slot(out, target).map(Some); // a resent begin resumes
             }
-            if network && t.moved.elapsed() < TRANSFER_IDLE {
+            if network && holds_off(t.began.elapsed(), t.moved.elapsed()) {
                 return Err(HandlerError::Unavailable); // another transfer is under way
             }
         }
@@ -426,6 +442,7 @@ impl OsUpdates {
             sha256,
             got: vec![false; chunks],
             count: 0,
+            began: Instant::now(),
             moved: Instant::now(),
         });
         reply_slot(out, target).map(Some)
@@ -1485,6 +1502,48 @@ mod tests {
             call(&mut os, keys::BEGIN, &begin_of(&other, V2), Some(&trust)),
             Ok(vec![1]),
             "the serial port starts over"
+        );
+    }
+
+    /// A busy transfer holds off another network `begin` for at most
+    /// TRANSFER_HOLD_MAX; an idle one only for TRANSFER_IDLE.
+    #[test]
+    fn a_transfer_holds_off_a_network_begin_for_a_bounded_time() {
+        let s = Duration::from_secs;
+        assert!(holds_off(s(0), s(0)));
+        assert!(holds_off(TRANSFER_HOLD_MAX - s(1), s(5)), "busy, young");
+        assert!(!holds_off(TRANSFER_HOLD_MAX, s(0)), "busy but too old");
+        assert!(!holds_off(s(5), TRANSFER_IDLE), "idle");
+    }
+
+    /// A signed `abort` clears a transfer that holds off a network `begin`.
+    #[test]
+    fn a_signed_abort_clears_a_transfer_that_holds_off_a_begin() {
+        let dir = scratch("abort-hold");
+        let card = MemDevice::new(4 * CHUNK_LEN);
+        let mut os = restart(&card, &dir);
+        let trust = TrustState::Claimed {
+            key: root_key(),
+            min_version: Version(0),
+        };
+        let begin_of = |img: &[u8], v: u32| {
+            encoded(Command::Begin {
+                len: img.len() as u32,
+                version: Version(v),
+                sha256: sha(img),
+            })
+        };
+        let (junk, mine) = (image(CHUNK_LEN + 10, 3), image(500, 4));
+        call_net(&mut os, keys::BEGIN, &begin_of(&junk, V1), Some(&trust)).unwrap();
+        assert_eq!(
+            call_net(&mut os, keys::BEGIN, &begin_of(&mine, V2), Some(&trust)),
+            Err(HandlerError::Unavailable)
+        );
+        let abort = signed_control_by(&SEED, ControlOp::OsAbort, 1).encode();
+        call_net(&mut os, keys::ABORT, &abort, Some(&trust)).unwrap();
+        assert_eq!(
+            call_net(&mut os, keys::BEGIN, &begin_of(&mine, V2), Some(&trust)),
+            Ok(vec![1])
         );
     }
 

@@ -6670,8 +6670,12 @@ the same root key, channel and cert as the MCU payloads and firmware
   (`Denied`); the serial port still takes them. Claim the node first (over
   serial), then `mwctl os update` over the LAN. On a claimed node a network
   `begin` for another image does not replace a transfer that moved in the
-  last 60 s (`Unavailable`; the same `begin` resumes it), so an anonymous
-  peer cannot cut an update short. The node serves the seven keys per node
+  last 60 s, for at most 10 min from its `begin` (`Unavailable`; the same
+  `begin` resumes it; a signed `abort` clears it), so an anonymous peer
+  cannot cut an update short. Chunks are not authenticated: a peer on the
+  network can still delay an update (hold the transfer, send wrong chunks
+  that fail the hash at `commit`), never install one. Closing that needs a
+  signed `begin` and authenticated chunks (a wire change, not done). The node serves the seven keys per node
   over Zenoh when it has a root, straight to its controller (posix-node
   `sysnode.rs`, as `sys/cert/*`): beside the gateway's allowlist, not in
   it, because a chunk is 64 KiB and the gateway's frames are 1 KiB; the
