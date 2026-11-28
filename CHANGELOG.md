@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### STM32 base firmware: BigTreeTech EBB42 CAN (STM32G0B1) (ST1–ST12, NF5)
+- New crate `firmware-stm32/` (`stm32-base`, standalone workspace, `thumbv6m-none-eabi`): serves `sys/info` (chip `stm32g0b1`, `+no-wasm`, node id from the UID), `sys/board` and `sys/manifest` on the USB-C port (CDC-ACM, pid.codes VID 0x1209 / test PID 0x0001, product `stm32-base`). No payload runtime yet. About 20 KB of flash.
+- The pure core `stm32_base` is tested on the host (`cargo host-test`, 10 tests, including a host `SerialLink` against the device loop). `requests::Node` puts an application's keys beside the system ones; `sys/` keys never reach the application.
+- board-pins: `boards::EBB42` (`by_chip("stm32g0b1")`) and `stm32` pin numbering (`port · 16 + line`, PA0 = 0 … PD15 = 63).
+- `just fw-build stm32g0b1`, `just provision-stm32 <VID:PID[:SERIAL]>` (SWD) and `just provision-stm32-dfu` (ROM USB DFU); CI builds and lints it on every pull request; `release-main` publishes `firmware-stm32-ebb42.bin` / `.elf`.
+- HIL: the board is protocol-only and matched by VID:PID, product and interface (the test PID is shared).
+- NF5: `scripts/check-no-fuse-writes.sh` also refuses STM32 option byte and OTP writes (RDP level 2 is permanent).
+- Not yet run on hardware (ST12).
+
 ### posix-node: claiming over SSH (OS5c)
 - A node without a local serial port can be claimed in two steps: `sys/trust/propose` over Zenoh with the public key as hex (`mwctl --zenoh <endpoint> --node <id> request sys/trust/propose $(mwctl key pub <KEYFILE>)`) keeps it as the pending key and answers its fingerprint; then, as root on the machine (over SSH), `mw-posix-node trust accept <fingerprint>` has the running node pin it through its local claim path. A pending key authorises nothing; while one is pending another key is refused (`Unavailable`), and `trust clear` drops it; a claimed node refuses proposals. The accept binds the whole key (the fingerprint is only displayed), and the root CLI reads and writes the node's state directory without following links (`O_NOFOLLOW`, `O_EXCL`). `mw-posix-node trust pending` shows the pending key. New module `provision` (`Provision`, `PROPOSE`, `fingerprint`, `cli`); `DeviceParts` and `spawn_device` take `provision` (**breaking for struct literals**: add `provision: None`); `Controller::set_provision`. nix/posix-node.nix installs `mw-posix-node-trust` (the CLI against `/var/lib/mw-posix-node`).
 

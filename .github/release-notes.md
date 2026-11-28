@@ -12,6 +12,7 @@ takes an update signed at install time (`mwctl fw update --key` or `--pkcs11`).
 | MIMXRT1050-EVKB, update | `imxrt-base-<V>.slot` | `mwctl --port <tty> fw update <file>` |
 | MIMXRT1050-EVKB, first install | `imxrt-boot.bin` and the `.slot` | Over SWD from a checkout: `python3 firmware-imxrt/tools/flash.py 0x0:imxrt-boot.bin 0x400000:imxrt-base-<V>.slot` |
 | BBC micro:bit v2 (nRF52833) | `firmware-nrf52-microbit-v2.hex` | Copy to the `MICROBIT` drive; or `probe-rs download --chip nRF52833_xxAA firmware-nrf52-microbit-v2.elf` |
+| BigTreeTech EBB42 CAN (STM32G0B1) | `firmware-stm32-ebb42.bin` | Hold BOOT, press RESET, then `dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D firmware-stm32-ebb42.bin`; or `probe-rs download --chip STM32G0B1CBTx firmware-stm32-ebb42.elf` |
 | ESP32, ESP32-S3, ESP32-C3 | `esp-base-<chip>.bin` | Merged image at offset 0: `espflash write-bin 0x0 esp-base-<chip>.bin` |
 | ESP8266 | `esp-base-esp8266.bin` | `esptool --chip esp8266 write_flash 0x0 esp-base-esp8266.bin` |
 

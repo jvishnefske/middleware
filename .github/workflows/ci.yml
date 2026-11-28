@@ -91,6 +91,35 @@ jobs:
         working-directory: firmware-rp
         run: cargo build --release --target ${{ matrix.target }} --features ${{ matrix.chip }}
 
+  firmware-stm32:
+    name: STM32 base firmware (stm32g0b1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: present
+        run: echo "stm32=$([ -f firmware-stm32/Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.stm32 == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+          components: rust-src, clippy
+      - if: steps.present.outputs.stm32 == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware-stm32
+      - if: steps.present.outputs.stm32 == 'true'
+        name: Pure core on the host
+        working-directory: firmware-stm32
+        run: |
+          cargo test --locked --lib --no-default-features --target x86_64-unknown-linux-gnu
+          cargo clippy --locked --lib --tests --no-default-features --target x86_64-unknown-linux-gnu -- -D warnings
+      - if: steps.present.outputs.stm32 == 'true'
+        name: Firmware
+        working-directory: firmware-stm32
+        run: |
+          cargo build --locked --release
+          cargo clippy --locked --release -- -D warnings
+
   web:
     name: Web (vitest, tsc, vite build)
     runs-on: ubuntu-latest

@@ -27,6 +27,7 @@
 //! and the LPUART1 console pins are 23 and 24 ([`crate::imxrt::evkb`] maps
 //! each to its pad, with the table and its sources).
 
+use crate::stm32::{pa, pb, pc, pd};
 use crate::{FixedSpi, PinMap, Reason, SpiRouting, bit, span};
 
 const PICO_REASONS: &[Reason] = &[
@@ -111,6 +112,100 @@ pub const MICROBIT: PinMap = PinMap {
 const MICROBIT_RESERVED_ALL: u64 = bit(6) | bit(40) | bit(21) | bit(22) | bit(15) | bit(24) | bit(19)
     | bit(28) | bit(11) | bit(31) | bit(30) | bit(37) | bit(14) | bit(23) | bit(9) | bit(10) | bit(12)
     | bit(16) | bit(8) | bit(0) | bit(5) | bit(20) | bit(25) | bit(36);
+
+/// BigTreeTech EBB42 CAN v1.2 (STM32G0B1CB, LQFP48). Pin numbers are
+/// [`crate::stm32`]'s (`port · 16 + line`); the chip's GPIOs in that range
+/// are PA0–PA15, PB0–PB15, PC6, PC7, PC13–PC15 and PD0–PD3.
+///
+/// Payload pins are the headers' signal pins: FAN1 PA0 and FAN2 PA1 (outputs
+/// through the board's low-side MOSFETs), the thermistor input TH0 PA3 (ADC
+/// channel 0, with the board's pull-up), and PB3–PB9 (endstop, probe,
+/// filament sensor and I2C1: SCL PB6, SDA PB7). Everything else is reserved,
+/// with the reason in [`EBB42_REASONS`]: USB-C, SWD, CAN, the TMC2209, the
+/// heater, the MAX31865 and ADXL345 SPI buses, the RGB LED, and the pins on
+/// no header. The header assignments follow BigTreeTech's published
+/// sample configuration for the v1.2 board.
+pub const EBB42: PinMap = PinMap {
+    gpio: span(0, 31) | bit(pc(6)) | bit(pc(7)) | span(pc(13), pc(15)) | span(pd(0), pd(3)),
+    reserved: EBB42_RESERVED_ALL,
+    input_only: 0,
+    adc: &[pa(3)],
+    i2c: [Some((pb(7), pb(6))), None],
+    pwm: &[],
+    spi: SpiRouting::None,
+    reasons: EBB42_REASONS,
+};
+
+/// Why each reserved pin of [`EBB42`] is held.
+pub const EBB42_REASONS: &[Reason] = &[
+    Reason {
+        pins: bit(pa(11)) | bit(pa(12)),
+        why: "USB-C D- / D+ (the protocol port)",
+    },
+    Reason {
+        pins: bit(pa(13)) | bit(pa(14)),
+        why: "SWD (SWDIO, SWCLK)",
+    },
+    Reason {
+        pins: bit(pb(0)) | bit(pb(1)),
+        why: "the CAN transceiver (FDCAN RX, TX)",
+    },
+    Reason {
+        pins: bit(pd(0)) | bit(pd(1)) | bit(pd(2)) | bit(pa(15)),
+        why: "the TMC2209 stepper driver (STEP, DIR, EN, UART)",
+    },
+    Reason {
+        pins: bit(pb(13)),
+        why: "the hotend heater MOSFET",
+    },
+    Reason {
+        pins: span(pa(4), pa(7)),
+        why: "the MAX31865 RTD converter (SPI1: CS, SCK, MISO, MOSI)",
+    },
+    Reason {
+        pins: bit(pb(12)) | bit(pb(10)) | bit(pb(11)) | bit(pb(2)),
+        why: "the ADXL345 accelerometer (SPI2: CS, SCK, MOSI, MISO)",
+    },
+    Reason {
+        pins: bit(pd(3)),
+        why: "the RGB status LED",
+    },
+    Reason {
+        pins: bit(pa(2))
+            | span(pa(8), pa(10))
+            | bit(pb(14))
+            | bit(pb(15))
+            | bit(pc(6))
+            | bit(pc(7))
+            | span(pc(13), pc(15)),
+        why: "not on a header",
+    },
+];
+
+const EBB42_RESERVED_ALL: u64 = bit(pa(11))
+    | bit(pa(12))
+    | bit(pa(13))
+    | bit(pa(14))
+    | bit(pb(0))
+    | bit(pb(1))
+    | bit(pd(0))
+    | bit(pd(1))
+    | bit(pd(2))
+    | bit(pa(15))
+    | bit(pb(13))
+    | span(pa(4), pa(7))
+    | bit(pb(12))
+    | bit(pb(10))
+    | bit(pb(11))
+    | bit(pb(2))
+    | bit(pd(3))
+    | bit(pa(2))
+    | span(pa(8), pa(10))
+    | bit(pb(14))
+    | bit(pb(15))
+    | bit(pc(6))
+    | bit(pc(7))
+    | span(pc(13), pc(15));
 
 /// AI-Thinker ESP32-CAM: GPIO 0–19, 21–23, 25–27, 32–39.
 pub const ESP32: PinMap = PinMap {
@@ -296,7 +391,7 @@ pub const RT1050_EVKB: PinMap = PinMap {
 };
 
 /// The map for a chip name as `sys/info` reports it (`esp32`, `esp32s3`,
-/// `esp32c3`, `esp8266`, `rp2040`, `rp2350`, `ecp5`, `rt1050`).
+/// `esp32c3`, `esp8266`, `rp2040`, `rp2350`, `ecp5`, `rt1050`, `stm32g0b1`).
 pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
     match chip {
         "esp32" => Some(&ESP32),
@@ -306,6 +401,7 @@ pub fn by_chip(chip: &str) -> Option<&'static PinMap> {
         "rp2040" | "rp2350" => Some(&PICO),
         "ecp5" => Some(&COLORLIGHT_5A75B),
         "rt1050" => Some(&RT1050_EVKB),
+        "stm32g0b1" => Some(&EBB42),
         _ => None,
     }
 }
@@ -323,6 +419,7 @@ mod tests {
         assert_eq!(by_chip("esp32c3"), Some(&ESP32C3));
         assert_eq!(by_chip("esp8266"), Some(&ESP8266));
         assert_eq!(by_chip("ecp5"), Some(&COLORLIGHT_5A75B));
+        assert_eq!(by_chip("stm32g0b1"), Some(&EBB42));
         assert_eq!(by_chip("badge"), None);
     }
 
@@ -414,5 +511,54 @@ mod tests {
         assert!(pin(spi.mosi).function(Signal::Lpspi1Sdo).is_some());
         assert!(pin(spi.miso).function(Signal::Lpspi1Sdi).is_some());
         assert_eq!(m.pwm_pins().count(), 0);
+    }
+
+    #[test]
+    fn st1_ebb42_map() {
+        use crate::stm32::pin;
+        use crate::{AdcError, Direction, PinError};
+        let m = &EBB42;
+        let p = |port, line| pin(port, line).unwrap();
+        // 44 package pins: 41 in the payload range (PF0–PF2 are past it).
+        assert_eq!(m.gpios().count(), 41);
+        let expect = [p('A', 0), p('A', 1), p('A', 3)]
+            .into_iter()
+            .chain((3..=9).map(|l| p('B', l)));
+        assert!(m.payload_pins().eq(expect));
+        // Pins the LQFP48 lacks.
+        for n in [p('C', 0), p('C', 12), p('D', 4), p('D', 15)] {
+            assert_eq!(
+                m.check(n, Direction::Input),
+                Err(PinError::NoSuchPin),
+                "{n}"
+            );
+        }
+        // Every held pin has a reason, and only held pins do.
+        for n in m.gpios() {
+            assert_eq!(m.reason(n).is_some(), m.is_reserved(n), "pin {n}");
+        }
+        assert_eq!(
+            m.reason(p('A', 12)),
+            Some("USB-C D- / D+ (the protocol port)")
+        );
+        assert_eq!(
+            m.reason(p('D', 0)),
+            Some("the TMC2209 stepper driver (STEP, DIR, EN, UART)")
+        );
+        // The reasons cover exactly the reserved mask.
+        let covered = EBB42_REASONS.iter().fold(0u64, |a, r| a | r.pins);
+        assert_eq!(covered, m.reserved_mask());
+        // No input-only pins; every payload pin drives.
+        for n in m.payload_pins() {
+            assert_eq!(m.check(n, Direction::Output), Ok(()));
+        }
+        // TH0 is ADC channel 0; a fan pin is not analog for payloads.
+        assert_eq!(m.adc_channel(p('A', 3)), Ok(0));
+        assert_eq!(m.adc_channel(p('A', 0)), Err(AdcError::NotAnalog));
+        // I2C1 on PB7 (SDA) / PB6 (SCL), both payload pins.
+        assert_eq!(m.i2c_pins(0), Some((p('B', 7), p('B', 6))));
+        assert_eq!(m.i2c_pins(1), None);
+        assert_eq!(m.pwm_pins().count(), 0);
+        assert_eq!(m.spi_routing(), SpiRouting::None);
     }
 }

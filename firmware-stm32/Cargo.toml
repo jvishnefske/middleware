@@ -1,0 +1,73 @@
+[package]
+name = "stm32-base"
+version = "26.11.21"
+edition = "2024"
+rust-version = "1.88"
+description = "STM32 base firmware (BigTreeTech EBB42 CAN, STM32G0B1): serves the middleware serial protocol over USB CDC-ACM"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone workspace: cross-compiled for thumbv6m-none-eabi, so it stays
+# out of the parent (host) workspace, like `firmware-rp/` and `firmware-nrf52/`.
+[workspace]
+
+[lib]
+# The pure core (`stm32_base`): the board profile (sys/board, sys/manifest),
+# sys/info, request routing, the node id and the USB constants. No STM32
+# dependencies; tested on the host with
+#   cargo test --lib --no-default-features --target x86_64-unknown-linux-gnu
+# Applications on the same board (pickup_winder) put their own keys beside
+# the system ones with `requests::Node`.
+path = "src/lib.rs"
+
+[[bin]]
+name = "stm32-base"
+path = "src/main.rs"
+test = false
+bench = false
+required-features = ["shell"]
+
+[features]
+default = ["shell"]
+# The imperative shell: embassy on the STM32G0B1 and the USB CDC link.
+shell = [
+  "dep:embassy-stm32",
+  "dep:embassy-executor",
+  "dep:embassy-time",
+  "dep:embassy-futures",
+  "dep:embassy-usb",
+  "dep:embedded-io-async",
+  "dep:static_cell",
+  "dep:portable-atomic",
+  "dep:cortex-m",
+  "dep:cortex-m-rt",
+  "dep:panic-halt",
+]
+
+[dependencies]
+middleware = { path = "..", default-features = false, features = ["serial"] }
+board-pins = { path = "../board-pins" }
+
+embassy-stm32 = { version = "0.6", features = ["stm32g0b1cb", "time-driver-any", "memory-x"], optional = true }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"], optional = true }
+embassy-time = { version = "0.5", optional = true }
+embassy-futures = { version = "0.1", optional = true }
+embassy-usb = { version = "0.6", default-features = false, optional = true }
+embedded-io-async = { version = "0.7", optional = true }
+static_cell = { version = "2", optional = true }
+# Cortex-M0+ has no CAS: static_cell's atomics go through critical sections
+# (cortex-m's single-core implementation).
+portable-atomic = { version = "1", default-features = false, features = ["critical-section"], optional = true }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"], optional = true }
+cortex-m-rt = { version = "0.7", optional = true }
+panic-halt = { version = "1", optional = true }
+
+[dev-dependencies]
+# The in-memory cable of the end-to-end link test.
+embedded-io-async = "0.7"
+
+[profile.release]
+debug = 2
+opt-level = "s"
+lto = true
+codegen-units = 1

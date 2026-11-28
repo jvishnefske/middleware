@@ -15,6 +15,7 @@ name: Release from main
 #   rp-base-rp2040.uf2 .elf, rp-base-rp2350-<V>-factory.uf2 -update.uf2 .elf
 #   imxrt-boot.bin, imxrt-base-<V>.slot                  (MIMXRT1050-EVKB)
 #   firmware-nrf52-microbit-v2.hex .elf                  (once firmware-nrf52/ is on main)
+#   firmware-stm32-ebb42.bin .elf                        (BTT EBB42 CAN, STM32G0B1)
 #   esp-base-<chip>.bin .bsp.json                        (esp32, esp32s3, esp32c3; esp8266 best effort)
 #   mwctl-x86_64-linux                                   (glibc; the tool `fw update` needs)
 #   <name>-<arch>-linux-musl                             (static: every mw-* flake binary, zenohd)
@@ -148,6 +149,34 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rel-nrf52
+          path: out/
+          if-no-files-found: error
+
+  stm32:
+    name: BTT EBB42 (STM32G0B1) firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+          components: rust-src, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware-stm32
+      # One image linked at 0x0800_0000: the .bin is for the ROM's USB DFU
+      # (just provision-stm32-dfu), the .elf for an SWD probe.
+      - name: Build
+        run: |
+          (cd firmware-stm32 && cargo build --release --locked --bin stm32-base)
+          elf=firmware-stm32/target/thumbv6m-none-eabi/release/stm32-base
+          objcopy="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-objcopy"
+          mkdir out
+          cp "$elf" out/firmware-stm32-ebb42.elf
+          "$objcopy" -O binary "$elf" out/firmware-stm32-ebb42.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-stm32
           path: out/
           if-no-files-found: error
 
@@ -309,7 +338,7 @@ jobs:
 
   release:
     name: Publish the release
-    needs: [rp, imxrt, nrf52, esp32, esp8266, mwctl, nix-binaries, x86-image, pi-image]
+    needs: [rp, imxrt, nrf52, stm32, esp32, esp8266, mwctl, nix-binaries, x86-image, pi-image]
     # The best-effort jobs (continue-on-error) count as success here.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest

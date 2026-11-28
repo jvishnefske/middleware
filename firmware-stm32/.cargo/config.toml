@@ -1,0 +1,12 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+# Flashed over SWD (the EBB42's SWD pads, any CMSIS-DAP / ST-Link probe).
+runner = "probe-rs run --chip STM32G0B1CBTx"
+rustflags = ["-C", "link-arg=-Tlink.x"]
+
+[alias]
+# The pure core's tests on the host (the shell needs the board).
+host-test = "test --lib --no-default-features --target x86_64-unknown-linux-gnu"
+host-clippy = "clippy --lib --tests --no-default-features --target x86_64-unknown-linux-gnu"

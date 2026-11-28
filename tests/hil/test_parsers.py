@@ -200,3 +200,12 @@ def test_kd240_console_board_is_a_linux_board_not_installed(tmp_path):
     assert "linux-aarch64" in b.kind.chips
     with pytest.raises(B.NotInstalled, match="just os-update"):
         B.install(b, None, build=False)  # raises before it needs mwctl
+
+
+def test_stm32_base_is_matched_by_product_and_interface_only():
+    kind = B.usb_kind(0x1209, 0x0001, "stm32-base", 0)
+    assert kind is not None and kind.chips == frozenset({"stm32g0b1"})
+    # pid.codes' test PID is shared: another product or interface is not ours.
+    assert B.usb_kind(0x1209, 0x0001, "something else", 0) is None
+    assert B.usb_kind(0x1209, 0x0001, "stm32-base", 1) is None
+    assert B.usb_kind(0x1209, 0x0001) is None
